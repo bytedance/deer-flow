@@ -21,10 +21,13 @@ class Mem0AuthError(Mem0APIError):
     """401 -- missing or invalid API key."""
 
 
-def _memory_results(payload: dict[str, Any]) -> list[dict[str, Any]]:
+def _memory_results(payload: dict[str, Any], *, context: str) -> list[dict[str, Any]]:
     results = payload.get("results", [])
-    if not isinstance(results, list) or any(not isinstance(record, dict) for record in results):
-        raise Mem0APIError("mem0 response results must be a list of objects")
+    if not isinstance(results, list):
+        raise Mem0APIError(f"mem0 {context} response results must be a list of objects; got {type(results).__name__}")
+    for index, record in enumerate(results):
+        if not isinstance(record, dict):
+            raise Mem0APIError(f"mem0 {context} response results[{index}] must be an object; got {type(record).__name__}")
     return results
 
 
@@ -62,7 +65,7 @@ class Mem0Client:
             return {}
         try:
             payload = resp.json()
-        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        except (json.JSONDecodeError, UnicodeDecodeError, RecursionError) as e:
             raise Mem0APIError(f"mem0 {method} {path} returned malformed JSON: {e}") from e
         if not isinstance(payload, dict):
             raise Mem0APIError(f"mem0 {method} {path} returned a non-object JSON payload")
@@ -95,7 +98,7 @@ class Mem0Client:
         threshold: float,
     ) -> list[dict[str, Any]]:
         body = {"query": query, "filters": filters, "top_k": top_k, "threshold": threshold}
-        return _memory_results(self._request("POST", "/v3/memories/search/", json=body))
+        return _memory_results(self._request("POST", "/v3/memories/search/", json=body), context="POST /v3/memories/search/")
 
     def list_memories(
         self,
@@ -114,7 +117,7 @@ class Mem0Client:
                 params={"page": page, "page_size": page_size},
                 json={"filters": filters},
             )
-            results.extend(_memory_results(data))
+            results.extend(_memory_results(data, context=f"POST /v3/memories/ page={page}"))
             if not data.get("next") or (max_items is not None and len(results) >= max_items):
                 return results[:max_items] if max_items is not None else results
             page += 1
