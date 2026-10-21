@@ -328,6 +328,8 @@ export function BrowserViewPanel({
           key: event.key,
           metaKey: event.metaKey,
           ctrlKey: event.ctrlKey,
+          shiftKey: event.shiftKey,
+          altKey: event.altKey,
         });
         if (!input) {
           return;
