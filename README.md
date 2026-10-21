@@ -1593,6 +1593,8 @@ names and base URLs readable.
 
 For `LocalSandboxProvider`, this is a managed tool-path boundary rather than host filesystem isolation. Explicit per-Agent skill policies are accepted only while host bash is disabled (the default), because a host subprocess can address canonical paths without using the provider's virtual-path mappings. Use Docker/AIO, the Kubernetes provisioner, or E2B when the filesystem boundary must remain enforceable alongside shell access.
 
+When the local sandbox uses PowerShell, unquoted virtual paths also work when the mapped host directory contains spaces; existing quoting and wildcard expansion are preserved.
+
 On Windows, the local sandbox's `cmd.exe` fallback decodes builtin output using
 the console output code page, including UTF-8 after `chcp 65001`, independently
 of Python's UTF-8 mode. If no console page is available, it uses the system OEM

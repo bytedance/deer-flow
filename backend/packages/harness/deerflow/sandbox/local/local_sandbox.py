@@ -184,6 +184,54 @@ class ResolvedPath(NamedTuple):
     mapping: PathMapping | None
 
 
+_POWERSHELL_QUOTE_TRANSLATION = str.maketrans("\u2018\u2019\u201c\u201d", "''\"\"")
+
+
+def escape_powershell_path_spaces(match: re.Match[str], path: str) -> str:
+    """Keep host-path whitespace literal without quoting wildcards or caller syntax."""
+    quote = None
+    escaped = False
+    subexpressions: list[str | None] = []
+    prefix = match.string[: match.start()]
+    index = 0
+    while index < len(prefix):
+        char = prefix[index].translate(_POWERSHELL_QUOTE_TRANSLATION)
+        if escaped:
+            escaped = False
+        elif char == "`" and quote != "'":
+            escaped = True
+        elif quote is None and prefix[index : index + 2] == "<#":
+            end = prefix.find("#>", index + 2)
+            index = len(prefix) if end < 0 else end + 1
+        elif quote is None and char == "#" and (index == 0 or prefix[index - 1].isspace() or prefix[index - 1] in ";|&(){}="):
+            end = prefix.find("\n", index)
+            index = len(prefix) if end < 0 else end
+        elif quote is None and prefix[index : index + 2] in ("@'", '@"'):
+            delimiter = prefix[index + 1]
+            end = re.search(rf"(?m)^{delimiter}@", prefix[index + 2 :])
+            if end is None:
+                if delimiter == "'":
+                    return path
+                quote = '@"'
+                index += 1
+            else:
+                index += end.end() + 1
+        elif char == "$" and prefix[index : index + 2] == "$(" and quote != "'":
+            subexpressions.append(quote)
+            quote = None
+            index += 1
+        elif char in "\"'" and quote in (None, char):
+            quote = None if quote else char
+        elif quote is None and char == "(":
+            subexpressions.append(None)
+        elif quote is None and char == ")" and subexpressions:
+            quote = subexpressions.pop()
+        index += 1
+    if quote is not None:
+        return path
+    return re.sub(r"[ \t]", lambda space: "`" + space.group(), path)
+
+
 class LocalSandbox(Sandbox):
     #: Every call is a fresh ``subprocess.run([shell, "-c", ...])`` process —
     #: no shell state survives into the next command.
@@ -561,12 +609,13 @@ class LocalSandbox(Sandbox):
 
         return result
 
-    def _resolve_paths_in_command(self, command: str) -> str:
+    def _resolve_paths_in_command(self, command: str, *, shell: str | None = None) -> str:
         """
         Resolve container paths to local paths in a command string.
 
         Args:
             command: Command string that may contain container paths
+            shell: Execution shell, or None for unescaped path resolution
 
         Returns:
             Command with container paths resolved to local paths
@@ -583,10 +632,14 @@ class LocalSandbox(Sandbox):
                 # canonicalizing the truncated prefix would follow an
                 # unrelated symlink and reassemble a path to a different
                 # file, so substitute textually there.
-                return self._resolve_path_textually(matched_path).replace("\\", "/")
+                resolved = self._resolve_path_textually(matched_path).replace("\\", "/")
+            else:
+                resolved = self._resolve_path(matched_path).replace("\\", "/")
             # Normalize to forward slashes so bash doesn't interpret Windows
             # backslash sequences (\\U, \\a, \\d, \\s, \\n, \\t) as escapes.
-            return self._resolve_path(matched_path).replace("\\", "/")
+            if any(char in resolved for char in " \t") and self._is_powershell(shell or ""):
+                return escape_powershell_path_spaces(match, resolved)
+            return resolved
 
         return pattern.sub(replace_match, command)
 
@@ -683,8 +736,8 @@ class LocalSandbox(Sandbox):
         # any new caller to use safe key names.
         _validate_extra_env(env)
         # Resolve container paths in command before execution
-        resolved_command = self._resolve_paths_in_command(command)
         shell = self._get_shell()
+        resolved_command = self._resolve_paths_in_command(command, shell=shell)
         if timeout is None:
             timeout = DEFAULT_COMMAND_TIMEOUT_SECONDS
 
