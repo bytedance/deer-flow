@@ -23,6 +23,7 @@ from deerflow.persistence.scheduled_tasks.model import (
 )
 from deerflow.scheduler.host_notes import RUN_ERROR_END_REACHED
 from deerflow.scheduler.schedules import next_run_at as compute_next_run_at
+from deerflow.scheduler.schedules import should_advance_schedule_cursor
 from deerflow.utils.time import coerce_iso
 
 EXECUTING_RUN_STATUSES: tuple[str, ...] = ("launching", "running")
@@ -213,7 +214,7 @@ class ScheduledTaskRunRepository:
         task.last_thread_id = row.thread_id
         # A manual recurring run is an extra trial. Keep the task's existing
         # cadence while repairing launch bookkeeping after a crash.
-        if not (row.trigger == "manual" and task.schedule_type != "once"):
+        if should_advance_schedule_cursor(task.schedule_type, trigger=row.trigger):
             task.next_run_at = compute_next_run_at(
                 task.schedule_type,
                 task.schedule_spec,

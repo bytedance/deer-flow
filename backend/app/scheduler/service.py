@@ -30,7 +30,7 @@ from deerflow.persistence.user.model import UserPreferenceRow
 from deerflow.runtime import ConflictError, RunRecord
 from deerflow.runtime.run_origin import origin_kind_of
 from deerflow.scheduler.host_notes import RUN_ERROR_DELETED_WHILE_QUEUED, RUN_ERROR_INTERRUPTED, RUN_ERROR_LEASE_LOST, RUN_ERROR_PAUSED_WHILE_QUEUED, RUN_ERROR_QUEUE_TIMEOUT, RUN_ERROR_RESTARTED
-from deerflow.scheduler.schedules import next_run_at
+from deerflow.scheduler.schedules import next_run_at, should_advance_schedule_cursor
 from deerflow.scheduler.stop_rule import launch_prompt
 from deerflow.trace_context import ensure_trace_context
 from deerflow.utils.thread_id import validate_thread_id
@@ -517,7 +517,7 @@ class ScheduledTaskService:
         scheduled occurrence. One-time tasks retain their existing boundary
         semantics, so only recurring manual launches keep the stored value.
         """
-        if trigger == "manual" and task["schedule_type"] != "once":
+        if not should_advance_schedule_cursor(task["schedule_type"], trigger=trigger):
             return task.get("next_run_at")
         return next_run_at(
             task["schedule_type"],

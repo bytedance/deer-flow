@@ -343,6 +343,60 @@ async def test_manual_trial_does_not_push_recurring_next_run(repos, schedule_typ
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    ("schedule_type", "schedule_spec", "expected_next_run_at"),
+    [
+        ("interval", {"every_seconds": 3600}, datetime(2030, 1, 1, 11, 6, tzinfo=UTC)),
+        ("cron", {"cron": "0 10 * * *"}, datetime(2030, 1, 2, 10, tzinfo=UTC)),
+    ],
+)
+async def test_trial_after_missed_recurring_slot_allows_one_catch_up(repos, schedule_type, schedule_spec, expected_next_run_at):
+    """An overdue cursor survives the trial and advances only at catch-up dispatch."""
+    tasks, runs = repos
+    scheduled_at = datetime(2030, 1, 1, 10, tzinfo=UTC)
+    trial_at = scheduled_at + timedelta(minutes=5)
+    catch_up_at = scheduled_at + timedelta(minutes=6)
+    task_id = f"overdue-{schedule_type}"
+    launches = []
+
+    async def launch_run(**kwargs):
+        launches.append(kwargs)
+        return {"run_id": f"run-{len(launches)}", "thread_id": kwargs["thread_id"]}
+
+    service = _service(tasks, runs, launch_run)
+    task = await _create_recurring_task(
+        tasks,
+        task_id=task_id,
+        schedule_type=schedule_type,
+        schedule_spec=schedule_spec,
+        next_run_at=scheduled_at,
+    )
+    assert (await service.dispatch_task(task, now=trial_at, trigger="manual"))["outcome"] == "launched"
+    assert (await tasks.get(task_id, user_id=OWNER))["next_run_at"] == coerce_iso(scheduled_at)
+
+    # The due cursor must not bypass the trial's single active-occurrence slot.
+    await service.run_once(now=trial_at + timedelta(seconds=30))
+    assert len(launches) == 1
+    assert len(await runs.list_by_task(task_id)) == 1
+
+    await service.handle_run_completion(_record(launches[0], "run-1", RunStatus.success))
+    assert (await tasks.get(task_id, user_id=OWNER))["next_run_at"] == coerce_iso(scheduled_at)
+    await service.run_once(now=catch_up_at)
+
+    assert [launch["metadata"]["scheduled_trigger"] for launch in launches] == ["manual", "scheduled"]
+    assert (await tasks.get(task_id, user_id=OWNER))["next_run_at"] == coerce_iso(expected_next_run_at)
+    # Neither another poll while active nor one after completion repeats the
+    # overdue occurrence; the catch-up dispatch has moved the cursor forward.
+    await service.run_once(now=catch_up_at + timedelta(seconds=1))
+    await service.handle_run_completion(_record(launches[1], "run-2", RunStatus.success))
+    await service.run_once(now=catch_up_at + timedelta(minutes=1))
+    assert len(launches) == 2
+    occurrences = await runs.list_by_task(task_id)
+    assert sorted((row["trigger"], row["status"]) for row in occurrences) == [("manual", "success"), ("scheduled", "success")]
+    assert (await tasks.get(task_id, user_id=OWNER))["next_run_at"] == coerce_iso(expected_next_run_at)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     ("schedule_type", "schedule_spec"),
     [("interval", {"every_seconds": 3600}), ("cron", {"cron": "0 10 * * *"})],
 )
