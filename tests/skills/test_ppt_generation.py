@@ -11,7 +11,7 @@ generate_ppt = runpy.run_path(str(SCRIPT))["generate_ppt"]
 
 
 @pytest.mark.parametrize("aspect_ratio", ["16:9", "4:3"])
-@pytest.mark.parametrize("image_size", [(320, 80), (80, 320), (120, 120), (160, 120)])
+@pytest.mark.parametrize("image_size", [(320, 80), (80, 320), (120, 120), (160, 120), (100, 700), (700, 100)])
 def test_slide_images_are_centered_without_cropping(tmp_path, aspect_ratio, image_size):
     plan_path = tmp_path / "plan.json"
     plan_path.write_text(
@@ -33,9 +33,9 @@ def test_slide_images_are_centered_without_cropping(tmp_path, aspect_ratio, imag
     bottom = presentation.slide_height - picture.top - picture.height
 
     assert min(picture.left, picture.top, right, bottom) >= 0
-    # Allow two EMUs for the existing inch-to-integer coordinate rounding.
-    assert abs(picture.left - right) <= 2
-    assert abs(picture.top - bottom) <= 2
+    # An odd amount of unused space leaves one extra EMU on the right or bottom.
+    assert 0 <= right - picture.left <= 1
+    assert 0 <= bottom - picture.top <= 1
     assert picture.width / picture.height == pytest.approx(image_size[0] / image_size[1], rel=1e-5)
     assert picture.width == presentation.slide_width or picture.height == presentation.slide_height
     assert picture.image.size == image_size
