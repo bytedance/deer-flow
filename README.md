@@ -207,6 +207,8 @@ streams simulate chunks from a non-streaming response, while no-tool streams sta
    Jina can also bound concurrent HTTP attempts and FIFO waiting with the opt-in `request_admission` tool extra. One immutable budget is shared across clients and agent threads in each process; replicas have independent budgets. See [Jina request admission](backend/docs/CONFIGURATION.md#jina-request-admission).
 
    Run `make doctor` at any time to verify your setup and get actionable fix hints.
+   The setup wizard and health check support legacy terminal encodings, including
+   Windows cp936, replacing unsupported characters so both commands can finish.
    If you are opening a GitHub issue about a local setup or runtime problem, run
    `make support-bundle`. The command prints reporter next steps, writes a
    `*-issue-summary.md` file to paste into the issue, a `*-issue-draft.md` file
@@ -570,6 +572,12 @@ after `make docker-start`, run the printed `sudo chown -R <uid>:<gid> '<home>'`
 recovery command and retry. The check honors secret overrides from the shell or
 `.env`, accepts readable read-only secret files, and leaves `make down` available
 without reading or generating secrets.
+
+Production Docker commands can select a root dotenv profile with
+`DEER_FLOW_COMPOSE_ENV_FILE=/srv/deer-flow/stage.env make up`. The same file
+feeds Compose interpolation, Gateway/provisioner variables, and deployment
+secret checks. YAML and runtime-state locations remain separate selectors;
+see [production env files](backend/docs/CONFIGURATION.md#production-compose-env-files).
 
 For persistent deployments, configure `database.backend` as `sqlite` or
 `postgres`. The selected backend is shared by the LangGraph checkpointer,
@@ -1050,6 +1058,9 @@ Attachments saved by the shared IM ingestion pipeline or Feishu/DingTalk's
 embedded downloads keep distinct filenames, including when concurrent uploads
 choose the same name. The final filename is passed to the agent and used for
 sandbox sync; an existing conversation file is not overwritten.
+
+Feishu and DingTalk attachment transfers return standalone temporary sandboxes
+to the pool after synchronization, without interrupting an active run.
 
 **Configuration in `config.yaml`:**
 

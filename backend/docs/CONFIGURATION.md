@@ -764,7 +764,7 @@ Notes:
 - The declaration also drives the `agent_storage.backend: file` divergence warning, the inbound webhook dedupe warning, the `auth.local.throttle_storage: memory` warning, and the WeChat QR-login guard, which otherwise only look at the worker count.
 - Login lockouts are shared through the database: `auth.local.throttle_storage` (startup-only) defaults to `auto`, which keeps the per-IP failed-login counters for `POST /api/v1/auth/login/local` in the `login_throttle` table whenever `database.backend` is `sqlite` or `postgres`, so every instance enforces one `max_login_attempts` limit per client IP and a lockout on one instance holds on all of them. `memory` keeps the historical per-process counter (N instances give an attacker N × `max_login_attempts` guesses; a declared multi-instance deployment logs a warning), and `db` forces the table (it falls back to memory with a warning when the database backend is `memory`, and refuses to start when the configured database's engine is unavailable; `auto` falls back with a warning in that case). `max_login_attempts` and `lockout_seconds` stay live-read.
 - IM chat-to-thread bindings are shared through the database too: with `database.backend: sqlite` or `postgres` the `ChannelManager` keeps the `channel_name:chat_id[:topic_id]` → thread mapping of unbound IM conversations in the `channel_thread_bindings` table (migration `0038_channel_thread_bindings`), so a conversation created on one instance continues on the same thread when its next message lands on another. On the first start after upgrading, an existing `{base_dir}/channels/store.json` is imported once — only into an empty table, with `INSERT … ON CONFLICT DO NOTHING` so concurrently starting instances cannot duplicate a binding — and renamed `store.json.migrated`; a populated table leaves the file untouched. `memory` keeps the per-process JSON file.
-- With the default DeerMem backend, the declaration also warns when the derived SQLite retrieval index sits inside the shared `storage_path` (the default `{storage_path}/.retrieval`). Set `memory.backend_config.retrieval_index_path` to an instance-local directory (relative values resolve against `storage_path`): SQLite WAL is unsupported on network filesystems, and the index is rebuilt from the Markdown facts at startup and re-synced per user scope after a peer writes.
+- With the default DeerMem backend, the declaration also warns when the derived SQLite retrieval index sits inside the shared `storage_path` (the default `{storage_path}/.retrieval`). Set `memory.backend_config.retrieval_index_path` to an instance-local directory (relative values resolve against `storage_path`): SQLite WAL is unsupported on network filesystems, and the index is rebuilt from the Markdown facts at startup and re-synced per user scope after a peer writes. DeerMem's extraction watermark lives in the shared `storage_path` too (`users/{user}/agents/{agent}/.metadata/watermarks.json`), so a thread whose next turn lands on another instance, or on a restarted one, does not send already-extracted turns to the memory LLM again.
 - A declared multi-instance deployment that enables a feature storing credentials (today `channel_connections.enabled: true`) also needs one shared `DEER_FLOW_CREDENTIALS_KEY`; see [Credentials encryption key](#credentials-encryption-key-deer_flow_credentials_key).
 - IM channels: the gate refuses `channels.leader_lease.enabled: false` while a provider other than GitHub is enabled (under `channels.*`, or connectable from the web UI through `channel_connections.<provider>.enabled`), because every instance would otherwise open the platform connection with the same bot credentials. With `auto` (the default) or `true` the instances share each provider's connection through the `channel_leases` table; see [IM channel leader lease](#im-channel-leader-lease-channelsleader_lease).
 - Restart-required: the gate runs once at startup. Restart all Gateway instances together after changing it.
@@ -1924,6 +1924,47 @@ values already injected by those layers remain process variables and win.
 For containers, explicitly pass the selector and mount the selected file at a
 container-visible path. Database, runtime-home, storage and tenant isolation
 must be configured separately; selecting a dotenv file does not provide them.
+
+
+## Production Compose env files
+
+Set `DEER_FLOW_COMPOSE_ENV_FILE` in the launcher environment to select a
+production dotenv file for `make up`, `make down`, and direct
+`./scripts/deploy.sh build|start|down` calls:
+
+```bash
+DEER_FLOW_COMPOSE_ENV_FILE=/srv/deer-flow/stage.env make up
+```
+
+Relative paths are resolved from the checkout root. The production launcher
+passes the same file to Compose's `--env-file`, the Gateway and provisioner
+`env_file` entries, the secret-resolution probe, and optional build-extra
+discovery. It never sources the file as shell code. An explicit missing,
+directory, or unreadable selector fails before Docker is invoked for startup
+or build. `make down` can still stop the stack if the selected file was removed.
+An unset or empty selector preserves the optional repo-root `.env` default.
+
+For direct Compose calls, use an absolute path and provide both selectors:
+`--env-file` controls interpolation; service `env_file` controls container
+variables.
+
+```bash
+DEER_FLOW_COMPOSE_ENV_FILE=/srv/deer-flow/stage.env \
+  docker compose --env-file /srv/deer-flow/stage.env \
+  -f docker/docker-compose.yaml config
+```
+
+Existing shell variables retain Compose's precedence. Export
+`DEER_FLOW_CONFIG_PATH`, `DEER_FLOW_EXTENSIONS_CONFIG_PATH`, and
+`DEER_FLOW_HOME` independently when choosing different configuration and state
+locations. This is a production Docker file-selection option. `make start` uses
+the local
+`serve.sh --prod` launcher, and `make docker-*` uses Docker development; those
+commands keep their repo-root `.env` handling.
+`frontend/.env`, project/container names, database separation, and tenant
+isolation are not changed. Stop an existing stack before switching its profile.
+Keep credential-bearing profiles outside the checkout or in local Git exclusions.
+`DEER_FLOW_ENV_FILE` remains the separate backend Python dotenv selector.
 
 ## Configuration Location
 
