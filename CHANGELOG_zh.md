@@ -1112,6 +1112,22 @@
 
 ### 修复
 
+- **MCP：** 使用 OAuth `refresh_token` 授权的 MCP 服务器，在提供方轮换 refresh token
+  （Auth0、Okta、Google）时，跨 Gateway 重启、工具缓存重置、个人连接的多次运行以及多个
+  Gateway 实例都能继续工作。此前令牌只保存在进程内存中，每个新进程或新 manager 都从配置里
+  的 refresh token 重新开始，而该 token 已被第一次刷新消耗，于是得到 `invalid_grant`。
+  当 `database.backend` 为 `sqlite` 或 `postgres` 时，每个连接的 access token 与最新的
+  refresh token 现保存在新表 `mcp_oauth_tokens`（迁移 `0047_mcp_oauth_tokens`）中，用
+  `DEER_FLOW_CREDENTIALS_KEY` 加密，按部署级服务器或个人连接的所有者分别建键。刷新前先重读
+  该行，并以短租约（token 请求进行期间持续续约）加版本号比较交换（compare-and-set）认领，
+  因此并发实例只调用一次 token 端点并采用彼此的结果；未能写入的轮换结果会被保留，并在下次
+  刷新前先写回。修改配置中的种子、token 端点、client、scope 或 audience 会从配置
+  开始新的令牌链。`client_credentials` 令牌仍留在进程内。保存 MCP 配置时会删除配置中已不存在
+  的连接所存的令牌；refresh token 被拒绝时，工具调用会报出要求重新配置 refresh token 的错误
+  （若本实例无法解密其他实例存下的令牌链，还会提示所有实例需要相同的密钥）。声明多实例部署且启用了
+  `refresh_token` OAuth 服务器时，缺少 `DEER_FLOW_CREDENTIALS_KEY` 现在会拒绝启动。
+  ([#7207])
+
 - **社区工具：** 拒绝 LightRAG 与 RAGFlow 的 `knowledge_search` 数值设置中的
   布尔值，不再静默把 `true` 当作一秒超时、一条结果或一个字符的输出。无效设置返回
   现有的配置错误。([#7042])
@@ -10333,3 +10349,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7167]: https://github.com/bytedance/deer-flow/pull/7167
 [#7170]: https://github.com/bytedance/deer-flow/pull/7170
 [#7205]: https://github.com/bytedance/deer-flow/pull/7205
+[#7207]: https://github.com/bytedance/deer-flow/pull/7207
