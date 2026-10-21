@@ -44,6 +44,15 @@ def personal_server_name(user_id: str, name: str, configuration: dict[str, Any])
     return PERSONAL_SERVER_PREFIX + hashlib.sha256(identity.encode()).hexdigest()[:32]
 
 
+def personal_server_name_variants(user_id: str, name: str, configuration: dict[str, Any]) -> set[str]:
+    """Runtime names one saved connection takes as stored and with ``enabled`` toggled either way.
+
+    Toggling a connection off and on again restores its earlier runtime name,
+    so state keyed by that name (stored OAuth tokens) must survive the toggle.
+    """
+    return {personal_server_name(user_id, name, variant) for variant in (configuration, {**configuration, "enabled": True}, {**configuration, "enabled": False})}
+
+
 def load_user_mcp_config(user_id: str) -> ExtensionsConfig:
     """Read literal user values; personal files cannot resolve host $ENV secrets."""
     raw = read_user_mcp_config(user_id)

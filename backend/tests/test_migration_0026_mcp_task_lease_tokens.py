@@ -2,7 +2,7 @@
 
 Adds the nullable per-claim token columns ``McpTaskRepository`` uses to fence
 poll, cancel, and notification mutations to the exact claim generation. The
-chain-head pin lives in ``test_migration_0046_skill_mutations``.
+chain-head pin lives in ``test_migration_0047_mcp_oauth_tokens``.
 """
 
 from __future__ import annotations
