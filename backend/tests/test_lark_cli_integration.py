@@ -2640,21 +2640,25 @@ def test_complete_lark_auth_captures_status_under_lock_and_probes_runtime_after(
     spawn_lock_states: list[bool] = []
     first_unlock = threading.Event()
     lock_exits = {"count": 0}
+    credential_mutex = threading.Lock()
 
     class _CredentialLock:
         def __enter__(self):
+            credential_mutex.acquire()
             assert lock_state["active"] is False
             lock_state["active"] = True
 
         def __exit__(self, *_args):
             lock_state["active"] = False
-            lock_exits["count"] += 1
-            first_unlock.set()
-            if lock_exits["count"] == 2:
-                # Model another tab switching credentials as soon as the
-                # post-completion snapshot lock is released.
-                credential_state["app_id"] = "next-app"
-                credential_state["auth"] = lark_cli.LarkAuthProbe(status="not_authorized", user=None)
+            if threading.current_thread() is threading.main_thread():
+                lock_exits["count"] += 1
+                first_unlock.set()
+                if lock_exits["count"] == 2:
+                    # Model another tab switching credentials after the
+                    # request captures its post-completion snapshot.
+                    credential_state["app_id"] = "next-app"
+                    credential_state["auth"] = lark_cli.LarkAuthProbe(status="not_authorized", user=None)
+            credential_mutex.release()
 
     class _LoginProcess:
         pid = None  # Markers treat a missing CLI pid as owned by this process.

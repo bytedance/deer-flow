@@ -205,20 +205,21 @@ and keep fixture filesystem work behind `asyncio.to_thread`.
 ## Lark device-login single-flight
 
 `test_lark_auth_singleflight.py` pins the `(user_id, generation)` single-flight
-contract: wait timeouts never kill or respawn the shared login process, polls
-attach to one run, supersession terminates the orphan, and finished outcomes
-stay idempotently attachable. Cross-worker ownership rides per-generation
-marker/result files under the credential root (first writer wins); termination
-kills the login's whole process group so wrapper children cannot hold the
-pipes open. Drive the `_spawn_lark_login_process` seam with Popen-shaped fakes
-held open by `threading.Event` (no sleep-based timing), and always
-release/kill blocked fakes so the daemon worker threads exit; the autouse
-fixture calls `_clear_lark_login_runs_for_tests()` on both sides to keep the
-process-global registry from leaking between tests. The
-`GATEWAY_WORKERS > 1` regression forks two real workers over one credential
-root with a FIFO-gated CLI stub; assert retry attachment (no second spawn),
-non-owner switch fencing (owner CLI killed, no post-switch token write) and
-cross-worker success attachment through the published result file.
+contract: request timeouts leave one shared CLI alive; supersession terminates
+it, including its POSIX process group. Forked workers share a credential root;
+every CLI gets the invocation-log environment so duplicate spawns are visible.
+Publication grace starts at observed CLI exit, independent of login duration.
+Cover publication between a foreign result read and its marker probe.
+`test_lark_auth_lifecycle_failures.py` injects storage and startup failures:
+terminal marker receipts prevent retrying uncertain single-use codes, cleanup
+errors preserve published results, and failed starts reap children and wake
+waiters. Treat unhandled worker-thread warnings as errors. Event-driven process
+doubles must be released/killed and joined at teardown.
+`test_lark_credential_tree_churn.py` removes real descendants at each walk step;
+assert the injection fired and surviving secrets reached private modes. Missing
+roots, permission errors and symlinks remain errors. Mutations must fail these
+assertions; merely returning without an exception is insufficient.
+Run mutations on a copied harness; never swap checkout sources during tests.
 
 ## Remote read fixtures
 

@@ -32,6 +32,8 @@ from deerflow.config import paths as paths_module
 from deerflow.config.paths import Paths
 from deerflow.integrations import lark_cli
 
+pytestmark = pytest.mark.filterwarnings("error::pytest.PytestUnhandledThreadExceptionWarning")
+
 
 def _config(skills_root: Path):
     return SimpleNamespace(
@@ -682,13 +684,15 @@ def _count_lines(path: str, grace_seconds: float = 2.0) -> int:
         time.sleep(0.05)
 
 
-def _window_worker_a(base_dir: str, cli_dir: str, env: dict[str, str], invocations: str, pause_flag: str, release_flag: str, out) -> None:
+def _window_worker_a(base_dir: str, cli_dir: str, env: dict[str, str], invocations: str, pause_flag: str, release_flag: str, out, login_age_seconds: float = 0) -> None:
     """Owner paused between CLI exit and result publication (the P1 window)."""
     try:
         paths_module._paths = Paths(base_dir=Path(base_dir))
         os.environ.update(env)
         os.environ["PATH"] = f"{cli_dir}{os.pathsep}{os.environ.get('PATH', '')}"
         lark_cli.LARK_AUTH_COMPLETE_MIN_WAIT_SECONDS = 0
+        # Advance only the peer's view of the attempt age; no wall-clock sleep.
+        lark_cli.time = SimpleNamespace(time=lambda: time.time() - login_age_seconds, monotonic=time.monotonic, sleep=time.sleep)
         config = _cross_worker_config(Path(base_dir))
         with lark_cli._lark_credential_lock("alice"):
             generation = lark_cli._advance_lark_flow_generation_locked("alice")
@@ -722,6 +726,7 @@ def _window_worker_b(base_dir: str, cli_dir: str, invocations: str, out, cmd) ->
     try:
         paths_module._paths = Paths(base_dir=Path(base_dir))
         os.environ["PATH"] = f"{cli_dir}{os.pathsep}{os.environ.get('PATH', '')}"
+        os.environ["LARK_TEST_INVOCATIONS"] = invocations
         lark_cli.LARK_AUTH_COMPLETE_MIN_WAIT_SECONDS = 0
         config = _cross_worker_config(Path(base_dir))
         generation = cmd.get(timeout=30)
@@ -739,7 +744,8 @@ def _window_worker_b(base_dir: str, cli_dir: str, invocations: str, out, cmd) ->
     "fork" not in multiprocessing.get_all_start_methods() or lark_cli.fcntl is None,
     reason="requires POSIX fork and fcntl",
 )
-def test_login_marker_ownership_covers_exit_to_publication_window(tmp_path) -> None:
+@pytest.mark.parametrize("login_age_seconds", [0, 30])
+def test_login_marker_ownership_covers_exit_to_publication_window(tmp_path, login_age_seconds) -> None:
     """CLI exit alone must not end ownership: while the owner is still alive
     and the result unpublished, a foreign poll must not spawn a second login
     for the same device code (P1 exit-to-publication regression)."""
@@ -758,7 +764,7 @@ def test_login_marker_ownership_covers_exit_to_publication_window(tmp_path) -> N
 
     context = multiprocessing.get_context("fork")
     a_out, b_out, b_cmd = context.Queue(), context.Queue(), context.Queue()
-    worker_a = context.Process(target=_window_worker_a, args=(str(base_dir), str(cli_dir), env, str(invocations), str(pause_flag), str(release_flag), a_out))
+    worker_a = context.Process(target=_window_worker_a, args=(str(base_dir), str(cli_dir), env, str(invocations), str(pause_flag), str(release_flag), a_out, login_age_seconds))
     worker_b = context.Process(target=_window_worker_b, args=(str(base_dir), str(cli_dir), str(invocations), b_out, b_cmd))
     worker_a.start()
     try:
@@ -770,6 +776,8 @@ def test_login_marker_ownership_covers_exit_to_publication_window(tmp_path) -> N
         _await_pid_death(cli_pid)
         _await_file(pause_flag)
         assert Path(marker_path).exists()
+        marker = json.loads(Path(marker_path).read_text(encoding="utf-8"))
+        assert time.time() - marker["created_at"] >= login_age_seconds - 1
 
         worker_b.start()
         try:
@@ -829,8 +837,18 @@ def _reissue_owner_worker(base_dir: str, cli_dir: str, env: dict[str, str], invo
             out.put(("a_code_a", "unexpected-attach"))
         except BaseException as exc:
             out.put(("a_code_a", type(exc).__name__))
+        # Keep code B alive until the parent has observed its invocation.
+        cmd.get(timeout=30)
     except BaseException as exc:  # noqa: BLE001 - reported to the parent
         out.put(("a_error", f"{type(exc).__name__}: {exc}"))
+    finally:
+        # Forked workers do not run the parent's pytest fixture teardown.
+        with lark_cli._LARK_LOGIN_RUNS_LOCK:
+            runs = list(lark_cli._LARK_LOGIN_RUNS.values())
+        for run in runs:
+            if run.process is not None:
+                lark_cli._terminate_pid(run.process.pid)
+        lark_cli._clear_lark_login_runs_for_tests()
 
 
 def _reissue_issuer_worker(base_dir: str, cli_dir: str, env: dict[str, str], out, cmd) -> None:
@@ -897,6 +915,7 @@ def test_reissue_poll_landing_on_original_owner_is_not_fenced(tmp_path) -> None:
             if worker_b.is_alive():
                 worker_b.terminate()
     finally:
+        a_cmd.put("finish")
         worker_a.join(timeout=30)
         if worker_a.is_alive():
             worker_a.terminate()
@@ -907,53 +926,8 @@ def test_reissue_poll_landing_on_original_owner_is_not_fenced(tmp_path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_walk_and_harden_tolerates_a_vanished_entry(monkeypatch, tmp_path) -> None:
-    """A credential-tree entry that disappears between iterdir() and lstat()
-    is skipped, not an unhandled exception in the login worker (P2)."""
-    root = tmp_path / "cred"
-    root.mkdir()
-    victim = root / "vanishes.txt"
-    victim.write_text("x", encoding="utf-8")
-
-    # Monkeypatch Path.lstat so the real _credential_tree_path_kind sees the
-    # entry vanish between the walk's iterdir() and its lstat().
-    real_lstat = Path.lstat
-
-    def _flaky_lstat(self: Path):
-        if self == victim:
-            victim.unlink()
-            raise FileNotFoundError(self)
-        return real_lstat(self)
-
-    monkeypatch.setattr(Path, "lstat", _flaky_lstat)
-    lark_cli._harden_posix_credential_tree(root)  # must not raise
-
-    # A directory that vanishes between iterdir() and the follow-up iterdir is
-    # likewise skipped.
-    root2 = tmp_path / "cred2"
-    root2.mkdir()
-    sub = root2 / "sub"
-    sub.mkdir()
-    (sub / "keep.txt").write_text("x", encoding="utf-8")
-
-    real_iterdir = Path.iterdir
-
-    def _flaky_iterdir(self: Path):
-        entries = list(real_iterdir(self))
-        if self == root2:
-            (sub / "keep.txt").unlink()
-            sub.rmdir()
-        return iter(entries)
-
-    monkeypatch.setattr(Path, "iterdir", _flaky_iterdir)
-    lark_cli._harden_posix_credential_tree(root2)  # must not raise
-
-
-def test_write_result_once_continues_when_hardening_fails(monkeypatch, tmp_path) -> None:
-    """A filesystem hiccup during ensure_lark_cli_credential_tree must not
-    abort result publication: the in-process outcome is already set by the
-    worker's finally block, so the cross-worker result file must still be
-    written and the marker sweep must still run."""
+def test_write_result_once_does_not_bypass_hardening_failure(monkeypatch, tmp_path) -> None:
+    """A rejected credential boundary must not become a permissive write."""
     _patch_paths(monkeypatch, tmp_path / "home")
     # ensure_lark_cli_credential_tree is mocked below, so create the root it
     # would have created; tempfile.mkstemp(dir=...) requires it to exist.
@@ -966,45 +940,26 @@ def test_write_result_once_continues_when_hardening_fails(monkeypatch, tmp_path)
     user_id = "alice"
     generation = "gen"
     digest = lark_cli._lark_login_code_digest("code-A")
-    published = lark_cli._write_lark_login_result_once(
-        user_id, generation, digest, {"ok": False, "kind": "superseded", "error": "sweep"}
-    )
-    assert published is True
-    assert lark_cli._lark_login_result_path(user_id, generation, digest).is_file()
+    with pytest.raises(OSError, match="simulated fs hiccup"):
+        lark_cli._write_lark_login_result_once(user_id, generation, digest, {"ok": False, "kind": "superseded", "error": "sweep"})
+    assert not lark_cli._lark_login_result_path(user_id, generation, digest).exists()
 
 
-def test_abandoned_marker_with_dead_owner_is_swept_within_grace(tmp_path) -> None:
-    """A marker whose CLI is gone and whose owner outlived the publication
-    grace is dead: foreign polls must sweep it and respawn instead of
-    blocking on a result file that can never arrive."""
+def test_abandoned_marker_requires_a_new_device_code(monkeypatch, tmp_path) -> None:
+    """An uncertain redeemed code is rejected after the publication grace."""
     base_dir = tmp_path / "home"
-    (base_dir / "lark-cli").mkdir(parents=True)
     user_id = "alice"
     generation = "gen"
     digest = lark_cli._lark_login_code_digest("code-A")
     now = time.time()
-    from deerflow.config import paths as paths_module
-
-    paths_module._paths = paths_module.Paths(base_dir=base_dir)
-
-    try:
-        lark_cli._lark_cli_credential_root(user_id).mkdir(parents=True, exist_ok=True)
-        marker_path = lark_cli._lark_login_marker_path(user_id, generation, digest)
-        marker_path.write_text(
-            json.dumps(
-                {
-                    "generation": generation,
-                    "device_code_digest": digest,
-                    "cli_pid": None,
-                    "owner_pid": os.getpid(),  # alive, but...
-                    "owner_pid_started_at": now - 60.0,  # ...far beyond the 10 s grace
-                    "created_at": now - 1.0,
-                }
-            ),
-            encoding="utf-8",
-        )
-        live = lark_cli._read_live_lark_login_marker_locked(user_id, generation, "code-A")
-        assert live is None
-        assert not marker_path.exists()
-    finally:
-        paths_module._paths = None
+    _patch_paths(monkeypatch, base_dir)
+    lark_cli.ensure_lark_cli_credential_tree(user_id)
+    marker_path = lark_cli._lark_login_marker_path(user_id, generation, digest)
+    marker_path.write_text(
+        json.dumps({"generation": generation, "device_code_digest": digest, "cli_pid": None, "owner_pid": os.getpid(), "cli_exit_observed_at": now - 60.0, "created_at": now - 1.0}),
+        encoding="utf-8",
+    )
+    with lark_cli._lark_credential_lock(user_id):
+        with pytest.raises(ValueError, match="Restart the authorization flow"):
+            lark_cli._read_live_lark_login_marker_locked(user_id, generation, "code-A")
+    assert marker_path.exists(), "an uncertain code must not become a free login slot"
