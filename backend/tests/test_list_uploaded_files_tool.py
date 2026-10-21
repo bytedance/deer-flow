@@ -83,6 +83,14 @@ class TestFormatOmittedSummary:
 
 
 class TestListUploadedFiles:
+    def test_outline_preserves_separate_bold_spans(self, tmp_path):
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "report.md").write_text("# **Revenue** and **Profit**\n", encoding="utf-8")
+
+        result = _list_uploaded_files_impl(include_outline=True, runtime=_runtime(), _paths=_paths(tmp_path))
+
+        assert result["files"][0]["outline"] == [{"title": "**Revenue** and **Profit**", "line": 1}]
+
     def test_no_runtime_returns_empty(self):
         result = _list_uploaded_files_impl(runtime=None)
         assert result["files"] == []

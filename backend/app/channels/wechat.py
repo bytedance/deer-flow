@@ -11,10 +11,13 @@ import logging
 import math
 import mimetypes
 import secrets
+import shutil
 import tempfile
 import time
 from collections.abc import Mapping
+from contextlib import suppress
 from enum import IntEnum
+from functools import partial
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlparse
@@ -27,7 +30,8 @@ from app.channels.allowed_users import parse_allowed_users
 from app.channels.base import Channel, ChannelUnavailable
 from app.channels.commands import is_known_channel_command
 from app.channels.connection_identity import attach_connection_identity
-from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
+from app.channels.credential_staging import cleanup_stale_credential_staging, credential_staging_prefix
+from app.channels.message_bus import INBOUND_FILE_CLEANUP_KEY, InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment, cleanup_inbound_files
 from deerflow.utils.file_io import await_drained
 
 logger = logging.getLogger(__name__)
@@ -815,38 +819,43 @@ class WechatChannel(Channel):
             return
 
         files = await self._extract_inbound_files(raw_message)
-        if not text and not files:
-            return
+        published = False
+        try:
+            if not text and not files:
+                return
 
-        thread_ts = context_token or str(raw_message.get("client_id") or raw_message.get("msg_id") or "").strip() or None
+            thread_ts = context_token or str(raw_message.get("client_id") or raw_message.get("msg_id") or "").strip() or None
 
-        if context_token:
-            self._context_tokens_by_chat[chat_id] = context_token
-            if thread_ts:
-                self._context_tokens_by_thread[thread_ts] = context_token
+            if context_token:
+                self._context_tokens_by_chat[chat_id] = context_token
+                if thread_ts:
+                    self._context_tokens_by_thread[thread_ts] = context_token
 
-        inbound = self._make_inbound(
-            chat_id=chat_id,
-            user_id=chat_id,
-            text=text,
-            msg_type=InboundMessageType.COMMAND if is_known_channel_command(text) else InboundMessageType.CHAT,
-            thread_ts=thread_ts,
-            files=files,
-            metadata={
-                "context_token": context_token,
-                "ilink_user_id": chat_id,
-                "message_id": str(raw_message.get("message_id") or raw_message.get("msg_id") or "").strip(),
-                "ref_msg": self._extract_ref_message(raw_message),
-                "raw_message": raw_message,
-            },
-        )
-        inbound.topic_id = None
-        inbound = await self._attach_connection_identity(inbound)
-        if context_token and not raw_message.get("group_id") and inbound.connection_id and inbound.owner_user_id:
-            await self._remember_notification_context(connection_id=inbound.connection_id, owner_user_id=inbound.owner_user_id, chat_id=chat_id, context_token=context_token)
-        # The iLink poll loop processes updates sequentially on the Gateway
-        # loop, so no provider-side task needs a pre-handoff reservation.
-        await self._publish_inbound_or_drop(inbound)
+            inbound = self._make_inbound(
+                chat_id=chat_id,
+                user_id=chat_id,
+                text=text,
+                msg_type=InboundMessageType.COMMAND if is_known_channel_command(text) else InboundMessageType.CHAT,
+                thread_ts=thread_ts,
+                files=files,
+                metadata={
+                    "context_token": context_token,
+                    "ilink_user_id": chat_id,
+                    "message_id": str(raw_message.get("message_id") or raw_message.get("msg_id") or "").strip(),
+                    "ref_msg": self._extract_ref_message(raw_message),
+                    "raw_message": raw_message,
+                },
+            )
+            inbound.topic_id = None
+            inbound = await self._attach_connection_identity(inbound)
+            if context_token and not raw_message.get("group_id") and inbound.connection_id and inbound.owner_user_id:
+                await self._remember_notification_context(connection_id=inbound.connection_id, owner_user_id=inbound.owner_user_id, chat_id=chat_id, context_token=context_token)
+            # The iLink poll loop processes updates sequentially on the Gateway
+            # loop, so no provider-side task needs a pre-handoff reservation.
+            published = await self._publish_inbound_or_drop(inbound)
+        finally:
+            if not published:
+                await cleanup_inbound_files(files)
 
     async def _attach_connection_identity(self, inbound: InboundMessage) -> InboundMessage:
         return await attach_connection_identity(
@@ -1300,17 +1309,21 @@ class WechatChannel(Channel):
 
         message_id = str(raw_message.get("message_id") or raw_message.get("msg_id") or raw_message.get("client_id") or "msg")
 
-        for index, item in enumerate(item_list):
-            if not isinstance(item, Mapping):
-                continue
-            if item.get("type") == int(MessageItemType.IMAGE):
-                image_file = await self._extract_image_file(item, message_id=message_id, index=index)
-                if image_file:
-                    files.append(image_file)
-            elif item.get("type") == int(MessageItemType.FILE):
-                file_info = await self._extract_file_item(item, message_id=message_id, index=index)
-                if file_info:
-                    files.append(file_info)
+        try:
+            for index, item in enumerate(item_list):
+                if not isinstance(item, Mapping):
+                    continue
+                if item.get("type") == int(MessageItemType.IMAGE):
+                    image_file = await self._extract_image_file(item, message_id=message_id, index=index)
+                    if image_file:
+                        files.append(image_file)
+                elif item.get("type") == int(MessageItemType.FILE):
+                    file_info = await self._extract_file_item(item, message_id=message_id, index=index)
+                    if file_info:
+                        files.append(file_info)
+        except (Exception, asyncio.CancelledError):
+            await cleanup_inbound_files(files)
+            raise
         return files
 
     async def _extract_image_file(self, item: Mapping[str, Any], *, message_id: str, index: int) -> dict[str, Any] | None:
@@ -1372,16 +1385,15 @@ class WechatChannel(Channel):
         detected_image = _detect_image_extension_and_mime(decrypted)
         image_extension = detected_image[0] if detected_image else ".jpg"
         filename = _safe_media_filename("wechat-image", image_extension, message_id=message_id, index=index)
-        stored_path = await asyncio.to_thread(self._stage_downloaded_file, filename, decrypted)
-        if stored_path is None:
+        staged_file = await self._stage_inbound_file(filename, decrypted)
+        if staged_file is None:
             return None
 
         mime_type = detected_image[1] if detected_image else mimetypes.guess_type(filename)[0] or "image/jpeg"
         return {
             "type": "image",
-            "filename": stored_path.name,
+            **staged_file,
             "size": len(decrypted),
-            "path": str(stored_path),
             "mime_type": mime_type,
             "source": "wechat",
             "message_item_type": int(MessageItemType.IMAGE),
@@ -1444,35 +1456,63 @@ class WechatChannel(Channel):
             logger.warning("[WeChat] inbound file exceeds size limit (%d bytes), skipping message_id=%s", len(decrypted), message_id)
             return None
 
-        stored_path = await asyncio.to_thread(self._stage_downloaded_file, filename, decrypted)
-        if stored_path is None:
+        staged_file = await self._stage_inbound_file(filename, decrypted)
+        if staged_file is None:
             return None
 
         return {
             "type": "file",
-            "filename": stored_path.name,
+            **staged_file,
             "size": len(decrypted),
-            "path": str(stored_path),
             "mime_type": mime_type,
             "source": "wechat",
             "message_item_type": int(MessageItemType.FILE),
             "full_url": full_url,
         }
 
+    async def _stage_inbound_file(self, filename: str, content: bytes) -> dict[str, Any] | None:
+        staged_file: dict[str, Any] = {}
+
+        def stage() -> None:
+            path = self._stage_downloaded_file(filename, content)
+            if path is not None:
+                staged_file.update({"filename": path.name, "path": str(path), INBOUND_FILE_CLEANUP_KEY: partial(shutil.rmtree, path.parent)})
+
+        try:
+            # Drain the write before releasing its directory, even if cancelled
+            # before the worker has returned the new path to the event loop.
+            await await_drained(asyncio.to_thread(stage))
+        except (Exception, asyncio.CancelledError):
+            await cleanup_inbound_files([staged_file])
+            raise
+        return staged_file or None
+
     def _stage_downloaded_file(self, filename: str, content: bytes) -> Path | None:
+        if not filename or filename in {".", ".."} or Path(filename).name != filename or "/" in filename or "\\" in filename or "\x00" in filename:
+            logger.warning("[WeChat] unsafe inbound staging filename, dropping media file")
+            return None
         download_dir = self._download_dir()
         if download_dir is None:
             # Silent None here made an attachment vanish with no log line —
             # the same observability gap as a mislabeled skip reason.
             logger.warning("[WeChat] no state directory configured, dropping staged inbound media file %s", filename)
             return None
+        staging_dir = None
         try:
             download_dir.mkdir(parents=True, exist_ok=True)
-            path = download_dir / filename
+            # Keep the display name while giving each attachment exclusive
+            # storage until the manager has consumed the published message.
+            staging_dir = Path(tempfile.mkdtemp(prefix="inbound-", dir=download_dir))
+            path = staging_dir / filename
             path.write_bytes(content)
             return path
         except OSError:
             logger.exception("[WeChat] failed to persist inbound media file %s", filename)
+            if staging_dir is not None:
+                try:
+                    shutil.rmtree(staging_dir)
+                except OSError:
+                    logger.warning("[WeChat] failed to clean up staged inbound media file %s", filename, exc_info=True)
             return None
 
     @staticmethod
@@ -1667,12 +1707,15 @@ class WechatChannel(Channel):
             return
         try:
             self._cursor_path.parent.mkdir(parents=True, exist_ok=True)
-            self._cursor_path.write_text(json.dumps({"get_updates_buf": self._get_updates_buf}, ensure_ascii=False, indent=2), encoding="utf-8")
+            self._cursor_path.write_text(json.dumps({"get_updates_buf": self._get_updates_buf}, ensure_ascii=False, indent=2), encoding="utf-8", newline="")
         except OSError:
             logger.warning("[WeChat] failed to persist cursor state to %s", self._cursor_path)
 
     def _load_auth_state(self) -> None:
-        if not self._auth_path or not self._auth_path.exists():
+        if not self._auth_path:
+            return
+        cleanup_stale_credential_staging(self._auth_path)
+        if not self._auth_path.exists():
             return
         try:
             data = json.loads(self._auth_path.read_text(encoding="utf-8"))
@@ -1731,17 +1774,28 @@ class WechatChannel(Channel):
                 # iLink bot_token is never briefly readable at umask defaults
                 # (mirrors ChannelRuntimeConfigStore._save). NamedTemporaryFile
                 # uses mkstemp, which creates the file at 0o600 from the start.
-                fd = tempfile.NamedTemporaryFile(mode="w", dir=self._auth_path.parent, suffix=".tmp", delete=False, encoding="utf-8")
+                fd = tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", newline="", dir=self._auth_path.parent, prefix=credential_staging_prefix(self._auth_path), suffix=".tmp", delete=False)
                 try:
                     json.dump(data, fd, ensure_ascii=False, indent=2)
                     fd.close()
                     Path(fd.name).replace(self._auth_path)
                 except BaseException:
-                    fd.close()
-                    Path(fd.name).unlink(missing_ok=True)
+                    # Cleanup is best-effort: a failing close or unlink must not take
+                    # the original persist error with it, and the unlink is still
+                    # attempted after a failed close.
+                    try:
+                        fd.close()
+                    except OSError:
+                        with suppress(Exception):
+                            logger.warning("Failed to close temporary WeChat auth state file %s", fd.name, exc_info=True)
+                    try:
+                        Path(fd.name).unlink(missing_ok=True)
+                    except OSError:
+                        with suppress(Exception):
+                            logger.warning("Failed to remove temporary WeChat auth state file %s", fd.name, exc_info=True)
                     raise
             except OSError:
-                logger.warning("[WeChat] failed to persist auth state to %s", self._auth_path)
+                logger.warning("[WeChat] failed to persist auth state to %s", self._auth_path, exc_info=True)
             else:
                 # Hardening only; the destination already inherits 0o600 from the
                 # temp file. A chmod failure on filesystems without POSIX perms

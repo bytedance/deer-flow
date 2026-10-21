@@ -5,6 +5,7 @@ import os
 import stat
 import tempfile
 from collections.abc import AsyncIterator
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
@@ -190,7 +191,8 @@ def _cleanup_uploaded_paths(paths: list[os.PathLike[str] | str]) -> None:
         except FileNotFoundError:
             pass
         except Exception:
-            logger.warning("Failed to clean up upload path after rejected request: %s", path, exc_info=True)
+            with suppress(Exception):
+                logger.warning("Failed to clean up upload path after rejected request: %s", path, exc_info=True)
 
 
 def _pure_destination(uploads_dir: os.PathLike[str] | str, display_filename: str) -> Path:
@@ -320,7 +322,8 @@ def _remove_staged_file(staged_path: os.PathLike[str] | str) -> None:
     except FileNotFoundError:
         pass
     except OSError:
-        logger.warning("Failed to remove staged upload file: %s", staged_path, exc_info=True)
+        with suppress(Exception):
+            logger.warning("Failed to remove staged upload file: %s", staged_path, exc_info=True)
 
 
 def _write_upload_chunk(upload_temp: _UploadTempFile, chunk: bytes) -> None:
@@ -330,6 +333,9 @@ def _write_upload_chunk(upload_temp: _UploadTempFile, chunk: bytes) -> None:
 def _abort_upload_temp(upload_temp: _UploadTempFile) -> None:
     try:
         upload_temp.handle.close()
+    except Exception:
+        with suppress(Exception):
+            logger.warning("Failed to close staged upload file: %s", upload_temp.temp_path, exc_info=True)
     finally:
         # Best-effort, not ``os.unlink``: an abandoned duplication worker can
         # still hold this inode open (Windows refuses to remove it then), and

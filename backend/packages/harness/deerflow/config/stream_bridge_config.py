@@ -54,6 +54,10 @@ class StreamBridgeConfig(BaseModel):
             "even if cleanup never runs. Set to 0 to disable. Only applies to the redis bridge."
         ),
     )
+    producer_lease_recovery_enabled: bool = Field(
+        default=False,
+        description=("Allow terminal Redis consumers to recover a missing END from an expired producer lease. Enable only after every Gateway writer has been upgraded and pre-upgrade runs have drained."),
+    )
     recovered_stream_cleanup_delay_seconds: float = Field(
         default=60.0,
         ge=0,

@@ -54,6 +54,8 @@ in node tests to cover those behaviors.
 
 E2E tests live under `tests/e2e/` and use Playwright with Chromium. They mock all backend APIs via `page.route()` network interception and test real page interactions (navigation, chat input, streaming responses). Config: `playwright.config.ts`. The real-backend auth contract in `tests/e2e-real-backend/auth-disabled-contract.spec.ts` and `backend/tests/test_auth_me_permissions.py` pin the complete route-permission list; update both when adding registered permissions (including `projects:read/write/delete`).
 
+CI runs four E2E shards; only shard 1 runs auth recovery. Suite reports stay separate.
+
 The dedicated `run-history.ts` hook replaces the unpaged runs hook. Show counts
 only after a successful history read, never during initial loading or errors.
 Scheduled run history uses task/page query keys and the existing live offset API.
@@ -111,16 +113,15 @@ Users create **threads** (conversations), send messages, set thread-scoped `/goa
 
 ### Source Layout (`src/`)
 
-- `app/` — Next.js routes: chat/workspace, agents, auth, showcase, artifact views,
-  localized docs/blog, and API handlers.
-- `components/` — generated `ui/` and `ai-elements/`; application components under
-  `workspace/`, `landing/`, and `docs/`.
-- `core/` — domain logic, API clients, state/hooks, i18n, and Markdown renderers.
-- `hooks/`, `lib/`, `typings/` — shared hooks, utilities, and ambient types.
-- `content/`, `styles/` — MDX content and Tailwind styles.
-- `env.js`, `mdx-components.ts` — environment validation and MDX component map.
+`AuthProvider` publishes the query owner (user ID, confirmed logout, or unknown
+auth). `QueryClientProvider` owns a mount-local client and remounts its consumers
+when that owner changes, clearing the old cache and cancelling old queries.
+Confirmed logout unmounts query consumers immediately; public and unknown-auth
+routes still render with an independent client. Keep auth outside the query
+provider. Superseded auth refreshes cannot restore an earlier owner.
 
-Read [src/AGENTS.md](src/AGENTS.md) for component and domain ownership.
+See [project structure](README.md#project-structure) for the directory map and
+[src/AGENTS.md](src/AGENTS.md) for component and domain ownership.
 
 ## Code Style
 
@@ -158,6 +159,10 @@ document through `core/agents/api.ts`. Keep file parsing client-side only for
 previewing the proposed local name; the Gateway is authoritative for schema,
 name, model, and conflict validation. Export downloads must never synthesize
 runtime state from browser caches.
+
+New-Agent saves need the latest `setup_agent` success and API read-back.
+Failed/exhausted saves restore Save. Fence superseded or unmounted callbacks.
+DOM regression: `new-agent-save.dom.test.tsx`.
 
 - **Imports**: Enforced ordering (builtin → external → internal → parent → sibling), alphabetized, newlines between groups. Use inline type imports: `import { type Foo }`.
 - **Unused variables**: Prefix with `_`.

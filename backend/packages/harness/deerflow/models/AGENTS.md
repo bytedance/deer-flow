@@ -136,6 +136,15 @@ reported as text instead of raising `AttributeError`. SSE failures do not enter
 the HTTP-status retry loop.
 Offline HTTP-stream coverage: `tests/test_codex_stream_terminal_events.py`.
 
+### Codex Retry Delays (`openai_codex_provider.py`)
+
+Prefer numeric `retry-after-ms` over numeric or HTTP-date `Retry-After` hints.
+Interpret HTTP-date values in UTC, including the obsolete timezone-less asctime
+form. Apply `utils.retry_after.bounded_retry_after_ms` to every parsed delay:
+past dates retry immediately; malformed, non-finite or over-24-hour hints retain
+local exponential backoff. Keep millisecond hints numeric-only. Offline coverage
+in `tests/test_codex_retry_after.py` includes public sync/async HTTP retries.
+
 ### Claude Code Credentials (`packages/harness/deerflow/models/credential_loader.py`)
 
 - `ClaudeChatModel.model_post_init` calls `load_claude_code_credential()` for every instance, and `create_chat_model` builds fresh instances per run (lead agent, title, summarization, subagents)
@@ -218,7 +227,7 @@ Direct `AppConfig.from_file()` continues to read only operator configuration.
 `config/managed_model_providers.py` is the sole registry for provider IDs, labels,
 endpoints, protocols, authentication parameter mappings, adapters and request
 defaults. Capability rules match exact verified model IDs; unknown preset IDs
-have an unsupported-thinking contract, no vision and no inferred context window.
+have an unsupported-thinking contract, no vision and no inferred context window. Verified DeepSeek presets declare an effort vocabulary of `low`/`medium`/`high`/`max`/`xhigh` (default `low`) and alias the generic `minimal` preset onto `low`, so a saved per-agent `minimal` default serializes as a value the official endpoint accepts (issue #4514).
 Preset drafts cannot supply endpoints or adapter paths. Legacy custom
 `openai-compatible` records retain endpoint-based official DeepSeek detection;
 never infer that adapter from a model-name substring. Reads do not migrate the

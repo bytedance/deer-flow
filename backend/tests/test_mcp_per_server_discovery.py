@@ -556,7 +556,13 @@ async def test_personal_discovery_uses_personal_pool_domain_and_task_scope(monke
         AsyncMock(return_value=config),
     )
     monkeypatch.setattr("deerflow.mcp.tasks.runtime.is_mcp_task_runtime_available", lambda: True)
-    monkeypatch.setattr("deerflow.mcp.tools.OAuthTokenManager.from_extensions_config", lambda config: personal_manager)
+    oauth_owners: list[str | None] = []
+
+    def personal_manager_for(config, *, owner_user_id=None):
+        oauth_owners.append(owner_user_id)
+        return personal_manager
+
+    monkeypatch.setattr("deerflow.mcp.tools.OAuthTokenManager.from_extensions_config", personal_manager_for)
     monkeypatch.setattr("deerflow.mcp.tools.get_mcp_task_oauth_token_manager", deployment_manager)
     monkeypatch.setattr("deerflow.mcp.tools.get_initial_oauth_headers", AsyncMock(return_value={}))
     monkeypatch.setattr("deerflow.mcp.tools.build_mcp_tool_interceptors", lambda *args, **kwargs: [])
@@ -574,6 +580,8 @@ async def test_personal_discovery_uses_personal_pool_domain_and_task_scope(monke
     assert pool.ensure_binding.call_args.kwargs == {"domain": "personal"}
     assert ownership_domains == ["personal"]
     assert connection_scopes == ["personal"]
+    # Stored OAuth tokens are keyed by the owner of a personal connection.
+    assert oauth_owners == ["alice"]
     deployment_manager.assert_not_called()
 
 
