@@ -167,7 +167,7 @@ class McpTaskToolCaller:
             if caller is None:
                 # A personal name can equal a deployment name. Never consult
                 # the deployment OAuth state or startup snapshot for this path.
-                caller = McpTaskToolCaller(snapshot.config, oauth_token_manager=OAuthTokenManager.from_extensions_config(snapshot.config))
+                caller = McpTaskToolCaller(snapshot.config, oauth_token_manager=OAuthTokenManager.from_extensions_config(snapshot.config, owner_user_id=user_id))
                 self._personal_callers[user_id] = (snapshot, caller)
             return caller
 
