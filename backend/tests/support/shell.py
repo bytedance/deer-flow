@@ -20,19 +20,18 @@ import pytest
 
 
 def _git_roots(git: str) -> list[Path]:
-    """Return the Git installation roots that can hold *git*'s executables, nearest first.
+    """Return the two directories the Makefile wrapper probes for the Git root.
 
-    Git for Windows keeps ``git.exe`` in ``<root>/cmd`` or ``<root>/bin``, but
-    PortableGit and GitHub Desktop put it in ``<root>/mingw64/bin``, one level
-    deeper. Bash and sh stay at ``<root>/bin`` and ``<root>/usr/bin`` in both
-    layouts, so the installation root — not ``git.exe``'s parent — is what the
-    shell candidates hang off.
+    ``scripts/run-with-git-bash.cmd`` checks ``bin\\bash.exe`` under ``git.exe``'s
+    directory and then one level above it. Git for Windows keeps ``git.exe`` in
+    ``<root>/cmd`` (or ``<root>/bin``), so the first entry is the installation
+    root. PortableGit and GitHub Desktop keep it in ``<root>/mingw64/bin``, where
+    only the second entry is; the first is ``<root>/mingw64`` and typically holds
+    no ``bin/bash.exe`` in stock trees. Bash and sh themselves stay at
+    ``<root>/bin`` and ``<root>/usr/bin`` in both layouts.
     """
     git_dir = Path(git).resolve().parent
-    roots = [git_dir.parent]
-    if git_dir.parent.name.casefold() == "mingw64":
-        roots.append(git_dir.parent.parent)
-    return roots
+    return [git_dir.parent, git_dir.parent.parent]
 
 
 def _script_bash_candidates(git: str | None, program_files: str | None, path_bash: str | None) -> list[Path]:
