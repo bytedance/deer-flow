@@ -130,6 +130,22 @@ def test_read_by_id_deduplicates_active_and_archived_source(scoped):
     assert [row["id"] for row in result["results"]] == [source_id]
 
 
+def test_active_only_matches_deduplicate_before_result_limit(scoped):
+    archived = [HumanMessage(content="needle archived", id="archived")]
+    history = archive.capture({}, scoped, archived, TaskContinuityConfig(enabled=True))
+    duplicate_a = HumanMessage(content="needle duplicate")
+    duplicate_b = HumanMessage(content="needle duplicate")
+
+    result = archive.lookup(
+        {"task_history": history, "messages": [duplicate_a, duplicate_b]},
+        scoped,
+        query="needle",
+    )
+
+    assert len(result["results"]) == 2
+    assert {row["message_id"] for row in result["results"]} == {None, "archived"}
+
+
 def test_retention_is_explicit_and_duplicate_capture_is_idempotent(scoped):
     config = TaskContinuityConfig(enabled=True, max_batches=1)
     old = {"task_history": archive.capture({}, scoped, conversation(), config)}
