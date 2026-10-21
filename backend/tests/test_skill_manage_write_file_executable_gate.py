@@ -104,7 +104,12 @@ def test_write_file_support_path_containing_scripts_substring_is_scanned_as_stat
     assert scan_calls == [{"executable": False, "location": f"demo-skill/{path}"}], f"support file '{path}' must be moderated as static content (executable=False); got {scan_calls}"
 
 
-def test_write_file_top_level_scripts_file_is_scanned_as_executable(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    "path",
+    ["scripts/run.sh", "scripts/sub/run.sh", "./scripts/run.sh"],
+    ids=["top-level-script", "nested-under-scripts", "dot-prefixed"],
+)
+def test_write_file_top_level_scripts_file_is_scanned_as_executable(monkeypatch, tmp_path, path):
     runtime, scan_calls, skill_dir = _setup_with_scan_recorder(monkeypatch, tmp_path)
     content = "#!/bin/bash\necho hello\n"
 
@@ -114,8 +119,27 @@ def test_write_file_top_level_scripts_file_is_scanned_as_executable(monkeypatch,
         "write_file",
         "demo-skill",
         content,
-        "scripts/run.sh",
+        path,
     )
 
-    assert (skill_dir / "scripts" / "run.sh").read_text(encoding="utf-8") == content
-    assert scan_calls == [{"executable": True, "location": "demo-skill/scripts/run.sh"}], f"top-level scripts/ file must be moderated as executable content; got {scan_calls}"
+    assert (skill_dir / Path(path)).read_text(encoding="utf-8") == content
+    assert scan_calls == [{"executable": True, "location": f"demo-skill/{path}"}], f"file '{path}' under the top-level scripts/ directory must be moderated as executable content; got {scan_calls}"
+
+
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        ("scripts/run.sh", True),
+        ("scripts/sub/run.sh", True),
+        ("scripts\\run.sh", True),
+        # The shared predicate treats a bare ``scripts`` as a member too; the
+        # storage layer rejects it as a support path before classification.
+        ("scripts", True),
+        ("references/scripts/overview.md", False),
+        ("/scripts/run.sh", False),
+    ],
+)
+def test_is_scripts_member_uses_the_shared_posix_rule(path, expected):
+    from deerflow.skills.package_files import is_scripts_member
+
+    assert is_scripts_member(path) is expected

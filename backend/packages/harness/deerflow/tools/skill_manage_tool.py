@@ -19,6 +19,7 @@ from langchain.tools import tool
 
 from deerflow.agents.lead_agent.prompt import SkillCacheResetPublishError, publish_skills_cache_reset, refresh_user_skills_system_prompt_cache_async
 from deerflow.runtime.user_context import resolve_runtime_user_id
+from deerflow.skills.package_files import is_scripts_member
 from deerflow.skills.security_scanner import scan_skill_content
 from deerflow.skills.security_static_scanner import (
     StaticFinding,
@@ -308,11 +309,11 @@ async def _skill_manage_impl(
 
             prev_content = await _to_thread(read_optional_text, skill_storage, target)
             # Executable content is a file under the skill's top-level ``scripts/``
-            # directory (the ``scripts/`` member rule in skills/package_files.py);
-            # the storage layer already parsed this path with the same Path
-            # semantics. A substring test here also caught support files such as
-            # references/scripts/overview.md and templates/my-scripts/setup.md.
-            executable = Path(path).parts[:1] == ("scripts",)
+            # directory. Classify with the shared ``scripts/``-member rule instead
+            # of re-deriving it; a substring test here also caught support files
+            # such as references/scripts/overview.md and
+            # templates/my-scripts/setup.md.
+            executable = is_scripts_member(path)
             static_findings = await _scan_static_candidate_or_raise(name, {path: content}, skill_storage)
             scan = await _scan_or_raise(content, executable=executable, location=f"{name}/{path}", static_findings=static_findings)
             scan["static_findings"] = static_findings
