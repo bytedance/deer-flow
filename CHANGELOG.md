@@ -1397,6 +1397,29 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
 
 ### Fixed
 
+- **mcp:** MCP servers using the OAuth `refresh_token` grant keep working
+  across Gateway restarts, tool-cache resets, repeated personal-connection runs
+  and multiple Gateway instances when the provider rotates refresh tokens
+  (Auth0, Okta, Google). Tokens lived only in process memory, so every new
+  process or manager started again from the configured refresh token, which
+  the first refresh had already consumed, and got `invalid_grant`. With
+  `database.backend: sqlite` or `postgres`, each connection's access token and
+  latest refresh token now live in the new `mcp_oauth_tokens` table (migration
+  `0047_mcp_oauth_tokens`), encrypted with `DEER_FLOW_CREDENTIALS_KEY` and keyed
+  per deployment server or per personal-connection owner. A refresh re-reads
+  the row first and is claimed with a short lease (renewed while the token
+  request runs) plus a version compare-and-set, so concurrent instances call
+  the token endpoint once and adopt each other's result; a rotation that could
+  not be stored is kept and stored before the next refresh. Changing the configured seed, token endpoint,
+  client, scope or audience starts a new chain from the configuration.
+  `client_credentials` tokens stay in process. Saving an MCP configuration
+  deletes the stored tokens of connections it no longer has, and a rejected
+  refresh token now fails the tool call with an error asking for a new refresh
+  token (adding, when the instance could not decrypt the stored chain, that
+  every instance needs the same key). A declared multi-instance deployment with
+  an enabled `refresh_token` OAuth server now refuses to start without
+  `DEER_FLOW_CREDENTIALS_KEY`. ([#7207])
+
 - **community:** Reject booleans in numeric LightRAG and RAGFlow
   `knowledge_search` settings instead of silently treating `true` as a
   one-second timeout, one result or one character of output. Invalid settings
@@ -12944,3 +12967,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7167]: https://github.com/bytedance/deer-flow/pull/7167
 [#7170]: https://github.com/bytedance/deer-flow/pull/7170
 [#7205]: https://github.com/bytedance/deer-flow/pull/7205
+[#7207]: https://github.com/bytedance/deer-flow/pull/7207
