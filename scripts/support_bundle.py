@@ -899,6 +899,10 @@ def create_support_bundle(
     config_path = (config_path or project_root / "config.yaml").resolve()
     extensions_config_path = (extensions_config_path or project_root / "extensions_config.json").resolve()
     out_path = (out_path or _default_out_path(project_root)).resolve()
+    # `--out` names the zip, so a directory there would only fail inside
+    # zipfile with a raw PermissionError/IsADirectoryError.
+    if out_path.is_dir():
+        raise ValueError(f"--out must be a file path, not a directory: {out_path}")
     out_path.parent.mkdir(parents=True, exist_ok=True)
     if thread_id:
         _validate_thread_id(thread_id)
