@@ -161,8 +161,10 @@ class _FakeWindowsHandle:
 
 
 def _force_windows_runtime_branch(monkeypatch) -> None:
-    """Drive the NTFS content checks without replacing the real ``os`` module."""
-    monkeypatch.setattr(lark_cli.os, "name", "nt", raising=False)
+    """Expose an ``os.name == "nt"`` view only through lark_cli."""
+    members = {name: getattr(os, name) for name in dir(os) if not name.startswith("__")}
+    members["name"] = "nt"
+    monkeypatch.setattr(lark_cli, "os", SimpleNamespace(**members))
 
 
 def _windows_os_stub() -> SimpleNamespace:
@@ -288,7 +290,7 @@ def test_managed_sandbox_runtime_download_accepts_filler_prefixed_binaries_on_wi
     checksums = "".join(f"{hashlib.sha256(payload).hexdigest()}  {name}\n" for name, payload in archives.items()).encode()
     assets = {"checksums.txt": checksums, **archives}
     monkeypatch.setattr(lark_cli, "_download_lark_release_asset", lambda _version, name, **_kwargs: assets[name])
-    monkeypatch.setattr(lark_cli.os, "name", "nt", raising=False)
+    _force_windows_runtime_branch(monkeypatch)
 
     runtime = lark_cli._ensure_managed_sandbox_lark_cli("v1.0.65")
 
@@ -403,7 +405,7 @@ def test_managed_sandbox_runtime_accepts_filler_prefixed_binaries_on_windows(mon
     launcher.write_text("#!/bin/sh\n", encoding="utf-8")
     launcher.chmod(0o755)
     monkeypatch.setenv(lark_cli.LARK_CLI_SANDBOX_RUNTIME_SOURCE_ENV, str(source))
-    monkeypatch.setattr(lark_cli.os, "name", "nt", raising=False)
+    _force_windows_runtime_branch(monkeypatch)
 
     runtime = lark_cli._ensure_managed_sandbox_lark_cli("v1.0.65")
 
