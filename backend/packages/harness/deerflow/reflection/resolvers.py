@@ -40,10 +40,22 @@ def resolve_variable[T](
         ImportError: If the module path is invalid or the attribute doesn't exist.
         ValueError: If the resolved variable doesn't pass the validation checks.
     """
-    try:
-        module_path, variable_name = variable_path.rsplit(":", 1)
-    except ValueError as err:
-        raise ImportError(f"{variable_path} doesn't look like a variable path. Example: parent_package_name.sub_package_name.module_name:variable_name") from err
+    # A valid variable path is exactly one "module:attribute" pair. Anything else
+    # (no colon, extra colons, or an empty module/attribute) is a malformed path,
+    # not a missing dependency, so steer the operator toward the correct shape
+    # rather than a misleading install hint.
+    if not isinstance(variable_path, str) or variable_path.count(":") != 1:
+        raise ImportError(
+            f"{variable_path} doesn't look like a variable path. "
+            "Example: parent_package_name.sub_package_name.module_name:variable_name"
+        )
+
+    module_path, variable_name = variable_path.split(":", 1)
+    if not module_path or not variable_name:
+        raise ImportError(
+            f"{variable_path} doesn't look like a variable path. "
+            "Example: parent_package_name.sub_package_name.module_name:variable_name"
+        )
 
     try:
         module = import_module(module_path)

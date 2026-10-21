@@ -47,3 +47,25 @@ def test_resolve_variable_invalid_path_format():
         resolve_variable("invalid.variable.path")
 
     assert "doesn't look like a variable path" in str(exc_info.value)
+
+
+def test_resolve_variable_empty_attribute_gets_format_guidance():
+    """A trailing colon (empty attribute) must not produce a broken message (issue #7015)."""
+    with pytest.raises(ImportError) as exc_info:
+        resolve_variable("json:")
+
+    message = str(exc_info.value)
+    assert "doesn't look like a variable path" in message
+    # The misleading missing-dependency install hint must not be shown.
+    assert "uv add" not in message
+
+
+def test_resolve_variable_extra_colon_gets_format_guidance():
+    """An extra colon must not produce a bogus install hint like `uv add json:loads` (issue #7015)."""
+    with pytest.raises(ImportError) as exc_info:
+        resolve_variable("json:loads:extra")
+
+    message = str(exc_info.value)
+    assert "doesn't look like a variable path" in message
+    # The install hint must not suggest a distribution literally named `json:loads`.
+    assert "uv add" not in message
