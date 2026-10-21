@@ -6129,7 +6129,7 @@ This release closes that milestone with **621 merged pull requests**.
   permission error, or a disk too full to create the staging file, answered with
   the absolute host path of the thread's uploads directory, including the user
   and thread IDs. They now return `Failed to upload <name>.` /
-  `Failed to delete <name>.`, and the full error stays in the Gateway log.
+  `Failed to delete <name>.`, and the full error stays in the Gateway log. ([#7217])
 
 - **skills:** `GET /api/skills`, `GET /api/skills/custom` and
   `GET /api/skills/{name}`, which every signed-in user can call, no longer put
@@ -11941,3 +11941,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7123]: https://github.com/bytedance/deer-flow/pull/7123
 [#7155]: https://github.com/bytedance/deer-flow/pull/7155
 [#7205]: https://github.com/bytedance/deer-flow/pull/7205
+[#7217]: https://github.com/bytedance/deer-flow/pull/7217

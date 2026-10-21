@@ -4620,7 +4620,7 @@
   其 `500` 响应的 detail 不再包含原始 `OSError` 文本。此前遇到权限错误，或磁盘已满到
   无法创建暂存文件时，响应会返回该线程上传目录的宿主机绝对路径（含用户 ID 和线程 ID）。
   现在它们返回 `Failed to upload <name>.` / `Failed to delete <name>.`，完整错误只记录在
-  Gateway 日志中。
+  Gateway 日志中。 ([#7217])
 
 - **技能：** 所有已登录用户都能调用的 `GET /api/skills`、`GET /api/skills/custom`
   和 `GET /api/skills/{name}`，其 `500` 响应的 detail 不再包含原始异常文本。此前
@@ -9488,3 +9488,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7123]: https://github.com/bytedance/deer-flow/pull/7123
 [#7155]: https://github.com/bytedance/deer-flow/pull/7155
 [#7205]: https://github.com/bytedance/deer-flow/pull/7205
+[#7217]: https://github.com/bytedance/deer-flow/pull/7217
