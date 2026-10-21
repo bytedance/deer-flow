@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from deerflow.skills.package_files import is_executable_binary_prefix
+from deerflow.skills.package_files import EXEC_SNIFF_BYTES, is_executable_binary_prefix
 from deerflow.skills.security_scanner import scan_skill_content
 from deerflow.skills.skillscan import StaticScanBlockedError, enforce_static_scan, scan_archive_preflight, scan_skill_dir
 from deerflow.skills.skillscan.orchestrator import _PYTHON_CLIENT_SINK_METHODS, MAX_FILE_BYTES
@@ -543,6 +543,38 @@ def test_truncated_mach_o_magic_is_not_an_executable(tmp_path: Path) -> None:
     (skill_dir / "data.bin").write_bytes(b"\xfe\xed\xfa\x00\x00\x00\x00\x00")
 
     assert not [finding for finding in scan_skill_dir(skill_dir)["findings"] if finding["rule_id"] == "package-executable-binary"]
+
+
+@pytest.mark.parametrize(
+    ("filler", "magic", "expected"),
+    [
+        (b"\n", b"\x7fELF", True),
+        (b"\x00\t ", b"MZ", True),
+        (b"\xef\xbb\xbf", b"\xca\xfe\xba\xbf", True),
+        (b" " * 63, b"\x7fELF", True),
+        (b" " * 64, b"\x7fELF", False),
+        # A BOM is one sequence; its last byte must not start a Mach-O magic.
+        (b"\xef\xbb\xbf", b"\xba\xfe\xca", False),
+    ],
+    ids=["newline", "nul-whitespace", "bom-then-fat64", "max-offset", "over-max-offset", "bom-not-bytewise"],
+)
+def test_executable_magic_after_bounded_filler(tmp_path: Path, filler: bytes, magic: bytes, expected: bool) -> None:
+    payload = filler + magic + b"\x00" * 64
+    assert EXEC_SNIFF_BYTES == 67
+    assert is_executable_binary_prefix(payload[:EXEC_SNIFF_BYTES]) is expected
+
+    skill_dir = tmp_path / "demo-skill"
+    _write_skill(skill_dir)
+    (skill_dir / "tool").write_bytes(payload)
+    findings = [finding for finding in scan_skill_dir(skill_dir)["findings"] if finding["rule_id"] == "package-executable-binary"]
+    assert bool(findings) is expected
+
+    archive = tmp_path / "demo-skill.skill"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("demo-skill/SKILL.md", "---\nname: demo-skill\ndescription: Demo skill\n---\n")
+        zf.writestr("demo-skill/tool", payload)
+    archive_findings = [finding for finding in scan_archive_preflight(archive)["findings"] if finding["rule_id"] == "package-executable-binary"]
+    assert bool(archive_findings) is expected
 
 
 def test_archive_preflight_rejects_ntfs_ads_colon_member(tmp_path: Path) -> None:

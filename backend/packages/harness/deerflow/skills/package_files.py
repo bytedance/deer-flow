@@ -53,7 +53,8 @@ def is_code_file(path: str | PurePath, head: bytes) -> bool:
 
 #: Bytes callers should hand over so a capped filler run plus the longest
 #: magic always fits the sniff window.
-EXEC_SNIFF_BYTES = _EXEC_SNIFF_LIMIT + max(len(magic) for magic in _EXECUTABLE_MAGIC_PREFIXES)
+# At most 63 filler bytes are tolerated, so one 4-byte magic fits in 67 bytes.
+EXEC_SNIFF_BYTES = (_EXEC_SNIFF_LIMIT - 1) + max(len(magic) for magic in _EXECUTABLE_MAGIC_PREFIXES)
 
 
 def _leading_filler_length(head: bytes) -> int:

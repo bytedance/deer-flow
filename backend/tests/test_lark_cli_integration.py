@@ -1365,7 +1365,7 @@ def test_install_lark_integration_rejects_executable_binary_member(monkeypatch, 
     config = _config(tmp_path / "skills")
     archive = _make_lark_cli_source_zip(tmp_path)
     with zipfile.ZipFile(archive, "a") as zf:
-        zf.writestr("cli-1.0.65/skills/lark-doc/bin/tool", b"\xef\xbb\xbf\x7fELFbinary")
+        zf.writestr("cli-1.0.65/skills/lark-doc/bin/tool", b"\n\x7fELFbinary")
 
     with pytest.raises(ValueError, match="executable binary member"):
         lark_cli.install_lark_integration("alice", config, source_archive=archive)
