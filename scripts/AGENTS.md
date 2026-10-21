@@ -214,6 +214,11 @@ runs `check-data-not-in-use.sh` before `make stop` (which would stop a live
 stack's sandboxes) and refuses while that container runs; an absent or
 unreachable Docker passes. `make stop` must still run before the delete: it
 stops `deer-flow-sandbox*` containers, whose thread mounts live in that tree.
+`cleanup-containers.sh` must verify an anchored `<prefix>-` name after Docker's
+substring `name=` filter, and use the same rule for Apple Container IDs. Parse
+Apple Container JSON without interpolating the prefix into Python source; bad
+entries must not hide later valid containers. Offline stub coverage lives in
+`backend/tests/test_cleanup_containers_script.py`.
 `RUNTIME_DATA_CONTENTS` feeds both the help line and the deletion notice.
 
 Host-side pnpm calls must go through `scripts/pnpm.py`. With native Windows
