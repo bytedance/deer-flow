@@ -1,6 +1,7 @@
 """Synthetic LightRAG v1.5.7 graph evidence; no live service required."""
 
 import json
+import re
 from pathlib import Path
 
 import httpx
@@ -131,7 +132,18 @@ async def test_edges_reference_only_their_own_chunks_and_reuse_shared_positions(
     assert len([hit for hit in result.hits if hit.source]) == 2
     for budget in [0, 50, 200, 500, 8000]:
         content, _ = format_result(result, max_total_chars=budget)
-        import re
-
         for ref in re.findall(r"result \[(\d+)\]", content):
             assert f"[{ref}] [citation:" in content
+
+
+@pytest.mark.asyncio
+async def test_hit_budget_distinguishes_omitted_evidence_from_missing_evidence(graph):
+    provider, _, state = graph
+    state["chunks"] = [{"chunk_id": f"c{i}", "file_path": "evidence.md", "content": f"Evidence {i}."} for i in range(50)]
+    state["relationships"] = [{"src_id": f"A{i}", "tgt_id": "B", "source_id": f"c{i}"} for i in range(50)]
+    result = await provider.relations_search("q", context=KnowledgeRequestContext("alice"))
+    assert len(result.hits) == 100
+    tail_edge = result.hits[-2].content
+    assert "A49 — B" in tail_edge
+    assert "Evidence omitted for this edge: bounded view." in tail_edge
+    assert "No retrieved document evidence" not in tail_edge

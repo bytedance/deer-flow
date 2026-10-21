@@ -66,6 +66,7 @@ def normalize_relations(data: dict) -> RetrievalResult:
         ids = relation.get("source_id")
         evidence_ids = [key for key in dict.fromkeys(ids.split("<SEP>")) if key in chunks] if isinstance(ids, str) else []
         positions = []
+        evidence_omitted = False
         for key in evidence_ids:
             if key not in evidence_positions:
                 normalized = normalize_retrieval_result({"chunks": [chunks[key]], "references": references})
@@ -73,6 +74,7 @@ def normalize_relations(data: dict) -> RetrievalResult:
                     continue
                 # Reserve one hit for the edge and one for the bounded-view note.
                 if len(hits) >= 98:
+                    evidence_omitted = True
                     break
                 hits.append(normalized.hits[0])
                 evidence_positions[key] = len(hits)
@@ -82,6 +84,8 @@ def normalize_relations(data: dict) -> RetrievalResult:
             # emitted edge referring to a chunk omitted by the shared formatter.
             evidence_refs = ", ".join(f"result [{position}]" for position in positions)
             hits.append(RetrievalHit(content=f"Evidence: {evidence_refs}.\n{path}"))
+        elif evidence_omitted:
+            hits.append(RetrievalHit(content=path + "\nEvidence omitted for this edge: bounded view."))
         else:
             hits.append(RetrievalHit(content=path + "\nNo retrieved document evidence for this edge."))
         if len(hits) >= 99:

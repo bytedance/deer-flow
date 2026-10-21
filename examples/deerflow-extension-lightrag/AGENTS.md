@@ -15,3 +15,5 @@ results and limits. Never let live tests upload data or silently enable API usag
 Shared graph evidence chunks are emitted once per returned chunk ID, before the
 first referencing edge. Every edge names its evidence result positions; prefix
 truncation therefore cannot leave a retained edge pointing to omitted evidence.
+
+At the hit limit, distinguish omitted evidence from absent retrieved evidence.

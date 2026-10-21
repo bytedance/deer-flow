@@ -208,3 +208,18 @@ local provider services; blocking-I/O **266 passed, 1 skipped**. Extension
 catalog E2E **10 passed**, including English/Chinese LightRAG descriptions and
 catalog discovery with the runtime API unavailable. The old E2E expectation
 of 10 bundled extensions was updated to 11.
+
+## Hit-budget boundary follow-up — 2026-10-21
+
+The last retained edge now says `Evidence omitted for this edge: bounded view.`
+when the 98-hit threshold prevented its first valid chunk from being emitted.
+Missing/unmatched chunk IDs retain the distinct no-retrieved-evidence wording.
+A 50-edge/50-chunk regression fails before the change and passes afterwards.
+The repeated test-loop `re` import was moved to module scope.
+
+The preceding remote head passed all four backend shards, frontend unit tests,
+blocking-I/O, lint, package checks and guidance validation. Both browser CI jobs
+failed before tests because ubuntu-latest rolled to Ubuntu 26.04, which the
+locked Playwright 1.59.1 cannot install Chromium dependencies on. Those two
+jobs now explicitly use Ubuntu 24.04, with a workflow regression checking both
+runner selection and preservation of the Chromium dependency-install step.
