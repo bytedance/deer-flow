@@ -204,6 +204,25 @@ the production PATH lookup, including a directory containing spaces. Seed fake
 app credentials so auth completion reaches the CLI instead of returning early,
 and keep fixture filesystem work behind `asyncio.to_thread`.
 
+## Lark device-login single-flight
+
+`test_lark_auth_singleflight.py` pins the `(user_id, generation)` single-flight
+contract: request timeouts leave one shared CLI alive; supersession terminates
+it, including its POSIX process group. Forked workers share a credential root;
+every CLI gets the invocation-log environment so duplicate spawns are visible.
+Publication grace starts at observed CLI exit, independent of login duration.
+Cover publication between a foreign result read and its marker probe.
+`test_lark_auth_lifecycle_failures.py` injects storage and startup failures:
+terminal marker receipts prevent retrying uncertain single-use codes, cleanup
+errors preserve published results, and failed starts reap children and wake
+waiters. Treat unhandled worker-thread warnings as errors. Event-driven process
+doubles must be released/killed and joined at teardown.
+`test_lark_credential_tree_churn.py` removes real descendants at each walk step;
+assert the injection fired and surviving secrets reached private modes. Missing
+roots, permission errors and symlinks remain errors. Mutations must fail these
+assertions; merely returning without an exception is insufficient.
+Run mutations on a copied harness; never swap checkout sources during tests.
+
 ## Remote read fixtures
 
 Remote ranged-read fixtures pass POSIX sandbox paths to adapters and map those
