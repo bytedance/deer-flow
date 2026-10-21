@@ -21,10 +21,13 @@ from deerflow.persistence.channel_connections.model import (
     ChannelCredentialRow,
     ChannelOAuthStateRow,
 )
+from deerflow.persistence.channel_leases.model import ChannelLeaseRow
+from deerflow.persistence.channel_runtime_configs.model import ChannelRuntimeConfigRow
 from deerflow.persistence.channel_thread_bindings.model import ChannelThreadBindingRow
 from deerflow.persistence.feedback.model import FeedbackRow
 from deerflow.persistence.login_throttle.model import LoginThrottleRow
 from deerflow.persistence.managed_subagents.model import ManagedSubagentRow
+from deerflow.persistence.mcp_oauth_tokens.model import McpOAuthTokenRow
 from deerflow.persistence.mcp_tasks.model import McpTaskRow
 from deerflow.persistence.models.run_event import RunEventRow, RunEventThreadSeqRow
 from deerflow.persistence.notification_deliveries.model import NotificationDeliveryRow
@@ -34,9 +37,11 @@ from deerflow.persistence.run.model import RunChangeClockRow, RunRow
 from deerflow.persistence.scheduled_task_events.model import ScheduledTaskEventRow
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
 from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
+from deerflow.persistence.skill_mutations.model import SkillAssetRow, SkillOperationRow, SkillOwnerRow, SkillProposalRow
 from deerflow.persistence.subagent_batches.model import SubagentBatchItemRow, SubagentBatchRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.persistence.thread_reads.model import ThreadReadMarkerRow, ThreadReadVersionRow
+from deerflow.persistence.user.im_notifications import ImNotificationPreferenceRow
 from deerflow.persistence.user.model import UserPreferenceRow, UserRow
 from deerflow.persistence.webhook_delivery.model import WebhookDeliveryRow
 
@@ -45,10 +50,13 @@ __all__ = [
     "ChannelConnectionRow",
     "ChannelConversationRow",
     "ChannelCredentialRow",
+    "ChannelLeaseRow",
     "ChannelOAuthStateRow",
+    "ChannelRuntimeConfigRow",
     "ChannelThreadBindingRow",
     "FeedbackRow",
     "LoginThrottleRow",
+    "McpOAuthTokenRow",
     "McpTaskRow",
     "ManagedSubagentRow",
     "NotificationDeliveryRow",
@@ -59,6 +67,10 @@ __all__ = [
     "RunEventThreadSeqRow",
     "RunChangeClockRow",
     "RunRow",
+    "SkillAssetRow",
+    "SkillOperationRow",
+    "SkillOwnerRow",
+    "SkillProposalRow",
     "ScheduledTaskEventRow",
     "ScheduledTaskRow",
     "ScheduledTaskRunRow",
@@ -68,6 +80,7 @@ __all__ = [
     "ThreadReadMarkerRow",
     "ThreadReadVersionRow",
     "UserPreferenceRow",
+    "ImNotificationPreferenceRow",
     "UserRow",
     "WebhookDeliveryRow",
 ]

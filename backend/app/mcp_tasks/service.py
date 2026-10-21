@@ -9,7 +9,7 @@ from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 
 from app.mcp_tasks.errors import PermanentNotificationError
 from deerflow.constants import (
@@ -18,6 +18,7 @@ from deerflow.constants import (
     MCP_TASK_RESULT_ARTIFACT_MAX_BYTES,
 )
 from deerflow.mcp.tasks import (
+    McpTaskConnectionUnavailableError,
     McpTaskDriverRegistry,
     McpTaskProtocolError,
     TaskReference,
@@ -41,6 +42,7 @@ _CANCELLATION_DRAIN_TIMEOUT_SECONDS = 5.0
 @dataclass(slots=True)
 class _BatchRecordState:
     record: dict[str, Any]
+    parent_task: asyncio.Task[Any] | None = None
     ordinary_release_task: asyncio.Future[Any] | None = None
     ordinary_release_terminal: bool = False
     cancellation_release_task: asyncio.Future[Any] | None = None
@@ -62,6 +64,13 @@ _current_batch_record: ContextVar[_BatchRecordState | None] = ContextVar(
     "mcp_task_current_batch_record",
     default=None,
 )
+_control_lease_lost: ContextVar[asyncio.Event | None] = ContextVar("mcp_control_lease_lost", default=None)
+
+
+def _require_control_lease() -> None:
+    lost = _control_lease_lost.get()
+    if lost is not None and lost.is_set():
+        raise asyncio.CancelledError("MCP control claim ownership was lost")
 
 
 def _bound_error(error: str | None) -> str | None:
@@ -128,6 +137,8 @@ class McpTaskService:
         self._stop_timeout_logged = False
         self._compensation_tasks: set[asyncio.Future[Any]] = set()
         self._claim_owners: dict[str, _ClaimOwner] = {}
+        # Includes children still draining after a bounded cancellation handoff.
+        self._active_control_calls: set[str] = set()
         self._stop = asyncio.Event()
 
     @property
@@ -596,9 +607,9 @@ class McpTaskService:
         release: Callable[[dict[str, Any]], Awaitable[None]],
         action: str,
     ) -> tuple[list[_BatchRecordState], list[Any]]:
-        states = [_BatchRecordState(record) for record in records]
-        batch_state = _BatchState()
         parent_task = asyncio.current_task()
+        states = [_BatchRecordState(record, parent_task=parent_task) for record in records]
+        batch_state = _BatchState()
 
         async def run_one(state: _BatchRecordState) -> Any:
             context_token = _current_batch_record.set(state)
@@ -662,24 +673,150 @@ class McpTaskService:
 
         return states, results
 
+    async def _with_control_lease(
+        self,
+        record: dict[str, Any],
+        *,
+        phase: Literal["poll", "cancel"],
+        operation: Callable[[], Awaitable[Any]],
+    ) -> Any:
+        task_id = record["id"]
+        if task_id in self._active_control_calls or len(self._active_control_calls) >= self._max_concurrent_polls:
+            raise asyncio.CancelledError("MCP control capacity is occupied")
+        self._active_control_calls.add(task_id)
+        lost = asyncio.Event()
+        children: list[asyncio.Task[Any]] = []
+        renewals: set[asyncio.Task[bool]] = set()
+        detach_cleanup = False
+        interval = self._lease_seconds / 3
+
+        def renewal_done(renewal: asyncio.Task[bool]) -> None:
+            renewals.discard(renewal)
+            # Its waiter may have been cancelled on the same turn it failed.
+            _consume_task_error(renewal)
+
+        async def renew() -> bool:
+            renewal = asyncio.create_task(
+                self._repository.renew_control_claim(
+                    task_id,
+                    phase=phase,
+                    lease_owner=self._lease_owner,
+                    lease_token=record["lease_token"],
+                    now=datetime.now(UTC),
+                    lease_seconds=self._lease_seconds,
+                ),
+                name=f"mcp-{phase}-renew-{task_id}",
+            )
+            renewals.add(renewal)
+            renewal.add_done_callback(renewal_done)
+            done, _ = await asyncio.wait({renewal}, timeout=interval)
+            if not done:
+                raise TimeoutError("MCP control claim renewal exceeded its deadline")
+            return renewal.result()
+
+        async def owned_operation() -> Any:
+            state = _current_batch_record.get()
+            if state is not None and state.parent_task is not None and state.parent_task.cancelling():
+                raise asyncio.CancelledError("MCP batch cancellation was requested before execution")
+            token = _control_lease_lost.set(lost)
+            try:
+                return await operation()
+            finally:
+                _control_lease_lost.reset(token)
+
+        async def heartbeat(work: asyncio.Task[Any]) -> None:
+            while not work.done():
+                await asyncio.sleep(interval)
+                try:
+                    renewed = await renew()
+                except Exception:
+                    if work.done():
+                        return
+                    logger.warning("Cannot confirm MCP %s claim ownership (task_id=%s); stopping the local call", phase, task_id, exc_info=True)
+                    lost.set()
+                    return
+                if not renewed:
+                    if not work.done():
+                        lost.set()
+                        logger.info("MCP %s claim ownership changed or expired (task_id=%s); stopping the local call", phase, task_id)
+                    return
+
+        try:
+            # Claim acquisition can itself outlast its lease. Check before any
+            # remote side effect, rather than waiting for the first heartbeat.
+            if not await renew():
+                detach_cleanup = True
+                raise asyncio.CancelledError("MCP control claim expired before execution")
+            work = asyncio.create_task(owned_operation(), name=f"mcp-{phase}-owned-{task_id}")
+            pulse = asyncio.create_task(heartbeat(work), name=f"mcp-{phase}-heartbeat-{task_id}")
+            children = [work, pulse]
+            await asyncio.wait(children, return_when=asyncio.FIRST_COMPLETED)
+            detach_cleanup = True
+            if work.done():
+                return await work
+            # Includes a heartbeat that cancelled itself: fail closed instead
+            # of continuing an unmonitored remote operation.
+            lost.set()
+            detach_cleanup = True
+            raise asyncio.CancelledError("MCP control claim ownership could not be confirmed")
+        except Exception:
+            detach_cleanup = True
+            raise
+        finally:
+            if children and not children[0].done():
+                lost.set()
+            children.extend(renewals)
+            for child in children:
+                if not child.done():
+                    child.cancel()
+            if children:
+                completion = asyncio.gather(*children, return_exceptions=True)
+                completion.add_done_callback(lambda _: self._active_control_calls.discard(task_id))
+                if detach_cleanup:
+                    # Ownership loss can happen without caller cancellation.
+                    # Keep uncooperative children owned without blocking scans.
+                    await self._drain_cancellation_task(
+                        completion,
+                        action=f"drain {phase} control children",
+                        task_id=task_id,
+                        deadline=asyncio.get_running_loop().time() + _CANCELLATION_DRAIN_TIMEOUT_SECONDS,
+                    )
+                else:
+                    # Caller cancellation already has a bounded batch handoff.
+                    # That owner must retain the children until they settle.
+                    while not completion.done():
+                        try:
+                            await asyncio.shield(completion)
+                        except asyncio.CancelledError:
+                            continue
+                    completion.result()
+            else:
+                self._active_control_calls.discard(task_id)
+
     async def run_once(self, *, now: datetime) -> None:
         await self._run_cancellations(now=now)
 
-        claimed = await self._claim_with_cancellation_release(
-            lambda: self._repository.claim_due_tasks(
-                now=now,
-                lease_owner=self._lease_owner,
-                lease_seconds=self._lease_seconds,
-                limit=self._max_concurrent_polls,
-            ),
-            phase="poll",
-            action="poll claim",
-            release=self._release_poll_after_cancellation,
+        capacity = self._max_concurrent_polls - len(self._active_control_calls)
+        claimed = (
+            await self._claim_with_cancellation_release(
+                lambda: self._repository.claim_due_tasks(
+                    now=now,
+                    lease_owner=self._lease_owner,
+                    lease_seconds=self._lease_seconds,
+                    limit=capacity,
+                    **({"exclude_task_ids": tuple(self._active_control_calls)} if self._active_control_calls else {}),
+                ),
+                phase="poll",
+                action="poll claim",
+                release=self._release_poll_after_cancellation,
+            )
+            if capacity > 0
+            else []
         )
         if claimed:
             states, results = await self._run_claimed_batch(
                 claimed,
-                operation=lambda record: self._poll_one_claimed(record, now=now),
+                operation=lambda record: self._with_control_lease(record, phase="poll", operation=lambda: self._poll_one_claimed(record, now=now)),
                 release=self._release_poll_after_cancellation,
                 action="poll",
             )
@@ -766,14 +903,16 @@ class McpTaskService:
 
     async def _run_cancellations(self, *, now: datetime) -> None:
         claim = getattr(self._repository, "claim_cancel_requests", None)
-        if claim is None:
+        capacity = self._max_concurrent_polls - len(self._active_control_calls)
+        if claim is None or capacity <= 0:
             return
         records = await self._claim_with_cancellation_release(
             lambda: claim(
                 now=now,
                 lease_owner=self._lease_owner,
                 lease_seconds=self._lease_seconds,
-                limit=self._max_concurrent_polls,
+                limit=capacity,
+                **({"exclude_task_ids": tuple(self._active_control_calls)} if self._active_control_calls else {}),
             ),
             phase="cancel",
             action="cancel claim",
@@ -782,7 +921,7 @@ class McpTaskService:
         if records:
             states, results = await self._run_claimed_batch(
                 records,
-                operation=self._cancel_one_claimed,
+                operation=lambda record: self._with_control_lease(record, phase="cancel", operation=lambda: self._cancel_one_claimed(record)),
                 release=self._release_cancel_after_cancellation,
                 action="cancel",
             )
@@ -804,20 +943,23 @@ class McpTaskService:
             snapshot = self._normalize_snapshot(await driver.cancel(TaskReference.from_record(record)))
             if snapshot.status not in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED):
                 raise McpTaskProtocolError("MCP task cancellation must return a terminal status")
-            await self._repository.apply_cancel_snapshot(
-                record["id"],
-                lease_owner=self._lease_owner,
-                lease_token=record["lease_token"],
-                status=snapshot.status.value,
-                result=snapshot.result,
-                result_preview=snapshot.result_preview,
-                result_truncated=snapshot.result_truncated,
-                result_artifact=snapshot.result_artifact,
-                error=snapshot.error,
-                input_required=snapshot.input_required,
-                completed_at=datetime.now(UTC),
+            await self._apply_cancel_snapshot(record, snapshot)
+        except McpTaskConnectionUnavailableError as exc:
+            logger.error(
+                "MCP task cancellation cannot resolve the task connection (task_id=%s, driver=%s): %s",
+                record.get("id"),
+                driver_name,
+                exc,
+            )
+            await self._apply_cancel_snapshot(
+                record,
+                TaskSnapshot(
+                    status=TaskStatus.FAILED,
+                    error=_bound_error(f"{exc}; the remote task could not be cancelled"),
+                ),
             )
         except Exception as exc:  # noqa: BLE001 - remote cancellation is retryable
+            _require_control_lease()
             attempts = max(0, int(record.get("cancel_attempt_count") or 1) - 1)
             retry_seconds = min(self._poll_interval_seconds * (2 ** min(attempts, 16)), self._max_poll_backoff_seconds)
             failed_at = datetime.now(UTC)
@@ -832,6 +974,27 @@ class McpTaskService:
                     error=retry_error,
                 ),
                 action="release cancel retry",
+            )
+
+    async def _apply_cancel_snapshot(self, record: dict[str, Any], snapshot: TaskSnapshot) -> None:
+        _require_control_lease()
+        applied = await self._repository.apply_cancel_snapshot(
+            record["id"],
+            lease_owner=self._lease_owner,
+            lease_token=record["lease_token"],
+            status=snapshot.status.value,
+            result=snapshot.result,
+            result_preview=snapshot.result_preview,
+            result_truncated=snapshot.result_truncated,
+            result_artifact=snapshot.result_artifact,
+            error=snapshot.error,
+            input_required=snapshot.input_required,
+            completed_at=datetime.now(UTC),
+        )
+        if not applied:
+            logger.info(
+                "Discarded MCP task cancel result after lease ownership changed or expired (task_id=%s)",
+                record.get("id"),
             )
 
     async def _run_notifications(self, *, now: datetime) -> None:
@@ -1354,9 +1517,9 @@ class McpTaskService:
 
         try:
             snapshot = self._normalize_snapshot(await driver.get_status(TaskReference.from_record(record)))
-        except McpTaskProtocolError as exc:
+        except (McpTaskConnectionUnavailableError, McpTaskProtocolError) as exc:
             logger.error(
-                "MCP task status contract failed permanently (task_id=%s, driver=%s): %s",
+                "MCP task status failed permanently (task_id=%s, driver=%s): %s",
                 record.get("id"),
                 driver_name,
                 exc,
@@ -1397,6 +1560,7 @@ class McpTaskService:
         *,
         polled_at: datetime,
     ) -> None:
+        _require_control_lease()
         applied = await self._repository.apply_snapshot(
             record["id"],
             lease_owner=self._lease_owner,
@@ -1427,6 +1591,7 @@ class McpTaskService:
         return now + timedelta(seconds=interval)
 
     async def _release_after_error(self, record: dict, *, now: datetime, error: str) -> None:
+        _require_control_lease()
         consecutive_errors = max(0, int(record.get("consecutive_poll_error_count") or 0))
         retry_seconds = min(
             self._poll_interval_seconds * (2 ** min(consecutive_errors, 16)),

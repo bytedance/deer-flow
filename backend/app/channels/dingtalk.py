@@ -5,16 +5,19 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import platform
 import re
 import stat
 import threading
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote_plus
 
 import httpx
 
-from app.channels.base import Channel, ChannelStopTimeout
+from app.channels.allowed_users import parse_allowed_users, parse_string_or_int_user_id
+from app.channels.base import Channel, ChannelStopTimeout, abort_connection_transport, shutdown_private_loop
 from app.channels.commands import is_known_channel_command, strip_leading_mentions
 from app.channels.connection_identity import attach_connection_identity
 from app.channels.message_bus import InboundMessage, InboundMessageType, InboundReservation, MessageBus, OutboundMessage, ResolvedAttachment
@@ -35,6 +38,16 @@ logger = logging.getLogger(__name__)
 DINGTALK_API_BASE = "https://api.dingtalk.com"
 
 _TOKEN_REFRESH_MARGIN_SECONDS = 300
+
+# stop() budget for the dingtalk-stream thread: ask its private loop to close
+# the socket (bounded by the close timeout) and stop, then join the thread.
+DINGTALK_STOP_TIMEOUT_SECONDS = 5
+DINGTALK_STREAM_CLOSE_TIMEOUT_SECONDS = 2
+# Deadline for the Stream ticket request (the SDK's own has none).
+DINGTALK_STREAM_TICKET_TIMEOUT_SECONDS = 30
+# Retry pacing copied from DingTalkStreamClient.start() (dingtalk-stream 0.24).
+_DINGTALK_STREAM_RETRY_SECONDS = 10
+_DINGTALK_STREAM_ERROR_RETRY_SECONDS = 3
 
 _CONVERSATION_TYPE_P2P = "1"
 _CONVERSATION_TYPE_GROUP = "2"
@@ -60,20 +73,20 @@ def _normalize_conversation_type(raw: Any) -> str:
     return _CONVERSATION_TYPE_P2P
 
 
-def _normalize_allowed_users(allowed_users: Any) -> set[str]:
-    if allowed_users is None:
-        return set()
-    if isinstance(allowed_users, str):
-        values = [allowed_users]
-    elif isinstance(allowed_users, (list, tuple, set)):
-        values = allowed_users
-    else:
-        logger.warning(
-            "DingTalk allowed_users should be a list of user IDs; treating %s as one string value",
-            type(allowed_users).__name__,
-        )
-        values = [allowed_users]
-    return {str(uid) for uid in values if str(uid)}
+def _parse_allowed_users(allowed_users: Any) -> frozenset[str] | None:
+    """Parse DingTalk staff IDs with the shared fail-closed allowlist semantics.
+
+    Staff IDs are often all digits, so integer entries are accepted as text.
+    """
+    return parse_allowed_users(
+        allowed_users,
+        parse_user_id=parse_string_or_int_user_id,
+        logger=logger,
+        channel_name="DingTalk",
+        expected_id="a DingTalk staff ID (senderStaffId)",
+        valid_id_name="staff ID",
+        warn_on_scalar_separators=True,
+    )
 
 
 def _is_dingtalk_command(text: str) -> bool:
@@ -104,6 +117,28 @@ _HORIZONTAL_RULE_RE = re.compile(r"^-{3,}$", re.MULTILINE)
 _TABLE_SEPARATOR_RE = re.compile(r"^\|[-:| ]+\|$", re.MULTILINE)
 
 
+def _split_markdown_table_row(row: str) -> list[str]:
+    r"""Keep escaped pipes and empty cells when removing the outer borders.
+
+    Known boundary: the single-character lookbehind in the split pattern
+    cannot distinguish an escaped pipe (``\|``) from an escaped backslash
+    immediately followed by a real separator (``\\|``). A cell ending in a
+    literal backslash therefore absorbs the next cell: ``| foo\\ | bar |``
+    splits as one cell instead of two. GFM counts consecutive backslashes
+    for this reason; doing so is out of scope here — this helper is
+    intentionally not a general Markdown parser.
+    """
+    # ``(?<!\\)`` inspects only one preceding character, so the second
+    # backslash of ``\\|`` is mistaken for an escaping backslash and the
+    # pipe is kept whole. See the boundary note in the docstring above.
+    cells = re.split(r"(?<!\\)\|", row.strip())
+    if cells and cells[0] == "":
+        cells.pop(0)
+    if cells and cells[-1] == "":
+        cells.pop()
+    return [cell.strip() for cell in cells]
+
+
 def _convert_markdown_table(text: str) -> str:
     # DingTalk sampleMarkdown does not render pipe-delimited tables.
     lines = text.split("\n")
@@ -113,10 +148,10 @@ def _convert_markdown_table(text: str) -> str:
         line = lines[i]
         # Detect table: header row followed by separator row
         if i + 1 < len(lines) and line.strip().startswith("|") and _TABLE_SEPARATOR_RE.match(lines[i + 1].strip()):
-            headers = [h.strip() for h in line.strip().strip("|").split("|")]
+            headers = _split_markdown_table_row(line)
             i += 2  # skip header + separator
             while i < len(lines) and lines[i].strip().startswith("|"):
-                cells = [c.strip() for c in lines[i].strip().strip("|").split("|")]
+                cells = _split_markdown_table_row(lines[i])
                 for h, c in zip(headers, cells):
                     result.append(f"> **{h}**: {c}")
                 result.append("")
@@ -153,14 +188,18 @@ class DingTalkChannel(Channel):
         self._main_loop: asyncio.AbstractEventLoop | None = None
         self._client_id: str = ""
         self._client_secret: str = ""
-        self._allowed_users: set[str] = _normalize_allowed_users(config.get("allowed_users"))
+        self._allowed_users: frozenset[str] | None = _parse_allowed_users(config.get("allowed_users"))
         self._cached_token: str = ""
         self._token_expires_at: float = 0.0
         self._token_lock = asyncio.Lock()
         self._card_template_id: str = config.get("card_template_id", "")
         self._card_track_ids: dict[str, str] = {}
         self._dingtalk_client: Any = None
+        # The SDK thread's private loop and client, published under _stream_lock
+        # once constructed so stop() can shut them down from the Gateway loop.
         self._stream_client: Any = None
+        self._stream_loop: asyncio.AbstractEventLoop | None = None
+        self._stream_lock = threading.Lock()
         self._incoming_messages: dict[str, Any] = {}
         self._incoming_messages_lock = threading.Lock()
         self._card_repliers: dict[str, Any] = {}
@@ -211,32 +250,63 @@ class DingTalkChannel(Channel):
     async def stop(self) -> None:
         self._running = False
         self.bus.unsubscribe_outbound(self._on_outbound)
+        # Signal the SDK thread first so its loop winds down while the
+        # Gateway-side drain below runs.
+        self._request_stream_shutdown()
         await self._close_and_drain_threadsafe_futures()
 
-        stream_client = self._stream_client
-        if stream_client is not None:
-            try:
-                if hasattr(stream_client, "disconnect"):
-                    stream_client.disconnect()
-            except Exception:
-                logger.debug("[DingTalk] error disconnecting stream client", exc_info=True)
-
         self._dingtalk_client = None
-        self._stream_client = None
         with self._incoming_messages_lock:
             self._incoming_messages.clear()
         self._card_repliers.clear()
         self._card_track_ids.clear()
         if self._thread:
-            # The SDK thread only returns on a fatal error, so this join
-            # normally waits out its full timeout; keep it off the event loop.
+            # The thread exits once its loop has stopped; keep the join off the
+            # event loop because a wedged SDK call can still use up the budget.
             thread = self._thread
-            await asyncio.to_thread(thread.join, timeout=5)
+            await asyncio.to_thread(thread.join, timeout=DINGTALK_STOP_TIMEOUT_SECONDS)
             if thread.is_alive():
                 raise ChannelStopTimeout("DingTalk SDK thread is still running after stop timeout")
             if self._thread is thread:
                 self._thread = None
+        with self._stream_lock:
+            self._stream_loop = None
+            self._stream_client = None
         logger.info("DingTalk channel stopped")
+
+    def _request_stream_shutdown(self) -> None:
+        """Ask the SDK thread to close its socket and stop its loop (non-blocking)."""
+        with self._stream_lock:
+            loop = self._stream_loop
+            client = self._stream_client
+        if loop is None:
+            return
+        try:
+            loop.call_soon_threadsafe(self._begin_stream_shutdown, loop, client)
+        except RuntimeError:
+            # The loop closed between the snapshot and the call: the thread is
+            # already on its way out and the join below observes that.
+            logger.debug("[DingTalk] stream loop already closed before shutdown could be scheduled")
+
+    def _begin_stream_shutdown(self, loop: asyncio.AbstractEventLoop, client: Any) -> None:
+        loop.create_task(self._shutdown_stream(loop, client))
+
+    async def _shutdown_stream(self, loop: asyncio.AbstractEventLoop, client: Any) -> None:
+        """Runs on the SDK loop: close the live websocket, then stop the loop."""
+        try:
+            websocket = getattr(client, "websocket", None) if client is not None else None
+            if websocket is not None:
+                try:
+                    await asyncio.wait_for(websocket.close(), timeout=DINGTALK_STREAM_CLOSE_TIMEOUT_SECONDS)
+                except Exception:
+                    logger.debug("[DingTalk] stream close did not complete cleanly", exc_info=True)
+                if abort_connection_transport(websocket):
+                    logger.warning("[DingTalk] stream close handshake did not finish within %ss; transport aborted", DINGTALK_STREAM_CLOSE_TIMEOUT_SECONDS)
+                    await asyncio.sleep(0)  # let connection_lost run before the loop stops
+        except asyncio.CancelledError:
+            # The thread is already draining this loop; leave it to that.
+            raise
+        loop.stop()
 
     def _resolve_routing(self, msg: OutboundMessage) -> tuple[str, str, str]:
         """Return (conversation_type, sender_staff_id, conversation_id).
@@ -376,22 +446,126 @@ class DingTalkChannel(Channel):
     # -- stream client (runs in dedicated thread) --------------------------
 
     def _run_stream(self, client_id: str, client_secret: str) -> None:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
         try:
             import dingtalk_stream
 
             credential = dingtalk_stream.Credential(client_id, client_secret)
             client = dingtalk_stream.DingTalkStreamClient(credential)
-            self._stream_client = client
             client.register_callback_handler(
                 dingtalk_stream.chatbot.ChatbotMessage.TOPIC,
                 _DingTalkMessageHandler(self),
             )
-            client.start_forever()
+            with self._stream_lock:
+                if not self._running:
+                    # stop() ran before the client existed: never dial.
+                    return
+                self._stream_loop = loop
+                self._stream_client = client
+            loop.run_until_complete(self._serve_stream(client))
         except Exception:
             if self._running:
                 logger.exception("DingTalk Stream Push error")
+            else:
+                logger.debug("[DingTalk] stream loop exited after stop", exc_info=True)
+            self._running = False
         finally:
-            self._stream_client = None
+            with self._stream_lock:
+                if self._stream_loop is loop:
+                    self._stream_loop = None
+                    self._stream_client = None
+            shutdown_private_loop(loop)
+
+    async def _serve_stream(self, client: Any) -> None:
+        """Run dingtalk-stream's connection loop so ``stop()`` can end it.
+
+        Mirrors ``DingTalkStreamClient.start()`` (dingtalk-stream 0.24): open a
+        connection ticket, hold the websocket, hand each frame to the SDK's
+        ``background_task``, and retry after 10s on a lost connection or 3s on
+        anything else. The SDK's own loop is ``while True`` and also catches
+        ``CancelledError``, so it can only be left by killing the thread; this
+        copy re-checks ``_running`` before every dial and fetches the ticket
+        asynchronously with a deadline so ``stop()`` can cancel it.
+        """
+        import websockets
+
+        client.pre_start()
+        while self._running:
+            try:
+                connection = await self._open_stream_connection(client)
+                if not self._running:
+                    break
+                if not connection:
+                    logger.error("[DingTalk] open connection failed")
+                    await asyncio.sleep(_DINGTALK_STREAM_RETRY_SECONDS)
+                    continue
+                # The ticket in ``connection`` is a credential; log the endpoint only.
+                logger.info("[DingTalk] stream endpoint is %s", connection.get("endpoint"))
+                uri = f"{connection['endpoint']}?ticket={quote_plus(connection['ticket'])}"
+                async with websockets.connect(uri) as websocket:
+                    client.websocket = websocket
+                    keepalive = asyncio.create_task(client.keepalive(websocket))
+                    try:
+                        async for raw_message in websocket:
+                            asyncio.create_task(client.background_task(json.loads(raw_message)))
+                    finally:
+                        keepalive.cancel()
+            except websockets.exceptions.ConnectionClosedError as exc:
+                if not self._running:
+                    break
+                logger.error("[DingTalk] stream connection lost: %s", exc)
+                await asyncio.sleep(_DINGTALK_STREAM_RETRY_SECONDS)
+            except Exception:
+                if not self._running:
+                    break
+                logger.exception("[DingTalk] stream error")
+                await asyncio.sleep(_DINGTALK_STREAM_ERROR_RETRY_SECONDS)
+
+    async def _open_stream_connection(self, client: Any) -> dict[str, Any] | None:
+        """Fetch a Stream ticket: ``DingTalkStreamClient.open_connection()`` with a deadline.
+
+        The SDK's version calls ``requests.post`` with no timeout, so a stalled
+        ticket endpoint pins whichever thread runs it (and, from an executor,
+        Gateway process exit, which joins executor workers). This sends the same
+        request through ``httpx`` on the stream loop under
+        ``DINGTALK_STREAM_TICKET_TIMEOUT_SECONDS``, so ``stop()`` cancels it like
+        any other task. Returns ``None`` on failure like the SDK does.
+        """
+        from dingtalk_stream.version import VERSION_STRING
+
+        topics: list[dict[str, str]] = []
+        if getattr(client, "_is_event_required", False):
+            topics.append({"type": "EVENT", "topic": "*"})
+        for topic in client.callback_handler_map:
+            topics.append({"type": "CALLBACK", "topic": topic})
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": f"DingTalkStream/1.0 SDK/{VERSION_STRING} Python/{platform.python_version()} (+https://github.com/open-dingtalk/dingtalk-stream-sdk-python)",
+        }
+        body = {
+            "clientId": client.credential.client_id,
+            "clientSecret": client.credential.client_secret,
+            "subscriptions": topics,
+            "ua": f"dingtalk-sdk-python/v{VERSION_STRING}-union",
+            "localIp": client.get_host_ip(),
+        }
+        try:
+            async with httpx.AsyncClient(timeout=DINGTALK_STREAM_TICKET_TIMEOUT_SECONDS) as http:
+                response = await http.post(client.OPEN_CONNECTION_API, headers=headers, json=body)
+                response.raise_for_status()
+                payload = response.json()
+        except httpx.HTTPStatusError as exc:
+            logger.error("[DingTalk] open connection failed: HTTP %s", exc.response.status_code)
+            return None
+        except (httpx.HTTPError, ValueError) as exc:
+            logger.error("[DingTalk] open connection failed: %s", type(exc).__name__)
+            return None
+        if not isinstance(payload, dict) or not payload.get("endpoint") or not payload.get("ticket"):
+            logger.error("[DingTalk] open connection returned no endpoint/ticket")
+            return None
+        return payload
 
     def _on_chatbot_message(self, message: Any) -> None:
         if not self._running:
@@ -430,7 +604,7 @@ class DingTalkChannel(Channel):
                     logger.warning("[DingTalk] main loop not running, cannot bind channel connection")
                 return
 
-            if self._allowed_users and sender_staff_id not in self._allowed_users:
+            if self._allowed_users is not None and sender_staff_id not in self._allowed_users:
                 logger.debug("[DingTalk] ignoring message from non-allowed user: %s", sender_staff_id)
                 return
 
@@ -707,6 +881,7 @@ class DingTalkChannel(Channel):
                 virtual_path=virtual_path,
                 content=content,
                 owner_prefix="dingtalk-upload",
+                release_on_last=True,
             )
             if not synced:
                 # Mirror Feishu: the agent's non-local sandbox cannot see this

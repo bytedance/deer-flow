@@ -83,10 +83,14 @@ function renderGroupedSection(): ReturnType<typeof render> {
     [...INFINITE_THREADS_QUERY_KEY_PREFIX, { archived: false }],
     {
       pages: [
-        [
-          makeThread("thread-active", ACTIVE_PROJECT_ID),
-          makeThread("thread-archived", ARCHIVED_PROJECT_ID),
-        ],
+        {
+          threads: [
+            makeThread("thread-active", ACTIVE_PROJECT_ID),
+            makeThread("thread-archived", ARCHIVED_PROJECT_ID),
+          ],
+          hiddenCount: 0,
+          hasMore: false,
+        },
       ],
       pageParams: [0],
     },

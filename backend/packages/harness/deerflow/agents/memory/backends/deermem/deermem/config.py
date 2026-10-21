@@ -143,7 +143,14 @@ class DeerMemConfig(BaseModel):
         default=30,
         ge=1,
         le=300,
-        description="Seconds to wait before processing queued updates (debounce).",
+        description="Per-conversation quiet period before queued extraction becomes eligible.",
+    )
+    max_wait_seconds: int = Field(
+        default=300,
+        ge=1,
+        description=(
+            "Maximum debounce deferral from a conversation's first pending update. Continuous same-key updates cannot postpone eligibility beyond this limit. Extraction remains serial: consumer backlog and LLM latency can delay completion."
+        ),
     )
     queue_max_depth: int = Field(
         default=1000,
@@ -313,16 +320,17 @@ class DeerMemConfig(BaseModel):
             "Set programmatically by the host factory (not from YAML)."
         ),
     )
-    # ── Watermark cache (in-memory, bounded LRU) ─────────────────────────
+    # ── Watermark (in-memory LRU + persisted per-agent sidecar) ──────────
     watermark_max_keys: int = Field(
         default=4096,
         ge=0,
         description=(
             "Soft cap on the in-memory conversation-watermark cache (one entry "
-            "per distinct thread/user/agent). The cache is a bounded LRU: when "
-            "over capacity the least-recently-used entry is dropped, and a "
-            "dropped key re-extracts one batch on that thread's next turn (the "
-            "same as a restart). 0 = unbounded."
+            "per distinct thread/user/agent) and on each agent's persisted "
+            "watermarks.json sidecar (one entry per thread). Over capacity the "
+            "cache drops its least-recently-used entry and the sidecar its "
+            "least-recently-advanced thread; a thread missing from both "
+            "re-extracts one batch on its next turn. 0 = unbounded."
         ),
     )
     # ── Message processing (externalized patterns / prompts) ──

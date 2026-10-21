@@ -117,6 +117,11 @@ class PatchedChatMiniMax(ChatOpenAI):
         **kwargs: Any,
     ) -> dict:
         payload = super()._get_request_payload(input_, stop=stop, **kwargs)
+        # MiniMax's documented OpenAI-compatible API takes max_tokens. Stock
+        # ChatOpenAI renames it to OpenAI's newer max_completion_tokens, which
+        # would lose the output bound on both probes and ordinary chat calls.
+        if "max_completion_tokens" in payload:
+            payload["max_tokens"] = payload.pop("max_completion_tokens")
         extra_body = payload.get("extra_body")
         if isinstance(extra_body, dict):
             payload["extra_body"] = {

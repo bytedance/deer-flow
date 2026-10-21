@@ -63,6 +63,24 @@ def _retry_after(value: str | None) -> float | None:
         return None
 
 
+class _RetryBudgetExhausted(TimeoutError):
+    """Distinguish the shared retry deadline from transport timeouts."""
+
+
+@asynccontextmanager
+async def _retry_budget_timeout_at(deadline: float | None):
+    timeout = asyncio.timeout_at(deadline)
+    try:
+        async with timeout:
+            yield
+    except TimeoutError as exc:
+        # asyncio's timeout object records its own expiry. Rechecking loop.time()
+        # here is unreliable on hosts whose monotonic clock has coarse resolution.
+        if timeout.expired():
+            raise _RetryBudgetExhausted from exc
+        raise
+
+
 class _CleanupStream(httpx.AsyncByteStream):
     """Keep the lease until HTTPX's underlying close completes, even on cancel.
 
@@ -158,7 +176,7 @@ class JinaClient:
             # deadline covers requests, waits, and cleanup. With admission,
             # cleanup may outlast the retry budget; cancellation propagates after close.
             deadline = asyncio.get_running_loop().time() + retry_budget_seconds if max_retries else None
-            async with asyncio.timeout_at(None if admission else deadline):
+            async with _retry_budget_timeout_at(None if admission else deadline):
                 client_kwargs: dict[str, object] = {"trust_env": trust_env, "follow_redirects": True}
                 if proxy:
                     client_kwargs["proxy"] = proxy
@@ -167,18 +185,18 @@ class JinaClient:
                     for attempt in range(max_retries + 1):
                         remaining = deadline - asyncio.get_running_loop().time() if deadline is not None else None
                         if remaining is not None and remaining <= 0:
-                            raise TimeoutError
+                            raise _RetryBudgetExhausted
                         server_floor = None
                         try:
                             async with admission.attempt(remaining) if admission else nullcontext() as lease:
                                 # Admission consumes the original logical budget. Start the
                                 # network timer only after acquisition so queue expiry stays local.
-                                async with asyncio.timeout_at(deadline if admission else None):
+                                async with _retry_budget_timeout_at(deadline if admission else None):
                                     if lease is not None:
                                         lease.check_deadline()
                                     remaining = deadline - asyncio.get_running_loop().time() if deadline is not None else None
                                     if remaining is not None and remaining <= 0:
-                                        raise TimeoutError
+                                        raise _RetryBudgetExhausted
                                     request_timeout = min(timeout, remaining) if remaining is not None else timeout
                                     if max_response_bytes is None and admission is None:
                                         response = await client.post("https://r.jina.ai/", headers=headers, json=data, timeout=request_timeout)
@@ -216,13 +234,13 @@ class JinaClient:
                         if server_floor is not None and server_floor >= remaining:
                             return f"Error: Jina API returned status {response.status_code}: {response_text}"
                         if remaining <= 0:
-                            raise TimeoutError
+                            raise _RetryBudgetExhausted
                         wait = min(delay, remaining) * random.uniform(0.5, 1.0)
                         if server_floor is not None:
                             wait = max(wait, server_floor)
                             if wait >= remaining:
                                 return f"Error: Jina API returned status {response.status_code}: {response_text}"
-                        async with asyncio.timeout_at(deadline if admission else None):
+                        async with _retry_budget_timeout_at(deadline if admission else None):
                             await asyncio.sleep(wait)
                         delay = min(delay * 2, 4.0)
         except JinaAdmissionError as e:
@@ -230,7 +248,7 @@ class JinaClient:
             logger.warning(error_message)
             return f"Error: {error_message}"
         except Exception as e:
-            if isinstance(e, TimeoutError) and max_retries and deadline is not None and asyncio.get_running_loop().time() >= deadline:
+            if isinstance(e, _RetryBudgetExhausted):
                 error_message = "Request to Jina API failed: retry time budget exhausted"
             else:
                 error_message = f"Request to Jina API failed: {type(e).__name__}: {e}"

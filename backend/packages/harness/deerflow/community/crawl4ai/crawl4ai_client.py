@@ -44,10 +44,22 @@ class Crawl4AiClient:
                     content_type = resp.headers.get("content-type", "unknown")
                     return f"Error: Crawl4AI returned a non-JSON 200 response (content-type: {content_type}): {resp.text[:200]}"
 
+                # A JSON 200 that is not an object is a format error, not a
+                # success: indexing it raised "'list' object has no attribute
+                # 'get'" and the generic handler below echoed that Python text
+                # to the agent. Sibling providers (tavily's _response_objects)
+                # report a format error instead.
+                if not isinstance(data, dict):
+                    logger.error("Crawl4AI returned an unexpected payload type: %s", type(data).__name__)
+                    return "Error: Crawl4AI returned an unexpected response format"
+
                 if not data.get("success", False):
                     return f"Error: Crawl4AI reported failure for {url}"
 
                 markdown = data.get("markdown") or ""
+                if not isinstance(markdown, str):
+                    logger.error("Crawl4AI returned an unexpected 'markdown' payload type: %s", type(markdown).__name__)
+                    return "Error: Crawl4AI returned an unexpected response format"
                 if not markdown.strip():
                     return "Error: Crawl4AI returned empty markdown"
 

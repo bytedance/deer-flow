@@ -90,3 +90,14 @@ def test_retire_replaced_generations_keeps_unversioned_crash_fence(tmp_path):
     store.retire_replaced_generations(SandboxInfo("thread-sandbox", "http://sandbox", container_id="new-generation"))
 
     assert (directory / "unknown").exists()
+
+
+def test_quarantine_keys_are_truncated_for_windows_max_path():
+    # The quarantine nests three hashed path components (scope, sandbox id,
+    # container id). Three full 64-char SHA-256 hexdigests exceed Windows'
+    # 260-char MAX_PATH under a long root, so each key is truncated to 16 hex
+    # chars (64 bits). Pin that bound so a revert can't silently re-break
+    # Windows record creation while Linux CI still passes.
+    assert len(SandboxQuarantine._key("thread-sandbox")) == 16
+    assert len(SandboxQuarantine._key("provisioner-a")) == 16
+    assert len(SandboxQuarantine._key("old-generation")) == 16

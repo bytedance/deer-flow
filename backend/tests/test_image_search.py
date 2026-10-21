@@ -18,6 +18,7 @@ async def test_image_search_uses_full_image_url_not_thumbnail():
             "title": "a cat",
             "image": "https://example.com/full.jpg",
             "thumbnail": "https://example.com/thumb.jpg",
+            "url": "https://example.com/cats/page",
         }
     ]
     cfg = MagicMock()
@@ -32,6 +33,8 @@ async def test_image_search_uses_full_image_url_not_thumbnail():
     result = output["results"][0]
     assert result["image_url"] == "https://example.com/full.jpg"
     assert result["thumbnail_url"] == "https://example.com/thumb.jpg"
+    # The web UI links each thumbnail through `source_url`, as Brave's image_search emits it.
+    assert result["source_url"] == "https://example.com/cats/page"
 
 
 async def _search_kwargs(query="a cat", **kwargs):

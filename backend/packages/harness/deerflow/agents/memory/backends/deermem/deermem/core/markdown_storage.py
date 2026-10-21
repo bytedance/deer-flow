@@ -11,21 +11,23 @@ backward compatibility, but its loader is *tolerant*:
 * a corrupt or partially written summary no longer crashes the agent;
 * a Markdown summary is accepted only through its fenced ```` ```memory-json ````
   block, which is parsed losslessly;
-* when the on-disk file is unreadable (neither valid JSON nor a Markdown
-  summary with a usable fenced block), it is *quarantined* as
+* invalid UTF-8 bytes, or text that is neither valid JSON nor a Markdown
+  summary with a usable fenced block, trigger best-effort quarantine as
   ``memory.json.corrupt-<timestamp>`` before the loader returns ``None``.
   Quarantining keeps the content recoverable: returning ``None`` alone would
   make the next :meth:`save` rebuild the manifest from scratch (revision
-  reset, no journal backup) and silently erase the unreadable state.
+  reset, no journal backup) and silently erase the unreadable state;
+* file-access and I/O read failures raise ``MemoryStorageCorruption``, matching
+  the default storage error contract. The original file stays in place, and
+  reads and writes can be retried after access recovers.
 
 Writes still persist JSON (the write path is untouched). Hand-edited
 Markdown files are therefore a *read-time* convenience: the next write
 rewrites ``memory.json`` as JSON, so the Markdown rendering is temporary
 until a Markdown write path lands.
 
-This is intentionally a small, additive change scoped to the load path only:
-the JSON UI and all other backends are untouched. Enabling it cannot break
-existing deployments.
+The tolerant decoding policy is scoped to this opt-in loader. Summary I/O
+failures use the same storage error contract as the default backend.
 """
 
 from __future__ import annotations
@@ -36,13 +38,13 @@ from pathlib import Path
 from typing import Any
 
 from .markdown_format import _parse_markdown_memory
-from .storage import FileMemoryStorage, logger
+from .storage import FileMemoryStorage, MemoryStorageCorruption, logger
 
 
 class MarkdownMemoryStorage(FileMemoryStorage):
     """File-backed storage whose summary loader tolerates corrupt/Markdown.
 
-    Fully opt-in. Enable via ``memory.storage_class: markdown`` (or the full
+    Fully opt-in. Enable via ``memory.backend_config.storage_class: markdown`` (or the full
     import path ``deerflow.agents.memory.backends.deermem.deermem.core.
     markdown_storage.MarkdownMemoryStorage``). The default JSON summary
     format is unchanged, so the existing JSON UI and all other backends keep
@@ -53,10 +55,20 @@ class MarkdownMemoryStorage(FileMemoryStorage):
         if not path.exists():
             return None
         try:
-            raw = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeError) as exc:
-            logger.warning("Cannot read memory summary %s: %s", path, exc)
+            # utf-8-sig, matching the base loader: a BOM does not make the
+            # summary unreadable, so it must not trigger the quarantine path.
+            raw = path.read_text(encoding="utf-8-sig")
+        except UnicodeError as exc:
+            logger.warning("Cannot decode memory summary %s as UTF-8: %s", path, exc)
+            # Invalid text has the same quarantine contract as an unparseable
+            # summary below: preserve its bytes before allowing a rebuild.
+            self._quarantine_unreadable(path)
             return None
+        except OSError as exc:
+            # A failed read does not establish that the bytes are corrupt.
+            # Match the default storage error contract, preserving the file
+            # and preventing a write from rebuilding over a transient failure.
+            raise MemoryStorageCorruption(f"Failed to read memory summary {path}: {exc}") from exc
 
         parsed: dict[str, Any] | None = None
         try:

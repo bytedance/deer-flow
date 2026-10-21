@@ -44,6 +44,34 @@ class AgentRuns(Protocol):
         """
         ...
 
+    async def configuration_evidence(self, *, thread_id: str, run_id: str) -> dict[str, Any]:
+        """Read immutable host evidence captured from this run's actual assembly.
+
+        Fails closed if the factory/host produced no evidence. No config re-read,
+        credentials, raw instructions or mutable thread-state fallback.
+        """
+        ...
+
+    async def read_artifact(self, *, thread_id: str, path: str) -> bytes:
+        """Read a bounded regular output file through owner authorization.
+
+        Returns at most 2 MiB, rejecting symlinks and concurrent mutations.
+        The caller must retain these bytes to create an immutable version.
+        """
+        ...
+
+    async def configuration_revision(self, *, assistant_ids: list[str], durable: bool = False) -> str:
+        """Opaque revision of declarative Agent/host configuration.
+
+        Revalidates the caller. Includes app/extensions config and Custom Agent
+        config/SOUL; excludes mutable memory, file contents referenced by tools,
+        provider state and effective per-run assembly. By default compare within
+        one host lifetime only. With durable=True, compare across restarts sharing the host
+        signing secret; secret rotation invalidates revisions. This retains no
+        grant and is an invalidation guard, not an assembly attestation.
+        """
+        ...
+
     async def create_thread(self, *, assistant_id: str = "lead_agent", thread_id: str | None = None, metadata: Mapping[str, Any] | None = None) -> str:
         """Create an owned thread, or return the caller's existing thread ID."""
         ...

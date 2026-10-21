@@ -10,11 +10,24 @@ import threading
 from concurrent.futures import Future
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
+import httpx
+
+from app.channels.allowed_users import parse_channel_ids
 from app.channels.base import Channel
 from app.channels.commands import is_known_channel_command
 from app.channels.connection_identity import attach_connection_identity
-from app.channels.message_bus import InboundMessage, InboundMessageType, InboundReservation, MessageBus, OutboundMessage, ResolvedAttachment
+from app.channels.inbound_files import coerce_file_size, safe_inbound_filename
+from app.channels.message_bus import (
+    INBOUND_FILE_CONTENT_KEY,
+    InboundMessage,
+    InboundMessageType,
+    InboundReservation,
+    MessageBus,
+    OutboundMessage,
+    ResolvedAttachment,
+)
 from deerflow.utils.file_io import await_drained
 
 logger = logging.getLogger(__name__)
@@ -33,6 +46,15 @@ DISCORD_OUTBOUND_TIMEOUT_SECONDS = 30.0
 # a healthy upload mid-transfer would report it as failed, so the bound here
 # only exists to convert a wedged client into a logged failure.
 DISCORD_UPLOAD_TIMEOUT_SECONDS = 120.0
+
+# Match Discord's default non-Nitro upload ceiling for inbound attachments.
+DISCORD_MAX_INBOUND_FILE_BYTES = 25 * 1024 * 1024
+# Bot Authorization is only attached for these CDN host suffixes.
+DISCORD_CDN_HOST_SUFFIXES = frozenset({"discordapp.net", "discordapp.com", "discord.com"})
+
+
+class _NotClaimed(Exception):
+    """This delivery lost the message's dedupe claim: create no thread, publish nothing."""
 
 
 def _parse_discord_guild_id(entry: Any) -> int | None:
@@ -81,10 +103,7 @@ def _parse_allowed_channels(allowed_channels: Any) -> frozenset[str]:
     the entries are kept verbatim rather than validated — an unreadable ID just
     never matches, which leaves ``mention_only`` in force (fail-closed).
     """
-    if allowed_channels is None or (isinstance(allowed_channels, str) and not allowed_channels.strip()):
-        return frozenset()
-    entries = list(allowed_channels) if isinstance(allowed_channels, list | tuple | set) else [allowed_channels]
-    return frozenset(text for text in (str(entry).strip() for entry in entries) if text)
+    return parse_channel_ids(allowed_channels, logger=logger, channel_name="Discord", key_name="allowed_channels")
 
 
 class DiscordChannel(Channel):
@@ -116,6 +135,12 @@ class DiscordChannel(Channel):
         # Uses a dedicated JSON file next to the channel store's state, separate from
         # the ChannelStore itself, which maps IM conversations to DeerFlow thread IDs.
         self._active_threads: dict[str, str] = {}
+        # Dedupe claims recorded for messages not yet committed to the bus, by
+        # Discord message id. Each is settled once: a commit hands it to the
+        # queue (the manager releases it if shutdown discards the message),
+        # every other outcome releases it, and stop() releases what is left.
+        self._unsettled_claims: dict[str, InboundMessage] = {}
+        self._unsettled_claims_lock = threading.Lock()
         # Reverse-lookup set for O(1) thread ID checks (avoids O(n) scan of _active_threads.values()).
         self._active_thread_ids: set[str] = set()
         # Lock protecting _active_threads and the JSON file from concurrent access.
@@ -202,7 +227,7 @@ class DiscordChannel(Channel):
                 if not self._thread_store_path.exists():
                     logger.debug("[Discord] no thread mappings file at %s", self._thread_store_path)
                 else:
-                    data = json.loads(self._thread_store_path.read_text())
+                    data = json.loads(self._thread_store_path.read_text(encoding="utf-8"))
                     self._active_threads.clear()
                     self._active_thread_ids.clear()
                     for channel_id, thread_id in data.items():
@@ -250,7 +275,7 @@ class DiscordChannel(Channel):
             try:
                 snapshot = dict(self._active_threads)
                 self._thread_store_path.parent.mkdir(parents=True, exist_ok=True)
-                self._thread_store_path.write_text(json.dumps(snapshot, indent=2))
+                self._thread_store_path.write_text(json.dumps(snapshot, indent=2), encoding="utf-8", newline="")
             except Exception:
                 logger.exception("[Discord] failed to persist thread mappings")
 
@@ -336,6 +361,17 @@ class DiscordChannel(Channel):
         # raise a cross-loop RuntimeError.
         if discord_loop and discord_loop is not current_loop and not discord_loop.is_running():
             self._discard_ephemeral_tasks()
+
+        # Claims the stopped loop left unsettled: a release refused after intake
+        # closed, or a hand-off cancelled before it ran. None was committed.
+        with self._unsettled_claims_lock:
+            leftover = list(self._unsettled_claims.values())
+            self._unsettled_claims.clear()
+        for claim in leftover:
+            try:
+                await self.bus.release_inbound_claim(claim)
+            except Exception:
+                logger.warning("[Discord] failed to release the dedupe claim of uncommitted message %s", claim.metadata.get("message_id"), exc_info=True)
 
         self._client = None
         self._discord_loop = None
@@ -560,7 +596,9 @@ class DiscordChannel(Channel):
             return
 
         text = (message.content or "").strip()
-        if not text:
+        files = self._extract_inbound_files(message)
+        # File-only messages have empty content; still admit them when attachments exist.
+        if not text and not files:
             return
 
         if self._discord_module is None:
@@ -582,6 +620,7 @@ class DiscordChannel(Channel):
         if has_mention:
             text = text.replace(bot_mention or "", "").replace(alt_mention or "", "").replace(standard_mention or "", "").strip()
             # Don't return early if text is empty — still process the mention (e.g., create thread)
+            # or a captionless attachment that arrived with an @mention.
 
         connect_code = self._pending_connect_code(text)
         if connect_code and await self._bind_connection_from_connect_code(message, connect_code):
@@ -598,6 +637,7 @@ class DiscordChannel(Channel):
             user_id=str(message.author.id),
             text=text,
             msg_type=msg_type,
+            files=files,
             metadata={
                 "guild_id": str(guild.id) if guild else None,
                 "channel_id": str(message.channel.id),
@@ -615,6 +655,7 @@ class DiscordChannel(Channel):
             guild=guild,
             has_mention=bool(has_mention),
             reservation=reservation,
+            files=files,
         )
 
     async def _handle_admitted_message(
@@ -626,9 +667,19 @@ class DiscordChannel(Channel):
         guild,
         has_mention: bool,
         reservation: InboundReservation,
+        files: list[dict[str, Any]] | None = None,
     ) -> None:
         """Finish Discord routing while owning one bounded intake slot."""
         reservation_transferred = False
+        files = files or []
+        # Every instance's session receives every MESSAGE_CREATE; the one that
+        # wins this message's dedupe claim is the only one to create a thread.
+        claim = self._make_inbound(
+            chat_id=str(message.channel.id),
+            user_id=str(message.author.id),
+            text="",
+            metadata={"guild_id": str(guild.id) if guild else None, "channel_id": str(message.channel.id), "message_id": str(message.id)},
+        )
         try:
             # --- Determine thread/channel routing and typing target ---
             thread_id = None
@@ -650,6 +701,7 @@ class DiscordChannel(Channel):
                         text=text,
                         msg_type=msg_type,
                         thread_ts=thread_id,
+                        files=files,
                         metadata={
                             "guild_id": str(guild.id) if guild else None,
                             "channel_id": str(message.channel.id),
@@ -686,7 +738,7 @@ class DiscordChannel(Channel):
                     return
                 # mention_only + fresh @ → create new thread instead of routing to existing one
                 if self._mention_only and has_mention:
-                    thread_obj = await self._create_thread(message)
+                    thread_obj = await self._create_thread_once_claimed(message, claim)
                     if thread_obj is not None:
                         target_thread_id = str(thread_obj.id)
                         self._record_thread_mapping(channel_id, target_thread_id)
@@ -713,7 +765,7 @@ class DiscordChannel(Channel):
                 return
             elif self._mention_only and has_mention:
                 # First mention in this channel → create thread
-                thread_obj = await self._create_thread(message)
+                thread_obj = await self._create_thread_once_claimed(message, claim)
                 if thread_obj is not None:
                     target_thread_id = str(thread_obj.id)
                     self._record_thread_mapping(channel_id, target_thread_id)
@@ -730,7 +782,7 @@ class DiscordChannel(Channel):
                     typing_target = message.channel  # Type into the channel
             elif self._thread_mode:
                 # thread_mode but mention_only is False → create thread anyway for conversation grouping
-                thread_obj = await self._create_thread(message)
+                thread_obj = await self._create_thread_once_claimed(message, claim)
                 if thread_obj is None:
                     # Thread creation failed (disabled/permissions), fall back to channel replies
                     logger.info("[Discord] thread creation failed in channel %s, falling back to channel replies", channel_id)
@@ -756,6 +808,7 @@ class DiscordChannel(Channel):
                 text=text,
                 msg_type=msg_type,
                 thread_ts=thread_id,
+                files=files,
                 metadata={
                     "guild_id": str(guild.id) if guild else None,
                     "channel_id": str(message.channel.id),
@@ -763,15 +816,61 @@ class DiscordChannel(Channel):
                 },
             )
             inbound.topic_id = thread_id
+            inbound.dedupe_claimed = claim.dedupe_claimed
 
             handoff = self._publish_reserved(inbound, reservation, guild_id=str(guild.id) if guild else None)
             if handoff is None:
                 return
             reservation_transferred = True
             await self._acknowledge_after_handoff(message, handoff, typing_target=typing_target, chat_id=chat_id, thread_id=thread_id)
+        except _NotClaimed:
+            logger.info("[Discord] skipping message %s: another delivery claimed it, or the Gateway loop is stopping", message.id)
         finally:
             if not reservation_transferred:
                 reservation.release()
+                if claim.dedupe_claimed:
+                    # Refused once stop() closed cross-loop intake; stop() then releases it.
+                    message_id = claim.metadata["message_id"]
+                    self._submit_threadsafe_coroutine(self._release_unsettled_claim(message_id), self._main_loop, name="release_inbound_claim", msg_id=message_id)
+
+    async def _create_thread_once_claimed(self, message, claim: InboundMessage):
+        """``_create_thread`` after winning *claim*; raises ``_NotClaimed`` on a duplicate."""
+        if not claim.dedupe_claimed and not await self._claim_inbound(claim):
+            raise _NotClaimed
+        return await self._create_thread(message)
+
+    async def _claim_inbound(self, claim: InboundMessage) -> bool:
+        """Run ``MessageBus.claim_inbound`` on the Gateway loop, where the dedupe store's engine lives."""
+        future = self._submit_threadsafe_coroutine_future(self._claim_on_gateway_loop(claim), self._main_loop, name="claim_inbound", msg_id=claim.metadata.get("message_id"))
+        if future is None:
+            return False  # the Gateway loop is gone; the hand-off would be refused as well
+        try:
+            return await asyncio.shield(asyncio.wrap_future(future))
+        except asyncio.CancelledError:
+            if not future.cancelled():
+                raise
+            return False  # drained by stop()
+        except Exception:
+            # Fail open like the dedupe store itself: the worker still dedupes.
+            logger.warning("[Discord] inbound dedupe claim failed for message %s; continuing", claim.metadata.get("message_id"), exc_info=True)
+            return True
+
+    async def _claim_on_gateway_loop(self, claim: InboundMessage) -> bool:
+        claimed = await self.bus.claim_inbound(claim)
+        if claim.dedupe_claimed:
+            # Registered with the claim itself, so no later exit path can lose it.
+            with self._unsettled_claims_lock:
+                self._unsettled_claims[claim.metadata["message_id"]] = claim
+        return claimed
+
+    def _settle_claim(self, message_id: Any) -> InboundMessage | None:
+        """Take *message_id*'s unsettled claim, if any: the caller now decides its outcome."""
+        with self._unsettled_claims_lock:
+            return self._unsettled_claims.pop(str(message_id), None)
+
+    async def _release_unsettled_claim(self, message_id: Any) -> None:
+        if (claim := self._settle_claim(message_id)) is not None:
+            await self.bus.release_inbound_claim(claim)
 
     def _publish_reserved(self, inbound: InboundMessage, reservation: InboundReservation, *, guild_id: str | None) -> Future[bool] | None:
         """Transfer an already-reserved message to the Gateway loop.
@@ -852,9 +951,22 @@ class DiscordChannel(Channel):
         *,
         guild_id: str | None,
     ) -> bool:
-        """Attach connection identity and commit the reservation on the Gateway loop."""
-        inbound = await self._attach_connection_identity(inbound, guild_id=guild_id)
-        return self._commit_reserved_inbound(reservation, inbound)
+        """Attach connection identity and commit the reservation on the Gateway loop.
+
+        A message that was claimed against inbound dedupe but never committed
+        gives its claim back, also when stop() cancels this task.
+        """
+        message_id = inbound.metadata.get("message_id")
+        try:
+            committed = self._commit_reserved_inbound(reservation, await self._attach_connection_identity(inbound, guild_id=guild_id))
+        except BaseException:
+            await await_drained(self._release_unsettled_claim(message_id))
+            raise
+        if committed:
+            self._settle_claim(message_id)
+        else:
+            await self._release_unsettled_claim(message_id)
+        return committed
 
     async def _attach_connection_identity(self, inbound: InboundMessage, guild_id: str | None = None) -> InboundMessage:
         return await attach_connection_identity(
@@ -925,6 +1037,178 @@ class DiscordChannel(Channel):
             await send(text)
         except Exception:
             logger.exception("[Discord] failed to send connection reply")
+
+    async def receive_file(self, msg: InboundMessage, thread_id: str, *, user_id: str | None = None) -> InboundMessage:
+        """Download inbound Discord attachments for the shared upload pipeline.
+
+        Attachment CDN URLs are captured on the message event (they expire).
+        Bytes cross to ``ChannelManager`` through ``INBOUND_FILE_CONTENT_KEY``
+        (same shape as Slack/Telegram). Prefer a Bot Authorization header when
+        the channel has a token — Discord has been rolling authenticated CDN
+        access — but signed URLs still download without one.
+        """
+        del thread_id, user_id
+        if not msg.files:
+            return msg
+
+        token = self._bot_token or None
+        materialized: list[dict[str, Any]] = []
+        unavailable: list[str] = []
+        size_limit_notice = f"exceeds the {DISCORD_MAX_INBOUND_FILE_BYTES / (1024 * 1024):g} MiB download limit"
+
+        for file_info in msg.files:
+            if not isinstance(file_info, dict):
+                continue
+
+            filename = self._safe_inbound_filename(file_info.get("filename"), "attachment")
+            declared_size = self._file_size(file_info.get("size"))
+            if declared_size is not None and declared_size > DISCORD_MAX_INBOUND_FILE_BYTES:
+                logger.warning("[Discord] inbound file exceeds download limit, skipping: %s", filename)
+                unavailable.append(f"{filename} ({size_limit_notice})")
+                continue
+
+            url = file_info.get("url")
+            if not isinstance(url, str) or not url.strip():
+                logger.error("[Discord] cannot download inbound file without url: %s", filename)
+                unavailable.append(f"{filename} (download unavailable)")
+                continue
+
+            try:
+                content = await self._download_attachment(url.strip(), token)
+            except Exception as exc:
+                logger.error(
+                    "[Discord] failed to download inbound file %s: %s",
+                    filename,
+                    type(exc).__name__,
+                )
+                unavailable.append(f"{filename} (download failed)")
+                continue
+
+            if content is None:
+                # Stream aborted for size; encoding refusals raise above.
+                unavailable.append(f"{filename} ({size_limit_notice})")
+                continue
+
+            if len(content) > DISCORD_MAX_INBOUND_FILE_BYTES:
+                logger.warning("[Discord] downloaded inbound file exceeds limit, skipping: %s", filename)
+                unavailable.append(f"{filename} ({size_limit_notice})")
+                continue
+
+            materialized.append(
+                {
+                    "type": "image" if file_info.get("type") == "image" else "file",
+                    "filename": filename,
+                    "mime_type": file_info.get("mime_type") if isinstance(file_info.get("mime_type"), str) else "application/octet-stream",
+                    "size": len(content),
+                    INBOUND_FILE_CONTENT_KEY: content,
+                }
+            )
+
+        msg.files = materialized
+        if unavailable:
+            notice = f"[Discord attachment unavailable: {', '.join(unavailable)}]"
+            msg.text = f"{msg.text}\n\n{notice}" if msg.text else notice
+        return msg
+
+    @classmethod
+    def _is_discord_cdn_url(cls, url: str) -> bool:
+        """True when *url* targets a Discord CDN host (dot-boundary aware)."""
+        try:
+            host = (urlsplit(url).hostname or "").lower()
+        except ValueError:
+            return False
+        if not host:
+            return False
+        return any(host == suffix or host.endswith(f".{suffix}") for suffix in DISCORD_CDN_HOST_SUFFIXES)
+
+    async def _download_attachment(self, url: str, token: str | None) -> bytes | None:
+        """Stream a Discord attachment CDN URL; never log the URL.
+
+        Bot Authorization is attached only for Discord CDN hosts so a foreign
+        URL on the bus can never carry the bot token off-platform. Returns
+        ``None`` only when the streamed body exceeds the per-file cap; a
+        non-identity ``Content-Encoding`` raises so callers report
+        ``(download failed)`` instead of a misleading size-limit notice.
+        """
+        headers = {"Accept-Encoding": "identity"}
+        if token and self._is_discord_cdn_url(url):
+            headers["Authorization"] = f"Bot {token}"
+        chunks: list[bytes] = []
+        total = 0
+        async with httpx.AsyncClient(timeout=httpx.Timeout(20.0)) as client:
+            async with client.stream("GET", url, headers=headers) as response:
+                response.raise_for_status()
+                encoding = (response.headers.get("content-encoding") or "").strip().lower()
+                if encoding and encoding != "identity":
+                    logger.warning(
+                        "[Discord] inbound file response uses Content-Encoding %r, dropping before decode",
+                        encoding,
+                    )
+                    raise RuntimeError(f"unsupported content-encoding: {encoding}")
+                async for chunk in response.aiter_raw():
+                    total += len(chunk)
+                    if total > DISCORD_MAX_INBOUND_FILE_BYTES:
+                        logger.warning(
+                            "[Discord] inbound file exceeds %d bytes download limit, dropping",
+                            DISCORD_MAX_INBOUND_FILE_BYTES,
+                        )
+                        return None
+                    chunks.append(chunk)
+        return b"".join(chunks)
+
+    @classmethod
+    def _extract_inbound_files(cls, message) -> list[dict[str, Any]]:
+        """Build file descriptors from a discord.py Message's attachments."""
+        raw_attachments = getattr(message, "attachments", None) or []
+        files: list[dict[str, Any]] = []
+        for index, raw in enumerate(raw_attachments):
+            if isinstance(raw, dict):
+                url = raw.get("url")
+                filename_raw = raw.get("filename")
+                content_type = raw.get("content_type") or raw.get("mime_type")
+                size_raw = raw.get("size")
+                file_id = raw.get("id") or raw.get("file_id")
+            else:
+                url = getattr(raw, "url", None)
+                filename_raw = getattr(raw, "filename", None)
+                content_type = getattr(raw, "content_type", None)
+                size_raw = getattr(raw, "size", None)
+                file_id = getattr(raw, "id", None)
+
+            if not isinstance(url, str) or not url.strip():
+                continue
+
+            if isinstance(file_id, int):
+                file_id_str = str(file_id)
+            elif isinstance(file_id, str) and file_id:
+                file_id_str = file_id
+            else:
+                file_id_str = str(index)
+
+            mime_type = content_type if isinstance(content_type, str) and content_type else "application/octet-stream"
+            fallback = f"discord-file-{file_id_str}.bin"
+            filename = cls._safe_inbound_filename(filename_raw, fallback)
+            is_image = mime_type.startswith("image/")
+            files.append(
+                {
+                    "type": "image" if is_image else "file",
+                    "file_id": file_id_str,
+                    "filename": filename,
+                    "mime_type": mime_type,
+                    "size": cls._file_size(size_raw),
+                    # CDN URL only — Authorization is attached in receive_file when available.
+                    "url": url.strip(),
+                }
+            )
+        return files
+
+    @staticmethod
+    def _safe_inbound_filename(value: Any, fallback: str) -> str:
+        return safe_inbound_filename(value, fallback)
+
+    @staticmethod
+    def _file_size(value: Any) -> int | None:
+        return coerce_file_size(value)
 
     def _run_client(self) -> None:
         self._discord_loop = asyncio.new_event_loop()

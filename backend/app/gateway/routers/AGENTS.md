@@ -1,5 +1,9 @@
 # Router contracts
 
+Shared scheduled-task update validation preserves an unchanged future `once`
+instant on a live task inside `scheduler.min_once_delay_seconds`; new/changed
+instants and terminal reactivation still enforce the minimum delay.
+
 The MCP task list accepts optional `TaskStatus` and `active_only` query filters.
 Pass both to the repository before its limit; preserve `threads:read`, owner
 checks, current-thread incarnation scoping, and the unfiltered array response.
@@ -11,6 +15,25 @@ credentials. Import may rename locally but must remain owner-scoped and
 create-only: collisions return 409, never overwrite or upsert. Ordinary creation
 and import share `_persist_new_agent`, which uses `run_drained_write` so a
 cancelled request still drains the owned persistence worker.
+
+`GET /api/skills`, `/api/skills/custom` and `/api/skills/{name}` serve every
+signed-in user, so their unexpected-failure 500s return a fixed detail. Load
+errors (e.g. a malformed `extensions_config.json`) carry host paths and stay in
+the server log.
+
+Skill mutation operation lists return `next_cursor: null` when `has_more` is false, including empty pages after a supplied `after_id`. The next cursor is the final returned operation only when a further page exists.
+
+`GET /api/agent-tool-groups` projects only configured group names for the
+custom-Agent settings allowlist. Never expose tool provider paths, credentials,
+or raw tool configuration through this catalog.
+
+Custom Agent update guards apply legacy shared-file checks only when the
+resolved store is `FileAgentStore`, including the `update_agent` tool. DB
+imports retain source files for rollback; those files cannot veto SQL updates.
+Keep store resolution and filesystem checks off-loop in the HTTP route.
+Agent PUT uses `preserve_non_managed_fields(..., new_tool_groups=...)` to clear
+an inherited knowledge default when changed groups remove knowledge access.
+Explicit scope/null updates still win; unchanged groups are not a migration.
 
 Committed MCP reconciliation failures are logged once by
 `fail_mcp_reconciliation`, with only the underlying exception type.
@@ -25,3 +48,7 @@ critical section to preserve history ordering. Keep the sidecar distinct from
 the nested projection lock, retain it across requests, and acquire/release both
 off-loop inside the drained worker. Unrelated users retain independent locks;
 external filesystem writers do not participate in this history guarantee.
+
+Plugin actions stamp `ActionContext.interaction=session` only from authenticated
+session provenance. Never accept it from payloads or propagate it to model tools;
+extensions use it to distinguish owner review from model/tool output.

@@ -27,6 +27,7 @@ from deerflow.mcp.session_pool import (
     get_session_pool,
     normalized_connection_fingerprint,
 )
+from deerflow.mcp.tasks.ordinary import McpTaskConnectionUnavailableError
 from deerflow.mcp.tasks.runtime import get_mcp_task_oauth_token_manager
 from deerflow.mcp.user_config import PersonalMcpConfigSnapshot, load_user_mcp_config_if_changed
 from deerflow.mcp_scope import mcp_session_scope_key
@@ -162,11 +163,11 @@ class McpTaskToolCaller:
                 self._personal_callers.popitem(last=False)
             server = snapshot.config.mcp_servers.get(server_name)
             if server is None or not server.enabled:
-                raise LookupError("Personal MCP task connection is missing, disabled or changed")
+                raise McpTaskConnectionUnavailableError("Personal MCP task connection is missing, disabled or changed")
             if caller is None:
                 # A personal name can equal a deployment name. Never consult
                 # the deployment OAuth state or startup snapshot for this path.
-                caller = McpTaskToolCaller(snapshot.config, oauth_token_manager=OAuthTokenManager.from_extensions_config(snapshot.config))
+                caller = McpTaskToolCaller(snapshot.config, oauth_token_manager=OAuthTokenManager.from_extensions_config(snapshot.config, owner_user_id=user_id))
                 self._personal_callers[user_id] = (snapshot, caller)
             return caller
 
@@ -186,7 +187,7 @@ class McpTaskToolCaller:
         interceptors = self._interceptors if is_background_call else self._submit_interceptors
         server_config = self._extensions_config.get_enabled_mcp_servers().get(server_name)
         if server_config is None:
-            raise LookupError(f"MCP task server {server_name!r} is missing or disabled in the startup configuration")
+            raise McpTaskConnectionUnavailableError(f"MCP task server {server_name!r} is missing or disabled in the startup configuration")
         connection = build_server_params(server_name, server_config)
         transport = connection.get("transport", "stdio")
         scope_key = mcp_session_scope_key(

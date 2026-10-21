@@ -1839,6 +1839,22 @@ def test_execute_command_does_not_mark_dead_on_unrelated_error():
     assert sb.is_dead is False
 
 
+def test_execute_command_timeout_appends_exit_marker():
+    """A command deadline is a shell outcome, not a provider hiccup: the result
+    must end with the same ``Exit Code: 124`` marker Local/AIO/Tenki emit on
+    timeout, so the acceptance-checklist harvest recovers the real status
+    (#6847)."""
+
+    def slow(_cmd: str, **kwargs) -> Any:
+        raise TimeoutException("deadline exceeded")
+
+    client = FakeClient(commands=FakeCommandsAPI([slow]))
+    sb = _make_sandbox(client)
+    out = sb.execute_command("sleep 9999", timeout=5)
+    assert out == "Error: command timed out\nExit Code: 124"
+    assert sb.is_dead is False
+
+
 def test_execute_command_forwards_env_and_timeout_to_commands_run():
     """execute_command(env=..., timeout=...) routes env as ``envs`` and the
     timeout through to ``commands.run`` so request-scoped secrets (#3861) reach
@@ -2441,7 +2457,7 @@ def test_reconcile_honors_wall_clock_budget(monkeypatch):
     fake_cls.list_return = [_info("sb-never-probed", "u1", "t1")]
     p._config["reconciliation_max_seconds"] = 0.5
     provider_mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
-    ticks = iter([0.0, 0.0, 1.0, 1.0])
+    ticks = iter([0.0, 0.0, 0.0, 1.0, 1.0])
     monkeypatch.setattr(provider_mod.time, "monotonic", lambda: next(ticks))
 
     stats = p._reconcile_remote_sandboxes(now=100.0)
@@ -2469,7 +2485,7 @@ def test_reconcile_never_probes_or_adopts_a_warm_pool_sandbox(monkeypatch):
     p = _make_provider()
     fake_cls = _install_fake_sdk(monkeypatch, p)
     fake_cls.list_return = [_info("sb-warm", "u1", "t1")]
-    p._warm_pool["sb-warm"] = (p._stable_seed("t1", "u1"), time.time())
+    p._warm_pool["sb-warm"] = (p._stable_seed("t1", "u1"), time.monotonic())
 
     stats = p._reconcile_remote_sandboxes(now=100.0)
 
@@ -2633,7 +2649,7 @@ def test_reconcile_sweeps_expired_warm_pool_entry(monkeypatch):
     fake_cls = _install_fake_sdk(monkeypatch, p)
     store = _install_shared_deployment_capacity(p)
     fake_cls.list_return = []
-    p._warm_pool["sb-old"] = (p._stable_seed("t1", "u1"), time.time() - 601)
+    p._warm_pool["sb-old"] = (p._stable_seed("t1", "u1"), time.monotonic() - 601)
     p._owned_sandbox_ids.add("sb-old")
     p._mount_results["sb-old"] = MagicMock()
     p._ownership.take("sb-old")
@@ -2655,7 +2671,7 @@ def test_reconcile_keeps_unexpired_warm_pool_entry(monkeypatch):
     p = _make_provider(idle_timeout=600)
     fake_cls = _install_fake_sdk(monkeypatch, p)
     fake_cls.list_return = []
-    p._warm_pool["sb-fresh"] = (p._stable_seed("t1", "u1"), time.time())
+    p._warm_pool["sb-fresh"] = (p._stable_seed("t1", "u1"), time.monotonic())
 
     p._reconcile_remote_sandboxes(now=100.0)
 
@@ -2672,7 +2688,7 @@ def test_reconcile_kills_remote_duplicate_of_a_warm_pool_sandbox(monkeypatch):
     ]
     duplicate = FakeClient(sandbox_id="sb-duplicate")
     fake_cls.connect_factory = lambda sid, **_kw: duplicate if sid == "sb-duplicate" else FakeClient(sandbox_id=sid)
-    p._warm_pool["sb-warm"] = (p._stable_seed("t1", "u1"), time.time())
+    p._warm_pool["sb-warm"] = (p._stable_seed("t1", "u1"), time.monotonic())
     p._config["reconciliation_grace_seconds"] = 0.0
 
     stats = p._reconcile_remote_sandboxes(now=100.0)
@@ -2695,7 +2711,7 @@ def test_reconcile_adoption_recheck_treats_warm_pool_as_local(monkeypatch):
     client = FakeClient(sandbox_id="sb-race")
 
     def connect_and_park(sid, **_kw):
-        p._warm_pool[sid] = (p._stable_seed("t1", "u1"), time.time())
+        p._warm_pool[sid] = (p._stable_seed("t1", "u1"), time.monotonic())
         return client
 
     fake_cls.connect_factory = connect_and_park
@@ -3389,6 +3405,298 @@ def test_shutdown_only_kills_sandboxes_owned_by_current_instance(monkeypatch):
 def _setup_paths(monkeypatch, tmp_path):
     paths_mod = importlib.import_module("deerflow.config.paths")
     monkeypatch.setattr(paths_mod, "get_paths", lambda: Paths(base_dir=tmp_path), raising=False)
+
+
+@pytest.mark.parametrize("home_dir", ["/home/user", "/home/custom"])
+@pytest.mark.parametrize("async_acquire", [False, True])
+def test_recreated_sandbox_restores_saved_thread_files(monkeypatch, tmp_path, home_dir, async_acquire):
+    """A second turn must read saved bytes after the first VM expires."""
+    _setup_paths(monkeypatch, tmp_path)
+    provider = _make_provider()
+    provider._config["home_dir"] = home_dir
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda *args: [])
+    sdk = _install_fake_sdk(monkeypatch, provider)
+    clients = []
+
+    def create(**kwargs):
+        client = FakeClient(sandbox_id=f"vm-{len(clients)}")
+        clients.append(client)
+        return client
+
+    sdk.create_factory = create
+
+    def acquire():
+        if async_acquire:
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                provider._acquire_executor = executor
+                return asyncio.run(provider.acquire_async("t1", user_id="u1"))
+        return provider.acquire("t1", user_id="u1")
+
+    paths = Paths(base_dir=tmp_path)
+    paths.ensure_thread_dirs("t1", user_id="u1")
+    (paths.sandbox_uploads_dir("t1", user_id="u1") / "input.bin").write_bytes(b"\x00\xff")
+    (paths.acp_workspace_dir("t1", user_id="u1") / "result.md").write_text("ACP result", encoding="utf-8")
+    # Neither another owner nor another thread may supply the restored bytes.
+    for user_id, thread_id in [("u2", "t1"), ("u1", "t2")]:
+        paths.ensure_thread_dirs(thread_id, user_id=user_id)
+        (paths.sandbox_outputs_dir(thread_id, user_id=user_id) / "private.txt").write_text("private", encoding="utf-8")
+
+    first_id = acquire()
+    first = provider.get(first_id)
+    contents = {"outputs/test.md": "# Saved output\n", "workspace/nested/test.md": "# Saved work\n"}
+    for relative, content in contents.items():
+        first.write_file(f"/mnt/user-data/{relative}", content)
+    listing = "".join(f"{len(content.encode())}\t2.000000000\t{home_dir}/{relative}\x00" for relative, content in contents.items())
+    clients[0].commands._responses.append(SimpleNamespace(stdout=listing, stderr="", exit_code=0))
+    provider.release(first_id)
+    for relative, content in contents.items():
+        assert (paths.thread_dir("t1", user_id="u1") / "user-data" / relative).read_text(encoding="utf-8") == content
+
+    def expired(*args, **kwargs):
+        raise RuntimeError(FakeCommandsAPI.NOT_FOUND_MSG)
+
+    sdk.connect_factory = expired
+    second_id = acquire()
+    assert second_id != first_id
+    second = provider.get(second_id)
+    for relative, content in contents.items():
+        assert second.read_file(f"/mnt/user-data/{relative}") == content
+    assert clients[1].files.store[f"{home_dir}/uploads/input.bin"] == b"\x00\xff"
+    assert clients[1].files.store[f"{home_dir}/acp-workspace/result.md"] == b"ACP result"
+    assert not any("private.txt" in path for path in clients[1].files.store)
+    assert second.mount_upload_result.completed_files == 4
+    provider.shutdown()
+
+
+@pytest.mark.parametrize("reuse", ["active", "warm", "discovered"])
+def test_thread_restore_does_not_overwrite_live_sandbox(monkeypatch, tmp_path, reuse):
+    _setup_paths(monkeypatch, tmp_path)
+    provider = _make_provider()
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda *args: [])
+    sdk = _install_fake_sdk(monkeypatch, provider)
+    paths = Paths(base_dir=tmp_path)
+    paths.ensure_thread_dirs("t1", user_id="u1")
+    (paths.sandbox_outputs_dir("t1", user_id="u1") / "test.md").write_text("stale", encoding="utf-8")
+    client = FakeClient(files=FakeFilesAPI({"/home/user/outputs/test.md": b"newer"}))
+    sdk.connect_factory = lambda *args, **kwargs: client
+    if reuse == "active":
+        provider._sandboxes[client.sandbox_id] = _make_sandbox(client, sandbox_id=client.sandbox_id)
+        provider._thread_sandboxes[provider._thread_key("t1", "u1")] = client.sandbox_id
+    elif reuse == "warm":
+        provider._warm_pool[client.sandbox_id] = (provider._stable_seed("t1", "u1"), time.monotonic())
+    else:
+        sdk.list_return = [_info(client.sandbox_id, "u1", "t1")]
+    sandbox_id = provider.acquire("t1", user_id="u1")
+    assert provider.get(sandbox_id).read_file("/mnt/user-data/outputs/test.md") == "newer"
+    assert client.files.write_calls == []
+    provider.shutdown()
+
+
+@pytest.mark.parametrize("failure", ["write", "file_limit", "byte_limit", "single_file_limit", "tree_file_limit", "tree_byte_limit", "deadline"])
+def test_thread_restore_failure_discards_unusable_sandbox(monkeypatch, tmp_path, caplog, failure):
+    _setup_paths(monkeypatch, tmp_path)
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    provider = _make_provider()
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda *args: [])
+    sdk = _install_fake_sdk(monkeypatch, provider)
+    client = FakeClient()
+    sdk.create_factory = lambda **kwargs: client
+    paths = Paths(base_dir=tmp_path)
+    paths.ensure_thread_dirs("t1", user_id="u1")
+    saved = paths.sandbox_outputs_dir("t1", user_id="u1") / "test.md"
+    saved.write_bytes(b"saved")
+    if failure == "write":
+        monkeypatch.setattr(client.files, "write", MagicMock(side_effect=OSError("upload failed")))
+    elif failure == "file_limit":
+        monkeypatch.setattr(mod, "_MAX_MOUNT_PASS_FILES", 0)
+    elif failure == "byte_limit":
+        monkeypatch.setattr(mod, "_MAX_MOUNT_PASS_TOTAL_BYTES", 1)
+    elif failure == "single_file_limit":
+        monkeypatch.setattr(mod, "_MAX_MOUNT_FILE_SIZE", 1)
+    elif failure == "tree_file_limit":
+        monkeypatch.setattr(mod, "_MAX_MOUNT_FILES", 0)
+    elif failure == "tree_byte_limit":
+        monkeypatch.setattr(mod, "_MAX_MOUNT_TOTAL_SIZE", 1)
+    else:
+        provider._config["mount_upload_deadline_seconds"] = 0
+    with pytest.raises(RuntimeError, match="restore.*thread") as error:
+        provider.acquire("t1", user_id="u1")
+    message = str(error.value)
+    assert str(tmp_path) not in message
+    assert "tree=" in message
+    if failure.endswith("limit"):
+        assert isinstance(error.value, mod._ThreadResourceRestoreLimitError)
+        assert "tree=outputs" in message
+        assert "Operator action required" in message
+        assert "Retrying unchanged data" in message
+        expected_limit = {
+            "file_limit": "file count cap 0",
+            "byte_limit": "total byte budget 1",
+            "single_file_limit": "1-byte file limit",
+            "tree_file_limit": "0-file limit",
+            "tree_byte_limit": "1-byte total limit",
+        }[failure]
+        assert expected_limit in message
+    else:
+        assert not isinstance(error.value, mod._ThreadResourceRestoreLimitError)
+        assert "Operator action required" not in message
+        assert ("OSError" if failure == "write" else "time budget 0s") in message
+    records = [r for r in caplog.records if "Failed to restore" in r.message]
+    assert len(records) == 1
+    assert records[0].exc_info is not None
+    assert "u1" in records[0].message and "t1" in records[0].message
+    if failure == "write":
+        assert "upload failed" in caplog.text
+    assert client.killed and client.closed
+    assert not provider._sandboxes
+    assert not provider._thread_sandboxes
+    assert not provider._remote_ops_in_progress
+    assert provider._reserved_slots == 0
+    assert saved.read_bytes() == b"saved"
+    provider.shutdown()
+
+
+@pytest.mark.parametrize("cap", ["_MAX_MOUNT_PASS_FILES", "_MAX_MOUNT_PASS_TOTAL_BYTES"])
+def test_thread_restore_shared_limit_requires_saved_data_remediation(monkeypatch, tmp_path, cap):
+    _setup_paths(monkeypatch, tmp_path)
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    monkeypatch.setattr(mod, cap, 1)
+    provider = _make_provider()
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda *args: [])
+    sdk = _install_fake_sdk(monkeypatch, provider)
+    clients = []
+
+    def create(**kwargs):
+        client = FakeClient(sandbox_id=f"restore-{len(clients)}")
+        clients.append(client)
+        return client
+
+    sdk.create_factory = create
+    paths = Paths(base_dir=tmp_path)
+    paths.ensure_thread_dirs("t1", user_id="u1")
+    first = paths.sandbox_work_dir("t1", user_id="u1") / "first.txt"
+    first.write_bytes(b"1")
+    (paths.sandbox_outputs_dir("t1", user_id="u1") / "second.txt").write_bytes(b"2")
+    try:
+        for _ in range(2):
+            with pytest.raises(mod._ThreadResourceRestoreLimitError, match="tree=outputs"):
+                provider.acquire("t1", user_id="u1")
+            assert clients[-1].killed and clients[-1].closed
+            assert not provider._sandboxes
+            assert provider._reserved_slots == 0
+        # Only changing the persisted data resolves a deterministic budget breach.
+        first.unlink()
+        sandbox_id = provider.acquire("t1", user_id="u1")
+        assert provider.get(sandbox_id) is not None
+        assert clients[-1].files.write_calls == [("/home/user/outputs/second.txt", b"2")]
+    finally:
+        provider.shutdown()
+
+
+def test_thread_restore_skips_links_and_unpublished_files(monkeypatch, tmp_path):
+    from support.symlinks import symlink_or_skip
+
+    _setup_paths(monkeypatch, tmp_path)
+    provider = _make_provider()
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda *args: [])
+    paths = Paths(base_dir=tmp_path)
+    paths.ensure_thread_dirs("t1", user_id="u1")
+    uploads = paths.sandbox_uploads_dir("t1", user_id="u1")
+    (uploads / "ready.txt").write_bytes(b"ready")
+    (uploads / ".upload-inflight.part").write_bytes(b"partial")
+    (uploads / "result.e2bsync.tmp").write_bytes(b"partial")
+    outside = tmp_path / "private"
+    outside.mkdir()
+    (outside / "secret.txt").write_bytes(b"secret")
+    symlink_or_skip(uploads / "linked.txt", outside / "secret.txt")
+    symlink_or_skip(uploads / "linked-dir", outside, target_is_directory=True)
+    client = FakeClient()
+
+    result = provider._apply_mounts(client, user_id="u1", thread_id="t1")
+
+    assert client.files.write_calls == [("/home/user/uploads/ready.txt", b"ready")]
+    assert result.completed_files == 1
+
+
+@pytest.mark.parametrize("root", ["user", "thread", "workspace"])
+def test_thread_restore_rejects_linked_resource_roots(monkeypatch, tmp_path, root):
+    from support.symlinks import symlink_or_skip
+
+    _setup_paths(monkeypatch, tmp_path)
+    provider = _make_provider()
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda *args: [])
+    sdk = _install_fake_sdk(monkeypatch, provider)
+    client = FakeClient()
+    sdk.create_factory = lambda **kwargs: client
+    paths = Paths(base_dir=tmp_path)
+    roots = {
+        "user": paths.user_dir("u1"),
+        "thread": paths.thread_dir("t1", user_id="u1"),
+        "workspace": paths.sandbox_work_dir("t1", user_id="u1"),
+    }
+    source = roots[root]
+    source.parent.mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / "private"
+    outside.mkdir()
+    symlink_or_skip(source, outside, target_is_directory=True)
+    with pytest.raises(RuntimeError, match="restore.*thread"):
+        provider.acquire("t1", user_id="u1")
+    assert client.files.write_calls == []
+    assert client.killed and client.closed
+    provider.shutdown()
+
+
+def test_thread_restore_shares_budget_with_optional_mounts(monkeypatch, tmp_path):
+    _setup_paths(monkeypatch, tmp_path)
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    monkeypatch.setattr(mod, "_MAX_MOUNT_PASS_FILES", 1)
+    provider = _make_provider()
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda *args: [])
+    paths = Paths(base_dir=tmp_path)
+    paths.ensure_thread_dirs("t1", user_id="u1")
+    (paths.sandbox_outputs_dir("t1", user_id="u1") / "saved.txt").write_bytes(b"saved")
+    optional = tmp_path / "optional.txt"
+    optional.write_bytes(b"optional")
+    provider._config["mounts"] = [SimpleNamespace(host_path=str(optional), container_path="/mnt/extra", read_only=False)]
+    client = FakeClient()
+
+    result = provider._apply_mounts(client, user_id="u1", thread_id="t1")
+
+    assert client.files.write_calls == [("/home/user/outputs/saved.txt", b"saved")]
+    assert result.truncated
+    assert result.completed_files == 1
+
+
+@pytest.mark.parametrize(
+    "tree,path_method",
+    [
+        ("workspace", "sandbox_work_dir"),
+        ("uploads", "sandbox_uploads_dir"),
+        ("outputs", "sandbox_outputs_dir"),
+        ("acp-workspace", "acp_workspace_dir"),
+    ],
+)
+def test_thread_restore_scan_error_is_not_an_empty_directory(monkeypatch, tmp_path, caplog, tree, path_method):
+    _setup_paths(monkeypatch, tmp_path)
+    provider = _make_provider()
+    paths = Paths(base_dir=tmp_path)
+    paths.ensure_thread_dirs("t1", user_id="u1")
+
+    unreadable_root = getattr(paths, path_method)("t1", user_id="u1")
+    unreadable_root.mkdir(parents=True, exist_ok=True)
+    original_walk = os.walk
+
+    def unreadable(source, *, followlinks, onerror):
+        if source == unreadable_root:
+            onerror(PermissionError(13, "unreadable directory", str(source)))
+        return original_walk(source, followlinks=followlinks, onerror=onerror)
+
+    monkeypatch.setattr(os, "walk", unreadable)
+    with pytest.raises(RuntimeError, match=f"tree={tree}.*PermissionError") as error:
+        provider._apply_mounts(FakeClient(), user_id="u1", thread_id="t1")
+    assert isinstance(error.value.__cause__, PermissionError)
+    assert str(tmp_path) not in str(error.value)
+    assert "unreadable directory" in caplog.text
 
 
 def test_sync_outputs_to_host_writes_new_files(monkeypatch, tmp_path):
@@ -4769,7 +5077,7 @@ def test_shutdown_during_initial_eviction_reconnect_failure_tracks_vm(monkeypatc
     """Shutdown must destroy a VM while its first eviction reconnects."""
     p = _make_provider()
     fake_cls = _install_fake_sdk(monkeypatch, p)
-    p._warm_pool["warm-1"] = ("seed", time.time())
+    p._warm_pool["warm-1"] = ("seed", time.monotonic())
 
     reconnect_started = threading.Event()
     allow_failure = threading.Event()
@@ -4809,7 +5117,7 @@ def test_shutdown_during_gone_sandbox_eviction_releases_slot_once(monkeypatch):
     """
     p = _make_provider()
     fake_cls = _install_fake_sdk(monkeypatch, p)
-    p._warm_pool["warm-1"] = ("seed", time.time())
+    p._warm_pool["warm-1"] = ("seed", time.monotonic())
 
     reconnect_started = threading.Event()
     allow_failure = threading.Event()
@@ -6261,7 +6569,7 @@ def test_warm_sweep_cannot_delete_concurrent_discovery_lease(monkeypatch):
     provider = _make_provider(idle_timeout=30)
     sdk = _install_fake_sdk(monkeypatch, provider)
     sdk.list_return = [_info("sb-race", "u1", "t1")]
-    provider._warm_pool["sb-race"] = (provider._stable_seed("t1", "u1"), time.time() - 31)
+    provider._warm_pool["sb-race"] = (provider._stable_seed("t1", "u1"), time.monotonic() - 31)
     provider._ownership.take("sb-race")
     provider._owned_sandbox_ids.add("sb-race")
     cleanup_started, finish_cleanup, acquire_reached = threading.Event(), threading.Event(), threading.Event()
@@ -6307,7 +6615,7 @@ def test_warm_sweep_cannot_delete_concurrent_discovery_lease(monkeypatch):
 
 def test_warm_sweep_serializes_with_lapsed_lease_renewal(monkeypatch):
     provider = _make_provider(idle_timeout=30)
-    provider._warm_pool["sb-race"] = (provider._stable_seed("t1", "u1"), time.time() - 31)
+    provider._warm_pool["sb-race"] = (provider._stable_seed("t1", "u1"), time.monotonic() - 31)
     provider._owned_sandbox_ids.add("sb-race")
     renewal_started, finish_renewal, cleanup_reached = threading.Event(), threading.Event(), threading.Event()
     renew = provider._ownership.renew
@@ -6429,7 +6737,7 @@ def test_reconcile_does_not_readopt_a_release_in_progress(monkeypatch):
 def test_warm_sweep_leaves_shared_capacity_to_inventory(monkeypatch, inventory_complete):
     provider = _make_provider(idle_timeout=30)
     store = _install_shared_deployment_capacity(provider)
-    provider._warm_pool["sb-old"] = (provider._stable_seed("t1", "u1"), time.time() - 31)
+    provider._warm_pool["sb-old"] = (provider._stable_seed("t1", "u1"), time.monotonic() - 31)
     monkeypatch.setattr(provider, "_list_remote_entries", lambda _metadata: ([], False, inventory_complete))
 
     provider._reconcile_remote_sandboxes()
@@ -6517,7 +6825,7 @@ def test_warm_sweep_cannot_release_reacquired_ownership(monkeypatch, acquire_pat
     provider = _make_provider(idle_timeout=30)
     sdk = _install_fake_sdk(monkeypatch, provider)
     sdk.list_return = [_info("sb-race", "u1", "t1")]
-    provider._warm_pool["sb-race"] = (provider._stable_seed("t1", "u1"), time.time() - 31)
+    provider._warm_pool["sb-race"] = (provider._stable_seed("t1", "u1"), time.monotonic() - 31)
     provider._owned_sandbox_ids.add("sb-race")
     provider._ownership.take("sb-race")
     cleaning = threading.Event()
@@ -6568,7 +6876,7 @@ def test_warm_sweep_cannot_release_reacquired_ownership(monkeypatch, acquire_pat
 def test_warm_sweep_rechecks_snapshot_after_lifecycle_wait(monkeypatch, transition):
     provider = _make_provider(idle_timeout=30)
     sid = "sb-stale-snapshot"
-    old_entry = (provider._stable_seed("t1", "u1"), time.time() - 31)
+    old_entry = (provider._stable_seed("t1", "u1"), time.monotonic() - 31)
     provider._warm_pool[sid] = old_entry
     provider._owned_sandbox_ids.add(sid)
     provider._ownership.take(sid)
@@ -6585,7 +6893,7 @@ def test_warm_sweep_rechecks_snapshot_after_lifecycle_wait(monkeypatch, transiti
             # The sweep has already captured old_entry. A competing operation
             # completes before it acquires the lifecycle lock.
             if transition == "repark":
-                provider._warm_pool[sid] = (old_entry[0], time.time())
+                provider._warm_pool[sid] = (old_entry[0], time.monotonic())
             else:
                 provider._publish_ownership(sid)
         with lifecycle(sandbox_id):
@@ -6672,7 +6980,7 @@ def test_warm_sweep_cannot_race_lapsed_lease_reclaim(monkeypatch):
 
     provider = _make_provider(idle_timeout=30)
     sid = "sb-lapsed"
-    provider._warm_pool[sid] = (provider._stable_seed("t1", "u1"), time.time() - 31)
+    provider._warm_pool[sid] = (provider._stable_seed("t1", "u1"), time.monotonic() - 31)
     provider._owned_sandbox_ids.add(sid)
     renewing = threading.Event()
     finish_renewal = threading.Event()

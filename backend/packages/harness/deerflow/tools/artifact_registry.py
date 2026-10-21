@@ -48,7 +48,7 @@ _STRUCTURED_TASK_KEYS = frozenset({"task_id", "job_id"})
 # commonly wraps paths in, including CJK punctuation. `\S+` would otherwise
 # consume them into `real_ref`.
 _REF_TRAILING_NOISE_CHARS = ".,;:)]}\"'`\u3002\uff0c\uff1b\uff1a\u3001\uff09\u3011\u300b\u201d\u2019"
-_CJK_CLOSING_DELIMITERS = {"）": "（", "】": "【", "》": "《", "”": "“", "’": "‘"}
+_REF_CLOSING_DELIMITERS = {")": "(", "]": "[", "}": "{", "）": "（", "】": "【", "》": "《", "”": "“", "’": "‘"}
 
 # Content-block and structured-key refs are trusted only in these shapes.
 # `data:`/`blob:` URIs can carry arbitrarily large embedded payloads (MCP
@@ -131,16 +131,16 @@ def _make_entry(
 
 
 def _strip_ref_trailing_noise(raw: str) -> str:
-    """Strip prose closers while preserving paired CJK characters inside a ref."""
+    """Strip prose closers while preserving paired ASCII/CJK delimiters inside a ref."""
     end = len(raw.rstrip(_REF_TRAILING_NOISE_CHARS))
     if end == len(raw):
         return raw
 
-    unmatched_openers = dict.fromkeys(_CJK_CLOSING_DELIMITERS.values(), 0)
+    unmatched_openers = dict.fromkeys(_REF_CLOSING_DELIMITERS.values(), 0)
     for index, char in enumerate(raw):
         if char in unmatched_openers:
             unmatched_openers[char] += 1
-        elif (opener := _CJK_CLOSING_DELIMITERS.get(char)) and unmatched_openers[opener]:
+        elif (opener := _REF_CLOSING_DELIMITERS.get(char)) and unmatched_openers[opener]:
             unmatched_openers[opener] -= 1
             # An opener outside the detected token is prose; an opener inside
             # it makes this closer part of a literal directory name or URL.
@@ -303,8 +303,9 @@ def extract_artifacts_from_result(
        results — become ``file`` entries, subject to the same
        referenceability gate as every other ref source (``data:``/``blob:``
        and other unresolvable URIs are skipped).
-    3. ``content`` blocks of type ``file`` / ``image`` with a URL source become
-       ``file`` / ``image`` entries.
+    3. ``content`` blocks of type ``file`` / ``image`` with a top-level ``url``
+       or legacy ``source.url`` become ``file`` / ``image`` entries. A present
+       top-level URL takes precedence, with MIME metadata from the same shape.
     4. ``content`` text blocks and plain-string results are scanned
        conservatively for sandbox paths and remote file URLs (gated by
        ``detect_refs_in_text``).
@@ -383,7 +384,10 @@ def extract_artifacts_from_result(
         block_type = block.get("type", "")
 
         if block_type in {"file", "image"}:
-            source = block.get("source") or {}
+            # Standard LangChain blocks keep URL/MIME at the top level. Select
+            # one shape before validation so conflicting legacy fields cannot
+            # replace an invalid standard URL or supply unrelated MIME metadata.
+            source = block if "url" in block else block.get("source") or {}
             if not isinstance(source, dict):
                 continue
             url = source.get("url")

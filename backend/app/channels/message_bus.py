@@ -6,21 +6,55 @@ import asyncio
 import logging
 import threading
 import time
-from collections.abc import Callable, Coroutine
+from collections.abc import Awaitable, Callable, Coroutine
+from contextlib import suppress
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
+
+from deerflow.utils.file_io import await_drained
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_INBOUND_QUEUE_MAXSIZE = 1000
 
 PENDING_CLARIFICATION_METADATA_KEY = "pending_clarification"
+# Full ``human_input`` payload (artifact of the ask_clarification tool message),
+# attached to the final outbound so channels can render richer affordances
+# (e.g. Feishu button cards) for option-based clarifications.
+HUMAN_INPUT_REQUEST_METADATA_KEY = "human_input_request"
+# A channel-synthesized human-input answer (e.g. a Feishu card button click),
+# carried on the inbound so the manager can attach it to the human message's
+# additional_kwargs for the Gateway's human_input protocol.
+HUMAN_INPUT_RESPONSE_METADATA_KEY = "human_input_response"
 RESOLVED_FROM_PENDING_CLARIFICATION_METADATA_KEY = "resolved_from_pending_clarification"
 # Adapter-owned bytes may use this transient key while crossing the channel
 # boundary. ChannelManager consumes and removes it before persisting metadata.
 INBOUND_FILE_CONTENT_KEY = "_content"
+# Only adapters can supply a callable cleanup capability; a path in provider
+# metadata never grants deletion authority. Consume it before persisting files.
+INBOUND_FILE_CLEANUP_KEY = "_cleanup"
+
+
+async def cleanup_inbound_files(files: list[dict[str, Any]]) -> None:
+    """Release adapter-owned staging once, off-loop, including on cancellation."""
+    callbacks = [f.pop(INBOUND_FILE_CLEANUP_KEY, None) for f in files if isinstance(f, dict)]
+    callbacks = [callback for callback in callbacks if callable(callback)]
+    if not callbacks:
+        return
+
+    def cleanup() -> None:
+        for callback in callbacks:
+            try:
+                callback()
+            except Exception as exc:
+                # A diagnostic failure must not hide the primary error or
+                # prevent the remaining owned attachments from being released.
+                with suppress(Exception):
+                    logger.warning("Failed to clean up inbound attachment staging: %s", type(exc).__name__)
+
+    await await_drained(asyncio.to_thread(cleanup))
 
 
 # ---------------------------------------------------------------------------
@@ -59,6 +93,9 @@ class InboundMessage:
         files: Optional list of file attachments (platform-specific dicts).
         metadata: Arbitrary extra data from the channel.
         created_at: Unix timestamp when the message was created.
+        dedupe_claimed: Set by ``MessageBus.claim_inbound`` once the
+            manager's dedupe key for this message is recorded, so the worker
+            does not record it again (it would read as a duplicate).
     """
 
     channel_name: str
@@ -74,6 +111,7 @@ class InboundMessage:
     files: list[dict[str, Any]] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
+    dedupe_claimed: bool = False
 
 
 @dataclass
@@ -135,6 +173,8 @@ class OutboundMessage:
 # ---------------------------------------------------------------------------
 
 OutboundCallback = Callable[[OutboundMessage], Coroutine[Any, Any, None]]
+InboundClaim = Callable[[InboundMessage], Awaitable[bool]]
+InboundClaimRelease = Callable[[InboundMessage], Awaitable[None]]
 
 
 class InboundQueueFullError(RuntimeError):
@@ -193,6 +233,8 @@ class MessageBus:
         self._full_rejection_count = 0
         self._last_full_warning_at = 0.0
         self._outbound_listeners: list[OutboundCallback] = []
+        self._inbound_claim: InboundClaim | None = None
+        self._inbound_claim_release: InboundClaimRelease | None = None
 
     # -- inbound -----------------------------------------------------------
 
@@ -285,6 +327,29 @@ class MessageBus:
         with self._inbound_admission_lock:
             self._inbound_queued -= 1
         return msg
+
+    def set_inbound_claim(self, claim: InboundClaim, release: InboundClaimRelease) -> None:
+        """Install the dispatcher's dedupe claim (``ChannelManager._claim_inbound``)."""
+        self._inbound_claim = claim
+        self._inbound_claim_release = release
+
+    async def claim_inbound(self, msg: InboundMessage) -> bool:
+        """Claim *msg* against inbound dedupe before a platform side effect.
+
+        For an adapter whose side effect a duplicate delivery must not repeat
+        (Discord creating a thread): ``False`` means another delivery owns the
+        message. On ``True`` the adapter copies ``msg.dedupe_claimed`` onto the
+        message it publishes, and calls ``release_inbound_claim`` if it never
+        publishes one. Without a dispatcher every message may proceed. Must run
+        on the Gateway loop, where the dedupe store's engine lives.
+        """
+        if self._inbound_claim is None:
+            return True
+        return await self._inbound_claim(msg)
+
+    async def release_inbound_claim(self, msg: InboundMessage) -> None:
+        if self._inbound_claim_release is not None and msg.dedupe_claimed:
+            await self._inbound_claim_release(msg)
 
     def inbound_task_done(self) -> None:
         """Mark one dequeued inbound message as fully handled."""

@@ -10,7 +10,7 @@ import logging
 import time
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit, urlunsplit
 
 import httpx
 import jwt
@@ -169,7 +169,10 @@ class OIDCService:
             params["code_challenge"] = code_challenge
             params["code_challenge_method"] = "S256"
 
-        return f"{metadata.authorization_endpoint}?{urlencode(params)}"
+        endpoint = urlsplit(metadata.authorization_endpoint)
+        # OAuth endpoints may already have a query (RFC 6749 section 3.1).
+        query = f"{endpoint.query}&{urlencode(params)}" if endpoint.query else urlencode(params)
+        return urlunsplit(endpoint._replace(query=query))
 
     # ── Token exchange ─────────────────────────────────────────────────────
 

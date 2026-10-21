@@ -184,6 +184,14 @@ export function SettingsDialog(props: SettingsDialogProps) {
     t.settings.sections.notification,
     t.settings.sections.about,
   ]);
+  // A `?settings=<section>` deep link (or a stale dialog store) can activate
+  // a section this user's nav does not offer — e.g. user management for a
+  // non-admin — so fall back to the first available section instead of
+  // rendering a panel with no highlighted entry. The base list above is
+  // non-empty, so the fallback itself always resolves.
+  const activeId = sections.some((section) => section.id === activeSection)
+    ? activeSection
+    : sections[0]!.id;
   return (
     <Dialog
       {...dialogProps}
@@ -203,7 +211,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
           <nav className="bg-sidebar min-h-0 overflow-y-auto rounded-lg border p-2">
             <ul className="space-y-1 pr-1">
               {sections.map(({ id, label, icon: Icon }) => {
-                const active = activeSection === id;
+                const active = activeId === id;
                 return (
                   <li key={id}>
                     <button
@@ -226,15 +234,15 @@ export function SettingsDialog(props: SettingsDialogProps) {
           </nav>
           <ScrollArea className="h-full min-h-0 rounded-lg border">
             <div className="space-y-8 p-6">
-              {activeSection === "models" && <ModelSettingsPage />}
-              {activeSection === "users" && <UserSettingsPage />}
-              {activeSection === "account" && <AccountSettingsPage />}
-              {activeSection === "appearance" && <AppearanceSettingsPage />}
-              {activeSection === "memory" && <MemorySettingsPage />}
-              {activeSection === "subagents" && <SubagentSettingsPage />}
-              {activeSection === "notification" && <NotificationSettingsPage />}
-              {activeSection === "channels" && <ChannelsSettingsPage />}
-              {activeSection === "about" && <AboutSettingsPage />}
+              {activeId === "models" && <ModelSettingsPage />}
+              {activeId === "users" && <UserSettingsPage />}
+              {activeId === "account" && <AccountSettingsPage />}
+              {activeId === "appearance" && <AppearanceSettingsPage />}
+              {activeId === "memory" && <MemorySettingsPage />}
+              {activeId === "subagents" && <SubagentSettingsPage />}
+              {activeId === "notification" && <NotificationSettingsPage />}
+              {activeId === "channels" && <ChannelsSettingsPage />}
+              {activeId === "about" && <AboutSettingsPage />}
             </div>
           </ScrollArea>
         </div>

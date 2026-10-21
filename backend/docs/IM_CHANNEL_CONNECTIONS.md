@@ -420,7 +420,7 @@ Buzz's relay only delivers chat events to **channel-scoped** subscriptions, whic
 | Subscription | Filter | Purpose |
 |---|---|---|
 | `buzz-discovery` | `{"kinds":[39000]}` | Historical query listing exactly the channels this identity is a member of (one stored event each, then `EOSE`). Supplies each channel's name and type, which is also what the DM mention-exemption reads. Do **not** narrow it with `#p` — that matches nothing. |
-| `buzz-membership` | `{"kinds":[44100,44101], "#p":["<our pubkey>"], "since": …}` | **Live** membership notifications. `44100` (added) subscribes to the new channel immediately; `44101` (removed) closes that channel's subscription. This is what makes a newly added channel work without a restart. |
+| `buzz-membership` | `{"kinds":[44100,44101], "#p":["<our pubkey>"], "since": …}` | **Live** membership notifications. `44100` (added) subscribes to the new channel immediately; `44101` (removed) closes that channel's live and backlog subscriptions and clears its paging state. This is what makes a newly added channel work without a restart. |
 | `buzz-chat-<uuid>` | `{"kinds":[9], "#h":["<uuid>"], "since": …}` | One per discovered channel — the only shape that actually receives messages. |
 
 Consequences worth knowing operationally:
@@ -429,7 +429,7 @@ Consequences worth knowing operationally:
 - **Membership is scoped to live events.** The relay *stores* 44100/44101 events, so without a `since` every connection replayed the whole membership history as if it had just happened — re-running channel discovery once per stored add (you would see several `channel discovery complete` lines for one connect, and channels logged as `<unnamed>`), re-subscribing channels you have since been removed from, and briefly unsubscribing channels you are still in. The subscription is therefore anchored at the moment the socket opened, minus 60s of slack so a membership change made *during* the connect/auth handshake — or a small relay clock skew — is still picked up.
 - **The number of channel subscriptions is capped** (256). The channel list comes off the wire, so it is bounded like any other remote-fed state. At the cap, new channels are refused and named in a `per-channel subscription limit reached` warning rather than an existing, working subscription being evicted.
 - **A subscription the relay closes is re-opened, up to 3 times per connection.** Every subscription on the socket fails *silently* when the relay drops it: a chat subscription deafens one channel, `buzz-membership` stops DeerFlow ever learning it was added to or removed from a channel, `buzz-discovery` kills the completeness sweep. So a `CLOSED` frame is recovered, not just noted, and the subscription that went quiet is always named at WARNING level. Recovery is skipped when the relay's stated reason says the subscription is not ours any more — a NIP-01/NIP-42 `auth-required:` / `restricted:` / `blocked:` / `invalid:` prefix, or buzz-relay's own revocation wording — because re-issuing the same REQ then just fights the relay. Any other reason (including a `CLOSED` with no reason at all) is treated as a hiccup and retried, with the 3-attempt budget as the backstop; after that it stays down until the next reconnect, which rebuilds everything from scratch.
-- **Known bound: more than 2000 unread messages in one channel across a disconnect loses the oldest of them.** The relay caps historical delivery at 2000 events per subscription and serves them newest-first, even with a `since`. DeerFlow processes what it receives and the channel's watermark advances past the rest, so those older messages are never delivered and never retried. Every other gap in the design fails toward duplicate delivery (which is absorbed by inbound dedupe); this is the one remaining case that can skip, and it needs both a disconnect and a >2000-message backlog in a *single* channel to occur.
+- **A backlog larger than the relay's 2000-per-subscription cap is now paged, not lost.** The relay serves at most 2000 stored events per subscription, newest-first, even with a `since`. When a channel's history page comes back *at* that cap, DeerFlow walks the history backwards with further `until`-bounded queries on a separate subscription until a page comes back under the cap or it reaches the point it had already read, so the oldest unread messages are fetched rather than skipped. The walk needs a read watermark to stop at, so it runs only for a channel DeerFlow has already read from; a channel's *first* connect (and any channel whose cursor was evicted) keeps the previous newest-2000 behaviour rather than paging back with nothing to reach. The walk is best-effort and additive. It stops with a warning at 50 pages or when a saturated page makes no timestamp progress. A full page of events at the inclusive `until` boundary cannot be advanced safely using timestamps alone: subtracting a second could skip unread events with that timestamp, so DeerFlow stops instead of repeatedly fetching the same page. Remaining history may be unfetched. Membership removal or a closed live subscription closes any open backlog page and clears its state; late backlog frames are ignored.
 
 ### Buzz trust model
 
@@ -447,6 +447,133 @@ Neither can make anything be *acted on*. The `allowed_users` allowlist and per-e
 **Deny-by-default allowlist:** unlike other providers (where an empty `allowed_users` means "allow everyone"), `channels.buzz.allowed_users` is deliberately deny-by-default — an empty list means *nobody* can trigger a run, and DeerFlow logs a startup warning saying so. Add each member pubkey (hex or `npub1…`) that should be able to reach the agent. Individual drops are logged at DEBUG level.
 
 **Bound identity:** once a pubkey completes `/connect`, its inbound messages resolve to that connection and run under the bound DeerFlow user (memory, files, and artifacts land in that user's buckets). Bindings are scoped to the relay host, so the same pubkey on a different relay is a different identity and must bind separately.
+
+### Feishu / Lark TLS troubleshooting
+
+If Gateway startup succeeds but the Lark SDK keeps logging
+`connect failed, err: [SSL: CERTIFICATE_VERIFY_FAILED] ... self-signed certificate in certificate chain`,
+the channel worker has started but its connection has not passed TLS verification.
+Changing the App ID, App Secret, or event permissions does not repair a certificate
+trust failure. A browser that can reach Feishu does not prove that the Gateway's
+Python environment trusts the same CA certificates.
+
+The SDK first obtains a connection URL over HTTPS using Requests, then opens a
+WebSocket using Python's default SSL context. Check both trust sources in the
+**same environment and process configuration as the Gateway**. From the repository
+root, after installing backend dependencies:
+
+```bash
+uv run --no-sync --project backend python -c "import ssl; print(ssl.get_default_verify_paths()); print(ssl.create_default_context().cert_store_stats())"
+uv run --no-sync --project backend python -c "import requests; print(requests.certs.where()); print(requests.Session().merge_environment_settings('https://open.feishu.cn', {}, None, None, None)['verify'])"
+```
+
+These commands inspect trust configuration without sending app credentials or
+connecting to Feishu. They do not establish that the remote certificate chain
+is valid. Run them inside the Gateway container when using Docker; host Python
+and the container can have different trust stores.
+
+If a corporate proxy or security product inspects TLS, ask its administrator for
+the approved root/intermediate CA certificates in PEM format and verify their
+provenance. Use a CA bundle that retains the public roots needed by other Gateway
+connections and includes those approved certificates. If no TLS inspection is
+expected, investigate the presented certificate chain and repair the Python or
+container CA installation before adding any certificate to trust.
+
+Set **both** variables to the absolute path of that bundle in the Gateway's
+environment, for example in the root `.env`:
+
+```dotenv
+SSL_CERT_FILE=/absolute/path/to/approved-ca-bundle.pem
+REQUESTS_CA_BUNDLE=/absolute/path/to/approved-ca-bundle.pem
+```
+
+`SSL_CERT_FILE` selects the default OpenSSL CA file for the WebSocket connection
+(and clients such as HTTPX); `REQUESTS_CA_BUNDLE` selects the Requests CA bundle
+for connection discovery and synchronous API calls. Setting only the Requests
+variable can leave the WebSocket handshake failing. The diagnostic commands above
+do not load `.env` themselves: export these variables in the diagnostic shell as
+well, using your shell's environment-variable syntax.
+
+For Docker, mount the bundle read-only into the `gateway` service and use its
+**container path** in both variables. A host path in `.env` is not automatically
+mounted. Recreate the Gateway container after changing its environment or mounts;
+for local development, restart the Gateway process. These variables configure
+trust for the whole Gateway, so use an operator-approved bundle.
+
+Do not disable certificate or hostname verification (`verify=False`,
+`CERT_NONE`, or an unverified SSL context) to make the bot connect. Confirm recovery
+by checking that the certificate errors stop and that the bot receives and replies
+to a test message; the earlier "channel started" log alone is not a handshake or
+message-delivery check. If the error persists, compare the CA issuer and trust
+configuration for both the configured Feishu/Lark API domain and the WebSocket
+host. When sharing diagnostics, omit app secrets, tokens, and connection-URL query
+parameters.
+
+References: [Python SSL trust paths](https://docs.python.org/3.12/library/ssl.html#ssl.get_default_verify_paths),
+[Requests CA bundles](https://requests.readthedocs.io/en/latest/user/advanced/#ssl-cert-verification).
+
+### Feishu scheduled-task notifications
+
+Feishu/Lark sends scheduled-task result and lifecycle notices as static Markdown
+cards to the task owner's currently bound user. The existing notification outbox
+provides retry, localization, redaction and send-time binding checks; Settings
+reports this through `proactive_notifications`. Manual trial runs stay silent.
+
+The configured app needs bot messaging permission (`im:message:send_as_bot`, or
+its broader `im:message` alternative), and the recipient must be in its available
+scope. Complete `/connect <code>` in a private chat with the same app. The outbox
+keeps the application-scoped `open_id` as its identity; delivery prefers that
+owner's currently connected, explicitly recorded private-chat address. Group
+chats are never used for these personal notices. Older bindings without recorded
+chat type keep the `open_id` path; if Feishu rejects it with `230101`, bind again
+in private chat. Changing the app also requires rebinding.
+The existing WebSocket channel must be running; sends use the configured SDK's
+REST client, so no public callback or interactive-card subscription is needed.
+
+For provider-backed acceptance, bind a test user, let a once task run on its
+schedule, and confirm the notice arrives without another chat message. Check
+that a platform rejection is recorded as a failed delivery and that unbinding
+prevents later sends. API acceptance is not a read receipt. The shared outbox
+can retry an ambiguously acknowledged send; it does not promise exactly-once
+messages at the provider. Record whether domestic Feishu or international Lark
+was actually exercised.
+
+### Group notifications
+
+Tasks may explicitly select one additional connected Feishu, QQ or WeCom group. Personal
+notifications keep their existing recipients. The task stores the chosen
+`notification_group_connection_id`; a group notice stores that connection ID as
+its outbox target with `payload.target_type="group"`. It never infers a group
+destination from all of the owner's bindings.
+
+In the task form select the supported channel's group-binding button. For QQ
+and WeCom, enter a recognizable group name before generating the code; the
+browser sends optional `group_name` to `POST /api/channels/{provider}/connect`,
+which stores the name with the single-use OAuth state. Send the unchanged
+`/connect` command in that group, then refresh and select the saved name.
+Bindings for two groups remain distinct from each other and from private chats.
+Feishu can retrieve its group name using `im:chat:read`; grant that permission
+and publish the app changes. A failed lookup does not discard the binding,
+but unnamed groups cannot be newly selected: fix the permission or name and
+bind again. API selection and each delivery verify the
+task owner, connection ID, connected status, and recorded group/chat identity.
+The adapter resolves its verified group identity; a lost binding cannot fall back
+to another group or a private chat. A bot removed from the group produces a
+normal platform rejection handled by the existing retry budget.
+
+Omitting the field in PATCH preserves it; `null` clears it. Destination-only
+edits do not re-arm completed tasks or change the run budget. The destination
+is fixed when each notification is enqueued; later task edits affect future
+notices, and unbinding still blocks pending ones. Migration `0040` adds a nullable
+reference with no backfill. Upgrade Gateway workers and the frontend together;
+the form uses `/api/features.scheduled_tasks.group_notifications` to hide new
+selection on older Gateways. The conversation scheduling tool does not set
+group targets in this version.
+
+Real-provider acceptance should confirm that a selected task appears in the
+specified group, an unselected task remains private, and removing the bot or
+revoking its binding prevents a successful group send. Record the account and
+tenant setup actually used; the outbox remains at-least-once.
 
 ### QQ WebSocket setup (MVP)
 
@@ -497,10 +624,19 @@ OpenIDs represent the same identity. Bind each context separately. Group
 conversation histories are isolated by sender, but replies remain visible to
 everyone in the group.
 
+List several OpenIDs as a YAML list. A single OpenID, such as an
+`allowed_users: $QQ_ALLOWED_USERS` reference, is one entry rather than a
+sequence of characters. An unset or null value, an empty list, and a blank or
+whitespace-only string such as `" "` all allow every sender; they do not
+restrict access. Entries that are not OpenID strings, such as numeric
+QQ account numbers, are ignored with a warning, and a mapping is rejected as a
+whole, so none of its keys is authorized. A configured value with no valid
+OpenID denies every sender and logs an error.
+
 The MVP supports text-only `C2C_MESSAGE_CREATE` and `GROUP_AT_MESSAGE_CREATE`
 events and final text replies. It does not download/upload attachments, stream
-partial answers, handle guild/channel messages, or proactively push scheduled
-results. Replies require the original message ID: C2C replies have a 60-minute
+partial answers or handle guild/channel messages. Scheduled private results
+use the separate proactive notification path described below. Replies require the original message ID: C2C replies have a 60-minute
 window with at most four replies per source message; group replies have a
 5-minute window with at most five replies. Long answers are split at UTF-8 character boundaries with a
 conservative 4,000-byte adapter budget per message; overflow is marked as
@@ -545,13 +681,81 @@ Incoming messages that resolve to a connection carry `connection_id`, `owner_use
 
 Runtime provider credentials are deployment-level bot secrets, not user-owned
 connection credentials. They can come from `channels.*` in `config.yaml` or
-from the browser runtime setup flow, which persists them through
-`ChannelRuntimeConfigStore` so local/private deployments can configure bots
-without editing YAML. The runtime store is a local plaintext JSON fallback with
-owner-only file permissions (`0600`); use it only where the DeerFlow data
+from the browser runtime setup flow (`POST` / `DELETE
+/api/channels/{provider}/runtime-config`, admin only), so local/private
+deployments can configure bots without editing YAML. With a `sqlite` or
+`postgres` database the flow stores one row per provider in
+`channel_runtime_configs`: the provider's config block encrypted with
+`DEER_FLOW_CREDENTIALS_KEY`, a plaintext disconnect flag (a disconnect keeps
+suppressing the provider's `config.yaml` block, key or no key), and a
+`version` bumped on every save. Every request re-reads the table, so all
+Gateway instances serve the same providers. Without a usable key, saving
+credentials answers `503` rather than storing plaintext, and rows the key
+cannot decrypt read as not configured. The first start after the upgrade
+imports an existing `{DEER_FLOW_HOME}/channels/runtime-config.json` (a
+provider already in the table keeps its row) and then deletes the plaintext
+file, so a downgrade to a build without the table must re-enter UI-configured
+bots. With `database.backend: memory` that file (mode `0600`, saves under an
+advisory sidecar lock) remains the store; use it only where the DeerFlow data
 directory is already trusted as secret storage. WeChat QR login auth state
-follows the same local-runtime model and may persist a QR-derived bot token in
-the channel state directory.
+follows the local-runtime model and may persist a QR-derived bot token in the
+channel state directory.
+
+With several Gateway instances, `channels.leader_lease` gives each provider's
+platform connection to one instance: the holder of the provider's row in
+`channel_leases`. Bindings, connect codes and conversations are shared SQL
+state, so the connect flow works on any instance; `GET /api/channels/` names
+each provider's `leader`. Runtime credentials saved, or a disconnect made, on
+any instance reach the holder within one lease renewal interval: it compares
+each provider's `version` in `channel_runtime_configs` on every tick and
+restarts, starts or stops its transport when the config changed. Channel runs are created with `on_disconnect: continue`, so a run
+keeps executing when the request that created it dies with its instance (a
+leader hand-off, a rolling restart, a crash): its thread state is persisted
+and the answer stays readable in the web UI, while the IM reply itself is
+lost with the old holder's transport state. Because that run survives, the
+manager keeps the inbound dedupe key once a run request has left it (a
+cancelled worker, a read timeout, a dropped connection), so the provider's
+redelivery of the same message on the new holder is dropped instead of
+executing the turn twice; a request the Gateway rejected, or a failure before
+the request was sent, still releases the key for a retry. See
+[IM channel leader lease](CONFIGURATION.md#im-channel-leader-lease-channelsleader_lease).
+
+### Duplicate and late deliveries
+
+The inbound dedupe key is `(channel, workspace, chat, message id)`; with a
+PostgreSQL database every instance shares it for 10 minutes, and it fails open
+on a database error. Discord keys a message by its guild (`dm` for a direct
+message, which used to get no key at all) and by the channel it was posted in,
+so two instances that route a reply in a thread differently still see one
+message. A Discord session on every instance receives every message, so the
+adapter claims that key before it creates a Discord thread for the message:
+only the instance that wins the claim creates one. A claimed message that is
+never processed (a failed or cancelled hand-off, a shutdown that discards it
+from the queue) gives the key back, so a peer can still take it.
+
+Past the dedupe window, after a restart, or while the dedupe store is down, a
+redelivery still reaches the run request. Every run request for a message
+with a dedupe key carries an `Idempotency-Key` derived from it, and the human
+message id is derived from the same key, so the Gateway returns the run it
+admitted for the first delivery instead of starting another one (on a
+`memory` database, only while that Gateway process still holds the run). The
+Gateway scopes these internal keys by owner rather than by thread, so a
+redelivery that arrives after `/new` rebound the conversation to a fresh thread
+gets a 409 for the admitted run, answered with the same note, instead of
+running again there. The
+redelivery then attaches to that run: a streaming channel replays its events,
+or, once they are gone, the manager reads this message's turn from the thread
+state; a `runs.wait` channel reads that turn as well, and a run that is still
+in progress is answered with a short "already being processed" note. A
+redelivered message is not run again even when its first run failed; a new
+message is. Messages without a dedupe key (no stable message id or workspace)
+are not covered.
+
+The first message of a new conversation binds it to a thread with an
+insert-if-absent claim on `channel_conversations` (connected users) or
+`channel_thread_bindings` (unbound chats). An instance that created a thread
+but lost the claim adopts the winner's thread and deletes its own, empty one;
+`/new` still rebinds the conversation to a fresh thread.
 
 ## Security Notes
 
@@ -566,11 +770,79 @@ the channel state directory.
   credential material cannot be decrypted — a lost or changed key — DeerFlow
   treats it as unavailable instead of using corrupt secrets. A declared
   multi-instance deployment with channel connections enabled must set the key.
-- The local plaintext runtime credential fallback is documented above; prefer
-  deployment-managed environment/config secrets for non-local deployments until
-  a dedicated secret backend is configured.
+- Runtime bot credentials entered in the browser are encrypted with the same
+  key in `channel_runtime_configs`. Only `database.backend: memory` keeps the
+  plaintext JSON fallback documented above; prefer deployment-managed
+  environment/config secrets there.
 - `allowed_users` is **not** a bind-time defense. Because connect codes are processed before the allowlist (see Connect Flow), anyone who possesses a valid code can consume it — not only allowlisted users. Bind security therefore rests entirely on the code's confidentiality: it is 128-bit random, expires after 10 minutes, is single-use, and is shown only in the initiating user's browser (never echoed back to chat). Treat connect codes like one-time passwords and do not forward them.
 - An external identity — `(provider, external account, workspace/team/guild)` — has at most one active owner. The most recent successful bind wins: connecting an identity that another DeerFlow user already holds transfers ownership and revokes the previous owner's binding (and its stored credentials). This is enforced at the database layer, so two users racing to bind the same identity cannot both end up connected.
 - Provider bot tokens remain in `channels.*` and are never returned to the browser.
 - Stored per-connection credentials are encrypted. If stored credential material cannot be decrypted, DeerFlow treats it as unavailable instead of using corrupt secrets.
 - This implementation does not add public provider callback or webhook routes.
+
+## Proactive notification settings
+
+The shared outbox sends scheduled result/lifecycle notices to bound private
+identities on WeCom, Feishu/Lark, WeChat and QQ. **Settings → Notifications → IM
+notifications** lists connected, push-capable apps with the same per-provider
+control. The setting is durable and owner-scoped, and also works in local
+`DEER_FLOW_AUTH_DISABLED=1` mode. It does not disable chatting, disconnect an
+account or stop a scheduled task. Browser notifications have a separate switch.
+
+Opting out stops new enqueueing and permanently closes pending/retrying notices
+for that owner/provider, including any selected group. Re-enabling does
+not replay these notices. A platform send already in progress may still arrive.
+Preference lookup failures park instead of sending; ordinary binding revocation,
+localized summaries, redaction, deduplication and retry budgets remain shared.
+Upgrade every Gateway worker before relying on an opt-out during a rolling
+upgrade. Downgrading below `0041_im_notice_preferences` removes the choices.
+
+The same settings page has three default-off ordinary task/goal event controls:
+completion, terminal failure and requests for input. These use the same outbox,
+ownership checks, localized renderer and send/retry opt-out. An unanswered
+Human Input Card takes precedence over completion and is rechecked before
+sending; an answered or superseded request is dropped. Ordinary goal stand-downs,
+recoverable tool errors and interrupted runs do not become failure or input
+notices. IM-originated runs retain their normal conversation replies. Migration
+`0043_runtime_im_notices` adds real source identities for non-scheduled notices;
+downgrading that revision deletes the runtime notices and retains scheduled ones.
+
+WeCom groups bound before group destinations were introduced keep their legacy
+chat identity. That compatibility applies only to the old group-binding shape;
+a new private binding never authorizes messages from an unbound group. Bind a
+specific group again with a name to make it available as a notification target.
+
+### WeChat private notifications
+
+Use the existing iLink QR/bot setup and bind in a private chat. Send one private
+message so the worker can securely save the current conversation context. New
+contexts live in encrypted connection credentials and survive restart; private
+context tokens are not exposed by the browser connection API. Old bindings do
+not automatically trust a token previously stored in public metadata, and a
+changed bot token needs a fresh private message. Missing context or a platform
+rejection fails visibly rather than being recorded as sent. A server-expired
+context may need another private message. Notifications use the existing
+`sendmessage` HTTP path and require its success ACK, without a provider-local
+retry loop. WeChat group notification targets are not part of this version.
+
+Official protocol: [Tencent/openclaw-weixin](https://github.com/Tencent/openclaw-weixin/blob/main/docs/protocol.md).
+The client-side protocol does not guarantee that the server accepts missing or
+arbitrarily old conversation contexts; real account acceptance is still required.
+
+### QQ private notifications
+
+Configure the existing QQ WebSocket bot and `/connect` in **private/C2C chat**.
+Group member OpenIDs are a different recipient namespace; a group-only binding
+is not used as a private notification destination. A proactive notice uses
+`POST /v2/users/{user_openid}/messages`, without `msg_id`, `event_id`, passive reply
+sequence/quota or `is_wakeup`. The recipient must permit proactive messages and
+the bot must have platform access. Success requires a nonempty message ID ACK.
+Transport failures park; platform rejections use the shared retry budget.
+
+Current official rules are in the [QQ message overview](https://bot.q.qq.com/wiki/develop/api-v2/server-inter/message/overview.html).
+Older GitHub bot-docs snapshots say proactive sending was discontinued; use the
+current live documentation and verify the actual bot account. QQ group notices
+use the selected connection's current-App `group_openid`, not a member OpenID
+or the passive reply context. WeCom group notices use the selected current-bot
+`chatid` through the same smart-bot WebSocket sender; neither path falls back to
+a private destination when a group binding is unavailable.

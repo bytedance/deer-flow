@@ -149,6 +149,7 @@ class ScheduledTaskRepository:
         end_at: datetime | str | None = None,
         standing_notes: list[str] | None = None,
         stop_condition: str | None = None,
+        notification_group_connection_id: str | None = None,
     ) -> dict[str, Any]:
         if goal_objective is not None:
             normalize_goal_objective(goal_objective)
@@ -166,6 +167,7 @@ class ScheduledTaskRepository:
             origin_thread_id=origin_thread_id,
             goal_objective=goal_objective,
             stop_condition=stop_condition,
+            notification_group_connection_id=notification_group_connection_id,
             max_runs=max_runs,
             end_at=_coerce_datetime(end_at),
             standing_notes=list(standing_notes) if standing_notes is not None else None,

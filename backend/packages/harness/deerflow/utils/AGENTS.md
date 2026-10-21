@@ -1,3 +1,28 @@
+### Atomic Byte Publication
+
+`atomic_write.publish_bytes_atomically` owns browser screenshot and Browserless
+capture/fetch publication. It writes and fsyncs a hidden exclusive sibling before
+`os.replace`, cleaning it on failure. New files use `0666` filtered by the host
+umask; replacements preserve existing permission bits before publication. Never
+read the process umask by changing it in this threaded runtime. Behavioral tests
+for both tool imports live in `tests/test_browser_outputs_atomic.py`.
+`cleanup_failed_atomic_write` shares best-effort cleanup across this publisher,
+`skills/projection.py`'s private manifest writer, project document staging, and
+Gateway upload staging.
+Use it on publication failure or after deciding to discard an owned
+temporary; pass a raw descriptor only until `fdopen` succeeds, or an explicitly
+transferred duplicate descriptor owned by the cleanup caller. Shelf discards
+must preserve both a rejected project's 404 and a dedup hit's 200 response.
+Callers retain their own serialization, permissions and publication policy.
+Failure cleanup must preserve the original publication exception, including
+interruptions. Descriptor close and sibling unlink are separate best-effort
+operations: a close failure must not prevent the unlink attempt.
+Attempt warning logs for cleanup `OSError`s with the temporary path and exception
+details. Guard logging-handler exceptions so diagnostics neither replace the
+publication exception (including interruptions) nor skip remaining cleanup.
+Both tools take collision names from `output_names.output_name_candidates`
+(name, `-1`..`-1000`, five timestamps); claim each atomically, never pre-check.
+
 ### Model Retry Hints
 
 `retry_after.py::bounded_retry_after_ms` shares the 24-hour provider-hint ceiling
@@ -97,8 +122,9 @@ and preserve the generic `+xml` rule.
 
 ### Conversion Worker Ownership
 
-`convert_file_to_markdown` drains large-file conversion workers across caller
-cancellation before returning control to source-file cleanup. Keep conversion
+`convert_file_to_markdown` offloads parsing for every source size: compressed
+Office files can require seconds of work below 1 MiB. It drains conversion workers
+across caller cancellation before returning control to source-file cleanup. Keep conversion
 inside `await_drained`, including when the worker fails or cancellation repeats;
 upload ingestion owns a temporary source that it removes in `finally`. Coverage
 lives in `tests/test_file_conversion_cancellation.py`.
@@ -124,3 +150,13 @@ non-ASCII whitespace remain unchanged.
 Do not normalize arbitrary Unicode digits into device numbers: names such as
 `COM⁴.txt` and `COM¹notes.txt` are ordinary portable names. Read/removal callers
 retain their existing portability exemptions.
+
+### Advisory File Lock Retries
+
+`file_lock.retry_until_locked` owns contention-only acquisition retries for the
+Windows Lark and extension-manager locks and bounded skill-projection reads.
+Retry only EACCES/EAGAIN/EDEADLK; other errors propagate without sleeping.
+Keep per-caller policies: Lark has a 15-minute Windows file-lock deadline,
+extension management waits indefinitely, and skill export retains its existing
+deadline, 0.02-second cadence and cancellation check. Clocks and sleeps are
+injectable; tests must not patch the shared stdlib time module.

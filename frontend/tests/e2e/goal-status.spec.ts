@@ -164,6 +164,30 @@ const OPEN_QUESTION = [
 
 const STOOD_DOWN = [
   {
+    name: "a loop safety stop",
+    objective: "Finish the report",
+    goal: {
+      continuation_count: 0,
+      last_evaluation: {
+        satisfied: false,
+        blocker: "goal_not_met_yet",
+        reason: "The report is unfinished.",
+        stand_down_reason: "loop_capped",
+      },
+    },
+    reply: [
+      {
+        type: "ai",
+        id: "goal-ai",
+        content: "Repeated inspections stopped before the report was finished.",
+      },
+    ],
+    chip: "Stopped",
+    detail:
+      "Repeated tool calls triggered a safety stop. Adjust the approach and send a new message to retry; your goal stays active.",
+    note: "The report is unfinished.",
+  },
+  {
     name: "a goal that used every automatic follow-up",
     objective: "Make every test in the suite pass",
     goal: {
