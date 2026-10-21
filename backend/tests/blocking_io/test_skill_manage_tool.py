@@ -67,7 +67,7 @@ async def test_skill_manage_edit_does_not_block_event_loop(monkeypatch) -> None:
     result = await skill_manage_module.skill_manage_tool.coroutine(_RUNTIME, "edit", _SKILL_NAME, edited)
 
     assert result == f"Updated custom skill '{_SKILL_NAME}'."
-    assert await asyncio.to_thread(skill_file.read_text, encoding="utf-8") == edited
+    assert await asyncio.to_thread(skill_file.read_bytes) == edited.encode("utf-8")
 
 
 async def test_skill_manage_edit_publishes_the_shared_marker_off_the_loop(monkeypatch, tmp_path: Path) -> None:

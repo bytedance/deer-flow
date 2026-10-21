@@ -46,6 +46,9 @@ def test_bootstrap_preserves_owner_display_name(tmp_path, monkeypatch, backend, 
     assert config.skills == ["test-skill"]
     assert store.get_soul("reviewer", user_id=owner) == "new soul"
     assert store.get("reviewer", user_id="other").display_name == "Other owner"
+    if backend == "file":
+        soul_path = tmp_path / "users" / owner / "agents" / "reviewer" / "SOUL.md"
+        assert soul_path.read_bytes() == b"new soul"
 
 
 @pytest.mark.parametrize("model", [AgentConfig, AgentCreateRequest, AgentUpdateRequest])
