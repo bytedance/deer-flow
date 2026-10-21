@@ -156,6 +156,9 @@ class SubagentResult:
             execution. ``None`` when the delegation carried no acceptance
             criteria, the run ended before streaming, or harvesting failed;
             an empty list means the stream carried no bash-family tool calls.
+        execution_done_event: Internal lifecycle fence set only after stream,
+            sandbox, extension, and capacity cleanup has settled. A configured
+            timeout may publish ``TIMED_OUT`` before this fence opens.
     """
 
     task_id: str
@@ -173,18 +176,26 @@ class SubagentResult:
     admission_failure: bool = False
     tool_receipts: list[dict[str, Any]] | None = field(default=None, kw_only=True)
     bash_executions: list[dict[str, Any]] | None = field(default=None, kw_only=True)
+    knowledge_sources: list[dict[str, Any]] = field(default_factory=list, kw_only=True)
+    _knowledge_messages: list[Any] = field(default_factory=list, init=False, repr=False)
     cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
+    execution_done_event: threading.Event = field(default_factory=threading.Event, init=False, repr=False)
     _state_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
     def __post_init__(self):
         """Initialize mutable defaults."""
         if self.ai_messages is None:
             self.ai_messages = []
+        if self.status.is_terminal or self.completed_at is not None:
+            self.execution_done_event.set()
 
     def update_token_usage_records(self, records: list[dict[str, int | str | None]]) -> None:
-        """Publish the latest cumulative collector snapshot while still running."""
+        """Publish cumulative usage, including timeout/cancel cleanup tails."""
         with self._state_lock:
-            if not self.status.is_terminal:
+            if not self.status.is_terminal or self.status in {
+                SubagentStatus.CANCELLED,
+                SubagentStatus.TIMED_OUT,
+            }:
                 self.token_usage_records = list(records)
 
     def update_tool_receipts(self, receipts: list[dict[str, Any]] | None) -> None:
@@ -223,6 +234,29 @@ class SubagentResult:
             if self.tool_receipts is None:
                 return None
             return [dict(receipt) for receipt in self.tool_receipts]
+
+    def update_knowledge_sources(self, messages: list[Any] | None) -> None:
+        """Accumulate validated retrieval evidence before terminal publication."""
+        from deerflow.knowledge import sources_from_messages
+
+        with self._state_lock:
+            if self.status.is_terminal:
+                return
+            if messages is None:
+                return
+            # Values histories grow cumulatively, but compaction/replacements
+            # can change the prefix. Rescan from the first changed message.
+            start = 0
+            for previous, current in zip(self._knowledge_messages, messages):
+                if previous != current:
+                    break
+                start += 1
+            sources = sources_from_messages(messages[start:]) if start < len(messages) else []
+            self._knowledge_messages = list(messages)
+            merged = {source["id"]: source for source in self.knowledge_sources}
+            for source in sources:
+                merged[source.id] = source.model_dump(mode="json", exclude_none=True)
+            self.knowledge_sources = list(merged.values())[-100:]
 
     def try_set_terminal(
         self,
@@ -268,10 +302,29 @@ class SubagentResult:
             return True
 
 
-def _extract_final_result(final_state: Any, *, trace_id: str, name: str) -> str:
+def _terminal_direct_results(final_state: Any, return_direct_tools: set[str]) -> list[ToolMessage] | None:
+    """Match a complete terminal direct-tool batch in call order."""
+    if not final_state or not return_direct_tools:
+        return None
+    messages = final_state.get("messages", [])
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        if not isinstance(message, AIMessage):
+            continue
+        calls = message.tool_calls
+        if calls and all(call["name"] in return_direct_tools for call in calls):
+            results = {item.tool_call_id: item for item in messages[index + 1 :] if isinstance(item, ToolMessage)}
+            if all(call["id"] in results for call in calls):
+                return [results[call["id"]] for call in calls]
+        return None
+    return None
+
+
+def _extract_final_result(final_state: Any, *, trace_id: str, name: str, return_direct_tools: set[str] | None = None) -> str:
     """Extract a human-readable result string from the streamed subagent state.
 
-    Finds the last ``AIMessage`` in the conversation and stringifies its
+    Uses the matched tool results when the last assistant turn consists only
+    of direct-return tools. Otherwise finds the last ``AIMessage`` and stringifies its
     content via the shared :func:`message_content_to_text` helper; falls back
     to the last message of any type when no AIMessage is present. Returns a
     sentinel string (``"No response generated"``) when there is nothing to
@@ -290,12 +343,12 @@ def _extract_final_result(final_state: Any, *, trace_id: str, name: str) -> str:
     messages = final_state.get("messages", [])
     logger.info(f"[trace={trace_id}] Subagent {name} final messages count: {len(messages)}")
 
-    last_ai_message = None
-    for msg in reversed(messages):
-        if isinstance(msg, AIMessage):
-            last_ai_message = msg
-            break
+    direct_results = _terminal_direct_results(final_state, return_direct_tools or set())
+    if direct_results is not None:
+        texts = [message_content_to_text(message.content) for message in direct_results]
+        return "\n\n".join(text for text in texts if text) or "No response generated"
 
+    last_ai_message = next((message for message in reversed(messages) if isinstance(message, AIMessage)), None)
     if last_ai_message is not None:
         text = message_content_to_text(last_ai_message.content)
         return text if text else "No response generated"
@@ -367,6 +420,10 @@ _background_tasks: dict[str, SubagentResult] = {}
 _background_tasks_lock = threading.Lock()
 
 _background_futures: dict[str, Future[SubagentResult]] = {}
+_background_cleanup_requested: set[str] = set()
+# A timed-out public result can precede stream/resource cleanup. Keep the
+# execution task alive and observed until that cleanup settles on its owner loop.
+_background_execution_tasks: set[asyncio.Task[SubagentResult]] = set()
 
 
 def _harvest_tool_receipts(
@@ -546,13 +603,18 @@ def _harvest_bash_executions(
             meta_status = str(meta.get("status") or getattr(message, "status", "success") or "success")
             content = message.content if isinstance(message.content, str) else json.dumps(message.content, sort_keys=True, default=str)
             status, status_marker = _bash_evidence_status(content, meta_status)
+            output_tail = content[-_BASH_EVIDENCE_OUTPUT_TAIL_CHARS:]
+            if len(content) > _BASH_EVIDENCE_OUTPUT_TAIL_CHARS and content[-_BASH_EVIDENCE_OUTPUT_TAIL_CHARS - 1] != "\n":
+                # A clipped test name/log line can look like a summary after
+                # losing its reporter prefix. Retain only complete lines.
+                output_tail = output_tail.partition("\n")[2]
             executions.append(
                 {
                     "tool_call_id": tool_call_id,
                     "tool_name": name,
                     "command": command,
                     "command_truncated": command_truncated,
-                    "output_tail": content[-_BASH_EVIDENCE_OUTPUT_TAIL_CHARS:],
+                    "output_tail": output_tail,
                     "status": status,
                     "status_marker": status_marker,
                 }
@@ -578,7 +640,9 @@ def _harvest_bash_executions(
 _isolated_subagent_loop: asyncio.AbstractEventLoop | None = None
 _isolated_subagent_loop_thread: threading.Thread | None = None
 _isolated_subagent_loop_started: threading.Event | None = None
+_isolated_subagent_loop_shutdown_pending = False
 _isolated_subagent_loop_lock = threading.Lock()
+_isolated_subagent_loop_shutdown_lock = threading.Lock()
 
 
 def _run_isolated_subagent_loop(
@@ -594,38 +658,56 @@ def _run_isolated_subagent_loop(
         started_event.clear()
 
 
-def _shutdown_isolated_subagent_loop() -> None:
+def _shutdown_isolated_subagent_loop(*, only_if_pending: bool = False) -> None:
     """Stop and close the persistent isolated subagent loop."""
-    global _isolated_subagent_loop, _isolated_subagent_loop_thread, _isolated_subagent_loop_started
+    global _isolated_subagent_loop, _isolated_subagent_loop_thread, _isolated_subagent_loop_started, _isolated_subagent_loop_shutdown_pending
 
-    with _isolated_subagent_loop_lock:
-        loop = _isolated_subagent_loop
-        thread = _isolated_subagent_loop_thread
-        _isolated_subagent_loop = None
-        _isolated_subagent_loop_thread = None
-        _isolated_subagent_loop_started = None
+    with _isolated_subagent_loop_shutdown_lock:
+        with _isolated_subagent_loop_lock:
+            # Dispatch recovery can become stale while waiting for this lock.
+            # Recheck the fence before touching the current loop generation.
+            if only_if_pending and not _isolated_subagent_loop_shutdown_pending:
+                return
+            loop = _isolated_subagent_loop
+            thread = _isolated_subagent_loop_thread
+            if loop is None:
+                _isolated_subagent_loop_shutdown_pending = False
+                return
+            _isolated_subagent_loop_shutdown_pending = True
 
-    if loop is None:
-        return
+            # A previous bounded shutdown/startup attempt already requested
+            # loop.stop. Dispatch-side recovery should only probe whether the
+            # retained worker has exited; repeatedly joining here would stall
+            # every caller for up to one second while the worker remains live.
+            if only_if_pending and thread is not None and thread.is_alive():
+                return
 
-    if loop.is_running():
-        loop.call_soon_threadsafe(loop.stop)
+        if loop.is_running():
+            loop.call_soon_threadsafe(loop.stop)
 
-    if thread is not None and thread.is_alive() and thread is not threading.current_thread():
-        thread.join(timeout=1)
+        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=1)
 
-    thread_stopped = thread is None or not thread.is_alive()
-    loop_stopped = not loop.is_running()
+        thread_stopped = thread is None or not thread.is_alive()
+        loop_stopped = not loop.is_running()
 
-    if not loop.is_closed():
-        if thread_stopped and loop_stopped:
-            loop.close()
-        else:
+        if not thread_stopped or not loop_stopped:
             logger.warning(
-                "Skipping close of isolated subagent loop because shutdown did not complete within timeout (thread_alive=%s, loop_running=%s)",
+                "Retaining isolated subagent loop ownership because shutdown did not complete within timeout (thread_alive=%s, loop_running=%s)",
                 thread is not None and thread.is_alive(),
                 loop.is_running(),
             )
+            return
+
+        if not loop.is_closed():
+            loop.close()
+
+        with _isolated_subagent_loop_lock:
+            if _isolated_subagent_loop is loop and _isolated_subagent_loop_thread is thread:
+                _isolated_subagent_loop = None
+                _isolated_subagent_loop_thread = None
+                _isolated_subagent_loop_started = None
+                _isolated_subagent_loop_shutdown_pending = False
 
 
 atexit.register(_shutdown_isolated_subagent_loop)
@@ -633,8 +715,19 @@ atexit.register(_shutdown_isolated_subagent_loop)
 
 def _get_isolated_subagent_loop() -> asyncio.AbstractEventLoop:
     """Return the persistent event loop used by isolated subagent executions."""
-    global _isolated_subagent_loop, _isolated_subagent_loop_thread, _isolated_subagent_loop_started
+    global _isolated_subagent_loop, _isolated_subagent_loop_thread, _isolated_subagent_loop_started, _isolated_subagent_loop_shutdown_pending
+
+    # A startup/shutdown timeout retains ownership while the worker is alive.
+    # Ordinary dispatch is also the retry path once that worker has actually
+    # exited: reap the retained loop under the shutdown lifecycle lock before
+    # deciding whether replacement is still fenced.
+    if _isolated_subagent_loop_shutdown_pending:
+        _shutdown_isolated_subagent_loop(only_if_pending=True)
+
     with _isolated_subagent_loop_lock:
+        if _isolated_subagent_loop_shutdown_pending:
+            raise RuntimeError("Isolated subagent event loop shutdown is still pending; retained worker is still exiting")
+
         thread_is_alive = _isolated_subagent_loop_thread is not None and _isolated_subagent_loop_thread.is_alive()
         loop_is_usable = _isolated_subagent_loop is not None and not _isolated_subagent_loop.is_closed() and _isolated_subagent_loop.is_running() and thread_is_alive
 
@@ -651,7 +744,18 @@ def _get_isolated_subagent_loop() -> asyncio.AbstractEventLoop:
             if not started_event.wait(timeout=5):
                 loop.call_soon_threadsafe(loop.stop)
                 thread.join(timeout=1)
-                loop.close()
+                if thread.is_alive() or loop.is_running():
+                    _isolated_subagent_loop = loop
+                    _isolated_subagent_loop_thread = thread
+                    _isolated_subagent_loop_started = started_event
+                    _isolated_subagent_loop_shutdown_pending = True
+                    logger.warning(
+                        "Retaining isolated subagent loop ownership after startup timeout (thread_alive=%s, loop_running=%s)",
+                        thread.is_alive(),
+                        loop.is_running(),
+                    )
+                elif not loop.is_closed():
+                    loop.close()
                 raise RuntimeError("Timed out starting isolated subagent event loop")
             _isolated_subagent_loop = loop
             _isolated_subagent_loop_thread = thread
@@ -930,7 +1034,7 @@ class SubagentExecutor:
         )
         self.tools = self._base_tools
         # Populated from the same per-user, config-filtered registry used to
-        # build the prompt. Runtime skill activation/policy middleware receives
+        # build the prompt. Runtime skill activation middleware receives
         # this exact set so a subagent cannot activate an undisclosed skill.
         self._available_skill_names: set[str] = set()
         # Guard middlewares that expose ``consume_stop_reason`` (currently
@@ -941,6 +1045,12 @@ class SubagentExecutor:
         # not just the first — because the v2 contract advertises more than one
         # cap reason.
         self._stop_reason_middlewares: list[Any] = []
+        self._return_direct_tools: set[str] = set()
+        # The one skill-authorization context for this execution, resolved
+        # lazily by ``_resolve_skill_authorization`` and shared by the Layer 1
+        # filter and every runtime ``skill:activate`` check (activation
+        # middleware, describe gate, skill-read stamping).
+        self._skill_authorization: Any | None = None
         # LangGraph super-step budget that buys ``config.max_turns`` turns,
         # resolved in ``_create_agent`` once the middleware chain — and with it
         # the compiled graph's per-turn node count — is known. Stays ``None``
@@ -963,7 +1073,7 @@ class SubagentExecutor:
             self._resolved_app_config = get_app_config()
         return self._resolved_app_config
 
-    def _create_agent(
+    async def _create_agent(
         self,
         tools: list[BaseTool] | None = None,
         *,
@@ -975,6 +1085,12 @@ class SubagentExecutor:
         ``deferred_setup`` (assembled in ``_build_initial_state``) carries the
         deferred MCP tool names + catalog hash so the subagent gets the same
         DeferredToolFilterMiddleware the lead agent has. ``None`` is a no-op.
+
+        Async because the middleware-declared-tool decision below calls the
+        authorization provider's ``filter_resources`` — potentially external
+        policy-service I/O — and this method runs on the shared event loop
+        (``_aexecute`` awaits it), so the decision is offloaded to a worker
+        thread with the same provider instance and context.
         """
         app_config = self._get_resolved_app_config()
         if self.model_name is None:
@@ -1008,9 +1124,66 @@ class SubagentExecutor:
         authz_provider = getattr(self, "_authz_provider", None)
         if authz_provider is not None:
             middleware_kwargs["authorization_provider"] = authz_provider
+        # Phase 3 (Layer 2): arm the runtime ``skill:activate`` check on the
+        # subagent chain too — a delegated task is a plain HumanMessage, so
+        # task text containing /skill-name reaches the activation middleware.
+        # Resolved through the same memoized helper the Layer 1 filter used
+        # (``_resolve_skill_authorization``): provider factories are
+        # deliberately uncached, so resolving independently here could hand the
+        # runtime checks a different provider instance (and policy snapshot)
+        # than the filter that built ``_available_skill_names``.
+        skill_authorization = self._resolve_skill_authorization()
+        if skill_authorization is not None:
+            middleware_kwargs["skill_authorization"] = skill_authorization
         if mcp_routing_middleware is not None:
             middleware_kwargs["mcp_routing_middleware"] = mcp_routing_middleware
         middlewares = build_subagent_runtime_middlewares(**middleware_kwargs)
+        # Authorization Layer 1 for middleware-declared tools (e.g. extension
+        # contributions): collect from the built stack, decide with the same
+        # provider/principal as the ordinary pass (offloaded off the event
+        # loop — a custom provider's filter_resources may do policy-service
+        # I/O), then narrow the view build-locally. The verification before
+        # create_agent is the backstop for third-party __copy__ behavior.
+        declared_authorized = None
+        layer_one = getattr(self, "_layer_one_outcome", None)
+        authz_context = getattr(self, "_authz_context", None)
+        # Production sets provider, context, and outcome together in
+        # ``_build_initial_state``; a missing piece means no ordinary pass ran
+        # on this executor (direct ``_create_agent`` calls in tests), so there
+        # is no verdict set to seed the decision with and the pass is skipped.
+        if authz_provider is not None and layer_one is not None and authz_context is not None:
+            from deerflow.agents.middlewares.tool_declarations import (
+                apply_declared_tool_view,
+                collect_declared_tools,
+                decide_declared_tools,
+                verify_declared_tool_view,
+            )
+
+            declared = collect_declared_tools(middlewares)
+            declared_authorized = await asyncio.to_thread(
+                decide_declared_tools,
+                declared,
+                outcome=layer_one,
+                context=authz_context,
+                app_config=app_config,
+                authorization_provider=authz_provider,
+            )
+            middlewares = apply_declared_tool_view(middlewares, authorized_names=declared_authorized)
+            verify_declared_tool_view(middlewares, authorized_names=declared_authorized)
+        elif authz_provider is not None:
+            # Defense in depth: the provider is configured but the seeded
+            # decision state is missing, so the declaration pass is skipped.
+            # Layer 2 still enforces at call time, but middleware-declared
+            # tools bypass Layer 1 in this build — log so a future refactor
+            # that breaks the ``_build_initial_state`` invariant is visible
+            # instead of silently reopening the channel.
+            missing = [name for name, value in (("_layer_one_outcome", layer_one), ("_authz_context", authz_context)) if value is None]
+            logger.warning(
+                "Authorization provider is configured but %s %s not set for subagent %r; skipping the middleware-declared tool pass (Layer 2 still enforces at call time)",
+                " and ".join(missing),
+                "is" if len(missing) == 1 else "are",
+                self.config.name,
+            )
         # Collect every guard middleware that exposes ``consume_stop_reason``
         # (TokenBudgetMiddleware, LoopDetectionMiddleware) so _aexecute can read
         # each after the run and surface whichever cap fired. Duck-typed
@@ -1031,6 +1204,13 @@ class SubagentExecutor:
             state_schema=ThreadState,
             checkpointer=False,
         )
+        # Use the compiled registry: it includes middleware tools, normalized
+        # callables, and LangChain's last-definition-wins name precedence.
+        from langgraph.prebuilt import ToolNode
+
+        tool_graph_node = agent.get_graph().nodes.get("tools")
+        tool_node = tool_graph_node.data if tool_graph_node is not None else None
+        self._return_direct_tools = {tool.name for tool in tool_node.tools_by_name.values() if tool.return_direct} if isinstance(tool_node, ToolNode) else set()
         self._describe_assembly(
             app_config=app_config,
             tools=bound_tools,
@@ -1205,8 +1385,66 @@ class SubagentExecutor:
         # Filter by config.skills whitelist
         if self.config.skills is not None:
             allowed = set(self.config.skills)
+        else:
+            allowed = None
+
+        # Phase 3: enforce skill authorization (Layer 1). Filter the skill
+        # allowlist by the provider's "skill" policy so denied skills never
+        # reach the returned list (and are never turned into tools). Pass the
+        # already-loaded ``all_skills`` names as candidates so we don't pay a
+        # second ``load_skills`` round-trip inside the filter, and the memoized
+        # authorization context so the filter's provider instance is the same
+        # one the runtime ``skill:activate`` checks on this assembly use.
+        from deerflow.authz.skill_filter import filter_available_skills_by_authorization
+
+        resolved_app_config = self.app_config or get_app_config()
+        allowed = filter_available_skills_by_authorization(
+            allowed,
+            context=self._skill_authz_context(),
+            app_config=resolved_app_config,
+            # Same bucket convention as the middleware chain (self.user_id or
+            # DEFAULT_USER_ID); only consulted if candidates were not supplied.
+            user_id=self.user_id or DEFAULT_USER_ID,
+            candidate_skill_names=[s.name for s in all_skills],
+            authorization=self._resolve_skill_authorization(),
+        )
+
+        if allowed is not None:
             return [s for s in all_skills if s.name in allowed]
         return all_skills
+
+    def _resolve_skill_authorization(self):
+        """The one skill-authorization context for this execution.
+
+        Resolved once per executor assembly (executors are built per task
+        dispatch) and shared by the Layer 1 filter in ``_load_skills``, the
+        runtime ``skill:activate`` check on the activation middleware, the
+        ``describe_skill`` gate, and the skill-read stamping middleware — so
+        every layer of this assembly sees the same provider instance and
+        policy snapshot. Providers are uncached by design; resolving per layer
+        would let a custom provider observe different snapshots for visibility
+        and activation within one run.
+        """
+        resolved = getattr(self, "_skill_authorization", None)
+        if resolved is None:
+            from deerflow.authz.skill_filter import resolve_skill_authorization
+
+            resolved = resolve_skill_authorization(self._skill_authz_context(), self._get_resolved_app_config())
+            self._skill_authorization = resolved
+        return resolved
+
+    def _skill_authz_context(self) -> dict[str, Any]:
+        """Identity mapping shared by the Layer 1 filter and the runtime
+        ``skill:activate`` check wired into the subagent middleware chain."""
+        return {
+            "user_id": self.user_id,
+            "user_role": self.user_role,
+            "oauth_provider": self.oauth_provider,
+            "oauth_id": self.oauth_id,
+            "channel_user_id": self.channel_user_id,
+            "is_internal": self.is_internal,
+            "authz_attributes": self.authz_attributes,
+        }
 
     async def _build_initial_state(self, task: str) -> tuple[dict[str, Any], list[BaseTool], "DeferredToolSetup"]:
         """Build the initial state for agent execution.
@@ -1227,8 +1465,9 @@ class SubagentExecutor:
         from deerflow.tools.builtins.tool_search import assemble_deferred_tools, get_deferred_tools_prompt_section, get_mcp_routing_hints_prompt_section
 
         # Skills are discoverable metadata until explicitly slash-activated or
-        # loaded through read_file. Their allowed-tools declarations are applied
-        # dynamically by SkillToolPolicyMiddleware, not eagerly here.
+        # loaded through read_file. Their allowed-tools declarations are
+        # compatibility metadata only, not tool authority; loading them here
+        # does not filter any tool.
         skills = await self._load_skills()
         self._assembled_skills = list(skills)
         self._available_skill_names = {skill.name for skill in skills}
@@ -1241,10 +1480,12 @@ class SubagentExecutor:
             skills,
             enabled=resolved_app_config.skills.deferred_discovery,
             container_base_path=resolved_app_config.skills.container_path,
+            skill_authorization=self._resolve_skill_authorization(),
         )
 
         # Apply authorization Layer 1: filter tools before deferred assembly
         # so denied tools can never enter the DeferredToolCatalog.
+        from deerflow.agents.middlewares.tool_declarations import layer_one_outcome
         from deerflow.authz.tool_filter import apply_tool_authorization
 
         authz_context = {
@@ -1265,6 +1506,10 @@ class SubagentExecutor:
             context=authz_context,
             app_config=resolved_app_config,
         )
+        # The declaration pass in ``_create_agent`` reuses this run's provider,
+        # context, and verdicts — one principal and one verdict set per run.
+        self._authz_context = authz_context
+        self._layer_one_outcome = layer_one_outcome(authorization_candidates, authorized_tools)
         configured_tools = [tool for tool in authorized_tools if id(tool) in configured_tool_ids]
         late_tools = [tool for tool in authorized_tools if id(tool) not in configured_tool_ids]
 
@@ -1273,9 +1518,10 @@ class SubagentExecutor:
         # binding full MCP schemas.
         # The generated tool_search helper is intentionally not subject to the
         # subagent's name-level allow/deny (config.tools / disallowed_tools):
-        # its catalog is built from that already-filtered list. Active skill
-        # policy is applied later by middleware to both schema visibility and
-        # execution, so promotion cannot widen an active skill's authority.
+        # its catalog is built from that already-filtered list. The catalog remains
+        # scoped to the subagent admitted tool list, and runtime authorization
+        # still checks execution, so promotion cannot widen
+        # the subagent's admitted tool authority.
         final_tools, deferred_setup = assemble_deferred_tools(
             configured_tools,
             enabled=resolved_app_config.tool_search.enabled,
@@ -1389,9 +1635,10 @@ class SubagentExecutor:
                 capacity = self.execution_capacity or get_subagent_execution_capacity()
                 async with capacity.slot():
                     with result._state_lock:
-                        if not result.status.is_terminal:
-                            result.status = SubagentStatus.RUNNING
-                            result.started_at = _utcnow()
+                        if result.status.is_terminal:
+                            return result
+                        result.status = SubagentStatus.RUNNING
+                        result.started_at = _utcnow()
                     return await self._aexecute_admitted(task, result)
             except SubagentCapacityError as exc:
                 result.try_set_terminal(
@@ -1400,6 +1647,8 @@ class SubagentExecutor:
                     admission_failure=True,
                 )
                 return result
+            finally:
+                result.execution_done_event.set()
 
     async def _aexecute_admitted(self, task: str, result_holder: SubagentResult | None = None) -> SubagentResult:
         """Execute a task asynchronously.
@@ -1505,7 +1754,7 @@ class SubagentExecutor:
                 return result
 
             state, final_tools, deferred_setup = await self._build_initial_state(task)
-            agent = self._create_agent(
+            agent = await self._create_agent(
                 final_tools,
                 deferred_setup=deferred_setup,
                 extensions=loaded_extensions,
@@ -1592,6 +1841,9 @@ class SubagentExecutor:
             context[_SANDBOX_LEASE_OWNER_CONTEXT_KEY] = sandbox_lease_owner_id
             context[_SANDBOX_COMMAND_SCOPE_CONTEXT_KEY] = sandbox_lease_owner_id
             execution_context = context
+            from deerflow.sandbox.lease import register_sandbox_prewarm_cleanup
+
+            register_sandbox_prewarm_cleanup(context)
             context["agent_id"] = self.config.name
             if self.loop_detection_recorder is not None:
                 context[LOOP_DETECTION_RECORDER_CONTEXT_KEY] = self.loop_detection_recorder
@@ -1625,6 +1877,7 @@ class SubagentExecutor:
                     # harvesting includes a tool result that completed while the
                     # cancellation request was in flight.
                     final_state = chunk
+                    result.update_knowledge_sources(chunk.get("messages") or [])
                     result.update_tool_receipts(terminal_receipts())
                     result.update_bash_executions(current_bash_executions())
 
@@ -1644,7 +1897,7 @@ class SubagentExecutor:
                     # several ToolMessages when the model emits multiple tool calls in
                     # one turn, so capturing only messages[-1] would drop all but the
                     # last output (#3779). Dedup/serialization live in capture_step_message.
-                    messages = chunk.get("messages", [])
+                    messages = chunk.get("messages") or []
                     previous_count = len(ai_messages)
                     processed_message_count = capture_new_step_messages(messages, ai_messages, seen_message_ids, processed_message_count)
                     if len(ai_messages) > previous_count:
@@ -1709,7 +1962,22 @@ class SubagentExecutor:
                     tool_receipts=terminal_receipts(),
                 )
             else:
-                final_result = _extract_final_result(final_state, trace_id=self.trace_id, name=self.config.name)
+                final_result = _extract_final_result(
+                    final_state,
+                    trace_id=self.trace_id,
+                    name=self.config.name,
+                    return_direct_tools=self._return_direct_tools,
+                )
+                direct_results = _terminal_direct_results(final_state, self._return_direct_tools)
+                if direct_results is not None and any(message.status == "error" for message in direct_results):
+                    result.try_set_terminal(
+                        SubagentStatus.FAILED,
+                        result=final_result,
+                        error=f"Direct-return tool failure:\n{final_result}",
+                        token_usage_records=token_usage_records,
+                        tool_receipts=terminal_receipts(),
+                    )
+                    return result
                 # A guard hard-stop (token budget or loop detection) does not raise
                 # — it strips tool_calls so the run completes with a final answer.
                 # ``consume_stop_reason`` on each guard tells us whether that
@@ -1801,13 +2069,18 @@ class SubagentExecutor:
             )
 
         finally:
-            if execution_context is not None and execution_context.get("sandbox_id") is not None:
+            # Cancellation (including wait_for's execution timeout) bypasses
+            # the terminal branches above. A completed model response can be
+            # in the collector before its graph node publishes a values chunk.
+            # Stream teardown has drained at this point; publish its final
+            # usage before the outer wrapper chooses CANCELLED or TIMED_OUT.
+            if collector is not None:
+                result.update_token_usage_records(collector.snapshot_records())
+            if execution_context is not None:
                 try:
-                    from deerflow.sandbox import get_sandbox_provider
-                    from deerflow.sandbox.lease import get_sandbox_lease_manager
+                    from deerflow.sandbox.lease import release_sandbox_execution_lease_async
 
-                    provider = get_sandbox_provider()
-                    await get_sandbox_lease_manager(provider).release_async(sandbox_lease_owner_id)
+                    await release_sandbox_execution_lease_async(execution_context)
                 except Exception:
                     logger.warning(
                         "[trace=%s] Failed to release sandbox execution lease for subagent %s",
@@ -1945,21 +2218,46 @@ class SubagentExecutor:
             _background_tasks[execution_id] = result
 
         async def run_with_timeout() -> SubagentResult:
+            execution_task = asyncio.create_task(
+                self._aexecute(task, result),
+                name=f"subagent-{self.config.name}-execution",
+            )
             try:
-                return await asyncio.wait_for(
-                    self._aexecute(task, result),
+                done, _ = await asyncio.wait(
+                    {execution_task},
                     timeout=self.config.timeout_seconds,
                 )
-            except TimeoutError:
+                if execution_task in done:
+                    return execution_task.result()
+
+                # Publish the configured hard timeout without waiting for
+                # cancellation-resistant stream cleanup. The detached execution
+                # still owns its capacity slot and sandbox lease until its
+                # supervisor observes full teardown.
                 result.cancel_event.set()
                 result.try_set_terminal(
                     SubagentStatus.TIMED_OUT,
                     error=f"Execution timed out after {self.config.timeout_seconds} seconds",
                     tool_receipts=result.snapshot_tool_receipts(),
                 )
+                execution_task.cancel()
+                _supervise_background_execution(
+                    execution_id,
+                    result,
+                    execution_task,
+                )
+                execution_task = None
                 return result
             except asyncio.CancelledError:
                 result.cancel_event.set()
+                if not execution_task.done():
+                    execution_task.cancel()
+                try:
+                    await execution_task
+                except (asyncio.CancelledError, Exception):
+                    # The child can fail before cancellation reaches it. Keep
+                    # its terminal write, or publish cancellation below.
+                    pass
                 result.try_set_terminal(
                     SubagentStatus.CANCELLED,
                     error="Cancelled by user",
@@ -1968,8 +2266,19 @@ class SubagentExecutor:
                 return result
             except Exception as exc:
                 logger.exception("[trace=%s] Subagent %s async execution failed", self.trace_id, self.config.name)
+                if not execution_task.done():
+                    execution_task.cancel()
+                    _supervise_background_execution(
+                        execution_id,
+                        result,
+                        execution_task,
+                    )
+                    execution_task = None
                 result.try_set_terminal(SubagentStatus.FAILED, error=str(exc))
                 return result
+            finally:
+                if execution_task is not None:
+                    _mark_background_execution_done(execution_id, result)
 
         try:
             execution_future = _submit_to_isolated_loop_in_context(parent_context, run_with_timeout)
@@ -1986,7 +2295,9 @@ class SubagentExecutor:
         with _background_tasks_lock:
             _background_futures[execution_id] = execution_future
 
-        def forget_future(_future: Future[SubagentResult]) -> None:
+        def forget_future(completed_future: Future[SubagentResult]) -> None:
+            if not completed_future.cancelled():
+                completed_future.exception()
             with _background_tasks_lock:
                 _background_futures.pop(execution_id, None)
 
@@ -2043,14 +2354,55 @@ def list_background_tasks() -> list[SubagentResult]:
         return list(_background_tasks.values())
 
 
+def _remove_background_task_locked(execution_id: str) -> None:
+    _background_tasks.pop(execution_id, None)
+    _background_futures.pop(execution_id, None)
+    _background_cleanup_requested.discard(execution_id)
+
+
+def _mark_background_execution_done(
+    execution_id: str,
+    result: SubagentResult,
+) -> None:
+    result.execution_done_event.set()
+    with _background_tasks_lock:
+        if execution_id in _background_cleanup_requested and _background_tasks.get(execution_id) is result:
+            _remove_background_task_locked(execution_id)
+
+
+def _supervise_background_execution(
+    execution_id: str,
+    result: SubagentResult,
+    task: asyncio.Task[SubagentResult],
+) -> None:
+    """Own a timed-out/cancelled execution until resource teardown settles."""
+    _background_execution_tasks.add(task)
+
+    def settled(completed: asyncio.Task[SubagentResult]) -> None:
+        _background_execution_tasks.discard(completed)
+        if not completed.cancelled():
+            try:
+                completed.result()
+            except BaseException as exc:
+                logger.error(
+                    "Detached cleanup for background execution %s failed",
+                    execution_id,
+                    exc_info=(type(exc), exc, exc.__traceback__),
+                )
+        _mark_background_execution_done(execution_id, result)
+
+    task.add_done_callback(settled)
+
+
 def cleanup_background_task(execution_id: str) -> None:
     """Remove a completed task from background tasks.
 
     Should be called by task_tool after it finishes polling and returns the result.
     This prevents memory leaks from accumulated completed tasks.
 
-    Only removes tasks that are in a terminal state (COMPLETED/FAILED/TIMED_OUT)
-    to avoid race conditions with the background executor still updating the task entry.
+    Only removes a terminal task after its execution-cleanup fence opens. A hard
+    timeout may publish its business outcome first; cleanup requested in that
+    window is completed by the detached execution supervisor.
 
     Args:
         execution_id: The execution ID to remove.
@@ -2059,15 +2411,20 @@ def cleanup_background_task(execution_id: str) -> None:
         result = _background_tasks.get(execution_id)
         if result is None:
             # Nothing to clean up; may have been removed already.
+            _background_cleanup_requested.discard(execution_id)
             logger.debug("Requested cleanup for unknown background execution %s", execution_id)
             return
 
-        # Only clean up tasks that are in a terminal state to avoid races with
-        # the background executor still updating the task entry.
-        if result.status.is_terminal or result.completed_at is not None:
-            del _background_tasks[execution_id]
-            _background_futures.pop(execution_id, None)
+        terminal = result.status.is_terminal or result.completed_at is not None
+        if terminal and result.execution_done_event.is_set():
+            _remove_background_task_locked(execution_id)
             logger.debug("Cleaned up background execution: %s", execution_id)
+        elif terminal:
+            _background_cleanup_requested.add(execution_id)
+            logger.debug(
+                "Deferred cleanup for background execution %s until teardown completes",
+                execution_id,
+            )
         else:
             logger.debug(
                 "Skipping cleanup for non-terminal background execution %s (status=%s)",
@@ -2092,6 +2449,5 @@ def force_cleanup_background_task(execution_id: str) -> None:
         execution_id: The execution ID to remove.
     """
     with _background_tasks_lock:
-        _background_tasks.pop(execution_id, None)
-        _background_futures.pop(execution_id, None)
+        _remove_background_task_locked(execution_id)
     logger.warning("Force-cleaned background execution %s after unreadable status", execution_id)

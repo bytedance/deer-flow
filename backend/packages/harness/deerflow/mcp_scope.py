@@ -9,6 +9,11 @@ THREAD_INCARNATION_CONTEXT_KEY = "thread_incarnation"
 THREAD_INCARNATION_METADATA_GUARD_KEY = "__deerflow_thread_incarnation_metadata_guard"
 _MISSING = object()
 
+# Prefix that distinguishes a versioned scope from the legacy ``user:thread``
+# encoding. Shared with :func:`mcp_scope_belongs_to_thread` so the two can
+# never drift apart.
+_V2_SCOPE_PREFIX = "v2:"
+
 
 def is_valid_thread_incarnation(value: object) -> TypeGuard[str | None]:
     """Return whether *value* is a supported legacy or versioned incarnation."""
@@ -33,11 +38,37 @@ def mcp_session_scope_key(
         return scope
     # A JSON tuple is an unambiguous, versioned encoding even when an opaque
     # user/thread id contains the delimiter used by the legacy scope.
-    return "v2:" + json.dumps(
+    return _V2_SCOPE_PREFIX + json.dumps(
         [user_id, thread_id, thread_incarnation],
         ensure_ascii=True,
         separators=(",", ":"),
     )
+
+
+def mcp_scope_belongs_to_thread(scope_key: str, *, user_id: str, thread_id: str) -> bool:
+    """Return whether *scope_key* was minted for this user/thread identity.
+
+    Matches both encodings :func:`mcp_session_scope_key` can produce: the legacy
+    ``user:thread`` scope (NULL incarnation) and the versioned
+    ``v2:[user, thread, incarnation]`` scope. The incarnation is deliberately
+    *not* compared — a caller tearing down a whole thread has to invalidate every
+    generation of it, and the current generation cannot be read reliably at
+    teardown time (see ``MCPSessionPool.close_thread_scope``).
+
+    The legacy branch is a prefix-free string compare, so a crafted ``user_id``
+    containing ``:`` can collide with another owner's legacy key. That can only
+    ever over-close (tear down an extra session), never leak one, and the
+    versioned encoding — which every incarnation-aware caller uses — is exact.
+    """
+    if scope_key == f"{user_id}:{thread_id}":
+        return True
+    if not scope_key.startswith(_V2_SCOPE_PREFIX):
+        return False
+    try:
+        decoded = json.loads(scope_key[len(_V2_SCOPE_PREFIX) :])
+    except ValueError:
+        return False
+    return isinstance(decoded, list) and len(decoded) == 3 and decoded[0] == user_id and decoded[1] == thread_id
 
 
 def runtime_thread_incarnation(runtime: Any | None) -> str | None:

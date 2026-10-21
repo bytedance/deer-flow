@@ -1,5 +1,7 @@
 """Tests for bounded composer input history (pure)."""
 
+import pytest
+
 from deerflow.tui.input_history import InputHistory
 
 
@@ -48,9 +50,24 @@ def test_down_walks_forward_then_restores_draft():
     assert h.down() == "my draft"  # past newest -> stashed draft
 
 
-def test_up_with_empty_history_returns_draft():
+@pytest.mark.parametrize("entries", [[], ["previous prompt"]])
+def test_down_without_history_navigation_returns_no_change(entries):
+    h = InputHistory(entries)
+    assert h.down() is None
+
+
+@pytest.mark.parametrize("draft", ["", "first line\nsecond line"])
+def test_down_restores_draft_once_and_then_stops(draft):
+    h = InputHistory(["previous prompt"])
+    assert h.up(draft) == "previous prompt"
+    assert h.down() == draft
+    assert h.down() is None
+
+
+@pytest.mark.parametrize("draft", ["", "keep", "first line\nsecond line"])
+def test_up_with_empty_history_returns_no_change(draft):
     h = InputHistory()
-    assert h.up(draft="keep") == "keep"
+    assert h.up(draft=draft) is None
 
 
 def test_add_resets_navigation_cursor():

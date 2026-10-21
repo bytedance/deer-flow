@@ -3,6 +3,7 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import os
+import tempfile
 from codecs import BOM_UTF16_BE, BOM_UTF16_LE, getincrementaldecoder
 from pathlib import Path
 
@@ -218,7 +219,10 @@ def _snapshot_file(
         return None
 
     binary = host_file.suffix.lower() in BINARY_EXTENSIONS or _looks_binary(sample)
-    sha256 = _sha256_file(host_file) if size <= limits.max_file_bytes_for_diff else None
+    try:
+        sha256 = _sha256_file(host_file) if size <= limits.max_file_bytes_for_diff else None
+    except FileNotFoundError:
+        return None
     text: str | None = None
     text_path: str | None = None
     reason: DiffUnavailableReason | None = None
@@ -323,10 +327,28 @@ def _snapshot_symlink(root: WorkspaceRoot, host_file: Path) -> FileSnapshot | No
     )
 
 
+def _publish_text_atomically(path: Path, content: str) -> None:
+    """Publish text through a temporary file so a partial write cannot survive."""
+    fd, temporary = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            Path(temporary).unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
 def _cache_text_file(text: str, virtual_path: str, cache_dir: Path) -> Path:
+    """Cache decoded text atomically; the caller serves this path as file content."""
     cache_name = hashlib.sha256(virtual_path.encode("utf-8")).hexdigest()
     target = cache_dir / cache_name
-    target.write_text(text, encoding="utf-8")
+    _publish_text_atomically(target, text)
     return target
 
 

@@ -8,12 +8,14 @@ import os
 import json
 import sys
 from typing import Any, Dict, List, Optional
+from urllib.parse import quote
 
 try:
     import requests
 except ImportError:
     # Fallback to urllib if requests not available
     import urllib.error
+    import urllib.parse
     import urllib.request
 
     class RequestsFallback:
@@ -35,7 +37,7 @@ except ImportError:
         @staticmethod
         def get(url: str, headers: dict = None, params: dict = None, timeout: int = 30):
             if params:
-                query = "&".join(f"{k}={v}" for k, v in params.items())
+                query = urllib.parse.urlencode(params)
                 url = f"{url}?{query}"
 
             req = urllib.request.Request(url, headers=headers or {})
@@ -99,23 +101,23 @@ class GitHubAPI:
             return f"[README not found: {e}]"
 
     def get_tree(
-        self, owner: str, repo: str, branch: str = "main", recursive: bool = True
+        self, owner: str, repo: str, branch: str = "HEAD", recursive: bool = True
     ) -> Dict:
-        """Get repository directory tree."""
+        """Get repository directory tree.
+
+        ``HEAD`` is resolved by GitHub to the repository's default branch, so a
+        repository that uses neither ``main`` nor ``master`` gets its current tree.
+        Guessing those two names instead served the tree of an abandoned branch
+        whenever the repository kept a stale ``master`` around.
+        """
         params = {"recursive": "1"} if recursive else {}
-        try:
-            return self._get(f"/repos/{owner}/{repo}/git/trees/{branch}", params)
-        except Exception:
-            # Try 'master' if 'main' fails
-            if branch == "main":
-                return self._get(f"/repos/{owner}/{repo}/git/trees/master", params)
-            raise
+        return self._get(f"/repos/{owner}/{repo}/git/trees/{branch}", params)
 
     def get_file_content(self, owner: str, repo: str, path: str) -> str:
-        """Get content of a specific file."""
+        """Get content of a file using its raw repository-relative path."""
         try:
             return self._get(
-                f"/repos/{owner}/{repo}/contents/{path}",
+                f"/repos/{owner}/{repo}/contents/{quote(path, safe='/')}",
                 accept="application/vnd.github.raw",
             )
         except Exception as e:

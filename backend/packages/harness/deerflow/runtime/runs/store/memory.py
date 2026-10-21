@@ -5,6 +5,7 @@ Equivalent to the original RunManager._runs dict behavior.
 
 from __future__ import annotations
 
+import copy
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -13,6 +14,7 @@ from deerflow.runtime.runs.store.base import (
     RunIdempotencyConflict,
     RunStore,
     StatusFinalization,
+    canonical_run_created_at,
     run_is_before_cursor,
     run_sort_key,
 )
@@ -62,10 +64,14 @@ class MemoryRunStore(RunStore):
         kwargs=None,
         error=None,
         stop_reason=None,
+        goal_verdict=None,
         created_at=None,
         owner_worker_id=None,
         lease_expires_at=None,
         idempotency_key=None,
+        evidence_origin="unknown",
+        evidence_agent_id=None,
+        idempotency_request=None,
     ):
         now = datetime.now(UTC).isoformat()
         existing = self._runs.get(run_id)
@@ -73,6 +79,8 @@ class MemoryRunStore(RunStore):
             "run_id": run_id,
             "thread_id": thread_id,
             "assistant_id": assistant_id,
+            "evidence_origin": evidence_origin,
+            "evidence_agent_id": evidence_agent_id,
             "user_id": user_id,
             "model_name": model_name,
             "status": status,
@@ -82,11 +90,13 @@ class MemoryRunStore(RunStore):
             "kwargs": kwargs or {},
             "error": error,
             "stop_reason": stop_reason,
+            "goal_verdict": copy.deepcopy(goal_verdict),
             "created_at": created_at or now,
             "updated_at": now,
             "owner_worker_id": owner_worker_id,
             "lease_expires_at": lease_expires_at,
             "idempotency_key": idempotency_key,
+            "idempotency_request": copy.deepcopy(idempotency_request),
             # ``put`` is an idempotent snapshot write. Preserve a cancellation
             # request that may have raced a retry of an earlier snapshot.
             "cancel_action": existing.get("cancel_action") if existing else None,
@@ -147,6 +157,20 @@ class MemoryRunStore(RunStore):
         results.sort(key=lambda r: run_sort_key(r.get("created_at"), r["run_id"]), reverse=True)
         return results[:limit]
 
+    async def list_by_thread_created_at(self, thread_id, *, user_id, created_at):
+        target = canonical_run_created_at(created_at)
+        matches = []
+        for run_id in self._runs_by_thread.get(thread_id, ()):
+            row = self._runs[run_id]
+            if row.get("user_id") != user_id:
+                continue
+            try:
+                if canonical_run_created_at(row["created_at"]) == target:
+                    matches.append(row)
+            except (TypeError, ValueError):
+                continue
+        return matches
+
     async def list_successful_regenerate_sources(self, thread_id, *, user_id=None):
         run_ids = self._runs_by_thread.get(thread_id) or ()
         sources: set[str] = set()
@@ -181,9 +205,15 @@ class MemoryRunStore(RunStore):
         thread_run_ids = self._runs_by_thread.get(thread_id) or ()
         return {run_id: run for run_id in thread_run_ids if run_id in run_ids and (run := self._runs.get(run_id)) is not None and run.get("operation_kind", "run") == "run" and (user_id is None or run.get("user_id") == user_id)}
 
-    async def update_status(self, run_id, status, *, error=None, stop_reason=None):
+    async def update_status(self, run_id, status, *, error=None, stop_reason=None, goal_verdict=None, owner_worker_id=None):
         run = self._runs.get(run_id)
         if run is None:
+            return False
+        if owner_worker_id is not None and not self._live_owner(run, owner_worker_id):
+            return False
+        if owner_worker_id is not None and run["status"] == "interrupted" and status != "error":
+            return False
+        if owner_worker_id is not None and status == "success" and (run["status"] not in ("pending", "running") or run.get("cancel_action") is not None):
             return False
         # Guard: only transition rows that are still active. ``interrupted``
         # is included for the rollback path (``interrupted → error`` finalize).
@@ -194,6 +224,8 @@ class MemoryRunStore(RunStore):
             run["error"] = error
         if stop_reason is not None:
             run["stop_reason"] = stop_reason
+        if goal_verdict is not None:
+            run["goal_verdict"] = copy.deepcopy(goal_verdict)
         run["updated_at"] = datetime.now(UTC).isoformat()
         self._mark_changed(run)
         return True
@@ -237,11 +269,13 @@ class MemoryRunStore(RunStore):
             removed += 1
         return removed
 
-    async def update_run_completion(self, run_id, *, status, **kwargs):
+    async def update_run_completion(self, run_id, *, status, require_terminal=False, owner_worker_id=None, **kwargs):
         run = self._runs.get(run_id)
         if run is None:
             return False
         current_status = run.get("status")
+        if require_terminal and (status in ("pending", "running") or current_status != status or run.get("owner_worker_id") != owner_worker_id):
+            return False
         allowed_sources = {"pending", "running", status}
         if status == "error":
             allowed_sources.add("interrupted")
@@ -249,8 +283,10 @@ class MemoryRunStore(RunStore):
             return False
         run["status"] = status
         for key, value in kwargs.items():
+            if require_terminal and key in ("error", "stop_reason", "goal_verdict"):
+                continue
             if value is not None:
-                run[key] = value
+                run[key] = copy.deepcopy(value) if key == "goal_verdict" else value
         run["updated_at"] = datetime.now(UTC).isoformat()
         self._mark_changed(run)
         return True
@@ -314,19 +350,28 @@ class MemoryRunStore(RunStore):
     # Multi-worker run ownership methods
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _live_owner(run, owner_worker_id) -> bool:
+        from deerflow.utils.time import is_lease_expired
+
+        return run.get("owner_worker_id") == owner_worker_id and not is_lease_expired(run.get("lease_expires_at"), grace_seconds=0)
+
     async def update_lease(
         self,
         run_id: str,
         *,
         owner_worker_id: str,
         lease_expires_at: str,
+        allow_interrupted: bool = False,
     ) -> bool:
         run = self._runs.get(run_id)
         if run is None:
             return False
-        if run["status"] not in ("pending", "running"):
+        if run["status"] not in (("pending", "running", "interrupted") if allow_interrupted else ("pending", "running")):
             return False
-        if run.get("owner_worker_id") != owner_worker_id:
+        if not self._live_owner(run, owner_worker_id):
+            return False
+        if datetime.fromisoformat(lease_expires_at) <= datetime.now(UTC):
             return False
         run["owner_worker_id"] = owner_worker_id
         run["lease_expires_at"] = lease_expires_at
@@ -339,6 +384,7 @@ class MemoryRunStore(RunStore):
         *,
         owner_worker_id: str,
         lease_expires_at: str,
+        allow_interrupted: bool = False,
     ) -> LeaseRenewal:
         # Delegate through ``update_lease`` so lightweight subclasses and tests
         # that override the legacy primitive keep the same behavior.
@@ -346,6 +392,7 @@ class MemoryRunStore(RunStore):
             run_id,
             owner_worker_id=owner_worker_id,
             lease_expires_at=lease_expires_at,
+            **({"allow_interrupted": True} if allow_interrupted else {}),
         )
         if not renewed:
             return LeaseRenewal(renewed=False)
@@ -375,9 +422,13 @@ class MemoryRunStore(RunStore):
         status: str,
         error: str | None = None,
         stop_reason: str | None = None,
+        goal_verdict: dict[str, Any] | None = None,
+        owner_worker_id: str | None = None,
     ) -> StatusFinalization:
         run = self._runs.get(run_id)
         if run is None:
+            return StatusFinalization(finalized=False)
+        if owner_worker_id is not None and (run["status"] not in ("pending", "running") or not self._live_owner(run, owner_worker_id)):
             return StatusFinalization(finalized=False)
         if run.get("cancel_action") is not None:
             return StatusFinalization(
@@ -391,6 +442,8 @@ class MemoryRunStore(RunStore):
             run["error"] = error
         if stop_reason is not None:
             run["stop_reason"] = stop_reason
+        if goal_verdict is not None:
+            run["goal_verdict"] = copy.deepcopy(goal_verdict)
         run["updated_at"] = datetime.now(UTC).isoformat()
         self._mark_changed(run)
         return StatusFinalization(finalized=True)
@@ -480,6 +533,9 @@ class MemoryRunStore(RunStore):
         created_at: str | None = None,
         grace_seconds: int = 10,
         idempotency_key: str | None = None,
+        evidence_origin: str = "unknown",
+        evidence_agent_id: str | None = None,
+        idempotency_request: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         from deerflow.runtime.runs.manager import ConflictError
 
@@ -557,6 +613,8 @@ class MemoryRunStore(RunStore):
             "run_id": run_id,
             "thread_id": thread_id,
             "assistant_id": assistant_id,
+            "evidence_origin": evidence_origin,
+            "evidence_agent_id": evidence_agent_id,
             "user_id": user_id,
             "model_name": model_name,
             "status": "pending",
@@ -568,6 +626,7 @@ class MemoryRunStore(RunStore):
             "owner_worker_id": owner_worker_id,
             "lease_expires_at": lease_expires_at,
             "idempotency_key": idempotency_key,
+            "idempotency_request": copy.deepcopy(idempotency_request),
             "cancel_action": None,
             "cancel_requested_at": None,
             "created_at": created_at or now,
@@ -578,4 +637,6 @@ class MemoryRunStore(RunStore):
         new_row["change_seq"] = change_seq
         self._runs[run_id] = new_row
         self._index_run(run_id, thread_id)
-        return new_row, claimed
+        # Commit acknowledgments must not change when a later writer mutates
+        # the in-memory row while the caller is waiting to receive this result.
+        return copy.deepcopy(new_row), copy.deepcopy(claimed)

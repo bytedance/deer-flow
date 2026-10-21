@@ -24,6 +24,7 @@ from __future__ import annotations
 import logging
 import re
 from collections.abc import Awaitable, Callable
+from copy import deepcopy
 from typing import override
 
 from langchain.agents import AgentState
@@ -95,6 +96,7 @@ _BLOCKED_TAG_NAMES: frozenset[str] = frozenset(
         "mcp_routing_hints",
         "available-deferred-tools",
         "goal_continuation",
+        "active_goal",
         "background_task_event",
         "file_editing_workflow",
         "guidelines",
@@ -119,6 +121,10 @@ _BLOCKED_TAG_NAMES: frozenset[str] = frozenset(
         # configuration or fabricates shelf entries/tool-callable IDs.
         "project",
         "documents",
+        # Client context block (runtime/client_context.py): the calling
+        # client's request-scoped capabilities and preferences. Forging it in
+        # untrusted input mimics the run's declared client.
+        "client_context",
         # Common prompt-injection tag patterns
         "system",
         "instruction",
@@ -357,11 +363,11 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
                                     new_content.append(block)
                             else:
                                 new_content.append(block)
-                        return HumanMessage(
-                            content=new_content,
-                            id=msg.id,
-                            name=msg.name,
-                            additional_kwargs=preserved_kwargs,
+                        return msg.model_copy(
+                            update={
+                                "content": deepcopy(new_content),
+                                "additional_kwargs": preserved_kwargs,
+                            },
                         )
                     # Cannot distinguish server block from user blocks
                     # (non-list content or len(content) < 2).
@@ -410,11 +416,11 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
             content if isinstance(content, str) else "[content-blocks]",
             processed,
         )
-        return HumanMessage(
-            content=new_content,
-            id=msg.id,
-            name=msg.name,
-            additional_kwargs=preserved_kwargs,
+        return msg.model_copy(
+            update={
+                "content": deepcopy(new_content),
+                "additional_kwargs": preserved_kwargs,
+            },
         )
 
     def _process_request(self, request: ModelRequest) -> ModelRequest:

@@ -14,14 +14,13 @@ from langchain.agents.middleware.types import ModelCallResult, ModelRequest, Mod
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, ToolMessage
 
 from deerflow.agents.thread_state import ThreadState
+from deerflow.sandbox.download import MAX_IMAGE_BYTES as _MAX_IMAGE_BYTES
 from deerflow.sandbox.lease import run_sync_lifecycle_operation
 
 logger = logging.getLogger(__name__)
 
-# Mirror the tool-side size cap as a defense-in-depth check. The tool
-# enforces this at write time; the middleware re-checks at read time in
-# case the file grew between view and injection.
-_MAX_IMAGE_BYTES = 20 * 1024 * 1024
+_MAX_CONTEXT_IMAGES = 4
+_MAX_CONTEXT_BASE64_BYTES = 28 * 1024 * 1024
 _IMAGE_CONTEXT_MESSAGE_ID_PREFIX = "view-image-context:"
 _IMAGE_CONTEXT_MESSAGE_MARKER_KEY = "deerflow_view_image_context"
 
@@ -37,7 +36,7 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
     1. Wraps each LLM call
     2. Checks if the last assistant message contains view_image tool calls
     3. Verifies all tool calls in that message have been completed (have corresponding ToolMessages)
-    4. If conditions are met, appends a human message with all viewed image details (including base64 data)
+    4. If conditions are met, appends a human message with recent viewed image details (including base64 data)
     5. Hands the augmented request to the model so it can see and analyze the images
 
     This enables the LLM to automatically receive and analyze images that were loaded via view_image tool,
@@ -52,6 +51,30 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
     """
 
     state_schema = ViewImageMiddlewareState
+
+    def __init__(
+        self,
+        *,
+        max_injected_images: int = 4,
+        max_injected_total_chars: int = 32_000_000,
+    ) -> None:
+        """Bound the per-request image context injected after view_image rounds.
+
+        ``viewed_images`` only grows (#6825): every model call that follows a
+        ``view_image`` round re-encodes and re-sends every entry ever viewed,
+        so a long PDF-inspection thread pushes the request body past provider
+        limits (e.g. Anthropic's 32 MB) even though each single image is
+        capped. A request admits at most four images and 28 MiB of base64.
+        These knobs may further cap how many images and how much payload
+        (in data-url characters) may be injected per model call; admission
+        runs newest-first so the most recently viewed images survive, and
+        over-budget entries keep their text bullet with a placeholder, so
+        nothing silently disappears. The 32M-character default keeps a single
+        max-size image injectable (20 MiB source -> ~27 MB base64) while
+        bounding accumulation below typical provider request limits.
+        """
+        self._max_injected_images = max(1, int(max_injected_images))
+        self._max_injected_total_chars = max(1, int(max_injected_total_chars))
 
     @staticmethod
     def _is_image_context_message(message: object) -> bool:
@@ -168,6 +191,46 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
             return None
 
     @classmethod
+    def _read_blob_image_as_data_url(
+        cls,
+        blob_ref_data: Mapping[str, object] | None,
+        mime_type: str,
+        expected_size: int,
+        expected_sha256: str | None,
+    ) -> str | None:
+        """Resolve a trusted checkpoint blob ref, rejecting metadata drift."""
+        if blob_ref_data is None or expected_sha256 is None:
+            return None
+
+        from deerflow.storage import BlobRef, get_blob_store_if_enabled
+
+        try:
+            ref = BlobRef.model_validate(dict(blob_ref_data))
+        except (TypeError, ValueError):
+            return None
+        if ref.kind != "viewed-image" or ref.sha256 != expected_sha256 or ref.size != expected_size or ref.content_type != mime_type:
+            return None
+
+        try:
+            store = get_blob_store_if_enabled()
+            if store is None:
+                return None
+            image_bytes = store.get_bytes(ref)
+        except Exception:
+            logger.warning(
+                "Failed to resolve viewed image blob %s",
+                ref.sha256[:12],
+                exc_info=True,
+            )
+            return None
+        return cls._encode_image_bytes(
+            image_bytes,
+            mime_type,
+            expected_size,
+            expected_sha256,
+        )
+
+    @classmethod
     def _read_image_as_data_url(
         cls,
         state: ViewImageMiddlewareState,
@@ -177,6 +240,7 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
         expected_size: int,
         expected_sha256: str | None,
         source_sandbox_id: str | None,
+        blob_ref_data: Mapping[str, object] | None = None,
         *,
         allow_host_copy: bool = False,
     ) -> str | None:
@@ -190,6 +254,15 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
         fallback. When no live sandbox exists, the historical host compatibility
         path remains available (digest-checked when present).
         """
+        blob_data_url = cls._read_blob_image_as_data_url(
+            blob_ref_data,
+            mime_type,
+            expected_size,
+            expected_sha256,
+        )
+        if blob_data_url is not None:
+            return blob_data_url
+
         from deerflow.sandbox.overwrite import unwrap_sandbox
         from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 
@@ -216,7 +289,7 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
                     if host_data_url is not None:
                         return host_data_url
                 try:
-                    image_bytes = sandbox.download_file(image_path)
+                    image_bytes = sandbox.download_file(image_path, max_bytes=_MAX_IMAGE_BYTES)
                 except Exception:
                     logger.warning(
                         "Failed to recover viewed image %s from replacement sandbox %s",
@@ -239,7 +312,7 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
                 return None
 
             try:
-                image_bytes = sandbox.download_file(image_path)
+                image_bytes = sandbox.download_file(image_path, max_bytes=_MAX_IMAGE_BYTES)
             except Exception:
                 logger.warning("Failed to read viewed image %s from sandbox %s", image_path, sandbox_id, exc_info=True)
                 return None
@@ -265,13 +338,18 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
         *,
         host_path_allowed: Callable[[str, str], bool] | None = None,
     ) -> list[str | dict]:
-        """Create a formatted message with all viewed image details.
+        """Create bounded image context, prioritizing the most recently viewed paths.
 
         Reads image files on-demand from the active sandbox when available and
         encodes them as base64 for the model. The base64 data is NOT persisted in
         state -- only lightweight metadata (path, mime_type, size, digest, and
         source sandbox id when applicable) is stored in ``viewed_images``,
         avoiding large duplicate payloads across every checkpoint (see #4138).
+
+        Content blocks are emitted oldest-first, but budget admission itself
+        runs newest-first (reversed insertion order) so the most recently
+        viewed images survive the caps (see #6825); an entry over budget keeps
+        its text bullet plus a placeholder instead of its base64 payload.
 
         Args:
             state: Current state containing viewed_images
@@ -284,18 +362,34 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
             # Return a properly formatted text block, not a plain string array
             return [{"type": "text", "text": "No images have been viewed."}]
 
-        # Build the message with image information
+        # Select newest first so older entries cannot consume the budget before
+        # the image that triggered this model call. Preserve chronological
+        # output and the upstream per-image omission placeholders.
         content_blocks: list[str | dict] = [{"type": "text", "text": "Here are the images you've viewed:"}]
-
-        for image_path, image_data in viewed_images.items():
+        selected: list[list[dict]] = []
+        encoded_bytes = 0
+        admitted_chars = 0
+        attempted_images = 0
+        omitted = 0
+        for image_path, image_data in reversed(list(viewed_images.items())):
             mime_type = image_data.get("mime_type", "unknown")
             actual_path = image_data.get("actual_path", "")
             expected_size = image_data.get("size", 0)
             expected_sha256 = image_data.get("sha256")
             source_sandbox_id = image_data.get("source_sandbox_id")
+            blob_ref = image_data.get("blob_ref")
 
-            # Add text description
-            content_blocks.append({"type": "text", "text": f"\n- **{image_path}** ({mime_type})"})
+            estimated_bytes = 4 * ((expected_size + 2) // 3) if isinstance(expected_size, int) and expected_size >= 0 else _MAX_CONTEXT_BASE64_BYTES + 1
+            estimated_chars = estimated_bytes + len(f"data:{mime_type};base64,")
+            blocks = [{"type": "text", "text": f"\n- **{image_path}** ({mime_type})"}]
+            # Failed reads also consume slots, bounding potentially remote read attempts.
+            if attempted_images >= min(_MAX_CONTEXT_IMAGES, self._max_injected_images) or encoded_bytes + estimated_bytes > _MAX_CONTEXT_BASE64_BYTES or admitted_chars + estimated_chars > self._max_injected_total_chars:
+                omitted += 1
+                blocks.append({"type": "text", "text": "  (omitted: image injection budget reached; call view_image again to re-view this image)"})
+                selected.append(blocks)
+                continue
+            attempted_images += 1
+            admitted_chars += estimated_chars
 
             # Read the image file on-demand and encode as base64 for the model
             data_url = self._read_image_as_data_url(
@@ -306,17 +400,25 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
                 expected_size,
                 expected_sha256 if isinstance(expected_sha256, str) else None,
                 source_sandbox_id if isinstance(source_sandbox_id, str) else None,
+                blob_ref if isinstance(blob_ref, Mapping) else None,
                 allow_host_copy=host_path_allowed(image_path, actual_path) if host_path_allowed is not None else False,
             )
             if data_url:
-                content_blocks.append(
+                encoded_bytes += estimated_bytes
+                blocks.append(
                     {
                         "type": "image_url",
                         "image_url": {"url": data_url},
                     }
                 )
             else:
-                content_blocks.append({"type": "text", "text": f"  (file unavailable or changed: {image_path})"})
+                blocks.append({"type": "text", "text": f"  (file unavailable or changed: {image_path})"})
+            selected.append(blocks)
+
+        if omitted:
+            content_blocks.append({"type": "text", "text": f"Omitted viewed images: {omitted}. Call view_image again to inspect a specific image."})
+        for blocks in reversed(selected):
+            content_blocks.extend(blocks)
 
         return content_blocks
 

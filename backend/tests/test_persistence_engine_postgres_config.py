@@ -9,6 +9,8 @@ from types import ModuleType
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
+import yaml
+from pydantic import ValidationError
 
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.persistence import engine as engine_mod
@@ -52,6 +54,62 @@ def test_postgres_engine_kwargs_allow_command_timeout_opt_out() -> None:
 
     assert config.command_timeout is None
     assert kwargs["connect_args"] == {}
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (None, None),
+        (30, 30.0),
+        (0.5, 0.5),
+        ("60", 60.0),
+    ],
+)
+def test_database_command_timeout_accepts_finite_positive_seconds(raw, expected: float | None) -> None:
+    assert DatabaseConfig(command_timeout=raw).command_timeout == expected
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        True,
+        False,
+        yaml.safe_load("on"),
+        yaml.safe_load("off"),
+        yaml.safe_load("yes"),
+        yaml.safe_load("no"),
+        0,
+        -1,
+        -0.5,
+        float("inf"),
+        float("-inf"),
+        float("nan"),
+        yaml.safe_load(".inf"),
+        yaml.safe_load(".nan"),
+        "1e999",
+    ],
+)
+def test_database_command_timeout_rejects_boolean_and_non_finite_values(raw) -> None:
+    with pytest.raises(ValidationError, match="command_timeout"):
+        DatabaseConfig(command_timeout=raw)
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid_value"),
+    [
+        ("pool_size", True),
+        ("pool_size", False),
+        ("pool_size", 0),
+        ("pool_size", -1),
+        ("pool_recycle", True),
+        ("pool_recycle", False),
+        ("pool_recycle", 0),
+        ("pool_recycle", -1),
+    ],
+)
+def test_database_pool_settings_reject_booleans_and_non_positive_integers(field: str, invalid_value) -> None:
+    with pytest.raises(ValidationError):
+        DatabaseConfig(**{field: invalid_value})
 
 
 @pytest.mark.asyncio

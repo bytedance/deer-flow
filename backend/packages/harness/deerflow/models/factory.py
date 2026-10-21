@@ -1,4 +1,6 @@
+import copy
 import logging
+import os
 
 from langchain.chat_models import BaseChatModel
 from langchain_openai.chat_models.base import BaseChatOpenAI
@@ -46,19 +48,26 @@ def _deep_merge_dicts(base: dict | None, override: dict) -> dict:
     for key, value in override.items():
         if isinstance(value, dict) and isinstance(merged.get(key), dict):
             merged[key] = _deep_merge_dicts(merged[key], value)
+        elif isinstance(value, dict):
+            # Copy, don't alias: *override* is usually a template straight from
+            # the cached ``ModelConfig`` (see ``_merge_settings``).
+            merged[key] = copy.deepcopy(value)
         else:
             merged[key] = value
     return merged
 
 
+# The two spellings of the vLLM/Qwen chat-template thinking switch: the legacy
+# ``thinking`` alias DeerFlow documented first and ``enable_thinking``, which
+# vLLM's Qwen reasoning parser reads. ``VllmChatModel`` maps the alias onto
+# ``enable_thinking`` just before sending; other OpenAI-compatible classes
+# forward both keys as written.
+_VLLM_THINKING_SWITCHES = ("thinking", "enable_thinking")
+
+
 def _vllm_disable_chat_template_kwargs(chat_template_kwargs: dict) -> dict:
     """Build the disable payload for vLLM/Qwen chat template kwargs."""
-    disable_kwargs: dict[str, bool] = {}
-    if "thinking" in chat_template_kwargs:
-        disable_kwargs["thinking"] = False
-    if "enable_thinking" in chat_template_kwargs:
-        disable_kwargs["enable_thinking"] = False
-    return disable_kwargs
+    return {key: False for key in _VLLM_THINKING_SWITCHES if key in chat_template_kwargs}
 
 
 def _merge_settings(settings: dict, payload: dict) -> None:
@@ -71,8 +80,62 @@ def _merge_settings(settings: dict, payload: dict) -> None:
     for key, value in payload.items():
         if isinstance(value, dict) and isinstance(settings.get(key), dict):
             settings[key] = _deep_merge_dicts(settings[key], value)
+        elif isinstance(value, dict):
+            # Never hand the constructor (or a later in-place edit here) the
+            # template's own mapping: payloads come straight from the cached
+            # ``ModelConfig``, and a shared reference would leak one call's
+            # adjustments into every later ``create_chat_model`` for that profile.
+            settings[key] = copy.deepcopy(value)
         else:
             settings[key] = value
+
+
+def _chat_template_kwargs(settings: dict) -> dict | None:
+    """``settings["extra_body"]["chat_template_kwargs"]`` when both levels are mappings, else ``None``."""
+    extra_body = settings.get("extra_body")
+    if not isinstance(extra_body, dict):
+        return None
+    chat_template_kwargs = extra_body.get("chat_template_kwargs")
+    return chat_template_kwargs if isinstance(chat_template_kwargs, dict) else None
+
+
+def _merge_thinking_payload(settings: dict, payload: dict) -> None:
+    """Deep-merge a thinking on/off *payload*, keeping its vLLM switch authoritative.
+
+    Keys are never removed: a template can only add or override, so a profile's
+    unrelated ``extra_body`` / ``chat_template_kwargs`` entries survive in both
+    directions. The one thing a plain deep merge gets wrong is the vLLM switch,
+    which has two spellings (see ``_VLLM_THINKING_SWITCHES``): a profile that
+    spells it differently from the payload (base ``enable_thinking: false``,
+    template ``thinking: true``) would keep both keys with opposite values, and
+    whichever key the server reads might be the profile's. So after merging, the
+    value the payload declares is mirrored onto the *other* spelling when the
+    profile carries it. Both keys then agree: ``VllmChatModel`` collapses them to
+    ``enable_thinking``, and a plain OpenAI-compatible class sends both, so the
+    server sees the payload's intent under whichever name it honors. No spelling
+    is invented (a template using only ``thinking`` never grows
+    ``enable_thinking``), and a payload that spells both itself is left as
+    written. Non-mapping template values are forwarded unchanged, as before.
+
+    Deep-merging also means a template cannot *remove* a key by omitting it:
+    a base ``extra_body.thinking.budget_tokens`` survives a disable template
+    that only sets ``thinking.type: disabled``. Enable-only keys therefore
+    belong in ``when_thinking_enabled``, not in the profile's base settings.
+    """
+    _merge_settings(settings, payload)
+    payload_kwargs = _chat_template_kwargs(payload)
+    merged_kwargs = _chat_template_kwargs(settings)
+    if payload_kwargs is None or merged_kwargs is None:
+        return
+    declared = {key: payload_kwargs[key] for key in _VLLM_THINKING_SWITCHES if key in payload_kwargs}
+    if len(declared) != 1:
+        return
+    value = next(iter(declared.values()))
+    # In-place is safe: ``_merge_settings`` / ``_deep_merge_dicts`` copy every
+    # template mapping they store, so ``merged_kwargs`` is never the config's own dict.
+    for key in _VLLM_THINKING_SWITCHES:
+        if key not in declared and key in merged_kwargs:
+            merged_kwargs[key] = value
 
 
 def _set_dotted_setting(settings: dict, path: str, value: object) -> None:
@@ -97,12 +160,17 @@ def _infer_dialect(effective_wte: dict) -> str:
     Mirrors the historical disable-path heuristics so ``dialect: auto`` behaves
     like the legacy factory did for the same template shape.
     """
-    extra_body = effective_wte.get("extra_body") or {}
+    extra_body = effective_wte.get("extra_body")
+    if not isinstance(extra_body, dict):
+        # ``ModelConfig.when_thinking_enabled`` accepts unvalidated nested values,
+        # so a truthy non-mapping ``extra_body`` reaches this heuristic; like a
+        # null value it carries no payload shape to infer from.
+        extra_body = {}
     thinking = extra_body.get("thinking")
     if isinstance(thinking, dict) and thinking.get("type"):
         return "openai_extra_body"
     chat_template_kwargs = extra_body.get("chat_template_kwargs") or {}
-    if isinstance(chat_template_kwargs, dict) and ("thinking" in chat_template_kwargs or "enable_thinking" in chat_template_kwargs):
+    if isinstance(chat_template_kwargs, dict) and any(key in chat_template_kwargs for key in _VLLM_THINKING_SWITCHES):
         return "vllm_chat_template"
     native_thinking = effective_wte.get("thinking")
     if isinstance(native_thinking, dict) and native_thinking.get("type"):
@@ -114,7 +182,7 @@ def _infer_dialect(effective_wte: dict) -> str:
 
 def _vllm_toggle_chat_template_kwargs(chat_template_kwargs: dict, *, enabled: bool) -> dict:
     """Mirror whichever vLLM/Qwen switch the template declares; default to ``enable_thinking``."""
-    toggled = {key: enabled for key in ("thinking", "enable_thinking") if key in chat_template_kwargs}
+    toggled = {key: enabled for key in _VLLM_THINKING_SWITCHES if key in chat_template_kwargs}
     return toggled or {"enable_thinking": enabled}
 
 
@@ -143,32 +211,38 @@ def _apply_legacy_thinking_settings(
 ) -> None:
     """Historical thinking/effort payload path for profiles without a ``reasoning:`` contract.
 
-    Kept byte-for-byte so existing configurations retain their behavior (issue
-    #5073 acceptance criterion), including the synthesized ``reasoning_effort=minimal``
-    on the OpenAI-compatible disable path that the contract path drops.
+    Kept as-is so existing configurations retain their behavior (issue #5073
+    acceptance criterion), including the synthesized ``reasoning_effort=minimal``
+    on the OpenAI-compatible disable path that the contract path drops. The one
+    deliberate change is how the operator's templates are applied: both
+    ``when_thinking_enabled`` and ``when_thinking_disabled`` used to be
+    ``dict.update``-ed onto the settings, so a template's ``extra_body`` replaced
+    the profile's whole ``extra_body`` and silently dropped sibling keys such as
+    GLM's ``tool_stream``. Both now go through ``_merge_thinking_payload`` like
+    the synthesized ``extra_body`` disable payloads and the contract path: keys
+    are never removed (so enable-only keys such as ``budget_tokens`` belong in
+    ``when_thinking_enabled``, not in the base ``extra_body``), template values
+    win on conflicts, and the template's vLLM switch stays authoritative across
+    its two spellings. The native-Anthropic disable still assigns
+    ``settings["thinking"]`` outright: that mapping is a tagged union keyed by
+    ``type``, and nothing else lives beside it at the top level.
     """
     if requested_reasoning_effort is not None and not is_codex_model:
         settings["reasoning_effort"] = requested_reasoning_effort
     if thinking_enabled and has_thinking_settings and effective_wte:
-        settings.update(effective_wte)
+        _merge_thinking_payload(settings, effective_wte)
     if not thinking_enabled:
         if model_config.when_thinking_disabled is not None:
-            # User-provided disable settings take full precedence
-            settings.update(model_config.when_thinking_disabled)
-        elif has_thinking_settings and effective_wte.get("extra_body", {}).get("thinking", {}).get("type"):
+            # User-provided disable settings win on conflicts; profile keys survive.
+            _merge_thinking_payload(settings, model_config.when_thinking_disabled)
+        elif has_thinking_settings and ((effective_wte.get("extra_body") or {}).get("thinking") or {}).get("type"):
             # OpenAI-compatible gateway: thinking is nested under extra_body
-            settings["extra_body"] = _deep_merge_dicts(
-                settings.get("extra_body"),
-                {"thinking": {"type": "disabled"}},
-            )
+            _merge_thinking_payload(settings, {"extra_body": {"thinking": {"type": "disabled"}}})
             settings["reasoning_effort"] = "minimal"
-        elif has_thinking_settings and (disable_chat_template_kwargs := _vllm_disable_chat_template_kwargs(effective_wte.get("extra_body", {}).get("chat_template_kwargs") or {})):
+        elif has_thinking_settings and (disable_chat_template_kwargs := _vllm_disable_chat_template_kwargs((effective_wte.get("extra_body") or {}).get("chat_template_kwargs") or {})):
             # vLLM uses chat template kwargs to switch thinking on/off.
-            settings["extra_body"] = _deep_merge_dicts(
-                settings.get("extra_body"),
-                {"chat_template_kwargs": disable_chat_template_kwargs},
-            )
-        elif has_thinking_settings and effective_wte.get("thinking", {}).get("type"):
+            _merge_thinking_payload(settings, {"extra_body": {"chat_template_kwargs": disable_chat_template_kwargs}})
+        elif has_thinking_settings and (effective_wte.get("thinking") or {}).get("type"):
             # Native langchain_anthropic: thinking is a direct constructor parameter
             settings["thinking"] = {"type": "disabled"}
 
@@ -203,16 +277,20 @@ def _apply_contract_thinking_settings(
     dialect = contract.dialect if contract.dialect != "auto" else _infer_dialect(effective_wte)
     # Both directions mirror whichever vLLM switch the template declares, so a
     # template using the older ``thinking`` key never also grows ``enable_thinking``.
-    chat_template_kwargs = (effective_wte.get("extra_body") or {}).get("chat_template_kwargs") or {}
+    # ``when_thinking_enabled`` holds unvalidated nested values: a truthy
+    # non-mapping ``extra_body`` has no ``chat_template_kwargs`` to mirror and is
+    # treated as absent, like the null values the ``or {}`` defaults already cover.
+    extra_body = effective_wte.get("extra_body")
+    chat_template_kwargs = (extra_body.get("chat_template_kwargs") or {}) if isinstance(extra_body, dict) else {}
     if thinking_enabled:
         payload = _deep_merge_dicts(_dialect_payload(dialect, enabled=True, chat_template_kwargs=chat_template_kwargs), effective_wte)
         if contract.history is not None and dialect == "openai_extra_body":
             payload = _deep_merge_dicts(payload, {"extra_body": {"thinking": {"clear_thinking": contract.history == "clear"}}})
-        _merge_settings(settings, payload)
+        _merge_thinking_payload(settings, payload)
     elif model_config.when_thinking_disabled is not None:
-        _merge_settings(settings, model_config.when_thinking_disabled)
+        _merge_thinking_payload(settings, model_config.when_thinking_disabled)
     else:
-        _merge_settings(settings, _dialect_payload(dialect, enabled=False, chat_template_kwargs=chat_template_kwargs))
+        _merge_thinking_payload(settings, _dialect_payload(dialect, enabled=False, chat_template_kwargs=chat_template_kwargs))
     if contract.effort is None or contract.effort.path != "reasoning_effort":
         # A custom path is the only effort wire format for this contract.
         # Drop a generic key supplied by model_overrides as well as stale
@@ -361,6 +439,99 @@ def _apply_stream_chunk_timeout_default(model_class: type, model_settings_from_c
     model_settings_from_config["stream_chunk_timeout"] = _DEFAULT_STREAM_CHUNK_TIMEOUT_SECONDS
 
 
+# gpt-6 family must use the OpenAI Responses API when tools are attached.
+#
+# The locked ``langchain-openai==1.2.1`` still routes tool use through
+# ``/v1/chat/completions`` for every model that is not in its hard-coded
+# ``_RESPONSES_API_ONLY_PREFIXES`` tuple (gpt-5-pro style names only). OpenAI
+# rejects function tools for the gpt-6 family on that endpoint ("Function tools
+# with reasoning_effort are not supported for gpt-6.<x> in /v1/chat/completions"),
+# so a gpt-6 model configured with ``langchain_openai:ChatOpenAI`` plus any tool
+# fails every tool call with a 400. Newer langchain-openai (1.7.1+) added a
+# ``gpt-6 + tools`` → Responses API branch; backport that behaviour here so the
+# pinned dependency does not silently break the whole gpt-6 family.
+#
+# The model factory creates the client before any tool is bound, so a
+# "gpt-6 + tools" check is not expressible at this point — the injection is
+# necessarily broader than upstream's bind-time routing. Two gates keep that
+# blast radius small:
+#
+# * **Custom endpoints are never touched.** ``_normalize_openai_base_url`` ran
+#   just above, so an OpenAI-compatible gateway/proxy configured via
+#   ``base_url``/``openai_api_base`` already lands in ``model_settings_from_config``;
+#   those deployments (LiteLLM, vLLM, one-api, …) often lack ``/responses`` and
+#   must not be silently re-pointed. ``AzureChatOpenAI`` is skipped too: it
+#   subclasses ``BaseChatOpenAI``, and Azure's Responses API additionally
+#   requires ``api-version >= 2025-04-01-preview``. A gateway wired purely via
+#   the ``OPENAI_BASE_URL``/``OPENAI_API_BASE`` environment variables (the openai
+#   SDK's fallback when no ``base_url`` is passed) is also treated as a custom
+#   endpoint. Known blind spot: a ``BaseChatOpenAI`` subclass that declares its
+#   own ``api_base`` field (ChatDeepSeek-style) skips
+#   ``_normalize_openai_base_url``, so its ``api_base`` never becomes ``base_url``
+#   and is invisible to this gate.
+# * **The injection is logged**, so an operator can trace why their model began
+#   calling ``/responses`` even before they diagnose a failure.
+#
+# Behaviour:
+#
+# * An explicit ``use_responses_api`` always wins (true or false) — it is the
+#   operator's routing decision, even on a custom endpoint or Azure.
+# * Otherwise a ``BaseChatOpenAI`` subclass whose ``model`` starts with ``gpt-6``
+#   gets ``use_responses_api: true`` + ``output_version: responses/v1`` injected,
+#   unless the model targets a custom endpoint (``base_url``/``openai_api_base``,
+#   or a set ``OPENAI_BASE_URL``/``OPENAI_API_BASE`` env var) or is an
+#   ``AzureChatOpenAI``.
+# * An explicit ``output_version`` alone (without ``use_responses_api``) implies
+#   the operator expects Responses formatting: their value is preserved and
+#   ``use_responses_api: true`` is still injected, so the issue #6841 400s do not
+#   silently reappear.
+# * Any other model family or client (e.g. ChatAnthropic) is left untouched.
+def _apply_openai_responses_api_default(model_class: type, model_settings_from_config: dict) -> None:
+    if not issubclass(model_class, BaseChatOpenAI):
+        return
+    model_name = model_settings_from_config.get("model")
+    if not isinstance(model_name, str) or not model_name.lower().startswith("gpt-6"):
+        return
+    # An explicit routing choice always wins, even on a custom endpoint or Azure.
+    if "use_responses_api" in model_settings_from_config:
+        return
+    # A custom endpoint means the operator already owns routing: OpenAI-compatible
+    # gateways/proxies (LiteLLM, vLLM, one-api) configured via base_url /
+    # openai_api_base (canonicalized just above by _normalize_openai_base_url),
+    # and Azure deployments, rarely implement /responses (Azure's additionally
+    # needs api-version >= 2025-04-01-preview). Leave them untouched. The Azure
+    # check walks the MRO so it also covers env-configured Azure deployments
+    # (which leave azure_endpoint out of the model settings) and any subclass.
+    if any(getattr(base, "__name__", "") == "AzureChatOpenAI" for base in model_class.__mro__):
+        return
+    if any(key in model_settings_from_config for key in ("base_url", "openai_api_base", "azure_endpoint")):
+        return
+    # A gateway can also be wired purely through the environment: the openai SDK
+    # falls back to OPENAI_BASE_URL/OPENAI_API_BASE when no base_url is passed,
+    # so a gpt-6 model behind an env-var-wired gateway would otherwise be
+    # re-pointed at <gateway>/responses — the exact regression the endpoint gate
+    # exists to avoid. Treat a set env var like an explicit endpoint.
+    if os.getenv("OPENAI_BASE_URL") or os.getenv("OPENAI_API_BASE"):
+        return
+    if "output_version" in model_settings_from_config:
+        # Operator pinned an output version — implying Responses formatting —
+        # without enabling routing. Honor the value but still turn the default on,
+        # otherwise gpt-6 stays on /v1/chat/completions and re-exposes #6841.
+        model_settings_from_config["use_responses_api"] = True
+        logger.debug(
+            "gpt-6 model '%s': enabling OpenAI Responses API routing (use_responses_api=true) with operator output_version=%r",
+            model_name,
+            model_settings_from_config["output_version"],
+        )
+        return
+    model_settings_from_config["use_responses_api"] = True
+    model_settings_from_config["output_version"] = "responses/v1"
+    logger.info(
+        "gpt-6 model '%s': routing through the OpenAI Responses API (use_responses_api=true, output_version=responses/v1) because the pinned langchain-openai cannot call gpt-6 tools on /v1/chat/completions",
+        model_name,
+    )
+
+
 def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *, app_config: AppConfig | None = None, attach_tracing: bool = True, model_overrides: dict | None = None, **kwargs) -> BaseChatModel:
     """Create a chat model instance from the config.
 
@@ -448,7 +619,9 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
     requested_reasoning_effort = resolved_reasoning.reasoning_effort
     if contract.source == "legacy":
         # Profiles without a ``reasoning:`` block keep the historical payload
-        # path byte-for-byte, driven by the caller's raw thinking flag.
+        # path, driven by the caller's raw thinking flag; the only change from
+        # the pre-contract factory is that its templates deep-merge (see the
+        # function docstring) instead of replacing whole settings.
         _apply_legacy_thinking_settings(
             model_settings_from_config,
             model_config,
@@ -477,6 +650,8 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
     # heuristics (stream_usage default below / stream_chunk_timeout) see the canonical endpoint key.
     _normalize_openai_base_url(model_class, model_settings_from_config)
     _apply_stream_chunk_timeout_default(model_class, model_settings_from_config)
+    # gpt-6 + tools must route through the Responses API (see the helper docstring).
+    _apply_openai_responses_api_default(model_class, model_settings_from_config)
 
     # For Codex Responses API models: map thinking mode to reasoning_effort
     if is_codex_model:

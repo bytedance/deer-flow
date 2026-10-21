@@ -4,6 +4,7 @@ import asyncio
 import atexit
 import concurrent.futures
 import copy
+import hashlib
 import html
 import json
 import logging
@@ -174,6 +175,14 @@ def _removal_scope_gate_reason(removal: dict[str, Any]) -> str | None:
     return None
 
 
+def _log_dropped_confidence(raw: object) -> None:
+    """Make a systematic out-of-range confidence visible without logging content."""
+    logger.warning(
+        "Dropping an extracted fact with out-of-range confidence %s; expected 0.0-1.0. A model emitting a percentage scale would lose every extracted fact.",
+        repr(raw)[:80],
+    )
+
+
 def _normalize_memory_update_fact(fact: Any) -> dict[str, Any] | None:
     """Normalize a single fact entry from a model-produced memory update."""
     if not isinstance(fact, dict):
@@ -198,14 +207,29 @@ def _normalize_memory_update_fact(fact: Any) -> dict[str, Any] | None:
             return None
         try:
             raw_confidence = float(raw_confidence)
-        except ValueError:
+        except (OverflowError, ValueError):
             return None
-    elif isinstance(raw_confidence, (int, float)):
+    elif isinstance(raw_confidence, int):
+        # Range-check before float(): an unbounded JSON integer such as 10**400
+        # raises OverflowError in float() and would fail the whole batch.
+        if not 0 <= raw_confidence <= 1:
+            _log_dropped_confidence(raw_confidence)
+            return None
         raw_confidence = float(raw_confidence)
+    elif isinstance(raw_confidence, float):
+        pass
     else:
         return None
 
-    if not math.isfinite(raw_confidence):
+    if not math.isfinite(raw_confidence) or not 0.0 <= raw_confidence <= 1.0:
+        # Out-of-range confidence (for example a model emitting 95 or 1.5) is
+        # malformed like every other shape above: drop this item instead of
+        # letting the storage layer reject the whole update. A rejected batch
+        # never advances the extraction watermark, so the same paid call would
+        # otherwise repeat on every turn. Values are dropped, never rescaled:
+        # silently rewriting the scale would change the confidence-threshold
+        # semantics, and the warning makes a percentage-scale model visible.
+        _log_dropped_confidence(raw_confidence)
         return None
 
     normalized_fact = {
@@ -826,10 +850,12 @@ def _message_identity(msg: Any) -> tuple[str, ...] | None:
     valid when summarization removes the conversation front (an index watermark
     would point at the wrong message after a front removal, silently skipping
     un-extracted turns). Prefers the langgraph message ``id`` (unique, robust to
-    duplicate content); falls back to ``(type, content)`` when no id is set
-    (e.g. plain ``HumanMessage(content=...)`` in tests). Returns ``None`` for a
-    message with neither id nor extractable text -- the caller then feeds the
-    full list, which is safe over-extraction and never loss.
+    duplicate content); falls back to ``(type, sha256(content))`` when no id is
+    set (e.g. plain ``HumanMessage(content=...)`` in tests) -- a digest because
+    the identity is also persisted to the watermark sidecar, which must not hold
+    conversation text. Returns ``None`` for a message with neither id nor
+    extractable text -- the caller then feeds the full list, which is safe
+    over-extraction and never loss.
     """
     mid = getattr(msg, "id", None)
     if isinstance(mid, str) and mid:
@@ -838,7 +864,7 @@ def _message_identity(msg: Any) -> tuple[str, ...] | None:
     if not text:
         return None
     msg_type = getattr(msg, "type", "") or ""
-    return ("content", msg_type, text)
+    return ("content", msg_type, hashlib.sha256(text.encode("utf-8")).hexdigest())
 
 
 class MemoryUpdater:
@@ -864,10 +890,12 @@ class MemoryUpdater:
         self._prompts_dir = prompts_dir
         self._callbacks = callbacks
         # Watermark: last-extracted message identity per (thread_id, user_id,
-        # agent_name), held in memory so a restart re-extracts one batch. The
-        # cache is a bounded LRU (config.watermark_max_keys) so a long-lived
-        # gateway handling many threads cannot grow it without limit; a dropped
-        # key re-extracts one batch on that thread's next turn.
+        # agent_name). This process caches it in a bounded LRU
+        # (config.watermark_max_keys) so a long-lived gateway handling many
+        # threads cannot grow it without limit, and writes it through to the
+        # storage's per-agent sidecar so a restart or a peer replica sharing the
+        # storage root continues from it. A key missing from both re-extracts
+        # one batch on that thread's next turn.
         self._watermarks: OrderedDict[tuple[str | None, str | None, str | None], tuple[str, ...] | None] = OrderedDict()
 
     # ── Data access + fact CRUD (formerly module-level functions; use self._storage) ──
@@ -960,7 +988,14 @@ class MemoryUpdater:
         except Exception:
             logger.warning("Failed to record capacity-eviction audit", exc_info=True)
 
-    def import_memory_data(self, memory_data: dict[str, Any], agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
+    def import_memory_data(
+        self,
+        memory_data: dict[str, Any],
+        agent_name: str | None = None,
+        *,
+        user_id: str | None = None,
+        replace_shared_summaries: bool = True,
+    ) -> dict[str, Any]:
         """Persist imported memory data via the injected storage."""
         if not isinstance(memory_data, dict):
             raise ValueError("memory_data")
@@ -985,14 +1020,19 @@ class MemoryUpdater:
             )
             current_by_id = {str(fact.get("id")): fact for fact in current.get("facts", []) if isinstance(fact, dict)}
             incoming_ids = {str(fact.get("id")) for fact in incoming_facts}
+            change_set = {
+                "upserts": incoming_facts,
+                "upsertRevisions": {str(fact.get("id")): (int(current_by_id[str(fact.get("id"))].get("revision") or 1) if str(fact.get("id")) in current_by_id else None) for fact in incoming_facts},
+                "deletes": [fact_id for fact_id in current_by_id if fact_id not in incoming_ids],
+                "deleteRevisions": {fact_id: int(fact.get("revision") or 1) for fact_id, fact in current_by_id.items() if fact_id not in incoming_ids},
+            }
+            if replace_shared_summaries:
+                change_set["summaries"] = {
+                    "user": copy.deepcopy(memory_data.get("user", {})),
+                    "history": copy.deepcopy(memory_data.get("history", {})),
+                }
             self._storage.apply_changes(
-                {
-                    "upserts": incoming_facts,
-                    "upsertRevisions": {str(fact.get("id")): (int(current_by_id[str(fact.get("id"))].get("revision") or 1) if str(fact.get("id")) in current_by_id else None) for fact in incoming_facts},
-                    "deletes": [fact_id for fact_id in current_by_id if fact_id not in incoming_ids],
-                    "deleteRevisions": {fact_id: int(fact.get("revision") or 1) for fact_id, fact in current_by_id.items() if fact_id not in incoming_ids},
-                    "summaries": {"user": copy.deepcopy(memory_data.get("user", {})), "history": copy.deepcopy(memory_data.get("history", {}))},
-                },
+                change_set,
                 agent_name=agent_name,
                 user_id=user_id,
                 expected_manifest_revision=int(current.get("revision") or 0),
@@ -1337,14 +1377,21 @@ class MemoryUpdater:
         agent_name: str | None,
         signals: frozenset[str],
         user_id: str | None = None,
+        conversation_text: str | None = None,
     ) -> tuple[dict[str, Any], list[Any]] | None:
-        """Load memory and build the update prompt for a conversation."""
+        """Load memory and build the update prompt for a conversation.
+
+        ``conversation_text`` lets the caller hand over the formatted text it
+        already produced for the memory judge, so the conversation is formatted
+        once per batch instead of twice.
+        """
         config = self._config
         if not messages:
             return None
 
         current_memory = self.get_memory_data(agent_name, user_id=user_id)
-        conversation_text = format_conversation_for_update(messages)
+        if conversation_text is None:
+            conversation_text = format_conversation_for_update(messages)
         if not conversation_text.strip():
             return None
 
@@ -1438,6 +1485,50 @@ class MemoryUpdater:
         except Exception:
             logger.warning("extraction_callback raised; ignoring", exc_info=True)
 
+    def _judge_batch(
+        self,
+        hook: Any,
+        *,
+        batch_text: str,
+        signals: frozenset[str],
+        thread_id: str | None,
+        agent_name: str | None,
+        user_id: str | None,
+        trace_id: str | None,
+        bypass_watermark: bool,
+        message_count: int,
+    ) -> Any:
+        """Ask an injected memory judge about this batch; ``None`` when unjudged.
+
+        The hook is a plain callable over a mapping -- the same convention as
+        ``extraction_callback``'s payload -- so DeerMem stays host-agnostic (it
+        imports no host judging types) while the host owns what a verdict means.
+
+        A judge failure is logged and treated as "no opinion": pre-screening must
+        never lose a memory and signal classification must never block one, so
+        this path can only ever fall back to today's behaviour (design L2 / S2).
+        """
+        if hook is None:
+            return None
+        try:
+            return hook(
+                {
+                    "batch_text": batch_text,
+                    "signals": signals,
+                    "staleness_review_enabled": bool(self._config.staleness_review_enabled),
+                    "consolidation_enabled": bool(self._config.consolidation_enabled),
+                    "bypass_watermark": bypass_watermark,
+                    "thread_id": thread_id,
+                    "user_id": user_id,
+                    "agent_name": agent_name,
+                    "trace_id": trace_id,
+                    "message_count": message_count,
+                }
+            )
+        except Exception:
+            logger.warning("Memory judge failed; extracting as usual", exc_info=True)
+            return None
+
     def _finalize_update(
         self,
         current_memory: dict[str, Any],
@@ -1476,7 +1567,6 @@ class MemoryUpdater:
                     user_id=user_id,
                     capacity_decisions=capacity_decisions,
                 )
-                updated_memory = _strip_upload_mentions_from_memory(updated_memory)
                 current_by_id = {str(fact.get("id")): fact for fact in current_memory.get("facts", [])}
                 updated_by_id = {str(fact.get("id")): fact for fact in updated_memory.get("facts", [])}
                 change_set = {
@@ -1525,7 +1615,6 @@ class MemoryUpdater:
             user_id=user_id,
             capacity_decisions=capacity_decisions,
         )
-        updated_memory = _strip_upload_mentions_from_memory(updated_memory)
         saved = self._storage.save(
             updated_memory,
             agent_name,
@@ -1552,6 +1641,7 @@ class MemoryUpdater:
         trace_id: str | None = None,
         *,
         bypass_watermark: bool = False,
+        judge: bool = True,
     ) -> bool:
         """Update memory asynchronously by delegating to the sync path.
 
@@ -1570,6 +1660,7 @@ class MemoryUpdater:
             user_id=user_id,
             trace_id=trace_id,
             bypass_watermark=bypass_watermark,
+            judge=judge,
         )
 
     def _do_update_memory_sync(
@@ -1582,6 +1673,7 @@ class MemoryUpdater:
         trace_id: str | None = None,
         *,
         bypass_watermark: bool = False,
+        judge: bool = True,
     ) -> bool:
         """Pure-sync memory update; bind ``trace_id`` into the request-trace
         ContextVar for the worker thread, then delegate to the impl.
@@ -1605,6 +1697,7 @@ class MemoryUpdater:
                     user_id=user_id,
                     trace_id=trace_id,
                     bypass_watermark=bypass_watermark,
+                    judge=judge,
                 )
         return self._do_update_memory_sync_impl(
             messages=messages,
@@ -1614,6 +1707,7 @@ class MemoryUpdater:
             user_id=user_id,
             trace_id=trace_id,
             bypass_watermark=bypass_watermark,
+            judge=judge,
         )
 
     def _watermark_get(self, key: tuple[str | None, str | None, str | None]) -> tuple[str, ...] | None:
@@ -1633,17 +1727,71 @@ class MemoryUpdater:
         value: tuple[str, ...] | None,
     ) -> None:
         """Store ``value`` for ``key``, evicting the least-recently-used entry
-        when the bounded LRU cache exceeds ``config.watermark_max_keys``.
+        when the bounded LRU cache exceeds ``config.watermark_max_keys``, and
+        write a real identity through to the storage sidecar.
 
         A dropped key is safe: the next turn for that thread finds no watermark
-        and re-extracts one batch (the documented restart behavior). ``0`` =
-        unbounded (no eviction).
+        and re-extracts one batch. ``0`` = unbounded (no eviction).
         """
         self._watermarks[key] = value
         self._watermarks.move_to_end(key)
         cap = self._config.watermark_max_keys
         if cap > 0 and len(self._watermarks) > cap:
             self._watermarks.popitem(last=False)
+        self._store_persisted_watermark(key, value)
+
+    @staticmethod
+    def _persisted_watermark_scope(key: tuple[str | None, str | None, str | None]) -> tuple[str, str | None, str] | None:
+        """Return ``(thread_id, user_id, agent_name)`` when ``key`` can be
+        persisted; the sidecar is per agent and keyed by thread id."""
+        thread_id, user_id, agent_name = key
+        if not isinstance(thread_id, str) or not thread_id or agent_name is None:
+            return None
+        return thread_id, user_id, agent_name
+
+    def _load_persisted_watermark(self, key: tuple[str | None, str | None, str | None]) -> tuple[str, ...] | None:
+        """Read ``key``'s watermark from the storage sidecar.
+
+        ``None`` when the storage keeps none or the read fails: the sidecar is
+        best-effort, so the in-process cache then decides alone.
+        """
+        scope = self._persisted_watermark_scope(key)
+        getter = getattr(self._storage, "get_extraction_watermark", None)
+        if scope is None or getter is None:
+            return None
+        thread_id, user_id, agent_name = scope
+        try:
+            value = getter(thread_id, agent_name=agent_name, user_id=user_id)
+        except Exception:
+            logger.warning("Failed to read the persisted memory watermark (thread=%s)", thread_id, exc_info=True)
+            return None
+        if isinstance(value, list | tuple) and value and all(isinstance(part, str) for part in value):
+            return tuple(value)
+        return None
+
+    def _store_persisted_watermark(
+        self,
+        key: tuple[str | None, str | None, str | None],
+        value: tuple[str, ...] | None,
+    ) -> None:
+        """Write ``key``'s watermark to the storage sidecar, best-effort.
+
+        A ``None`` identity (the last message has neither id nor text) is not
+        written: the persisted entry, possibly advanced by a peer, still marks
+        an extracted prefix, and the furthest-of-both read keeps using it.
+        A failure is logged and leaves the in-process cache authoritative for
+        this process; the extraction it follows has already been persisted, so
+        it must not turn into a failed update.
+        """
+        scope = self._persisted_watermark_scope(key)
+        setter = getattr(self._storage, "set_extraction_watermark", None)
+        if value is None or scope is None or setter is None:
+            return
+        thread_id, user_id, agent_name = scope
+        try:
+            setter(thread_id, list(value), agent_name=agent_name, user_id=user_id)
+        except Exception:
+            logger.warning("Failed to persist the memory watermark (thread=%s)", thread_id, exc_info=True)
 
     def _feed_after_watermark(
         self,
@@ -1653,19 +1801,25 @@ class MemoryUpdater:
         """Return the slice of ``messages`` not yet extracted.
 
         The watermark stores the identity of the last-extracted message (see
-        :func:`_message_identity`). If that message is still present, everything
-        *after* it is fed; if it is absent (front removed by summarization, or
-        the first-ever extraction for this key) the full list is fed. Re-feeding
-        is safe over-extraction -- it never skips a turn, which is the only
-        failure direction that would lose facts.
+        :func:`_message_identity`). Two copies are consulted: this process's LRU
+        entry and the storage sidecar (written by this process, an earlier one,
+        or a peer replica sharing the storage root). Each marks a prefix that
+        was already extracted, so the feed starts after whichever is found
+        furthest along ``messages``; a stale copy therefore costs nothing. If
+        neither is present (front removed by summarization, or the first-ever
+        extraction for this key) the full list is fed. Re-feeding is safe
+        over-extraction -- it never skips a turn, which is the only failure
+        direction that would lose facts.
         """
-        last_id = self._watermark_get(watermark_key)
-        if last_id is None:
+        candidates = {self._watermark_get(watermark_key), self._load_persisted_watermark(watermark_key)} - {None}
+        if not candidates:
             return messages
-        for i, msg in enumerate(messages):
-            if _message_identity(msg) == last_id:
-                return messages[i + 1 :]
-        return messages
+        identities = [_message_identity(msg) for msg in messages]
+        start = 0
+        for last_id in candidates:
+            if last_id in identities:
+                start = max(start, identities.index(last_id) + 1)
+        return messages[start:]
 
     def _do_update_memory_sync_impl(
         self,
@@ -1677,6 +1831,7 @@ class MemoryUpdater:
         trace_id: str | None = None,
         *,
         bypass_watermark: bool = False,
+        judge: bool = True,
     ) -> bool:
         """Pure-sync memory update using ``model.invoke()``.
 
@@ -1689,10 +1844,11 @@ class MemoryUpdater:
         Watermark: the middleware passes the full conversation each turn, so
         without skipping already-extracted turns every update re-feeds old
         messages. The watermark stores the identity of the last-extracted
-        message (content/id based, in-memory only) so it stays correct when
-        summarization removes the conversation front; a restart loses it and
-        re-extracts one batch. ``bypass_watermark`` is set by the emergency
-        (summarization) flush path: the subset it carries is a one-shot
+        message (content/id based, cached in-process and persisted per agent
+        by the storage) so it stays correct when summarization removes the
+        conversation front and survives a restart or a move to a peer replica
+        (see :meth:`_feed_after_watermark`). ``bypass_watermark`` is set by the
+        emergency (summarization) flush path: the subset it carries is a one-shot
         "extract before removal" snapshot, so it is fed in full and does not
         read or advance the conversation watermark (advancing it from the
         subset's own length would regress the watermark and skip un-extracted
@@ -1719,11 +1875,55 @@ class MemoryUpdater:
             # served their purpose (backpressure admission at enqueue); the hint
             # is a soft nudge and must not point at turns the watermark excluded.
             feed_signals = detect_signals(feed_messages, patterns_dir=self._config.patterns_dir)
+            # The judge's L3 veto reads the whole batch, not the hint window: a skip
+            # consumes every turn fed here (it advances the watermark), so an explicit
+            # signal anywhere in the batch has to keep that batch out of judging. The
+            # extraction hint above keeps the default 6-message window -- a hint points
+            # at recent turns, a veto answers for the batch.
+            batch_signals = detect_signals(feed_messages, patterns_dir=self._config.patterns_dir, window=None)
+            batch_text = format_conversation_for_update(feed_messages)
+            # The memory judge (when the host injected one) runs here: still off the
+            # turn path, before any LLM call, on exactly the text the extractor would
+            # see -- no second truncation. ``judge=False`` (the shutdown drain) and a
+            # ``None`` hook both leave the batch unjudged.
+            verdict = self._judge_batch(
+                self._config.judge if judge else None,
+                batch_text=batch_text,
+                signals=frozenset(batch_signals),
+                thread_id=thread_id,
+                agent_name=agent_name,
+                user_id=user_id,
+                trace_id=trace_id,
+                bypass_watermark=bypass_watermark,
+                message_count=len(feed_messages),
+            )
+            verdict_payload = getattr(verdict, "payload", None)
+            if isinstance(verdict_payload, dict):
+                metrics.update({key: value for key, value in verdict_payload.items() if value is not None})
+            if getattr(verdict, "skip", False):
+                # The pre-screen decided this batch is not worth a call: consume it
+                # and advance the watermark (nothing else runs -- no prompt, no
+                # invoke, no apply). Advancing is what makes the saving real; leaving
+                # the watermark put would re-judge a longer batch every turn and the
+                # digest-keyed cache could never hit.
+                if not bypass_watermark:
+                    self._watermark_set(watermark_key, _message_identity(messages[-1]))
+                success = True
+                # The judge record is this batch's only trace, so emit it even though
+                # no LLM call happened (the finally-block gate reads this flag).
+                attempted = True
+                logger.info("Memory extraction skipped by the pre-screen (thread=%s)", thread_id)
+                return True
+            model_hints = getattr(verdict, "hints", None)
             prepared = self._prepare_update_prompt(
                 messages=feed_messages,
                 agent_name=agent_name,
-                signals=feed_signals,
+                # Hint text takes the union (deterministic + model hints); the
+                # reinforcement evidence gate below still reads the deterministic
+                # set only, so a model verdict can never confirm a fact (S4).
+                signals=frozenset(feed_signals) | (model_hints if isinstance(model_hints, frozenset) else frozenset()),
                 user_id=user_id,
+                conversation_text=batch_text,
             )
             if prepared is None:
                 return False
@@ -1805,6 +2005,14 @@ class MemoryUpdater:
             # pre-attempt early returns (no new messages, empty conversation, no
             # model) do not emit, matching the prior behavior.
             if attempted:
+                if not success:
+                    # A failed extraction persisted nothing, so the apply-site
+                    # counter must not be published. The evaluation script scores a
+                    # present counter even on ``success=False`` (it is treated as an
+                    # outcome, not a censored failure), which would register a
+                    # rejected commit as a missed memory. Absent + failed is censored
+                    # -- the honest reading (persistent-mutation contract).
+                    metrics.pop("mutations_accepted", None)
                 self._emit_extraction_metrics(
                     metrics,
                     thread_id=thread_id,
@@ -1856,6 +2064,7 @@ class MemoryUpdater:
         trace_id: str | None = None,
         *,
         bypass_watermark: bool = False,
+        judge: bool = True,
     ) -> bool:
         """Synchronously update memory using the sync LLM path.
 
@@ -1863,6 +2072,10 @@ class MemoryUpdater:
         separate connection pool from the async ``AsyncClient`` shared by
         the lead agent.  This eliminates the cross-loop connection-reuse
         bug described in issue #2615.
+
+        ``judge=False`` forbids this batch from being judged by the injected
+        memory judge (the shutdown-drain path sets it: the drain budget belongs
+        to persistence, not to a cost optimization).
 
         When called from within a running event loop (e.g. from a LangGraph
         node), the blocking sync call is offloaded to a thread pool so the
@@ -1898,6 +2111,7 @@ class MemoryUpdater:
                     user_id=user_id,
                     trace_id=trace_id,
                     bypass_watermark=bypass_watermark,
+                    judge=judge,
                 )
                 return future.result()
             except Exception:
@@ -1912,6 +2126,7 @@ class MemoryUpdater:
             user_id=user_id,
             trace_id=trace_id,
             bypass_watermark=bypass_watermark,
+            judge=judge,
         )
 
     def _apply_updates(
@@ -1941,6 +2156,13 @@ class MemoryUpdater:
         """
         config = self._config
         now = utc_now_iso_z()
+        # Mutations that actually landed, counted at their real apply sites. New
+        # facts are counted only after they survive capacity enforcement (and any
+        # consolidation pass), not at the append. This is the pre-screen's "worth
+        # remembering" signal: a batch whose only effect was a summary rewrite
+        # counts zero, so a skip that dropped it is not a missed memory
+        # (pre-screening design §5).
+        mutations_accepted = 0
         scope_gate_rejections: dict[str, dict[str, int]] = {
             "facts": {"missing": 0, "scope": 0, "durability": 0, "authority": 0},
             "summaries": {"missing": 0, "scope": 0, "authority": 0},
@@ -1963,6 +2185,11 @@ class MemoryUpdater:
                 for entry in update_data.get("factsToReinforce", [])
                 if isinstance(entry, dict) and entry.get("scope") == "user" and isinstance(entry.get("reason"), str) and entry["reason"].strip() and isinstance(entry.get("id"), str)
             }
+            # Only an id that actually exists can be confirmed. A nonexistent
+            # target changes nothing, so counting it would report an accepted
+            # mutation that never landed (the pre-screen evaluation reads the
+            # counter as "worth remembering").
+            reinforced_ids &= {fact.get("id") for fact in current_memory.get("facts", []) if isinstance(fact, dict)}
             if reinforced_ids:
                 current_memory["facts"] = [
                     {
@@ -1974,6 +2201,7 @@ class MemoryUpdater:
                     else fact
                     for fact in current_memory.get("facts", [])
                 ]
+                mutations_accepted += len(reinforced_ids)
 
         # Update user sections
         user_updates = update_data.get("user", {})
@@ -2119,6 +2347,18 @@ class MemoryUpdater:
         # persisted-fact count.
         passed_threshold = 0
         replacement_fact_keys: dict[int, str] = {}
+        # Fact IDs appended by this pass. They count as accepted mutations only
+        # if they survive to the final fact set (see the metrics block): capacity
+        # enforcement can evict one immediately, and a later consolidation can
+        # consume one as a source.
+        added_fact_ids: list[str] = []
+        # Existing fact IDs a near-duplicate merge actually changed (confidence
+        # raised). Counted under the same survival rule: a no-op merge (proposed
+        # confidence not higher) changed nothing and must not count.
+        changed_merge_ids: set[str] = set()
+        # Legacy id-less facts cannot be matched by id, so they are tracked by
+        # object identity; the target dicts stay alive in the memory being edited.
+        changed_merge_facts: dict[int, dict[str, Any]] = {}
         # A correction must keep its proposed content, not inherit an older
         # paraphrase. Also avoid strengthening any proposed removal target,
         # including stale targets retained by candidate guards or the cap.
@@ -2175,6 +2415,14 @@ class MemoryUpdater:
                     if confidence > existing_confidence:
                         merge_target["confidence"] = confidence
                         merge_target["source"] = thread_id or "unknown"
+                        # This merge persisted a change to an existing fact, so it
+                        # is a mutation outcome too -- but only once we know the
+                        # target survives (the count below checks the final set).
+                        merge_target_id = merge_target.get("id")
+                        if isinstance(merge_target_id, str):
+                            changed_merge_ids.add(merge_target_id)
+                        else:
+                            changed_merge_facts[id(merge_target)] = merge_target
                     if metrics is not None:
                         metrics["facts_merged_dedup"] = metrics.get("facts_merged_dedup", 0) + 1
                     # New proposals have no durable ID yet. Log their batch
@@ -2211,6 +2459,7 @@ class MemoryUpdater:
                 fact_entry["expected_valid_days"] = min(evd, creation_cap)
             current_memory["facts"].append(fact_entry)
             existing_fact_keys.add(fact_key)
+            added_fact_ids.append(fact_entry["id"])
 
         # Enforce one capacity policy across automatic, manual, and import
         # writes. Usage comes from a separate sidecar, so scoring never rewrites
@@ -2252,7 +2501,14 @@ class MemoryUpdater:
             fact_ids_to_remove.add(fact_id)
 
         if fact_ids_to_remove:
-            current_memory["facts"] = [fact for fact in current_memory.get("facts", []) if fact.get("id") not in fact_ids_to_remove]
+            # Count only targets that actually existed: a scope-valid removal of
+            # a nonexistent id deletes nothing, so counting it would report an
+            # accepted mutation that never landed (the pre-screen evaluation
+            # reads the counter as "worth remembering").
+            landed_removals = fact_ids_to_remove & {fact.get("id") for fact in current_memory.get("facts", []) if isinstance(fact, dict)}
+            if landed_removals:
+                current_memory["facts"] = [fact for fact in current_memory.get("facts", []) if fact.get("id") not in landed_removals]
+                mutations_accepted += len(landed_removals)
 
         # ── Memory consolidation ──
         # Runs after the max_facts trim so source facts that were just evicted
@@ -2427,6 +2683,29 @@ class MemoryUpdater:
                 if ids_consumed:
                     current_memory["facts"] = [f for f in current_memory.get("facts", []) if f.get("id") not in ids_consumed]
                     current_memory["facts"].extend(new_consolidated)
+                    mutations_accepted += merge_count
+
+        # Finalization scrubs upload-event facts (session-scoped) from the memory it
+        # persists; apply that here, before scoring survival, so a fact accepted by
+        # the apply but dropped by the scrub is not counted as a landed mutation
+        # (the shadow evaluation reads a positive count on a skip as a lost memory).
+        current_memory = _strip_upload_mentions_from_memory(current_memory)
+
+        # Count new facts and changed near-duplicate targets only once they survive
+        # capacity enforcement. A proposed fact can pass the confidence gate and be
+        # appended, then be immediately evicted by _select_for_capacity; a merge
+        # target can be evicted the same way. Counting either would report an
+        # accepted mutation even though the persistent facts are unchanged, and the
+        # pre-screen evaluation reads any positive mutations_accepted on a skip as a
+        # lost memory (memory/AGENTS.md, "worth remembering"). Scoring against the
+        # final fact set also excludes a fact a later consolidation consumed as a
+        # source, whose merge is counted separately.
+        final_fact_ids = {fact.get("id") for fact in current_memory.get("facts", []) if isinstance(fact, dict)}
+        mutations_accepted += sum(1 for fact_id in added_fact_ids if fact_id in final_fact_ids)
+        mutations_accepted += sum(1 for fact_id in changed_merge_ids if fact_id in final_fact_ids)
+        if changed_merge_facts:
+            surviving_objects = {id(fact) for fact in current_memory.get("facts", []) if isinstance(fact, dict)}
+            mutations_accepted += sum(1 for object_id in changed_merge_facts if object_id in surviving_objects)
 
         if metrics is not None:
             metrics["facts_passed_confidence"] = passed_threshold
@@ -2434,5 +2713,6 @@ class MemoryUpdater:
             metrics["facts_passed_scope_gate"] = len(new_facts) - sum(scope_gate_rejections["facts"].values())
             metrics["rejected_by_scope_gate"] = sum(count for reasons in scope_gate_rejections.values() for count in reasons.values())
             metrics["scope_gate_rejections"] = scope_gate_rejections
+            metrics["mutations_accepted"] = mutations_accepted
 
         return current_memory

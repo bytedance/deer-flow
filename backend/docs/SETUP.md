@@ -30,10 +30,15 @@ DeerFlow uses a YAML configuration file that should be placed in the **project r
    vim config.yaml  # or your preferred editor
    ```
 
-4. **Verify configuration**:
+4. **Verify configuration in the backend environment**:
+   Complete the [local development installation](../../CONTRIBUTING.md#option-2-local-development),
+   including any extras required by your configuration (such as `postgres`).
+   Run from the repository root. `--project backend` selects the installed
+   backend environment while keeping relative configuration and runtime paths
+   anchored to this directory; `--no-sync` retains its installed extras.
+
    ```bash
-   cd backend
-   python -c "from deerflow.config import get_app_config; print('✓ Config loaded:', get_app_config().models[0].name)"
+   uv run --no-sync --project backend python -c "from deerflow.config import get_app_config; print('✓ Config loaded:', get_app_config().models[0].name)"
    ```
 
 ## Important Notes
@@ -77,8 +82,8 @@ If you skip this step, the image will be automatically pulled on first agent exe
 
 ```bash
 # Check where the backend is looking
-cd deer-flow/backend
-python -c "from deerflow.config.app_config import AppConfig; print(AppConfig.resolve_config_path())"
+cd /path/to/deer-flow
+uv run --no-sync --project backend python -c "from deerflow.config.app_config import AppConfig; print(AppConfig.resolve_config_path())"
 ```
 
 If it can't find the config:
@@ -89,7 +94,7 @@ If it can't find the config:
 ### Permission denied
 
 ```bash
-chmod 600 ../config.yaml  # Protect sensitive configuration
+chmod 600 config.yaml  # Run from the repository root
 ```
 
 ## See Also

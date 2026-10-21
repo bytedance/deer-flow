@@ -77,10 +77,10 @@ Exactly two shapes are proven safe, and the retention service implements only th
 
 Two mechanical constraints come with deletion:
 
-- **Joint table deletion, orphan-first.** Deleting a checkpoint row requires deciding which writes and blob rows are orphaned; a row is an orphan only if no *surviving* checkpoint references it, computed in a whole-thread pass. A real duration-only leaf is not payload-free — it materializes the parent's values — and on Postgres its blob rows are the same rows backing its parent.
+- **Preserve shared storage.** General retention computes blob reachability in a whole-thread pass. Admission cleanup instead requires the root duration leaf and its parent to have identical channel-version maps, deletes only the leaf's checkpoint/writes rows, and leaves all shared blobs intact.
 - **All-or-nothing.** A partial deletion that leaves a dangling parent link converts a cleanup into a thread-level outage: branch and regenerate fail loudly for every later turn.
 
-There is also a history fast-path interaction to sequence around: the trailing duration-only leaf carries the `run_durations` and `run_message_ids` maps that `get_thread_history` reads from the latest checkpoint. Deleting the leaf makes the next history read fall back to store scans and re-persist a fresh leaf, so any wiring must sequence retention away from history reads or spare cache-carrying leaves.
+There is also a history fast-path interaction: the trailing duration-only leaf carries the `run_durations` and `run_message_ids` maps that `get_thread_history` reads from the latest checkpoint. The Gateway keeps that leaf available for history reads until the next run wins durable same-thread admission, then deletes it under the checkpoint lock before the run's first checkpoint read. Cleanup reads at most the root head and its parent and probes only the candidate's pending writes; it performs no history scan, statistics pass or blob GC. Explicit `checkpoint_id` and `checkpoint_map` selections are protected. Delta-history caches are invalidated before deletion, and a cache failure preserves the source checkpoint.
 
 ### Policy defaults
 
@@ -92,11 +92,11 @@ There is also a history fast-path interaction to sequence around: the trailing d
 | `strict_pending_write_guard` | `True` | Treat any checkpoint that still owns writes rows as protected |
 | `max_delete_per_run` | `None` | Optional cap on deletions per run |
 
-### There is no production trigger yet
+### Production retention trigger
 
-The retention service (`backend/app/gateway/checkpoint_retention.py`) ships **without a production trigger**: where retention is invoked from — post-run hook, scheduler, or explicit admin action — is a maintainer decision that lands with the contract itself. Nothing in DeerFlow calls it, and there is no production caller of `prune` or `aprune` either: in the pinned environment only the base implementation defines them, and it raises `NotImplementedError`.
+After a run wins durable same-thread admission, the Gateway calls the conservative retention policy before its first checkpoint read. The admission fence and per-thread checkpoint lock exclude concurrent runs and writers; explicitly selected checkpoint IDs are protected. The hook deletes at most one contract-proven trailing metadata-only leaf and treats failures as non-fatal. It does not prune resumable ancestors or sibling branches.
 
-Treat this as unfinished work rather than a safe default. The executable contract proves the branch-ancestor, explicit-resume-target, pending-writes, leaf-duration, and leaf-sibling scenarios against the **full-mode** state schema; only the growth baseline is delta-shaped. Delta-specific prune safety is neither proved by the suite nor implemented.
+The production trailing-duration-leaf deletion has regressions against both **full** and **delta** state schemas. The broader branch-ancestor, explicit-resume-target, pending-writes, and sibling-branch contract is still primarily full-shaped; production does not attempt those deletions without a future rebase/TTL contract.
 
 ## The one remaining patch
 
@@ -206,7 +206,7 @@ Three consequences are worth stating plainly:
 
 - **Redis is rejected on the sync path.** Selecting `database.checkpoint_cache.type: redis` raises `ValueError("database.checkpoint_cache.type 'redis' is not supported on the sync checkpointer path (TUI/embedded); use 'memory'.")` at checkpointer construction, so a configuration that is valid for the Gateway can break the TUI. The rejection is honest rather than a fallback: the sync path is process-local anyway.
 - **There is no degraded read path.** Delta materialization needs the graph's channel table, and the TUI has no equivalent to the Gateway's raw-checkpoint fallback.
-- **An uncaught mismatch is a traceback on the headless runners.** The embedded client raises `CheckpointModeMismatchError` in-process — no HTTP status, no run record, no SSE frame — and the CLI dispatches straight to its print or JSON runner without a handler, so `--print` and `--json` fail with a Python traceback on stderr. The Textual TUI is the exception: its `stream_actions()` helper catches every exception from `client.stream()` and emits `AssistantError` plus `RunEnded`, so an interactive user sees the failure in the UI instead.
+- **A mismatch is a reported error on every surface.** The embedded client raises `CheckpointModeMismatchError` in-process — no HTTP status, no run record, no SSE frame. The CLI's headless runners catch it: `--print` prints a concise `Error: ...` line on stderr and exits non-zero, and `--json` appends a terminal `{"type": "error"}` record to the NDJSON stream (diagnostics stay on stderr) and exits non-zero. The Textual TUI's `stream_actions()` helper catches the same exception and emits `AssistantError` plus `RunEnded`, so an interactive user sees the failure in the UI.
 
 Third-party embedders hit a related guard: `create_deerflow_agent` with `checkpoint_channel_mode="delta"` **and** a checkpointer is rejected with `ValueError`, because graphs built there bypass checkpoint-mode marker injection and the fail-closed compatibility gate, so a mixed-mode store would silently corrupt thread state. Delta without a checkpointer is ephemeral and allowed; persisted delta graphs must go through the guarded application paths (`make_lead_agent` or `DeerFlowClient`).
 

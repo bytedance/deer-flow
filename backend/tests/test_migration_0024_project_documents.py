@@ -42,7 +42,15 @@ COLUMNS = {
     "trash_origin",
     "created_at",
     "updated_at",
+    # Added by 0037_project_document_summaries: the empty-DB bootstrap path
+    # creates the table from the ORM model, so the column is present here.
+    "summary",
 }
+
+#: The shape produced by the 0024 revision's own ``create_table`` — without
+#: the later 0037 column. Bootstrap (create_all from ORM) carries ``summary``;
+#: a downgrade-and-re-upgrade to 0024 does not.
+COLUMNS_AT_0024 = COLUMNS - {"summary"}
 
 
 async def _engine(tmp_path, name: str = "test.db"):
@@ -92,7 +100,7 @@ async def test_0024_downgrade_drops_table_and_reupgrade_recreates(tmp_path):
         await asyncio.to_thread(command.upgrade, cfg, REVISION)
         exists, columns, indexes = await _inspect(engine)
         assert exists
-        assert columns == COLUMNS
+        assert columns == COLUMNS_AT_0024
         assert INDEXES <= indexes
     finally:
         await close_engine()

@@ -38,6 +38,7 @@ def test_process_queue_forwards_correction_flag_to_updater() -> None:
         user_id=None,
         trace_id=None,
         bypass_watermark=False,
+        judge=True,
     )
 
 
@@ -68,6 +69,7 @@ def test_process_queue_forwards_reinforcement_flag_to_updater() -> None:
         user_id=None,
         trace_id=None,
         bypass_watermark=False,
+        judge=True,
     )
 
 
@@ -142,7 +144,7 @@ def test_finishing_worker_reschedules_once_when_reprocess_pending() -> None:
     with patch("deerflow.agents.memory.backends.deermem.deermem.core.queue.threading.Timer", return_value=created_timer) as timer_cls:
         queue._process_queue()
 
-    timer_cls.assert_called_once_with(0, queue._process_queue)
+    timer_cls.assert_called_once_with(0.05, queue._process_queue)
     assert created_timer.daemon is True
     created_timer.start.assert_called_once_with()
     assert queue._reprocess_pending is False
@@ -188,7 +190,7 @@ def test_flush_nowait_is_non_blocking() -> None:
 
 def test_queue_keeps_updates_for_different_agents_in_same_thread() -> None:
     queue = _queue()
-    with patch.object(queue, "_reset_timer"):
+    with patch.object(queue, "_rearm_timer_locked"):
         queue.add(thread_id="thread-1", messages=["agent-a"], agent_name="agent-a")
         queue.add(thread_id="thread-1", messages=["agent-b"], agent_name="agent-b")
 
@@ -210,7 +212,7 @@ def test_queue_still_coalesces_updates_for_same_agent_in_same_thread() -> None:
 
 def test_process_queue_updates_different_agents_in_same_thread_separately() -> None:
     queue = _queue()
-    with patch.object(queue, "_reset_timer"):
+    with patch.object(queue, "_rearm_timer_locked"):
         queue.add(thread_id="thread-1", messages=["agent-a"], agent_name="agent-a")
         queue.add(thread_id="thread-1", messages=["agent-b"], agent_name="agent-b")
 
@@ -224,8 +226,8 @@ def test_process_queue_updates_different_agents_in_same_thread_separately() -> N
     assert mock_updater.update_memory.call_count == 2
     mock_updater.update_memory.assert_has_calls(
         [
-            call(messages=["agent-a"], thread_id="thread-1", agent_name="agent-a", signals=frozenset(), user_id=None, trace_id=None, bypass_watermark=False),
-            call(messages=["agent-b"], thread_id="thread-1", agent_name="agent-b", signals=frozenset(), user_id=None, trace_id=None, bypass_watermark=False),
+            call(messages=["agent-a"], thread_id="thread-1", agent_name="agent-a", signals=frozenset(), user_id=None, trace_id=None, bypass_watermark=False, judge=True),
+            call(messages=["agent-b"], thread_id="thread-1", agent_name="agent-b", signals=frozenset(), user_id=None, trace_id=None, bypass_watermark=False, judge=True),
         ]
     )
 
@@ -246,6 +248,7 @@ def test_process_queue_forwards_trace_id_to_updater() -> None:
         user_id=None,
         trace_id="trace-memory-1",
         bypass_watermark=False,
+        judge=True,
     )
 
 
@@ -290,6 +293,7 @@ def test_flush_sync_drains_pending_queue_and_returns_true() -> None:
         user_id=None,
         trace_id=None,
         bypass_watermark=False,
+        judge=False,
     )
 
 
@@ -502,5 +506,6 @@ def test_cancel_by_agent_does_not_touch_in_flight_batch() -> None:
         user_id=in_flight[0].user_id,
         trace_id=None,
         bypass_watermark=False,
+        judge=True,
     )
     mock_updater.update_memory.assert_called_once()

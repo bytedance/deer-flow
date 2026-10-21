@@ -39,6 +39,7 @@ from deerflow.projects.documents import (
     stage_document_copy_for_attach,
     validate_shelf_filename,
 )
+from deerflow.projects.summaries import enqueue_summary
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.uploads.manager import normalize_filename
 from deerflow.utils.file_io import run_file_io
@@ -63,6 +64,9 @@ class ProjectDocumentResponse(BaseModel):
     source_name: str | None = None
     created_at: str
     updated_at: str
+    #: Best-effort LLM-generated one-line description; NULL when
+    #: generation is disabled, pending, failed, or the source is ineligible.
+    summary: str | None = None
     #: Read-time truth (never a persisted column): the immutable original is
     #: missing or size-mismatched — external interference, §8.3/§11. The
     #: derived companion is not the integrity anchor; the original is.
@@ -96,6 +100,7 @@ def _to_response(row: dict, *, content_missing: bool = False) -> ProjectDocument
         source_name=row.get("source_name"),
         created_at=row.get("created_at", ""),
         updated_at=row.get("updated_at", ""),
+        summary=row.get("summary") or None,
         content_missing=content_missing,
     )
 
@@ -128,6 +133,20 @@ async def _require_project(request: Request, project_id: str) -> dict:
     """Owned project row in any status (archived keeps read access, §8.4), else 404."""
     row = await get_project_repo(request).get(project_id)
     if row is None:
+        raise _not_found()
+    return row
+
+
+async def _require_active_project(request: Request, project_id: str) -> dict:
+    """Owned ``status='active'`` project row, else 404 — checked before staging.
+
+    Staging creates ``users/{user_id}/projects/{project_id}/`` on disk, so a
+    missing, foreign, or archived project (or an id no row can carry) must be
+    rejected before any byte is written. The shelf insert re-checks under the
+    project row lock; this is the early exit, not the authority (§8.4).
+    """
+    row = await _require_project(request, project_id)
+    if row.get("status") != "active":
         raise _not_found()
     return row
 
@@ -173,9 +192,9 @@ async def upload_project_document(
 ) -> ProjectDocumentUploadResponse:
     """Shelf exactly one file (§17.2): 201 created, or 200 on a content dedup hit.
 
-    Active projects only — the shelf insert locks the project row with
-    ``status='active'`` inside its transaction, so an archived/foreign/missing
-    project is the same 404 (§8.4, §11). The display name defaults to the
+    Active projects only — an archived/foreign/missing project is the same
+    404 (§8.4, §11), rejected before the body is staged and re-checked by the
+    shelf insert under the project row lock. The display name defaults to the
     multipart filename; both go through the same validation (400 when empty,
     separator-bearing, or over 255 UTF-8 bytes). Size reuses
     ``uploads.max_file_size`` (413, mirroring the uploads router).
@@ -185,6 +204,7 @@ async def upload_project_document(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
+    await _require_active_project(request, project_id)
     user_id = get_effective_user_id()
     paths = get_paths()
     max_file_size = _get_upload_limit(config, "max_file_size", DEFAULT_MAX_FILE_SIZE, legacy_key="max_single_file_size")
@@ -215,6 +235,9 @@ async def upload_project_document(
         # Dedup hit: same body, 200 instead of 201 — the first writer's name
         # and provenance win (§10.9).
         response.status_code = 200
+    else:
+        # Best-effort: off by default; no-op when unwired/disabled (§6.1).
+        enqueue_summary(document_id=row["id"], project_id=project_id, user_id=user_id)
     return ProjectDocumentUploadResponse(document=_to_response(row), deduplicated=not created)
 
 
@@ -279,9 +302,9 @@ async def promote_thread_file_to_shelf(
     The source is never moved — the shelf gets a project-owned snapshot with
     provenance (``source_thread_id``/``source_kind``/``source_name``), so
     deleting the thread cannot affect it. ``shelf_name`` defaults to the
-    source name and follows upload-name validation. The shelf insert locks
-    the project row with ``status='active'``, so an archived/foreign/missing
-    project is the same 404 as a source that fails confinement (§8.4, §11).
+    source name and follows upload-name validation. An archived/foreign/missing
+    project is the same 404 as a source that fails confinement (§8.4, §11),
+    rejected before staging and re-checked by the shelf insert's row lock.
     Response mirrors upload: 201 created, 200 on a content dedup hit (the
     existing row keeps its own name and provenance, §10.9).
     """
@@ -299,6 +322,7 @@ async def promote_thread_file_to_shelf(
     if source is None:
         raise _not_found()
 
+    await _require_active_project(request, project_id)
     max_file_size = _get_upload_limit(config, "max_file_size", DEFAULT_MAX_FILE_SIZE, legacy_key="max_single_file_size")
     try:
         staged = await stage_document_bytes(paths, user_id=user_id, project_id=project_id, chunks=read_file_chunks(source, chunk_size=UPLOAD_CHUNK_SIZE), max_bytes=max_file_size)
@@ -329,6 +353,9 @@ async def promote_thread_file_to_shelf(
         # Dedup hit: same body, 200 instead of 201 — the first writer's name
         # and provenance win (§10.9).
         response.status_code = 200
+    else:
+        # Best-effort: off by default; no-op when unwired/disabled (§6.1).
+        enqueue_summary(document_id=row["id"], project_id=project_id, user_id=user_id)
     return ProjectDocumentUploadResponse(document=_to_response(row), deduplicated=not created)
 
 
@@ -380,9 +407,9 @@ async def attach_project_document_to_thread(
             await service.open()
             file_info = await service.ingest_chunks(read_file_chunks(staged_path, chunk_size=UPLOAD_CHUNK_SIZE), display_name=row["name"])
         except UnsafeFilenameError as exc:
-            # Shelf names always normalize, so this cannot fire — fail closed.
+            # Legacy shelf rows may predate current upload-name validation.
             await service.cleanup_written()
-            raise HTTPException(status_code=500, detail=f"Failed to upload {row['name']}: {exc}")
+            raise HTTPException(status_code=400, detail=f"Cannot attach {row['name']}: {exc}. Download it, rename it, and upload it directly to the thread.")
         except UnsafeUploadDestinationError as exc:
             await service.cleanup_written()
             raise HTTPException(status_code=500, detail=f"Failed to upload {row['name']}: {exc}")

@@ -133,6 +133,15 @@ async def _noop_initial_state(self, task):
     return ({}, [], None)
 
 
+def _create_agent_stub(seen: dict | None = None):
+    """Async stand-in for SubagentExecutor._create_agent (the real one is async)."""
+
+    async def _create(self, tools, **kwargs):
+        return _CompletingAgent(seen)
+
+    return _create
+
+
 @pytest.mark.asyncio
 async def test_subagent_success_emits_shaped_start_and_completed_stop(monkeypatch, env):
     recorder = _Recorder()
@@ -140,11 +149,7 @@ async def test_subagent_success_emits_shaped_start_and_completed_stop(monkeypatc
     executor = _executor(env)
     seen: dict = {}
     monkeypatch.setattr(env.SubagentExecutor, "_build_initial_state", _noop_initial_state)
-    monkeypatch.setattr(
-        env.SubagentExecutor,
-        "_create_agent",
-        lambda self, tools, **kwargs: _CompletingAgent(seen),
-    )
+    monkeypatch.setattr(env.SubagentExecutor, "_create_agent", _create_agent_stub(seen))
 
     result = await executor._aexecute("do the thing")
 
@@ -178,11 +183,7 @@ async def test_subagent_failure_and_cancellation_map_to_distinct_outcomes(monkey
     assert recorder.stops[-1][1] is TaskOutcome.FAILED
 
     monkeypatch.setattr(env.SubagentExecutor, "_build_initial_state", _noop_initial_state)
-    monkeypatch.setattr(
-        env.SubagentExecutor,
-        "_create_agent",
-        lambda self, tools, **kwargs: _CompletingAgent(),
-    )
+    monkeypatch.setattr(env.SubagentExecutor, "_create_agent", _create_agent_stub())
     holder = env.SubagentResult(
         task_id="cancel-me",
         trace_id="trace",
@@ -218,11 +219,7 @@ async def test_subagent_without_parent_run_skips_lifecycle_but_keeps_task_store(
     executor = _executor(env, run_id=None)
     seen: dict = {}
     monkeypatch.setattr(env.SubagentExecutor, "_build_initial_state", _noop_initial_state)
-    monkeypatch.setattr(
-        env.SubagentExecutor,
-        "_create_agent",
-        lambda self, tools, **kwargs: _CompletingAgent(seen),
-    )
+    monkeypatch.setattr(env.SubagentExecutor, "_create_agent", _create_agent_stub(seen))
 
     result = await executor._aexecute("direct")
 
@@ -244,7 +241,7 @@ async def test_subagent_keeps_one_snapshot_across_build_context_and_hooks(monkey
         set_loaded_extensions(_loaded(second))
         return ({}, [], None)
 
-    def _capture_agent(self, tools, *, deferred_setup=None, extensions=None):
+    async def _capture_agent(self, tools, *, deferred_setup=None, extensions=None):
         seen["extensions"] = extensions
         return _CompletingAgent(seen)
 

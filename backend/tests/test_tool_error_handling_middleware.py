@@ -212,23 +212,26 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     # ToolErrorHandling)
     # + 1 ReadBeforeWriteMiddleware + 1 LoopDetectionMiddleware
     # + 1 TokenBudgetMiddleware (subagents.token_budget enabled by default, #3875 Phase 2)
-    # + 1 SkillActivationMiddleware + 1 SkillToolPolicyMiddleware
+    # + 1 SkillActivationMiddleware (allowed-tools is metadata, no policy wrapper)
     # + 1 SafetyFinishReasonMiddleware + 1 DurableContextMiddleware
     # + 1 SubagentDateContextMiddleware
     # + 1 SystemMessageCoalescingMiddleware + 1 ToolReceiptMiddleware
     # (all enabled by default).
+    # + 1 ArtifactResolutionMiddleware + 1 ArtifactCaptureMiddleware
+    # (tool_artifacts enabled by default, #4676).
+    # + 1 ModelContentCompatibilityMiddleware (unconditional read-time
+    # sanitizer between DurableContext and the date/coalescer tail).
     from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
     from deerflow.agents.middlewares.dynamic_context_middleware import SubagentDateContextMiddleware
     from deerflow.agents.middlewares.knowledge_scope_middleware import KnowledgeScopeMiddleware
     from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
     from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
-    from deerflow.agents.middlewares.skill_tool_policy_middleware import SkillToolPolicyMiddleware
     from deerflow.agents.middlewares.system_message_coalescing_middleware import SystemMessageCoalescingMiddleware
     from deerflow.agents.middlewares.token_budget_middleware import TokenBudgetMiddleware
     from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
     from deerflow.agents.middlewares.tool_receipt_middleware import ToolReceiptMiddleware
 
-    assert len(middlewares) == 20
+    assert len(middlewares) == 22
     assert isinstance(middlewares[0], FakeMiddleware)  # InputSanitizationMiddleware stub
     assert isinstance(middlewares[1], KnowledgeScopeMiddleware)
     assert isinstance(middlewares[2], ToolOutputBudgetMiddleware)
@@ -242,9 +245,6 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     assert any(isinstance(m, TokenBudgetMiddleware) for m in middlewares)
     assert any(isinstance(m, SafetyFinishReasonMiddleware) for m in middlewares)
     activation_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, SkillActivationMiddleware))
-    policy_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, SkillToolPolicyMiddleware))
-    assert policy_idx == activation_idx + 1
-    assert middlewares[activation_idx]._slash_source_owner_token == middlewares[policy_idx]._slash_source_owner_token
     # DurableContextMiddleware is present but not last: the coalescer (#4040) is
     # appended innermost so it can merge the SystemMessage DurableContext injects.
     # The coalescer is appended unconditionally (after the optional summarization
@@ -253,7 +253,7 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     durable_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, DurableContextMiddleware))
     date_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, SubagentDateContextMiddleware))
     assert isinstance(middlewares[-1], SystemMessageCoalescingMiddleware)
-    assert policy_idx < durable_idx < date_idx == len(middlewares) - 2
+    assert activation_idx < durable_idx < date_idx == len(middlewares) - 2
 
 
 def test_subagent_runtime_sandbox_does_not_own_lead_skill_projection() -> None:
@@ -300,6 +300,75 @@ def test_tool_progress_middleware_is_outer_relative_to_error_handling(monkeypatc
     progress_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, ToolProgressMiddleware))
     error_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, ToolErrorHandlingMiddleware))
     assert progress_idx < error_idx, f"ToolProgressMiddleware (index {progress_idx}) must be outer (lower index) than ToolErrorHandlingMiddleware (index {error_idx}); order: {[type(m).__name__ for m in middlewares]}"
+
+
+def test_artifact_middlewares_ordering_in_runtime_chain(monkeypatch: pytest.MonkeyPatch):
+    # Resolution precedes authorization, auditing and write/progress gates;
+    # all policy layers inspect the same concrete arguments as the tool.
+    # ArtifactCaptureMiddleware is position-independent in the wrap chain — it
+    # is a `before_model` hook reading state messages, not a tool wrapper — so
+    # the assertion below only pins its assembly slot, not a behavioral
+    # dependency. — issue #4676.
+    from deerflow.agents.middlewares.artifact_capture_middleware import ArtifactCaptureMiddleware
+    from deerflow.agents.middlewares.artifact_resolution_middleware import ArtifactResolutionMiddleware
+    from deerflow.config.tool_artifact_config import ToolArtifactConfig
+    from deerflow.config.tool_progress_config import ToolProgressConfig
+
+    app_config = AppConfig(
+        models=[
+            ModelConfig(
+                name="test-model",
+                display_name="test-model",
+                description=None,
+                use="langchain_openai:ChatOpenAI",
+                model="test-model",
+            )
+        ],
+        sandbox=SandboxConfig(use="test"),
+        guardrails=GuardrailsConfig(enabled=False),
+        circuit_breaker=CircuitBreakerConfig(failure_threshold=7, recovery_timeout_sec=11),
+        tool_progress=ToolProgressConfig(enabled=True),
+        tool_artifacts=ToolArtifactConfig(enabled=True, resolve_handles_in_args=True),
+    )
+
+    _stub_runtime_middleware_imports(monkeypatch)
+
+    middlewares = build_subagent_runtime_middlewares(app_config=app_config, lazy_init=False)
+    names = [type(m).__name__ for m in middlewares]
+
+    resolution_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, ArtifactResolutionMiddleware))
+    capture_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, ArtifactCaptureMiddleware))
+    error_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, ToolErrorHandlingMiddleware))
+    assert resolution_idx < error_idx < capture_idx, f"expected resolution < error < capture, got: {names}"
+    for name in ("FakeSandboxAuditMiddleware", "ReadBeforeWriteMiddleware", "ToolProgressMiddleware"):
+        gate_idx = next(i for i, m in enumerate(middlewares) if type(m).__name__ == name)
+        assert resolution_idx < gate_idx, names
+
+
+def test_artifact_capture_absent_when_disabled(monkeypatch: pytest.MonkeyPatch):
+    from deerflow.agents.middlewares.artifact_capture_middleware import ArtifactCaptureMiddleware
+    from deerflow.config.tool_artifact_config import ToolArtifactConfig
+
+    app_config = AppConfig(
+        models=[
+            ModelConfig(
+                name="test-model",
+                display_name="test-model",
+                description=None,
+                use="langchain_openai:ChatOpenAI",
+                model="test-model",
+            )
+        ],
+        sandbox=SandboxConfig(use="test"),
+        guardrails=GuardrailsConfig(enabled=False),
+        circuit_breaker=CircuitBreakerConfig(failure_threshold=7, recovery_timeout_sec=11),
+        tool_artifacts=ToolArtifactConfig(enabled=False),
+    )
+
+    _stub_runtime_middleware_imports(monkeypatch)
+
+    middlewares = build_subagent_runtime_middlewares(app_config=app_config, lazy_init=False)
+    assert not any(isinstance(m, ArtifactCaptureMiddleware) for m in middlewares)
 
 
 def test_middleware_ordering_guard_moved_to_declarative_constraints(monkeypatch: pytest.MonkeyPatch):
@@ -697,7 +766,7 @@ def test_subagent_runtime_middlewares_attach_deferred_filter_when_setup_has_name
 
     from deerflow.agents.middlewares.deferred_tool_filter_middleware import DeferredToolFilterMiddleware
     from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
-    from deerflow.agents.middlewares.skill_tool_policy_middleware import SkillToolPolicyMiddleware
+    from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
     from deerflow.agents.middlewares.tool_promotion_audit_middleware import DeferredToolPromotionAuditMiddleware
     from deerflow.tools.builtins.tool_search import build_deferred_tool_setup
     from deerflow.tools.mcp_metadata import tag_mcp_tool
@@ -720,10 +789,10 @@ def test_subagent_runtime_middlewares_attach_deferred_filter_when_setup_has_name
     assert len(filters) == 1
     assert len(audits) == 1
     audit_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, DeferredToolPromotionAuditMiddleware))
-    policy_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, SkillToolPolicyMiddleware))
+    activation_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, SkillActivationMiddleware))
     filter_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, DeferredToolFilterMiddleware))
     safety_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, SafetyFinishReasonMiddleware))
-    assert audit_idx < policy_idx < filter_idx
+    assert activation_idx < audit_idx < filter_idx
     assert filter_idx < safety_idx
 
 

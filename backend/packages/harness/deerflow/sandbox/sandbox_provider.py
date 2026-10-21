@@ -129,7 +129,10 @@ class SandboxProvider(ABC):
         return []
 
     async def consume_network_policy_events_async(self, sandbox_id: str) -> list[dict[str, object]]:
-        return await asyncio.to_thread(self.consume_network_policy_events, sandbox_id)
+        return await run_sync_lifecycle_operation(
+            self.consume_network_policy_events,
+            sandbox_id,
+        )
 
     def deny_pending_network_policy_events(self, sandbox_id: str) -> bool:
         """Atomically deny all unsurfaced trusted-proxy events for a sandbox."""
@@ -137,7 +140,10 @@ class SandboxProvider(ABC):
         return False
 
     async def deny_pending_network_policy_events_async(self, sandbox_id: str) -> bool:
-        return await asyncio.to_thread(self.deny_pending_network_policy_events, sandbox_id)
+        return await run_sync_lifecycle_operation(
+            self.deny_pending_network_policy_events,
+            sandbox_id,
+        )
 
     def decide_network_policy_request(self, sandbox_id: str, request_id: str, decision: str) -> bool:
         """Apply a user decision to one trusted-proxy event."""
@@ -145,7 +151,12 @@ class SandboxProvider(ABC):
         return False
 
     async def decide_network_policy_request_async(self, sandbox_id: str, request_id: str, decision: str) -> bool:
-        return await asyncio.to_thread(self.decide_network_policy_request, sandbox_id, request_id, decision)
+        return await run_sync_lifecycle_operation(
+            self.decide_network_policy_request,
+            sandbox_id,
+            request_id,
+            decision,
+        )
 
 
 _default_sandbox_provider: SandboxProvider | None = None
@@ -242,11 +253,11 @@ def reset_sandbox_provider() -> None:
 
 
 def shutdown_sandbox_provider() -> None:
-    """Shutdown and reset the sandbox provider.
+    """Shutdown the provider, keeping failed cleanup reachable for retry.
 
-    This properly shuts down the provider (releasing all sandboxes)
-    before clearing the singleton. Call this when the application
-    is shutting down or when you need to completely reset the sandbox system.
+    A provider installed concurrently takes precedence over a failed instance.
+    Provider callbacks run outside the registry lock; discard execution leases
+    only after successful shutdown.
     """
     global _default_sandbox_provider
     # Detach the reference under the lock, then run the (potentially slow)
@@ -257,8 +268,17 @@ def shutdown_sandbox_provider() -> None:
     if provider is not None and hasattr(provider, "shutdown"):
         from deerflow.sandbox.lease import discard_sandbox_lease_manager
 
-        discard_sandbox_lease_manager(provider)
-        provider.shutdown()
+        try:
+            provider.shutdown()
+        except BaseException:
+            # Keep a failed cleanup reachable for a later shutdown call, without
+            # replacing a new provider installed while this callback ran.
+            with _provider_lock:
+                if _default_sandbox_provider is None:
+                    _default_sandbox_provider = provider
+            raise
+        else:
+            discard_sandbox_lease_manager(provider)
 
 
 def set_sandbox_provider(provider: SandboxProvider) -> None:

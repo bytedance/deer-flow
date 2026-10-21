@@ -1,5 +1,4 @@
 import base64
-import errno
 import logging
 import math
 import threading
@@ -9,17 +8,18 @@ from dataclasses import dataclass, field
 import httpx
 from agent_sandbox import Sandbox as AioSandboxClient
 from agent_sandbox.core.api_error import ApiError
+from pydantic import ValidationError
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
+from deerflow.sandbox.download import DEFAULT_DOWNLOAD_LIMIT as _MAX_DOWNLOAD_SIZE
+from deerflow.sandbox.download import download_limit, read_download_stream
 from deerflow.sandbox.remote_list_dir import parse_remote_list_dir_output, remote_list_dir_command
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
-from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path, truncate_line
+from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path_under_root, truncate_line
 
 from .backend import sandbox_http_trust_env
 
 logger = logging.getLogger(__name__)
-
-_MAX_DOWNLOAD_SIZE = 100 * 1024 * 1024  # 100 MB
 
 _ERROR_OBSERVATION_SIGNATURE = "'ErrorObservation' object has no attribute 'exit_code'"
 
@@ -75,6 +75,7 @@ class AioSandbox(Sandbox):
         home_dir: str | None = None,
         request_headers: dict[str, str] | None = None,
         default_command_timeout: float | None = None,
+        lark_cli_broker: bool | None = None,
     ):
         """Initialize the AIO sandbox.
 
@@ -86,8 +87,14 @@ class AioSandbox(Sandbox):
                 relay. These are never injected into sandbox commands.
             default_command_timeout: Provider-configured command deadline used
                 when a command does not provide an explicit timeout.
+            lark_cli_broker: Pod-attested Lark broker mode. ``True``/``False``
+                are attested states; the ``None`` default keeps an unattested
+                sandbox fail-closed, so a construction site that forgets to
+                thread the attested value cannot silently authorize the
+                plaintext credential-mount overlay.
         """
         super().__init__(id)
+        self.lark_cli_broker = lark_cli_broker
         if default_command_timeout is None:
             self._default_command_timeout = self._DEFAULT_HARD_TIMEOUT
         else:
@@ -315,11 +322,24 @@ class AioSandbox(Sandbox):
             )
 
     @property
+    def has_pending_session_creates(self) -> bool:
+        """Whether a shell/bash create still needs its outcome reconciled."""
+        with self._session_creation_state_lock:
+            return bool(self._shell_session_creation_state.pending or self._bash_session_creation_state.pending)
+
+    @property
     def requires_container_recycle(self) -> bool:
         with self._session_creation_state_lock:
             shell = self._shell_session_creation_state
             bash = self._bash_session_creation_state
-            return bool(shell.pending or shell.ambiguous or bash.pending or bash.ambiguous)
+            # The implicit shell cannot be cleaned up by a known session id.
+            # Its fence must outlive this client, including release/reclaim.
+            # Pending creations are transient in-flight requests, not uncertain
+            # outcomes: an unresolved create becomes an ambiguous tombstone
+            # before its execution lease ends. Fencing on pending let a
+            # concurrent acquire recycle a healthy container that another run
+            # was actively using.
+            return bool(self._default_shell_corrupted or shell.ambiguous or bash.ambiguous)
 
     def _create_shell_session(self, client) -> str:
         session_id = str(uuid.uuid4())
@@ -399,6 +419,8 @@ class AioSandbox(Sandbox):
         timeout: float,
     ) -> tuple[str, int | None, str | None]:
         kwargs = {
+            # /v1/shell is a persistent PTY. Keep its command and terminal stdin
+            # intact; the broker shim already treats a TTY as non-payload input.
             "command": command,
             "no_change_timeout": self._effective_no_change_timeout(timeout),
             "hard_timeout": timeout,
@@ -916,7 +938,14 @@ class AioSandbox(Sandbox):
                 try:
                     session_id = self._create_bash_session(self._client)
                     result = self._client.bash.exec(
-                        command=command,
+                        # /v1/bash keeps a subprocess stdin pipe open for writes.
+                        # This fresh, released session is non-interactive, so close
+                        # its default input before running the original script.
+                        # Explicit pipes/heredocs/files still override fd0. A plain
+                        # prefix keeps top-level parsing (aliases/extglob) and never
+                        # appends a delimiter that a trailing backslash can consume.
+                        # Do not apply exec to the persistent PTY transport above.
+                        command=f"exec < /dev/null\n{command}",
                         session_id=session_id,
                         env=env,
                         hard_timeout=timeout,
@@ -1001,11 +1030,21 @@ class AioSandbox(Sandbox):
                 kwargs["end_line"] = max(end_line, 0)
             result = self._client.file.read_file(file=path, **kwargs)
             return result.data.content if result.data else ""
+        except ValidationError as e:
+            # The server reports read failures (e.g. ENOENT) as an error
+            # envelope with ``data: {}``, which cannot satisfy the required
+            # ``content``/``file`` fields of the SDK's FileReadResult model,
+            # so the SDK raises a ValidationError. A missing file is an
+            # expected outcome (ReadBeforeWrite probes every new-file write),
+            # so log quietly and return an explicit, model-actionable result
+            # instead of leaking the pydantic error text.
+            logger.debug("Sandbox read_file validation failure for %r: %s", path, e)
+            return f"Error: file not found or unreadable: {path}"
         except Exception as e:
             logger.error(f"Failed to read file in sandbox: {e}")
             return f"Error: {e}"
 
-    def download_file(self, path: str) -> bytes:
+    def download_file(self, path: str, *, max_bytes: int | None = None) -> bytes:
         """Download file bytes from the sandbox.
 
         Raises:
@@ -1013,6 +1052,7 @@ class AioSandbox(Sandbox):
                 outside ``VIRTUAL_PATH_PREFIX``.
             OSError: If the file cannot be retrieved from the sandbox.
         """
+        limit = download_limit(max_bytes, _MAX_DOWNLOAD_SIZE)
         # Reject path traversal before sending to the container API.
         # LocalSandbox gets this implicitly via _resolve_path;
         # here the path is forwarded verbatim so we must check explicitly.
@@ -1028,20 +1068,14 @@ class AioSandbox(Sandbox):
             logger.error("Refused download outside allowed directory: path=%s, allowed_prefix=%s", path, VIRTUAL_PATH_PREFIX)
             raise PermissionError(f"Access denied: path must be under '{VIRTUAL_PATH_PREFIX}': '{path}'")
 
+        # Keep the lock through iteration and stream cleanup: the SDK iterator
+        # opens its HTTP response lazily, and close() detaches this client under
+        # the same lock before closing its pooled connections. Request-level
+        # concurrency does not make a download safe against concurrent close.
         with self._lock:
             try:
-                chunks: list[bytes] = []
-                total = 0
-                for chunk in self._client.file.download_file(path=path):
-                    total += len(chunk)
-                    if total > _MAX_DOWNLOAD_SIZE:
-                        raise OSError(
-                            errno.EFBIG,
-                            f"File exceeds maximum download size of {_MAX_DOWNLOAD_SIZE} bytes",
-                            path,
-                        )
-                    chunks.append(chunk)
-                return b"".join(chunks)
+                stream = self._client.file.download_file(path=path)
+                return read_download_stream(stream, limit, path)
             except OSError:
                 raise
             except Exception as e:
@@ -1156,22 +1190,22 @@ class AioSandbox(Sandbox):
                 raise
 
     def glob(self, path: str, pattern: str, *, include_dirs: bool = False, max_results: int = 200) -> tuple[list[str], bool]:
+        root_path = path.rstrip("/") or "/"
         if not include_dirs:
             result = self._client.file.find_files(path=path, glob=pattern)
             files = result.data.files if result.data and result.data.files else []
-            filtered = [file_path for file_path in files if not should_ignore_path(file_path)]
+            filtered = [file_path for file_path in files if not should_ignore_path_under_root(file_path, root_path)]
             truncated = len(filtered) > max_results
             return filtered[:max_results], truncated
 
         result = self._client.file.list_path(path=path, recursive=True, show_hidden=False)
         entries = result.data.files if result.data and result.data.files else []
         matches: list[str] = []
-        root_path = path.rstrip("/") or "/"
         root_prefix = root_path if root_path == "/" else f"{root_path}/"
         for entry in entries:
             if entry.path != root_path and not entry.path.startswith(root_prefix):
                 continue
-            if should_ignore_path(entry.path):
+            if should_ignore_path_under_root(entry.path, root_path):
                 continue
             rel_path = entry.path[len(root_path) :].lstrip("/")
             if path_matches(pattern, rel_path):
@@ -1223,7 +1257,7 @@ class AioSandbox(Sandbox):
         truncated = bool(data and data.truncated)
         for match in provider_matches:
             file_path = match.file
-            if should_ignore_path(file_path):
+            if should_ignore_path_under_root(file_path, root):
                 continue
             if file_path == root:
                 rel_path = file_path.rsplit("/", 1)[-1]

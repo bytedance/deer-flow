@@ -3,7 +3,12 @@
 A deployment-installed Python extension can register a `PluginContribution` with
 optional browser code, authenticated backend actions and model tools. This extends
 the existing `install(registry, config)` workflow. MCP and Skills keep their existing
-APIs and lifecycles. Public contracts live in `deerflow_extension_api` (0.2.4).
+APIs and lifecycles. Public contracts live in `deerflow_extension_api` (0.2.7).
+
+Backend actions and model tools may use the optional host-bound
+`context.agent_runs` capability to create, continue, inspect, resume, and cancel
+full Agent runs. See [Agent run control](../backend/docs/extension-agent-runs.md)
+for authorization, service-held handle lifetime, and handoff examples.
 
 The browser contribution API is experimental. `BrowserModule(code=...)` remains the
 self-contained transport; `BrowserAssets(root=...)` adds manifest-listed resources
@@ -35,6 +40,11 @@ the existing positional rollback and source attribution.
   loads a versioned resource manifest from an installed package (details below).
 - `BackendAction(name, handler)` declares an async handler receiving a JSON object and
   `ActionContext(principal, settings)`. The principal comes from host authentication.
+  Since API 0.2.7, keyword-only `interaction` defaults to `"other"`; the Gateway
+  stamps `"session"` only for authenticated session actions. It is not taken from
+  payloads and is never stamped on model `ToolContext`. Plugins implementing human
+  output review must also check resource ownership, exact attempt/version, and
+  reject `ToolContext`; session provenance alone is not business authorization.
 - `ModelTool(name, description, input_schema, handler, group="extensions")` declares
   an async handler with a `ToolContext` that additionally carries the thread ID.
   Object schemas must be inline: reference resolution is rejected. Tools enter the
@@ -47,6 +57,45 @@ Tool names are namespace-derived and collision-checked. Tool inputs are bounded 
 256 KiB, outputs to 64 KiB and execution to 30 seconds. Backend actions accept object
 inputs up to 256 KiB and have a 30-second timeout. Cancellation does not guarantee
 rollback of external effects or already-running worker-thread operations.
+
+### Structured tool artifacts
+
+Existing model tools return JSON-encoded content. To return separate structured
+metadata, declare the keyword-only `response_format="content_and_artifact"` and
+return `PluginToolResult` from the async handler:
+
+```python
+from deerflow_extension_api import ModelTool, PluginToolResult
+
+async def search(payload, context):
+    return PluginToolResult(
+        content="Retrieved excerpt from the selected document.",
+        artifact={"documents": [{"title": "Guide", "excerpt": "Retrieved excerpt"}]},
+    )
+
+tool = ModelTool(
+    "search", "Search selected documents",
+    {"type": "object", "properties": {"query": {"type": "string"}}},
+    search, response_format="content_and_artifact",
+)
+```
+
+Content must be a string and artifact must be a JSON object or `None`, with string
+keys in every nested object. Non-string keys are rejected rather than coerced.
+Content and artifact share the 64 KiB UTF-8 JSON output cap. The host validates and snapshots the artifact
+before attaching it to `ToolMessage.artifact`; it does not append it to ordinary
+tool content or let it replace the tool name or call ID. Invalid result shapes,
+non-JSON values and oversize output use the normal sanitized tool-error path.
+The default `response_format="content"` preserves existing JSON encoding,
+including tuple/list results. The structured mode requires a typed result rather
+than a bare tuple; an older host cannot silently JSON-encode that carrier.
+
+Use the matching host and extension-api 0.2.6 or newer, and declare that API floor
+through the existing extension decorator and package requirement. Artifacts can
+be persisted and exposed to host clients; they are not secret storage. Generic
+artifact support does not grant citation trust or change native RAGFlow tool-name
+checks. See the [local retrieval example](../examples/deerflow-extension-retrieval/README.md)
+for a small, default-disabled plugin without a knowledge-management service.
 
 A plugin can also contribute tools alone. The
 [text classification example](../examples/deerflow-extension-jev-classify/README.md)
@@ -242,6 +291,30 @@ as `plugin_actions` and `plugin_management`. A role with no policy for a
 resource is **unrestricted** for it, so list these keys explicitly wherever you
 want to constrain them; `config.example.yaml` shows the shape.
 
+### Middleware-declared tools
+
+A contributed middleware may declare tools through LangChain's `middleware.tools`
+attribute. When authorization is enabled, every build collects those declarations
+after the middleware stack is assembled and applies the same `tools` policy as for
+explicitly configured tools, seeded with the build's Layer-1 verdicts (a name
+denied for the build cannot be resurrected by declaring it). A middleware whose
+declaration is denied is replaced in that build's stack by an independent,
+state-preserving copy carrying only the authorized declarations — the contributor's
+own instance is never mutated, so a later build under a more permissive principal
+binds the declaration again. Declarations must be `BaseTool` instances with a
+usable name: anything else (for example a plain callable, which LangChain would
+otherwise auto-convert and bind unchecked) cannot be authorized by name and is
+removed from the bound stack with a warning when authorization is enabled — wrap
+callables in a `StructuredTool`. Three author-visible rules follow: declare tools as a
+plain instance attribute holding a `list` or `tuple` (a `tools` property cannot be
+narrowed safely and fails the build, and any other container shape — a `set`,
+generator, `dict_values`, … — would be iterated and bound by LangChain as-is, so it
+likewise fails the build), and if you customize `__copy__`, it must return an
+independent copy that preserves current instance state — returning `self` or
+rebuilding from constructor arguments fails the build loudly rather than silently
+restoring a denied tool. With `authorization.enabled: false` nothing is collected or
+narrowed.
+
 ### Guarding a contributed management route
 
 A contributed router is not covered by the registered-action dispatcher, so it
@@ -344,6 +417,33 @@ across a service restart. A changed asset revision or removed action fails expli
 and requires reload. Disabled/unloaded pages have no navigation entry after refresh;
 visiting an unavailable page directly does not mount a plugin.
 
+## Frontend implementation invariants
+
+`core/extensions/` loads authenticated deployment-installed ES modules from `/api/plugins`.
+Inline modules use authenticated fetch plus a released Blob URL. Manifest assets use
+native credentialed module scripts, preserving relative imports and resource URLs.
+Both honor the backend base and prefixes; transport and cache semantics are documented in
+`docs/full-stack-plugins.md`. Host copy belongs in the typed locale dictionaries.
+Conversation action factories, shapes and availability callbacks are guarded per plugin;
+only validated value snapshots reach the toolbar/sidebar render paths.
+`PluginNavigation` and the dynamic workspace extension route consume page declarations;
+Capability Center defaults to the repository examples in `core/extensions/catalog.ts`,
+merged by explicit namespace with runtime descriptors. Catalog-only entries are discovery
+metadata, never module-loader inputs or proof of installation. Backend-only examples may
+have no plugin descriptor; keep their runtime status unasserted. Details link to package
+installation instructions. Keep the catalog aligned with `examples/deerflow-extension-*`.
+Agent teams uses `community.agent-teams`; merge its installed descriptor into the
+localized catalog entry without asserting runtime status for a catalog-only row.
+Conversation action slots augment normal/custom-agent toolbars and sidebar menus without replacing native export or notification.
+Plugin views use mount/dispose and abort signals; Shadow DOM is CSS isolation, not a sandbox.
+Descriptors are user-keyed page snapshots, refreshed manually. Backend calls bind the plugin's
+namespace, action allowlist and expected viewer identity. See `docs/full-stack-plugins.md`.
+
+Plugin page `openConversation(threadId)` resolves authenticated thread metadata
+with `pathOfThread`; do not let plugins hardcode default-agent routes. The page's
+abort signal fences late navigation after unmount/account changes. Synchronous
+conversation-action callbacks reject Promise returns while consuming rejections.
+
 ## Validation scope
 
 The bookmark E2E test runs the production frontend against real Python action handlers
@@ -359,3 +459,76 @@ To exercise the actual Turbopack development build, start the frontend with
 `DEER_FLOW_DEV_BUNDLER=turbo pnpm dev`, then run
 `PLAYWRIGHT_SKIP_WEB_SERVER=1 pnpm exec playwright test tests/e2e/bookmark-plugin.spec.ts`.
 Set `PLAYWRIGHT_BASE_URL` if the development server uses a port other than 3000.
+
+### Composer mention providers
+
+An optional `mentionProviders` array on a browser module contributes candidates to
+both the native `@` menu and the mobile mention picker. No custom editor is needed:
+
+```javascript
+export default {
+  apiVersion: 1,
+  module: "example-team",
+  mentionProviders: [{
+    id: "members",
+    label: "Team members",
+    async search(query, context) {
+      return context.callBackend("find_members", { query });
+    },
+  }],
+};
+```
+
+Declare `find_members` in the package's backend actions. Its response is an array
+of `{ id, label, description? }`; the host supplies the namespace and provider ID.
+The context includes `locale`, `settings`, `threadId`, an `AbortSignal`, and the
+same viewer-bound `callBackend` service used by page surfaces. Observe the signal
+when doing asynchronous work. A provider must return a promise; the host debounces
+queries by 150 ms, truncates queries to 256 characters before calling `search`,
+stops waiting after three seconds, and discards late responses after query,
+thread, viewer, locale, or installed snapshot changes. Settled candidates remain
+visible while a new query is in flight within the same viewer/thread/locale and
+installed snapshot; changing any of those clears them immediately. A failed
+provider does not remove other providers or built-in candidates. Retrying is
+available in the picker.
+Cancellation ends host waiting; trusted JavaScript cannot be forcibly terminated.
+
+Each module may register eight providers, with unique lowercase slug IDs and
+labels of at most 120 characters. The picker searches the first 16 providers in
+installation order and considers at most 50 results per provider. Item IDs are
+nonempty strings of at most 512 characters, labels at most 120, descriptions at
+most 240. Duplicate item IDs within a provider are ignored. IDs are namespaced,
+so two plugins can use the same local identifier.
+
+Selections remain in the thread's existing draft as inline reference tokens.
+Submitting renders each token as `@label` in the human message and attaches:
+
+```json
+{"extension_mentions":[{"namespace":"example.team","provider":"members","id":"alice","label":"Alice"}]}
+```
+
+This object is in the human message's `additional_kwargs`. Up to 16 distinct
+plugin references may be submitted. Removing a token removes its metadata;
+duplicate tokens share one metadata entry. Restored references retain their
+original identities even if a package later becomes unavailable. **All metadata
+is user input, not authorization**: plugins must revalidate the referenced object,
+current installation, and viewer permissions before acting. The host does not
+interpret a reference as delegation or start another Agent. Those behaviors
+belong to the plugin's backend handlers or middleware.
+
+### Immutable file review and run configuration evidence
+
+`AgentRuns.configuration_evidence(thread_id, run_id)` returns host-owned proof
+recorded from actual Agent assembly before graph execution and bound to the run.
+It includes actual model, safe numeric parameters and keyed versions of instructions,
+model configuration, tools, Skills and policies. No raw secrets are exposed.
+Missing evidence fails closed; the declarative revision remains a separate preflight
+guard. Evidence describes assembly-time configuration, not external service state.
+
+`AgentRuns.read_artifact(thread_id, path)` authorizes a bounded (2 MiB) regular
+output-file snapshot, rejects symlink traversal, and reserves the thread against
+concurrent runs/edits while reading off-loop. The workflow extension stores those
+bytes append-only with SHA-256, approves exact versions, and serves preview and
+approved consumer reads from the same snapshot (16 KiB chunks). File versions are
+owner/workflow scoped; consumers cannot use an unapproved version. See the workflow
+extension README for limits and `captureArtifact` / `readArtifact` examples.

@@ -9,6 +9,7 @@ instance would be dead on the second call.
 from __future__ import annotations
 
 import asyncio
+import gzip
 import hashlib
 import json
 import time
@@ -325,6 +326,21 @@ class TestResponseValidation:
         provider = _provider(_Server(lambda request: httpx.Response(200, content=content)))
         with pytest.raises(TypeSafeGuardrailError) as excinfo:
             provider.evaluate(_request())
+        assert excinfo.value.cause == "invalid_response"
+
+    def test_a_compressed_response_denies_instead_of_being_read(self):
+        """A body that only becomes large after decompression is a failed evaluation.
+
+        The gate's failure direction is deny, so an endpoint that answers with an
+        encoded body must not be allowed through unexamined (the shared client refuses
+        to decode it and this provider maps that to ``invalid_response``).
+        """
+        body = gzip.compress(b" " * (1 << 20))
+        provider = _provider(_Server(lambda request: httpx.Response(200, content=body, headers={"Content-Encoding": "gzip"})))
+
+        with pytest.raises(TypeSafeGuardrailError) as excinfo:
+            provider.evaluate(_request())
+
         assert excinfo.value.cause == "invalid_response"
 
     def test_nan_never_reaches_the_threshold_comparison(self):

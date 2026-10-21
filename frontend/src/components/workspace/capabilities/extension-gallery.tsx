@@ -4,6 +4,7 @@ import { ArrowLeftIcon, ChevronRightIcon } from "lucide-react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 
 import { Button } from "@/components/ui/button";
+import { extensionDirectory } from "@/core/extensions/catalog";
 import { useFrontendExtensions } from "@/core/extensions/hooks";
 import { extensionIcon } from "@/core/extensions/registry";
 import { useI18n } from "@/core/i18n/hooks";
@@ -17,7 +18,10 @@ export function ExtensionGallery({ query = "" }: { query?: string }) {
   const router = useRouter();
   const pathname = usePathname();
   const selected = params.get("extension");
-  const entries = publicQuery.data ?? [];
+  const entries = extensionDirectory(
+    publicQuery.data ?? [],
+    t.extensions.catalog,
+  );
   const source = publicQuery;
   function select(namespace?: string) {
     const next = new URLSearchParams(params);
@@ -26,26 +30,27 @@ export function ExtensionGallery({ query = "" }: { query?: string }) {
     else next.delete("extension");
     router.replace(`${pathname}?${next.toString()}`, { scroll: false });
   }
-  if (source.isPending) return <p role="status">{t.extensions.loading}</p>;
-  if (source.isError)
-    return (
-      <div role="alert">
-        <p>{t.extensions.unavailable}</p>
-        <Button variant="outline" onClick={() => void source.refetch()}>
-          {t.extensions.retry}
-        </Button>
-      </div>
-    );
+  const status = source.isPending ? (
+    <p role="status">{t.extensions.loading}</p>
+  ) : source.isError ? (
+    <div role="alert">
+      <p>{t.extensions.unavailable}</p>
+      <Button variant="outline" onClick={() => void source.refetch()}>
+        {t.extensions.retry}
+      </Button>
+    </div>
+  ) : null;
   const reload = (
     <Button variant="outline" onClick={() => window.location.reload()}>
       {t.extensions.reloadAll}
     </Button>
   );
   if (selected) {
-    const entry = entries.find((item) => item.namespace === selected);
+    const entry = entries.find((item) => item.id === selected);
     return (
       <div className="space-y-6">
         {reload}
+        {status}
         <Button variant="ghost" onClick={() => select()}>
           <ArrowLeftIcon />
           {t.extensions.all}
@@ -57,35 +62,45 @@ export function ExtensionGallery({ query = "" }: { query?: string }) {
             <h2 className="text-2xl font-semibold">{entry.title}</h2>
             <p className="text-muted-foreground">{entry.description}</p>
             <p>
-              {entry.settings.enabled === true
-                ? t.extensions.enabledManaged
-                : t.extensions.disabledManaged}
+              {entry.loaded?.error
+                ? t.extensions.moduleUnavailable
+                : entry.loaded
+                  ? entry.loaded.settings.enabled === true
+                    ? t.extensions.enabledManaged
+                    : t.extensions.disabledManaged
+                  : t.extensions.catalogHint}
             </p>
+            {entry.guide && (
+              <Button variant="outline" asChild>
+                <a href={entry.guide} target="_blank" rel="noopener noreferrer">
+                  {t.extensions.installationGuide}
+                </a>
+              </Button>
+            )}
           </div>
         )}
       </div>
     );
   }
   const visible = entries.filter((entry) =>
-    `${entry.title} ${entry.description}`
+    `${entry.title} ${entry.description} ${entry.package ?? ""} ${entry.id} ${entry.loaded?.title ?? ""} ${entry.loaded?.description ?? ""}`
       .toLowerCase()
       .includes(query.trim().toLowerCase()),
   );
   return (
     <div className="space-y-5">
       {reload}
+      {status}
       <p className="text-muted-foreground text-sm">
         {t.extensions.deploymentHint}
       </p>
       <div className="grid gap-x-10 md:grid-cols-2">
         {visible.map((entry) => {
-          const loaded = publicQuery.data?.find(
-            (item) => item.namespace === entry.namespace,
-          );
-          const Icon = extensionIcon(loaded?.extension?.icon);
+          const loaded = entry.loaded;
+          const Icon = extensionIcon(loaded?.extension?.icon ?? entry.icon);
           return (
             <PluginRow
-              key={entry.namespace}
+              key={entry.id}
               name={entry.title}
               description={entry.description}
               icon={
@@ -96,18 +111,20 @@ export function ExtensionGallery({ query = "" }: { query?: string }) {
               label={
                 loaded?.error
                   ? t.extensions.moduleUnavailable
-                  : entry.settings.enabled === true
-                    ? t.capabilities.enabled
-                    : t.capabilities.disabled
+                  : loaded
+                    ? loaded.settings.enabled === true
+                      ? t.capabilities.enabled
+                      : t.capabilities.disabled
+                    : t.extensions.catalogEntry
               }
-              onDetails={() => select(entry.namespace)}
+              onDetails={() => select(entry.id)}
               detailsLabel={t.extensions.view(entry.title)}
             >
               <Button
                 variant="ghost"
                 size="icon"
                 aria-label={t.extensions.open(entry.title)}
-                onClick={() => select(entry.namespace)}
+                onClick={() => select(entry.id)}
               >
                 <ChevronRightIcon />
               </Button>

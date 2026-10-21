@@ -16,7 +16,7 @@ from langgraph.channels import DeltaChannel
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
 import deerflow.checkpoint_patches as _checkpoint_patches  # noqa: F401 - import-time saver fixes
-from deerflow.agents.goal_state import GoalState
+from deerflow.agents.goal_state import GoalOutcomeState, GoalState
 from deerflow.agents.task_continuity.state import TaskNotesChannel, merge_task_notes
 from deerflow.config.database_config import DEFAULT_CHECKPOINT_SNAPSHOT_FREQUENCY, CheckpointChannelMode
 from deerflow.subagents.status_contract import SUBAGENT_STATUS_VALUES
@@ -50,6 +50,15 @@ class BackgroundTaskState(TypedDict):
     updated_at: str
 
 
+class BlobRefData(TypedDict):
+    """JSON-safe checkpoint representation of ``deerflow.storage.BlobRef``."""
+
+    sha256: str
+    size: int
+    kind: str
+    content_type: NotRequired[str | None]
+
+
 class ViewedImageData(TypedDict):
     """Metadata for a viewed image file.
 
@@ -64,6 +73,7 @@ class ViewedImageData(TypedDict):
     actual_path: str
     sha256: str
     source_sandbox_id: NotRequired[str]
+    blob_ref: NotRequired[BlobRefData]
 
 
 def merge_sandbox(existing: SandboxState | None, new: SandboxState | None) -> SandboxState | None:
@@ -105,6 +115,12 @@ def merge_viewed_images(existing: dict[str, ViewedImageData] | None, new: dict[s
 
     Special case: If new is an empty dict {}, it clears the existing images.
     This allows middlewares to clear the viewed_images state after processing.
+
+    Dict order tracks recency: a key updated by ``new`` is re-inserted at the
+    end, so a re-viewed image becomes the newest entry. The image injection
+    middleware admits entries newest-first and tells the model to re-view an
+    omitted image, so the recovery only works if the re-viewed entry actually
+    moves to the newest position (#6825, review on #6829).
     """
     if existing is None:
         return new or {}
@@ -113,8 +129,11 @@ def merge_viewed_images(existing: dict[str, ViewedImageData] | None, new: dict[s
     # Special case: empty dict means clear all viewed images
     if len(new) == 0:
         return {}
-    # Merge dictionaries, new values override existing ones for same keys
-    return {**existing, **new}
+    # Merge dictionaries; new values override existing ones for same keys, and
+    # updated keys move to the end so insertion order reflects recency.
+    merged = {key: value for key, value in existing.items() if key not in new}
+    merged.update(new)
+    return merged
 
 
 def merge_todos(existing: list | None, new: list | None) -> list | None:
@@ -140,27 +159,35 @@ def merge_goal(existing: GoalState | None, new: GoalState | None) -> GoalState |
 class PromotedTools(TypedDict):
     catalog_hash: str
     names: list[str]
+    turn_id: NotRequired[str]
 
 
 def merge_promoted(existing: PromotedTools | None, new: PromotedTools | None) -> PromotedTools | None:
-    """Reducer for deferred-tool promotions, scoped by catalog hash.
+    """Reducer for deferred-tool promotions, scoped by catalog and user turn.
 
     - new None/empty -> preserve existing (node didn't touch promotions).
-    - catalog_hash changed -> replace wholesale, dropping stale names (prevents a
-      persisted bare name from exposing a different tool after catalog drift).
-    - same catalog_hash -> union names, dedupe, preserve order.
+    - catalog_hash or explicit turn_id changed -> replace wholesale, dropping
+      stale names.
+    - same scope -> union names, dedupe, preserve order.
+    - a missing new turn_id inherits the existing scope. ``tool_search`` writes
+      this shape after the filter establishes the current turn before the model.
     """
     if not new:
         return existing
-    if existing is None or existing.get("catalog_hash") != new["catalog_hash"]:
-        return {
-            "catalog_hash": new["catalog_hash"],
-            "names": list(dict.fromkeys(new["names"])),
-        }
-    return {
-        "catalog_hash": existing["catalog_hash"],
-        "names": list(dict.fromkeys(existing["names"] + new["names"])),
+    new_turn_id = new.get("turn_id")
+    replace = existing is None or existing.get("catalog_hash") != new["catalog_hash"] or (new_turn_id is not None and existing.get("turn_id") != new_turn_id)
+    existing_names = existing.get("names") if existing is not None else None
+    if not isinstance(existing_names, list) or not all(isinstance(name, str) for name in existing_names):
+        existing_names = []
+    names = new["names"] if replace else existing_names + new["names"]
+    merged: PromotedTools = {
+        "catalog_hash": new["catalog_hash"],
+        "names": list(dict.fromkeys(names)),
     }
+    turn_id = new_turn_id if new_turn_id is not None else (existing or {}).get("turn_id")
+    if turn_id is not None:
+        merged["turn_id"] = turn_id
+    return merged
 
 
 TERMINAL_STATUSES: frozenset[str] = frozenset(SUBAGENT_STATUS_VALUES)
@@ -193,28 +220,34 @@ def merge_delegations(existing: list[DelegationEntry] | None, new: list[Delegati
     """Reducer for the delegation ledger.
 
     - new None/empty -> preserve existing.
-    - append entries, replacing same id with the latest version while preserving
-      first-seen order.
+    - append entries, replacing the same (run_id, tool-call id) with the latest
+      version while preserving first-seen order. Provider ids can repeat in
+      later runs of the same thread.
     - terminal status is never overwritten by a non-terminal status.
     """
     if not new:
         return existing or []
 
-    by_id: dict[str, DelegationEntry] = {}
-    order: list[str] = []
+    by_key: dict[tuple[str | None, str], DelegationEntry] = {}
+    order: list[tuple[str | None, str]] = []
     for entry in [*(existing or []), *new]:
         entry_id = entry["id"]
-        previous = by_id.get(entry_id)
+        key = (entry.get("run_id") or None, entry_id)
+        if key[0] is None:
+            # Legacy updates without run_id still update the most recent
+            # matching entry, as they did before run-scoped identities.
+            key = next((prior for prior in reversed(order) if prior[1] == entry_id), key)
+        previous = by_key.get(key)
         if previous is not None and previous["status"] in TERMINAL_STATUSES and entry["status"] not in TERMINAL_STATUSES:
             continue
-        if entry_id not in by_id:
-            order.append(entry_id)
+        if key not in by_key:
+            order.append(key)
         elif previous.get("created_at"):
             entry = {**entry, "created_at": previous["created_at"]}
             if previous.get("run_id") and not entry.get("run_id"):
                 entry["run_id"] = previous["run_id"]
-        by_id[entry_id] = entry
-    merged = [by_id[entry_id] for entry_id in order]
+        by_key[key] = entry
+    merged = [by_key[key] for key in order]
     if len(merged) > _DELEGATION_LEDGER_MAX_ENTRIES:
         merged = merged[-_DELEGATION_LEDGER_MAX_ENTRIES:]
     return merged
@@ -277,6 +310,72 @@ def merge_skill_context(existing: list[SkillEntry] | None, new: list[SkillEntry]
     return merged
 
 
+# Absolute ceiling applied by the reducer itself. The operator-configured cap
+# (`tool_artifacts.max_entries`) is enforced per-agent by
+# ArtifactCaptureMiddleware when it emits updates, so two agents in one process
+# can carry different caps without sharing state.
+_ARTIFACT_MAX_ENTRIES_CEILING = 1000
+
+
+class ArtifactEntry(TypedDict):
+    """A captured artifact reference from a tool result (issue #4676).
+
+    Stored in ``ThreadState.tool_artifacts`` so it survives context compaction.
+    The model sees only the short ``handle``; the real reference (path, URL,
+    task id) lives here and is resolved at tool-call time.
+    """
+
+    handle: str
+    tool_name: str
+    tool_call_id: str
+    call_index: int
+    artifact_type: str
+    display_name: str
+    real_ref: str
+    mime_type: NotRequired[str]
+    created_at: str
+    consumed_by: NotRequired[list[str]]
+
+
+def merge_tool_artifacts(existing: list[ArtifactEntry] | None, new: list[ArtifactEntry] | None) -> list[ArtifactEntry]:
+    """Reducer for the tool-artifact registry channel.
+
+    - new None/empty -> preserve existing.
+    - append entries, replacing same handle with the latest version while
+      preserving first-seen order (latest wins, e.g. for consumption updates).
+    - a trailing ``{"op": "trim_to", "keep": N}`` directive (emitted by the
+      capture middleware) makes the configured cap a sliding window: the
+      oldest entries beyond N are evicted. Without a directive nothing is
+      evicted, so updates stay purely additive.
+    - absolute ceiling of 1000 applies regardless.
+    """
+    if not new:
+        return existing or []
+
+    by_handle: dict[str, ArtifactEntry] = {}
+    order: list[str] = []
+    for entry in [*(existing or []), *new]:
+        if not isinstance(entry, dict) or "handle" not in entry:
+            continue
+        handle = entry["handle"]
+        if handle not in by_handle:
+            order.append(handle)
+        by_handle[handle] = entry
+
+    merged = [by_handle[handle] for handle in order]
+
+    for item in reversed(new):
+        if isinstance(item, dict) and item.get("op") == "trim_to":
+            keep = min(int(item.get("keep", len(merged))), _ARTIFACT_MAX_ENTRIES_CEILING)
+            if keep < len(merged):
+                merged = merged[-keep:]
+            break
+
+    if len(merged) > _ARTIFACT_MAX_ENTRIES_CEILING:
+        merged = merged[-_ARTIFACT_MAX_ENTRIES_CEILING:]
+    return merged
+
+
 class ThreadState(AgentState):
     sandbox: SandboxStateField
     thread_data: NotRequired[ThreadDataState | None]
@@ -284,11 +383,14 @@ class ThreadState(AgentState):
     artifacts: Annotated[list[str], merge_artifacts]
     todos: Annotated[list | None, merge_todos]
     goal: Annotated[GoalState | None, merge_goal]
+    goal_outcome: NotRequired[GoalOutcomeState | None]
     uploaded_files: NotRequired[list[dict] | None]
     viewed_images: Annotated[dict[str, ViewedImageData], merge_viewed_images]  # image_path -> metadata (no base64)
     promoted: Annotated[PromotedTools | None, merge_promoted]
     delegations: Annotated[list[DelegationEntry], merge_delegations]
     skill_context: Annotated[list[SkillEntry], merge_skill_context]
+    tool_artifacts: Annotated[list[ArtifactEntry], merge_tool_artifacts]
+    tool_artifact_processed: Annotated[list[str], merge_artifacts]
     task_notes: Annotated[dict | None, TaskNotesChannel(dict | None, merge_task_notes)]
     task_history: NotRequired[dict | None]
     summary_text: NotRequired[str | None]
@@ -408,6 +510,8 @@ THREAD_STATE_REDUCER_FIELDS = frozenset(
         "promoted",
         "delegations",
         "skill_context",
+        "tool_artifacts",
+        "tool_artifact_processed",
         "task_notes",
     }
 )

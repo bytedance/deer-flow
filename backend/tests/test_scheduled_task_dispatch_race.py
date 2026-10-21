@@ -26,6 +26,7 @@ from app.scheduler.service import ScheduledTaskService
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
 from deerflow.persistence.scheduled_task_runs import ActiveScheduledRunConflict, ScheduledTaskRunRepository
+from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
 from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
 
 pytestmark = pytest.mark.asyncio
@@ -276,5 +277,102 @@ async def test_release_dispatch_lease_does_not_revive_a_paused_task(tmp_path):
         assert task is not None
         assert task["status"] == "paused", "the user's pause must not be reverted by the lease release"
         assert task["lease_owner"] is None
+    finally:
+        await close_engine()
+
+
+class _ParkingRunRepoSession:
+    """AsyncSession proxy that parks the first load of a given run row, so a
+    second writer can commit inside the reader's WAL snapshot window — the
+    deterministic stand-in for a lease-expiry requeue + re-claim racing a late
+    status write."""
+
+    def __init__(self, real, state) -> None:
+        self._real = real
+        self._state = state
+
+    async def __aenter__(self):
+        await self._real.__aenter__()
+        return self
+
+    async def __aexit__(self, *exc):
+        return await self._real.__aexit__(*exc)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+    async def get(self, *args, **kwargs):
+        row = await self._real.get(*args, **kwargs)
+        state = self._state
+        if state["armed"] and not state["done"] and args and args[0] is ScheduledTaskRunRow and args[1] == state["run_record_id"]:
+            state["done"] = True
+            state["holding"].set()
+            await state["resume"].wait()
+        return row
+
+
+async def test_update_status_lease_guard_does_not_read_a_stale_snapshot(tmp_path):
+    """A late ``update_status`` must fence against a re-claim that landed
+    after its read.
+
+    ``update_status`` guarded ``expected_lease_owner`` on a plain SELECT. On
+    SQLite (WAL) that guard read a pre-requeue snapshot: a lease-expiry
+    requeue plus a re-claim by another scheduler that committed while the late
+    write was in flight passed the stale guard and clobbered the fresh claim.
+    The guard now re-reads under the parent's writer lock — the same
+    staleness #5777 fixed for the task-level lease release.
+    """
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    try:
+        sf = get_session_factory()
+        assert sf is not None
+        now = datetime.now(UTC)
+        task_repo = ScheduledTaskRepository(sf)
+        await _seed_task(task_repo, "task-stale-guard", next_run_at=now)
+
+        state = {
+            "armed": False,
+            "done": False,
+            "holding": asyncio.Event(),
+            "resume": asyncio.Event(),
+            "run_record_id": "run-stale-guard",
+        }
+
+        def hooked_factory():
+            return _ParkingRunRepoSession(sf(), state)
+
+        run_repo = ScheduledTaskRunRepository(sf)
+        parked_repo = ScheduledTaskRunRepository(hooked_factory)
+        plain_repo = ScheduledTaskRunRepository(sf)
+
+        created = await run_repo.create(
+            run_record_id="run-stale-guard",
+            task_id="task-stale-guard",
+            thread_id="th-1",
+            scheduled_for=now,
+            trigger="cron",
+            status="queued",
+        )
+        assert created["status"] == "queued"
+        claimed = await run_repo.claim_queued_run("run-stale-guard", lease_owner="scheduler-A", now=now, lease_seconds=120, global_max_concurrent_runs=10)
+        assert claimed is not None and claimed["lease_owner"] == "scheduler-A"
+
+        state["armed"] = True
+        late = asyncio.create_task(parked_repo.update_status("run-stale-guard", status="failed", error="late completion", expected_lease_owner="scheduler-A"))
+        await asyncio.wait_for(state["holding"].wait(), timeout=5)
+
+        # A lease-expiry requeue plus a fresh claim by another scheduler land
+        # while the late write is parked between its read and its write.
+        assert await plain_repo.requeue_claimed_run("run-stale-guard", lease_owner="scheduler-A") is True
+        reclaimed = await plain_repo.claim_queued_run("run-stale-guard", lease_owner="scheduler-B", now=now, lease_seconds=120, global_max_concurrent_runs=10)
+        assert reclaimed is not None and reclaimed["lease_owner"] == "scheduler-B"
+        state["resume"].set()
+
+        assert await asyncio.wait_for(late, timeout=10) is False, "the stale guard must fence the late write"
+
+        row = await plain_repo.get_active_run("task-stale-guard")
+        assert row is not None
+        assert row["status"] == "launching", "the re-claim must survive the late write"
+        assert row["lease_owner"] == "scheduler-B"
     finally:
         await close_engine()

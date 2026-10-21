@@ -1,5 +1,7 @@
 import hashlib
+import logging
 import mimetypes
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Annotated
 
@@ -8,9 +10,12 @@ from langchain_core.messages import ToolMessage
 from langchain_core.tools import StructuredTool
 from langgraph.types import Command
 
-from deerflow.agents.thread_state import ThreadDataState
+from deerflow.agents.thread_state import ThreadDataState, ViewedImageData
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
+from deerflow.sandbox.download import MAX_IMAGE_BYTES as _MAX_IMAGE_BYTES
 from deerflow.tools.types import Runtime
+
+logger = logging.getLogger(__name__)
 
 _ALLOWED_IMAGE_VIRTUAL_ROOTS = (
     f"{VIRTUAL_PATH_PREFIX}/workspace",
@@ -18,7 +23,6 @@ _ALLOWED_IMAGE_VIRTUAL_ROOTS = (
     f"{VIRTUAL_PATH_PREFIX}/outputs",
 )
 _ALLOWED_IMAGE_VIRTUAL_ROOTS_TEXT = ", ".join(_ALLOWED_IMAGE_VIRTUAL_ROOTS)
-_MAX_IMAGE_BYTES = 20 * 1024 * 1024
 _EXTENSION_TO_MIME = {
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
@@ -48,6 +52,19 @@ def _sanitize_image_error(error: Exception, thread_data: ThreadDataState | None)
     from deerflow.sandbox.tools import mask_local_paths_in_output
 
     return mask_local_paths_in_output(f"{type(error).__name__}: {error}", thread_data)
+
+
+def _get_thread_id(runtime: Runtime) -> str | None:
+    """Resolve advisory blob provenance without depending on ambient config."""
+    context = getattr(runtime, "context", None)
+    if isinstance(context, Mapping):
+        thread_id = context.get("thread_id")
+        if isinstance(thread_id, str) and thread_id:
+            return thread_id
+    config = getattr(runtime, "config", None)
+    configurable = config.get("configurable") if isinstance(config, Mapping) else None
+    thread_id = configurable.get("thread_id") if isinstance(configurable, Mapping) else None
+    return thread_id if isinstance(thread_id, str) and thread_id else None
 
 
 def _is_file_not_found_error(error: BaseException) -> bool:
@@ -183,7 +200,7 @@ def _view_image_authorized(runtime: Runtime, image_path: str, tool_call_id: str)
 
     if sandbox is not None:
         try:
-            image_data = sandbox.download_file(image_path)
+            image_data = sandbox.download_file(image_path, max_bytes=_MAX_IMAGE_BYTES)
             read_source_sandbox_id = sandbox_id
         except IsADirectoryError:
             return Command(
@@ -274,12 +291,36 @@ def _view_image_authorized(runtime: Runtime, image_path: str, tool_call_id: str)
         )
     mime_type = detected_mime_type
 
-    image_metadata = {
+    image_metadata: ViewedImageData = {
         "mime_type": mime_type,
         "size": image_size,
         "actual_path": str(actual_path),
         "sha256": hashlib.sha256(image_data).hexdigest(),
     }
+    from deerflow.storage import get_blob_store_if_enabled
+
+    try:
+        blob_store = get_blob_store_if_enabled()
+        if blob_store is not None:
+            blob_ref = blob_store.put_bytes(
+                image_data,
+                kind="viewed-image",
+                content_type=mime_type,
+                thread_id=_get_thread_id(runtime),
+            )
+            image_metadata["blob_ref"] = blob_ref.model_dump(mode="json", exclude_none=True)
+    except Exception:
+        logger.warning("Failed to persist viewed image in shared blob storage", exc_info=True)
+        return Command(
+            update={
+                "messages": [
+                    ToolMessage(
+                        "Error: Failed to persist image in shared blob storage",
+                        tool_call_id=tool_call_id,
+                    )
+                ]
+            },
+        )
     if read_source_sandbox_id is not None:
         image_metadata["source_sandbox_id"] = read_source_sandbox_id
     new_viewed_images = {image_path: image_metadata}

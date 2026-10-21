@@ -2,13 +2,13 @@
 
 import asyncio
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
 from pydantic import BaseModel, Field, ValidationError
 
-from app.gateway.deps import is_admin_user
+from app.gateway.deps import get_current_user_from_request, is_admin_user
 from app.gateway.routers import integrations, mcp, skills
 from deerflow.capabilities.business import connection_config
 from deerflow.capabilities.catalog import PluginManifest
@@ -46,6 +46,7 @@ class AdapterContext:
     request: Request
     config: AppConfig
     user_id: str
+    scope: Literal["deployment", "user"] = "deployment"
 
 
 class CapabilityAdapter(Protocol):
@@ -87,7 +88,16 @@ def validate_mcp_connection(configuration: dict[str, Any]) -> None:
 
 class MCPAdapter:
     async def list_installations(self, context: AdapterContext) -> list[CapabilityInstallation]:
-        servers = await asyncio.to_thread(mcp._load_raw_mcp_server_responses)
+        if context.scope == "user":
+            from deerflow.mcp.user_config import read_user_mcp_config
+
+            try:
+                raw_config = await asyncio.to_thread(read_user_mcp_config, context.user_id)
+            except ValueError as exc:
+                mcp._raise_invalid_mcp_configuration(str(exc), cause=exc)
+            servers = mcp._mcp_server_responses_from_raw(raw_config)
+        else:
+            servers = await asyncio.to_thread(mcp._load_raw_mcp_server_responses)
         result = []
         ambiguous = ambiguous_installation_ids({name: server.model_dump() for name, server in servers.items()})
         for name, server in servers.items():
@@ -113,6 +123,7 @@ class MCPAdapter:
                     health="ambiguous" if identity in ambiguous else "unknown",
                     plugin_id=metadata.get("plugin_id") if isinstance(metadata.get("plugin_id"), str) else None,
                     adapter="mcp",
+                    scope=context.scope,
                     name=name,
                     reference=name,
                     description=server.description or "",
@@ -134,7 +145,12 @@ class MCPAdapter:
             body = mcp.McpConfigUpdateRequest(mcp_servers={name: mcp.McpServerConfigResponse.model_validate(definition)})
         except ValidationError as error:
             raise HTTPException(422, "Invalid MCP configuration") from error
-        await mcp.create_mcp_servers(context.request, body)
+        if context.scope == "user":
+            from app.gateway.routers.personal_mcp import create_servers
+
+            await create_servers(context.request, body)
+        else:
+            await mcp.create_mcp_servers(context.request, body)
 
 
 class BusinessAdapter(MCPAdapter):
@@ -222,7 +238,12 @@ registry.register("lark", LarkAdapter())
 registry.register("skills", SkillAdapter())
 
 
-async def list_installations(adapter: str, request: Request, config: AppConfig) -> InstallationList:
-    context = AdapterContext(request, config, get_effective_user_id())
+async def list_installations(adapter: str, request: Request, config: AppConfig, scope: Literal["deployment", "user", "all"] = "deployment") -> InstallationList:
+    user_id = get_effective_user_id()
+    if scope != "deployment":
+        user_id = str((await get_current_user_from_request(request)).id)
+    context = AdapterContext(request, config, user_id, "user" if scope == "user" else "deployment")
     items = await registry.get(adapter).list_installations(context)
-    return InstallationList(items=items, can_manage=await is_admin_user(request))
+    if scope == "all" and adapter in {"mcp", "business"}:
+        items += await registry.get(adapter).list_installations(AdapterContext(request, config, user_id, "user"))
+    return InstallationList(items=items, can_manage=scope == "user" or await is_admin_user(request))

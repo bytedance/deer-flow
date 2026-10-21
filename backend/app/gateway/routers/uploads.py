@@ -5,6 +5,7 @@ import os
 import stat
 import tempfile
 from collections.abc import AsyncIterator
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
@@ -30,6 +31,7 @@ from deerflow.uploads.manager import (
     enrich_file_listing,
     ensure_uploads_dir,
     get_uploads_dir,
+    is_reserved_upload_filename,
     list_files_in_dir,
     normalize_filename,
     upload_artifact_url,
@@ -163,6 +165,8 @@ def _get_upload_limit(app_config: AppConfig, key: str, default: int, *, legacy_k
             value = _get_uploads_config_value(app_config, legacy_key, None)
         if value is None:
             value = default
+        if isinstance(value, bool):
+            raise ValueError
         limit = int(value)
         if limit <= 0:
             raise ValueError
@@ -187,7 +191,8 @@ def _cleanup_uploaded_paths(paths: list[os.PathLike[str] | str]) -> None:
         except FileNotFoundError:
             pass
         except Exception:
-            logger.warning("Failed to clean up upload path after rejected request: %s", path, exc_info=True)
+            with suppress(Exception):
+                logger.warning("Failed to clean up upload path after rejected request: %s", path, exc_info=True)
 
 
 def _pure_destination(uploads_dir: os.PathLike[str] | str, display_filename: str) -> Path:
@@ -317,7 +322,8 @@ def _remove_staged_file(staged_path: os.PathLike[str] | str) -> None:
     except FileNotFoundError:
         pass
     except OSError:
-        logger.warning("Failed to remove staged upload file: %s", staged_path, exc_info=True)
+        with suppress(Exception):
+            logger.warning("Failed to remove staged upload file: %s", staged_path, exc_info=True)
 
 
 def _write_upload_chunk(upload_temp: _UploadTempFile, chunk: bytes) -> None:
@@ -327,6 +333,9 @@ def _write_upload_chunk(upload_temp: _UploadTempFile, chunk: bytes) -> None:
 def _abort_upload_temp(upload_temp: _UploadTempFile) -> None:
     try:
         upload_temp.handle.close()
+    except Exception:
+        with suppress(Exception):
+            logger.warning("Failed to close staged upload file: %s", upload_temp.temp_path, exc_info=True)
     finally:
         # Best-effort, not ``os.unlink``: an abandoned duplication worker can
         # still hold this inode open (Windows refuses to remove it then), and
@@ -407,6 +416,16 @@ async def upload_files(
     limits = _get_upload_limits(config)
     if len(files) > limits.max_files:
         raise HTTPException(status_code=413, detail=f"Too many files: maximum is {limits.max_files}")
+
+    # Check reserved staging basenames and Win32 aliases using either separator before
+    # opening storage or a sandbox, so a later reserved name cannot partially
+    # upload the batch. Other unsafe filenames keep ingestion's skip behavior.
+    for file in files:
+        if file.filename and is_reserved_upload_filename(Path(file.filename.replace("\\", "/")).name):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Filename uses reserved upload staging pattern: {file.filename!r}. Rename the file and upload it again.",
+            )
 
     # Setup runs INSIDE the cleanup scope: open() can acquire the sandbox
     # request lease and then raise (e.g. the acquired lease yields no

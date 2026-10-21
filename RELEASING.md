@@ -42,7 +42,8 @@ distinguishes it from a release.
   ```
 - `scripts/verify_versions.sh [version]` — check that all sources agree. With
   no argument it requires mutual equality; with an argument it requires every
-  source to equal it. Exits non-zero on mismatch. Run it locally before tagging
+  source to equal it. It also runs `uv lock --check` in `backend/`, so it needs
+  `uv` on `PATH` too. Exits non-zero on mismatch. Run it locally before tagging
   to catch drift early:
   ```bash
   scripts/verify_versions.sh 2.1.0
@@ -149,12 +150,15 @@ Both features stay opt-in: the provisioner ignores them until
 
 Both publishing workflows call `.github/workflows/verify-versions.yml` as their
 first job. It runs `scripts/verify_versions.sh` against the tag (minus the
-`v`). If any of the four version sources doesn't match the tag, the verify job
-fails and **all** publish jobs are skipped — no images, no chart.
+`v`). If any of the four version sources doesn't match the tag, or
+`backend/uv.lock` is stale, the verify job fails and **all** publish jobs are
+skipped — no images, no chart.
 
-The gate covers those four fields. `backend/uv.lock` is refreshed to the same
-version by `scripts/bump_version.sh` and checked by `uv lock --check` in lint CI,
-which fails on a stale lock.
+The lock records the root package version in uv's PEP 440 form, so the gate
+checks it with `uv lock --check` (the job installs the same pinned uv as the
+backend image) rather than comparing strings. Without that check, a lock left on
+the previous version would pass the gate and then fail the backend image's
+`uv sync --locked`, after the chart and the other images had already published.
 
 When it fails, the job annotation names the offending file and suggests the
 fix:

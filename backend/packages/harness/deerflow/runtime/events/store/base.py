@@ -24,6 +24,19 @@ class IncompleteMessageRunLookupError(RuntimeError):
     """Raised when a store cannot prove that a targeted lookup is complete."""
 
 
+class RunEventStoreNotCommittedError(RuntimeError):
+    """A batch write definitely did not commit any of its events.
+
+    ``RunEventStore.put_batch()`` implementations may raise this only when they
+    can prove that none of the batch was persisted (for example, the write was
+    rejected before reaching storage). ``RunJournal`` may then deliberately
+    retry the batch. Any other exception from ``put_batch`` is treated as an
+    ambiguous/UNKNOWN outcome: the batch is quarantined and is never replayed,
+    because a store that committed and then lost its acknowledgement would
+    otherwise produce duplicate events.
+    """
+
+
 def normalize_message_ids(message_ids: set[str]) -> set[str]:
     """Return the non-empty string IDs that can participate in a lookup."""
     return {message_id for message_id in message_ids if isinstance(message_id, str) and message_id}
@@ -115,6 +128,9 @@ class RunEventStore(abc.ABC):
         - before_seq: return the last ``limit`` records with seq < before_seq (ascending)
         - after_seq: return the first ``limit`` records with seq > after_seq (ascending)
         - neither: return the latest ``limit`` records (ascending)
+
+        When both cursors are supplied, return the first ``limit`` records in
+        the exclusive window ``after_seq < seq < before_seq`` (ascending).
 
         ``user_id`` may be passed explicitly by request-independent callers;
         user-scoped backends must apply it according to their isolation model.
@@ -215,6 +231,7 @@ class RunEventStore(abc.ABC):
         limit: int = 50,
         before_seq: int | None = None,
         after_seq: int | None = None,
+        user_id: str | None | _AutoSentinel = AUTO,
     ) -> list[dict]:
         """Return displayable messages (category=message) for a specific run, ordered by seq ascending.
 
@@ -222,6 +239,11 @@ class RunEventStore(abc.ABC):
         - after_seq: return the first ``limit`` records with seq > after_seq (ascending)
         - before_seq: return the last ``limit`` records with seq < before_seq (ascending)
         - neither: return the latest ``limit`` records (ascending)
+
+        When both cursors are supplied, return the first ``limit`` records in
+        the exclusive window ``after_seq < seq < before_seq`` (ascending).
+        ``user_id`` follows the same explicit-caller semantics as
+        :meth:`list_messages`.
         """
 
     @abc.abstractmethod

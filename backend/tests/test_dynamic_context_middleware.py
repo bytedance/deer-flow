@@ -630,6 +630,31 @@ def test_reminder_uses_original_id_user_message_uses_derived_id():
     assert result["messages"][1].id == f"{original_id}__user"
 
 
+def test_user_message_copy_preserves_response_metadata():
+    """Re-id'd user message keeps fields a hand-built HumanMessage would drop.
+
+    API callers can attach response_metadata to the incoming turn; rebuilding
+    the message field-by-field silently discarded it, so the copy is made with
+    ``model_copy`` (same pattern as the pii_redaction / uploads middlewares)
+    while still deriving the ``{id}__user`` id.
+    """
+    mw = _make_middleware()
+    original = HumanMessage(
+        content="Hello",
+        id="original-id-abc",
+        response_metadata={"external": "value"},
+    )
+    state = {"messages": [original]}
+
+    with mock.patch("deerflow.agents.lead_agent.prompt._get_memory_context", return_value=""), mock.patch("deerflow.agents.middlewares.dynamic_context_middleware.datetime") as mock_dt:
+        mock_dt.now.return_value.strftime.return_value = "2026-05-08, Friday"
+        result = mw.before_agent(state, _fake_runtime())
+
+    user_msg = result["messages"][1]
+    assert user_msg.id == "original-id-abc__user"
+    assert user_msg.response_metadata == {"external": "value"}
+
+
 def test_message_without_id_gets_stable_uuid():
     """If the original HumanMessage has no ID, a UUID is generated and used consistently."""
     mw = _make_middleware()
@@ -1009,6 +1034,15 @@ def _declared_date_timezone_policies():
     ]
 
 
+# The request-only client block is model-visible, so its delivery and limits are
+# part of DynamicContext's assembly identity.
+_CLIENT_CONTEXT_POLICY = {
+    "client_context_delivery": "framed_request_message_after_system_prompt",
+    "client_context_limits": {"max_items": 32, "max_name_length": 80, "max_value_length": 200, "max_integer": 2**53 - 1},
+    "client_context_pii_redaction": False,
+}
+
+
 def _expected_policies(tz_name: str):
     """The DynamicContext declaration also carries the shelf index's effective
     rendering caps (no app config here ⇒ ProjectsConfig defaults); the
@@ -1022,6 +1056,7 @@ def _expected_policies(tz_name: str):
             "memory_enabled": True,
             "shelf_index_max_entries": defaults.shelf_index_max_entries,
             "shelf_index_max_bytes": defaults.shelf_index_max_bytes,
+            **_CLIENT_CONTEXT_POLICY,
         },
         {"current_date_timezone": tz_name},
     ]
@@ -1051,6 +1086,7 @@ def test_dynamic_context_release_policy_includes_memory_opt_out(monkeypatch):
         "memory_enabled": False,
         "shelf_index_max_entries": defaults.shelf_index_max_entries,
         "shelf_index_max_bytes": defaults.shelf_index_max_bytes,
+        **_CLIENT_CONTEXT_POLICY,
     }
 
 

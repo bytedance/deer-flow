@@ -20,7 +20,8 @@ deferred to a separate proposal and PR.
 | Validated manifest schema | `deerflow.capabilities.catalog.PluginManifest` |
 | Installation/status adapters | `backend/app/gateway/capabilities.py` |
 | Catalog and safe discovery HTTP API | `backend/app/gateway/routers/capabilities.py` |
-| MCP settings, secrets, enable/delete, cache reload | Existing `/api/mcp/config` services and `extensions_config.json` |
+| Personal MCP settings, secrets, enable/delete | `/api/mcp/personal/config` and `.deer-flow/users/<user_id>/integrations/mcp.json` |
+| Deployment MCP settings and cache reload | Administrator-only `/api/mcp/config` and `extensions_config.json` |
 | Lark installation and personal account authorization | Existing `/api/integrations/lark` services |
 | Skill archives, enable state, user storage | Existing `/api/skills` services |
 | Agent selection | Agent config `mcp_plugins` and existing `skills` |
@@ -35,7 +36,7 @@ loader is separate from this user-facing directory.
 Three entries ship working API clients with the harness, using the `business`
 configuration adapter and the existing stdio MCP runtime. No separate service,
 package download, or Dify runtime is needed. Configure them under **Capability
-Center → Plugins** as an administrator:
+Center → Plugins** using your own account:
 
 | Plugin | Configuration | Tools |
 | --- | --- | --- |
@@ -51,10 +52,18 @@ DeerFlow's incoming IM channels. Existing manually configured CLI connections
 are not rewritten when the catalog entry changes.
 
 Configuration saves credentials without sending a message or creating a CRM
-record. These deployment credentials are shared by runs allowed to use the
-configured MCP server; they are not personal OAuth connections. Credentials
-remain in the existing MCP `env` configuration and its masked admin editor.
-Edit, toggle and delete the configured entry using the existing MCP controls.
+record. Connections created under **My plugins** are personal: credentials,
+enabled state and edits belong to the signed-in user, including administrators.
+They are stored under `.deer-flow/users/<user_id>/integrations/mcp.json` and
+remain masked in the editor. Existing deployment connections in
+`extensions_config.json` stay shared and are not copied to any personal account.
+The page separates **Platform provided** (deployment setup guides and shared MCP
+entries) from **My plugins** (personal connections, configuration templates and
+Lark account authorization). Existing search and category filters apply to both.
+Administrators can add, edit, toggle and delete shared MCP entries under
+**Platform provided**. These changes apply to all users; ordinary users see
+shared entries read-only.
+Edit, toggle and delete personal entries using the existing MCP controls.
 An Agent selects these connections through **Plugins and skills**, just like
 other MCP servers. New tool selection applies on the next run.
 
@@ -118,7 +127,7 @@ only link to setup instructions; listing them never claims they are installed.
 The catalog version describes this manifest, not a remotely detected server
 version. A catalog listing does not install, enable, or authorize anything.
 
-The first MCP form supports HTTP endpoints and a deployment Authorization header.
+The MCP form saves a personal HTTP endpoint and Authorization header.
 The advanced JSON editor retains stdio, SSE, OAuth token configuration, and
 per-user credential mappings supported by the existing MCP runtime. The presence
 of `oauth` in a manifest is not a new interactive OAuth implementation. Lark
@@ -134,8 +143,11 @@ service's authorization and validation; never add a provider branch to the galle
 - `GET /api/capabilities/catalog`: validated bundled manifests.
 - `GET /api/capabilities/installations/{adapter}`: safe installation projections
   for `mcp`, `business`, `lark`, and `skills`; separate requests isolate integration failures.
-- `POST /api/capabilities/installations`: administrator installation dispatch.
-  Body: `plugin_id`, `name`, and adapter `configuration`. MCP configuration uses
+- `POST /api/capabilities/installations`: installation dispatch with `plugin_id`,
+  `name`, adapter `configuration`, and optional `scope` (default `deployment`).
+  Deployment scope requires an administrator; authenticated users may choose
+  `scope: "user"` for MCP and bundled business connections. Other adapters
+  still require an administrator. MCP configuration uses
   the existing server definition schema. HTTP/SSE connections require a valid
   HTTP(S) URL without embedded credentials; stdio connections require a command.
   Invalid transport configuration returns 422 before saving. Duplicate server
@@ -204,3 +216,42 @@ Agent persistence, delegated selection, and a real local stdio MCP invocation.
 Browser tests cover catalog installation, Agent selection save/reopen, existing
 icon editing, filtering, and desktop/mobile settings layouts. Browser fixture
 screenshots show sample integrations; they are not production default settings.
+
+## Personal and deployment MCP configuration
+
+`config.yaml` tools and existing `extensions_config.json` MCP servers remain
+platform-provided capabilities. The administrator-only `/api/mcp/config` API
+continues to manage deployment MCP configuration.
+
+The web editor uses `/api/mcp/personal/config`: GET reads only the authenticated
+user's definitions; POST `/servers`, PUT `/server`, PATCH and DELETE
+`/servers/{name}` manage that same user's file. No caller-supplied user ID selects
+the owner. Catalog installation accepts `scope: "user"`; catalog discovery
+accepts `scope=user` or `scope=all` (deployment plus the caller's connections).
+The default API scope remains deployment for existing integrations.
+
+Personal files use the existing atomic file writer and cross-process lock. Keep
+`DEER_FLOW_HOME` on persistent storage; multiple Gateway workers must share it.
+Personal values are literal and cannot read deployment environment variables.
+A missing personal connection never falls back to a same-named shared one.
+Personal tools are discovered per run, outside the process-wide platform cache.
+Calls check ownership and the current stored revision. Credential edits, disable
+and delete invalidate already assembled personal tools; restart the run after
+an edit. Durable tasks bind the same owner and connection revision, including
+after recovery; changing that connection blocks its pending remote calls until
+the original configuration is restored.
+
+Allowing personal configuration does not grant host execution privileges:
+ordinary users may configure public HTTP/SSE endpoints and the fixed bundled
+business launchers. Arbitrary stdio commands, internal endpoints and OAuth token
+endpoints still require an administrator. Public endpoints are checked again on
+HTTP requests, with redirects and environment proxies disabled.
+
+Connections saved with administrator privileges require the owner's current
+administrator role during discovery and before every tool call, including
+durable submit, poll and cancel calls. Demotion, account deletion or an authority
+lookup failure blocks those connections even if tools or callers are cached.
+The owner can save a compatible connection again under ordinary-user policy.
+Gateway workers query current account records; standalone hosts must install
+an authority lookup to use privileged personal definitions. Already admitted
+operations are not forcibly terminated by a subsequent role change.
