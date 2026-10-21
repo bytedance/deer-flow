@@ -900,3 +900,111 @@ def test_reissue_poll_landing_on_original_owner_is_not_fenced(tmp_path) -> None:
         worker_a.join(timeout=30)
         if worker_a.is_alive():
             worker_a.terminate()
+
+
+# ---------------------------------------------------------------------------
+# Publication-race regressions (willem-bd 2026-10-21 round)
+# ---------------------------------------------------------------------------
+
+
+def test_walk_and_harden_tolerates_a_vanished_entry(monkeypatch, tmp_path) -> None:
+    """A credential-tree entry that disappears between iterdir() and lstat()
+    is skipped, not an unhandled exception in the login worker (P2)."""
+    root = tmp_path / "cred"
+    root.mkdir()
+    victim = root / "vanishes.txt"
+    victim.write_text("x", encoding="utf-8")
+
+    # Monkeypatch Path.lstat so the real _credential_tree_path_kind sees the
+    # entry vanish between the walk's iterdir() and its lstat().
+    real_lstat = Path.lstat
+
+    def _flaky_lstat(self: Path):
+        if self == victim:
+            victim.unlink()
+            raise FileNotFoundError(self)
+        return real_lstat(self)
+
+    monkeypatch.setattr(Path, "lstat", _flaky_lstat)
+    lark_cli._harden_posix_credential_tree(root)  # must not raise
+
+    # A directory that vanishes between iterdir() and the follow-up iterdir is
+    # likewise skipped.
+    root2 = tmp_path / "cred2"
+    root2.mkdir()
+    sub = root2 / "sub"
+    sub.mkdir()
+    (sub / "keep.txt").write_text("x", encoding="utf-8")
+
+    real_iterdir = Path.iterdir
+
+    def _flaky_iterdir(self: Path):
+        entries = list(real_iterdir(self))
+        if self == root2:
+            (sub / "keep.txt").unlink()
+            sub.rmdir()
+        return iter(entries)
+
+    monkeypatch.setattr(Path, "iterdir", _flaky_iterdir)
+    lark_cli._harden_posix_credential_tree(root2)  # must not raise
+
+
+def test_write_result_once_continues_when_hardening_fails(monkeypatch, tmp_path) -> None:
+    """A filesystem hiccup during ensure_lark_cli_credential_tree must not
+    abort result publication: the in-process outcome is already set by the
+    worker's finally block, so the cross-worker result file must still be
+    written and the marker sweep must still run."""
+    _patch_paths(monkeypatch, tmp_path / "home")
+    # ensure_lark_cli_credential_tree is mocked below, so create the root it
+    # would have created; tempfile.mkstemp(dir=...) requires it to exist.
+    lark_cli._lark_cli_credential_root("alice").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(
+        lark_cli,
+        "ensure_lark_cli_credential_tree",
+        lambda *_a, **_k: (_ for _ in ()).throw(OSError("simulated fs hiccup")),
+    )
+    user_id = "alice"
+    generation = "gen"
+    digest = lark_cli._lark_login_code_digest("code-A")
+    published = lark_cli._write_lark_login_result_once(
+        user_id, generation, digest, {"ok": False, "kind": "superseded", "error": "sweep"}
+    )
+    assert published is True
+    assert lark_cli._lark_login_result_path(user_id, generation, digest).is_file()
+
+
+def test_abandoned_marker_with_dead_owner_is_swept_within_grace(tmp_path) -> None:
+    """A marker whose CLI is gone and whose owner outlived the publication
+    grace is dead: foreign polls must sweep it and respawn instead of
+    blocking on a result file that can never arrive."""
+    base_dir = tmp_path / "home"
+    (base_dir / "lark-cli").mkdir(parents=True)
+    user_id = "alice"
+    generation = "gen"
+    digest = lark_cli._lark_login_code_digest("code-A")
+    now = time.time()
+    from deerflow.config import paths as paths_module
+
+    paths_module._paths = paths_module.Paths(base_dir=base_dir)
+
+    try:
+        lark_cli._lark_cli_credential_root(user_id).mkdir(parents=True, exist_ok=True)
+        marker_path = lark_cli._lark_login_marker_path(user_id, generation, digest)
+        marker_path.write_text(
+            json.dumps(
+                {
+                    "generation": generation,
+                    "device_code_digest": digest,
+                    "cli_pid": None,
+                    "owner_pid": os.getpid(),  # alive, but...
+                    "owner_pid_started_at": now - 60.0,  # ...far beyond the 10 s grace
+                    "created_at": now - 1.0,
+                }
+            ),
+            encoding="utf-8",
+        )
+        live = lark_cli._read_live_lark_login_marker_locked(user_id, generation, "code-A")
+        assert live is None
+        assert not marker_path.exists()
+    finally:
+        paths_module._paths = None

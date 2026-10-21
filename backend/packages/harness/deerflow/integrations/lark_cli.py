@@ -424,9 +424,17 @@ def _walk_and_harden(root: Path, apply_: Callable[[Path, str], None]) -> None:
     while pending:
         path = pending.pop()
         kind = _credential_tree_path_kind(path)
+        if kind == "gone":
+            # Vanished between iterdir() and here (concurrent atomic rename or
+            # marker unlink); nothing to harden, keep walking the rest.
+            continue
         apply_(path, kind)
         if kind == "dir":
-            pending.extend(path.iterdir())
+            try:
+                pending.extend(path.iterdir())
+            except FileNotFoundError:
+                # Directory unlinked concurrently (same churn as above).
+                continue
 
 
 def _credential_tree_path_kind(path: Path) -> str:
@@ -435,7 +443,14 @@ def _credential_tree_path_kind(path: Path) -> str:
     Rejects any symlink and any Windows reparse point *before* the caller may
     descend, so a junction cannot redirect traversal outside the tree.
     """
-    info = path.lstat()
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        # The single-flight login run writes marker/result/flow-state files in
+        # this directory via atomic rename, and another thread may unlink a
+        # marker between our iterdir() and here; a vanished entry is not a
+        # security violation, so let the walk skip it instead of aborting.
+        return "gone"
     if stat.S_ISLNK(info.st_mode):
         raise ValueError(f"Lark CLI credential path must not be a symlink: {path}")
     if os.name == "nt" and (getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT):
@@ -2306,6 +2321,15 @@ def set_lark_app_credentials(
 # which comfortably covers the device code's server-side lifetime.
 _LARK_LOGIN_ATTEMPT_MAX_SECONDS = 600
 
+#: A live marker whose CLI has exited may be kept by an alive owner only while
+#: the owner still plausibly holds the login worker thread.  The
+#: exit-to-publication window is milliseconds (hardening plus two small
+#: writes), so an owner that outlives this grace with a dead CLI is itself
+#: dead — the worker thread crashed or was never started — and the marker
+#: must be swept instead of wedging every foreign poll until
+#: ``_LARK_LOGIN_ATTEMPT_MAX_SECONDS``.
+_LARK_LOGIN_OWNER_ALIVE_GRACE_SECONDS = 10.0
+
 # A finished run's outcome stays attachable briefly so late/duplicate polls
 # return the same result instead of re-consuming an already-redeemed code.
 _LARK_LOGIN_RUN_RETENTION_SECONDS = 120.0
@@ -2336,6 +2360,11 @@ class _LarkLoginRun:
         self.process: subprocess.Popen[str] | None = None
         self.thread: threading.Thread | None = None
         self.finished_at: float | None = None
+        # Set just before thread.start() so the marker can distinguish a live
+        # owner from a recycled pid (a restarted Gateway worker handed the
+        # same low pid in a container) or from an owner whose login thread
+        # died before publishing.
+        self.owner_pid_started_at: float | None = None
 
 
 class _ForeignLarkLoginRun:
@@ -2412,6 +2441,7 @@ def _write_lark_login_marker_locked(user_id: str, run: _LarkLoginRun) -> None:
         "device_code_digest": _lark_login_code_digest(run.device_code),
         "cli_pid": cli_pid if isinstance(cli_pid, int) else None,
         "owner_pid": os.getpid(),
+        "owner_pid_started_at": run.owner_pid_started_at,
         "created_at": time.time(),
     }
     _write_json_file_atomic(_lark_login_marker_path(run.user_id, run.generation, payload["device_code_digest"]), payload)
@@ -2433,20 +2463,45 @@ def _read_live_lark_login_marker_locked(user_id: str, generation: str, device_co
         return None
     cli_pid = marker.get("cli_pid")
     owner_pid = marker.get("owner_pid")
+    owner_pid_started_at = marker.get("owner_pid_started_at")
     cli_alive = _pid_alive(cli_pid) if isinstance(cli_pid, int) else False
     owner_alive = _pid_alive(owner_pid) if isinstance(owner_pid, int) else False
     created_at = marker.get("created_at")
     fresh = isinstance(created_at, (int, float)) and time.time() - created_at <= _LARK_LOGIN_ATTEMPT_MAX_SECONDS
     result_published = _lark_login_result_path(user_id, generation, digest).is_file()
-    if fresh and (cli_alive or (owner_alive and not result_published)):
+    if not fresh:
+        path.unlink(missing_ok=True)
+        return None
+    if cli_alive:
         return marker
+    if owner_alive and not result_published:
+        # The CLI has exited; the owner may still be publishing (hardening +
+        # two small writes, normally milliseconds).  Keep the marker live
+        # only while the owner is within the publication grace.  A live pid
+        # beyond the grace means either the pid was recycled by a restarted
+        # worker or the owner's login thread died before publishing — in both
+        # cases no result can arrive, so the marker must be swept instead of
+        # wedging every foreign poll for the remaining 600 s.
+        if (
+            isinstance(owner_pid_started_at, (int, float))
+            and time.time() - owner_pid_started_at <= _LARK_LOGIN_OWNER_ALIVE_GRACE_SECONDS
+        ):
+            return marker
     path.unlink(missing_ok=True)
     return None
 
 
 def _write_lark_login_result_once(user_id: str, generation: str, device_code_digest: str, payload: dict[str, Any]) -> bool:
     """Publish the run outcome atomically; the first writer wins."""
-    ensure_lark_cli_credential_tree(user_id)
+    try:
+        ensure_lark_cli_credential_tree(user_id)
+    except Exception:
+        # Best-effort: a filesystem hiccup (e.g. a concurrently-vanished temp
+        # file) must not strand the flow — the in-process outcome is already
+        # set by the caller's finally block, and the marker sweep below still
+        # needs to run so foreign polls do not block on a result file that
+        # will never exist.
+        logger.exception("Failed to re-harden the Lark credential tree before publishing a login result; continuing with publication.")
     path = _lark_login_result_path(user_id, generation, device_code_digest)
     fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
     os.close(fd)
@@ -2691,6 +2746,7 @@ def _get_or_start_lark_login_run(user_id: str, *, generation: str, device_code: 
         args = [path, "auth", "login", "--device-code", device_code, "--json"]
         run.process = _spawn_lark_login_process(args, user_id=user_id)
         run.thread = threading.Thread(target=_lark_login_run_worker, args=(run,), name=f"lark-login-{generation[:8]}", daemon=True)
+        run.owner_pid_started_at = time.time()
         with _LARK_LOGIN_RUNS_LOCK:
             _LARK_LOGIN_RUNS[key] = run
         _write_lark_login_marker_locked(user_id, run)
