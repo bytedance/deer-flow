@@ -540,6 +540,13 @@ different cache settings. Redis thread cleanup treats a configured `key_prefix`
 as literal text, including glob metacharacters, so deletion stays within that
 namespace and thread.
 
+Gateway checkpoint cleanup runs when the next run wins durable same-thread
+admission, before its first checkpoint read. It checks only the root head and
+its parent, removes at most one metadata-only duration leaf without pending
+writes, and preserves explicit checkpoint selections and delta replay state.
+See [checkpoint operations](https://deerflow.tech/docs/harness/checkpoints/operations)
+for the retention constraints.
+
 > [!TIP]
 > On Linux, if Docker-based commands fail with `permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock`, add your user to the `docker` group and re-login before retrying. See [CONTRIBUTING.md](CONTRIBUTING.md#linux-docker-daemon-permission-denied) for the full fix.
 
