@@ -321,6 +321,7 @@ setup, after the autouse fixtures initialize runtime, to avoid the package cycle
 
 `test_helm_redis_existing_secret.py` renders the chart and executes its startup
 and both probe commands with argument-recording Redis stubs through
-`support.shell.require_posix_sh`. Keep missing/empty password keys, stale values
-passwords, Secret precedence, external mode and shell metacharacters covered.
+`support.shell.require_posix_sh`. Keep missing/empty password keys, stale
+`redis.auth.password` values, Secret precedence, external mode and shell
+metacharacters covered.
 Render tests skip when Helm is unavailable; they need no Kubernetes cluster.

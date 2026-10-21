@@ -83,7 +83,10 @@ def test_bundled_redis_uses_optional_existing_secret_password(password: str | No
     assert _secret_ref(redis, "REDIS_PASSWORD") == {"name": "managed-redis", "key": "redis-password", "optional": True}
     assert _secret_ref(_container(documents, "gateway"), "DEER_FLOW_STREAM_BRIDGE_REDIS_URL") == {"name": "managed-redis", "key": "redis-url"}
     assert not any(document.get("kind") == "Secret" and document["metadata"]["name"].endswith("-redis") for document in documents)
-    assert PASSWORD not in yaml.safe_dump(documents)
+    if ignored_password:
+        # The stale value must not leak into the manifest: it is the only input
+        # here that a template edit could accidentally start rendering.
+        assert ignored_password not in yaml.safe_dump(documents)
     expected_auth = ["--requirepass", password] if password else []
     assert _run_command(redis["command"] + redis["args"], tmp_path, password) == ["redis-server", "--appendonly", "yes", *expected_auth]
     for probe in ("readinessProbe", "livenessProbe"):
