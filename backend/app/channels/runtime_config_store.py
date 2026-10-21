@@ -162,6 +162,7 @@ class ChannelRuntimeConfigStore:
         fd = tempfile.NamedTemporaryFile(
             mode="w",
             encoding="utf-8",
+            newline="",
             dir=self._path.parent,
             prefix=credential_staging_prefix(self._path),
             suffix=".tmp",

@@ -112,8 +112,10 @@ can become stale or inaccessible when a host editor replaces a file on save.
 Configuration priority:
 1. Explicit `config_path` argument
 2. `DEER_FLOW_EXTENSIONS_CONFIG_PATH` environment variable
-3. `extensions_config.json` in current directory (backend/)
-4. `extensions_config.json` in parent directory (project root - **recommended location**)
+3. `extensions_config.json`, then legacy `mcp_config.json`, in the project root (`DEER_FLOW_PROJECT_ROOT`, else the current directory) - **recommended location**
+4. Legacy `backend/` and repository-root copies, located from the harness source tree
+
+When the search finds nothing, the Gateway skill toggle and MCP writers create the file at `ExtensionsConfig.default_config_path()` (the project root, step 3), so the next resolution reads back what they wrote; `DeerFlowClient` raises instead of creating one.
 
 Extensions are optional only in the fallback *search* mode (priority 3-4 above): `ExtensionsConfig.resolve_config_path()` returns `None` when neither an explicit `config_path` nor `DEER_FLOW_EXTENSIONS_CONFIG_PATH` is given and the search locations find nothing. An explicit `config_path` argument or a set `DEER_FLOW_EXTENSIONS_CONFIG_PATH` (priority 1-2) is an operator assertion that one particular file must be used, so a missing file in either of those modes raises `FileNotFoundError` instead — including when the file existed earlier and has since been deleted. The MCP tools cache's staleness check (`deerflow.mcp.cache._resolve_config_path`) is a narrow, deliberate exception to that rule: it catches that `FileNotFoundError` locally and treats it as "unconfigured" so a previously-valid config disappearing mid-run degrades the cache to serving its last-known-good tools instead of raising out of a per-request hot path (see the MCP System section below).
 

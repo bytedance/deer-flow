@@ -1,5 +1,7 @@
 ### IM Channels System (`app/channels/`)
 
+Store JSON decode errors follow corrupt-file recovery; SQL import keeps the original bytes.
+
 IM channels use `langgraph-sdk` HTTP; Gateway owns thread lifecycle.
 WeChat outbound: off-loop cap+1; overflow `None` before encryption/upload; <=0 unlimited.
 Cancel drains cursor writes; expiry drains cursor/auth reset under `_auth_lock`.

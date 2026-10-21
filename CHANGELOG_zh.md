@@ -1112,6 +1112,22 @@
 
 ### 修复
 
+- **MCP：** 使用 OAuth `refresh_token` 授权的 MCP 服务器，在提供方轮换 refresh token
+  （Auth0、Okta、Google）时，跨 Gateway 重启、工具缓存重置、个人连接的多次运行以及多个
+  Gateway 实例都能继续工作。此前令牌只保存在进程内存中，每个新进程或新 manager 都从配置里
+  的 refresh token 重新开始，而该 token 已被第一次刷新消耗，于是得到 `invalid_grant`。
+  当 `database.backend` 为 `sqlite` 或 `postgres` 时，每个连接的 access token 与最新的
+  refresh token 现保存在新表 `mcp_oauth_tokens`（迁移 `0047_mcp_oauth_tokens`）中，用
+  `DEER_FLOW_CREDENTIALS_KEY` 加密，按部署级服务器或个人连接的所有者分别建键。刷新前先重读
+  该行，并以短租约（token 请求进行期间持续续约）加版本号比较交换（compare-and-set）认领，
+  因此并发实例只调用一次 token 端点并采用彼此的结果；未能写入的轮换结果会被保留，并在下次
+  刷新前先写回。修改配置中的种子、token 端点、client、scope 或 audience 会从配置
+  开始新的令牌链。`client_credentials` 令牌仍留在进程内。保存 MCP 配置时会删除配置中已不存在
+  的连接所存的令牌；refresh token 被拒绝时，工具调用会报出要求重新配置 refresh token 的错误
+  （若本实例无法解密其他实例存下的令牌链，还会提示所有实例需要相同的密钥）。声明多实例部署且启用了
+  `refresh_token` OAuth 服务器时，缺少 `DEER_FLOW_CREDENTIALS_KEY` 现在会拒绝启动。
+  ([#7207])
+
 - **社区工具：** 拒绝 LightRAG 与 RAGFlow 的 `knowledge_search` 数值设置中的
   布尔值，不再静默把 `true` 当作一秒超时、一条结果或一个字符的输出。无效设置返回
   现有的配置错误。([#7042])
@@ -1615,29 +1631,42 @@
   两个实例为同一会话的第一条消息各自创建线程时，绑定现在以“不存在才插入”的方式在
   `channel_conversations` / `channel_thread_bindings` 中认领：落败的实例改用胜出者的线程
   并删除自己创建的空线程，`/new` 仍会重新绑定到新线程。 (issue #7103, [#7104])
+  
 - **技能：** agent 通过 `skill_manage` 工具创建、编辑、修补或删除的技能，现在会像通过
   技能 API 所做的修改一样，传达到共享同一 home 卷的每个 Gateway 进程。此前该工具只刷新
   本进程的技能提示缓存，对端副本会继续为该用户渲染旧的技能列表；现在它在本地刷新之后、
   于事件循环之外发布同一个按用户限定的共享缓存重置标记。写入、历史记录、刷新与标记作为
   一个整体完成，因此写入途中被取消的运行不再让本进程或对端继续使用过期列表。标记无法写入
   时，工具会报告修改已生效但未能通知其他进程，而不会让人误以为写入失败。 ([#7099])
+  
 - **provisioner：** 两个 provisioner 副本在 `K8S_NAMESPACE` 尚不存在时同时启动，输掉
   创建竞争的一方不再在启动时崩溃：它收到的 `409 AlreadyExists` 现在视为命名空间已存在，
   与 Pod 和 Service 的创建一致。Helm 部署中 provisioner 运行在其管理的命名空间内，从不
   经过这条路径。 ([#7099])
+  
 - **项目：** 向调用者无权写入的项目上传书架文档或从对话保存文件时，不再遗留目录，
   也不再返回 `500`。这两个路由此前先把请求体暂存到
   `users/{user_id}/projects/{project_id}/` 下才检查项目，因此不存在、属于他人或已归档
   的 id 会留下一个回收站对账永远不会清理的空 `{project_id}/documents/` 目录，而超过单个
   路径分量长度的 id 会因 `ENAMETOOLONG` 失败。现在会先确认项目归调用者所有且处于活跃
   状态，不写任何内容即返回同样的 `404`；书架插入仍会在项目行锁下再次检查。 ([#7040])
+  
+- **skills：** 在尚无 `extensions_config.json` 时切换技能开关，现在会在项目根目录
+  （`DEER_FLOW_PROJECT_ROOT`，未设置时为工作目录）创建该文件，这与 MCP 编辑器已有的
+  创建位置一致，也是配置解析最先查找的位置。此前技能开关使用工作目录的父目录：当
+  Gateway 不是从 `backend/` 启动时，新文件会落在查找路径之外，重新加载后开关被静默
+  丢弃，之后的 MCP 编辑还会再创建第二个文件。现在两个路由共用
+  `ExtensionsConfig.default_config_path()`。Docker 与 `make dev` 不受影响：它们设置了
+  配置路径，或者项目根目录恰好就是那个父目录。 ([#7048])
+
 - **工作流：** 脚本工作流等待耗时较长的子 Agent 运行时，不再无视 `timeout_seconds`，
   在约 209 秒后因 `Worker turn limit` 失败。此前只要步骤尚未完成，监督器就会在每次
   20 ms 轮询时向 QuickJS worker 重发一个空帧，每次往返都会计入 10,000 次交互上限。
   现在 worker 会报告其作业队列何时已排空，随后监督器在本地等待尚未完成的调用，不再
   交换帧（仍每隔 20 ms 检查取消、故障和 worker 退出），因此空闲等待不再消耗交互次数，
   `timeout_seconds` 成为唯一的实际耗时上限；持续驱动作业队列的脚本仍受交互次数上限
-  约束。(issue #7022, [#7024])
+  约束。(issue [#7022], [#7024])
+  
 - **浏览器：** `browser_screenshot` 不再替换线程 outputs 目录中已存在的文件。此前以
   `report.png` 保存的截图会覆盖用户自己的 `report.png`、更早的截图，或同一秒内生成的
   另一张默认命名截图；现在会像 `web_capture` 一样改用下一个空闲名称（`report-1.png`、
@@ -9584,6 +9613,7 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#5634]: https://github.com/bytedance/deer-flow/pull/5634
 [#5640]: https://github.com/bytedance/deer-flow/pull/5640
 [#5643]: https://github.com/bytedance/deer-flow/pull/5643
+[#5645]: https://github.com/bytedance/deer-flow/pull/5645
 [#5647]: https://github.com/bytedance/deer-flow/pull/5647
 [#5648]: https://github.com/bytedance/deer-flow/pull/5648
 [#5649]: https://github.com/bytedance/deer-flow/pull/5649
@@ -9787,6 +9817,7 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6045]: https://github.com/bytedance/deer-flow/pull/6045
 [#6046]: https://github.com/bytedance/deer-flow/pull/6046
 [#6048]: https://github.com/bytedance/deer-flow/pull/6048
+[#6051]: https://github.com/bytedance/deer-flow/pull/6051
 [#6054]: https://github.com/bytedance/deer-flow/pull/6054
 [#6056]: https://github.com/bytedance/deer-flow/pull/6056
 [#6057]: https://github.com/bytedance/deer-flow/pull/6057
@@ -10007,6 +10038,7 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6433]: https://github.com/bytedance/deer-flow/pull/6433
 [#6435]: https://github.com/bytedance/deer-flow/pull/6435
 [#6436]: https://github.com/bytedance/deer-flow/pull/6436
+[#6439]: https://github.com/bytedance/deer-flow/pull/6439
 [#6441]: https://github.com/bytedance/deer-flow/pull/6441
 [#6443]: https://github.com/bytedance/deer-flow/pull/6443
 [#6445]: https://github.com/bytedance/deer-flow/pull/6445
@@ -10026,6 +10058,7 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6477]: https://github.com/bytedance/deer-flow/pull/6477
 [#6478]: https://github.com/bytedance/deer-flow/pull/6478
 [#6481]: https://github.com/bytedance/deer-flow/pull/6481
+[#6483]: https://github.com/bytedance/deer-flow/pull/6483
 [#6484]: https://github.com/bytedance/deer-flow/pull/6484
 [#6485]: https://github.com/bytedance/deer-flow/pull/6485
 [#6486]: https://github.com/bytedance/deer-flow/pull/6486
@@ -10080,6 +10113,7 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6571]: https://github.com/bytedance/deer-flow/pull/6571
 [#6573]: https://github.com/bytedance/deer-flow/pull/6573
 [#6574]: https://github.com/bytedance/deer-flow/pull/6574
+[#6579]: https://github.com/bytedance/deer-flow/pull/6579
 [#6580]: https://github.com/bytedance/deer-flow/pull/6580
 [#6581]: https://github.com/bytedance/deer-flow/pull/6581
 [#6582]: https://github.com/bytedance/deer-flow/pull/6582
@@ -10103,12 +10137,15 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6619]: https://github.com/bytedance/deer-flow/pull/6619
 [#6620]: https://github.com/bytedance/deer-flow/pull/6620
 [#6623]: https://github.com/bytedance/deer-flow/pull/6623
+[#6628]: https://github.com/bytedance/deer-flow/pull/6628
+[#6630]: https://github.com/bytedance/deer-flow/pull/6630
 [#6635]: https://github.com/bytedance/deer-flow/pull/6635
 [#6636]: https://github.com/bytedance/deer-flow/pull/6636
 [#6638]: https://github.com/bytedance/deer-flow/pull/6638
 [#6639]: https://github.com/bytedance/deer-flow/pull/6639
 [#6641]: https://github.com/bytedance/deer-flow/pull/6641
 [#6645]: https://github.com/bytedance/deer-flow/pull/6645
+[#6648]: https://github.com/bytedance/deer-flow/pull/6648
 [#6656]: https://github.com/bytedance/deer-flow/pull/6656
 [#6659]: https://github.com/bytedance/deer-flow/pull/6659
 [#6661]: https://github.com/bytedance/deer-flow/pull/6661
@@ -10117,6 +10154,7 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6665]: https://github.com/bytedance/deer-flow/pull/6665
 [#6666]: https://github.com/bytedance/deer-flow/pull/6666
 [#6668]: https://github.com/bytedance/deer-flow/pull/6668
+[#6669]: https://github.com/bytedance/deer-flow/pull/6669
 [#6670]: https://github.com/bytedance/deer-flow/pull/6670
 [#6671]: https://github.com/bytedance/deer-flow/pull/6671
 [#6672]: https://github.com/bytedance/deer-flow/pull/6672
@@ -10127,47 +10165,15 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6683]: https://github.com/bytedance/deer-flow/pull/6683
 [#6685]: https://github.com/bytedance/deer-flow/pull/6685
 [#6689]: https://github.com/bytedance/deer-flow/pull/6689
+[#6690]: https://github.com/bytedance/deer-flow/pull/6690
 [#6691]: https://github.com/bytedance/deer-flow/pull/6691
 [#6692]: https://github.com/bytedance/deer-flow/pull/6692
-[#6702]: https://github.com/bytedance/deer-flow/pull/6702
-[#6706]: https://github.com/bytedance/deer-flow/pull/6706
-[#6746]: https://github.com/bytedance/deer-flow/pull/6746
-[#6781]: https://github.com/bytedance/deer-flow/pull/6781
-[#6785]: https://github.com/bytedance/deer-flow/pull/6785
-[#6798]: https://github.com/bytedance/deer-flow/pull/6798
-[#6836]: https://github.com/bytedance/deer-flow/pull/6836
-[#6843]: https://github.com/bytedance/deer-flow/pull/6843
-[#6844]: https://github.com/bytedance/deer-flow/pull/6844
-[#6852]: https://github.com/bytedance/deer-flow/pull/6852
-[#6859]: https://github.com/bytedance/deer-flow/pull/6859
-[#6865]: https://github.com/bytedance/deer-flow/pull/6865
-[#6876]: https://github.com/bytedance/deer-flow/pull/6876
-[#6897]: https://github.com/bytedance/deer-flow/pull/6897
-[#6909]: https://github.com/bytedance/deer-flow/pull/6909
-[#6913]: https://github.com/bytedance/deer-flow/pull/6913
-[#6930]: https://github.com/bytedance/deer-flow/pull/6930
-[#6988]: https://github.com/bytedance/deer-flow/pull/6988
-[#6991]: https://github.com/bytedance/deer-flow/pull/6991
-[#7040]: https://github.com/bytedance/deer-flow/pull/7040
-[#7099]: https://github.com/bytedance/deer-flow/pull/7099
-[#7104]: https://github.com/bytedance/deer-flow/pull/7104
-[#7123]: https://github.com/bytedance/deer-flow/pull/7123
-[#7155]: https://github.com/bytedance/deer-flow/pull/7155
-[#7205]: https://github.com/bytedance/deer-flow/pull/7205
-[#5645]: https://github.com/bytedance/deer-flow/pull/5645
-[#6051]: https://github.com/bytedance/deer-flow/pull/6051
-[#6439]: https://github.com/bytedance/deer-flow/pull/6439
-[#6483]: https://github.com/bytedance/deer-flow/pull/6483
-[#6579]: https://github.com/bytedance/deer-flow/pull/6579
-[#6628]: https://github.com/bytedance/deer-flow/pull/6628
-[#6630]: https://github.com/bytedance/deer-flow/pull/6630
-[#6648]: https://github.com/bytedance/deer-flow/pull/6648
-[#6669]: https://github.com/bytedance/deer-flow/pull/6669
-[#6690]: https://github.com/bytedance/deer-flow/pull/6690
 [#6693]: https://github.com/bytedance/deer-flow/pull/6693
 [#6699]: https://github.com/bytedance/deer-flow/pull/6699
 [#6700]: https://github.com/bytedance/deer-flow/pull/6700
 [#6701]: https://github.com/bytedance/deer-flow/pull/6701
+[#6702]: https://github.com/bytedance/deer-flow/pull/6702
+[#6706]: https://github.com/bytedance/deer-flow/pull/6706
 [#6709]: https://github.com/bytedance/deer-flow/pull/6709
 [#6714]: https://github.com/bytedance/deer-flow/pull/6714
 [#6716]: https://github.com/bytedance/deer-flow/pull/6716
@@ -10184,6 +10190,7 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6740]: https://github.com/bytedance/deer-flow/pull/6740
 [#6741]: https://github.com/bytedance/deer-flow/pull/6741
 [#6742]: https://github.com/bytedance/deer-flow/pull/6742
+[#6746]: https://github.com/bytedance/deer-flow/pull/6746
 [#6747]: https://github.com/bytedance/deer-flow/pull/6747
 [#6749]: https://github.com/bytedance/deer-flow/pull/6749
 [#6753]: https://github.com/bytedance/deer-flow/pull/6753
@@ -10198,8 +10205,10 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6774]: https://github.com/bytedance/deer-flow/pull/6774
 [#6776]: https://github.com/bytedance/deer-flow/pull/6776
 [#6779]: https://github.com/bytedance/deer-flow/pull/6779
+[#6781]: https://github.com/bytedance/deer-flow/pull/6781
 [#6782]: https://github.com/bytedance/deer-flow/pull/6782
 [#6783]: https://github.com/bytedance/deer-flow/pull/6783
+[#6785]: https://github.com/bytedance/deer-flow/pull/6785
 [#6787]: https://github.com/bytedance/deer-flow/pull/6787
 [#6788]: https://github.com/bytedance/deer-flow/pull/6788
 [#6791]: https://github.com/bytedance/deer-flow/pull/6791
@@ -10207,6 +10216,7 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6794]: https://github.com/bytedance/deer-flow/pull/6794
 [#6795]: https://github.com/bytedance/deer-flow/pull/6795
 [#6796]: https://github.com/bytedance/deer-flow/pull/6796
+[#6798]: https://github.com/bytedance/deer-flow/pull/6798
 [#6799]: https://github.com/bytedance/deer-flow/pull/6799
 [#6800]: https://github.com/bytedance/deer-flow/pull/6800
 [#6803]: https://github.com/bytedance/deer-flow/pull/6803
@@ -10228,20 +10238,27 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6831]: https://github.com/bytedance/deer-flow/pull/6831
 [#6832]: https://github.com/bytedance/deer-flow/pull/6832
 [#6834]: https://github.com/bytedance/deer-flow/pull/6834
+[#6836]: https://github.com/bytedance/deer-flow/pull/6836
 [#6838]: https://github.com/bytedance/deer-flow/pull/6838
 [#6839]: https://github.com/bytedance/deer-flow/pull/6839
+[#6843]: https://github.com/bytedance/deer-flow/pull/6843
+[#6844]: https://github.com/bytedance/deer-flow/pull/6844
 [#6845]: https://github.com/bytedance/deer-flow/pull/6845
 [#6846]: https://github.com/bytedance/deer-flow/pull/6846
 [#6848]: https://github.com/bytedance/deer-flow/pull/6848
 [#6850]: https://github.com/bytedance/deer-flow/pull/6850
+[#6852]: https://github.com/bytedance/deer-flow/pull/6852
 [#6855]: https://github.com/bytedance/deer-flow/pull/6855
 [#6857]: https://github.com/bytedance/deer-flow/pull/6857
 [#6858]: https://github.com/bytedance/deer-flow/pull/6858
+[#6859]: https://github.com/bytedance/deer-flow/pull/6859
 [#6861]: https://github.com/bytedance/deer-flow/pull/6861
 [#6863]: https://github.com/bytedance/deer-flow/pull/6863
+[#6865]: https://github.com/bytedance/deer-flow/pull/6865
 [#6868]: https://github.com/bytedance/deer-flow/pull/6868
 [#6870]: https://github.com/bytedance/deer-flow/pull/6870
 [#6871]: https://github.com/bytedance/deer-flow/pull/6871
+[#6876]: https://github.com/bytedance/deer-flow/pull/6876
 [#6878]: https://github.com/bytedance/deer-flow/pull/6878
 [#6880]: https://github.com/bytedance/deer-flow/pull/6880
 [#6882]: https://github.com/bytedance/deer-flow/pull/6882
@@ -10250,13 +10267,16 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6891]: https://github.com/bytedance/deer-flow/pull/6891
 [#6893]: https://github.com/bytedance/deer-flow/pull/6893
 [#6894]: https://github.com/bytedance/deer-flow/pull/6894
+[#6897]: https://github.com/bytedance/deer-flow/pull/6897
 [#6898]: https://github.com/bytedance/deer-flow/pull/6898
 [#6900]: https://github.com/bytedance/deer-flow/pull/6900
 [#6901]: https://github.com/bytedance/deer-flow/pull/6901
 [#6903]: https://github.com/bytedance/deer-flow/pull/6903
 [#6904]: https://github.com/bytedance/deer-flow/pull/6904
 [#6907]: https://github.com/bytedance/deer-flow/pull/6907
+[#6909]: https://github.com/bytedance/deer-flow/pull/6909
 [#6910]: https://github.com/bytedance/deer-flow/pull/6910
+[#6913]: https://github.com/bytedance/deer-flow/pull/6913
 [#6914]: https://github.com/bytedance/deer-flow/pull/6914
 [#6916]: https://github.com/bytedance/deer-flow/pull/6916
 [#6917]: https://github.com/bytedance/deer-flow/pull/6917
@@ -10267,6 +10287,7 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6924]: https://github.com/bytedance/deer-flow/pull/6924
 [#6927]: https://github.com/bytedance/deer-flow/pull/6927
 [#6929]: https://github.com/bytedance/deer-flow/pull/6929
+[#6930]: https://github.com/bytedance/deer-flow/pull/6930
 [#6931]: https://github.com/bytedance/deer-flow/pull/6931
 [#6932]: https://github.com/bytedance/deer-flow/pull/6932
 [#6934]: https://github.com/bytedance/deer-flow/pull/6934
@@ -10291,7 +10312,9 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6980]: https://github.com/bytedance/deer-flow/pull/6980
 [#6981]: https://github.com/bytedance/deer-flow/pull/6981
 [#6984]: https://github.com/bytedance/deer-flow/pull/6984
+[#6988]: https://github.com/bytedance/deer-flow/pull/6988
 [#6990]: https://github.com/bytedance/deer-flow/pull/6990
+[#6991]: https://github.com/bytedance/deer-flow/pull/6991
 [#6992]: https://github.com/bytedance/deer-flow/pull/6992
 [#6995]: https://github.com/bytedance/deer-flow/pull/6995
 [#6998]: https://github.com/bytedance/deer-flow/pull/6998
@@ -10308,6 +10331,8 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7033]: https://github.com/bytedance/deer-flow/pull/7033
 [#7035]: https://github.com/bytedance/deer-flow/pull/7035
 [#7039]: https://github.com/bytedance/deer-flow/pull/7039
+[#7040]: https://github.com/bytedance/deer-flow/pull/7040
+[#7048]: https://github.com/bytedance/deer-flow/pull/7048
 [#7042]: https://github.com/bytedance/deer-flow/pull/7042
 [#7051]: https://github.com/bytedance/deer-flow/pull/7051
 [#7053]: https://github.com/bytedance/deer-flow/pull/7053
@@ -10322,12 +10347,15 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7078]: https://github.com/bytedance/deer-flow/pull/7078
 [#7084]: https://github.com/bytedance/deer-flow/pull/7084
 [#7093]: https://github.com/bytedance/deer-flow/pull/7093
+[#7099]: https://github.com/bytedance/deer-flow/pull/7099
+[#7104]: https://github.com/bytedance/deer-flow/pull/7104
 [#7106]: https://github.com/bytedance/deer-flow/pull/7106
 [#7108]: https://github.com/bytedance/deer-flow/pull/7108
 [#7112]: https://github.com/bytedance/deer-flow/pull/7112
 [#7116]: https://github.com/bytedance/deer-flow/pull/7116
 [#7117]: https://github.com/bytedance/deer-flow/pull/7117
 [#7122]: https://github.com/bytedance/deer-flow/pull/7122
+[#7123]: https://github.com/bytedance/deer-flow/pull/7123
 [#7127]: https://github.com/bytedance/deer-flow/pull/7127
 [#7140]: https://github.com/bytedance/deer-flow/pull/7140
 [#7141]: https://github.com/bytedance/deer-flow/pull/7141
@@ -10337,7 +10365,10 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7151]: https://github.com/bytedance/deer-flow/pull/7151
 [#7152]: https://github.com/bytedance/deer-flow/pull/7152
 [#7154]: https://github.com/bytedance/deer-flow/pull/7154
+[#7155]: https://github.com/bytedance/deer-flow/pull/7155
 [#7163]: https://github.com/bytedance/deer-flow/pull/7163
 [#7167]: https://github.com/bytedance/deer-flow/pull/7167
 [#7170]: https://github.com/bytedance/deer-flow/pull/7170
+[#7205]: https://github.com/bytedance/deer-flow/pull/7205
+[#7207]: https://github.com/bytedance/deer-flow/pull/7207
 [#7217]: https://github.com/bytedance/deer-flow/pull/7217
