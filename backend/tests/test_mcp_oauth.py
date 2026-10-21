@@ -5,12 +5,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
 
-from deerflow.config.extensions_config import ExtensionsConfig
+from deerflow.config.extensions_config import ExtensionsConfig, McpOAuthConfig
 from deerflow.mcp.oauth import OAuthTokenManager, build_oauth_tool_interceptor, get_initial_oauth_headers
 
 
@@ -484,6 +485,48 @@ def test_oauth_refresh_token_rotation_persists_rotated_value(monkeypatch):
     assert post_calls[1]["data"]["refresh_token"] == "rt-rotated-1"
 
 
+def test_refresh_waiters_leave_default_executor_available(monkeypatch):
+    """Waiting for one refresh must not starve DNS or unrelated executor work."""
+    post_calls: list[dict[str, Any]] = []
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        executor = ThreadPoolExecutor(max_workers=1)
+        loop.set_default_executor(executor)
+        refreshing = asyncio.Event()
+        release_refresh = asyncio.Event()
+
+        class HeldClient(_MockAsyncClient):
+            async def post(self, url, data):
+                refreshing.set()
+                await release_refresh.wait()
+                return await super().post(url, data)
+
+        monkeypatch.setattr("httpx.AsyncClient", lambda **kwargs: HeldClient(payload={"access_token": "shared-token", "expires_in": 3600}, post_calls=post_calls, **kwargs))
+        manager = OAuthTokenManager({"secure-http": McpOAuthConfig(enabled=True, token_url="https://auth.example.com/token", client_id="client-id", client_secret="client-secret")})
+        callers = [asyncio.create_task(manager.get_authorization_header("secure-http"))]
+        try:
+            await asyncio.wait_for(refreshing.wait(), timeout=5)
+            callers.extend(asyncio.create_task(manager.get_authorization_header("secure-http")) for _ in range(2))
+            # Let both callers reach their wait. The loop marker is queued after
+            # their tasks, so any acquisition jobs they schedule precede the probe.
+            waiting = loop.create_future()
+            loop.call_soon(waiting.set_result, None)
+            await waiting
+            assert await asyncio.wait_for(asyncio.to_thread(lambda: "executor-ready"), timeout=5) == "executor-ready"
+            release_refresh.set()
+            assert await asyncio.wait_for(asyncio.gather(*callers), timeout=5) == ["Bearer shared-token"] * 3
+        finally:
+            release_refresh.set()
+            for caller in callers:
+                caller.cancel()
+            await asyncio.gather(*callers, return_exceptions=True)
+            executor.shutdown(wait=True, cancel_futures=True)
+
+    asyncio.run(scenario())
+    assert len(post_calls) == 1
+
+
 def test_get_authorization_header_concurrent_threads_no_deadlock(monkeypatch):
     """Concurrent callers on different event loops/threads must not deadlock.
 
@@ -598,116 +641,91 @@ def test_get_authorization_header_concurrent_threads_no_deadlock(monkeypatch):
     assert len(post_calls) == 1
 
 
-def test_get_authorization_header_cancelled_while_waiting_does_not_leak_lock(monkeypatch):
-    """A caller cancelled while waiting on the per-server lock must not leak it.
+@pytest.mark.parametrize("failure", ["cancel", "error"])
+def test_failed_refresh_owner_allows_waiter_to_retry(monkeypatch, failure):
+    """A refresh failure belongs to its caller; a waiting caller can retry."""
 
-    ``get_authorization_header`` runs ``lock.acquire()`` on a real OS thread via
-    ``asyncio.to_thread`` so a blocking wait never blocks the event loop. Once that
-    thread has actually started running ``lock.acquire()``, Python cannot interrupt
-    it: cancelling the *caller* only stops the caller from continuing, it does not
-    stop the thread. If cancellation at that await let the thread go on to acquire
-    the lock unobserved (nobody left holding a reference that will call
-    ``release()`` for it), the lock would stay held forever and every subsequent
-    call for this server would block permanently at the same line -- the very
-    cross-thread deadlock this file's lock was introduced to fix, reintroduced via
-    a different path.
+    async def scenario():
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        attempts = 0
 
-    This test holds the per-server lock (simulating another in-flight caller),
-    starts a second caller that has to wait for it, cancels that waiter while it
-    is genuinely blocked in its executor thread, releases the original holder, and
-    then asserts a third caller completes within a bounded timeout and performs
-    exactly one token fetch. Every potentially-hanging await is wrapped in a
-    bounded timeout so a regression fails this test quickly instead of hanging the
-    suite.
-    """
-    post_calls: list[dict[str, Any]] = []
+        class HeldClient(_MockAsyncClient):
+            async def post(self, url, data):
+                nonlocal attempts
+                attempts += 1
+                if attempts == 1:
+                    entered.set()
+                    await release.wait()
+                    raise RuntimeError("first refresh failed")
+                return await super().post(url, data)
 
-    def _client_factory(*args, **kwargs):
-        return _MockAsyncClient(
-            payload={
-                "access_token": "after-cancel-token",
-                "token_type": "Bearer",
-                "expires_in": 3600,
-            },
-            post_calls=post_calls,
-            **kwargs,
-        )
-
-    monkeypatch.setattr("httpx.AsyncClient", _client_factory)
-
-    config = ExtensionsConfig.model_validate(
-        {
-            "mcpServers": {
-                "secure-http": {
-                    "enabled": True,
-                    "type": "http",
-                    "url": "https://api.example.com/mcp",
-                    "oauth": {
-                        "enabled": True,
-                        "token_url": "https://auth.example.com/oauth/token",
-                        "grant_type": "client_credentials",
-                        "client_id": "client-id",
-                        "client_secret": "client-secret",
-                    },
-                }
-            }
-        }
-    )
-
-    manager = OAuthTokenManager.from_extensions_config(config)
-    lock = manager._states["secure-http"].lock
-
-    async def scenario() -> None:
-        # Simulate another in-flight caller already holding the per-server lock
-        # (uncontended, so this succeeds immediately without blocking).
-        lock.acquire()
+        monkeypatch.setattr("httpx.AsyncClient", lambda **kwargs: HeldClient(payload={"access_token": "recovered-token", "expires_in": 3600}, post_calls=[], **kwargs))
+        manager = OAuthTokenManager({"secure-http": McpOAuthConfig(enabled=True, token_url="https://auth.example.com/token", client_id="client-id", client_secret="client-secret")})
+        owner = asyncio.create_task(manager.get_authorization_header("secure-http"))
+        callers = [owner]
         try:
+            await asyncio.wait_for(entered.wait(), 5)
             waiter = asyncio.create_task(manager.get_authorization_header("secure-http"))
-
-            # Let the waiter's asyncio.to_thread(lock.acquire) actually get
-            # scheduled onto an executor thread and start genuinely blocking on
-            # the real lock before cancelling it -- otherwise the cancellation
-            # could land before the thread even starts, which would not exercise
-            # the bug.
-            await asyncio.sleep(0.2)
-
-            waiter.cancel()
-            # The original holder finishes its own work and releases *before* we
-            # wait on the cancelled waiter: a correct fix must keep the lock's
-            # eventual acquisition shielded from this coroutine's cancellation and
-            # wait for it to actually land before releasing, so awaiting the
-            # cancelled waiter can legitimately block until the lock is free
-            # either way.
-            lock.release()
-
-            with pytest.raises(asyncio.CancelledError):
-                await asyncio.wait_for(waiter, timeout=5)
-
-            # The crux of the regression: under the bug, the waiter's abandoned
-            # executor thread went on to acquire the lock with nobody left to
-            # release it, so this third call would block forever. Bound it so a
-            # regression fails fast instead of hanging the test itself.
-            third = await asyncio.wait_for(manager.get_authorization_header("secure-http"), timeout=5)
-            assert third == "Bearer after-cancel-token"
+            callers.append(waiter)
+            waiting = asyncio.get_running_loop().create_future()
+            asyncio.get_running_loop().call_soon(waiting.set_result, None)
+            await waiting
+            if failure == "cancel":
+                owner.cancel()
+            else:
+                release.set()
+            with pytest.raises(asyncio.CancelledError if failure == "cancel" else RuntimeError):
+                await owner
+            assert await asyncio.wait_for(waiter, 5) == "Bearer recovered-token"
+            assert await manager.get_authorization_header("secure-http") == "Bearer recovered-token"
+            assert attempts == 2
         finally:
-            # Test-only safety net, independent of the assertions above: under
-            # the bug, the lock is left permanently locked with a background
-            # thread (from whichever caller's orphaned acquisition landed last)
-            # still parked on a *subsequent* acquire() that will now never
-            # return. asyncio.run()'s own teardown joins every thread the
-            # default executor ever created before it returns, so leaving that
-            # thread stuck would hang this test process at interpreter/loop
-            # shutdown even after the failure above is already reported. Forcing
-            # the lock open here lets any such thread finish so the process can
-            # exit; it is a no-op once the fix keeps the lock correctly balanced.
-            if lock.locked():
-                lock.release()
+            release.set()
+            for caller in callers:
+                caller.cancel()
+            await asyncio.gather(*callers, return_exceptions=True)
 
     asyncio.run(scenario())
 
-    # Exactly one real token fetch: the cancelled waiter must never reach
-    # _fetch_token, so the third call is the only one that performs it.
+
+def test_cancelled_waiter_can_close_its_loop_during_refresh(monkeypatch, caplog):
+    """A cancelled sync wrapper can close its loop without disturbing the owner."""
+    entered = threading.Event()
+    release = threading.Event()
+    post_calls: list[dict[str, Any]] = []
+
+    class HeldClient(_MockAsyncClient):
+        async def post(self, url, data):
+            entered.set()
+            assert await asyncio.to_thread(release.wait, 5), "test did not release refresh"
+            return await super().post(url, data)
+
+    monkeypatch.setattr("httpx.AsyncClient", lambda **kwargs: HeldClient(payload={"access_token": "shared-token", "expires_in": 3600}, post_calls=post_calls, **kwargs))
+    manager = OAuthTokenManager({"secure-http": McpOAuthConfig(enabled=True, token_url="https://auth.example.com/token", client_id="client-id", client_secret="client-secret")})
+
+    async def cancel_waiter():
+        waiter = asyncio.create_task(manager.get_authorization_header("secure-http"))
+        waiting = asyncio.get_running_loop().create_future()
+        asyncio.get_running_loop().call_soon(waiting.set_result, None)
+        await waiting
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+
+    with ThreadPoolExecutor(max_workers=2) as callers:
+        owner = callers.submit(asyncio.run, manager.get_authorization_header("secure-http"))
+        try:
+            assert entered.wait(5), "refresh did not start"
+            cancelled = callers.submit(asyncio.run, cancel_waiter())
+            cancelled.result(timeout=2)
+            assert not owner.done(), "owner should still be waiting on the token response"
+        finally:
+            release.set()
+        assert owner.result(timeout=5) == "Bearer shared-token"
+    assert asyncio.run(manager.get_authorization_header("secure-http")) == "Bearer shared-token"
     assert len(post_calls) == 1
+    assert not any(record.name == "concurrent.futures" and record.levelno >= logging.ERROR for record in caplog.records)
 
 
 # --- Illegal header values ---------------------------------------------------
