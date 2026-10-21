@@ -1593,7 +1593,7 @@ names and base URLs readable.
 
 For `LocalSandboxProvider`, this is a managed tool-path boundary rather than host filesystem isolation. Explicit per-Agent skill policies are accepted only while host bash is disabled (the default), because a host subprocess can address canonical paths without using the provider's virtual-path mappings. Use Docker/AIO, the Kubernetes provisioner, or E2B when the filesystem boundary must remain enforceable alongside shell access.
 
-When the local sandbox uses PowerShell, unquoted virtual paths also work when the mapped host directory contains spaces; existing quoting and wildcard expansion are preserved.
+When the local sandbox uses PowerShell, mapped host-path spaces and shell metacharacters are escaped for the caller's quoting context; wildcard expansion is preserved. The public `bash` tool's existing workspace prefix uses `&&` and POSIX path quoting: it requires PowerShell 7 for that separator and does not support workspace paths containing apostrophes. These workspace-prefix limitations are separate from virtual-path mapping.
 
 On Windows, the local sandbox's `cmd.exe` fallback decodes builtin output using
 the console output code page, including UTF-8 after `chcp 65001`, independently

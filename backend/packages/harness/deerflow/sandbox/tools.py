@@ -40,7 +40,7 @@ from deerflow.sandbox.lease import (
     sandbox_command_scope,
     sandbox_lease_owner,
 )
-from deerflow.sandbox.local.local_sandbox import LocalSandbox, escape_powershell_path_spaces
+from deerflow.sandbox.local.local_sandbox import LocalSandbox, escape_powershell_path
 from deerflow.sandbox.overwrite import unwrap_sandbox
 from deerflow.sandbox.path_patterns import build_output_mask_pattern, normalize_mask_tail, replace_output_path_matches
 from deerflow.sandbox.prewarm import claim_sandbox_prewarm
@@ -1937,8 +1937,8 @@ def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState 
 
         def replace_user_data_match(match: re.Match) -> str:
             resolved = replace_virtual_path(match.group(0), thread_data).replace("\\", "/")
-            if any(char in resolved for char in " \t") and LocalSandbox._is_powershell(shell or LocalSandbox._get_shell()):
-                return escape_powershell_path_spaces(match, resolved)
+            if LocalSandbox._is_powershell(shell or LocalSandbox._get_shell()):
+                return escape_powershell_path(match, resolved)
             return resolved
 
         result = pattern.sub(replace_user_data_match, result)

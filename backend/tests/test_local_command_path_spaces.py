@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
-from deerflow.sandbox.tools import bash_tool
+from deerflow.sandbox.tools import bash_tool, replace_virtual_paths_in_command
 
 
 @pytest.fixture
@@ -71,6 +71,100 @@ def test_other_shell_path_resolution_is_unchanged(mounted, shell):
     assert sandbox._resolve_paths_in_command(command, shell=shell) == expected
 
 
+@pytest.mark.parametrize("layer", ["provider", "thread"])
+@pytest.mark.parametrize(
+    "command,expected",
+    [
+        ("Get-Content {virtual}/marker.txt", "Get-Content {escaped}/marker.txt"),
+        ('Get-Content "{virtual}/marker.txt"', 'Get-Content "{raw}/marker.txt"'),
+        ("Get-Content '{virtual}/marker.txt'", "Get-Content '{raw}/marker.txt'"),
+        ("Get-Content \u2018{virtual}/marker.txt\u2019", "Get-Content \u2018{raw}/marker.txt\u2019"),
+        ("Get-Content \u201c{virtual}/marker.txt\u201d", "Get-Content \u201c{raw}/marker.txt\u201d"),
+        ('Write-Output "$(Get-Content {virtual}/marker.txt)"', 'Write-Output "$(Get-Content {escaped}/marker.txt)"'),
+        ("# it's text\nGet-Content {virtual}/marker.txt", "# it's text\nGet-Content {escaped}/marker.txt"),
+        ("<# it's text #> Get-Content {virtual}/*.txt", "<# it's text #> Get-Content {escaped}/*.txt"),
+        ('Get-Content "{virtual}/marker.txt"; Get-Content {virtual}/*.txt', 'Get-Content "{raw}/marker.txt"; Get-Content {escaped}/*.txt'),
+        ('Write-Output @"\n$(Get-Content {virtual}/marker.txt)\n"@', 'Write-Output @"\n$(Get-Content {escaped}/marker.txt)\n"@'),
+    ],
+)
+def test_powershell_command_mapping_is_portable(mounted, layer, command, expected):
+    sandbox, root = mounted
+    virtual = "/mnt/data" if layer == "provider" else "/mnt/user-data/uploads"
+    raw = str(root.resolve()).replace("\\", "/")
+    command = command.format(virtual=virtual)
+    if layer == "provider":
+        result = sandbox._resolve_paths_in_command(command, shell="pwsh")
+    else:
+        result = replace_virtual_paths_in_command(command, {"uploads_path": str(root)}, shell="pwsh")
+    assert result == expected.format(raw=raw, escaped=raw.replace(" ", "` "))
+
+
+@pytest.mark.parametrize("layer", ["provider", "thread"])
+@pytest.mark.parametrize(
+    "directory,escaped",
+    [
+        ("O'Brien", "O`'Brien"),
+        ("Tom & Jerry", "Tom` `&` Jerry"),
+        ("a;b", "a`;b"),
+        ("a`b", "a``b"),
+        ("cost$USER", "cost`$USER"),
+        ("a(b)", "a`(b`)"),
+        ("a,b", "a`,b"),
+        ("a{b}", "a`{b`}"),
+        ("a\u2019b", "a`\u2019b"),
+        ("a\u201db", "a`\u201db"),
+        ("O'Brien's Folder", "O`'Brien`'s` Folder"),
+    ],
+)
+def test_powershell_mapped_metacharacters_are_literal(tmp_path, layer, directory, escaped):
+    root = tmp_path / directory
+    root.mkdir()
+    virtual = "/mnt/data" if layer == "provider" else "/mnt/user-data/uploads"
+    command = f"Get-Content {virtual}/marker.txt"
+    if layer == "provider":
+        result = LocalSandbox("local", [PathMapping(virtual, str(root))])._resolve_paths_in_command(command, shell="pwsh")
+    else:
+        result = replace_virtual_paths_in_command(command, {"uploads_path": str(root)}, shell="pwsh")
+    parent = str(tmp_path.resolve()).replace("\\", "/").replace(" ", "` ")
+    assert result == f"Get-Content {parent}/{escaped}/marker.txt"
+
+
+@pytest.mark.parametrize("layer", ["provider", "thread"])
+@pytest.mark.parametrize(
+    "directory,quote,escaped",
+    [
+        ("O'Brien", "'", "O''Brien"),
+        ("a`b", '"', "a``b"),
+        ("cost$USER", '"', "cost`$USER"),
+        ("a\u2019b", "'", "a\u2019\u2019b"),
+        ("a\u201db", '"', "a`\u201db"),
+    ],
+)
+def test_quoted_powershell_mapped_metacharacters_are_literal(tmp_path, layer, directory, quote, escaped):
+    root = tmp_path / directory
+    root.mkdir()
+    virtual = "/mnt/data" if layer == "provider" else "/mnt/user-data/uploads"
+    command = f"Get-Content {quote}{virtual}/marker.txt{quote}"
+    if layer == "provider":
+        result = LocalSandbox("local", [PathMapping(virtual, str(root))])._resolve_paths_in_command(command, shell="pwsh")
+    else:
+        result = replace_virtual_paths_in_command(command, {"uploads_path": str(root)}, shell="pwsh")
+    parent = str(tmp_path.resolve()).replace("\\", "/")
+    assert result == f"Get-Content {quote}{parent}/{escaped}/marker.txt{quote}"
+
+
+@pytest.mark.parametrize("directory", ["O'Brien", "O'Brien's Folder", "Tom & Jerry", "a;b", "a`b", "cost$USER", "a(b)", "a,b", "a{b}", "a\u2019b", "a\u201db", "a;Write-Output unexpected;#"])
+@pytest.mark.parametrize("quote", ["", '"', "'"])
+def test_powershell_executes_mapped_metacharacters(powershell, tmp_path, directory, quote):
+    root = tmp_path / directory
+    root.mkdir()
+    (root / "marker.txt").write_text("needle", encoding="utf-8")
+    sandbox = LocalSandbox("local", [PathMapping("/mnt/data", str(root))])
+    output = sandbox.execute_command(f"Get-Content {quote}/mnt/data/marker.txt{quote}")
+    assert "needle" in output, output
+    assert "Exit Code:" not in output, output
+
+
 @pytest.mark.parametrize("shell_name", ["sh", "cmd.exe"])
 def test_quoted_paths_still_execute_in_other_shells(mounted, monkeypatch, shell_name):
     shell = shutil.which(shell_name)
@@ -95,10 +189,12 @@ def test_powershell_redirects_to_mapped_path_with_spaces(powershell, mounted):
 
 
 @pytest.mark.parametrize("quote", ["", '"', "'"])
-def test_public_bash_tool_preserves_thread_path_argument(powershell, tmp_path, monkeypatch, quote):
+@pytest.mark.parametrize("upload_directory", ["thread data", "O'Brien", "cost$USER", "a;b"])
+def test_public_bash_tool_preserves_thread_path_argument(powershell, tmp_path, monkeypatch, quote, upload_directory):
     from deerflow.config.sandbox_config import SandboxConfig
 
     dirs = {f"{name}_path": str(tmp_path / "thread data" / name) for name in ("workspace", "uploads", "outputs")}
+    dirs["uploads_path"] = str(tmp_path / upload_directory / "uploads")
     for directory in dirs.values():
         Path(directory).mkdir(parents=True)
     Path(dirs["uploads_path"], "marker.txt").write_text("needle", encoding="utf-8")

@@ -187,8 +187,8 @@ class ResolvedPath(NamedTuple):
 _POWERSHELL_QUOTE_TRANSLATION = str.maketrans("\u2018\u2019\u201c\u201d", "''\"\"")
 
 
-def escape_powershell_path_spaces(match: re.Match[str], path: str) -> str:
-    """Keep host-path whitespace literal without quoting wildcards or caller syntax."""
+def escape_powershell_path(match: re.Match[str], path: str) -> str:
+    """Keep mapped paths literal in the caller's quote context, preserving wildcards."""
     quote = None
     escaped = False
     subexpressions: list[str | None] = []
@@ -227,9 +227,14 @@ def escape_powershell_path_spaces(match: re.Match[str], path: str) -> str:
         elif quote is None and char == ")" and subexpressions:
             quote = subexpressions.pop()
         index += 1
-    if quote is not None:
-        return path
-    return re.sub(r"[ \t]", lambda space: "`" + space.group(), path)
+    # The path matcher includes a caller's closing smart quote in its tail.
+    closing_quote = path[-1:] if quote in ("'", '"') and match.group()[-1:].translate(_POWERSHELL_QUOTE_TRANSLATION) == quote else ""
+    if closing_quote:
+        path = path[:-1]
+    if quote == "'":
+        return re.sub(r"['\u2018\u2019]", lambda char: char.group() * 2, path) + closing_quote
+    characters = r'[`$"\u201c\u201d]' if quote is not None else r"[ \t`$'\";&,()@{}#\u2018\u2019\u201c\u201d]"
+    return re.sub(characters, lambda char: "`" + char.group(), path) + closing_quote
 
 
 class LocalSandbox(Sandbox):
@@ -637,8 +642,8 @@ class LocalSandbox(Sandbox):
                 resolved = self._resolve_path(matched_path).replace("\\", "/")
             # Normalize to forward slashes so bash doesn't interpret Windows
             # backslash sequences (\\U, \\a, \\d, \\s, \\n, \\t) as escapes.
-            if any(char in resolved for char in " \t") and self._is_powershell(shell or ""):
-                return escape_powershell_path_spaces(match, resolved)
+            if self._is_powershell(shell or ""):
+                return escape_powershell_path(match, resolved)
             return resolved
 
         return pattern.sub(replace_match, command)
