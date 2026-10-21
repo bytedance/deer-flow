@@ -6,6 +6,7 @@ on demand via the ``list_uploaded_files`` tool.
 
 import logging
 import math
+import re
 from collections import Counter
 from pathlib import Path
 from typing import NotRequired, override
@@ -22,12 +23,23 @@ from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.uploads.manager import is_upload_staging_file
 from deerflow.utils.file_outline import extract_outline_for_file
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, message_content_to_text, restore_original_human_message
-from deerflow.utils.upload_context import UPLOAD_CONTEXT_KEY, UPLOAD_CONTEXT_VERSION
+from deerflow.utils.upload_context import UPLOAD_CONTEXT_KEY, UPLOAD_CONTEXT_VERSION, upload_context_text
 
 logger = logging.getLogger(__name__)
 
 _MAX_FILES_PER_CONTEXT_SECTION = 10
 _MAX_DISPLAY_FILE_SIZE_BYTES = 1024**4
+_INLINE_UPLOAD_CONTEXT_RE = re.compile(r"<(?P<tag>current_uploads|uploaded_files)>(?P<body>.*?)</(?P=tag)>", re.DOTALL | re.IGNORECASE)
+
+
+def _has_ambiguous_inline_upload_context(content: object) -> bool:
+    """Decline pristine-content claims for legacy-shaped file descriptions.
+
+    This only selects the legacy compatibility path; it never removes text or
+    infers which substring belongs to the user. Bare literal tag examples do
+    not resemble file context and remain eligible for structured capture.
+    """
+    return any("/mnt/user-data/uploads/" in match["body"] or "The following files were uploaded" in match["body"] for match in _INLINE_UPLOAD_CONTEXT_RE.finditer(message_content_to_text(content)))
 
 
 def _extension_label(file: dict) -> str:
@@ -297,7 +309,8 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
 
         logger.debug(f"Current uploads: {[f['filename'] for f in new_files]}")
 
-        # Capture the validated context separately; never prepend it to state.
+        # Capture validated descriptions separately, except on the legacy
+        # compatibility path that cannot establish pristine user content.
         files_message = self._create_files_message(
             context_files,
             omitted_files=omitted_files if omitted_files else None,
@@ -306,6 +319,20 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         original_content = last_message.content
         additional_kwargs = dict(last_message.additional_kwargs or {})
         original_user_content = additional_kwargs.get(ORIGINAL_USER_CONTENT_KEY)
+        if not isinstance(original_user_content, str) and upload_context_text(last_message) is None and _has_ambiguous_inline_upload_context(original_content):
+            # Old inline turns without provenance cannot truthfully declare
+            # their whole content to be pristine user prose. Keep legacy
+            # display containment and do not manufacture original provenance.
+            additional_kwargs.pop(ORIGINAL_USER_CONTENT_KEY, None)
+            additional_kwargs.pop(UPLOAD_CONTEXT_KEY, None)
+            prefix = f"{files_message}\n\n"
+            if isinstance(original_content, str):
+                content = original_content if original_content.startswith(prefix) else prefix + original_content
+            else:
+                block = {"type": "text", "text": prefix}
+                content = original_content if original_content and original_content[0] == block else [block, *original_content]
+            messages[last_message_index] = last_message.model_copy(update={"content": content, "additional_kwargs": additional_kwargs})
+            return {"uploaded_files": new_files, "messages": messages}
         if isinstance(original_user_content, str) and UPLOAD_CONTEXT_KEY not in additional_kwargs:
             # Upgrade a legacy inline/transport-decorated turn only when an
             # explicit original is available. Never regex-strip user content.

@@ -2,9 +2,11 @@
 
 `upload_context.py` validates versioned server-owned upload metadata and builds
 detached model-facing copies. Preserve message IDs and native media; do not infer
-ownership by matching tag strings. The `projected` marker is transient and removed
-by human-message restoration. Gateway admission strips this metadata from external
-callers. Never persist projections or send the envelope to memory extraction.
+ownership by matching tag strings. Transient `projected` and `sanitized` markers
+separate prefix idempotence from guardrail success; restoration removes both.
+Gateway admission strips this metadata from external callers. Never persist
+projections or send the envelope to memory extraction. Python and TypeScript share
+`contracts/upload_context_contract.json` for envelope validity.
 
 ### Atomic Byte Publication
 

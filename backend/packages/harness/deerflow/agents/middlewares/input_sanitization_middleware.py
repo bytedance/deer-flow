@@ -38,7 +38,7 @@ from langchain_core.messages import HumanMessage
 from langgraph.errors import GraphBubbleUp
 
 from deerflow.agents.middlewares.message_utils import requires_input_sanitization
-from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, message_content_to_text
+from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, message_content_to_text, restore_original_human_message
 from deerflow.utils.upload_context import UPLOAD_CONTEXT_KEY, project_upload_context, upload_context_text
 
 logger = logging.getLogger(__name__)
@@ -306,9 +306,10 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
         preserved while the tags lose their semantic significance. The original
         message is never mutated.
         """
-        if upload_context_text(msg) is not None and msg.additional_kwargs[UPLOAD_CONTEXT_KEY].get("projected") is True:
-            # This view was already sanitized before its server-owned context
-            # was projected. A nested retry must not frame/escape it again.
+        context = msg.additional_kwargs.get(UPLOAD_CONTEXT_KEY)
+        if upload_context_text(msg) is not None and context.get("projected") is True and context.get("sanitized") is True:
+            # Projection alone also occurs after a fail-open exception. Skip
+            # re-entry only when the guardrail actually completed successfully.
             return None
         content = msg.content
         text_content, text_blocks = self._extract_text_from_content(content)
@@ -410,7 +411,10 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
                     ORIGINAL_USER_CONTENT_KEY,
                     type(original_user_content).__name__,
                 )
-            preserved_kwargs[ORIGINAL_USER_CONTENT_KEY] = message_content_to_text(content)
+            # A fail-open projection may have lost provenance before re-entry.
+            # Recover only its exact owned prefix before saving user text;
+            # otherwise restoration would put file descriptions back in prose.
+            preserved_kwargs[ORIGINAL_USER_CONTENT_KEY] = message_content_to_text(restore_original_human_message(msg).content)
         logger.debug(
             "InputSanitizationMiddleware: original=%r -> processed=%r",
             content if isinstance(content, str) else "[content-blocks]",
@@ -458,6 +462,7 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
             # fail open, and one unprocessable history row must not widen that
             # into "no sanitization this turn" — an attacker who can land such a
             # row would otherwise buy themselves an unescaped newest turn.
+            sanitization_succeeded = True
             try:
                 sanitized = self._sanitize_message(msg)
             except GraphBubbleUp:
@@ -471,7 +476,8 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
                 # Preserve the existing fail-open stance without also losing
                 # independently captured file descriptions for this turn.
                 sanitized = None
-            projected = project_upload_context(sanitized if sanitized is not None else msg)
+                sanitization_succeeded = False
+            projected = project_upload_context(sanitized if sanitized is not None else msg, sanitized=sanitization_succeeded)
             if projected is not msg:
                 messages[index] = projected
                 changed = True

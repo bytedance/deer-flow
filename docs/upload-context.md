@@ -31,15 +31,17 @@ blocks retain their values and order. Projection preserves message IDs and does
 not append a hidden sibling message, so normal replacement, deletion, checkpoint
 replay and compaction manage the context together with its owning turn.
 
-The copied envelope carries `projected: true` for nested-wrapper idempotence.
-It is transient: UI/run-journal restoration removes that flag and restores the
-user text. Never copy a projected request back into graph state. Model-facing
-copies and persisted messages must not share mutable content blocks.
+The copied envelope carries `projected: true` to prevent repeated upload prefixes
+and `sanitized: true` only after the guardrail completes successfully. Both are
+transient: UI/run-journal restoration removes them and restores the user text.
+Never copy a projected request back into graph state. Model-facing copies and
+persisted messages must not share mutable content blocks.
 If original-user provenance is missing or malformed, restoration still clears
-the transient flag and removes the exact owned upload prefix when present; it
+the transient markers and removes the exact owned upload prefix when present; it
 does not guess how to recover user text from transport framing. A guardrail
 exception retains the existing fail-open behavior and still projects the
-independently captured file descriptions.
+independently captured file descriptions. A nested retry skips sanitization only
+when both markers are true; projection alone cannot claim guardrail success.
 
 Summary triggers, token/fraction retention and the context-usage estimate count
 the projected context; partitioning still retains the original stored messages.
@@ -51,19 +53,27 @@ the context metadata; file outlines are not durable user memory.
 ## Display and compatibility
 
 For a supported version-1 envelope with a string `text`, the human content is
-already user data. Chat rendering, editing/copying, conversation outlines and
+already user data. The wire version is the JSON number `1` (including `1.0`),
+never a boolean or string. Chat rendering, editing/copying, conversation outlines and
 Markdown/JSON exports do not remove tag-like text from it. Internal context is
 never included in the export's selected fields. Attachment chips still use
 `additional_kwargs.files`.
 
 Unversioned historical messages keep the existing inline-tag cleanup and legacy
 file-chip fallback. Unsupported or malformed metadata does not opt a message out
-of that containment; backend projection ignores it with a warning. Assistant and
-hidden framework-message filtering retain their existing rules.
+of that containment; backend projection ignores it with a debug log so repeated
+history reads do not flood warnings. Assistant and hidden framework-message
+filtering retain their existing rules.
 
 There is no bulk migration of old checkpoints. Recapturing an old upload turn
 can restore its explicit `original_user_content` provenance before recording a
-new envelope; it never guesses which part of the user's text is internal.
+new envelope; it never guesses which part of the user's text is internal. Without
+valid original provenance, legacy-shaped file descriptions (upload tags containing
+upload paths or the historical file-list preamble) stay on the unversioned inline
+path. Recapture adds the current validated descriptions without declaring that
+old body pristine or manufacturing original-user provenance. An unchanged current
+prefix is not added twice. Bare literal tag examples remain eligible for v1;
+explicit original provenance preserves even file-description-shaped user examples.
 Other internal-context producers remain outside this upload-specific change.
 
 ![A chat preserves a literal user tag example and displays the attached file without the internal outline.](assets/structured-upload-context.png)
@@ -73,7 +83,9 @@ Other internal-context producers remain outside this upload-specific change.
 `backend/tests/test_structured_upload_context.py` exercises capture, sanitization,
 checkpointed sync/async agent replay and deletion, journal restoration, summaries,
 delegation snapshots, memory admission and forged Gateway metadata without live
-model calls. Existing upload-admission tests continue to exercise owner isolation
+model calls. `contracts/upload_context_contract.json` supplies the same validity
+cases to Python and TypeScript tests, including malformed and future metadata.
+Existing upload-admission tests continue to exercise owner isolation
 through a real agent graph. Frontend coverage pins literal examples, legacy
 cleanup, export and conversation grouping; the plain-text Playwright suite checks
 the rendered bubble and file chip.

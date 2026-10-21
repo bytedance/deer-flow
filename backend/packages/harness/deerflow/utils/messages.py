@@ -138,7 +138,7 @@ def restore_original_human_message(message: HumanMessage) -> HumanMessage:
     additional_kwargs = dict(message.additional_kwargs)
     additional_kwargs.pop(ORIGINAL_USER_CONTENT_KEY, None)
     if is_projected:
-        additional_kwargs[UPLOAD_CONTEXT_KEY] = {key: value for key, value in context.items() if key != "projected"}
+        additional_kwargs[UPLOAD_CONTEXT_KEY] = {key: value for key, value in context.items() if key not in ("projected", "sanitized")}
 
     content = message.content
     if not isinstance(original_content, str):

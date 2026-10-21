@@ -77,6 +77,33 @@ describe("structured upload context", () => {
     expect(formatThreadAsJSON(thread, [message])).not.toContain("legacy.pdf");
   });
 
+  it.each(["current_uploads", "uploaded_files"])(
+    "contains recaptured legacy %s context in copy, exports and titles",
+    (tag) => {
+      const message = human(
+        `<current_uploads>report.md\npath: /mnt/user-data/uploads/report.md\nDocument outline: NEW_INTERNAL_OUTLINE</current_uploads>\n\n` +
+          `<${tag}>old.pdf\npath: /mnt/user-data/uploads/old.pdf\nOLD_INTERNAL_OUTLINE</${tag}>\n\nQuestion`,
+      );
+      delete message.additional_kwargs?.deerflow_upload_context;
+      expect(hasStructuredUploadContext(message)).toBe(false);
+      expect(isHiddenFromUIMessage(message)).toBe(false);
+      expect(getMessageCopyData(message)).toBe("Question");
+      const json = formatThreadAsJSON(thread, [message]);
+      expect(JSON.parse(json).messages[0].content).toBe("Question");
+      const markdown = formatThreadAsMarkdown(thread, [message]);
+      expect(markdown).toContain("Question");
+      const chapters = buildConversationChapters(
+        getMessageGroups([message]),
+        "Attachment",
+      );
+      expect(chapters[0]?.title).toBe("Question");
+      for (const output of [json, markdown, chapters[0]?.title ?? ""]) {
+        expect(output).not.toContain("/mnt/user-data/uploads/");
+        expect(output).not.toContain("INTERNAL_OUTLINE");
+      }
+    },
+  );
+
   it.each(
     [
       null,
