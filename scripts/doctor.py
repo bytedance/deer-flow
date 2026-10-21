@@ -869,6 +869,10 @@ def check_env_file(project_root: Path) -> CheckResult:
 
 
 def main() -> int:
+    # Keep reporting usable on terminals and pipes with legacy encodings.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(errors="replace")
+
     project_root = Path(__file__).resolve().parents[1]
 
     # Load .env early so key checks work
