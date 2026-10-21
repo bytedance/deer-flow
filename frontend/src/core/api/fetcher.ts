@@ -66,23 +66,26 @@ export async function fetch(
   input: RequestInfo | string,
   init?: RequestInit,
 ): Promise<Response> {
+  const request = typeof input === "string" ? undefined : input;
   const url = typeof input === "string" ? input : input.url;
+  const method = init?.method ?? request?.method ?? "GET";
+  let headers = init?.headers ?? request?.headers;
 
   // Static demos have no Gateway. Resolve REST calls before credentials,
   // CSRF, or redirects; demo assets and explicit mock routes still use HTTP.
   if (isStaticWebsiteOnly()) {
     const response = await staticApiResponse(url, {
       ...init,
-      method:
-        init?.method ?? (typeof input === "string" ? "GET" : input.method),
+      method,
+      headers,
+      signal: init?.signal === undefined ? request?.signal : init.signal,
     });
     if (response) return response;
   }
 
   // Inject CSRF for state-changing methods. GET/HEAD/OPTIONS/TRACE skip
   // it to mirror the gateway's ``should_check_csrf`` logic exactly.
-  let headers = init?.headers;
-  if (isStateChangingMethod(init?.method ?? "GET")) {
+  if (isStateChangingMethod(method)) {
     const token = readCsrfCookie();
     if (token) {
       // Fresh Headers instance so we don't mutate caller-supplied objects.
@@ -94,7 +97,7 @@ export async function fetch(
     }
   }
 
-  const res = await globalThis.fetch(url, {
+  const res = await globalThis.fetch(input, {
     ...init,
     headers,
     credentials: "include",

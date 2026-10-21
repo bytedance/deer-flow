@@ -3622,6 +3622,11 @@ immediately after starting any deployment that is not loopback-only.
 
 We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, workflow, and guidelines.
 
+The frontend's shared REST fetcher accepts URL strings or `Request` objects,
+preserves Request bodies and cancellation, and applies CSRF protection using the
+effective request method. Explicit method, headers, body, and signal options
+override the Request; the helper continues to require included credentials.
+
 Backend `make test` runs four duration-balanced shards concurrently and reports
 failure if any shard fails. Use `make test TEST_JOBS=1` to run the shards sequentially.
 It excludes live external-API and blocking-I/O coverage.
