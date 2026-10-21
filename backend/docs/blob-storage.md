@@ -43,7 +43,7 @@ This backend already delivers multi-instance resolution when `root` points at a 
 ```yaml
 blob_storage:
   enabled: true                # default false
-  backend: local_fs            # folder name under storage/backends/, or a dotted import path
+  backend: local_fs            # folder name under storage/backends/, or module.Class / module:Class
   backend_config:
     root: /mnt/shared/deerflow-blobs   # default: {runtime_home}/blobs, absolute
 ```

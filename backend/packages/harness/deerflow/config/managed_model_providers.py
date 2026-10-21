@@ -95,7 +95,7 @@ def _capabilities(provider: str, model: str) -> dict[str, Any]:
             when_thinking_enabled={"extra_body": {"thinking": {"type": "enabled"}}},
             when_thinking_disabled={"extra_body": {"thinking": {"type": "disabled"}}},
         )
-        result["reasoning"]["effort"] = {"values": ["high", "max"], "default": "high", "aliases": {"minimal": "high", "low": "high", "medium": "high"}}
+        result["reasoning"]["effort"] = {"values": ["low", "medium", "high", "max", "xhigh"], "default": "low", "aliases": {"minimal": "low"}}
     elif provider in {"zai", "zhipu-cn"} and model in {"glm-4.5", "glm-4.6", "glm-4.7", "glm-5.3-flash"}:
         result.update(
             reasoning={"thinking": "optional", "dialect": "openai_extra_body", "history": "preserve"},

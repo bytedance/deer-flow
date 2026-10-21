@@ -168,3 +168,66 @@ async def test_expired_unreleased_row_is_reclaimed_on_next_redelivery():
         assert row is not None and row[0] is True
     finally:
         await store.release(key)
+
+
+@pytest.mark.asyncio
+async def test_two_managers_share_dedupe_for_a_discord_direct_message():
+    """A Discord DM has no guild id and used to get no dedupe key, so every
+    instance whose session received the MESSAGE_CREATE ran it."""
+    from app.channels.manager import ChannelManager
+    from app.channels.message_bus import InboundMessage, MessageBus
+    from app.channels.store import JsonChannelStore
+    from deerflow.persistence.base import Base
+    from deerflow.persistence.engine import get_engine, get_session_factory
+    from deerflow.persistence.webhook_delivery.model import WebhookDeliveryRow
+
+    async with get_engine().begin() as conn:
+        await conn.run_sync(Base.metadata.create_all, tables=[WebhookDeliveryRow.__table__], checkfirst=True)
+    shared_store = PostgresInboundDedupeStore(session_factory=get_session_factory())
+    manager_a = ChannelManager(bus=MessageBus(), store=JsonChannelStore(), inbound_dedupe_store=shared_store)
+    manager_b = ChannelManager(bus=MessageBus(), store=JsonChannelStore(), inbound_dedupe_store=shared_store)
+    dm_channel = str(uuid.uuid4().int)[:19]
+
+    def delivery() -> InboundMessage:
+        return InboundMessage(
+            channel_name="discord",
+            chat_id=dm_channel,
+            user_id="42",
+            text="hi",
+            topic_id=dm_channel,
+            metadata={"guild_id": None, "channel_id": dm_channel, "message_id": "1300000000000000001"},
+        )
+
+    try:
+        assert await manager_a._is_duplicate_inbound(delivery()) is False
+        assert await manager_b._is_duplicate_inbound(delivery()) is True
+    finally:
+        await manager_a._release_inbound_dedupe_key(delivery())
+
+
+@pytest.mark.asyncio
+async def test_two_managers_share_dedupe_for_a_reply_in_a_thread_only_one_tracks():
+    """The instance tracking Discord thread T routes a reply in T to its parent
+    channel; the other treats T as an orphan. One message, one run."""
+    from app.channels.manager import ChannelManager
+    from app.channels.message_bus import InboundMessage, MessageBus
+    from app.channels.store import JsonChannelStore
+    from deerflow.persistence.base import Base
+    from deerflow.persistence.engine import get_engine, get_session_factory
+    from deerflow.persistence.webhook_delivery.model import WebhookDeliveryRow
+
+    async with get_engine().begin() as conn:
+        await conn.run_sync(Base.metadata.create_all, tables=[WebhookDeliveryRow.__table__], checkfirst=True)
+    shared_store = PostgresInboundDedupeStore(session_factory=get_session_factory())
+    manager_a = ChannelManager(bus=MessageBus(), store=JsonChannelStore(), inbound_dedupe_store=shared_store)
+    manager_b = ChannelManager(bus=MessageBus(), store=JsonChannelStore(), inbound_dedupe_store=shared_store)
+    thread_t = str(uuid.uuid4().int)[:19]
+    metadata = {"guild_id": "guild-1", "channel_id": thread_t, "message_id": "1300000000000000002"}
+    tracked = InboundMessage(channel_name="discord", chat_id="parent-1", user_id="42", text="hi", topic_id=thread_t, metadata=dict(metadata))
+    orphaned = InboundMessage(channel_name="discord", chat_id=thread_t, user_id="42", text="hi", topic_id="new-thread", metadata=dict(metadata))
+
+    try:
+        assert await manager_a._is_duplicate_inbound(tracked) is False
+        assert await manager_b._is_duplicate_inbound(orphaned) is True
+    finally:
+        await manager_a._release_inbound_dedupe_key(tracked)

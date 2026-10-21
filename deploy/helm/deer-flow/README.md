@@ -135,7 +135,7 @@ they resolve from the `secrets` map):
 
 ```yaml
 config: |
-  config_version: 60
+  config_version: 61
   models:
     - name: gpt-4
       use: langchain_openai:ChatOpenAI
@@ -307,10 +307,11 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   replaced within `lease_seconds + grace_seconds` plus one renewal interval
   (50 s by default) and a Pod stopped cleanly hands its providers over on the
   next heartbeat. The startup gate refuses `enabled: false` while channels are
-  enabled. Credentials saved from the web UI reach the holding Pod only when it
-  next starts the channel, so restart it after changing them, and a failover
-  loses the IM replies in flight on the old holder, though the runs themselves
-  finish and their threads stay readable in the web UI. `gateway.replicas: 1`
+  enabled. Credentials saved (or a disconnect made) from the web UI on any Pod
+  reach the holding Pod within one renewal interval through the shared,
+  encrypted `channel_runtime_configs` table. A failover loses the IM replies in
+  flight on the old holder, though the runs themselves finish and their
+  threads stay readable in the web UI. `gateway.replicas: 1`
   stays the default because the WeChat QR login and browser tools are still
   single-instance. Before raising replicas, also set
   `persistence.home.accessMode: ReadWriteMany` on multi-node clusters (thread
@@ -389,7 +390,8 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   ```
 - **Credentials key.** The app Secret also holds `DEER_FLOW_CREDENTIALS_KEY`,
   the Fernet key the gateway encrypts stored credentials with (per-connection
-  IM channel credentials today). The chart generates it once (32 random bytes,
+  IM channel credentials, the bot credentials entered in the web UI, and
+  rotating MCP OAuth refresh tokens). The chart generates it once (32 random bytes,
   urlsafe base64) and preserves it across upgrades via `lookup`; every gateway
   Pod reads the same value. **Back it up**: deleting the Secret or the release
   generates a new key, and credentials stored under the old one become
@@ -398,7 +400,8 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   values have been rewritten. An `existingAppSecret` should carry it; the env
   entry is optional, so without it a single Pod falls back to an auto-generated
   `.credentials_key` on the home volume, while a multi-instance gateway with
-  `channel_connections.enabled` refuses to start. If you add the key to an
+  `channel_connections.enabled` or a `refresh_token` MCP OAuth server refuses
+  to start. If you add the key to an
   `existingAppSecret` later, copy that file's value so stored credentials stay
   readable:
 

@@ -1,5 +1,7 @@
 """Immutable file versions and run-bound configuration evidence."""
 
+import os
+
 import pytest
 
 
@@ -51,6 +53,7 @@ def test_artifact_versions_are_append_only_and_owner_scoped(tmp_path, monkeypatc
         store.capture_artifact("alice", "workflow", "step", "report.pdf", b"overwrite")
 
 
+@pytest.mark.skipif(os.name == "nt", reason="output capture is POSIX-only (dir_fd and O_NOFOLLOW)")
 def test_host_output_capture_rejects_unsafe_files(tmp_path, monkeypatch):
     from types import SimpleNamespace
 

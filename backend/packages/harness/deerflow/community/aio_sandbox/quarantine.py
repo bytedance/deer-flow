@@ -100,10 +100,37 @@ class SandboxQuarantine:
         The provider must hold its local reservation and the cross-worker
         teardown lease throughout that proof and this removal. A successful
         delete request or failed health check alone does not prove absence.
+
+        A peer may fence the same logical ID between the listing below and the
+        ``rmdir``. The teardown lease is keyed by that ID, and a replacement
+        shares it, so while the ``del:`` marker is held a peer's claim — and an
+        acquire-side ``take()`` for the replacement — are excluded. What is not
+        guaranteed is that the exclusion is still held when ``rmdir`` runs: it
+        is a TTL lease, not a lock, so the heartbeat can lose it mid-teardown
+        (the documented "Lost the teardown exclusion" path stops refreshing
+        while the stop continues) and the config schema permits TTLs below a
+        normal stop. A record written in that lapse proves the directory holds a
+        live generation, so the ``rmdir`` failure is swallowed and the directory
+        is kept — exactly as :meth:`retire_replaced_generations` keeps a live
+        generation's record: teardown must not abort on a fence a peer just
+        wrote.
+
+        This is best-effort, not full fence preservation: it closes the listing
+        → ``rmdir`` window only. A peer record landing before the listing is
+        still unlinked along with the rest, and the unlink loop has unguarded
+        sibling windows of its own — a concurrent ``retire()`` can remove the
+        directory between the existence check and the listing
+        (``FileNotFoundError``), and on Windows a peer's ``mark()`` still
+        holding the fresh record open for its ``fsync`` raises
+        ``PermissionError``.
         """
         directory = self._directory(info)
         if not self._exists(directory):
             return
         for record in directory.iterdir():
             record.unlink()
-        directory.rmdir()
+        try:
+            directory.rmdir()
+        except OSError:
+            # A live or freshly fenced generation still has its record.
+            pass
