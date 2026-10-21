@@ -49,6 +49,11 @@ data directory, so clearing afterward would leave `config.json` with a dangling
 keychain reference. The snapshot still supplies the previous OAuth data for
 logout and restores the complete old tree on any switch failure.
 
+### DDG image search
+
+Offload config/DDGS together. Only returned empties mean `No images found`;
+the SDK sentinel can hide timeouts. See `tests/test_image_search_errors.py`.
+
 ### Browser Progress Screenshots (`community/browser_automation/`)
 
 Hidden per-action browser progress frames use JPEG at quality 80 to keep their
