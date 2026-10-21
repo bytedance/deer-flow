@@ -387,7 +387,7 @@ class TenkiSandboxProvider(WarmPoolLifecycleMixin[TenkiSandbox], SandboxProvider
             if self._shutdown_called:
                 close_sandbox = sandbox
             else:
-                self._warm_pool[sandbox_id] = (sandbox, time.time())
+                self._warm_pool[sandbox_id] = (sandbox, time.monotonic())
 
         if close_sandbox is not None:
             self._close_quietly(close_sandbox, context="released during shutdown")
@@ -443,7 +443,7 @@ class TenkiSandboxProvider(WarmPoolLifecycleMixin[TenkiSandbox], SandboxProvider
         instance's idle reaper and atexit shutdown instead of orphaning them.
         """
         with self._lock:
-            now = time.time()
+            now = time.monotonic()
             for sandbox_id, sandbox in self._sandboxes.items():
                 self._warm_pool.setdefault(sandbox_id, (sandbox, now))
             self._sandboxes.clear()

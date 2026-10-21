@@ -212,7 +212,7 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     # ToolErrorHandling)
     # + 1 ReadBeforeWriteMiddleware + 1 LoopDetectionMiddleware
     # + 1 TokenBudgetMiddleware (subagents.token_budget enabled by default, #3875 Phase 2)
-    # + 1 SkillActivationMiddleware + 1 SkillToolPolicyMiddleware
+    # + 1 SkillActivationMiddleware (allowed-tools is metadata, no policy wrapper)
     # + 1 SafetyFinishReasonMiddleware + 1 DurableContextMiddleware
     # + 1 SubagentDateContextMiddleware
     # + 1 SystemMessageCoalescingMiddleware + 1 ToolReceiptMiddleware
@@ -226,13 +226,12 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     from deerflow.agents.middlewares.knowledge_scope_middleware import KnowledgeScopeMiddleware
     from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
     from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
-    from deerflow.agents.middlewares.skill_tool_policy_middleware import SkillToolPolicyMiddleware
     from deerflow.agents.middlewares.system_message_coalescing_middleware import SystemMessageCoalescingMiddleware
     from deerflow.agents.middlewares.token_budget_middleware import TokenBudgetMiddleware
     from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
     from deerflow.agents.middlewares.tool_receipt_middleware import ToolReceiptMiddleware
 
-    assert len(middlewares) == 23
+    assert len(middlewares) == 22
     assert isinstance(middlewares[0], FakeMiddleware)  # InputSanitizationMiddleware stub
     assert isinstance(middlewares[1], KnowledgeScopeMiddleware)
     assert isinstance(middlewares[2], ToolOutputBudgetMiddleware)
@@ -246,9 +245,6 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     assert any(isinstance(m, TokenBudgetMiddleware) for m in middlewares)
     assert any(isinstance(m, SafetyFinishReasonMiddleware) for m in middlewares)
     activation_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, SkillActivationMiddleware))
-    policy_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, SkillToolPolicyMiddleware))
-    assert policy_idx == activation_idx + 1
-    assert middlewares[activation_idx]._slash_source_owner_token == middlewares[policy_idx]._slash_source_owner_token
     # DurableContextMiddleware is present but not last: the coalescer (#4040) is
     # appended innermost so it can merge the SystemMessage DurableContext injects.
     # The coalescer is appended unconditionally (after the optional summarization
@@ -257,7 +253,7 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     durable_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, DurableContextMiddleware))
     date_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, SubagentDateContextMiddleware))
     assert isinstance(middlewares[-1], SystemMessageCoalescingMiddleware)
-    assert policy_idx < durable_idx < date_idx == len(middlewares) - 2
+    assert activation_idx < durable_idx < date_idx == len(middlewares) - 2
 
 
 def test_subagent_runtime_sandbox_does_not_own_lead_skill_projection() -> None:
@@ -770,7 +766,7 @@ def test_subagent_runtime_middlewares_attach_deferred_filter_when_setup_has_name
 
     from deerflow.agents.middlewares.deferred_tool_filter_middleware import DeferredToolFilterMiddleware
     from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
-    from deerflow.agents.middlewares.skill_tool_policy_middleware import SkillToolPolicyMiddleware
+    from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
     from deerflow.agents.middlewares.tool_promotion_audit_middleware import DeferredToolPromotionAuditMiddleware
     from deerflow.tools.builtins.tool_search import build_deferred_tool_setup
     from deerflow.tools.mcp_metadata import tag_mcp_tool
@@ -793,10 +789,10 @@ def test_subagent_runtime_middlewares_attach_deferred_filter_when_setup_has_name
     assert len(filters) == 1
     assert len(audits) == 1
     audit_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, DeferredToolPromotionAuditMiddleware))
-    policy_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, SkillToolPolicyMiddleware))
+    activation_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, SkillActivationMiddleware))
     filter_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, DeferredToolFilterMiddleware))
     safety_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, SafetyFinishReasonMiddleware))
-    assert audit_idx < policy_idx < filter_idx
+    assert activation_idx < audit_idx < filter_idx
     assert filter_idx < safety_idx
 
 

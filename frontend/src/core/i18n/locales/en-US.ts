@@ -545,6 +545,8 @@ export const enUS: Translations = {
           "No progress between turns. Reply with what's missing, or rephrase the goal with /goal.",
         tokenCapped:
           "Token budget reached. Send a message to continue; a new run starts with a fresh budget.",
+        loopCapped:
+          "Repeated tool calls triggered a safety stop. Adjust the approach and send a new message to retry; your goal stays active.",
         missingEvidence:
           "Goal check: evidence missing. Ask it to show the result or explain what's missing; if the goal no longer applies, run /goal clear.",
         runFailed:
@@ -1212,6 +1214,7 @@ export const enUS: Translations = {
         maxContinuations: "Continuation limit reached",
         noProgress: "No progress between turns",
         tokenCapped: "Token budget reached",
+        loopCapped: "Repeated tool calls reached the safety limit",
         evaluatorFailed: "Couldn't check the goal; the run itself may be fine",
         noDurableEndOfTurn: "Couldn't check the goal: no final reply was saved",
         threadChanged:

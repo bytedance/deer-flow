@@ -70,12 +70,11 @@ def record_tool_promotion(
 
 
 class DeferredToolPromotionAuditMiddleware(AgentMiddleware[AgentState]):
-    """Observe final ``tool_search`` Commands after policy filtering.
+    """Observe final ``tool_search`` Commands.
 
-    This wrapper must remain outer of ``SkillToolPolicyMiddleware``. Tool-call
-    wrappers unwind in reverse registration order, so observing the handler's
-    final return value is what prevents denied schemas from being reported as
-    effective promotions.
+    Tool-call wrappers unwind in reverse registration order, so observing the
+    handler's final return value is what keeps the audit aligned with the
+    Command the deferred filter actually applies.
     """
 
     def __init__(self, deferred_names: frozenset[str], catalog_hash: str | None) -> None:

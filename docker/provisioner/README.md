@@ -425,8 +425,8 @@ chart's `provisioner.replicas`; compose runs a single container):
 
 The one startup write is `_ensure_namespace()`: when `K8S_NAMESPACE` does not
 exist yet, two replicas starting together can both see `404` and race to create
-it; the loser's `409` is not caught, so that process exits and is restarted into
-the now-existing namespace. Under the Helm chart the provisioner runs inside the
+it; the loser's `409 AlreadyExists` is treated as "the namespace exists", so
+both replicas start. Under the Helm chart the provisioner runs inside the
 namespace it manages, so this path never runs there.
 
 ## Security Considerations

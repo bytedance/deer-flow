@@ -104,17 +104,26 @@ IdempotencyKeyHeader = Annotated[
 
 
 def _scope_http_run_idempotency_key(request: Request, thread_id: str, key: str | None) -> str | None:
-    """Namespace a caller key for the process-wide run idempotency index."""
+    """Namespace a caller key for the process-wide run idempotency index.
+
+    Browser and API keys are scoped by owner and thread. A trusted internal
+    caller's key is scoped by owner only: the IM channel manager derives it
+    from the provider message, and a redelivery may be requested on another
+    thread once ``/new`` rebound the conversation; it must then meet the run
+    admitted for the first delivery (a 409) instead of starting a second one.
+    """
     if not isinstance(key, str):
         return None
     key = key.strip()
     if not key:
         raise HTTPException(status_code=422, detail="Idempotency-Key must not be blank")
     owner_id = get_trusted_internal_owner_user_id(request)
+    user = getattr(request.state, "user", None)
     if owner_id is None:
-        user = getattr(request.state, "user", None)
         user_id = getattr(user, "id", None)
         owner_id = str(user_id) if user_id is not None else get_effective_user_id()
+    if getattr(user, "system_role", None) == INTERNAL_SYSTEM_ROLE:
+        return "internal-run:" + hashlib.sha256(f"{owner_id}\0{key}".encode()).hexdigest()
     digest = hashlib.sha256(f"{owner_id}\0{thread_id}\0{key}".encode()).hexdigest()
     return f"http-run:{digest}"
 
