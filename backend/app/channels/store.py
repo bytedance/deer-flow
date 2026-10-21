@@ -334,6 +334,9 @@ def _read_legacy_file(path: Path, *, log_missing: bool, on_corrupt: str) -> dict
         if log_missing:
             logger.debug("No legacy channel store at %s", path)
         return None
+    except UnicodeDecodeError:
+        logger.warning(on_corrupt, path)
+        return None
     except OSError:
         logger.warning(on_corrupt, path, exc_info=True)
         return None
