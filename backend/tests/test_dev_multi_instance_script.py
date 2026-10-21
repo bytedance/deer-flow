@@ -404,7 +404,8 @@ def test_nginx_conf_balances_both_gateways(tmp_path):
     assert "server 127.0.0.1:8001;" in text
     assert "server 127.0.0.1:8011;" in text
     assert "X-DeerFlow-Upstream $upstream_addr" in text
-    assert mi._nginx_path(tmp_path / "run" / "nginx.pid") in text
+    expected_pid = str(tmp_path / "run" / "nginx.pid").replace("\\", "\\\\")
+    assert f'pid "{expected_pid}";' in text
 
 
 def test_nginx_conf_quotes_paths_with_whitespace(tmp_path):
@@ -412,9 +413,13 @@ def test_nginx_conf_quotes_paths_with_whitespace(tmp_path):
 
     text = mi.render_nginx_conf(listen_port=2027, gateway_ports=[8001, 8011], frontend_port=3000, state_dir=state)
 
-    assert f"pid {mi._nginx_path(state / 'run' / 'nginx.pid')};" in text
-    assert f"access_log {mi._nginx_path(state / 'logs' / 'nginx-access.log')};" in text
-    assert f"proxy_temp_path {mi._nginx_path(state / 'nginx' / 'temp' / 'proxy')};" in text
+    pid_str = str(state / "run" / "nginx.pid").replace("\\", "\\\\")
+    access_log_str = str(state / "logs" / "nginx-access.log").replace("\\", "\\\\")
+    proxy_temp_str = str(state / "nginx" / "temp" / "proxy").replace("\\", "\\\\")
+
+    assert f'pid "{pid_str}";' in text
+    assert f'access_log "{access_log_str}";' in text
+    assert f'proxy_temp_path "{proxy_temp_str}";' in text
 
 
 def test_nginx_conf_rejects_paths_nginx_would_interpolate(tmp_path):
