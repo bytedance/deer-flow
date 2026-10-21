@@ -10,6 +10,8 @@ ownership and capture cleanup. Retain the real XLSX conversion coverage.
 
 Backend tests must preserve the runtime invariants they exercise without changing production execution topology.
 
+`test_goal_loop_stop_probe.py` runs the standalone Goal-loop reproduction through the native graph, loop middleware, worker and checkpoints. Only model responses are scripted; do not replace the Goal decision or simulate the stop-reason write.
+
 InfoQuest fetch log assertions install the real `UrlRedactionFilter` on the
 capture handler with fixture-scoped cleanup. Expect scheme/host context with
 redacted paths, so isolated runs and full-suite logging configuration agree;
@@ -172,6 +174,25 @@ the write is still in staging and after it fails, with no staging or backup
 tree left behind. Do not replace these behavioral checks with assertions about
 source formatting or duplicate the runtime publication control in
 `test_lark_cli_atomic_publish.py`.
+
+## Channel staging cleanup
+
+`test_channel_staging_cleanup.py` blocks the rename destination (a non-empty
+directory, because an empty one would just swallow the staged file) and fails
+`Path.unlink`, the descriptor `close()`, and the log handler in turn. Assert the
+save error is what propagates, that the unlink is still attempted after a failed
+close, and that a staged copy the cleanup could not remove is named in a warning.
+Keep these as injected-failure behavior checks: an assertion that the handler
+source merely contains `suppress` would pass while the close error still skipped
+the unlink.
+
+`test_channel_credential_staging.py` leaves copies through the real credential writers, then ages
+one for restart cleanup. Preserve current credentials, recent peer staging, anonymous files,
+symlinks, directories and nested attachments. Exercise SQL startup after the legacy file is gone,
+plus failed unlink/listing and a real delayed FileHandler whose parent is missing. WeChat startup
+cleanup must also pass the strict blocking-I/O gate. Buzz failure tests keep the original write
+exception attributable through close/unlink/diagnostic errors, retain pending events for a later
+flush, and propagate interruptions after cleanup.
 
 ## Lark CLI blocking-I/O fixtures
 

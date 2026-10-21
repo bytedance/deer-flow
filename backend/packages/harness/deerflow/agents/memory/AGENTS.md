@@ -298,10 +298,12 @@ It does not require a separate signal-to-fact match.
 Search increments access heat only for facts it returns.
 Prompt injection and `get_context()` do not increment access heat.
 
-Usage and audit sidecars live below the agent `.metadata/` directory.
+Usage, audit, and per-thread extraction watermark sidecars live below the
+agent `.metadata/` directory.
 They must not change canonical Markdown timestamps or revisions.
 Write audits only after canonical persistence succeeds.
 User delete and clear operations must remove matching sidecar data.
+Updates feed after the furthest of the LRU and persisted watermark (best-effort IO).
 
 Staleness review reuses the regular updater call.
 It can keep, remove, or extend eligible aged facts.
@@ -390,8 +392,8 @@ Keep these cross-component constraints in sync:
 - The pod grace period must include retrieval wait, flush time, and shutdown margin.
 - `retrieval_adapter` selects FTS5, a custom factory, or the empty fallback.
 - Eviction weights must total `1.0`.
-- `watermark_max_keys: 0` makes the conversation watermark cache unbounded.
-- A dropped watermark can re-extract one batch on the next turn.
+- `watermark_max_keys` caps the watermark LRU and each `watermarks.json`; `0` is unbounded.
+- A watermark missing from both can re-extract one batch on the next turn.
 
 #### Write-side near-duplicate fact gate (opt-in)
 
