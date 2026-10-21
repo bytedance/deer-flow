@@ -56,13 +56,15 @@ def user_skill_dir(tmp_path, user_storage):
 
 
 def test_write_creates_file(tmp_path, storage):
-    storage.write_custom_skill("demo-skill", "SKILL.md", "# hello")
-    assert (tmp_path / "custom" / "demo-skill" / "SKILL.md").read_text() == "# hello"
+    content = "---\nname: demo-skill\n---\n\n# hello\n"
+    storage.write_custom_skill("demo-skill", "SKILL.md", content)
+    assert (tmp_path / "custom" / "demo-skill" / "SKILL.md").read_bytes() == content.encode("utf-8")
 
 
 def test_write_creates_subdirectory(tmp_path, storage):
-    storage.write_custom_skill("demo-skill", "references/ref.md", "# ref")
-    assert (tmp_path / "custom" / "demo-skill" / "references" / "ref.md").exists()
+    content = "# ref\nline\n"
+    storage.write_custom_skill("demo-skill", "references/ref.md", content)
+    assert (tmp_path / "custom" / "demo-skill" / "references" / "ref.md").read_bytes() == content.encode("utf-8")
 
 
 def test_write_is_atomic_overwrite(tmp_path, storage):
@@ -210,16 +212,18 @@ def test_rejects_invalid_skill_name_in_path_helpers(storage, name, method_name):
 
 
 def test_user_scoped_write_creates_file_in_user_dir(tmp_path, user_storage):
-    user_storage.write_custom_skill("demo-skill", "SKILL.md", "# hello")
+    content = "---\nname: demo-skill\n---\n\n# hello\n"
+    user_storage.write_custom_skill("demo-skill", "SKILL.md", content)
     user_file = tmp_path / "users" / "test-user" / "skills" / "custom" / "demo-skill" / "SKILL.md"
-    assert user_file.read_text() == "# hello"
+    assert user_file.read_bytes() == content.encode("utf-8")
     # Does not create in global custom
     assert not (tmp_path / "custom" / "demo-skill" / "SKILL.md").exists()
 
 
 def test_user_scoped_write_creates_subdirectory(tmp_path, user_storage):
-    user_storage.write_custom_skill("demo-skill", "references/ref.md", "# ref")
-    assert (tmp_path / "users" / "test-user" / "skills" / "custom" / "demo-skill" / "references" / "ref.md").exists()
+    content = "# ref\nline\n"
+    user_storage.write_custom_skill("demo-skill", "references/ref.md", content)
+    assert (tmp_path / "users" / "test-user" / "skills" / "custom" / "demo-skill" / "references" / "ref.md").read_bytes() == content.encode("utf-8")
 
 
 def test_user_scoped_write_is_atomic_overwrite(tmp_path, user_storage):

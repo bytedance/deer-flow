@@ -133,4 +133,7 @@ def test_custom_skill_history_serializes_independent_processes(tmp_path, action,
     assert entries[len(prior)]["new_content"] == first_content
     assert entries[-1]["prev_content"] == first_content
     assert entries[-1]["new_content"] == concurrent
-    assert skill_file.read_text(encoding="utf-8") == concurrent
+    assert skill_file.read_bytes() == concurrent.encode("utf-8")
+    history_bytes = history_file.read_bytes()
+    assert b"\r\n" not in history_bytes
+    assert history_bytes.endswith(b"\n")

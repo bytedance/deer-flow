@@ -70,6 +70,23 @@ async def test_skill_manage_edit_does_not_block_event_loop(monkeypatch) -> None:
     assert await asyncio.to_thread(skill_file.read_bytes) == edited.encode("utf-8")
 
 
+async def test_skill_manage_static_candidate_receives_exact_content_bytes(monkeypatch: pytest.MonkeyPatch) -> None:
+    await asyncio.to_thread(_install_skill)
+    edited = _SKILL_MD + "\nExact bytes.\n"
+    observed: dict[str, bytes] = {}
+
+    def _capture(skill_dir, *, skill_name=None, app_config=None):
+        observed["bytes"] = (skill_dir / "SKILL.md").read_bytes()
+        return []
+
+    monkeypatch.setattr(skill_manage_module, "enforce_static_scan", _capture)
+
+    findings = await skill_manage_module._scan_static_candidate_or_raise(_SKILL_NAME, {"SKILL.md": edited})
+
+    assert findings == []
+    assert observed["bytes"] == edited.encode("utf-8")
+
+
 async def test_skill_manage_edit_publishes_the_shared_marker_off_the_loop(monkeypatch, tmp_path: Path) -> None:
     await asyncio.to_thread(_install_skill)
     config_path = tmp_path / "extensions_config.json"
