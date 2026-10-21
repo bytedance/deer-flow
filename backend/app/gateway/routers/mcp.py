@@ -13,6 +13,7 @@ from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from app.gateway.deps import require_admin_user
+from app.gateway.mcp_oauth_tokens import forget_unconfigured_mcp_oauth_tokens
 from app.gateway.persistent_writes import run_drained_write
 from deerflow.config.extensions_config import (
     ExtensionsConfig,
@@ -1250,6 +1251,8 @@ def _commit_mcp_config_write(
     # Re-parse so the committed fence sees the ledger we just wrote.
     candidate = validate_raw_extensions_config(raw_data)
     atomic_write_extensions_config(config_path, raw_data)
+    # Disabled servers keep their stored OAuth tokens; removed ones cannot use them again.
+    forget_unconfigured_mcp_oauth_tokens(None, candidate.mcp_servers.keys())
     try:
         reload_extensions_config()
         return prepare_mcp_reconciliation(candidate, config_path=config_path)
