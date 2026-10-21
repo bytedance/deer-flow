@@ -3004,8 +3004,9 @@ def ls_tool(runtime: Runtime, path: str, description: str = "") -> str:
         return f"Error: {e}"
     except FileNotFoundError:
         return f"Error: Directory not found: {requested_path}"
-    except PermissionError:
-        return f"Error: Permission denied: {requested_path}"
+    except PermissionError as e:
+        detail = _sanitize_error(e, runtime) if e.filename is not None else requested_path
+        return f"Error: Permission denied: {detail}"
     except Exception as e:
         return f"Error: Unexpected error listing directory: {_sanitize_error(e, runtime)}"
 
@@ -3069,8 +3070,9 @@ def glob_tool(
         return f"Error: Directory not found: {requested_path}"
     except NotADirectoryError:
         return f"Error: Path is not a directory: {requested_path}"
-    except PermissionError:
-        return f"Error: Permission denied: {requested_path}"
+    except PermissionError as e:
+        detail = _sanitize_error(e, runtime) if e.filename is not None else requested_path
+        return f"Error: Permission denied: {detail}"
     except Exception as e:
         return f"Error: Unexpected error searching paths: {_sanitize_error(e, runtime)}"
 
