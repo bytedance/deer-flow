@@ -1062,6 +1062,13 @@
   的 id 会留下一个回收站对账永远不会清理的空 `{project_id}/documents/` 目录，而超过单个
   路径分量长度的 id 会因 `ENAMETOOLONG` 失败。现在会先确认项目归调用者所有且处于活跃
   状态，不写任何内容即返回同样的 `404`；书架插入仍会在项目行锁下再次检查。 ([#7040])
+- **工作流：** 脚本工作流等待耗时较长的子 Agent 运行时，不再无视 `timeout_seconds`，
+  在约 209 秒后因 `Worker turn limit` 失败。此前只要步骤尚未完成，监督器就会在每次
+  20 ms 轮询时向 QuickJS worker 重发一个空帧，每次往返都会计入 10,000 次交互上限。
+  现在 worker 会报告其作业队列何时已排空，随后监督器在本地等待尚未完成的调用，不再
+  交换帧（仍每隔 20 ms 检查取消、故障和 worker 退出），因此空闲等待不再消耗交互次数，
+  `timeout_seconds` 成为唯一的实际耗时上限；持续驱动作业队列的脚本仍受交互次数上限
+  约束。(issue #7022)
 - **浏览器：** `browser_screenshot` 不再替换线程 outputs 目录中已存在的文件。此前以
   `report.png` 保存的截图会覆盖用户自己的 `report.png`、更早的截图，或同一秒内生成的
   另一张默认命名截图；现在会像 `web_capture` 一样改用下一个空闲名称（`report-1.png`、
@@ -1091,6 +1098,32 @@
   重投递会被丢弃，而不是把这一轮再执行一遍；Gateway 拒绝的请求或发送前的失败仍会释放该键
   以便重试。即发即弃渠道（GitHub）不受影响：`runs.create` 在运行进入 pending 后即返回。
   ([#6876])
+
+- **部署：** Gateway 容器现在可以优雅关闭。生产 compose 的 `command`、
+  `backend/Dockerfile` 中的两个 `CMD` 以及 Helm chart 此前都通过
+  `sh -c "cd backend && … uv run … uvicorn …"` 启动服务，导致没有 SIGTERM 处理器的
+  `sh` 成为 PID 1，内核因而丢弃停止信号：uvicorn 从不关闭，lifespan 收尾流程
+  （记忆队列刷新、运行排空、渠道、调度器和 MCP 关闭）也从不执行，每次停止都会耗尽
+  宽限期，最终以 SIGKILL（退出码 137）结束。现在所有生产启动路径都像已有的
+  `docker/dev-entrypoint.sh` 一样通过 `exec` 执行服务器，compose 的 gateway 也设置了
+  `init: true`，确保孤立的孙进程仍能被回收。(issue #6835, [#6836])
+
+- **渠道：** `FeishuChannel.stop()` 和 `DingTalkChannel.stop()` 现在会结束各自的
+  SDK 线程，不再超时。两个 SDK 都在仅于致命错误时才会退出的线程私有事件循环上运行，
+  因此此前每次停止都会等待线程 5 秒、抛出 `ChannelStopTimeout`，并让旧进程的平台连接
+  继续存活；重启、重新部署以及即将引入的按 provider 划分的 leader 交接都无法释放连接。
+  现在各渠道在锁保护下公开该循环，`stop()` 在其上安排关闭操作，再等待线程结束。
+  飞书在关闭 socket 和停止循环前禁用 lark-oapi 的 `_auto_reconnect`，因为 SDK 的
+  `start()` 否则会在重连分支中吞掉循环被中断的异常并再次连接；钉钉自行驱动一份
+  dingtalk-stream 连接循环（SDK 的循环是 `while True`，还会捕获 `CancelledError`），
+  每次连接前重新检查运行标志，并自行通过带超时限制的 `httpx` 发送 ticket 请求
+  （SDK 的 `requests.post` 没有超时，端点卡住就可能阻塞线程或进程退出），日志也只
+  记录端点，不再记录携带 ticket 的连接载荷。对端一直不回应关闭帧时，两个渠道都会
+  主动中止传输，而不再把 socket 留给垃圾回收，因为有界的关闭等待会取消 websockets
+  自身的关闭超时中止逻辑。共享的 `shutdown_private_loop` 会取消 SDK 遗留的任务、
+  在限定时间内排空并关闭循环；客户端创建前收到停止请求时不会发起连接。
+  `ChannelStopTimeout` 现在仅用于线程确实卡在 SDK 调用中的情形。Telegram 原本就
+  以这种方式停止循环，行为不变。([#6798])
 
 - **前端：** 用户管理设置页不再在静态网站演示中发出注定失败的查询，非管理员的
   `?settings=users` 深链接也不再打开仅管理员可见的面板。该页面此前只以
@@ -1341,18 +1374,6 @@
   多出的这次让出在 3.12 上是无操作；已交给属主循环的事件在所有受支持的
   Python 版本上都会提交。([#6565])
 
-- **渠道：** IM 会话在多个 Gateway 副本之间现在会保留同一条 DeerFlow 线程。`ChannelManager` 此前把聊天到线程的绑定
-  （`channel_name:chat_id[:topic_id]` → `thread_id`）保存在进程私有的 JSON 文件 `channels/store.json` 中，启动时读取一次、
-  每次变更整体重写，因此在多个 Gateway 实例下，一个实例上创建的绑定对其他实例不可见——同一聊天的下一条消息若落到
-  另一个实例，就会新开第二条线程——并发写入还会互相覆盖文件。现在只要 `database.backend` 是 `sqlite` 或 `postgres`，
-  绑定就保存在共享的 `channel_thread_bindings` 表中（迁移 `0038_channel_thread_bindings`）；`memory` 后端继续使用 JSON
-  文件。升级后的首次启动会把已有的 `store.json` 一次性导入空表（`INSERT … ON CONFLICT DO NOTHING`，因此两个副本同时
-  导入也不会产生重复绑定），并将文件重命名为 `store.json.migrated`；表非空时保持该文件不动；键组成部分超出表列宽度
-  的条目会被跳过并计数，不会让整个导入失败。存储 API 为异步，数据库永远不会阻塞 Gateway 事件循环；飞书的同步 lark
-  回调以短暂的有限等待把查询桥接到该循环，数据库未及时应答的查询会在 Gateway 循环上重试（至多 30 秒，之后丢弃消息
-  并记录警告），而不是因缺少映射被路由到新线程；这类延迟消息会占用有限入站队列（`channels.inbound_queue_maxsize`）
-  的一个槽位，因此数据库中断不会让积压增长，无法入队的消息会被丢弃并记录警告。([#6558])
-
 - **子智能体：** 持久子智能体批次的停机清理现在能在调用方被取消之后继续存活。
   #6517 加入的批次停止在取消 poller 与条目任务后直接 await 它们，而 Gateway
   有界的 `asyncio.wait_for()` 会在停机期限到达时取消 `stop()` 调用方——该取消
@@ -1408,16 +1429,6 @@
   重试交由每次尝试都会被准入的中间件处理，配置与调用方的重试设置都无法重新
   启用它；未启用准入的模型与无关的自定义限流器保持既有重试策略。([#6545])
 
-- **部署：** Helm chart 不再把沙箱 provisioner 钉在单个 Pod 上。`provisioner.replicas`（默认 1，不变）设置副本数，
-  provisioner Deployment 采用与 gateway 相同的先扩后缩滚动策略（`maxSurge: 1`、`maxUnavailable: 0`），并在
-  `provisioner.replicas > 1` 时渲染 `PodDisruptionBudget`（`provisioner.podDisruptionBudget`，`minAvailable: 1`），因此
-  多副本 gateway 部署不会再因为唯一的 provisioner Pod 重启或节点被抽干而丢失沙箱创建能力。provisioner 本身无需改动：
-  带标签的沙箱 Pod 和 Service 就是它唯一的注册表，每个处理器都从 API server 回读，create 也已能容忍并发创建者产生的
-  `409 AlreadyExists`。chart README 与 provisioner README 记录了副本数所依赖的前提，以及单副本时永远不会渲染该预算的
-  事实。两个预算的 `minAvailable` 都经由同一个辅助函数渲染：它会保留 `"50%"` 这类百分比（此前直接做 `int` 强转——既有
-  的 gateway 预算同样如此——会悄悄把它变成 `0`，一个什么都保护不了的预算），并对 `0`、`"0%"` 及其他不支持的值让渲染
-  失败，报错信息中会指出对应的 values 键。([#6543])
-
 - **存储：** 文件系统 blob 写入成功后，即使为元数据 sidecar 分配失败也保持
   成功。blob 存储把 JSON sidecar 视为附属信息，但其临时文件的分配位于尽力而为
   异常处理之外，那里的 `OSError` 会在内容已原子发布之后仍报告写入失败；对已
@@ -1435,7 +1446,7 @@
 - **llm-text：** 推理标签清理现在在带引号的属性之外定位开定界符，形如
   `<think note=">"/>` 的空标签不再吞掉其后的答案。此前两个清理函数都把第一个
   带引号的 `>` 当作开始标签的结尾，把这个标签视为未闭合的推理段，对
-  `<think note=">"/>{\"answer\":\"yes\"}` 这类输入返回空字符串。现在开定界符
+  `<think note=">"/>{"answer":"yes"}` 这类输入返回空字符串。现在开定界符
   在单引号与双引号属性之外查找；带此类属性的自闭合标签会保留其后的答案；共享
   的前向扫描器保持既有的标签名边界与悬挂块行为。([#6535])
 
@@ -1526,18 +1537,6 @@
   现在每次派发都基于调用开始时取得的快照进行，监听器计数日志与回调投递都使用该
   快照。([#6502])
 
-- **认证：** 登录锁定现在按客户端 IP 在所有 Gateway 副本间只计一次。`POST /api/v1/auth/login/local` 此前把失败计数
-  存在进程私有的字典里，因此同一个负载均衡器后挂 N 个副本时，攻击者能获得 N × `max_login_attempts` 次尝试机会，
-  一个副本上的锁定对其他副本不可见。该计数现在由 `LoginThrottleStore` 管理：新增的 `auth.local.throttle_storage`
-  选择器（默认 `auto`）在 `database.backend` 为 `sqlite` 或 `postgres` 时把计数保存在共享的 `login_throttle` 表中
-  （迁移 `0035_login_throttle`），没有可共享的数据库时（`memory` 数据库，或已配置但引擎未初始化的数据库）回退到
-  进程内计数并记录警告；`memory` 强制沿用历史上的进程内行为；`db` 强制使用表，配置的数据库引擎不可用时拒绝启动。
-  Gateway 在启动时、紧随持久化引擎之后解析一次该存储；独立应用则在第一次限流调用时解析。失败通过一次原子 upsert
-  计数，同时保留生效中锁定的开始时间与已提交时长（判定措辞是“锁定开始后 N 秒”，而非“最后一次尝试之后”）；锁定
-  期间策略变化时仍以锁定时提交的时长为准；登录成功会清除该 IP 在所有位置的计数；已生效的锁定与空闲计数按有界
-  批次清扫；声明了多实例部署却仍使用 `memory` 的安装会在启动时记录警告。登录端点的状态码和消息不变；
-  `max_login_attempts` 与 `lockout_seconds` 仍为实时读取。`config_version` 现为 57。([#6501])
-
 - **网关：** 带键（keyed）resume 的重试现在是幂等的。运行执行让 `command.resume`
   优先于 `input`，而幂等复用此前只比较存储的与重试的 `input`，因此两个
   `input=null` 的不同恢复决定可能复用同一个运行。现在带键 resume 的准入会在新增
@@ -1560,28 +1559,6 @@
   同一个请求字典并把 `thinking` 从 `true` 切换为 `false` 时，第二个请求仍会发送
   `enable_thinking=true`，且请求构造会改写模型保存的默认值。现在归一化在请求自有的
   副本上进行；显式 `enable_thinking` 保持优先，无关字段得以保留。([#6496])
-
-- **技能：** 通过一个 Gateway 副本做出的技能变更，现在会进入其他所有副本系统提示词中的技能列表。`SkillStorage` 每次
-  调用都会重新扫描磁盘，但提示词层按进程缓存已启用技能列表和渲染好的 `<skill_system>` 段落，而安装、编辑、删除、
-  回滚或启停技能（以及 `POST /api/skills/reload`）只刷新处理该请求的进程，因此在多个 uvicorn worker 或多个共享同一
-  home 卷的 Pod 下，其他副本会一直提供旧技能列表，直到各自重启。现在上述每一种变更还会在共享的
-  `extensions_config.json` 旁发布 `.extensions_config.json.skills-cache-reset.json`，使用与配置文件相同的原子替换和
-  跨进程锁；每次返回缓存条目前至多每秒一次地比对该标记的签名；只针对某个用户自定义技能的标记只会让该用户的
-  条目失效。`/api/skills/reload` 在标记写入成功时报告 `scope: shared_config`，在无法解析 extensions 配置路径时报告
-  `scope: process`，运维者不再需要在每个 Pod 或 worker 上单独调用。MCP 缓存重置的标记现在与它共用同一个
-  `deerflow.config.shared_reset_marker` 辅助函数。([#6495])
-
-- **记忆：** DeerMem 派生的 SQLite FTS5 检索索引现在可以放在记忆根目录之外，Gateway 实例也能看到其他实例写入的事实。
-  此前每个用户的索引是 `{storage_path}/.retrieval` 处一个 WAL 模式的 SQLite 数据库，多个共享同一 home 卷的 Gateway Pod
-  会经网络文件系统打开同一个 WAL 文件，而 SQLite 不支持这种用法；每个 Pod 启动都会在其他 Pod 仍在使用时清空并重新
-  填充共享索引，一个 Pod 的损坏恢复会删掉其他 Pod 仍打开的文件，而同伴写入新事实之后，Pod 仍继续提供自己那份旧
-  副本。新增的 `memory.backend_config.retrieval_index_path` 可把索引目录放到别处（留空保持现有位置；相对路径基于
-  `storage_path` 解析），启动重建与损坏恢复只触及该本地索引；搜索现在会对自本进程上次索引以来 `memory.json` 修订号
-  发生变化的作用域重新同步，因此同伴的事实会出现在下一次搜索中，而本实例自己的写入不会触发重建。声明了多实例
-  部署（`deployment.multi_instance: true` / `DEER_FLOW_MULTI_INSTANCE=1`）却仍把索引放在 `storage_path` 内的安装会在
-  启动时记录警告。Helm chart 现在把 Pod 本地的 `emptyDir` 挂载到 `/var/lib/deerflow/memory-index`，将该配置项指向它，
-  并删除了 Gateway 每次启动都会丢弃并警告的遗留 `memory.storage_path: memory.json` 一行。`config_version` 现为 56。
-  ([#6494])
 
 - **部署：** `$DEER_FLOW_HOME` 不可写时，`scripts/deploy.sh` 现在会快速失败并给出
   可操作的提示。此前开发栈（`make docker-start`）可能以 root 创建
@@ -1693,27 +1670,6 @@
   而是直接中止。现在该分支也捕获 `OverflowError`，与其他畸形提示一样将其视为不可
   用；同一辅助函数中的日期解析回退此前已防护该情况。([#6455])
 
-- **网关：** Redis 流桥接不可达时，`GET /health/ready` 现在会报告未就绪。桥接的 Redis 客户端是惰性连接的，此前没有任何
-  逻辑去 ping 它，因此 Redis 宕机的 Gateway 照常启动，对 Kubernetes 就绪探针和 Compose healthcheck 都回答 `200 ready`，
-  并继续接收流量，而每次运行的首个发布都在失败；在多实例门槛已把 Redis 桥接设为必需之后，这样的副本完全无法对外
-  提供服务。`StreamBridge` 新增 `ping()`；响应体新增 `stream_bridge` 判定（内存桥接为 `not_configured`），不可达时端点
-  翻转为 503；另新增仅报告、不影响状态码的 `provisioner` 判定，来自沙箱 provisioner 自己的 `/health`（设置了
-  `sandbox.provisioner_url` 时），由于所有副本共享同一个 provisioner，它永远不会改变状态码。现在只有超出端点时限的
-  探测才会被标记为不可达，公开探测的门闩改为每种探测一把锁。([#6447])
-
-- **上传：** Gateway 启动时对孤立的 `.upload-*.part` 暂存文件的清扫现在会跳过 24 小时内的新文件。此前清扫会删除找到的
-  每一个暂存文件，这对单个 Gateway 没问题，但对共享同一 home 卷的多个副本不成立：滚动更新期间启动的副本会删掉另一个
-  副本仍在写入的上传的暂存文件，该上传随后在原子提交时失败。分块写入会刷新暂存文件的 mtime，因此进行中的上传始终
-  比该阈值年轻；崩溃残留则由 24 小时之后的第一次启动回收，与项目文档暂存已在使用的防护一致。已经与已发布上传共享
-  inode 的暂存文件（原子链接与删除暂存名之间发生崩溃所致）在下次启动时仍会被无条件回收，以免该目标文件在下次替换时
-  无法通过多链接安全检查。([#6445])
-
-- **沙箱：** AIO 沙箱在凭据放置与容器复用上不再信任未经验证的状态。provisioner 能力探测失败不再被解读为“broker 关闭”
-  （此前会在负缓存 TTL 期间把明文 lark 凭据目录 bind-mount 进无 broker 的 Pod）；broker 模式按 Pod 依据 provisioner 的
-  原子观测加以证实；lark 供应配置冲突会携带能力刷新标记，使部署变更在下一次 acquire 时自愈；隐式 shell 结局不明确的
-  容器由持久化的隔离区（`{DEER_FLOW_HOME}/sandbox-quarantine`）在热复用、重新发现与重启之间设防，按既有的所有权与
-  拆除围栏回收，其记录只有在确认容器确实不存在之后才退役。([#6436])
-
 - **MCP：** 被取代的 stdio 服务器绑定现在在会话池边界处被围栏隔离。此前 stdio
   工具包装器可能比创建它的配置纪元活得更久：旧包装器可以在服务器的连接身份
   被取代后仍指向该服务器；进行中的创建者可以在绑定变更后才完成初始化并发布
@@ -1823,14 +1779,6 @@
   持有缺口。现在两处游标写入都经由仓库现有的取消安全 `await_drained()` 排干，
   过期认证路径复用现有的 `_save_auth_state_drained()` 辅助函数。([#6389])
 
-- **配置：** 共享同一份 `extensions_config.json` 的每个 Gateway 进程，现在都能看到其他进程做出的 MCP 与技能变更。此前
-  解析结果按进程只缓存一次，只有处理写入的进程会重新加载，因此在多个 uvicorn worker、或共享卷上的多个 Pod 之下，
-  其他进程一直沿用启动时的副本：智能体可用的 MCP 服务器，以及更重要的、由文件系统 MCP 服务器推导出的 local-bash
-  绝对路径 allowlist，在各副本之间并不一致，直到每个进程重启。`get_extensions_config()` 现在每次读取都会按文件的路径
-  与内容签名重新校验缓存实例，与 `get_app_config()` 对 `config.yaml` 的做法一致，缓存 `AppConfig` 的 `extensions` 快照
-  也随之更新。截断或无效的修订（例如 bind-mounted 文件上非原子覆盖回退进行到一半时）会保留上一个配置并只记录一次
-  日志；启动时遇到损坏的文件仍然会明确报错失败。([#6386])
-
 - **记忆：** 无效和原始的助手工具调用现在被排除在记忆采集之外。DeerMem 与
   mem0 此前只过滤解析后的 `tool_calls`，但函数参数格式错误的真实 OpenAI 响应
   会变成一条 `tool_calls` 为空、`invalid_tool_calls` 非空的 `AIMessage`，于是
@@ -1855,17 +1803,6 @@
   `0600` 模式发布，会去掉组或公共读权限。快照捕获现在从同一个打开文件读取字节
   和模式，恢复在发布前把该模式应用到临时文件；写入、`chmod` 或发布失败时，当前
   目标文件保持原样，临时文件被清理。([#6366])
-
-- **Helm：** 默认的 Helm 安装现在又能创建沙箱了。chart 启用沙箱 provisioner 并把 `config.sandbox.provisioner_url` 指向
-  它，但没有任何环节渲染 `PROVISIONER_API_KEY`：provisioner Deployment 没有该环境变量，`<release>-app` Secret 没有该
-  键，内嵌配置也没有 `provisioner_api_key`。自 provisioner 开始强制要求该密钥（#4116）以来，只要密钥为空或不匹配，其
-  `verify_api_key` 中间件就会对每个 `/api/*` 请求回答 401，因此每一次沙箱创建都会失败。现在 app Secret 会生成一次该
-  密钥，并像其他 app 密钥一样在升级时保留；gateway 与 provisioner Pod 都从这一个 Secret 读取（`provisioner.enabled` 为
-  true 时，用户自管的 `existingAppSecret` 必须携带该键）；默认 `config` 设置 `sandbox.provisioner_api_key:
-  $PROVISIONER_API_KEY`，chart README 的配置示例现在也保留了这一行。`provisioner.enabled: false` 时，gateway 使用运维者
-  通过 `secrets` 或 `existingSecret` 提供的密钥（外部 provisioner）；否则其启动命令把该变量默认为空字符串，因此即使用户
-  自管的 provider Secret 只包含模型密钥，默认 `config` 也能加载，gateway 照常启动。docker-compose 不受影响：它从 `.env`
-  读取该密钥。([#6365])
 
 - **智能体：** `ReadBeforeWriteMiddleware` 的读取标记现在绑定到执行读取的那个
   工具调用。Agent 工具可以返回携带自身结果和对其他消息更新的 LangGraph
@@ -1913,20 +1850,6 @@
   持有者退栈后继续释放沙箱。`SandboxMiddleware._release_sandbox_async()` 中的
   直接释放与沙箱工具中的直接释放回滚，现在都经由既有的取消安全
   `await_drained()` 辅助函数排空。([#6348])
-
-- **部署：** Helm chart 与 docker-compose 不再自带多副本陷阱。chart 的默认 `config` 启用 `run_ownership.heartbeat_enabled`
-  和 `run_events.backend: db`（这样启动中的 Pod 只会认领属主确实已消失的运行，消息历史跨 Pod 共享）；按 `gateway.replicas`
-  或显式的 `gateway.multiInstance` 为 Gateway 的启动门槛导出 `DEER_FLOW_MULTI_INSTANCE`（用 `kubectl scale` 或 HPA 扩容前
-  先设置它，chart 看不到这类扩容）；生成并注入共享的 `AUTH_JWT_SECRET`（此前每个 Pod 各自的 `.jwt_secret` 文件会让用户
-  在副本之间被登出；gateway 为多实例时该密钥为必需，避免并发启动的 Pod 竞相写入不同的密钥）；声明先扩后缩的滚动
-  策略；为多实例 gateway 渲染 `PodDisruptionBudget`；并在 90 秒终止宽限期内约束 uvicorn 的优雅关闭
-  （`gateway.uvicornGracefulShutdownSeconds`，10 秒；`0` 会被遵守），空闲 SSE 流不会再把记忆落盘拖进 SIGKILL。
-  `existingAppSecret` 现在被所有消费者遵守（gateway 和 frontend 此前一直引用并未渲染的生成版 `<release>-app` Secret，
-  导致 Pod 根本无法启动）。两个 compose 文件也绑定同样的 uvicorn 超时并设置 `stop_grace_period: 90s`（Docker 默认的
-  10 秒会打断 30 秒的记忆落盘；把每个有界拆除钩子都算上，lifespan 的最坏情况约 61 秒，测试会直接从 Gateway 读取这些
-  界限）。chart README 与 compose 注释不再引用早已关闭的 issue #3948 作为保持单副本的理由，改为列出真正仍需单实例的
-  部分（IM 渠道、微信扫码登录、浏览器工具）。升级早于 `AUTH_JWT_SECRET` 的发布版本会生成新密钥，并把所有浏览器会话
-  登出一次；chart README 说明了如何先把旧密钥写入 Secret 以保留会话。([#6347])
 
 - **MCP：** 轮换式 OAuth refresh token 现在在工具发现与持久 MCP 任务调用之间
   共享。这两条路径此前各自解析一份部署配置副本，启用轮换时发现可能把 refresh
@@ -2049,9 +1972,17 @@
   现在 Jina 请求会跟随重定向，同时保留现有的代理、环境与超时设置，临时重定向
   以 POST 方法原样到达目标。([#5808])
 
-- **目标：** 外部 state 和运行输入在写入前拒绝缺失或无效的目标文本、错误计数及 reducer 控制标记，保持合法的稀疏
-  goal 状态兼容。重放历史 checkpoint（包括重新生成回答）沿用当前 goal 和已用续跑
-  预算，不会恢复旧目标，并移除旧回答的达成记录；不需要前端改动或数据库迁移。
+- **渠道：** IM 会话在多个 Gateway 副本之间现在会保留同一条 DeerFlow 线程。`ChannelManager` 此前把聊天到线程的绑定
+  （`channel_name:chat_id[:topic_id]` → `thread_id`）保存在进程私有的 JSON 文件 `channels/store.json` 中，启动时读取一次、
+  每次变更整体重写，因此在多个 Gateway 实例下，一个实例上创建的绑定对其他实例不可见——同一聊天的下一条消息若落到
+  另一个实例，就会新开第二条线程——并发写入还会互相覆盖文件。现在只要 `database.backend` 是 `sqlite` 或 `postgres`，
+  绑定就保存在共享的 `channel_thread_bindings` 表中（迁移 `0038_channel_thread_bindings`）；`memory` 后端继续使用 JSON
+  文件。升级后的首次启动会把已有的 `store.json` 一次性导入空表（`INSERT … ON CONFLICT DO NOTHING`，因此两个副本同时
+  导入也不会产生重复绑定），并将文件重命名为 `store.json.migrated`；表非空时保持该文件不动；键组成部分超出表列宽度
+  的条目会被跳过并计数，不会让整个导入失败。存储 API 为异步，数据库永远不会阻塞 Gateway 事件循环；飞书的同步 lark
+  回调以短暂的有限等待把查询桥接到该循环，数据库未及时应答的查询会在 Gateway 循环上重试（至多 30 秒，之后丢弃消息
+  并记录警告），而不是因缺少映射被路由到新线程；这类延迟消息会占用有限入站队列（`channels.inbound_queue_maxsize`）
+  的一个槽位，因此数据库中断不会让积压增长，无法入队的消息会被丢弃并记录警告。([#6558])
 
 - **运行时：** JSONL 事件存储在末行写坏后不再丢失事件。写入中途被打断会让文件缺少结尾换行，下一次追加会接在残缺记录后面，
   两者合成一行无法解析；被截断的多字节字符还会让整个文件解码失败，所有完好记录都读不出来，序号恢复也随之失效。现在追加前
@@ -2073,9 +2004,43 @@
   不会改变任务的状态和 `next_run_at`，与周期任务的试运行一致，其结果只记录在试运行自己的运行记录上。执行时间已过之后
   的试运行仍算作任务本身的执行。若试运行的启动记录在轮询器认领已到期的任务之后才写入，也不会再清除该认领的租约；此前这会让
   该认领的入队失败，任务停留在 `running` 且没有任何待执行的运行。([#6512])
+- **认证：** 登录锁定现在按客户端 IP 在所有 Gateway 副本间只计一次。`POST /api/v1/auth/login/local` 此前把失败计数
+  存在进程私有的字典里，因此同一个负载均衡器后挂 N 个副本时，攻击者能获得 N × `max_login_attempts` 次尝试机会，
+  一个副本上的锁定对其他副本不可见。该计数现在由 `LoginThrottleStore` 管理：新增的 `auth.local.throttle_storage`
+  选择器（默认 `auto`）在 `database.backend` 为 `sqlite` 或 `postgres` 时把计数保存在共享的 `login_throttle` 表中
+  （迁移 `0035_login_throttle`），没有可共享的数据库时（`memory` 数据库，或已配置但引擎未初始化的数据库）回退到
+  进程内计数并记录警告；`memory` 强制沿用历史上的进程内行为；`db` 强制使用表，配置的数据库引擎不可用时拒绝启动。
+  Gateway 在启动时、紧随持久化引擎之后解析一次该存储；独立应用则在第一次限流调用时解析。失败通过一次原子 upsert
+  计数，同时保留生效中锁定的开始时间与已提交时长（判定措辞是“锁定开始后 N 秒”，而非“最后一次尝试之后”）；锁定
+  期间策略变化时仍以锁定时提交的时长为准；登录成功会清除该 IP 在所有位置的计数；已生效的锁定与空闲计数按有界
+  批次清扫；声明了多实例部署却仍使用 `memory` 的安装会在启动时记录警告。登录端点的状态码和消息不变；
+  `max_login_attempts` 与 `lockout_seconds` 仍为实时读取。`config_version` 现为 57。([#6501])
+
+- **记忆：** DeerMem 派生的 SQLite FTS5 检索索引现在可以放在记忆根目录之外，Gateway 实例也能看到其他实例写入的事实。
+  此前每个用户的索引是 `{storage_path}/.retrieval` 处一个 WAL 模式的 SQLite 数据库，多个共享同一 home 卷的 Gateway Pod
+  会经网络文件系统打开同一个 WAL 文件，而 SQLite 不支持这种用法；每个 Pod 启动都会在其他 Pod 仍在使用时清空并重新
+  填充共享索引，一个 Pod 的损坏恢复会删掉其他 Pod 仍打开的文件，而同伴写入新事实之后，Pod 仍继续提供自己那份旧
+  副本。新增的 `memory.backend_config.retrieval_index_path` 可把索引目录放到别处（留空保持现有位置；相对路径基于
+  `storage_path` 解析），启动重建与损坏恢复只触及该本地索引；搜索现在会对自本进程上次索引以来 `memory.json` 修订号
+  发生变化的作用域重新同步，因此同伴的事实会出现在下一次搜索中，而本实例自己的写入不会触发重建。声明了多实例
+  部署（`deployment.multi_instance: true` / `DEER_FLOW_MULTI_INSTANCE=1`）却仍把索引放在 `storage_path` 内的安装会在
+  启动时记录警告。Helm chart 现在把 Pod 本地的 `emptyDir` 挂载到 `/var/lib/deerflow/memory-index`，将该配置项指向它，
+  并删除了 Gateway 每次启动都会丢弃并警告的遗留 `memory.storage_path: memory.json` 一行。`config_version` 现为 56。
+  ([#6494])
+
 - **技能：** `/技能名` 激活现在在模型调用重试时不再丢失。此前激活在调用模型之前就被标记为已完成，因此调用失败
   （限流、过载、超时）或返回空响应而重试时，重试请求不再包含 `SKILL.md` 正文，而该技能的工具限制仍然生效。现在重试
   会携带与首次尝试相同的激活内容，不会重新读取技能或重复记录激活，重试得到的响应也保留技能使用记录。([#6506])
+- **技能：** 通过一个 Gateway 副本做出的技能变更，现在会进入其他所有副本系统提示词中的技能列表。`SkillStorage` 每次
+  调用都会重新扫描磁盘，但提示词层按进程缓存已启用技能列表和渲染好的 `<skill_system>` 段落，而安装、编辑、删除、
+  回滚或启停技能（以及 `POST /api/skills/reload`）只刷新处理该请求的进程，因此在多个 uvicorn worker 或多个共享同一
+  home 卷的 Pod 下，其他副本会一直提供旧技能列表，直到各自重启。现在上述每一种变更还会在共享的
+  `extensions_config.json` 旁发布 `.extensions_config.json.skills-cache-reset.json`，使用与配置文件相同的原子替换和
+  跨进程锁；每次返回缓存条目前至多每秒一次地比对该标记的签名；只针对某个用户自定义技能的标记只会让该用户的
+  条目失效。`/api/skills/reload` 在标记写入成功时报告 `scope: shared_config`，在无法解析 extensions 配置路径时报告
+  `scope: process`，运维者不再需要在每个 Pod 或 worker 上单独调用。MCP 缓存重置的标记现在与它共用同一个
+  `deerflow.config.shared_reset_marker` 辅助函数。([#6495])
+
 - **持久化：** `scripts/migrate_user_isolation.py` 现在会把每个 legacy 线程移动到其所属用户下。此前脚本在
   `{base_dir}/deer-flow.db` 中查找线程归属，而 DeerFlow 从不创建这个文件（数据库是 `{sqlite_dir}/deerflow.db`
   或 PostgreSQL），因此归属映射始终为空，所有 legacy 线程都被移到 `users/default/`。现在归属从 `config.yaml`
@@ -2090,6 +2055,21 @@
   与退出码，现在会按返回结果的方式格式化。stderr 中恰好包含 "sandbox not found" 的失败命令
   也不再把沙箱标记为已回收。e2b 的 `list_dir` 也会处理同一异常：目录不存在时抛出
   `FileNotFoundError`，超过 500 条被截断（SIGPIPE 141）的列表会正常返回，不再以 `OSError` 失败。([#6441])
+- **上传：** Gateway 启动时对孤立的 `.upload-*.part` 暂存文件的清扫现在会跳过 24 小时内的新文件。此前清扫会删除找到的
+  每一个暂存文件，这对单个 Gateway 没问题，但对共享同一 home 卷的多个副本不成立：滚动更新期间启动的副本会删掉另一个
+  副本仍在写入的上传的暂存文件，该上传随后在原子提交时失败。分块写入会刷新暂存文件的 mtime，因此进行中的上传始终
+  比该阈值年轻；崩溃残留则由 24 小时之后的第一次启动回收，与项目文档暂存已在使用的防护一致。已经与已发布上传共享
+  inode 的暂存文件（原子链接与删除暂存名之间发生崩溃所致）在下次启动时仍会被无条件回收，以免该目标文件在下次替换时
+  无法通过多链接安全检查。([#6445])
+
+- **网关：** Redis 流桥接不可达时，`GET /health/ready` 现在会报告未就绪。桥接的 Redis 客户端是惰性连接的，此前没有任何
+  逻辑去 ping 它，因此 Redis 宕机的 Gateway 照常启动，对 Kubernetes 就绪探针和 Compose healthcheck 都回答 `200 ready`，
+  并继续接收流量，而每次运行的首个发布都在失败；在多实例门槛已把 Redis 桥接设为必需之后，这样的副本完全无法对外
+  提供服务。`StreamBridge` 新增 `ping()`；响应体新增 `stream_bridge` 判定（内存桥接为 `not_configured`），不可达时端点
+  翻转为 503；另新增仅报告、不影响状态码的 `provisioner` 判定，来自沙箱 provisioner 自己的 `/health`（设置了
+  `sandbox.provisioner_url` 时），由于所有副本共享同一个 provisioner，它永远不会改变状态码。现在只有超出端点时限的
+  探测才会被标记为不可达，公开探测的门闩改为每种探测一把锁。([#6447])
+
 - **前端：** 附件上传失败后重试发送时，现在会保留原先附带的上下文。输入框此前在发送开始时（附件上传之前）就清除了
   引用、对话引用、已暂存的项目文件和已保存的草稿，因此上传失败后文字和文件虽仍在，重试发送却缺少这些上下文。
   现在这些一次性状态只在发送真正派发（上传完成）后才清除；若上传完成时用户已切换对话或离开页面，只清除该次发送
@@ -2115,6 +2095,12 @@
   因此在创建侧边对话或上传附件失败时，已输入的文字和附件都会丢失；发往新侧边对话的第一条消息也会在排队时（实际发送前）
   就被清空。现在提交处理会在提示后抛出错误，排队的首条发送也以其自身结果完成提交，因此草稿会保留以便重试，只有消息
   实际发出后才会清空。([#6407])
+- **沙箱：** AIO 沙箱在凭据放置与容器复用上不再信任未经验证的状态。provisioner 能力探测失败不再被解读为“broker 关闭”
+  （此前会在负缓存 TTL 期间把明文 lark 凭据目录 bind-mount 进无 broker 的 Pod）；broker 模式按 Pod 依据 provisioner 的
+  原子观测加以证实；lark 供应配置冲突会携带能力刷新标记，使部署变更在下一次 acquire 时自愈；隐式 shell 结局不明确的
+  容器由持久化的隔离区（`{DEER_FLOW_HOME}/sandbox-quarantine`）在热复用、重新发现与重启之间设防，按既有的所有权与
+  拆除围栏回收，其记录只有在确认容器确实不存在之后才退役。([#6436])
+
 - **前端：** 刷新页面后的首次重连失败时，现在会在同一标签页中重试。SDK 只根据标签页的
   `lg:stream` 指针重连一次，出错时保留该指针；而活动运行恢复会跳过指针匹配的运行，
   因此实时流在再次刷新前一直无法恢复。现在该重连失败时（包括流中途断开），恢复逻辑会释放指针；
@@ -2140,6 +2126,14 @@
   因此会压缩响应的代理（例如不经 nginx、直接 `pnpm start` 时的 Next.js 改写代理）
   不再先缓冲整段流、再成批送出。`X-Accel-Buffering: no` 与 `Content-Location`
   保持不变，使用 nginx 的部署不受影响。([#6393])
+- **配置：** 共享同一份 `extensions_config.json` 的每个 Gateway 进程，现在都能看到其他进程做出的 MCP 与技能变更。此前
+  解析结果按进程只缓存一次，只有处理写入的进程会重新加载，因此在多个 uvicorn worker、或共享卷上的多个 Pod 之下，
+  其他进程一直沿用启动时的副本：智能体可用的 MCP 服务器，以及更重要的、由文件系统 MCP 服务器推导出的 local-bash
+  绝对路径 allowlist，在各副本之间并不一致，直到每个进程重启。`get_extensions_config()` 现在每次读取都会按文件的路径
+  与内容签名重新校验缓存实例，与 `get_app_config()` 对 `config.yaml` 的做法一致，缓存 `AppConfig` 的 `extensions` 快照
+  也随之更新。截断或无效的修订（例如 bind-mounted 文件上非原子覆盖回退进行到一半时）会保留上一个配置并只记录一次
+  日志；启动时遇到损坏的文件仍然会明确报错失败。([#6386])
+
 - **中间件：** 工具输出预算不再让子智能体证据丢失失败的 shell 退出码。长度介于
   `externalize_min_chars`（12,000）与沙箱上限（20,000）之间的 bash 结果会被替换为
   以 `Access:` 页脚结尾的预览，结尾的 `Exit Code: N` 不再位于最后，
@@ -2159,6 +2153,17 @@
   而下一条提示已在同一线程上运行；最后写入检查点的运行会成为会话历史，新的一轮可能因此悄然消失。
   现在在被中断的工作线程返回之前，在该会话中发送提示会显示提示信息而不会启动第二个运行；
   其他会话仍可通过 `/new` 和 `/resume` 使用。([#6350])
+- **Helm：** 默认的 Helm 安装现在又能创建沙箱了。chart 启用沙箱 provisioner 并把 `config.sandbox.provisioner_url` 指向
+  它，但没有任何环节渲染 `PROVISIONER_API_KEY`：provisioner Deployment 没有该环境变量，`<release>-app` Secret 没有该
+  键，内嵌配置也没有 `provisioner_api_key`。自 provisioner 开始强制要求该密钥（#4116）以来，只要密钥为空或不匹配，其
+  `verify_api_key` 中间件就会对每个 `/api/*` 请求回答 401，因此每一次沙箱创建都会失败。现在 app Secret 会生成一次该
+  密钥，并像其他 app 密钥一样在升级时保留；gateway 与 provisioner Pod 都从这一个 Secret 读取（`provisioner.enabled` 为
+  true 时，用户自管的 `existingAppSecret` 必须携带该键）；默认 `config` 设置 `sandbox.provisioner_api_key:
+  $PROVISIONER_API_KEY`，chart README 的配置示例现在也保留了这一行。`provisioner.enabled: false` 时，gateway 使用运维者
+  通过 `secrets` 或 `existingSecret` 提供的密钥（外部 provisioner）；否则其启动命令把该变量默认为空字符串，因此即使用户
+  自管的 provider Secret 只包含模型密钥，默认 `config` 也能加载，gateway 照常启动。docker-compose 不受影响：它从 `.env`
+  读取该密钥。([#6365])
+
 - **沙箱：** 启用 host bash 时，本地沙箱不再把线程固定在上一个受限 Agent 的技能视图上。
   该视图只在 host bash 关闭时维护，但 `LocalSandboxProvider` 只要它存在就会挂载，导致该线程之后
   不受限的运行仍沿用旧的 allowlist，读不到 `/mnt/skills` 下其他已启用或新增的技能。现在这些运行
@@ -2195,6 +2200,30 @@
   验收条件。现在警告插在结尾的 `Exit Code: N` 或 `Command exited with code N`
   之前，整段只有 `Command exited with code N` 的输出保持原样，结果保留
   `deerflow_tool_meta`、`artifact` 与 `id`。([#6307])
+- **部署：** Helm chart 与 docker-compose 不再自带多副本陷阱。chart 的默认 `config` 启用 `run_ownership.heartbeat_enabled`
+  和 `run_events.backend: db`（这样启动中的 Pod 只会认领属主确实已消失的运行，消息历史跨 Pod 共享）；按 `gateway.replicas`
+  或显式的 `gateway.multiInstance` 为 Gateway 的启动门槛导出 `DEER_FLOW_MULTI_INSTANCE`（用 `kubectl scale` 或 HPA 扩容前
+  先设置它，chart 看不到这类扩容）；生成并注入共享的 `AUTH_JWT_SECRET`（此前每个 Pod 各自的 `.jwt_secret` 文件会让用户
+  在副本之间被登出；gateway 为多实例时该密钥为必需，避免并发启动的 Pod 竞相写入不同的密钥）；声明先扩后缩的滚动
+  策略；为多实例 gateway 渲染 `PodDisruptionBudget`；并在 90 秒终止宽限期内约束 uvicorn 的优雅关闭
+  （`gateway.uvicornGracefulShutdownSeconds`，10 秒；`0` 会被遵守），空闲 SSE 流不会再把记忆落盘拖进 SIGKILL。
+  `existingAppSecret` 现在被所有消费者遵守（gateway 和 frontend 此前一直引用并未渲染的生成版 `<release>-app` Secret，
+  导致 Pod 根本无法启动）。两个 compose 文件也绑定同样的 uvicorn 超时并设置 `stop_grace_period: 90s`（Docker 默认的
+  10 秒会打断 30 秒的记忆落盘；把每个有界拆除钩子都算上，lifespan 的最坏情况约 61 秒，测试会直接从 Gateway 读取这些
+  界限）。chart README 与 compose 注释不再引用早已关闭的 issue #3948 作为保持单副本的理由，改为列出真正仍需单实例的
+  部分（IM 渠道、微信扫码登录、浏览器工具）。升级早于 `AUTH_JWT_SECRET` 的发布版本会生成新密钥，并把所有浏览器会话
+  登出一次；chart README 说明了如何先把旧密钥写入 Secret 以保留会话。([#6347])
+
+- **部署：** Helm chart 不再把沙箱 provisioner 钉在单个 Pod 上。`provisioner.replicas`（默认 1，不变）设置副本数，
+  provisioner Deployment 采用与 gateway 相同的先扩后缩滚动策略（`maxSurge: 1`、`maxUnavailable: 0`），并在
+  `provisioner.replicas > 1` 时渲染 `PodDisruptionBudget`（`provisioner.podDisruptionBudget`，`minAvailable: 1`），因此
+  多副本 gateway 部署不会再因为唯一的 provisioner Pod 重启或节点被抽干而丢失沙箱创建能力。provisioner 本身无需改动：
+  带标签的沙箱 Pod 和 Service 就是它唯一的注册表，每个处理器都从 API server 回读，create 也已能容忍并发创建者产生的
+  `409 AlreadyExists`。chart README 与 provisioner README 记录了副本数所依赖的前提，以及单副本时永远不会渲染该预算的
+  事实。两个预算的 `minAvailable` 都经由同一个辅助函数渲染：它会保留 `"50%"` 这类百分比（此前直接做 `int` 强转——既有
+  的 gateway 预算同样如此——会悄悄把它变成 `0`，一个什么都保护不了的预算），并对 `0`、`"0%"` 及其他不支持的值让渲染
+  失败，报错信息中会指出对应的 values 键。([#6543])
+
 - **持久化：** 另一个实例正在执行 PostgreSQL 模式迁移时，第二个 Gateway 实例不再
   因 `TimeoutError` 启动失败。引导期 advisory lock 此前在应用引擎上以阻塞的
   `pg_advisory_lock` 获取，而该引擎的 asyncpg `database.command_timeout`（默认
@@ -2467,23 +2496,6 @@
   `custom/` 下的一级链接，但 `delete_custom_skill` 用 `shutil.rmtree` 删除包目录，而它拒绝
   符号链接：删除在写入历史记录之后以 `OSError` 失败，退出时清空了用户的技能投影视图，
   `DELETE /api/skills/custom/{name}` 返回 500。现在只移除链接本身，绝不触碰其指向的外部目录。([#5881])
-- **开发：** 当同级 worktree 的路径包含空格时，`make stop` / `make dev` 现在也能回收它占用的
-  开发端口。`serve.sh` 用 `awk '{print $2}'` 解析 `git worktree list --porcelain` 来构建
-  worktree 根目录列表，而该输出中的路径不加引号，因此 `.../deer flow two` 被记录成了
-  `.../deer`；从那个 worktree 启动的 Gateway 或前端永远不会被识别为 deer-flow 的进程，
-  启动会以“端口已被占用”中止。现在会保留整条路径。([#5856])
-- **上传：** 运行消息元数据中格式错误的 `files[*].size` 不再导致整个运行失败。
-  `UploadsMiddleware` 对客户端提供的文件条目的其他字段都做了容错校验，唯独把 `size` 直接交给
-  `int()`，因此 `"abc"` 或列表这样的值会在调用模型之前从 `before_agent` 抛出——而且由于该条目
-  会被原样带入，之后每次编辑或重新生成这条消息都会再次失败。该字段只用于 `<current_uploads>`
-  里的可读大小；现在无法使用的值会回退为 `0`，与缺失时一致，数字字符串仍然有效。([#5855])
-- **发布：** 版本升级不再把 `backend/uv.lock` 落下。`scripts/bump_version.sh` 会改写
-  `backend/pyproject.toml`、`frontend/package.json` 与 Helm chart，但 lockfile 同样记录了
-  根包自身的版本（uv 保留其 PEP 440 形式，因此 `2.1.0-rc0` 存为 `2.1.0rc0`），于是文档给出的
-  发布步骤产出的提交会被 lock 相关 CI 拦下：`uv lock --check` 判其过期，`uv sync --locked`
-  也会拒绝该工作区；装了 pre-commit 时还会更早在 `uv-lock-check` 钩子上失败。现在该脚本会用
-  `uv lock` 刷新 lockfile，并在缺少 `uv` 时于修改任何文件之前退出，而不是留下一个只改一半的
-  工作区。实际改动仅涉及根包的那一行版本号。([#5859])
 - **前端：** 子任务渲染状态不再在 `MessageList` 渲染过程中被就地修
   改。子任务同步从渲染阶段移入 effect，因此即使任务上下文尚未发布
   更新，卡片也能立即拿到纯派生自消息的快照——修复了最终流式参数与
@@ -3355,6 +3367,23 @@
   器现在通过共享的 `file_signature.read_config_with_signature()`
   helper 只读取一次，并对返回的字节精确签名；竞态编辑最多
   只多付出一次重载。([#5848])
+- **开发：** 当同级 worktree 的路径包含空格时，`make stop` / `make dev` 现在也能回收它占用的
+  开发端口。`serve.sh` 用 `awk '{print $2}'` 解析 `git worktree list --porcelain` 来构建
+  worktree 根目录列表，而该输出中的路径不加引号，因此 `.../deer flow two` 被记录成了
+  `.../deer`；从那个 worktree 启动的 Gateway 或前端永远不会被识别为 deer-flow 的进程，
+  启动会以“端口已被占用”中止。现在会保留整条路径。([#5856])
+- **上传：** 运行消息元数据中格式错误的 `files[*].size` 不再导致整个运行失败。
+  `UploadsMiddleware` 对客户端提供的文件条目的其他字段都做了容错校验，唯独把 `size` 直接交给
+  `int()`，因此 `"abc"` 或列表这样的值会在调用模型之前从 `before_agent` 抛出——而且由于该条目
+  会被原样带入，之后每次编辑或重新生成这条消息都会再次失败。该字段只用于 `<current_uploads>`
+  里的可读大小；现在无法使用的值会回退为 `0`，与缺失时一致，数字字符串仍然有效。([#5855])
+- **发布：** 版本升级不再把 `backend/uv.lock` 落下。`scripts/bump_version.sh` 会改写
+  `backend/pyproject.toml`、`frontend/package.json` 与 Helm chart，但 lockfile 同样记录了
+  根包自身的版本（uv 保留其 PEP 440 形式，因此 `2.1.0-rc0` 存为 `2.1.0rc0`），于是文档给出的
+  发布步骤产出的提交会被 lock 相关 CI 拦下：`uv lock --check` 判其过期，`uv sync --locked`
+  也会拒绝该工作区；装了 pre-commit 时还会更早在 `uv-lock-check` 钩子上失败。现在该脚本会用
+  `uv lock` 刷新 lockfile，并在缺少 `uv` 时于修改任何文件之前退出，而不是留下一个只改一半的
+  工作区。实际改动仅涉及根包的那一行版本号。([#5859])
 - **沙箱：** `glob` 与 `grep` 不再在搜索根目录（或其任一祖先目录）命中忽略模式（如 `build`、
   `dist`、`logs`、`node_modules`、`coverage`、`target`）时返回空结果。此前各远端沙箱把
   `should_ignore_path` 用在**绝对路径**上，而该函数会检查路径的每一段，于是树上任意位置的忽略名
@@ -4606,6 +4635,20 @@
   因为它会把相对路径的 `cd` 移出工作区。`$PWD/...` 仍然允许，因为它与对应的相对路径
   指向同一文件，除非命令自己重新绑定了 `PWD`。URL 中的变量不受影响。该守卫仍是尽力
   而为的检查，并非隔离边界。([#6930])
+- **沙箱：** 启用 host bash 时，本地路径守卫重新接受 awk 字段运算，例如
+  `awk '{print $NF/2}' data.txt`、`awk '{print $sum/$n}' data.txt` 和 `($2+$3)/2`。
+  自 [#6930] 起，除非两侧都是数字，每个 `$NAME/` 都会被当作以变量为前缀的主机路径，
+  而 `)` 后的 `/` 此前一直被视为绝对路径。现在 `awk`、`gawk`、`mawk` 或 `nawk`
+  的单引号内联程序中的 `$` 或 `/` 可以豁免，因为 bash 不会展开其中的内容，awk 则将其
+  解释为字段引用或除法；程序可位于 `-F`、`-v` 等选项之后，命令词按 shell 的方式定位：
+  跳过赋值前缀、将路径简化为文件名，也覆盖 `$(...)` 内部。对绝对路径扫描，仅豁免
+  `/2` 或 `/NR` 这类单段匹配，`/a/b` 形式即使在 awk 代码中也仍被拒绝。awk 字符串
+  字面量、`-v` 等选项、输入操作数、双引号程序以及由 `sh -c` 或 `eval` 重新读取的文本
+  仍会被扫描。可能重新定义 `awk` 或重新读取带引号文本的命令（`alias`、`function`、
+  `name()`、`eval`、`source`、`.`、`hash`、`PATH=`、heredoc）、扫描器未建模的语法
+  （反斜杠换行、反引号、`$'...'`、未配对的 `)`），以及 `"` 可能位于 awk 正则字面量
+  中的程序都不享受豁免；awk 字符串字面量中的 `/` 和 `#` 按普通文本处理。
+  (issue #7021)
 - **沙箱：** 在本地沙箱中，`ls` 现在接受 `/mnt/user-data` 根目录本身，并像 AIO 一样
   列出 `workspace`、`uploads` 和 `outputs`。提供方有意映射了这个根目录，但工具层只允许
   其下的路径，因此返回 `Permission denied`（带结尾斜杠时来自内部的
@@ -4637,20 +4680,6 @@
   256 个字符，每个可搜索的名称或描述限定 65,536 个字符。预算耗尽时返回重试提示且
   不做部分晋升，无效模式仍回退到字面匹配，`select:` 保持精确、区分大小写且不设上限。
   ([#6676])
-
-- **社区工具：** 委托式 `web_fetch`/`web_capture` 后端默认失败关闭。
-  Browserless、Crawl4AI、Firecrawl 与 fastCRW 在后端自己的网络命名空间中解析
-  目标 URL，针对目标 URL 的 SSRF 屏障无法端到端生效。现在每个入口在委托之前
-  先筛查其解析出的后端 base URL（配置键、环境变量回退与默认值）：公网后端
-  照常工作；回环、私有或无法验证的后端会被拒绝，除非运维确认其出网隔离。
-  **升级提示：** 使用文档默认配置的部署（Browserless 位于
-  `http://localhost:3032`、Crawl4AI 位于 `http://localhost:11235`，或经
-  `base_url`/`CRW_API_URL` 自建的 Firecrawl/fastCRW）会在
-  `web_fetch`/`web_capture` 上遇到委托错误，直到把后端指向其公网地址，或在
-  隔离后端出网之后在每个工具配置中设置 `network_isolation_confirmed: true`。
-  `make doctor` 会对被拒绝的后端配置发出警告，包括 `CRW_API_URL` 覆盖。
-  `allow_private_addresses` 仍然只控制目标 URL。参见[部署指引](backend/docs/CONFIGURATION.md#delegated-fetch-backend-isolation)。
-  ([#6531])
 
 - **路径：** 上传、新建沙箱路径与新建技能支持文件路径现在拒绝扩展名前用 ASCII 空格
   填充的 Windows 保留设备名主干（`NUL .txt`、`COM1  .log`）。此前共享的文件名可
@@ -4888,6 +4917,20 @@
   安装器的可执行代码策略（warn 即拒绝安装）也适用于包内任意位置的这类
   文件。此前带一个杂散字节的 `hooks/install.jse` 既得不到静态分析，也
   不经过可执行代码审查。([#6321])
+
+- **社区工具：** 委托式 `web_fetch`/`web_capture` 后端默认失败关闭。
+  Browserless、Crawl4AI、Firecrawl 与 fastCRW 在后端自己的网络命名空间中解析
+  目标 URL，针对目标 URL 的 SSRF 屏障无法端到端生效。现在每个入口在委托之前
+  先筛查其解析出的后端 base URL（配置键、环境变量回退与默认值）：公网后端
+  照常工作；回环、私有或无法验证的后端会被拒绝，除非运维确认其出网隔离。
+  **升级提示：** 使用文档默认配置的部署（Browserless 位于
+  `http://localhost:3032`、Crawl4AI 位于 `http://localhost:11235`，或经
+  `base_url`/`CRW_API_URL` 自建的 Firecrawl/fastCRW）会在
+  `web_fetch`/`web_capture` 上遇到委托错误，直到把后端指向其公网地址，或在
+  隔离后端出网之后在每个工具配置中设置 `network_isolation_confirmed: true`。
+  `make doctor` 会对被拒绝的后端配置发出警告，包括 `CRW_API_URL` 覆盖。
+  `allow_private_addresses` 仍然只控制目标 URL。参见[部署指引](backend/docs/CONFIGURATION.md#delegated-fetch-backend-isolation)。
+  ([#6531])
 
 - **脚本：** 本地 `make dev` / `make start` 改为绑定回环地址。此前 `serve.sh`
   和 `backend/Makefile` 以 `--host 0.0.0.0` 启动 Gateway，`nginx.local.conf`
@@ -9463,6 +9506,8 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6746]: https://github.com/bytedance/deer-flow/pull/6746
 [#6781]: https://github.com/bytedance/deer-flow/pull/6781
 [#6785]: https://github.com/bytedance/deer-flow/pull/6785
+[#6798]: https://github.com/bytedance/deer-flow/pull/6798
+[#6836]: https://github.com/bytedance/deer-flow/pull/6836
 [#6843]: https://github.com/bytedance/deer-flow/pull/6843
 [#6844]: https://github.com/bytedance/deer-flow/pull/6844
 [#6852]: https://github.com/bytedance/deer-flow/pull/6852
