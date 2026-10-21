@@ -156,6 +156,20 @@ async def _stream_upload(file: UploadFile) -> AsyncIterator[bytes]:
         yield chunk
 
 
+async def _discard_staged_copy(staging_path: Path) -> None:
+    """Remove a staged shelf copy that is no longer needed.
+
+    Best-effort, mirroring ``routers/uploads.py::_remove_staged_file``: the caller
+    is about to return or raise its real outcome, and a removal failure (a Windows
+    handle still held elsewhere, a read-only mount) must neither replace that
+    outcome nor skip later teardown. The leftover is what the staging sweep owns.
+    """
+    try:
+        await run_file_io(staging_path.unlink, True)
+    except OSError:
+        logger.warning("Failed to remove staged shelf copy: %s", staging_path, exc_info=True)
+
+
 @router.get("", response_model=ProjectDocumentListResponse)
 @require_permission("projects", "read")
 async def list_project_documents(
@@ -216,7 +230,7 @@ async def upload_project_document(
         # Unsafe project_id charset — fail closed, indistinguishable from missing.
         raise _not_found()
     if staged.size_bytes == 0:
-        await run_file_io(staged.staging_path.unlink, True)
+        await _discard_staged_copy(staged.staging_path)
         raise HTTPException(status_code=400, detail="Empty file")
 
     result = await add_staged_document(
@@ -332,7 +346,7 @@ async def promote_thread_file_to_shelf(
         # Unsafe project_id charset — fail closed, indistinguishable from missing.
         raise _not_found()
     if staged.size_bytes == 0:
-        await run_file_io(staged.staging_path.unlink, True)
+        await _discard_staged_copy(staged.staging_path)
         raise HTTPException(status_code=400, detail="Empty file")
 
     result = await add_staged_document(
@@ -424,7 +438,10 @@ async def attach_project_document_to_thread(
         # uploads: they propagate and the host files stay in place.
         await service.finalize()
     finally:
-        await run_file_io(staged_path.unlink, True)
+        # The staged copy is best-effort, so its removal can never replace the
+        # caller's outcome; ``aclose()`` is this endpoint's only teardown and must
+        # still run when the removal fails.
+        await _discard_staged_copy(staged_path)
         await service.aclose()
     return AttachDocumentResponse(
         filename=file_info["filename"],
