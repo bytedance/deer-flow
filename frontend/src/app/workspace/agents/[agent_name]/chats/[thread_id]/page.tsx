@@ -106,7 +106,7 @@ export default function AgentChatPage() {
   const [isWelcomeMode, setIsWelcomeMode] = useState(isNewThread);
   const [settings, setSettings] = useThreadSettings(threadId);
   const modelControl = useModelControl(
-    `${user?.id ?? "anonymous"}:${threadId}`,
+    `${user?.id ?? "anonymous"}:${agent_name}:${threadId}`,
     locale,
   );
   const prepareModelControl = modelControl.prepare;
@@ -265,9 +265,20 @@ export default function AgentChatPage() {
     threadMetadata.isLoading,
   ]);
 
+  const submissionEpochRef = useRef(0);
+  useEffect(
+    () => () => {
+      submissionEpochRef.current += 1;
+    },
+    [agent_name, threadId, user?.id],
+  );
+
   const handleSubmit = useCallback(
     async (message: PromptInputMessage, options?: InputBoxSubmitOptions) => {
+      const submissionEpoch = submissionEpochRef.current;
       const choice = await prepareModelControl(message.text);
+      if (submissionEpochRef.current !== submissionEpoch)
+        throw new Error("thread-submission-stale");
       const modelInput = modelTaskInput(message.text, choice);
       const runContext: Record<string, unknown> = { agent_name };
       if (
@@ -277,6 +288,8 @@ export default function AgentChatPage() {
         isNewThread
       ) {
         await createThread(threadId);
+        if (submissionEpochRef.current !== submissionEpoch)
+          throw new Error("thread-submission-stale");
       }
       if (choice?.model_name) {
         if (choice.scope === "task") {

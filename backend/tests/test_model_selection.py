@@ -154,8 +154,8 @@ def test_gateway_keeps_model_controls_in_the_current_runtime_only():
     from app.gateway.services import merge_run_context_overrides
 
     config = {"configurable": {"subagent_model_name": "stale", "model_selection_requested": "stale"}}
-    merge_run_context_overrides(config, {"subagent_model_name": "child-B", "model_selection_requested": "parent-A"})
-    assert config["context"] == {"subagent_model_name": "child-B", "model_selection_requested": "parent-A"}
+    merge_run_context_overrides(config, {"model_name": "parent-A", "subagent_model_name": "child-B", "model_selection_requested": "parent-A"})
+    assert config["context"] == {"model_name": "parent-A", "subagent_model_name": "child-B", "model_selection_requested": "parent-A"}
     assert "subagent_model_name" not in config["configurable"]
     assert "model_selection_requested" not in config["configurable"]
 

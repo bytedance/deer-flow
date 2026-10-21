@@ -1071,8 +1071,10 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
     if explicit_selection is not None:
         from deerflow.models.selection import authorize_selected_model
 
-        if not isinstance(explicit_selection, str) or explicit_selection != model_name:
-            raise ValueError("The explicitly selected model is no longer available.")
+        if not isinstance(explicit_selection, str) or explicit_selection != requested_model_name:
+            raise ValueError("An explicit model selection must carry the same model_name.")
+        if explicit_selection != model_name:
+            raise ValueError("The explicitly selected model is not configured.")
         authorize_selected_model(model_name, context=cfg, app_config=resolved_app_config)
     else:
         model_name = _authorize_model_name(model_name, context=cfg, app_config=resolved_app_config)
