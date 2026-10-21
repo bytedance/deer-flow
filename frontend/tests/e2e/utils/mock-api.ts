@@ -2358,6 +2358,24 @@ export function mockLangGraphAPI(
     return route.fallback();
   });
 
+  // General UI specs do not choose a model. Model-control specs can override
+  // this preview just as they override the empty model list above.
+  void page.route("**/api/models/resolve", (route) => {
+    if (route.request().method() === "POST") {
+      return route.fulfill({
+        json: {
+          status: "none",
+          scope: null,
+          query: "",
+          model_name: null,
+          candidates: [],
+          task_offset: 0,
+        },
+      });
+    }
+    return route.fallback();
+  });
+
   // Feature flags — frontend gates UI (e.g. agents/browser) on these. Default to
   // enabled so existing tests exercise the normal path; tests that need the
   // disabled state override this route after calling mockLangGraphAPI.
