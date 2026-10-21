@@ -11,6 +11,7 @@ on:
     types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - '.github/workflows/backend-windows-live-policy.yml'
+      - 'backend/packages/harness/deerflow/workspace_changes/**'
       - 'backend/tests/test_client_live_policy.py'
       - 'backend/tests/test_client_live.py'
       - 'backend/tests/test_scanner_text_cache_atomic.py'
