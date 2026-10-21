@@ -133,6 +133,14 @@ imagePullSecrets:
 {{- printf "%s-postgres" (include "deer-flow.fullname" .) -}}
 {{- end -}}
 
+{{/* Name of the operator-managed postgres Secret, or empty when the chart owns
+     the credentials. This is the only place the precedence chain is encoded:
+     databaseUrlSecret derives from it, so a source added here cannot make the
+     gateway and the postgres StatefulSet read different Secrets. */}}
+{{- define "deer-flow.databaseUserSecret" -}}
+{{- or .Values.postgresql.external.existingSecret .Values.postgresql.existingSecret -}}
+{{- end -}}
+
 {{/* Name of the Secret holding DATABASE_URL (and, in bundled mode, the
      postgres superuser password). Resolution order:
        1. postgresql.external.existingSecret (user-managed, key=database-url)
@@ -140,9 +148,7 @@ imagePullSecrets:
        3. chart-managed secret `<release>-postgres`
      Only #3 is created by this chart; #1/#2 must exist already. */}}
 {{- define "deer-flow.databaseUrlSecret" -}}
-{{- if .Values.postgresql.external.existingSecret -}}{{- .Values.postgresql.external.existingSecret -}}
-{{- else if .Values.postgresql.existingSecret -}}{{- .Values.postgresql.existingSecret -}}
-{{- else -}}{{- include "deer-flow.postgresFullname" . -}}{{- end -}}
+{{- include "deer-flow.databaseUserSecret" . | default (include "deer-flow.postgresFullname" .) -}}
 {{- end -}}
 
 {{/* Name of the redis StatefulSet/Service. */}}
