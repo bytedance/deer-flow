@@ -993,6 +993,8 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
         # ``build_run_config`` copies ``body.config['configurable']`` verbatim,
         # and ``configurable`` is persisted in checkpoints.
         existing_configurable.pop("client", None)
+        existing_configurable.pop("subagent_model_name", None)
+        existing_configurable.pop("model_selection_requested", None)
     existing_runtime_context = config.get("context")
     if isinstance(existing_runtime_context, dict) and "client" in existing_runtime_context:
         existing_client_context = _sanitize_request_client_context(existing_runtime_context.get("client"))
@@ -1013,6 +1015,16 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
                 configurable.setdefault(key, context[key])
             if isinstance(runtime_context, dict):
                 runtime_context.setdefault(key, context[key])
+    # Explicit choices belong to this run, never to checkpoint defaults. Model
+    # use is authorized against the authenticated identity during assembly and
+    # again at child dispatch; these fields grant no additional permissions.
+    for key in ("subagent_model_name", "model_selection_requested"):
+        if key in context:
+            value = context[key]
+            if not isinstance(value, str) or not value.strip() or len(value) > 200:
+                raise HTTPException(status_code=400, detail="A configured model name is required.")
+            if isinstance(runtime_context, dict):
+                runtime_context[key] = value
     # Context-only keys (secrets / runtime flags) land in ``config['context']``
     # only — never ``configurable`` (which is persisted in checkpoints) — and only
     # for internal callers, the sole legitimate producers.

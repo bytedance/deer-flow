@@ -15,6 +15,7 @@ from app.gateway.internal_auth import get_trusted_internal_owner_user_id
 from deerflow.config.app_config import AppConfig
 from deerflow.config.model_config import ModelConfig
 from deerflow.models.reasoning import reasoning_capabilities_payload, resolve_reasoning_contract
+from deerflow.models.selection import ModelScope, resolve_model_control
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +91,28 @@ class ModelsListResponse(BaseModel):
 
     models: list[ModelResponse]
     token_usage: TokenUsageResponse
+
+
+class ModelControlRequest(BaseModel):
+    text: str = Field(max_length=4000)
+    model_name: str | None = Field(default=None, max_length=200)
+    scope: ModelScope | None = None
+
+
+@router.post("/models/resolve", summary="Resolve a direct user model selection")
+async def resolve_model_selection(body: ModelControlRequest, request: Request, config: AppConfig = Depends(get_config)) -> dict:
+    """Read-only preview. Never starts a run or changes model defaults."""
+    import asyncio
+
+    listing = await list_models(request, config)
+    visible_names = {model.name for model in listing.models}
+    result = resolve_model_control(body.text, [model for model in config.models if model.name in visible_names], model_name=body.model_name, scope=body.scope)
+    if result["status"] == "resolved":
+        user = await get_optional_user_from_request(request)
+        if user is not None:
+            owner = await _resolve_bound_owner_for_model_list(request)
+            await asyncio.to_thread(authorize_model_use, owner or user, result["model_name"], is_internal=_is_internal_caller(request, user), app_config=config)
+    return result
 
 
 @router.get(
