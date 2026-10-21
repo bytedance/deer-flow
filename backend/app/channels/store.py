@@ -135,7 +135,7 @@ class JsonChannelStore:
 
     def _save(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        fd = tempfile.NamedTemporaryFile(mode="w", dir=self._path.parent, suffix=".tmp", delete=False)
+        fd = tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", newline="", dir=self._path.parent, suffix=".tmp", delete=False)
         try:
             json.dump(self._data, fd, indent=2)
             fd.close()
