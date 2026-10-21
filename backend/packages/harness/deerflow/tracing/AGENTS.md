@@ -7,12 +7,15 @@ and resumed work restores a trusted historical reference. Never persist the
 decrypted `RunTracingSnapshot` in runtime config or checkpoint metadata.
 `scoped.py` binds the snapshot and owns reference-counted private exporters;
 `otel_callback.py` emits OpenInference spans and `otlp_exporter.py` sends explicit
-OTLP requests without ambient credentials. Startup installs one global sampling
-guard before Monocle. Missing guards or incompatible frozen Monocle settings
+OTLP requests without ambient credentials. Managed public endpoints require TLS;
+plaintext is limited to loopback/private IP collectors. Startup installs one global sampling
+guard only when Monocle is enabled. Missing guards or incompatible frozen Monocle settings
 fail closed. Keep implicit LangSmith suppression separate from explicit private
 handler enablement and disable environment replica routing. API, permission,
 lifecycle and real-delivery boundaries are documented in
 [`backend/docs/AGENT_TRACING.md`](../../../../docs/AGENT_TRACING.md).
+Runtime, subagent and compaction scopes offload fingerprint/exporter setup and
+draining; ContextVar activation and restoration stay on the calling task.
 
 LangSmith and Langfuse are both supported. The wiring lives in two layers:
 

@@ -72,6 +72,19 @@ def test_profile_validation_and_unknown_field_failures_never_echo_secrets(api):
     assert response.status_code == 422 and "http-secret" not in response.text
 
 
+@pytest.mark.parametrize("transport", ["http", "grpc"])
+def test_public_plaintext_profile_is_rejected_without_persisting_or_echoing_credentials(api, transport):
+    client, _, owner, service = api
+    draft = _draft(owner)
+    draft["providers"][0].update(endpoint="http://collector.example/v1/traces", transport=transport)
+    response = client.post("/api/tracing/profiles", json=draft)
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "invalid_tracing_configuration"
+    assert "HTTPS" in response.json()["detail"]["message"]
+    assert "http-secret" not in response.text
+    assert service.repository.list_profiles() == []
+
+
 def test_nonadmin_cannot_manage_profiles_and_cannot_read_another_owners_binding(api):
     client, auth, owner, _ = api
     profile = client.post("/api/tracing/profiles", json=_draft(owner)).json()

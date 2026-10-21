@@ -28,11 +28,12 @@ def setup_monocle_tracing_if_enabled() -> bool:
     ``monocle_apptrace.setup_monocle_telemetry()`` is idempotent, so this stays a thin,
     config-gated wrapper. Returns ``True`` when enabled.
     """
+    if not is_monocle_tracing_enabled():
+        return False
+
     from deerflow.tracing.scoped import install_global_tracing_guard
 
     install_global_tracing_guard()
-    if not is_monocle_tracing_enabled():
-        return False
 
     monocle = get_tracing_config().monocle
     # Fail fast on an unknown MONOCLE_EXPORTERS value or a missing OKAHU_API_KEY,

@@ -393,7 +393,3 @@ unknown or cancelled write outcomes cannot yield a receipt or be replayed. Only
 proven-not-committed batches may be retried. Normal close stops new evidence
 producers and drains already admitted cross-thread callbacks inside its operation
 lock before flushing and detaching; do not reacquire that lock through `flush()`.
-
-Tracing: preserve trusted snapshot refs and restore scopes across resume,
-delegation and compaction. See `tracing_snapshot.py` and `../tracing/AGENTS.md`;
-never persist credentials in runtime config.

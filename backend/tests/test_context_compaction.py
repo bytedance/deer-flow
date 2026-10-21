@@ -52,6 +52,21 @@ class _FakeAccessor:
         }
 
 
+@pytest.fixture
+def isolated_langsmith_env_cache():
+    from langsmith.utils import get_env_var
+
+    from deerflow.config.tracing_config import reset_tracing_config
+
+    get_env_var.cache_clear()
+    reset_tracing_config()
+    try:
+        yield
+    finally:
+        get_env_var.cache_clear()
+        reset_tracing_config()
+
+
 def test_manual_compaction_requests_standalone_model_tracing(monkeypatch):
     captured = {}
 
@@ -162,12 +177,12 @@ async def test_compact_thread_context_rejects_unavailable_checkpoint_before_summ
 
 
 @pytest.mark.asyncio
-async def test_compact_thread_context_real_mutation_graph_finishes_without_scheduling(monkeypatch):
+async def test_compact_thread_context_real_mutation_graph_finishes_without_scheduling(monkeypatch, isolated_langsmith_env_cache):
     from langchain_core.callbacks.manager import AsyncCallbackManager
     from langchain_core.tracers.langchain import LangChainTracer
 
     from deerflow.tracing.profiles import RunTracingSnapshot
-    from deerflow.tracing.scoped import get_current_snapshot
+    from deerflow.tracing.scoped import get_current_snapshot, tracing_scope
 
     frozen = RunTracingSnapshot(snapshot_id="disabled-history", owner_user_id="test-user-autouse", agent_name="lead_agent", mode="disabled", revision="1", providers=())
     refs = {"deerflow_tracing_snapshot_id": "disabled-history", "deerflow_tracing_agent_name": "lead_agent", "deerflow_tracing_managed": True}
@@ -190,23 +205,24 @@ async def test_compact_thread_context_real_mutation_graph_finishes_without_sched
             )
         )
     )
-    seed_accessor, seed_config = gateway_services.build_checkpoint_state_mutation_accessor(
-        request,
-        thread_id="thread-real-compaction",
-        as_node="seed",
-    )
-    seed_config["metadata"] = {
-        CHECKPOINT_AGENT_NAME_METADATA_KEY: DEFAULT_AGENT_NAME_METADATA_VALUE,
-        **refs,
-    }
-    await seed_accessor.aupdate(
-        seed_config,
-        {
-            "messages": Overwrite(messages),
-            "summary_text": "OLD SUMMARY",
-        },
-        as_node="seed",
-    )
+    with tracing_scope(frozen):
+        seed_accessor, seed_config = gateway_services.build_checkpoint_state_mutation_accessor(
+            request,
+            thread_id="thread-real-compaction",
+            as_node="seed",
+        )
+        seed_config["metadata"] = {
+            CHECKPOINT_AGENT_NAME_METADATA_KEY: DEFAULT_AGENT_NAME_METADATA_VALUE,
+            **refs,
+        }
+        await seed_accessor.aupdate(
+            seed_config,
+            {
+                "messages": Overwrite(messages),
+                "summary_text": "OLD SUMMARY",
+            },
+            as_node="seed",
+        )
     accessor, config = gateway_services.build_checkpoint_state_mutation_accessor(
         request,
         thread_id="thread-real-compaction",

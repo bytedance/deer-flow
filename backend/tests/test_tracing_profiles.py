@@ -45,6 +45,48 @@ def _save(service, **values):
     return service.save_profile(profile_id="profile-a", name="Operations", providers=(_provider(),), allowed_user_ids=["alice"], expected_revision=0, **values)
 
 
+@pytest.mark.parametrize("transport", ["http", "grpc"])
+@pytest.mark.parametrize("host", ["collector.example", "localhost.example", "8.8.8.8", "[2001:4860:4860::8888]", "169.254.169.254"])
+def test_profiles_reject_plaintext_credentials_to_nonprivate_collectors(control, transport, host):
+    from deerflow.tracing.profiles import TracingInputError
+
+    service, _, _, _ = control
+    provider = _provider().model_copy(update={"endpoint": f"http://{host}/v1/traces", "transport": transport})
+    with pytest.raises(TracingInputError, match="HTTPS") as error:
+        service.save_profile(profile_id="profile-a", name="Operations", providers=(provider,), allowed_user_ids=["alice"], expected_revision=0)
+    assert "private-test-key" not in str(error.value)
+    assert service.repository.list_profiles() == []
+
+
+@pytest.mark.parametrize("transport", ["http", "grpc"])
+@pytest.mark.parametrize("host", ["localhost", "127.0.0.1", "[::1]", "10.1.2.3", "172.16.0.5", "192.168.1.5", "[fd00::1]", "[::ffff:127.0.0.1]"])
+def test_profiles_accept_local_plaintext_collectors_with_redacted_warning(control, caplog, transport, host):
+    import logging
+
+    service, _, _, _ = control
+    provider = _provider().model_copy(update={"endpoint": f"http://{host}/v1/traces", "transport": transport})
+    with caplog.at_level(logging.WARNING, logger="deerflow.tracing.profiles"):
+        saved = service.save_profile(profile_id="profile-a", name="Operations", providers=(provider,), allowed_user_ids=["alice"], expected_revision=0)
+    assert saved["revision"] == 1
+    messages = [record.getMessage() for record in caplog.records if record.name == "deerflow.tracing.profiles"]
+    assert any("plaintext" in message for message in messages)
+    assert all("private-test-key" not in message and provider.endpoint not in message for message in messages)
+
+
+def test_recovered_configured_snapshot_cannot_bypass_public_plaintext_policy(control, monkeypatch):
+    from deerflow.tracing import profiles
+
+    service, _, _, _ = control
+    provider = _provider().model_copy(update={"endpoint": "http://collector.example/v1/traces"})
+    with monkeypatch.context() as old_worker:
+        old_worker.setattr(profiles, "_validate_providers", lambda providers: None)
+        service.save_profile(profile_id="legacy", name="Legacy", providers=(provider,), allowed_user_ids=["alice"], expected_revision=0)
+        service.set_binding("worker", "alice", mode="configured", profile_id="legacy", expected_revision=0)
+        saved = service.resolve_snapshot("worker", "alice")
+    with pytest.raises(profiles.TracingInputError, match="HTTPS"):
+        service.resolve_snapshot("worker", "alice", snapshot_id=saved.snapshot_id)
+
+
 def test_committed_profile_is_visible_to_a_fresh_replica_and_preserves_omitted_secret(control):
     from deerflow.persistence.tracing_profiles.sql import SqlTracingProfileRepository
     from deerflow.tracing.profiles import TracingProfileService
@@ -256,15 +298,54 @@ def test_old_monocle_snapshot_cannot_redirect_after_exporter_environment_changes
     from deerflow.config.tracing_config import reset_tracing_config
     from deerflow.tracing.profiles import TracingUnavailableError
 
+    service, _, _, path = control
+    monkeypatch.setenv("MONOCLE_TRACING", "true")
+    monkeypatch.setenv("MONOCLE_EXPORTERS", "file")
+    monkeypatch.setenv("MONOCLE_TRACE_OUTPUT_PATH", str(path / "before"))
+    reset_tracing_config()
+    snapshot = service.resolve_snapshot("worker", "alice")
+    assert service.resolve_snapshot("worker", "alice", snapshot_id=snapshot.snapshot_id) == snapshot
+    monkeypatch.setenv("AWS_SESSION_TOKEN", "unrelated-model-session-token")
+    assert service.resolve_snapshot("worker", "alice", snapshot_id=snapshot.snapshot_id) == snapshot
+    monkeypatch.setenv("MONOCLE_TRACE_OUTPUT_PATH", str(path / "after"))
+    with pytest.raises(TracingUnavailableError):
+        service.resolve_snapshot("worker", "alice", snapshot_id=snapshot.snapshot_id)
+
+
+def test_legacy_monocle_snapshot_recovers_with_unchanged_legacy_environment(control, monkeypatch):
+    import hashlib
+    import json
+
+    from deerflow.config.tracing_config import get_tracing_config, reset_tracing_config
+    from deerflow.tracing import profiles
+
+    service, _, _, path = control
+    monkeypatch.setenv("MONOCLE_TRACING", "true")
+    monkeypatch.setenv("MONOCLE_EXPORTERS", "file")
+    monkeypatch.setenv("MONOCLE_TRACE_OUTPUT_PATH", str(path / "legacy"))
+    reset_tracing_config()
+    # Reproduce the fingerprint format persisted by pre-v2 workers.
+    prefixes = ("MONOCLE_", "OKAHU_", "AWS_", "AZURE_", "GOOGLE_", "GCP_", "GCLOUD_", "OTEL_")
+    settings = {"config": get_tracing_config().monocle.model_dump(), "environment": {key: value for key, value in os.environ.items() if key.startswith(prefixes)}, "working_directory": os.getcwd()}
+    legacy_fingerprint = hashlib.sha256(json.dumps(settings, sort_keys=True).encode()).hexdigest()
+    with monkeypatch.context() as legacy_worker:
+        legacy_worker.setattr(profiles, "current_monocle_fingerprint", lambda: legacy_fingerprint)
+        old = service.resolve_snapshot("worker", "alice")
+    assert service.resolve_snapshot("worker", "alice", snapshot_id=old.snapshot_id) == old
+    monkeypatch.setenv("MONOCLE_TRACE_OUTPUT_PATH", str(path / "other"))
+    with pytest.raises(profiles.TracingUnavailableError):
+        service.resolve_snapshot("worker", "alice", snapshot_id=old.snapshot_id)
+
+
+def test_new_monocle_snapshots_identify_the_narrowed_fingerprint_format(control, monkeypatch):
+    from deerflow.config.tracing_config import reset_tracing_config
+
     service, _, _, _ = control
     monkeypatch.setenv("MONOCLE_TRACING", "true")
     monkeypatch.setenv("MONOCLE_EXPORTERS", "file")
     reset_tracing_config()
     snapshot = service.resolve_snapshot("worker", "alice")
-    assert service.resolve_snapshot("worker", "alice", snapshot_id=snapshot.snapshot_id) == snapshot
-    monkeypatch.setenv("AWS_ENDPOINT_URL", "https://different-export-destination.example")
-    with pytest.raises(TracingUnavailableError):
-        service.resolve_snapshot("worker", "alice", snapshot_id=snapshot.snapshot_id)
+    assert snapshot.monocle_fingerprint.startswith("monocle-v2:")
 
 
 def test_old_disabled_snapshot_requires_a_working_guard_on_the_restoring_replica(control, monkeypatch):

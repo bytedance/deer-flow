@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import json
 import logging
 import threading
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from typing import TYPE_CHECKING
 
 from opentelemetry.sdk.trace.sampling import Decision, Sampler, SamplingResult
+
+from deerflow.tracing.otlp_exporter import TracingGrpcDependencyError
+from deerflow.utils.file_io import await_drained
 
 if TYPE_CHECKING:
     from deerflow.tracing.profiles import ProviderConfig, RunTracingSnapshot
@@ -196,6 +200,9 @@ class TracingSession:
                     leases[snapshot.snapshot_id] = leases.get(snapshot.snapshot_id, 0) + 1
                     self._keys.append(key)
                     self.resources.append(_pool[key][0])
+        except TracingGrpcDependencyError:
+            self.close()
+            raise
         except Exception:
             self.close()
             raise RuntimeError("Tracing exporter initialization failed") from None
@@ -257,6 +264,26 @@ class TracingSession:
 def tracing_scope(snapshot: RunTracingSnapshot | None, *, parent_contexts: dict | None = None):
     with TracingSession(snapshot, parent_contexts=parent_contexts) as session, session.activate():
         yield session
+
+
+@asynccontextmanager
+async def async_tracing_scope(snapshot: RunTracingSnapshot | None, *, parent_contexts: dict | None = None):
+    """Offload fingerprint/exporter I/O while binding ContextVars on the caller task."""
+    session = None
+
+    def construct():
+        nonlocal session
+        # Preserve ownership if cancellation drains construction but discards
+        # its return value before the caller can enter the scope.
+        session = TracingSession(snapshot, parent_contexts=parent_contexts)
+
+    try:
+        await await_drained(asyncio.to_thread(construct))
+        with session.activate():
+            yield session
+    finally:
+        if session is not None:
+            await await_drained(asyncio.to_thread(session.close))
 
 
 def _is_provider_callback(handler) -> bool:

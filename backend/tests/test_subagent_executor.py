@@ -5090,10 +5090,10 @@ class TestSubagentTracingWiring:
 
     @pytest.mark.anyio
     async def test_background_execution_keeps_parent_snapshot_after_profile_change(self, classes, executor_module, monkeypatch):
-        from contextlib import contextmanager
+        from contextlib import asynccontextmanager
 
         from deerflow.tracing.profiles import RunTracingSnapshot
-        from deerflow.tracing.scoped import get_current_snapshot, tracing_scope
+        from deerflow.tracing.scoped import async_tracing_scope, get_current_snapshot, tracing_scope
 
         original = RunTracingSnapshot(snapshot_id="parent-frozen", owner_user_id="alice", agent_name="parent", mode="disabled", revision="1", providers=())
         replacement = original.model_copy(update={"snapshot_id": "later-profile", "revision": "2"})
@@ -5103,13 +5103,13 @@ class TestSubagentTracingWiring:
         monkeypatch.setattr(executor_module, "capture_tracing_parent_context", lambda: parents)
         entered_parents = []
 
-        @contextmanager
-        def scope(snapshot, **kwargs):
+        @asynccontextmanager
+        async def scope(snapshot, **kwargs):
             entered_parents.append(kwargs.get("parent_contexts"))
-            with tracing_scope(snapshot, **kwargs):
+            async with async_tracing_scope(snapshot, **kwargs):
                 yield
 
-        monkeypatch.setattr(executor_module, "tracing_scope", scope)
+        monkeypatch.setattr(executor_module, "async_tracing_scope", scope)
 
         class Agent(_FakeStreamAgent):
             async def astream(self, *args, **kwargs):

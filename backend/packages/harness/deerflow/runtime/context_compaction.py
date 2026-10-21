@@ -18,7 +18,7 @@ from deerflow.runtime.checkpoint_state import CheckpointStateAccessor
 from deerflow.runtime.context_keys import CHECKPOINT_AGENT_NAME_METADATA_KEY, DEFAULT_AGENT_NAME_METADATA_VALUE, checkpoint_agent_binding_metadata
 from deerflow.runtime.tracing_snapshot import restore_snapshot
 from deerflow.runtime.user_context import get_effective_user_id
-from deerflow.tracing.scoped import tracing_scope
+from deerflow.tracing.scoped import async_tracing_scope
 
 logger = logging.getLogger(__name__)
 _AGENT_CONFIG_NOT_LOADED = object()
@@ -163,7 +163,7 @@ async def compact_thread_context(
     resolved_app_config = app_config or get_app_config()
     snapshot = await accessor.aget({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}})
     tracing_snapshot = await asyncio.to_thread(restore_snapshot, getattr(snapshot, "metadata", None) or {}, user_id=user_id or get_effective_user_id(), app_config=resolved_app_config)
-    with tracing_scope(tracing_snapshot):
+    async with async_tracing_scope(tracing_snapshot):
         return await _compact_thread_context(accessor, thread_id, keep=keep, force=force, user_id=user_id, agent_name=agent_name, model_name=model_name, app_config=resolved_app_config, snapshot=snapshot)
 
 

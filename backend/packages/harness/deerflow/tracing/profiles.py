@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
+from ipaddress import ip_address, ip_network
 from typing import Literal
 from urllib.parse import urlsplit
 from uuid import uuid4
@@ -22,6 +24,9 @@ from deerflow.persistence.tracing_profiles.sql import ProfileRevisionConflict, S
 
 TracingMode = Literal["inherit", "disabled", "configured"]
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
+_PRIVATE_COLLECTOR_NETWORKS = tuple(ip_network(network) for network in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7"))
+_MONOCLE_FINGERPRINT_PREFIX = "monocle-v2:"
+logger = logging.getLogger(__name__)
 
 
 class TracingControlError(Exception):
@@ -114,10 +119,24 @@ def _public_provider(provider: ProviderConfig) -> dict:
     return {**provider.model_dump(exclude={"api_key", "secret_key"}), "has_api_key": bool(provider.api_key and provider.api_key.get_secret_value()), "has_secret_key": bool(provider.secret_key and provider.secret_key.get_secret_value())}
 
 
+def _is_local_collector(endpoint: str) -> bool:
+    hostname = urlsplit(endpoint).hostname or ""
+    if hostname in {"localhost", "localhost."}:
+        return True
+    try:
+        address = ip_address(hostname)
+    except ValueError:
+        return False
+    address = getattr(address, "ipv4_mapped", None) or address
+    return address.is_loopback or any(address in network for network in _PRIVATE_COLLECTOR_NETWORKS)
+
+
 def _validate_providers(providers: tuple[ProviderConfig, ...]) -> None:
     if not providers or len({item.provider for item in providers}) != len(providers):
         raise TracingInputError("Select one or more distinct tracing providers")
     for item in providers:
+        if urlsplit(item.endpoint).scheme == "http" and not _is_local_collector(item.endpoint):
+            raise TracingInputError("Tracing profiles require HTTPS except for localhost and loopback or private IP collectors")
         if item.provider in {"arize", "langsmith"} and not (item.api_key and item.api_key.get_secret_value()):
             raise TracingInputError("The selected tracing provider requires an API key")
         if item.provider == "arize" and not (item.project and item.space_id):
@@ -152,17 +171,31 @@ def _operator_locked() -> bool:
 
 
 def current_monocle_fingerprint() -> str:
-    """Fingerprint settings without persisting raw exporter/cloud credentials."""
-    config = get_tracing_config().monocle
+    """Fingerprint selected Monocle exporter inputs without exposing secrets."""
+    from deerflow.tracing.monocle_environment import fingerprint_monocle_environment
+
+    return _MONOCLE_FINGERPRINT_PREFIX + fingerprint_monocle_environment(get_tracing_config().monocle)
+
+
+def _legacy_monocle_fingerprint() -> str:
+    # Historical encrypted snapshots retain only this digest; their narrower
+    # inputs cannot be reconstructed without the original environment.
     prefixes = ("MONOCLE_", "OKAHU_", "AWS_", "AZURE_", "GOOGLE_", "GCP_", "GCLOUD_", "OTEL_")
-    settings = {"config": config.model_dump(), "environment": {key: value for key, value in os.environ.items() if key.startswith(prefixes)}, "working_directory": os.getcwd()}
+    settings = {"config": get_tracing_config().monocle.model_dump(), "environment": {key: value for key, value in os.environ.items() if key.startswith(prefixes)}, "working_directory": os.getcwd()}
     return hashlib.sha256(json.dumps(settings, sort_keys=True).encode()).hexdigest()
 
 
 def validate_snapshot_environment(snapshot: RunTracingSnapshot) -> None:
     """A frozen snapshot cannot redirect global instrumentation on another worker."""
     if snapshot.monocle_enabled:
-        if not get_tracing_config().monocle.enabled or not snapshot.monocle_fingerprint or snapshot.monocle_fingerprint != current_monocle_fingerprint():
+        saved = snapshot.monocle_fingerprint
+        expected = None
+        if get_tracing_config().monocle.enabled and saved:
+            if saved.startswith(_MONOCLE_FINGERPRINT_PREFIX):
+                expected = current_monocle_fingerprint()
+            elif re.fullmatch(r"[0-9a-f]{64}", saved):
+                expected = _legacy_monocle_fingerprint()
+        if saved != expected or expected is None:
             raise TracingUnavailableError("The frozen Monocle exporter configuration differs from this worker")
     elif _operator_locked():
         raise TracingOperatorLockError("This worker cannot suppress global Monocle tracing for the frozen run")
@@ -231,6 +264,9 @@ class TracingProfileService:
             revision = self.repository.save_profile(profile_id, name=name.strip(), providers_ciphertext=ciphertext, allowed_user_ids=sorted(set(allowed_user_ids)), expected_revision=expected_revision)
         except ProfileRevisionConflict:
             raise TracingConflictError("Tracing profile changed; reload before saving") from None
+        for provider in providers:
+            if urlsplit(provider.endpoint).scheme == "http":
+                logger.warning("Tracing profile uses plaintext %s transport for a local/private collector", provider.transport)
         return {"id": profile_id, "name": name.strip(), "revision": revision, "providers": [_public_provider(item) for item in providers], "allowed_user_ids": sorted(set(allowed_user_ids))}
 
     def set_binding(self, agent_name: str | None, user_id: str, *, mode: TracingMode, profile_id: str | None, expected_revision: int, is_admin: bool = False) -> dict:
@@ -307,6 +343,8 @@ class TracingProfileService:
             current, _ = self._state(agent_name, user_id)
             if current["agent_incarnation"] != snapshot.agent_incarnation:
                 raise TracingConflictError("The frozen run belongs to a deleted Agent incarnation")
+            if snapshot.mode == "configured":
+                _validate_providers(snapshot.providers)
             validate_snapshot_environment(snapshot)
             return snapshot
         binding, profile = self._state(agent_name, user_id)

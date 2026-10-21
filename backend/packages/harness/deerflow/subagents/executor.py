@@ -63,7 +63,7 @@ from deerflow.tracing import (
     build_tracing_callbacks,
     inject_langfuse_metadata,
 )
-from deerflow.tracing.scoped import capture_tracing_parent_context, get_current_snapshot, tracing_scope
+from deerflow.tracing.scoped import async_tracing_scope, capture_tracing_parent_context, get_current_snapshot
 from deerflow.utils.messages import message_content_to_text
 
 if TYPE_CHECKING:
@@ -1635,23 +1635,25 @@ class SubagentExecutor:
                 trace_id=self.trace_id,
                 status=SubagentStatus.PENDING,
             )
-        with ensure_trace_context(self.deerflow_trace_id), tracing_scope(self.tracing_snapshot, parent_contexts=self.tracing_parent_contexts):
+        with ensure_trace_context(self.deerflow_trace_id):
             try:
-                capacity = self.execution_capacity or get_subagent_execution_capacity()
-                async with capacity.slot():
-                    with result._state_lock:
-                        if result.status.is_terminal:
-                            return result
-                        result.status = SubagentStatus.RUNNING
-                        result.started_at = _utcnow()
-                    return await self._aexecute_admitted(task, result)
-            except SubagentCapacityError as exc:
-                result.try_set_terminal(
-                    SubagentStatus.FAILED,
-                    error=str(exc),
-                    admission_failure=True,
-                )
-                return result
+                async with async_tracing_scope(self.tracing_snapshot, parent_contexts=self.tracing_parent_contexts):
+                    try:
+                        capacity = self.execution_capacity or get_subagent_execution_capacity()
+                        async with capacity.slot():
+                            with result._state_lock:
+                                if result.status.is_terminal:
+                                    return result
+                                result.status = SubagentStatus.RUNNING
+                                result.started_at = _utcnow()
+                            return await self._aexecute_admitted(task, result)
+                    except SubagentCapacityError as exc:
+                        result.try_set_terminal(
+                            SubagentStatus.FAILED,
+                            error=str(exc),
+                            admission_failure=True,
+                        )
+                        return result
             finally:
                 result.execution_done_event.set()
 

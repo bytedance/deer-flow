@@ -853,6 +853,9 @@ postgres = [
 redis = [
     { name = "deerflow-harness", extra = ["redis"] },
 ]
+tracing-grpc = [
+    { name = "deerflow-harness", extra = ["tracing-grpc"] },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -883,6 +886,7 @@ requires-dist = [
     { name = "deerflow-harness", extras = ["ollama"], marker = "extra == 'ollama'", editable = "packages/harness" },
     { name = "deerflow-harness", extras = ["postgres"], marker = "extra == 'postgres'", editable = "packages/harness" },
     { name = "deerflow-harness", extras = ["redis"], marker = "extra == 'redis'", editable = "packages/harness" },
+    { name = "deerflow-harness", extras = ["tracing-grpc"], marker = "extra == 'tracing-grpc'", editable = "packages/harness" },
     { name = "dingtalk-stream", specifier = ">=0.24.3" },
     { name = "discord-py", marker = "extra == 'discord'", specifier = ">=2.7.0" },
     { name = "e2b-code-interpreter", specifier = ">=2.8.1" },
@@ -902,7 +906,7 @@ requires-dist = [
     { name = "websockets", specifier = ">=16.0,<17" },
     { name = "wecom-aibot-python-sdk", specifier = ">=0.1.6" },
 ]
-provides-extras = ["postgres", "redis", "discord", "buzz", "monocle", "ollama", "browser", "memory-zh"]
+provides-extras = ["postgres", "redis", "discord", "buzz", "monocle", "tracing-grpc", "ollama", "browser", "memory-zh"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -946,7 +950,6 @@ dependencies = [
     { name = "e2b-code-interpreter" },
     { name = "exa-py" },
     { name = "firecrawl-py" },
-    { name = "grpcio" },
     { name = "html5lib" },
     { name = "httpx" },
     { name = "jsonschema" },
@@ -1016,6 +1019,9 @@ redis = [
 tenki = [
     { name = "tenki" },
 ]
+tracing-grpc = [
+    { name = "grpcio" },
+]
 tui = [
     { name = "textual" },
 ]
@@ -1038,7 +1044,7 @@ requires-dist = [
     { name = "e2b-code-interpreter", specifier = ">=2.8.0" },
     { name = "exa-py", specifier = ">=1.0.0" },
     { name = "firecrawl-py", specifier = ">=1.15.0" },
-    { name = "grpcio", specifier = ">=1.80.0" },
+    { name = "grpcio", marker = "extra == 'tracing-grpc'", specifier = ">=1.80.0" },
     { name = "html5lib", specifier = ">=1.1" },
     { name = "httpx", specifier = ">=0.28.0" },
     { name = "jieba", marker = "extra == 'memory-zh'", specifier = ">=0.42.1" },
@@ -1085,7 +1091,7 @@ requires-dist = [
     { name = "tiktoken", specifier = ">=0.8.0" },
     { name = "tzdata", specifier = ">=2025.1" },
 ]
-provides-extras = ["tui", "groundroute", "ollama", "postgres", "redis", "pymupdf", "boxlite", "tenki", "opensandbox", "monocle", "browser", "memory-zh"]
+provides-extras = ["tui", "groundroute", "ollama", "postgres", "redis", "pymupdf", "boxlite", "tenki", "opensandbox", "monocle", "tracing-grpc", "browser", "memory-zh"]
 
 [[package]]
 name = "defusedxml"

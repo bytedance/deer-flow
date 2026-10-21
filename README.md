@@ -1336,7 +1336,9 @@ schemas, arguments, results, or catalog hash into the promotion event itself.
 Agent settings also supports authorized tracing profiles, explicit per-Agent
 disable, shared revision activation, and Arize AX. See the
 [Agent tracing guide](backend/docs/AGENT_TRACING.md) for storage prerequisites,
-credential rotation, and run snapshot behavior.
+credential rotation, secure collector endpoints, the optional gRPC transport,
+and run snapshot behavior. Monocle remains opt-in and leaves the global OTel
+provider untouched when disabled.
 
 DeerFlow has built-in [LangSmith](https://smith.langchain.com) integration for observability. When enabled, all LLM calls, agent runs, and tool executions are traced and visible in the LangSmith dashboard.
 

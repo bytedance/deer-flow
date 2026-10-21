@@ -100,7 +100,7 @@ from deerflow.sandbox.lease import SANDBOX_SERVER_OWNED_CONTEXT_KEYS, register_s
 from deerflow.scheduler.runtime import SCHEDULER_CAPABILITY_CONTEXT_KEY, SchedulerRunCapability
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, ensure_trace_id
 from deerflow.tracing import build_tracing_callbacks, inject_langfuse_metadata
-from deerflow.tracing.scoped import tracing_scope
+from deerflow.tracing.scoped import async_tracing_scope
 from deerflow.utils.assembly_io import run_assembly
 from deerflow.utils.messages import message_to_text
 from deerflow.workspace_changes import capture_workspace_snapshot, get_changed_output_paths, record_workspace_changes
@@ -1124,8 +1124,8 @@ async def run_agent(
         # The durable record, rather than request config or today's profile,
         # selects the immutable snapshot throughout execution and finalization.
         tracing_snapshot = await asyncio.to_thread(restore_snapshot, record.metadata or {}, user_id=record.user_id or get_effective_user_id(), app_config=ctx.app_config)
-        tracing_context = tracing_scope(tracing_snapshot)
-        tracing_context.__enter__()
+        tracing_context = async_tracing_scope(tracing_snapshot)
+        await tracing_context.__aenter__()
         stamp_snapshot_references(config.setdefault("metadata", {}), tracing_snapshot)
 
         # Keep cancellable preflight work under the worker's terminal guard so
@@ -2180,7 +2180,7 @@ async def run_agent(
             await _drain_run_finalization(finalizer, on_host_cancel=interrupt_completion_hook)
         finally:
             if tracing_context is not None:
-                tracing_context.__exit__(None, None, None)
+                await tracing_context.__aexit__(None, None, None)
 
 
 # ---------------------------------------------------------------------------

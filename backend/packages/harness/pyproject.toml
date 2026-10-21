@@ -67,7 +67,6 @@ dependencies = [
     "opentelemetry-sdk>=1.41.1",
     "langsmith>=0.8.18",
     "opentelemetry-exporter-otlp-proto-common>=1.41.1",
-    "grpcio>=1.80.0",
 ]
 
 [project.scripts]
@@ -104,9 +103,11 @@ tenki = ["tenki>=1.4.0"]
 # OpenSandbox remote sandbox provider (deerflow.community.opensandbox). The
 # sync SDK is loaded only when this provider is selected.
 opensandbox = ["opensandbox>=0.1.15,<0.2.0"]
-# Agent observability (Monocle). Optional so a default install stays free of the
-# OpenTelemetry stack; only pulled in when MONOCLE_TRACING is used.
+# Monocle's automatic instrumentation is used only when MONOCLE_TRACING is on.
 monocle = ["monocle_apptrace>=0.8.8"]
+# Explicit runtime floor for OTLP/gRPC tracing. Other dependencies can still
+# install grpcio transitively; the HTTP tracing path does not import it.
+tracing-grpc = ["grpcio>=1.80.0"]
 # Agentic browser control (browser_navigate/click/type/... tool group). Optional
 # so the core harness install stays lean; import is lazy inside the private
 # Playwright loop. After install, run `playwright install chromium` once.

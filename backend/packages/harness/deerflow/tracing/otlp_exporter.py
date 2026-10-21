@@ -12,6 +12,13 @@ from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
 logger = logging.getLogger(__name__)
 
 
+class TracingGrpcDependencyError(RuntimeError):
+    """A fixed installation hint safe to expose through run initialization."""
+
+    def __init__(self) -> None:
+        super().__init__("gRPC tracing requires the tracing-grpc extra. In backend/, run `uv sync --extra tracing-grpc`, or install `pip install 'deerflow-harness[tracing-grpc]'`.")
+
+
 class IsolatedOtlpExporter(SpanExporter):
     """Send one bounded batch only to the profile's endpoint and credentials."""
 
@@ -23,8 +30,11 @@ class IsolatedOtlpExporter(SpanExporter):
         self._channel = None
         self._stub = None
         if transport == "grpc":
-            import grpc
-            from opentelemetry.proto.collector.trace.v1.trace_service_pb2_grpc import TraceServiceStub
+            try:
+                import grpc
+                from opentelemetry.proto.collector.trace.v1.trace_service_pb2_grpc import TraceServiceStub
+            except (ImportError, RuntimeError):
+                raise TracingGrpcDependencyError() from None
 
             parsed = urlsplit(endpoint)
             self._channel = grpc.secure_channel(parsed.netloc, grpc.ssl_channel_credentials()) if parsed.scheme == "https" else grpc.insecure_channel(parsed.netloc)

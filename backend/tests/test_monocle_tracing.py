@@ -66,6 +66,80 @@ def test_setup_noop_when_disabled(monkeypatch):
     assert called is False
 
 
+def test_disabled_setup_leaves_global_provider_available_to_later_extensions():
+    script = textwrap.dedent(
+        """
+        import os
+        os.environ["MONOCLE_TRACING"] = "false"
+        os.environ["OTEL_TRACES_SAMPLER"] = "always_on"
+        os.environ.pop("OTEL_PYTHON_TRACER_PROVIDER", None)
+        os.environ.pop("OTEL_SDK_DISABLED", None)
+
+        from opentelemetry import trace
+        from opentelemetry.trace import ProxyTracerProvider
+        from opentelemetry.sdk.trace import TracerProvider
+        from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+        from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+        from deerflow.tracing.monocle import setup_monocle_tracing_if_enabled
+
+        original = trace.get_tracer_provider()
+        assert isinstance(original, ProxyTracerProvider)
+        assert setup_monocle_tracing_if_enabled() is False
+        assert trace.get_tracer_provider() is original
+
+        extension = TracerProvider()
+        exporter = InMemorySpanExporter()
+        extension.add_span_processor(SimpleSpanProcessor(exporter))
+        trace.set_tracer_provider(extension)
+        assert trace.get_tracer_provider() is extension
+        with trace.get_tracer("extension").start_as_current_span("extension-operation"):
+            pass
+        assert len(exporter.get_finished_spans()) == 1
+        extension.shutdown()
+        print("DISABLED_PROVIDER_UNTOUCHED")
+        """
+    )
+    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert "DISABLED_PROVIDER_UNTOUCHED" in result.stdout
+
+
+def test_enabled_setup_installs_guard_before_monocle_and_preserves_scoped_sampling():
+    script = textwrap.dedent(
+        """
+        import os
+        os.environ["MONOCLE_TRACING"] = "true"
+        os.environ["MONOCLE_EXPORTERS"] = "console"
+        os.environ["OTEL_TRACES_SAMPLER"] = "always_on"
+        os.environ.pop("OTEL_PYTHON_TRACER_PROVIDER", None)
+        os.environ.pop("OTEL_SDK_DISABLED", None)
+
+        from opentelemetry import trace
+        from deerflow.tracing.monocle import setup_monocle_tracing_if_enabled
+        from deerflow.tracing.profiles import RunTracingSnapshot, current_monocle_fingerprint
+        from deerflow.tracing.scoped import ScopedRoutingSampler, tracing_scope
+
+        assert setup_monocle_tracing_if_enabled() is True
+        provider = trace.get_tracer_provider()
+        assert isinstance(provider.sampler, ScopedRoutingSampler)
+        tracer = provider.get_tracer("monocle-routing")
+        disabled = RunTracingSnapshot(snapshot_id="disabled", owner_user_id="alice", agent_name="lead_agent", mode="disabled", revision="1", providers=())
+        with tracing_scope(disabled):
+            with tracer.start_as_current_span("disabled-operation") as span:
+                assert not span.is_recording()
+        inherited = RunTracingSnapshot(snapshot_id="inherit", owner_user_id="alice", agent_name="lead_agent", mode="inherit", revision="1", providers=(), monocle_enabled=True, monocle_fingerprint=current_monocle_fingerprint())
+        with tracing_scope(inherited):
+            with tracer.start_as_current_span("inherited-operation") as span:
+                assert span.is_recording()
+        provider.shutdown()
+        print("ENABLED_GUARD_ROUTING_OK")
+        """
+    )
+    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert "ENABLED_GUARD_ROUTING_OK" in result.stdout
+
+
 def test_toggles_on_and_sets_up(monkeypatch):
     monkeypatch.setenv("MONOCLE_TRACING", "true")
     reset_tracing_config()
