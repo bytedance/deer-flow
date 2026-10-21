@@ -131,6 +131,8 @@ def validate_skill(skill_path):
                     depth -= 1
             if quote is not None:
                 return False, "allowed-tools contains an unclosed quote"
+            if depth > 0:
+                return False, "allowed-tools contains an unclosed parenthesized pattern"
         elif isinstance(allowed_tools, list):
             for item in allowed_tools:
                 if not isinstance(item, str):

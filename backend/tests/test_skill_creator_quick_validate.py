@@ -267,6 +267,7 @@ def test_shared_skill_parser_accepts_bom_prefixed_frontmatter(tmp_path: Path) ->
         ('["Read", ""]', "allowed-tools cannot contain empty tool names"),
         ('"Bash(grep))"', "allowed-tools contains an unmatched closing parenthesis"),
         ('"Bash(\'grep)"', "allowed-tools contains an unclosed quote"),
+        ('"Bash(grep"', "allowed-tools contains an unclosed parenthesized pattern"),
         ("42", "allowed-tools must be a space-separated string or list of strings"),
     ],
 )
@@ -279,7 +280,7 @@ def test_validate_skill_rejects_malformed_allowed_tools(tmp_path: Path, allowed_
 
 @pytest.mark.parametrize(
     "allowed_tools",
-    ['"Read Bash(grep)"', '["Read", "Bash(grep)"]', '"Bash(grep"'],
+    ['"Read Bash(grep)"', '["Read", "Bash(grep)"]'],
 )
 def test_validate_skill_accepts_well_formed_allowed_tools(tmp_path: Path, allowed_tools: str) -> None:
     validator = _load_validator()
