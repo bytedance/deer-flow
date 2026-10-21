@@ -51,6 +51,23 @@ def test_bootstrap_preserves_owner_display_name(tmp_path, monkeypatch, backend, 
         assert soul_path.read_bytes() == b"new soul"
 
 
+def test_default_setup_agent_publishes_exact_soul_bytes(tmp_path, monkeypatch):
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    from deerflow.config import paths as paths_module
+
+    monkeypatch.setattr(paths_module, "_paths", None)
+    soul = "Default persona\nwith LF.\n"
+
+    result = setup_agent.func(
+        soul=soul,
+        description="default",
+        runtime=SimpleNamespace(context={}, tool_call_id="test"),
+    )
+
+    assert result.update["created_agent_name"] is None
+    assert (tmp_path / "SOUL.md").read_bytes() == soul.encode("utf-8")
+
+
 @pytest.mark.parametrize("model", [AgentConfig, AgentCreateRequest, AgentUpdateRequest])
 @pytest.mark.parametrize("codepoint", [*range(0x20), *range(0x7F, 0xA0), 0xAD, 0x61C, 0x200B, 0x200E, 0x200F, *range(0x2028, 0x202F), *range(0x2060, 0x206A), 0xFEFF])
 def test_display_name_rejects_controls(model, codepoint):

@@ -98,7 +98,9 @@ def test_skill_manage_create_and_patch(monkeypatch, tmp_path):
     assert "Patched custom skill" in patch_result
     # User-scoped: custom skills written under users/default/skills/custom/
     user_custom = tmp_path / "users" / "default" / "skills" / "custom"
-    assert "Patched skill" in (user_custom / "demo-skill" / "SKILL.md").read_text(encoding="utf-8")
+    patched = (user_custom / "demo-skill" / "SKILL.md").read_bytes()
+    assert b"Patched skill" in patched
+    assert b"\r\n" not in patched
     assert refresh_calls == [("refresh", "default"), ("refresh", "default")]
 
 
