@@ -38,23 +38,16 @@ _FETCH_SNIPPET_LIMIT = 4096
 _api_key_warned: set[str] = set()
 
 
-def _get_api_key(tool_name: str) -> str | None:
-    """Resolve the GroundRoute key from a given tool's config block, then the env var.
-
-    `tool_name` is the config section to read (web_search vs web_fetch) so a flow that
-    runs GroundRoute for fetch but a different engine for search still reads the right
-    key. Mirrors serper/exa/firecrawl, which all take the tool name.
-    """
-    api_key, _ = _resolve_tool_settings(tool_name)
-    return api_key
-
-
 def _resolve_tool_settings(tool_name: str) -> tuple[str | None, object]:
     """Resolve the API key and the configured `max_results` in one config read.
 
     Config resolution stats the config file, so callers must run this off the
     agent event loop. Reading the key and the result count from a single
     resolution keeps the tool from touching the config file twice per call.
+
+    `tool_name` is the config section to read (web_search vs web_fetch) so a
+    flow that runs GroundRoute for fetch but a different engine for search
+    still reads the right key.
     """
     tool_config = get_app_config().get_tool_config(tool_name)
     max_results = None
@@ -190,7 +183,7 @@ async def web_fetch_tool(url: str) -> str:
     Args:
         url: The URL to fetch the contents of.
     """
-    api_key = await asyncio.to_thread(_get_api_key, "web_fetch")
+    api_key, _ = await asyncio.to_thread(_resolve_tool_settings, "web_fetch")
     if not api_key:
         return _missing_key_error("web_fetch", url=url)
 

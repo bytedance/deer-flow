@@ -17,8 +17,16 @@ pool's threads for the network round-trip, so several providers queried in paral
 queued behind each other. Resolve the config in the same coroutine, but keep the
 config file read off the event loop: the tool body now runs on the loop, so a file
 read left in it would block it. `backend/tests/blocking_io/test_groundroute_search_async.py`
-pins both halves — the request is awaited on the loop thread, and the config lookup
-does not run there.
+pins all three — the request is awaited on the loop thread, the config lookup does
+not run there, and the request goes out through the async client. That last one
+matters because a `MockTransport` runs its handler on the calling thread without
+real blocking I/O, so a provider that stayed async but fell back to a sync client
+would satisfy the thread assertion; the anchor records which client factory the
+provider reached for.
+
+Both tools resolve the key and `max_results` through `_resolve_tool_settings`, one
+config read per call. Do not add a second seam around that read: a wrapper with no
+production caller can drift from the real call path.
 
 `web_search` returns the structured `{"error": ..., "query": ...}` response; `web_fetch`
 returns the `Error: ...` string. Log the malformed container's type, or that no usable

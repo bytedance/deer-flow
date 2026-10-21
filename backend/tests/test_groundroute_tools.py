@@ -62,16 +62,16 @@ def _per_tool_config(**by_tool):
     return app
 
 
-class TestGetApiKey:
+class TestResolveToolSettings:
     def test_returns_config_key_when_present(self):
         with patch("deerflow.community.groundroute.tools.get_app_config") as mock:
             tool_config = MagicMock()
             tool_config.model_extra = {"api_key": "from-config"}
             mock.return_value.get_tool_config.return_value = tool_config
 
-            from deerflow.community.groundroute.tools import _get_api_key
+            from deerflow.community.groundroute.tools import _resolve_tool_settings
 
-            assert _get_api_key("web_search") == "from-config"
+            assert _resolve_tool_settings("web_search")[0] == "from-config"
 
     def test_falls_back_to_env_when_config_key_empty(self):
         with patch("deerflow.community.groundroute.tools.get_app_config") as mock:
@@ -79,17 +79,17 @@ class TestGetApiKey:
             tool_config.model_extra = {"api_key": "   "}
             mock.return_value.get_tool_config.return_value = tool_config
             with patch.dict("os.environ", {"GROUNDROUTE_API_KEY": "env-key"}, clear=True):
-                from deerflow.community.groundroute.tools import _get_api_key
+                from deerflow.community.groundroute.tools import _resolve_tool_settings
 
-                assert _get_api_key("web_search") == "env-key"
+                assert _resolve_tool_settings("web_search")[0] == "env-key"
 
     def test_returns_none_when_no_key_anywhere(self):
         with patch("deerflow.community.groundroute.tools.get_app_config") as mock:
             mock.return_value.get_tool_config.return_value = None
             with patch.dict("os.environ", {}, clear=True):
-                from deerflow.community.groundroute.tools import _get_api_key
+                from deerflow.community.groundroute.tools import _resolve_tool_settings
 
-                assert _get_api_key("web_search") is None
+                assert _resolve_tool_settings("web_search")[0] is None
 
     def test_reads_the_named_tools_config_block(self):
         """web_fetch must read the web_fetch block, not web_search (multi-engine flows)."""
@@ -98,10 +98,10 @@ class TestGetApiKey:
                 web_search={"api_key": "search-key"},
                 web_fetch={"api_key": "fetch-key"},
             )
-            from deerflow.community.groundroute.tools import _get_api_key
+            from deerflow.community.groundroute.tools import _resolve_tool_settings
 
-            assert _get_api_key("web_search") == "search-key"
-            assert _get_api_key("web_fetch") == "fetch-key"
+            assert _resolve_tool_settings("web_search")[0] == "search-key"
+            assert _resolve_tool_settings("web_fetch")[0] == "fetch-key"
 
 
 class TestWebSearchTool:
