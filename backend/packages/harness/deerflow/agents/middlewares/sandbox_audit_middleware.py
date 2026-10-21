@@ -109,6 +109,12 @@ _HIGH_RISK_COMMAND_POSITION_PATTERNS: list[re.Pattern[str]] = [
     # handed. Anchoring keeps it in command position: a dot that is an ordinary
     # path argument (`du -sh . $(curl u)`) stays value position.
     re.compile(rf"^{_COMMAND_POSITION_PREFIX}\.\s+[\"']?{_RISKY_SUBSTITUTION}"),
+    # `cmd < <(curl u)`: with no script argument the shell, the dot builtin or an
+    # interpreter reads its *program* from stdin, so the process substitution is
+    # executed. A script argument keeps the redirect as data
+    # (`bash script.sh < <(curl u)` passes).
+    re.compile(rf"^{_COMMAND_POSITION_PREFIX}{_CODE_STRING_INTERPRETERS}\s+{_LEADING_FLAGS}<\s*<\(\s*{_RISKY_SUBSTITUTION_EXECUTABLES}"),
+    re.compile(rf"^{_COMMAND_POSITION_PREFIX}(?:source|\.)\s+<\s*<\(\s*{_RISKY_SUBSTITUTION_EXECUTABLES}"),
 ]
 
 _MEDIUM_RISK_PATTERNS: list[re.Pattern[str]] = [
