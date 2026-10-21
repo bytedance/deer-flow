@@ -762,6 +762,61 @@ describe("extractCitationSources", () => {
     ]);
   });
 
+  it("keeps a literal quote marker inside a quoted list fence", () => {
+    // The fence already consumed the quote it was opened in, so the second `>`
+    // here is literal code. `linePosition()` stripped both markers, which made
+    // the sample line look dedented past the fence's column and ended the fence
+    // one line early, surfacing the citation the renderer shows as code.
+    const markdown = [
+      "> - ```md",
+      ">   > example",
+      ">   [citation:Fake](https://example.com/fake)",
+      ">   ```",
+      "[citation:Real](https://example.com/real)",
+    ].join("\n");
+
+    expect(extractCitationSources(markdown).map((s) => s.url)).toEqual([
+      "https://example.com/real",
+    ]);
+  });
+
+  it("keeps the list item open across a lazy paragraph continuation", () => {
+    // An unindented line of paragraph text continues the item's paragraph rather
+    // than leaving it, so the item's content column still measures the fence two
+    // columns in. Popping the item there recorded the fence at column zero, which
+    // swallowed the unindented citation to end of input.
+    const markdown = [
+      "- note",
+      "lazy continuation",
+      "",
+      "  ~~~md",
+      "  sample",
+      "[citation:Real](https://example.com/real)",
+    ].join("\n");
+
+    expect(extractCitationSources(markdown).map((s) => s.url)).toEqual([
+      "https://example.com/real",
+    ]);
+  });
+
+  it("reads five columns after a list marker as indented code, not padding", () => {
+    // Only up to four columns of whitespace pad a list marker; the fifth belongs
+    // to an indented code block inside an item whose content column is two.
+    // Consuming the whole run recorded column six, so the two-space fence looked
+    // like a dedent that left the item and the citation after it hid to EOF.
+    const markdown = [
+      "-     code",
+      "",
+      "  ~~~md",
+      "  sample",
+      "[citation:Real](https://example.com/real)",
+    ].join("\n");
+
+    expect(extractCitationSources(markdown).map((s) => s.url)).toEqual([
+      "https://example.com/real",
+    ]);
+  });
+
   it("restores the enclosing list when an ordinary quote ends", () => {
     // The blank line ends `> note`, but the list item outlives the quote, so the
     // two-space fence still belongs to an item whose content column is two. The

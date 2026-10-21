@@ -491,6 +491,12 @@ function maskFencedCodeBlocks(markdown: string): string {
   let paragraphQuote = 0;
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i]!;
+    // After the split on "\n" a CRLF ending still carries its "\r", and that
+    // "\r" is the other half of the line ending rather than content: the
+    // line-anchored patterns below and `linePosition` have to read the same
+    // CR-normalized line, or a `---\r` setext underline fails the test and keeps
+    // a finished paragraph blocking the list that follows it.
+    const boundary = line.endsWith("\r") ? line.slice(0, -1) : line;
     const position = linePosition(line);
     const opener = fenceOpener(line);
     if (pendingQuoteExit) {
@@ -529,11 +535,17 @@ function maskFencedCodeBlocks(markdown: string): string {
       // line can leave, and its content lines are literal: measuring them
       // through `linePosition()` stripped a leading `>` and its padding, so
       // `  > example` inside a column-two list fence looked dedented to zero.
+      // A `>` deeper than the fence's own quote markers is literal code rather
+      // than a container the line still sits in: stripping it made the content
+      // look dedented past the fence's column and ended the fence one line early.
       const containment =
         fence!.quoteDepth === 0 ? literalPosition(line) : position;
+      const overQuoted =
+        fence!.quoteDepth > 0 && position.quoteDepth > fence!.quoteDepth;
       const escaped =
-        containment.quoteDepth < fence!.quoteDepth ||
-        (containment.body !== "" && containment.indent < fence!.column);
+        !overQuoted &&
+        (containment.quoteDepth < fence!.quoteDepth ||
+          (containment.body !== "" && containment.indent < fence!.column));
       if (escaped) {
         const leftTheQuote = fence!.quoteDepth > 0 && position.quoteDepth === 0;
         openMarker = null;
@@ -594,7 +606,20 @@ function maskFencedCodeBlocks(markdown: string): string {
       }
       itemsQuoteDepth = position.quoteDepth;
     }
-    if (position.body !== "") {
+    // A line that dedents past the open list items only leaves them when it
+    // starts a block of its own. Unindented paragraph text is a lazy
+    // continuation: the item stays open, so a fence later at the item's content
+    // column still belongs to it and an unindented citation leaves the fence with
+    // the item rather than hiding until end of input.
+    const lazyParagraph =
+      paragraphColumn >= 0 &&
+      paragraphQuote === position.quoteDepth &&
+      position.indent < paragraphColumn &&
+      opener === null &&
+      !ATX_HEADING_RE.test(boundary) &&
+      !THEMATIC_BREAK_RE.test(boundary) &&
+      !INTERRUPTING_LIST_RE.test(boundary);
+    if (position.body !== "" && !lazyParagraph) {
       survivingItemColumn(items, position.indent);
     }
     // A line can open several list items at once and the fence belongs to the
@@ -630,7 +655,19 @@ function maskFencedCodeBlocks(markdown: string): string {
       // The item's content column is where its marker text ends in columns, not
       // in characters: `-\t` reaches column four, and reading it as two would
       // keep a citation two spaces in inside a fence the reader already left.
-      markerColumn = advanceColumns(markerColumn, item[0]);
+      // That padding tops out at four columns, though: a fifth belongs to an
+      // indented code block inside an item whose content starts one column past
+      // its marker, so `-     code` opens a column-two item, not a column-six one.
+      const padding = /[ \t]+$/.exec(item[0])?.[0] ?? "";
+      const markerEnd = advanceColumns(
+        markerColumn,
+        item[0].slice(0, item[0].length - padding.length),
+      );
+      const paddedColumn = advanceColumns(markerEnd, padding);
+      markerColumn =
+        paddedColumn - markerEnd > INDENTED_CODE_COLUMNS
+          ? markerEnd + 1
+          : paddedColumn;
       items.push(markerColumn);
       markerRest = markerRest.slice(item[0].length);
       markersPushed += 1;
@@ -681,17 +718,20 @@ function maskFencedCodeBlocks(markdown: string): string {
     } else {
       // Everything else that carries text keeps the paragraph open, which is the
       // state the next line's first container marker has to interrupt. Headings
-      // and thematic breaks (including a setext underline) are leaf blocks, and
-      // a blank line ends the paragraph.
+      // and thematic breaks (including a setext underline) are leaf blocks, a
+      // blank line ends the paragraph, and the two predicates read the same
+      // CR-normalized line `linePosition` classifies: `THEMATIC_BREAK_RE` is
+      // anchored at the end of the line, so an underline `---\r` failed it and
+      // kept a finished paragraph blocking the list that followed.
       //
-      // The two predicates read the same CR-normalized line `linePosition`
-      // classifies: after the split on "\n" a CRLF ending still carries its
-      // "\r", and `THEMATIC_BREAK_RE` is anchored at the end of the line, so an
-      // underline `---\r` failed it and kept a finished paragraph blocking the
-      // list that followed.
-      const boundary = line.endsWith("\r") ? line.slice(0, -1) : line;
+      // A freshly opened item whose content sits four columns past its marker
+      // starts with an indented code block instead, which is a leaf too.
+      const indentedItemContent =
+        markersPushed > 0 &&
+        position.indent - containerColumn >= INDENTED_CODE_COLUMNS;
       if (
         position.body !== "" &&
+        !indentedItemContent &&
         !ATX_HEADING_RE.test(boundary) &&
         !THEMATIC_BREAK_RE.test(boundary)
       ) {
