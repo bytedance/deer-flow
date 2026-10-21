@@ -390,7 +390,8 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   ```
 - **Credentials key.** The app Secret also holds `DEER_FLOW_CREDENTIALS_KEY`,
   the Fernet key the gateway encrypts stored credentials with (per-connection
-  IM channel credentials and the bot credentials entered in the web UI). The chart generates it once (32 random bytes,
+  IM channel credentials, the bot credentials entered in the web UI, and
+  rotating MCP OAuth refresh tokens). The chart generates it once (32 random bytes,
   urlsafe base64) and preserves it across upgrades via `lookup`; every gateway
   Pod reads the same value. **Back it up**: deleting the Secret or the release
   generates a new key, and credentials stored under the old one become
@@ -399,7 +400,8 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   values have been rewritten. An `existingAppSecret` should carry it; the env
   entry is optional, so without it a single Pod falls back to an auto-generated
   `.credentials_key` on the home volume, while a multi-instance gateway with
-  `channel_connections.enabled` refuses to start. If you add the key to an
+  `channel_connections.enabled` or a `refresh_token` MCP OAuth server refuses
+  to start. If you add the key to an
   `existingAppSecret` later, copy that file's value so stored credentials stay
   readable:
 

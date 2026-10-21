@@ -170,3 +170,103 @@ def test_tree_does_not_guess_another_branch(monkeypatch, fallback_client):
     # A stale `master` still resolves as a branch, so retrying names here silently
     # returns the stale branch's tree instead of failing.
     assert asked == ["/repos/owner/repo/git/trees/HEAD"]
+
+
+def _client_returning_status(monkeypatch, transport, status, body=b'{"ok": true}'):
+    """One client whose transport answers ``status`` for every request, plus its module.
+
+    Both transports are exercised because the script picks one at import time: a fix that
+    only holds for ``requests`` would leave the fallback (the path taken when the dependency is
+    missing) answering an error as content.
+    """
+    script = (
+        Path(__file__).resolve().parents[2]
+        / "skills/public/github-deep-research/scripts/github_api.py"
+    )
+    if transport == "urllib":
+        monkeypatch.setitem(sys.modules, "requests", None)
+        module = runpy.run_path(str(script))
+
+        def fake_urlopen(request, timeout):
+            response = io.BytesIO(body)
+            response.status = status
+            return response
+
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+        return module["GitHubAPI"](), module
+
+    requests = pytest.importorskip("requests")
+    monkeypatch.delitem(sys.modules, "requests", raising=False)
+    module = runpy.run_path(str(script))
+
+    def fake_send(session, prepared_request, **kwargs):
+        response = requests.Response()
+        response.status_code = status
+        response._content = body
+        response.url = prepared_request.url
+        return response
+
+    monkeypatch.setattr(requests.Session, "send", fake_send)
+    return module["GitHubAPI"](), module
+
+
+@pytest.mark.parametrize("transport", ["requests", "urllib"])
+@pytest.mark.parametrize("status", [404, 403])
+def test_a_failed_readme_fetch_is_an_error_not_content(monkeypatch, transport, status):
+    client, module = _client_returning_status(monkeypatch, transport, status)
+
+    with pytest.raises(module["GitHubAPIError"]) as excinfo:
+        client.get_readme("owner", "repo")
+
+    message = str(excinfo.value)
+    assert "README" in message and "owner/repo" in message
+    assert str(status) in message, "the HTTP status must stay visible"
+
+
+def test_a_rate_limit_is_distinguishable_from_a_missing_repository(
+    monkeypatch,
+):
+    limited, module = _client_returning_status(monkeypatch, "requests", 403)
+    with pytest.raises(module["GitHubAPIError"]) as excinfo:
+        limited.get_readme("owner", "repo")
+    limited_message = str(excinfo.value)
+
+    monkeypatch.undo()
+    missing, module = _client_returning_status(monkeypatch, "requests", 404)
+    with pytest.raises(module["GitHubAPIError"]) as excinfo:
+        missing.get_readme("owner", "repo")
+    missing_message = str(excinfo.value)
+
+    assert "403" in limited_message and "404" not in limited_message
+    assert "404" in missing_message and "403" not in missing_message
+
+
+@pytest.mark.parametrize("transport", ["requests", "urllib"])
+def test_a_failed_file_fetch_names_the_path(monkeypatch, transport):
+    client, module = _client_returning_status(monkeypatch, transport, 404)
+
+    with pytest.raises(module["GitHubAPIError"]) as excinfo:
+        client.get_file_content("owner", "repo", "docs/guide.md")
+
+    message = str(excinfo.value)
+    assert "docs/guide.md" in message and "404" in message
+
+
+@pytest.mark.parametrize("transport", ["requests", "urllib"])
+def test_the_cli_reports_a_fetch_failure_on_stderr_and_exits_nonzero(
+    monkeypatch, capsys, transport
+):
+    """The success channel stays empty: a caller reading stdout cannot mistake a failure for a
+    README body, and the exit code says the run did not succeed."""
+    _, module = _client_returning_status(monkeypatch, transport, 404)
+    monkeypatch.setattr(
+        sys, "argv", ["github_api.py", "owner", "repo", "readme"]
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        module["main"]()
+
+    captured = capsys.readouterr()
+    assert excinfo.value.code == 1
+    assert captured.out == ""
+    assert "404" in captured.err

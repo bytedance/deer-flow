@@ -446,6 +446,8 @@ DeerFlow 还可以在 workspace UI 里暴露用户自有的 IM 渠道连接。�
 | QQ | WebSocket（仅文本私聊及群 @；每条来源消息最多回复 4 / 5 条） | 中等 |
 | Buzz | Nostr relay（WebSocket，NIP-42） | 中等 |
 
+飞书和钉钉在附件同步完成后，会将独立的临时沙箱归还资源池，不会中断仍在运行的任务。
+
 **`config.yaml` 中的配置示例：**
 
 ```yaml
