@@ -225,9 +225,9 @@ def _decode_escaped_newlines_outside_fences(content: str) -> str:
     if "\\n" not in content:
         return content
 
-    parts = re.split(r"(```[\s\S]*?```)", content)
+    parts = re.split(r"(```[\s\S]*?```|~~~[\s\S]*?~~~)", content)
     for idx, part in enumerate(parts):
-        if part.startswith("```"):
+        if part.startswith("```") or part.startswith("~~~"):
             continue
         parts[idx] = part.replace("\\n", "\n")
     return "".join(parts)
@@ -247,7 +247,32 @@ class _EscapedNewlineStreamDecoder:
 
     def __init__(self) -> None:
         self._inside_fence = False
+        self._fence_delim = ""
         self._pending = ""
+
+    # Triple-backtick and triple-tilde are the two markdown fence delimiters;
+    # a fence opened with one closes only with the same one.
+    _DELIMS = ("```", "~~~")
+
+    def _find_open(self, data: str):
+        """Return (index, delimiter) of the earliest fence opener, or (-1, b"")."""
+        best = -1
+        best_d = ""
+        for d in self._DELIMS:
+            i = data.find(d)
+            if i != -1 and (best == -1 or i < best):
+                best, best_d = i, d
+        return best, best_d
+
+    def _hold_outside(self, data: str) -> int:
+        """Characters that may still grow into a delimiter or an escape."""
+        hold = len(data) - len(data.rstrip("`\\~"))
+        return hold
+
+    def _hold_inside(self, data: str, delim: str) -> int:
+        """Characters that may still grow into the closing delimiter."""
+        hold = len(data) - len(data.rstrip(delim[0]))
+        return hold
 
     def push(self, text: str) -> str:
         """Return the text decodable so far, holding back an undecided tail."""
@@ -255,32 +280,36 @@ class _EscapedNewlineStreamDecoder:
         self._pending = ""
         out = []
         while data:
-            fence = data.find("```")
             if self._inside_fence:
+                delim = self._fence_delim
+                fence = data.find(delim)
                 if fence == -1:
-                    # The closing ``` may be split across chunks: emit the
+                    # The closing delimiter may be split across chunks: emit
                     # fenced code verbatim and keep a partial closer pending.
-                    hold = len(data) - len(data.rstrip("`"))
+                    hold = self._hold_inside(data, delim)
                     out.append(data[: len(data) - hold])
                     self._pending = data[len(data) - hold :]
                     break
-                # Fenced code up to and including its closing ``` stays verbatim.
-                out.append(data[: fence + 3])
-                data = data[fence + 3 :]
+                # Fenced code up to and including its closing delimiter stays verbatim.
+                out.append(data[: fence + len(delim)])
+                data = data[fence + len(delim) :]
                 self._inside_fence = False
+                self._fence_delim = ""
                 continue
+            fence, delim = self._find_open(data)
             if fence == -1:
-                # Outside a fence the tail may still grow into ``` or into an
-                # escape split across the boundary; hold it back, decode the rest.
-                hold = len(data) - len(data.rstrip("`\\"))
+                # Outside a fence the tail may still grow into a delimiter or
+                # an escape split across the boundary; hold back, decode rest.
+                hold = self._hold_outside(data)
                 out.append(_decode_escaped_newlines_outside_fences(data[: len(data) - hold]))
                 self._pending = data[len(data) - hold :]
                 break
-            # Prose before the opening ``` decodes; the fence itself does not.
+            # Prose before the opening delimiter decodes; the fence itself does not.
             out.append(_decode_escaped_newlines_outside_fences(data[:fence]))
-            out.append(data[fence : fence + 3])
-            data = data[fence + 3 :]
+            out.append(data[fence : fence + len(delim)])
+            data = data[fence + len(delim) :]
             self._inside_fence = True
+            self._fence_delim = delim
         return "".join(out)
 
     def flush(self) -> str:
