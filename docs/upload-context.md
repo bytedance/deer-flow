@@ -76,8 +76,6 @@ prefix is not added twice. Bare literal tag examples remain eligible for v1;
 explicit original provenance preserves even file-description-shaped user examples.
 Other internal-context producers remain outside this upload-specific change.
 
-![A chat preserves a literal user tag example and displays the attached file without the internal outline.](assets/structured-upload-context.png)
-
 ## Verification
 
 `backend/tests/test_structured_upload_context.py` exercises capture, sanitization,
