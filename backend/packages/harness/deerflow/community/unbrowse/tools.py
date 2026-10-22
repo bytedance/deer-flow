@@ -171,4 +171,8 @@ def web_fetch_tool(url: str) -> str:
 
     metadata = data.get("metadata")
     title = (metadata.get("title") if isinstance(metadata, dict) else None) or "Untitled"
-    return f"# {title}\n\n{content}"
+    status = metadata.get("statusCode") if isinstance(metadata, dict) else None
+    warning = ""
+    if isinstance(status, int) and not isinstance(status, bool) and 400 <= status <= 599:
+        warning = f"Warning: target page responded with HTTP {status}.\n\n"
+    return f"{warning}# {title}\n\n{content}"
