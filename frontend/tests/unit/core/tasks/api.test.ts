@@ -90,6 +90,58 @@ describe("fetchSubtaskSteps", () => {
     expect(mockedFetch).toHaveBeenCalledTimes(1);
   });
 
+  test("stops and keeps the accumulated prefix when a full page does not advance the cursor", async () => {
+    mockedFetch.mockImplementation(() =>
+      Promise.resolve(
+        jsonResponse(200, [
+          stepEvent(10, 0, "web_search"),
+          stepEvent(11, 1, "read_file"),
+        ]),
+      ),
+    );
+
+    const steps = await fetchSubtaskSteps("t", "r", "A", 2);
+
+    // The repeated page is dropped instead of being re-requested up to the
+    // 100-page bound, and the valid first page still reaches the caller.
+    expect(steps.map((s) => s.message_index)).toEqual([0, 1]);
+    expect(mockedFetch).toHaveBeenCalledTimes(2);
+  });
+
+  test.each([12, 13])(
+    "keeps all prior pages when a later full page ends at non-advancing seq %s",
+    async (lastSeq) => {
+      mockedFetch
+        .mockResolvedValueOnce(
+          jsonResponse(200, [
+            stepEvent(10, 0, "web_search"),
+            stepEvent(11, 1, "read_file"),
+          ]),
+        )
+        .mockResolvedValueOnce(
+          jsonResponse(200, [
+            stepEvent(12, 2, "bash"),
+            stepEvent(13, 3, "write_file"),
+          ]),
+        )
+        .mockImplementation(() =>
+          Promise.resolve(
+            jsonResponse(200, [
+              stepEvent(lastSeq - 1, 4, "web_search"),
+              stepEvent(lastSeq, 5, "read_file"),
+            ]),
+          ),
+        );
+
+      const steps = await fetchSubtaskSteps("t", "r", "A", 2);
+
+      expect(steps.map((s) => s.message_index)).toEqual([0, 1, 2, 3]);
+      expect(mockedFetch).toHaveBeenCalledTimes(3);
+      expect(mockedFetch.mock.calls[1]![0] as string).toContain("after_seq=11");
+      expect(mockedFetch.mock.calls[2]![0] as string).toContain("after_seq=13");
+    },
+  );
+
   test("throws when a page request fails", async () => {
     mockedFetch.mockResolvedValueOnce(jsonResponse(500, { detail: "boom" }));
 

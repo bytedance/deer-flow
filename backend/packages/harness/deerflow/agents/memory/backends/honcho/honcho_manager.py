@@ -89,10 +89,18 @@ def _stable_id(raw: str) -> str:
 
 
 class HonchoMemoryManager(MemoryManager):
-    """MemoryManager backed by a Honcho v3 instance (self-hosted or hosted)."""
+    """MemoryManager backed by a Honcho v3 instance (self-hosted or hosted).
+
+    Known limitation: ``search`` scopes ``category`` server-side to messages
+    stored with ``metadata.category``, but ``add()`` writes plain metadata-less
+    messages and fact CRUD is unsupported, so nothing this backend stores ever
+    carries a category — category queries return empty results here until the
+    write path gains metadata support (see ``search``).
+    """
 
     _config: HonchoConfig = PrivateAttr(default=None)
     _client: Any = PrivateAttr(default=None)
+    _should_keep_hidden_message: Any = PrivateAttr(default=None)
 
     supports_search: ClassVar[bool] = True
     # Honcho's server-side deriver extracts facts/representation from add()
@@ -120,7 +128,10 @@ class HonchoMemoryManager(MemoryManager):
         Connectivity is deliberately NOT probed: a temporarily unreachable Honcho
         must not block Gateway startup; reads degrade per ``failure_policy.read``.
         """
-        return cls(backend_config=backend_config, mode=mode)
+        manager = cls(backend_config=backend_config, mode=mode)
+        hidden_filter = host_hooks.get("should_keep_hidden_message")
+        manager._should_keep_hidden_message = hidden_filter if callable(hidden_filter) else None
+        return manager
 
     @classmethod
     def read_failures_are_fatal_for_config(
@@ -177,6 +188,16 @@ class HonchoMemoryManager(MemoryManager):
         outgoing: list[dict[str, str]] = []
         for message in messages or []:
             msg_type = getattr(message, "type", None)
+            if msg_type == "human":
+                additional_kwargs = getattr(message, "additional_kwargs", {}) or {}
+                keep_hidden = self._should_keep_hidden_message
+                if additional_kwargs.get("hide_from_ui"):
+                    try:
+                        if keep_hidden is None or not keep_hidden(additional_kwargs):
+                            continue
+                    except Exception:
+                        logger.warning("honcho memory: hidden message filter failed; skipping hidden message")
+                        continue
             text = _content_to_text(getattr(message, "content", "")).strip()
             if not text:
                 continue
@@ -223,14 +244,26 @@ class HonchoMemoryManager(MemoryManager):
         agent_name: str | None = None,
         category: str | None = None,
     ) -> list[dict[str, Any]]:
+        """``category`` must filter, not label: it scopes the Honcho query itself
+        (a ``metadata`` filter the server applies before its ``limit``, per the
+        base-class contract), and each result is labeled from its own metadata so
+        hits are never attested to a category they do not have.
+
+        Known limitation: that filter only matches messages stored with
+        ``metadata.category``, and nothing this backend writes has it — ``add()``
+        sends plain ``{"peer_id", "content"}`` messages with no metadata, and
+        fact CRUD is unsupported, so no other write path can set it either. A
+        ``category`` query therefore returns empty results in this backend
+        until the write path gains metadata support."""
         workspace = self._workspace(user_id)
         if workspace is None:
             return []
-        results = self._read_or_fallback([], lambda: self._client.search(workspace, query, limit=top_k))
+        filters = {"metadata": {"category": category}} if category else None
+        results = self._read_or_fallback([], lambda: self._client.search(workspace, query, limit=top_k, filters=filters))
         return [
             {
                 "content": item.get("content", ""),
-                "category": category or "memory",
+                "category": (item.get("metadata") or {}).get("category") or "memory",
                 "session_id": item.get("session_id"),
                 "peer_id": item.get("peer_id"),
                 "created_at": item.get("created_at"),

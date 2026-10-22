@@ -51,11 +51,14 @@ Docker provides a consistent, isolated environment with all dependencies pre-con
    version, creates the missing `.env` files, and exports `DEER_FLOW_ROOT`.
 
    If you do run Compose directly, run it **from the repository root** and set
-   `DEER_FLOW_ROOT` to the absolute path of your checkout. Compose interpolates
-   that variable into host-side paths (`DEER_FLOW_HOST_BASE_DIR`,
-   `THREADS_HOST_PATH`) that the AIO and provisioner sandbox modes bind-mount;
-   leaving it unset renders them as `/backend/.deer-flow`, so those mounts
-   silently miss your checkout instead of failing:
+   `DEER_FLOW_ROOT` to the absolute path of your checkout. The default command
+   starts the local/AIO development stack without Kubernetes; add
+   `--profile provisioner` only when you need provisioner/Kubernetes sandbox
+   mode. Compose interpolates `DEER_FLOW_ROOT` into host-side paths
+   (`DEER_FLOW_HOST_BASE_DIR`, `THREADS_HOST_PATH`) that the AIO and provisioner
+   sandbox modes bind-mount; leaving it unset renders them as
+   `/backend/.deer-flow`, so those mounts silently miss your checkout instead of
+   failing:
 
    ```bash
    # macOS / Linux
@@ -104,6 +107,8 @@ If Docker builds are slow in your network, you can override the default package 
 export UV_INDEX_URL=https://pypi.org/simple
 export NPM_REGISTRY=https://registry.npmjs.org
 ```
+
+Keep `UV_INDEX_URL` at `https://pypi.org/simple`: the gateway image installs with `uv sync --locked`, and `uv.lock` is locked to that index, so a mirror makes the build fail with ``The lockfile at `uv.lock` needs to be updated, but `--locked` was provided``.
 
 #### Recommended host resources
 
@@ -355,6 +360,11 @@ make test
 cd frontend
 make test-e2e
 ```
+
+If a host-configured uv package mirror blocks dependencies while running the
+config upgrade tests, run `make test-config-version` from the repository root.
+That command uses public PyPI for this suite and its subprocesses without
+changing the host's uv settings or the normal config upgrade command.
 
 `make test-live` calls real external APIs and may incur API costs or create
 local sandboxes, artifacts, and files. It is never run by the default backend

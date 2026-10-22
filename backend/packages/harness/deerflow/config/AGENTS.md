@@ -112,8 +112,10 @@ can become stale or inaccessible when a host editor replaces a file on save.
 Configuration priority:
 1. Explicit `config_path` argument
 2. `DEER_FLOW_EXTENSIONS_CONFIG_PATH` environment variable
-3. `extensions_config.json` in current directory (backend/)
-4. `extensions_config.json` in parent directory (project root - **recommended location**)
+3. `extensions_config.json`, then legacy `mcp_config.json`, in the project root (`DEER_FLOW_PROJECT_ROOT`, else the current directory) - **recommended location**
+4. Legacy `backend/` and repository-root copies, located from the harness source tree
+
+When the search finds nothing, the Gateway skill toggle and MCP writers create the file at `ExtensionsConfig.default_config_path()` (the project root, step 3), so the next resolution reads back what they wrote; `DeerFlowClient` raises instead of creating one.
 
 Extensions are optional only in the fallback *search* mode (priority 3-4 above): `ExtensionsConfig.resolve_config_path()` returns `None` when neither an explicit `config_path` nor `DEER_FLOW_EXTENSIONS_CONFIG_PATH` is given and the search locations find nothing. An explicit `config_path` argument or a set `DEER_FLOW_EXTENSIONS_CONFIG_PATH` (priority 1-2) is an operator assertion that one particular file must be used, so a missing file in either of those modes raises `FileNotFoundError` instead — including when the file existed earlier and has since been deleted. The MCP tools cache's staleness check (`deerflow.mcp.cache._resolve_config_path`) is a narrow, deliberate exception to that rule: it catches that `FileNotFoundError` locally and treats it as "unconfigured" so a previously-valid config disappearing mid-run degrades the cache to serving its last-known-good tools instead of raising out of a per-request hot path (see the MCP System section below).
 
@@ -176,7 +178,7 @@ Tests: `tests/test_secret_file.py`, `tests/test_credentials_key.py`.
 
 **`extensions_config.json`**:
 - `mcpServers` - Map of server name → config (enabled, type, command, args, env, url, headers, oauth, description, `routing`, `tools`, `tool_call_timeout`, `session_init_timeout`). `routing.mode="prefer"` emits `<mcp_routing_hints>` prompt guidance; if `tool_search` defers the hinted tool, `McpRoutingMiddleware` can also auto-promote matching deferred schemas before the model call. It does not hard-disable other tools. `session_init_timeout` (default `DEFAULT_MCP_SESSION_INIT_TIMEOUT` = 60s, `null` to disable) bounds server bring-up: tool discovery and persistent stdio session initialization, so a hung server cannot block agent construction indefinitely; durable HTTP/SSE task calls use it for their ephemeral session initialization too. `tool_call_timeout` bounds individual stdio calls and durable-task calls on every transport; other HTTP/SSE tools use transport-level timeouts.
-- `tool_search.auto_promote_top_k` - Global MCP routing auto-promote breadth. Default `3`, clamped to `1..5`; applies only when `tool_search.enabled=true` and only to deferred MCP tools with `routing.mode="prefer"` and non-empty keywords. For lead agents the deferred catalog is built from the full configured MCP set; auto-promotion never grants authority because an active skill's runtime policy still filters model-visible schemas, `tool_search` results, and execution.
+- `tool_search.auto_promote_top_k` - Global MCP routing auto-promote breadth. Default `3`, clamped to `1..5`; applies only when `tool_search.enabled=true` and only to deferred MCP tools with `routing.mode="prefer"` and non-empty keywords. For lead agents the deferred catalog is built from the full configured MCP set; auto-promotion never grants authority — it only raises visibility for tools already admitted to the agent's catalog, while assembly and execution authorization still apply independently.
 - `skills` - Map of skill name → state (enabled)
 - `middlewares` - `AgentMiddleware` entries for lead and subagent runtime extension: class-path strings or `{class, kwargs}` objects. `kwargs` values must be JSON types; YAML dates and timestamps are coerced to ISO strings so they match JSON. `config.yaml -> extensions` can override these fields after validation; overrides are replace-per-field, not list concatenation.
 
@@ -186,8 +188,11 @@ Values beginning with `$` are resolved from the environment when the file is loa
 
 `AgentConfig.knowledge_scope` uses the versioned `KnowledgeScope` contract as a
 Gateway new-turn default. The API preserves omitted updates and clears explicit
-null; file and SQL stores persist it in the existing config document. Keep it
-outside `MANAGED_AGENT_CONFIG_FIELDS` so harness self-updates preserve it;
+null; file and SQL stores persist it in the existing config document. Both
+`update_agent` and HTTP PUT pass the effective groups to
+`preserve_non_managed_fields`: a changed list excluding knowledge clears the
+inherited default, but explicit API scope fields still win. Keep it outside
+`MANAGED_AGENT_CONFIG_FIELDS` so unrelated self-updates preserve it;
 `setup_agent` also preserves the binding when re-bootstrapping. Admission uses
 explicit message scope before this default and snapshots it onto the current
 human message. Resolve the executing agent with runtime context over configurable,

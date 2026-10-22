@@ -49,6 +49,7 @@ from app.gateway.routers import (
     projects,
     runs,
     scheduled_tasks,
+    skill_mutations,
     skills,
     subagent_batches,
     subagents,
@@ -715,9 +716,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.warning("Upload staging file cleanup skipped", exc_info=True)
 
     # Initialize LangGraph runtime components (StreamBridge, RunManager, checkpointer, store)
+    from app.gateway.mcp_oauth_tokens import mcp_oauth_token_persistence
     from app.gateway.personal_mcp_access import personal_mcp_authority
 
-    async with personal_mcp_authority(), _runtime_with_mcp_pool_shutdown(app, startup_config):
+    async with personal_mcp_authority(), mcp_oauth_token_persistence(startup_config), _runtime_with_mcp_pool_shutdown(app, startup_config):
         logger.info("LangGraph runtime initialised")
 
         # Check admin bootstrap state and migrate orphan threads after admin exists.
@@ -1330,6 +1332,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # Skills API is mounted at /api/skills
     app.include_router(skills.router)
+    app.include_router(skill_mutations.router)
 
     # First-party integrations API is mounted at /api/integrations
     app.include_router(integrations.router)

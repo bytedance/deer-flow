@@ -3,6 +3,8 @@
 import asyncio
 import json
 import os
+import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -33,6 +35,21 @@ class Runs:
         self.hold_admission = False
         self.jobs = []
         self.denied = False
+
+    revision = "initial"
+
+    async def configuration_evidence(self, *, thread_id, run_id):
+        return {"run_id": run_id, "thread_id": thread_id, "source": "host_assembly", "version": "synthetic-assembly", "model": "test-model"}
+
+    async def read_artifact(self, *, thread_id, path):
+        return self.file_content
+
+    file_content = b"original file"
+
+    async def configuration_revision(self, *, assistant_ids, durable=False):
+        if self.denied:
+            raise AgentRunError(403, "revoked")
+        return self.revision
 
     async def create_thread(self, *, assistant_id, thread_id, metadata):
         if self.denied:
@@ -193,6 +210,43 @@ async def test_sequential_parallel_branch_loop_structured_results(plugin):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("material", ["x" * 9000, "材料" * 750, "x" * 11998], ids=["ascii-report", "chinese-report", "maximum-output"])
+async def test_step_output_can_be_handed_to_next_agent_without_truncation(plugin, material):
+    runs = plugin[3]
+    original_answer = runs.answer
+
+    async def answer(run, input):
+        await original_answer(run, input)
+        task = json.loads(input["messages"][0]["content"])
+        content = material if task == "prepare" else {"received": True}
+        runs.threads[run.thread_id]["values"]["messages"][-1]["content"] = json.dumps(content)
+
+    runs.answer = answer
+    launched = await launch(
+        plugin,
+        """
+        const first = await agent({stepId:'prepare',agentRef:'lead_agent',task:'prepare'});
+        const second = await agent({stepId:'produce',agentRef:'lead_agent',task:{material:first.output,instruction:'Use the supplied material'}});
+        return second.output;
+        """,
+    )
+    final = await done(plugin, launched["run_id"])
+    assert final["status"] == "completed", final
+    assert final["result"] == {"received": True}
+    assert len(runs.starts) == 2
+    assert json.loads(runs.starts[1][1]["messages"][0]["content"]) == {"material": material, "instruction": "Use the supplied material"}
+
+
+@pytest.mark.asyncio
+async def test_oversized_agent_task_is_rejected_before_child_admission(plugin):
+    launched = await launch(plugin, "return await agent({stepId:'large',agentRef:'lead_agent',task:'x'.repeat(16001)});")
+    final = await done(plugin, launched["run_id"])
+    assert final["status"] == "failed"
+    assert not plugin[3].starts
+    assert not plugin[2].processes
+
+
+@pytest.mark.asyncio
 async def test_background_return_idempotency_and_owner_scope(plugin):
     script = "return await agent({stepId:'a',agentRef:'lead_agent',task:'blocked'});"
     first = await launch(plugin, script)
@@ -339,7 +393,7 @@ async def test_service_shutdown_drains_children_and_worker(plugin):
     assert all(r.status == "interrupted" for r in plugin[3].runs.values())
     await plugin[2].start(None)
     final = await plugin[1]["get"]({"run_id": result["run_id"]}, context(plugin[3]))
-    assert final["status"] == "cancelled"
+    assert final["status"] == "needs_reconciliation"
 
 
 @pytest.mark.asyncio
@@ -436,6 +490,7 @@ async def test_startup_marks_unfinished_records_interrupted_without_replay(plugi
     await done(plugin, result["run_id"])
     record = await asyncio.to_thread(plugin[2].store.get, "alice", result["run_id"])
     record["status"] = "running"
+    record.pop("recovery_version", None)
     await asyncio.to_thread(plugin[2].store.put, "alice", record)
     await plugin[2].stop()
     await plugin[2].start(None)
@@ -493,6 +548,112 @@ async def test_workflow_deadline_is_failed_and_cleans_up(plugin, with_child):
         assert len(runs.starts) == 1
         assert final["steps"][0]["child_status"] == "interrupted"
         assert all(run.status == "interrupted" for run in runs.runs.values())
+
+
+def count_sends(service, monkeypatch):
+    sent = []
+    original = service.send
+
+    async def send(process, message):
+        sent.append(message)
+        await original(process, message)
+
+    monkeypatch.setattr(service, "send", send)
+    return sent
+
+
+@pytest.mark.asyncio
+async def test_pending_agent_wait_does_not_consume_worker_turns(plugin, monkeypatch):
+    service, runs = plugin[2], plugin[3]
+    monkeypatch.setattr(sys.modules[type(service).__module__], "TURN_LIMIT", 20)
+    sent = count_sends(service, monkeypatch)
+    result = await launch(plugin, "return await agent({stepId:'a',agentRef:'lead_agent',task:'blocked'});")
+    await asyncio.wait_for(runs.entered.wait(), 5)
+    await asyncio.sleep(3)
+    runs.release.set()
+    final = await done(plugin, result["run_id"])
+    assert final["status"] == "completed", final
+    # Idle waiting must not round-trip to the worker every poll interval.
+    assert len(sent) <= 5, len(sent)
+
+
+@pytest.mark.asyncio
+async def test_worker_exit_while_agent_pending_fails_promptly(plugin):
+    _, actions, service, runs = plugin
+    service.config["timeout_seconds"] = 60
+    result = await launch(plugin, "return await agent({stepId:'a',agentRef:'lead_agent',task:'blocked'});")
+    await asyncio.wait_for(runs.entered.wait(), 5)
+    assert runs.active == 1
+    process = service.processes[result["run_id"]]
+    process.kill()
+    await asyncio.wait_for(process.wait(), 3)
+
+    # A dead idle worker must fail before the workflow's 60-second deadline,
+    # without waiting for the blocked Agent to complete by itself.
+    await asyncio.wait_for(service.wait_idle(result["run_id"]), 3)
+    final = await actions["get"]({"run_id": result["run_id"]}, context(runs))
+    assert final["status"] == "failed", final
+    assert final["error"] == "Worker exited while waiting for Agent calls"
+    assert final["steps"][0]["child_status"] == "interrupted"
+    assert all(run.status == "interrupted" for run in runs.runs.values())
+    assert not service.processes
+
+
+@pytest.mark.asyncio
+async def test_work_frames_still_count_against_worker_turn_budget(plugin, monkeypatch):
+    """Work-carrying frames retain the turn cap (regression from PR #7025)."""
+    service = plugin[2]
+    monkeypatch.setattr(sys.modules[type(service).__module__], "TURN_LIMIT", 2)
+    result = await launch(
+        plugin,
+        """
+      await agent({stepId:'a',agentRef:'lead_agent',task:'one'});
+      await agent({stepId:'b',agentRef:'lead_agent',task:'two'});
+      return 1;
+    """,
+    )
+    final = await done(plugin, result["run_id"])
+    assert final["status"] == "failed", final
+    assert final["error"] == "Worker turn limit"
+    assert not service.processes
+
+
+@pytest.mark.asyncio
+async def test_cancel_while_agent_pending_stops_promptly(plugin):
+    _, actions, service, runs = plugin
+    result = await launch(plugin, "return await agent({stepId:'a',agentRef:'lead_agent',task:'blocked'});")
+    await asyncio.wait_for(runs.entered.wait(), 5)
+    await asyncio.sleep(0.3)
+    started = time.monotonic()
+    await actions["cancel"]({"run_id": result["run_id"]}, context(runs))
+    # Cancel latency is ~4 ms locally; the budget also covers the store writes
+    # and process reaping, which can spike on a loaded CI runner.
+    await asyncio.wait_for(service.wait_idle(result["run_id"]), 3)
+    assert time.monotonic() - started < 3
+    final = await actions["get"]({"run_id": result["run_id"]}, context(runs))
+    assert final["status"] == "cancelled", final
+    assert not service.processes
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "script",
+    [
+        "for(;;) await null;",
+        "const p=agent({stepId:'a',agentRef:'lead_agent',task:'blocked'}); for(;;) await null;",
+    ],
+)
+async def test_spinning_script_still_hits_turn_limit(plugin, monkeypatch, script):
+    service = plugin[2]
+    # Exercise the frame cap without racing 50 durable frame commits against
+    # the fixture's short wall deadline on loaded CI runners.
+    monkeypatch.setattr(sys.modules[type(service).__module__], "TURN_LIMIT", 3)
+    monkeypatch.setitem(service.config, "timeout_seconds", 30)
+    result = await launch(plugin, script)
+    final = await done(plugin, result["run_id"])
+    assert final["status"] == "failed", final
+    assert final["error"] == "Worker turn limit"
+    assert not service.processes
 
 
 @pytest.mark.asyncio
@@ -624,7 +785,7 @@ async def test_cancelled_launch_caller_keeps_committed_sqlite_launch_owned(plugi
             await asyncio.wait_for(runs.entered.wait(), 5)
             await plugin[1]["cancel"]({"run_id": retry["run_id"]}, context(runs))
         final = await done(plugin, retry["run_id"])
-        assert final["status"] == "cancelled", final
+        assert final["status"] in ({"recoverable", "needs_reconciliation"} if shutdown else {"cancelled"}), final
         assert len(runs.starts) <= 1
         assert not service.entries and not service.workers and not service.processes
         await plugin[1]["delete"]({"run_id": retry["run_id"]}, context(runs))
@@ -632,3 +793,369 @@ async def test_cancelled_launch_caller_keeps_committed_sqlite_launch_owned(plugi
         release.set()
         if stopping:
             await stopping
+
+
+async def waiting(plugin, run_id, status="waiting_approval"):
+    async with asyncio.timeout(5):
+        while True:
+            result = await plugin[1]["get"]({"run_id": run_id}, context(plugin[3]))
+            if result["status"] == status:
+                return result
+            await asyncio.sleep(0.01)
+
+
+@pytest.mark.asyncio
+async def test_phase2_definition_versions_are_immutable_and_owner_scoped(plugin):
+    _, actions, _, runs = plugin
+    first = await actions["save_definition"]({"name": "inspection", "script": "return args;"}, context(runs))
+    assert await actions["save_definition"]({"name": "inspection", "script": "return args;"}, context(runs)) == first
+    second = await actions["save_definition"]({"name": "inspection", "script": "return args.product;"}, context(runs))
+    assert first["version"] != second["version"]
+    launched = await actions["launch"]({"request_id": "versioned", "definition": first, "args": {"product": "A"}}, context(runs))
+    assert (await done(plugin, launched["run_id"]))["result"] == {"product": "A"}
+    with pytest.raises(ValueError):
+        await actions["launch"]({"request_id": "stolen", "definition": first}, context(runs, "bob"))
+
+
+@pytest.mark.asyncio
+async def test_phase2_checkpoint_requires_exact_authenticated_decision_and_dispatches_once(plugin):
+    from dataclasses import replace
+
+    from deerflow_extension_api.plugins import ToolContext
+
+    _, actions, _, runs = plugin
+    launched = await launch(
+        plugin,
+        """
+const evidence = await agent({stepId:'evidence',agentRef:'lead_agent',task:'evidence'});
+await humanCheckpoint({stepId:'confirm',sourceStepId:'evidence',artifactVersion:evidence.artifactVersion});
+return await agent({stepId:'report',agentRef:'lead_agent',task:evidence.output});
+""",
+    )
+    run_id = launched["run_id"]
+    paused = await waiting(plugin, run_id)
+    checkpoint = paused["checkpoints"][0]
+    assert len(runs.starts) == 1
+    decision = {"run_id": run_id, "step_id": "confirm", "attempt": 1, "artifact_version": checkpoint["artifact_version"], "decision": "approve"}
+    human = replace(context(runs), interaction="session")
+    for invalid in (context(runs), replace(human, principal=ExtensionPrincipal("bob")), ToolContext(human.principal, human.settings, "chat", agent_runs=runs, interaction="session")):
+        with pytest.raises(ValueError):
+            await actions["decide"](decision, invalid)
+    with pytest.raises(ValueError):
+        await actions["decide"]({**decision, "artifact_version": "stale"}, human)
+    await asyncio.gather(*(actions["decide"](decision, human) for _ in range(3)))
+    result = await done(plugin, run_id)
+    assert result["status"] == "completed"
+    assert len(runs.starts) == 2
+    assert result["checkpoints"][0]["decided_by"] == "alice"
+    with pytest.raises(ValueError):
+        await actions["decide"]({**decision, "decision": "reject"}, human)
+
+
+@pytest.mark.asyncio
+async def test_phase2_pause_resume_preserves_results_and_invalidates_configuration(plugin):
+    _, actions, _, runs = plugin
+    launched = await launch(
+        plugin,
+        """
+const a = await agent({stepId:'a',agentRef:'lead_agent',task:'original'});
+await pause({stepId:'break'});
+return a.output;
+""",
+    )
+    run_id = launched["run_id"]
+    paused = await waiting(plugin, run_id, "paused")
+    runs.threads[runs.starts[0][0]]["values"]["messages"].append({"type": "ai", "content": "changed later"})
+    with pytest.raises(ValueError):
+        await actions["resume"]({"run_id": run_id, "step_id": "break", "attempt": 1, "fingerprint": "changed"}, context(runs))
+    await actions["resume"]({"run_id": run_id, "step_id": "break", "attempt": 1, "fingerprint": paused["fingerprint"]}, context(runs))
+    assert (await done(plugin, run_id))["result"] == {"echo": "original"}
+    assert len(runs.starts) == 1
+    launched = await launch(plugin, "await pause({stepId:'break'}); return 1;", request_id="changed-config")
+    paused = await waiting(plugin, launched["run_id"], "paused")
+    runs.revision = "modified"
+    with pytest.raises(ValueError, match="configuration"):
+        await actions["resume"]({"run_id": launched["run_id"], "step_id": "break", "attempt": 1, "fingerprint": paused["fingerprint"]}, context(runs))
+    await actions["cancel"]({"run_id": launched["run_id"]}, context(runs))
+    assert (await done(plugin, launched["run_id"]))["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["reject", "cancel", "expiry"])
+async def test_phase2_checkpoint_stop_never_dispatches_downstream(plugin, kind):
+    from dataclasses import replace
+
+    _, actions, service, runs = plugin
+    if kind == "expiry":
+        service.config["pause_timeout_seconds"] = 1
+    launched = await launch(
+        plugin,
+        "const a=await agent({stepId:'a',agentRef:'lead_agent',task:'data'});await humanCheckpoint({stepId:'confirm',sourceStepId:'a',artifactVersion:a.artifactVersion});return await agent({stepId:'b',agentRef:'lead_agent',task:'never'});",
+    )
+    run_id = launched["run_id"]
+    paused = await waiting(plugin, run_id)
+    if kind == "reject":
+        await actions["decide"]({"run_id": run_id, "step_id": "confirm", "attempt": 1, "artifact_version": paused["checkpoints"][0]["artifact_version"], "decision": "reject"}, replace(context(runs), interaction="session"))
+    elif kind == "cancel":
+        await actions["cancel"]({"run_id": run_id}, context(runs))
+    result = await done(plugin, run_id)
+    assert result["status"] == ("cancelled" if kind == "cancel" else "failed")
+    assert len(runs.starts) == 1
+    assert not service.processes
+
+
+@pytest.mark.asyncio
+async def test_phase2_pause_does_not_consume_execution_budget_and_duplicate_resume_is_fenced(plugin):
+    _, actions, service, runs = plugin
+    service.config["timeout_seconds"] = 1
+    launched = await launch(plugin, "await pause({stepId:'first'});await pause({stepId:'second'});return 42;")
+    run_id = launched["run_id"]
+    first = await waiting(plugin, run_id, "paused")
+    await asyncio.sleep(1.1)
+    payload = {"run_id": run_id, "step_id": "first", "attempt": 1, "fingerprint": first["fingerprint"]}
+    await actions["resume"](payload, context(runs))
+    async with asyncio.timeout(5):
+        while True:
+            second = await actions["get"]({"run_id": run_id}, context(runs))
+            if len(second["checkpoints"]) == 2:
+                break
+            await asyncio.sleep(0.01)
+    await actions["resume"](payload, context(runs))
+    assert (await actions["get"]({"run_id": run_id}, context(runs)))["checkpoints"][1]["status"] == "pending"
+    await actions["resume"]({**payload, "step_id": "second"}, context(runs))
+    assert (await done(plugin, run_id))["result"] == 42
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "script",
+    [
+        "await humanCheckpoint({stepId:'c',sourceStepId:'fake',artifactVersion:'approved'});",
+        "pause({stepId:'p'}); await agent({stepId:'a',agentRef:'lead_agent',task:'forbidden'});",
+        "await pause({stepId:'p'});",
+    ],
+)
+async def test_phase2_fail_closed_checkpoint_and_restart(plugin, script):
+    _, actions, service, runs = plugin
+    launched = await launch(plugin, script)
+    run_id = launched["run_id"]
+    if script == "await pause({stepId:'p'});":
+        paused = await waiting(plugin, run_id, "paused")
+        with pytest.raises(ValueError):
+            await actions["delete"]({"run_id": run_id}, context(runs))
+        await service.stop()
+        # Simulate a crash-retained record and a new Gateway instance.
+        record = await asyncio.to_thread(service.store.get, "alice", run_id)
+        record["status"] = "paused"
+        await asyncio.to_thread(service.store.put, "alice", record)
+        from deerflow_extension_workflows.service import Workflows
+
+        replacement = Workflows(service.config)
+        await replacement.start(None)
+        try:
+            assert (await replacement.get({"run_id": run_id}, context(runs)))["status"] == "recoverable"
+            with pytest.raises(ValueError):
+                await replacement.resume({"run_id": run_id, "step_id": "p", "attempt": 1, "fingerprint": paused["fingerprint"]}, context(runs))
+        finally:
+            await replacement.stop()
+    else:
+        assert (await done(plugin, run_id))["status"] == "failed"
+    assert not runs.starts
+
+
+@pytest.mark.asyncio
+async def test_phase2_real_gateway_output_checkpoint(plugin, gateway_runtime):
+    from dataclasses import replace
+
+    runs, *_ = gateway_runtime
+    _, actions, service, _ = plugin
+    launched = await actions["launch"](
+        {"request_id": "real-approval", "script": "const a=await agent({stepId:'a',agentRef:'lead_agent',task:'first'});await humanCheckpoint({stepId:'confirm',sourceStepId:'a',artifactVersion:a.artifactVersion});return a.output;"},
+        context(runs),
+    )
+    run_id = launched["run_id"]
+    paused = await waiting(plugin, run_id)
+    retained = await actions["get_step"]({"run_id": run_id, "step_id": "a"}, context(runs))
+    assert retained["artifact_version"] == paused["checkpoints"][0]["artifact_version"]
+    await actions["decide"]({"run_id": run_id, "step_id": "confirm", "attempt": 1, "artifact_version": retained["artifact_version"], "decision": "approve"}, replace(context(runs), interaction="session"))
+    await service.wait_idle(run_id)
+    assert (await actions["get"]({"run_id": run_id}, context(runs)))["result"] == retained["output"]
+
+
+@pytest.mark.asyncio
+async def test_phase2_disconnected_decision_still_publishes_exactly_once(plugin, monkeypatch):
+    from dataclasses import replace
+
+    _, actions, service, runs = plugin
+    launched = await launch(plugin, "const a=await agent({stepId:'a',agentRef:'lead_agent',task:'x'});await humanCheckpoint({stepId:'confirm',sourceStepId:'a',artifactVersion:a.artifactVersion});return 42;")
+    run_id = launched["run_id"]
+    paused = await waiting(plugin, run_id)
+    decision = {"run_id": run_id, "step_id": "confirm", "attempt": 1, "artifact_version": paused["checkpoints"][0]["artifact_version"], "decision": "approve"}
+    persisted, release = asyncio.Event(), asyncio.Event()
+    original = service.save
+
+    async def hold(owner, record):
+        await original(owner, record)
+        if record["status"] == "waiting_approval" and record["checkpoints"][0]["status"] == "approved":
+            persisted.set()
+            await release.wait()
+
+    monkeypatch.setattr(service, "save", hold)
+    caller = asyncio.create_task(actions["decide"](decision, replace(context(runs), interaction="session")))
+    await asyncio.wait_for(persisted.wait(), 5)
+    caller.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+    release.set()
+    assert (await done(plugin, run_id))["result"] == 42
+    assert len(runs.starts) == 1
+
+
+@pytest.mark.asyncio
+async def test_phase2_inspection_example_reviews_each_stage_and_final_output(plugin, monkeypatch):
+    from dataclasses import replace
+
+    _, actions, _, runs = plugin
+    original = runs.answer
+
+    async def answer(run, input):
+        await original(run, input)
+        task = json.loads(input["messages"][0]["content"])
+        if isinstance(task, dict) and task.get("instruction", "").startswith("Return JSON with verdict"):
+            runs.threads[run.thread_id]["values"]["messages"][-1]["content"] = json.dumps({"verdict": "ready"})
+
+    monkeypatch.setattr(runs, "answer", answer)
+    script = (ROOT / "examples/deerflow-extension-workflows/examples/inspection.workflow.js").read_text(encoding="utf-8")
+    launched = await launch(
+        plugin, script, args={"complianceAgent": "lead_agent", "ingredientAgent": "lead_agent", "reportAgent": "lead_agent", "reviewerAgent": "lead_agent", "product": "synthetic", "referenceDate": "2026-10-15", "formula": []}
+    )
+    run_id = launched["run_id"]
+    for step_id, calls in [("confirm-evidence", 1), ("confirm-findings", 2), ("confirm-final-report", 4)]:
+        async with asyncio.timeout(5):
+            while True:
+                result = await actions["get"]({"run_id": run_id}, context(runs))
+                checkpoint = next((c for c in result["checkpoints"] if c["step_id"] == step_id), None)
+                if checkpoint and result["status"] == "waiting_approval":
+                    break
+                await asyncio.sleep(0.01)
+        assert len(runs.starts) == calls
+        await actions["decide"]({"run_id": run_id, "step_id": step_id, "attempt": 1, "artifact_version": checkpoint["artifact_version"], "decision": "approve"}, replace(context(runs), interaction="session"))
+    result = await done(plugin, run_id)
+    assert result["status"] == "completed", result
+    assert result["result"]["status"] == "human_confirmed_report"
+    assert result["result"]["artifactVersion"] == result["checkpoints"][-1]["artifact_version"]
+
+
+@pytest.mark.asyncio
+async def test_immutable_file_review_and_downstream_consume_same_version(plugin):
+    import base64
+    from dataclasses import replace
+
+    _, actions, _, runs = plugin
+    launched = await launch(
+        plugin,
+        """
+await agent({stepId:'report',agentRef:'lead_agent',task:'create file'});
+const file=await captureArtifact({stepId:'file',sourceStepId:'report',path:'/mnt/user-data/outputs/report.pdf'});
+await humanCheckpoint({stepId:'confirm-file',sourceStepId:'file',artifactVersion:file.artifactVersion});
+return await readArtifact({artifactVersion:file.artifactVersion});
+""",
+    )
+    run_id = launched["run_id"]
+    paused = await waiting(plugin, run_id)
+    file = paused["artifacts"][0]
+    assert file["sha256"] and file["source_run_id"]
+    with pytest.raises(ValueError, match="approved"):
+        await actions["read_artifact"]({"run_id": run_id, "version": file["version"]}, context(runs))
+    preview = await actions["get_artifact"]({"run_id": run_id, "version": file["version"]}, context(runs))
+    runs.file_content = b"overwritten source after preview"
+    decision = {"run_id": run_id, "step_id": "confirm-file", "attempt": 1, "artifact_version": file["version"], "decision": "approve"}
+    with pytest.raises(ValueError):
+        await actions["decide"]({**decision, "artifact_version": "different-version"}, replace(context(runs), interaction="session"))
+    await actions["decide"](decision, replace(context(runs), interaction="session"))
+    result = await done(plugin, run_id)
+    assert result["status"] == "completed", result
+    assert result["result"] == preview
+    assert base64.b64decode(result["result"]["content_base64"]) == b"original file"
+    source = await actions["get_step"]({"run_id": run_id, "step_id": "report"}, context(runs))
+    assert source["configuration_evidence"]["run_id"] == source["run_id"]
+
+
+@pytest.mark.asyncio
+async def test_file_reference_requires_approval_before_child_admission(plugin):
+    launched = await launch(
+        plugin,
+        "await agent({stepId:'a',agentRef:'lead_agent',task:'file'});"
+        "const f=await captureArtifact({stepId:'f',sourceStepId:'a',path:'/mnt/user-data/outputs/report.pdf'});"
+        "return await agent({stepId:'b',agentRef:'lead_agent',task:'read',artifacts:[f.artifactVersion]});",
+    )
+    result = await done(plugin, launched["run_id"])
+    assert result["status"] == "failed"
+    assert len(plugin[3].starts) == 1
+
+
+@pytest.mark.asyncio
+async def test_approved_file_reference_is_bound_to_child_input(plugin):
+    from dataclasses import replace
+
+    _, actions, _, runs = plugin
+    launched = await launch(
+        plugin,
+        "await agent({stepId:'a',agentRef:'lead_agent',task:'file'});"
+        "const f=await captureArtifact({stepId:'f',sourceStepId:'a',path:'/mnt/user-data/outputs/report.pdf'});"
+        "await humanCheckpoint({stepId:'ok',sourceStepId:'f',artifactVersion:f.artifactVersion});return await agent({stepId:'b',agentRef:'lead_agent',task:'read',artifacts:[f.artifactVersion]});",
+    )
+    run_id = launched["run_id"]
+    paused = await waiting(plugin, run_id)
+    version = paused["artifacts"][0]["version"]
+    await actions["decide"]({"run_id": run_id, "step_id": "ok", "attempt": 1, "artifact_version": version, "decision": "approve"}, replace(context(runs), interaction="session"))
+    result = await done(plugin, run_id)
+    assert result["status"] == "completed", result
+    step = await actions["get_step"]({"run_id": run_id, "step_id": "b"}, context(runs))
+    task = json.loads(runs.starts[-1][1]["messages"][0]["content"])
+    assert step["input_artifacts"] == task["approved_artifacts"]
+    assert task["approved_artifacts"][0]["version"] == version
+    assert task["approved_artifacts"][0]["sha256"] == paused["artifacts"][0]["sha256"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("duplicate", [False, True])
+async def test_parallel_approved_file_consumers_reserve_atomically(plugin, monkeypatch, duplicate):
+    import threading
+    from dataclasses import replace
+
+    _, actions, service, runs = plugin
+    service.config["max_calls"] = 8 if duplicate else 2
+    script = """
+await agent({stepId:'source',agentRef:'lead_agent',task:'file'});
+const f=await captureArtifact({stepId:'file',sourceStepId:'source',path:'/mnt/user-data/outputs/report.pdf'});
+await humanCheckpoint({stepId:'confirm',sourceStepId:'file',artifactVersion:f.artifactVersion});
+return await Promise.all([
+agent({stepId:'consumer',agentRef:'lead_agent',task:'read',artifacts:[f.artifactVersion]}),
+agent({stepId:args.second,agentRef:'lead_agent',task:'read',artifacts:[f.artifactVersion]})]);
+"""
+    launched = await launch(plugin, script, args={"second": "consumer" if duplicate else "other"})
+    run_id = launched["run_id"]
+    paused = await waiting(plugin, run_id)
+    original = service.store.artifact
+    barrier = threading.Barrier(2, timeout=5)
+    reads = []
+    lock = threading.Lock()
+
+    def synchronized(*args):
+        value = original(*args)
+        with lock:
+            reads.append(args)
+            decision_read = len(reads) == 1
+        if not decision_read:
+            barrier.wait()
+        return value
+
+    monkeypatch.setattr(service.store, "artifact", synchronized)
+    await actions["decide"]({"run_id": run_id, "step_id": "confirm", "attempt": 1, "artifact_version": paused["artifacts"][0]["version"], "decision": "approve"}, replace(context(runs), interaction="session"))
+    result = await done(plugin, run_id)
+    assert len(reads) == 3 and not barrier.broken
+    assert result["status"] == "failed", result
+    assert len(result["steps"]) <= 2
+    assert len(runs.starts) <= 2
+    assert len({s["step_id"] for s in result["steps"]}) == len(result["steps"])

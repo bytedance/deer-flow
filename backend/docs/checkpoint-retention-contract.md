@@ -73,9 +73,9 @@ resume, (c) branch from an older visible turn, and (d) orphan row counts.
 
 ## Deletion mechanics
 
-- Deletion must cover the backend's tables jointly and account for orphans, and
-  blob reachability must be computed from the **surviving checkpoints in a
-  whole-thread pass**: after deleting a checkpoint row, a `checkpoint_blobs` /
+- Deletion must cover the backend's tables jointly and account for orphans.
+  General retention computes blob reachability from the **surviving checkpoints
+  in a whole-thread pass**: after deleting a checkpoint row, a `checkpoint_blobs` /
   `checkpoint_writes` row is an orphan only if *no surviving checkpoint*
   references it. The shared-version case is not hypothetical — the real
   duration-only checkpoint is a copy of the head checkpoint dict
@@ -89,6 +89,11 @@ resume, (c) branch from an older visible turn, and (d) orphan row counts.
   payload-free: it materializes the parent's values under
   `{"writes": {"runtime_run_duration": {...}}, "source": "update", "step":
   ...}` metadata, which is what makes reclaiming it worthwhile.)
+- Bounded admission cleanup instead proves that the root duration leaf and
+  its addressable parent have identical `channel_versions` maps. It deletes
+  only that leaf's checkpoint/writes rows and leaves all blobs intact: the
+  parent still references every version the leaf did. No whole-thread blob
+  scan or GC is needed for this shape.
 - Failure semantics: if a proposed deletion cannot be proven safe against the
   protected set, it must not ship. Partial deletion that leaves a dangling
   `parent_config` converts a cleanup into a thread-level outage (branch and
@@ -116,21 +121,26 @@ duration-only leaf — which the next retention pass deletes again. Net effect
 without sequencing: the reclaimed row comes straight back, plus recurring
 store scans and an extra write per read.
 
-The wiring PR that introduces the production trigger must therefore either:
+Gateway runs retention only when the next run has won durable same-thread
+admission, before that worker's first checkpoint read, and under the local
+checkpoint lock. The cache leaf remains available while the thread is idle;
+cleanup does not run from the completion callback. The admitted run's
+`checkpoint_id` and every `checkpoint_map` selector are explicitly protected.
 
-1. **Sequence retention away from history reads** — e.g. run retention on a
-   schedule whose next pass re-reclaims the re-created leaf, or run it when
-   the thread is not being read; or
-2. **Adopt a policy that spares cache-carrying leaves** — e.g. a
-   `RetentionPolicy` flag that keeps any trailing duration-only leaf whose
-   metadata still carries `run_durations` / `run_message_ids` (same spirit
-   as the strict pending-writes guard), at the cost of not reclaiming that
-   leaf's rows.
+The production `enforce_completed_run_retention` entrypoint delegates to
+`enforce_trailing_duration_retention`: at most two checkpoint lookups (the
+root head and its parent), one checkpoint-scoped pending-write existence
+probe, and one leaf deletion. It performs no `alist`, whole-thread writes
+audit, statistics or blob GC; work does not grow with retained history length.
+The exhaustive `enforce_thread_retention` engine remains separate for
+maintenance and contract measurements. A missing parent, changed channel
+versions, or writes on the candidate makes admission cleanup a no-op.
 
-Without either, E1 pruning and history reads churn against each other. This
-decision belongs to the wiring PR, not to the storage-level service: the
-service cannot tell a cache-carrying leaf from a payload-free one on the
-alist path without re-implementing the writer's merge semantics.
+Wrapper histories are invalidated through the public cache lifecycle API
+before source deletion; an invalidation failure leaves the checkpoint intact.
+Cleanup failures are non-fatal to admission. Unpinned delta state reads retry
+once if their resolved target disappeared during hydration; explicit
+historical reads never silently move to a different checkpoint.
 
 ## Item 4 note (large tool results)
 

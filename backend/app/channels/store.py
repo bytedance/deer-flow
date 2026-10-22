@@ -42,6 +42,7 @@ import logging
 import tempfile
 import threading
 import time
+from contextlib import suppress
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -65,6 +66,10 @@ class ChannelStore(Protocol):
 
     async def set_thread_id(self, channel_name: str, chat_id: str, thread_id: str, *, topic_id: str | None = None, user_id: str = "") -> None:
         """Create or update the mapping for an IM conversation/topic (an update keeps ``created_at``)."""
+        ...
+
+    async def claim_thread_id(self, channel_name: str, chat_id: str, thread_id: str, *, topic_id: str | None = None, user_id: str = "") -> str:
+        """Map the conversation/topic to ``thread_id`` unless it is mapped already; return the mapped thread."""
         ...
 
     async def remove(self, channel_name: str, chat_id: str, topic_id: str | None = None) -> bool:
@@ -130,14 +135,25 @@ class JsonChannelStore:
 
     def _save(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        fd = tempfile.NamedTemporaryFile(mode="w", dir=self._path.parent, suffix=".tmp", delete=False)
+        fd = tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", newline="", dir=self._path.parent, suffix=".tmp", delete=False)
         try:
             json.dump(self._data, fd, indent=2)
             fd.close()
             Path(fd.name).replace(self._path)
         except BaseException:
-            fd.close()
-            Path(fd.name).unlink(missing_ok=True)
+            # Cleanup is best-effort: a failing close or unlink must not take the
+            # original save error with it, and the unlink is still attempted after
+            # a failed close.
+            try:
+                fd.close()
+            except OSError:
+                with suppress(Exception):
+                    logger.warning("Failed to close temporary channel store file %s", fd.name, exc_info=True)
+            try:
+                Path(fd.name).unlink(missing_ok=True)
+            except OSError:
+                with suppress(Exception):
+                    logger.warning("Failed to remove temporary channel store file %s", fd.name, exc_info=True)
             raise
 
     # -- sync bodies -------------------------------------------------------
@@ -159,6 +175,17 @@ class JsonChannelStore:
                 "updated_at": now,
             }
             self._save()
+
+    def _claim_sync(self, key: str, thread_id: str, user_id: str) -> str:
+        with self._lock:
+            data = self._ensure_loaded()
+            existing = data.get(key)
+            if existing:
+                return existing["thread_id"]
+            now = time.time()
+            data[key] = {"thread_id": thread_id, "user_id": user_id, "created_at": now, "updated_at": now}
+            self._save()
+            return thread_id
 
     def _remove_sync(self, channel_name: str, chat_id: str, topic_id: str | None) -> bool:
         with self._lock:
@@ -203,6 +230,9 @@ class JsonChannelStore:
     async def set_thread_id(self, channel_name: str, chat_id: str, thread_id: str, *, topic_id: str | None = None, user_id: str = "") -> None:
         await asyncio.to_thread(self._set_sync, binding_key(channel_name, chat_id, topic_id), thread_id, user_id)
 
+    async def claim_thread_id(self, channel_name: str, chat_id: str, thread_id: str, *, topic_id: str | None = None, user_id: str = "") -> str:
+        return await asyncio.to_thread(self._claim_sync, binding_key(channel_name, chat_id, topic_id), thread_id, user_id)
+
     async def remove(self, channel_name: str, chat_id: str, topic_id: str | None = None) -> bool:
         return await asyncio.to_thread(self._remove_sync, channel_name, chat_id, topic_id)
 
@@ -231,6 +261,9 @@ class SqlChannelStore:
 
     async def set_thread_id(self, channel_name: str, chat_id: str, thread_id: str, *, topic_id: str | None = None, user_id: str = "") -> None:
         await self._repo.upsert(ChannelThreadBinding.build(channel_name, chat_id, thread_id, topic_id=topic_id, user_id=user_id, now=time.time()))
+
+    async def claim_thread_id(self, channel_name: str, chat_id: str, thread_id: str, *, topic_id: str | None = None, user_id: str = "") -> str:
+        return await self._repo.claim(ChannelThreadBinding.build(channel_name, chat_id, thread_id, topic_id=topic_id, user_id=user_id, now=time.time()))
 
     async def remove(self, channel_name: str, chat_id: str, topic_id: str | None = None) -> bool:
         if topic_id is not None:
@@ -300,6 +333,9 @@ def _read_legacy_file(path: Path, *, log_missing: bool, on_corrupt: str) -> dict
     except FileNotFoundError:
         if log_missing:
             logger.debug("No legacy channel store at %s", path)
+        return None
+    except UnicodeDecodeError:
+        logger.warning(on_corrupt, path)
         return None
     except OSError:
         logger.warning(on_corrupt, path, exc_info=True)

@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+import deerflow.workspace_changes.scanner as scanner
 from deerflow.config.paths import Paths
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.runs.manager import RunManager
@@ -16,6 +17,7 @@ from deerflow.workspace_changes import (
     capture_workspace_snapshot,
     compare_snapshots,
     get_changed_output_paths,
+    get_changed_paths,
     record_workspace_changes,
     scan_workspace_roots,
 )
@@ -76,6 +78,82 @@ def test_compare_snapshots_reports_text_file_changes(tmp_path):
     assert changes["/mnt/user-data/workspace/old.txt"].status == "deleted"
 
 
+def test_cached_crlf_text_round_trips_byte_exactly_into_diffs(tmp_path):
+    """The text cache is published and read back byte-exactly on every host.
+
+    The pre-run snapshot carries its text through ``_publish_text_atomically``
+    (write) and ``_snapshot_text`` (read) while the post-run snapshot carries
+    text inline, exactly like ``record_workspace_changes``. Host newline
+    translation on either cache side would corrupt the served text and the
+    built diff (a spurious blank line per CRLF line on native Windows).
+    """
+    roots = _roots(tmp_path)
+    (roots[0].host_path / "notes.md").write_bytes(b"first\r\nsecond\r\n")
+    before_cache = tmp_path / "cache-before"
+    before = scan_workspace_roots(roots, text_cache_dir=before_cache)
+
+    (roots[0].host_path / "notes.md").write_bytes(b"first\r\nthird\r\n")
+    after = scan_workspace_roots(roots)
+
+    assert before.files["/mnt/user-data/workspace/notes.md"].text_path is not None
+    result = compare_snapshots(before, after)
+
+    change = {c.path: c for c in result.files}["/mnt/user-data/workspace/notes.md"]
+    assert "-second" in change.diff
+    assert "+third" in change.diff
+    # Pin the line counts: a host that translates newlines on the cache write
+    # and re-translates on read rounds the cached text up to "first\n\nsecond\n"
+    # (one spurious blank line per CRLF line), which shows up here as an extra
+    # deletion line. "-second"/"+third" alone stay present under that bug, so
+    # only the counts catch it — on any host, not just native Windows.
+    assert (change.additions, change.deletions) == (1, 1), change.diff
+
+
+@pytest.mark.parametrize("include_text", [False, True])
+@pytest.mark.parametrize("size", [16, SAMPLE_BYTES + 1])
+def test_scan_keeps_other_files_when_a_file_disappears_before_hashing(tmp_path, monkeypatch, include_text, size):
+    roots = _roots(tmp_path)
+    workspace, outputs = [root.host_path for root in roots]
+    # Byte-pinned fixtures (tests/AGENTS.md): a text-mode write translates the
+    # LF byte into CRLF on native Windows, and the compared snapshot text
+    # would then round-trip as "report\r\n" instead of "report\n".
+    (workspace / "a-kept.txt").write_bytes(b"kept\n")
+    vanished = workspace / "scratch.txt"
+    vanished.write_text("x" * size, encoding="utf-8")
+    (outputs / "report.md").write_bytes(b"report\n")
+    real_hash = scanner._sha256_file
+    removed = []
+
+    def remove_before_hash(path):
+        if path == vanished:
+            path.unlink()
+            removed.append(path)
+        return real_hash(path)
+
+    monkeypatch.setattr(scanner, "_sha256_file", remove_before_hash)
+
+    snapshot = scan_workspace_roots(roots, include_text=include_text)
+
+    assert removed == [vanished]
+    assert set(snapshot.files) == {"/mnt/user-data/workspace/a-kept.txt", "/mnt/user-data/outputs/report.md"}
+    assert snapshot.files["/mnt/user-data/outputs/report.md"].sha256 is not None
+    assert snapshot.files["/mnt/user-data/outputs/report.md"].text == ("report\n" if include_text else None)
+
+
+@pytest.mark.parametrize("error", [PermissionError("denied"), OSError("disk read failed")])
+def test_scan_does_not_hide_operational_hash_errors(tmp_path, monkeypatch, error):
+    roots = _roots(tmp_path)
+    (roots[0].host_path / "report.md").write_text("report\n", encoding="utf-8")
+
+    def fail_hash(path):
+        raise error
+
+    monkeypatch.setattr(scanner, "_sha256_file", fail_hash)
+
+    with pytest.raises(type(error), match=str(error)):
+        scan_workspace_roots(roots)
+
+
 def test_get_changed_output_paths_returns_only_created_or_modified_regular_outputs(tmp_path):
     roots = _roots(tmp_path)
     workspace = roots[0].host_path
@@ -95,6 +173,55 @@ def test_get_changed_output_paths_returns_only_created_or_modified_regular_outpu
         "/mnt/user-data/outputs/created.md",
         "/mnt/user-data/outputs/existing.md",
     ]
+
+
+@pytest.mark.parametrize(
+    ("before_contents", "after_contents", "expected_statuses"),
+    [
+        pytest.param(
+            {"b.txt": "before", "c.txt": "unchanged"},
+            {"a.txt": "new", "b.txt": "before", "c.txt": "unchanged"},
+            {"a.txt": "created"},
+            id="insertion-pushes-existing-file-out-of-scan",
+        ),
+        pytest.param(
+            {"a.txt": "removed", "b.txt": "before", "c.txt": "unchanged"},
+            {"b.txt": "before", "c.txt": "unchanged"},
+            {"a.txt": "deleted"},
+            id="deletion-brings-existing-file-into-scan",
+        ),
+        pytest.param(
+            {"a.txt": "removed", "b.txt": "before", "c.txt": "unchanged"},
+            {"b.txt": "after", "c.txt": "unchanged", "d.txt": "new"},
+            {"b.txt": "modified"},
+            id="both-truncated-preserve-observed-modifications",
+        ),
+    ],
+)
+def test_workspace_changes_do_not_infer_absence_from_truncated_snapshots(tmp_path, before_contents, after_contents, expected_statuses):
+    roots = _roots(tmp_path)
+    outputs = roots[1].host_path
+    limits = WorkspaceChangeLimits(max_scanned_files=2)
+    for name, content in before_contents.items():
+        (outputs / name).write_text(content, encoding="utf-8")
+    before = scan_workspace_roots(roots, limits=limits)
+
+    for name in before_contents.keys() - after_contents.keys():
+        (outputs / name).unlink()
+    for name, content in after_contents.items():
+        (outputs / name).write_text(content, encoding="utf-8")
+    after = scan_workspace_roots(roots, limits=limits)
+
+    result = compare_snapshots(before, after, limits=limits)
+
+    expected = {f"/mnt/user-data/outputs/{name}": status for name, status in expected_statuses.items()}
+    assert {change.path: change.status for change in result.files} == expected
+    assert result.summary.created == list(expected.values()).count("created")
+    assert result.summary.modified == list(expected.values()).count("modified")
+    assert result.summary.deleted == list(expected.values()).count("deleted")
+    assert result.summary.truncated is True
+    assert get_changed_paths(before, after) == set(expected)
+    assert get_changed_output_paths(before, after) == sorted(path for path, status in expected.items() if status != "deleted")
 
 
 def test_compare_snapshots_treats_utf16_markdown_as_text(tmp_path):
@@ -234,6 +361,28 @@ def test_count_diff_lines_counts_content_starting_with_dashes_or_pluses():
 
     assert additions == 1
     assert deletions == 1
+
+
+def test_scan_workspace_roots_walks_subdirectories_in_sorted_order(tmp_path, monkeypatch):
+    # The truncation boundary must not depend on the filesystem's directory order.
+    roots = _roots(tmp_path)
+    workspace = roots[0].host_path
+    for name in ("a", "b"):
+        (workspace / name).mkdir()
+        (workspace / name / "file.txt").write_text(name, encoding="utf-8")
+    real_walk = os.walk
+
+    def reversed_walk(top, *args, **kwargs):
+        for dirpath, dirnames, filenames in real_walk(top, *args, **kwargs):
+            dirnames.sort(reverse=True)
+            yield dirpath, dirnames, filenames
+
+    monkeypatch.setattr(scanner.os, "walk", reversed_walk)
+
+    snapshot = scan_workspace_roots(roots, limits=WorkspaceChangeLimits(max_scanned_files=1))
+
+    assert snapshot.truncated is True
+    assert list(snapshot.files) == ["/mnt/user-data/workspace/a/file.txt"]
 
 
 def test_scan_workspace_roots_skips_excluded_directories(tmp_path):

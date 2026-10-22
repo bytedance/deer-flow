@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
 from deerflow.persistence.scheduled_task_runs.projection import account_launch, can_project, once_run_still_scheduled
-from deerflow.scheduler.schedules import next_run_at
+from deerflow.scheduler.schedules import next_run_at, should_advance_schedule_cursor
 from deerflow.utils.time import coerce_iso
 
 if TYPE_CHECKING:
@@ -155,7 +155,10 @@ async def finalize_occurrence(
         task.last_run_at = launched_at
         task.last_run_id = run_id
         task.last_thread_id = occurrence.thread_id
-        task.next_run_at = next_run_at(task.schedule_type, task.schedule_spec, task.timezone, now=launched_at)
+        # A manual recurring run is an extra trial. Keep the task's existing
+        # cadence; only scheduled runs and once-task boundary logic advance it.
+        if should_advance_schedule_cursor(task.schedule_type, trigger=occurrence.trigger):
+            task.next_run_at = next_run_at(task.schedule_type, task.schedule_spec, task.timezone, now=launched_at)
         task.lease_owner = None
         task.lease_expires_at = None
         if task.schedule_type != "once" and task.status == "running":

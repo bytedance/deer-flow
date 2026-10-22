@@ -163,6 +163,12 @@ const CASES: Case[] = [
     zh: `目标${OBJECTIVE}已停止详情 | 已达到 token 预算。发送消息即可继续，新的运行会重新计算预算。`,
   },
   {
+    name: "stopped at the loop safety limit",
+    props: { goal: stoodDown("loop_capped") },
+    en: `Goal${OBJECTIVE}StoppedDetails | Repeated tool calls triggered a safety stop. Adjust the approach and send a new message to retry; your goal stays active.`,
+    zh: `目标${OBJECTIVE}已停止详情 | 重复工具调用触发了安全停止。调整要求后发送新消息即可重试，目标会保留。`,
+  },
+  {
     name: "stopped without evidence (count 0)",
     props: { goal: stoodDown("blocked:missing_evidence") },
     en: `Goal${OBJECTIVE}StoppedDetails | Goal check: evidence missing. Ask it to show the result or explain what's missing; if the goal no longer applies, run /goal clear.`,

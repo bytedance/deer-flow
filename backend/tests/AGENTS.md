@@ -1,5 +1,9 @@
 # Backend Tests
 
+`test_image_result_url_safety.py` drives GroundRoute through `ainvoke` and an
+offline HTTPX transport. Patch only the provider's `httpx` reference; preserve
+the shared client and exercise real configuration resolution and URL screening.
+
 `test_client_upload_snapshot.py` keeps upload publication and conversion on the
 same private capture. Cover source edits/removal, both conversion branches,
 same-file rejection, metadata and cleanup; retain sandbox symlink defenses.
@@ -9,6 +13,20 @@ assert one source open, original metadata, preserved competing uploads, companio
 ownership and capture cleanup. Retain the real XLSX conversion coverage.
 
 Backend tests must preserve the runtime invariants they exercise without changing production execution topology.
+
+`test_goal_loop_stop_probe.py` runs the standalone Goal-loop reproduction through the native graph, loop middleware, worker and checkpoints. Only model responses are scripted; do not replace the Goal decision or simulate the stop-reason write.
+
+InfoQuest fetch log assertions install the real `UrlRedactionFilter` on the
+capture handler with fixture-scoped cleanup. Expect scheme/host context with
+redacted paths, so isolated runs and full-suite logging configuration agree;
+keep payload omission and tool-result assertions intact.
+
+`.github/workflows/backend-windows-live-policy.yml` runs the child-env contract and all
+four live-test collection policy cases on Windows/Python 3.12, weekly, manually,
+and for relevant PR changes. These children only collect live tests. Keep the
+make-dependent checks in the default suite. The workflow-selection regression
+in `test_client_live_policy.py` collects the configured pytest nodes and pins
+all five policy checks, so a partial name filter cannot silently omit cases.
 
 Runtime-callback cleanup tests keep DEBUG capture enabled and implement graph
 checkpoint reads. Fixture-only exception tracebacks can retain the journal;
@@ -98,6 +116,8 @@ must fail rather than receive a fabricated IPv4 answer.
 The local sandbox's UTF-8 subprocess guard inspects each text-mode call with
 `ast`, checking both `encoding` and `errors`; module-wide literal counts can
 hide unpinned calls behind unrelated settings.
+Channel JSON state coverage likewise checks each writer and Discord reader call
+within its owning class/method; unrelated encoding literals must not mask a regression.
 
 ## PostgreSQL batch fixtures
 
@@ -161,6 +181,25 @@ tree left behind. Do not replace these behavioral checks with assertions about
 source formatting or duplicate the runtime publication control in
 `test_lark_cli_atomic_publish.py`.
 
+## Channel staging cleanup
+
+`test_channel_staging_cleanup.py` blocks the rename destination (a non-empty
+directory, because an empty one would just swallow the staged file) and fails
+`Path.unlink`, the descriptor `close()`, and the log handler in turn. Assert the
+save error is what propagates, that the unlink is still attempted after a failed
+close, and that a staged copy the cleanup could not remove is named in a warning.
+Keep these as injected-failure behavior checks: an assertion that the handler
+source merely contains `suppress` would pass while the close error still skipped
+the unlink.
+
+`test_channel_credential_staging.py` leaves copies through the real credential writers, then ages
+one for restart cleanup. Preserve current credentials, recent peer staging, anonymous files,
+symlinks, directories and nested attachments. Exercise SQL startup after the legacy file is gone,
+plus failed unlink/listing and a real delayed FileHandler whose parent is missing. WeChat startup
+cleanup must also pass the strict blocking-I/O gate. Buzz failure tests keep the original write
+exception attributable through close/unlink/diagnostic errors, retain pending events for a later
+flush, and propagate interruptions after cleanup.
+
 ## Lark CLI blocking-I/O fixtures
 
 `blocking_io/test_integrations_router.py` uses a real local CLI stub: a `.cmd`
@@ -168,6 +207,25 @@ script on Windows and an executable shell script on POSIX. Resolve it through
 the production PATH lookup, including a directory containing spaces. Seed fake
 app credentials so auth completion reaches the CLI instead of returning early,
 and keep fixture filesystem work behind `asyncio.to_thread`.
+
+## Lark device-login single-flight
+
+`test_lark_auth_singleflight.py` pins the `(user_id, generation)` single-flight
+contract: request timeouts leave one shared CLI alive; supersession terminates
+it, including its POSIX process group. Forked workers share a credential root;
+every CLI gets the invocation-log environment so duplicate spawns are visible.
+Publication grace starts at observed CLI exit, independent of login duration.
+Cover publication between a foreign result read and its marker probe.
+`test_lark_auth_lifecycle_failures.py` injects storage and startup failures:
+terminal marker receipts prevent retrying uncertain single-use codes, cleanup
+errors preserve published results, and failed starts reap children and wake
+waiters. Treat unhandled worker-thread warnings as errors. Event-driven process
+doubles must be released/killed and joined at teardown.
+`test_lark_credential_tree_churn.py` removes real descendants at each walk step;
+assert the injection fired and surviving secrets reached private modes. Missing
+roots, permission errors and symlinks remain errors. Mutations must fail these
+assertions; merely returning without an exception is insufficient.
+Run mutations on a copied harness; never swap checkout sources during tests.
 
 ## Remote read fixtures
 
@@ -290,7 +348,11 @@ secrets, shell/Compose dotenv overrides, readable read-only secrets, and teardow
 without secret exports. `down` must not probe, read, or generate secrets.
 Writable-directory cases remain portable.
 
-## Workspace text cache
+## Workspace snapshots and text cache
+
+`test_workspace_changes.py` and `test_run_worker_delivery.py` remove real files
+at the hash-read boundary. A vanished source must not discard other file records
+or produced-output detection; permission and other hash I/O errors still propagate.
 
 `test_scanner_text_cache_atomic.py` verifies complete publication and preservation
 of an existing entry on failure. A cleanup failure must preserve the original
@@ -300,3 +362,18 @@ setup, after the autouse fixtures initialize runtime, to avoid the package cycle
 ### Web model provider presets
 
 `test_managed_provider_presets.py` covers encrypted compatibility, auto IDs, key switching, snapshot isolation and native/compatible protocols. Its HTTP double is below actual LangChain/vendor SDK serialization; do not replace these adapters with successful stubs. `test_managed_presets_live.py` requires explicit opt-in and vendor credentials, and remains skipped in CI.
+
+## Helm Redis credentials
+
+`test_helm_redis_existing_secret.py` renders the chart and executes its startup
+and both probe commands with argument-recording Redis stubs through
+`support.shell.require_posix_sh`. Keep missing/empty password keys, stale
+`redis.auth.password` values, Secret precedence, external mode and shell
+metacharacters covered.
+Render tests skip when Helm is unavailable; they need no Kubernetes cluster.
+## Multi-instance harness
+
+Multi-instance harness tests use `support.shell.require_script_bash()` for shell
+smoke checks. Keep config content and secret stability checks portable; isolate
+POSIX owner-only permission assertions so Windows skips only those checks.
+Nginx path expectations must include quoted-string escaping for native paths.

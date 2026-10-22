@@ -23,6 +23,7 @@ from deerflow.persistence.scheduled_tasks.model import (
 )
 from deerflow.scheduler.host_notes import RUN_ERROR_END_REACHED
 from deerflow.scheduler.schedules import next_run_at as compute_next_run_at
+from deerflow.scheduler.schedules import should_advance_schedule_cursor
 from deerflow.utils.time import coerce_iso
 
 EXECUTING_RUN_STATUSES: tuple[str, ...] = ("launching", "running")
@@ -211,12 +212,15 @@ class ScheduledTaskRunRepository:
         task.last_run_at = launched_at
         task.last_run_id = candidate.run_id
         task.last_thread_id = row.thread_id
-        task.next_run_at = compute_next_run_at(
-            task.schedule_type,
-            task.schedule_spec,
-            task.timezone,
-            now=launched_at,
-        )
+        # A manual recurring run is an extra trial. Keep the task's existing
+        # cadence while repairing launch bookkeeping after a crash.
+        if should_advance_schedule_cursor(task.schedule_type, trigger=row.trigger):
+            task.next_run_at = compute_next_run_at(
+                task.schedule_type,
+                task.schedule_spec,
+                task.timezone,
+                now=launched_at,
+            )
         task.lease_owner = None
         task.lease_expires_at = None
         task.updated_at = datetime.now(UTC)
@@ -875,6 +879,13 @@ class ScheduledTaskRunRepository:
                 task = await self._lock_task(session, task_id)
                 row = await session.get(ScheduledTaskRunRow, row_id, with_for_update=True)
                 if row is None or row.status != "launching":
+                    continue
+                # The scan only identifies candidates. While waiting for the
+                # parent lock, the old launch can requeue and a manual trigger
+                # can claim this same occurrence again, even under the same
+                # lease owner. Revalidate expiry under the write lock before
+                # clearing any claim or reconciling its underlying run.
+                if _lease_is_alive(row.lease_expires_at, now=now, grace_seconds=0):
                     continue
                 candidate = await self._find_underlying_run(session, row, task)
                 row.lease_owner = None
