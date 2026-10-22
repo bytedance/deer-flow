@@ -1533,7 +1533,7 @@ Skills are what make DeerFlow do *almost anything*.
 
 A standard Agent Skill is a structured capability module — a Markdown file that defines a workflow, best practices, and references to supporting resources. DeerFlow ships with built-in skills for research, report generation, slide creation, web pages, image and video generation, and more. But the real power is extensibility: add your own skills, replace the built-in ones, or combine them into compound workflows.
 
-The [music-generation skill](skills/public/music-generation/SKILL.md#output-handling) preserves existing output when the provider returns malformed, empty or unrecognized audio.
+The [music-generation skill](skills/public/music-generation/SKILL.md#output-handling) preserves existing output when the provider returns malformed, empty or unrecognized audio. Its CLI reports generation failures with a nonzero exit status and diagnostics on stderr.
 
 Skills are loaded progressively — only when the task needs them, not all at once. This keeps the context window lean and makes DeerFlow work well even with token-sensitive models.
 

@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import sys
 
 import requests
 
@@ -35,7 +36,7 @@ def generate_music(prompt_file: str, output_file: str) -> str:
 
     api_key = os.getenv("MINIMAX_API_KEY")
     if not api_key:
-        return "MINIMAX_API_KEY is not set"
+        raise ValueError("MINIMAX_API_KEY is not set")
 
     prompt = (spec.get("prompt") or "").strip()
     if not prompt:
@@ -103,4 +104,5 @@ if __name__ == "__main__":
     try:
         print(generate_music(args.prompt_file, args.output_file))
     except Exception as e:
-        print(f"Error while generating music: {e}")
+        print(f"Error while generating music: {e}", file=sys.stderr)
+        sys.exit(1)
