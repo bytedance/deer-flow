@@ -167,6 +167,7 @@ Reuse stock `Sidebar`; close before link navigation and on pathname changes,
 preserving page focus. Dismissal restores the opener or remounted rail trigger.
 `WorkspaceSidebarTrigger` owns surface icons/ARIA; keep generated UI unchanged.
 Test frame DOM behavior and `tests/e2e/sidebar.spec.ts`.
+Agents headers/actions wrap with the rail; sidebar E2E tests cover bounds.
 
 Scheduled-task list search filters the current authorized query result by title or
 prompt, composing with status/type filters and thread scope. Selection must derive

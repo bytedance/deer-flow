@@ -1,3 +1,5 @@
+import { writeFile } from "node:fs/promises";
+
 import { expect, test } from "@playwright/test";
 
 import { MOCK_THREAD_ID, mockLangGraphAPI } from "./utils/mock-api";
@@ -194,6 +196,142 @@ test.describe("Sidebar navigation", () => {
         await expect(search).toBeFocused();
         await page.keyboard.type("Find a conversation");
         await expect(search).toHaveValue("Find a conversation");
+      });
+    }
+  });
+
+  test.describe("Agents gallery header", () => {
+    for (const width of [390, 767, 1280]) {
+      test.describe(`${width}px`, () => {
+        test.use({ hasTouch: width < 768 });
+
+        for (const preference of ["false", "true"]) {
+          test(`keeps header actions usable with sidebar_state=${preference}`, async ({
+            page,
+            context,
+            baseURL,
+          }) => {
+            await context.addCookies([
+              { name: "sidebar_state", value: preference, url: baseURL! },
+            ]);
+            await page.setViewportSize({ width, height: 812 });
+            mockLangGraphAPI(page);
+            await page.goto("/workspace/agents");
+            if (width < 768 && preference === "false") {
+              await expect(
+                page.locator(
+                  "[data-sidebar='sidebar'][data-collapsible='icon']:visible",
+                ),
+              ).toBeVisible();
+            }
+
+            const title = page.getByRole("heading", { level: 1 });
+            const description = title.locator("..").locator("p");
+            const importButton = page.getByRole("button", {
+              name: "Import Agent",
+              exact: true,
+            });
+            const newAgentButtons = page.getByRole("button", {
+              name: "New Agent",
+              exact: true,
+            });
+            const headerNewAgentButton = newAgentButtons.first();
+            await expect(title).toBeVisible();
+            // The mocked empty gallery also exposes a second New Agent button.
+            await expect(newAgentButtons).toHaveCount(2);
+            await page.evaluate(() =>
+              document.fonts.ready.then(() => undefined),
+            );
+
+            try {
+              const content = await page
+                .locator("[data-slot='sidebar-inset']")
+                .boundingBox();
+              expect(content).not.toBeNull();
+              const elements = [
+                { name: "title", locator: title },
+                { name: "description", locator: description },
+                { name: "import", locator: importButton },
+                { name: "newAgent", locator: headerNewAgentButton },
+              ];
+              const geometry = await Promise.all(
+                elements.map(async ({ name, locator }) => ({
+                  name,
+                  box: await locator.boundingBox(),
+                })),
+              );
+              const geometryPath = test
+                .info()
+                .outputPath(`agents-header-${width}-${preference}.json`);
+              await writeFile(
+                geometryPath,
+                JSON.stringify({
+                  viewport: width,
+                  documentWidth: await page.evaluate(
+                    () => document.documentElement.scrollWidth,
+                  ),
+                  content,
+                  elements: geometry,
+                }),
+                "utf8",
+              );
+              await test.info().attach("agents-header-geometry", {
+                path: geometryPath,
+                contentType: "application/json",
+              });
+              for (const { locator } of elements) {
+                await expect(locator).toBeVisible();
+                const box = await locator.boundingBox();
+                expect(box).not.toBeNull();
+                expect(box!.x).toBeGreaterThanOrEqual(content!.x - 1);
+                expect(box!.x + box!.width).toBeLessThanOrEqual(width + 1);
+              }
+              await expect
+                .poll(() =>
+                  page.evaluate(() => document.documentElement.scrollWidth),
+                )
+                .toBeLessThanOrEqual(width);
+              if (width === 390) {
+                const descriptionBox = await description.boundingBox();
+                // A fully visible but word-wide description is still unusable.
+                expect(descriptionBox!.width).toBeGreaterThan(width / 2);
+              }
+            } finally {
+              const screenshot = test
+                .info()
+                .outputPath(`agents-header-${width}-${preference}.png`);
+              await page.screenshot({
+                path: screenshot,
+                animations: "disabled",
+              });
+              await test.info().attach("agents-header", {
+                path: screenshot,
+                contentType: "image/png",
+              });
+            }
+
+            const fileChooserOpened = page.waitForEvent("filechooser");
+            if (width < 768) {
+              await importButton.tap();
+            } else {
+              await importButton.click();
+            }
+            const fileChooser = await fileChooserOpened;
+            await fileChooser.setFiles([]);
+            expect(
+              (await context.cookies()).find(
+                (cookie) => cookie.name === "sidebar_state",
+              )?.value,
+            ).toBe(preference);
+
+            if (width < 768) {
+              await headerNewAgentButton.tap();
+            } else {
+              await headerNewAgentButton.click();
+            }
+            await expect(page).toHaveURL(/\/workspace\/agents\/new$/);
+          });
+        }
       });
     }
   });

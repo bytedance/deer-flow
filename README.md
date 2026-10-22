@@ -1471,6 +1471,8 @@ toggle opens the full navigation drawer; closing the drawer returns to the icon
 bar without changing your saved desktop sidebar preference. Navigating to another
 page also closes the mobile drawer and preserves the destination page's focus.
 Dismissing the drawer returns keyboard focus to the control that opened it.
+The Agents gallery header wraps to the available width so its import and create
+actions remain visible beside the compact sidebar on narrow screens.
 
 ### Skills & Tools
 
