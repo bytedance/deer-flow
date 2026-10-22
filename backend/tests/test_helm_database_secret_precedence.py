@@ -54,8 +54,22 @@ def _postgres_secrets(documents: list[dict]) -> list[str]:
         (("postgresql.existingSecret=custom-pg",), "custom-pg"),
         (("postgresql.external.existingSecret=ext-pg",), "ext-pg"),
         (("postgresql.existingSecret=custom-pg", "postgresql.external.existingSecret=ext-pg"), "ext-pg"),
+        # Falsy non-string values are how people spell "not set" in values.yaml.
+        # The old if/else-if treated them as unset, and the helper has to keep
+        # doing that: `or` returns its last operand even when it is falsy, which
+        # would name the Secret `false`. `default ""` yields an empty string
+        # instead, so the chart-managed branch is taken.
+        (("postgresql.existingSecret=false",), None),
+        (("postgresql.external.existingSecret=false", "postgresql.existingSecret=false"), None),
     ],
-    ids=["chart-managed", "existing-secret", "external-secret", "external-wins"],
+    ids=[
+        "chart-managed",
+        "existing-secret",
+        "external-secret",
+        "external-wins",
+        "existing-secret-false",
+        "both-secrets-false",
+    ],
 )
 def test_gateway_and_postgres_resolve_the_same_secret(settings: tuple[str, ...], expected: str | None) -> None:
     documents = _render_chart(*settings)

@@ -135,10 +135,16 @@ imagePullSecrets:
 
 {{/* Name of the operator-managed postgres Secret, or empty when the chart owns
      the credentials. This is the only place the precedence chain is encoded:
-     databaseUrlSecret derives from it, so a source added here cannot make the
-     gateway and the postgres StatefulSet read different Secrets. */}}
+     databaseUrlSecret, the gateway's DATABASE_URL, the StatefulSet's
+     POSTGRES_PASSWORD and postgres-secret.yaml's render gate all read it, so a
+     source added here cannot make them disagree.
+
+     `default` rather than `or`: `or` returns its last operand even when falsy,
+     so a `existingSecret: false` (or `0`) would render the literal name
+     "false". Chaining `default` keeps the old if/else-if truthiness and yields
+     an empty string for any falsy value. */}}
 {{- define "deer-flow.databaseUserSecret" -}}
-{{- or .Values.postgresql.external.existingSecret .Values.postgresql.existingSecret -}}
+{{- .Values.postgresql.external.existingSecret | default .Values.postgresql.existingSecret | default "" -}}
 {{- end -}}
 
 {{/* Name of the Secret holding DATABASE_URL (and, in bundled mode, the
