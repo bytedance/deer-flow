@@ -67,7 +67,13 @@ Checkpointer storage runs in one of two channel modes, selected by `checkpoint_c
 **Journal capture**: Image-only input stops batch scans and later human-event
 capture despite an empty summary. AI summaries strip leading think sections
 before the 2000-character cap, preserving events, literal answer tags, and
-prior useful summaries. Tests: `test_run_journal*.py` (callbacks, full/delta).
+prior useful summaries. When an admitted run is interrupted after root assistant
+text was published but before `on_llm_end`, the worker records the accumulated
+visible text as an interrupted partial `llm.ai.response` feed event after the
+agent stream closes. Completed responses win cancellation races by message ID;
+hidden, subgraph, unpublished, and ID-less chunks are not recovered. Partial
+events never enter authoritative checkpoint state. Tests: `test_run_journal*.py`
+(callbacks, full/delta) and `test_run_worker_rollback.py` (interruption recovery).
 
 **Per-call LLM telemetry** (`runtime/journal.py`): `RunJournal` adds observation-only keys
 to `llm.ai.response` metadata and to `llm.error` metadata (previously empty): `langchain_run_id`,
@@ -107,6 +113,8 @@ from `on_llm_end` before inspecting the response or touching any run state.
 answers for paginated history. See `docs/skill-usage-ui.md`.
 
 **Run delivery receipts:** Finalize artifact evidence and terminal status before clearing an ordinary satisfied goal, under a checkpoint-write reservation. Delivery failure retains the goal without continuing. Only that clear writes `goal_outcome`; other goal writes remove it. Historical replay keeps the current goal and budget, and drops the old outcome. Scheduled exception below; details: `backend/docs/runtime-guidance-details.md`.
+
+**Workspace change detection:** Truncated snapshots cannot prove absence. Mark skipped delivery verification in the receipt. Details: `backend/docs/runtime-guidance-details.md`.
 
 Unmet goals stand down on run-level token/loop hard stops and retain the original stop reason; hidden continuations must not re-enter that run's shared safety state.
 
