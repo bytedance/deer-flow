@@ -366,6 +366,7 @@ def detect_from_config(path: Path) -> list[str]:
     if (nested_section_value(lines, "sandbox.ownership", "type") or "").lower() == "redis":
         extras.add("redis")
     connections_enabled = (section_value(lines, "channel_connections", "enabled") or "").lower() == "true"
+    # Only channel providers with extras in backend/pyproject.toml [project.optional-dependencies] belong here; keep this set in sync.
     for provider in ("discord", "buzz"):
         legacy_enabled = (nested_section_value(lines, f"channels.{provider}", "enabled") or "").lower() == "true"
         browser_enabled = connections_enabled and (nested_section_value(lines, f"channel_connections.{provider}", "enabled") or "").lower() == "true"

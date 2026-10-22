@@ -85,7 +85,11 @@ For Discord and Buzz, detect the provider extra when either legacy
 `channels.<provider>.enabled` is true or both `channel_connections.enabled`
 and `channel_connections.<provider>.enabled` are true. Keep these gates aligned
 with `enabled_transport_providers()` in the channel service, including setup
-wizard output. Nonempty `UV_EXTRAS` continues to override config-derived extras.
+wizard output. The provider set includes only channel providers declared in
+`backend/pyproject.toml` under `[project.optional-dependencies]`; update it when
+a channel gains or loses an extra. Providers whose SDKs are core dependencies
+must not be added to this set. Nonempty `UV_EXTRAS` continues to override
+config-derived extras.
 `serve.sh`'s config-presence gate also accepts the project-root file when the
 checkout has no config. `tests/test_serve_config_presence.py` runs the full
 launcher through dependency detection with service operations stubbed.
