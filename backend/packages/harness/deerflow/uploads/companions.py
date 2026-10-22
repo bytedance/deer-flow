@@ -13,6 +13,8 @@ import os
 import tempfile
 from pathlib import Path
 
+from deerflow.utils.atomic_write import cleanup_failed_atomic_write
+
 logger = logging.getLogger(__name__)
 
 
@@ -38,8 +40,11 @@ def register_companion(original: Path, markdown: Path) -> None:
     source_stat = original.stat(follow_symlinks=False)
     markdown_stat = markdown.stat(follow_symlinks=False)
     fd, staged = tempfile.mkstemp(prefix=".companion-", dir=records_dir)
+    staged_path = Path(staged)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as output:
+        output = os.fdopen(fd, "w", encoding="utf-8")
+        fd = None  # The file object now owns the descriptor.
+        with output:
             json.dump(
                 {
                     "original": original.name,
@@ -49,10 +54,10 @@ def register_companion(original: Path, markdown: Path) -> None:
                 },
                 output,
             )
-        os.replace(staged, record)
-    finally:
-        if os.path.exists(staged):
-            os.unlink(staged)
+        os.replace(staged_path, record)
+    except BaseException:
+        cleanup_failed_atomic_write(staged_path, fd)
+        raise
 
 
 def unregister_companion(original: Path) -> None:

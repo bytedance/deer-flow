@@ -77,15 +77,49 @@ def test_compare_snapshots_reports_text_file_changes(tmp_path):
     assert changes["/mnt/user-data/workspace/old.txt"].status == "deleted"
 
 
+def test_cached_crlf_text_round_trips_byte_exactly_into_diffs(tmp_path):
+    """The text cache is published and read back byte-exactly on every host.
+
+    The pre-run snapshot carries its text through ``_publish_text_atomically``
+    (write) and ``_snapshot_text`` (read) while the post-run snapshot carries
+    text inline, exactly like ``record_workspace_changes``. Host newline
+    translation on either cache side would corrupt the served text and the
+    built diff (a spurious blank line per CRLF line on native Windows).
+    """
+    roots = _roots(tmp_path)
+    (roots[0].host_path / "notes.md").write_bytes(b"first\r\nsecond\r\n")
+    before_cache = tmp_path / "cache-before"
+    before = scan_workspace_roots(roots, text_cache_dir=before_cache)
+
+    (roots[0].host_path / "notes.md").write_bytes(b"first\r\nthird\r\n")
+    after = scan_workspace_roots(roots)
+
+    assert before.files["/mnt/user-data/workspace/notes.md"].text_path is not None
+    result = compare_snapshots(before, after)
+
+    change = {c.path: c for c in result.files}["/mnt/user-data/workspace/notes.md"]
+    assert "-second" in change.diff
+    assert "+third" in change.diff
+    # Pin the line counts: a host that translates newlines on the cache write
+    # and re-translates on read rounds the cached text up to "first\n\nsecond\n"
+    # (one spurious blank line per CRLF line), which shows up here as an extra
+    # deletion line. "-second"/"+third" alone stay present under that bug, so
+    # only the counts catch it — on any host, not just native Windows.
+    assert (change.additions, change.deletions) == (1, 1), change.diff
+
+
 @pytest.mark.parametrize("include_text", [False, True])
 @pytest.mark.parametrize("size", [16, SAMPLE_BYTES + 1])
 def test_scan_keeps_other_files_when_a_file_disappears_before_hashing(tmp_path, monkeypatch, include_text, size):
     roots = _roots(tmp_path)
     workspace, outputs = [root.host_path for root in roots]
-    (workspace / "a-kept.txt").write_text("kept\n", encoding="utf-8")
+    # Byte-pinned fixtures (tests/AGENTS.md): a text-mode write translates the
+    # LF byte into CRLF on native Windows, and the compared snapshot text
+    # would then round-trip as "report\r\n" instead of "report\n".
+    (workspace / "a-kept.txt").write_bytes(b"kept\n")
     vanished = workspace / "scratch.txt"
     vanished.write_text("x" * size, encoding="utf-8")
-    (outputs / "report.md").write_text("report\n", encoding="utf-8")
+    (outputs / "report.md").write_bytes(b"report\n")
     real_hash = scanner._sha256_file
     removed = []
 

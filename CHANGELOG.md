@@ -6916,6 +6916,14 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
 
 ### Security
 
+- **uploads:** Thread uploads (`POST /api/threads/{thread_id}/uploads`), upload
+  deletes (`DELETE /api/threads/{thread_id}/uploads/{filename}`) and shelf
+  attach-to-thread no longer put the raw `OSError` text in their `500` detail. A
+  permission error, or a disk too full to create the staging file, answered with
+  the absolute host path of the thread's uploads directory, including the user
+  and thread IDs. They now return `Failed to upload <name>.` /
+  `Failed to delete <name>.`, and the full error stays in the Gateway log. ([#7217])
+  
 - **agents:** The custom-agent and user-profile routes no longer put the raw
   exception text in their `500` detail. An unparsable agent `config.yaml` or a
   filesystem error (`[Errno 13]` and the like) made them answer with the
@@ -12994,4 +13002,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7170]: https://github.com/bytedance/deer-flow/pull/7170
 [#7205]: https://github.com/bytedance/deer-flow/pull/7205
 [#7207]: https://github.com/bytedance/deer-flow/pull/7207
+[#7217]: https://github.com/bytedance/deer-flow/pull/7217
 [#7255]: https://github.com/bytedance/deer-flow/pull/7255
