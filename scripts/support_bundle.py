@@ -968,7 +968,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--config", type=Path, default=None, help="Path to config.yaml")
     parser.add_argument("--extensions-config", type=Path, default=None, help="Path to extensions_config.json")
     parser.add_argument("--thread-id", default=None, help="Optional thread id to include file manifests for")
-    parser.add_argument("--out", type=Path, default=None, help="Output zip path")
+    parser.add_argument("--out", type=Path, default=None, help="Output zip file path")
     parser.add_argument("--include-doctor", action="store_true", help="Include redacted make doctor output")
     return parser.parse_args(argv)
 
