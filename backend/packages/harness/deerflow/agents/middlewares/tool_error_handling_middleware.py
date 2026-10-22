@@ -540,7 +540,12 @@ def _build_runtime_middlewares(
     if app_config.tool_streaming.enabled:
         from deerflow.agents.middlewares.tool_streaming_middleware import ToolStreamingMiddleware
 
-        tail.append(ToolStreamingMiddleware.from_config(app_config.tool_streaming))
+        tail.append(
+            ToolStreamingMiddleware.from_config(
+                app_config.tool_streaming,
+                pii_redaction_config=app_config.pii_redaction,
+            )
+        )
 
     middlewares = [*outer_wrappers, *thread_hooks, *tail]
 

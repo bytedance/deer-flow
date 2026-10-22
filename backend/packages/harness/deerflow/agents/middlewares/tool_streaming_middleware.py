@@ -44,6 +44,8 @@ from langgraph.errors import GraphBubbleUp
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
+from deerflow.agents.middlewares.pii_redaction_middleware import redact_text
+from deerflow.config.pii_redaction_config import PiiRedactionConfig
 from deerflow.config.tool_streaming_config import ToolStreamingConfig
 from deerflow.utils.custom_events import aemit_custom_event
 
@@ -71,15 +73,29 @@ def _build_start_chunk(tool_call_id: str, tool_name: str) -> dict:
     }
 
 
-def _build_final_chunk(tool_call_id: str, tool_name: str, content: str) -> dict:
+def _build_final_chunk(
+    tool_call_id: str,
+    tool_name: str,
+    content: str,
+    *,
+    pii_redaction_config: PiiRedactionConfig | None = None,
+) -> dict:
     """Build the end-of-execution lifecycle chunk with a short preview.
 
     The complete output arrives as a canonical ToolMessage in the message
     stream; re-sending it in full here doubles the payload and creates UI
     flicker.  Emit only a short preview so the frontend receives a
     completion signal without a redundant payload.
+
+    The preview bypasses ``PiiRedactionMiddleware`` (that middleware only
+    rewrites model-bound messages), so it is redacted here under the same
+    configured policy *before* truncation — truncating first could cut a
+    match in half and leak the surviving prefix.
     """
     preview = content[: content.find("\n")] if "\n" in content else content
+    redacted = redact_text(preview, pii_redaction_config)
+    if redacted is not None:
+        preview = redacted
     if len(preview) > _FINAL_PREVIEW_MAX_CHARS:
         preview = preview[:_FINAL_PREVIEW_MAX_CHARS] + "…"
     return {
@@ -164,14 +180,29 @@ class ToolStreamingMiddleware(AgentMiddleware[AgentState]):
     tool execution is unaffected.
     """
 
-    def __init__(self, *, config: ToolStreamingConfig | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        config: ToolStreamingConfig | None = None,
+        pii_redaction_config: PiiRedactionConfig | None = None,
+    ) -> None:
         super().__init__()
         self._enabled = config.enabled if config is not None else False
+        self._pii_redaction_config = pii_redaction_config
 
     @classmethod
-    def from_config(cls, config: ToolStreamingConfig) -> ToolStreamingMiddleware:
-        """Create from a ``ToolStreamingConfig`` instance."""
-        return cls(config=config)
+    def from_config(
+        cls,
+        config: ToolStreamingConfig,
+        *,
+        pii_redaction_config: PiiRedactionConfig | None = None,
+    ) -> ToolStreamingMiddleware:
+        """Create from a ``ToolStreamingConfig`` instance.
+
+        *pii_redaction_config* applies the same policy used for model-bound
+        messages to the lifecycle previews this middleware emits.
+        """
+        return cls(config=config, pii_redaction_config=pii_redaction_config)
 
     # ------------------------------------------------------------------
     # Sync path — pass-through (streaming is async-only)
@@ -227,6 +258,9 @@ class ToolStreamingMiddleware(AgentMiddleware[AgentState]):
             # (outer) will catch the re-raised exception and convert it to an
             # error ToolMessage.
             error_text = str(exc).strip() or exc.__class__.__name__
+            redacted_error = redact_text(error_text, self._pii_redaction_config)
+            if redacted_error is not None:
+                error_text = redacted_error
             if len(error_text) > 500:
                 error_text = error_text[:497] + "..."
             try:
@@ -242,7 +276,15 @@ class ToolStreamingMiddleware(AgentMiddleware[AgentState]):
         # message stream; re-sending it in full here doubles the payload.
         content = _extract_content(result)
         try:
-            await aemit_custom_event(_build_final_chunk(tool_call_id, tool_name, content), writer=writer)
+            await aemit_custom_event(
+                _build_final_chunk(
+                    tool_call_id,
+                    tool_name,
+                    content,
+                    pii_redaction_config=self._pii_redaction_config,
+                ),
+                writer=writer,
+            )
         except GraphBubbleUp:
             raise
         except Exception:

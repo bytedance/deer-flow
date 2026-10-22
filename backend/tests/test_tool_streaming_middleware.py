@@ -702,3 +702,107 @@ class TestConfigToggles:
 
         await mw.awrap_tool_call(request, handler)
         assert writer.call_count == 2  # start + final
+
+
+# ---------------------------------------------------------------------------
+# PII redaction of lifecycle previews (review P2 on #4150)
+# ---------------------------------------------------------------------------
+
+
+def _make_pii_config(*, enabled: bool = True):
+    from deerflow.config.pii_redaction_config import PiiRedactionConfig
+
+    if not enabled:
+        return PiiRedactionConfig()
+    return PiiRedactionConfig(enabled=True, token_secret="streaming-preview-test-secret")
+
+
+class TestPiiRedactionOfPreviews:
+    @pytest.mark.asyncio
+    async def test_final_preview_redacts_email(self, monkeypatch):
+        """The final preview must not leak PII the model-bound path would redact."""
+        writer = _writer_mock()
+        monkeypatch.setattr(
+            "deerflow.agents.middlewares.tool_streaming_middleware._get_stream_writer",
+            lambda: writer,
+        )
+
+        mw = ToolStreamingMiddleware(
+            config=_make_config(enabled=True),
+            pii_redaction_config=_make_pii_config(),
+        )
+        msg = _make_tool_message(content="contact: alice@example.com\nsecond line")
+        result = await mw.awrap_tool_call(_make_tool_request(), AsyncMock(return_value=msg))
+
+        assert result is msg
+        final_chunk = writer.call_args_list[1][0][0]
+        assert final_chunk["is_final"] is True
+        assert "alice@example.com" not in final_chunk["chunk"]
+        assert final_chunk["chunk"]  # a placeholder still signals completion
+
+    @pytest.mark.asyncio
+    async def test_final_preview_redacts_before_truncation(self, monkeypatch):
+        """Redaction runs on the whole first line, so truncation cannot split a match.
+
+        The token straddles the 200-char preview boundary: truncating first
+        would emit the surviving ``ghp_`` prefix of a live credential.
+        """
+        writer = _writer_mock()
+        monkeypatch.setattr(
+            "deerflow.agents.middlewares.tool_streaming_middleware._get_stream_writer",
+            lambda: writer,
+        )
+
+        token = "ghp_" + "a" * 36
+        padded = "x" * 180 + " " + token
+        assert padded.index("ghp_") < 200 < padded.index("ghp_") + len(token)
+
+        mw = ToolStreamingMiddleware(
+            config=_make_config(enabled=True),
+            pii_redaction_config=_make_pii_config(),
+        )
+        msg = _make_tool_message(content=padded)
+        await mw.awrap_tool_call(_make_tool_request(), AsyncMock(return_value=msg))
+
+        final_chunk = writer.call_args_list[1][0][0]
+        assert "ghp_" not in final_chunk["chunk"]
+
+    @pytest.mark.asyncio
+    async def test_final_preview_unchanged_when_redaction_disabled(self, monkeypatch):
+        writer = _writer_mock()
+        monkeypatch.setattr(
+            "deerflow.agents.middlewares.tool_streaming_middleware._get_stream_writer",
+            lambda: writer,
+        )
+
+        mw = ToolStreamingMiddleware(
+            config=_make_config(enabled=True),
+            pii_redaction_config=_make_pii_config(enabled=False),
+        )
+        msg = _make_tool_message(content="contact: alice@example.com")
+        await mw.awrap_tool_call(_make_tool_request(), AsyncMock(return_value=msg))
+
+        final_chunk = writer.call_args_list[1][0][0]
+        assert final_chunk["chunk"] == "contact: alice@example.com"
+
+    @pytest.mark.asyncio
+    async def test_error_chunk_redacts_secret(self, monkeypatch):
+        """Exception text can carry credentials too; it follows the same policy."""
+        writer = _writer_mock()
+        monkeypatch.setattr(
+            "deerflow.agents.middlewares.tool_streaming_middleware._get_stream_writer",
+            lambda: writer,
+        )
+
+        mw = ToolStreamingMiddleware(
+            config=_make_config(enabled=True),
+            pii_redaction_config=_make_pii_config(),
+        )
+        handler = AsyncMock(side_effect=RuntimeError("auth failed with key sk-abcdefghijklmnopqrstuvwxyz012345"))
+
+        with pytest.raises(RuntimeError):
+            await mw.awrap_tool_call(_make_tool_request(), handler)
+
+        error_chunk = writer.call_args_list[1][0][0]
+        assert error_chunk["error"] is True
+        assert "sk-abcdefghijklmnopqrstuvwxyz012345" not in error_chunk["chunk"]
