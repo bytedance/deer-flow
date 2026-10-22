@@ -952,3 +952,54 @@ def test_projection_read_windows_lock_retries_only_contention(tmp_path, monkeypa
                 pytest.fail("Must not enter after a permanent lock error")
         assert caught.value.errno == errno.EBADF
         assert calls == [FakeMsvcrt.LK_NBLCK]
+
+
+def test_thread_projection_stays_fresh_when_view_metadata_drifts(
+    projection_env,
+    monkeypatch,
+) -> None:
+    """A view digest that keeps changing must not force a rebuild.
+
+    Network filesystems can return different metadata for a tree that was just
+    rewritten before those readings settle, so the view digest is not a stable
+    freshness signal for a per-turn check; only the source signature should gate
+    reuse.
+    """
+    from deerflow.skills import projection as projection_module
+
+    env = projection_env
+    _write_skill(env.skills_root / "public", "alpha")
+    allowed = {"alpha"}
+    ensure_thread_skill_projection(env.storage, "thread-view-drift", allowed)
+
+    digests = iter(f"drift-{index}" for index in range(1000))
+    monkeypatch.setattr(projection_module, "_view_signature", lambda *args, **kwargs: next(digests))
+
+    with patch.object(
+        projection_module,
+        "_rebuild_thread_locked",
+        wraps=projection_module._rebuild_thread_locked,
+    ) as rebuild:
+        ensure_thread_skill_projection(env.storage, "thread-view-drift", allowed)
+
+    assert not rebuild.called
+
+
+def test_thread_projection_rebuilds_when_a_source_skill_changes(projection_env) -> None:
+    from deerflow.skills import projection as projection_module
+
+    env = projection_env
+    _write_skill(env.skills_root / "public", "alpha", "v1")
+    allowed = {"alpha"}
+    ensure_thread_skill_projection(env.storage, "thread-source-change", allowed)
+
+    _write_skill(env.skills_root / "public", "alpha", "a longer replacement body")
+
+    with patch.object(
+        projection_module,
+        "_rebuild_thread_locked",
+        wraps=projection_module._rebuild_thread_locked,
+    ) as rebuild:
+        ensure_thread_skill_projection(env.storage, "thread-source-change", allowed)
+
+    assert rebuild.called

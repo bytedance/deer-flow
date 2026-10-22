@@ -489,9 +489,15 @@ def _thread_projection_is_fresh(
     if manifest_before is None or manifest_before.get("version") != _MANIFEST_VERSION:
         return False
     source_sig = _thread_source_signature(storage, allowed_skills)
-    view_sig = _view_signature(paths, "thread")
+    # The thread view is rewritten by every rebuild, and a rebuild is exactly
+    # what this check is deciding on: digesting its filesystem metadata would
+    # compare a reading taken right after the write against a later one.  On
+    # shared filesystems those readings only settle tens of seconds later, so
+    # the comparison fails on every turn and forces a full rebuild each time.
+    # Isolation is already carried by source_signature (policy version, source
+    # trees, enable states and the sorted allowlist).
     manifest_after = _read_manifest(scope_root)
-    return manifest_before == manifest_after and manifest_before.get("source_signature") == source_sig and manifest_before.get("view_signature") == view_sig
+    return manifest_before == manifest_after and manifest_before.get("source_signature") == source_sig
 
 
 def _load_public_skills(storage: SkillStorage, *, enabled_only: bool) -> list[Skill]:
