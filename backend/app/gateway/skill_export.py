@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 from collections.abc import Callable
+from contextlib import suppress
 from typing import Any, Literal
 
 from fastapi import HTTPException, Request
@@ -14,6 +16,8 @@ from starlette.responses import StreamingResponse
 
 from deerflow.skills.export import SkillExportArchive, SkillExportError
 from deerflow.utils.file_io import run_file_io
+
+logger = logging.getLogger(__name__)
 
 # Slots are shared across all users in this Gateway process.
 _slots = threading.BoundedSemaphore(2)
@@ -100,6 +104,17 @@ async def _finish_io(func: Callable, *args):
         raise
 
 
+def _close_archive_best_effort(archive: SkillExportArchive) -> None:
+    """A cleanup failure cannot change the transfer or request outcome."""
+    try:
+        archive.close()
+    except Exception:
+        # Logging handlers are application code and can fail too. Keep this
+        # guard narrow so interruption signals still propagate normally.
+        with suppress(Exception):
+            logger.warning("Could not close skill export archive", exc_info=True)
+
+
 async def _disconnected(request: Request) -> None:
     while (await request.receive())["type"] != "http.disconnect":
         pass
@@ -128,7 +143,7 @@ async def run_export_work(work: Callable[[threading.Event], Any], request: Reque
                     pass
                 else:
                     if isinstance(result, SkillExportArchive):
-                        await _finish_io(result.close)
+                        await _finish_io(_close_archive_best_effort, result)
         finally:
             lease.release()
         raise
@@ -176,7 +191,7 @@ class SkillExportResponse(StreamingResponse):
                 raise ClientDisconnect from None
         finally:
             try:
-                await _finish_io(self.archive.close)
+                await _finish_io(_close_archive_best_effort, self.archive)
             finally:
                 self.lease.release()
 
