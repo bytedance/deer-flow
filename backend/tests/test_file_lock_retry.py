@@ -95,3 +95,45 @@ def test_check_errors_are_not_treated_as_lock_contention():
 
     assert caught.value is error
     assert attempts == sleeps == []
+
+
+def test_replace_with_retry_retries_windows_sharing_errors(monkeypatch):
+    from deerflow.utils import file_lock
+
+    attempts = []
+    sleeps = []
+
+    def replace(_source, _target):
+        attempts.append(True)
+        if len(attempts) < 3:
+            error = PermissionError(13, "busy")
+            error.winerror = 5
+            raise error
+
+    monkeypatch.setattr(file_lock.os, "replace", replace)
+    monkeypatch.setattr(file_lock.time, "sleep", sleeps.append)
+
+    file_lock.replace_with_retry("source", "target")
+
+    assert len(attempts) == 3
+    assert sleeps == [0.05, 0.05]
+
+
+def test_replace_with_retry_does_not_retry_permanent_errors(monkeypatch):
+    from deerflow.utils import file_lock
+
+    error = PermissionError(13, "access denied")
+    error.winerror = 5
+    calls = []
+
+    def replace(_source, _target):
+        calls.append(True)
+        raise error
+
+    monkeypatch.setattr(file_lock.os, "replace", replace)
+
+    with pytest.raises(PermissionError) as caught:
+        file_lock.replace_with_retry("source", "target", deadline_seconds=0)
+
+    assert caught.value is error
+    assert len(calls) == 1

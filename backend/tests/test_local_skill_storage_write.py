@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import stat
 from unittest.mock import patch
 
@@ -224,6 +225,30 @@ def test_user_scoped_write_creates_subdirectory(tmp_path, user_storage):
     content = "# ref\nline\n"
     user_storage.write_custom_skill("demo-skill", "references/ref.md", content)
     assert (tmp_path / "users" / "test-user" / "skills" / "custom" / "demo-skill" / "references" / "ref.md").read_bytes() == content.encode("utf-8")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows sharing semantics")
+def test_write_retries_while_target_is_briefly_held_open(tmp_path, storage):
+    import threading
+
+    target = tmp_path / "custom" / "demo-skill" / "SKILL.md"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"old")
+    release = threading.Event()
+
+    def hold():
+        with target.open("rb"):
+            release.wait(0.25)
+
+    holder = threading.Thread(target=hold)
+    holder.start()
+    try:
+        storage.write_custom_skill("demo-skill", "SKILL.md", "new\n")
+    finally:
+        release.set()
+        holder.join(5)
+
+    assert target.read_bytes() == b"new\n"
 
 
 def test_both_storage_backends_publish_identical_bytes(tmp_path, storage, user_storage):
