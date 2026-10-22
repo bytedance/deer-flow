@@ -116,7 +116,7 @@ answers for paginated history. See `docs/skill-usage-ui.md`.
 
 **Workspace change detection:** Truncated snapshots cannot prove absence. Mark skipped delivery verification in the receipt. Details: `backend/docs/runtime-guidance-details.md`.
 
-Unmet goals stand down on run-level token/loop hard stops and retain the original stop reason; hidden continuations must not re-enter that run's shared safety state.
+Unmet goals stand down on run-level token/loop hard stops and retain the original stop reason; hidden continuations must not re-enter that run's shared safety state. Operation-based no-progress counting: `backend/docs/runtime-guidance-details.md`.
 
 **Deferred terminal commit:** With an event store, the worker stages its terminal
 status locally and commits it only after finalization's receipt and duration

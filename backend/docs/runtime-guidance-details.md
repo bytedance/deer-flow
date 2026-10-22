@@ -2,6 +2,28 @@
 
 The runtime AGENTS.md indexes these detailed contracts. Preserve their behavior when changing the corresponding code.
 
+**Goal no-progress counting** (`runtime/goal_progress.py`): pair actual tool calls
+with their results in the current human/hidden-continuation interval. Normalize
+success/error metadata without mutating checkpoint messages. Retain only exact
+successful-operation hashes in the active Goal's `last_evaluation`; no global
+cache, arbitrary operation-count cutoff, file inspection or extra model call.
+Repeated results, UI-only sandbox descriptions, failed commands, receipt IDs and
+timestamps alone do not reset the counter. Validate receipts against the original
+arguments before excluding narration from operation identity. Shared shell-result
+classification recognizes nonzero exit markers, correcting older generic success
+metadata while preserving explicit producer stamps. A successful new operation is
+activity, not proof of usefulness or completion. Pure-text turns retain the
+existing reply comparison.
+
+Already evaluated hashes survive checkpoint restart and compaction. Results
+removed before observation cannot be reconstructed; do not claim complete tool
+history capture. Goal replacement/clearing drops the active set, while historical
+checkpoints retain their existing lifecycle. Storage grows with observed work;
+measure it rather than reintroducing a silent fallback to text after a fixed
+number of operations. Preserve old counters on first migration, merge against
+freshly read Goal state when persisting, and leave all existing stop, durability,
+cancellation and racing-user checks unchanged.
+
 **JSONL tail recovery** (`runtime/events/store/jsonl.py`, #6520): every append
 path goes through `_append_records`. A nonempty file whose last byte is not LF
 gets a separator written first, so a crash that left either valid JSON without
