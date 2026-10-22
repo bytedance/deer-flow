@@ -102,6 +102,12 @@ class _Probe:
     tool_name: str
     arguments_text: str
     state_digest: str
+    state_text: str
+    """The exact canonical JSON the digest was taken over.
+
+    Carried on the probe rather than re-derived: an endpoint dialect whose input is text instead
+    of a ``state`` object must judge the same bytes the digest identifies, and a second
+    serialisation of the same call could differ from the first."""
 
 
 @dataclass(frozen=True)
@@ -130,6 +136,21 @@ class TypeSafeGuardrailProvider:
     policy_id = "deerflow.guardrails.typesafe"
     policy_version = "1.1.0"
 
+    #: Prefix of every reason code this provider publishes. A dialect for another endpoint
+    #: overrides it so a denial names the service that actually decided.
+    code_prefix = "typesafe"
+
+    #: Names this service in a message about a response that carried no answer at all.
+    provider_name = "TypeSafe"
+
+    #: The config block whose values reached this provider, for the missing-credential message.
+    configuration_source = _CONFIGURATION_SOURCE
+
+    #: Raised when an evaluation produced no usable verdict. A dialect overrides the class so a
+    #: failure names its own service, while staying inside the same exception family the
+    #: middleware's ``guardrails.fail_closed`` mapping already handles.
+    error_class = TypeSafeGuardrailError
+
     def __init__(
         self,
         *,
@@ -151,8 +172,8 @@ class TypeSafeGuardrailProvider:
         cache_ttl_seconds: float = 300.0,
         transport_factory: TransportFactory | None = None,
     ) -> None:
-        connection: TypeSafeConnection = resolve_connection(
-            settings={
+        connection: TypeSafeConnection = self._resolve_connection(
+            {
                 "api_key": api_key,
                 "api_key_env": api_key_env,
                 "base_url": base_url,
@@ -161,12 +182,10 @@ class TypeSafeGuardrailProvider:
                 "deadline_seconds": deadline_seconds,
                 "max_attempts": max_attempts,
                 "retry_backoff": retry_backoff,
-            },
-            defaults=typesafe_defaults(),
-            configuration_source=_CONFIGURATION_SOURCE,
+            }
         )
         self._connection = connection
-        self._client = TypeSafeClient(connection, transport_factory=transport_factory)
+        self._client = self._build_client(connection, transport_factory=transport_factory)
         self._threshold = finite_float("threshold", threshold, minimum=0.0, maximum=1.0)
         self._instructions = defaulted_text("instructions", instructions, DEFAULT_INSTRUCTIONS)
         self._criteria_true = defaulted_text("criteria.true", criteria_entry(criteria, True), DEFAULT_CRITERIA_TRUE)
@@ -183,6 +202,18 @@ class TypeSafeGuardrailProvider:
         )
         self._questions: dict[str, Question] = {_QUESTION_ID: self._question}
         self._cache: OrderedDict[tuple[str, str], _CacheEntry] = OrderedDict()
+
+    # --- dialect hooks ------------------------------------------------------
+
+    def _code(self, suffix: str) -> str:
+        return f"{self.code_prefix}.{suffix}"
+
+    def _resolve_connection(self, settings: dict[str, object]) -> TypeSafeConnection:
+        """Resolve this provider's effective connection: provider config, then its own defaults."""
+        return resolve_connection(settings=settings, defaults=typesafe_defaults(), configuration_source=self.configuration_source)
+
+    def _build_client(self, connection: TypeSafeConnection, *, transport_factory: TransportFactory | None) -> TypeSafeClient:
+        return TypeSafeClient(connection, transport_factory=transport_factory)
 
     def release_policy_parameters(self) -> dict[str, object]:
         """Declare behaviour-affecting parameters for assembly identity (never the key).
@@ -231,14 +262,14 @@ class TypeSafeGuardrailProvider:
         try:
             answer_set = self._client.ask(self._state(probe), self._questions)
         except TypeSafeError as exc:
-            raise TypeSafeGuardrailError(str(exc), cause=exc.cause) from exc
+            raise self.error_class(str(exc), cause=exc.cause) from exc
         return self._recorded_answer(answer_set)
 
     async def _ask_async(self, probe: _Probe) -> _Answer:
         try:
             answer_set = await self._client.aask(self._state(probe), self._questions)
         except TypeSafeError as exc:
-            raise TypeSafeGuardrailError(str(exc), cause=exc.cause) from exc
+            raise self.error_class(str(exc), cause=exc.cause) from exc
         return self._recorded_answer(answer_set)
 
     def _recorded_answer(self, answer_set: AnswerSet) -> _Answer:
@@ -252,8 +283,8 @@ class TypeSafeGuardrailProvider:
         answer = answer_set.noul(_QUESTION_ID)
         if answer is None:
             error = answer_set.errors_by_question.get(_QUESTION_ID)
-            message = error.message if error is not None else f"TypeSafe response has no answer for question {_QUESTION_ID!r}"
-            raise TypeSafeGuardrailError(message, cause=CAUSE_INVALID_RESPONSE)
+            message = error.message if error is not None else f"{self.provider_name} response has no answer for question {_QUESTION_ID!r}"
+            raise self.error_class(message, cause=CAUSE_INVALID_RESPONSE)
         return _Answer(probability=answer.probability, model=recordable_model(answer_set.model))
 
     def _state(self, probe: _Probe) -> dict[str, object]:
@@ -273,14 +304,14 @@ class TypeSafeGuardrailProvider:
         if self._allowed_tools is not None and tool_name not in self._allowed_tools:
             return GuardrailDecision(
                 allow=False,
-                reasons=[GuardrailReason(code="typesafe.tool_not_allowed", message=f"typesafe.tool_not_allowed: tool={tool_name!r} not in configured allowed_tools policy={self._policy_ref()}")],
+                reasons=[GuardrailReason(code=self._code("tool_not_allowed"), message=f"{self._code('tool_not_allowed')}: tool={tool_name!r} not in configured allowed_tools policy={self._policy_ref()}")],
                 policy_id=self.policy_id,
                 metadata={"tool_not_allowed": True},
             )
         if self._tools is not None and tool_name not in self._tools:
             return GuardrailDecision(
                 allow=True,
-                reasons=[GuardrailReason(code="typesafe.tool_not_probed", message=f"typesafe.tool_not_probed: tool={tool_name!r} not in configured tools policy={self._policy_ref()}")],
+                reasons=[GuardrailReason(code=self._code("tool_not_probed"), message=f"{self._code('tool_not_probed')}: tool={tool_name!r} not in configured tools policy={self._policy_ref()}")],
                 policy_id=self.policy_id,
                 metadata={"tool_not_probed": True},
             )
@@ -305,14 +336,14 @@ class TypeSafeGuardrailProvider:
         # when a consumer asks it to; it changes no limit).
         if len(arguments_text) > self._max_state_chars:
             return self._state_unusable("too_large", limit=self._max_state_chars, length=len(arguments_text), digest=state_digest)
-        return _Probe(tool_name=tool_name, arguments_text=arguments_text, state_digest=state_digest)
+        return _Probe(tool_name=tool_name, arguments_text=arguments_text, state_digest=state_digest, state_text=state_text)
 
     def _state_unusable(self, cause: str, **fields: object) -> GuardrailDecision:
         """Deny a call TypeSafe must not see: nothing truncated, nothing lossy is sent."""
         detail = " ".join(f"{key}={value}" for key, value in fields.items())
         return GuardrailDecision(
             allow=False,
-            reasons=[GuardrailReason(code="typesafe.state_unusable", message=f"typesafe.state_unusable: cause={cause} {detail} policy={self._policy_ref()}")],
+            reasons=[GuardrailReason(code=self._code("state_unusable"), message=f"{self._code('state_unusable')}: cause={cause} {detail} policy={self._policy_ref()}")],
             policy_id=self.policy_id,
             metadata={"state_unusable_cause": cause, **fields},
         )
@@ -326,7 +357,7 @@ class TypeSafeGuardrailProvider:
         return self._model_decision(allow=entry.allow, probability=entry.probability, model=entry.model, state_digest=entry.state_digest, cached=True)
 
     def _model_decision(self, *, allow: bool, probability: float, model: str, state_digest: str, cached: bool) -> GuardrailDecision:
-        code = "typesafe.allowed" if allow else "typesafe.tool_call_risky"
+        code = self._code("allowed" if allow else "tool_call_risky")
         # repr(): the recorded probability and threshold must replay to the same
         # verdict, so neither is rounded for display. repr() round-trips exactly.
         # ``model`` is already bounded by recordable_model: it is response

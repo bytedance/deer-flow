@@ -264,6 +264,27 @@ test("switching providers clears test status and cannot reuse a saved key", asyn
   ).not.toHaveProperty("base_url");
 });
 
+test("reverting a provider switch preserves the saved key", async () => {
+  rs.mocked(loadManagedModels).mockResolvedValue({
+    models: [{ ...existing, provider: "openai", base_url: null }],
+  });
+  mount();
+  fireEvent.click(await screen.findByRole("button", { name: "Edit model" }));
+  await selectProvider("Anthropic");
+  await selectProvider("OpenAI");
+
+  expect(screen.queryByText(enUS.settings.models.providerChanged)).toBeNull();
+  expect(
+    screen.getByPlaceholderText(enUS.settings.models.keepKey),
+  ).toBeTruthy();
+
+  fireEvent.click(screen.getByRole("button", { name: "Save" }));
+  await waitFor(() => expect(saveManagedModel).toHaveBeenCalledTimes(1));
+  expect(
+    rs.mocked(saveManagedModel).mock.calls[0]![0].config,
+  ).not.toHaveProperty("api_key");
+});
+
 test("custom endpoint is separate and allows no authentication", async () => {
   mount();
   await waitFor(() =>
@@ -287,6 +308,29 @@ test("custom endpoint is separate and allows no authentication", async () => {
     provider: "openai-compatible",
     base_url: "http://localhost:9000/v1",
   });
+});
+
+test("reverting a custom endpoint edit preserves the saved key", async () => {
+  mount();
+  fireEvent.click(await screen.findByRole("button", { name: "Edit model" }));
+  const endpoint = screen.getByLabelText("Base URL");
+  fireEvent.change(endpoint, {
+    target: { value: "https://other.example.com/v1" },
+  });
+  fireEvent.change(endpoint, {
+    target: { value: existing.base_url },
+  });
+
+  expect(screen.queryByText(enUS.settings.models.providerChanged)).toBeNull();
+  expect(
+    screen.getByPlaceholderText(enUS.settings.models.keepKey),
+  ).toBeTruthy();
+
+  fireEvent.click(screen.getByRole("button", { name: "Save" }));
+  await waitFor(() => expect(saveManagedModel).toHaveBeenCalledTimes(1));
+  expect(
+    rs.mocked(saveManagedModel).mock.calls[0]![0].config,
+  ).not.toHaveProperty("api_key");
 });
 
 test("preset edits retain stable ID, leave key blank and preserve advanced overrides", async () => {

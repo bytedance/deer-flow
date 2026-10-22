@@ -28,6 +28,7 @@ const server=createServer(async(req,res)=>{
         if(action==='get_step'&&window.fileReview)return {kind:'file',name:'report.txt',size:bytes.length,sha256:window.badHash?'bad':hash,artifact_version:'artifact-v1'};
         if(action==='get_step')return {output:{report:'Retained <img src=x onerror=alert(1)> report'},artifact_version:'artifact-v1'};
         if(action==='decide'){window.state='completed';return {status:'approved'};}
+        if(action==='recover'){window.state='paused';return {status:'queued'};}
         if(action==='resume'){window.state='completed';return {status:'resumed'};}
         if(action==='launch'){saved=payload;identities.add(payload.request_id);if(window.loseLaunch-- > 0)throw Error('Launch response lost');return {run_id:'fixture-run',status:'queued'};}
         if(action==='list' && window.failList-- > 0)throw Error('List refresh failed');
@@ -48,6 +49,15 @@ try{
   await page.getByRole('button',{name:'Launch workflow',exact:true}).click();
   await page.getByRole('heading',{name:'fixture-run · running',exact:true}).waitFor();
   const launch=await page.evaluate(()=>calls.find(c=>c.action==='launch'));
+  await page.evaluate(()=>window.state='recoverable');
+  // Refresh the selected run through the existing list action.
+  await page.locator('nav button').first().click();
+  await page.getByRole('button',{name:'Recover workflow',exact:true}).click();
+  assert.equal(await page.evaluate(()=>calls.filter(c=>c.action==='recover').length),1);
+  await page.getByRole('button',{name:'Resume this checkpoint',exact:true}).waitFor();
+  await page.evaluate(()=>window.state='running');
+  await page.locator('nav button').first().click();
+
   assert.equal(launch.payload.request_id.length,32);
   assert.match(launch.payload.script,/await agent/);
   await page.getByRole('button',{name:'Open child conversation',exact:true}).click();

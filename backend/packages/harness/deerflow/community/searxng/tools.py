@@ -4,11 +4,27 @@ import logging
 from langchain.tools import tool
 
 from deerflow.community.search_time_range import SearchTimeRange
+from deerflow.community.url_safety import safe_public_result_url
 from deerflow.config import get_app_config
 
-from .searxng_client import SearxngClient
+from .searxng_client import SearxngClient, SearxngResponseError
 
 logger = logging.getLogger(__name__)
+
+
+def _unexpected_format_error(query: str) -> str:
+    """Report a malformed instance payload without echoing the payload.
+
+    A SearXNG instance that answers HTTP 200 with an error page, a non-list
+    ``results`` container, or a non-empty list holding no objects is not an
+    empty search: "No results found" would tell the agent the query legitimately
+    matched nothing.
+
+    The query is echoed back on purpose, matching the sibling providers, so the
+    agent can tell which search the error belongs to; only the payload is
+    withheld.
+    """
+    return json.dumps({"error": "SearXNG returned an unexpected response format", "query": query}, ensure_ascii=False)
 
 
 def _get_tool_config(tool_name: str) -> dict | None:
@@ -62,12 +78,14 @@ async def web_search_tool(query: str, time_range: SearchTimeRange | None = None)
         normalized = [
             {
                 "title": r.get("title", ""),
-                "url": r.get("url", ""),
+                "url": safe_public_result_url(r.get("url")),
                 "snippet": r.get("content", ""),
             }
             for r in results
         ]
         return json.dumps(normalized, indent=2, ensure_ascii=False)
+    except SearxngResponseError:
+        return _unexpected_format_error(query)
     except Exception as e:
         logger.error(f"Error in web_search_tool: {e}")
         return json.dumps({"error": str(e), "query": query}, ensure_ascii=False)

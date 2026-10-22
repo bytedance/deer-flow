@@ -94,10 +94,21 @@ under continuous updates. One timer wakes for the earliest deadline and one
 consumer processes eligible items serially. Other conversations cannot reset
 that deadline. Consumer backlog and LLM latency can still delay completion.
 Early wakeups rearm with a 50 ms minimum; arrivals during extraction wait for
-the finishing worker to rearm. Emergency snapshots are immediately eligible;
+the finishing worker to rearm. Emergency snapshots are immediately eligible
+and remain separate in arrival order, including within the same conversation
+key: successive compactions can remove disjoint message partitions. Only normal
+cumulative updates coalesce; neither kind replaces the other.
+Emergency snapshots bypass `queue_max_depth`. Warn at 32 pending snapshots for
+one `(thread_id, user_id, agent_name)` key and each doubling, without logging
+message contents. Count only pending emergency items; drain, cancellation, and
+clear reset the threshold naturally. Retention remains unbounded and process-local.
+Regression coverage: `tests/test_memory_emergency_backlog.py`.
 `flush`, `flush_nowait`, and `flush_sync` make all pending items eligible.
 Tests in `tests/test_memory_queue_deadlines.py` use a fake monotonic clock and
 timer to exercise scheduling without timing-sensitive sleeps.
+`tests/test_memory_emergency_snapshots.py` covers overlapping compactions through
+the real memory hook, updater, and canonical storage, plus scoped cancellation
+and drain behavior.
 
 DeerMem and mem0 exclude assistant tool-call intent in every representation:
 `tool_calls`, `invalid_tool_calls`, and provider-raw `tool_calls`/`function_call`.
@@ -140,7 +151,11 @@ fence is accepted from Markdown. Decode the value before checking its closing
 fence so embedded backticks and later fenced notes stay lossless. Parser and
 storage regressions belong in `tests/test_memory_storage.py`; configure a data
 root directory, not the existing manifest file. Legacy v1 reads still migrate
-and advance the revision. Unparseable summary text is quarantined before rebuild.
+and advance the revision. Invalid UTF-8 bytes and unparseable summary text are
+quarantined before rebuild. Summary read `OSError`s raise `MemoryStorageCorruption`
+and preserve the file; `save()` returns false until access recovers.
+Summary and canonical fact reads strip a leading UTF-8 BOM; writes use UTF-8.
+Fact BOM regressions use public save/reload and preserve content and scope.
 
 `FileMemoryStorage` owns canonical storage and the retrieval adapter.
 Do not reach into its private adapter state from higher layers.
@@ -258,6 +273,7 @@ Extraction labels proposals with `scope`, `durability`, and `authority`.
 Automatic writes accept only user-scoped, durable, descriptive facts.
 Summary prose must be user-scoped and descriptive.
 Missing labels reject that item without stopping unrelated updates.
+An out-of-range `confidence` (including a model-emitted percentage) is rejected per item with a warning that names the raw value, and is never rescaled: a silent scale rewrite would change the confidence-threshold semantics. Storage's own `[0, 1]` validation must not fail the batch, because a failed batch keeps the extraction watermark and repeats the same paid call. A batch that also proposes `factsToRemove` still fails closed when any new fact is dropped, because removal `replacementFactIndex` values refer to newFacts positions.
 
 Contradiction removals include `id`, `scope`, `reason`, and optional `replacementFactIndex`.
 Task-scoped and project-scoped removals fail closed.
@@ -282,10 +298,12 @@ It does not require a separate signal-to-fact match.
 Search increments access heat only for facts it returns.
 Prompt injection and `get_context()` do not increment access heat.
 
-Usage and audit sidecars live below the agent `.metadata/` directory.
+Usage, audit, and per-thread extraction watermark sidecars live below the
+agent `.metadata/` directory.
 They must not change canonical Markdown timestamps or revisions.
 Write audits only after canonical persistence succeeds.
 User delete and clear operations must remove matching sidecar data.
+Updates feed after the furthest of the LRU and persisted watermark (best-effort IO).
 
 Staleness review reuses the regular updater call.
 It can keep, remove, or extend eligible aged facts.
@@ -333,6 +351,16 @@ Honcho is a remote HTTP adapter for user-model memory.
 It creates one workspace per resolved `user_id`.
 A missing user fails closed to no memory.
 Its async methods offload synchronous HTTP work with `asyncio.to_thread`.
+Honcho's `from_config` consumes the `should_keep_hidden_message` host hook.
+Its write path drops hidden human messages unless that hook accepts them;
+the host default keeps valid user clarification answers and rejects framework context.
+Without a callable hook, standalone construction drops all hidden human messages.
+If the hook raises an `Exception`, skip only that hidden message and continue the batch.
+Log a generic warning without message metadata, content or exception text.
+Keep this boundary around the hook; do not change HTTP write errors or catch `BaseException`.
+Keep the filter inside `add` so sync, async and pre-compaction writes share it;
+`tests/test_honcho_hidden_messages.py` checks the real HTTP payloads, middleware and host factory;
+`tests/blocking_io/test_honcho_memory_backend.py` keeps the filter hook off the event loop.
 The default read failure policy logs and returns no results.
 `failure_policy.read: fail_closed` rethrows recall failures.
 
@@ -366,8 +394,8 @@ Keep these cross-component constraints in sync:
 - The pod grace period must include retrieval wait, flush time, and shutdown margin.
 - `retrieval_adapter` selects FTS5, a custom factory, or the empty fallback.
 - Eviction weights must total `1.0`.
-- `watermark_max_keys: 0` makes the conversation watermark cache unbounded.
-- A dropped watermark can re-extract one batch on the next turn.
+- `watermark_max_keys` caps the watermark LRU and each `watermarks.json`; `0` is unbounded.
+- A watermark missing from both can re-extract one batch on the next turn.
 
 #### Write-side near-duplicate fact gate (opt-in)
 

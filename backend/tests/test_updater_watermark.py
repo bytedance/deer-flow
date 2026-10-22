@@ -1,14 +1,22 @@
-"""Tests for the in-memory watermark (skip already-extracted messages)."""
+"""Tests for the extraction watermark (skip already-extracted messages).
+
+The updater keeps a bounded in-process LRU and, with file storage, persists the
+same watermark to ``agents/{agent}/.metadata/watermarks.json`` so a restarted
+process or a peer replica on the same storage root does not re-extract turns.
+"""
 
 from __future__ import annotations
 
+import errno
 import json
+from pathlib import Path
 from typing import Any
 
+import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from deerflow.agents.memory.backends.deermem.deermem.config import DeerMemConfig
-from deerflow.agents.memory.backends.deermem.deermem.core.storage import MemoryStorage
+from deerflow.agents.memory.backends.deermem.deermem.core.storage import FileMemoryStorage, MemoryStorage
 from deerflow.agents.memory.backends.deermem.deermem.core.updater import MemoryUpdater, _message_identity
 
 
@@ -181,3 +189,253 @@ def test_watermark_cache_is_bounded_lru() -> None:
     # t1's next turn finds no watermark -> re-extracts one batch (not skipped).
     updater.update_memory(msgs, thread_id="t1", agent_name="a", user_id="u")
     assert llm.invoke_count == 4  # t1, t2, t3, then t1 re-extract
+
+
+# ── Persisted watermark (``.metadata/watermarks.json``) ──────────────────
+
+
+class _RecordingLLM(_FakeLLM):
+    """``_FakeLLM`` that also keeps each prompt, to check what was fed."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.prompts: list[str] = []
+
+    def invoke(self, prompt: Any, config: Any = None) -> Any:
+        self.prompts.append(str(prompt))
+        return super().invoke(prompt, config)
+
+
+def _file_updater(root: Path, llm: _FakeLLM | None = None, **overrides: Any) -> MemoryUpdater:
+    """Build an updater over real file storage, the way a fresh process or a
+    peer replica sharing ``storage_path`` would."""
+    config = _config(storage_path=str(root), retrieval_adapter="", **overrides)
+    return MemoryUpdater(config, FileMemoryStorage(config), llm or _RecordingLLM())
+
+
+def _sidecar(root: Path, *, user_id: str = "u", agent_name: str = "a") -> Path:
+    return root / "users" / user_id / "agents" / agent_name / ".metadata" / "watermarks.json"
+
+
+def test_watermark_survives_a_restart(tmp_path: Path) -> None:
+    messages = _msgs("first")
+    first_llm = _RecordingLLM()
+    _file_updater(tmp_path, first_llm).update_memory(messages, thread_id="t1", agent_name="a", user_id="u")
+    assert first_llm.invoke_count == 1
+
+    # A new process starts with an empty LRU but reads the persisted watermark.
+    llm = _RecordingLLM()
+    restarted = _file_updater(tmp_path, llm)
+    assert restarted.update_memory(messages, thread_id="t1", agent_name="a", user_id="u") is True
+    assert llm.invoke_count == 0
+
+    messages += _msgs("second")
+    restarted.update_memory(messages, thread_id="t1", agent_name="a", user_id="u")
+    assert llm.invoke_count == 1
+    assert "reply-second" in llm.prompts[0]
+    assert "reply-first" not in llm.prompts[0]
+
+
+def test_peer_updaters_continue_from_each_others_watermark(tmp_path: Path) -> None:
+    """Two replicas on one storage root: whichever runs the next update starts
+    from the furthest watermark either recorded, even when its own cached entry
+    for the thread is stale."""
+    llm_a, llm_b = _RecordingLLM(), _RecordingLLM()
+    replica_a = _file_updater(tmp_path, llm_a)
+    replica_b = _file_updater(tmp_path, llm_b)
+    messages = _msgs("first")
+    replica_a.update_memory(messages, thread_id="t1", agent_name="a", user_id="u")
+
+    messages += _msgs("second")
+    replica_b.update_memory(messages, thread_id="t1", agent_name="a", user_id="u")
+    assert llm_b.invoke_count == 1
+    assert "reply-first" not in llm_b.prompts[0]
+
+    # Replica A's cache still points at the first turn; the sidecar is further.
+    messages += _msgs("third")
+    replica_a.update_memory(messages, thread_id="t1", agent_name="a", user_id="u")
+    assert llm_a.invoke_count == 2
+    assert "reply-third" in llm_a.prompts[1]
+    assert "reply-second" not in llm_a.prompts[1]
+
+
+def test_clearing_memory_removes_the_persisted_watermark(tmp_path: Path) -> None:
+    """Scoped and user-wide clears delete the watermark sidecar together with
+    the other ``.metadata`` sidecars of the cleared agent."""
+    messages = _msgs("first")
+    updater = _file_updater(tmp_path)
+
+    updater.update_memory(messages, thread_id="t1", agent_name="a", user_id="u")
+    assert _sidecar(tmp_path).is_file()
+    updater.clear_memory_data("a", user_id="u")
+    assert not _sidecar(tmp_path).exists()
+
+    updater.update_memory(messages, thread_id="t2", agent_name="a", user_id="u")
+    assert _sidecar(tmp_path).is_file()
+    updater.clear_all_memory_data(user_id="u")
+    assert not _sidecar(tmp_path).parent.exists()
+
+    # A fresh process finds no watermark for the cleared scope.
+    llm = _RecordingLLM()
+    _file_updater(tmp_path, llm).update_memory(messages, thread_id="t1", agent_name="a", user_id="u")
+    assert llm.invoke_count == 1
+
+
+def test_persisted_watermarks_are_capped_by_watermark_max_keys(tmp_path: Path) -> None:
+    messages = _msgs("first")
+    updater = _file_updater(tmp_path, watermark_max_keys=2)
+    for thread_id in ("t1", "t2", "t3"):
+        updater.update_memory(messages, thread_id=thread_id, agent_name="a", user_id="u")
+    assert sorted(json.loads(_sidecar(tmp_path).read_text(encoding="utf-8"))) == ["t2", "t3"]
+
+    llm = _RecordingLLM()
+    restarted = _file_updater(tmp_path, llm, watermark_max_keys=2)
+    restarted.update_memory(messages, thread_id="t3", agent_name="a", user_id="u")
+    assert llm.invoke_count == 0
+    # The least-recently-advanced thread was dropped: it re-extracts one batch.
+    restarted.update_memory(messages, thread_id="t1", agent_name="a", user_id="u")
+    assert llm.invoke_count == 1
+
+
+def test_persisted_watermark_is_scoped_to_its_user_and_agent(tmp_path: Path) -> None:
+    messages = _msgs("first")
+    _file_updater(tmp_path).update_memory(messages, thread_id="t1", agent_name="a", user_id="u1")
+
+    llm = _RecordingLLM()
+    other = _file_updater(tmp_path, llm)
+    other.update_memory(messages, thread_id="t1", agent_name="a", user_id="u2")
+    other.update_memory(messages, thread_id="t1", agent_name="b", user_id="u1")
+    assert llm.invoke_count == 2
+
+    other.update_memory(messages, thread_id="t1", agent_name="a", user_id="u1")
+    assert llm.invoke_count == 2
+
+
+def test_emergency_flush_neither_reads_nor_advances_the_persisted_watermark(tmp_path: Path) -> None:
+    msgs = _msgs("a", "b")
+    _file_updater(tmp_path).update_memory(msgs[:2], thread_id="t1", agent_name="a", user_id="u")
+    before = _sidecar(tmp_path).read_bytes()
+
+    llm = _RecordingLLM()
+    restarted = _file_updater(tmp_path, llm)
+    restarted.update_memory(msgs[:2], thread_id="t1", agent_name="a", user_id="u", bypass_watermark=True)
+    assert llm.invoke_count == 1
+    assert _sidecar(tmp_path).read_bytes() == before
+
+    restarted.update_memory(msgs, thread_id="t1", agent_name="a", user_id="u")
+    assert llm.invoke_count == 2
+    assert "reply-a" not in llm.prompts[1]
+
+
+def test_an_unidentifiable_last_message_keeps_the_persisted_watermark(tmp_path: Path) -> None:
+    """A last message with neither id nor text has no identity. Writing that
+    through would delete a persisted watermark a peer may have advanced and
+    force a full feed on every replica."""
+    messages = _msgs("first")
+    _file_updater(tmp_path).update_memory(messages, thread_id="t1", agent_name="a", user_id="u")
+    before = _sidecar(tmp_path).read_bytes()
+
+    llm = _RecordingLLM()
+    updater = _file_updater(tmp_path, llm)
+    updater.update_memory(messages + _msgs("second") + [AIMessage(content="")], thread_id="t1", agent_name="a", user_id="u")
+    assert llm.invoke_count == 1
+    assert _sidecar(tmp_path).read_bytes() == before
+
+
+def test_persisted_watermark_stores_no_message_text(tmp_path: Path) -> None:
+    """Messages without an id fall back to a content identity, which is
+    persisted as a digest so the sidecar never holds conversation text."""
+    messages = [HumanMessage(content="My passport number is X1234567"), AIMessage(content="Noted, I will remember it.")]
+    _file_updater(tmp_path).update_memory(messages, thread_id="t1", agent_name="a", user_id="u")
+
+    raw = _sidecar(tmp_path).read_text(encoding="utf-8")
+    assert "X1234567" not in raw
+    assert "remember" not in raw
+    llm = _RecordingLLM()
+    _file_updater(tmp_path, llm).update_memory(messages, thread_id="t1", agent_name="a", user_id="u")
+    assert llm.invoke_count == 0
+
+
+def test_watermark_sidecar_failures_fall_back_to_the_process_cache(tmp_path: Path) -> None:
+    class _BrokenSidecarStorage(FileMemoryStorage):
+        def get_extraction_watermark(self, *args: Any, **kwargs: Any) -> Any:
+            raise OSError("sidecar unavailable")
+
+        def set_extraction_watermark(self, *args: Any, **kwargs: Any) -> None:
+            raise OSError("sidecar unavailable")
+
+    config = _config(storage_path=str(tmp_path), retrieval_adapter="")
+    llm = _RecordingLLM()
+    updater = MemoryUpdater(config, _BrokenSidecarStorage(config), llm)
+    messages = _msgs("first")
+
+    assert updater.update_memory(messages, thread_id="t1", agent_name="a", user_id="u") is True
+    assert updater.update_memory(messages, thread_id="t1", agent_name="a", user_id="u") is True
+    assert llm.invoke_count == 1
+
+
+def test_file_storage_round_trips_extraction_watermarks_without_a_manifest_write(tmp_path: Path) -> None:
+    storage = FileMemoryStorage(_config(storage_path=str(tmp_path), retrieval_adapter=""))
+    assert storage.get_extraction_watermark("t1", agent_name="a", user_id="u") is None
+
+    storage.set_extraction_watermark("t1", ["id", "m1"], agent_name="a", user_id="u")
+    storage.set_extraction_watermark("t2", ["id", "m2"], agent_name="a", user_id="u")
+    assert storage.get_extraction_watermark("t1", agent_name="a", user_id="u") == ["id", "m1"]
+    # A watermark is not memory content: no manifest (and no revision) is written.
+    assert not (tmp_path / "users" / "u" / "memory.json").exists()
+
+    storage.set_extraction_watermark("t1", None, agent_name="a", user_id="u")
+    storage.set_extraction_watermark("t2", None, agent_name="a", user_id="u")
+    assert storage.get_extraction_watermark("t1", agent_name="a", user_id="u") is None
+    assert not _sidecar(tmp_path).exists()
+
+
+def test_malformed_watermark_sidecar_entries_are_ignored(tmp_path: Path) -> None:
+    storage = FileMemoryStorage(_config(storage_path=str(tmp_path), retrieval_adapter=""))
+    sidecar = _sidecar(tmp_path)
+    sidecar.parent.mkdir(parents=True)
+    sidecar.write_text("not json", encoding="utf-8")
+    assert storage.get_extraction_watermark("t1", agent_name="a", user_id="u") is None
+
+    sidecar.write_text(json.dumps({"t1": "id", "t2": ["id", 2], "t3": []}), encoding="utf-8")
+    for thread_id in ("t1", "t2", "t3"):
+        assert storage.get_extraction_watermark(thread_id, agent_name="a", user_id="u") is None
+
+    storage.set_extraction_watermark("t4", ["id", "m4"], agent_name="a", user_id="u")
+    assert json.loads(sidecar.read_text(encoding="utf-8")) == {"t4": ["id", "m4"]}
+
+
+def test_unreadable_watermark_sidecar_is_never_replaced(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A read error is not an empty sidecar: every write rewrites the whole
+    file, so treating it as empty would drop the other threads' watermarks."""
+    config = _config(storage_path=str(tmp_path), retrieval_adapter="")
+    storage = FileMemoryStorage(config)
+    storage.set_extraction_watermark("t1", ["id", "m1"], agent_name="a", user_id="u")
+    storage.set_extraction_watermark("t2", ["id", "m2"], agent_name="a", user_id="u")
+    sidecar = _sidecar(tmp_path)
+    before = sidecar.read_bytes()
+
+    def _fail_on_sidecar(read: Any) -> Any:
+        def wrapper(self: Path, *args: Any, **kwargs: Any) -> Any:
+            if self.name == "watermarks.json":
+                raise OSError(errno.EIO, "Input/output error", str(self))
+            return read(self, *args, **kwargs)
+
+        return wrapper
+
+    monkeypatch.setattr(Path, "read_bytes", _fail_on_sidecar(Path.read_bytes))
+    monkeypatch.setattr(Path, "read_text", _fail_on_sidecar(Path.read_text))
+
+    with pytest.raises(OSError):
+        storage.set_extraction_watermark("t3", ["id", "m3"], agent_name="a", user_id="u")
+    with pytest.raises(OSError):
+        storage.set_extraction_watermark("t1", None, agent_name="a", user_id="u")
+    # Through the updater the extraction still succeeds; only the write-through is skipped.
+    llm = _RecordingLLM()
+    assert MemoryUpdater(config, storage, llm).update_memory(_msgs("first"), thread_id="t3", agent_name="a", user_id="u") is True
+    assert llm.invoke_count == 1
+
+    monkeypatch.undo()
+    assert sidecar.read_bytes() == before
+    assert storage.get_extraction_watermark("t1", agent_name="a", user_id="u") == ["id", "m1"]
+    assert storage.get_extraction_watermark("t2", agent_name="a", user_id="u") == ["id", "m2"]
