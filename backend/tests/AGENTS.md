@@ -1,5 +1,9 @@
 # Backend Tests
 
+`test_image_result_url_safety.py` drives GroundRoute through `ainvoke` and an
+offline HTTPX transport. Patch only the provider's `httpx` reference; preserve
+the shared client and exercise real configuration resolution and URL screening.
+
 `test_client_upload_snapshot.py` keeps upload publication and conversion on the
 same private capture. Cover source edits/removal, both conversion branches,
 same-file rejection, metadata and cleanup; retain sandbox symlink defenses.
