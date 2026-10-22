@@ -3041,6 +3041,10 @@ API). It builds user-model memory — long-term preferences and a cross-session
 working representation — on Honcho's server side, so the backend makes no LLM
 calls locally. Each user gets an isolated workspace derived from `user_id`; a
 missing user id fails closed instead of falling back to a shared workspace.
+Framework-hidden user messages are excluded from Honcho writes; the host's
+human-input filter preserves valid user clarification answers carried in hidden messages.
+If that filter raises an exception, only the affected hidden message is skipped;
+other messages in the batch can still be captured.
 Fact CRUD and Settings-page fact editing are not available for this backend. See
 the [Honcho backend guide](backend/packages/harness/deerflow/agents/memory/backends/honcho/README.md).
 
