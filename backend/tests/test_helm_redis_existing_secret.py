@@ -94,6 +94,27 @@ def test_bundled_redis_uses_optional_existing_secret_password(password: str | No
         assert argv == ["redis-cli", *(["--no-auth-warning", "-a", password] if password else []), "ping"]
 
 
+@pytest.mark.parametrize(
+    "settings",
+    [
+        ("redis.existingSecret=false",),
+        ("redis.external.existingSecret=false", "redis.existingSecret=false"),
+    ],
+    ids=["existing-secret-false", "both-secrets-false"],
+)
+def test_falsy_existing_secret_still_uses_the_chart_managed_secret(settings: tuple[str, ...]) -> None:
+    # `false` is how people spell "not set" in values.yaml. `or` returns its
+    # last operand even when falsy, so it would name the Secret `false` — and
+    # nothing creates a Secret by that name, leaving both refs dangling.
+    documents = _render_chart(*settings, f"redis.auth.password={PASSWORD}")
+    gateway_ref = _secret_ref(_container(documents, "gateway"), "DEER_FLOW_STREAM_BRIDGE_REDIS_URL")
+    redis_ref = _secret_ref(_container(documents, "redis"), "REDIS_PASSWORD")
+    assert isinstance(gateway_ref["name"], str)
+    assert gateway_ref == {"name": redis_ref["name"], "key": "redis-url"}
+    assert redis_ref["key"] == "redis-password"
+    assert any(document.get("kind") == "Secret" and document["metadata"]["name"] == gateway_ref["name"] for document in documents)
+
+
 @pytest.mark.parametrize("enabled", ["true", "false"])
 def test_external_secret_precedence_is_unchanged(enabled: str) -> None:
     # The existing helper gives external.existingSecret precedence in both modes.
