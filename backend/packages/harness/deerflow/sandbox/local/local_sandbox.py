@@ -11,6 +11,7 @@ import stat
 import subprocess
 import sys
 import threading
+from contextlib import suppress
 from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
@@ -52,7 +53,11 @@ def _publish_file_revision(path: str, content: str) -> None:
         publish_bytes_atomically(target, content.encode("utf-8"), temporary_prefix=".deerflow-write-", preserve_metadata_from=fd)
     finally:
         if fd is not None:
-            os.close(fd)
+            try:
+                os.close(fd)
+            except OSError:
+                with suppress(Exception):
+                    logger.warning("Failed to close file revision source descriptor for %s", target, exc_info=True)
 
 
 class _BoundedPipeCapture:

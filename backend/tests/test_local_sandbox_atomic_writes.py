@@ -9,6 +9,7 @@ import stat
 import subprocess
 import sys
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
@@ -100,6 +101,63 @@ def test_successful_save_preserves_bytes_and_path_translation(tmp_path, sandbox,
     assert target.read_bytes() == expected.encode("utf-8")
     assert sandbox.read_file("/mnt/user-data/outputs/report.md") == content
     assert list(tmp_path.iterdir()) == [target]
+
+
+@requires_atomic_revision
+@pytest.mark.parametrize("content", ["", "new\n", "n" * (256 * 1024 + 1)], ids=["empty", "nonempty", "large-same-size"])
+def test_revision_updates_modification_time(tmp_path, sandbox, content):
+    target = tmp_path / "report.md"
+    target.write_bytes(b"o" * max(4, len(content)))
+    old_time = 946684800_000000000
+    os.utime(target, ns=(old_time, old_time))
+
+    sandbox.write_file("/mnt/user-data/outputs/report.md", content)
+
+    assert target.stat().st_mtime_ns > old_time
+    assert target.read_bytes() == content.encode("utf-8")
+    assert list(tmp_path.iterdir()) == [target]
+
+
+@requires_atomic_revision
+@pytest.mark.parametrize("outcome", ["success", "write-error", "interrupted"])
+@pytest.mark.parametrize("broken_logging", [False, True])
+def test_source_close_error_preserves_publication_outcome(tmp_path, monkeypatch, outcome, broken_logging):
+    target = tmp_path / "report.md"
+    target.write_bytes(b"old\n")
+    before = target.stat()
+    real_close = os.close
+    closed = []
+    primary = KeyboardInterrupt("interrupted publication") if outcome == "interrupted" else OSError(errno.ENOSPC, "No space left on device")
+
+    def close(fd):
+        source = os.fstat(fd).st_ino == before.st_ino
+        real_close(fd)
+        if source:
+            closed.append(fd)
+            raise OSError(errno.EIO, "Source descriptor close failed")
+
+    def fail_fsync(fd):
+        raise primary
+
+    warning = Mock(side_effect=RuntimeError("broken log handler") if broken_logging else None)
+    monkeypatch.setattr(local.logger, "warning", warning)
+    monkeypatch.setattr(os, "close", close)
+    if outcome != "success":
+        monkeypatch.setattr(os, "fsync", fail_fsync)
+
+    if outcome == "success":
+        local._publish_file_revision(str(target), "new\n")
+    else:
+        with pytest.raises(type(primary)) as error:
+            local._publish_file_revision(str(target), "new\n")
+        assert error.value is primary
+
+    assert len(closed) == 1
+    assert target.read_bytes() == (b"new\n" if outcome == "success" else b"old\n")
+    assert list(tmp_path.iterdir()) == [target]
+    warning.assert_called_once()
+    assert warning.call_args.args[1] == target
+    assert warning.call_args.kwargs["exc_info"] is True
 
 
 def test_append_keeps_existing_inode_and_content(tmp_path, sandbox):
@@ -236,19 +294,56 @@ def test_max_length_filename_can_be_overwritten(tmp_path, sandbox):
     assert list(tmp_path.iterdir()) == [target]
 
 
+def _darwin_acl_bytes(path):
+    """Compare native ACL data without DirectoryService's display-name lookup."""
+    import ctypes
+
+    library = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+    signatures = {
+        "acl_get_file": ([ctypes.c_char_p, ctypes.c_int], ctypes.c_void_p),
+        "acl_size": ([ctypes.c_void_p], ctypes.c_ssize_t),
+        "acl_copy_ext": ([ctypes.c_void_p, ctypes.c_void_p, ctypes.c_ssize_t], ctypes.c_ssize_t),
+        "acl_free": ([ctypes.c_void_p], ctypes.c_int),
+    }
+    for name, (arguments, result) in signatures.items():
+        function = getattr(library, name)
+        function.argtypes = arguments
+        function.restype = result
+    acl = library.acl_get_file(os.fsencode(path), 0x100)
+    if not acl:
+        assert ctypes.get_errno() == errno.ENOENT
+        return b""
+    try:
+        size = library.acl_size(acl)
+        assert size > 0
+        buffer = ctypes.create_string_buffer(size)
+        written = library.acl_copy_ext(buffer, acl, size)
+        assert written == size
+        return buffer.raw
+    finally:
+        assert library.acl_free(acl) == 0
+
+
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS extended ACL regression")
 def test_overwrite_preserves_existing_extended_acl(tmp_path, sandbox):
     target = tmp_path / "report.md"
     target.write_bytes(b"old\n")
+    empty = _darwin_acl_bytes(target)
     subprocess.run(["chmod", "+a", "nobody deny read", str(target)], check=True, capture_output=True)
-    before = subprocess.check_output(["ls", "-le", str(target)], text=True).splitlines()[1:]
-    assert before, "The fixture must install an actual ACL"
+    before = _darwin_acl_bytes(target)
+    assert before != empty, "The fixture must install an actual ACL"
 
     sandbox.write_file("/mnt/user-data/outputs/report.md", "new\n")
 
-    after = subprocess.check_output(["ls", "-le", str(target)], text=True).splitlines()[1:]
+    after = _darwin_acl_bytes(target)
     assert after == before
     assert target.read_bytes() == b"new\n"
+
+    # Keep the comparison sensitive to both lost and changed permissions.
+    subprocess.run(["chmod", "-N", str(target)], check=True, capture_output=True)
+    assert _darwin_acl_bytes(target) == empty
+    subprocess.run(["chmod", "+a", "nobody deny write", str(target)], check=True, capture_output=True)
+    assert _darwin_acl_bytes(target) != before
 
 
 @requires_atomic_revision

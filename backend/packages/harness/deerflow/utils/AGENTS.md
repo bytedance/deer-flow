@@ -22,6 +22,9 @@ descriptor xattrs, including its access ACL, removing inherited extras. Errors
 abort; never ignore metadata permission failures. Refuse set-id bits, macOS file
 flags and content-bound privilege attributes rather than reattach stale privileges to new
 content. Other publisher callers retain their existing mode-only contract.
+Do not restore old timestamps on a content revision, including an empty save.
+Source-descriptor close failures are best-effort warnings, not save failures;
+guard diagnostics so the publication result or original interruption survives.
 Failure cleanup must preserve the original publication exception, including
 interruptions. Descriptor close and sibling unlink are separate best-effort
 operations: a close failure must not prevent the unlink attempt.

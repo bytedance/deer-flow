@@ -91,4 +91,3 @@ def preserve_revision_metadata(source: int, destination: int) -> None:
         _copy_linux_metadata(source, destination)
     else:
         raise OSError(errno.ENOTSUP, "File revision metadata is supported on Linux and macOS only")
-    os.utime(destination, ns=(before.st_atime_ns, before.st_mtime_ns))
