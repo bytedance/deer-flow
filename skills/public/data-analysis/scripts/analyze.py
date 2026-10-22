@@ -363,6 +363,23 @@ def _export_results(columns: list[str], rows: list[tuple], output_file: str) -> 
             writer.writerows(rows)
 
     elif ext == ".json":
+        # A JSON record cannot retain two values under one key, so duplicate
+        # result column names (e.g. `SELECT a.id, b.id`) would silently drop
+        # every overwritten value. Reject the ambiguous export instead.
+        duplicate_columns = sorted(
+            {col for col in columns if columns.count(col) > 1}
+        )
+        if duplicate_columns:
+            msg = (
+                "JSON export failed: query result has duplicate column names "
+                f"({', '.join(duplicate_columns)}). A JSON record cannot hold "
+                "two values under one key. Give the columns distinct SQL "
+                "aliases (e.g. `SELECT a.id AS a_id, b.id AS b_id`) and rerun "
+                "the export. CSV and Markdown exports preserve both columns."
+            )
+            print(msg)
+            return msg
+
         records = []
         for row in rows:
             record = {}
