@@ -45,6 +45,19 @@ _RISKY_SUBSTITUTION = rf"(?:[$<]\(\s*|`\s*){_RISKY_SUBSTITUTION_EXECUTABLES}"
 # alternation cannot backtrack on long input.
 _CODE_STRING_INTERPRETERS = r"(?:(?:ba|da|k|z)?sh|python[\d.]*|perl|ruby|node|php)"
 _LEADING_FLAGS = r"(?:-\w+\s+){0,4}"
+# Flags before a stdin-redirect program also include the bare `-` ("read the
+# program from stdin") and long forms. A flag taking its value as the next word
+# (`-o pipefail`, `--rcfile f`) still hides the redirect; that spelling stays a
+# documented gap, because its value is indistinguishable from a script argument.
+_STDIN_SCRIPT_FLAGS = r"(?:--?[-\w]*\s+){0,4}"
+
+# A command position is not always the first character: POSIX shell allows leading
+# variable assignments, and exec wrappers keep what follows in command position
+# (``FOO=1 $(curl url)``, ``env FOO=1 $(curl url)``, ``nohup $(curl url)``). The
+# assignment branch cannot match ``x=$(curl url)`` because it requires whitespace
+# between the assignment and the substitution, so value position stays allowed.
+# The repetition is bounded to keep the alternation from backtracking on long input.
+_COMMAND_POSITION_PREFIX = r"(?:(?:env|command|builtin|exec|nohup|time|sudo|doas)\s+|\w+=\S*\s+){0,8}"
 
 # Each pattern is compiled once at import time.
 _HIGH_RISK_PATTERNS: list[re.Pattern[str]] = [
@@ -60,6 +73,10 @@ _HIGH_RISK_PATTERNS: list[re.Pattern[str]] = [
     # spelling is deliberately *not* here: as a path argument (`du -sh . $(curl u)`)
     # a dot is value position, so it is matched in command position only, below. ---
     re.compile(rf"\b(?:eval|source)\s+[\"']?{_RISKY_SUBSTITUTION}"),
+    # `eval . $(curl u)` executes the same fetched content one step removed:
+    # eval re-parses the dot builtin, which sources the substitution's output.
+    # `_COMMAND_POSITION_PREFIX` still admits wrappers (`eval env . $(curl u)`).
+    re.compile(rf"\b(?:eval|source)\s+{_COMMAND_POSITION_PREFIX}\.\s+[\"']?{_RISKY_SUBSTITUTION}"),
     # --- an interpreter's code-string flag is an execution context too ---
     re.compile(rf"\b{_CODE_STRING_INTERPRETERS}\s+{_LEADING_FLAGS}-[cepr]\s+[\"']?{_RISKY_SUBSTITUTION}"),
     re.compile(rf"\b{_CODE_STRING_INTERPRETERS}\s+{_LEADING_FLAGS}<<<\s*[\"']?{_RISKY_SUBSTITUTION}"),
@@ -93,15 +110,6 @@ _HIGH_RISK_PATTERNS: list[re.Pattern[str]] = [
 #
 # The previous unanchored rule could not tell them apart and refused everyday
 # output capture (issue #4611).
-#
-# A command position is not always the first character: POSIX shell allows leading
-# variable assignments, and exec wrappers keep what follows in command position
-# (``FOO=1 $(curl url)``, ``env FOO=1 $(curl url)``, ``nohup $(curl url)``). The
-# assignment branch cannot match ``x=$(curl url)`` because it requires whitespace
-# between the assignment and the substitution, so value position stays allowed.
-# The repetition is bounded to keep the alternation from backtracking on long input.
-_COMMAND_POSITION_PREFIX = r"(?:(?:env|command|builtin|exec|nohup|time|sudo|doas)\s+|\w+=\S*\s+){0,8}"
-
 _HIGH_RISK_COMMAND_POSITION_PATTERNS: list[re.Pattern[str]] = [
     re.compile(rf"^{_COMMAND_POSITION_PREFIX}[\"']?\$\(\s*{_RISKY_SUBSTITUTION_EXECUTABLES}"),
     re.compile(rf"^{_COMMAND_POSITION_PREFIX}[\"']?`\s*{_RISKY_SUBSTITUTION_EXECUTABLES}"),
@@ -113,7 +121,7 @@ _HIGH_RISK_COMMAND_POSITION_PATTERNS: list[re.Pattern[str]] = [
     # interpreter reads its *program* from stdin, so the process substitution is
     # executed. A script argument keeps the redirect as data
     # (`bash script.sh < <(curl u)` passes).
-    re.compile(rf"^{_COMMAND_POSITION_PREFIX}{_CODE_STRING_INTERPRETERS}\s+{_LEADING_FLAGS}<\s*<\(\s*{_RISKY_SUBSTITUTION_EXECUTABLES}"),
+    re.compile(rf"^{_COMMAND_POSITION_PREFIX}{_CODE_STRING_INTERPRETERS}\s+{_STDIN_SCRIPT_FLAGS}<\s*<\(\s*{_RISKY_SUBSTITUTION_EXECUTABLES}"),
     re.compile(rf"^{_COMMAND_POSITION_PREFIX}(?:source|\.)\s+<\s*<\(\s*{_RISKY_SUBSTITUTION_EXECUTABLES}"),
 ]
 
