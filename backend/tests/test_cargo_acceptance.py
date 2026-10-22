@@ -18,6 +18,12 @@ from deerflow.agents.middlewares.tool_error_handling_middleware import ToolError
 from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
 from deerflow.subagents.acceptance_checks import check_acceptance_criteria, render_acceptance_section, render_acceptance_segment
 
+# Each parametrization compiles the fixture from a cold target directory, and a
+# loaded CI runner can spend far longer than the compile itself on toolchain
+# startup. 60s occasionally expired mid-compile, which surfaces as "Exit Code:
+# 124" instead of a test summary; the run is still bounded by the harness.
+CARGO_BUILD_TIMEOUT = 180
+
 
 def _summary(passed=0, failed=0, ignored=0):
     return f"test result: {'FAILED' if failed else 'ok'}. {passed} passed; {failed} failed; {ignored} ignored; 0 measured; 0 filtered out; finished in 0.00s"
@@ -147,7 +153,7 @@ async def test_native_cargo_output_reaches_parent_acceptance_through_tool_node(t
     outputs = []
 
     async def bash(command: str) -> str:
-        output = await asyncio.to_thread(sandbox.execute_command, command, timeout=60)
+        output = await asyncio.to_thread(sandbox.execute_command, command, timeout=CARGO_BUILD_TIMEOUT)
         outputs.append(output)
         return output
 

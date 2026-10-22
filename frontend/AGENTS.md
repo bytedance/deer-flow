@@ -83,6 +83,8 @@ Keep IM notification preferences viewer-fenced and separate from browser alerts;
 
 ## Architecture
 
+Model controls: `core/models/use-model-control` + HumanInputCard.
+
 Knowledge evidence is parsed in `core/citations/sources.ts` from version-1
 ToolMessage artifacts. Message rows receive sources from preceding loaded tool
 messages. `#knowledge-source-ID` links resolve to `KnowledgeCitation` and an
@@ -232,13 +234,7 @@ round-trip validation must still reject newly entered skipped times.
 
 ## Contributing
 
-When adding features:
-
-1. Follow the established `src/` structure
-2. Add TypeScript types and proper error handling
-3. Write unit tests under `tests/unit/` (`pnpm test`) and E2E tests under `tests/e2e/` (`pnpm test:e2e`)
-4. Run `pnpm check` before committing
-5. Update this `AGENTS.md` when architecture, commands, or conventions change
+Features follow `src/` ownership, include TypeScript types/error handling, unit tests (`tests/unit/`, `pnpm test`) and E2E (`tests/e2e/`, `pnpm test:e2e`). Run `pnpm check` before committing; update AGENTS.md when architecture, commands or conventions change.
 
 Route asset budgets are enforced with `pnpm perf:check`. The command measures
 `/login` from a normal production build, then builds in static-demo mode for the

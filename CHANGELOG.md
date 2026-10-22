@@ -6923,6 +6923,15 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
   the absolute host path of the thread's uploads directory, including the user
   and thread IDs. They now return `Failed to upload <name>.` /
   `Failed to delete <name>.`, and the full error stays in the Gateway log. ([#7217])
+  
+- **agents:** The custom-agent and user-profile routes no longer put the raw
+  exception text in their `500` detail. An unparsable agent `config.yaml` or a
+  filesystem error (`[Errno 13]` and the like) made them answer with the
+  absolute host path under `users/<user_id>/`. They now return a fixed
+  `Failed to <action>` detail, matching agent import and export, and the full
+  error stays in the Gateway log. Scheduled-task create and update keep the
+  `invalid_assistant` 422 for an unloadable agent config but no longer echo
+  the parse error, which also reached the scheduler tool result. ([#7255])
 
 - **infoquest:** Screen organic, news and image result URLs through the shared
   public-URL policy, dropping non-public and unsafe references before they
@@ -12994,3 +13003,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7205]: https://github.com/bytedance/deer-flow/pull/7205
 [#7207]: https://github.com/bytedance/deer-flow/pull/7207
 [#7217]: https://github.com/bytedance/deer-flow/pull/7217
+[#7255]: https://github.com/bytedance/deer-flow/pull/7255
