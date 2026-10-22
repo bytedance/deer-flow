@@ -322,6 +322,7 @@ async def _search_project_documents_impl(runtime: Runtime, *, query: str, limit:
     skipped = {"non_text": 0, "unconverted": 0, "missing": 0, "error": 0}
     truncated_ids: list[str] = []
     unscanned_ids: list[str] = []
+    processed = 0  # non-tier-1 rows examined before any budget trip
     paths = get_paths()
     page_offset = 0
     while True:
@@ -329,23 +330,24 @@ async def _search_project_documents_impl(runtime: Runtime, *, query: str, limit:
         if not rows:
             break
         for row in rows:
-            if stop_reason == "budget":
-                # Tier 1 was fully scanned before tier 2 started: an id in
-                # tier1_ids is already in results and was searched, so it can
-                # never be "unscanned" — listing it would contradict the
-                # coverage contract and make coverage position-dependent.
-                if row["id"] not in tier1_ids:
-                    unscanned_ids.append(row["id"])
-                continue
             if remaining == 0:
                 stop_reason = "limit"
                 break
             if row["id"] in tier1_ids:
+                # Tier 1 was fully scanned before tier 2 started: these are
+                # already in results and were searched — never "unscanned".
                 continue
             if budget_left <= 0:
+                # Budget tripped. Unscanned ids are enumerated ONLY from the
+                # page already in flight (up to the payload cap); the honest
+                # total is derived after the loop from one count_active query,
+                # so a trip never pages shelf_size/200 more rounds just to
+                # count rows it already ruled out.
                 stop_reason = "budget"
-                unscanned_ids.append(row["id"])
+                if len(unscanned_ids) < _SEARCH_ID_LIST_CAP:
+                    unscanned_ids.append(row["id"])
                 continue
+            processed += 1
             try:
                 serving_path, reason = await read_text_serving_path(repo, paths, user_id=user_id, row=row, auto_convert=False)
             except Exception:
@@ -370,6 +372,8 @@ async def _search_project_documents_impl(runtime: Runtime, *, query: str, limit:
             if match is not None:
                 results.append({"id": row["id"], "name": neutralize_untrusted_tags(str(row.get("name") or "")), "matched": "content", "excerpt": _search_excerpt(text, match), "offset": match.start()})
                 remaining -= 1
+        if stop_reason == "budget":
+            break
         if remaining == 0:
             # The page filled exactly at its end: no extra list_active round
             # trip, and stop_reason is "limit" (not "complete") even when this
@@ -381,7 +385,13 @@ async def _search_project_documents_impl(runtime: Runtime, *, query: str, limit:
             break
 
     truncated_capped, truncated_total = _capped_id_list(truncated_ids)
-    unscanned_capped, unscanned_total = _capped_id_list(unscanned_ids)
+    unscanned_total = 0
+    if stop_reason == "budget":
+        # Tier 1 enumerated the whole shelf, so the honest unscanned total is
+        # active - tier-1 hits - rows processed before the trip — one query,
+        # no paging. max() absorbs a concurrent trash/purge racing the count.
+        total_active = await repo.count_active(project_id, user_id=user_id)
+        unscanned_total = max(total_active - len(tier1_ids) - processed, len(unscanned_ids))
     return json.dumps(
         {
             "results": results,
@@ -390,7 +400,7 @@ async def _search_project_documents_impl(runtime: Runtime, *, query: str, limit:
             "skipped": skipped,
             "truncated_document_ids": truncated_capped,
             "truncated_count": truncated_total,
-            "unscanned_document_ids": unscanned_capped,
+            "unscanned_document_ids": unscanned_ids,
             "unscanned_count": unscanned_total,
         },
         ensure_ascii=False,

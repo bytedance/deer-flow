@@ -47,9 +47,9 @@ def _runtime(*, project_id: str | None, user_id: str = _USER) -> SimpleNamespace
     return SimpleNamespace(context=context)
 
 
-async def _shelve(env, *, name: str, data: bytes, project_id: str | None = None) -> dict:
-    staged = await stage_document_bytes(env.paths, user_id=_USER, project_id=project_id or env.project["id"], chunks=[data], max_bytes=1 << 20)
-    result = await add_staged_document(env.docs, env.paths, user_id=_USER, project_id=project_id or env.project["id"], name=name, staged=staged)
+async def _shelve(env, *, name: str, data: bytes, project_id: str | None = None, user_id: str = _USER) -> dict:
+    staged = await stage_document_bytes(env.paths, user_id=user_id, project_id=project_id or env.project["id"], chunks=[data], max_bytes=1 << 20)
+    result = await add_staged_document(env.docs, env.paths, user_id=user_id, project_id=project_id or env.project["id"], name=name, staged=staged)
     assert result is not None
     row, created = result
     assert created
@@ -214,6 +214,31 @@ class TestBudgetsAndCoverage:
         assert result["stop_reason"] == "limit"
         assert len(result["results"]) == 1
 
+    async def test_budget_trip_does_not_page_the_rest_of_the_shelf(self, env, monkeypatch):
+        """After the budget trips, unscanned ids come only from the page in
+        flight and the total is derived from one count_active — no further
+        list_active paging just to enumerate what was never searched."""
+        _budgets(monkeypatch, 10, 10)
+        from deerflow.persistence.projects import ProjectDocumentRepository
+
+        calls = 0
+        real_list_active = ProjectDocumentRepository.list_active
+
+        async def counting_list_active(self, *args, **kwargs):
+            nonlocal calls
+            calls += 1
+            return await real_list_active(self, *args, **kwargs)
+
+        monkeypatch.setattr(ProjectDocumentRepository, "list_active", counting_list_active)
+        for i in range(25):
+            await _shelve(env, name=f"doc-{i}.txt", data=f"x{i}".encode() * 500)
+        result = await _search(env, "needle")
+        assert result["stop_reason"] == "budget"
+        assert result["unscanned_count"] == 24
+        assert len(result["unscanned_document_ids"]) == 20
+        # One tier-1 page plus the trip page — never shelf_size/200 more.
+        assert calls == 2
+
     async def test_id_lists_are_capped_with_total_counts(self, env, monkeypatch):
         _budgets(monkeypatch, 10, 10_000_000)
         for i in range(25):
@@ -250,6 +275,22 @@ class TestQueryValidation:
     async def test_fail_closed_without_pinned_context(self, env):
         result = json.loads(await _search_project_documents_impl(_runtime(project_id=None), query="q", limit=10))
         assert "error" in result
+
+
+class TestIsolation:
+    async def test_other_projects_never_appear(self, env, monkeypatch):
+        """Search authorization rests entirely on list_active's project/user
+        predicates: a keyword doc in another project — same user or another
+        user — must never surface in this project's results."""
+        _budgets(monkeypatch, 10_000, 100_000)
+        mine = await _shelve(env, name="mine.txt", data=b"needle mine")
+        same_user_other = await env.projects.create(name="P2", user_id=_USER)
+        await _shelve(env, name="same-user.txt", data=b"needle", project_id=same_user_other["id"])
+        other_user = await env.projects.create(name="P3", user_id="u2")
+        await _shelve(env, name="other-user.txt", data=b"needle", project_id=other_user["id"], user_id="u2")
+        result = await _search(env, "needle")
+        assert [r["id"] for r in result["results"]] == [mine["id"]]
+        assert result["stop_reason"] == "complete"
 
 
 class TestConfig:
