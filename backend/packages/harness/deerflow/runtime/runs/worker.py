@@ -34,6 +34,7 @@ from functools import lru_cache
 from typing import Any, Final, Literal, cast
 
 from deerflow_extension_api.agent_runs import AGENT_RUNS_CONTEXT_KEY
+from langchain_core.messages import AIMessage, AIMessageChunk
 from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.types import Overwrite
 
@@ -428,6 +429,33 @@ async def _produced_output_paths(
 # Keep this streaming policy separate from middleware write-authorization sets.
 _LARGE_FILE_TOOL_NAMES = frozenset({"str_replace", "write_file"})
 _LARGE_FILE_TOOL_BATCH_SIZE = 32
+
+
+@dataclass
+class _PartialAssistantResponseAccumulator:
+    """Collect root assistant text that was successfully streamed to clients."""
+
+    text_by_id: dict[str, str] = field(default_factory=dict)
+
+    def observe(self, chunk: Any) -> None:
+        if not isinstance(chunk, tuple) or len(chunk) != 2:
+            return
+        message, _metadata = chunk
+        if not isinstance(message, (AIMessage, AIMessageChunk)):
+            return
+        additional_kwargs = getattr(message, "additional_kwargs", None)
+        if isinstance(additional_kwargs, Mapping) and additional_kwargs.get("hide_from_ui") is True:
+            return
+        message_id = getattr(message, "id", None)
+        if not isinstance(message_id, str) or not message_id:
+            return
+        text = message_to_text(message, text_attribute_fallback=True)
+        if not text:
+            return
+        self.text_by_id[message_id] = self.text_by_id.get(message_id, "") + text
+
+    def messages(self) -> list[AIMessage]:
+        return [AIMessage(id=message_id, content=text) for message_id, text in self.text_by_id.items() if text.strip()]
 
 
 @dataclass
@@ -1000,6 +1028,7 @@ async def run_agent(
     accessor: CheckpointStateAccessor | None = None
     rollback_point: RollbackPoint | None = None
     journal = None
+    partial_assistant_response: _PartialAssistantResponseAccumulator | None = None
     seq_stamper: _MessageSeqStamper | None = None
     runtime_ctx: dict[str, Any] | None = None
     runtime: Any | None = None
@@ -1116,6 +1145,8 @@ async def run_agent(
                 user_id=record.user_id,
                 progress_reporter=lambda snapshot: run_manager.update_run_progress(run_id, **snapshot),
             )
+            if "messages-tuple" in requested_modes:
+                partial_assistant_response = _PartialAssistantResponseAccumulator()
 
         # Keep cancellable preflight work under the worker's terminal guard so
         # cancellation cannot strand a pending RunRecord or stream subscriber.
@@ -1506,6 +1537,8 @@ async def run_agent(
                                 if single_mode == "values" and seq_stamper is not None:
                                     single_payload = await seq_stamper.stamp(single_payload)
                                 await bridge.publish(run_id, sse_event, single_payload)
+                                if single_mode == "messages" and partial_assistant_response is not None:
+                                    partial_assistant_response.observe(chunk)
                                 if single_mode == "custom":
                                     await subagent_events.add(chunk)
                         finally:
@@ -1564,6 +1597,8 @@ async def run_agent(
                                 subagent_events=subagent_events,
                                 seq_stamper=seq_stamper,
                             )
+                            if not namespace and mode == "messages" and partial_assistant_response is not None:
+                                partial_assistant_response.observe(chunk)
                     finally:
                         close_error = sys.exception()
                         try:
@@ -1807,6 +1842,8 @@ async def run_agent(
                 # crash window where a terminal run could otherwise outlive its receipt.
                 # A fenced worker leaves receipt recovery to the peer that claimed it.
                 if not record.ownership_lost and journal is not None:
+                    if record.status == RunStatus.interrupted and partial_assistant_response is not None:
+                        journal.record_interrupted_ai_responses(partial_assistant_response.messages())
                     try:
                         await journal.flush()
                     except Exception:

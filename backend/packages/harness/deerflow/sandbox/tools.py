@@ -40,6 +40,7 @@ from deerflow.sandbox.lease import (
     sandbox_command_scope,
     sandbox_lease_owner,
 )
+from deerflow.sandbox.local.local_sandbox import LocalSandbox, escape_powershell_path
 from deerflow.sandbox.overwrite import unwrap_sandbox
 from deerflow.sandbox.path_patterns import build_output_mask_pattern, normalize_mask_tail, replace_output_path_matches
 from deerflow.sandbox.prewarm import claim_sandbox_prewarm
@@ -1888,7 +1889,7 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
         raise PermissionError(f"Unsafe absolute paths in command: {unsafe}. Use paths under {VIRTUAL_PATH_PREFIX}. {_LOCAL_BASH_PATH_RECOVERY_GUIDANCE}")
 
 
-def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState | None) -> str:
+def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState | None, *, shell: str | None = None) -> str:
     """Replace /mnt/user-data virtual paths in a command string for local sandbox.
 
     Skills paths (/mnt/skills) and ACP workspace paths (/mnt/acp-workspace)
@@ -1901,6 +1902,7 @@ def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState 
     Args:
         command: The command string that may contain virtual paths.
         thread_data: The thread data containing actual paths.
+        shell: Local execution shell, auto-detected when omitted.
 
     Returns:
         The command with user-data virtual paths replaced.
@@ -1934,7 +1936,10 @@ def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState 
         pattern = re.compile(rf"{re.escape(VIRTUAL_PATH_PREFIX)}(?=/|$|[^\w./-])(/[^\s\"';&|<>():]*)?")
 
         def replace_user_data_match(match: re.Match) -> str:
-            return replace_virtual_path(match.group(0), thread_data).replace("\\", "/")
+            resolved = replace_virtual_path(match.group(0), thread_data).replace("\\", "/")
+            if LocalSandbox._is_powershell(shell or LocalSandbox._get_shell()):
+                return escape_powershell_path(match, resolved)
+            return resolved
 
         result = pattern.sub(replace_user_data_match, result)
 
@@ -3004,8 +3009,9 @@ def ls_tool(runtime: Runtime, path: str, description: str = "") -> str:
         return f"Error: {e}"
     except FileNotFoundError:
         return f"Error: Directory not found: {requested_path}"
-    except PermissionError:
-        return f"Error: Permission denied: {requested_path}"
+    except PermissionError as e:
+        detail = _sanitize_error(e, runtime) if e.filename is not None else requested_path
+        return f"Error: Permission denied: {detail}"
     except Exception as e:
         return f"Error: Unexpected error listing directory: {_sanitize_error(e, runtime)}"
 
@@ -3069,8 +3075,9 @@ def glob_tool(
         return f"Error: Directory not found: {requested_path}"
     except NotADirectoryError:
         return f"Error: Path is not a directory: {requested_path}"
-    except PermissionError:
-        return f"Error: Permission denied: {requested_path}"
+    except PermissionError as e:
+        detail = _sanitize_error(e, runtime) if e.filename is not None else requested_path
+        return f"Error: Permission denied: {detail}"
     except Exception as e:
         return f"Error: Unexpected error searching paths: {_sanitize_error(e, runtime)}"
 

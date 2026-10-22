@@ -1067,7 +1067,17 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
 
     # Phase 3: enforce model:use authorization. On deny, fall back to the first
     # allowed model (graceful) rather than crashing the run (RFC §9).
-    model_name = _authorize_model_name(model_name, context=cfg, app_config=resolved_app_config)
+    explicit_selection = cfg.get("model_selection_requested")
+    if explicit_selection is not None:
+        from deerflow.models.selection import authorize_selected_model
+
+        if not isinstance(explicit_selection, str) or explicit_selection != requested_model_name:
+            raise ValueError("An explicit model selection must carry the same model_name.")
+        if explicit_selection != model_name:
+            raise ValueError("The explicitly selected model is not configured.")
+        authorize_selected_model(model_name, context=cfg, app_config=resolved_app_config)
+    else:
+        model_name = _authorize_model_name(model_name, context=cfg, app_config=resolved_app_config)
 
     model_config = resolved_app_config.get_model_config(model_name)
 
@@ -1318,6 +1328,14 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
         app_config=resolved_app_config,
         chat_model=chat_model,
     )
+    selected_child_model = cfg.get("subagent_model_name")
+    if selected_child_model is not None:
+        from deerflow.models.selection import authorize_selected_model, bind_selected_task_model
+
+        if not subagent_enabled or not isinstance(selected_child_model, str):
+            raise ValueError("A child model selection requires enabled subagents and a configured model name.")
+        authorize_selected_model(selected_child_model, context=cfg, app_config=resolved_app_config)
+        raw_tools = bind_selected_task_model(raw_tools, selected_child_model)
     configured_tools = raw_tools + extra_tools
     configured_tools = [tool for tool in configured_tools if tool.name not in interaction_policy.disabled_tool_names]
     authorization_candidates = [*configured_tools]
