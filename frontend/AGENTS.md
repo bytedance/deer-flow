@@ -51,6 +51,8 @@ in node tests to cover those behaviors.
 
 E2E tests live under `tests/e2e/` and use Playwright with Chromium. They mock all backend APIs via `page.route()` network interception and test real page interactions (navigation, chat input, streaming responses). Config: `playwright.config.ts`. The real-backend auth contract in `tests/e2e-real-backend/auth-disabled-contract.spec.ts` and `backend/tests/test_auth_me_permissions.py` pin the complete route-permission list; update both when adding registered permissions (including `projects:read/write/delete`).
 
+CI runs four E2E shards; only shard 1 runs auth recovery. Suite reports stay separate.
+
 The dedicated `run-history.ts` hook replaces the unpaged runs hook. Show counts
 only after a successful history read, never during initial loading or errors.
 Scheduled run history uses task/page query keys and the existing live offset API.
@@ -80,6 +82,8 @@ Chat pages pass `useThreadScheduledTaskEvents` data to `MessageList` (`scheduled
 Keep IM notification preferences viewer-fenced and separate from browser alerts; only confirmed server writes change switches.
 
 ## Architecture
+
+Model controls: `core/models/use-model-control` + HumanInputCard.
 
 Knowledge evidence is parsed in `core/citations/sources.ts` from version-1
 ToolMessage artifacts. Message rows receive sources from preceding loaded tool
@@ -230,13 +234,7 @@ round-trip validation must still reject newly entered skipped times.
 
 ## Contributing
 
-When adding features:
-
-1. Follow the established `src/` structure
-2. Add TypeScript types and proper error handling
-3. Write unit tests under `tests/unit/` (`pnpm test`) and E2E tests under `tests/e2e/` (`pnpm test:e2e`)
-4. Run `pnpm check` before committing
-5. Update this `AGENTS.md` when architecture, commands, or conventions change
+Features follow `src/` ownership, include TypeScript types/error handling, unit tests (`tests/unit/`, `pnpm test`) and E2E (`tests/e2e/`, `pnpm test:e2e`). Run `pnpm check` before committing; update AGENTS.md when architecture, commands or conventions change.
 
 Route asset budgets are enforced with `pnpm perf:check`. The command measures
 `/login` from a normal production build, then builds in static-demo mode for the

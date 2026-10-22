@@ -27,6 +27,7 @@ from app.channels.dingtalk import (
 )
 from app.channels.message_bus import InboundMessageType, MessageBus, OutboundMessage
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
+from deerflow.sandbox.lease import discard_sandbox_lease_manager, get_sandbox_lease_manager
 
 
 def _run(coro):
@@ -2101,6 +2102,29 @@ def _patch_uploads(monkeypatch, uploads_dir, *, sandbox_id="local", sandbox=None
         release=lambda sid: None,
     )
     monkeypatch.setattr("app.channels.dingtalk.get_sandbox_provider", lambda: provider)
+    return provider
+
+
+@pytest.fixture
+def non_local_upload(tmp_path, monkeypatch):
+    channel = DingTalkChannel(MessageBus(), config={})
+    channel._download_by_code = AsyncMock(return_value=b"BYTES")
+    uploads = tmp_path / "uploads"
+    uploads.mkdir()
+    sandbox = SimpleNamespace(update_file=MagicMock(), release_command_scope=MagicMock())
+    provider = _patch_uploads(monkeypatch, uploads, sandbox_id="aio:box1", sandbox=sandbox)
+    provider.release = MagicMock()
+    message = channel._make_inbound(
+        chat_id="c",
+        user_id="u",
+        text="hi",
+        thread_ts="m",
+        files=[{"type": "file", "download_code": "dc", "filename": "a.pdf"}],
+    )
+    try:
+        yield SimpleNamespace(channel=channel, provider=provider, sandbox=sandbox, message=message)
+    finally:
+        discard_sandbox_lease_manager(provider)
 
 
 class TestExtractFiles:
@@ -2696,6 +2720,82 @@ class TestReceiveFile:
             await channel.receive_file(msg, "t1", user_id="default")
 
             fake_sandbox.update_file.assert_called_once_with(f"{VIRTUAL_PATH_PREFIX}/uploads/a.pdf", b"BYTES")
+
+        _run(go())
+
+    def test_non_local_upload_releases_standalone_sandbox(self, non_local_upload):
+        async def go():
+            upload = non_local_upload
+            result = await asyncio.wait_for(upload.channel.receive_file(upload.message, "t1", user_id="default"), timeout=5)
+
+            assert result.text == f"{VIRTUAL_PATH_PREFIX}/uploads/a.pdf\n\nhi"
+            upload.sandbox.update_file.assert_called_once_with(f"{VIRTUAL_PATH_PREFIX}/uploads/a.pdf", b"BYTES")
+            upload.sandbox.release_command_scope.assert_called_once()
+            upload.provider.release.assert_called_once_with("aio:box1")
+
+        _run(go())
+
+    @pytest.mark.parametrize("run_finishes_first", [False, True])
+    def test_non_local_upload_releases_only_after_upload_and_run_finish(self, non_local_upload, run_finishes_first):
+        async def go():
+            upload = non_local_upload
+            manager = get_sandbox_lease_manager(upload.provider)
+            await manager.retain_async("active-run", "aio:box1", thread_id="t1", user_id="default")
+            started = asyncio.Event()
+            finish_update = threading.Event()
+            update_finished = threading.Event()
+            loop = asyncio.get_running_loop()
+
+            def update_file(path, content):
+                loop.call_soon_threadsafe(started.set)
+                try:
+                    if not finish_update.wait(timeout=10):
+                        raise TimeoutError("test did not release sandbox update")
+                finally:
+                    update_finished.set()
+
+            upload.sandbox.update_file.side_effect = update_file
+            task = asyncio.create_task(upload.channel.receive_file(upload.message, "t1", user_id="default"))
+            try:
+                await asyncio.wait_for(started.wait(), timeout=5)
+                upload.provider.release.assert_not_called()
+                assert not update_finished.is_set()
+
+                if run_finishes_first:
+                    await manager.release_async("active-run")
+                    upload.provider.release.assert_not_called()
+                    assert not update_finished.is_set()
+
+                finish_update.set()
+                result = await asyncio.wait_for(task, timeout=5)
+                assert result.text == f"{VIRTUAL_PATH_PREFIX}/uploads/a.pdf\n\nhi"
+                assert update_finished.is_set()
+                if not run_finishes_first:
+                    upload.provider.release.assert_not_called()
+                    assert manager.binding_for("active-run") == "aio:box1"
+                    await manager.release_async("active-run")
+
+                upload.provider.release.assert_called_once_with("aio:box1")
+                assert manager.binding_for("active-run") is None
+                assert upload.sandbox.release_command_scope.call_count == 2
+            finally:
+                finish_update.set()
+                await asyncio.gather(task, return_exceptions=True)
+                await manager.release_async("active-run")
+
+        _run(go())
+
+    def test_failed_non_local_upload_releases_standalone_sandbox(self, non_local_upload):
+        async def go():
+            upload = non_local_upload
+            upload.sandbox.update_file.side_effect = RuntimeError("sandbox transport down")
+
+            result = await asyncio.wait_for(upload.channel.receive_file(upload.message, "t1", user_id="default"), timeout=5)
+
+            assert result.text == "[failed to load file: a.pdf]\n\nhi"
+            upload.sandbox.update_file.assert_called_once_with(f"{VIRTUAL_PATH_PREFIX}/uploads/a.pdf", b"BYTES")
+            upload.sandbox.release_command_scope.assert_called_once()
+            upload.provider.release.assert_called_once_with("aio:box1")
 
         _run(go())
 
