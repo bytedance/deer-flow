@@ -919,6 +919,9 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: frozenset[str] = (
 # they are internal-only as well — see :data:`_INTERNAL_ONLY_CONTEXT_KEYS`.
 _CONTEXT_RUNTIME_ONLY_KEYS: frozenset[str] = frozenset({"github_token", "disable_clarification", "channel_name"})
 
+# Public run-only controls are accepted through body.context, not body.config.
+_MODEL_SELECTION_CONTEXT_KEYS = frozenset({"subagent_model_name", "model_selection_requested"})
+
 # Every run-context key an external client may never supply, in either section.
 # The two sets differ only in *where* a legitimate internal caller's value lands
 # (both sections vs. ``context`` alone); their trust requirement is identical.
@@ -994,6 +997,10 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
         # and ``configurable`` is persisted in checkpoints.
         existing_configurable.pop("client", None)
     existing_runtime_context = config.get("context")
+    for section in (existing_configurable, existing_runtime_context):
+        if isinstance(section, dict):
+            for key in _MODEL_SELECTION_CONTEXT_KEYS:
+                section.pop(key, None)
     if isinstance(existing_runtime_context, dict) and "client" in existing_runtime_context:
         existing_client_context = _sanitize_request_client_context(existing_runtime_context.get("client"))
         if existing_client_context is None:
@@ -1013,6 +1020,18 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
                 configurable.setdefault(key, context[key])
             if isinstance(runtime_context, dict):
                 runtime_context.setdefault(key, context[key])
+    # Explicit choices belong to this run, never to checkpoint defaults. Model
+    # use is authorized against the authenticated identity during assembly and
+    # again at child dispatch; these fields grant no additional permissions.
+    for key in _MODEL_SELECTION_CONTEXT_KEYS:
+        if key in context:
+            value = context[key]
+            if not isinstance(value, str) or not value.strip() or len(value) > 200:
+                raise HTTPException(status_code=400, detail="A configured model name is required.")
+            if isinstance(runtime_context, dict):
+                runtime_context[key] = value
+    if "model_selection_requested" in context and (context.get("model_name") != context["model_selection_requested"] or not isinstance(runtime_context, dict) or runtime_context.get("model_name") != context["model_selection_requested"]):
+        raise HTTPException(status_code=400, detail="model_selection_requested must match model_name in context.")
     # Context-only keys (secrets / runtime flags) land in ``config['context']``
     # only — never ``configurable`` (which is persisted in checkpoints) — and only
     # for internal callers, the sole legitimate producers.

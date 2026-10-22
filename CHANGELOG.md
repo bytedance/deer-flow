@@ -2086,6 +2086,7 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
   `channel_conversations` / `channel_thread_bindings`: the instance that loses
   adopts the winner's thread and deletes its own empty one, and `/new` still
   rebinds. (issue #7103, [#7104])
+  
 - **skills:** A skill the agent creates, edits, patches or deletes with the
   `skill_manage` tool now reaches every Gateway process sharing the home
   volume, as a change made through the skills API already did. The tool
@@ -2097,12 +2098,14 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
   this or a peer process serving the stale list. When the marker cannot be
   written, the tool reports that the change was applied but other processes
   were not notified, instead of reading as a failed write. ([#7099])
+  
 - **provisioner:** When two provisioner replicas start together and
   `K8S_NAMESPACE` does not exist yet, the one that loses the create race no
   longer crashes at startup: its `409 AlreadyExists` now counts as the
   namespace existing, as the Pod and Service creates already did. Helm
   deployments, where the provisioner runs inside the namespace it manages,
   never took this path. ([#7099])
+  
 - **projects:** A shelf upload or save-from-thread into a project the caller
   cannot write no longer leaves a directory behind or answers `500`. Both
   routes staged the body under `users/{user_id}/projects/{project_id}/` before
@@ -2112,6 +2115,18 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
   now check for an owned, active project first and answer the same `404`
   without writing; the shelf insert still re-checks under the project row lock.
   ([#7040])
+  
+- **skills:** Toggling a skill when no `extensions_config.json` exists yet now
+  creates the file in the project root (`DEER_FLOW_PROJECT_ROOT`, else the
+  working directory), where the MCP editor already creates it and where config
+  resolution looks first. The toggle used the working directory's parent
+  instead: with the Gateway started from anywhere but `backend/`, the new file
+  landed outside the search path, so the toggle was silently lost after reload
+  and the next MCP edit created a second file. Both routers now share
+  `ExtensionsConfig.default_config_path()`. Docker and `make dev` were not
+  affected: they set the config path, or a project root equal to that parent.
+  ([#7048])
+
 - **workflows:** A script workflow waiting on a long child Agent run no longer
   fails with `Worker turn limit` after about 209 seconds regardless of
   `timeout_seconds`. The supervisor re-sent an empty frame to the QuickJS worker
@@ -2120,7 +2135,8 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
   and the supervisor then waits on the pending calls locally (still checking
   cancellation, faults and worker exits every 20 ms) without exchanging frames,
   so idle waits no longer consume turns and `timeout_seconds` is the only wall-clock bound;
-  scripts that spin the job queue still hit the turn cap. (issue #7022, [#7024])
+  scripts that spin the job queue still hit the turn cap. (issue [#7022], [#7024])
+  
 - **browser:** `browser_screenshot` no longer replaces a file that already
   exists in the thread's outputs directory. A screenshot saved as
   `report.png` used to overwrite the user's own `report.png`, an earlier
@@ -12930,6 +12946,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7035]: https://github.com/bytedance/deer-flow/pull/7035
 [#7039]: https://github.com/bytedance/deer-flow/pull/7039
 [#7040]: https://github.com/bytedance/deer-flow/pull/7040
+[#7048]: https://github.com/bytedance/deer-flow/pull/7048
 [#7042]: https://github.com/bytedance/deer-flow/pull/7042
 [#7051]: https://github.com/bytedance/deer-flow/pull/7051
 [#7053]: https://github.com/bytedance/deer-flow/pull/7053

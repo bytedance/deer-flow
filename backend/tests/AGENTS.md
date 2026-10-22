@@ -204,6 +204,25 @@ the production PATH lookup, including a directory containing spaces. Seed fake
 app credentials so auth completion reaches the CLI instead of returning early,
 and keep fixture filesystem work behind `asyncio.to_thread`.
 
+## Lark device-login single-flight
+
+`test_lark_auth_singleflight.py` pins the `(user_id, generation)` single-flight
+contract: request timeouts leave one shared CLI alive; supersession terminates
+it, including its POSIX process group. Forked workers share a credential root;
+every CLI gets the invocation-log environment so duplicate spawns are visible.
+Publication grace starts at observed CLI exit, independent of login duration.
+Cover publication between a foreign result read and its marker probe.
+`test_lark_auth_lifecycle_failures.py` injects storage and startup failures:
+terminal marker receipts prevent retrying uncertain single-use codes, cleanup
+errors preserve published results, and failed starts reap children and wake
+waiters. Treat unhandled worker-thread warnings as errors. Event-driven process
+doubles must be released/killed and joined at teardown.
+`test_lark_credential_tree_churn.py` removes real descendants at each walk step;
+assert the injection fired and surviving secrets reached private modes. Missing
+roots, permission errors and symlinks remain errors. Mutations must fail these
+assertions; merely returning without an exception is insufficient.
+Run mutations on a copied harness; never swap checkout sources during tests.
+
 ## Remote read fixtures
 
 Remote ranged-read fixtures pass POSIX sandbox paths to adapters and map those
@@ -339,3 +358,10 @@ setup, after the autouse fixtures initialize runtime, to avoid the package cycle
 ### Web model provider presets
 
 `test_managed_provider_presets.py` covers encrypted compatibility, auto IDs, key switching, snapshot isolation and native/compatible protocols. Its HTTP double is below actual LangChain/vendor SDK serialization; do not replace these adapters with successful stubs. `test_managed_presets_live.py` requires explicit opt-in and vendor credentials, and remains skipped in CI.
+
+## Multi-instance harness
+
+Multi-instance harness tests use `support.shell.require_script_bash()` for shell
+smoke checks. Keep config content and secret stability checks portable; isolate
+POSIX owner-only permission assertions so Windows skips only those checks.
+Nginx path expectations must include quoted-string escaping for native paths.

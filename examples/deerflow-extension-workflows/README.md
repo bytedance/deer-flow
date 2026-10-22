@@ -115,6 +115,11 @@ API; validate verdicts in the script before branching. Every Agent call must be
 awaited, including fan-out calls. Returning while child promises are outstanding
 fails the workflow and interrupts tracked children.
 
+Agent task inputs allow 16,000 serialized JSON bytes, including wrapping fields
+and file references; step outputs allow 12,000. This leaves room to pass a saved
+output to the next Agent with a short task instruction. JSON escaping counts
+toward these limits. Larger material must use the file workflow described below.
+
 `parallel()` takes lazy thunks and preserves order. The service, independently of
 JavaScript promises, bounds admitted children per workflow and globally. A rejected
 call rejects its promise; failures are not silently converted to null. Scripts may

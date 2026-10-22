@@ -42,6 +42,10 @@ missing or strictly older leases remain recoverable.
 
 `mcp_tasks/sql.py::claim_notification_work` never returns a row without a dispatch event. A pending snapshot whose condition resolved before delivery (tracking recovered, or an answered `input_required` prompt returned the task to `working`) is consumed at claim time: `notified_version` advances, the content fingerprint clears so an identical later event is recorded again, stale error/attempt/dispatch state clears, status returns to `none`, and the claim lease is released instead of launching an empty event. A legacy row left without a dispatch event is consumed only when nothing newer exists; a newer recorded event is rebuilt and claimed instead. Consumption is a conditional UPDATE fenced on the event version and phase the claim read, so a concurrent newer event (SQLite has no row locks) is never acknowledged and stays claimable. Coverage: `tests/test_mcp_task_repository.py` (resolved snapshot, legacy retry, expired-claim reclaim, identical-event recurrence, interleaved newer completion, legacy launching/dispatched with and without a newer completion).
 
+## MCP control leases
+
+`McpTaskRepository` retains upstream poll claims' eligibility-fenced UPDATE after candidate selection, so an interleaved cancellation or competing claim is not overwritten. Cancel claims reserve the SQLite writer before SELECT; `FOR UPDATE SKIP LOCKED` alone does not serialize SQLite readers. Renewal is one owner/token/phase/expiry-fenced UPDATE and changes only lease expiry, explicitly preserving the ORM `updated_at` column. A stale generation, expired lease, terminal task or changed cancellation phase cannot renew. Keep local draining-row exclusions before LIMIT. See [control-call leases](../../../../docs/mcp-control-leases.md).
+
 ## Run terminal authority and lease expiry
 
 `RunRepository.update_status(..., owner_worker_id=...)` and

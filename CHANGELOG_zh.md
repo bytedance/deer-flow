@@ -1631,29 +1631,42 @@
   两个实例为同一会话的第一条消息各自创建线程时，绑定现在以“不存在才插入”的方式在
   `channel_conversations` / `channel_thread_bindings` 中认领：落败的实例改用胜出者的线程
   并删除自己创建的空线程，`/new` 仍会重新绑定到新线程。 (issue #7103, [#7104])
+  
 - **技能：** agent 通过 `skill_manage` 工具创建、编辑、修补或删除的技能，现在会像通过
   技能 API 所做的修改一样，传达到共享同一 home 卷的每个 Gateway 进程。此前该工具只刷新
   本进程的技能提示缓存，对端副本会继续为该用户渲染旧的技能列表；现在它在本地刷新之后、
   于事件循环之外发布同一个按用户限定的共享缓存重置标记。写入、历史记录、刷新与标记作为
   一个整体完成，因此写入途中被取消的运行不再让本进程或对端继续使用过期列表。标记无法写入
   时，工具会报告修改已生效但未能通知其他进程，而不会让人误以为写入失败。 ([#7099])
+  
 - **provisioner：** 两个 provisioner 副本在 `K8S_NAMESPACE` 尚不存在时同时启动，输掉
   创建竞争的一方不再在启动时崩溃：它收到的 `409 AlreadyExists` 现在视为命名空间已存在，
   与 Pod 和 Service 的创建一致。Helm 部署中 provisioner 运行在其管理的命名空间内，从不
   经过这条路径。 ([#7099])
+  
 - **项目：** 向调用者无权写入的项目上传书架文档或从对话保存文件时，不再遗留目录，
   也不再返回 `500`。这两个路由此前先把请求体暂存到
   `users/{user_id}/projects/{project_id}/` 下才检查项目，因此不存在、属于他人或已归档
   的 id 会留下一个回收站对账永远不会清理的空 `{project_id}/documents/` 目录，而超过单个
   路径分量长度的 id 会因 `ENAMETOOLONG` 失败。现在会先确认项目归调用者所有且处于活跃
   状态，不写任何内容即返回同样的 `404`；书架插入仍会在项目行锁下再次检查。 ([#7040])
+  
+- **skills：** 在尚无 `extensions_config.json` 时切换技能开关，现在会在项目根目录
+  （`DEER_FLOW_PROJECT_ROOT`，未设置时为工作目录）创建该文件，这与 MCP 编辑器已有的
+  创建位置一致，也是配置解析最先查找的位置。此前技能开关使用工作目录的父目录：当
+  Gateway 不是从 `backend/` 启动时，新文件会落在查找路径之外，重新加载后开关被静默
+  丢弃，之后的 MCP 编辑还会再创建第二个文件。现在两个路由共用
+  `ExtensionsConfig.default_config_path()`。Docker 与 `make dev` 不受影响：它们设置了
+  配置路径，或者项目根目录恰好就是那个父目录。 ([#7048])
+
 - **工作流：** 脚本工作流等待耗时较长的子 Agent 运行时，不再无视 `timeout_seconds`，
   在约 209 秒后因 `Worker turn limit` 失败。此前只要步骤尚未完成，监督器就会在每次
   20 ms 轮询时向 QuickJS worker 重发一个空帧，每次往返都会计入 10,000 次交互上限。
   现在 worker 会报告其作业队列何时已排空，随后监督器在本地等待尚未完成的调用，不再
   交换帧（仍每隔 20 ms 检查取消、故障和 worker 退出），因此空闲等待不再消耗交互次数，
   `timeout_seconds` 成为唯一的实际耗时上限；持续驱动作业队列的脚本仍受交互次数上限
-  约束。(issue #7022, [#7024])
+  约束。(issue [#7022], [#7024])
+  
 - **浏览器：** `browser_screenshot` 不再替换线程 outputs 目录中已存在的文件。此前以
   `report.png` 保存的截图会覆盖用户自己的 `report.png`、更早的截图，或同一秒内生成的
   另一张默认命名截图；现在会像 `web_capture` 一样改用下一个空闲名称（`report-1.png`、
@@ -10312,6 +10325,7 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7035]: https://github.com/bytedance/deer-flow/pull/7035
 [#7039]: https://github.com/bytedance/deer-flow/pull/7039
 [#7040]: https://github.com/bytedance/deer-flow/pull/7040
+[#7048]: https://github.com/bytedance/deer-flow/pull/7048
 [#7042]: https://github.com/bytedance/deer-flow/pull/7042
 [#7051]: https://github.com/bytedance/deer-flow/pull/7051
 [#7053]: https://github.com/bytedance/deer-flow/pull/7053
