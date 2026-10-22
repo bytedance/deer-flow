@@ -169,7 +169,14 @@ def find_glob_matches(root: Path, pattern: str, *, include_dirs: bool = False, m
     if not root.is_dir():
         raise NotADirectoryError(root)
 
-    for current_root, dirs, files in os.walk(root):
+    def handle_walk_error(error: OSError) -> None:
+        # Entries may disappear or change type during enumeration. Other
+        # errors, such as permission failures, must reach the caller rather
+        # than being reported as an incomplete successful search.
+        if error.errno not in _GREP_RACE_ERRNOS:
+            raise error
+
+    for current_root, dirs, files in os.walk(root, onerror=handle_walk_error):
         dirs[:] = [name for name in dirs if not should_ignore_name(name)]
         # root is already resolved; os.walk builds current_root by joining under root,
         # so relative_to() works without an extra stat()/resolve() per directory.

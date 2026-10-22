@@ -10,6 +10,28 @@ const settings = {
 } as unknown as LocalSettings["context"];
 
 describe("buildRunContext", () => {
+  it("applies a one-turn model without mutating saved context", () => {
+    const before = { ...settings };
+    const current = buildRunContext({
+      settings,
+      threadId: "t-1",
+      extraContext: { model_name: "child-choice" },
+    });
+    expect(current.model_name).toBe("child-choice");
+    expect(settings).toEqual(before);
+    expect(buildRunContext({ settings, threadId: "t-1" }).model_name).toBe(
+      "gemma4",
+    );
+  });
+  it("passes child-only selection separately from the parent model", () => {
+    const context = buildRunContext({
+      settings,
+      threadId: "t-1",
+      extraContext: { subagent_model_name: "child-choice" },
+    });
+    expect(context.model_name).toBe("gemma4");
+    expect(context.subagent_model_name).toBe("child-choice");
+  });
   it("sends attached references as a plain string[] under context.conversation_references", () => {
     const context = buildRunContext({
       settings,

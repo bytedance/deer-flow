@@ -8,6 +8,9 @@ Generated script runs only in worker.py's isolated, capability-free JS context.
 Never pass host callables, capability handles, credentials or ambient environment
 into it. Keep every IPC and stored/public payload bounded. Parent lifecycle must
 kill and reap the worker and explicitly observe child cancellation.
+Agent tasks allow 16,000 serialized JSON bytes and outputs 12,000; preserve enough
+input room for a retained output plus task wrapping. Test sequential handoff with
+both ASCII and escaped Unicode, and reject oversized inputs before admission.
 The worker turn cap counts worker frames only; while the worker is idle (its job
 queue drained) and Agent calls are pending, wait locally with bounded cancellation,
 fault and worker-exit polls instead of round-tripping empty frames, so wall time stays the only clock bound.

@@ -1042,6 +1042,7 @@ class _PreparedServerDiscovery:
     bindings: dict[str, ServerBinding]
     ownership_domain: MCPPoolDomain
     connection_scope: str
+    personal_user_id: str | None = None
 
 
 def _prepare_server_client(
@@ -1321,6 +1322,7 @@ def _prepare_server_discovery(
         bindings=server_bindings,
         ownership_domain=ownership_domain,
         connection_scope="personal" if personal_user_id is not None else "deployment",
+        personal_user_id=personal_user_id,
     )
 
 
@@ -1331,7 +1333,7 @@ async def _discover_and_wrap_prepared(
     """Run the OAuth/discovery phase, then wrap successful results in order."""
     client_cls, load_mcp_tools_fn = adapter_symbols
     extensions_config = prepared.config
-    oauth_token_manager = OAuthTokenManager.from_extensions_config(extensions_config) if prepared.connection_scope == "personal" else get_mcp_task_oauth_token_manager(extensions_config)
+    oauth_token_manager = OAuthTokenManager.from_extensions_config(extensions_config, owner_user_id=prepared.personal_user_id) if prepared.connection_scope == "personal" else get_mcp_task_oauth_token_manager(extensions_config)
 
     # Only selected, valid connections reach this point. Selected-but-invalid
     # servers are intentionally not contacted for OAuth headers (F1 contract).
