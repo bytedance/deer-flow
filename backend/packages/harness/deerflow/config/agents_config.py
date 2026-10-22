@@ -213,7 +213,8 @@ class AgentConfig(BaseModel):
     model: str | None = None
     tool_groups: list[str] | None = None
     # skills controls which skills are discoverable and may be activated by the
-    # agent. It does not activate their allowed-tools policies at construction:
+    # agent. allowed-tools is compatibility metadata only and never restricts
+    # tools:
     # - None (or omitted): load all enabled skills (default fallback behavior)
     # - [] (explicit empty list): disable all skills
     # - ["skill1", "skill2"]: load only the specified skills
@@ -377,7 +378,11 @@ def load_agent_soul(agent_name: str | None, *, user_id: str | None = None) -> st
         soul_path = get_paths().base_dir / SOUL_FILENAME
         if not soul_path.exists():
             return None
-        content = soul_path.read_text(encoding="utf-8").strip()
+        # ``utf-8-sig`` drops the BOM a Windows editor (Notepad, PowerShell 5.1)
+        # prepends. ``str.strip()`` does not remove U+FEFF, so reading this as
+        # plain ``utf-8`` would make the mark the first character of the text
+        # injected into the lead agent's system prompt.
+        content = soul_path.read_text(encoding="utf-8-sig").strip()
         return content or None
     from deerflow.persistence.agents import get_agent_store
 

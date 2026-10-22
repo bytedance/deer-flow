@@ -80,6 +80,11 @@ export const enUS: Translations = {
         description:
           "Demonstrate read-only retrieval and structured tool results using fixed sample documents, without an external knowledge service.",
       },
+      lightrag: {
+        title: "LightRAG",
+        description:
+          "Retrieve documents and entity relations from LightRAG with shared source citations.",
+      },
       weknora: {
         title: "WeKnora knowledge retrieval",
         description:
@@ -545,6 +550,8 @@ export const enUS: Translations = {
           "No progress between turns. Reply with what's missing, or rephrase the goal with /goal.",
         tokenCapped:
           "Token budget reached. Send a message to continue; a new run starts with a fresh budget.",
+        loopCapped:
+          "Repeated tool calls triggered a safety stop. Adjust the approach and send a new message to retry; your goal stays active.",
         missingEvidence:
           "Goal check: evidence missing. Ask it to show the result or explain what's missing; if the goal no longer applies, run /goal clear.",
         runFailed:
@@ -1212,6 +1219,7 @@ export const enUS: Translations = {
         maxContinuations: "Continuation limit reached",
         noProgress: "No progress between turns",
         tokenCapped: "Token budget reached",
+        loopCapped: "Repeated tool calls reached the safety limit",
         evaluatorFailed: "Couldn't check the goal; the run itself may be fine",
         noDurableEndOfTurn: "Couldn't check the goal: no final reply was saved",
         threadChanged:
@@ -1410,8 +1418,10 @@ export const enUS: Translations = {
       "You can save this agent at any time from the top-right menu, even if this is only a first draft.",
     saveCommandMessage:
       "Please save this custom agent now based on everything we have discussed so far. Treat this as my explicit confirmation to save. If some details are still missing, make reasonable assumptions, generate a concise first SOUL.md in English, and call setup_agent immediately without asking me for more confirmation.",
+    agentSaveFailed:
+      "DeerFlow could not save this agent. Review the tool error and try again.",
     agentCreatedPendingRefresh:
-      "The agent was created, but DeerFlow could not load it yet. Please refresh this page in a moment.",
+      "DeerFlow could not confirm the saved agent. Please try saving it again.",
     more: "More actions",
     agentCreated: "Agent created!",
     startChatting: "Start chatting",

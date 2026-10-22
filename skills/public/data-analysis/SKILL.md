@@ -9,6 +9,16 @@ description: Use this skill when the user uploads Excel (.xlsx/.xls) or CSV file
 
 This skill analyzes user-uploaded Excel/CSV files using DuckDB — an in-process analytical SQL engine. It supports schema inspection, SQL-based querying, statistical summaries, and result export, all through a single Python script.
 
+## Environment setup
+
+Prepare the Python environment before running analyses. Install the required packages explicitly using the same interpreter that will run the script:
+
+```bash
+python -m pip install duckdb openpyxl
+```
+
+If either package is missing, the script exits with a setup instruction; it does not invoke an installer or modify the environment. DuckDB's existing spatial-extension setup for loading files is unchanged.
+
 ## Core Capabilities
 
 - Inspect Excel/CSV file structure (sheets, columns, types, row counts)
@@ -103,7 +113,8 @@ Supported output formats (auto-detected from extension):
 - **Excel files**: Each sheet becomes a table named after the sheet (e.g., `Sheet1`, `Sales`, `Revenue`)
 - **CSV files**: Table name is the filename without extension (e.g., `data.csv` → `data`)
 - **Multiple files**: All tables from all files are available in the same query context, enabling cross-file joins
-- **Special characters**: Sheet/file names with spaces or special characters are auto-sanitized (spaces → underscores). Use double quotes for names that start with numbers or contain special characters, e.g., `"2024_Sales"`
+- **Collisions**: Repeated names (including case-only differences) receive unique SQL names in input order, such as `report`, `report_1`, `report_2`. This also applies to repeated Excel sheet names. Use the SQL names shown by `inspect` for queries and summaries. An original-name alias never overrides an earlier SQL name.
+- **Special characters**: Sheet/file names are sanitized into SQL names (for example, `sales-2026` → `sales_2026`). Use the SQL names printed by `inspect`, or double-quote a unique original name, e.g., `SELECT * FROM "sales-2026"`. Queries execute unchanged: string literals, column aliases, comments, and CTEs retain normal DuckDB semantics. Names containing a double quote escape it by doubling it, e.g., `"net""amount"`
 
 ## Analysis Patterns
 
@@ -233,8 +244,8 @@ After analysis:
 
 The script automatically caches loaded data to avoid re-parsing files on every call:
 
-- On first load, files are parsed and stored in a persistent DuckDB database under `/mnt/user-data/workspace/.data-analysis-cache/`
-- The cache key is a SHA256 hash of all input file contents — if files change, a new cache is created
+- On first load, files are parsed and stored in a persistent DuckDB database under the system temporary directory (`.data-analysis-cache/`)
+- The cache key hashes the ordered input basenames and a separate SHA256 digest of each file. Renaming, reordering, or changing inputs creates a new cache; moving unchanged, identically named inputs to another directory preserves reuse. The updated key namespace ignores older cached table maps, which are rebuilt on first use
 - Subsequent calls with the same files will use the cached database directly (near-instant startup)
 - Cache is transparent — no extra parameters needed
 

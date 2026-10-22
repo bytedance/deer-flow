@@ -157,9 +157,44 @@ imagePullSecrets:
        3. chart-managed secret `<release>-redis`
      Only #3 is created by this chart; #1/#2 must exist already. */}}
 {{- define "deer-flow.redisUrlSecret" -}}
-{{- if .Values.redis.external.existingSecret -}}{{- .Values.redis.external.existingSecret -}}
-{{- else if .Values.redis.existingSecret -}}{{- .Values.redis.existingSecret -}}
-{{- else -}}{{- include "deer-flow.redisFullname" . -}}{{- end -}}
+{{- include "deer-flow.redisUserSecret" . | default (include "deer-flow.redisFullname" .) -}}
+{{- end -}}
+
+{{/* Name of the operator-managed redis Secret, or empty when the chart owns the
+     credentials. Only the chart-managed Secret is created by this chart, and
+     only there is the AUTH password known at render time — a user-managed
+     Secret may or may not carry `redis-password`. */}}
+{{- define "deer-flow.redisUserSecret" -}}
+{{- or .Values.redis.external.existingSecret .Values.redis.existingSecret -}}
+{{- end -}}
+
+{{/* Args for the bundled redis container. With a user-managed Secret the
+     password is only knowable at runtime, so the container reads
+     `redis-password` from that Secret and enables AUTH only when the value is
+     nonempty. This keeps a `redis-url`-only Secret in no-auth mode instead of
+     failing to start, and keeps a stale `redis.auth.password` from winning over
+     the user-managed Secret (values.yaml documents it as ignored there). */}}
+{{- define "deer-flow.redisServerArgs" -}}
+{{- if include "deer-flow.redisUserSecret" . -}}
+if [ -n "$REDIS_PASSWORD" ]; then exec redis-server --appendonly yes --requirepass "$REDIS_PASSWORD"; fi; exec redis-server --appendonly yes
+{{- else if .Values.redis.auth.password -}}
+exec redis-server --appendonly yes --requirepass "$REDIS_PASSWORD"
+{{- else -}}
+exec redis-server --appendonly yes
+{{- end -}}
+{{- end -}}
+
+{{/* Readiness/liveness command for the bundled redis container. Mirrors
+     redisServerArgs so the probes authenticate exactly when the server has a
+     password — otherwise a password-protected server reports itself unhealthy. */}}
+{{- define "deer-flow.redisPingCommand" -}}
+{{- if include "deer-flow.redisUserSecret" . -}}
+if [ -n "$REDIS_PASSWORD" ]; then redis-cli --no-auth-warning -a "$REDIS_PASSWORD" ping; else redis-cli ping; fi
+{{- else if .Values.redis.auth.password -}}
+redis-cli --no-auth-warning -a "$REDIS_PASSWORD" ping
+{{- else -}}
+redis-cli ping
+{{- end -}}
 {{- end -}}
 
 {{/* Whether any redis stream-bridge backend is configured (bundled StatefulSet,

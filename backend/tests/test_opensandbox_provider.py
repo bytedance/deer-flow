@@ -762,7 +762,10 @@ def test_output_sync_is_bounded(output_sync_provider, monkeypatch, caplog, limit
         monkeypatch.setattr(provider, "_MAX_SYNC_LISTING_BYTES", 4)
     else:
         monkeypatch.setattr(provider, "_SYNC_DEADLINE_SECONDS", 1)
-        monkeypatch.setattr("deerflow.community.opensandbox.provider.time", types.SimpleNamespace(monotonic=iter([0, 2]).__next__, time=time.time))
+        monkeypatch.setattr(
+            "deerflow.community.opensandbox.provider.time",
+            types.SimpleNamespace(monotonic=iter([0, 2, 2]).__next__, time=time.time),
+        )
     provider.release(sandbox_id)
     if limit in {"files", "bytes"}:
         assert (outputs / "first.txt").read_bytes() == b"123"
@@ -1069,6 +1072,27 @@ def test_reset_parks_active_and_shutdown_destroys_active_and_warm(monkeypatch: p
     provider.shutdown()
     assert [remote.destroy_calls for remote in sdk.remotes] == [1, 1]
     assert provider._sandboxes == {} and provider._warm_pool == {}
+
+
+def test_reset_parks_with_monotonic_timestamp_and_reaper_expires_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider, sdk = _install(monkeypatch)
+    sandbox_id = provider.acquire("active", user_id="user")
+    remote = sdk.remotes[0]
+    monkeypatch.setattr(time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(time, "time", lambda: 1_000_000.0)
+
+    provider.reset()
+    assert provider._warm_pool[sandbox_id][1] == 100.0
+
+    # This reset path was omitted by #6996. A backwards wall-clock step must not
+    # prevent the shared reaper from observing ten elapsed monotonic seconds.
+    monkeypatch.setattr(time, "monotonic", lambda: 110.0)
+    monkeypatch.setattr(time, "time", lambda: -1_000_000.0)
+    provider._reap_expired_warm(idle_timeout=5)
+
+    assert sandbox_id not in provider._warm_pool
+    assert remote.destroy_calls == 1
+    provider.shutdown()
 
 
 def test_shutdown_stops_idle_reaper(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -23,10 +23,11 @@ class FakeStatus(Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    TIMED_OUT = "timed_out"
 
     @property
     def is_terminal(self) -> bool:
-        return self in {FakeStatus.COMPLETED, FakeStatus.FAILED, FakeStatus.CANCELLED}
+        return self in {FakeStatus.COMPLETED, FakeStatus.FAILED, FakeStatus.CANCELLED, FakeStatus.TIMED_OUT}
 
 
 def _request(**overrides) -> BatchSubmitRequest:
@@ -399,6 +400,42 @@ async def _wait_until(predicate, *, timeout: float = 2.0) -> None:
             await asyncio.sleep(0.01)
 
     await asyncio.wait_for(poll(), timeout=timeout)
+
+
+@pytest.mark.asyncio
+async def test_terminal_item_waits_for_execution_cleanup_before_finalizing(monkeypatch) -> None:
+    registry = _Registry()
+    terminal_published = asyncio.Event()
+
+    async def mark_item_running():
+        result = registry.results["execution-1"]
+        result.status = FakeStatus.COMPLETED
+        result.result = "done"
+        terminal_published.set()
+        return True
+
+    service, finalized = _running_item_service(
+        monkeypatch,
+        registry,
+        mark_item_running=mark_item_running,
+    )
+    execution_done = asyncio.Event()
+    registry.results["execution-1"].execution_done_event = execution_done
+
+    await service.run_once(now=service_module.datetime.now(service_module.UTC))
+    await asyncio.wait_for(terminal_published.wait(), timeout=1)
+    await asyncio.sleep(0.15)
+    assert finalized.kwargs is None
+
+    execution_done.set()
+    await asyncio.wait_for(
+        asyncio.gather(*list(service._executions.values())),
+        timeout=1,
+    )
+
+    assert finalized.kwargs is not None
+    assert finalized.kwargs["succeeded"] is True
+    assert finalized.kwargs["result"] == "done"
 
 
 @pytest.mark.asyncio
@@ -977,3 +1014,40 @@ async def test_release_logs_a_failure_on_the_subagent_loop(monkeypatch, caplog) 
     failures = [record for record in caplog.records if "execution-1" in record.getMessage()]
     assert len(failures) == 1 and failures[0].levelno == logging.ERROR
     assert str(failures[0].exc_info[1]) == "registry lock poisoned"
+
+
+@pytest.mark.asyncio
+async def test_terminal_item_cleanup_fence_budget_does_not_renew_forever(monkeypatch, caplog) -> None:
+    registry = _Registry()
+    execution_done = asyncio.Event()
+    cleanup_requests = []
+
+    async def mark_item_running():
+        result = registry.results["execution-1"]
+        result.status = FakeStatus.TIMED_OUT
+        result.error = "Execution timed out"
+        return True
+
+    service, finalized = _running_item_service(monkeypatch, registry, mark_item_running=mark_item_running)
+    registry.results["execution-1"].execution_done_event = execution_done
+    monkeypatch.setattr(service_module, "_TERMINAL_CLEANUP_GRACE_SECONDS", 0.0, raising=False)
+    # Like the real registry, retain the result while resource teardown is live.
+    monkeypatch.setattr(service_module, "cleanup_background_task", cleanup_requests.append)
+    await service.run_once(now=service_module.datetime.now(service_module.UTC))
+    workers = list(service._executions.values())
+    try:
+        with caplog.at_level(logging.WARNING, logger=service_module.__name__):
+            await asyncio.wait_for(asyncio.gather(*workers), timeout=0.5)
+        assert finalized.kwargs is not None
+        assert finalized.kwargs["succeeded"] is False
+        assert finalized.kwargs["error"] == "Execution timed out"
+        assert not execution_done.is_set()
+        assert registry.get("execution-1") is not None
+        assert cleanup_requests == ["execution-1"]
+        assert registry.forced == []
+        assert "cleanup" in caplog.text.lower()
+        assert not service._execution_ids
+    finally:
+        execution_done.set()
+        await asyncio.gather(*workers, return_exceptions=True)
+        registry.cleanup("execution-1")

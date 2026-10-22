@@ -453,7 +453,15 @@ def _ensure_namespace() -> None:
                     },
                 )
             )
-            core_v1.create_namespace(ns)
+            try:
+                core_v1.create_namespace(ns)
+            except ApiException as create_exc:
+                # 409 = AlreadyExists: a replica starting alongside this one
+                # created it between our read and our create.
+                if create_exc.status != 409:
+                    raise
+                logger.info(f"Namespace '{K8S_NAMESPACE}' was created concurrently; using it")
+                return
             logger.info(f"Created namespace '{K8S_NAMESPACE}'")
         else:
             raise

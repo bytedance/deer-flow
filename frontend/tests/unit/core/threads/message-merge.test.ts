@@ -2503,6 +2503,43 @@ test("reconnected turn order treats a content-only streaming text as a boundary"
   ).toEqual([streamingText, human, toolStep, laterStep]);
 });
 
+test("reconnected turn order does not treat Anthropic thinking blocks as a completed answer", () => {
+  const thinkingStep = {
+    id: "thinking-step",
+    type: "ai",
+    content: [{ type: "thinking", thinking: "Still analyzing" }],
+    run_id: "run-r",
+  } as unknown as Message;
+  const toolStep = {
+    id: "tool-step",
+    type: "ai",
+    content: "",
+    tool_calls: [{ id: "tc-1", name: "read_file", args: {} }],
+    run_id: "run-r",
+  } as unknown as Message;
+  const human = {
+    id: "human-r",
+    type: "human",
+    content: "Question",
+  } as Message;
+  const laterStep = {
+    id: "later",
+    type: "ai",
+    content: "",
+    tool_calls: [{ id: "tc-2", name: "write_file", args: {} }],
+    run_id: "run-r",
+  } as unknown as Message;
+
+  expect(
+    restoreReconnectedTurnMessageOrder([
+      thinkingStep,
+      toolStep,
+      human,
+      laterStep,
+    ]),
+  ).toEqual([human, thinkingStep, toolStep, laterStep]);
+});
+
 test("rendered message ledger does not retain explicitly superseded messages", () => {
   const retained = {
     id: "retained-answer",
