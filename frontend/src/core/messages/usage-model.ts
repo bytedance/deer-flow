@@ -166,6 +166,7 @@ export function buildTokenDebugSteps(
     }
 
     if (actionLabels.length === 0) {
+      // Thinking-only blocks (Anthropic) carry no visible answer content.
       if (extractContentFromMessage(message).length > 0) {
         actionLabels.push(t.tokenUsage.finalAnswer);
       } else {
