@@ -309,7 +309,21 @@ class _ArchiveResponse:
         return self._chunk
 
 
-def test_lark_archive_too_large_keeps_its_error_when_cleanup_fails(monkeypatch, real_unlink):
+def _staged_archive_in(tmp_path):
+    """Keep the download's temporary archive inside the test's own directory."""
+    import tempfile as tempfile_module
+
+    # Bind the real allocator first: ``lark_cli.tempfile`` is this same module,
+    # so a late lookup would call the patched attribute and recurse forever.
+    real_mkstemp = tempfile_module.mkstemp
+
+    def mkstemp(*_args, **_kwargs):
+        return real_mkstemp(dir=tmp_path, prefix="lark-cli-skills-", suffix=".zip")
+
+    return mkstemp
+
+
+def test_lark_archive_too_large_keeps_its_error_when_cleanup_fails(tmp_path, monkeypatch, real_unlink):
     """The size guard's ValueError must survive a failing download cleanup."""
     from deerflow.integrations import lark_cli
 
@@ -319,13 +333,14 @@ def test_lark_archive_too_large_keeps_its_error_when_cleanup_fails(monkeypatch, 
         "urlopen",
         lambda *_args, **_kwargs: _ArchiveResponse(oversized),
     )
+    monkeypatch.setattr(lark_cli.tempfile, "mkstemp", _staged_archive_in(tmp_path))
     _fail_unlink_on(monkeypatch, lambda path: path.suffix == ".zip", real_unlink)
 
     with pytest.raises(ValueError, match="too large"):
         lark_cli._download_lark_archive("v1.2.3")
 
 
-def test_lark_archive_download_error_keeps_its_message_when_cleanup_fails(monkeypatch, real_unlink):
+def test_lark_archive_download_error_keeps_its_message_when_cleanup_fails(tmp_path, monkeypatch, real_unlink):
     """The network boundary's ValueError must survive a failing download cleanup."""
 
     def _offline(*_args, **_kwargs):
@@ -334,6 +349,7 @@ def test_lark_archive_download_error_keeps_its_message_when_cleanup_fails(monkey
     from deerflow.integrations import lark_cli
 
     monkeypatch.setattr(lark_cli.urllib.request, "urlopen", _offline)
+    monkeypatch.setattr(lark_cli.tempfile, "mkstemp", _staged_archive_in(tmp_path))
     _fail_unlink_on(monkeypatch, lambda path: path.suffix == ".zip", real_unlink)
 
     with pytest.raises(ValueError, match="Could not download the Lark skill pack"):
