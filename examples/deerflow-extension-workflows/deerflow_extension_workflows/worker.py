@@ -10,6 +10,10 @@ MAX_FRAME = 48 * 1024
 
 BOOT = r"""
 (() => {
+  // Replay must not observe wall time or host randomness. These globals are
+  // unavailable; callers pass timestamps and random seeds explicitly in args.
+  Object.defineProperty(globalThis,'Date',{value:undefined,writable:false,configurable:false});
+  Object.defineProperty(Math,'random',{value:()=>{throw new Error('Pass randomness in args');},writable:false,configurable:false});
   const encode=JSON.stringify.bind(JSON), decode=JSON.parse.bind(JSON);
   const requests=[], pending=new Map(); let serial=0, final=null;
   const clone=value=>decode(encode(value));

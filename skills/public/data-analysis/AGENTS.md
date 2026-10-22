@@ -23,3 +23,7 @@ Keep these views connection-local and preserve normal CTE shadowing.
 Prepare DuckDB and openpyxl explicitly in the execution environment. Missing
 packages produce setup instructions without launching installers; keep those
 import-failure regressions offline in the root skill tests.
+
+Markdown exports use the same cell escaping for headers and values. Escape
+backslashes before pipes and normalize CRLF, CR, and LF to inline `<br>` breaks;
+raw newlines must not split one query-result row across Markdown table rows.

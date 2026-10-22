@@ -148,6 +148,20 @@ class CheckpointStateAccessor:
         prepared = self._prepare_config(config)
         snapshot = await self.graph.aget_state(prepared)
         raise_if_snapshot_incompatible(snapshot, self.mode)
+        # Delta materialization may perform a second saver read after LangGraph
+        # has resolved the latest checkpoint. Retention can remove a trailing
+        # metadata-only leaf in that interval. CachedHistorySaver then cannot
+        # walk the vanished target's parent chain and the first materialization
+        # can contain an empty messages channel. For an unpinned latest-state
+        # read, verify that the resolved target still exists and retry once from
+        # the new head when it does not. Explicit historical selections remain
+        # fail-closed instead of silently moving to another checkpoint.
+        if self.mode == "delta" and not prepared["configurable"].get("checkpoint_id"):
+            snapshot_config = getattr(snapshot, "config", None)
+            checkpoint_id = (snapshot_config or {}).get("configurable", {}).get("checkpoint_id")
+            if checkpoint_id and await self.checkpointer.aget_tuple(snapshot_config) is None:
+                snapshot = await self.graph.aget_state(prepared)
+                raise_if_snapshot_incompatible(snapshot, self.mode)
         return snapshot
 
     def get_tuple(self, config: dict[str, Any]) -> Any | None:

@@ -299,7 +299,7 @@ class DeerFlowTUI(App):
             self._close_palette()
             return
         self._restored_draft = None
-        if value.startswith("/") and " " not in value and "\n" not in value:
+        if value.startswith("/") and not any(char.isspace() for char in value):
             from .command_registry import build_registry, filter_commands
 
             items = filter_commands(build_registry(self._skills_meta), value[1:])

@@ -19,6 +19,7 @@ https://github.com/user-attachments/assets/a8bcadc4-e040-4cf2-8fda-dd768b999c18
 ## 官网
 
 想了解更多，或者直接看**真实演示**，可以访问[**官网**](https://deerflow.tech)。
+首页精选案例已配置为免登录白名单只读演示。
 
 ## 姐妹项目
 
@@ -34,6 +35,8 @@ https://github.com/user-attachments/assets/a8bcadc4-e040-4cf2-8fda-dd768b999c18
 
 ## InfoQuest
 
+InfoQuest 的 reader、网页搜索与图片搜索采用 30 秒 HTTP 连接/读取非活动超时。抓取配置中的 `timeout` 和 `navigation_timeout` 仍为独立的服务端参数，不控制本地 HTTP 超时。
+
 DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[InfoQuest（支持免费在线体验）](https://docs.byteplus.com/en/docs/InfoQuest/What_is_Info_Quest)
 
 <a href="https://docs.byteplus.com/en/docs/InfoQuest/What_is_Info_Quest" target="_blank">
@@ -46,6 +49,7 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
 
 - [🦌 DeerFlow - 2.0](#-deerflow---20)
   - [官网](#官网)
+  - [姐妹项目](#姐妹项目)
   - [字节跳动火山引擎方舟 Coding Plan](#字节跳动火山引擎方舟-coding-plan)
   - [InfoQuest](#infoquest)
   - [目录](#目录)
@@ -301,7 +305,7 @@ make docker-init    # 拉取 sandbox 镜像（首次运行或镜像更新时执�
 make docker-start   # 启动服务（会根据 config.yaml 自动判断 sandbox 模式）
 ```
 
-如果 `config.yaml` 使用的是 provisioner 模式（`sandbox.use: deerflow.community.aio_sandbox:AioSandboxProvider` 且配置了 `provisioner_url`），`make docker-start` 才会启动 `provisioner`。
+如果 `config.yaml` 使用的是 provisioner 模式（`sandbox.use: deerflow.community.aio_sandbox:AioSandboxProvider` 且配置了 `provisioner_url`），`make docker-start` 才会启动 `provisioner`。直接使用 Docker Compose 的用户可以在 dev 命令中加入 `--profile provisioner` 来启用相同模式；默认栈不需要 Kubernetes。
 
 **生产模式**（本地构建镜像，并挂载运行期配置与数据）：
 
@@ -429,6 +433,8 @@ DeerFlow 支持可配置的 MCP Server 和 skills，用来扩展能力。
 
 DeerFlow 支持从即时通讯应用接收任务。只要配置完成，对应渠道会自动启动，而且都不需要公网 IP。
 
+`channels/store.json` 含无效 UTF-8 字节时，采用与 JSON 格式损坏相同的恢复方式：SQL 迁移记录警告并跳过，保留原文件，让渠道可以继续启动；memory 后端的 JSON 存储记录警告并从空状态开始，在下次写入时替换该文件。
+
 DeerFlow 还可以在 workspace UI 里暴露用户自有的 IM 渠道连接。启用 `channel_connections` 后，已登录用户可以从侧边栏 / Settings > Channels 绑定 Telegram、Slack、Discord、Feishu/Lark、DingTalk、WeChat、WeCom、QQ 或 Buzz。它复用现有的 `channels.*` 出站传输，因此不需要公网 IP 或 provider 回调地址。入站 IM 消息会以所连接的 DeerFlow 用户身份运行。设置和安全注意事项参见 [IM Channel Connections](backend/docs/IM_CHANNEL_CONNECTIONS.md)。
 
 | 渠道 | 传输方式 | 上手难度 |
@@ -441,6 +447,8 @@ DeerFlow 还可以在 workspace UI 里暴露用户自有的 IM 渠道连接。�
 | 钉钉 | Stream Push（WebSocket） | 中等 |
 | QQ | WebSocket（仅文本私聊及群 @；每条来源消息最多回复 4 / 5 条） | 中等 |
 | Buzz | Nostr relay（WebSocket，NIP-42） | 中等 |
+
+飞书和钉钉在附件同步完成后，会将独立的临时沙箱归还资源池，不会中断仍在运行的任务。
 
 **`config.yaml` 中的配置示例：**
 
@@ -855,6 +863,12 @@ DeerFlow 不只是“会说它能做”，它是真的有一台自己的“电�
 ```
 
 ### Agentic Browser Control
+
+浏览器截图与 Browserless 网页截屏（captures）支持原子化完整内容发布。新创建的文件使用宿主机的常规文件权限（通常为 `0644`），覆盖已有文件时会保留已有权限，以便沙箱代码在权限允许时能够读取截图。
+
+Browserless 会通过空占位文件提前预留截屏文件名，以防并发截屏相互覆盖。如果发布失败会自动释放该占位符；若清理失败，Gateway 会记录带有路径的告警日志，并保留原始的发布错误或中断信息。
+
+浏览器依赖自动检测支持在工具配置项中以任意顺序指定 `name`、`group` 与 `use`，且兼容缩进或非缩进风格的 YAML 列表。
 
 读取页面和真正“使用”页面不是一回事。除了只读的 `web_fetch` 和 `web_capture` 工具外，DeerFlow 还提供一组可选的 agentic browser 工具，为每次对话保持一个实时浏览器会话，让 agent 真正操作页面——导航、读取可交互元素、点击、输入、提交表单，并在重度 JavaScript 站点上完成多步流程。
 

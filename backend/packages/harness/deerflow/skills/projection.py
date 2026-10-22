@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 
 from deerflow.skills.parser import parse_skill_file
 from deerflow.skills.types import SKILL_MD_FILE, Skill, SkillCategory
+from deerflow.utils.atomic_write import cleanup_failed_atomic_write
 from deerflow.utils.file_lock import retry_until_locked
 
 if TYPE_CHECKING:
@@ -437,11 +438,13 @@ def _write_manifest(scope_root: Path, source_signature: str, view_signature: str
     if view_signature is not None:
         payload["view_signature"] = view_signature
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+        stream = os.fdopen(fd, "w", encoding="utf-8")
+        fd = None  # The file object now owns the descriptor.
+        with stream:
             json.dump(payload, stream, sort_keys=True)
         temporary.replace(target)
-    except Exception:
-        temporary.unlink(missing_ok=True)
+    except BaseException:
+        cleanup_failed_atomic_write(temporary, fd)
         raise
 
 

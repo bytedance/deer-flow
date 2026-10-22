@@ -60,13 +60,15 @@ class AgentRuns(Protocol):
         """
         ...
 
-    async def configuration_revision(self, *, assistant_ids: list[str]) -> str:
-        """Opaque process-local revision of declarative Agent/host configuration.
+    async def configuration_revision(self, *, assistant_ids: list[str], durable: bool = False) -> str:
+        """Opaque revision of declarative Agent/host configuration.
 
         Revalidates the caller. Includes app/extensions config and Custom Agent
         config/SOUL; excludes mutable memory, file contents referenced by tools,
-        provider state and effective per-run assembly. Compare within one host
-        lifetime only; this is an invalidation guard, not an assembly attestation.
+        provider state and effective per-run assembly. By default compare within
+        one host lifetime only. With durable=True, compare across restarts sharing the host
+        signing secret; secret rotation invalidates revisions. This retains no
+        grant and is an invalidation guard, not an assembly attestation.
         """
         ...
 

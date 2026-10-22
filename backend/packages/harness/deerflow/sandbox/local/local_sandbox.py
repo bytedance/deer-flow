@@ -1029,6 +1029,13 @@ class LocalSandbox(Sandbox):
             if not virtual_children or os.path.exists(resolved_path):
                 raise
             entries = []
+        except OSError as e:
+            if e.filename is None:
+                raise
+            # Keep custom-mount host paths out of public listing errors.
+            filename = self._reverse_resolve_path(os.fsdecode(e.filename))
+            filename2 = self._reverse_resolve_path(os.fsdecode(e.filename2)) if e.filename2 is not None else None
+            raise type(e)(e.errno, e.strerror, filename, getattr(e, "winerror", None), filename2) from None
         # Reverse resolve local paths back to container paths and preserve
         # list_dir's trailing "/" marker for directories.
         result: list[str] = []
@@ -1144,7 +1151,15 @@ class LocalSandbox(Sandbox):
 
     def glob(self, path: str, pattern: str, *, include_dirs: bool = False, max_results: int = 200) -> tuple[list[str], bool]:
         resolved_path = Path(self._resolve_path(path))
-        matches, truncated = find_glob_matches(resolved_path, pattern, include_dirs=include_dirs, max_results=max_results)
+        try:
+            matches, truncated = find_glob_matches(resolved_path, pattern, include_dirs=include_dirs, max_results=max_results)
+        except OSError as e:
+            if e.filename is None:
+                raise
+            # Keep custom-mount host paths out of public search errors.
+            filename = self._reverse_resolve_path(os.fsdecode(e.filename))
+            filename2 = self._reverse_resolve_path(os.fsdecode(e.filename2)) if e.filename2 is not None else None
+            raise type(e)(e.errno, e.strerror, filename, getattr(e, "winerror", None), filename2) from None
         return [self._reverse_resolve_path(match) for match in matches], truncated
 
     def grep(
