@@ -7,11 +7,18 @@ import json
 from collections.abc import Iterator
 from contextlib import contextmanager
 from functools import partial
+from types import SimpleNamespace
 from typing import Any
+from uuid import UUID
 
 import httpx
 import pytest
+from _router_auth_helpers import make_authed_test_app
+from fastapi.testclient import TestClient
 
+from app.gateway.auth.models import User
+from app.gateway.routers import memory
+from deerflow.agents.memory import tools
 from deerflow.agents.memory.backends.mem0 import mem0_manager
 from deerflow.agents.memory.backends.mem0.client import Mem0APIError, Mem0Client
 from deerflow.agents.memory.manager import MemoryReadError
@@ -135,3 +142,61 @@ def test_local_conversion_errors_are_not_treated_as_remote_data_errors(monkeypat
     with _manager(monkeypatch, [_record()], policy) as (manager, _):
         with pytest.raises(ValueError, match="local programming error"):
             _read(manager, operation)
+
+
+@pytest.mark.parametrize("path", ["/api/memory", "/api/memory/export"])
+@pytest.mark.parametrize("policy", POLICIES)
+@pytest.mark.parametrize("invalid", [False, True])
+def test_record_policy_through_memory_routes(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, path: str, policy: str, invalid: bool) -> None:
+    # Stub authentication only; keep the permission decorator, user-context
+    # propagation, router, response model, manager and HTTP client real.
+    user = User(id=UUID("00000000-0000-0000-0000-000000000123"), email="memory-test@example.com")
+    app = make_authed_test_app(user_factory=lambda: user, bind_current_user=True)
+    app.include_router(memory.router)
+    records = [_record(score="private-invalid-score" if invalid else "0.75")]
+    with _manager(monkeypatch, records, policy) as (manager, requests):
+        monkeypatch.setattr(memory, "get_memory_manager", lambda: manager)
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.get(path, params={"agent_name": "Research-Agent", "user_id": "untrusted-user"})
+        if invalid and policy == "fail_closed":
+            # The existing router leaves MemoryReadError unhandled. Preserve
+            # its generic 500 rather than inventing a new HTTP error contract.
+            assert response.status_code == 500
+            assert response.text == "Internal Server Error"
+        else:
+            assert response.status_code == 200
+            facts = response.json()["facts"]
+            assert [fact["id"] for fact in facts] == ([] if invalid else ["m1"])
+            if facts:
+                assert facts[0]["confidence"] == 0.75
+        assert len(requests) == 1
+        assert json.loads(requests[0].content)["filters"] == {"AND": [{"user_id": str(user.id)}, {"agent_id": "Research-Agent"}]}
+    assert "private-" not in response.text
+    assert "private-" not in caplog.text
+    assert PRIVATE_CONTENT not in caplog.text
+
+
+@pytest.mark.parametrize("tool_name", ["search", "get"])
+@pytest.mark.parametrize("policy", POLICIES)
+@pytest.mark.parametrize("invalid", [False, True])
+def test_record_policy_through_memory_tool_handlers(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, tool_name: str, policy: str, invalid: bool) -> None:
+    runtime = SimpleNamespace(context={"user_id": "runtime-user", "agent_name": "Research-Agent"})
+    records = [_record(score="private-invalid-score" if invalid else "0.75")]
+    with _manager(monkeypatch, records, policy) as (manager, requests):
+        monkeypatch.setattr(tools, "get_memory_manager", lambda: manager)
+        raw = tools.memory_search_tool.func(runtime, "preferences") if tool_name == "search" else tools.memory_get_tool.func(runtime, "m1")
+        result = json.loads(raw)
+        if invalid and policy == "fail_closed":
+            assert result == {"error": "mem0 read failed: mem0 memory field score must be a finite number"}
+        elif tool_name == "search":
+            assert result["count"] == (0 if invalid else 1)
+            assert [fact["id"] for fact in result["results"]] == ([] if invalid else ["m1"])
+        elif invalid:
+            assert result == {"error": "Fact not found: m1"}
+        else:
+            assert result["fact"]["id"] == "m1"
+        assert len(requests) == 1
+        assert json.loads(requests[0].content)["filters"] == {"AND": [{"user_id": "runtime-user"}, {"agent_id": "Research-Agent"}]}
+    assert "private-" not in raw
+    assert "private-" not in caplog.text
+    assert PRIVATE_CONTENT not in caplog.text
