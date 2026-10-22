@@ -95,3 +95,14 @@ records; document parse completion alone is insufficient.
 Out of scope: a management frontend, platform spaces/sharing, arbitrary parser or
 model configuration, Trace persistence, standalone Wiki editing, upstream user
 impersonation, multi-Gateway ingestion admission and exactly-once writes.
+
+## PR review follow-up
+
+Review regressions now reject parent-child chunk overrides on manual, URL, file
+and reprocess paths before any upstream mutation; empty and non-chunk overrides
+remain supported. All four rejection cases failed before the fix and passed
+afterward. The oversized-upload case has a compact explicit pytest ID, avoiding
+Windows environment-variable limits (native Windows was not rerun locally).
+Frontend discovery includes the package's actual namespace and localized copy.
+Focused backend/guidance checks: 64 passed, 1 skipped. Frontend catalog: 9 passed;
+frontend lint/typecheck and backend formatting passed.

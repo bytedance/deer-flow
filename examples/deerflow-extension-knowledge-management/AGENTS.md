@@ -15,7 +15,9 @@ Pin WeKnora mappings to v0.8.3 commit
 Processing capabilities describe upstream configuration, not observed success.
 Finalizing may be searchable, and unknown states must remain unknown. Never
 claim Wiki/graph completion based on the document's terminal parse status.
-Preserve base chunking settings when overriding size/overlap: v0.8.3 treats
+Reject chunk size/overlap overrides before mutation on parent-child bases;
+upstream derives effective sizes and overlap independently. Preserve base
+chunking settings for supported overrides: v0.8.3 treats
 parent-child mode as authoritative and ignores zero integer overrides. Reject
 an unrepresentable zero overlap. Empty reparse options preserve the stored policy. Keep arbitrary credential,
 model and parser configuration out of request bodies.
@@ -31,3 +33,6 @@ use a dedicated synthetic base and caller-supplied session/CSRF credentials.
 Preserve native IDs for uncertain-write reconciliation; no automatic write retry
 or cleanup. Record real stage outcomes and lexical Wiki-search limitations in
 VALIDATION.md separately from mock contract coverage.
+
+Frontend discovery uses the knowledge-management namespace with English/Chinese
+copy; catalog presence never activates routes or implies a management page.

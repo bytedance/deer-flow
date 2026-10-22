@@ -24,7 +24,7 @@ def management(monkeypatch):
         if state["code"] != 200:
             return httpx.Response(state["code"], text="synthetic-secret private error")
         if request.url.path == "/api/v1/knowledge-bases/kb-1":
-            data = {"id": "kb-1", "capabilities": {"wiki": True, "graph": True, "vector": True}, "chunking_config": {"chunk_size": 1024, "chunk_overlap": 128}}
+            data = {"id": "kb-1", "capabilities": {"wiki": True, "graph": True, "vector": True}, "chunking_config": state.get("chunking_config", {"chunk_size": 1024, "chunk_overlap": 128})}
         else:
             data = {"id": "doc-1", "knowledge_base_id": state["base"], "parse_status": state["status"], "enable_status": "enabled"}
         return httpx.Response(201 if request.url.path.endswith(("/file", "/url")) else 200, json={"success": True, "data": data})
@@ -165,7 +165,7 @@ async def test_unsupported_graph_rejected_before_mutation(management):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("filename,content", [("../guide.txt", b"text"), ("guide\n.txt", b"text"), ("guide.txt", b""), ("guide.txt", b"x" * (16 * 1024 * 1024 + 1))])
+@pytest.mark.parametrize("filename,content", [("../guide.txt", b"text"), ("guide\n.txt", b"text"), ("guide.txt", b""), pytest.param("guide.txt", b"x" * (16 * 1024 * 1024 + 1), id="oversized")])
 async def test_invalid_upload_never_reaches_provider(management, filename, content):
     from deerflow_extension_knowledge_management.contracts import ManagementContext, ProcessingOptions
 
@@ -390,15 +390,35 @@ async def test_declared_optional_operations_fail_closed(management):
         await CatalogOnly().upload(ManagementContext(ExtensionPrincipal("alice", is_admin=True)), "connection", "base", "file.txt", b"text", ProcessingOptions())
 
 
-def test_chunk_overrides_preserve_upstream_parent_child_mode(management):
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["manual", "url", "upload", "reprocess"])
+async def test_parent_child_chunk_overrides_rejected_before_mutation(management, operation):
+    from deerflow_extension_knowledge_management.contracts import IngestRequest, ManagementContext, ProcessingOptions
+
+    provider, calls, state = management
+    state["chunking_config"] = {"chunk_size": 1024, "chunk_overlap": 128, "enable_parent_child": True, "parent_chunk_size": 4096, "child_chunk_size": 384}
+    context = ManagementContext(ExtensionPrincipal("alice", is_admin=True))
+    options = ProcessingOptions(chunk_size=512, chunk_overlap=64)
+    with pytest.raises(NotImplementedError, match="parent-child"):
+        if operation == "upload":
+            await provider.upload(context, "local", "kb-1", "guide.txt", b"text", options)
+        elif operation == "reprocess":
+            await provider.process(context, "local", "kb-1", "doc-1", operation, options)
+        else:
+            body = {"kind": operation, "title": "Guide", "processing": options}
+            body.update({"content": "text"} if operation == "manual" else {"url": "https://example.com"})
+            await provider.ingest(context, "local", "kb-1", IngestRequest(**body))
+    assert calls and all(call.method == "GET" for call in calls)
+    assert state["chunking_config"]["parent_chunk_size"] == 4096
+
+
+def test_parent_child_without_chunk_overrides_preserves_policy(management):
     from deerflow_extension_knowledge_management.contracts import ProcessingOptions
 
     provider, _, _ = management
-    base = {"chunking_config": {"chunk_size": 1024, "chunk_overlap": 128, "enable_parent_child": True, "parent_chunk_size": 4096, "child_chunk_size": 384}}
-    result = provider._options(ProcessingOptions(chunk_size=512, chunk_overlap=64), base)
-    assert result["chunking_config"]["enable_parent_child"] is True
-    assert result["chunking_config"]["parent_chunk_size"] == 4096
-    assert base["chunking_config"]["chunk_size"] == 1024
+    base = {"chunking_config": {"enable_parent_child": True, "parent_chunk_size": 4096, "child_chunk_size": 384}}
+    assert provider._options(ProcessingOptions(), base) == {}
+    assert provider._options(ProcessingOptions(summary_enabled=False), base) == {"summary_enabled": False}
 
 
 def test_weknora_zero_overlap_override_is_not_silently_ignored(management):

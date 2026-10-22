@@ -155,6 +155,8 @@ class WeKnoraManagement:
             existing = base.get("chunking_config")
             if not isinstance(existing, dict):
                 raise RuntimeError("Invalid provider chunking configuration")
+            if existing.get("enable_parent_child") is True:
+                raise NotImplementedError("Chunk overrides are unsupported in parent-child mode")
             # v0.8.3 merges nonzero integers but treats enable_parent_child as
             # authoritative even when omitted. Preserve its full base snapshot.
             if options.chunk_overlap == 0 and existing.get("chunk_overlap") != 0:

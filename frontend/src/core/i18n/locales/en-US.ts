@@ -85,6 +85,11 @@ export const enUS: Translations = {
         description:
           "Retrieve documents and entity relations from LightRAG with shared source citations.",
       },
+      knowledgeManagement: {
+        title: "Knowledge ingestion and processing",
+        description:
+          "Ingest files, URLs and text through WeKnora and manage processing with explicit administrator grants. Requires installation and configuration; no management page is included.",
+      },
       weknora: {
         title: "WeKnora knowledge retrieval",
         description:
