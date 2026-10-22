@@ -160,13 +160,13 @@ DOM regression: `new-agent-save.dom.test.tsx`.
 - **Path alias**: `@/*` maps to `src/*`.
 - **Components**: `ui/` and `ai-elements/` are generated from registries (Shadcn, MagicUI, React Bits, Vercel AI SDK) — don't manually edit these.
 
-Customize `components/workspace/workspace-sidebar-frame.tsx`, outside generated UI.
-Mobile rail/drawer share one content tree; visibility uses
-`useWorkspaceSidebarExpanded`, preserving desktop `SidebarProvider.open`.
-Keep activity polling and the shared delete-dialog provider outside that tree.
-Reuse `Sidebar` for drawer width/accessibility; close on pathname changes, then
-restore rail focus after portal unmount. Header triggers expose expanded/dialog
-ARIA state. Cover frame DOM behavior and `tests/e2e/sidebar.spec.ts`.
+Sidebar customization: `components/workspace/workspace-sidebar-frame.tsx`.
+Rail/drawer mount one tree; `useWorkspaceSidebarExpanded` preserves desktop
+`SidebarProvider.open`. Keep polling/delete-dialog provider outside that tree.
+Reuse stock `Sidebar`; close before link navigation and on pathname changes,
+preserving page focus. Dismissal restores the opener or remounted rail trigger.
+`WorkspaceSidebarTrigger` owns surface icons/ARIA; keep generated UI unchanged.
+Test frame DOM behavior and `tests/e2e/sidebar.spec.ts`.
 
 Scheduled-task list search filters the current authorized query result by title or
 prompt, composing with status/type filters and thread scope. Selection must derive

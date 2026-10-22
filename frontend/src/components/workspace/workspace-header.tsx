@@ -8,7 +8,6 @@ import {
   SidebarMenu,
   SidebarMenuButton,
   SidebarMenuItem,
-  SidebarTrigger,
   useSidebar,
 } from "@/components/ui/sidebar";
 import { useI18n } from "@/core/i18n/hooks";
@@ -16,6 +15,7 @@ import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
 import { useWorkspaceSidebarExpanded } from "./workspace-sidebar-frame";
+import { WorkspaceSidebarTrigger } from "./workspace-sidebar-trigger";
 
 export function WorkspaceHeader({ className }: { className?: string }) {
   const { t } = useI18n();
@@ -40,9 +40,7 @@ export function WorkspaceHeader({ className }: { className?: string }) {
             >
               DF
             </div>
-            <SidebarTrigger
-              aria-expanded={isSidebarOpen}
-              aria-haspopup={isMobile ? "dialog" : undefined}
+            <WorkspaceSidebarTrigger
               className={cn(
                 "pl-2",
                 !isMobile && "hidden group-hover/workspace-header:block",
@@ -60,10 +58,7 @@ export function WorkspaceHeader({ className }: { className?: string }) {
                 DeerFlow
               </div>
             )}
-            <SidebarTrigger
-              aria-expanded={isSidebarOpen}
-              aria-haspopup={isMobile ? "dialog" : undefined}
-            />
+            <WorkspaceSidebarTrigger />
           </div>
         )}
       </div>

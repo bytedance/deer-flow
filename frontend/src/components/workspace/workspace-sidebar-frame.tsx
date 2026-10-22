@@ -5,6 +5,7 @@ import {
   createContext,
   useContext,
   useEffect,
+  useLayoutEffect,
   useRef,
   type ReactNode,
   type RefObject,
@@ -29,29 +30,79 @@ function Presentation({
   expanded: boolean | undefined;
   children: ReactNode;
 }) {
+  const { isMobile, setOpenMobile } = useSidebar();
   return (
     <ExpandedContext.Provider value={expanded}>
-      {children}
+      <div
+        className="contents"
+        onClickCapture={(event) => {
+          if (
+            !isMobile ||
+            event.defaultPrevented ||
+            !(event.target instanceof Element) ||
+            event.button !== 0 ||
+            event.metaKey ||
+            event.ctrlKey ||
+            event.shiftKey ||
+            event.altKey
+          )
+            return;
+          const link = event.target.closest<HTMLAnchorElement>("a[href]");
+          if (
+            !link ||
+            link.hasAttribute("download") ||
+            (link.target && link.target !== "_self")
+          )
+            return;
+          const destination = new URL(link.href, window.location.href);
+          if (
+            destination.origin === window.location.origin &&
+            destination.pathname !== window.location.pathname
+          ) {
+            // Release the focus trap before the destination mounts its input.
+            setOpenMobile(false);
+          }
+        }}
+      >
+        {children}
+      </div>
     </ExpandedContext.Provider>
   );
 }
 
-function RestoreRailFocus({
+function RestoreSidebarFocus({
   railRef,
+  pathnameRef,
 }: {
   railRef: RefObject<HTMLDivElement | null>;
+  pathnameRef: RefObject<string | null>;
 }) {
-  useEffect(
-    () => () => {
-      // Wait for the stock drawer portal to unmount before restoring focus.
-      setTimeout(() => {
-        railRef.current
-          ?.querySelector<HTMLButtonElement>('[data-sidebar="trigger"]')
-          ?.focus();
-      }, 0);
-    },
-    [railRef],
-  );
+  useLayoutEffect(() => {
+    // Capture the opener before the drawer's focus scope moves focus inside.
+    const opener = document.activeElement;
+    const openedOn = pathnameRef.current;
+    const restoreFocus = () => {
+      if (
+        pathnameRef.current !== openedOn ||
+        document.activeElement !== document.body
+      ) {
+        return;
+      }
+      const target =
+        opener instanceof HTMLElement &&
+        opener !== document.body &&
+        opener.isConnected
+          ? opener
+          : railRef.current?.querySelector<HTMLButtonElement>(
+              '[data-sidebar="trigger"]',
+            );
+      target?.focus();
+    };
+    // Read the latest refs after the stock drawer portal has unmounted.
+    return () => {
+      setTimeout(restoreFocus, 0);
+    };
+  }, [railRef, pathnameRef]);
   return null;
 }
 
@@ -66,9 +117,11 @@ export function WorkspaceSidebarFrame({
 }: React.ComponentProps<typeof Sidebar>) {
   const { isMobile, open, openMobile, setOpenMobile } = useSidebar();
   const pathname = usePathname();
+  const pathnameRef = useRef(pathname);
   const railRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
+    pathnameRef.current = pathname;
     setOpenMobile(false);
   }, [pathname, setOpenMobile]);
 
@@ -82,6 +135,9 @@ export function WorkspaceSidebarFrame({
         style={style}
         {...props}
       >
+        {isMobile && collapsible !== "none" && (
+          <RestoreSidebarFocus railRef={railRef} pathnameRef={pathnameRef} />
+        )}
         <Presentation
           expanded={isMobile && collapsible !== "none" ? openMobile : undefined}
         >
@@ -119,7 +175,7 @@ export function WorkspaceSidebarFrame({
         )}
       </div>
       <Sidebar side={side} variant={variant} collapsible={collapsible}>
-        <RestoreRailFocus railRef={railRef} />
+        <RestoreSidebarFocus railRef={railRef} pathnameRef={pathnameRef} />
         {/* Only one content tree is mounted: no duplicate menus or queries. */}
         {openMobile && <Presentation expanded>{children}</Presentation>}
       </Sidebar>

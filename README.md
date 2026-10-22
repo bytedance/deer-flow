@@ -1469,7 +1469,8 @@ Use it as-is. Or tear it apart and make it yours.
 The workspace keeps a collapsed icon sidebar visible on narrow screens. Its
 toggle opens the full navigation drawer; closing the drawer returns to the icon
 bar without changing your saved desktop sidebar preference. Navigating to another
-page also closes the mobile drawer.
+page also closes the mobile drawer and preserves the destination page's focus.
+Dismissing the drawer returns keyboard focus to the control that opened it.
 
 ### Skills & Tools
 

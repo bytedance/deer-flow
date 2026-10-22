@@ -7,12 +7,14 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
+import Link from "next/link";
 
 import {
   SidebarProvider,
   SidebarTrigger,
   useSidebar,
 } from "@/components/ui/sidebar";
+import { WorkspaceHeader } from "@/components/workspace/workspace-header";
 import {
   WorkspaceSidebarFrame,
   useWorkspaceSidebarExpanded,
@@ -26,6 +28,12 @@ rs.mock("@/hooks/use-mobile", () => ({ useIsMobile: () => mobile.value }));
 rs.mock("next/navigation", () => ({
   usePathname: () => navigation.pathname,
 }));
+rs.mock("@/core/i18n/hooks", () => ({
+  useI18n: () => ({ t: { sidebar: { newChat: "New chat" } } }),
+}));
+rs.mock("@/env", () => ({
+  env: { NEXT_PUBLIC_STATIC_WEBSITE_ONLY: "false" },
+}));
 
 function Contents() {
   const expanded = useWorkspaceSidebarExpanded();
@@ -36,6 +44,9 @@ function Contents() {
         Toggle navigation
       </button>
       <a href="#agents">Agents</a>
+      <Link href="/workspace/chats" onClick={(event) => event.preventDefault()}>
+        Chats
+      </Link>
       {expanded && <p>Projects and recent chats</p>}
     </>
   );
@@ -60,6 +71,9 @@ function Harness({
       </WorkspaceSidebarFrame>
       <DesktopState />
       <SidebarTrigger />
+      {navigation.pathname === "/workspace/chats" && (
+        <input aria-label="Search chats" autoFocus />
+      )}
     </SidebarProvider>
   );
 }
@@ -72,6 +86,55 @@ afterEach(() => {
 });
 
 describe("workspace mobile sidebar", () => {
+  it("shows the drawer state in the sidebar header icon", async () => {
+    render(
+      <SidebarProvider defaultOpen={false}>
+        <WorkspaceSidebarFrame>
+          <WorkspaceHeader />
+        </WorkspaceSidebarFrame>
+      </SidebarProvider>,
+    );
+    const railTrigger = screen.getByRole("button", { name: "Toggle Sidebar" });
+    expect(railTrigger.querySelector(".lucide-panel-left-open")).not.toBeNull();
+    fireEvent.click(railTrigger);
+    const dialog = await screen.findByRole("dialog");
+    const drawerTrigger = within(dialog).getByRole("button", {
+      name: "Toggle Sidebar",
+    });
+    expect(drawerTrigger.getAttribute("aria-expanded")).toBe("true");
+    expect(
+      drawerTrigger.querySelector(".lucide-panel-left-close"),
+    ).not.toBeNull();
+  });
+
+  it("returns focus to the page trigger that opened the drawer", async () => {
+    render(<Harness />);
+    const pageTrigger = screen.getByRole("button", { name: "Toggle Sidebar" });
+    pageTrigger.focus();
+    fireEvent.click(pageTrigger);
+    await screen.findByRole("dialog");
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    await waitFor(() => expect(document.activeElement).toBe(pageTrigger));
+  });
+
+  it("preserves destination focus when navigation closes the drawer", async () => {
+    const view = render(<Harness />);
+    fireEvent.click(screen.getByRole("button", { name: "Toggle navigation" }));
+    await screen.findByRole("dialog");
+
+    fireEvent.click(screen.getByRole("link", { name: "Chats" }));
+    navigation.pathname = "/workspace/chats";
+    view.rerender(<Harness />);
+
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    await waitFor(() =>
+      expect(document.activeElement).toBe(
+        screen.getByRole("textbox", { name: "Search chats" }),
+      ),
+    );
+  });
+
   it("uses the standard mobile drawer width with a collapsed desktop preference", async () => {
     render(<Harness defaultOpen />);
     fireEvent.click(screen.getByRole("button", { name: "Toggle Sidebar" }));
