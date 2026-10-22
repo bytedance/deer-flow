@@ -403,7 +403,7 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
                 self._thread_sandboxes.pop(key, None)
             destroy_after_unlock = self._shutdown_called
             if not destroy_after_unlock:
-                self._warm_pool[sandbox_id] = (sandbox, time.time())
+                self._warm_pool[sandbox_id] = (sandbox, time.monotonic())
         if destroy_after_unlock:
             self._destroy_quietly(sandbox, context="released during shutdown")
 
@@ -552,7 +552,7 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
     def reset(self) -> None:
         """Park active clients so the detached provider still owns their cleanup."""
         with self._lock:
-            now = time.time()
+            now = time.monotonic()
             for sandbox_id, sandbox in self._sandboxes.items():
                 self._warm_pool.setdefault(sandbox_id, (sandbox, now))
             self._sandboxes.clear()

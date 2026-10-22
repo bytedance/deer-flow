@@ -278,8 +278,8 @@ def test_creator_stream_close_after_orphan_recovery_end_does_not_cancel(monkeypa
     async def scenario():
         recorder = _CancelRecorder()
 
-        async def orphan_recovered(record, run_mgr):
-            return True
+        async def orphan_recovered(record, run_mgr, bridge):
+            return "recovered"
 
         monkeypatch.setattr(
             "app.gateway.services._orphan_recovery_observed_after_heartbeat",

@@ -17,6 +17,7 @@ from deerflow.agents.middlewares.audit_context import (
     TOOL_PROMOTION_RECORDER_CONTEXT_KEY,
     resolve_audit_recorder,
 )
+from deerflow.agents.middlewares.message_utils import genuine_user_turn_id
 from deerflow.runtime.events.catalog import MIDDLEWARE_TOOL_PROMOTION_TAG
 
 logger = logging.getLogger(__name__)
@@ -69,12 +70,11 @@ def record_tool_promotion(
 
 
 class DeferredToolPromotionAuditMiddleware(AgentMiddleware[AgentState]):
-    """Observe final ``tool_search`` Commands after policy filtering.
+    """Observe final ``tool_search`` Commands.
 
-    This wrapper must remain outer of ``SkillToolPolicyMiddleware``. Tool-call
-    wrappers unwind in reverse registration order, so observing the handler's
-    final return value is what prevents denied schemas from being reported as
-    effective promotions.
+    Tool-call wrappers unwind in reverse registration order, so observing the
+    handler's final return value is what keeps the audit aligned with the
+    Command the deferred filter actually applies.
     """
 
     def __init__(self, deferred_names: frozenset[str], catalog_hash: str | None) -> None:
@@ -92,6 +92,9 @@ class DeferredToolPromotionAuditMiddleware(AgentMiddleware[AgentState]):
     def _current_promoted(self, state: Mapping[str, Any] | None) -> set[str]:
         promoted = (state or {}).get("promoted")
         if not isinstance(promoted, Mapping) or promoted.get("catalog_hash") != self._catalog_hash:
+            return set()
+        turn_id = genuine_user_turn_id(list((state or {}).get("messages") or []))
+        if turn_id is not None and promoted.get("turn_id") != turn_id:
             return set()
         names = promoted.get("names")
         if not isinstance(names, list) or not all(isinstance(name, str) for name in names):

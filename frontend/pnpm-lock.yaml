@@ -164,9 +164,6 @@ importers:
       h3:
         specifier: 1.15.9
         version: 1.15.9
-      hast:
-        specifier: ^1.0.0
-        version: 1.0.0
       katex:
         specifier: ^0.16.28
         version: 0.16.28
@@ -181,16 +178,16 @@ importers:
         version: 5.1.16
       next:
         specifier: ^16.3.8
-        version: 16.3.8(@opentelemetry/api@1.9.0)(@playwright/test@1.59.1)(@types/node@20.19.33)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
+        version: 16.3.8(@opentelemetry/api@1.9.0)(@playwright/test@1.62.1)(@types/node@20.19.33)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
       next-themes:
         specifier: ^0.4.6
         version: 0.4.6(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
       nextra:
         specifier: ^4.6.1
-        version: 4.6.1(next@16.3.8(@opentelemetry/api@1.9.0)(@playwright/test@1.59.1)(@types/node@20.19.33)(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(react-dom@19.2.4(react@19.2.4))(react@19.2.4)(typescript@5.9.3)
+        version: 4.6.1(next@16.3.8(@opentelemetry/api@1.9.0)(@playwright/test@1.62.1)(@types/node@20.19.33)(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(react-dom@19.2.4(react@19.2.4))(react@19.2.4)(typescript@5.9.3)
       nextra-theme-docs:
         specifier: ^4.6.1
-        version: 4.6.1(@types/react@19.2.13)(next@16.3.8(@opentelemetry/api@1.9.0)(@playwright/test@1.59.1)(@types/node@20.19.33)(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(nextra@4.6.1(next@16.3.8(@opentelemetry/api@1.9.0)(@playwright/test@1.59.1)(@types/node@20.19.33)(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(react-dom@19.2.4(react@19.2.4))(react@19.2.4)(typescript@5.9.3))(react-dom@19.2.4(react@19.2.4))(react@19.2.4)(use-sync-external-store@1.6.0(react@19.2.4))
+        version: 4.6.1(@types/react@19.2.13)(next@16.3.8(@opentelemetry/api@1.9.0)(@playwright/test@1.62.1)(@types/node@20.19.33)(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(nextra@4.6.1(next@16.3.8(@opentelemetry/api@1.9.0)(@playwright/test@1.62.1)(@types/node@20.19.33)(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(react-dom@19.2.4(react@19.2.4))(react@19.2.4)(typescript@5.9.3))(react-dom@19.2.4(react@19.2.4))(react@19.2.4)(use-sync-external-store@1.6.0(react@19.2.4))
       nuxt-og-image:
         specifier: ^5.1.13
         version: 5.1.13(@unhead/vue@2.1.4(vue@3.5.28(typescript@5.9.3)))(unstorage@1.17.4)(vite@7.3.1(@types/node@20.19.33)(jiti@2.6.1)(lightningcss@1.30.2)(yaml@2.8.3))(vue@3.5.28(typescript@5.9.3))
@@ -262,8 +259,8 @@ importers:
         specifier: ^3.3.1
         version: 3.3.3
       '@playwright/test':
-        specifier: ^1.59.1
-        version: 1.59.1
+        specifier: ^1.62.1
+        version: 1.62.1
       '@rsbuild/plugin-react':
         specifier: ^2.1.0
         version: 2.1.0(@rsbuild/core@2.0.15)(@rspack/core@2.0.8(@swc/helpers@0.5.23))
@@ -279,9 +276,6 @@ importers:
       '@testing-library/react':
         specifier: ^16.3.2
         version: 16.3.2(@testing-library/dom@10.4.1)(@types/react-dom@19.2.3(@types/react@19.2.13))(@types/react@19.2.13)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
-      '@types/gsap':
-        specifier: ^3.0.0
-        version: 3.0.0
       '@types/node':
         specifier: ^20.14.10
         version: 20.19.33
@@ -1219,9 +1213,9 @@ packages:
     resolution: {integrity: sha512-3giAOQvZiH5F9bMlMiv8+GSPMeqg0dbaeo58/0SlA9sxSqZhnUtxzX9/2FzyhS9sWQf5S0GJE0AKBrFqjpeYcg==}
     engines: {node: '>=8.0.0'}
 
-  '@playwright/test@1.59.1':
-    resolution: {integrity: sha512-PG6q63nQg5c9rIi4/Z5lR5IVF7yU5MqmKaPOe0HSc0O2cX1fPi96sUQu5j7eo4gKCkB2AnNGoWt7y4/Xx3Kcqg==}
-    engines: {node: '>=18'}
+  '@playwright/test@1.62.1':
+    resolution: {integrity: sha512-DTcUc8qii+cpHvtOwggMtBRMjKZHXYWdw8syRYu2vtzuq4Wxphqq4NfCs5Zt44L6mA8rfDfj+PHnxFc/FeK6mQ==}
+    engines: {node: '>=20'}
     hasBin: true
 
   '@polka/url@1.0.0-next.29':
@@ -2488,10 +2482,6 @@ packages:
 
   '@types/geojson@7946.0.16':
     resolution: {integrity: sha512-6C8nqWur3j98U6+lXDfTUWIfgvZU+EumvpHKcYjujKH7woYyLj2sUmff0tRhrqM7BohUw7Pz3ZB1jj2gW9Fvmg==}
-
-  '@types/gsap@3.0.0':
-    resolution: {integrity: sha512-BbWLi4WRHGze4C8NV7U7yRevuBFiPkPZZyGa0rryanvh/9HPUFXTNBXsGQxJZJq7Ix7j4RXMYodP3s+OsqCErg==}
-    deprecated: This is a stub types definition. gsap provides its own type definitions, so you do not need this installed.
 
   '@types/hast@3.0.4':
     resolution: {integrity: sha512-WPs+bbQw5aCj+x6laNGWLH3wviHtoCv/P3+otBhbOhJgG8qtpdAMlTCxLtsTWA7LH1Oh/bFCHsBn0TPS5m30EQ==}
@@ -3942,10 +3932,6 @@ packages:
   hast-util-whitespace@3.0.0:
     resolution: {integrity: sha512-88JUN06ipLwsnv+dVn+OIYOvAuvBMy/Qoi6O7mQHxdPXpjy+Cd6xRkWwux7DKO+4sYILtLBRIKgsdpS2gQc7qw==}
 
-  hast@1.0.0:
-    resolution: {integrity: sha512-vFUqlRV5C+xqP76Wwq2SrM0kipnmpxJm7OfvVXpB35Fp+Fn4MV+ozr+JZr5qFvyR1q/U+Foim2x+3P+x9S1PLA==}
-    deprecated: Renamed to rehype
-
   hastscript@9.0.1:
     resolution: {integrity: sha512-g7df9rMFX/SPi34tyGCyUBREQoKkapwdY/T04Qn9TDWfHhAYt4/I0gMVirzK5wEzeUqIjEB+LXC/ypb7Aqno5w==}
 
@@ -4949,14 +4935,14 @@ packages:
     engines: {node: '>=18'}
     hasBin: true
 
-  playwright-core@1.59.1:
-    resolution: {integrity: sha512-HBV/RJg81z5BiiZ9yPzIiClYV/QMsDCKUyogwH9p3MCP6IYjUFu/MActgYAvK0oWyV9NlwM3GLBjADyWgydVyg==}
-    engines: {node: '>=18'}
+  playwright-core@1.62.1:
+    resolution: {integrity: sha512-wPYSwEBJY9GHraISXqyqtx0na0LpO3XEX7jNDhntbex7tzUS7kLnZsOlFruFJB4Hi/rhDMjXGqHewDZ68nYZVw==}
+    engines: {node: '>=20'}
     hasBin: true
 
-  playwright@1.59.1:
-    resolution: {integrity: sha512-C8oWjPR3F81yljW9o5OxcWzfh6avkVwDD2VYdwIGqTkl+OGFISgypqzfu7dOe4QNLL2aqcWBmI3PMtLIK233lw==}
-    engines: {node: '>=18'}
+  playwright@1.62.1:
+    resolution: {integrity: sha512-0M+L3LAD8/nm554LOla9Ayx0j0tmFZ0FBcoQ7F1VuVHpM/XpiC8RcDzBQB8W5+hA8L22THxELzeF+2WcUzvcLg==}
+    engines: {node: '>=20'}
     hasBin: true
 
   points-on-curve@0.2.0:
@@ -7028,9 +7014,9 @@ snapshots:
 
   '@opentelemetry/api@1.9.0': {}
 
-  '@playwright/test@1.59.1':
+  '@playwright/test@1.62.1':
     dependencies:
-      playwright: 1.59.1
+      playwright: 1.62.1
 
   '@polka/url@1.0.0-next.29': {}
 
@@ -8214,10 +8200,6 @@ snapshots:
   '@types/estree@1.0.9': {}
 
   '@types/geojson@7946.0.16': {}
-
-  '@types/gsap@3.0.0':
-    dependencies:
-      gsap: 3.14.2
 
   '@types/hast@3.0.4':
     dependencies:
@@ -10051,8 +10033,6 @@ snapshots:
     dependencies:
       '@types/hast': 3.0.4
 
-  hast@1.0.0: {}
-
   hastscript@9.0.1:
     dependencies:
       '@types/hast': 3.0.4
@@ -11024,7 +11004,7 @@ snapshots:
       react: 19.2.4
       react-dom: 19.2.4(react@19.2.4)
 
-  next@16.3.8(@opentelemetry/api@1.9.0)(@playwright/test@1.59.1)(@types/node@20.19.33)(react-dom@19.2.4(react@19.2.4))(react@19.2.4):
+  next@16.3.8(@opentelemetry/api@1.9.0)(@playwright/test@1.62.1)(@types/node@20.19.33)(react-dom@19.2.4(react@19.2.4))(react@19.2.4):
     dependencies:
       '@next/env': 16.3.8
       '@swc/helpers': 0.5.23
@@ -11044,20 +11024,20 @@ snapshots:
       '@next/swc-win32-arm64-msvc': 16.3.8
       '@next/swc-win32-x64-msvc': 16.3.8
       '@opentelemetry/api': 1.9.0
-      '@playwright/test': 1.59.1
+      '@playwright/test': 1.62.1
       sharp: 0.35.5(@types/node@20.19.33)
     transitivePeerDependencies:
       - '@babel/core'
       - '@types/node'
       - babel-plugin-macros
 
-  nextra-theme-docs@4.6.1(@types/react@19.2.13)(next@16.3.8(@opentelemetry/api@1.9.0)(@playwright/test@1.59.1)(@types/node@20.19.33)(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(nextra@4.6.1(next@16.3.8(@opentelemetry/api@1.9.0)(@playwright/test@1.59.1)(@types/node@20.19.33)(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(react-dom@19.2.4(react@19.2.4))(react@19.2.4)(typescript@5.9.3))(react-dom@19.2.4(react@19.2.4))(react@19.2.4)(use-sync-external-store@1.6.0(react@19.2.4)):
+  nextra-theme-docs@4.6.1(@types/react@19.2.13)(next@16.3.8(@opentelemetry/api@1.9.0)(@playwright/test@1.62.1)(@types/node@20.19.33)(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(nextra@4.6.1(next@16.3.8(@opentelemetry/api@1.9.0)(@playwright/test@1.62.1)(@types/node@20.19.33)(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(react-dom@19.2.4(react@19.2.4))(react@19.2.4)(typescript@5.9.3))(react-dom@19.2.4(react@19.2.4))(react@19.2.4)(use-sync-external-store@1.6.0(react@19.2.4)):
     dependencies:
       '@headlessui/react': 2.2.9(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
       clsx: 2.1.1
-      next: 16.3.8(@opentelemetry/api@1.9.0)(@playwright/test@1.59.1)(@types/node@20.19.33)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
+      next: 16.3.8(@opentelemetry/api@1.9.0)(@playwright/test@1.62.1)(@types/node@20.19.33)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
       next-themes: 0.4.6(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
-      nextra: 4.6.1(next@16.3.8(@opentelemetry/api@1.9.0)(@playwright/test@1.59.1)(@types/node@20.19.33)(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(react-dom@19.2.4(react@19.2.4))(react@19.2.4)(typescript@5.9.3)
+      nextra: 4.6.1(next@16.3.8(@opentelemetry/api@1.9.0)(@playwright/test@1.62.1)(@types/node@20.19.33)(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(react-dom@19.2.4(react@19.2.4))(react@19.2.4)(typescript@5.9.3)
       react: 19.2.4
       react-compiler-runtime: 19.1.0-rc.3(react@19.2.4)
       react-dom: 19.2.4(react@19.2.4)
@@ -11069,7 +11049,7 @@ snapshots:
       - immer
       - use-sync-external-store
 
-  nextra@4.6.1(next@16.3.8(@opentelemetry/api@1.9.0)(@playwright/test@1.59.1)(@types/node@20.19.33)(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(react-dom@19.2.4(react@19.2.4))(react@19.2.4)(typescript@5.9.3):
+  nextra@4.6.1(next@16.3.8(@opentelemetry/api@1.9.0)(@playwright/test@1.62.1)(@types/node@20.19.33)(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(react-dom@19.2.4(react@19.2.4))(react@19.2.4)(typescript@5.9.3):
     dependencies:
       '@formatjs/intl-localematcher': 0.6.2
       '@headlessui/react': 2.2.9(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
@@ -11090,7 +11070,7 @@ snapshots:
       mdast-util-gfm: 3.1.0
       mdast-util-to-hast: 13.2.1
       negotiator: 1.0.0
-      next: 16.3.8(@opentelemetry/api@1.9.0)(@playwright/test@1.59.1)(@types/node@20.19.33)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
+      next: 16.3.8(@opentelemetry/api@1.9.0)(@playwright/test@1.62.1)(@types/node@20.19.33)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
       react: 19.2.4
       react-compiler-runtime: 19.1.0-rc.3(react@19.2.4)
       react-dom: 19.2.4(react@19.2.4)
@@ -11400,11 +11380,11 @@ snapshots:
 
   playwright-core@1.58.2: {}
 
-  playwright-core@1.59.1: {}
+  playwright-core@1.62.1: {}
 
-  playwright@1.59.1:
+  playwright@1.62.1:
     dependencies:
-      playwright-core: 1.59.1
+      playwright-core: 1.62.1
     optionalDependencies:
       fsevents: 2.3.2
 

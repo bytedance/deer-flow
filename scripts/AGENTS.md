@@ -34,6 +34,11 @@ Tests: `backend/tests/test_extension_check_script.py`.
 status in `make check`, independently of the host locale.
 Tests: `backend/tests/test_check_script.py`.
 
+`doctor.py` and `setup_wizard.py` configure stdout with `errors="replace"` at
+the start of `main`, preserving its encoding so legacy terminals and pipes can
+finish reports and setup. Guard `reconfigure` for embedded/captured streams.
+Offline subprocess coverage: `backend/tests/test_setup_script_encoding.py`.
+
 ## Manual Claude OAuth Export
 
 `export_claude_code_oauth.py` validates Keychain JSON as an object containing an
@@ -45,6 +50,14 @@ trimming its contents. Offline CLI coverage:
 `backend/tests/test_claude_keychain_export.py`.
 
 ## Service Startup Contracts
+
+Both launchers call `sandbox-mode.sh` via Bash; keep it Bash/awk-only.
+Dev passes `$PROJECT_ROOT/config.yaml`; prod passes `$DEER_FLOW_CONFIG_PATH`.
+For AIO, omitted/blank/empty-quoted/YAML-null URLs (including comments) select
+`aio`; preserve quoting so `"null"` and `"~"` remain nonempty strings.
+This is not a general YAML parser or URL validator; aliases, multiline values
+and environment expansion are out of scope. Offline helper and launcher tests:
+`backend/tests/test_docker_sandbox_mode_detection.py`.
 
 The setup wizard offers Webz.io as a news-only `web_search` provider using
 `deerflow.community.webz.tools:web_search_tool` and `WEBZ_API_KEY`. Keep its
@@ -64,6 +77,13 @@ indentless lists are supported; nested option names and block-scalar text
 must not enable the browser extra. Keep the detector standard-library-only
 because it runs before dependency synchronization. Read UTF-8 config files
 with or without a leading BOM so the first section remains detectable.
+`detect_uv_extras.py` checks an existing `DEER_FLOW_CONFIG_PATH` first, then
+`DEER_FLOW_PROJECT_ROOT/config.yaml`, before the legacy checkout candidates.
+Keep this lookup standard-library-only; test shadowing checkout configs and
+the CLI under `python -S` in `backend/tests/test_detect_uv_extras.py`.
+`serve.sh`'s config-presence gate also accepts the project-root file when the
+checkout has no config. `tests/test_serve_config_presence.py` runs the full
+launcher through dependency detection with service operations stubbed.
 `setup-sandbox.sh` also strips the leading BOM and normalizes CRLF before selecting the image;
 keep its shell filter compatible with GNU and BSD sed.
 An Apple Container pull that succeeds on macOS must not fail the setup step
@@ -188,12 +208,24 @@ likewise prefix the target with `bash`. This keeps documented `make` commands
 working when a source archive, `core.fileMode=false`, or a non-POSIX filesystem
 does not preserve executable bits.
 
+The Windows wrapper resolves `bash.exe` under the Git installation root, which
+is the parent of `cmd/`, `bin/`, or `mingw64/bin/` depending on the distribution:
+Git for Windows puts `git.exe` in `cmd/`, while PortableGit and GitHub Desktop
+put it in `mingw64/bin/`. Bash and sh stay at `<root>/bin` and `<root>/usr/bin`
+in both layouts. `backend/tests/support/shell.py` mirrors the same rule for the
+shell-script suites.
+
 `make clean` deletes `backend/.deer-flow` (database, users, threads, uploads,
 secrets), which both compose stacks mount into `deer-flow-gateway`. Its recipe
 runs `check-data-not-in-use.sh` before `make stop` (which would stop a live
 stack's sandboxes) and refuses while that container runs; an absent or
 unreachable Docker passes. `make stop` must still run before the delete: it
 stops `deer-flow-sandbox*` containers, whose thread mounts live in that tree.
+`cleanup-containers.sh` must verify an anchored `<prefix>-` name after Docker's
+substring `name=` filter, and use the same rule for Apple Container IDs. Parse
+Apple Container JSON without interpolating the prefix into Python source; bad
+entries must not hide later valid containers. Offline stub coverage lives in
+`backend/tests/test_cleanup_containers_script.py`.
 `RUNTIME_DATA_CONTENTS` feeds both the help line and the deletion notice.
 
 Host-side pnpm calls must go through `scripts/pnpm.py`. With native Windows
@@ -454,3 +486,14 @@ Keep exit codes, timeouts and redaction intact; do not rely on the host locale.
 Regressions use real local children, including ASCII/GBK capture defaults,
 nonzero exits, surrogate characters and malformed output, without invoking
 provider diagnostics. Doctor covers both `_run` streams and pnpm runner capture.
+
+## Production dotenv selection
+
+`deploy.sh` resolves `DEER_FLOW_COMPOSE_ENV_FILE` from the checkout before
+creating state or probing secrets. Keep Compose interpolation, Gateway and
+provisioner env files, secret probes, and UV_EXTRAS discovery on that one path.
+Normalize host paths for Git Bash; quote path arguments rather than sourcing
+dotenv files. Unset/empty selection preserves the optional root .env default;
+explicit invalid files reject build/start before Docker. Stopping remains
+possible after the selected file is removed. Tests: `test_deploy_env_file.py`
+and the existing deployment/Compose suites.

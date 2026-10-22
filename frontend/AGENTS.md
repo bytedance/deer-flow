@@ -1,6 +1,6 @@
 # AGENTS.md
 
-This is the source of truth for DeerFlow frontend coding agents; the sibling `CLAUDE.md` imports it via `@AGENTS.md`.
+DeerFlow frontend guidance source of truth; `CLAUDE.md` imports `@AGENTS.md`.
 
 ## Project Overview
 
@@ -42,9 +42,16 @@ Webpack is the default development bundler. Use `DEER_FLOW_DEV_BUNDLER=turbo` wi
 
 On Windows `pnpm dev` binds `127.0.0.1` by default because Hyper-V/winnat excluded port ranges can reject Next's default `0.0.0.0` bind with `EACCES` (#2870). Pass `pnpm dev -- --hostname 0.0.0.0` to listen on a LAN interface instead.
 
-Rstest runs them as two projects (`rstest.config.ts`). `*.test.ts` / `*.test.tsx` run in a plain **node** environment — that is nearly the whole suite, and it is the default for anything that is pure logic. `*.dom.test.ts` / `*.dom.test.tsx` run in **happy-dom**, for tests that need a document: hooks driven through `renderHook` from `@testing-library/react`, and components. Keep the split — a DOM environment costs roughly 3x the runtime of the node suite, so tests that do not render should not opt into it. A hook whose behavior only exists under real React (effect ordering, cleanup on unmount, re-render on store change) belongs in a `.dom.test.*` file rather than a node test that mocks `react` itself.
+`rstest.config.ts` separates **node** (`*.test.ts` / `*.test.tsx`) for pure logic
+from **happy-dom** (`*.dom.test.ts` / `*.dom.test.tsx`) for components and hooks
+rendered with `@testing-library/react`'s `renderHook`. Keep the split: DOM tests
+cost roughly 3x more runtime. Hooks that depend on React effect ordering, unmount
+cleanup, or re-renders on store changes belong in `.dom.test.*`; do not mock React
+in node tests to cover those behaviors.
 
 E2E tests live under `tests/e2e/` and use Playwright with Chromium. They mock all backend APIs via `page.route()` network interception and test real page interactions (navigation, chat input, streaming responses). Config: `playwright.config.ts`. The real-backend auth contract in `tests/e2e-real-backend/auth-disabled-contract.spec.ts` and `backend/tests/test_auth_me_permissions.py` pin the complete route-permission list; update both when adding registered permissions (including `projects:read/write/delete`).
+
+CI runs four E2E shards; only shard 1 runs auth recovery. Suite reports stay separate.
 
 The dedicated `run-history.ts` hook replaces the unpaged runs hook. Show counts
 only after a successful history read, never during initial loading or errors.
@@ -76,6 +83,8 @@ Keep IM notification preferences viewer-fenced and separate from browser alerts;
 
 ## Architecture
 
+Model controls: `core/models/use-model-control` + HumanInputCard.
+
 Knowledge evidence is parsed in `core/citations/sources.ts` from version-1
 ToolMessage artifacts. Message rows receive sources from preceding loaded tool
 messages. `#knowledge-source-ID` links resolve to `KnowledgeCitation` and an
@@ -103,22 +112,22 @@ Users create **threads** (conversations), send messages, set thread-scoped `/goa
 
 ### Source Layout (`src/`)
 
-- `app/` — Next.js routes: chat/workspace, agents, auth, showcase, artifact views,
-  localized docs/blog, and API handlers.
-- `components/` — generated `ui/` and `ai-elements/`; application components under
-  `workspace/`, `landing/`, and `docs/`.
-- `core/` — domain logic, API clients, state/hooks, i18n, and Markdown renderers.
-- `hooks/`, `lib/`, `typings/` — shared hooks, utilities, and ambient types.
-- `content/`, `styles/` — MDX content and Tailwind styles.
-- `env.js`, `mdx-components.ts` — environment validation and MDX component map.
+`AuthProvider` publishes the query owner (user ID, confirmed logout, or unknown
+auth). `QueryClientProvider` owns a mount-local client and remounts its consumers
+when that owner changes, clearing the old cache and cancelling old queries.
+Confirmed logout unmounts query consumers immediately; public and unknown-auth
+routes still render with an independent client. Keep auth outside the query
+provider. Superseded auth refreshes cannot restore an earlier owner.
 
-Read [src/AGENTS.md](src/AGENTS.md) for component and domain ownership.
+See [project structure](README.md#project-structure) for the directory map and
+[src/AGENTS.md](src/AGENTS.md) for component and domain ownership.
 
 ## Code Style
 
 `core/utils/markdown.ts` reads web-fetch titles from the first nonblank line.
-Match zero to three literal spaces before `# ` without trimming indentation;
-mixed space/tab code blocks must fall back to the URL. Strip optional closing
+Match zero to three literal spaces before a single `#` followed by an ASCII
+space or tab, without trimming indentation; mixed space/tab code blocks must
+fall back to the URL. Strip optional closing
 hashes with a backwards scan so long fetched titles cannot cause quadratic regex
 backtracking. Closing hashes require a preceding space/tab (or an empty title)
 and only ASCII spaces/tabs afterward, apart from the terminal CR in CRLF input.
@@ -149,6 +158,10 @@ document through `core/agents/api.ts`. Keep file parsing client-side only for
 previewing the proposed local name; the Gateway is authoritative for schema,
 name, model, and conflict validation. Export downloads must never synthesize
 runtime state from browser caches.
+
+New-Agent saves need the latest `setup_agent` success and API read-back.
+Failed/exhausted saves restore Save. Fence superseded or unmounted callbacks.
+DOM regression: `new-agent-save.dom.test.tsx`.
 
 - **Imports**: Enforced ordering (builtin → external → internal → parent → sibling), alphabetized, newlines between groups. Use inline type imports: `import { type Foo }`.
 - **Unused variables**: Prefix with `_`.
@@ -221,13 +234,7 @@ round-trip validation must still reject newly entered skipped times.
 
 ## Contributing
 
-When adding features:
-
-1. Follow the established `src/` structure
-2. Add TypeScript types and proper error handling
-3. Write unit tests under `tests/unit/` (`pnpm test`) and E2E tests under `tests/e2e/` (`pnpm test:e2e`)
-4. Run `pnpm check` before committing
-5. Update this `AGENTS.md` when architecture, commands, or conventions change
+Features follow `src/` ownership, include TypeScript types/error handling, unit tests (`tests/unit/`, `pnpm test`) and E2E (`tests/e2e/`, `pnpm test:e2e`). Run `pnpm check` before committing; update AGENTS.md when architecture, commands or conventions change.
 
 Route asset budgets are enforced with `pnpm perf:check`. The command measures
 `/login` from a normal production build, then builds in static-demo mode for the
@@ -384,10 +391,11 @@ through the contract's aliases/default (`resolveReasoningEffort`). Effort values
 are open strings (`ReasoningEffortValue`), so provider-specific tokens such as
 `max` flow through local settings and account preferences unchanged; the custom
 agent dialog offers only the intersection with the per-agent `low/medium/high`
-schema and hides "off" for required-thinking models. Do not read the booleans in
-components directly. On a legacy model, `resolveReasoningEffort` keeps only its
-advertised generic values; this drops a remembered provider-specific token after
-a model switch without changing the backend's direct legacy-request behavior.
+schema and blocks new "off" for required-thinking models. Do not read the booleans in
+components directly. Legacy `resolveReasoningEffort` keeps only advertised generic
+values, dropping provider tokens after a switch; backend requests stay unchanged.
+Agent settings omit untouched reasoning, show invalid saved values for clearing,
+and require a known model to save a model switch.
 
 ## Full-stack plugin UI
 

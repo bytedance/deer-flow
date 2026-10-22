@@ -1635,6 +1635,9 @@ def test_cleanup_called_on_timed_out(monkeypatch):
     config = _make_subagent_config()
     events = []
     cleanup_calls = []
+    usage_tail_calls = []
+    result = _make_result(FakeSubagentStatus.TIMED_OUT, error="timeout")
+    result.execution_done_event = threading.Event()
 
     monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
     monkeypatch.setattr(
@@ -1647,7 +1650,7 @@ def test_cleanup_called_on_timed_out(monkeypatch):
     monkeypatch.setattr(
         task_tool_module,
         "get_background_task_result",
-        lambda _: _make_result(FakeSubagentStatus.TIMED_OUT, error="timeout"),
+        lambda _: result,
     )
     monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
     monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
@@ -1656,6 +1659,19 @@ def test_cleanup_called_on_timed_out(monkeypatch):
         task_tool_module,
         "cleanup_background_task",
         lambda task_id: cleanup_calls.append(task_id),
+    )
+    monkeypatch.setattr(
+        task_tool_module,
+        "_schedule_deferred_subagent_cleanup",
+        lambda runtime, execution_id, trace_id, max_polls, *, terminal_result=None: usage_tail_calls.append(
+            (
+                runtime,
+                execution_id,
+                trace_id,
+                max_polls,
+                terminal_result,
+            )
+        ),
     )
 
     output = _run_task_tool(
@@ -1668,6 +1684,13 @@ def test_cleanup_called_on_timed_out(monkeypatch):
 
     assert _task_tool_message(output).content == "Task timed out. Error: timeout"
     assert cleanup_calls == ["tc-cleanup-timedout"]
+    assert len(usage_tail_calls) == 1
+    assert usage_tail_calls[0][1:] == (
+        "tc-cleanup-timedout",
+        "trace-1",
+        task_tool_module._TERMINAL_USAGE_TAIL_POLLS,
+        result,
+    )
 
 
 def test_cleanup_not_called_on_polling_safety_timeout(monkeypatch):
@@ -2399,6 +2422,103 @@ def test_deferred_final_usage_reported_on_parent_loop_with_real_recorder(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_terminal_usage_tail_waits_for_cleanup_fence_and_reports_on_parent_loop(monkeypatch):
+    parent_loop = asyncio.get_running_loop()
+    execution_done = threading.Event()
+    calls: list[tuple[object, list[dict]]] = []
+    scheduled: list[asyncio.Task] = []
+    result = SimpleNamespace(
+        status=FakeSubagentStatus.TIMED_OUT,
+        usage_reported=True,
+        token_usage_records=[
+            {"source_run_id": "run-1", "total_tokens": 10},
+        ],
+        execution_done_event=execution_done,
+    )
+
+    class LoopPinnedJournal:
+        def record_external_llm_usage_records(self, records):
+            calls.append((asyncio.get_running_loop(), list(records)))
+
+    runtime = SimpleNamespace(config={"callbacks": [LoopPinnedJournal()]})
+
+    def schedule_locally(coro):
+        task = asyncio.create_task(coro)
+        scheduled.append(task)
+        return task
+
+    cleanup_calls = []
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(
+        task_tool_module,
+        "run_on_isolated_subagent_loop",
+        schedule_locally,
+    )
+    monkeypatch.setattr(task_tool_module, "cleanup_background_task", cleanup_calls.append)
+    monkeypatch.setattr(task_tool_module, "_SUBAGENT_POLL_INTERVAL_SECONDS", 0.001)
+
+    handle = task_tool_module._schedule_deferred_subagent_cleanup(
+        runtime,
+        "execution-timeout",
+        "trace-timeout",
+        1_000,
+        terminal_result=result,
+    )
+    assert handle is scheduled[0]
+    await asyncio.sleep(0.01)
+    assert calls == []
+
+    result.token_usage_records.append(
+        {"source_run_id": "run-2", "total_tokens": 25},
+    )
+    execution_done.set()
+    await handle
+    await asyncio.sleep(0)
+
+    assert len(calls) == 1
+    observed_loop, observed_records = calls[0]
+    assert observed_loop is parent_loop
+    assert [record["source_run_id"] for record in observed_records] == [
+        "run-1",
+        "run-2",
+    ]
+    assert cleanup_calls == ["execution-timeout"]
+
+
+def test_terminal_usage_tail_reports_final_snapshot_when_cleanup_already_done(monkeypatch):
+    result = _make_result(FakeSubagentStatus.TIMED_OUT, error="timeout")
+    result.execution_done_event = threading.Event()
+    result.execution_done_event.set()
+    runtime = _make_runtime()
+    report_calls = []
+    scheduled = []
+
+    monkeypatch.setattr(
+        task_tool_module,
+        "_report_subagent_usage",
+        lambda runtime_arg, result_arg, **kwargs: report_calls.append(
+            (runtime_arg, result_arg, kwargs),
+        ),
+    )
+    monkeypatch.setattr(
+        task_tool_module,
+        "_schedule_deferred_subagent_cleanup",
+        lambda *args, **kwargs: scheduled.append((args, kwargs)),
+    )
+
+    task_tool_module._supervise_terminal_usage_tail(
+        runtime,
+        "execution-timeout",
+        "trace-timeout",
+        12,
+        result,
+    )
+
+    assert report_calls == [(runtime, result, {"final": True})]
+    assert scheduled == []
+
+
+@pytest.mark.asyncio
 async def test_unexpected_error_grace_wait_cancellation_is_honored(monkeypatch):
     """A graph-node cancellation landing inside the generic-error grace wait
     must surface as CancelledError, not the original poller error.
@@ -2681,6 +2801,66 @@ def test_cancellation_wait_uses_subagent_polling_budget(monkeypatch):
 
     assert report_calls == [(_make_runtime(), terminal_result)]
     assert cleanup_calls == ["tc-cancel-budget"]
+
+
+@pytest.mark.asyncio
+async def test_interrupted_terminal_result_defers_final_usage_until_cleanup_fence(monkeypatch):
+    result = _make_result(FakeSubagentStatus.TIMED_OUT, error="timeout")
+    result.execution_done_event = threading.Event()
+    runtime = _make_runtime()
+    report_calls = []
+    cleanup_calls = []
+    scheduled = []
+
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_background_task_result",
+        lambda _: result,
+    )
+    monkeypatch.setattr(
+        task_tool_module,
+        "_report_subagent_usage",
+        lambda runtime_arg, result_arg, **kwargs: report_calls.append(
+            (runtime_arg, result_arg, kwargs),
+        ),
+    )
+    monkeypatch.setattr(
+        task_tool_module,
+        "cleanup_background_task",
+        cleanup_calls.append,
+    )
+    monkeypatch.setattr(
+        task_tool_module,
+        "_schedule_deferred_subagent_cleanup",
+        lambda runtime_arg, execution_id, trace_id, max_polls, *, terminal_result=None: scheduled.append(
+            (
+                runtime_arg,
+                execution_id,
+                trace_id,
+                max_polls,
+                terminal_result,
+            )
+        ),
+    )
+
+    await task_tool_module._finalize_interrupted_subagent(
+        runtime,
+        "execution-timeout",
+        "trace-timeout",
+        12,
+    )
+
+    assert report_calls == [(runtime, result, {})]
+    assert scheduled == [
+        (
+            runtime,
+            "execution-timeout",
+            "trace-timeout",
+            12,
+            result,
+        )
+    ]
+    assert cleanup_calls == ["execution-timeout"]
 
 
 def test_cancellation_calls_request_cancel(monkeypatch):
@@ -3415,3 +3595,76 @@ def test_task_tool_forwards_execution_only_knowledge_scope(monkeypatch):
         "mode": "selected",
         "dataset_ids": ["dataset-1"],
     }
+
+
+@pytest.mark.parametrize("status", [FakeSubagentStatus.COMPLETED, FakeSubagentStatus.FAILED, FakeSubagentStatus.CANCELLED, FakeSubagentStatus.TIMED_OUT])
+def test_one_task_model_is_local_and_used_before_tool_assembly(monkeypatch, status):
+    parent = _make_subagent_config()
+    app_config = SimpleNamespace(get_model_config=lambda name: object() if name == "child-B" else None)
+    runtime = _make_runtime(app_config=app_config)
+    seen = {}
+
+    class Executor:
+        def __init__(self, **kwargs):
+            seen.update(kwargs)
+
+        def execute_async(self, prompt, task_id=None):
+            return "execution"
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", Executor)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *args, **kwargs: parent)
+    monkeypatch.setattr(task_tool_module, "get_available_subagent_names", lambda **kwargs: ["general-purpose"])
+    monkeypatch.setattr(task_tool_module, "get_background_task_result", lambda _: _make_result(status, result="done", error="stopped"))
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _: None)
+    assemble = MagicMock(return_value=[])
+    monkeypatch.setattr("deerflow.tools.get_available_tools", assemble)
+    _run_task_tool(runtime=runtime, prompt="calculate", subagent_type="general-purpose", tool_call_id="choice", model_name="child-B")
+    assert seen["config"].model == "child-B"
+    assert seen["config"] is not parent
+    assert assemble.call_args.kwargs["model_name"] == "child-B"
+    assert parent.model == "inherit"
+    assert runtime.config["metadata"]["model_name"] == "ark-model"
+    assert runtime.context.get("model_name") is None
+
+
+def test_unknown_task_model_rejects_before_assembly(monkeypatch):
+    config = SimpleNamespace(get_model_config=lambda _: None)
+    runtime = _make_runtime(app_config=config)
+    monkeypatch.setattr(task_tool_module, "get_available_subagent_names", lambda **kwargs: ["general-purpose"])
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *args, **kwargs: _make_subagent_config())
+    assemble = MagicMock()
+    monkeypatch.setattr("deerflow.tools.get_available_tools", assemble)
+    message = _task_tool_message(_run_task_tool(runtime=runtime, prompt="calculate", subagent_type="general-purpose", tool_call_id="choice", model_name="unknown"))
+    assert message.additional_kwargs[SUBAGENT_STATUS_KEY] == "failed"
+    assert "not configured" in message.content
+    assemble.assert_not_called()
+
+
+def test_parallel_task_choices_do_not_mutate_parent_or_shared_config(monkeypatch):
+    shared = _make_subagent_config()
+    runtime = _make_runtime(app_config=SimpleNamespace(get_model_config=lambda _: object()))
+    seen = []
+
+    class Executor:
+        def __init__(self, **kwargs):
+            seen.append(kwargs)
+
+        def execute_async(self, prompt, task_id=None):
+            return task_id
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", Executor)
+    monkeypatch.setattr(task_tool_module, "get_available_subagent_names", lambda **kwargs: ["general-purpose"])
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *args, **kwargs: shared)
+    monkeypatch.setattr(task_tool_module, "get_background_task_result", lambda _: _make_result(FakeSubagentStatus.COMPLETED, result="done"))
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _: None)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
+
+    async def run_both():
+        return await asyncio.gather(*(task_tool_module.task_tool.coroutine(runtime=runtime, prompt="calculate", subagent_type="general-purpose", tool_call_id=name, model_name=name) for name in ["B", "C"]))
+
+    asyncio.run(run_both())
+    assert {entry["config"].model for entry in seen} == {"B", "C"}
+    assert shared.model == "inherit"
+    assert runtime.config["metadata"]["model_name"] == "ark-model"
