@@ -36,6 +36,8 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
+from deerflow.utils.atomic_write import cleanup_failed_atomic_write
+
 logger = logging.getLogger(__name__)
 
 _POLL_INTERVAL_SECONDS = 0.05
@@ -147,7 +149,9 @@ def _create_exclusive(path: Path, generate: Callable[[], str]) -> bool:
             return _publish_under_claim(path, generate, replace_empty=False)
         return True
     finally:
-        Path(temporary).unlink(missing_ok=True)
+        # The value is already published through the hard link, so removing our
+        # own temporary name must never turn that success into a failure.
+        cleanup_failed_atomic_write(Path(temporary))
 
 
 def _claim_path(path: Path) -> Path:
@@ -186,4 +190,6 @@ def _publish_under_claim(path: Path, generate: Callable[[], str], *, replace_emp
         return True
     finally:
         if not published:
-            claim.unlink(missing_ok=True)
+            # Dropping our unpublished claim is best-effort: a failure here must
+            # not replace the error that aborted the publication.
+            cleanup_failed_atomic_write(claim)
