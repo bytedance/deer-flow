@@ -2271,6 +2271,41 @@ def test_acquire_releases_lease_of_reaped_warm_pool_sandbox(monkeypatch, tmp_pat
     assert p._transitioning_slots == 0
 
 
+def _transient_error(*_args, **_kwargs):
+    # Not one of the trusted gone signatures: the VM may still be alive.
+    raise RuntimeError("connection reset by peer")
+
+
+def test_acquire_keeps_lease_when_in_process_ping_fails_transiently(monkeypatch, tmp_path):
+    _setup_paths(monkeypatch, tmp_path)
+    p = _make_provider()
+    _install_fake_sdk(monkeypatch, p)
+    sandbox_id = p.acquire("t1", user_id="u1")
+    p._sandboxes[sandbox_id].client.commands = FakeCommandsAPI([_transient_error])
+
+    assert p.acquire("t1", user_id="u1") == sandbox_id
+    assert sandbox_id in p._owned_sandbox_ids
+    assert p._ownership.owner(sandbox_id) == p._owner_id
+
+
+def test_acquire_keeps_lease_when_warm_pool_reconnect_fails_transiently(monkeypatch, tmp_path):
+    _setup_paths(monkeypatch, tmp_path)
+    p = _make_provider()
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+    warm_id = p.acquire("t1", user_id="u1")
+    p.release(warm_id)
+    fake_cls.connect_factory = _transient_error
+
+    fresh_id = p.acquire("t1", user_id="u1")
+
+    assert fresh_id != warm_id
+    assert warm_id not in p._warm_pool
+    assert warm_id in p._owned_sandbox_ids
+    assert p._ownership.owner(warm_id) == p._owner_id
+    # Eviction releases the lease once the VM's state is known.
+    assert warm_id in p._eviction_tombstones
+
+
 def test_dead_sandbox_lease_release_failure_does_not_block_rebuild(monkeypatch, tmp_path):
     from deerflow.community.aio_sandbox.ownership import OwnershipBackendError
 
