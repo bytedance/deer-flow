@@ -67,6 +67,7 @@ async def test_shared_admission_rejects_nonexistent_wall_time(timezone, wall_tim
             await validate_scheduled_task_update(_existing(timezone), body.model_dump(exclude_unset=True), user_id="owner", thread_store=None, scheduler_config=SchedulerConfig(), assistant_resolver=AsyncMock(), used=0, now=NOW)
     assert caught.value.status_code == 422
     assert caught.value.detail["code"] == ("invalid_schedule" if field == "run_at" else "invalid_request")
+    assert caught.value.detail["message"].startswith(f"{field}: ")
     assert "does not exist" in caught.value.detail["message"]
     assert timezone in caught.value.detail["message"]
 
@@ -135,3 +136,21 @@ async def test_gap_schedule_is_revalidated_when_reinterpreted_or_rearmed(change)
         await validate_scheduled_task_update(existing, fields, user_id="owner", thread_store=None, scheduler_config=SchedulerConfig(), assistant_resolver=AsyncMock(), used=0, now=NOW)
     assert caught.value.status_code == 422
     assert caught.value.detail["code"] == "invalid_schedule"
+    assert caught.value.detail["message"].startswith("run_at: ")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["create", "update", "reactivate"])
+@pytest.mark.parametrize("run_at", ["not-a-date", "2027-02-30T09:00:00"])
+async def test_invalid_once_date_names_run_at_in_the_admission_error(operation, run_at):
+    spec = {"run_at": run_at}
+    with pytest.raises(HTTPException) as caught:
+        if operation == "create":
+            body = ScheduledTaskCreateRequest(title="Report", prompt="Write the report", schedule_type="once", schedule_spec=spec, timezone="UTC")
+            await validate_scheduled_task_create(body, user_id="owner", thread_store=None, scheduler_config=SchedulerConfig(), assistant_resolver=AsyncMock(), now=NOW)
+        else:
+            existing = _existing("UTC", status="completed" if operation == "reactivate" else "enabled")
+            await validate_scheduled_task_update(existing, {"schedule_spec": spec}, user_id="owner", thread_store=None, scheduler_config=SchedulerConfig(), assistant_resolver=AsyncMock(), used=0, now=NOW)
+    assert caught.value.status_code == 422
+    assert caught.value.detail["code"] == "invalid_schedule"
+    assert caught.value.detail["message"].startswith("run_at: ")

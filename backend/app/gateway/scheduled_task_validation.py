@@ -73,7 +73,10 @@ def _resolve_local_datetime(value: datetime, timezone: str) -> datetime:
 def _validate_once_wall_time(schedule_spec: dict[str, Any], timezone: str) -> None:
     run_at = schedule_spec.get("run_at")
     if isinstance(run_at, str):
-        _resolve_local_datetime(datetime.fromisoformat(run_at), timezone)
+        try:
+            _resolve_local_datetime(datetime.fromisoformat(run_at), timezone)
+        except ValueError as exc:
+            raise ValueError(f"run_at: {exc}") from exc
 
 
 def resolve_end_at(value: datetime | str | None, timezone: str) -> datetime | None:
