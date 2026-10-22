@@ -7,7 +7,7 @@ from firecrawl import AsyncFirecrawlApp
 from langchain.tools import tool
 
 from deerflow.community.search_max_results import DEFAULT_MAX_RESULTS, coerce_max_results
-from deerflow.community.url_safety import validate_delegated_backend_url, validate_public_http_url
+from deerflow.community.url_safety import safe_public_result_url, validate_delegated_backend_url, validate_public_http_url
 from deerflow.config import get_app_config
 
 logger = logging.getLogger(__name__)
@@ -114,7 +114,7 @@ async def web_search_tool(query: str) -> str:
         normalized_results = [
             {
                 "title": getattr(item, "title", "") or "",
-                "url": getattr(item, "url", "") or "",
+                "url": safe_public_result_url(getattr(item, "url", None)),
                 "snippet": getattr(item, "description", "") or "",
             }
             for item in web_results
