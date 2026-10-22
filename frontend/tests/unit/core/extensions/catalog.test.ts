@@ -164,3 +164,14 @@ test("WeKnora discovery is localized without implying runtime activation", () =>
     expect(entry?.loaded).toBeUndefined();
   }
 });
+
+test("LightRAG discovery is localized without claiming a runtime registration", () => {
+  for (const copy of [enUS.extensions.catalog, zhCN.extensions.catalog]) {
+    const entry = extensionDirectory([], copy).find(
+      (item) => item.package === "deerflow-extension-lightrag",
+    );
+    expect(entry?.title).toBe("LightRAG");
+    expect(entry?.description).toBe(copy.lightrag.description);
+    expect(entry?.loaded).toBeUndefined();
+  }
+});

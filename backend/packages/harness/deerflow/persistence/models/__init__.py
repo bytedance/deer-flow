@@ -27,6 +27,7 @@ from deerflow.persistence.channel_thread_bindings.model import ChannelThreadBind
 from deerflow.persistence.feedback.model import FeedbackRow
 from deerflow.persistence.login_throttle.model import LoginThrottleRow
 from deerflow.persistence.managed_subagents.model import ManagedSubagentRow
+from deerflow.persistence.mcp_oauth_tokens.model import McpOAuthTokenRow
 from deerflow.persistence.mcp_tasks.model import McpTaskRow
 from deerflow.persistence.models.run_event import RunEventRow, RunEventThreadSeqRow
 from deerflow.persistence.notification_deliveries.model import NotificationDeliveryRow
@@ -55,6 +56,7 @@ __all__ = [
     "ChannelThreadBindingRow",
     "FeedbackRow",
     "LoginThrottleRow",
+    "McpOAuthTokenRow",
     "McpTaskRow",
     "ManagedSubagentRow",
     "NotificationDeliveryRow",

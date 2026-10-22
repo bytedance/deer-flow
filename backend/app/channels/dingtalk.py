@@ -881,6 +881,7 @@ class DingTalkChannel(Channel):
                 virtual_path=virtual_path,
                 content=content,
                 owner_prefix="dingtalk-upload",
+                release_on_last=True,
             )
             if not synced:
                 # Mirror Feishu: the agent's non-local sandbox cannot see this
