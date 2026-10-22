@@ -48,6 +48,8 @@ DINGTALK_STREAM_TICKET_TIMEOUT_SECONDS = 30
 # Retry pacing copied from DingTalkStreamClient.start() (dingtalk-stream 0.24).
 _DINGTALK_STREAM_RETRY_SECONDS = 10
 _DINGTALK_STREAM_ERROR_RETRY_SECONDS = 3
+_DINGTALK_STREAM_MAX_PENDING_TASKS = 100
+_DINGTALK_STREAM_TASK_CANCELLATION_TIMEOUT_SECONDS = 5
 
 _CONVERSATION_TYPE_P2P = "1"
 _CONVERSATION_TYPE_GROUP = "2"
@@ -199,6 +201,8 @@ class DingTalkChannel(Channel):
         # once constructed so stop() can shut them down from the Gateway loop.
         self._stream_client: Any = None
         self._stream_loop: asyncio.AbstractEventLoop | None = None
+        self._stream_stop_event: asyncio.Event | None = None
+        self._stream_message_tasks: set[asyncio.Task[Any]] = set()
         self._stream_lock = threading.Lock()
         self._incoming_messages: dict[str, Any] = {}
         self._incoming_messages_lock = threading.Lock()
@@ -293,6 +297,8 @@ class DingTalkChannel(Channel):
 
     async def _shutdown_stream(self, loop: asyncio.AbstractEventLoop, client: Any) -> None:
         """Runs on the SDK loop: close the live websocket, then stop the loop."""
+        if self._stream_stop_event is not None:
+            self._stream_stop_event.set()
         try:
             websocket = getattr(client, "websocket", None) if client is not None else None
             if websocket is not None:
@@ -448,6 +454,7 @@ class DingTalkChannel(Channel):
     def _run_stream(self, client_id: str, client_secret: str) -> None:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
+        self._stream_stop_event = asyncio.Event()
         try:
             import dingtalk_stream
 
@@ -476,6 +483,31 @@ class DingTalkChannel(Channel):
                     self._stream_loop = None
                     self._stream_client = None
             shutdown_private_loop(loop)
+            self._stream_stop_event = None
+            self._stream_message_tasks.clear()
+
+    async def _wait_for_stream_task_capacity(self) -> bool:
+        """Apply backpressure before accepting more frames than the SDK can drain."""
+        while True:
+            completed = {task for task in self._stream_message_tasks if task.done()}
+            self._stream_message_tasks.difference_update(completed)
+            if len(self._stream_message_tasks) < _DINGTALK_STREAM_MAX_PENDING_TASKS:
+                break
+            stop_event = self._stream_stop_event
+            if not self._running or stop_event is None or stop_event.is_set():
+                return False
+
+            stop_waiter = asyncio.create_task(stop_event.wait())
+            try:
+                await asyncio.wait(
+                    [*self._stream_message_tasks, stop_waiter],
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+            finally:
+                stop_waiter.cancel()
+                await asyncio.gather(stop_waiter, return_exceptions=True)
+        stop_event = self._stream_stop_event
+        return self._running and stop_event is not None and not stop_event.is_set()
 
     async def _serve_stream(self, client: Any) -> None:
         """Run dingtalk-stream's connection loop so ``stop()`` can end it.
@@ -506,11 +538,32 @@ class DingTalkChannel(Channel):
                 async with websockets.connect(uri) as websocket:
                     client.websocket = websocket
                     keepalive = asyncio.create_task(client.keepalive(websocket))
+                    connection_tasks: set[asyncio.Task[Any]] = set()
                     try:
                         async for raw_message in websocket:
-                            asyncio.create_task(client.background_task(json.loads(raw_message)))
+                            if not await self._wait_for_stream_task_capacity():
+                                break
+                            task = asyncio.create_task(client.background_task(json.loads(raw_message)))
+                            self._stream_message_tasks.add(task)
+                            connection_tasks.add(task)
+                            task.add_done_callback(self._stream_message_tasks.discard)
+                            task.add_done_callback(connection_tasks.discard)
                     finally:
                         keepalive.cancel()
+                        await asyncio.gather(keepalive, return_exceptions=True)
+                        for task in connection_tasks:
+                            task.cancel()
+                        if connection_tasks:
+                            _, pending = await asyncio.wait(
+                                connection_tasks,
+                                timeout=_DINGTALK_STREAM_TASK_CANCELLATION_TIMEOUT_SECONDS,
+                            )
+                            if pending:
+                                logger.warning(
+                                    "[DingTalk] %d message task(s) ignored cancellation; "
+                                    "they remain counted against the stream task limit",
+                                    len(pending),
+                                )
             except websockets.exceptions.ConnectionClosedError as exc:
                 if not self._running:
                     break

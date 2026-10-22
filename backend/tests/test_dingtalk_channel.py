@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from support.symlinks import symlink_or_skip
 
+from app.channels import dingtalk as dingtalk_module
 from app.channels.commands import KNOWN_CHANNEL_COMMANDS
 from app.channels.dingtalk import (
     _CONVERSATION_TYPE_GROUP,
@@ -1834,6 +1835,84 @@ class TestCardMode:
             assert channel._incoming_messages == {}
             assert channel._card_repliers == {}
             assert channel._card_track_ids == {}
+
+        _run(go())
+
+
+class TestStreamMessageBackpressure:
+    def test_stream_caps_in_flight_message_tasks(self, monkeypatch):
+        websockets = pytest.importorskip("websockets")
+        monkeypatch.setattr(dingtalk_module, "_DINGTALK_STREAM_MAX_PENDING_TASKS", 2)
+
+        async def go():
+            channel = DingTalkChannel(MessageBus(), config={})
+            channel._running = True
+            channel._stream_stop_event = asyncio.Event()
+            channel._open_stream_connection = AsyncMock(return_value={"endpoint": "ws://test", "ticket": "ticket"})
+            release_messages = asyncio.Event()
+            started_messages = asyncio.Event()
+            reached_capacity = asyncio.Event()
+
+            class FakeWebSocket:
+                def __init__(self):
+                    self.reads = 0
+
+                def __aiter__(self):
+                    return self
+
+                async def __anext__(self):
+                    self.reads += 1
+                    if self.reads == 3:
+                        reached_capacity.set()
+                        return "{}"
+                    if self.reads == 4:
+                        channel._running = False
+                        raise StopAsyncIteration
+                    return "{}"
+
+            websocket = FakeWebSocket()
+
+            class FakeConnection:
+                async def __aenter__(self):
+                    return websocket
+
+                async def __aexit__(self, *_args):
+                    return False
+
+            monkeypatch.setattr(websockets, "connect", lambda _uri: FakeConnection())
+
+            class FakeClient:
+                active = 0
+                max_active = 0
+
+                def pre_start(self):
+                    pass
+
+                async def keepalive(self, _websocket):
+                    await asyncio.Event().wait()
+
+                async def background_task(self, _message):
+                    self.active += 1
+                    self.max_active = max(self.max_active, self.active)
+                    if self.active == 2:
+                        started_messages.set()
+                    try:
+                        await release_messages.wait()
+                    finally:
+                        self.active -= 1
+
+            client = FakeClient()
+            serve = asyncio.create_task(channel._serve_stream(client))
+            await asyncio.wait_for(reached_capacity.wait(), timeout=1)
+            await asyncio.wait_for(started_messages.wait(), timeout=1)
+            assert len(channel._stream_message_tasks) == 2
+            assert client.active == 2
+
+            release_messages.set()
+            await asyncio.wait_for(serve, timeout=1)
+
+            assert client.max_active == 2
+            assert channel._stream_message_tasks == set()
 
         _run(go())
 
