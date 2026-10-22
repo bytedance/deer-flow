@@ -446,6 +446,64 @@ def test_nginx_conf_is_accepted_by_nginx(tmp_path, state_name):
 
 
 # ---------------------------------------------------------------------------
+# --out validation
+# ---------------------------------------------------------------------------
+
+_OUT_ARGV = {
+    "render-config": lambda out: ["render-config", "--base", str(REPO_ROOT / "config.example.yaml"), "--out", str(out), "--database-url", DATABASE_URL, "--redis-url", REDIS_URL, "--state-dir", str(out.parent / "state")],
+    "secrets": lambda out: ["secrets", "--out", str(out)],
+    "nginx-conf": lambda out: ["nginx-conf", "--out", str(out), "--state-dir", str(out.parent / "state"), "--listen-port", "2027", "--gateway-port", "8001", "--gateway-port", "8011"],
+}
+
+
+@pytest.mark.parametrize("command", sorted(_OUT_ARGV))
+def test_cli_rejects_a_directory_out_before_writing(tmp_path, capsys, command):
+    out = tmp_path / "bundle"
+    out.mkdir()
+
+    with pytest.raises(SystemExit) as exit_info:
+        mi.main(_OUT_ARGV[command](out))
+
+    assert exit_info.value.code == 2
+    assert f"--out must be a file path, not a directory: {out}" in capsys.readouterr().err
+    assert list(tmp_path.iterdir()) == [out], "a rejected --out must not leave a temporary file behind"
+
+
+@pytest.mark.parametrize("command", sorted(_OUT_ARGV))
+def test_cli_rejects_an_out_whose_parent_is_a_file(tmp_path, capsys, command):
+    parent = tmp_path / "not-a-dir"
+    parent.write_text("", encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exit_info:
+        mi.main(_OUT_ARGV[command](parent / "bundle"))
+
+    assert exit_info.value.code == 2
+    assert f"--out parent must be a directory: {parent}" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("missing", ["missing", "a/b"])
+@pytest.mark.parametrize("command", sorted(_OUT_ARGV))
+def test_cli_rejects_a_file_ancestor_behind_missing_directories(tmp_path, capsys, command, missing):
+    blocker = tmp_path / "blocker"
+    blocker.write_text("", encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exit_info:
+        mi.main(_OUT_ARGV[command](blocker / missing / "secrets.env"))
+
+    assert exit_info.value.code == 2
+    assert f"--out parent must be a directory: {blocker}" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("command", sorted(_OUT_ARGV))
+def test_cli_still_creates_missing_out_parents(tmp_path, command):
+    out = tmp_path / "a" / "b" / "secrets.env"
+
+    assert mi.main(_OUT_ARGV[command](out)) == 0
+
+    assert out.is_file()
+
+
+# ---------------------------------------------------------------------------
 # Check helpers
 # ---------------------------------------------------------------------------
 
