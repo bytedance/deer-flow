@@ -11,6 +11,7 @@ attach-vs-purge staged-copy serialization (§13 concurrency).
 
 from __future__ import annotations
 
+import errno
 import os
 import stat
 import threading
@@ -549,6 +550,24 @@ class TestAttach:
             # open() raised after acquiring the lease; the route's cleanup
             # scope released the partially acquired holder.
             release.assert_awaited_once()
+
+    def test_attach_keeps_os_error_text_out_of_500(self, tmp_path, caplog):
+        """A staging OSError names its host path, so it stays in the server log."""
+        app = _build_app(tmp_path)
+        with TestClient(app) as client, patch.object(uploads, "get_sandbox_provider", return_value=_mounted_provider()):
+            pid = _create_project(client)["id"]
+            doc = _upload(client, pid, "report.txt", b"data").json()["document"]
+            _seed_thread(app, "thread-1")
+            staged_path = _thread_uploads("thread-1") / ".upload-abc123.part"
+            disk_full = OSError(errno.ENOSPC, os.strerror(errno.ENOSPC), str(staged_path))
+
+            with patch.object(uploads, "_prepare_upload_destination", side_effect=disk_full):
+                response = _attach(client, pid, doc["id"], "thread-1")
+
+            assert response.status_code == 500
+            assert response.json() == {"detail": "Failed to upload report.txt."}
+            assert str(staged_path) in caplog.text
+            assert not (_thread_uploads("thread-1") / "report.txt").exists()
 
     def test_attach_sync_failure_retains_host_file(self, tmp_path):
         app = _build_app(tmp_path)

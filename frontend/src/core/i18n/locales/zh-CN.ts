@@ -76,6 +76,10 @@ export const zhCN: Translations = {
         description:
           "使用固定示例文档演示只读检索与结构化工具结果，不连接外部知识库。",
       },
+      lightrag: {
+        title: "LightRAG",
+        description: "从 LightRAG 检索文档与实体关系，并使用统一的来源引用。",
+      },
       weknora: {
         title: "WeKnora 知识检索",
         description:

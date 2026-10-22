@@ -168,6 +168,31 @@ describe("static website API requests", () => {
     expect(network).toHaveBeenCalledTimes(2);
   });
 
+  it("respects cancellation inherited from a Request before resolving a static response", async () => {
+    const controller = new AbortController();
+    const request = new Request("http://127.0.0.1:3000/api/features", {
+      signal: controller.signal,
+    });
+    controller.abort();
+
+    await expect(apiFetch(request)).rejects.toThrow();
+    expect(network).not.toHaveBeenCalled();
+  });
+
+  it("lets an init signal override an aborted Request in static mode", async () => {
+    const controller = new AbortController();
+    const override = new AbortController();
+    const request = new Request("http://127.0.0.1:3000/api/features", {
+      signal: controller.signal,
+    });
+    controller.abort();
+
+    expect((await apiFetch(request, { signal: override.signal })).status).toBe(
+      200,
+    );
+    expect(network).not.toHaveBeenCalled();
+  });
+
   it("uses the current browser origin for fixtures and respects cancellation", async () => {
     rs.stubEnv("HOSTNAME", "demo.internal");
     rs.stubEnv("PORT", "4000");
