@@ -17,6 +17,24 @@ PORT="${1:?Usage: wait-for-port.sh <port> [timeout] [service_name]}"
 TIMEOUT="${2:-60}"
 SERVICE="${3:-Service}"
 
+case "$TIMEOUT" in
+    ''|*[!0-9]*)
+        echo "Timeout must be a non-negative integer: $TIMEOUT" >&2
+        exit 1
+        ;;
+esac
+
+# Normalize leading zeroes before arithmetic so values such as 08 remain decimal.
+TIMEOUT_VALUE="${TIMEOUT#"${TIMEOUT%%[!0]*}"}"
+TIMEOUT_VALUE="${TIMEOUT_VALUE:-0}"
+timeout_length="${#TIMEOUT_VALUE}"
+if [ "$timeout_length" -gt 19 ] || {
+    [ "$timeout_length" -eq 19 ] && [[ "$TIMEOUT_VALUE" > 9223372036854775807 ]];
+}; then
+    echo "Timeout is too large: $TIMEOUT" >&2
+    exit 1
+fi
+
 case "$PORT" in
     ''|*[!0-9]*)
         echo "Port must be a numeric TCP port: $PORT" >&2
@@ -61,7 +79,7 @@ is_port_listening() {
 }
 
 while ! is_port_listening; do
-    if [ "$elapsed" -ge "$TIMEOUT" ]; then
+    if [ "$elapsed" -ge "$TIMEOUT_VALUE" ]; then
         echo ""
         echo "✗ $SERVICE failed to start on port $PORT after ${TIMEOUT}s"
         exit 1
