@@ -24,6 +24,8 @@ nested underflow into zero. Regression coverage is in `tests/test_mindie_provide
 
 ### Model Factory (`packages/harness/deerflow/models/factory.py`)
 
+`selection.py` resolves direct user model controls against the visible catalog without model calls. `aliases` is presentation metadata, stripped from provider kwargs and assembly parameters. Gateway copies `subagent_model_name`/`model_selection_requested` into runtime context only. Explicit choices use `model:use` with no deny-to-default substitution; provider errors retain deployment policy. Bind selected child names through cloned task schemas; never mutate shared tools or agent configs.
+
 Request-admission waits follow the next scheduled admission and configured
 interval, capped at 50 ms; the cap must not become a minimum poll interval that
 limits high-RPM throughput. Local `AdmissionError` is structurally non-retriable

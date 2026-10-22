@@ -215,7 +215,10 @@ def test_harvest_drops_a_partial_label_before_interpreting_counts(executor_modul
     ],
 )
 async def test_real_node_results_reach_parent_acceptance(tmp_path, monkeypatch, executor_module, reporter, body, expected):
-    (tmp_path / "sample.test.cjs").write_text("const { test, describe } = require('node:test');\n" + body, encoding="utf-8")
+    # Keep reporter counts inside the bounded evidence tail regardless of
+    # temporary-path length; truncation itself has dedicated coverage above.
+    (tmp_path / "sample.test.cjs").write_text("const { test, describe } = require('node:test');\nError.stackTraceLimit = 0;\n" + body, encoding="utf-8")
+    monkeypatch.delenv("NO_COLOR", raising=False)
     sandbox = LocalSandbox("node-evidence", path_mappings=[PathMapping("/mnt/user-data/workspace", str(tmp_path))])
     monkeypatch.setattr("deerflow.sandbox.sandbox_provider.get_sandbox_provider", lambda: SimpleNamespace(get=lambda sandbox_id: sandbox if sandbox_id == sandbox.id else None))
     outputs = []
