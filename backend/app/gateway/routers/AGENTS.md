@@ -16,6 +16,11 @@ create-only: collisions return 409, never overwrite or upsert. Ordinary creation
 and import share `_persist_new_agent`, which uses `run_drained_write` so a
 cancelled request still drains the owned persistence worker.
 
+`GET /api/skills`, `/api/skills/custom` and `/api/skills/{name}` serve every
+signed-in user, so their unexpected-failure 500s return a fixed detail. Load
+errors (e.g. a malformed `extensions_config.json`) carry host paths and stay in
+the server log.
+
 Skill mutation operation lists return `next_cursor: null` when `has_more` is false, including empty pages after a supplied `after_id`. The next cursor is the final returned operation only when a further page exists.
 
 `GET /api/agent-tool-groups` projects only configured group names for the
@@ -29,6 +34,10 @@ Keep store resolution and filesystem checks off-loop in the HTTP route.
 Agent PUT uses `preserve_non_managed_fields(..., new_tool_groups=...)` to clear
 an inherited knowledge default when changed groups remove knowledge access.
 Explicit scope/null updates still win; unchanged groups are not a migration.
+
+Custom-agent and user-profile 500s and the scheduled-task `invalid_assistant`
+422 use fixed text: agent config parse errors and `OSError`s carry host paths
+and stay in the server log.
 
 Committed MCP reconciliation failures are logged once by
 `fail_mcp_reconciliation`, with only the underlying exception type.

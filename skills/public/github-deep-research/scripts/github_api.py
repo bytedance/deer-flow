@@ -50,6 +50,17 @@ except ImportError:
     requests = RequestsFallback()
 
 
+class GitHubAPIError(RuntimeError):
+    """A fetch this client could not complete.
+
+    The two content readers used to answer with strings such as
+    ``"[README not found: HTTP 404]"``, which put a failure on the same channel and with the
+    same exit code as a successful body: a rate-limited run and a missing README looked alike
+    to whoever read stdout. Raising keeps the HTTP status visible on stderr and out of the
+    content path.
+    """
+
+
 class GitHubAPI:
     """GitHub API client for repository analysis."""
 
@@ -98,7 +109,7 @@ class GitHubAPI:
                 f"/repos/{owner}/{repo}/readme", accept="application/vnd.github.raw"
             )
         except Exception as e:
-            return f"[README not found: {e}]"
+            raise GitHubAPIError(f"README fetch failed for {owner}/{repo}: {e}") from e
 
     def get_tree(
         self, owner: str, repo: str, branch: str = "HEAD", recursive: bool = True
@@ -121,7 +132,9 @@ class GitHubAPI:
                 accept="application/vnd.github.raw",
             )
         except Exception as e:
-            return f"[File not found: {e}]"
+            raise GitHubAPIError(
+                f"File fetch failed for {owner}/{repo}:{path}: {e}"
+            ) from e
 
     def get_languages(self, owner: str, repo: str) -> Dict[str, int]:
         """Get repository languages and their bytes."""

@@ -3,6 +3,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 import pytest_asyncio
+from fastapi import HTTPException
 
 from app.scheduler.service import ScheduledTaskService
 from deerflow.runtime import ConflictError, RunStatus
@@ -349,6 +350,85 @@ async def test_manual_overlap_conflict_is_kept_in_queue():
     assert result["outcome"] == "queued"
     assert run_repo.updated[-1][1]["status"] == "queued"
     assert task_repo.release_calls == []
+
+
+@pytest.mark.asyncio
+async def test_plain_409_from_launch_is_a_permanent_failure():
+    async def fake_launch(**_kwargs):
+        raise HTTPException(status_code=409, detail="Idempotency-Key already used with a different request")
+
+    task_repo = DummyTaskRepo(
+        [
+            {
+                "id": "task-permanent-409",
+                "user_id": "user-1",
+                "thread_id": "thread-1",
+                "context_mode": "reuse_thread",
+                "assistant_id": "lead_agent",
+                "prompt": "Summarize thread",
+                "schedule_type": "cron",
+                "schedule_spec": {"cron": "0 9 * * *"},
+                "timezone": "UTC",
+                "status": "enabled",
+                "overlap_policy": "enqueue",
+            }
+        ]
+    )
+    run_repo = DummyRunRepo()
+    service = ScheduledTaskService(
+        task_repo=task_repo,
+        task_run_repo=run_repo,
+        launch_run=fake_launch,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_runs=3,
+    )
+
+    result = await service.dispatch_task(task_repo.rows[0], now=datetime.now(UTC), trigger="scheduled")
+
+    assert result["outcome"] == "failed"
+    assert run_repo.updated[-1][1]["status"] == "failed"
+    assert "Idempotency-Key already used" in run_repo.updated[-1][1]["error"]
+
+
+@pytest.mark.asyncio
+async def test_busy_thread_http_conflict_is_kept_in_queue():
+    from app.gateway.services import BusyThreadConflict
+
+    async def fake_launch(**_kwargs):
+        raise BusyThreadConflict("Thread thread-1 already has an active run")
+
+    task_repo = DummyTaskRepo(
+        [
+            {
+                "id": "task-busy-thread",
+                "user_id": "user-1",
+                "thread_id": "thread-1",
+                "context_mode": "reuse_thread",
+                "assistant_id": "lead_agent",
+                "prompt": "Summarize thread",
+                "schedule_type": "cron",
+                "schedule_spec": {"cron": "0 9 * * *"},
+                "timezone": "UTC",
+                "status": "enabled",
+                "overlap_policy": "enqueue",
+            }
+        ]
+    )
+    run_repo = DummyRunRepo()
+    service = ScheduledTaskService(
+        task_repo=task_repo,
+        task_run_repo=run_repo,
+        launch_run=fake_launch,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_runs=3,
+    )
+
+    result = await service.dispatch_task(task_repo.rows[0], now=datetime.now(UTC), trigger="scheduled")
+
+    assert result["outcome"] == "queued"
+    assert run_repo.updated[-1][1]["status"] == "queued"
 
 
 @pytest.mark.asyncio

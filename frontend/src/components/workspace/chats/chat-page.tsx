@@ -24,6 +24,7 @@ import {
   MESSAGE_LIST_DEFAULT_PADDING_BOTTOM,
 } from "@/components/workspace/messages";
 import { ThreadContext } from "@/components/workspace/messages/context";
+import { HumanInputCard } from "@/components/workspace/messages/human-input-card";
 import {
   SidecarProvider,
   SidecarTrigger,
@@ -58,13 +59,15 @@ import {
   type HumanInputResponse,
 } from "@/core/messages/human-input";
 import { isHiddenFromUIMessage } from "@/core/messages/utils";
+import { modelTaskInput } from "@/core/models/control";
 import { useModels } from "@/core/models/hooks";
+import { useModelControl } from "@/core/models/use-model-control";
 import { useNotification } from "@/core/notification/hooks";
 import { useProject } from "@/core/projects";
 import { useThreadScheduledTaskEvents } from "@/core/scheduled-tasks/events";
 import { useScheduleToolResultRefresh } from "@/core/scheduled-tasks/hooks";
 import { useLocalSettings, useThreadSettings } from "@/core/settings";
-import { resolveThreadContext } from "@/core/settings/store";
+import { resolveThreadContext, selectThreadModel } from "@/core/settings/store";
 import { createThread } from "@/core/threads/api";
 import {
   useBranchThread,
@@ -87,7 +90,7 @@ import { useMarkOpenThreadRead } from "./use-mark-open-thread-read";
 import { useThreadChat } from "./use-thread-chat";
 
 export default function ChatPage() {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const { user } = useAuth();
   const canStopStreaming = hasPermission(user, PERMISSIONS.RUNS_CANCEL);
   const canCreateRuns = hasPermission(user, PERMISSIONS.RUNS_CREATE);
@@ -112,6 +115,13 @@ export default function ChatPage() {
   const [isWelcomeMode, setIsWelcomeMode] = useState(isNewThread);
   const queryClient = useQueryClient();
   const [settings, setSettings] = useThreadSettings(threadId);
+  const modelControl = useModelControl(
+    `${user?.id ?? "anonymous"}:${threadId}`,
+    locale,
+  );
+  const prepareModelControl = modelControl.prepare;
+  const [modelChoiceSummary, setModelChoiceSummary] = useState("");
+  useEffect(() => setModelChoiceSummary(""), [threadId, user?.id]);
   const [localSettings, setLocalSettings] = useLocalSettings();
   const { enabled: browserControlEnabled } = useBrowserControlEnabled();
   const { tokenUsageEnabled } = useModels();
@@ -321,6 +331,28 @@ export default function ChatPage() {
   const handleSubmit = useCallback(
     async (message: PromptInputMessage, options?: InputBoxSubmitOptions) => {
       const submissionEpoch = submissionEpochRef.current;
+      setModelChoiceSummary("");
+      const choice = await prepareModelControl(message.text);
+      const modelInput = modelTaskInput(message.text, choice);
+      if (submissionEpochRef.current !== submissionEpoch)
+        throw new Error("thread-submission-stale");
+      const runModelContext: Record<string, unknown> = {};
+      if (choice?.model_name) {
+        if (choice.scope === "task") {
+          if (settings.context.mode !== "ultra") {
+            toast.error(
+              locale.startsWith("zh")
+                ? "当前未启用子任务，请先启用 Ultra 模式。"
+                : "Subtasks are disabled. Enable Ultra mode first.",
+            );
+            throw new Error("subtasks-disabled");
+          }
+          runModelContext.subagent_model_name = choice.model_name;
+        } else {
+          runModelContext.model_name = choice.model_name;
+          runModelContext.model_selection_requested = choice.model_name;
+        }
+      }
       await ensureProjectThread();
       // Conversation switched (or the page unmounted) while the project
       // pre-create was pending: drop the submission. Reject silently — the
@@ -329,6 +361,45 @@ export default function ChatPage() {
       if (submissionEpochRef.current !== submissionEpoch) {
         throw new Error("thread-submission-stale");
       }
+      if (
+        choice?.scope === "conversation" &&
+        !modelInput.text &&
+        message.files.length === 0 &&
+        isNewThread &&
+        !projectParam
+      ) {
+        await createThread(threadId);
+        if (submissionEpochRef.current !== submissionEpoch)
+          throw new Error("thread-submission-stale");
+      }
+      if (choice?.model_name) {
+        if (choice.scope === "conversation")
+          try {
+            selectThreadModel(threadId, choice.model_name);
+          } catch (error) {
+            toast.error(
+              locale.startsWith("zh")
+                ? "无法在浏览器保存本对话的默认模型，请检查存储权限。"
+                : "Unable to save this conversation's default model. Check browser storage permissions.",
+            );
+            throw error;
+          }
+        const label =
+          choice.candidates.find((item) => item.name === choice.model_name)
+            ?.label ?? choice.model_name;
+        const scopeLabel = locale.startsWith("zh")
+          ? ({
+              task: "本次子任务",
+              turn: "仅本次主任务",
+              conversation: "本对话默认模型",
+            } as const)
+          : ({
+              task: "This subtask",
+              turn: "This turn only",
+              conversation: "Conversation default",
+            } as const);
+        setModelChoiceSummary(`${scopeLabel[choice.scope!]} · ${label}`);
+      } else setModelChoiceSummary("");
       const scopedOptions = currentKnowledgeScopeSnapshot
         ? {
             ...options,
@@ -338,18 +409,67 @@ export default function ChatPage() {
             },
           }
         : options;
+      if (
+        choice?.scope === "turn" &&
+        !modelInput.text &&
+        message.files.length === 0
+      ) {
+        toast.info(
+          locale.startsWith("zh")
+            ? "请补充这次需要处理的任务。"
+            : "Please include the task to run with this model.",
+        );
+        throw new Error("model-task-missing");
+      }
+      if (
+        choice?.scope === "conversation" &&
+        !modelInput.text &&
+        message.files.length === 0
+      ) {
+        if (isNewThread) {
+          history.replaceState(null, "", `/workspace/chats/${threadId}`);
+          setThreadId(threadId);
+          setIsNewThread(false);
+        }
+        options?.onSent?.();
+        toast.success(
+          locale.startsWith("zh")
+            ? "已设置本对话的默认模型。"
+            : "Conversation default model saved.",
+        );
+        return;
+      }
+      const executionOptions = {
+        ...scopedOptions,
+        additionalKwargs: {
+          ...scopedOptions?.additionalKwargs,
+          ...modelInput.additionalKwargs,
+        },
+      };
       const sendPromise = sendMessage(
         threadId,
-        message,
-        undefined,
-        scopedOptions,
+        { ...message, text: modelInput.text },
+        runModelContext,
+        executionOptions,
       );
       if (message.files.length > 0) {
         return sendPromise;
       }
       void sendPromise;
     },
-    [currentKnowledgeScopeSnapshot, sendMessage, threadId, ensureProjectThread],
+    [
+      currentKnowledgeScopeSnapshot,
+      sendMessage,
+      threadId,
+      ensureProjectThread,
+      prepareModelControl,
+      settings.context.mode,
+      locale,
+      isNewThread,
+      projectParam,
+      setThreadId,
+      setIsNewThread,
+    ],
   );
   const handleSubmitHumanInput = useCallback(
     async (request: HumanInputRequest, response: HumanInputResponse) => {
@@ -624,6 +744,22 @@ export default function ChatPage() {
                       </div>
                     </div>
                   )}
+                  {modelControl.request && (
+                    <div className="mb-3" data-testid="model-selection-card">
+                      <HumanInputCard
+                        request={modelControl.request}
+                        onSubmit={(response) => modelControl.choose(response)}
+                      />
+                    </div>
+                  )}
+                  {modelChoiceSummary && (
+                    <p
+                      className="text-muted-foreground mb-2 text-sm"
+                      data-testid="model-selection-applied"
+                    >
+                      {modelChoiceSummary}
+                    </p>
+                  )}
                   {mountedRef.current ? (
                     <InputBox
                       className={cn(
@@ -662,6 +798,7 @@ export default function ChatPage() {
                         isMock ||
                         env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" ||
                         isUploading ||
+                        modelControl.busy ||
                         (!isNewThread && isHistoryLoading)
                       }
                       onContextChange={(context, options) => {
