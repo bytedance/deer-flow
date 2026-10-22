@@ -15,6 +15,7 @@ import {
   ResizablePanel,
   ResizablePanelGroup,
 } from "@/components/ui/resizable";
+import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   Sheet,
   SheetContent,
@@ -391,13 +392,13 @@ const ChatBoxContent: React.FC<ChatBoxProps> = ({
               <header className="shrink-0">
                 <h2 className="text-lg font-medium">Artifacts</h2>
               </header>
-              <main className="min-h-0 grow">
+              <ScrollArea className="min-h-0 grow">
                 <ArtifactFileList
                   className="max-w-(--container-width-sm) p-4 pt-12"
                   files={artifacts}
                   threadId={threadId}
                 />
-              </main>
+              </ScrollArea>
             </div>
           )}
         </div>
