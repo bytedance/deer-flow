@@ -140,7 +140,7 @@ imagePullSecrets:
      source added here cannot make them disagree.
 
      `default` rather than `or`: `or` returns its last operand even when falsy,
-     so a `existingSecret: false` (or `0`) would render the literal name
+     so `existingSecret: false` (or `0`) would render the literal name
      "false". Chaining `default` keeps the old if/else-if truthiness and yields
      an empty string for any falsy value. */}}
 {{- define "deer-flow.databaseUserSecret" -}}
