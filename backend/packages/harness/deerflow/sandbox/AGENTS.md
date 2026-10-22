@@ -2,6 +2,8 @@
 
 Sandbox restore requires a thread ID, even forks.
 
+PowerShell command mapping escapes host-path whitespace/metacharacters for the caller's quote context in both user-data and provider mappings. Preserve wildcards; Bash/cmd mapping stays unchanged. Keep portable string assertions alongside native Windows smoke tests. The public bash tool's existing POSIX-quoted cwd prefix requires PowerShell 7 (`&&`) and workspace paths without apostrophes; mapping does not repair that prefix.
+
 Local `grep` skips non-regular entries before reading. File reads and directory scans propagate errors, except `ENOENT`/`ENOTDIR`/`ELOOP`/`EISDIR`/`ESTALE` races (`ESTALE` when available). Error filenames are reverse-resolved at the local sandbox boundary, including custom mounts; permission errors identify the virtual failing path.
 
 **Network approval policy**: `SandboxMiddleware` uses
