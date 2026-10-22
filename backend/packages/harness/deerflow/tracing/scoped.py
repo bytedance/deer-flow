@@ -291,6 +291,12 @@ def tracing_scope(snapshot: RunTracingSnapshot | None, *, parent_contexts: dict 
 @asynccontextmanager
 async def async_tracing_scope(snapshot: RunTracingSnapshot | None, *, parent_contexts: dict | None = None):
     """Offload fingerprint/exporter I/O while binding ContextVars on the caller task."""
+    if snapshot is None:
+        # Unmanaged scopes own no I/O and must not queue behind unrelated work.
+        with tracing_scope(None, parent_contexts=parent_contexts) as session:
+            yield session
+        return
+
     session = None
 
     def construct():
