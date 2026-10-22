@@ -223,3 +223,12 @@ failed before tests because ubuntu-latest rolled to Ubuntu 26.04, which the
 locked Playwright 1.59.1 cannot install Chromium dependencies on. Those two
 jobs now explicitly use Ubuntu 24.04, with a workflow regression checking both
 runner selection and preservation of the Chromium dependency-install step.
+
+## Runner regression correction — 2026-10-22
+
+Maintainers restored both browser jobs to `ubuntu-latest`; all four E2E shards
+and full-stack replay passed remotely at `7e7710d03`. The earlier backend
+regression still pinned Ubuntu 24.04 and was the sole failure in backend shards
+1 and 3. It now checks Chromium dependency installation precedes browser test
+execution, without imposing a runner version. The maintainer-selected runner
+and E2E sharding remain unchanged.
