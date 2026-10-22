@@ -660,6 +660,12 @@ class ScheduledTaskRepository:
         status, leaving the occurrence in ``running`` until a restart. This
         non-destructive pass only consumes already-terminal ``runs`` rows; it
         never takes over, interrupts, or otherwise touches a live run.
+
+        Each candidate commits in its own transaction. A poisoned occurrence
+        (for example, the same observer/database failure that made the sweep
+        necessary) rolls back only its own savepoint, is logged, and cannot
+        prevent later candidates from finalizing or the rest of the poller from
+        running.
         """
         async with self._sf() as session:
             candidates = list(
@@ -678,38 +684,46 @@ class ScheduledTaskRepository:
                     )
                 ).all()
             )
-            finalized = 0
-            for occurrence_id, task_id in candidates:
-                task = await self._lock_task(session, task_id)
-                occurrence = await session.get(ScheduledTaskRunRow, occurrence_id, with_for_update=True)
-                if occurrence is None or occurrence.task_id != task_id or occurrence.status != "running" or occurrence.run_id is None:
-                    continue
-                run = await session.get(RunRow, occurrence.run_id)
-                if run is None or run.status not in _TERMINAL_DURABLE_RUN_STATUSES or run.operation_kind != "run":
-                    continue
-                metadata = run.metadata_json if isinstance(run.metadata_json, dict) else {}
-                if metadata.get("scheduled_task_id") != task_id or metadata.get("scheduled_task_run_id") != occurrence_id:
-                    continue
-                if run.status == "success":
-                    status, error = "success", None
-                elif run.status == "interrupted":
-                    status, error = "interrupted", run.error or RUN_ERROR_INTERRUPTED
-                else:
-                    status, error = "failed", run.error
-                if await finalize_occurrence(
-                    session,
-                    task,
-                    occurrence,
-                    status=status,
-                    error=error,
-                    finished_at=now,
-                    run_id=run.run_id,
-                    goal_verdict=run.goal_verdict,
-                    observer=self._finalization_observer,
-                ):
-                    finalized += 1
-            await session.commit()
-            return finalized
+        finalized = 0
+        for occurrence_id, task_id in candidates:
+            try:
+                async with self._sf() as session:
+                    task = await self._lock_task(session, task_id)
+                    occurrence = await session.get(ScheduledTaskRunRow, occurrence_id, with_for_update=True)
+                    if occurrence is None or occurrence.task_id != task_id or occurrence.status != "running" or occurrence.run_id is None:
+                        continue
+                    run = await session.get(RunRow, occurrence.run_id)
+                    if run is None or run.status not in _TERMINAL_DURABLE_RUN_STATUSES or run.operation_kind != "run":
+                        continue
+                    metadata = run.metadata_json if isinstance(run.metadata_json, dict) else {}
+                    if metadata.get("scheduled_task_id") != task_id or metadata.get("scheduled_task_run_id") != occurrence_id:
+                        continue
+                    if run.status == "success":
+                        status, error = "success", None
+                    elif run.status == "interrupted":
+                        status, error = "interrupted", run.error or RUN_ERROR_INTERRUPTED
+                    else:
+                        status, error = "failed", run.error
+                    accepted = await finalize_occurrence(
+                        session,
+                        task,
+                        occurrence,
+                        status=status,
+                        error=error,
+                        finished_at=now,
+                        run_id=run.run_id,
+                        goal_verdict=run.goal_verdict,
+                        observer=self._finalization_observer,
+                    )
+                    await session.commit()
+                    if accepted:
+                        finalized += 1
+            except Exception:
+                logger.exception(
+                    "Failed to reconcile scheduled occurrence %s from its terminal run; leaving it for the next poll",
+                    occurrence_id,
+                )
+        return finalized
 
     async def claim_dispatch_lease(
         self,
