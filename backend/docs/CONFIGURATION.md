@@ -1589,7 +1589,7 @@ sandbox:
       read_only: false
 ```
 
-When you configure `sandbox.mounts`, DeerFlow exposes those `container_path` values in the agent prompt so the agent can discover and operate on mounted directories directly instead of assuming everything must live under `/mnt/user-data`.
+When you configure `sandbox.mounts`, DeerFlow exposes those `container_path` values in the agent prompt so the agent can discover and operate on mounted directories directly instead of assuming everything must live under `/mnt/user-data`. See [Skills and sandbox paths](#skills-and-sandbox-paths) for Windows, WSL, and Docker path examples.
 
 #### Sandbox network policy
 
@@ -1792,12 +1792,78 @@ Configure the skills directory for specialized workflows:
 
 ```yaml
 skills:
-  # Host path (optional, default: ../skills)
+  # Gateway-visible source root (optional; see resolution order below)
   path: /custom/path/to/skills
 
-  # Container mount path (default: /mnt/skills)
+  # Agent-facing POSIX path (default: /mnt/skills, including on Windows)
   container_path: /mnt/skills
 ```
+
+#### Skills and sandbox paths
+
+Choose paths from the filesystem of the process that reads them:
+
+| Setting | Meaning |
+| --- | --- |
+| `skills.path` | Source directory read by the Gateway, containing `public/` and any legacy `custom/` skills. It is not the path the agent uses. |
+| `skills.container_path` | Agent-facing skills root, normally `/mnt/skills`. DeerFlow prepares the enabled skill views beneath this root; do not add a second `sandbox.mounts` entry for skills. |
+| `sandbox.mounts[].host_path` | Existing absolute source directory. With `LocalSandboxProvider`, it must be visible to the Gateway process. With local AIO Docker, it must be available to the Docker daemon creating the sandbox. |
+| `sandbox.mounts[].container_path` | Absolute POSIX path used by agent tools, such as `/mnt/shared`, on every host OS. Local mode maps it to the source; AIO Docker bind-mounts the source there. |
+
+Skills source resolution is: explicit `skills.path`, then `DEER_FLOW_SKILLS_PATH`,
+then `<project-root>/skills`. The project root is `DEER_FLOW_PROJECT_ROOT` when
+set, otherwise the Gateway process's working directory. Relative skill source
+paths use that root, **not the directory containing `config.yaml`**. If the default
+directory is absent, a source checkout also tries its repository `skills/`
+directory. Use an absolute path to remove ambiguity; `~` is not expanded in
+these path fields. Changing `skills.path` does not relocate per-user custom
+skills, which live under `DEER_FLOW_HOME/users/<user-id>/skills/custom/`.
+
+For a Gateway running directly on the machine with `LocalSandboxProvider`,
+adapt the two source paths in this example to your platform:
+
+```yaml
+skills:
+  path: /home/alice/deer-flow/skills
+  container_path: /mnt/skills
+sandbox:
+  use: deerflow.sandbox.local:LocalSandboxProvider
+  mounts:
+    - host_path: /home/alice/data
+      container_path: /mnt/shared
+      read_only: true
+```
+
+| Gateway environment | Example `skills.path` | Example `sandbox.mounts[].host_path` |
+| --- | --- | --- |
+| Linux | `/home/alice/deer-flow/skills` | `/home/alice/data` |
+| macOS | `/Users/alice/deer-flow/skills` | `/Users/alice/data` |
+| Native Windows Python (including when launched from Git Bash) | `'D:/deer-flow/skills'` | `'D:/data'` |
+| Linux Python inside WSL, using files on Windows drive D | `/mnt/d/deer-flow/skills` | `/mnt/d/data` |
+
+Keep both `container_path` values unchanged. For example, an agent reads
+`/mnt/shared/report.csv`; native Windows resolves that to `D:/data/report.csv`,
+while WSL resolves it to `/mnt/d/data/report.csv`. WSL-native files can instead
+use `/home/alice/...`. Native Windows paths should use forward slashes as above,
+or YAML single quotes around backslashes (`'D:\data'`), so YAML does not interpret
+backslash escapes. These are path examples; the [local development prerequisites](../../README.md#option-2-local-development)
+still apply, including the documented WSL limitations of the startup scripts.
+
+**Gateway in Docker:** both bundled Compose files mount the repository's
+`skills/` at `/app/skills` and set `DEER_FLOW_PROJECT_ROOT=/app`. Leave
+`skills.path` unset, or use `/app/skills`. To use another host skills directory,
+replace that Gateway volume's source and keep its container destination consistent
+with `skills.path`; a host path such as `D:/deer-flow/skills` is not a path inside
+the Linux Gateway container.
+
+For local-sandbox custom directories, use the two-step [Gateway bind mount
+example](#sandbox) above: Docker host directory → Gateway-visible `host_path` →
+agent-facing `container_path`. In AIO Docker-outside-of-Docker mode, custom mounts
+go directly from the Docker host to the sandbox: on a Linux Docker host,
+`host_path: /srv/data` and `container_path: /mnt/shared` expose `/srv/data` there,
+even if the Gateway sees the same directory at `/app/data`. Do not substitute
+`/app/data` unless it is also the intended source on the Docker host. These local
+mount examples do not configure Kubernetes PVCs or remote sandbox storage.
 
 For the AIO provider (including the Kubernetes provisioner) and E2B,
 `skills.container_path` is captured when the provider starts and must be one
@@ -1809,7 +1875,7 @@ same root. E2B also records the root in remote metadata and refuses to adopt a
 VM created for another root.
 
 **How Skills Work**:
-- Skills are stored in `deer-flow/skills/{public,custom}/`
+- Public and legacy skills use the configured source root; user-installed custom skills use the per-user runtime directory above
 - Each skill has a `SKILL.md` file with metadata
 - Skills are automatically discovered and loaded
 - Available in both local and Docker sandbox via path mapping
