@@ -35,6 +35,20 @@ const BLOCKQUOTE_PREFIX_RE = /^ {0,3}(?:[ \t]*>)+/;
 const MAX_LIST_INDENT = 200;
 const DEEP_INDENT_HINT_RE = new RegExp(`^[ \\t]{${MAX_LIST_INDENT + 1},}`, "m");
 
+function getOpeningFence(line: string): string | null {
+  const match = FENCE_MARKER_RE.exec(line);
+  if (!match) {
+    return null;
+  }
+  const marker = match[1]!;
+  // Backtick info strings cannot contain backticks; complete inline code
+  // spans at the start of a line must still be processed as prose.
+  if (marker.startsWith("`") && line.slice(match[0].length).includes("`")) {
+    return null;
+  }
+  return marker;
+}
+
 export function capBlockquoteNesting(markdown: string): string {
   if (!DEEP_BLOCKQUOTE_HINT_RE.test(markdown)) {
     return markdown;
@@ -44,18 +58,20 @@ export function capBlockquoteNesting(markdown: string): string {
   return markdown
     .split("\n")
     .map((line) => {
-      const fenceMatch = FENCE_MARKER_RE.exec(line);
-      if (fenceMatch) {
-        if (fenceMarker === null) {
-          fenceMarker = fenceMatch[1]!;
-        } else if (isClosingFence(line, fenceMarker)) {
+      if (fenceMarker !== null) {
+        if (isClosingFence(line, fenceMarker)) {
           fenceMarker = null;
         }
         return line;
       }
+      const openingFence = getOpeningFence(line);
+      if (openingFence !== null) {
+        fenceMarker = openingFence;
+        return line;
+      }
       // ">" runs inside fenced or indented code blocks are literal text, not
       // nesting — rewriting them would silently corrupt code content.
-      if (fenceMarker !== null || INDENTED_CODE_RE.test(line)) {
+      if (INDENTED_CODE_RE.test(line)) {
         return line;
       }
       const match = BLOCKQUOTE_PREFIX_RE.exec(line);
@@ -86,18 +102,17 @@ export function capListNesting(markdown: string): string {
   return markdown
     .split("\n")
     .map((line) => {
-      const fenceMatch = FENCE_MARKER_RE.exec(line);
-      if (fenceMatch) {
-        if (fenceMarker === null) {
-          fenceMarker = fenceMatch[1]!;
-        } else if (isClosingFence(line, fenceMarker)) {
+      if (fenceMarker !== null) {
+        if (isClosingFence(line, fenceMarker)) {
           fenceMarker = null;
         }
         return line;
       }
+      const openingFence = getOpeningFence(line);
       // Indentation inside fenced code is literal layout (ASCII art, pasted
       // source); collapsing it would corrupt the rendered block.
-      if (fenceMarker !== null) {
+      if (openingFence !== null) {
+        fenceMarker = openingFence;
         return line;
       }
       const whitespace = /^[ \t]*/.exec(line)![0];
@@ -226,19 +241,18 @@ export function normalizeLatexMathDelimiters(markdown: string): string {
   return markdown
     .split("\n")
     .map((line) => {
-      const fenceMatch = FENCE_MARKER_RE.exec(line);
-      if (fenceMatch && !mathState.openBlock) {
-        if (fenceMarker === null) {
-          fenceMarker = fenceMatch[1]!;
-        } else if (isClosingFence(line, fenceMarker)) {
+      if (fenceMarker !== null) {
+        if (isClosingFence(line, fenceMarker)) {
           fenceMarker = null;
         }
         return line;
       }
-      if (
-        fenceMarker !== null ||
-        (INDENTED_CODE_RE.test(line) && !mathState.openBlock)
-      ) {
+      const openingFence = getOpeningFence(line);
+      if (openingFence !== null && !mathState.openBlock) {
+        fenceMarker = openingFence;
+        return line;
+      }
+      if (INDENTED_CODE_RE.test(line) && !mathState.openBlock) {
         return line;
       }
       const converted = convertLatexDelimitersInLine(line, mathState);
@@ -296,21 +310,21 @@ export function compactDisplayMathBlocks(markdown: string): string {
   let mathLines: string[] | null = null;
 
   for (const line of markdown.split("\n")) {
-    const fenceMatch = FENCE_MARKER_RE.exec(line);
-    if (fenceMatch && mathLines === null) {
-      if (fenceMarker === null) {
-        fenceMarker = fenceMatch[1]!;
-      } else if (isClosingFence(line, fenceMarker)) {
+    if (fenceMarker !== null) {
+      if (isClosingFence(line, fenceMarker)) {
         fenceMarker = null;
       }
       output.push(line);
       continue;
     }
+    const openingFence = getOpeningFence(line);
+    if (openingFence !== null && mathLines === null) {
+      fenceMarker = openingFence;
+      output.push(line);
+      continue;
+    }
 
-    if (
-      fenceMarker !== null ||
-      (INDENTED_CODE_RE.test(line) && mathLines === null)
-    ) {
+    if (INDENTED_CODE_RE.test(line) && mathLines === null) {
       output.push(line);
       continue;
     }
@@ -381,13 +395,8 @@ export function stripLeakedSystemTags(markdown: string): string {
 
   return lines
     .map((line) => {
-      const fenceMatch = FENCE_MARKER_RE.exec(line);
-      if (fenceMatch) {
-        const marker = fenceMatch[1]!;
-        if (fenceMarker === null) {
-          // Opening a fenced code block
-          fenceMarker = marker;
-        } else if (isClosingFence(line, fenceMarker)) {
+      if (fenceMarker !== null) {
+        if (isClosingFence(line, fenceMarker)) {
           // Closing fence: same character, at least as long, no info string
           fenceMarker = null;
         }
@@ -395,7 +404,12 @@ export function stripLeakedSystemTags(markdown: string): string {
         // (e.g. ``` inside ~~~~, or `` inside `````) — stay inside.
         return line;
       }
-      if (fenceMarker !== null || INDENTED_CODE_RE.test(line)) {
+      const openingFence = getOpeningFence(line);
+      if (openingFence !== null) {
+        fenceMarker = openingFence;
+        return line;
+      }
+      if (INDENTED_CODE_RE.test(line)) {
         return line;
       }
       return line.replace(_INTERNAL_TAG_RE, "");

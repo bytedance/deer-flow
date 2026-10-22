@@ -10,6 +10,67 @@ import {
   stripLeakedSystemTags,
 } from "@/core/streamdown/preprocess";
 
+for (const marker of ["```", "````"]) {
+  for (const indent of ["", "   "]) {
+    const prefix = `${indent}${marker}one${marker}\n\n${indent}${marker}two${marker}\n\n`;
+
+    test(`math resumes after ${JSON.stringify(prefix)} inline spans`, () => {
+      expect(normalizeStreamdownMathMarkdown(prefix + "\\(x\\)")).toBe(
+        prefix + "$x$",
+      );
+      expect(
+        normalizeStreamdownMathMarkdown(
+          `${indent}${marker}one${marker} \\(x\\)`,
+        ),
+      ).toBe(`${indent}${marker}one${marker} $x$`);
+    });
+
+    test(`display math compacts after ${JSON.stringify(prefix)} inline spans`, () => {
+      expect(compactDisplayMathBlocks(prefix + "$$\nx\n+ y\n$$")).toBe(
+        prefix + "$$\nx + y\n$$",
+      );
+    });
+
+    test(`nesting caps resume after ${JSON.stringify(prefix)} inline spans`, () => {
+      const quote = ">".repeat(101) + " quote";
+      const list = " ".repeat(202) + "- item";
+      expect(capBlockquoteNesting(prefix + quote)).toBe(
+        prefix + ">".repeat(100) + " quote",
+      );
+      expect(capListNesting(prefix + list)).toBe(
+        prefix + " ".repeat(200) + "- item",
+      );
+      expect(capMarkdownNesting(prefix + quote + "\n" + list)).toBe(
+        prefix + ">".repeat(100) + " quote\n" + " ".repeat(200) + "- item",
+      );
+    });
+
+    test(`system tags are stripped after ${JSON.stringify(prefix)} inline spans`, () => {
+      expect(stripLeakedSystemTags(prefix + "<memory>visible</memory>")).toBe(
+        prefix + "visible",
+      );
+    });
+  }
+}
+
+test("tilde fence info strings may contain backticks", () => {
+  const input = [
+    "~~~text `example`",
+    "\\(literal\\)",
+    "$$",
+    "x",
+    "+ y",
+    "$$",
+    ">".repeat(101) + " quote",
+    " ".repeat(202) + "- item",
+    "<memory>literal</memory>",
+    "~~~",
+  ].join("\n");
+  expect(normalizeStreamdownMathMarkdown(input)).toBe(input);
+  expect(capMarkdownNesting(input)).toBe(input);
+  expect(stripLeakedSystemTags(input)).toBe(input);
+});
+
 test("capBlockquoteNesting returns normal content unchanged", () => {
   const input = "# Title\n\n> a quote\n>> nested\n\nsome `code`";
   expect(capBlockquoteNesting(input)).toBe(input);
