@@ -95,6 +95,10 @@ Supported output formats (auto-detected from extension):
 - `.json` — JSON array of records
 - `.md` — Markdown table
 
+JSON result column names must be unique. Use explicit SQL aliases for repeated
+names, for example `SELECT a.id AS left_id, b.id AS right_id FROM ...`.
+Duplicate names cause an error and leave any existing output file untouched.
+
 ### Parameters
 
 | Parameter | Required | Description |
