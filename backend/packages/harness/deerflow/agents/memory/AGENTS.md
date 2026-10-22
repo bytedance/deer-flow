@@ -327,9 +327,10 @@ HTTP client before returning recall data. Invalid structures raise Mem0APIError,
 so existing read policies apply to search, injection, management and export.
 Validate every page; a malformed later page must not publish a partial listing.
 Missing results and valid empty lists retain the existing empty-read behavior.
-Structure errors identify the endpoint, list page, and invalid container or record
-type without logging memory contents. Catch RecursionError only at JSON parsing;
-local programming errors must still propagate.
+Decoding and structure errors identify the endpoint and list page without memory
+contents; structure errors also identify the invalid container or record type.
+Preserve decoding causes. Catch RecursionError only at JSON parsing; local
+programming errors must still propagate.
 Regressions use offline HTTP transports in `tests/test_mem0_response_policy.py`.
 
 Strict reads use the backend-neutral `MemoryReadError`.

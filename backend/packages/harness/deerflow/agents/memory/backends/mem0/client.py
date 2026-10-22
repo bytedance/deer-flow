@@ -52,7 +52,8 @@ class Mem0Client:
     def close(self) -> None:
         self._http.close()
 
-    def _request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
+    def _request(self, method: str, path: str, *, response_context: str | None = None, **kwargs: Any) -> dict[str, Any]:
+        context = response_context or f"{method} {path}"
         try:
             resp = self._http.request(method, path, **kwargs)
         except httpx.HTTPError as e:
@@ -60,15 +61,15 @@ class Mem0Client:
         if resp.status_code == 401:
             raise Mem0AuthError("mem0 authentication failed (check the API key)")
         if resp.status_code >= 400:
-            raise Mem0APIError(f"mem0 {method} {path} -> {resp.status_code}: {resp.text[:200]}")
+            raise Mem0APIError(f"mem0 {context} -> {resp.status_code}: {resp.text[:200]}")
         if not resp.content:
             return {}
         try:
             payload = resp.json()
         except (json.JSONDecodeError, UnicodeDecodeError, RecursionError) as e:
-            raise Mem0APIError(f"mem0 {method} {path} returned malformed JSON: {e}") from e
+            raise Mem0APIError(f"mem0 {context} returned malformed JSON: {e}") from e
         if not isinstance(payload, dict):
-            raise Mem0APIError(f"mem0 {method} {path} returned a non-object JSON payload")
+            raise Mem0APIError(f"mem0 {context} returned a non-object JSON payload")
         return payload
 
     def add_memories(
@@ -111,13 +112,15 @@ class Mem0Client:
         results: list[dict[str, Any]] = []
         page = 1
         while True:
+            context = f"POST /v3/memories/ page={page}"
             data = self._request(
                 "POST",
                 "/v3/memories/",
+                response_context=context,
                 params={"page": page, "page_size": page_size},
                 json={"filters": filters},
             )
-            results.extend(_memory_results(data, context=f"POST /v3/memories/ page={page}"))
+            results.extend(_memory_results(data, context=context))
             if not data.get("next") or (max_items is not None and len(results) >= max_items):
                 return results[:max_items] if max_items is not None else results
             page += 1

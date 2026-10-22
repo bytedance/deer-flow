@@ -372,3 +372,40 @@ def test_local_recursion_error_is_not_silently_swallowed(monkeypatch: pytest.Mon
         monkeypatch.setattr(manager._client, "search_memories", broken_search)
         with pytest.raises(RecursionError, match="local programming error"):
             manager.search("preference", user_id="u1")
+
+
+@pytest.mark.parametrize("policy", ["fail_open", "fail_closed"])
+@pytest.mark.parametrize("failed_page", [1, 2])
+@pytest.mark.parametrize(
+    ("body", "cause_type"),
+    [
+        pytest.param(b'{"synthetic-private-content":', json.JSONDecodeError, id="invalid-json"),
+        pytest.param(b'{"results": ["\xff"]}', UnicodeDecodeError, id="invalid-utf8"),
+        pytest.param(_deep_json_body(), RecursionError, id="deep-json"),
+        pytest.param(b'["synthetic-private-content"]', None, id="non-object"),
+    ],
+)
+def test_listing_response_errors_identify_page_without_content(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, policy: str, failed_page: int, body: bytes, cause_type: type[Exception] | None) -> None:
+    pages: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        page = int(request.url.params["page"])
+        pages.append(page)
+        if page < failed_page:
+            return httpx.Response(200, json={"results": [{"id": "m0", "memory": "synthetic-private-content"}], "next": "page-2"})
+        return httpx.Response(200, content=body)
+
+    with closing(_manager(monkeypatch, policy, handler)) as manager:
+        if policy == "fail_closed":
+            with pytest.raises(MemoryReadError) as caught:
+                manager.get_memory(user_id="u1")
+            assert isinstance(caught.value.__cause__, Mem0APIError)
+            if cause_type is not None:
+                assert isinstance(caught.value.__cause__.__cause__, cause_type)
+            message = str(caught.value)
+        else:
+            assert manager.get_memory(user_id="u1") == {"facts": []}
+            message = caplog.text
+    assert pages == list(range(1, failed_page + 1))
+    assert f"POST /v3/memories/ page={failed_page}" in message
+    assert "synthetic-private-content" not in message
