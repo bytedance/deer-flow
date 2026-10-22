@@ -33,7 +33,6 @@ import { SidebarProvider } from "@/components/ui/sidebar";
 import { ChatProviders } from "@/components/workspace/chats/chat-providers";
 import { ArtifactDraftsProvider } from "@/core/artifacts/draft-context";
 import { AuthProvider } from "@/core/auth/AuthProvider";
-import type { User } from "@/core/auth/types";
 import { I18nContext } from "@/core/i18n/context";
 import { enUS } from "@/core/i18n/locales/en-US";
 import { DEFAULT_LOCAL_SETTINGS } from "@/core/settings/local";
@@ -58,12 +57,11 @@ const streams = rs.hoisted(() => ({
   byThread: {} as Record<string, StreamCallbacks>,
 }));
 
-// ``AuthProvider`` (mounted by the route-level provider test below) reads
-// ``useRouter``/``usePathname`` from next/navigation.  Hand it a no-op router
-// so it mounts under happy-dom instead of requiring a real Next.js app router.
+// ``ChatProviders`` -> ``ArtifactsProvider`` reads the auth context, and the
+// real ``AuthProvider`` reaches for the App Router.
 rs.mock("next/navigation", () => ({
   useRouter: () => ({ push: rs.fn(), replace: rs.fn(), refresh: rs.fn() }),
-  usePathname: () => "/workspace",
+  usePathname: () => "/",
 }));
 
 rs.mock("@langchain/langgraph-sdk/react", () => ({
@@ -98,13 +96,6 @@ const MAIN_THREAD = "thread-main";
 const SIDECAR_THREAD = "thread-sidecar";
 const MAIN_TOOL_CALL = "tc-main";
 const SIDECAR_TOOL_CALL = "tc-sidecar";
-const TEST_USER: User = {
-  id: "user-test",
-  email: "test@example.com",
-  system_role: "user",
-  needs_setup: false,
-  oauth_provider: null,
-};
 
 // Loaded per test so the `rs.mock` above is in place before the hook module
 // (and its SDK import) is evaluated.
@@ -405,16 +396,18 @@ describe("the real route-level provider wrapper shares one map", () => {
               {
                 value: { locale: "en-US", setLocale: () => undefined, t: enUS },
               },
-              // ``ChatProviders`` mounts ``ArtifactsProvider``, which reads the
-              // sidebar, auth and artifact-draft contexts.  In the app those
-              // come from the workspace shell and the root layout; supply the
-              // same shells here so the real provider stack can mount.
+              // ``ArtifactsProvider`` (inside ``ChatProviders``) reads the
+              // sidebar context, which the workspace shell supplies in the app.
               createElement(
                 SidebarProvider,
                 null,
+                // ``ArtifactsProvider`` inside ``ChatProviders`` calls
+                // ``useAuth``, so the real provider has to be present here.
+                // ``src/app/layout.tsx`` mounts ``ArtifactDraftsProvider``
+                // above every page, so mirror the real stack here too.
                 createElement(
                   AuthProvider,
-                  { initialUser: TEST_USER },
+                  { initialUser: null },
                   createElement(
                     ArtifactDraftsProvider,
                     null,
