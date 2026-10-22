@@ -3,6 +3,7 @@
 import { BotIcon, PlusSquare } from "lucide-react";
 import { useParams, useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { toast } from "sonner";
 
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
 import { Button } from "@/components/ui/button";
@@ -28,6 +29,7 @@ import {
   MESSAGE_LIST_DEFAULT_PADDING_BOTTOM,
 } from "@/components/workspace/messages";
 import { ThreadContext } from "@/components/workspace/messages/context";
+import { HumanInputCard } from "@/components/workspace/messages/human-input-card";
 import {
   SidecarProvider,
   SidecarTrigger,
@@ -62,11 +64,14 @@ import {
   type HumanInputResponse,
 } from "@/core/messages/human-input";
 import { isHiddenFromUIMessage } from "@/core/messages/utils";
+import { modelTaskInput } from "@/core/models/control";
 import { useModels } from "@/core/models/hooks";
+import { useModelControl } from "@/core/models/use-model-control";
 import { useNotification } from "@/core/notification/hooks";
 import { useThreadScheduledTaskEvents } from "@/core/scheduled-tasks/events";
 import { useLocalSettings, useThreadSettings } from "@/core/settings";
-import { resolveThreadContext } from "@/core/settings/store";
+import { resolveThreadContext, selectThreadModel } from "@/core/settings/store";
+import { createThread } from "@/core/threads/api";
 import {
   useThreadMetadata,
   useThreadStream,
@@ -81,7 +86,7 @@ import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
 export default function AgentChatPage() {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const { user } = useAuth();
   const canStopStreaming = hasPermission(user, PERMISSIONS.RUNS_CANCEL);
   const canCreateRuns = hasPermission(user, PERMISSIONS.RUNS_CREATE);
@@ -100,6 +105,11 @@ export default function AgentChatPage() {
   // it can flip immediately on submit without triggering eager history loads.
   const [isWelcomeMode, setIsWelcomeMode] = useState(isNewThread);
   const [settings, setSettings] = useThreadSettings(threadId);
+  const modelControl = useModelControl(
+    `${user?.id ?? "anonymous"}:${agent_name}:${threadId}`,
+    locale,
+  );
+  const prepareModelControl = modelControl.prepare;
   const [localSettings, setLocalSettings] = useLocalSettings();
   const { enabled: browserControlEnabled } = useBrowserControlEnabled();
   const { scopeSelectionEnabled } = useKnowledgeBaseEnabled();
@@ -255,8 +265,59 @@ export default function AgentChatPage() {
     threadMetadata.isLoading,
   ]);
 
+  const submissionEpochRef = useRef(0);
+  useEffect(
+    () => () => {
+      submissionEpochRef.current += 1;
+    },
+    [agent_name, threadId, user?.id],
+  );
+
   const handleSubmit = useCallback(
-    (message: PromptInputMessage, options?: InputBoxSubmitOptions) => {
+    async (message: PromptInputMessage, options?: InputBoxSubmitOptions) => {
+      const submissionEpoch = submissionEpochRef.current;
+      const choice = await prepareModelControl(message.text);
+      if (submissionEpochRef.current !== submissionEpoch)
+        throw new Error("thread-submission-stale");
+      const modelInput = modelTaskInput(message.text, choice);
+      const runContext: Record<string, unknown> = { agent_name };
+      if (
+        choice?.scope === "conversation" &&
+        !modelInput.text &&
+        message.files.length === 0 &&
+        isNewThread
+      ) {
+        await createThread(threadId);
+        if (submissionEpochRef.current !== submissionEpoch)
+          throw new Error("thread-submission-stale");
+      }
+      if (choice?.model_name) {
+        if (choice.scope === "task") {
+          if (settings.context.mode !== "ultra") {
+            toast.error(
+              locale.startsWith("zh")
+                ? "当前未启用子任务，请先启用 Ultra 模式。"
+                : "Subtasks are disabled. Enable Ultra mode first.",
+            );
+            throw new Error("subtasks-disabled");
+          }
+          runContext.subagent_model_name = choice.model_name;
+        } else {
+          runContext.model_name = choice.model_name;
+          runContext.model_selection_requested = choice.model_name;
+        }
+        if (choice.scope === "conversation")
+          try {
+            selectThreadModel(threadId, choice.model_name);
+          } catch (error) {
+            toast.error(
+              locale.startsWith("zh")
+                ? "无法在浏览器保存本对话的默认模型，请检查存储权限。"
+                : "Unable to save this conversation's default model. Check browser storage permissions.",
+            );
+            throw error;
+          }
+      }
       const scopedOptions = currentKnowledgeScopeSnapshot
         ? {
             ...options,
@@ -266,18 +327,70 @@ export default function AgentChatPage() {
             },
           }
         : options;
+      if (
+        choice?.scope === "turn" &&
+        !modelInput.text &&
+        message.files.length === 0
+      ) {
+        toast.info(
+          locale.startsWith("zh")
+            ? "请补充这次需要处理的任务。"
+            : "Please include the task to run with this model.",
+        );
+        throw new Error("model-task-missing");
+      }
+      if (
+        choice?.scope === "conversation" &&
+        !modelInput.text &&
+        message.files.length === 0
+      ) {
+        if (isNewThread) {
+          history.replaceState(
+            null,
+            "",
+            `/workspace/agents/${agent_name}/chats/${threadId}`,
+          );
+          setThreadId(threadId);
+          setIsNewThread(false);
+        }
+        options?.onSent?.();
+        toast.success(
+          locale.startsWith("zh")
+            ? "已设置本对话的默认模型。"
+            : "Conversation default model saved.",
+        );
+        return;
+      }
+      const executionOptions = {
+        ...scopedOptions,
+        additionalKwargs: {
+          ...scopedOptions?.additionalKwargs,
+          ...modelInput.additionalKwargs,
+        },
+      };
       const sendPromise = sendMessage(
         threadId,
-        message,
-        { agent_name },
-        scopedOptions,
+        { ...message, text: modelInput.text },
+        runContext,
+        executionOptions,
       );
       if (message.files.length > 0) {
         return sendPromise;
       }
       void sendPromise;
     },
-    [currentKnowledgeScopeSnapshot, sendMessage, threadId, agent_name],
+    [
+      currentKnowledgeScopeSnapshot,
+      sendMessage,
+      threadId,
+      agent_name,
+      prepareModelControl,
+      settings.context.mode,
+      locale,
+      isNewThread,
+      setThreadId,
+      setIsNewThread,
+    ],
   );
 
   const handleSubmitHumanInput = useCallback(
@@ -534,6 +647,14 @@ export default function AgentChatPage() {
                     </div>
                   )}
 
+                  {modelControl.request && (
+                    <div className="mb-3" data-testid="model-selection-card">
+                      <HumanInputCard
+                        request={modelControl.request}
+                        onSubmit={(response) => modelControl.choose(response)}
+                      />
+                    </div>
+                  )}
                   <InputBox
                     className={cn(
                       "bg-background/5 w-full",
@@ -585,6 +706,7 @@ export default function AgentChatPage() {
                     disabled={
                       env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" ||
                       isUploading ||
+                      modelControl.busy ||
                       (selectorVisible && agent === null) ||
                       (!isNewThread && isHistoryLoading)
                     }

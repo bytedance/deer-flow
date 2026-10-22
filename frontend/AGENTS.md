@@ -8,12 +8,9 @@ DeerFlow's Next.js 16 frontend provides thread-based AI conversations with strea
 
 **Stack**: Next.js 16, React 19, TypeScript 5.8, Tailwind CSS 4, pnpm 10.26.2. Requires Node.js 22+ and pnpm 10.26.2+.
 
-### Core dependencies
-
-- **LangGraph SDK** (`@langchain/langgraph-sdk` ^1.5.3) — Agent orchestration and streaming
-- **LangChain Core** (`@langchain/core` ^1.1.15) — Fundamental AI building blocks
-- **TanStack Query** (`@tanstack/react-query` ^5.90.17) — Server state management
-- **UI**: Shadcn UI, MagicUI, React Bits, and Vercel AI SDK elements (generated from registries — see Code Style)
+Core dependencies: `@langchain/langgraph-sdk` ^1.5.3 for orchestration/streaming,
+`@langchain/core` ^1.1.15, and `@tanstack/react-query` ^5.90.17 for server state.
+Registry UI: Shadcn, MagicUI, React Bits, Vercel AI SDK (see Code Style).
 
 `pnpm-workspace.yaml` overrides vulnerable `@xmldom/xmldom` 0.9.x releases to
 0.9.12 for GHSA-965w-775f-mr7g. Nextra pulls it in through MathJax and
@@ -76,6 +73,8 @@ Chat pages pass `useThreadScheduledTaskEvents` data to `MessageList` (`scheduled
 Keep IM notification preferences viewer-fenced and separate from browser alerts; only confirmed server writes change switches.
 
 ## Architecture
+
+Model controls: `core/models/use-model-control` + HumanInputCard.
 
 Knowledge evidence is parsed in `core/citations/sources.ts` from version-1
 ToolMessage artifacts. Message rows receive sources from preceding loaded tool
