@@ -34,23 +34,25 @@ Installed `lark-shared` guidance points to Capability Center > Plugins > Lark
 version marker; reinstalling the managed skill pack refreshes the stored text.
 
 Managed skill-pack installation holds `_lark_install_lock` while preparing a
-private tree. The final `staging_target.rename(target)` publishes the validated
-skill bodies and manifest together; extraction, guidance and manifest writes
-remain private until that boundary. A write failure leaves the previous pack
-unchanged and discards staging. Replacement moves the old target to a backup
-first and restores it on an ordinary publication error. Atomic file writes
-fsync their temporary files, but extraction writes and parent directories are
-not fsynced; this does not guarantee whole-tree durability after power loss.
-Callers own final file modes: runtime artifacts are executable, while installed
-skill bodies and manifests are made read-only for sandbox access.
+private tree; the final `staging_target.rename(target)` publishes the validated
+skill bodies and manifest together, keeping earlier writes private. A write
+failure leaves the previous pack unchanged and discards staging; replacement
+moves the old target to a backup first and restores it on an ordinary
+publication error. Atomic writes fsync only their temporary files, so
+whole-tree durability after power loss is not guaranteed. Callers own final
+file modes: runtime artifacts executable, skill bodies and manifests read-only.
 
 App registration and direct app switching replace the per-user Lark credential
-tree transactionally. Clear the old OAuth data before running `lark-cli config
-init`: on Linux that command writes the new app secret into the file-backed
-keychain under the data directory, so clearing the directory afterward would
-leave `config.json` with a dangling keychain reference. The transaction snapshot
-still supplies the previous OAuth data for logout and restores the complete old
-tree if any switch step fails.
+tree transactionally. Clear the old OAuth data before `lark-cli config init`:
+on Linux it writes the new app secret into the file-backed keychain under the
+data directory, so clearing afterward would leave `config.json` with a dangling
+keychain reference. The snapshot still supplies the previous OAuth data for
+logout and restores the complete old tree on any switch failure.
+
+### DDG image search
+
+Offload config/DDGS together. Only returned empties mean `No images found`;
+the SDK sentinel can hide timeouts. See `tests/test_image_search_errors.py`.
 
 ### Browser Progress Screenshots (`community/browser_automation/`)
 
@@ -59,7 +61,8 @@ storage and transfer cost bounded relative to lossless PNG. The explicit
 `browser_screenshot` tool remains PNG because it creates a user-requested
 artifact. New automatic capture entry points must reuse the shared progress
 encoding definition in `tools.py` so the byte encoding and `.jpg` suffix cannot
-drift.
+drift. `browser_screenshot` never replaces an `outputs/` file: it hard-links
+onto the first free `-N` name.
 
 ### Embedded Client (`packages/harness/deerflow/client.py`)
 
@@ -122,35 +125,8 @@ Env values stay strings; parse booleans before SDK calls (`bool("false")` is tru
 
 ### E2B Mount Uploads
 
-E2B uploads host mounts during sandbox creation using binary file objects.
-Per-mount limits: 100 MiB/file, 512 MiB total, 2,000 files. The full creation
-pass shares a 512 MiB / 2,000-file budget across skill projections and mounts.
-
-The pass has a cooperative deadline controlled by
-``mount_upload_deadline_seconds`` (default: 120 seconds). The provider checks it before
-each mount, during directory preflight, and before each SDK write. The deadline
-does not interrupt active filesystem or E2B SDK calls.
-
-The provider checks mount limits before upload. It rechecks each opened file descriptor against its preflight size before SDK upload.
-
-For policy-scoped turns, clearing the four managed remote skill categories and
-uploading their prepared projection is one per-user/thread/skills-root critical
-section, shared with acquire and release. The provider snapshots that canonical
-root at startup and carries it through warm-pool identity and E2B metadata; a VM
-from another root is never adopted. A second policy sync cannot reset the remote
-tree until the first upload pass has completed.
-
-An invalid mount does not block later mounts.
-
-Each successful upload logs its source, destination, file count, byte count, and elapsed time.
-
-A stopped pass logs its limit reason and elapsed time. It reports attempted and completed upload totals separately.
-
-After creation, ``E2BSandbox.mount_upload_result`` holds a ``MountUploadResult``.
-``result.truncated`` is true only for resource-limit stops (deadline, file count,
-bytes), not logged mount failures (missing paths, SDK errors). A provider-level
-map preserves creation results within the Gateway process; ``None`` on a
-reclaimed sandbox means unavailable.
+Before changing creation uploads, policy projections, budgets, deadlines, or result
+reporting, read [the E2B upload contract](community/e2b_sandbox/AGENTS.md#mount-uploads).
 
 ### Workspace Snapshot Cancellation (`workspace_changes/recorder.py`)
 

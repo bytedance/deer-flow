@@ -28,6 +28,7 @@ from deerflow.agents.human_input import read_human_input_response
 from deerflow.agents.interaction_policy import RunInteractionPolicy
 from deerflow.config.pii_redaction_config import PiiRedactionConfig
 from deerflow.models import create_chat_model
+from deerflow.runtime.goal_progress import previous_goal_operations
 from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
 from deerflow.tracing import inject_langfuse_metadata
 from deerflow.utils.file_io import await_drained
@@ -644,15 +645,21 @@ def compute_goal_progress_key(evaluation: GoalEvaluation, *, evidence_signature:
     )
 
 
-def compute_no_progress_count(goal: GoalState, evaluation: GoalEvaluation, *, evidence_signature: str = "") -> int:
-    """Increment repeated-progress count when visible evidence has not advanced."""
+def compute_no_progress_count(goal: GoalState, evaluation: GoalEvaluation, *, evidence_signature: str = "", operation_progress: dict[str, Any] | None = None) -> int:
+    """Count repeated tool work, preserving the original pure-text behavior."""
     if evaluation["satisfied"]:
         return 0
     progress_key = compute_goal_progress_key(evaluation, evidence_signature=evidence_signature)
     previous = goal.get("last_evaluation", {})
-    if isinstance(previous, dict) and previous.get("progress_key") == progress_key:
-        return int(goal.get("no_progress_count", 0)) + 1
-    return 0
+    old_count = int(goal.get("no_progress_count", 0))
+    text_count = old_count + 1 if isinstance(previous, dict) and previous.get("progress_key") == progress_key else 0
+    if operation_progress is None or previous_goal_operations(goal) is None:
+        # The existing text progress key is unchanged. Preserve its exact count
+        # on the first observation, rather than inventing a migration stop rule.
+        return text_count
+    if operation_progress.get("has_tool_activity"):
+        return 0 if operation_progress.get("new_keys") else old_count + 1
+    return text_count
 
 
 def make_goal_continuation_message(goal: GoalState, evaluation: GoalEvaluation, *, pii_redaction: PiiRedactionConfig | None = None) -> HumanMessage:
@@ -846,6 +853,7 @@ def attach_goal_evaluation(
     no_progress_count: int | None = None,
     stand_down_reason: str | None = None,
     evidence_signature: str = "",
+    operation_progress: dict[str, Any] | None = None,
 ) -> GoalState:
     """Return a goal copy with the latest evaluator result attached."""
     next_goal = copy.deepcopy(goal)
@@ -864,6 +872,12 @@ def attach_goal_evaluation(
         "evaluated_at": next_goal["updated_at"],
         "progress_key": compute_goal_progress_key(evaluation, evidence_signature=evidence_signature),
     }
+    if operation_progress is not None:
+        current_operations = previous_goal_operations(goal)
+        next_goal["last_evaluation"]["operation_progress"] = {
+            "version": operation_progress["version"],
+            "seen_keys": sorted(set(operation_progress["seen_keys"]) | set(current_operations["seen_keys"] if current_operations is not None else [])),
+        }
     if stand_down_reason:
         next_goal["last_evaluation"]["stand_down_reason"] = stand_down_reason
     return next_goal

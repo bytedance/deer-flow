@@ -138,9 +138,11 @@ function renderChat() {
 }
 
 let uploadAttempts = 0;
+let firstUploadResponse: () => Response;
 
 beforeEach(() => {
   uploadAttempts = 0;
+  firstUploadResponse = () => json({ detail: "disk full" }, 500);
   mocks.submit.mockClear();
   // happy-dom's File is not a Node Blob, so the composer's preview URL needs
   // a stand-in.
@@ -151,7 +153,7 @@ beforeEach(() => {
     if (/\/api\/threads\/[^/]+\/uploads$/.test(url)) {
       uploadAttempts += 1;
       return uploadAttempts === 1
-        ? json({ detail: "disk full" }, 500)
+        ? firstUploadResponse()
         : json(UPLOAD_RESPONSE);
     }
     if (/\/runs(\?|$)/.test(url)) {
@@ -168,7 +170,7 @@ afterEach(() => {
   window.sessionStorage.clear();
 });
 
-it("retries a failed upload with the staged project attachment still attached", async () => {
+async function expectUploadRetryPreservesDraftAndAttachments() {
   stageProjectAttachment("thread-1", ATTACHMENT);
   const { container } = renderChat();
   await screen.findByTestId("project-attachment-chip");
@@ -191,6 +193,10 @@ it("retries a failed upload with the staged project attachment still attached", 
   );
 
   expect(mocks.submit).not.toHaveBeenCalled();
+  expect(screen.getByRole<HTMLTextAreaElement>("textbox").value).toBe(
+    "summarize it",
+  );
+  expect(screen.getByText("notes.txt")).toBeTruthy();
   expect(screen.getByTestId("project-attachment-chip")).toBeTruthy();
 
   fireEvent.submit(container.querySelector("form")!);
@@ -208,7 +214,23 @@ it("retries a failed upload with the staged project attachment still attached", 
     ATTACHMENT.virtual_path,
     "/mnt/user-data/uploads/notes.txt",
   ]);
-});
+}
+
+it.each(["HTTP error", "unsuccessful HTTP 200"])(
+  "retries an upload after %s with the draft and staged project attachment still attached",
+  async (failure) => {
+    if (failure === "unsuccessful HTTP 200") {
+      firstUploadResponse = () =>
+        json({
+          success: false,
+          files: [],
+          message: "Successfully uploaded 0 file(s); skipped 1 unsafe file(s)",
+          skipped_files: ["notes.txt"],
+        });
+    }
+    await expectUploadRetryPreservesDraftAndAttachments();
+  },
+);
 
 it("keeps the draft through a failed upload and a busy /goal, then runs the goal's objective once", async () => {
   // A /goal the Gateway refuses with 409 never reaches sendMessage, so like

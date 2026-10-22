@@ -124,6 +124,7 @@ def _write_literal(path: Path, data: bytes) -> None:
         path.write_bytes(data)
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows cannot create reserved AUX device names")
 def test_remove_preexisting_nonportable_support_file(storage, skill_dir):
     """Deletion of a stored non-portable name succeeds; creating one still fails."""
     target = skill_dir / "scripts" / "AUX.py"

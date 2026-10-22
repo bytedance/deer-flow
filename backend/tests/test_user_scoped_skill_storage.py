@@ -858,3 +858,40 @@ class TestInstallScanConfigParity:
 
         assert seen, "the LLM scan should have run for the installed SKILL.md"
         assert all(entry is config for entry in seen), "every LLM scan must receive the storage's own app_config"
+
+
+@pytest.mark.parametrize("explicit_config", [False, True])
+def test_prompt_skill_catalog_preserves_user_scope_with_optional_config(base_dir, skills_root, config, monkeypatch, explicit_config):
+    from collections import OrderedDict
+
+    from deerflow.agents.lead_agent import prompt
+    from deerflow.skills.mutations.guard import owner_is_managed
+
+    paths = Paths(base_dir=base_dir)
+    monkeypatch.setattr("deerflow.config.paths._paths", paths)
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+    monkeypatch.setattr(prompt, "_enabled_skills_by_config_cache", OrderedDict())
+    for root, name in [(skills_root / "public", "shared"), (paths.user_custom_skills_dir("alice"), "alice-only"), (paths.user_custom_skills_dir("bob"), "bob-only")]:
+        folder = root / name
+        folder.mkdir(parents=True)
+        (folder / "SKILL.md").write_text(_skill_content(name), encoding="utf-8")
+    public = LocalSkillStorage(host_path=str(skills_root)).load_skills(enabled_only=True)
+    monkeypatch.setattr(prompt, "_enabled_skills_cache", public)
+
+    for owner in ("alice", "bob"):
+        assert not owner_is_managed(owner)
+        skills = prompt.get_enabled_skills_for_config(app_config=config if explicit_config else None, user_id=owner)
+        assert {skill.name for skill in skills} == {"shared", f"{owner}-only"}
+
+
+def test_prompt_without_config_or_user_keeps_nonblocking_global_cache(monkeypatch):
+    from deerflow.agents.lead_agent import prompt
+
+    cached = [SimpleNamespace(name="cached")]
+    monkeypatch.setattr(prompt, "_enabled_skills_cache", cached)
+
+    def unexpected_storage(**_kwargs):
+        pytest.fail("Global cached access must not synchronously load storage")
+
+    monkeypatch.setattr(prompt, "get_or_new_skill_storage", unexpected_storage)
+    assert prompt.get_enabled_skills_for_config() == cached

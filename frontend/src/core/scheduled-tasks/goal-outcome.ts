@@ -9,6 +9,7 @@ export type GoalReasonKey =
   | "maxContinuations"
   | "noProgress"
   | "tokenCapped"
+  | "loopCapped"
   | "evaluatorFailed"
   | "noDurableEndOfTurn"
   | "threadChanged"
@@ -27,6 +28,7 @@ const REASON_KEYS: Record<string, GoalReasonKey> = {
   max_continuations_reached: "maxContinuations",
   no_progress_detected: "noProgress",
   token_capped: "tokenCapped",
+  loop_capped: "loopCapped",
   evaluator_failed: "evaluatorFailed",
   no_durable_end_of_turn: "noDurableEndOfTurn",
   thread_changed_after_evaluation: "threadChanged",

@@ -266,7 +266,10 @@ resume value, assistant and conversation references. Resume values must be stric
 JSON with finite numbers, with or without an idempotency key; booleans, integers
 and floats remain distinct when comparing keyed retries. Generate a new key for every intentional user
 action; reuse a key only when retrying that same action after an uncertain HTTP
-result. Keys may be at most 255 characters. Stateless `/api/langgraph/runs/*`
+result. Keys may be at most 255 characters. Trusted internal callers (the IM
+channel manager) get keys scoped by user only: the same key sent for another
+thread returns 409 instead of starting a run, because a redelivered IM message
+may be requested on a new thread after `/new`. Stateless `/api/langgraph/runs/*`
 endpoints do not support this header because requests without an explicit thread
 create a new temporary conversation.
 
@@ -363,6 +366,78 @@ their own defaults and override paths.
 - `model_name` (string): Override the default model
 - `thinking_enabled` (boolean): Enable extended thinking for supported models
 - `is_plan_mode` (boolean): Enable TodoList middleware for task tracking
+
+**Client Context:**
+
+A custom client can describe what it can display under top-level
+`context.client`, so the agent and its skills can choose an output shape that
+fits (for example a CSV download or a chart).
+
+```json
+{
+  "input": {
+    "messages": [
+      {
+        "role": "user",
+        "content": "Analyze this dataset"
+      }
+    ]
+  },
+  "context": {
+    "client": {
+      "name": "custom-analytics-frontend",
+      "capabilities": {
+        "artifacts": true,
+        "csv_download": true,
+        "charts": true
+      },
+      "preferences": {
+        "csv": "present",
+        "chart": "present"
+      }
+    }
+  }
+}
+```
+
+The Gateway keeps only `name` (at most 80 characters), `capabilities` (boolean
+flags) and `preferences` (string, number or boolean values; strings at most 200
+characters, integers at most 2^53 − 1 in magnitude), reading only the first 32
+entries of each map. Keys must match `^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$`;
+whitespace is collapsed, and other fields, nested values and non-finite numbers
+are dropped. Dropped fields are logged at debug level without their values. The
+result reaches `runtime.context["client"]` only, never `configurable` or the
+checkpoint. The legacy `config.context.client` input is sanitized the same way;
+`config.configurable.client` is ignored. Both nested config locations omit
+`client` when saving a run record or returning its configuration through the
+runs API. Cleanup leaves the caller's request object unchanged. Reading an
+older record also omits these fields without rewriting the stored record.
+
+On every model call the lead agent receives the current value as one hidden,
+user-role `<client_context>` block placed after the system prompt, with the
+values framed by the same `--- BEGIN/END USER INPUT ---` markers as the user's
+own message. It is never system text and never written to the thread history.
+A run without a usable client value in either supported input location has
+no block; only the current request's value applies.
+
+- Capabilities and preferences are advisory hints, not enforcement. A client
+  that must never receive some output still has to enforce that outside the
+  model, in server-side policy or in the client itself.
+- `name` is informational only. Never use it for authorization or identity;
+  trust comes from the authenticated principal.
+- Send the same `client` object on each run from the same client. Placement
+  after the system messages keeps an unchanged client ahead of the growing
+  conversation, allowing the message prefix to remain stable across runs.
+  Changing or omitting it can invalidate reuse of the following conversation
+  prefix. Actual cache hits, cost and latency depend on the model provider;
+  offline message-order tests do not establish those outcomes.
+- Subagents and embedded `DeerFlowClient` runs do not receive it; the lead
+  agent decides the user-facing output shape. Runs the server starts
+  (schedules, IM channels, GitHub agents, MCP notifications, and extensions
+  unless the plugin passes a `client`) carry none, even on a thread a custom
+  client opened. A thread does not retain a "last-seen client" for future
+  tasks: a launcher must explicitly supply its own current hints if needed.
+  Existing channel-specific response formatting is unchanged.
 
 **Response:** Server-Sent Events (SSE) stream
 
@@ -609,6 +684,12 @@ the existing Agent. Import is create-only and never restores runtime state.
   }
 }
 ```
+
+### Custom Agent errors
+
+**Error behavior:**
+- `/api/agents` and `/api/user-profile` routes answer unexpected failures with a fixed `500` detail such as `{"detail": "Failed to get agent"}`; an unparsable agent `config.yaml` or a filesystem error names host paths, so the full exception stays in server logs
+- Scheduled-task create and update return `invalid_assistant` (422) with a fixed message when the selected agent's config cannot be loaded
 
 ### Models
 
@@ -1114,6 +1195,9 @@ GET /api/skills/custom/{skill_name}/history
 }
 ```
 
+An invalid skill name returns `400`; a skill with neither a `SKILL.md` nor
+recorded history returns `404`.
+
 #### Rollback Custom Skill
 
 Restore a custom skill's `SKILL.md` from a history entry. The restored content is
@@ -1216,6 +1300,11 @@ mounted directory must be writable only by trusted operators.
 
 Upload one or more files to a thread.
 
+Automatic Office/PDF-to-Markdown conversion is disabled by default. To enable
+host-side parsing in a trusted deployment, set
+`uploads.auto_convert_documents: true` in `config.yaml`. See
+[document conversion configuration](FILE_UPLOAD.md#支持的文档格式).
+
 ```http
 POST /api/threads/{thread_id}/uploads
 Content-Type: multipart/form-data
@@ -1224,7 +1313,7 @@ Content-Type: multipart/form-data
 **Request Body:**
 - `files`: One or more files to upload
 
-**Response:**
+**Response** (example with automatic conversion enabled and successful):
 ```json
 {
   "success": true,
@@ -1246,9 +1335,11 @@ Content-Type: multipart/form-data
 
 ```
 
+**Error behavior:** an unexpected storage failure answers `500` with `{"detail": "Failed to upload <filename>."}`; the underlying error, which can name host paths, stays in server logs.
+
 **Name collisions:** filenames are claimed unique against the thread's existing uploads and reserved atomically — a same-name upload never replaces the existing file; it lands as `document_1.pdf` (the response's `filename`/`original_filename` reflect the claimed name). Use the artifacts `PUT` endpoint for sanctioned in-place updates.
 
-**Supported Document Formats** (auto-converted to Markdown):
+**Supported Document Formats** (converted to Markdown only when automatic conversion is enabled):
 - PDF (`.pdf`)
 - PowerPoint (`.ppt`, `.pptx`)
 - Excel (`.xls`, `.xlsx`)
@@ -1291,6 +1382,8 @@ DELETE /api/threads/{thread_id}/uploads/{filename}
   "message": "Deleted document.pdf"
 }
 ```
+
+**Error behavior:** an unexpected storage failure answers `500` with `{"detail": "Failed to delete <filename>."}`; the underlying error stays in server logs.
 
 ### Thread Cleanup
 
@@ -1451,7 +1544,7 @@ POST /api/projects/{project_id}/documents/{document_id}/attach-to-thread/{thread
 
 Materializes an independent copy of a live shelf document into the target thread's uploads directory through the same ingestion pipeline as an ordinary upload (filename claiming, size checks, optional conversion under `uploads.auto_convert_documents`, sandbox-readable permissions, and sandbox sync for non-mounted providers; a caller denied `sandbox:execute` keeps the host upload without allocating a sandbox). Reading an archived source project's shelf is allowed and does not mutate it; a missing/foreign document, or a target thread the caller cannot write, is `404`. A row whose original bytes are missing or size-mismatched answers `409` `"content_missing"`.
 
-**Response:** `200 OK` with `{"filename", "size_bytes", "virtual_path", "artifact_url"}` — returned only after ingestion succeeds.
+**Response:** `200 OK` with `{"filename", "size_bytes", "virtual_path", "artifact_url"}` — returned only after ingestion succeeds. An unexpected ingestion failure answers `500` with `{"detail": "Failed to upload <name>."}`; the underlying error stays in server logs.
 
 #### Get Document Content
 
@@ -1729,6 +1822,19 @@ see `backend/docs/CONFIGURATION.md` for the events and the merge rule.
 { "provider": "wecom", "display_name": "WeCom", "connection_status": "connected", "proactive_notifications": true }
 ```
 
+**Runtime bot credentials.** `POST /api/channels/{provider}/runtime-config`
+(body `{"values": {...}}`, keyed by the provider's `credential_fields`) and
+`DELETE /api/channels/{provider}/runtime-config` are admin-only; they save or
+disconnect the deployment's bot for that provider and answer with its provider
+item. Password values come back masked (`********`); sending the mask back
+keeps the stored value. A save whose channel fails to start on the serving
+instance, or a disconnect whose channel fails to stop there, answers `400` and
+stores nothing (under `channels.leader_lease` a non-holder stores the save and
+the holder applies it on its next renewal tick). With a SQLite or
+PostgreSQL database the values are stored encrypted with
+`DEER_FLOW_CREDENTIALS_KEY` and shared by every Gateway instance; without a
+usable key a save answers `503`. See `backend/docs/IM_CHANNEL_CONNECTIONS.md`.
+
 ---
 
 ## Error Responses
@@ -1866,7 +1972,13 @@ bounded by `stream_bridge.queue_maxsize` (default `256`) and, for Redis, by the
 rolling `stream_ttl_seconds`. A retained cursor resumes after that event with no
 additional control frame.
 
-When a syntactically valid cursor is older than the retained watermark, the
+The Memory bridge also remembers its exact last evicted event ID. Reconnecting
+from that known predecessor replays every retained successor without a `gap`,
+because none of the events after the cursor has been lost. This uses one ID per
+run and does not increase the retained event count. Redis keeps its conservative
+trimmed-cursor policy.
+
+For other syntactically valid cursors older than the retained watermark, the
 server sends exactly one `gap` event before any retained data and closes that
 subscription without an `end` event:
 

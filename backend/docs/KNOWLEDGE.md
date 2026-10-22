@@ -1,19 +1,22 @@
-# Read-only knowledge contract (#6269, phases 1–2)
+# Read-only knowledge contract (#6269, phases 1–3)
 
 `deerflow.knowledge` owns `RetrievalResult`, `RetrievalHit`, `KnowledgeSource`,
 `KnowledgeCapabilities`, and the search-only `RetrievalProvider` protocol.
 Search-only providers need no knowledge management service, resource store,
 catalog, or scope-filter implementation. Scope admission, the read-only catalog
 and selection UI consume the same operation-level capabilities. LightRAG still
-does not advertise dataset/document filters; WeKnora remains phase 3.
+does not advertise dataset/document filters. The phase 3
+[WeKnora extension](../../examples/deerflow-extension-weknora/README.md) implements
+all six read-only operations against the v0.8.3 API.
 
 ## Provider registration and optional operations
 
 An operator-installed extension calls
 `registry.knowledge_provider(name, provider)` during `install()`. The method
 returns `False` on older hosts and is supported by extension-api **0.2.7**.
-The provider implements the existing `RetrievalProvider.search(query)` and
-advertises `KnowledgeCapabilities`. Registration validates each advertised
+The provider advertises `KnowledgeCapabilities` and implements its retrieval
+operations: the existing `RetrievalProvider.search(query)`, or one of the
+optional entry/relation methods described below. Registration validates each advertised
 operation, rejects duplicate/reserved names, and participates in source
 attribution and positional install rollback. Connection settings, response
 mapping and credentials belong to that extension's `plugins[].config`.
@@ -22,7 +25,7 @@ The contract package remains dependency-free; providers use the published
 
 | Operation | Optional interface | Behavior |
 | --- | --- | --- |
-| `search` | `RetrievalProvider.search` | Required; returns `RetrievalResult` |
+| `search` | `RetrievalProvider.search` | Document retrieval; returns `RetrievalResult` |
 | `sources` | Existing result/source models | Advertises attributable evidence |
 | `catalog` | `RetrievalCatalogProvider.catalog` | Paginated accessible datasets |
 | `documents` | `RetrievalDocumentsProvider.documents` | Paginated documents in an accessible dataset |
@@ -35,10 +38,10 @@ provider identifiers, including non-UUID identifiers. Gateway validates this
 bounded public projection and never returns raw provider payloads.
 Dataset and document IDs are limited to **256 Unicode code points** throughout
 catalog output, URL parameters and scope snapshots. Overlong IDs are rejected,
-never truncated. A phase 3 WeKnora adapter must map space-qualified resources
-to stable, unambiguous IDs within this bound and resolve them inside the
-provider; the earlier `ks1_` encoding allowing 512 characters is not the public
-contract. Reuse provider API/mapping logic without adding a second discovery
+never truncated. The WeKnora extension maps endpoint/tenant/base tuples to stable
+`wk1_` SHA-256 IDs (68 ASCII characters), resolving them from the authorized
+catalog on each request without a mapping store. The earlier `ks1_` encoding
+allowing 512 characters is not the public contract. Reuse provider API/mapping logic without adding a second discovery
 protocol or a DeerFlow ACL store.
 
 `KnowledgeRequestContext` supplies the host user ID, Agent name and optional
@@ -251,3 +254,92 @@ uv run pytest tests/test_knowledge_contract_live.py -m live -q
 Set `LIGHTRAG_API_KEY` in the environment if required. This test performs no
 upload or resource changes. It requires attributable hits and checks each
 citation against the real returned chunk evidence.
+
+## WeKnora read-only extension
+
+The independently packaged `examples/deerflow-extension-weknora` registers
+`weknora` through the existing registry. Its operator configuration binds exact
+host users (and optionally current executor names) to credential environment
+variables, endpoint, tenant and optional base allowlist. No automatic tenant
+inference, default user binding, resource ACL storage or new core API is added.
+All bound users share the configured credential's upstream visibility; the
+plugin does not impersonate a WeKnora human user.
+
+The adapter uses v0.8.3's KB-bound `hybrid-search` with `query_text` and optional
+`knowledge_ids`, disabling context enrichment. This supports KB-restricted
+read-only API keys; the global search endpoint rejects their document targets
+and unions base/document target lists. Raw recall needs no chat/rerank model.
+The adapter validates all selected resources, checks returned document
+membership/status, and fails the request on access errors without retrying an
+unrestricted search. A missing title remains unattributed; pages and URLs are
+omitted because the mapped response does not establish those locators.
+
+See the extension README for immutable API references, installation, limits and
+opt-in real-provider verification. Offline synthetic responses exercise the
+actual registry, Gateway catalog, ToolNode, shared evidence and replay path.
+Live validation needs an indexed instance and is not implied by offline passes.
+The extension's [validation record](../../examples/deerflow-extension-weknora/VALIDATION.md)
+documents the local v0.8.3 / Ollama bge-m3 run.
+
+## New Phase 1: three independently configurable retrieval tools
+
+This is the follow-up plan in #6269 comments 6281785410 and 6282389387, distinct
+from the completed original three phases. Existing `tools`, `tool_groups`,
+`tools[].provider` and the registry remain the only configuration mechanism;
+there is no `retrieval_channels` or per-tool `enabled` switch.
+
+| Tool | Optional provider method | Filter capability names |
+| --- | --- | --- |
+| `knowledge_search` | existing `search` / `search_scoped` | `dataset_filter`, `document_filter` |
+| `knowledge_entries_search` | `entries_search(query, *, context)` | `entries_dataset_filter`, `entries_document_filter` |
+| `entity_relations_search` | `relations_search(query, *, context)` | `relations_dataset_filter`, `relations_document_filter` |
+
+Tool paths are `deerflow.knowledge.tools:<tool_name>_tool`. All methods return
+`RetrievalResult`; optional methods always receive `KnowledgeRequestContext`,
+including all-scope requests. Registration checks advertised async methods.
+An entry-only or relation-only provider needs no document `search` method.
+Add/remove any combination of the three tool entries, including all absent.
+Tool group and normal authorization admission remain unchanged.
+
+Core contains the generic dispatch and operation-level capability projection;
+provider API calls and mapping stay in packaged extensions. The catalog and
+admission expose the **intersection** of configured operations' scope support.
+Different registered providers cannot share selected IDs: combinations across
+providers support all/disabled only. This conservative rule also applies during
+runtime revalidation, resume and regeneration; it never drops filters or retries
+unrestricted. Single-operation deployments do not need document search enabled.
+The disabled-scope middleware hides and blocks all three tools.
+
+The WeKnora adapter advertises entries plus base filtering, using published Wiki
+pages on bases reporting `capabilities.wiki`. It rejects document filtering:
+its Wiki API cannot constrain a page to selected documents. It has no entity
+relation HTTP adapter; the pinned release's graph query is an internal Agent
+Tool and `/wiki/graph` is a page-link graph.
+
+The optional LightRAG plugin implements entity/relationship retrieval against
+`/query/data`, with explicit user/agent credential bindings. It maps returned
+one-edge paths and joins their `source_id` values to actual retrieved chunks.
+It does not invent multi-hop paths or treat graph summaries as document quotes.
+Graph facts are unattributed text hits; their corresponding document chunks
+are separate attributable hits. The v1 source wire model, ID hashing, evidence
+validation, budgets, ordinary delegation and replay readers are unchanged.
+No graph UI or new graph-source schema is introduced in this phase.
+
+The shared trusted context currently carries user, executing agent and scope;
+connections and upstream tenancy remain operator-owned plugin configuration.
+Later space/authorization/trace work must extend that contract deliberately,
+not infer user authority from labels or treat synthetic tests as a live trace.
+
+Tests: `test_knowledge_retrieval_tools.py` covers all eight configurations,
+real ToolNode calls, shared sources, replay, delegation and budget pruning;
+provider tests exercise API-shaped synthetic responses, access denial,
+unsupported filters and evidence joins. The opt-in `test_knowledge_phase1_live.py` also passed against real OrbStack
+WeKnora/LightRAG services with bge-m3 and a GLM-5.3 three-tool agent loop.
+See the [live validation record](../../examples/deerflow-extension-lightrag/VALIDATION.md)
+for exact coverage, reproduction and limits; this is not browser-chat acceptance.
+
+Configured generic retrieval tools must resolve to a registered provider advertising
+that tool's operation. Capability resolution rejects an invalid pair and logs the
+tool name, provider registration name and missing operation for the operator;
+it does not silently intersect it into an empty capability set. Model-visible
+errors remain generic so provider details are not exposed in tool results.

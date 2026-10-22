@@ -494,7 +494,7 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
                 self._thread_sandboxes.pop(key, None)
             destroy_after_unlock = self._shutdown_called
             if not destroy_after_unlock:
-                self._warm_pool[sandbox_id] = (sandbox, time.time())
+                self._warm_pool[sandbox_id] = (sandbox, time.monotonic())
             else:
                 self._pending_destroy[id(sandbox)] = sandbox
         if destroy_after_unlock:
@@ -651,7 +651,7 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
         self._acquire_serializer.close()
 
     def _park_active_locked(self) -> None:
-        now = time.time()
+        now = time.monotonic()
         for sandbox_id, sandbox in self._sandboxes.items():
             self._warm_pool.setdefault(sandbox_id, (sandbox, now))
         self._sandboxes.clear()
