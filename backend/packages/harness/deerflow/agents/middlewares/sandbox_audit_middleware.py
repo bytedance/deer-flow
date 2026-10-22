@@ -117,13 +117,40 @@ _HIGH_RISK_COMMAND_POSITION_PATTERNS: list[re.Pattern[str]] = [
     # handed. Anchoring keeps it in command position: a dot that is an ordinary
     # path argument (`du -sh . $(curl u)`) stays value position.
     re.compile(rf"^{_COMMAND_POSITION_PREFIX}\.\s+[\"']?{_RISKY_SUBSTITUTION}"),
-    # `cmd < <(curl u)`: with no script argument the shell, the dot builtin or an
-    # interpreter reads its *program* from stdin, so the process substitution is
-    # executed. A script argument keeps the redirect as data
-    # (`bash script.sh < <(curl u)` passes).
-    re.compile(rf"^{_COMMAND_POSITION_PREFIX}{_CODE_STRING_INTERPRETERS}\s+{_STDIN_SCRIPT_FLAGS}<\s*<\(\s*{_RISKY_SUBSTITUTION_EXECUTABLES}"),
-    re.compile(rf"^{_COMMAND_POSITION_PREFIX}(?:source|\.)\s+<\s*<\(\s*{_RISKY_SUBSTITUTION_EXECUTABLES}"),
 ]
+
+# `cmd < <(curl u)` is only an execution when *nothing* else supplies the
+# program: a script operand (`bash < <(curl u) consumer.sh`) or a noexec flag
+# (`bash -n < <(curl u)`) keeps the fetched bytes as data, and `.`/`source`
+# require a filename, so they never read a program from stdin at all. That is
+# more than one anchored pattern can express, so it is decided from the token
+# list instead.
+_STDIN_SUBSTITUTION_RE = re.compile(rf"<\s*<\s*\(\s*{_RISKY_SUBSTITUTION_EXECUTABLES}[^)]*\)")
+_STDIN_TRAILING_OPERATOR_RE = re.compile(r"^\s*(?:$|[|;&<>)(])")
+_SHELL_NOEXEC_RE = re.compile(r"(?:^|\s)(?:-n|--noexec)(?=\s|$)")
+_SHELL_INTERPRETER_RE = re.compile(r"^(?:ba|da|k|z)?sh$")
+_STDIN_INTERPRETER_HEAD_RE = re.compile(rf"^{_COMMAND_POSITION_PREFIX}({_CODE_STRING_INTERPRETERS})\s+({_STDIN_SCRIPT_FLAGS})(?=<\s*<\s*\()")
+
+
+def _stdin_program_substitution(command: str) -> bool:
+    """Return True when *command* feeds a fetched program to an interpreter on stdin.
+
+    The interpreter must be in command position, the process substitution must be
+    its stdin redirect, there must be no script operand after the redirect, and a
+    shell must not be in noexec mode.
+    """
+    head = _STDIN_INTERPRETER_HEAD_RE.match(command)
+    if head is None:
+        return False
+    interpreter, flags = head.group(1), head.group(2)
+    if _SHELL_INTERPRETER_RE.match(interpreter) and _SHELL_NOEXEC_RE.search(flags):
+        return False
+    rest = command[head.end() :]
+    substitution = _STDIN_SUBSTITUTION_RE.match(rest)
+    if substitution is None:
+        return False
+    return bool(_STDIN_TRAILING_OPERATOR_RE.match(rest[substitution.end() :]))
+
 
 _MEDIUM_RISK_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"chmod\s+777"),
@@ -336,6 +363,9 @@ def _classify_single_command(command: str) -> str:
     normalized = " ".join(command.split())
 
     if _matches_high_risk(normalized):
+        return "block"
+
+    if _stdin_program_substitution(normalized):
         return "block"
 
     # Also try shlex-parsed tokens for high-risk detection
