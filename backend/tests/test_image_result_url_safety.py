@@ -95,7 +95,17 @@ def _stub_serply(module, url):
 
 def _stub_groundroute(module, url):
     data = {"results": [{"title": "t", "url": url, "snippet": "c"}]}
-    return [patch.object(module, "_get_api_key", return_value="k"), patch.object(module, "_post_search", return_value=data)], _sync(module.web_search_tool)
+    config = SimpleNamespace(get_tool_config=lambda _: SimpleNamespace(model_extra={"api_key": "synthetic-test-key"}))
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json=data))
+    real_client = httpx.AsyncClient
+    return [
+        patch.object(module, "get_app_config", return_value=config),
+        patch.object(
+            module,
+            "httpx",
+            SimpleNamespace(AsyncClient=lambda **kwargs: real_client(transport=transport, **kwargs), HTTPStatusError=httpx.HTTPStatusError),
+        ),
+    ], _async(module.web_search_tool)
 
 
 def _stub_sofya(module, url):
