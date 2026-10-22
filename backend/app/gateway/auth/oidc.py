@@ -132,10 +132,12 @@ class OIDCService:
         data = _json_object(resp, f"OIDC discovery response from {issuer}")
 
         discovered_issuer = data.get("issuer")
+        # Type before presence: a falsy non-string (0, false, []) is a
+        # wrong-typed field, not a missing one.
+        if discovered_issuer is not None and not isinstance(discovered_issuer, str):
+            raise OIDCError(f"OIDC discovery response from {issuer} has a non-string issuer field")
         if not discovered_issuer:
             raise OIDCError(f"OIDC discovery response from {issuer} is missing the issuer field")
-        if not isinstance(discovered_issuer, str):
-            raise OIDCError(f"OIDC discovery response from {issuer} has a non-string issuer field")
 
         # RFC 8414 §4: the metadata issuer must equal the configured issuer.
         # Pinning it prevents a tampered/rogue discovery document from steering

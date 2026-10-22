@@ -681,6 +681,30 @@ async def test_oidc_discover_wraps_malformed_document_and_does_not_cache_it(docu
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("discovered_issuer", "message"),
+    [
+        (42, "non-string issuer field"),
+        (0, "non-string issuer field"),
+        (False, "non-string issuer field"),
+        ([], "non-string issuer field"),
+        ("", "missing the issuer field"),
+        (None, "missing the issuer field"),
+    ],
+)
+async def test_oidc_discover_reports_wrong_typed_issuer_apart_from_missing_one(discovered_issuer, message):
+    document = {key: value for key, value in _DISCOVERY.items() if key != "issuer"}
+    if discovered_issuer is not None:
+        document["issuer"] = discovered_issuer
+    service = _service_answering({"/.well-known/openid-configuration": document})
+    try:
+        with pytest.raises(OIDCError, match=message):
+            await service.discover(_ISSUER)
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
 async def test_oidc_discover_override_fills_an_endpoint_the_document_omits():
     service = _service_answering({"/.well-known/openid-configuration": {key: value for key, value in _DISCOVERY.items() if key != "authorization_endpoint"}})
     try:
