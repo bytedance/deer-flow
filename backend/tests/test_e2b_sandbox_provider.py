@@ -2219,6 +2219,79 @@ def test_reclaim_warm_pool_sandbox_returns_none_on_seed_mismatch(monkeypatch):
     assert "sb-other" in p._warm_pool
 
 
+def _assert_lease_dropped(p, sandbox_id: str) -> None:
+    assert sandbox_id not in p._owned_sandbox_ids
+    assert p._ownership.owner(sandbox_id) is None
+    # The renewer re-claims a lapsed lease it still tracks, so a single
+    # leftover ID would hold the shared lease until shutdown.
+    p._refresh_owned_leases()
+    assert sandbox_id not in p._owned_sandbox_ids
+    assert p._ownership.owner(sandbox_id) is None
+
+
+@pytest.mark.parametrize("dead_signal", ["is_dead", "ping"])
+def test_acquire_releases_lease_of_dead_in_process_sandbox(monkeypatch, tmp_path, dead_signal):
+    _setup_paths(monkeypatch, tmp_path)
+    p = _make_provider()
+    _install_fake_sdk(monkeypatch, p)
+    dead_id = p.acquire("t1", user_id="u1")
+    assert p._ownership.owner(dead_id) == p._owner_id
+    if dead_signal == "is_dead":
+        p._sandboxes[dead_id]._dead = True
+    else:
+        p._sandboxes[dead_id].client.commands = FakeCommandsAPI([FakeCommandsAPI.GONE])
+
+    fresh_id = p.acquire("t1", user_id="u1")
+
+    assert fresh_id != dead_id
+    _assert_lease_dropped(p, dead_id)
+    assert p._ownership.owner(fresh_id) == p._owner_id
+    assert fresh_id in p._owned_sandbox_ids
+
+
+def test_acquire_releases_lease_of_reaped_warm_pool_sandbox(monkeypatch, tmp_path):
+    _setup_paths(monkeypatch, tmp_path)
+    p = _make_provider()
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+    dead_id = p.acquire("t1", user_id="u1")
+    p.release(dead_id)
+    assert dead_id in p._warm_pool
+    assert p._ownership.owner(dead_id) == p._owner_id
+
+    def missing_sandbox(_sid, **_kw):
+        raise RuntimeError(FakeCommandsAPI.NOT_FOUND_MSG)
+
+    fake_cls.connect_factory = missing_sandbox
+
+    fresh_id = p.acquire("t1", user_id="u1")
+
+    assert fresh_id != dead_id
+    _assert_lease_dropped(p, dead_id)
+    assert p._ownership.owner(fresh_id) == p._owner_id
+    assert p._transitioning_slots == 0
+
+
+def test_dead_sandbox_lease_release_failure_does_not_block_rebuild(monkeypatch, tmp_path):
+    from deerflow.community.aio_sandbox.ownership import OwnershipBackendError
+
+    _setup_paths(monkeypatch, tmp_path)
+    p = _make_provider()
+    _install_fake_sdk(monkeypatch, p)
+    dead_id = p.acquire("t1", user_id="u1")
+    p._sandboxes[dead_id]._dead = True
+
+    def unavailable(_sid):
+        raise OwnershipBackendError("redis down")
+
+    monkeypatch.setattr(p._ownership, "release", unavailable)
+
+    fresh_id = p.acquire("t1", user_id="u1")
+
+    assert fresh_id != dead_id
+    # Without a renewer the shared lease expires on its own TTL.
+    assert dead_id not in p._owned_sandbox_ids
+
+
 class _FakePaginator:
     """Mirror of e2b SDK's ``SandboxPaginator``: items via ``next_items``."""
 
