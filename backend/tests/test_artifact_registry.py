@@ -673,3 +673,85 @@ def test_merge_tool_artifacts_consumption_update_does_not_grow_count():
     consumed = {**entries[0], "consumed_by": ["call-x"]}
     merged = merge_tool_artifacts(entries, [consumed])
     assert len(merged) == 1000
+
+
+# --- delimited sandbox paths (issue #7303) ---------------------------------
+
+
+@pytest.mark.parametrize("delimiter", ['"', "'", "`"])
+def test_a_delimited_sandbox_path_keeps_its_spaces(delimiter):
+    """A tool that quotes the filename means the whole quoted string is the path."""
+    path = "/mnt/user-data/outputs/quarterly report (final).pdf"
+
+    refs = _detect_refs_in_text(f"Created {delimiter}{path}{delimiter} successfully.")
+
+    assert [ref["ref"] for ref in refs] == [path]
+    assert refs[0]["display"] == "quarterly report (final).pdf"
+
+
+def test_a_bare_sandbox_path_keeps_the_whitespace_boundary():
+    """Nothing tells the free-text scan where an undelimited name with spaces ends, so it
+    keeps the conservative boundary it always had."""
+    refs = _detect_refs_in_text("Created /mnt/user-data/outputs/quarterly report.pdf successfully.")
+
+    assert [ref["ref"] for ref in refs] == ["/mnt/user-data/outputs/quarterly"]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # Never closed on this line.
+        'Created "/mnt/user-data/outputs/quarterly report.pdf successfully.',
+        "Created '/mnt/user-data/outputs/quarterly report.pdf",
+        "Created `/mnt/user-data/outputs/quarterly report.pdf",
+        # Closed, but only after the line break: a multi-line value is not one path.
+        'Created "/mnt/user-data/outputs/quarterly report.pdf\nsuccessfully."',
+    ],
+)
+def test_an_unterminated_delimited_span_produces_no_reference(text):
+    """A prefix of a quoted filename names a file that does not exist, so it is not
+    reported at all rather than reported truncated."""
+    assert _detect_refs_in_text(text) == []
+
+
+def test_delimited_paths_keep_their_order_and_deduplicate():
+    first = "/mnt/user-data/outputs/a report.pdf"
+    second = "/mnt/user-data/outputs/b report.csv"
+
+    refs = _detect_refs_in_text(f'Published `{first}` and "{second}", then again "{first}".')
+
+    assert [ref["ref"] for ref in refs] == [first, second]
+
+
+def test_a_delimited_and_a_bare_path_in_one_result_are_both_captured():
+    quoted = "/mnt/user-data/outputs/a report.pdf"
+
+    refs = _detect_refs_in_text(f'Copied to "{quoted}"; log at /mnt/user-data/workspace/run.log.')
+
+    assert [ref["ref"] for ref in refs] == [quoted, "/mnt/user-data/workspace/run.log"]
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ('Output: "/mnt/user-data/outputs/report.pdf".', "/mnt/user-data/outputs/report.pdf"),
+        ("Output: `/mnt/user-data/outputs/report.pdf`,", "/mnt/user-data/outputs/report.pdf"),
+    ],
+)
+def test_punctuation_outside_the_delimiter_is_not_part_of_the_reference(text, expected):
+    assert [ref["ref"] for ref in _detect_refs_in_text(text)] == [expected]
+
+
+def test_extraction_registers_the_full_delimited_path_once():
+    path = "/mnt/user-data/outputs/quarterly report.pdf"
+    message = ToolMessage(
+        content=f'Created "{path}" successfully.',
+        tool_call_id="export-1",
+        name="export_report",
+    )
+
+    entries = extract_artifacts_from_result(message, thread_id="demo")
+
+    assert [entry["real_ref"] for entry in entries] == [path]
+    assert entries[0]["display_name"] == "quarterly report.pdf"
+    assert entries[0]["artifact_type"] == "file"
