@@ -23,8 +23,6 @@ import re
 import socket
 import time
 import uuid
-from datetime import UTC
-from email.utils import parsedate_to_datetime
 from typing import Any
 
 import anthropic
@@ -32,7 +30,7 @@ from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import BaseMessage
 from pydantic import PrivateAttr
 
-from deerflow.utils.retry_after import bounded_retry_after_ms
+from deerflow.utils.retry_after import bounded_retry_after_ms, parse_retry_after_date_ms
 
 logger = logging.getLogger(__name__)
 
@@ -442,15 +440,8 @@ class ClaudeChatModel(ChatAnthropic):
                     if hint_ms is not None:
                         total_ms = hint_ms
                 except (ValueError, TypeError, OverflowError):
-                    try:
-                        target = parsedate_to_datetime(retry_after)
-                        # The obsolete asctime HTTP-date form has no zone token.
-                        if target.tzinfo is None:
-                            target = target.replace(tzinfo=UTC)
-                        hint_ms = bounded_retry_after_ms((target.timestamp() - time.time()) * 1000)
-                        if hint_ms is not None:
-                            total_ms = hint_ms
-                    except (ValueError, TypeError, OverflowError, OSError):
-                        pass
+                    hint_ms = parse_retry_after_date_ms(retry_after, now=time.time())
+                    if hint_ms is not None:
+                        total_ms = hint_ms
 
         return total_ms

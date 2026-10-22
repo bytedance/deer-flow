@@ -160,3 +160,7 @@ Keep per-caller policies: Lark has a 15-minute Windows file-lock deadline,
 extension management waits indefinitely, and skill export retains its existing
 deadline, 0.02-second cadence and cancellation check. Clocks and sleeps are
 injectable; tests must not patch the shared stdlib time module.
+
+`parse_retry_after_date_ms(raw, now=...)` owns HTTP-date parsing for Claude, Codex
+and LLM error middleware. Interpret timezone-less asctime as UTC and apply the
+shared delay bound. Callers retain numeric/header precedence and local backoff.
