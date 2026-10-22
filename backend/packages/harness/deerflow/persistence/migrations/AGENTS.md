@@ -36,7 +36,10 @@ The empty-DB path keeps using `create_all` because `Base.metadata` is the only a
 `0043_runtime_im_notices` → `0044_channel_runtime_configs` →
 `0045_completed_run_evidence` → `0046_skill_mutations`, then the independent
 `0047_mcp_oauth_tokens` and `0047_tracing_profiles` revisions join at
-`0048_merge_tracing_mcp_oauth` (current head). Both existing revision IDs and
+`0048_merge_tracing_mcp_oauth`, then `0049_tracing_retention` (current head).
+The retention revision timestamps snapshots and defaults old rows to protected
+`unmanaged` lifecycle state; it does not infer that missing run rows are unused.
+Both existing 0047 revision IDs and
 their original parents are retained so databases at either branch upgrade
 through the other branch before reaching the merge. Downgrading the merge to
 either 0047 leaves two version rows; automatic bootstrap refuses that intermediate

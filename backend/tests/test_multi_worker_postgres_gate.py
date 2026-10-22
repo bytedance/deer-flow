@@ -873,9 +873,9 @@ def _with_channel_connections(config, *, enabled: bool = True):
 
 def test_credentials_key_consumers_name_the_enabled_features():
     assert credentials_key_consumers(_config_with_backend("memory")) == []
-    assert credentials_key_consumers(_cluster_ready()) == ["database.backend=postgres (tracing snapshots)"]
-    assert credentials_key_consumers(_with_channel_connections(_cluster_ready(), enabled=False)) == ["database.backend=postgres (tracing snapshots)"]
-    assert credentials_key_consumers(_with_channel_connections(_cluster_ready())) == ["database.backend=postgres (tracing snapshots)", "channel_connections.enabled=true"]
+    assert credentials_key_consumers(_cluster_ready()) == []
+    assert credentials_key_consumers(_with_channel_connections(_cluster_ready(), enabled=False)) == []
+    assert credentials_key_consumers(_with_channel_connections(_cluster_ready())) == ["channel_connections.enabled=true"]
 
 
 def _with_mcp_oauth(config, *, grant_type: str = "refresh_token", oauth_enabled: bool = True, server_enabled: bool = True):
@@ -886,11 +886,10 @@ def _with_mcp_oauth(config, *, grant_type: str = "refresh_token", oauth_enabled:
 
 def test_rotating_mcp_oauth_servers_store_tokens_under_the_credentials_key():
     """mcp_oauth_tokens keeps refresh_token connections' tokens encrypted; client_credentials stay in process."""
-    tracing = ["database.backend=postgres (tracing snapshots)"]
-    assert credentials_key_consumers(_with_mcp_oauth(_cluster_ready())) == [*tracing, "mcpServers.reports.oauth.enabled=true"]
-    assert credentials_key_consumers(_with_mcp_oauth(_cluster_ready(), grant_type="client_credentials")) == tracing
-    assert credentials_key_consumers(_with_mcp_oauth(_cluster_ready(), oauth_enabled=False)) == tracing
-    assert credentials_key_consumers(_with_mcp_oauth(_cluster_ready(), server_enabled=False)) == tracing
+    assert credentials_key_consumers(_with_mcp_oauth(_cluster_ready())) == ["mcpServers.reports.oauth.enabled=true"]
+    assert credentials_key_consumers(_with_mcp_oauth(_cluster_ready(), grant_type="client_credentials")) == []
+    assert credentials_key_consumers(_with_mcp_oauth(_cluster_ready(), oauth_enabled=False)) == []
+    assert credentials_key_consumers(_with_mcp_oauth(_cluster_ready(), server_enabled=False)) == []
 
 
 def test_declared_multi_instance_with_rotating_mcp_oauth_requires_the_credentials_key(monkeypatch):
@@ -899,11 +898,10 @@ def test_declared_multi_instance_with_rotating_mcp_oauth_requires_the_credential
         _enforce_credentials_key(_with_mcp_oauth(_cluster_ready(deployment_multi_instance=True)))
     msg = str(exc_info.value)
     assert CREDENTIALS_KEY_ENV_VAR in msg
-    assert "database.backend=postgres (tracing snapshots)" in msg
+    assert "tracing snapshots" not in msg
     assert "mcpServers.reports.oauth.enabled=true" in msg
-    assert "or set mcpServers.reports.oauth.enabled=false" not in msg
-    with pytest.raises(SystemExit, match="tracing snapshots"):
-        _enforce_credentials_key(_with_mcp_oauth(_cluster_ready(deployment_multi_instance=True), oauth_enabled=False))
+    assert "or set mcpServers.reports.oauth.enabled=false" in msg
+    _enforce_credentials_key(_with_mcp_oauth(_cluster_ready(deployment_multi_instance=True), oauth_enabled=False))
     monkeypatch.setenv(CREDENTIALS_KEY_ENV_VAR, _VALID_KEY)
     _enforce_credentials_key(_with_mcp_oauth(_cluster_ready(deployment_multi_instance=True)))
 
@@ -919,8 +917,8 @@ def test_declared_multi_instance_with_channel_connections_requires_the_credentia
     assert GENERATE_KEY_COMMAND in msg, "the refusal must say how to generate a key"
     assert "Helm" in msg
     assert "deployment.multi_instance=false" in msg, "must name the rollback knob"
-    assert "tracing snapshots" in msg
-    assert "tracing snapshots)=false" not in msg
+    assert "tracing snapshots" not in msg
+    assert "or set channel_connections.enabled=false" in msg
 
 
 def test_env_declared_multi_instance_names_the_env_knob(monkeypatch):
@@ -938,13 +936,12 @@ def test_declared_multi_instance_accepts_a_shared_credentials_key(monkeypatch):
 
 
 @pytest.mark.parametrize("channel_connections", [None, False], ids=["section-absent", "disabled"])
-def test_declared_multi_instance_requires_snapshot_key_even_without_channel_credentials(channel_connections):
-    """Inherited tracing snapshots also need to decrypt on every replica."""
+def test_declared_multi_instance_without_credential_consumers_keeps_booting(channel_connections):
+    """Tracing checks shared encryption authority on the first secret operation."""
     config = _cluster_ready(deployment_multi_instance=True)
     if channel_connections is not None:
         _with_channel_connections(config, enabled=channel_connections)
-    with pytest.raises(SystemExit, match="tracing snapshots"):
-        _enforce_credentials_key(config)
+    _enforce_credentials_key(config)
 
 
 def test_multi_worker_without_a_declaration_shares_the_generated_key_file(monkeypatch):

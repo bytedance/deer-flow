@@ -1,7 +1,10 @@
 ### Tracing System (`packages/harness/deerflow/tracing/`)
 
-**Agent-scoped control plane**: `profiles.py` resolves encrypted immutable
-snapshots from `persistence/tracing_profiles`. New durable admissions validate
+**Agent-scoped control plane**: `profiles.py` resolves immutable snapshots from
+`persistence/tracing_profiles`; credentials are encrypted, and completely off
+snapshots use strictly validated `no-export:v1:` payloads without loading a key.
+Load tracing keys lazily with the shared-key topology gate. Never convert a
+decryption failure or missing reference into an off snapshot. New admissions validate
 head revisions under the same SQL fence used by profile/binding writes; queued
 and resumed work restores a trusted historical reference. Never persist the
 decrypted `RunTracingSnapshot` in runtime config or checkpoint metadata.

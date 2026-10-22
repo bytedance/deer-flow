@@ -40,7 +40,7 @@ from app.gateway.internal_auth import (
 from app.gateway.knowledge_scope_admission import admit_message_knowledge_scope
 from app.gateway.run_models import RunCreateRequest
 from app.gateway.run_origin import resolve_request_origin
-from app.gateway.tracing_admission import admit_run_tracing
+from app.gateway.tracing_admission import admit_run_tracing, release_unused_tracing_capture
 from app.gateway.utils import sanitize_log_param
 from app.mcp_tasks.errors import PermanentNotificationError
 from deerflow.agents.human_input import read_human_input_response
@@ -2575,16 +2575,20 @@ async def start_run(
                         run_id=admission_run_id,
                     )
                 except RunIdempotencyUnsupported as exc:
+                    await release_unused_tracing_capture(run_metadata, user_id=str(tracing_user_id), app_config=run_ctx.app_config)
                     raise HTTPException(status_code=503, detail=str(exc)) from exc
                 except TracingControlError as exc:
+                    await release_unused_tracing_capture(run_metadata, user_id=str(tracing_user_id), app_config=run_ctx.app_config)
                     raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)}) from None
                 except RunIdempotencyKeyMismatch as exc:
+                    await release_unused_tracing_capture(run_metadata, user_id=str(tracing_user_id), app_config=run_ctx.app_config)
                     # A trusted internal key is scoped by owner, not thread: the
                     # same message requested on another thread (IM ``/new``) is
                     # a different request for the run already admitted.
                     raise HTTPException(status_code=409, detail="Idempotency-Key already used with a different request") from exc
 
                 if record.idempotency_reused:
+                    await release_unused_tracing_capture(run_metadata, user_id=str(tracing_user_id), app_config=run_ctx.app_config)
                     stored = record.kwargs or {}
                     stored_input = stored.get("input")
                     stored_idempotency_request = record.idempotency_request or _legacy_stored_idempotency_request(stored)
@@ -2637,6 +2641,7 @@ async def start_run(
                     )
                     raise
         except ConflictError as exc:
+            await release_unused_tracing_capture(run_metadata, user_id=str(tracing_user_id), app_config=run_ctx.app_config)
             raise BusyThreadConflict(str(exc)) from exc
         except UnsupportedStrategyError as exc:
             raise HTTPException(status_code=501, detail=str(exc)) from exc

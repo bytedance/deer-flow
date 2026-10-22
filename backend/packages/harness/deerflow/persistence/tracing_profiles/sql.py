@@ -3,7 +3,7 @@
 from collections.abc import Mapping
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session, sessionmaker
@@ -129,7 +129,20 @@ class SqlTracingProfileRepository:
         with self._sf() as session:
             return session.scalar(select(UserRow.system_role).where(UserRow.id == user_id, UserRow.disabled.is_(False))) == "admin"
 
-    def save_snapshot(self, snapshot_id: str, owner_user_id: str, agent_name: str, payload_ciphertext: str, *, mode: str, binding_revision: int, profile_id: str | None, profile_revision: int | None, agent_incarnation: str) -> None:
+    def save_snapshot(
+        self,
+        snapshot_id: str,
+        owner_user_id: str,
+        agent_name: str,
+        payload_ciphertext: str,
+        *,
+        mode: str,
+        binding_revision: int,
+        profile_id: str | None,
+        profile_revision: int | None,
+        agent_incarnation: str,
+        retention_state: str = "unmanaged",
+    ) -> None:
         with self._sf.begin() as session:
             session.add(
                 RunTracingSnapshotRow(
@@ -142,6 +155,7 @@ class SqlTracingProfileRepository:
                     profile_id=profile_id,
                     profile_revision=profile_revision,
                     agent_incarnation=agent_incarnation,
+                    retention_state=retention_state,
                 )
             )
 
@@ -150,7 +164,62 @@ class SqlTracingProfileRepository:
             row = session.get(RunTracingSnapshotRow, snapshot_id)
             if row is None:
                 return None
-            return {"owner_user_id": row.owner_user_id, "agent_name": row.agent_name, "payload_ciphertext": row.payload_ciphertext}
+            return {"owner_user_id": row.owner_user_id, "agent_name": row.agent_name, "payload_ciphertext": row.payload_ciphertext, "retention_state": row.retention_state}
+
+    def release_snapshot(self, snapshot_id: str, owner_user_id: str) -> bool:
+        with self._sf.begin() as session:
+            _lock_admission_fence(session)
+            result = session.execute(
+                update(RunTracingSnapshotRow)
+                .where(RunTracingSnapshotRow.snapshot_id == snapshot_id, RunTracingSnapshotRow.owner_user_id == owner_user_id, RunTracingSnapshotRow.retention_state == "pending")
+                .values(retention_state="released")
+            )
+            return result.rowcount == 1
+
+    def protect_snapshot(self, snapshot_id: str, owner_user_id: str) -> bool:
+        from deerflow.tracing.profiles import TracingAuthorizationError, TracingUnavailableError
+
+        with self._sf.begin() as session:
+            _lock_admission_fence(session)
+            snapshot = session.execute(select(RunTracingSnapshotRow.owner_user_id, RunTracingSnapshotRow.retention_state).where(RunTracingSnapshotRow.snapshot_id == snapshot_id)).first()
+            if snapshot is None or snapshot.retention_state not in {"pending", "published", "unmanaged"}:
+                raise TracingUnavailableError("The run tracing snapshot is unavailable")
+            if snapshot.owner_user_id != owner_user_id:
+                raise TracingAuthorizationError("The tracing snapshot belongs to another execution scope")
+            if snapshot.retention_state != "unmanaged":
+                result = session.execute(update(RunTracingSnapshotRow).where(RunTracingSnapshotRow.snapshot_id == snapshot_id, RunTracingSnapshotRow.owner_user_id == owner_user_id).values(retention_state="unmanaged"))
+                if result.rowcount != 1:
+                    raise TracingUnavailableError("The run tracing snapshot is unavailable")
+            return True
+
+    def protect_history(self) -> int:
+        with self._sf.begin() as session:
+            _lock_admission_fence(session)
+            result = session.execute(update(RunTracingSnapshotRow).where(RunTracingSnapshotRow.retention_state.in_(("pending", "published"))).values(retention_state="unmanaged"))
+            return result.rowcount
+
+
+async def _read_admission_fence(session: AsyncSession) -> None:
+    """Admissions share the authority; configuration edits retain its writer lock."""
+    connection = await session.connection()
+    if connection.dialect.name == "sqlite":
+        raw = await connection.get_raw_connection()
+        if raw.driver_connection.in_transaction:
+            # A caller may already own a writer, or an explicit deferred read
+            # transaction. Reserve its writer without nesting BEGIN; a stale
+            # SQLite read snapshot cannot upgrade and must fail closed.
+            result = await session.execute(update(TracingAdmissionFenceRow).where(TracingAdmissionFenceRow.id == 1).values(version=TracingAdmissionFenceRow.version + 1))
+            available = result.rowcount == 1
+        else:
+            # SQLAlchemy autobegin alone does not start a SQLite transaction.
+            await session.execute(text("BEGIN IMMEDIATE"))
+            available = await session.scalar(select(TracingAdmissionFenceRow.id).where(TracingAdmissionFenceRow.id == 1)) == 1
+    else:
+        available = await session.scalar(select(TracingAdmissionFenceRow.id).where(TracingAdmissionFenceRow.id == 1).with_for_update(read=True)) == 1
+    if not available:
+        from deerflow.tracing.profiles import TracingUnavailableError
+
+        raise TracingUnavailableError("Tracing admission authority is unavailable")
 
 
 async def validate_tracing_admission(session: AsyncSession, metadata: Mapping[str, Any] | None, *, owner_user_id: str | None = None, agent_name: str | None = None) -> None:
@@ -172,10 +241,8 @@ async def validate_tracing_admission(session: AsyncSession, metadata: Mapping[st
         return
     if not isinstance(snapshot_id, str) or not snapshot_id or not isinstance(recorded_agent, str):
         raise TracingUnavailableError("The run tracing snapshot is unavailable")
-    # This must be the transaction's first write, before run/change-clock locks.
-    result = await session.execute(update(TracingAdmissionFenceRow).where(TracingAdmissionFenceRow.id == 1).values(version=TracingAdmissionFenceRow.version + 1))
-    if result.rowcount != 1:
-        raise TracingUnavailableError("Tracing admission authority is unavailable")
+    # Acquire authority before run/change-clock/task locks and retain to commit.
+    await _read_admission_fence(session)
     snapshot = (
         await session.execute(
             select(
@@ -186,15 +253,16 @@ async def validate_tracing_admission(session: AsyncSession, metadata: Mapping[st
                 RunTracingSnapshotRow.profile_id,
                 RunTracingSnapshotRow.profile_revision,
                 RunTracingSnapshotRow.agent_incarnation,
+                RunTracingSnapshotRow.retention_state,
             ).where(RunTracingSnapshotRow.snapshot_id == snapshot_id)
         )
     ).first()
-    if snapshot is None:
+    if snapshot is None or snapshot.retention_state == "released":
         raise TracingUnavailableError("The run tracing snapshot is unavailable")
     owner = owner_user_id if owner_user_id is not None else get_effective_user_id()
     if snapshot.owner_user_id != owner or snapshot.agent_name != canonical_agent_name(recorded_agent) or (agent_name is not None and snapshot.agent_name != canonical_agent_name(agent_name)):
         raise TracingAuthorizationError("The tracing snapshot belongs to another execution scope")
-    binding = await session.get(AgentTracingBindingRow, (snapshot.owner_user_id, snapshot.agent_name))
+    binding = await session.get(AgentTracingBindingRow, (snapshot.owner_user_id, snapshot.agent_name), populate_existing=True)
     current = _binding(binding)
     if current["agent_incarnation"] != snapshot.agent_incarnation:
         raise TracingConflictError("The Agent was replaced; retry with the current Agent")
@@ -217,11 +285,12 @@ async def validate_tracing_admission(session: AsyncSession, metadata: Mapping[st
             raise TracingConflictError("The Agent is unavailable; reload its configuration") from None
         if identity != snapshot.agent_incarnation:
             raise TracingConflictError("The Agent was replaced; retry with the current Agent")
-    if metadata.get("deerflow_tracing_pinned") is True:
-        return
-    if (current["revision"], current["mode"], current["profile_id"]) != (snapshot.binding_revision, snapshot.mode, snapshot.profile_id):
-        raise TracingConflictError("Tracing configuration changed; retry the run")
-    if snapshot.profile_id is not None:
-        profile_revision = await session.scalar(select(TracingProfileRow.revision).where(TracingProfileRow.id == snapshot.profile_id))
-        if profile_revision is None or profile_revision != snapshot.profile_revision:
+    if metadata.get("deerflow_tracing_pinned") is not True:
+        if (current["revision"], current["mode"], current["profile_id"]) != (snapshot.binding_revision, snapshot.mode, snapshot.profile_id):
             raise TracingConflictError("Tracing configuration changed; retry the run")
+        if snapshot.profile_id is not None:
+            profile_revision = await session.scalar(select(TracingProfileRow.revision).where(TracingProfileRow.id == snapshot.profile_id))
+            if profile_revision is None or profile_revision != snapshot.profile_revision:
+                raise TracingConflictError("Tracing configuration changed; retry the run")
+    if snapshot.retention_state == "pending":
+        await session.execute(update(RunTracingSnapshotRow).where(RunTracingSnapshotRow.snapshot_id == snapshot_id, RunTracingSnapshotRow.retention_state == "pending").values(retention_state="published"))

@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from deerflow.persistence import bootstrap
 from deerflow.persistence.run.model import RunRow
 
-HEAD = "0048_merge_tracing_mcp_oauth"
+HEAD = "0049_tracing_retention"
 TRACING = "0047_tracing_profiles"
 OAUTH = "0047_mcp_oauth_tokens"
 pytestmark = pytest.mark.asyncio

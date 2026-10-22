@@ -179,6 +179,6 @@ async def test_bootstrap_provisions_the_table_on_an_empty_database(tmp_path):
         await bootstrap.bootstrap_schema(engine, backend="sqlite")
         assert set((await _shape(engine))["columns"]) == COLUMNS
         async with engine.connect() as conn:
-            assert (await conn.execute(sa.text("SELECT version_num FROM alembic_version"))).scalar_one() == "0048_merge_tracing_mcp_oauth"
+            assert (await conn.execute(sa.text("SELECT version_num FROM alembic_version"))).scalar_one() == "0049_tracing_retention"
     finally:
         await engine.dispose()

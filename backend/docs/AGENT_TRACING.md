@@ -13,11 +13,19 @@ running Gateway's engine intact. The memory backend preserves environment-based 
 and reports profile management as unavailable; it cannot persist profile edits.
 
 Profiles, credential versions, Agent bindings, and resolved run snapshots use
-the application database. Declared multi-instance deployments require the same
-`DEER_FLOW_CREDENTIALS_KEY` on every replica. A single local instance can use
-the automatically generated runtime-home key file without that environment
-variable. Back up the key with the database. Keep old encryption
-keys available while historical runs still need their snapshots.
+the application database. Completely untraced decisions use the versioned,
+non-secret `no-export:v1:` format, retaining their original recovery references
+without loading or generating an encryption key. An empty profile list or
+inherit/disabled binding also needs no tracing key. Other enabled features can
+independently require a deployment credentials key.
+
+Saving a profile or reading encrypted credentials loads the key on demand.
+Declared multi-instance deployments, including a multi-instance scheduler,
+require the same `DEER_FLOW_CREDENTIALS_KEY` on every replica before those
+operations. A single instance can use its automatically generated runtime-home
+key file. Back it up with the database and retain old keys while historical
+encrypted snapshots need them. Old ciphertext still requires its original key;
+a missing key or failed decryption never becomes an untraced decision.
 
 ## Configure and select a profile
 
@@ -75,9 +83,14 @@ the unsaved draft so it can be copied before reopening the latest revision.
 Every new admission reads the authoritative binding and profile. A shared
 database fence orders profile activation against durable run/queue admission;
 if the selected revision changes during admission, the request is rejected for
-retry. Notifications and process caches are not the source of truth.
+retry. PostgreSQL admissions hold compatible `FOR SHARE` locks, while profile
+and binding edits retain exclusive access. SQLite reserves its ordinary writer
+transaction before reading; the normal admission path does not update the
+fence counter. Existing explicit transactions retain conservative writer
+reservation. Notifications and process caches are not the source of truth.
 
-A run keeps an encrypted immutable snapshot. Persisted run data, checkpoints
+A run keeps an immutable snapshot; provider credentials remain encrypted.
+Persisted run data, checkpoints
 and background-batch specifications contain references, not decrypted secrets.
 Delegated work, queued occurrences, and resumptions recover that snapshot;
 independent new runs resolve the current configuration. Missing snapshots,
@@ -123,12 +136,52 @@ stored digest; unrelated environment changes can still block those historical
 runs. Deploy compatible workers together when introducing a new format; older
 workers fail closed on snapshots they cannot validate.
 
-Profile revisions and encrypted snapshots are retained for recovery. There is
-no automatic history garbage collection; include these tables in database
-capacity planning and backup retention.
 Fully untraced durable runs retain an explicit frozen snapshot as well. Missing
 references mean legacy/unmanaged execution, so omitting an empty snapshot could
 let a queued or resumed run adopt subsequently enabled global tracing.
+The non-secret format also requires compatible workers: an older worker cannot
+restore it and fails closed. Upgrade workers together before admitting runs in
+the new format.
+
+## Unused history maintenance
+
+Run cleanup manually in an idle maintenance window, using the deployment's
+normal configuration. It needs database access, without decrypting credentials:
+
+```bash
+deerflow tracing cleanup --config /path/to/config.yaml --dry-run
+deerflow tracing cleanup --config /path/to/config.yaml --apply --older-than-days 7 --limit 100
+```
+
+Preview is the default. `--apply` deletes at most the shared `--limit` across
+snapshots and unused profile versions. The age threshold applies to snapshots;
+profile versions have no timestamp and are retained by reachability instead.
+Current profile heads and every version referenced by a retained snapshot stay
+protected. Binding tombstones and admission authority are never cleanup targets.
+
+Snapshot cleanup requires the standard checkpointer in the same application
+database and valid reference-table schemas/metadata. It retains references in
+all run states, scheduled occurrences, background batches and checkpoint
+namespaces, including branch checkpoints without a run row. Active thread
+operations or live worker leases defer snapshot cleanup. Legacy/separate savers,
+missing tables and unreadable metadata produce an explicit skip reason.
+
+Only old `published` or explicitly `released` captures are eligible. New durable
+admission publishes its capture in the same transaction as its run or queue row.
+Known refusals and idempotent reuse release only their unused fresh capture;
+unknown commit outcomes and cancellations remain protected. Migrated history,
+embedded sessions and captures from separate checkpointers remain `unmanaged`;
+in-flight captures remain `pending`. Cleanup does not infer that any of these
+are unused from age or an absent run row. It leaves them for an operator who can
+establish their complete lifecycle.
+Starting a Gateway with a separate saver also protects existing published
+history. Restoring through an unknown saver permanently protects that snapshot;
+later configuration reloads do not make those records eligible again.
+
+Reference checks can scan retained history while holding admission locks;
+`--limit` bounds deletions, not scan time. There is no automatic cleanup timer.
+The JSON report distinguishes preview candidates, actual deletions and a
+snapshot skip reason; exit status 2 indicates deferred snapshot cleanup.
 
 ## API
 

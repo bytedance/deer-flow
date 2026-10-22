@@ -1,4 +1,4 @@
-"""Tracing control plane and encrypted, immutable admission snapshots.
+"""Tracing control plane and immutable admission snapshots with encrypted credentials.
 
 All public functions perform blocking storage I/O. Async callers must offload them.
 Raw credentials are decrypted only for execution; public projections never carry them.
@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import re
+from collections.abc import Callable
 from ipaddress import ip_address, ip_network
 from typing import Literal
 from urllib.parse import urlsplit
@@ -26,6 +27,7 @@ TracingMode = Literal["inherit", "disabled", "configured"]
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
 _PRIVATE_COLLECTOR_NETWORKS = tuple(ip_network(network) for network in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7"))
 _MONOCLE_FINGERPRINT_PREFIX = "monocle-v2:"
+_NO_EXPORT_SNAPSHOT_PREFIX = "no-export:v1:"
 logger = logging.getLogger(__name__)
 
 
@@ -202,12 +204,24 @@ def validate_snapshot_environment(snapshot: RunTracingSnapshot) -> None:
 
 
 class TracingProfileService:
-    def __init__(self, repository: SqlTracingProfileRepository, cipher: CredentialsCipher, *, identity_resolver=None) -> None:
+    def __init__(self, repository: SqlTracingProfileRepository, cipher: CredentialsCipher | None = None, *, cipher_factory: Callable[[], CredentialsCipher] | None = None, identity_resolver=None) -> None:
         self.repository = repository
-        self.cipher = cipher
+        self._cipher = cipher
+        self._cipher_factory = cipher_factory or get_credentials_cipher
         from deerflow.persistence.tracing_profiles.identity import resolve_agent_incarnation
 
         self.identity_resolver = identity_resolver or resolve_agent_incarnation
+
+    @property
+    def cipher(self) -> CredentialsCipher:
+        if self._cipher is None:
+            try:
+                self._cipher = self._cipher_factory()
+            except TracingControlError:
+                raise
+            except Exception:
+                raise TracingUnavailableError("Tracing credentials encryption is unavailable") from None
+        return self._cipher
 
     def _state(self, name: str, owner: str) -> tuple[dict, dict | None]:
         try:
@@ -326,18 +340,26 @@ class TracingProfileService:
             result.update(can_select=False, error="tracing_operator_lock")
         return result
 
-    def resolve_snapshot(self, agent_name: str | None, user_id: str, *, snapshot_id: str | None = None) -> RunTracingSnapshot:
+    def resolve_snapshot(self, agent_name: str | None, user_id: str, *, snapshot_id: str | None = None, managed_admission: bool = False) -> RunTracingSnapshot:
         agent_name = canonical_agent_name(agent_name)
         if snapshot_id is not None:
             row = self.repository.get_snapshot(snapshot_id)
-            if row is None:
+            if row is None or row["retention_state"] == "released":
                 raise TracingUnavailableError("The admitted tracing snapshot is unavailable")
             if row["owner_user_id"] != user_id or row["agent_name"] != agent_name:
                 raise TracingAuthorizationError("Tracing snapshot belongs to another execution scope")
             try:
-                snapshot = RunTracingSnapshot.model_validate_json(self.cipher.decrypt_text(row["payload_ciphertext"]))
+                payload = row["payload_ciphertext"]
+                if payload.startswith("no-export:"):
+                    if not payload.startswith(_NO_EXPORT_SNAPSHOT_PREFIX):
+                        raise ValueError("Unknown no-export snapshot format")
+                    snapshot = RunTracingSnapshot.model_validate_json(payload.removeprefix(_NO_EXPORT_SNAPSHOT_PREFIX), strict=True)
+                    if snapshot.mode not in {"inherit", "disabled"} or snapshot.providers or snapshot.monocle_enabled or snapshot.monocle_fingerprint:
+                        raise ValueError("Invalid no-export snapshot")
+                else:
+                    snapshot = RunTracingSnapshot.model_validate_json(self.cipher.decrypt_text(payload))
             except (CredentialsDecryptError, ValueError, TypeError):
-                raise TracingUnavailableError("The admitted tracing snapshot cannot be decrypted") from None
+                raise TracingUnavailableError("The admitted tracing snapshot cannot be restored") from None
             if snapshot.snapshot_id != snapshot_id or snapshot.owner_user_id != user_id or snapshot.agent_name != agent_name:
                 raise TracingUnavailableError("The admitted tracing snapshot is invalid")
             current, _ = self._state(agent_name, user_id)
@@ -361,22 +383,26 @@ class TracingProfileService:
             agent_incarnation=binding["agent_incarnation"],
         )
         payload = {**snapshot.model_dump(exclude={"providers"}), "providers": [_provider_payload(item) for item in providers]}
+        serialized = json.dumps(payload)
+        stored_payload = _NO_EXPORT_SNAPSHOT_PREFIX + serialized if not providers and not monocle and snapshot.mode in {"inherit", "disabled"} else self.cipher.encrypt_text(serialized)
         self.repository.save_snapshot(
             snapshot.snapshot_id,
             user_id,
             agent_name,
-            self.cipher.encrypt_text(json.dumps(payload)),
+            stored_payload,
             mode=binding["mode"],
             binding_revision=binding["revision"],
             profile_id=binding["profile_id"],
             profile_revision=profile["revision"] if profile is not None else None,
             agent_incarnation=binding["agent_incarnation"],
+            retention_state="pending" if managed_admission else "unmanaged",
         )
         return snapshot
 
 
 def get_profile_service(*, app_config=None) -> TracingProfileService:
     from deerflow.config.app_config import get_app_config
+    from deerflow.config.credentials_key import get_tracing_credentials_cipher
     from deerflow.persistence.agents.sql import get_sync_sessionmaker
     from deerflow.persistence.tracing_profiles.identity import resolve_agent_incarnation
 
@@ -386,7 +412,7 @@ def get_profile_service(*, app_config=None) -> TracingProfileService:
             raise TracingUnavailableError("Tracing profiles require SQLite on one node or shared PostgreSQL across replicas")
         return TracingProfileService(
             SqlTracingProfileRepository(get_sync_sessionmaker(config.database.app_sync_sqlalchemy_url)),
-            get_credentials_cipher(),
+            cipher_factory=lambda: get_tracing_credentials_cipher(config),
             identity_resolver=lambda name, owner: resolve_agent_incarnation(name, owner, app_config=config),
         )
     except TracingControlError:
@@ -395,15 +421,54 @@ def get_profile_service(*, app_config=None) -> TracingProfileService:
         raise TracingUnavailableError("Tracing storage or the deployment credentials key is unavailable") from None
 
 
-def resolve_run_snapshot(agent_name: str | None, user_id: str, *, snapshot_id: str | None = None, app_config=None) -> RunTracingSnapshot | None:
+def resolve_run_snapshot(agent_name: str | None, user_id: str, *, snapshot_id: str | None = None, managed_admission: bool = False, app_config=None) -> RunTracingSnapshot | None:
     from deerflow.config.app_config import get_app_config
 
     try:
         config = app_config if app_config is not None else get_app_config()
         if config.database.backend == "memory" and snapshot_id is None:
             return None
-        return get_profile_service(app_config=config).resolve_snapshot(agent_name, user_id, snapshot_id=snapshot_id)
+        # A separate saver can retain references invisible to application SQL GC.
+        managed_admission = managed_admission and config.checkpointer is None and config.database.backend in {"sqlite", "postgres"}
+        return get_profile_service(app_config=config).resolve_snapshot(agent_name, user_id, snapshot_id=snapshot_id, managed_admission=managed_admission)
     except TracingControlError:
         raise
     except Exception:
         raise TracingUnavailableError("Tracing authority is unavailable; the run was not admitted") from None
+
+
+def release_run_snapshot(snapshot_id: str, user_id: str, *, app_config=None) -> bool:
+    """Release only a fresh capture whose admission was definitively rejected."""
+    try:
+        return get_profile_service(app_config=app_config).repository.release_snapshot(snapshot_id, user_id)
+    except TracingControlError:
+        raise
+    except Exception:
+        raise TracingUnavailableError("Tracing snapshot release is unavailable") from None
+
+
+def protect_run_snapshot(snapshot_id: str, user_id: str, *, app_config=None) -> bool:
+    """Keep a recovered snapshot when its saver lies outside SQL GC authority."""
+    from deerflow.config.app_config import get_app_config
+
+    try:
+        config = app_config if app_config is not None else get_app_config()
+        if config.database.backend == "memory":
+            return False
+        return get_profile_service(app_config=config).repository.protect_snapshot(snapshot_id, user_id)
+    except TracingControlError:
+        raise
+    except Exception:
+        raise TracingUnavailableError("Tracing snapshot protection is unavailable") from None
+
+
+def protect_tracing_history(app_config) -> int:
+    """Preserve existing captures before a saver outside SQL GC authority starts."""
+    try:
+        if app_config.database.backend == "memory":
+            return 0
+        return get_profile_service(app_config=app_config).repository.protect_history()
+    except TracingControlError:
+        raise
+    except Exception:
+        raise TracingUnavailableError("Tracing history protection is unavailable") from None

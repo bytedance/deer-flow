@@ -1,6 +1,8 @@
 """Tracing configuration is independent of portable Agent definition documents."""
 
-from sqlalchemy import JSON, BigInteger, Integer, String, Text, event
+from datetime import UTC, datetime
+
+from sqlalchemy import JSON, BigInteger, DateTime, Index, Integer, String, Text, event, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from deerflow.persistence.base import Base
@@ -49,6 +51,10 @@ class RunTracingSnapshotRow(Base):
     profile_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     profile_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
     payload_ciphertext: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC), server_default=func.current_timestamp())
+    retention_state: Mapped[str] = mapped_column(String(16), default="unmanaged", server_default="unmanaged")
+
+    __table_args__ = (Index("ix_run_tracing_snapshots_retention", "retention_state", "created_at"),)
 
 
 class TracingAdmissionFenceRow(Base):

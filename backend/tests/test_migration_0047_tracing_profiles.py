@@ -48,6 +48,9 @@ async def test_tracing_schema_matches_orm_for_fresh_and_upgraded_database(tmp_pa
         if existing:
             await asyncio.to_thread(command.upgrade, cfg, PREVIOUS)
             await asyncio.to_thread(command.upgrade, cfg, REVISION)
+            async with engine.connect() as connection:
+                assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == REVISION
+            await asyncio.to_thread(command.upgrade, cfg, "head")
         else:
             await bootstrap.bootstrap_schema(engine, backend=backend, postgres_schema=schema)
         async with engine.connect() as connection:
@@ -62,7 +65,7 @@ async def test_tracing_schema_matches_orm_for_fresh_and_upgraded_database(tmp_pa
                 return compare_metadata(context, Base.metadata)
 
             assert await connection.run_sync(diff) == []
-            assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == (REVISION if existing else "0048_merge_tracing_mcp_oauth")
+            assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == "0049_tracing_retention"
         await asyncio.to_thread(command.downgrade, cfg, PREVIOUS)
         async with engine.connect() as connection:
             assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == PREVIOUS

@@ -1,5 +1,13 @@
 # Persistence lifecycle
 
+Tracing cleanup is an explicit maintenance operation. Its fence and run-clock
+locks exclude new admissions; active operations and live worker leases defer
+snapshot deletion. Preserve run, queue, batch and all-namespace checkpoint
+references through parsed JSON, never raw text matching. Only known unified-SQL
+captures published transactionally or explicitly released are eligible;
+unmanaged and pending captures remain protected. See
+[`AGENT_TRACING.md`](../../../../docs/AGENT_TRACING.md).
+
 Embedded clients bootstrap the application schema before their first durable
 conversation through a temporary engine. Reuse the shared migration state machine
 and connection settings; never replace or close the Gateway's global engine.

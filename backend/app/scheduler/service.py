@@ -34,6 +34,7 @@ from deerflow.scheduler.schedules import next_run_at
 from deerflow.scheduler.stop_rule import launch_prompt
 from deerflow.trace_context import ensure_trace_context
 from deerflow.tracing.profiles import TracingControlError
+from deerflow.utils.file_io import await_drained
 from deerflow.utils.thread_id import validate_thread_id
 
 logger = logging.getLogger(__name__)
@@ -225,6 +226,7 @@ class ScheduledTaskService:
         own_stop_available: bool | None = None,
         resolve_human_input_request: Callable[[RunRecord], Any] | None = None,
         resolve_tracing_snapshot: Callable[[str | None, str], Any] | None = None,
+        release_tracing_snapshot: Callable[[str, str], Any] | None = None,
     ) -> None:
         self._task_repo = task_repo
         self._task_run_repo = task_run_repo
@@ -247,6 +249,7 @@ class ScheduledTaskService:
         self._notification_repo = notification_repo
         self._resolve_human_input_request = resolve_human_input_request
         self._resolve_tracing_snapshot = resolve_tracing_snapshot
+        self._release_tracing_snapshot = release_tracing_snapshot
         # Whether scheduled runs get stop_scheduled_task (scheduler.tool_enabled).
         # Decides how a launch phrases the user's stop rule (stop_rule.launch_prompt).
         # None (production) reads the live config at each launch, the same source
@@ -574,6 +577,7 @@ class ScheduledTaskService:
             return self._existing_active_result(active, execution_thread_id, trigger=trigger)
 
         task_run_id = f"task-run-{uuid.uuid4().hex}"
+        tracing_snapshot = None
         try:
             tracing_snapshot = await asyncio.to_thread(self._resolve_tracing_snapshot, task.get("assistant_id"), task["user_id"]) if self._resolve_tracing_snapshot is not None else None
             tracing_refs = snapshot_references(tracing_snapshot)
@@ -593,10 +597,12 @@ class ScheduledTaskService:
                 tracing_snapshot_refs=tracing_refs,
             )
         except TracingControlError as exc:
+            await self._release_unused_tracing_capture(tracing_snapshot, task["user_id"])
             if trigger == "scheduled":
                 await self._release_admission_lease(task, trigger=trigger)
             return {"outcome": "failed", "task_run_id": None, "run_id": None, "thread_id": execution_thread_id, "error": str(exc)}
         except ActiveScheduledRunConflict:
+            await self._release_unused_tracing_capture(tracing_snapshot, task["user_id"])
             active = await self._task_run_repo.get_active_run(task["id"])
             if trigger == "scheduled":
                 await self._release_admission_lease(task, trigger=trigger)
@@ -604,6 +610,7 @@ class ScheduledTaskService:
                 return self._active_run_conflict_result(execution_thread_id)
             return self._existing_active_result(active, execution_thread_id, trigger=trigger)
         except ScheduledTaskAdmissionRejected as exc:
+            await self._release_unused_tracing_capture(tracing_snapshot, task["user_id"])
             if exc.reason == "ended":
                 return {"outcome": "completed", "task_run_id": None, "run_id": None, "thread_id": execution_thread_id, "error": None}
             if exc.reason == "not_found":
@@ -633,6 +640,15 @@ class ScheduledTaskService:
             "tracing_snapshot_refs": tracing_refs,
         }
         return await self._attempt_queued_run(task, queued, now=now)
+
+    async def _release_unused_tracing_capture(self, snapshot: Any, user_id: str) -> None:
+        snapshot_id = getattr(snapshot, "snapshot_id", None)
+        if not isinstance(snapshot_id, str) or self._release_tracing_snapshot is None:
+            return
+        try:
+            await await_drained(asyncio.to_thread(self._release_tracing_snapshot, snapshot_id, user_id))
+        except Exception as exc:
+            logger.warning("Unused scheduled tracing capture remains protected (%s)", type(exc).__name__)
 
     async def _release_admission_lease(self, task: dict[str, Any], *, trigger: str) -> None:
         status = "enabled" if trigger == "scheduled" else (task.get("status") or "enabled")

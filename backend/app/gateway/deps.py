@@ -299,14 +299,10 @@ def credentials_key_consumers(config: AppConfig) -> list[str]:
     it. The Gateway loads the key at startup only when this list is non-empty,
     and the multi-instance gate below refuses a missing key only for these
     features, so a deployment that stores no credentials keeps booting without
-    one. Personal MCP OAuth connections are saved at runtime, so they cannot be
-    listed here; their store loads the key on first use.
+    one. Personal MCP OAuth connections and Agent tracing profiles can be saved
+    at runtime; their stores load the key on the first credential operation.
     """
     consumers: list[str] = []
-    if getattr(getattr(config, "database", None), "backend", None) in {"sqlite", "postgres"}:
-        # Every durable run freezes inherited tracing too. Snapshot ciphertext
-        # must remain readable after a restart and on every Gateway replica.
-        consumers.append(f"database.backend={config.database.backend} (tracing snapshots)")
     connections = getattr(config, "channel_connections", None)
     if connections is not None and getattr(connections, "enabled", False):
         # ChannelConnectionRepository encrypts per-connection credentials, and
@@ -348,8 +344,7 @@ def _enforce_credentials_key(config: AppConfig) -> None:
         return
     enabled = ", ".join(consumers)
     disabled = ", ".join(consumer.removesuffix("=true") + "=false" for consumer in consumers if consumer.endswith("=true"))
-    # Disabling channel connections cannot disable durable run snapshots.
-    disable_hint = f", or set {disabled}" if disabled and all(consumer.endswith("=true") for consumer in consumers) else ""
+    disable_hint = f", or set {disabled}" if disabled else ""
     raise SystemExit(
         f"{declaration.knob} with {enabled} requires {CREDENTIALS_KEY_ENV_VAR}: without it every instance generates its own "
         f"{{base_dir}}/{CREDENTIALS_KEY_FILENAME}, and credentials one instance stores cannot be decrypted on its peers. "

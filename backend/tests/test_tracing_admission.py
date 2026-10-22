@@ -7,6 +7,15 @@ from types import SimpleNamespace
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def memory_configuration():
+    from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
+
+    set_app_config(AppConfig.model_validate({"sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"}, "database": {"backend": "memory"}}))
+    yield
+    reset_app_config()
+
+
 def _admission():
     assert importlib.util.find_spec("app.gateway.tracing_admission") is not None, "Gateway tracing admission is not implemented"
     return importlib.import_module("app.gateway.tracing_admission")
@@ -18,7 +27,7 @@ async def test_new_admission_replaces_every_forged_tracing_reference(monkeypatch
     frozen = SimpleNamespace(snapshot_id="new-snapshot", agent_name="researcher")
     seen = []
 
-    def resolve(agent_name, user_id):
+    def resolve(agent_name, user_id, **kwargs):
         seen.append((agent_name, user_id))
         return frozen
 
