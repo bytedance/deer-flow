@@ -131,6 +131,13 @@ _SHELL_NOEXEC_RE = re.compile(r"(?:^|\s)(?:-n|--noexec)(?=\s|$)")
 _SHELL_INTERPRETER_RE = re.compile(r"^(?:ba|da|k|z)?sh$")
 _STDIN_INTERPRETER_HEAD_RE = re.compile(rf"^{_COMMAND_POSITION_PREFIX}({_CODE_STRING_INTERPRETERS})\s+({_STDIN_SCRIPT_FLAGS})(?=<\s*<\s*\()")
 
+# An interpreter handed a process substitution as its *operand* (`bash <(curl u)`)
+# runs the fetched bytes as the program; the substitution is a filename, not a
+# redirect. A script operand in front (`bash script.sh <(curl u)`) keeps it an
+# ordinary argument, and a noexec shell (`bash -n <(curl u)`) only parses it.
+_PROCESS_SUBSTITUTION_RE = re.compile(rf"<\s*\(\s*{_RISKY_SUBSTITUTION_EXECUTABLES}[^)]*\)")
+_PROCESS_SUBSTITUTION_PROGRAM_RE = re.compile(rf"^{_COMMAND_POSITION_PREFIX}({_CODE_STRING_INTERPRETERS})\s+({_STDIN_SCRIPT_FLAGS})(?=<\s*\()")
+
 
 def _stdin_program_substitution(command: str) -> bool:
     """Return True when *command* feeds a fetched program to an interpreter on stdin.
@@ -150,6 +157,21 @@ def _stdin_program_substitution(command: str) -> bool:
     if substitution is None:
         return False
     return bool(_STDIN_TRAILING_OPERATOR_RE.match(rest[substitution.end() :]))
+
+
+def _process_substitution_program(command: str) -> bool:
+    """Return True when *command* hands a fetched process substitution to an interpreter as its program.
+
+    The interpreter must be in command position and the substitution its first
+    operand: a script operand in front keeps it an argument, and a shell in
+    noexec mode only parses it.
+    """
+    head = _PROCESS_SUBSTITUTION_PROGRAM_RE.match(command)
+    if head is None:
+        return False
+    if _SHELL_INTERPRETER_RE.match(head.group(1)) and _SHELL_NOEXEC_RE.search(head.group(2)):
+        return False
+    return bool(_PROCESS_SUBSTITUTION_RE.match(command[head.end() :]))
 
 
 _MEDIUM_RISK_PATTERNS: list[re.Pattern[str]] = [
@@ -366,6 +388,9 @@ def _classify_single_command(command: str) -> str:
         return "block"
 
     if _stdin_program_substitution(normalized):
+        return "block"
+
+    if _process_substitution_program(normalized):
         return "block"
 
     # Also try shlex-parsed tokens for high-risk detection
