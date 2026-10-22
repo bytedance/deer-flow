@@ -226,6 +226,45 @@ def test_user_scoped_write_creates_subdirectory(tmp_path, user_storage):
     assert (tmp_path / "users" / "test-user" / "skills" / "custom" / "demo-skill" / "references" / "ref.md").read_bytes() == content.encode("utf-8")
 
 
+def test_both_storage_backends_publish_identical_bytes(tmp_path, storage, user_storage):
+    content = "---\nname: demo-skill\ndescription: Same bytes\n---\n\n# Body\nline two\n"
+
+    storage.write_custom_skill("demo-skill", "SKILL.md", content)
+    user_storage.write_custom_skill("demo-skill", "SKILL.md", content)
+
+    global_file = tmp_path / "custom" / "demo-skill" / "SKILL.md"
+    user_file = tmp_path / "users" / "test-user" / "skills" / "custom" / "demo-skill" / "SKILL.md"
+    assert global_file.read_bytes() == user_file.read_bytes() == content.encode("utf-8")
+
+
+def test_existing_crlf_skill_remains_readable_and_is_rewritten_as_lf(tmp_path, storage):
+    skill_file = tmp_path / "custom" / "demo-skill" / "SKILL.md"
+    skill_file.parent.mkdir(parents=True)
+    legacy = b"---\r\nname: demo-skill\r\n---\r\n\r\n# hello\r\n"
+    skill_file.write_bytes(legacy)
+
+    assert storage.read_custom_skill("demo-skill") == "---\nname: demo-skill\n---\n\n# hello\n"
+
+    replacement = "---\nname: demo-skill\n---\n\n# rewritten\n"
+    storage.write_custom_skill("demo-skill", "SKILL.md", replacement)
+    assert skill_file.read_bytes() == replacement.encode("utf-8")
+    assert storage.read_custom_skill("demo-skill") == replacement
+
+
+def test_existing_crlf_user_skill_remains_readable_and_is_rewritten_as_lf(tmp_path, user_storage):
+    skill_file = tmp_path / "users" / "test-user" / "skills" / "custom" / "demo-skill" / "SKILL.md"
+    skill_file.parent.mkdir(parents=True)
+    legacy = b"---\r\nname: demo-skill\r\n---\r\n\r\n# hello\r\n"
+    skill_file.write_bytes(legacy)
+
+    assert user_storage.read_custom_skill("demo-skill") == "---\nname: demo-skill\n---\n\n# hello\n"
+
+    replacement = "---\nname: demo-skill\n---\n\n# rewritten\n"
+    user_storage.write_custom_skill("demo-skill", "SKILL.md", replacement)
+    assert skill_file.read_bytes() == replacement.encode("utf-8")
+    assert user_storage.read_custom_skill("demo-skill") == replacement
+
+
 def test_user_scoped_write_is_atomic_overwrite(tmp_path, user_storage):
     user_storage.write_custom_skill("demo-skill", "SKILL.md", "first")
     user_storage.write_custom_skill("demo-skill", "SKILL.md", "second")
