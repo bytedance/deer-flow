@@ -1500,6 +1500,18 @@ Parsing remains strict and invalid skills stay unavailable to agents.
 
 #### Read-only knowledge sources
 
+Three retrieval tools can be configured independently in `tools[]`: document
+`knowledge_search`, published `knowledge_entries_search` through the
+[WeKnora plugin](examples/deerflow-extension-weknora/README.md), and
+`entity_relations_search` through the optional
+[LightRAG plugin](examples/deerflow-extension-lightrag/README.md). Remove a tool
+entry to disable it. They share scope admission, source validation, budgets and
+citation rendering. Wiki queries that return no pages retry up to four individual
+keywords within the same authorized base. Unsupported filters fail closed;
+multiple providers with different resource namespaces support only all/disabled scope. The new adapters
+have offline coverage and [local live validation](examples/deerflow-extension-lightrag/VALIDATION.md)
+with bge-m3 and GLM-5.3; see that record for coverage limits.
+
 Configure `knowledge_search` with either
 `deerflow.community.ragflow.tools:knowledge_search_tool` or
 `deerflow.community.lightrag.tools:knowledge_search_tool` in `config.yaml`.
