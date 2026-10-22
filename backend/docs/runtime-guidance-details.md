@@ -108,6 +108,30 @@ been admitted, the old completion leaves the goal alone. This allows duration
 bookkeeping while preserving newer goal or conversation changes. Delivery
 failure does not itself queue a hidden continuation.
 
+**Workspace change detection** (`workspace_changes/diff.py`, `scanner.py`):
+`get_changed_paths()` owns change filtering for summaries, text capture, and
+output delivery detection. Absence from a truncated snapshot is unknown:
+require a complete before snapshot to infer creation and a complete after
+snapshot to infer deletion. Keep comparing files observed in both snapshots and
+preserve the summary's truncation flag. The scanner walks directories and files
+in sorted order so the truncation boundary is reproducible across the before
+and after scans. Its budget is shared and consumed root by root (workspace
+before outputs), so a workspace at the limit starves outputs.
+`get_changed_output_paths()` inherits this uncertainty: newly observed outputs
+are suppressed when the before snapshot was truncated, while modifications
+observed in both snapshots remain eligible. The worker passes this list through
+`_produced_output_paths()` to its delivery check; an empty list leaves
+`produced_paths` and `verification` absent from the delivery receipt, and
+`_delivery_error()` returns no error. When that empty list accompanies a truncated
+pre-run snapshot, the receipt includes
+`verification_skipped: "truncated_pre_run_snapshot"` on both normal completion and
+failure/cancellation cleanup. This marker explains the skipped check without
+asserting that no outputs were produced. Observed modifications still receive the
+ordinary verification verdict, without a skip marker. A missing snapshot or
+capture error alone does not imply this skip reason. These cases are pinned
+through real snapshot capture and `run_agent()` in
+`tests/test_run_worker_delivery.py`.
+
 **Extension changed-run discovery** (`runtime/runs/store/` and
 `extensions/run_evidence.py`) orders public run-record changes by the
 backend-owned `(change_seq, run_id)` key rather than timestamps or per-thread

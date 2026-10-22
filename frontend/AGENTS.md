@@ -8,12 +8,9 @@ DeerFlow's Next.js 16 frontend provides thread-based AI conversations with strea
 
 **Stack**: Next.js 16, React 19, TypeScript 5.8, Tailwind CSS 4, pnpm 10.26.2. Requires Node.js 22+ and pnpm 10.26.2+.
 
-### Core dependencies
-
-- **LangGraph SDK** (`@langchain/langgraph-sdk` ^1.5.3) — Agent orchestration and streaming
-- **LangChain Core** (`@langchain/core` ^1.1.15) — Fundamental AI building blocks
-- **TanStack Query** (`@tanstack/react-query` ^5.90.17) — Server state management
-- **UI**: Shadcn UI, MagicUI, React Bits, and Vercel AI SDK elements (generated from registries — see Code Style)
+Core dependencies: `@langchain/langgraph-sdk` ^1.5.3 for orchestration/streaming,
+`@langchain/core` ^1.1.15, and `@tanstack/react-query` ^5.90.17 for server state.
+Registry UI: Shadcn, MagicUI, React Bits, Vercel AI SDK (see Code Style).
 
 `pnpm-workspace.yaml` overrides vulnerable `@xmldom/xmldom` 0.9.x releases to
 0.9.12 for GHSA-965w-775f-mr7g. Nextra pulls it in through MathJax and
@@ -23,18 +20,12 @@ upstream dependency chain resolves a patched version without it; regenerate
 
 ## Commands
 
-| Command          | Purpose                                       |
-| ---------------- | --------------------------------------------- |
-| `pnpm dev`       | Start the development server with Webpack     |
-| `pnpm build`     | Production build                              |
-| `pnpm check`     | Lint + type check (run before committing)     |
-| `pnpm lint`      | ESLint only                                   |
-| `pnpm lint:fix`  | ESLint with auto-fix                          |
-| `pnpm format`    | Prettier check (`pnpm format:write` to apply) |
-| `pnpm test`      | Run unit tests with Rstest                    |
-| `pnpm test:e2e`  | Run E2E tests with Playwright (Chromium)      |
-| `pnpm typecheck` | TypeScript type check (`tsc --noEmit`)        |
-| `pnpm start`     | Start production server                       |
+Run from `frontend/`; host pnpm calls use `../scripts/pnpm.py`.
+
+- `pnpm dev`: Webpack development server; `pnpm build` / `pnpm start`: production build/server.
+- `pnpm check`: ESLint + TypeScript (required before committing); `pnpm lint` / `pnpm typecheck`: individual checks; `pnpm lint:fix`: ESLint fixes.
+- `pnpm format` / `pnpm format:write`: Prettier check/write.
+- `pnpm test`: Rstest unit tests; `pnpm test:e2e`: Playwright Chromium E2E tests.
 
 Rstest unit tests under `tests/unit/` mirror `src/` (e.g., `tests/unit/core/api/stream-mode.test.ts` tests `src/core/api/stream-mode.ts`). Import source modules via `@/`.
 
@@ -169,6 +160,15 @@ DOM regression: `new-agent-save.dom.test.tsx`.
 - **Path alias**: `@/*` maps to `src/*`.
 - **Components**: `ui/` and `ai-elements/` are generated from registries (Shadcn, MagicUI, React Bits, Vercel AI SDK) — don't manually edit these.
 
+Sidebar customization: `components/workspace/workspace-sidebar-frame.tsx`.
+Rail/drawer mount one tree; `useWorkspaceSidebarExpanded` preserves desktop
+`SidebarProvider.open`. Keep polling/delete-dialog provider outside that tree.
+Reuse stock `Sidebar`; close before link navigation and on pathname changes,
+preserving page focus. Dismissal restores the opener or remounted rail trigger.
+`WorkspaceSidebarTrigger` owns surface icons/ARIA; keep generated UI unchanged.
+Test frame DOM behavior and `tests/e2e/sidebar.spec.ts`.
+Agents headers/actions wrap with the rail; sidebar E2E tests cover bounds.
+
 Scheduled-task list search filters the current authorized query result by title or
 prompt, composing with status/type filters and thread scope. Selection must derive
 from the filtered list so hidden tasks cannot remain actionable. Keep literal
@@ -234,7 +234,8 @@ round-trip validation must still reject newly entered skipped times.
 
 ## Contributing
 
-Features follow `src/` ownership, include TypeScript types/error handling, unit tests (`tests/unit/`, `pnpm test`) and E2E (`tests/e2e/`, `pnpm test:e2e`). Run `pnpm check` before committing; update AGENTS.md when architecture, commands or conventions change.
+Follow `src/` ownership, add types/error handling and unit/E2E coverage, run
+`pnpm check`, and update this guide for architecture, command, or convention changes.
 
 Route asset budgets are enforced with `pnpm perf:check`. The command measures
 `/login` from a normal production build, then builds in static-demo mode for the

@@ -1464,6 +1464,16 @@ Use it as-is. Or tear it apart and make it yours.
 
 ## Core Features
 
+### Workspace
+
+The workspace keeps a collapsed icon sidebar visible on narrow screens. Its
+toggle opens the full navigation drawer; closing the drawer returns to the icon
+bar without changing your saved desktop sidebar preference. Navigating to another
+page also closes the mobile drawer and preserves the destination page's focus.
+Dismissing the drawer returns keyboard focus to the control that opened it.
+The Agents gallery header wraps to the available width so its import and create
+actions remain visible beside the compact sidebar on narrow screens.
+
 ### Skills & Tools
 
 Open **Capability Center** from the workspace sidebar to manage **Plugins**
@@ -1489,6 +1499,18 @@ even when there are no YAML warnings; check Gateway logs for other load failures
 Parsing remains strict and invalid skills stay unavailable to agents.
 
 #### Read-only knowledge sources
+
+Three retrieval tools can be configured independently in `tools[]`: document
+`knowledge_search`, published `knowledge_entries_search` through the
+[WeKnora plugin](examples/deerflow-extension-weknora/README.md), and
+`entity_relations_search` through the optional
+[LightRAG plugin](examples/deerflow-extension-lightrag/README.md). Remove a tool
+entry to disable it. They share scope admission, source validation, budgets and
+citation rendering. Wiki queries that return no pages retry up to four individual
+keywords within the same authorized base. Unsupported filters fail closed;
+multiple providers with different resource namespaces support only all/disabled scope. The new adapters
+have offline coverage and [local live validation](examples/deerflow-extension-lightrag/VALIDATION.md)
+with bge-m3 and GLM-5.3; see that record for coverage limits.
 
 Configure `knowledge_search` with either
 `deerflow.community.ragflow.tools:knowledge_search_tool` or
@@ -2577,6 +2599,23 @@ storage permissions. An unclean shutdown can leave `.tool-output-*.tmp` files in
 Remove leftovers during thread-data maintenance with all Gateway writers stopped,
 or when deleting the corresponding inactive thread's data.
 
+Workspace change summaries scan up to 2,000 files by default, in sorted order:
+the workspace root first, then outputs. A workspace that alone reaches the limit
+leaves outputs unscanned. When a scan is incomplete, files missing from that
+partial snapshot are not reported as created or deleted. Changes to files
+observed in both snapshots are still reported, and the summary is marked as
+truncated; if no change can be established, no summary is recorded.
+
+Output-delivery verification uses these same snapshots. When the pre-run scan
+is truncated, genuinely new outputs can be omitted even if the post-run scan
+sees them. If no output changes can be established, the run does not fail with
+"Artifact delivery incomplete". If the pre-run scan was truncated, its persisted
+`run.delivery` receipt records `verification_skipped: "truncated_pre_run_snapshot"`
+instead of an output-verification verdict. This distinguishes an incomplete scan
+from a complete scan with no produced outputs; it does not prove that no outputs
+were produced. Outputs modified and observed in both snapshots still participate
+in that check.
+
 `E2BSandboxProvider` uses `wait` as its default overflow policy. It waits for
 `acquire_timeout`, then fails the agent turn. DeerFlow does not retry the turn
 automatically. Clients can use the structured error to schedule a retry.
@@ -3031,6 +3070,10 @@ API). It builds user-model memory — long-term preferences and a cross-session
 working representation — on Honcho's server side, so the backend makes no LLM
 calls locally. Each user gets an isolated workspace derived from `user_id`; a
 missing user id fails closed instead of falling back to a shared workspace.
+Framework-hidden user messages are excluded from Honcho writes; the host's
+human-input filter preserves valid user clarification answers carried in hidden messages.
+If that filter raises an exception, only the affected hidden message is skipped;
+other messages in the batch can still be captured.
 Fact CRUD and Settings-page fact editing are not available for this backend. See
 the [Honcho backend guide](backend/packages/harness/deerflow/agents/memory/backends/honcho/README.md).
 

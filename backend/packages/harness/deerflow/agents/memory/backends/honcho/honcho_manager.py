@@ -100,6 +100,7 @@ class HonchoMemoryManager(MemoryManager):
 
     _config: HonchoConfig = PrivateAttr(default=None)
     _client: Any = PrivateAttr(default=None)
+    _should_keep_hidden_message: Any = PrivateAttr(default=None)
 
     supports_search: ClassVar[bool] = True
     # Honcho's server-side deriver extracts facts/representation from add()
@@ -127,7 +128,10 @@ class HonchoMemoryManager(MemoryManager):
         Connectivity is deliberately NOT probed: a temporarily unreachable Honcho
         must not block Gateway startup; reads degrade per ``failure_policy.read``.
         """
-        return cls(backend_config=backend_config, mode=mode)
+        manager = cls(backend_config=backend_config, mode=mode)
+        hidden_filter = host_hooks.get("should_keep_hidden_message")
+        manager._should_keep_hidden_message = hidden_filter if callable(hidden_filter) else None
+        return manager
 
     @classmethod
     def read_failures_are_fatal_for_config(
@@ -184,6 +188,16 @@ class HonchoMemoryManager(MemoryManager):
         outgoing: list[dict[str, str]] = []
         for message in messages or []:
             msg_type = getattr(message, "type", None)
+            if msg_type == "human":
+                additional_kwargs = getattr(message, "additional_kwargs", {}) or {}
+                keep_hidden = self._should_keep_hidden_message
+                if additional_kwargs.get("hide_from_ui"):
+                    try:
+                        if keep_hidden is None or not keep_hidden(additional_kwargs):
+                            continue
+                    except Exception:
+                        logger.warning("honcho memory: hidden message filter failed; skipping hidden message")
+                        continue
             text = _content_to_text(getattr(message, "content", "")).strip()
             if not text:
                 continue

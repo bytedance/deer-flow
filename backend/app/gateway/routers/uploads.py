@@ -457,7 +457,7 @@ async def upload_files(
             except Exception as e:
                 logger.error(f"Failed to upload {file.filename}: {e}")
                 await service.cleanup_written()
-                raise HTTPException(status_code=500, detail=f"Failed to upload {file.filename}: {str(e)}")
+                raise HTTPException(status_code=500, detail=f"Failed to upload {file.filename}.")
             uploaded_files.append(file_info)
 
         await service.finalize()
@@ -513,4 +513,4 @@ async def delete_uploaded_file(thread_id: ThreadId, filename: str, request: Requ
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Failed to delete {filename}: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to delete {filename}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to delete {filename}.")

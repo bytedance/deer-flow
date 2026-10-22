@@ -426,11 +426,15 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   auto-generated into a Secret (key `redis-url`) and injected as
   `DEER_FLOW_STREAM_BRIDGE_REDIS_URL`; `config.yaml` sets `stream_bridge.type:
   redis` by default. No-auth by default (ClusterIP isolation, matching compose);
-  set `redis.auth.password` to enable AUTH. For a managed Redis, disable the
-  bundled instance and point at it via `redis.external`. The gateway readiness
-  probe pings this Redis on every check and reports the pod unready while it
-  is unreachable, since without the bridge no run can publish, stream or be
-  cancelled from a peer pod.
+  set `redis.auth.password` to enable AUTH. A user-managed
+  `redis.existingSecret` takes precedence over that value: the bundled server
+  reads `redis-password` from the same Secret that supplies the gateway's
+  `redis-url`, and stays unauthenticated when that key is absent or empty — so
+  keep the URL and the raw password in agreement. For a managed Redis, disable
+  the bundled instance and point at it via `redis.external`. The gateway
+  readiness probe pings this Redis on every check and reports the pod unready
+  while it is unreachable, since without the bridge no run can publish, stream
+  or be cancelled from a peer pod.
 - **Persistence.** A PVC (`<release>-home`) backs `/app/backend/.deer-flow`
   (sqlite DB, memory, custom agents, per-thread user-data). The gateway mounts
   it with `subPath: deer-flow` so the layout matches the provisioner's PVC

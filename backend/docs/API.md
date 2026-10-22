@@ -1335,6 +1335,8 @@ Content-Type: multipart/form-data
 
 ```
 
+**Error behavior:** an unexpected storage failure answers `500` with `{"detail": "Failed to upload <filename>."}`; the underlying error, which can name host paths, stays in server logs.
+
 **Name collisions:** filenames are claimed unique against the thread's existing uploads and reserved atomically — a same-name upload never replaces the existing file; it lands as `document_1.pdf` (the response's `filename`/`original_filename` reflect the claimed name). Use the artifacts `PUT` endpoint for sanctioned in-place updates.
 
 **Supported Document Formats** (converted to Markdown only when automatic conversion is enabled):
@@ -1380,6 +1382,8 @@ DELETE /api/threads/{thread_id}/uploads/{filename}
   "message": "Deleted document.pdf"
 }
 ```
+
+**Error behavior:** an unexpected storage failure answers `500` with `{"detail": "Failed to delete <filename>."}`; the underlying error stays in server logs.
 
 ### Thread Cleanup
 
@@ -1540,7 +1544,7 @@ POST /api/projects/{project_id}/documents/{document_id}/attach-to-thread/{thread
 
 Materializes an independent copy of a live shelf document into the target thread's uploads directory through the same ingestion pipeline as an ordinary upload (filename claiming, size checks, optional conversion under `uploads.auto_convert_documents`, sandbox-readable permissions, and sandbox sync for non-mounted providers; a caller denied `sandbox:execute` keeps the host upload without allocating a sandbox). Reading an archived source project's shelf is allowed and does not mutate it; a missing/foreign document, or a target thread the caller cannot write, is `404`. A row whose original bytes are missing or size-mismatched answers `409` `"content_missing"`.
 
-**Response:** `200 OK` with `{"filename", "size_bytes", "virtual_path", "artifact_url"}` — returned only after ingestion succeeds.
+**Response:** `200 OK` with `{"filename", "size_bytes", "virtual_path", "artifact_url"}` — returned only after ingestion succeeds. An unexpected ingestion failure answers `500` with `{"detail": "Failed to upload <name>."}`; the underlying error stays in server logs.
 
 #### Get Document Content
 
