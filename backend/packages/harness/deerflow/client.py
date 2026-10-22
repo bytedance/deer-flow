@@ -1873,11 +1873,10 @@ class DeerFlowClient:
                                 # copy, not write_bytes: the companion keeps the
                                 # converter's permissions, so a sandbox running as
                                 # another uid can still read it.
-                                if unique_md_name in existing_names:
-                                    md_path = copy_upload_file_no_symlink(uploads_dir, unique_md_name, converted)
-                                else:
-                                    md_path = publish_upload_copy(uploads_dir, unique_md_name, converted, claim_seed=provisional_md_name, seen_names=seen_names)
-                                    unique_md_name = md_path.name
+                                # Existing Markdown may be user-authored or owned
+                                # by another document from an earlier upload call.
+                                md_path = publish_upload_copy(uploads_dir, unique_md_name, converted, claim_seed=provisional_md_name, seen_names=seen_names)
+                                unique_md_name = md_path.name
                     except UnsafeUploadPathError:
                         logger.warning("Skipping markdown companion with unsafe destination: %s", unique_md_name)
                         md_path = None

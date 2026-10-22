@@ -1464,6 +1464,16 @@ Use it as-is. Or tear it apart and make it yours.
 
 ## Core Features
 
+### Workspace
+
+The workspace keeps a collapsed icon sidebar visible on narrow screens. Its
+toggle opens the full navigation drawer; closing the drawer returns to the icon
+bar without changing your saved desktop sidebar preference. Navigating to another
+page also closes the mobile drawer and preserves the destination page's focus.
+Dismissing the drawer returns keyboard focus to the control that opened it.
+The Agents gallery header wraps to the available width so its import and create
+actions remain visible beside the compact sidebar on narrow screens.
+
 ### Skills & Tools
 
 Open **Capability Center** from the workspace sidebar to manage **Plugins**
@@ -1489,6 +1499,18 @@ even when there are no YAML warnings; check Gateway logs for other load failures
 Parsing remains strict and invalid skills stay unavailable to agents.
 
 #### Read-only knowledge sources
+
+Three retrieval tools can be configured independently in `tools[]`: document
+`knowledge_search`, published `knowledge_entries_search` through the
+[WeKnora plugin](examples/deerflow-extension-weknora/README.md), and
+`entity_relations_search` through the optional
+[LightRAG plugin](examples/deerflow-extension-lightrag/README.md). Remove a tool
+entry to disable it. They share scope admission, source validation, budgets and
+citation rendering. Wiki queries that return no pages retry up to four individual
+keywords within the same authorized base. Unsupported filters fail closed;
+multiple providers with different resource namespaces support only all/disabled scope. The new adapters
+have offline coverage and [local live validation](examples/deerflow-extension-lightrag/VALIDATION.md)
+with bge-m3 and GLM-5.3; see that record for coverage limits.
 
 Configure `knowledge_search` with either
 `deerflow.community.ragflow.tools:knowledge_search_tool` or
@@ -1532,6 +1554,8 @@ its installation guide.
 Skills are what make DeerFlow do *almost anything*.
 
 A standard Agent Skill is a structured capability module — a Markdown file that defines a workflow, best practices, and references to supporting resources. DeerFlow ships with built-in skills for research, report generation, slide creation, web pages, image and video generation, and more. But the real power is extensibility: add your own skills, replace the built-in ones, or combine them into compound workflows.
+
+The [music-generation skill](skills/public/music-generation/SKILL.md#output-handling) preserves existing output when the provider returns malformed, empty or unrecognized audio.
 
 Skills are loaded progressively — only when the task needs them, not all at once. This keeps the context window lean and makes DeerFlow work well even with token-sensitive models.
 
@@ -1609,6 +1633,8 @@ errors redact credential values while leaving benign settings such as model
 names and base URLs readable.
 
 For `LocalSandboxProvider`, this is a managed tool-path boundary rather than host filesystem isolation. Explicit per-Agent skill policies are accepted only while host bash is disabled (the default), because a host subprocess can address canonical paths without using the provider's virtual-path mappings. Use Docker/AIO, the Kubernetes provisioner, or E2B when the filesystem boundary must remain enforceable alongside shell access.
+
+When the local sandbox uses PowerShell, mapped host-path spaces and shell metacharacters are escaped for the caller's quoting context; wildcard expansion is preserved. The public `bash` tool's existing workspace prefix uses `&&` and POSIX path quoting: it requires PowerShell 7 for that separator and does not support workspace paths containing apostrophes. These workspace-prefix limitations are separate from virtual-path mapping.
 
 On Windows, the local sandbox's `cmd.exe` fallback decodes builtin output using
 the console output code page, including UTF-8 after `chcp 65001`, independently
@@ -2188,7 +2214,7 @@ Interrupted first-turn runs still persist a fallback conversation title, so stop
 
 Streaming Markdown responses animate only newly arrived words; text that is already visible is not faded out and replayed when the next chunk extends the same block.
 
-In the Web UI, completed assistant turns can be branched into a new main conversation. Automatically inherited branch titles use the next free language-neutral numeric suffix (`Title (2)`, then `Title (3)` for another sibling or a branch of the numbered conversation) so generated sibling titles remain distinct without persisting a locale-specific label; matching explicit or renamed sibling titles also reserve their displayed suffix even though they carry no generated sequence metadata. An explicit API title is preserved. Renaming a branch clears its generated sequence, so its next automatic branch starts from the renamed title at `(2)`. Recent chats also groups loaded branches directly beneath a loaded parent with subtle tree connectors. Missing parents, malformed or cyclic lineage, and branches in a different pinned state stay visible at the top level instead of being hidden or moved across the pinned boundary. The new thread starts from that turn's checkpoint and keeps the preceding replay checkpoint, so the branched response can be regenerated immediately. The latest response can also be regenerated after an interruption, even when its streamed partial text never reached a checkpoint. Regenerating the latest response preserves the thread's current title, including a title you renamed manually after the original response. Legacy or imported histories without checkpoint parent links use a bounded chronological fallback; if no earlier replay checkpoint exists, branching still succeeds with the legacy single-checkpoint shape, while regeneration remains unavailable for that inherited response. Existing single-checkpoint branches are left unchanged rather than attempting an unsafe checkpoint copy. Because workspace files are not checkpointed, the branch only receives a best-effort copy of the current workspace when you branch from the latest turn; branching from an older turn keeps just the restored message history so the branch never inherits files that were created in a later part of the conversation.
+In the Web UI, completed assistant turns can be branched into a new main conversation. Automatically inherited branch titles use the next free language-neutral numeric suffix (`Title (2)`, then `Title (3)` for another sibling or a branch of the numbered conversation) so generated sibling titles remain distinct without persisting a locale-specific label; matching explicit or renamed sibling titles also reserve their displayed suffix even though they carry no generated sequence metadata. An explicit API title is preserved. Renaming a branch clears its generated sequence, so its next automatic branch starts from the renamed title at `(2)`. Recent chats also groups loaded branches directly beneath a loaded parent with subtle tree connectors. Missing parents, malformed or cyclic lineage, and branches in a different pinned state stay visible at the top level instead of being hidden or moved across the pinned boundary. The new thread starts from that turn's checkpoint and keeps the preceding replay checkpoint, so the branched response can be regenerated immediately. The latest response can also be regenerated after an interruption, even when its streamed partial text never reached a checkpoint. Stopping mid-answer retains the assistant text that was already streamed in the thread's message feed, so refreshing no longer discards visible progress; that partial text remains outside authoritative completed checkpoint state. Regenerating the latest response preserves the thread's current title, including a title you renamed manually after the original response. Legacy or imported histories without checkpoint parent links use a bounded chronological fallback; if no earlier replay checkpoint exists, branching still succeeds with the legacy single-checkpoint shape, while regeneration remains unavailable for that inherited response. Existing single-checkpoint branches are left unchanged rather than attempting an unsafe checkpoint copy. Because workspace files are not checkpointed, the branch only receives a best-effort copy of the current workspace when you branch from the latest turn; branching from an older turn keeps just the restored message history so the branch never inherits files that were created in a later part of the conversation.
 
 The Web UI reports completed task time once per run. This is total wall-clock time—including model reasoning, tool calls, and waiting—not a per-step or model-only thinking duration. Reasoning content remains available through its own separate disclosure.
 
@@ -2292,6 +2318,8 @@ The chat header also shows a context-window gauge when the selected model has a 
 When `token_budget.enabled` and `token_usage.enabled` are both enabled, each lead-agent run budget includes completed subagent usage, including the final batch. Hidden goal continuations share the budget; a new user run starts fresh.
 
 ### Sub-Agents
+
+Web chats accept direct model choices such as “ask MODEL to handle this”, “use MODEL for this turn”, and “from now on use MODEL”; Chinese equivalents are supported too. A child choice leaves the main model unchanged, a one-turn choice leaves defaults unchanged, and a conversation choice uses the existing browser-local thread override without changing account preferences. Choices resolve against available configurations and optional `models[].aliases`; ambiguous names or scopes show a selection card before execution, while delegation still requires enabled subagents (Ultra mode).
 
 When a sub-agent ends with `return_direct=True` tools, including tools contributed by extension middleware, their outputs are returned in tool-call order. A failed tool marks the task as failed while preserving the batch outputs.
 
@@ -2454,7 +2482,7 @@ Content-less sub-agent final messages report `No response generated` instead of 
 
 An ordinary `task` also receives a defensive snapshot of the dispatching run's current uploads. This lets eligible sub-agents use `list_uploaded_files` to find earlier-turn files without returning same-turn attachments as historical. Delayed or recovered `batch_task` workers leave this tool disabled because they have no valid turn-local upload boundary.
 
-Embedded Python uploads use the same captured content for the saved document and its Markdown conversion, even if the caller's source changes during upload.
+Embedded Python uploads use the same captured content for the saved document and its Markdown conversion, even if the caller's source changes during upload. Converted Markdown receives a free filename with a numeric suffix on collision, preserving user-authored Markdown and companions from earlier uploads. The upload response reports the actual companion filename.
 
 历史上传发现支持稳定续页：`list_uploaded_files` 默认每页 20 项、最多 100 项，
 将返回的 `next_cursor` 作为下一次调用的 `cursor`，保留相同过滤条件，直到末页不再
@@ -2572,6 +2600,23 @@ storage permissions. An unclean shutdown can leave `.tool-output-*.tmp` files in
 `tool_output.storage_subdir` (default `.tool-results`) under thread outputs.
 Remove leftovers during thread-data maintenance with all Gateway writers stopped,
 or when deleting the corresponding inactive thread's data.
+
+Workspace change summaries scan up to 2,000 files by default, in sorted order:
+the workspace root first, then outputs. A workspace that alone reaches the limit
+leaves outputs unscanned. When a scan is incomplete, files missing from that
+partial snapshot are not reported as created or deleted. Changes to files
+observed in both snapshots are still reported, and the summary is marked as
+truncated; if no change can be established, no summary is recorded.
+
+Output-delivery verification uses these same snapshots. When the pre-run scan
+is truncated, genuinely new outputs can be omitted even if the post-run scan
+sees them. If no output changes can be established, the run does not fail with
+"Artifact delivery incomplete". If the pre-run scan was truncated, its persisted
+`run.delivery` receipt records `verification_skipped: "truncated_pre_run_snapshot"`
+instead of an output-verification verdict. This distinguishes an incomplete scan
+from a complete scan with no produced outputs; it does not prove that no outputs
+were produced. Outputs modified and observed in both snapshots still participate
+in that check.
 
 `E2BSandboxProvider` uses `wait` as its default overflow policy. It waits for
 `acquire_timeout`, then fails the agent turn. DeerFlow does not retry the turn
@@ -3027,6 +3072,10 @@ API). It builds user-model memory — long-term preferences and a cross-session
 working representation — on Honcho's server side, so the backend makes no LLM
 calls locally. Each user gets an isolated workspace derived from `user_id`; a
 missing user id fails closed instead of falling back to a shared workspace.
+Framework-hidden user messages are excluded from Honcho writes; the host's
+human-input filter preserves valid user clarification answers carried in hidden messages.
+If that filter raises an exception, only the affected hidden message is skipped;
+other messages in the batch can still be captured.
 Fact CRUD and Settings-page fact editing are not available for this backend. See
 the [Honcho backend guide](backend/packages/harness/deerflow/agents/memory/backends/honcho/README.md).
 

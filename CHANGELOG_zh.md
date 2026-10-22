@@ -1112,6 +1112,13 @@
 
 ### 修复
 
+- **认证：** OIDC 提供方以 `200` 返回非预期 JSON 对象的响应体（例如维护中的 HTML
+  页面）时，SSO 登录与回调不再以 `500` 失败。discovery、token、JWKS 与 UserInfo
+  响应体、格式错误的 ID token 头以及缺少可用端点的 discovery 文档，现在都走既有的
+  `502` / `/login?error=sso_failed` 路径，被拒绝的 discovery 文档也不再被缓存。
+  格式错误的 UserInfo 响应体会像 UserInfo 请求失败一样被跳过，不再让 ID token
+  有效的登录中断。([#7258])
+
 - **MCP：** 使用 OAuth `refresh_token` 授权的 MCP 服务器，在提供方轮换 refresh token
   （Auth0、Okta、Google）时，跨 Gateway 重启、工具缓存重置、个人连接的多次运行以及多个
   Gateway 实例都能继续工作。此前令牌只保存在进程内存中，每个新进程或新 manager 都从配置里
@@ -5255,6 +5262,20 @@
   所有文件。([#6991])
 
 ### 安全
+
+- **上传：** 线程上传（`POST /api/threads/{thread_id}/uploads`）、删除上传文件
+  （`DELETE /api/threads/{thread_id}/uploads/{filename}`）以及把资料库文档附加到线程，
+  其 `500` 响应的 detail 不再包含原始 `OSError` 文本。此前遇到权限错误，或磁盘已满到
+  无法创建暂存文件时，响应会返回该线程上传目录的宿主机绝对路径（含用户 ID 和线程 ID）。
+  现在它们返回 `Failed to upload <name>.` / `Failed to delete <name>.`，完整错误只记录在
+  Gateway 日志中。([#7217])
+  
+- **agents：** 自定义智能体与用户画像路由的 `500` detail 不再包含原始异常文本。
+  此前无法解析的智能体 `config.yaml` 或文件系统错误（如 `[Errno 13]`）会让响应
+  带出 `users/<user_id>/` 下的宿主机绝对路径；现在返回与智能体导入、导出一致的
+  固定 `Failed to <action>` detail，完整错误仅保留在 Gateway 日志中。定时任务创建与
+  更新在智能体配置无法加载时仍返回 `invalid_assistant` 422，但不再回显解析错误
+  （该错误此前也会进入定时任务工具结果）。([#7255])
 
 - **infoquest：** 通过共享公网 URL 策略筛查自然搜索、新闻与图片结果的 URL，在其
   到达模型前丢弃非公网及不安全引用。([#7031])
@@ -10364,3 +10385,6 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7170]: https://github.com/bytedance/deer-flow/pull/7170
 [#7205]: https://github.com/bytedance/deer-flow/pull/7205
 [#7207]: https://github.com/bytedance/deer-flow/pull/7207
+[#7217]: https://github.com/bytedance/deer-flow/pull/7217
+[#7255]: https://github.com/bytedance/deer-flow/pull/7255
+[#7258]: https://github.com/bytedance/deer-flow/pull/7258

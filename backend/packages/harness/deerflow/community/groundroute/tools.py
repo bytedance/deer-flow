@@ -24,6 +24,7 @@ import os
 import httpx
 from langchain.tools import tool
 
+from deerflow.community.url_safety import safe_public_result_url
 from deerflow.config import get_app_config
 
 logger = logging.getLogger(__name__)
@@ -163,7 +164,7 @@ async def web_search_tool(query: str, max_results: int | None = None) -> str:
     normalized_results = [
         {
             "title": r.get("title", ""),
-            "url": r.get("url", ""),
+            "url": safe_public_result_url(r.get("url")),
             "snippet": r.get("snippet", ""),
             "source_engine": r.get("source_engine", ""),
         }

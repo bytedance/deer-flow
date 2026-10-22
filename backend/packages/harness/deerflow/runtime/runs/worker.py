@@ -34,6 +34,7 @@ from functools import lru_cache
 from typing import Any, Final, Literal, cast
 
 from deerflow_extension_api.agent_runs import AGENT_RUNS_CONTEXT_KEY
+from langchain_core.messages import AIMessage, AIMessageChunk
 from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.types import Overwrite
 
@@ -360,9 +361,13 @@ def _presented_path_covers_output(presented_path: str, produced_path: str) -> bo
 def _delivery_content_with_outputs(
     content: dict[str, Any],
     produced_paths: list[str],
+    *,
+    pre_run_snapshot: WorkspaceSnapshot | None = None,
 ) -> dict[str, Any]:
-    """Attach a delivery verdict when this run created or modified outputs."""
+    """Attach a delivery verdict or explain why a truncated scan skipped it."""
     if not produced_paths:
+        if pre_run_snapshot is not None and pre_run_snapshot.truncated:
+            return {**content, "verification_skipped": "truncated_pre_run_snapshot"}
         return content
 
     presented_paths = content.get("by_tool", {}).get("present_files", [])
@@ -428,6 +433,33 @@ async def _produced_output_paths(
 # Keep this streaming policy separate from middleware write-authorization sets.
 _LARGE_FILE_TOOL_NAMES = frozenset({"str_replace", "write_file"})
 _LARGE_FILE_TOOL_BATCH_SIZE = 32
+
+
+@dataclass
+class _PartialAssistantResponseAccumulator:
+    """Collect root assistant text that was successfully streamed to clients."""
+
+    text_by_id: dict[str, str] = field(default_factory=dict)
+
+    def observe(self, chunk: Any) -> None:
+        if not isinstance(chunk, tuple) or len(chunk) != 2:
+            return
+        message, _metadata = chunk
+        if not isinstance(message, (AIMessage, AIMessageChunk)):
+            return
+        additional_kwargs = getattr(message, "additional_kwargs", None)
+        if isinstance(additional_kwargs, Mapping) and additional_kwargs.get("hide_from_ui") is True:
+            return
+        message_id = getattr(message, "id", None)
+        if not isinstance(message_id, str) or not message_id:
+            return
+        text = message_to_text(message, text_attribute_fallback=True)
+        if not text:
+            return
+        self.text_by_id[message_id] = self.text_by_id.get(message_id, "") + text
+
+    def messages(self) -> list[AIMessage]:
+        return [AIMessage(id=message_id, content=text) for message_id, text in self.text_by_id.items() if text.strip()]
 
 
 @dataclass
@@ -1000,6 +1032,7 @@ async def run_agent(
     accessor: CheckpointStateAccessor | None = None
     rollback_point: RollbackPoint | None = None
     journal = None
+    partial_assistant_response: _PartialAssistantResponseAccumulator | None = None
     seq_stamper: _MessageSeqStamper | None = None
     runtime_ctx: dict[str, Any] | None = None
     runtime: Any | None = None
@@ -1116,6 +1149,8 @@ async def run_agent(
                 user_id=record.user_id,
                 progress_reporter=lambda snapshot: run_manager.update_run_progress(run_id, **snapshot),
             )
+            if "messages-tuple" in requested_modes:
+                partial_assistant_response = _PartialAssistantResponseAccumulator()
 
         # Keep cancellable preflight work under the worker's terminal guard so
         # cancellation cannot strand a pending RunRecord or stream subscriber.
@@ -1506,6 +1541,8 @@ async def run_agent(
                                 if single_mode == "values" and seq_stamper is not None:
                                     single_payload = await seq_stamper.stamp(single_payload)
                                 await bridge.publish(run_id, sse_event, single_payload)
+                                if single_mode == "messages" and partial_assistant_response is not None:
+                                    partial_assistant_response.observe(chunk)
                                 if single_mode == "custom":
                                     await subagent_events.add(chunk)
                         finally:
@@ -1564,6 +1601,8 @@ async def run_agent(
                                 subagent_events=subagent_events,
                                 seq_stamper=seq_stamper,
                             )
+                            if not namespace and mode == "messages" and partial_assistant_response is not None:
+                                partial_assistant_response.observe(chunk)
                     finally:
                         close_error = sys.exception()
                         try:
@@ -1691,6 +1730,7 @@ async def run_agent(
             delivery_content = _delivery_content_with_outputs(
                 journal.get_delivery_content() if journal is not None else _empty_delivery_content(),
                 produced_output_paths,
+                pre_run_snapshot=pre_run_workspace_snapshot,
             )
             delivery_error = _delivery_error(delivery_content)
             cancel_action = await run_manager.set_status_if_not_cancelled(
@@ -1807,6 +1847,8 @@ async def run_agent(
                 # crash window where a terminal run could otherwise outlive its receipt.
                 # A fenced worker leaves receipt recovery to the peer that claimed it.
                 if not record.ownership_lost and journal is not None:
+                    if record.status == RunStatus.interrupted and partial_assistant_response is not None:
+                        journal.record_interrupted_ai_responses(partial_assistant_response.messages())
                     try:
                         await journal.flush()
                     except Exception:
@@ -1815,7 +1857,7 @@ async def run_agent(
                     if delivery_content is None:
                         if produced_output_paths is None:
                             produced_output_paths = await _produced_output_paths(pre_run_workspace_snapshot, thread_id=thread_id, user_id=workspace_changes_user_id, extra_excluded_dir_names=workspace_excluded_dir_names)
-                        delivery_content = _delivery_content_with_outputs(journal.get_delivery_content(), produced_output_paths)
+                        delivery_content = _delivery_content_with_outputs(journal.get_delivery_content(), produced_output_paths, pre_run_snapshot=pre_run_workspace_snapshot)
                     receipt_persisted = await _persist_delivery_receipt(event_store, thread_id=thread_id, run_id=run_id, content=delivery_content)
                     if produced_output_paths and record.status == RunStatus.success and not receipt_persisted:
                         await run_manager.set_status(run_id, RunStatus.error, error=_DELIVERY_RECEIPT_FAILED_ERROR, persist=False)

@@ -96,6 +96,9 @@ async def test_knowledge_provider_receives_real_subagent_execution_identity(clas
     provider = SimpleNamespace(capabilities=KnowledgeCapabilities(operations={"search", "dataset_filter"}), search_scoped=AsyncMock(return_value=RetrievalResult()))
     monkeypatch.setattr(tools, "get_app_config", _default_app_config)
     monkeypatch.setattr(tools, "resolve_knowledge_provider", lambda *args, **kwargs: provider)
+    # This identity-focused fixture supplies the configured scope intersection
+    # alongside its stub provider; real configuration is covered by ToolNode tests.
+    monkeypatch.setattr(tools, "get_knowledge_capabilities", lambda *args, **kwargs: provider.capabilities)
     scope = {"version": 1, "mode": "selected", "dataset_ids": ["private"]}
 
     async def capturing_astream(state, *, context, **kwargs):
