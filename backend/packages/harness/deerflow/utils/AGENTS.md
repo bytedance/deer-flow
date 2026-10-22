@@ -6,6 +6,22 @@ capture/fetch publication. It writes and fsyncs a hidden exclusive sibling befor
 umask; replacements preserve existing permission bits before publication. Never
 read the process umask by changing it in this threaded runtime. Behavioral tests
 for both tool imports live in `tests/test_browser_outputs_atomic.py`.
+`cleanup_failed_atomic_write` shares best-effort cleanup across this publisher,
+`skills/projection.py`'s private manifest writer, project document staging, and
+Gateway upload staging.
+Use it on publication failure or after deciding to discard an owned
+temporary; pass a raw descriptor only until `fdopen` succeeds, or an explicitly
+transferred duplicate descriptor owned by the cleanup caller. Shelf discards
+must preserve both a rejected project's 404 and a dedup hit's 200 response.
+Callers retain their own serialization, permissions and publication policy.
+Failure cleanup must preserve the original publication exception, including
+interruptions. Descriptor close and sibling unlink are separate best-effort
+operations: a close failure must not prevent the unlink attempt.
+Attempt warning logs for cleanup `OSError`s with the temporary path and exception
+details. Guard logging-handler exceptions so diagnostics neither replace the
+publication exception (including interruptions) nor skip remaining cleanup.
+Both tools take collision names from `output_names.output_name_candidates`
+(name, `-1`..`-1000`, five timestamps); claim each atomically, never pre-check.
 
 ### Model Retry Hints
 
@@ -106,8 +122,9 @@ and preserve the generic `+xml` rule.
 
 ### Conversion Worker Ownership
 
-`convert_file_to_markdown` drains large-file conversion workers across caller
-cancellation before returning control to source-file cleanup. Keep conversion
+`convert_file_to_markdown` offloads parsing for every source size: compressed
+Office files can require seconds of work below 1 MiB. It drains conversion workers
+across caller cancellation before returning control to source-file cleanup. Keep conversion
 inside `await_drained`, including when the worker fails or cancellation repeats;
 upload ingestion owns a temporary source that it removes in `finally`. Coverage
 lives in `tests/test_file_conversion_cancellation.py`.

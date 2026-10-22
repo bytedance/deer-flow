@@ -64,6 +64,22 @@ def calculate_stats(values: list[float]) -> dict:
     }
 
 
+def _read_timing_number(timing_data: dict, key: str, timing_file: Path) -> int | float | None:
+    """Read an optional measurement without admitting invalid values to statistics."""
+    value = timing_data.get(key)
+    if value is None:
+        return None
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or value < 0
+        or (isinstance(value, float) and not math.isfinite(value))
+    ):
+        print(f"Warning: ignoring invalid {key} in {timing_file}; expected a finite non-negative number")
+        return None
+    return value
+
+
 def load_run_results(benchmark_dir: Path) -> dict:
     """
     Load all run results from a benchmark directory.
@@ -133,23 +149,29 @@ def load_run_results(benchmark_dir: Path) -> dict:
                     "total": grading.get("summary", {}).get("total", 0),
                 }
 
-                # Extract timing — check grading.json first, then sibling timing.json
+                # Read recorded tokens independently of the grading duration.
                 timing = grading.get("timing", {})
                 result["time_seconds"] = timing.get("total_duration_seconds", 0.0)
                 timing_file = run_dir / "timing.json"
-                if result["time_seconds"] == 0.0 and timing_file.exists():
-                    try:
+                try:
+                    if timing_file.exists():
                         with open(timing_file, encoding="utf-8") as tf:
                             timing_data = json.load(tf)
-                        result["time_seconds"] = timing_data.get("total_duration_seconds", 0.0)
-                        result["tokens"] = timing_data.get("total_tokens", 0)
-                    except json.JSONDecodeError:
-                        pass
+                        if not isinstance(timing_data, dict):
+                            print(f"Warning: ignoring non-object timing data in {timing_file}")
+                            timing_data = {}
+                        duration = _read_timing_number(timing_data, "total_duration_seconds", timing_file)
+                        if result["time_seconds"] == 0.0:
+                            result["time_seconds"] = duration if duration is not None else 0.0
+                        result["tokens"] = _read_timing_number(timing_data, "total_tokens", timing_file)
+                except (json.JSONDecodeError, UnicodeDecodeError, OSError) as e:
+                    print(f"Warning: Unable to read timing data in {timing_file}: {e}")
 
                 # Extract metrics if available
                 metrics = grading.get("execution_metrics", {})
                 result["tool_calls"] = metrics.get("total_tool_calls", 0)
-                if not result.get("tokens"):
+                # Keep the legacy proxy only when no token count was recorded.
+                if result.get("tokens") is None:
                     result["tokens"] = metrics.get("output_chars", 0)
                 result["errors"] = metrics.get("errors_encountered", 0)
 

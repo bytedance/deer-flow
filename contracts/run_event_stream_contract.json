@@ -142,7 +142,7 @@
     {
       "event_type": "llm.ai.response",
       "category": "message",
-      "producer": "RunJournal.on_llm_end()",
+      "producer": "RunJournal.on_llm_end() or RunJournal.record_interrupted_ai_responses()",
       "content_schema": {
         "type": "object",
         "required": ["type", "content", "tool_calls"],
@@ -177,7 +177,9 @@
           "request_message_chars": {"type": "integer", "minimum": 0},
           "request_tools_chars": {"type": ["integer", "null"], "minimum": 0},
           "request_message_count": {"type": "integer", "minimum": 0},
-          "request_started_at": {"type": "string"}
+          "request_started_at": {"type": "string"},
+          "interrupted": {"type": "boolean"},
+          "partial": {"type": "boolean"}
         },
         "additionalProperties": true
       }

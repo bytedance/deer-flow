@@ -367,7 +367,7 @@ ingress:
 # -- DeerFlow config.yaml content. Secrets MUST stay as $VAR references — never
 #    inline literal secret values here. The default enables provisioner sandbox.
 config: |
-  config_version: 60
+  config_version: 61
   log_level: info
   recursion_limit: 100
   max_recursion_limit: 1000
@@ -393,6 +393,9 @@ config: |
 
   sandbox:
     use: deerflow.community.aio_sandbox:AioSandboxProvider
+    prewarm: false
+    # Pending/ready-unused speculation per provider instance in each process.
+    prewarm_max_concurrent: 1
     provisioner_url: http://provisioner:8002
     # Sent as X-API-Key on every provisioner request. The chart injects the
     # generated `<release>-app` key into the gateway and provisioner Pods as

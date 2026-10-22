@@ -20,6 +20,7 @@ _MODEL_METADATA_FIELDS: frozenset[str] = frozenset(
         "use",
         "name",
         "display_name",
+        "aliases",
         "description",
         "supports_thinking",
         "supports_reasoning_effort",
@@ -160,7 +161,12 @@ def _infer_dialect(effective_wte: dict) -> str:
     Mirrors the historical disable-path heuristics so ``dialect: auto`` behaves
     like the legacy factory did for the same template shape.
     """
-    extra_body = effective_wte.get("extra_body") or {}
+    extra_body = effective_wte.get("extra_body")
+    if not isinstance(extra_body, dict):
+        # ``ModelConfig.when_thinking_enabled`` accepts unvalidated nested values,
+        # so a truthy non-mapping ``extra_body`` reaches this heuristic; like a
+        # null value it carries no payload shape to infer from.
+        extra_body = {}
     thinking = extra_body.get("thinking")
     if isinstance(thinking, dict) and thinking.get("type"):
         return "openai_extra_body"
@@ -272,7 +278,11 @@ def _apply_contract_thinking_settings(
     dialect = contract.dialect if contract.dialect != "auto" else _infer_dialect(effective_wte)
     # Both directions mirror whichever vLLM switch the template declares, so a
     # template using the older ``thinking`` key never also grows ``enable_thinking``.
-    chat_template_kwargs = (effective_wte.get("extra_body") or {}).get("chat_template_kwargs") or {}
+    # ``when_thinking_enabled`` holds unvalidated nested values: a truthy
+    # non-mapping ``extra_body`` has no ``chat_template_kwargs`` to mirror and is
+    # treated as absent, like the null values the ``or {}`` defaults already cover.
+    extra_body = effective_wte.get("extra_body")
+    chat_template_kwargs = (extra_body.get("chat_template_kwargs") or {}) if isinstance(extra_body, dict) else {}
     if thinking_enabled:
         payload = _deep_merge_dicts(_dialect_payload(dialect, enabled=True, chat_template_kwargs=chat_template_kwargs), effective_wte)
         if contract.history is not None and dialect == "openai_extra_body":

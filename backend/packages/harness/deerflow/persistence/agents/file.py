@@ -83,7 +83,11 @@ class FileAgentStore(AgentStore):
                     break
         if not soul_path.exists():
             return None
-        content = soul_path.read_text(encoding="utf-8").strip()
+        # Match the default-agent read in :func:`deerflow.config.agents_config.
+        # load_agent_soul`: ``utf-8-sig`` drops the BOM a Windows editor writes,
+        # which ``str.strip()`` would otherwise leave as the leading character of
+        # the ``<soul>`` block.
+        content = soul_path.read_text(encoding="utf-8-sig").strip()
         return content or None
 
     def list(self, *, user_id: str | None = None) -> list[AgentConfig]:

@@ -157,6 +157,19 @@ def _trim_trailing_partial_utf8(data: bytes) -> bytes:
     return data
 
 
+def _match_ends_before_a_colon(match: re.Match) -> bool:
+    """Whether the subject continues with a ``:`` right after ``match``.
+
+    The forward path-tail patterns stop at ``:`` so substitution resumes at
+    every entry of a colon-joined list, but such a match can also be a
+    truncated component of one POSIX filename (``cache:old.txt``) — the
+    caller must not canonicalize the truncated prefix, because it can be an
+    unrelated symlink (``cache -> data``) and the reassembled path would name
+    a different file (``data:old.txt``).
+    """
+    return match.end() < len(match.string) and match.string[match.end()] == ":"
+
+
 @dataclass(frozen=True)
 class PathMapping:
     """A path mapping from a container path to a local path with optional read-only flag."""
@@ -169,6 +182,59 @@ class PathMapping:
 class ResolvedPath(NamedTuple):
     path: str
     mapping: PathMapping | None
+
+
+_POWERSHELL_QUOTE_TRANSLATION = str.maketrans("\u2018\u2019\u201c\u201d", "''\"\"")
+
+
+def escape_powershell_path(match: re.Match[str], path: str) -> str:
+    """Keep mapped paths literal in the caller's quote context, preserving wildcards."""
+    quote = None
+    escaped = False
+    subexpressions: list[str | None] = []
+    prefix = match.string[: match.start()]
+    index = 0
+    while index < len(prefix):
+        char = prefix[index].translate(_POWERSHELL_QUOTE_TRANSLATION)
+        if escaped:
+            escaped = False
+        elif char == "`" and quote != "'":
+            escaped = True
+        elif quote is None and prefix[index : index + 2] == "<#":
+            end = prefix.find("#>", index + 2)
+            index = len(prefix) if end < 0 else end + 1
+        elif quote is None and char == "#" and (index == 0 or prefix[index - 1].isspace() or prefix[index - 1] in ";|&(){}="):
+            end = prefix.find("\n", index)
+            index = len(prefix) if end < 0 else end
+        elif quote is None and prefix[index : index + 2] in ("@'", '@"'):
+            delimiter = prefix[index + 1]
+            end = re.search(rf"(?m)^{delimiter}@", prefix[index + 2 :])
+            if end is None:
+                if delimiter == "'":
+                    return path
+                quote = '@"'
+                index += 1
+            else:
+                index += end.end() + 1
+        elif char == "$" and prefix[index : index + 2] == "$(" and quote != "'":
+            subexpressions.append(quote)
+            quote = None
+            index += 1
+        elif char in "\"'" and quote in (None, char):
+            quote = None if quote else char
+        elif quote is None and char == "(":
+            subexpressions.append(None)
+        elif quote is None and char == ")" and subexpressions:
+            quote = subexpressions.pop()
+        index += 1
+    # The path matcher includes a caller's closing smart quote in its tail.
+    closing_quote = path[-1:] if quote in ("'", '"') and match.group()[-1:].translate(_POWERSHELL_QUOTE_TRANSLATION) == quote else ""
+    if closing_quote:
+        path = path[:-1]
+    if quote == "'":
+        return re.sub(r"['\u2018\u2019]", lambda char: char.group() * 2, path) + closing_quote
+    characters = r'[`$"\u201c\u201d]' if quote is not None else r"[ \t`$'\";&,()@{}#\u2018\u2019\u201c\u201d]"
+    return re.sub(characters, lambda char: "`" + char.group(), path) + closing_quote
 
 
 class LocalSandbox(Sandbox):
@@ -338,7 +404,12 @@ class LocalSandbox(Sandbox):
             return None
         # The lookahead (?=/|$|...) ensures we only match at a path-segment boundary,
         # preventing /mnt/skills from matching inside /mnt/skills-extra.
-        patterns = [re.escape(m.container_path) + r"(?=/|$|[\s\"';&|<>()])(?:/[^\s\"';&|<>()]*)?" for m in mappings]
+        #
+        # The tail ends at ":" as well (mirroring path_patterns._PATH_TAIL):
+        # substitution resumes after a match, so a tail that ran through a
+        # ":"-joined list ($PATH, $PYTHONPATH) swallowed every later entry and
+        # left those container paths unresolved.
+        patterns = [re.escape(m.container_path) + r"(?=/|$|[\s\"';&|<>()])(?:/[^\s\"';&|<>():]*)?" for m in mappings]
         return re.compile("|".join(f"({p})" for p in patterns))
 
     @cached_property
@@ -347,7 +418,11 @@ class LocalSandbox(Sandbox):
         mappings = sorted(self.path_mappings, key=lambda m: len(m.container_path), reverse=True)
         if not mappings:
             return None
-        patterns = [re.escape(m.container_path) + r"(?=/|$|[^\w./-])(?:/[^\s\"';&|<>()]*)?" for m in mappings]
+        # The tail ends at ":" for the same reason as _command_pattern above:
+        # write_file content regularly stores PATH-style exports, and a tail
+        # that ran through the ":" left the later list entries virtual in the
+        # host file (read_file masked them back, so the corruption was hidden).
+        patterns = [re.escape(m.container_path) + r"(?=/|$|[^\w./-])(?:/[^\s\"';&|<>():]*)?" for m in mappings]
         return re.compile("|".join(f"({p})" for p in patterns))
 
     @cached_property
@@ -437,6 +512,27 @@ class LocalSandbox(Sandbox):
     def _resolve_path(self, path: str) -> str:
         return self._resolve_path_with_mapping(path).path
 
+    def _resolve_path_textually(self, path: str) -> str:
+        """Resolve ``path``'s mapped root while keeping its original tail spelling.
+
+        ``_resolve_path`` canonicalizes the joined path, which is right for a
+        complete path but wrong for one truncated right before a ``:`` that
+        belongs to a single POSIX filename (``cache:old.txt``): following an
+        unrelated symlink at the truncated prefix (``cache -> data``)
+        reassembles a path that names a different file (``data:old.txt``).
+        Substitute only the mapped root and keep the matched tail verbatim.
+        """
+        # The canonical resolution still runs so its containment check keeps
+        # rejecting ``..`` escapes exactly like ``_resolve_path``; only its
+        # spelling is discarded.
+        self._resolve_path(path)
+        mapping_match = self._find_path_mapping(path)
+        if mapping_match is None:
+            return path
+        mapping, relative = mapping_match
+        root = self._resolved_local_paths[mapping]
+        return f"{root}/{relative}" if relative else root
+
     def _is_resolved_path_read_only(self, resolved: ResolvedPath) -> bool:
         return bool(resolved.mapping and resolved.mapping.read_only) or self._is_read_only_path(resolved.path)
 
@@ -518,12 +614,13 @@ class LocalSandbox(Sandbox):
 
         return result
 
-    def _resolve_paths_in_command(self, command: str) -> str:
+    def _resolve_paths_in_command(self, command: str, *, shell: str | None = None) -> str:
         """
         Resolve container paths to local paths in a command string.
 
         Args:
             command: Command string that may contain container paths
+            shell: Execution shell, or None for unescaped path resolution
 
         Returns:
             Command with container paths resolved to local paths
@@ -534,9 +631,20 @@ class LocalSandbox(Sandbox):
 
         def replace_match(match: re.Match) -> str:
             matched_path = match.group(0)
+            if _match_ends_before_a_colon(match):
+                # The match may be a truncated component of one POSIX
+                # filename (``cache:old.txt``), not a complete list entry:
+                # canonicalizing the truncated prefix would follow an
+                # unrelated symlink and reassemble a path to a different
+                # file, so substitute textually there.
+                resolved = self._resolve_path_textually(matched_path).replace("\\", "/")
+            else:
+                resolved = self._resolve_path(matched_path).replace("\\", "/")
             # Normalize to forward slashes so bash doesn't interpret Windows
             # backslash sequences (\\U, \\a, \\d, \\s, \\n, \\t) as escapes.
-            return self._resolve_path(matched_path).replace("\\", "/")
+            if self._is_powershell(shell or ""):
+                return escape_powershell_path(match, resolved)
+            return resolved
 
         return pattern.sub(replace_match, command)
 
@@ -561,6 +669,12 @@ class LocalSandbox(Sandbox):
 
         def replace_match(match: re.Match) -> str:
             matched_path = match.group(0)
+            if _match_ends_before_a_colon(match):
+                # Same truncated-component case as ``_resolve_paths_in_command``:
+                # a ``:`` can sit inside one POSIX filename (``cache:old.txt``),
+                # and canonicalizing the truncated prefix follows an unrelated
+                # symlink, so the stored file would point at a different one.
+                return self._resolve_path_textually(matched_path).replace("\\", "/")
             resolved = self._resolve_path(matched_path)
             # Normalize to forward slashes so that Windows backslash paths
             # don't create invalid escape sequences in source files.
@@ -627,8 +741,8 @@ class LocalSandbox(Sandbox):
         # any new caller to use safe key names.
         _validate_extra_env(env)
         # Resolve container paths in command before execution
-        resolved_command = self._resolve_paths_in_command(command)
         shell = self._get_shell()
+        resolved_command = self._resolve_paths_in_command(command, shell=shell)
         if timeout is None:
             timeout = DEFAULT_COMMAND_TIMEOUT_SECONDS
 
@@ -973,6 +1087,13 @@ class LocalSandbox(Sandbox):
             if not virtual_children or os.path.exists(resolved_path):
                 raise
             entries = []
+        except OSError as e:
+            if e.filename is None:
+                raise
+            # Keep custom-mount host paths out of public listing errors.
+            filename = self._reverse_resolve_path(os.fsdecode(e.filename))
+            filename2 = self._reverse_resolve_path(os.fsdecode(e.filename2)) if e.filename2 is not None else None
+            raise type(e)(e.errno, e.strerror, filename, getattr(e, "winerror", None), filename2) from None
         # Reverse resolve local paths back to container paths and preserve
         # list_dir's trailing "/" marker for directories.
         result: list[str] = []
@@ -1088,7 +1209,15 @@ class LocalSandbox(Sandbox):
 
     def glob(self, path: str, pattern: str, *, include_dirs: bool = False, max_results: int = 200) -> tuple[list[str], bool]:
         resolved_path = Path(self._resolve_path(path))
-        matches, truncated = find_glob_matches(resolved_path, pattern, include_dirs=include_dirs, max_results=max_results)
+        try:
+            matches, truncated = find_glob_matches(resolved_path, pattern, include_dirs=include_dirs, max_results=max_results)
+        except OSError as e:
+            if e.filename is None:
+                raise
+            # Keep custom-mount host paths out of public search errors.
+            filename = self._reverse_resolve_path(os.fsdecode(e.filename))
+            filename2 = self._reverse_resolve_path(os.fsdecode(e.filename2)) if e.filename2 is not None else None
+            raise type(e)(e.errno, e.strerror, filename, getattr(e, "winerror", None), filename2) from None
         return [self._reverse_resolve_path(match) for match in matches], truncated
 
     def grep(
@@ -1102,14 +1231,22 @@ class LocalSandbox(Sandbox):
         max_results: int = 100,
     ) -> tuple[list[GrepMatch], bool]:
         resolved_path = Path(self._resolve_path(path))
-        matches, truncated = find_grep_matches(
-            resolved_path,
-            pattern,
-            glob_pattern=glob,
-            literal=literal,
-            case_sensitive=case_sensitive,
-            max_results=max_results,
-        )
+        try:
+            matches, truncated = find_grep_matches(
+                resolved_path,
+                pattern,
+                glob_pattern=glob,
+                literal=literal,
+                case_sensitive=case_sensitive,
+                max_results=max_results,
+            )
+        except OSError as e:
+            if e.filename is None:
+                raise
+            # Keep custom-mount host paths out of public search errors.
+            filename = self._reverse_resolve_path(os.fsdecode(e.filename))
+            filename2 = self._reverse_resolve_path(os.fsdecode(e.filename2)) if e.filename2 is not None else None
+            raise type(e)(e.errno, e.strerror, filename, getattr(e, "winerror", None), filename2) from None
         return [
             GrepMatch(
                 path=self._reverse_resolve_path(match.path),
