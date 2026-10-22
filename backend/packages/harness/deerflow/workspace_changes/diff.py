@@ -198,7 +198,11 @@ def _snapshot_text(file: FileSnapshot | None) -> str | None:
         return file.text
     if file.text_path:
         try:
-            with open(file.text_path, encoding="utf-8") as cached:
+            # The cache is published byte-exactly (the scanner pins
+            # newline="\n"), so read it back without newline translation:
+            # universal newlines would silently rewrite a decoded CRLF
+            # snapshot into LF text and corrupt the served content.
+            with open(file.text_path, encoding="utf-8", newline="") as cached:
                 return cached.read()
         except OSError:
             return None
