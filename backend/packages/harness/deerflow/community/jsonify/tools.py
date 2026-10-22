@@ -77,7 +77,9 @@ def _load_settings() -> _JsonifySettings | str:
     try:
         return _JsonifySettings(**extra)
     except ValidationError as exc:
-        logger.warning("Invalid %s configuration: %s", _TOOL_NAME, exc)
+        # Log only where and why validation failed; the input values are serve URLs, which are credentials.
+        problems = "; ".join(f"{'.'.join(str(part) for part in err['loc']) or '<root>'}: {err['type']}" for err in exc.errors())
+        logger.warning("Invalid %s configuration: %s", _TOOL_NAME, problems)
         return f"Error: {_TOOL_NAME} is not configured. Add a 'datasets' map of name to serve URL in config.yaml."
 
 
@@ -110,15 +112,16 @@ async def _read_rows(settings: _JsonifySettings, args: _RowsArgs) -> dict[str, A
     meta: dict[str, Any] = {}
     offset = 0
     version: int | None = None
+    truncated = False
     async with httpx.AsyncClient(timeout=settings.timeout) as client:
-        while len(rows) < max_rows:
+        while True:
             limit = min(_PAGE_SIZE, max_rows - len(rows))
             response = await client.get(
                 serve_url,
                 params=_build_params(limit=limit, offset=offset, columns=args.columns, filters=args.filters, version=version),
             )
             response.raise_for_status()
-            page = response.json()
+            page = _parse_page(response)
             if not meta:
                 meta = {
                     "dataset": args.dataset,
@@ -129,14 +132,32 @@ async def _read_rows(settings: _JsonifySettings, args: _RowsArgs) -> dict[str, A
                 }
             if version is None:
                 version = page.get("version")
-            for row in page.get("rows") or []:
-                rows.append({k: v for k, v in row.items() if k not in _SYSTEM_COLUMNS})
-            if not page.get("has_more") or page.get("next_offset") is None:
+            page_rows = [{k: v for k, v in row.items() if k not in _SYSTEM_COLUMNS} for row in page["rows"]]
+            rows.extend(page_rows)
+            has_more = bool(page.get("has_more"))
+            next_offset = page.get("next_offset")
+            if len(rows) >= max_rows:
+                truncated = has_more or len(rows) > max_rows
                 break
-            offset = page["next_offset"]
+            # Stop on an empty page or a cursor that does not advance, so a misbehaving endpoint cannot spin the loop.
+            if not has_more or not page_rows or not isinstance(next_offset, int) or next_offset <= offset:
+                break
+            offset = next_offset
 
     del rows[max_rows:]
-    return {**meta, "row_count": len(rows), "rows": rows}
+    return {**meta, "row_count": len(rows), "truncated": truncated, "rows": rows}
+
+
+def _parse_page(response: httpx.Response) -> dict[str, Any]:
+    """Decode one serve response and check it has the expected shape."""
+    try:
+        page = response.json()
+    except ValueError as exc:
+        raise ValueError("Jsonify returned a response that is not JSON") from exc
+    rows = page.get("rows") if isinstance(page, dict) else None
+    if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+        raise ValueError("Jsonify returned an unexpected response shape")
+    return page
 
 
 async def _dataset_rows(
@@ -158,12 +179,12 @@ async def _dataset_rows(
     try:
         args = _RowsArgs(dataset=dataset, filters=filters, columns=columns, limit=limit)
         result = await _read_rows(settings, args)
-    except (ValidationError, ValueError) as exc:
+    except (ValidationError, ValueError, TypeError, AttributeError) as exc:
         return redact_secret(f"Error: {exc}", serve_url)
     except httpx.HTTPStatusError as exc:
         return redact_secret(f"Error: Jsonify returned HTTP {exc.response.status_code}", serve_url)
     except httpx.HTTPError as exc:
-        return redact_secret(f"Error: Could not reach Jsonify: {exc}", serve_url)
+        return f"Error: Could not reach Jsonify: {type(exc).__name__}"
     return json.dumps(result, ensure_ascii=False)
 
 
@@ -173,7 +194,7 @@ dataset_rows_tool = StructuredTool.from_function(
     description=(
         "Read rows from a maintained Jsonify dataset. Rows are the latest published output of a scheduled, "
         "self-repairing pipeline, so they are current without scraping. Pass the dataset name, optional exact-match "
-        "filters, optional columns and a row limit. Returns JSON with dataset metadata, version, updated_at and rows."
+        "filters, optional columns and a row limit. Returns JSON with dataset metadata, version, updated_at, rows and a truncated flag that is true when more rows matched than were returned."
     ),
     args_schema=_RowsArgs,
 )

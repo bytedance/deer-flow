@@ -155,3 +155,122 @@ async def test_http_error_is_redacted():
 
     assert result == "Error: Jsonify returned HTTP 404"
     assert SERVE_URL not in result
+
+
+@pytest.mark.anyio
+@pytest.mark.usefixtures("public_dns")
+async def test_truncated_flag_when_more_rows_match():
+    from deerflow.community.jsonify.tools import dataset_rows_tool
+
+    client = _client_with([_response(PAGE_ONE)])
+    with (
+        patch("deerflow.community.jsonify.tools.get_app_config", return_value=_config({"datasets": {"pricing": SERVE_URL}})),
+        patch("deerflow.community.jsonify.tools.httpx.AsyncClient", return_value=client),
+    ):
+        result = json.loads(await dataset_rows_tool.ainvoke({"dataset": "pricing", "limit": 2}))
+
+    assert result["row_count"] == 2
+    assert result["truncated"] is True
+
+
+@pytest.mark.anyio
+@pytest.mark.usefixtures("public_dns")
+async def test_complete_read_is_not_truncated():
+    from deerflow.community.jsonify.tools import dataset_rows_tool
+
+    client = _client_with([_response(PAGE_TWO)])
+    with (
+        patch("deerflow.community.jsonify.tools.get_app_config", return_value=_config({"datasets": {"pricing": SERVE_URL}})),
+        patch("deerflow.community.jsonify.tools.httpx.AsyncClient", return_value=client),
+    ):
+        result = json.loads(await dataset_rows_tool.ainvoke({"dataset": "pricing"}))
+
+    assert result["truncated"] is False
+
+
+@pytest.mark.anyio
+@pytest.mark.usefixtures("public_dns")
+@pytest.mark.parametrize(
+    "page",
+    [
+        {**PAGE_ONE, "next_offset": 0},
+        {**PAGE_ONE, "next_offset": "2"},
+        {**PAGE_ONE, "rows": []},
+    ],
+)
+async def test_stops_when_cursor_does_not_advance_or_page_is_empty(page):
+    from deerflow.community.jsonify.tools import dataset_rows_tool
+
+    client = _client_with([_response(page), _response(PAGE_TWO)])
+    with (
+        patch("deerflow.community.jsonify.tools.get_app_config", return_value=_config({"datasets": {"pricing": SERVE_URL}})),
+        patch("deerflow.community.jsonify.tools.httpx.AsyncClient", return_value=client),
+    ):
+        result = json.loads(await dataset_rows_tool.ainvoke({"dataset": "pricing", "limit": 100}))
+
+    assert client.get.call_count == 1
+    assert result["row_count"] == len(page["rows"])
+
+
+@pytest.mark.anyio
+@pytest.mark.usefixtures("public_dns")
+@pytest.mark.parametrize("payload", [["not", "a", "page"], {"rows": "nope"}, {"rows": ["r1"]}, {"has_more": False}])
+async def test_malformed_page_returns_redacted_error(payload):
+    from deerflow.community.jsonify.tools import dataset_rows_tool
+
+    client = MagicMock()
+    client.get = AsyncMock(return_value=httpx.Response(200, json=payload, request=httpx.Request("GET", SERVE_URL)))
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=None)
+    with (
+        patch("deerflow.community.jsonify.tools.get_app_config", return_value=_config({"datasets": {"pricing": SERVE_URL}})),
+        patch("deerflow.community.jsonify.tools.httpx.AsyncClient", return_value=client),
+    ):
+        result = await dataset_rows_tool.ainvoke({"dataset": "pricing"})
+
+    assert result == "Error: Jsonify returned an unexpected response shape"
+
+
+@pytest.mark.anyio
+@pytest.mark.usefixtures("public_dns")
+async def test_non_json_page_returns_error():
+    from deerflow.community.jsonify.tools import dataset_rows_tool
+
+    client = _client_with([httpx.Response(200, text="<html>", request=httpx.Request("GET", SERVE_URL))])
+    with (
+        patch("deerflow.community.jsonify.tools.get_app_config", return_value=_config({"datasets": {"pricing": SERVE_URL}})),
+        patch("deerflow.community.jsonify.tools.httpx.AsyncClient", return_value=client),
+    ):
+        result = await dataset_rows_tool.ainvoke({"dataset": "pricing"})
+
+    assert result == "Error: Jsonify returned a response that is not JSON"
+
+
+def test_invalid_config_warning_omits_serve_url(caplog):
+    from deerflow.community.jsonify.tools import _load_settings
+
+    secret = "http://factory.jsonify.com/api/serve/supersecret"
+    with patch("deerflow.community.jsonify.tools.get_app_config", return_value=_config({"datasets": {"pricing": secret}})):
+        result = _load_settings()
+
+    assert isinstance(result, str)
+    assert "supersecret" not in caplog.text
+    assert "datasets: value_error" in caplog.text
+
+
+@pytest.mark.anyio
+@pytest.mark.usefixtures("public_dns")
+async def test_transport_error_omits_url():
+    from deerflow.community.jsonify.tools import dataset_rows_tool
+
+    client = MagicMock()
+    client.get = AsyncMock(side_effect=httpx.ConnectError(f"failed to connect to {SERVE_URL}"))
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=None)
+    with (
+        patch("deerflow.community.jsonify.tools.get_app_config", return_value=_config({"datasets": {"pricing": SERVE_URL}})),
+        patch("deerflow.community.jsonify.tools.httpx.AsyncClient", return_value=client),
+    ):
+        result = await dataset_rows_tool.ainvoke({"dataset": "pricing"})
+
+    assert result == "Error: Could not reach Jsonify: ConnectError"
