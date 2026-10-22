@@ -20,8 +20,7 @@ upstream dependency chain resolves a patched version without it; regenerate
 
 ## Commands
 
-Upload visibility: [contract](../docs/upload-context.md). Use
-`hasStructuredUploadContext` before legacy cleanup; preserve literal user tags.
+[Upload context](../docs/upload-context.md).
 
 Run from `frontend/`; host pnpm calls use `../scripts/pnpm.py`.
 
