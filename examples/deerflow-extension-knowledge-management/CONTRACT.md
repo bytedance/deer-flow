@@ -22,6 +22,11 @@ No timestamp, attempt ID, percentage or step success is invented. The future Tra
 
 Submitting a mutation has no automatic retry. A response loss may leave an accepted upstream operation. A consumer must reconcile before retrying; there is no local durable exactly-once promise. For a future durable workflow, add persistent admission/reconciliation before advertising retry-safe request IDs.
 
+Server-side warning logs distinguish transport exception types, HTTP status and
+malformed/oversized response categories. Logs omit exception messages, tracebacks,
+request URLs and provider payloads because these can contain credentials or source
+content. These diagnostics do not provide durable admission or processing Trace.
+
 ## Compatibility
 
 No changes are made to `knowledge_scope`, retrieval tools, source artifacts, frontend citation models or stored messages. Offline fixtures in `backend/tests/test_knowledge_management_extension.py` demonstrate shared dataset identity and citation replay with the existing WeKnora read-only provider. Synthetic fixture transitions are not live processing evidence.

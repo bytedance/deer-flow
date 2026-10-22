@@ -427,3 +427,51 @@ def test_weknora_zero_overlap_override_is_not_silently_ignored(management):
     provider, _, _ = management
     with pytest.raises(NotImplementedError):
         provider._options(ProcessingOptions(chunk_size=512, chunk_overlap=0), {"chunking_config": {"chunk_overlap": 128}})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["timeout", "connect", "json", "envelope", "status"])
+async def test_provider_failure_diagnostics_are_sanitized(management, caplog, failure):
+    from deerflow_extension_knowledge_management.contracts import ManagementContext
+    from deerflow_extension_knowledge_management.router import _invoke
+    from fastapi import HTTPException
+
+    provider, _, _ = management
+    secret = "synthetic-secret private-payload https://private.example/token"
+
+    def fail(request):
+        if failure == "timeout":
+            raise httpx.ReadTimeout(secret, request=request)
+        if failure == "connect":
+            raise httpx.ConnectError(secret, request=request)
+        if failure == "json":
+            return httpx.Response(200, text=secret)
+        if failure == "envelope":
+            return httpx.Response(200, json={"error": secret})
+        return httpx.Response(503, text=secret)
+
+    provider.transport = httpx.MockTransport(fail)
+    with caplog.at_level("WARNING"), pytest.raises(HTTPException) as caught:
+        await _invoke(provider.status(ManagementContext(ExtensionPrincipal("alice", is_admin=True)), "local", "kb-1", "doc-1"))
+    assert caught.value.status_code == 502
+    expected = {"timeout": "ReadTimeout", "connect": "ConnectError", "json": "JSONDecodeError", "envelope": "invalid_envelope", "status": "status=503"}[failure]
+    assert expected in caplog.text
+    assert "RuntimeError" in caplog.text
+    for text in (caplog.text, str(caught.value.detail)):
+        assert "synthetic-secret" not in text and "private-payload" not in text and "private.example" not in text
+    assert all(record.exc_info is None for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_custom_provider_exception_text_is_not_logged(management, caplog):
+    from deerflow_extension_knowledge_management.router import _invoke
+    from fastapi import HTTPException
+
+    async def fail():
+        raise RuntimeError("synthetic-secret private document")
+
+    with caplog.at_level("WARNING"), pytest.raises(HTTPException):
+        await _invoke(fail())
+    assert "RuntimeError" in caplog.text
+    assert "synthetic-secret" not in caplog.text and "private document" not in caplog.text
+    assert all(record.exc_info is None for record in caplog.records)

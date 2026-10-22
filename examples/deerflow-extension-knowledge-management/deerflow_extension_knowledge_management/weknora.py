@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import re
 from typing import Literal
@@ -15,6 +16,8 @@ import httpx
 from pydantic import AnyHttpUrl, Field, field_validator, model_validator
 
 from .contracts import Capabilities, IngestRequest, ManagementContext, Model, Operation, ProcessingOptions, ProcessingResult
+
+logger = logging.getLogger(__name__)
 
 MAX_UPLOAD_BYTES = 16 * 1024 * 1024
 
@@ -102,16 +105,21 @@ class WeKnoraManagement:
                     if response.status_code == 409:
                         raise FileExistsError("Provider reported a resource conflict")
                     if response.status_code not in {200, 201, 202}:
+                        logger.warning("Knowledge management provider request failed: status=%d", response.status_code)
                         raise RuntimeError("Provider request failed; reconcile state before retrying a write")
                     raw = bytearray()
                     async for part in response.aiter_bytes():
                         if len(raw) + len(part) > 4 * 1024 * 1024:
+                            logger.warning("Knowledge management provider request failed: response_too_large")
                             raise RuntimeError("Provider response exceeds limit")
                         raw.extend(part)
                     payload = json.loads(raw)
-        except (httpx.HTTPError, ValueError):
+        except (httpx.HTTPError, ValueError) as exc:
+            # Never log exception text, request URLs, response bodies or chains.
+            logger.warning("Knowledge management provider request failed: %s", type(exc).__name__)
             raise RuntimeError("Provider response unavailable; reconcile state before retrying a write") from None
         if not isinstance(payload, dict) or payload.get("success") is not True or not isinstance(payload.get("data"), dict):
+            logger.warning("Knowledge management provider request failed: invalid_envelope")
             raise RuntimeError("Invalid provider response")
         return payload["data"]
 

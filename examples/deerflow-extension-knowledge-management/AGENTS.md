@@ -36,3 +36,7 @@ VALIDATION.md separately from mock contract coverage.
 
 Frontend discovery uses the knowledge-management namespace with English/Chinese
 copy; catalog presence never activates routes or implies a management page.
+
+Provider failure logs include only exception types, numeric HTTP status and fixed
+response-failure categories. Never log exception text/chains, payloads, URLs or
+credentials; caplog regressions exercise transport and custom-provider failures.
