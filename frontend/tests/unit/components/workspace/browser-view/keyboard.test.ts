@@ -12,6 +12,8 @@ function ctx(
     key: "a",
     metaKey: false,
     ctrlKey: false,
+    shiftKey: false,
+    altKey: false,
     ...overrides,
   };
 }
@@ -33,6 +35,16 @@ describe("decideBrowserKeyInput", () => {
       type: "key",
       key: "ArrowLeft",
     });
+    expect(decideBrowserKeyInput(ctx({ key: "Tab", shiftKey: true }))).toEqual({
+      type: "key",
+      key: "Shift+Tab",
+    });
+    expect(
+      decideBrowserKeyInput(ctx({ key: "ArrowLeft", shiftKey: true })),
+    ).toEqual({
+      type: "key",
+      key: "Shift+ArrowLeft",
+    });
   });
 
   it("forwards modifier combos as a normalized key chord", () => {
@@ -43,6 +55,32 @@ describe("decideBrowserKeyInput", () => {
     expect(decideBrowserKeyInput(ctx({ key: "a", ctrlKey: true }))).toEqual({
       type: "key",
       key: "Control+A",
+    });
+    expect(
+      decideBrowserKeyInput(
+        ctx({ key: "ArrowLeft", ctrlKey: true, shiftKey: true }),
+      ),
+    ).toEqual({
+      type: "key",
+      key: "Control+Shift+ArrowLeft",
+    });
+    expect(
+      decideBrowserKeyInput(ctx({ key: "Backspace", ctrlKey: true })),
+    ).toEqual({
+      type: "key",
+      key: "Control+Backspace",
+    });
+    expect(
+      decideBrowserKeyInput(ctx({ key: "Backspace", metaKey: true })),
+    ).toEqual({
+      type: "key",
+      key: "Meta+Backspace",
+    });
+    expect(
+      decideBrowserKeyInput(ctx({ key: "ArrowRight", altKey: true })),
+    ).toEqual({
+      type: "key",
+      key: "Alt+ArrowRight",
     });
   });
 

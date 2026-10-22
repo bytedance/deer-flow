@@ -208,12 +208,24 @@ likewise prefix the target with `bash`. This keeps documented `make` commands
 working when a source archive, `core.fileMode=false`, or a non-POSIX filesystem
 does not preserve executable bits.
 
+The Windows wrapper resolves `bash.exe` under the Git installation root, which
+is the parent of `cmd/`, `bin/`, or `mingw64/bin/` depending on the distribution:
+Git for Windows puts `git.exe` in `cmd/`, while PortableGit and GitHub Desktop
+put it in `mingw64/bin/`. Bash and sh stay at `<root>/bin` and `<root>/usr/bin`
+in both layouts. `backend/tests/support/shell.py` mirrors the same rule for the
+shell-script suites.
+
 `make clean` deletes `backend/.deer-flow` (database, users, threads, uploads,
 secrets), which both compose stacks mount into `deer-flow-gateway`. Its recipe
 runs `check-data-not-in-use.sh` before `make stop` (which would stop a live
 stack's sandboxes) and refuses while that container runs; an absent or
 unreachable Docker passes. `make stop` must still run before the delete: it
 stops `deer-flow-sandbox*` containers, whose thread mounts live in that tree.
+`cleanup-containers.sh` must verify an anchored `<prefix>-` name after Docker's
+substring `name=` filter, and use the same rule for Apple Container IDs. Parse
+Apple Container JSON without interpolating the prefix into Python source; bad
+entries must not hide later valid containers. Offline stub coverage lives in
+`backend/tests/test_cleanup_containers_script.py`.
 `RUNTIME_DATA_CONTENTS` feeds both the help line and the deletion notice.
 
 Host-side pnpm calls must go through `scripts/pnpm.py`. With native Windows

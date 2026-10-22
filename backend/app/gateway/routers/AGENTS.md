@@ -35,6 +35,10 @@ Agent PUT uses `preserve_non_managed_fields(..., new_tool_groups=...)` to clear
 an inherited knowledge default when changed groups remove knowledge access.
 Explicit scope/null updates still win; unchanged groups are not a migration.
 
+Custom-agent and user-profile 500s and the scheduled-task `invalid_assistant`
+422 use fixed text: agent config parse errors and `OSError`s carry host paths
+and stay in the server log.
+
 Committed MCP reconciliation failures are logged once by
 `fail_mcp_reconciliation`, with only the underlying exception type.
 `_run_drained_mcp_apply` passes `_McpCommittedReconciliationError` as an expected

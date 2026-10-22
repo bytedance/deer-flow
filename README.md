@@ -770,6 +770,10 @@ DeerFlow runs the agent runtime inside the Gateway API. Development mode enables
 | **Stop** | `./scripts/serve.sh --stop`<br/>`make stop` | `./scripts/docker.sh stop`<br/>`make docker-stop` | `./scripts/deploy.sh down`<br/>`make down` |
 | **Restart** | `./scripts/serve.sh --restart [flags]` | `./scripts/docker.sh restart` | — |
 
+Local and Docker development stop commands also stop running sandbox containers
+whose names start with `deer-flow-sandbox-`. Containers with that text elsewhere
+in their names are left alone.
+
 `make start` and `make start-daemon` rebuild the frontend with `next build` on
 every run. To reuse the last build instead, pass `SKIP_FRONTEND_BUILD=1` (or add
 `--skip-frontend-build` when calling `./scripts/serve.sh --prod` directly). This
@@ -949,6 +953,7 @@ For HTTP/SSE MCP servers, OAuth token flows are supported (`client_credentials`,
 Missing, malformed, or out-of-range token response `expires_in` values use a one-hour default lifetime. This includes lifetimes that cannot be added to the current time without overflowing the expiry timestamp.
 Durable HTTP/SSE task status and cancellation calls select configured `user_auth` credentials using the persisted task owner, including after restart; per-request secrets are not retained for background calls. If a request-scoped credential overrides submit authentication, both credentials must authorize access to the same remote task.
 For stdio MCP servers, per-tool call timeouts can be configured with `tool_call_timeout`; durable background-task calls honor the same setting for HTTP/SSE servers as well.
+Durable background-task status and cancellation calls renew their claims while they run, so a slow response can still be saved after the original lease duration. If ownership is lost or renewal cannot be confirmed, the worker stops its local call and leaves recovery to the durable state. See [control-call leases](backend/docs/mcp-control-leases.md) for recovery and shutdown behavior.
 The persistent stdio session pool evicts only idle sessions at capacity. If every pooled session is executing a tool, a new session request fails with a capacity error and can be retried after a call finishes.
 For stdio file outputs, a bare filename is linked to a uniquely matching file created or changed by that call. Filenames embedded in unrelated paths, including Windows backslash paths, are left intact. Explicit remote URLs (`scheme://...`) retain their original query parameters and fragments even when these contain a generated file's name or path, including URLs with backslash-escaped quotes or markup delimiters; local references outside the URL still translate normally.
 For HTTP/SSE background-task calls, `session_init_timeout` separately bounds connection setup (including the SSE endpoint event) and MCP initialization together; it stops applying once the tool call begins. Initialization deadline errors identify the server and configured time limit.
@@ -1031,6 +1036,10 @@ cleanup when migrating from legacy metadata credentials.
 DeerFlow supports receiving tasks from messaging apps. Channels auto-start when configured — no public IP required for any of them.
 
 Cancelling a channel restart discards its pending configuration reload, preserving newer runtime settings applied afterward.
+
+Invalid UTF-8 in `channels/store.json` follows the same recovery policy as malformed JSON:
+SQL migration warns and skips the file, leaving it unchanged so channels can start; the
+memory backend's JSON store warns and starts empty, replacing the file on its next write.
 
 Conversation-binding, runtime channel-credential and WeChat auth-state saves preserve the original
 persistence failure when staged-file cleanup also fails. Remaining cleanup still runs, and warnings
@@ -1524,6 +1533,8 @@ Skills are what make DeerFlow do *almost anything*.
 
 A standard Agent Skill is a structured capability module — a Markdown file that defines a workflow, best practices, and references to supporting resources. DeerFlow ships with built-in skills for research, report generation, slide creation, web pages, image and video generation, and more. But the real power is extensibility: add your own skills, replace the built-in ones, or combine them into compound workflows.
 
+The [music-generation skill](skills/public/music-generation/SKILL.md#output-handling) preserves existing output when the provider returns malformed, empty or unrecognized audio.
+
 Skills are loaded progressively — only when the task needs them, not all at once. This keeps the context window lean and makes DeerFlow work well even with token-sensitive models.
 
 When deferred skill discovery is enabled, `describe_skill` ranks installed skills by bounded, Unicode-normalized intent-term coverage across names and descriptions. Natural multi-term requests can therefore find a relevant skill without requiring one exact phrase, while exact `select:` and required-name `+prefix` lookups remain available. Ranked searches use up to 256 characters and return up to five results; exact `select:` lists are not truncated and return all requested catalog matches.
@@ -1631,6 +1642,11 @@ or extend authorization. If an agent hits missing Lark authorization during a
 conversation, the managed `lark-shared` guidance points the user back to the
 same plugin configuration with `/workspace/capabilities?tab=plugins&plugin=lark`.
 
+Browser authorization continues across polling timeouts; repeated polls share
+the same attempt, including when Gateway runs multiple workers. Starting a new
+flow or changing the app cancels the previous attempt. If DeerFlow cannot
+confirm the outcome of a finished attempt, restart authorization for a new link.
+
 Once configured, **Change Lark app** lets a user point their DeerFlow account at
 a different Lark/Feishu app without a reinstall — either by pasting an existing
 app's App ID / App Secret or by re-registering an app in the browser. Switching
@@ -1734,6 +1750,8 @@ For DDG web search and DDG image search, `max_results` in `config.yaml` can be a
 Image result screening also recognizes Unicode hostname separators (`。`, `．`,
 `｡`) as dots, matching IDNA client normalization before classifying local/private
 hosts. Accepted result URLs retain their original spelling.
+
+DDG image search reports timeouts, rate limits, and setup failures as search errors with the original query. `No images found` is reserved for a returned empty result set. The SDK's `No results found.` exception remains a search error because it can also hide an unfinished backend request; this conservatively includes SDK exceptions from genuinely empty searches whose completion cannot be confirmed.
 
 Stdio MCP servers can set `cwd` in `extensions_config.json` when their entrypoint
 or data files depend on a specific working directory. The setting applies to
@@ -2274,6 +2292,8 @@ The chat header also shows a context-window gauge when the selected model has a 
 When `token_budget.enabled` and `token_usage.enabled` are both enabled, each lead-agent run budget includes completed subagent usage, including the final batch. Hidden goal continuations share the budget; a new user run starts fresh.
 
 ### Sub-Agents
+
+Web chats accept direct model choices such as “ask MODEL to handle this”, “use MODEL for this turn”, and “from now on use MODEL”; Chinese equivalents are supported too. A child choice leaves the main model unchanged, a one-turn choice leaves defaults unchanged, and a conversation choice uses the existing browser-local thread override without changing account preferences. Choices resolve against available configurations and optional `models[].aliases`; ambiguous names or scopes show a selection card before execution, while delegation still requires enabled subagents (Ultra mode).
 
 When a sub-agent ends with `return_direct=True` tools, including tools contributed by extension middleware, their outputs are returned in tool-call order. A failed tool marks the task as failed while preserving the batch outputs.
 
