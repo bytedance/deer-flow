@@ -508,7 +508,7 @@ async def list_skills(request: Request, config: AppConfig = Depends(get_config))
         skills = await asyncio.to_thread(_load_user_skills, config)
     except Exception as e:
         logger.error(f"Failed to load skills: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to load skills: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to load skills.") from e
 
     visible_skills = await _filter_visible_skills(request, config, skills)
 
@@ -655,7 +655,7 @@ async def list_custom_skills(request: Request, config: AppConfig = Depends(get_c
         return SkillsListResponse(skills=[_skill_to_response(skill) for skill in visible_skills])
     except Exception as e:
         logger.error("Failed to list custom skills: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to list custom skills: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to list custom skills.") from e
 
 
 @router.get("/skills/diagnostics/custom", response_model=SkillDiagnosticsResponse, summary="List Owned Custom Skill YAML Errors")
@@ -1027,7 +1027,7 @@ async def get_skill(skill_name: str, request: Request, config: AppConfig = Depen
         raise
     except Exception as e:
         logger.error(f"Failed to get skill {skill_name}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to get skill: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to get skill.") from e
 
 
 def _write_extensions_skill_state(
@@ -1056,7 +1056,7 @@ def _write_extensions_skill_state(
     projection_update = skill_projection_mutation(storage, "public", remove_names=removal_names) if rebuild_public_projection and isinstance(storage, LocalSkillStorage) else nullcontext()
     config_path = ExtensionsConfig.resolve_config_path()
     if config_path is None:
-        config_path = Path.cwd().parent / "extensions_config.json"
+        config_path = ExtensionsConfig.default_config_path()
         logger.info(f"No existing extensions config found. Creating new config at: {config_path}")
 
     from deerflow.skills.mutations.guard import managed_global_state_write

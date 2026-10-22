@@ -57,8 +57,9 @@ file above stores user bookmarks, not deployment settings.
    `/workspace/extensions/community.bookmarks/library`, and survives refresh.
 4. Search text or labels, edit a name, open the source conversation, or confirm deletion.
 5. Ask the Agent to find a saved answer. Its normal tool assembly contains a
-   namespace-qualified `search_bookmarks` tool; the existing tool/group/skill policy
-   still applies. Agents restricted to other tool groups do not receive it.
+   namespace-qualified `search_bookmarks` tool; the existing tool/group
+   configuration and host authorization still apply. Agents restricted to other
+   tool groups do not receive it.
 
 ## Boundaries
 

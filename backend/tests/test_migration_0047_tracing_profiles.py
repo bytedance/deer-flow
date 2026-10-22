@@ -22,10 +22,8 @@ REVISION = "0047_tracing_profiles"
 PREVIOUS = "0046_skill_mutations"
 
 
-def test_0047_is_the_single_chain_head_after_skill_mutations():
+def test_0047_tracing_retains_its_parent_before_the_merge():
     script = ScriptDirectory(str(bootstrap._MIGRATIONS_DIR))
-    assert script.get_heads() == [REVISION]
-    assert bootstrap._get_head_revision() == REVISION
     assert script.get_revision(REVISION).down_revision == PREVIOUS
 
 
@@ -64,7 +62,7 @@ async def test_tracing_schema_matches_orm_for_fresh_and_upgraded_database(tmp_pa
                 return compare_metadata(context, Base.metadata)
 
             assert await connection.run_sync(diff) == []
-            assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == REVISION
+            assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == (REVISION if existing else "0048_merge_tracing_mcp_oauth")
         await asyncio.to_thread(command.downgrade, cfg, PREVIOUS)
         async with engine.connect() as connection:
             assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == PREVIOUS
