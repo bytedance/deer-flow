@@ -26,7 +26,10 @@ import {
 } from "@/components/ai-elements/conversation";
 import { Button } from "@/components/ui/button";
 import { KnowledgeSourcesProvider } from "@/components/workspace/citations/knowledge-source";
-import { extractArtifactsFromThread } from "@/core/artifacts/utils";
+import {
+  collectThreadArtifactPaths,
+  extractArtifactsFromThread,
+} from "@/core/artifacts/utils";
 import {
   createKnowledgeSourceReader,
   type RetrievalSource,
@@ -112,6 +115,10 @@ import {
   type HumanInputSubmitResult,
 } from "./human-input-card";
 import { MarkdownContent } from "./markdown-content";
+import {
+  createMarkdownLinkComponent,
+  MessageArtifactPathsContext,
+} from "./markdown-link";
 import { MessageGroup, getMessageGroupReasoningMessage } from "./message-group";
 import { MessageListItem } from "./message-list-item";
 import {
@@ -1146,8 +1153,16 @@ export function MessageList({
     ],
   );
 
-  const artifactPaths = useStableArtifactPaths(
-    extractArtifactsFromThread(thread),
+  const stateArtifactPaths = extractArtifactsFromThread(thread);
+  const threadArtifactPaths = useMemo(
+    () => collectThreadArtifactPaths(stateArtifactPaths, messages),
+    [stateArtifactPaths, messages],
+  );
+  const artifactPaths = useStableArtifactPaths(threadArtifactPaths);
+  // Message text rendered outside MessageListItem resolves artifact links too.
+  const threadLinkComponents = useMemo(
+    () => ({ a: createMarkdownLinkComponent(threadId) }),
+    [threadId],
   );
 
   if (thread.isThreadLoading && messages.length === 0) {
@@ -1453,10 +1468,15 @@ export function MessageList({
                     group,
                     groupIndex,
                     <div className="w-full">
-                      <MarkdownContent
-                        content={extractContentFromMessage(message)}
-                        isLoading={thread.isLoading}
-                      />
+                      <MessageArtifactPathsContext.Provider
+                        value={artifactPaths}
+                      >
+                        <MarkdownContent
+                          content={extractContentFromMessage(message)}
+                          isLoading={thread.isLoading}
+                          components={threadLinkComponents}
+                        />
+                      </MessageArtifactPathsContext.Provider>
                       {renderTokenUsage({
                         messages: group.messages,
                         turnUsageMessages,
@@ -1494,11 +1514,16 @@ export function MessageList({
                   groupIndex,
                   <div className="w-full">
                     {group.messages[0] && hasContent(group.messages[0]) && (
-                      <MarkdownContent
-                        content={extractContentFromMessage(group.messages[0])}
-                        isLoading={thread.isLoading}
-                        className="mb-4"
-                      />
+                      <MessageArtifactPathsContext.Provider
+                        value={artifactPaths}
+                      >
+                        <MarkdownContent
+                          content={extractContentFromMessage(group.messages[0])}
+                          isLoading={thread.isLoading}
+                          className="mb-4"
+                          components={threadLinkComponents}
+                        />
+                      </MessageArtifactPathsContext.Provider>
                     )}
                     <ArtifactFileList
                       archiveDownloadsEnabled={
