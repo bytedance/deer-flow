@@ -33,6 +33,7 @@ export type BrowserInputEvent =
 
 export type BrowserStreamStatus = "idle" | "connecting" | "open" | "closed";
 
+const HANDSHAKE_TIMEOUT_MS = 10_000;
 const RECONNECT_BASE_DELAY_MS = 800;
 const RECONNECT_MAX_DELAY_MS = 10_000;
 const RECONNECT_MAX_ATTEMPTS = 6;
@@ -128,6 +129,8 @@ export function useBrowserStream(
     }
 
     let closedByEffect = false;
+    let attemptClosed = false;
+    let handshakeTimer: number | null = null;
     let reconnectTimer: number | null = null;
     setStatus("connecting");
     // browserStreamURL treats empty/undefined seed identically (no seed param),
@@ -138,6 +141,22 @@ export function useBrowserStream(
     const socket = new WebSocket(browserStreamURL(threadId, seedRef.current));
     socket.binaryType = "blob";
     socketRef.current = socket;
+
+    const clearHandshakeTimer = () => {
+      if (handshakeTimer !== null) {
+        window.clearTimeout(handshakeTimer);
+        handshakeTimer = null;
+      }
+    };
+
+    const closeSocket = () => {
+      if (
+        socket.readyState === WebSocket.CONNECTING ||
+        socket.readyState === WebSocket.OPEN
+      ) {
+        socket.close();
+      }
+    };
 
     const scheduleReconnect = () => {
       if (closedByEffect || !enabled) {
@@ -162,7 +181,20 @@ export function useBrowserStream(
       }, delay);
     };
 
+    const closeAttempt = () => {
+      if (closedByEffect || attemptClosed) return;
+      // Fence all callbacks before close() can emit another event. A retired
+      // attempt must not accept input or reset the reconnect budget on late open.
+      attemptClosed = true;
+      clearHandshakeTimer();
+      socketRef.current = null;
+      setStatus("closed");
+      scheduleReconnect();
+    };
+
     socket.onopen = () => {
+      if (closedByEffect || attemptClosed) return;
+      clearHandshakeTimer();
       const pendingNavigate = pendingNavigateRef.current;
       if (pendingNavigate) {
         socket.send(JSON.stringify(pendingNavigate));
@@ -178,7 +210,7 @@ export function useBrowserStream(
     };
     socket.onmessage = (message) => {
       try {
-        if (closedByEffect) return;
+        if (closedByEffect || attemptClosed) return;
         if (message.data instanceof Blob) {
           frameBuffer.push(
             message.data.type === "image/jpeg"
@@ -214,26 +246,31 @@ export function useBrowserStream(
         console.warn("Ignoring malformed browser stream message", error);
       }
     };
-    socket.onclose = () => {
-      if (!closedByEffect) {
-        setStatus("closed");
-        scheduleReconnect();
+    socket.onclose = closeAttempt;
+    socket.onerror = closeAttempt;
+
+    handshakeTimer = window.setTimeout(() => {
+      if (
+        closedByEffect ||
+        attemptClosed ||
+        socket.readyState !== WebSocket.CONNECTING
+      ) {
+        return;
       }
-    };
-    socket.onerror = () => {
-      if (!closedByEffect) {
-        setStatus("closed");
-        scheduleReconnect();
-      }
-    };
+      // A stalled upgrade may never emit error/close, even after close() is
+      // requested. Enter the bounded reconnect path without waiting for either.
+      closeAttempt();
+      closeSocket();
+    }, HANDSHAKE_TIMEOUT_MS);
 
     return () => {
       closedByEffect = true;
+      clearHandshakeTimer();
       if (reconnectTimer !== null) {
         window.clearTimeout(reconnectTimer);
       }
       socketRef.current = null;
-      socket.close();
+      closeSocket();
       frameBuffer.dispose();
     };
   }, [reconnectGeneration, enabled, frameBuffer, threadId]);
