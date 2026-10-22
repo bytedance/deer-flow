@@ -15,6 +15,13 @@ def _check_base_resp(payload: dict) -> None:
         )
 
 
+def _has_mp3_header(audio: bytes) -> bool:
+    """Check common MP3 signatures without decoding the audio stream."""
+    has_id3 = len(audio) >= 10 and audio.startswith(b"ID3")
+    has_mpeg_frame = len(audio) >= 4 and audio[0] == 0xFF and audio[1] & 0xE0 == 0xE0
+    return has_id3 or has_mpeg_frame
+
+
 def generate_music(prompt_file: str, output_file: str) -> str:
     """Generate a song from a JSON spec via MiniMax /v1/music_generation.
 
@@ -68,7 +75,10 @@ def generate_music(prompt_file: str, output_file: str) -> str:
     # Decode before opening the output: malformed responses must not erase it.
     audio = bytes.fromhex(audio_hex)
     if not audio:
-        raise ValueError("MiniMax returned no audio data")
+        raise ValueError("MiniMax audio decoded to empty bytes")
+    # The request pins MP3; reject obvious non-audio responses before writing.
+    if not _has_mp3_header(audio):
+        raise ValueError("MiniMax audio does not have an MP3 header")
 
     output_dir = os.path.dirname(output_file)
     if output_dir:
