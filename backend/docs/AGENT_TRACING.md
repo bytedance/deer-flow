@@ -6,8 +6,10 @@ button. Saving the Agent's name or instructions does not change tracing.
 ## Storage and deployment
 
 Use `database.backend: sqlite` for processes sharing one local database or
-`postgres` for independent Gateway replicas. Gateway startup migrates the
-application database. The memory backend preserves environment-based tracing
+`postgres` for independent Gateway replicas. Gateway startup and the embedded
+Python client's first conversation initialize and migrate the application
+database. Embedded initialization owns a temporary engine and leaves any
+running Gateway's engine intact. The memory backend preserves environment-based tracing
 and reports profile management as unavailable; it cannot persist profile edits.
 
 Profiles, credential versions, Agent bindings, and resolved run snapshots use
@@ -98,6 +100,10 @@ headers, disable redirects, and retain the deployment's proxy/TLS policy.
 Destination and credential changes produce a new exporter lease. Active users
 keep the previous lease; the last user closes it with a bounded queue drain.
 Historical snapshots can recreate the corresponding exporter after a restart.
+LangSmith child callbacks retain their parent's run, trace and dotted-order
+identities when rebuilt for delegated or delayed work. The transported parent
+context is bound to the frozen snapshot and destination; it does not restore
+ambient callbacks or route through a different profile.
 
 Monocle remains deployment-wide instrumentation. Gateway startup installs a
 fixed sampler only when Monocle is enabled, before instrumenting, allowing inherited Monocle spans and

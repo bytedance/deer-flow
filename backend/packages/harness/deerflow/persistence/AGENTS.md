@@ -1,5 +1,9 @@
 # Persistence lifecycle
 
+Embedded clients bootstrap the application schema before their first durable
+conversation through a temporary engine. Reuse the shared migration state machine
+and connection settings; never replace or close the Gateway's global engine.
+
 Postgres bootstrap owns its session-scoped advisory lock until `pg_advisory_unlock` completes. Drain that unlock across host cancellation before leaving the SQLAlchemy connection context; repeated cancellation must not return a pooled session while it still holds the bootstrap mutex. Ordinary database errors remain best-effort and are logged.
 
 Acquire that lock by polling `pg_try_advisory_lock`, never with a blocking `pg_advisory_lock`: the app engine's asyncpg `command_timeout` bounds every statement, so a blocking acquire fails a second instance's startup whenever a peer's migration outlasts it.

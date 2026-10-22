@@ -8,6 +8,7 @@ import hashlib
 import json
 import logging
 import threading
+from collections.abc import Mapping
 from contextlib import ExitStack, asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from typing import TYPE_CHECKING
@@ -131,16 +132,37 @@ class LangSmithResource:
     def callback(self, snapshot, *, parent_context=None):
         from langchain_core.tracers.langchain import LangChainTracer
         from langsmith import tracing_context
+        from langsmith.run_trees import RunTree
+
+        snapshot_id = getattr(snapshot, "snapshot_id", None)
+        destination_key = _key(self.config)
+        parent = None
+        if parent_context is not None:
+            try:
+                if not isinstance(parent_context, Mapping) or parent_context.get("snapshot_id") != snapshot_id or parent_context.get("destination_key") != destination_key:
+                    raise ValueError()
+                if any(not isinstance(parent_context.get(key), str) or not parent_context[key] for key in ("parent_run_id", "trace_id", "dotted_order")):
+                    raise ValueError()
+                parent = RunTree.from_dotted_order(parent_context["dotted_order"], client=self.client, project_name=self.config.project or "deer-flow", replicas=[])
+                if str(parent.id) != parent_context["parent_run_id"] or str(parent.trace_id) != parent_context["trace_id"]:
+                    raise ValueError()
+            except (KeyError, TypeError, ValueError):
+                raise ValueError("Invalid LangSmith parent tracing context") from None
 
         class PrivateLangChainTracer(LangChainTracer):
+            deerflow_scoped_tracing = True
+            _deerflow_snapshot_id = snapshot_id
+            _deerflow_destination_key = destination_key
+
             def _start_trace(self, run):
+                if parent is not None and run.parent_run_id is None:
+                    run.parent_run_id = parent.id
                 run.replicas = []
                 with tracing_context(enabled=True, client=self.client, parent=False, replicas=[]):
                     super()._start_trace(run)
 
-        callback = PrivateLangChainTracer(project_name=self.config.project or "deer-flow", client=self.client)
-        callback.deerflow_scoped_tracing = True
-        return callback
+        order_map = {parent.id: (parent.trace_id, parent.dotted_order)} if parent is not None else None
+        return PrivateLangChainTracer(project_name=self.config.project or "deer-flow", client=self.client, order_map=order_map)
 
     def close(self):
         self.client.flush(timeout=2)
@@ -300,7 +322,9 @@ def capture_tracing_parent_context() -> dict[str, dict]:
     if session is None or session.snapshot is None:
         return {}
     inherited = var_child_runnable_config.get() or {}
-    parent_run_id = getattr(inherited.get("callbacks"), "parent_run_id", None)
+    callbacks = inherited.get("callbacks")
+    parent_run_id = getattr(callbacks, "parent_run_id", None)
+    handlers = getattr(callbacks, "handlers", callbacks if isinstance(callbacks, (list, tuple)) else ())
     result = {}
     for resource in session.resources:
         if isinstance(resource, OtelResource):
@@ -312,6 +336,25 @@ def capture_tracing_parent_context() -> dict[str, dict]:
                 if parent is not None:
                     context = parent.get_span_context()
                     result[resource.config.provider] = {"trace_id": format(context.trace_id, "032x"), "span_id": format(context.span_id, "016x"), "trace_flags": int(context.trace_flags)}
+        elif isinstance(resource, LangSmithResource):
+            destination_key = _key(resource.config)
+            for handler in handlers:
+                if getattr(handler, "_deerflow_snapshot_id", None) != session.snapshot.snapshot_id or getattr(handler, "_deerflow_destination_key", None) != destination_key:
+                    continue
+                parent_id = parent_run_id
+                if parent_id is None:
+                    active = tuple(handler.run_map.values())
+                    parent_id = active[0].id if len(active) == 1 else None
+                order = handler.order_map.get(parent_id)
+                if order is not None:
+                    result["langsmith"] = {
+                        "snapshot_id": session.snapshot.snapshot_id,
+                        "destination_key": destination_key,
+                        "parent_run_id": str(parent_id),
+                        "trace_id": str(order[0]),
+                        "dotted_order": order[1],
+                    }
+                    break
     return result
 
 

@@ -22,6 +22,7 @@ import logging
 import mimetypes
 import os
 import tempfile
+import threading
 import uuid
 from collections.abc import Generator, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -90,6 +91,10 @@ from deerflow.uploads.manager import (
     upload_virtual_path,
 )
 from deerflow.utils.thread_id import resolve_thread_id, validate_thread_id
+
+# Each embedded bootstrap owns a short-lived engine; serialize first turns
+# across clients so separate SQLite connections cannot race through DDL.
+_PERSISTENCE_BOOTSTRAP_LOCK = threading.Lock()
 
 logger = logging.getLogger(__name__)
 
@@ -274,6 +279,7 @@ class DeerFlowClient:
         self._middlewares = list(middlewares) if middlewares else []
         self._environment = environment
         self._thread_incarnations: dict[str, str] = {}
+        self._persistence_schema_ready = False
 
         # Lazy agent — created on first call, recreated when config changes.
         self._agent = None
@@ -859,6 +865,16 @@ class DeerFlowClient:
     # Public API — conversation
     # ------------------------------------------------------------------
 
+    def _ensure_persistence_schema(self) -> None:
+        if self._app_config.database.backend == "memory" or self._persistence_schema_ready:
+            return
+        from deerflow.persistence.engine import bootstrap_schema_from_config
+
+        with _PERSISTENCE_BOOTSTRAP_LOCK:
+            if not self._persistence_schema_ready:
+                _run_async_from_sync(bootstrap_schema_from_config(self._app_config.database))
+                self._persistence_schema_ready = True
+
     def stream(
         self,
         message: str,
@@ -875,6 +891,7 @@ class DeerFlowClient:
         """
         # Resolve the id once, without mutating the caller's context.
         trace_id = get_current_trace_id() or generate_trace_id()
+        self._ensure_persistence_schema()
         snapshot = resolve_run_snapshot(self._agent_name, kwargs.get("user_id") or get_effective_user_id(), app_config=self._app_config)
         tracing_session = TracingSession(snapshot)
 

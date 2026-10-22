@@ -1339,6 +1339,8 @@ disable, shared revision activation, and Arize AX. See the
 credential rotation, secure collector endpoints, the optional gRPC transport,
 and run snapshot behavior. Monocle remains opt-in and leaves the global OTel
 provider untouched when disabled.
+Embedded Python clients initialize their durable database before the first
+conversation; a separate Gateway startup is not required.
 
 DeerFlow has built-in [LangSmith](https://smith.langchain.com) integration for observability. When enabled, all LLM calls, agent runs, and tool executions are traced and visible in the LangSmith dashboard.
 

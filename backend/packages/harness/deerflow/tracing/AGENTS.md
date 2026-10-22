@@ -16,6 +16,8 @@ lifecycle and real-delivery boundaries are documented in
 [`backend/docs/AGENT_TRACING.md`](../../../../docs/AGENT_TRACING.md).
 Runtime, subagent and compaction scopes offload fingerprint/exporter setup and
 draining; ContextVar activation and restoration stay on the calling task.
+Rebuilt LangSmith handlers carry only parent run/trace/order identities bound to
+the frozen snapshot and destination; retain ambient callback suppression.
 
 LangSmith and Langfuse are both supported. The wiring lives in two layers:
 
