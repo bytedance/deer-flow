@@ -175,9 +175,13 @@ imagePullSecrets:
 {{/* Name of the operator-managed redis Secret, or empty when the chart owns the
      credentials. Only the chart-managed Secret is created by this chart, and
      only there is the AUTH password known at render time — a user-managed
-     Secret may or may not carry `redis-password`. */}}
+     Secret may or may not carry `redis-password`.
+
+     Same truthiness rule as databaseUserSecret: `default` (not `or`) so a
+     falsy `existingSecret` yields an empty string instead of the literal name
+     "false". */}}
 {{- define "deer-flow.redisUserSecret" -}}
-{{- or .Values.redis.external.existingSecret .Values.redis.existingSecret -}}
+{{- .Values.redis.external.existingSecret | default .Values.redis.existingSecret | default "" -}}
 {{- end -}}
 
 {{/* Args for the bundled redis container. With a user-managed Secret the
@@ -213,7 +217,7 @@ redis-cli ping
      external URL, or a user-managed Secret). Drives the env injection in the
      gateway deployment. */}}
 {{- define "deer-flow.redisConfigured" -}}
-{{- or .Values.redis.enabled .Values.redis.external.redisUrl .Values.redis.external.existingSecret .Values.redis.existingSecret -}}
+{{- or .Values.redis.enabled .Values.redis.external.redisUrl (include "deer-flow.redisUserSecret" .) -}}
 {{- end -}}
 
 {{/* SHA256 checksums of the ConfigMaps. Mount these as pod-template

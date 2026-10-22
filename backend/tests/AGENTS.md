@@ -371,6 +371,8 @@ and both probe commands with argument-recording Redis stubs through
 `redis.auth.password` values, Secret precedence, external mode and shell
 metacharacters covered.
 Render tests skip when Helm is unavailable; they need no Kubernetes cluster.
+A falsy `existingSecret` (`false` is how people spell "not set") must fall
+through to the chart-managed Secret, not name the Secret after the value.
 
 ## Helm postgres Secret precedence
 
