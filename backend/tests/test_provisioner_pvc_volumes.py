@@ -18,9 +18,11 @@ def _thread_skill_mounts(
     ]
 
 
+@pytest.mark.parametrize("volume_name", ["user-data", "shared-userdata"])
 @pytest.mark.parametrize("broker", [False, True])
-def test_pod_reuses_one_userdata_claim_for_all_subpaths(provisioner_module, broker):
+def test_pod_reuses_one_userdata_claim_for_all_subpaths(provisioner_module, broker, volume_name):
     """One PVC volume serves sandbox projections and broker-only credentials."""
+    provisioner_module.USERDATA_VOLUME_NAME = volume_name
     provisioner_module.USERDATA_PVC_NAME = "userdata-pvc"
     provisioner_module.SKILLS_PVC_NAME = "skills-pvc"
     provisioner_module.DEER_FLOW_HOST_BASE_DIR = "/state"
@@ -38,7 +40,7 @@ def test_pod_reuses_one_userdata_claim_for_all_subpaths(provisioner_module, brok
     )
     spec = provisioner_module.k8s_client.ApiClient().sanitize_for_serialization(pod)["spec"]
     claim_volumes = [volume for volume in spec["volumes"] if "persistentVolumeClaim" in volume]
-    assert claim_volumes == [{"name": "user-data", "persistentVolumeClaim": {"claimName": "userdata-pvc"}}]
+    assert claim_volumes == [{"name": volume_name, "persistentVolumeClaim": {"claimName": "userdata-pvc"}}]
     declared_names = {volume["name"] for volume in spec["volumes"]}
     for container in [*spec["containers"], *spec.get("initContainers", [])]:
         assert all(mount["name"] in declared_names for mount in container.get("volumeMounts", []))
@@ -46,7 +48,7 @@ def test_pod_reuses_one_userdata_claim_for_all_subpaths(provisioner_module, brok
     sandbox_mounts = {mount["mountPath"]: mount for mount in spec["containers"][0]["volumeMounts"]}
     for category in ("public", "custom", "legacy", "integrations"):
         mount = sandbox_mounts[f"/mnt/skills/{category}"]
-        assert mount["name"] == "user-data"
+        assert mount["name"] == volume_name
         assert mount["subPath"] == f"deer-flow/users/alice/threads/thread-1/skills_view/{category}"
         assert mount["readOnly"] is True
     assert sandbox_mounts["/mnt/user-data"]["subPath"] == "deer-flow/users/alice/threads/thread-1/user-data"
@@ -56,7 +58,7 @@ def test_pod_reuses_one_userdata_claim_for_all_subpaths(provisioner_module, brok
         container = next(item for item in spec["containers"] if item["name"] == "lark-cli-broker")
         mounts = {mount["mountPath"]: mount for mount in container["volumeMounts"]}
         for mount in mounts.values():
-            assert mount["name"] == "user-data"
+            assert mount["name"] == volume_name
         assert mounts[provisioner_module.LARK_BROKER_SIDECAR_CONFIG_PATH]["subPath"] == "deer-flow/users/alice/integrations/lark-cli/config"
         assert mounts[provisioner_module.LARK_BROKER_SIDECAR_CONFIG_PATH]["readOnly"] is True
         assert mounts[provisioner_module.LARK_BROKER_SIDECAR_LOCKS_PATH]["readOnly"] is False
