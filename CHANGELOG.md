@@ -1397,6 +1397,11 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
 
 ### Fixed
 
+- **sandbox:** Release an E2B VM's ownership lease when acquire finds it gone
+  (a dead cached client or a warm-pool VM reaped while parked). The lease was
+  kept and renewed until Gateway shutdown, so every reaped VM left a tracked
+  ID and a renewed ownership key behind. ([#7277])
+
 - **mcp:** MCP servers using the OAuth `refresh_token` grant keep working
   across Gateway restarts, tool-cache resets, repeated personal-connection runs
   and multiple Gateway instances when the provider rotates refresh tokens
@@ -13004,3 +13009,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7207]: https://github.com/bytedance/deer-flow/pull/7207
 [#7217]: https://github.com/bytedance/deer-flow/pull/7217
 [#7255]: https://github.com/bytedance/deer-flow/pull/7255
+[#7277]: https://github.com/bytedance/deer-flow/pull/7277

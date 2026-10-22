@@ -1112,6 +1112,10 @@
 
 ### 修复
 
+- **沙箱：** acquire 发现 E2B VM 已不存在（缓存客户端已失效，或暖池中的 VM 在停放期间被
+  回收）时，释放该 VM 的所有权租约。此前租约会一直保留并续约到 Gateway 关闭，每个被回收的
+  VM 都会留下一个跟踪 ID 和一个持续续约的所有权键。([#7277])
+
 - **MCP：** 使用 OAuth `refresh_token` 授权的 MCP 服务器，在提供方轮换 refresh token
   （Auth0、Okta、Google）时，跨 Gateway 重启、工具缓存重置、个人连接的多次运行以及多个
   Gateway 实例都能继续工作。此前令牌只保存在进程内存中，每个新进程或新 manager 都从配置里
@@ -10380,3 +10384,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7207]: https://github.com/bytedance/deer-flow/pull/7207
 [#7217]: https://github.com/bytedance/deer-flow/pull/7217
 [#7255]: https://github.com/bytedance/deer-flow/pull/7255
+[#7277]: https://github.com/bytedance/deer-flow/pull/7277
