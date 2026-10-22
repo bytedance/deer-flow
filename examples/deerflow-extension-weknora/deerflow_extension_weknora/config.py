@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 
-from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 
 def native_id(value: object) -> str:
@@ -53,6 +53,13 @@ class Settings(BaseModel):
     spaces: tuple[Space, ...] = Field(min_length=1, max_length=20)
     timeout: float = Field(default=30, gt=0, le=120, allow_inf_nan=False)
     match_count: int = Field(default=8, ge=1, le=100, strict=True)
+
+    @field_validator("timeout", mode="before")
+    @classmethod
+    def reject_boolean_timeout(cls, value: object, info: ValidationInfo) -> object:
+        if isinstance(value, bool):
+            raise ValueError(f"{info.field_name} must not be a boolean")
+        return value
 
     @model_validator(mode="after")
     def unique_connections(self) -> Settings:

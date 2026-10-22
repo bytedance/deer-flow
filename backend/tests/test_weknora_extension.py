@@ -56,6 +56,14 @@ async def selection(provider, *, docs=True):
     return KnowledgeRequestContext("alice", "lead_agent", scope)
 
 
+@pytest.mark.parametrize("value", [True, False])
+def test_timeout_rejects_boolean_config(adapter, value):
+    provider, _, _, config, transport = adapter
+    config["timeout"] = value
+    with pytest.raises(ValueError, match="timeout must not be a boolean"):
+        type(provider)(config, transport=transport)
+
+
 @pytest.mark.asyncio
 async def test_catalog_documents_search_shared_evidence(adapter):
     provider, calls, _, _, _ = adapter

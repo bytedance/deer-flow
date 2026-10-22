@@ -24,6 +24,9 @@ Check capabilities.wiki and returned base membership; reject document filters
 before HTTP. Wiki responses use a separate pages envelope. Never advertise
 entity relations based on the Wiki page-link graph.
 
+Numeric connection settings must reject YAML booleans before Pydantic coercion;
+`match_count` is strict and `timeout` has an explicit before-validator.
+
 Wiki lexical search retries only successful empty pages with up to four distinct
 whitespace-separated keywords of at least two characters. Keep retries in the
 same authorized base, validate every response, deduplicate title/excerpt pairs,
