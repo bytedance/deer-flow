@@ -5256,6 +5256,13 @@
 
 ### 安全
 
+- **上传：** 线程上传（`POST /api/threads/{thread_id}/uploads`）、删除上传文件
+  （`DELETE /api/threads/{thread_id}/uploads/{filename}`）以及把资料库文档附加到线程，
+  其 `500` 响应的 detail 不再包含原始 `OSError` 文本。此前遇到权限错误，或磁盘已满到
+  无法创建暂存文件时，响应会返回该线程上传目录的宿主机绝对路径（含用户 ID 和线程 ID）。
+  现在它们返回 `Failed to upload <name>.` / `Failed to delete <name>.`，完整错误只记录在
+  Gateway 日志中。([#7217])
+  
 - **agents：** 自定义智能体与用户画像路由的 `500` detail 不再包含原始异常文本。
   此前无法解析的智能体 `config.yaml` 或文件系统错误（如 `[Errno 13]`）会让响应
   带出 `users/<user_id>/` 下的宿主机绝对路径；现在返回与智能体导入、导出一致的
@@ -10371,4 +10378,5 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7170]: https://github.com/bytedance/deer-flow/pull/7170
 [#7205]: https://github.com/bytedance/deer-flow/pull/7205
 [#7207]: https://github.com/bytedance/deer-flow/pull/7207
+[#7217]: https://github.com/bytedance/deer-flow/pull/7217
 [#7255]: https://github.com/bytedance/deer-flow/pull/7255
