@@ -1715,7 +1715,7 @@ async def update_thread_state(thread_id: ThreadId, body: ThreadStateUpdateReques
         logger.exception("Failed to update state for thread %s", sanitize_log_param(thread_id))
         raise HTTPException(status_code=500, detail="Failed to update thread state")
 
-    if thread_store and body.values and "title" in body.values:
+    if not checkpoint_ns and thread_store and body.values and "title" in body.values:
         new_title = body.values["title"]
         if new_title:
             try:
