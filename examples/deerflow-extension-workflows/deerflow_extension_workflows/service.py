@@ -23,6 +23,8 @@ from .store import TERMINAL, Store
 NAMESPACE = "community.workflows"
 FRAME = 48 * 1024
 TURN_LIMIT = 10000
+AGENT_TASK_BYTES = 16000
+AGENT_OUTPUT_BYTES = 12000
 logger = logging.getLogger(__name__)
 
 
@@ -418,7 +420,7 @@ class Workflows(Recovery, Lifecycle, Artifacts):
                     {
                         "role": "user",
                         "id": message_id,
-                        "content": encoded(task, 16000 if references else 8000),
+                        "content": encoded(task, AGENT_TASK_BYTES),
                     }
                 ]
             }
@@ -539,7 +541,7 @@ class Workflows(Recovery, Lifecycle, Artifacts):
                         output = content
                 else:
                     output = content
-                encoded(output, 12000)
+                encoded(output, AGENT_OUTPUT_BYTES)
                 # Evidence comes from the run's completed host assembly, never a
                 # fresh read of mutable configuration after the Agent finishes.
                 async with asyncio.timeout(5):

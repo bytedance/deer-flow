@@ -227,7 +227,7 @@ class DiscordChannel(Channel):
                 if not self._thread_store_path.exists():
                     logger.debug("[Discord] no thread mappings file at %s", self._thread_store_path)
                 else:
-                    data = json.loads(self._thread_store_path.read_text())
+                    data = json.loads(self._thread_store_path.read_text(encoding="utf-8"))
                     self._active_threads.clear()
                     self._active_thread_ids.clear()
                     for channel_id, thread_id in data.items():
@@ -275,7 +275,7 @@ class DiscordChannel(Channel):
             try:
                 snapshot = dict(self._active_threads)
                 self._thread_store_path.parent.mkdir(parents=True, exist_ok=True)
-                self._thread_store_path.write_text(json.dumps(snapshot, indent=2))
+                self._thread_store_path.write_text(json.dumps(snapshot, indent=2), encoding="utf-8", newline="")
             except Exception:
                 logger.exception("[Discord] failed to persist thread mappings")
 

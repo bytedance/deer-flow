@@ -213,7 +213,8 @@ class AgentConfig(BaseModel):
     model: str | None = None
     tool_groups: list[str] | None = None
     # skills controls which skills are discoverable and may be activated by the
-    # agent. It does not activate their allowed-tools policies at construction:
+    # agent. allowed-tools is compatibility metadata only and never restricts
+    # tools:
     # - None (or omitted): load all enabled skills (default fallback behavior)
     # - [] (explicit empty list): disable all skills
     # - ["skill1", "skill2"]: load only the specified skills

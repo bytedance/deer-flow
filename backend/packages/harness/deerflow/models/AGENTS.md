@@ -24,6 +24,8 @@ nested underflow into zero. Regression coverage is in `tests/test_mindie_provide
 
 ### Model Factory (`packages/harness/deerflow/models/factory.py`)
 
+`selection.py` resolves direct user model controls against the visible catalog without model calls. `aliases` is presentation metadata, stripped from provider kwargs and assembly parameters. Gateway copies `subagent_model_name`/`model_selection_requested` into runtime context only. Explicit choices use `model:use` with no deny-to-default substitution; provider errors retain deployment policy. Bind selected child names through cloned task schemas; never mutate shared tools or agent configs.
+
 Request-admission waits follow the next scheduled admission and configured
 interval, capped at 50 ms; the cap must not become a minimum poll interval that
 limits high-RPM throughput. Local `AdmissionError` is structurally non-retriable
@@ -135,6 +137,15 @@ returning partial output. Non-object error details or response containers are
 reported as text instead of raising `AttributeError`. SSE failures do not enter
 the HTTP-status retry loop.
 Offline HTTP-stream coverage: `tests/test_codex_stream_terminal_events.py`.
+
+### Codex Retry Delays (`openai_codex_provider.py`)
+
+Prefer numeric `retry-after-ms` over numeric or HTTP-date `Retry-After` hints.
+Interpret HTTP-date values in UTC, including the obsolete timezone-less asctime
+form. Apply `utils.retry_after.bounded_retry_after_ms` to every parsed delay:
+past dates retry immediately; malformed, non-finite or over-24-hour hints retain
+local exponential backoff. Keep millisecond hints numeric-only. Offline coverage
+in `tests/test_codex_retry_after.py` includes public sync/async HTTP retries.
 
 ### Claude Code Credentials (`packages/harness/deerflow/models/credential_loader.py`)
 

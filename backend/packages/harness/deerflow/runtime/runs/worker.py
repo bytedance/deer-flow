@@ -34,6 +34,7 @@ from functools import lru_cache
 from typing import Any, Final, Literal, cast
 
 from deerflow_extension_api.agent_runs import AGENT_RUNS_CONTEXT_KEY
+from langchain_core.messages import AIMessage, AIMessageChunk
 from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.types import Overwrite
 
@@ -431,6 +432,33 @@ _LARGE_FILE_TOOL_BATCH_SIZE = 32
 
 
 @dataclass
+class _PartialAssistantResponseAccumulator:
+    """Collect root assistant text that was successfully streamed to clients."""
+
+    text_by_id: dict[str, str] = field(default_factory=dict)
+
+    def observe(self, chunk: Any) -> None:
+        if not isinstance(chunk, tuple) or len(chunk) != 2:
+            return
+        message, _metadata = chunk
+        if not isinstance(message, (AIMessage, AIMessageChunk)):
+            return
+        additional_kwargs = getattr(message, "additional_kwargs", None)
+        if isinstance(additional_kwargs, Mapping) and additional_kwargs.get("hide_from_ui") is True:
+            return
+        message_id = getattr(message, "id", None)
+        if not isinstance(message_id, str) or not message_id:
+            return
+        text = message_to_text(message, text_attribute_fallback=True)
+        if not text:
+            return
+        self.text_by_id[message_id] = self.text_by_id.get(message_id, "") + text
+
+    def messages(self) -> list[AIMessage]:
+        return [AIMessage(id=message_id, content=text) for message_id, text in self.text_by_id.items() if text.strip()]
+
+
+@dataclass
 class _LargeFileToolChunkBatcher:
     """Batch file-body argument deltas to avoid quadratic browser parsing.
 
@@ -675,6 +703,9 @@ class RunContext:
     # Delta snapshot cadence frozen at startup; ``None`` means "not frozen in
     # this process" (embedded/tests) and resolves to the config default.
     checkpoint_snapshot_frequency: int | None = None
+    # Called after durable same-thread admission is active and before the first
+    # checkpoint read. Failures are isolated from the run outcome.
+    on_run_admitted: Any | None = field(default=None)
     on_run_completed: Any | None = field(default=None)
     # The host binds this capability to one run's authenticated reader and references.
     conversation_reader: Any | None = field(default=None)
@@ -997,6 +1028,7 @@ async def run_agent(
     accessor: CheckpointStateAccessor | None = None
     rollback_point: RollbackPoint | None = None
     journal = None
+    partial_assistant_response: _PartialAssistantResponseAccumulator | None = None
     seq_stamper: _MessageSeqStamper | None = None
     runtime_ctx: dict[str, Any] | None = None
     runtime: Any | None = None
@@ -1113,6 +1145,8 @@ async def run_agent(
                 user_id=record.user_id,
                 progress_reporter=lambda snapshot: run_manager.update_run_progress(run_id, **snapshot),
             )
+            if "messages-tuple" in requested_modes:
+                partial_assistant_response = _PartialAssistantResponseAccumulator()
 
         # Keep cancellable preflight work under the worker's terminal guard so
         # cancellation cannot strand a pending RunRecord or stream subscriber.
@@ -1149,6 +1183,12 @@ async def run_agent(
                 )
             return
         started = True
+
+        if ctx.on_run_admitted is not None:
+            try:
+                await ctx.on_run_admitted(record, config)
+            except Exception:
+                logger.warning("Run admission hook failed for %s (non-fatal)", run_id, exc_info=True)
 
         task_id = lead_task_id(run_id)
         if extensions.needs_task_store:
@@ -1497,6 +1537,8 @@ async def run_agent(
                                 if single_mode == "values" and seq_stamper is not None:
                                     single_payload = await seq_stamper.stamp(single_payload)
                                 await bridge.publish(run_id, sse_event, single_payload)
+                                if single_mode == "messages" and partial_assistant_response is not None:
+                                    partial_assistant_response.observe(chunk)
                                 if single_mode == "custom":
                                     await subagent_events.add(chunk)
                         finally:
@@ -1555,6 +1597,8 @@ async def run_agent(
                                 subagent_events=subagent_events,
                                 seq_stamper=seq_stamper,
                             )
+                            if not namespace and mode == "messages" and partial_assistant_response is not None:
+                                partial_assistant_response.observe(chunk)
                     finally:
                         close_error = sys.exception()
                         try:
@@ -1798,6 +1842,8 @@ async def run_agent(
                 # crash window where a terminal run could otherwise outlive its receipt.
                 # A fenced worker leaves receipt recovery to the peer that claimed it.
                 if not record.ownership_lost and journal is not None:
+                    if record.status == RunStatus.interrupted and partial_assistant_response is not None:
+                        journal.record_interrupted_ai_responses(partial_assistant_response.messages())
                     try:
                         await journal.flush()
                     except Exception:
@@ -2159,6 +2205,8 @@ async def run_agent(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+_GOAL_RUN_HARD_STOP_REASONS = frozenset({"token_capped", "loop_capped"})
 
 
 @dataclass(frozen=True)
@@ -2660,11 +2708,10 @@ async def _prepare_goal_continuation_input(
         return _GoalCompletionCandidate(copy.deepcopy(current_goal), conversation_signature_before, evaluation)
 
     stand_down_reason = _stand_down_reason(goal, evaluation, no_progress_count)
-    if stand_down_reason is None and run_stop_reason == "token_capped":
-        # The run already used up its token budget, and continuations share that
-        # budget, so another hidden turn would spend one more model call only to
-        # have its tool calls stripped.
-        stand_down_reason = "token_capped"
+    if stand_down_reason is None and run_stop_reason in _GOAL_RUN_HARD_STOP_REASONS:
+        # Both guards keep their safety state across hidden turns in this run.
+        # Respect the hard stop instead of re-entering the same run budget.
+        stand_down_reason = run_stop_reason
     if stand_down_reason is not None or not should_continue_goal(goal, evaluation, no_progress_count=no_progress_count):
         await _persist(goal, evaluation, no_progress_count, stand_down_reason=stand_down_reason)
         return None

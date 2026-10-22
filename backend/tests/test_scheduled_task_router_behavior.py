@@ -1305,6 +1305,23 @@ async def test_create_invalid_assistant_id_is_rejected():
 
 
 @pytest.mark.asyncio
+async def test_create_unparsable_assistant_config_keeps_host_path_out_of_422(caplog):
+    config_file = "/srv/deer-flow/users/user-1/agents/broken-bot/config.yaml"
+    with patch(
+        "app.gateway.routers.scheduled_tasks.load_agent_config",
+        side_effect=ValueError(f"Failed to parse agent config {config_file}: mapping values are not allowed here"),
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            await _call_create(_create_request(assistant_id="broken-bot"))
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.detail == {
+        "code": "invalid_assistant",
+        "message": "Agent config for assistant_id 'broken-bot' could not be loaded",
+    }
+    assert config_file in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_update_custom_assistant_id_is_persisted():
     repo = _Repo()
     task = await repo.create(
