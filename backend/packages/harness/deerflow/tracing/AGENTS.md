@@ -1,5 +1,27 @@
 ### Tracing System (`packages/harness/deerflow/tracing/`)
 
+**Agent-scoped control plane**: `profiles.py` resolves immutable snapshots from
+`persistence/tracing_profiles`; credentials are encrypted, and completely off
+snapshots use strictly validated `no-export:v1:` payloads without loading a key.
+Load tracing keys lazily with the shared-key topology gate. Never convert a
+decryption failure or missing reference into an off snapshot. New admissions validate
+head revisions under the same SQL fence used by profile/binding writes; queued
+and resumed work restores a trusted historical reference. Never persist the
+decrypted `RunTracingSnapshot` in runtime config or checkpoint metadata.
+`scoped.py` binds the snapshot and owns reference-counted private exporters;
+`otel_callback.py` emits OpenInference spans and `otlp_exporter.py` sends explicit
+OTLP requests without ambient credentials. Managed public endpoints require TLS;
+plaintext is limited to loopback/private IP collectors. Startup installs one global sampling
+guard only when Monocle is enabled. Missing guards or incompatible frozen Monocle settings
+fail closed. Keep implicit LangSmith suppression separate from explicit private
+handler enablement and disable environment replica routing. API, permission,
+lifecycle and real-delivery boundaries are documented in
+[`backend/docs/AGENT_TRACING.md`](../../../../docs/AGENT_TRACING.md).
+Runtime, subagent and compaction scopes offload fingerprint/exporter setup and
+draining; ContextVar activation and restoration stay on the calling task.
+Rebuilt LangSmith handlers carry only parent run/trace/order identities bound to
+the frozen snapshot and destination; retain ambient callback suppression.
+
 LangSmith and Langfuse are both supported. The wiring lives in two layers:
 
 - `factory.py::build_tracing_callbacks()` — returns the LangChain `CallbackHandler` list for the providers currently enabled via env vars (`LANGSMITH_TRACING`, `LANGFUSE_TRACING`, etc.). The handlers are attached at the **graph invocation root** for in-graph runs (`make_lead_agent` and `DeerFlowClient.stream` both append them to `config["callbacks"]` before invoking the graph) so a single run produces one trace with all node / LLM / tool calls as child spans. Standalone callers — anything that invokes a model outside such a graph (e.g. `MemoryUpdater`) — keep `create_chat_model`'s default `attach_tracing=True`, which falls back to model-level callback attachment.

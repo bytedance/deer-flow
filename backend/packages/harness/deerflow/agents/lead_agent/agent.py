@@ -74,6 +74,7 @@ from deerflow.runtime.checkpoint_mode import (
     frozen_checkpoint_channel_mode,
     inject_checkpoint_mode,
 )
+from deerflow.runtime.tracing_snapshot import ROOT_TRACING_BOUND_KEY
 from deerflow.scheduler.runtime import SCHEDULER_CAPABILITY_CONTEXT_KEY, is_scheduler_capability
 from deerflow.skills.types import Skill
 from deerflow.subagents.capacity import configured_subagent_max_running
@@ -1139,7 +1140,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
     # actually propagates ``langfuse_session_id`` / ``langfuse_user_id`` from
     # ``config["metadata"]`` onto the trace. Without root-level attachment the
     # model is a nested observation and the handler strips ``langfuse_*`` keys.
-    tracing_callbacks = build_tracing_callbacks()
+    tracing_callbacks = [] if config.get(ROOT_TRACING_BOUND_KEY) else build_tracing_callbacks()
     if tracing_callbacks:
         existing = config.get("callbacks") or []
         if not isinstance(existing, list):

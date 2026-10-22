@@ -720,6 +720,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     from app.gateway.personal_mcp_access import personal_mcp_authority
 
     async with personal_mcp_authority(), mcp_oauth_token_persistence(startup_config), _runtime_with_mcp_pool_shutdown(app, startup_config):
+        from app.gateway.tracing_admission import capture_run_tracing_snapshot, tracing_database_identity
+        from deerflow.tracing.profiles import protect_tracing_history
+
+        # Checkpointer connections are startup-bound even when request config reloads.
+        app.state.tracing_gc_authority = (
+            getattr(app.state, "checkpointer", None),
+            await asyncio.to_thread(tracing_database_identity, startup_config),
+        )
+        if app.state.tracing_gc_authority[0] is not None and app.state.tracing_gc_authority[1] is None:
+            await await_drained(asyncio.to_thread(protect_tracing_history, startup_config))
         logger.info("LangGraph runtime initialised")
 
         # Check admin bootstrap state and migrate orphan threads after admin exists.
@@ -771,12 +781,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         try:
             from app.gateway.services import launch_scheduled_thread_run
             from app.scheduler import ScheduledTaskService
+            from deerflow.tracing.profiles import release_run_snapshot
 
             if getattr(app.state, "scheduled_task_repo", None) is not None and getattr(app.state, "scheduled_task_run_repo", None) is not None:
                 scheduled_task_service = ScheduledTaskService(
                     task_repo=app.state.scheduled_task_repo,
                     task_run_repo=app.state.scheduled_task_run_repo,
                     launch_run=lambda **kwargs: launch_scheduled_thread_run(app=app, **kwargs),
+                    resolve_tracing_snapshot=lambda agent_name, user_id: capture_run_tracing_snapshot(app.state, agent_name, user_id, app_config=startup_config),
+                    release_tracing_snapshot=lambda snapshot_id, user_id: release_run_snapshot(snapshot_id, user_id, app_config=startup_config),
                     poll_interval_seconds=startup_config.scheduler.poll_interval_seconds,
                     lease_seconds=startup_config.scheduler.lease_seconds,
                     max_concurrent_runs=startup_config.scheduler.max_concurrent_runs,
@@ -1360,6 +1373,9 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # Agents API is mounted at /api/agents
     app.include_router(agents.router)
+    from app.gateway.routers import tracing
+
+    app.include_router(tracing.router)
     # Projects API is mounted at /api/projects
     app.include_router(projects.router)
     # Project document shelf API is mounted at /api/projects/{id}/documents

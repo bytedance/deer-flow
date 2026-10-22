@@ -28,10 +28,13 @@ from deerflow.persistence.user.im_notifications import ImNotificationPreferences
 from deerflow.persistence.user.model import UserPreferenceRow
 from deerflow.runtime import ConflictError, RunRecord
 from deerflow.runtime.run_origin import origin_kind_of
+from deerflow.runtime.tracing_snapshot import snapshot_references
 from deerflow.scheduler.host_notes import RUN_ERROR_DELETED_WHILE_QUEUED, RUN_ERROR_INTERRUPTED, RUN_ERROR_LEASE_LOST, RUN_ERROR_PAUSED_WHILE_QUEUED, RUN_ERROR_QUEUE_TIMEOUT, RUN_ERROR_RESTARTED
 from deerflow.scheduler.schedules import next_run_at, should_advance_schedule_cursor
 from deerflow.scheduler.stop_rule import launch_prompt
 from deerflow.trace_context import ensure_trace_context
+from deerflow.tracing.profiles import TracingControlError
+from deerflow.utils.file_io import await_drained
 from deerflow.utils.thread_id import validate_thread_id
 
 logger = logging.getLogger(__name__)
@@ -222,6 +225,8 @@ class ScheduledTaskService:
         notification_repo=None,
         own_stop_available: bool | None = None,
         resolve_human_input_request: Callable[[RunRecord], Any] | None = None,
+        resolve_tracing_snapshot: Callable[[str | None, str], Any] | None = None,
+        release_tracing_snapshot: Callable[[str, str], Any] | None = None,
     ) -> None:
         self._task_repo = task_repo
         self._task_run_repo = task_run_repo
@@ -243,6 +248,8 @@ class ScheduledTaskService:
         self._connection_repo = connection_repo
         self._notification_repo = notification_repo
         self._resolve_human_input_request = resolve_human_input_request
+        self._resolve_tracing_snapshot = resolve_tracing_snapshot
+        self._release_tracing_snapshot = release_tracing_snapshot
         # Whether scheduled runs get stop_scheduled_task (scheduler.tool_enabled).
         # Decides how a launch phrases the user's stop rule (stop_rule.launch_prompt).
         # None (production) reads the live config at each launch, the same source
@@ -587,7 +594,10 @@ class ScheduledTaskService:
             return self._existing_active_result(active, execution_thread_id, trigger=trigger)
 
         task_run_id = f"task-run-{uuid.uuid4().hex}"
+        tracing_snapshot = None
         try:
+            tracing_snapshot = await asyncio.to_thread(self._resolve_tracing_snapshot, task.get("assistant_id"), task["user_id"]) if self._resolve_tracing_snapshot is not None else None
+            tracing_refs = snapshot_references(tracing_snapshot)
             await self._task_run_repo.create(
                 run_record_id=task_run_id,
                 task_id=task["id"],
@@ -601,8 +611,15 @@ class ScheduledTaskService:
                 expected_task_updated_at=task.get("updated_at") if trigger == "manual" else None,
                 expected_task_lease_owner=self._lease_owner if trigger == "scheduled" else None,
                 release_task_lease_status="enabled" if trigger == "scheduled" else None,
+                tracing_snapshot_refs=tracing_refs,
             )
+        except TracingControlError as exc:
+            await self._release_unused_tracing_capture(tracing_snapshot, task["user_id"])
+            if trigger == "scheduled":
+                await self._release_admission_lease(task, trigger=trigger)
+            return {"outcome": "failed", "task_run_id": None, "run_id": None, "thread_id": execution_thread_id, "error": str(exc)}
         except ActiveScheduledRunConflict:
+            await self._release_unused_tracing_capture(tracing_snapshot, task["user_id"])
             active = await self._task_run_repo.get_active_run(task["id"])
             if trigger == "scheduled":
                 await self._release_admission_lease(task, trigger=trigger)
@@ -610,6 +627,7 @@ class ScheduledTaskService:
                 return self._active_run_conflict_result(execution_thread_id)
             return self._existing_active_result(active, execution_thread_id, trigger=trigger)
         except ScheduledTaskAdmissionRejected as exc:
+            await self._release_unused_tracing_capture(tracing_snapshot, task["user_id"])
             if exc.reason == "ended":
                 return {"outcome": "completed", "task_run_id": None, "run_id": None, "thread_id": execution_thread_id, "error": None}
             if exc.reason == "not_found":
@@ -636,8 +654,18 @@ class ScheduledTaskService:
             "task_id": task["id"],
             "thread_id": execution_thread_id,
             "trigger": trigger,
+            "tracing_snapshot_refs": tracing_refs,
         }
         return await self._attempt_queued_run(task, queued, now=now)
+
+    async def _release_unused_tracing_capture(self, snapshot: Any, user_id: str) -> None:
+        snapshot_id = getattr(snapshot, "snapshot_id", None)
+        if not isinstance(snapshot_id, str) or self._release_tracing_snapshot is None:
+            return
+        try:
+            await await_drained(asyncio.to_thread(self._release_tracing_snapshot, snapshot_id, user_id))
+        except Exception as exc:
+            logger.warning("Unused scheduled tracing capture remains protected (%s)", type(exc).__name__)
 
     async def _release_admission_lease(self, task: dict[str, Any], *, trigger: str) -> None:
         status = "enabled" if trigger == "scheduled" else (task.get("status") or "enabled")
@@ -696,6 +724,7 @@ class ScheduledTaskService:
             # Goals, notes, the stop rule and the previous-run reference apply
             # to every task, whether a chat or the tasks page created it.
             metadata = {"scheduled_task_id": task["id"], "scheduled_task_run_id": task_run_id, "scheduled_trigger": trigger, "scheduled_context_mode": task.get("context_mode")}
+            metadata["tracing_snapshot_refs"] = claimed.get("tracing_snapshot_refs") or queued.get("tracing_snapshot_refs") or {}
             if task.get("origin_thread_id") is not None:
                 metadata["scheduled_tool_created"] = True  # informational only
             # The stop rule is composed only here, never stored in the prompt.

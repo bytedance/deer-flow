@@ -395,16 +395,18 @@ async def test_agent_stream_allows_graph_goal_state_access() -> None:
         publish_end=AsyncMock(),
         cleanup=AsyncMock(),
     )
+    goal_lock_acquired = asyncio.Event()
 
     class DummyAgent:
         async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
             async with goal_thread_lock(record.thread_id):
+                goal_lock_acquired.set()
                 yield {"messages": []}
 
     def factory(*, config):
         return DummyAgent()
 
-    await asyncio.wait_for(
+    run_task = asyncio.create_task(
         run_agent(
             bridge,
             run_manager,
@@ -413,9 +415,15 @@ async def test_agent_stream_allows_graph_goal_state_access() -> None:
             agent_factory=factory,
             graph_input={},
             config={},
-        ),
-        timeout=0.05,
+        )
     )
+    try:
+        await asyncio.wait_for(goal_lock_acquired.wait(), timeout=5)
+        await asyncio.wait_for(asyncio.shield(run_task), timeout=5)
+    finally:
+        if not run_task.done():
+            run_task.cancel()
+        await asyncio.gather(run_task, return_exceptions=True)
     assert record.status.value == "success"
 
 

@@ -1053,6 +1053,10 @@ class RunRepository(RunStore):
         }
 
         async with self._sf() as session:
+            if operation_kind == "run":
+                from deerflow.persistence.tracing_profiles.sql import validate_tracing_admission
+
+                await validate_tracing_admission(session, metadata or {}, owner_user_id=resolved_user_id)
             # Keep the global clock -> run-row lock order used by every other
             # mutator. One position covers this atomic set of changes; run_id
             # provides deterministic ordering within the position.

@@ -76,7 +76,7 @@ class _FakeBridge:
         return None
 
 
-async def _run(config: dict) -> dict:
+async def _run(config: dict, *, metadata: dict | None = None) -> dict:
     """Drive ``run_agent`` once and return the config the graph received."""
     fake_agent = _FakeAgent()
     record = RunRecord(
@@ -85,6 +85,7 @@ async def _run(config: dict) -> dict:
         assistant_id="lead-agent",
         status=RunStatus.pending,
         on_disconnect=DisconnectMode.cancel,
+        metadata=metadata or {},
     )
     record.abort_event = asyncio.Event()
 
@@ -99,6 +100,40 @@ async def _run(config: dict) -> dict:
     )
     assert fake_agent.captured_config is not None
     return fake_agent.captured_config
+
+
+@pytest.mark.asyncio
+async def test_worker_drops_forged_tracing_references_from_all_config_carriers():
+    refs = {"deerflow_tracing_snapshot_id": "victim-snapshot", "deerflow_tracing_agent_name": "victim-agent"}
+    captured = await _run({"configurable": {"thread_id": "thread-trace-binding", **refs}, "metadata": dict(refs), "context": dict(refs)})
+    for section in ("configurable", "metadata", "context"):
+        assert not refs.keys() & captured[section].keys()
+
+
+@pytest.mark.asyncio
+async def test_worker_restores_durable_snapshot_before_building_callbacks(monkeypatch):
+    from deerflow.tracing.profiles import RunTracingSnapshot
+    from deerflow.tracing.scoped import get_current_snapshot
+
+    frozen = RunTracingSnapshot(snapshot_id="durable-frozen", owner_user_id="test-user-autouse", agent_name="lead_agent", mode="disabled", revision="old", providers=())
+    observed = []
+    monkeypatch.setattr("deerflow.runtime.runs.worker.restore_snapshot", lambda *args, **kwargs: frozen)
+
+    def callbacks():
+        observed.append(get_current_snapshot())
+        return []
+
+    monkeypatch.setattr("deerflow.runtime.runs.worker.build_tracing_callbacks", callbacks)
+    refs = {"deerflow_tracing_snapshot_id": "durable-frozen", "deerflow_tracing_agent_name": "lead_agent"}
+    captured = await _run({"configurable": {"thread_id": "thread-trace-binding"}}, metadata=refs)
+
+    assert observed == [frozen]
+    assert captured["metadata"]["deerflow_tracing_snapshot_id"] == "durable-frozen"
+    assert captured["context"]["deerflow_tracing_snapshot_id"] == "durable-frozen"
+    assert captured["metadata"]["deerflow_run_id"] == "run-trace-binding"
+    assert "run_id" not in captured["metadata"]
+    assert captured["metadata"]["thread_id"] == "thread-trace-binding"
+    assert get_current_snapshot() is None
 
 
 @pytest.mark.asyncio

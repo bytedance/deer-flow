@@ -40,6 +40,7 @@ from app.gateway.internal_auth import (
 from app.gateway.knowledge_scope_admission import admit_message_knowledge_scope
 from app.gateway.run_models import RunCreateRequest
 from app.gateway.run_origin import resolve_request_origin
+from app.gateway.tracing_admission import admit_run_tracing, release_unused_tracing_capture
 from app.gateway.utils import sanitize_log_param
 from app.mcp_tasks.errors import PermanentNotificationError
 from deerflow.agents.human_input import read_human_input_response
@@ -104,12 +105,14 @@ from deerflow.runtime.secret_context import (
     validate_run_metadata_secrets,
 )
 from deerflow.runtime.stream_modes import normalize_stream_modes
+from deerflow.runtime.tracing_snapshot import TRACING_SERVER_OWNED_KEYS
 from deerflow.runtime.user_context import reset_current_user, set_current_user
 from deerflow.sandbox.lease import SANDBOX_SERVER_OWNED_CONTEXT_KEYS
 from deerflow.scheduler.runtime import scheduler_tools_enabled
 from deerflow.scheduler.schedules import validate_timezone
 from deerflow.subagents.status_contract import SUBAGENT_ACCEPTANCE_VERDICT_KEY, SUBAGENT_RECEIPT_VERDICT_KEY, SUBAGENT_TOOL_RECEIPTS_KEY
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, ensure_trace_context, ensure_trace_id
+from deerflow.tracing.profiles import TracingControlError
 from deerflow.utils.assembly_io import run_assembly
 from deerflow.utils.file_io import await_drained
 from deerflow.utils.goal_objective import normalize_goal_objective
@@ -893,6 +896,7 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: frozenset[str] = (
         }
     )
     | SANDBOX_SERVER_OWNED_CONTEXT_KEYS
+    | TRACING_SERVER_OWNED_KEYS
 )
 
 # Keys forwarded from ``body.context`` into ``config['context']`` ONLY (the
@@ -2284,6 +2288,25 @@ async def start_run(
             request_context=getattr(body, "context", None),
         )
 
+        tracing_user_id = config.get("context", {}).get("user_id") or owner_user_id or (str(user.id) if user is not None else None)
+        if tracing_user_id is None:
+            from deerflow.runtime.user_context import get_effective_user_id
+
+            tracing_user_id = get_effective_user_id()
+        await admit_run_tracing(
+            request,
+            config,
+            run_metadata,
+            thread_id=thread_id,
+            # Bootstrap executes the built-in builder; the context Agent name
+            # is the creation target and has no definition/incarnation yet.
+            agent_name=None if scope_runtime_config.get("is_bootstrap") else scope_assistant_id,
+            user_id=str(tracing_user_id),
+            resume=isinstance(graph_input, Command),
+            scheduled_references=scheduled_task_runtime.get("tracing_snapshot_refs") if scheduled_task_runtime is not None else None,
+            app_config=run_ctx.app_config,
+        )
+
         if scheduled_task_runtime is not None:
             run_ctx = replace(run_ctx, scheduled_task_runtime=dict(scheduled_task_runtime))
         conversation_references = list(getattr(body, "conversation_references", None) or [])
@@ -2552,14 +2575,20 @@ async def start_run(
                         run_id=admission_run_id,
                     )
                 except RunIdempotencyUnsupported as exc:
+                    await release_unused_tracing_capture(run_metadata, user_id=str(tracing_user_id), app_config=run_ctx.app_config)
                     raise HTTPException(status_code=503, detail=str(exc)) from exc
+                except TracingControlError as exc:
+                    await release_unused_tracing_capture(run_metadata, user_id=str(tracing_user_id), app_config=run_ctx.app_config)
+                    raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)}) from None
                 except RunIdempotencyKeyMismatch as exc:
+                    await release_unused_tracing_capture(run_metadata, user_id=str(tracing_user_id), app_config=run_ctx.app_config)
                     # A trusted internal key is scoped by owner, not thread: the
                     # same message requested on another thread (IM ``/new``) is
                     # a different request for the run already admitted.
                     raise HTTPException(status_code=409, detail="Idempotency-Key already used with a different request") from exc
 
                 if record.idempotency_reused:
+                    await release_unused_tracing_capture(run_metadata, user_id=str(tracing_user_id), app_config=run_ctx.app_config)
                     stored = record.kwargs or {}
                     stored_input = stored.get("input")
                     stored_idempotency_request = record.idempotency_request or _legacy_stored_idempotency_request(stored)
@@ -2612,6 +2641,7 @@ async def start_run(
                     )
                     raise
         except ConflictError as exc:
+            await release_unused_tracing_capture(run_metadata, user_id=str(tracing_user_id), app_config=run_ctx.app_config)
             raise BusyThreadConflict(str(exc)) from exc
         except UnsupportedStrategyError as exc:
             raise HTTPException(status_code=501, detail=str(exc)) from exc
@@ -2711,6 +2741,9 @@ async def launch_scheduled_thread_run(
     task_id = (metadata or {}).get("scheduled_task_id")
     if owner_user_id and isinstance(task_id, str) and isinstance(scheduled_task_run_id, str):
         scheduled_task_runtime = {"task_id": task_id, "occurrence_id": scheduled_task_run_id, "user_id": owner_user_id}
+        if "tracing_snapshot_refs" in (metadata or {}):
+            scheduled_task_runtime["tracing_snapshot_refs"] = metadata["tracing_snapshot_refs"]
+            body.metadata.pop("tracing_snapshot_refs", None)
         if (metadata or {}).get("scheduled_context_mode") == "fresh_thread_per_run" and isinstance((metadata or {}).get("scheduled_goal_objective"), str):
             scheduled_task_runtime["goal_objective"] = metadata["scheduled_goal_objective"]
     idempotency_key = f"scheduled-task:{scheduled_task_run_id}" if isinstance(scheduled_task_run_id, str) else None

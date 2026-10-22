@@ -53,6 +53,7 @@ import {
   type SubagentAccessSelection,
   thinkingEnabledToSelection,
 } from "./agent-settings-dialog-helpers";
+import { AgentTracingSettings } from "./agent-tracing-settings";
 
 function sameSelection(left: string[] | null, right: string[] | null) {
   if (left === null || right === null) return left === right;
@@ -376,6 +377,7 @@ export function AgentSettingsDialog({
               {[...displayName.trim()].length}/100
             </p>
           </div>
+          <AgentTracingSettings agentName={agent.name} />
           {/* Default model */}
           <div className="space-y-1.5">
             <span className="text-sm font-medium">

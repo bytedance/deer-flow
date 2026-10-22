@@ -14,6 +14,7 @@ from deerflow.config.subagent_batches_config import SubagentBatchesConfig
 from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
 from deerflow.extensions import LoadedExtensions, get_loaded_extensions
 from deerflow.mcp_scope import THREAD_INCARNATION_CONTEXT_KEY
+from deerflow.runtime.tracing_snapshot import TRACING_PARENT_CONTEXT_KEY, restore_snapshot
 from deerflow.subagents.batch_acceptance import check_batch_acceptance
 from deerflow.subagents.batch_lease import BatchItemLease
 from deerflow.subagents.batch_runtime import BatchSubmitRequest
@@ -307,6 +308,7 @@ class SubagentBatchService:
                 config_data = {**config_data, "prompt_overlay": PromptOverlay.model_validate(config_data["prompt_overlay"])}
             config = SubagentConfig(**config_data)
             app_config = self._app_config or get_app_config()
+            tracing_snapshot = await asyncio.to_thread(restore_snapshot, spec, user_id=batch["user_id"], app_config=app_config)
             from deerflow.tools import get_available_tools
 
             effective_model = resolve_subagent_model_name(
@@ -358,6 +360,8 @@ class SubagentBatchService:
                 execution_capacity=self._execution_capacity,
                 extensions=self._extensions,
                 acceptance_criteria=item.get("acceptance_criteria"),
+                tracing_snapshot=tracing_snapshot,
+                tracing_parent_contexts=spec.get(TRACING_PARENT_CONTEXT_KEY, {}),
                 **executor_kwargs,
             )
             prompt = f"Durable batch item key: {item['item_key']}\nThis item may be retried after a worker crash. Keep side effects idempotent and use the item key as the idempotency identity.\n\n{item['prompt']}"

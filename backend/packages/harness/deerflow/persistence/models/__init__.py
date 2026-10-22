@@ -41,11 +41,17 @@ from deerflow.persistence.skill_mutations.model import SkillAssetRow, SkillOpera
 from deerflow.persistence.subagent_batches.model import SubagentBatchItemRow, SubagentBatchRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.persistence.thread_reads.model import ThreadReadMarkerRow, ThreadReadVersionRow
+from deerflow.persistence.tracing_profiles.model import AgentTracingBindingRow, RunTracingSnapshotRow, TracingAdmissionFenceRow, TracingProfileRow, TracingProfileVersionRow
 from deerflow.persistence.user.im_notifications import ImNotificationPreferenceRow
 from deerflow.persistence.user.model import UserPreferenceRow, UserRow
 from deerflow.persistence.webhook_delivery.model import WebhookDeliveryRow
 
 __all__ = [
+    "AgentTracingBindingRow",
+    "RunTracingSnapshotRow",
+    "TracingProfileRow",
+    "TracingProfileVersionRow",
+    "TracingAdmissionFenceRow",
     "AgentRow",
     "ChannelConnectionRow",
     "ChannelConversationRow",

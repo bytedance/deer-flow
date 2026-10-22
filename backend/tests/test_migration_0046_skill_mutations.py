@@ -1,4 +1,4 @@
-"""Additive Skill host schema; the chain-head pin lives in ``test_migration_0047_mcp_oauth_tokens``."""
+"""Additive Skill host schema and its migration-chain ancestry."""
 
 import asyncio
 
@@ -15,8 +15,9 @@ REVISION = "0046_skill_mutations"
 TABLES = {"skill_mutation_assets", "skill_mutation_owners", "skill_mutation_proposals", "skill_mutation_operations", "skill_mutation_scan_attempts"}
 
 
-def test_0046_remains_in_the_single_migration_chain():
+def test_0046_precedes_both_additive_0047_revisions():
     script = ScriptDirectory(str(bootstrap._MIGRATIONS_DIR))
+    assert script.get_revision("0047_tracing_profiles").down_revision == REVISION
     assert len(script.get_heads()) == 1
     assert script.get_revision("0047_mcp_oauth_tokens").down_revision == REVISION
     assert script.get_revision(REVISION).down_revision == "0045_completed_run_evidence"

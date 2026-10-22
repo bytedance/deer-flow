@@ -36,6 +36,11 @@ def _create_langfuse_handler(config) -> Any:
 
 def build_tracing_callbacks() -> list[Any]:
     """Build callbacks for all explicitly enabled tracing providers."""
+    from deerflow.tracing.scoped import build_scoped_callbacks
+
+    scoped = build_scoped_callbacks()
+    if scoped is not None:
+        return scoped
     validate_enabled_tracing_providers()
     # Monocle is not a callback provider; this per-run path is just where an
     # embedded process that skipped Gateway-lifespan setup can be told about it.
