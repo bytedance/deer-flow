@@ -1112,6 +1112,13 @@
 
 ### 修复
 
+- **认证：** OIDC 提供方以 `200` 返回非预期 JSON 对象的响应体（例如维护中的 HTML
+  页面）时，SSO 登录与回调不再以 `500` 失败。discovery、token、JWKS 与 UserInfo
+  响应体、格式错误的 ID token 头以及缺少可用端点的 discovery 文档，现在都走既有的
+  `502` / `/login?error=sso_failed` 路径，被拒绝的 discovery 文档也不再被缓存。
+  格式错误的 UserInfo 响应体会像 UserInfo 请求失败一样被跳过，不再让 ID token
+  有效的登录中断。([#7258])
+
 - **MCP：** 使用 OAuth `refresh_token` 授权的 MCP 服务器，在提供方轮换 refresh token
   （Auth0、Okta、Google）时，跨 Gateway 重启、工具缓存重置、个人连接的多次运行以及多个
   Gateway 实例都能继续工作。此前令牌只保存在进程内存中，每个新进程或新 manager 都从配置里
@@ -10372,3 +10379,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7205]: https://github.com/bytedance/deer-flow/pull/7205
 [#7207]: https://github.com/bytedance/deer-flow/pull/7207
 [#7255]: https://github.com/bytedance/deer-flow/pull/7255
+[#7258]: https://github.com/bytedance/deer-flow/pull/7258

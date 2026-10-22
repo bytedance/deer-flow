@@ -1397,6 +1397,15 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
 
 ### Fixed
 
+- **auth:** SSO login and callback no longer fail with a `500` when the OIDC
+  provider answers `200` with a body that is not the expected JSON object, such
+  as a maintenance HTML page. Discovery, token, JWKS and UserInfo bodies, a
+  malformed ID token header and a discovery document without a usable endpoint
+  now take the existing `502` / `/login?error=sso_failed` path, and a rejected
+  discovery document is no longer cached. A malformed UserInfo body is skipped
+  like a failed UserInfo request instead of aborting a login whose ID token is
+  valid. ([#7258])
+
 - **mcp:** MCP servers using the OAuth `refresh_token` grant keep working
   across Gateway restarts, tool-cache resets, repeated personal-connection runs
   and multiple Gateway instances when the provider rotates refresh tokens
@@ -12995,3 +13004,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7205]: https://github.com/bytedance/deer-flow/pull/7205
 [#7207]: https://github.com/bytedance/deer-flow/pull/7207
 [#7255]: https://github.com/bytedance/deer-flow/pull/7255
+[#7258]: https://github.com/bytedance/deer-flow/pull/7258
