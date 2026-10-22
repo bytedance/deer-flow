@@ -28,7 +28,7 @@ class Settings(BaseModel):
     @classmethod
     def reject_boolean_numbers(cls, value: object, info: ValidationInfo) -> object:
         if isinstance(value, bool):
-            raise ValueError(f"{info.field_name} must be numeric, not a boolean")
+            raise ValueError(f"{info.field_name} must not be a boolean")
         return value
 
     @field_validator("base_url")
