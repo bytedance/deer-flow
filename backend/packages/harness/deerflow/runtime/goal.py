@@ -653,9 +653,7 @@ def compute_no_progress_count(goal: GoalState, evaluation: GoalEvaluation, *, ev
     previous = goal.get("last_evaluation", {})
     old_count = int(goal.get("no_progress_count", 0))
     text_count = old_count + 1 if isinstance(previous, dict) and previous.get("progress_key") == progress_key else 0
-    if operation_progress is None:
-        return text_count
-    if previous_goal_operations(goal) is None:
+    if operation_progress is None or previous_goal_operations(goal) is None:
         # The existing text progress key is unchanged. Preserve its exact count
         # on the first observation, rather than inventing a migration stop rule.
         return text_count
@@ -878,7 +876,6 @@ def attach_goal_evaluation(
         current_operations = previous_goal_operations(goal)
         next_goal["last_evaluation"]["operation_progress"] = {
             "version": operation_progress["version"],
-            "text": operation_progress["text"],
             "seen_keys": sorted(set(operation_progress["seen_keys"]) | set(current_operations["seen_keys"] if current_operations is not None else [])),
         }
     if stand_down_reason:

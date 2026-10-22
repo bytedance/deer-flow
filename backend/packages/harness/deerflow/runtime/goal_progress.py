@@ -18,6 +18,10 @@ from deerflow.agents.middlewares.tool_receipt import TOOL_RECEIPT_KEY, is_valid_
 from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY, normalize_tool_message
 from deerflow.agents.middlewares.tool_transform_meta import TOOL_TRANSFORMS_KEY
 
+# Native sandbox tools use this argument only to explain the call in the UI.
+# Other tools may persist or send a description as their actual payload.
+_UI_NARRATION_TOOLS = frozenset({"bash", "read_file", "write_file", "str_replace", "ls", "glob", "grep"})
+
 
 def _field(message: Any, name: str, default: Any = None) -> Any:
     return message.get(name, default) if isinstance(message, dict) else getattr(message, name, default)
@@ -44,7 +48,7 @@ def _starts_goal_turn(message: Any) -> bool:
 def previous_goal_operations(goal: Mapping[str, Any]) -> dict[str, Any] | None:
     previous = goal.get("last_evaluation")
     record = previous.get("operation_progress") if isinstance(previous, Mapping) else None
-    if not isinstance(record, dict) or record.get("version") != 1 or not isinstance(record.get("text"), str):
+    if not isinstance(record, dict) or record.get("version") != 1:
         return None
     keys = record.get("seen_keys")
     if not isinstance(keys, list) or any(not isinstance(key, str) or len(key) != 64 or any(char not in "0123456789abcdef" for char in key) for key in keys):
@@ -93,11 +97,17 @@ def _successful_operation_key(call: dict[str, Any], message: Any) -> str | None:
         return None
     else:
         fingerprint = canonical
-    body = json.dumps([name, fingerprint["args_sha256"], fingerprint["output_sha256"], fingerprint["output_bytes"]])
+    args_key = fingerprint["args_sha256"]
+    if name in _UI_NARRATION_TOOLS and "description" in args:
+        # Validate the receipt against raw arguments above. Only repetition
+        # identity excludes narration; native receipts remain unchanged.
+        operation_args = {key: value for key, value in args.items() if key != "description"}
+        args_key = hashlib.sha256(json.dumps(operation_args, sort_keys=True, default=str).encode("utf-8")).hexdigest()[: len(canonical["args_sha256"])]
+    body = json.dumps([name, args_key, fingerprint["output_sha256"], fingerprint["output_bytes"]])
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
-def observe_goal_operations(goal: Mapping[str, Any], messages: list[Any], *, text_signature: str) -> dict[str, Any]:
+def observe_goal_operations(goal: Mapping[str, Any], messages: list[Any]) -> dict[str, Any]:
     """Observe paired successful results since this turn's initiating input.
 
     Genuine user/card replies and explicit hidden Goal continuations start turns;
@@ -131,7 +141,6 @@ def observe_goal_operations(goal: Mapping[str, Any], messages: list[Any], *, tex
                     observed.add(key)
     return {
         "version": 1,
-        "text": text_signature,
         "seen_keys": sorted(seen | observed),
         "has_tool_activity": has_tool_activity,
         "new_keys": len(observed - seen),

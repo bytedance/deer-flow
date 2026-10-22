@@ -2621,7 +2621,7 @@ async def _prepare_goal_continuation_input(
         messages = await _materialized_checkpoint_messages(accessor, thread_id)
         conversation_signature_before = visible_conversation_signature(messages)
         evidence_signature = latest_visible_assistant_signature(messages)
-        operation_progress = observe_goal_operations(goal, messages, text_signature=evidence_signature)
+        operation_progress = observe_goal_operations(goal, messages)
 
         if _ends_on_human_input_request(messages):
             # The agent asked the user something. Continuing would tell it to keep

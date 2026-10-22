@@ -7,9 +7,13 @@ with their results in the current human/hidden-continuation interval. Normalize
 success/error metadata without mutating checkpoint messages. Retain only exact
 successful-operation hashes in the active Goal's `last_evaluation`; no global
 cache, arbitrary operation-count cutoff, file inspection or extra model call.
-Repeated results, changed error arguments, receipt IDs and timestamps alone do
-not reset the counter. A successful new operation is activity, not proof of
-usefulness or completion. Pure-text turns retain the existing reply comparison.
+Repeated results, UI-only sandbox descriptions, failed commands, receipt IDs and
+timestamps alone do not reset the counter. Validate receipts against the original
+arguments before excluding narration from operation identity. Shared shell-result
+classification recognizes nonzero exit markers, correcting older generic success
+metadata while preserving explicit producer stamps. A successful new operation is
+activity, not proof of usefulness or completion. Pure-text turns retain the
+existing reply comparison.
 
 Already evaluated hashes survive checkpoint restart and compaction. Results
 removed before observation cannot be reconstructed; do not claim complete tool

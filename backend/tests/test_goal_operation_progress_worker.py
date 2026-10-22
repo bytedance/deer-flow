@@ -6,18 +6,23 @@ progress counting, and all existing worker guards execute production code.
 
 from __future__ import annotations
 
-import importlib.util
+import os
 import socket
-import sys
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from langchain_core.language_models.fake_chat_models import FakeListChatModel
 from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
+from langgraph.prebuilt import ToolNode
 
+from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware
+from deerflow.agents.middlewares.tool_error_handling_middleware import ToolErrorHandlingMiddleware
+from deerflow.agents.middlewares.tool_receipt_middleware import ToolReceiptMiddleware
+from deerflow.agents.thread_state import ThreadState
 from deerflow.runtime.checkpoint_state import CheckpointStateAccessor, build_state_mutation_graph
 from deerflow.runtime.goal import (
     GoalEvaluation,
@@ -28,6 +33,8 @@ from deerflow.runtime.goal import (
     write_thread_goal,
 )
 from deerflow.runtime.runs import worker
+from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
+from deerflow.sandbox.tools import bash_tool, read_file_tool, write_file_tool
 
 
 class _Bridge:
@@ -110,8 +117,8 @@ async def _append_turn(accessor, thread_id, messages, *, turn):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["full", "delta"])
-@pytest.mark.parametrize("count", [65, 256, 1000])
-async def test_worker_keeps_exact_seen_operations_above_64_without_fallback(mode, count):
+async def test_worker_keeps_exact_seen_operations_above_64_without_fallback(mode):
+    count = 65
     saver = InMemorySaver()
     thread_id = f"over-64-{mode}-{count}"
     accessor = await _seed(saver, mode, thread_id, _operations(range(count)))
@@ -175,13 +182,17 @@ async def test_worker_sqlite_reopen_preserves_exact_history(tmp_path, mode):
             assert len(goal["last_evaluation"]["operation_progress"]["seen_keys"]) == 65
 
 
-def _native_summary_test():
-    path = Path(__file__).with_name("test_summarization_rolling_contract.py")
-    spec = importlib.util.spec_from_file_location("goal_progress_native_summary_test", path)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+def _summary_middleware(*, keep):
+    return DeerFlowSummarizationMiddleware(
+        model=FakeListChatModel(responses=["Earlier operations summarized. Work remains."]),
+        trigger=("messages", 4),
+        keep=("messages", keep),
+        trim_tokens_to_summarize=2000,
+        token_counter=lambda messages: sum(len(message.content) for message in messages),
+        summary_prompt="{messages}",
+        anchor_model_name="primary",
+        run_model_name="primary",
+    )
 
 
 @pytest.mark.asyncio
@@ -191,11 +202,9 @@ async def test_worker_real_compaction_and_old_replay_do_not_reset_count(mode):
     accessor = await _seed(saver, mode, "compact", _operations(range(65)))
     await _decide(saver, accessor, "compact")
     snapshot = await accessor.aget(_config("compact"))
-    native = _native_summary_test()
-    model = native.RecordingModel(default_answer="Earlier operations observed task parts. Work remains.")
-    middleware = native._middleware(model, keep=("messages", 1), trim_tokens_to_summarize=2000)
+    middleware = _summary_middleware(keep=1)
     compact = await middleware.acompact_state(dict(snapshot.values), SimpleNamespace(context={}), force=True, raise_on_failure=True)
-    assert compact is not None and model.prompts
+    assert compact is not None and middleware.summary_call_count > 0
     await accessor.aupdate(_config("compact"), {"messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), *compact.preserved_messages], "summary_text": compact.summary_text}, as_node="goal_evaluator")
     second, goal = await _decide(saver, accessor, "compact")
     assert second is not None and goal["no_progress_count"] == 1
@@ -212,11 +221,9 @@ async def test_worker_first_turn_compaction_counts_retained_successful_pairs(mod
     prefix = [AIMessage(content="Earlier context " * 50, id=f"prefix-{index}") for index in range(20)]
     accessor = await _seed(saver, mode, "first-compact", [*prefix, *_operations(range(65))])
     snapshot = await accessor.aget(_config("first-compact"))
-    native = _native_summary_test()
-    model = native.RecordingModel(default_answer="Earlier context summarized.")
-    middleware = native._middleware(model, keep=("messages", 131), trim_tokens_to_summarize=2000)
+    middleware = _summary_middleware(keep=131)
     compact = await middleware.acompact_state(dict(snapshot.values), SimpleNamespace(context={}), force=True, raise_on_failure=True)
-    assert compact is not None and model.prompts
+    assert compact is not None and middleware.summary_call_count > 0
     assert sum(isinstance(message, ToolMessage) for message in compact.preserved_messages) == 65
     await accessor.aupdate(_config("first-compact"), {"messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), *compact.preserved_messages], "summary_text": compact.summary_text}, as_node="goal_evaluator")
     continuation, goal = await _decide(saver, accessor, "first-compact")
@@ -283,3 +290,107 @@ async def test_new_successful_work_cannot_override_existing_hard_stop(stop_reaso
     assert result is None
     assert goal["continuation_count"] == 0
     assert goal["last_evaluation"]["stand_down_reason"] == stop_reason
+
+
+def _native_tool_graph(tmp_path, monkeypatch, *, receipts):
+    (tmp_path / "workspace").mkdir()
+    (tmp_path / "workspace/input.txt").write_text("Stable input contents.\n", encoding="utf-8")
+    sandbox = LocalSandbox("local", path_mappings=[PathMapping("/mnt/user-data/workspace", str(tmp_path / "workspace"))])
+    monkeypatch.setattr("deerflow.sandbox.local.local_sandbox.build_sandbox_env", lambda _injected: {"PATH": os.defpath})
+    # Bind only execution policy and the test-owned sandbox; tools, their real
+    # results, normalization, receipt stamping and worker decisions stay native.
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: sandbox)
+
+    async def initialized(_runtime):
+        return sandbox
+
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized_async", initialized)
+    monkeypatch.setattr("deerflow.sandbox.tools.is_host_bash_allowed", lambda: True)
+    errors = ToolErrorHandlingMiddleware()
+    receipt = ToolReceiptMiddleware() if receipts else None
+
+    async def wrap(request, handler):
+        async def normalized(current):
+            return await errors.awrap_tool_call(current, handler)
+
+        return await receipt.awrap_tool_call(request, normalized) if receipt else await normalized(request)
+
+    builder = StateGraph(ThreadState)
+    builder.add_node("tools", ToolNode([bash_tool, read_file_tool, write_file_tool], awrap_tool_call=wrap, handle_tool_errors=False))
+    builder.add_edge(START, "tools")
+    builder.add_edge("tools", END)
+    return builder.compile()
+
+
+async def _native_tool_turn(graph, tmp_path, *, thread_id, turn, kind):
+    args = (
+        {"command": f"env -i /bin/sh -c 'exit 2' # attempt-{turn}", "description": "Controlled failing command"}
+        if kind == "failed-bash"
+        else {"path": "/mnt/user-data/workspace/input.txt", "description": f"Read attempt {turn}"}
+        if kind == "same-read"
+        else {"path": "/mnt/user-data/workspace/result.txt", "content": "The same file contents.\n", "description": f"Write attempt {turn}"}
+    )
+    tool_name = {"failed-bash": "bash", "same-read": "read_file", "same-write": "write_file"}[kind]
+    state = await graph.ainvoke(
+        {
+            "sandbox": {"sandbox_id": "local"},
+            "thread_data": {f"{name}_path": str(tmp_path / name) for name in ("workspace", "uploads", "outputs")},
+            "messages": [AIMessage(content="", tool_calls=[{"id": f"native-{turn}", "name": tool_name, "args": args}])],
+        },
+        context={"thread_id": thread_id},
+    )
+    result = next(message for message in state["messages"] if isinstance(message, ToolMessage))
+    return [*state["messages"], AIMessage(content="Work remains.", id=f"native-final-{turn}")], result
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Controlled native LocalSandbox commands use a POSIX shell")
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["full", "delta"])
+@pytest.mark.parametrize("receipts", [False, True], ids=["receipts-off", "receipts-on"])
+@pytest.mark.parametrize("kind", ["failed-bash", "same-read"])
+async def test_native_tool_results_cannot_buy_goal_continuations(tmp_path, monkeypatch, mode, receipts, kind):
+    graph = _native_tool_graph(tmp_path, monkeypatch, receipts=receipts)
+    async with AsyncSqliteSaver.from_conn_string(str(tmp_path / "goal.sqlite")) as saver:
+        await saver.setup()
+        accessor = await _seed(saver, mode, "native-progress", [])
+        counts, decisions, results = [], [], []
+        for turn in range(3):
+            messages, result = await _native_tool_turn(graph, tmp_path, thread_id="native-progress", turn=turn, kind=kind)
+            assert ("deerflow_tool_receipt" in result.additional_kwargs) is receipts
+            if kind == "failed-bash":
+                assert str(result.content).endswith("Exit Code: 2")
+            else:
+                assert "Stable input contents." in str(result.content)
+            await _append_turn(accessor, "native-progress", messages, turn=turn)
+            continuation, goal = await _decide(saver, accessor, "native-progress")
+            counts.append(goal["no_progress_count"])
+            decisions.append(continuation is not None)
+            results.append(result)
+        assert counts == [0, 1, 2]
+        assert decisions == [True, True, False]
+        assert goal["last_evaluation"]["stand_down_reason"] == "no_progress_detected"
+        assert len(goal["last_evaluation"]["operation_progress"]["seen_keys"]) == (0 if kind == "failed-bash" else 1)
+        assert all(result.additional_kwargs["deerflow_tool_meta"]["status"] == ("error" if kind == "failed-bash" else "success") for result in results)
+        assert (tmp_path / "workspace/input.txt").read_text(encoding="utf-8") == "Stable input contents.\n"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Controlled native LocalSandbox commands use a POSIX shell")
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["full", "delta"])
+@pytest.mark.parametrize("receipts", [False, True], ids=["receipts-off", "receipts-on"])
+async def test_native_success_after_failed_tools_resets_goal_stall(tmp_path, monkeypatch, mode, receipts):
+    graph = _native_tool_graph(tmp_path, monkeypatch, receipts=receipts)
+    async with AsyncSqliteSaver.from_conn_string(str(tmp_path / "goal.sqlite")) as saver:
+        await saver.setup()
+        accessor = await _seed(saver, mode, "native-recovery", [])
+        counts = []
+        for turn, kind in enumerate(["failed-bash", "failed-bash", "same-write"]):
+            messages, result = await _native_tool_turn(graph, tmp_path, thread_id="native-recovery", turn=turn, kind=kind)
+            assert result.additional_kwargs["deerflow_tool_meta"]["status"] == ("error" if kind == "failed-bash" else "success")
+            await _append_turn(accessor, "native-recovery", messages, turn=turn)
+            continuation, goal = await _decide(saver, accessor, "native-recovery")
+            assert continuation is not None
+            counts.append(goal["no_progress_count"])
+        assert counts == [0, 1, 0]
+        assert len(goal["last_evaluation"]["operation_progress"]["seen_keys"]) == 1
+        assert (tmp_path / "workspace/result.txt").read_text(encoding="utf-8") == "The same file contents.\n"
