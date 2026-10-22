@@ -10,6 +10,14 @@ from .constants import NAMESPACE
 
 
 class Cluster:
+    @staticmethod
+    def slot_releasable(row):
+        return (
+            (row.get("admission_rejected") is True and row.get("run_id") is None)
+            or row["status"] in ("completed", "cancelled", "waiting_input")
+            or row.get("child_status") in ("success", "error", "interrupted", "timeout")
+        )
+
     def dispatch_fence(self, record):
         if not self.clustered:
             return {}
@@ -30,7 +38,7 @@ class Cluster:
         finally:
             # Unknown admission/outcome retains its cluster reservation. Losing
             # an execution lease must never make a possibly live child free.
-            if (row["status"] in ("completed", "cancelled", "waiting_input") or row.get("child_status") in ("success", "error", "interrupted", "timeout")) and not entry.get("lease_lost"):
+            if self.slot_releasable(row) and not entry.get("lease_lost"):
                 await asyncio.to_thread(self.store.release_slot, owner, record, row["step_id"])
 
     async def follow_lease(self, entry):
@@ -92,7 +100,7 @@ class Cluster:
                     raise ValueError("Workflow execution lease lost")
                 if row.get("run_id") and row["status"] != "completed":
                     await self.cancel_child(context.agent_runs, row, record=record)
-                if row["status"] in ("completed", "cancelled", "waiting_input") or row.get("child_status") in ("success", "error", "interrupted", "timeout"):
+                if self.slot_releasable(row):
                     await asyncio.to_thread(self.store.release_slot, owner, record, row["step_id"])
             uncertain = any(r["status"] not in ("completed", "queued", "cancelled") for r in record["steps"])
             record.update(status="needs_reconciliation" if uncertain else "cancelled", error="Inspect uncertain child effects" if uncertain else None)

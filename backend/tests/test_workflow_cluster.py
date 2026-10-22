@@ -458,3 +458,48 @@ async def test_reads_do_not_wait_for_cluster_budget_lock(cluster):
         assert (await asyncio.to_thread(b.store.get, "alice", run_id))["status"] == "completed"
         assert [r["id"] for r in await asyncio.to_thread(b.store.list, "alice")] == [run_id]
         assert await asyncio.to_thread(b.store.list, "other") == []
+
+
+@pytest.mark.parametrize("failure", ["permission", "configuration", "uncertain"])
+async def test_rejected_admission_slot_accounting(cluster, monkeypatch, failure):
+    from contextlib import closing
+
+    from deerflow_extension_api import AgentRunError
+
+    a, b, runs = cluster
+    a.config["global_concurrency"] = b.config["global_concurrency"] = 1
+    original_start = runs.start
+    original_check = a.check_configuration
+
+    async def reject_start(**kwargs):
+        raise AgentRunError(403 if failure == "permission" else 503, "synthetic rejection")
+
+    async def reject_step_configuration(entry):
+        if entry["record"]["steps"]:
+            raise ValueError("Configuration changed")
+        await original_check(entry)
+
+    if failure == "configuration":
+        monkeypatch.setattr(a, "check_configuration", reject_step_configuration)
+    else:
+        monkeypatch.setattr(runs, "start", reject_start)
+    script = "return await agent({stepId:'a',agentRef:'lead_agent',task:'hello'});"
+    run_id = (await a.launch({"request_id": "rejected", "script": script, "args": {}}, context(runs)))["run_id"]
+    await asyncio.wait_for(a.wait_idle(run_id), 10)
+    assert not runs.starts
+
+    def slots():
+        with closing(a.store.connect(readonly=True)) as db:
+            return db.execute("SELECT count(*) FROM workflow_slots").fetchone()[0]
+
+    assert await asyncio.to_thread(slots) == (1 if failure == "uncertain" else 0)
+    if failure == "uncertain":
+        with pytest.raises(ValueError, match="Reconcile retained"):
+            await b.delete({"run_id": run_id}, context(runs))
+        return
+    await b.delete({"run_id": run_id}, context(runs))
+    monkeypatch.setattr(runs, "start", original_start)
+    peer = (await b.launch({"request_id": "peer-after-rejection", "script": script, "args": {}}, context(runs)))["run_id"]
+    await asyncio.wait_for(b.wait_idle(peer), 10)
+    assert (await b.get({"run_id": peer}, context(runs)))["status"] == "completed"
+    assert len(runs.starts) == 1

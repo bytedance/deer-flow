@@ -245,16 +245,22 @@ def cluster(tmp_path_factory):
         c.close()
 
 
+def final_gateway_port(response):
+    # nginx records all attempts, including failed IPv6 -> IPv4 retries.
+    destination = response.headers["x-acceptance-upstream"].rsplit(",", 1)[-1].strip()
+    return int(destination.rsplit(":", 1)[-1])
+
+
 def test_authenticated_cross_gateway_control_without_affinity(cluster):
     c = cluster
     for target in ("a", "b"):
         c.request(target, "GET", "/health/ready")
-    upstreams = {c.request("proxy", "GET", "/api/plugins").headers["x-acceptance-upstream"] for _ in range(6)}
-    assert len(upstreams) == 2
+    upstreams = {final_gateway_port(c.request("proxy", "GET", "/api/plugins")) for _ in range(6)}
+    assert upstreams == {c.ports["a"], c.ports["b"]}
     run = c.launch("await pause({stepId:'p'}); return await agent({stepId:'child',agentRef:'lead_agent',task:'hello'});")
     routed = [c.request("proxy", "POST", "/api/plugins/community.workflows/actions/get", json={"run_id": run}) for _ in range(6)]
     assert {r.json()["run_id"] for r in routed} == {run}
-    assert len({r.headers["x-acceptance-upstream"] for r in routed}) == 2
+    assert {final_gateway_port(r) for r in routed} == {c.ports["a"], c.ports["b"]}
     c.resume(run)
     result = c.wait(run, "completed")
     assert len(result["steps"]) == 1

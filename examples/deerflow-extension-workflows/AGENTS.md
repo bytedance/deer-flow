@@ -94,3 +94,7 @@ Keep the supervisor outcome private until child tasks and fenced cleanup finish.
 Child saves share the workflow record; publishing terminal status early retires
 the PostgreSQL lease before reservation release. Pin cancellation ordering with
 a barrier-based cluster regression.
+
+Proven pre-admission rejection releases child capacity before retiring the lease;
+unknown admission errors retain it. Share the slot-release predicate across cleanup paths.
+Acceptance routing counts final Gateway ports, not nginx retry-history strings.

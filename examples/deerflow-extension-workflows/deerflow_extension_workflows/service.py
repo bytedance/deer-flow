@@ -513,6 +513,8 @@ class Workflows(Cluster, Recovery, Lifecycle, Artifacts):
                     except Exception:
                         entry["fault"] = "Agent configuration changed or unavailable"
                         row["status"] = "failed"
+                        if row.get("run_id") is None:
+                            row["admission_rejected"] = True
                         raise
                 if row["status"] == "queued":
                     row["status"] = "creating_thread"
@@ -621,6 +623,8 @@ class Workflows(Cluster, Recovery, Lifecycle, Artifacts):
             response["error"] = entry["fault"]
         except AgentRunError as exc:
             if row:
+                if row.get("run_id") is None and exc.status_code in (400, 403, 404, 409, 422):
+                    row["admission_rejected"] = True
                 row["status"] = "failed" if exc.status_code in (400, 403, 404, 409, 422) else "needs_reconciliation"
             response["error"] = f"AgentRuns rejected operation ({exc.status_code})"
             entry["fault"] = response["error"]
@@ -827,7 +831,7 @@ class Workflows(Cluster, Recovery, Lifecycle, Artifacts):
                 await asyncio.gather(*cleanup)
             if self.clustered:
                 for row in record["steps"]:
-                    if row["status"] in ("completed", "cancelled", "waiting_input") or row.get("child_status") in ("success", "error", "interrupted", "timeout"):
+                    if self.slot_releasable(row):
                         await asyncio.to_thread(self.store.release_slot, owner, record, row["step_id"])
             # Child saves must not publish a terminal workflow and retire its
             # lease before all fenced cleanup and reservation releases finish.
