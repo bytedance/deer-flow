@@ -19,6 +19,7 @@ import { getAPIClient } from "../api";
 import { fetch } from "../api/fetcher";
 import { getBackendBaseURL } from "../config";
 import { useI18n } from "../i18n/hooks";
+import type { Locale } from "../i18n/locale";
 import { getMessageRunId } from "../messages/run-duration";
 import {
   extractContentFromMessage,
@@ -280,11 +281,13 @@ export function buildThreadSubmitMessages({
 export function buildRunContext({
   settings,
   threadId,
+  locale,
   extraContext,
   conversationReferences,
 }: {
   settings: LocalSettings["context"];
   threadId: string;
+  locale?: Locale;
   extraContext?: Record<string, unknown>;
   conversationReferences?: string[];
 }): Record<string, unknown> {
@@ -315,6 +318,7 @@ export function buildRunContext({
             ? "low"
             : undefined),
     thread_id: threadId,
+    ...(locale ? { locale } : {}),
     ...clientTimezoneContext(),
   };
 }
@@ -1973,7 +1977,7 @@ export function useThreadStream({
   onStart,
   onFinish,
 }: ThreadStreamOptions) {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const currentViewThreadId = displayThreadId ?? threadId ?? null;
   const currentViewThreadIdRef = useRef(currentViewThreadId);
   currentViewThreadIdRef.current = currentViewThreadId;
@@ -2810,6 +2814,7 @@ export function useThreadStream({
             context: buildRunContext({
               settings: context,
               threadId,
+              locale,
               extraContext,
               conversationReferences: options?.conversationReferences,
             }),
@@ -2833,6 +2838,7 @@ export function useThreadStream({
     [
       thread,
       t.uploads.uploadingFiles,
+      locale,
       context,
       queryClient,
       humanMessageCount,
@@ -2949,7 +2955,7 @@ export function useThreadStream({
           // Replaying a turn never carries conversation references: the grant
           // is per send, so a regenerate or edit runs without them unless the
           // user attaches them again.
-          context: buildRunContext({ settings: context, threadId }),
+          context: buildRunContext({ settings: context, threadId, locale }),
         });
         void queryClient.invalidateQueries({ queryKey: ["thread", threadId] });
         void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
@@ -2986,6 +2992,7 @@ export function useThreadStream({
     },
     [
       context,
+      locale,
       humanMessageCount,
       persistedMessages,
       queryClient,

@@ -2037,7 +2037,8 @@ export const enUS: Translations = {
       lightDescription: "Bright palette with higher contrast for daytime.",
       darkDescription: "Dim palette that reduces glare for focus.",
       languageTitle: "Language",
-      languageDescription: "Switch between languages.",
+      languageDescription:
+        "Choose the interface language and preferred language for replies.",
     },
     tools: {
       adminRequired: "Admin privileges are required to manage MCP tools.",
