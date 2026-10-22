@@ -174,14 +174,7 @@ Array previews coalesce consecutive generated markers only at the end into one o
 
 ### Key Patterns
 
-The shared REST `core/api/fetcher.ts` accepts both strings and `Request` inputs.
-Forward the original input to native fetch so the Request body, signal and other
-options survive. CSRF uses the effective `init.method ?? request.method`; headers
-come from `init.headers` when supplied, otherwise from the Request. Copy headers
-before adding CSRF, preserving explicit tokens and caller-owned objects. Static
-responses honor the same method, headers and signal overrides before networking.
-Regressions: `fetcher.test.ts` and `static-mode.test.ts` under
-`tests/unit/core/api/`.
+REST `core/api/fetcher.ts`: preserve Request; CSRF uses effective method/headers.
 
 Conversation exports read every persisted message page through
 `fetchThreadExportMessages` (200 rows/page). Run `mergeMessages` after history
