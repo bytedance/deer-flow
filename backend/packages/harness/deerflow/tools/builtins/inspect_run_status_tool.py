@@ -12,6 +12,8 @@ from langchain_core.messages import AIMessage
 from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
 from deerflow.tools.types import Runtime
 
+_SUBAGENT_DISPATCH_TOOL_NAMES = frozenset({"task", "batch_task"})
+
 
 def _nonnegative_int(value: object) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
@@ -60,7 +62,7 @@ def snapshot_run_status(state: Mapping[str, Any], context: Mapping[str, Any], *,
         last_input = input_value if isinstance(raw_input, int) and not isinstance(raw_input, bool) and raw_input >= 0 else None
         # TokenUsageMiddleware can fold a completed subagent's usage into the
         # dispatch AIMessage. Its input count is no longer a context-size proxy.
-        if any(isinstance(call, Mapping) and call.get("name") in {"task", "batch_task"} for call in (calls or [])):
+        if any(isinstance(call, Mapping) and call.get("name") in _SUBAGENT_DISPATCH_TOOL_NAMES for call in (calls or [])):
             last_input = None
 
     fill = None
