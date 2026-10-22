@@ -23,18 +23,12 @@ upstream dependency chain resolves a patched version without it; regenerate
 
 ## Commands
 
-| Command          | Purpose                                       |
-| ---------------- | --------------------------------------------- |
-| `pnpm dev`       | Start the development server with Webpack     |
-| `pnpm build`     | Production build                              |
-| `pnpm check`     | Lint + type check (run before committing)     |
-| `pnpm lint`      | ESLint only                                   |
-| `pnpm lint:fix`  | ESLint with auto-fix                          |
-| `pnpm format`    | Prettier check (`pnpm format:write` to apply) |
-| `pnpm test`      | Run unit tests with Rstest                    |
-| `pnpm test:e2e`  | Run E2E tests with Playwright (Chromium)      |
-| `pnpm typecheck` | TypeScript type check (`tsc --noEmit`)        |
-| `pnpm start`     | Start production server                       |
+Run from `frontend/`; host pnpm calls use `../scripts/pnpm.py`.
+
+- `pnpm dev`: Webpack development server; `pnpm build` / `pnpm start`: production build/server.
+- `pnpm check`: ESLint + TypeScript (required before committing); `pnpm lint` / `pnpm typecheck`: individual checks; `pnpm lint:fix`: ESLint fixes.
+- `pnpm format` / `pnpm format:write`: Prettier check/write.
+- `pnpm test`: Rstest unit tests; `pnpm test:e2e`: Playwright Chromium E2E tests.
 
 Rstest unit tests under `tests/unit/` mirror `src/` (e.g., `tests/unit/core/api/stream-mode.test.ts` tests `src/core/api/stream-mode.ts`). Import source modules via `@/`.
 
@@ -167,17 +161,13 @@ DOM regression: `new-agent-save.dom.test.tsx`.
 - **Path alias**: `@/*` maps to `src/*`.
 - **Components**: `ui/` and `ai-elements/` are generated from registries (Shadcn, MagicUI, React Bits, Vercel AI SDK) — don't manually edit these.
 
-Workspace sidebar customization belongs in `components/workspace/workspace-sidebar-frame.tsx`,
-outside the generated UI components. A mobile icon rail and its drawer mount only
-one content tree at a time. Header, channel, menu, and history visibility follow
-`useWorkspaceSidebarExpanded`; mobile drawer state must not overwrite the saved
-desktop `SidebarProvider.open` preference. Keep the activity poll and shared
-delete-dialog provider outside the switching content. Regression coverage lives
-in the frame DOM tests and `tests/e2e/sidebar.spec.ts`.
-Reuse the generated `Sidebar` for the mobile drawer so its width and accessibility
-markup stay shared. Close the mobile drawer on pathname changes, and restore rail
-focus after the drawer portal unmounts. Workspace header triggers expose their
-expanded state and announce the mobile dialog.
+Customize `components/workspace/workspace-sidebar-frame.tsx`, outside generated UI.
+Mobile rail/drawer share one content tree; visibility uses
+`useWorkspaceSidebarExpanded`, preserving desktop `SidebarProvider.open`.
+Keep activity polling and the shared delete-dialog provider outside that tree.
+Reuse `Sidebar` for drawer width/accessibility; close on pathname changes, then
+restore rail focus after portal unmount. Header triggers expose expanded/dialog
+ARIA state. Cover frame DOM behavior and `tests/e2e/sidebar.spec.ts`.
 
 Scheduled-task list search filters the current authorized query result by title or
 prompt, composing with status/type filters and thread scope. Selection must derive
@@ -244,13 +234,8 @@ round-trip validation must still reject newly entered skipped times.
 
 ## Contributing
 
-When adding features:
-
-1. Follow the established `src/` structure
-2. Add TypeScript types and proper error handling
-3. Write unit tests under `tests/unit/` (`pnpm test`) and E2E tests under `tests/e2e/` (`pnpm test:e2e`)
-4. Run `pnpm check` before committing
-5. Update this `AGENTS.md` when architecture, commands, or conventions change
+Follow `src/` ownership, add types/error handling and unit/E2E coverage, run
+`pnpm check`, and update this guide for architecture, command, or convention changes.
 
 Route asset budgets are enforced with `pnpm perf:check`. The command measures
 `/login` from a normal production build, then builds in static-demo mode for the
