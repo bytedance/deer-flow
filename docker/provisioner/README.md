@@ -146,6 +146,13 @@ List all sandboxes currently managed.
 
 ## Configuration
 
+When `USERDATA_PVC_NAME` is set, the Pod declares that claim once as `user-data`.
+User data, extra mounts and Lark broker credentials use separate `subPath` mounts
+on that volume. Read-only flags remain per mount; broker credentials are mounted
+only in the broker container. This avoids repeated claim publication on NFS CSI
+drivers that cannot handle multiple volume declarations for one claim. Without
+`USERDATA_PVC_NAME`, each hostPath keeps its own volume.
+
 The provisioner is configured via environment variables (set in [docker-compose-dev.yaml](../docker-compose-dev.yaml)):
 
 | Variable | Default | Description |

@@ -44,6 +44,10 @@ redirect `make dev`'s port wait. Nginx's IPv4+IPv6 `default_server` and Gateway'
 Require explicit bind addresses for new published ports;
 `backend/tests/test_compose_default_bind_host.py` pins every service in both files.
 
+Provisioner PVC mode declares `USERDATA_PVC_NAME` once as `user-data`; extra and
+Lark broker credential mounts reuse it with their existing subPaths and read-only
+flags. Keep credential mounts broker-only and keep distinct volumes in hostPath mode.
+
 ## Repository Map
 
 ```

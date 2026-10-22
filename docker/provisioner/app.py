@@ -575,14 +575,8 @@ def _build_extra_volumes(
         )
     ):
         if USERDATA_PVC_NAME:
-            volumes.append(
-                k8s_client.V1Volume(
-                    name=_extra_mount_volume_name(index),
-                    persistent_volume_claim=k8s_client.V1PersistentVolumeClaimVolumeSource(
-                        claim_name=USERDATA_PVC_NAME,
-                    ),
-                )
-            )
+            # _build_volumes already declares this claim as user-data. Reuse
+            # that volume with per-mount subPaths instead of republishing it.
             continue
 
         volumes.append(
@@ -610,7 +604,7 @@ def _build_extra_volume_mounts(
         )
     ):
         volume_mount = k8s_client.V1VolumeMount(
-            name=_extra_mount_volume_name(index),
+            name="user-data" if USERDATA_PVC_NAME else _extra_mount_volume_name(index),
             mount_path=mount.container_path,
             read_only=mount.read_only,
         )
@@ -770,14 +764,9 @@ def _build_volumes(
             if mount is None:
                 continue
             if USERDATA_PVC_NAME:
-                volumes.append(
-                    k8s_client.V1Volume(
-                        name=volume_name,
-                        persistent_volume_claim=k8s_client.V1PersistentVolumeClaimVolumeSource(
-                            claim_name=USERDATA_PVC_NAME,
-                        ),
-                    )
-                )
+                # Broker credentials use their own subPaths on user-data;
+                # only the broker container receives these mounts.
+                continue
             else:
                 volumes.append(
                     k8s_client.V1Volume(
@@ -963,7 +952,7 @@ def _build_lark_cli_broker_sidecars(
         if mount is None:
             continue
         sidecar_mount = k8s_client.V1VolumeMount(
-            name=volume_name,
+            name="user-data" if USERDATA_PVC_NAME else volume_name,
             mount_path=sidecar_path,
             read_only=mount.read_only,
         )
