@@ -81,6 +81,11 @@ with or without a leading BOM so the first section remains detectable.
 `DEER_FLOW_PROJECT_ROOT/config.yaml`, before the legacy checkout candidates.
 Keep this lookup standard-library-only; test shadowing checkout configs and
 the CLI under `python -S` in `backend/tests/test_detect_uv_extras.py`.
+For Discord and Buzz, detect the provider extra when either legacy
+`channels.<provider>.enabled` is true or both `channel_connections.enabled`
+and `channel_connections.<provider>.enabled` are true. Keep these gates aligned
+with `enabled_transport_providers()` in the channel service, including setup
+wizard output. Nonempty `UV_EXTRAS` continues to override config-derived extras.
 `serve.sh`'s config-presence gate also accepts the project-root file when the
 checkout has no config. `tests/test_serve_config_presence.py` runs the full
 launcher through dependency detection with service operations stubbed.
