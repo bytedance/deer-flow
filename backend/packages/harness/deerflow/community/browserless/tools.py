@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import math
 import os
 import re
 from datetime import UTC, datetime
@@ -52,17 +53,20 @@ def _coerce_timeout(value: object, default: float) -> float:
     Mirrors ``crawl4ai._coerce_timeout`` / ``jina_ai._coerce_timeout``: booleans and
     non-numeric strings fall back to the default, so ``timeout_s: off`` (YAML ``False``)
     does not become ``0.0`` and time out every request against a healthy server, and a
-    typo'd value does not raise out of tool construction.
+    typo'd value does not raise out of tool construction. Non-positive and
+    non-finite values also fall back so HTTP requests keep a usable timeout.
     """
     if isinstance(value, bool):
         return default
-    if isinstance(value, (int, float)):
-        return float(value)
-    if isinstance(value, str):
+    if isinstance(value, (int, float, str)):
         try:
-            return float(value)
-        except ValueError:
-            logger.warning("Browserless: invalid timeout %r in config; using %ss", value, default)
+            timeout = float(value)
+        except (ValueError, OverflowError):
+            pass
+        else:
+            if math.isfinite(timeout) and timeout > 0:
+                return timeout
+        logger.warning("Browserless: invalid timeout %r in config; using %ss", value, default)
     return default
 
 
