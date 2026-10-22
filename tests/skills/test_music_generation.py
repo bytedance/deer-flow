@@ -123,7 +123,7 @@ def test_missing_api_key_raises(monkeypatch, tmp_path):
     ],
     ids=["missing-key", "invalid-json", "missing-file", "empty-prompt"],
 )
-def test_cli_input_failure_returns_nonzero(
+def test_cli_input_failure_returns_status_one(
     monkeypatch, tmp_path, content, api_key, diagnostic
 ):
     if api_key:
@@ -149,7 +149,7 @@ def test_cli_input_failure_returns_nonzero(
         timeout=10,
     )
 
-    assert result.returncode != 0
+    assert result.returncode == 1
     assert diagnostic in result.stderr
     assert result.stdout == ""
     assert output.read_bytes() == b"previous song"
@@ -204,7 +204,7 @@ with patch.object(requests, "post", return_value=response):
         assert result.stderr == ""
         assert output.read_bytes() == _ID3_AUDIO
     else:
-        assert result.returncode != 0
+        assert result.returncode == 1
         assert "1008" in result.stderr
         assert result.stdout == ""
         assert output.read_bytes() == b"previous song"

@@ -189,6 +189,9 @@ cd backend && python -m pytest tests/path/to/test.py::test_func -q
 cd frontend && pnpm rstest run <pattern>     # e.g. pnpm rstest run my-component
 ```
 
+Music-generation CLI tests run real subprocesses and replace only HTTP transport
+for provider responses, keeping the production entry point and output handling under test.
+
 ### Logs
 
 - Docker stack: `make docker-logs` (or `docker compose -f docker/... logs -f <svc>`).
@@ -218,8 +221,6 @@ Repo-wide conventions:
   frontend tests live in `frontend/tests/`.
   Public skill script regressions live in `tests/skills/`; exercise dependency fallbacks
   with the optional import unavailable and mock HTTP transport to keep tests offline.
-  Music-generation CLI regressions run real subprocesses and replace only HTTP
-  transport for provider responses; failures must exit nonzero with stderr diagnostics.
 - **Before pushing** — backend `make format`, frontend `pnpm check`.
   Backend CI enforces `ruff format --check`.
 - **Skill text encoding** — use explicit UTF-8 for textual skill resources.
