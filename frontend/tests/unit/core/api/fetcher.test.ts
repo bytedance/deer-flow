@@ -61,6 +61,20 @@ describe("api fetcher Request inputs", () => {
     },
   );
 
+  it("does not inject CSRF for TRACE in init", async () => {
+    // Native Request rejects TRACE, so inspect options before that boundary.
+    const nativeFetch = rs.fn().mockResolvedValue(new Response("ok"));
+    rs.stubGlobal("fetch", nativeFetch);
+
+    await apiFetch("http://localhost/api/threads", { method: "TRACE" });
+
+    expect(nativeFetch).toHaveBeenCalledWith("http://localhost/api/threads", {
+      method: "TRACE",
+      headers: undefined,
+      credentials: "include",
+    });
+  });
+
   it("preserves an explicit CSRF header inherited from the Request", async () => {
     await apiFetch(
       new Request("http://localhost/api/threads", {
