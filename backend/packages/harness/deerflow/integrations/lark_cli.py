@@ -1503,6 +1503,23 @@ def _ensure_managed_sandbox_lark_cli(version: str) -> Path:
         return _ensure_managed_sandbox_lark_cli_locked(tag, target, parent)
 
 
+def _rename_sandbox_runtime(source: Path, target: Path) -> None:
+    """Keep atomic publication under the install lock through short NT handle contention.
+
+    Access denied may be transient on Windows (e.g. a scanner holds the newly
+    staged directory). A permanent denial still raises after 140 ms total wait;
+    never fall back to a non-atomic copy or change permission/ACL policy.
+    """
+    for attempt in range(8):
+        try:
+            source.rename(target)
+            return
+        except PermissionError as exc:
+            if os.name != "nt" or getattr(exc, "winerror", None) not in (5, 32, 33) or attempt == 7:
+                raise
+            time.sleep(0.005 * (attempt + 1))
+
+
 def _ensure_managed_sandbox_lark_cli_locked(tag: str, target: Path, parent: Path) -> Path:
     manifest = _read_json_object_file(target / LARK_CLI_RUNTIME_MANIFEST_FILE)
     if manifest and manifest.get("version") == tag:
@@ -1538,14 +1555,14 @@ def _ensure_managed_sandbox_lark_cli_locked(tag: str, target: Path, parent: Path
             backup = parent / f".replacing-sandbox-cli-{os.getpid()}"
             if backup.exists():
                 shutil.rmtree(backup, ignore_errors=True)
-            target.rename(backup)
-        staging.rename(target)
+            _rename_sandbox_runtime(target, backup)
+        _rename_sandbox_runtime(staging, target)
         if backup is not None:
             shutil.rmtree(backup, ignore_errors=True)
         return target
     except Exception:
         if backup is not None and backup.exists() and not target.exists():
-            backup.rename(target)
+            _rename_sandbox_runtime(backup, target)
         raise
     finally:
         shutil.rmtree(staging, ignore_errors=True)

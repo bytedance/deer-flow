@@ -54,6 +54,19 @@ logout and restores the complete old tree on any switch failure.
 Offload config/DDGS together. Only returned empties mean `No images found`;
 the SDK sentinel can hide timeouts. See `tests/test_image_search_errors.py`.
 
+Managed sandbox runtime publication keeps its install lock across atomic rename
+and rollback. Only Windows access/sharing errors (winerror 5/32/33) get eight
+attempts with 140 ms total backoff; permanent denials and unrelated errors still
+raise, without copy fallback or permission/ACL changes.
+
+### File Agent atomic writes (`persistence/agents/file.py`)
+
+Config and SOUL writes stage UTF-8 temporary files in the owning directory and
+publish by atomic replace. Windows sharing/access errors 5/32/33 retry only that
+same staged replace, at most eight attempts and 140 ms total wait; other errors
+and exhausted attempts still propagate. Keep cleanup and do not substitute
+in-place writes or permission changes. Regressions: `tests/test_update_agent_tool.py`.
+
 ### Browser Progress Screenshots (`community/browser_automation/`)
 
 Hidden per-action browser progress frames use JPEG at quality 80 to keep their

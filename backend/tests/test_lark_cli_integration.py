@@ -495,7 +495,114 @@ def test_managed_sandbox_runtime_rejects_launcher_without_shebang_on_windows(mon
     assert not lark_cli.lark_cli_managed_sandbox_dir().exists()
 
 
-def test_concurrent_managed_sandbox_runtime_installs_serialize_replacement(monkeypatch, tmp_path) -> None:
+@pytest.mark.parametrize("winerror", [5, 32, 33])
+def test_sandbox_runtime_rename_retries_only_windows_handle_contention(monkeypatch, tmp_path, winerror):
+    source, target = tmp_path / "staging", tmp_path / "runtime"
+    source.mkdir()
+    (source / "marker").write_text("verified", encoding="utf-8")
+    real_rename = Path.rename
+    calls = []
+    delays = []
+
+    def rename(path, destination):
+        calls.append((path, destination))
+        if len(calls) < 3:
+            error = PermissionError("temporarily held open")
+            error.winerror = winerror
+            raise error
+        return real_rename(path, destination)
+
+    monkeypatch.setattr(lark_cli, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(Path, "rename", rename)
+    monkeypatch.setattr(lark_cli.time, "sleep", delays.append)
+    lark_cli._rename_sandbox_runtime(source, target)
+
+    assert calls == [(source, target)] * 3
+    assert delays == [0.005, 0.01]
+    assert not source.exists()
+    assert (target / "marker").read_text(encoding="utf-8") == "verified"
+
+
+@pytest.mark.parametrize("platform,winerror,attempts", [("nt", 5, 8), ("nt", 32, 8), ("nt", 33, 8), ("nt", 87, 1), ("nt", None, 1), ("posix", 5, 1)])
+def test_sandbox_runtime_rename_propagates_permanent_or_unrelated_errors(monkeypatch, tmp_path, platform, winerror, attempts):
+    source, target = tmp_path / "staging", tmp_path / "runtime"
+    source.mkdir()
+    error = PermissionError("permanent denial")
+    error.winerror = winerror
+    calls = []
+    delays = []
+
+    def rename(path, destination):
+        calls.append((path, destination))
+        raise error
+
+    monkeypatch.setattr(lark_cli, "os", SimpleNamespace(name=platform))
+    monkeypatch.setattr(Path, "rename", rename)
+    monkeypatch.setattr(lark_cli.time, "sleep", delays.append)
+    with pytest.raises(PermissionError) as caught:
+        lark_cli._rename_sandbox_runtime(source, target)
+
+    assert caught.value is error
+    assert calls == [(source, target)] * attempts
+    assert delays == [0.005 * index for index in range(1, attempts)]
+    assert source.is_dir() and not target.exists()
+
+
+@pytest.mark.parametrize("permanent", [False, True])
+def test_managed_sandbox_runtime_publication_retry_keeps_lock_and_rollback(monkeypatch, tmp_path, permanent):
+    _patch_paths(monkeypatch, tmp_path / "home")
+    source = tmp_path / "pre-staged"
+    for arch in ("amd64", "arm64"):
+        binary = source / f"linux-{arch}" / "lark-cli"
+        binary.parent.mkdir(parents=True)
+        binary.write_bytes(b"\x7fELF" + arch.encode())
+        binary.chmod(0o755)
+    launcher = source / "bin" / "lark-cli"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text("#!/bin/sh\n", encoding="utf-8")
+    launcher.chmod(0o755)
+    monkeypatch.setenv(lark_cli.LARK_CLI_SANDBOX_RUNTIME_SOURCE_ENV, str(source))
+    target = lark_cli._ensure_managed_sandbox_lark_cli("v1.0.64")
+    real_rename = Path.rename
+    attempts = []
+    delays = []
+    error = PermissionError("runtime publication denied")
+    error.winerror = 5
+
+    def rename(path, destination):
+        assert lark_cli._LARK_RUNTIME_INSTALL_THREAD_LOCK.locked()
+        if path.name.startswith(".installing-sandbox-cli-"):
+            attempts.append(path)
+            if permanent or len(attempts) < 3:
+                raise error
+        return real_rename(path, destination)
+
+    def sleep(delay):
+        assert lark_cli._LARK_RUNTIME_INSTALL_THREAD_LOCK.locked()
+        delays.append(delay)
+
+    # Replace only this module's os reference; pathlib keeps the native host OS.
+    monkeypatch.setattr(lark_cli, "os", SimpleNamespace(**{**vars(os), "name": "nt"}))
+    monkeypatch.setattr(Path, "rename", rename)
+    monkeypatch.setattr(lark_cli.time, "sleep", sleep)
+    if permanent:
+        with pytest.raises(PermissionError) as caught:
+            lark_cli._ensure_managed_sandbox_lark_cli("v1.0.65")
+        assert caught.value is error
+    else:
+        assert lark_cli._ensure_managed_sandbox_lark_cli("v1.0.65") == target
+
+    assert len(attempts) == (8 if permanent else 3)
+    assert len(delays) == len(attempts) - 1
+    manifest = json.loads((target / lark_cli.LARK_CLI_RUNTIME_MANIFEST_FILE).read_text(encoding="utf-8"))
+    assert manifest["version"] == ("v1.0.64" if permanent else "v1.0.65")
+    lark_cli._validate_lark_cli_sandbox_runtime(target)
+    assert not list(target.parent.glob(".installing-sandbox-cli-*"))
+    assert not list(target.parent.glob(".replacing-sandbox-cli-*"))
+
+
+@pytest.mark.parametrize("_attempt", range(3))
+def test_concurrent_managed_sandbox_runtime_installs_serialize_replacement(monkeypatch, tmp_path, _attempt) -> None:
     _patch_paths(monkeypatch, tmp_path / "home")
     source = tmp_path / "pre-staged"
     for arch in ("amd64", "arm64"):
@@ -509,6 +616,8 @@ def test_concurrent_managed_sandbox_runtime_installs_serialize_replacement(monke
     launcher.chmod(0o755)
     monkeypatch.setenv(lark_cli.LARK_CLI_SANDBOX_RUNTIME_SOURCE_ENV, str(source))
 
+    # Force an actual replacement, not only a cold install followed by reuse.
+    lark_cli._ensure_managed_sandbox_lark_cli("v1.0.64")
     real_validate = lark_cli._validate_lark_cli_sandbox_runtime
     start = threading.Barrier(2)
     state_lock = threading.Lock()

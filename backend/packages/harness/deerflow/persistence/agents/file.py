@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import logging
 import shutil
+import sys
 import tempfile
+import time
 from collections.abc import Hashable
 from pathlib import Path
 from typing import Any
@@ -250,11 +252,25 @@ class FileAgentStore(AgentStore):
                 staged.append(soul_tmp)
                 pending.append((soul_tmp, agent_dir / SOUL_FILENAME))
             for tmp, target in pending:
-                tmp.replace(target)
+                _replace_staged_file(tmp, target)
                 staged.remove(tmp)
         finally:
             for tmp in staged:
                 tmp.unlink(missing_ok=True)
+
+
+def _replace_staged_file(source: Path, target: Path) -> None:
+    """Keep atomic replacement when a Windows reader briefly denies deletion."""
+    for attempt in range(8):
+        try:
+            source.replace(target)
+            return
+        except OSError as exc:
+            # Windows readers/scanners can temporarily omit FILE_SHARE_DELETE.
+            # Never retry other platforms/errors or fall back to in-place writes.
+            if sys.platform != "win32" or getattr(exc, "winerror", None) not in (5, 32, 33) or attempt == 7:
+                raise
+            time.sleep(0.005 * (attempt + 1))
 
 
 def _stage_temp(target: Path, text: str) -> Path:
