@@ -165,7 +165,8 @@ Read the nearest scoped `AGENTS.md` for subsystem ownership.
 
 ## Architecture
 
-Read-only knowledge: [contract](docs/KNOWLEDGE.md).
+Read-only knowledge: [contract](docs/KNOWLEDGE.md) covers independent retrieval
+tools, scope intersection and extension-owned providers.
 
 ### Harness / App Split
 
