@@ -77,6 +77,11 @@ def run_single_query(
         # programmatic subprocess usage is safe.
         env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
 
+        # Keep this reviewed CLI invocation as a fixed executable plus argv.
+        # Query/model values must never be interpolated into a shell command.
+        # Capture stdout for evaluation rather than inheriting a terminal.
+        # The surrounding finally block owns termination after early exits.
+        # Environment filtering above permits nested CLI evaluation.
         process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
