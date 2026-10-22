@@ -1,9 +1,11 @@
 """Cleanup failures in the secret-file and managed-model writers.
 
-Both writers publish a temporary file and then discard it. On Windows a scanner,
-a peer holding the handle, or a read-only mount can make that removal fail after
-the value is already published, so the removal has to stay best-effort: it must
-never replace the caller's outcome.
+Both writers stage a temporary file and then discard it. That removal runs on
+every exit path, not only after a successful publication: it also runs when the
+write, the close, or the replacement already failed. On Windows a scanner, a peer
+holding the handle, or a read-only mount can make the removal itself fail, so it
+has to stay best-effort — a cleanup error must never replace the outcome the
+caller needed, whether that outcome is a published value or an earlier error.
 """
 
 from __future__ import annotations

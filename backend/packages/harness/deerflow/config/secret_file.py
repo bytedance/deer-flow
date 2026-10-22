@@ -149,8 +149,10 @@ def _create_exclusive(path: Path, generate: Callable[[], str]) -> bool:
             return _publish_under_claim(path, generate, replace_empty=False)
         return True
     finally:
-        # The value is already published through the hard link, so removing our
-        # own temporary name must never turn that success into a failure.
+        # Removing our own temporary name is best-effort on every exit path —
+        # whether the hard link published the value, a peer won the name, a
+        # hard-link-less filesystem published through the replacement claim, or
+        # an earlier step already failed — and must never mask that outcome.
         cleanup_failed_atomic_write(Path(temporary))
 
 
