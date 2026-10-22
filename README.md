@@ -1053,6 +1053,12 @@ anonymous `tmp*.tmp` files require manual inspection because their writer cannot
 
 DeerFlow can also expose user-owned IM channel connections in the workspace UI. When `channel_connections` is enabled, logged-in users can bind Telegram, Slack, Discord, Feishu/Lark, DingTalk, WeChat, WeCom, QQ, or Buzz from the sidebar / Settings > Channels. It reuses the existing outbound `channels.*` transports, so no public IP or provider callback URL is required. Incoming IM messages then run under the connected DeerFlow user account. See [IM Channel Connections](backend/docs/IM_CHANNEL_CONNECTIONS.md) for setup and security notes. Buzz backlog paging stops with a warning if timestamp-based queries cannot advance, and channel removal closes both live and backlog subscriptions.
 
+For Discord and Buzz, the local and Docker launchers detect the required optional
+dependencies when both `channel_connections.enabled` and the corresponding
+`channel_connections.<provider>.enabled` are `true`. Selecting Discord in
+`make setup` sets these flags. A nonempty `UV_EXTRAS` overrides configuration
+auto-detection, so include `discord` or `buzz` there if you set it manually.
+
 | Channel | Transport | Difficulty |
 |---------|-----------|------------|
 | Telegram | Bot API (long-polling) | Easy |
