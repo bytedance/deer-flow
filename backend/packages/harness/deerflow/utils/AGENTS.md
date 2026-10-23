@@ -7,8 +7,12 @@ umask; replacements preserve existing permission bits before publication. Never
 read the process umask by changing it in this threaded runtime. Behavioral tests
 for both tool imports live in `tests/test_browser_outputs_atomic.py`.
 `cleanup_failed_atomic_write` shares best-effort cleanup across this publisher,
-`skills/projection.py`'s private manifest writer, project document staging, and
-Gateway upload staging.
+`skills/projection.py`'s private manifest writer, project document staging,
+extension snapshot rollback (including removal of a file that did not exist),
+the managed plugins-block rewrite, custom-skill file writes, per-user
+skill-state writes, Gateway upload staging, and the Gateway skill-archive
+upload copy and its post-install discard. The upload route discards that
+archive before closing the multipart form and suppresses close errors.
 Use it on publication failure or after deciding to discard an owned
 temporary; pass a raw descriptor only until `fdopen` succeeds, or an explicitly
 transferred duplicate descriptor owned by the cleanup caller. Shelf discards
