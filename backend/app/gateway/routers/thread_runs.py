@@ -90,6 +90,7 @@ _artifact_archive_slots = asyncio.Semaphore(4)
 _MISSING_REGENERATE_BASE_DETAIL = "Could not find an addressable checkpoint before the target user message"
 _UNSAFE_REGENERATE_LINEAGE_DETAIL = "Could not safely resolve the checkpoint before the target user message"
 THREAD_MESSAGE_LEGACY_SCAN_BATCH = 201
+MAX_EVENT_TYPE_FILTERS = 100
 _LEGACY_IDEMPOTENCY_REQUEST_KEY = "idempotency_request"
 
 
@@ -1829,9 +1830,6 @@ async def create_run_artifact_archive(
         },
         background=BackgroundTask(result.file.close),
     )
-
-
-MAX_EVENT_TYPE_FILTERS = 100
 
 
 @router.get("/{thread_id}/runs/{run_id}/events")
