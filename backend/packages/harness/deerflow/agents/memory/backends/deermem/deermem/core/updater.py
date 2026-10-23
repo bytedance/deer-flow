@@ -867,12 +867,15 @@ def _message_identity(msg: Any) -> tuple[str, ...] | None:
     return ("content", msg_type, hashlib.sha256(text.encode("utf-8")).hexdigest())
 
 
+# DeerMem is portable; the host test pins this map to its UI allowlist.
+_MEMORY_UI_LANGUAGES = {"en-US": "English", "zh-CN": "Simplified Chinese"}
+
+
 def _memory_language_preference(messages: list[Any]) -> str:
-    languages = {"en-US": "English", "zh-CN": "Simplified Chinese"}
     for message in reversed(messages):
         locale = (getattr(message, "additional_kwargs", {}) or {}).get("deerflow_ui_locale")
-        if isinstance(locale, str) and locale in languages:
-            return f"Preferred memory language: {languages[locale]} ({locale})"
+        if isinstance(locale, str) and locale in _MEMORY_UI_LANGUAGES:
+            return f"Preferred memory language: {_MEMORY_UI_LANGUAGES[locale]} ({locale})"
     return ""
 
 

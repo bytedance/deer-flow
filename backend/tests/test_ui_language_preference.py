@@ -8,8 +8,10 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, messages_to_dict
 from langgraph.runtime import Runtime
 
+from deerflow.agents.language import UI_LANGUAGES
 from deerflow.agents.memory import summarization_hook
 from deerflow.agents.memory.backends.deermem.deermem.config import DeerMemConfig
+from deerflow.agents.memory.backends.deermem.deermem.core import updater as memory_updater
 from deerflow.agents.memory.backends.deermem.deermem.core.message_processing import filter_messages_for_memory
 from deerflow.agents.memory.backends.deermem.deermem.core.storage import create_empty_memory
 from deerflow.agents.memory.backends.deermem.deermem.core.updater import MemoryUpdater
@@ -27,6 +29,10 @@ class _Request:
 
     def override(self, **kwargs):
         return _Request(kwargs.get("messages", self.messages), self.runtime.context)
+
+
+def test_deermem_language_map_matches_the_ui_allowlist():
+    assert memory_updater._MEMORY_UI_LANGUAGES == UI_LANGUAGES
 
 
 @pytest.mark.parametrize("locale", ["zh-CN", "en-US", None, "fr-FR", [], {}])

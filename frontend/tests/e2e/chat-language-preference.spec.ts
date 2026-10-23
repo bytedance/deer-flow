@@ -39,7 +39,11 @@ test("sends the current language after switching in Appearance settings", async 
     return handleRunStream(route);
   });
   await page.goto("/workspace/chats/new");
-  await switchLanguage(page, "中文", testInfo.outputPath("language-settings.png"));
+  await switchLanguage(
+    page,
+    "中文",
+    testInfo.outputPath("language-settings.png"),
+  );
   await page.locator("textarea").fill("Explain this in English");
   await page.locator("textarea").press("Enter");
   await expect.poll(() => locales).toEqual(["zh-CN"]);

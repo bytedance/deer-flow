@@ -8,6 +8,8 @@ run locale exists. Never change checkpoint messages or memory backend APIs.
 Bundled DeerMem reads this optional metadata into its human data message,
 keeping system text static and the portable backend free of host imports.
 Language influences new prose, not JSON keys or bulk translation of stored facts.
+`test_ui_language_preference.py` pins DeerMem's locale keys and display names
+to the host allowlist without importing host code into the portable backend.
 
 DeerMem `prompt_prepend`/`prompt_append` wrap the first system message from
 `memory_update` after formatting, without touching its human data message or
