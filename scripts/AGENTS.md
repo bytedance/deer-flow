@@ -51,12 +51,11 @@ trimming its contents. Offline CLI coverage:
 
 ## Service Startup Contracts
 
-`serve.sh` uses `DEER_FLOW_GATEWAY_STARTUP_TIMEOUT` for the local Gateway's
-port-readiness wait (positive integer seconds, default 30). Read it after the
-root `.env`, and reject invalid values before any service cleanup or startup;
-`--stop` bypasses this startup-only validation. Keep frontend/nginx deadlines
-unchanged. `backend/tests/test_serve_gateway_startup_timeout.py` runs the full
-launcher and real wait loop with process launches, readiness and time stubbed.
+`serve.sh` reads `DEER_FLOW_GATEWAY_STARTUP_TIMEOUT` after root `.env` for
+local Gateway port readiness (positive integer seconds, default 30). Reject
+invalid values before cleanup/startup except `--stop`; keep frontend/nginx waits.
+Launcher/wait-loop tests (processes, readiness and time stubbed):
+`backend/tests/test_serve_gateway_startup_timeout.py`.
 
 Both launchers call `sandbox-mode.sh` via Bash; keep it Bash/awk-only.
 Dev passes `$PROJECT_ROOT/config.yaml`; prod passes `$DEER_FLOW_CONFIG_PATH`.
