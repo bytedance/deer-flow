@@ -12,6 +12,8 @@ Resource identity is `(provider, connection_id, native_base_id, document_id)`. `
 
 Each base returns the intersection of configured management operations and the adapter's supported surface. `pipeline` describes the configured Provider's support, not observed task execution. The presence of a stage does not authorize a write. Unrecognized inputs and unavailable operations must fail rather than widen the request or silently drop options.
 
+Processing options reflect each base: graph controls require graph support; chunk controls require a valid non-parent-child chunking configuration. Local credential validation fails before HTTP with `ManagementCredentialUnavailable`, mapped to `503` without reconciliation guidance.
+
 The supplied WeKnora adapter exposes ingest, status, reprocess and cancel. Upload returns the Provider's native document identity. The Provider owns queues, parser/chunker/embedding work, Wiki generation, entity extraction and index storage. No local scheduler is involved.
 
 ## State and uncertainty

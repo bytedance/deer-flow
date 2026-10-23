@@ -40,3 +40,8 @@ copy; catalog presence never activates routes or implies a management page.
 Provider failure logs include only exception types, numeric HTTP status and fixed
 response-failure categories. Never log exception text/chains, payloads, URLs or
 credentials; caplog regressions exercise transport and custom-provider failures.
+
+Capability options must reflect the fetched base: omit graph controls without
+graph support and chunk overrides for missing/parent-child chunking config.
+Local credential validation raises ManagementCredentialUnavailable before HTTP;
+map it to 503 without uncertain-write reconciliation guidance.

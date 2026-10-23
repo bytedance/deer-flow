@@ -13,6 +13,10 @@ from pydantic import BaseModel, ConfigDict, Field, HttpUrl, model_validator
 Operation = Literal["capabilities", "status", "upload", "url", "manual", "reprocess", "cancel"]
 
 
+class ManagementCredentialUnavailable(RuntimeError):
+    """Local credential validation failed before an upstream request."""
+
+
 class Model(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 

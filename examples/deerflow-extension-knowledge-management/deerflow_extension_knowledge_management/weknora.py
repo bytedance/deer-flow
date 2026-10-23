@@ -15,7 +15,7 @@ from typing import Literal
 import httpx
 from pydantic import AnyHttpUrl, Field, field_validator, model_validator
 
-from .contracts import Capabilities, IngestRequest, ManagementContext, Model, Operation, ProcessingOptions, ProcessingResult
+from .contracts import Capabilities, IngestRequest, ManagementContext, ManagementCredentialUnavailable, Model, Operation, ProcessingOptions, ProcessingResult
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +87,7 @@ class WeKnoraManagement:
     async def _request(self, conn: Connection, method: str, path: str, **kwargs):
         key = os.environ.get(conn.api_key_env, "").strip()
         if not key or not key.isascii() or any(ord(c) < 33 or ord(c) == 127 for c in key):
-            raise RuntimeError("Management credential is unavailable")
+            raise ManagementCredentialUnavailable("Management credential is unavailable")
         try:
             async with await asyncio.to_thread(
                 httpx.AsyncClient,
@@ -186,7 +186,13 @@ class WeKnoraManagement:
             "entries": "provider_managed" if flags.get("wiki") is True else "unsupported",
             "entity_relations": "provider_managed" if flags.get("graph") is True else "unsupported",
         }
-        return Capabilities(operations=operations, processing_options=frozenset({"chunk_size", "chunk_overlap", "summary_enabled", "graph_enabled"}), pipeline=pipeline)
+        options = {"summary_enabled"}
+        if flags.get("graph") is True:
+            options.add("graph_enabled")
+        chunking = data.get("chunking_config")
+        if isinstance(chunking, dict) and chunking.get("enable_parent_child") is not True:
+            options.update({"chunk_size", "chunk_overlap"})
+        return Capabilities(operations=operations, processing_options=frozenset(options), pipeline=pipeline)
 
     async def ingest(self, context: ManagementContext, connection: str, base: str, body: IngestRequest) -> ProcessingResult:
         conn = self._authorize(context, connection, base, body.kind)

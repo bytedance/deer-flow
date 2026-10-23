@@ -106,3 +106,11 @@ Windows environment-variable limits (native Windows was not rerun locally).
 Frontend discovery includes the package's actual namespace and localized copy.
 Focused backend/guidance checks: 64 passed, 1 skipped. Frontend catalog: 9 passed;
 frontend lint/typecheck and backend formatting passed.
+
+Further review: capabilities now omit unsupported per-base controls, and invalid
+local credentials return a distinct pre-request 503. Seven new cases failed
+before the fix; focused backend/guidance checks now pass 77 tests (1 live skip).
+The three failing CI catalog E2E cases used the obsolete fixed count 11; they
+now use the catalog length plus explicit localized management-entry assertions.
+All three pass locally against an isolated Next.js development server. Catalog
+unit tests (9), frontend lint/typecheck and backend formatting also pass.

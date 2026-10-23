@@ -7,7 +7,7 @@ from deerflow_extension_api.auth import arequire_plugin_management
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import ValidationError
 
-from .contracts import IngestRequest, ManagementContext, ManagementProvider, ProcessingOptions
+from .contracts import IngestRequest, ManagementContext, ManagementCredentialUnavailable, ManagementProvider, ProcessingOptions
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +38,9 @@ async def _invoke(awaitable):
         raise HTTPException(422, "Unsupported knowledge capability") from None
     except ValueError:
         raise HTTPException(422, "Invalid management request") from None
+    except ManagementCredentialUnavailable as exc:
+        logger.warning("Knowledge management local configuration failed: %s", type(exc).__name__)
+        raise HTTPException(503, "Management credential is not configured") from None
     except RuntimeError as exc:
         # Exception text/chains can contain provider credentials or source data.
         logger.warning("Knowledge management provider invocation failed: %s", type(exc).__name__)

@@ -475,3 +475,34 @@ async def test_custom_provider_exception_text_is_not_logged(management, caplog):
     assert "RuntimeError" in caplog.text
     assert "synthetic-secret" not in caplog.text and "private document" not in caplog.text
     assert all(record.exc_info is None for record in caplog.records)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("chunking,graph,expected", [({"enable_parent_child": True}, False, {"summary_enabled"}), (None, True, {"summary_enabled", "graph_enabled"}), ({}, False, {"summary_enabled", "chunk_size", "chunk_overlap"})])
+async def test_capability_options_reflect_base_support(management, chunking, graph, expected):
+    from deerflow_extension_knowledge_management.contracts import ManagementContext
+
+    provider, _, _ = management
+    provider.transport = httpx.MockTransport(lambda request: httpx.Response(200, json={"success": True, "data": {"id": "kb-1", "chunking_config": chunking, "capabilities": {"graph": graph}}}))
+    result = await provider.capabilities(ManagementContext(ExtensionPrincipal("alice", is_admin=True)), "local", "kb-1")
+    assert result.processing_options == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("credential", [None, "", "invalid secret", "非ASCII"])
+async def test_unavailable_credential_is_local_service_failure(api, monkeypatch, caplog, credential):
+    app, _, calls, _ = api
+    if credential is None:
+        monkeypatch.delenv("MANAGEMENT_TEST_KEY")
+    else:
+        monkeypatch.setenv("MANAGEMENT_TEST_KEY", credential)
+    with caplog.at_level("WARNING"):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.get(API_BASE + "/capabilities")
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Management credential is not configured"
+    assert not calls
+    assert "ManagementCredentialUnavailable" in caplog.text
+    assert "reconcile" not in response.text
+    if credential:
+        assert credential not in caplog.text + response.text
