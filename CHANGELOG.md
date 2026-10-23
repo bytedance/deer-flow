@@ -1397,6 +1397,12 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
 
 ### Fixed
 
+- **examples:** The extension example's package tests pass again. Its test
+  registry lacked `knowledge_provider()`, so it no longer matched the
+  `ExtensionRegistry` protocol and the README's `pytest` run failed. Extension
+  Package Check now also runs the tests of bundled examples that ship them,
+  so a contract change that breaks them fails its pull request. ([#7364])
+
 - **tui:** Quitting after `Ctrl+C` interrupted a run no longer hangs on the
   step that run is still finishing. The run thread was joined on exit, so the
   TUI closed but the shell prompt stayed blocked until a long tool call or model
@@ -13035,3 +13041,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7277]: https://github.com/bytedance/deer-flow/pull/7277
 [#7325]: https://github.com/bytedance/deer-flow/pull/7325
 [#7326]: https://github.com/bytedance/deer-flow/pull/7326
+[#7364]: https://github.com/bytedance/deer-flow/pull/7364

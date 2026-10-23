@@ -1112,6 +1112,11 @@
 
 ### 修复
 
+- **示例：** 扩展示例的包测试重新通过。其测试用 registry 缺少
+  `knowledge_provider()`，不再满足 `ExtensionRegistry` 协议，按 README 运行
+  `pytest` 会失败。Extension Package Check 现在也会运行自带测试的内置示例的测试，
+  因此破坏这些测试的契约变更会在其 PR 中失败。([#7364])
+
 - **TUI：** 按 `Ctrl+C` 中断运行后再退出，不再卡在该运行仍在完成的步骤上。此前运行
   线程会在退出时被等待，TUI 已关闭但 shell 提示符一直阻塞，直到较长的工具调用或模型请求
   返回，再按 `Ctrl+C` 也只会打印 traceback。现在退出时会提示正在等待该步骤，并在其完成后
@@ -10405,3 +10410,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7277]: https://github.com/bytedance/deer-flow/pull/7277
 [#7325]: https://github.com/bytedance/deer-flow/pull/7325
 [#7326]: https://github.com/bytedance/deer-flow/pull/7326
+[#7364]: https://github.com/bytedance/deer-flow/pull/7364
