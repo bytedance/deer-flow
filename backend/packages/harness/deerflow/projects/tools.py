@@ -44,8 +44,7 @@ _SEARCH_QUERY_MAX_CHARS = 200
 #: Excerpt window: this many characters on each side of the match (spec §7;
 #: a constant, deliberately not a config knob).
 _SEARCH_EXCERPT_CONTEXT = 80
-#: Tier-1 metadata pagination size and the cap on each id list in the result.
-_SEARCH_PAGE_SIZE = 200
+#: Cap on each id list in the search result payload.
 _SEARCH_ID_LIST_CAP = 20
 
 _BINARY_DECLINE_MESSAGE = "This document is binary and cannot be read as text. To let the agent process it, attach it to a thread (attach-to-thread) instead."
@@ -270,30 +269,30 @@ async def _search_project_documents_impl(runtime: Runtime, *, query: str, limit:
     # the returned offset and the excerpt slice (spec §5.3).
     pattern = re.compile(re.escape(query), re.IGNORECASE)
 
-    # Tier 1: name/summary over the whole shelf (paged; no size assumption).
+    # Tier 1: name/summary over the whole shelf, materialized in ONE query.
+    # The rows are kept and reused for tier 2 — a stable candidate set.
+    # Offset paging would re-read the live shelf per page, so a concurrent
+    # upload/trash between pages could duplicate a row (an unrelated newest
+    # upload shifts every offset) or silently skip one (a trash shrinks
+    # earlier pages); a single SELECT reads one snapshot. A row trashed
+    # between the snapshot and its content read follows the normal serving
+    # rules ("missing" etc.) — shelf membership is fixed as of this call.
+    shelf_rows = await repo.list_active(project_id, limit=1 << 62, offset=0, user_id=user_id)  # effectively unbounded: one read snapshot
     name_hits: list[dict] = []
     summary_hits: list[dict] = []
     tier1_ids: set[str] = set()
-    page_offset = 0
-    while True:
-        rows = await repo.list_active(project_id, limit=_SEARCH_PAGE_SIZE, offset=page_offset, user_id=user_id)
-        if not rows:
-            break
-        for row in rows:
-            name = str(row.get("name") or "")
-            summary = row.get("summary") or None
-            name_match = pattern.search(name)
-            if name_match is not None:
-                name_hits.append({"id": row["id"], "name": neutralize_untrusted_tags(name), "matched": "name", "excerpt": _search_excerpt(name, name_match), "offset": None})
+    for row in shelf_rows:
+        name = str(row.get("name") or "")
+        summary = row.get("summary") or None
+        name_match = pattern.search(name)
+        if name_match is not None:
+            name_hits.append({"id": row["id"], "name": neutralize_untrusted_tags(name), "matched": "name", "excerpt": _search_excerpt(name, name_match), "offset": None})
+            tier1_ids.add(row["id"])
+        elif summary:
+            summary_match = pattern.search(str(summary))
+            if summary_match is not None:
+                summary_hits.append({"id": row["id"], "name": neutralize_untrusted_tags(name), "matched": "summary", "excerpt": _search_excerpt(str(summary), summary_match), "offset": None})
                 tier1_ids.add(row["id"])
-            elif summary:
-                summary_match = pattern.search(str(summary))
-                if summary_match is not None:
-                    summary_hits.append({"id": row["id"], "name": neutralize_untrusted_tags(name), "matched": "summary", "excerpt": _search_excerpt(str(summary), summary_match), "offset": None})
-                    tier1_ids.add(row["id"])
-        page_offset += len(rows)
-        if len(rows) < _SEARCH_PAGE_SIZE:
-            break
 
     results = (name_hits + summary_hits)[:limit]
     if len(results) >= limit:
@@ -313,9 +312,10 @@ async def _search_project_documents_impl(runtime: Runtime, *, query: str, limit:
             ensure_ascii=False,
         )
 
-    # Tier 2: content scan in shelf order, skipping tier-1 hits, bounded by
-    # the whole-shelf budget. auto_convert=False: search NEVER converts (a
-    # first search must not synchronously convert every PDF on the shelf).
+    # Tier 2: content scan over the SAME snapshot, in shelf order, skipping
+    # tier-1 hits, bounded by the whole-shelf budget. auto_convert=False:
+    # search NEVER converts (a first search must not synchronously convert
+    # every PDF on the shelf).
     remaining = limit - len(results)
     budget_left = total_budget
     stop_reason = "complete"
@@ -324,74 +324,59 @@ async def _search_project_documents_impl(runtime: Runtime, *, query: str, limit:
     unscanned_ids: list[str] = []
     processed = 0  # non-tier-1 rows examined before any budget trip
     paths = get_paths()
-    page_offset = 0
-    while True:
-        rows = await repo.list_active(project_id, limit=_SEARCH_PAGE_SIZE, offset=page_offset, user_id=user_id)
-        if not rows:
-            break
-        for row in rows:
-            if remaining == 0:
-                stop_reason = "limit"
-                break
-            if row["id"] in tier1_ids:
-                # Tier 1 was fully scanned before tier 2 started: these are
-                # already in results and were searched — never "unscanned".
-                continue
-            if budget_left <= 0:
-                # Budget tripped. Unscanned ids are enumerated ONLY from the
-                # page already in flight (up to the payload cap); the honest
-                # total is derived after the loop from one count_active query,
-                # so a trip never pages shelf_size/200 more rounds just to
-                # count rows it already ruled out.
-                stop_reason = "budget"
-                if len(unscanned_ids) < _SEARCH_ID_LIST_CAP:
-                    unscanned_ids.append(row["id"])
-                continue
-            processed += 1
-            try:
-                serving_path, reason = await read_text_serving_path(repo, paths, user_id=user_id, row=row, auto_convert=False)
-            except Exception:
-                skipped["error"] += 1
-                logger.warning("Shelf search: failed to resolve serving path for %s", row["id"], exc_info=True)
-                continue
-            if serving_path is None:
-                skipped[{"content_missing": "missing", "conversion_disabled": "unconverted"}.get(reason, "non_text")] += 1
-                continue
-            cap = min(per_doc_cap, budget_left)
-            try:
-                text = await read_document_text_window(serving_path, offset=0, limit=cap + 1)
-            except Exception:
-                skipped["error"] += 1
-                logger.warning("Shelf search: failed to read %s", row["id"], exc_info=True)
-                continue
-            budget_left -= len(text)
-            if len(text) > cap:
-                text = text[:cap]
-                truncated_ids.append(row["id"])
-            match = pattern.search(text)
-            if match is not None:
-                results.append({"id": row["id"], "name": neutralize_untrusted_tags(str(row.get("name") or "")), "matched": "content", "excerpt": _search_excerpt(text, match), "offset": match.start()})
-                remaining -= 1
-        if stop_reason == "budget":
-            break
+    for row in shelf_rows:
         if remaining == 0:
-            # The page filled exactly at its end: no extra list_active round
-            # trip, and stop_reason is "limit" (not "complete") even when this
-            # was the shelf's final row.
             stop_reason = "limit"
             break
-        page_offset += len(rows)
-        if len(rows) < _SEARCH_PAGE_SIZE:
-            break
+        if row["id"] in tier1_ids:
+            # Tier 1 was fully scanned over this snapshot: these are already
+            # in results and were searched — never "unscanned".
+            continue
+        if budget_left <= 0:
+            # Budget tripped. Unscanned ids are enumerated in memory, up to
+            # the payload cap; the honest total is derived after the loop
+            # from the snapshot — no further DB reads for rows already ruled
+            # out.
+            stop_reason = "budget"
+            if len(unscanned_ids) < _SEARCH_ID_LIST_CAP:
+                unscanned_ids.append(row["id"])
+            continue
+        processed += 1
+        try:
+            serving_path, reason = await read_text_serving_path(repo, paths, user_id=user_id, row=row, auto_convert=False)
+        except Exception:
+            skipped["error"] += 1
+            logger.warning("Shelf search: failed to resolve serving path for %s", row["id"], exc_info=True)
+            continue
+        if serving_path is None:
+            skipped[{"content_missing": "missing", "conversion_disabled": "unconverted"}.get(reason, "non_text")] += 1
+            continue
+        cap = min(per_doc_cap, budget_left)
+        try:
+            text = await read_document_text_window(serving_path, offset=0, limit=cap + 1)
+        except Exception:
+            skipped["error"] += 1
+            logger.warning("Shelf search: failed to read %s", row["id"], exc_info=True)
+            continue
+        budget_left -= len(text)
+        if len(text) > cap:
+            text = text[:cap]
+            truncated_ids.append(row["id"])
+        match = pattern.search(text)
+        if match is not None:
+            results.append({"id": row["id"], "name": neutralize_untrusted_tags(str(row.get("name") or "")), "matched": "content", "excerpt": _search_excerpt(text, match), "offset": match.start()})
+            remaining -= 1
 
     truncated_capped, truncated_total = _capped_id_list(truncated_ids)
+    if stop_reason == "complete" and remaining == 0:
+        # The limit filled exactly on the snapshot's final row — a limit stop,
+        # not a complete scan.
+        stop_reason = "limit"
     unscanned_total = 0
     if stop_reason == "budget":
-        # Tier 1 enumerated the whole shelf, so the honest unscanned total is
-        # active - tier-1 hits - rows processed before the trip — one query,
-        # no paging. max() absorbs a concurrent trash/purge racing the count.
-        total_active = await repo.count_active(project_id, user_id=user_id)
-        unscanned_total = max(total_active - len(tier1_ids) - processed, len(unscanned_ids))
+        # Exact — the snapshot IS the candidate set: unscanned = non-tier-1
+        # rows minus those processed before the trip.
+        unscanned_total = len(shelf_rows) - len(tier1_ids) - processed
     return json.dumps(
         {
             "results": results,

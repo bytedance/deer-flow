@@ -215,9 +215,9 @@ class TestBudgetsAndCoverage:
         assert len(result["results"]) == 1
 
     async def test_budget_trip_does_not_page_the_rest_of_the_shelf(self, env, monkeypatch):
-        """After the budget trips, unscanned ids come only from the page in
-        flight and the total is derived from one count_active — no further
-        list_active paging just to enumerate what was never searched."""
+        """After the budget trips, unscanned ids/counts come from the
+        materialized snapshot — a search makes exactly one list_active call
+        for the whole shelf, no matter where the budget trips."""
         _budgets(monkeypatch, 10, 10)
         from deerflow.persistence.projects import ProjectDocumentRepository
 
@@ -236,8 +236,7 @@ class TestBudgetsAndCoverage:
         assert result["stop_reason"] == "budget"
         assert result["unscanned_count"] == 24
         assert len(result["unscanned_document_ids"]) == 20
-        # One tier-1 page plus the trip page — never shelf_size/200 more.
-        assert calls == 2
+        assert calls == 1
 
     async def test_id_lists_are_capped_with_total_counts(self, env, monkeypatch):
         _budgets(monkeypatch, 10, 10_000_000)
@@ -291,6 +290,59 @@ class TestIsolation:
         result = await _search(env, "needle")
         assert [r["id"] for r in result["results"]] == [mine["id"]]
         assert result["stop_reason"] == "complete"
+
+
+class TestStableSnapshot:
+    async def test_upload_mid_scan_neither_duplicates_nor_skips(self, env, monkeypatch):
+        """The candidate set is one read snapshot: an unrelated upload landing
+        between the tier-1 enumeration and a content read must not duplicate
+        or reorder matches."""
+        _budgets(monkeypatch, 10_000, 100_000)
+        await _shelve(env, name="filler.txt", data=b"plain")
+        row_b = await _shelve(env, name="b.txt", data=b"needle B")
+        row_a = await _shelve(env, name="a.txt", data=b"needle A")
+        # Shelf order (updated_at DESC): a, b, filler.
+
+        uploaded = False
+        real_window = tools_mod.read_document_text_window
+
+        async def mutating_window(path, *, offset, limit):
+            nonlocal uploaded
+            if not uploaded:
+                uploaded = True
+                await _shelve(env, name="z-new.txt", data=b"unrelated newest upload")
+            return await real_window(path, offset=offset, limit=limit)
+
+        monkeypatch.setattr(tools_mod, "read_document_text_window", mutating_window)
+        result = await _search(env, "needle", limit=2)
+        assert [r["id"] for r in result["results"]] == [row_a["id"], row_b["id"]]
+        assert result["stop_reason"] == "limit"
+
+    async def test_trash_mid_scan_neither_skips_nor_hides_coverage(self, env, monkeypatch):
+        """Trashing an already-scanned nonmatching document mid-scan must not
+        make the scan skip a later match while still claiming complete
+        coverage."""
+        _budgets(monkeypatch, 10_000, 100_000)
+        row_a = await _shelve(env, name="a.txt", data=b"needle A")
+        filler = await _shelve(env, name="filler.txt", data=b"plain")
+        row_b = await _shelve(env, name="b.txt", data=b"needle B")
+        # Shelf order (updated_at DESC): b, filler, a.
+
+        trashed = False
+        real_window = tools_mod.read_document_text_window
+
+        async def mutating_window(path, *, offset, limit):
+            nonlocal trashed
+            if not trashed:
+                trashed = True
+                assert await env.docs.trash(filler["id"], user_id=_USER)
+            return await real_window(path, offset=offset, limit=limit)
+
+        monkeypatch.setattr(tools_mod, "read_document_text_window", mutating_window)
+        result = await _search(env, "needle", limit=2)
+        assert [r["id"] for r in result["results"]] == [row_b["id"], row_a["id"]]
+        assert result["stop_reason"] == "limit"
+        assert result["unscanned_count"] == 0
 
 
 class TestConfig:
