@@ -16,11 +16,13 @@ from pathlib import Path
 from deerflow_extension_api import AgentRunError
 
 from .artifacts import Artifacts
+from .cluster import Cluster
+from .constants import NAMESPACE as NAMESPACE
 from .lifecycle import Lifecycle
+from .postgres import LeaseLost
 from .recovery import RECOVERY_VERSION, Recovery
 from .store import TERMINAL, Store
 
-NAMESPACE = "community.workflows"
 FRAME = 48 * 1024
 TURN_LIMIT = 10000
 AGENT_TASK_BYTES = 16000
@@ -97,9 +99,12 @@ def project(record, detail=True):
     return result
 
 
-class Workflows(Recovery, Lifecycle, Artifacts):
+class Workflows(Cluster, Recovery, Lifecycle, Artifacts):
     def __init__(self, config):
         self.config = config
+        self.clustered = bool(config.get("storage_url"))
+        self.holder_id = uuid.uuid4().hex
+        self.heartbeats = {}
         self.store = None
         self.available = False
         self.workers = {}
@@ -118,31 +123,51 @@ class Workflows(Recovery, Lifecycle, Artifacts):
 
             path = Path(self.config["storage_path"])
             path.parent.mkdir(parents=True, exist_ok=True)
-            lock = path.with_suffix(path.suffix + ".lock").open("a+b")
+            lock = None if self.clustered else path.with_suffix(path.suffix + ".lock").open("a+b")
             try:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                store = Store(path)
-                store.interrupt_unfinished()
+                if self.clustered:
+                    from .postgres import PostgresStore
+
+                    store = PostgresStore(self.config["storage_url"], self.holder_id, self.config)
+                else:
+                    fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    store = Store(path)
+                    store.interrupt_unfinished()
                 # Include worker code and engine version in the conservative
                 # replay compatibility guard; upgrades never silently replay.
                 from importlib.metadata import version
 
                 signature = hashlib.sha256()
                 for name in (
+                    "constants.py",
                     "worker.py",
                     "service.py",
                     "recovery.py",
                     "lifecycle.py",
                     "artifacts.py",
+                    "cluster.py",
+                    "postgres.py",
                 ):
                     signature.update(Path(__file__).with_name(name).read_bytes())
                 signature.update(version("quickjs").encode())
                 return lock, store, signature.hexdigest()
             except BaseException:
-                lock.close()
+                if lock:
+                    lock.close()
                 raise
 
         self.lockfile, self.store, self.runtime_version = await asyncio.to_thread(initialize)
+        if self.clustered and deps is not None:
+            from sqlalchemy import text as sql_text
+
+            if deps.session_factory is None:
+                raise ValueError("Cluster workflows require the host PostgreSQL session factory")
+            async with deps.session_factory() as session:
+                if session.get_bind().dialect.name != "postgresql":
+                    raise ValueError("Cluster workflows require host PostgreSQL persistence")
+                host_identity = tuple((await session.execute(sql_text("SELECT current_database(),current_schema(),inet_server_addr()::text,inet_server_port()"))).one())
+            if host_identity != await asyncio.to_thread(self.store.database_identity):
+                raise ValueError("Workflow and host must share the same PostgreSQL database and schema")
         self.available = True
 
     async def stop(self):
@@ -158,6 +183,12 @@ class Workflows(Recovery, Lifecycle, Artifacts):
             await asyncio.gather(*list(self.admissions), return_exceptions=True)
         if workers:
             await asyncio.gather(*workers, return_exceptions=True)
+        if self.heartbeats:
+            heartbeats = list(self.heartbeats.values())
+            for heartbeat in heartbeats:
+                heartbeat.cancel()
+            await asyncio.gather(*heartbeats, return_exceptions=True)
+            self.heartbeats.clear()
         if self.lockfile:
             await asyncio.to_thread(self.lockfile.close)
             self.lockfile = None
@@ -190,7 +221,14 @@ class Workflows(Recovery, Lifecycle, Artifacts):
 
     async def save_drained(self, owner, record):
         async with self.write_lock:
-            record["revision"] = await asyncio.to_thread(self.store.put, owner, copy.deepcopy(record))
+            try:
+                record["revision"] = await asyncio.to_thread(self.store.put, owner, copy.deepcopy(record))
+            except LeaseLost:
+                entry = self.entries.get(record["id"])
+                if entry:
+                    entry["lease_lost"] = True
+                    entry["cancel"].set()
+                raise
 
     async def launch(self, payload, context):
         owner = self.owner(context)
@@ -293,7 +331,8 @@ class Workflows(Recovery, Lifecycle, Artifacts):
             if len(self.entries) >= self.config["max_workflows"] or len(current) >= self.config["max_workflows_per_owner"]:
                 raise ValueError("Active workflow limit")
             record, created = await asyncio.to_thread(self.store.create, owner, record)
-            self.publish(self.new_entry(owner, record, context.agent_runs))
+            if created:
+                self.publish(self.new_entry(owner, record, context.agent_runs))
             return {"run_id": record["id"], "status": record["status"]}
 
     def new_entry(self, owner, record, runs):
@@ -310,11 +349,16 @@ class Workflows(Recovery, Lifecycle, Artifacts):
     def publish(self, entry):
         run_id = entry["record"]["id"]
         self.entries[run_id] = entry
+        if self.clustered:
+            self.heartbeats[run_id] = asyncio.create_task(self.follow_lease(entry))
         task = asyncio.create_task(self.execute(entry))
         self.workers[run_id] = task
         task.add_done_callback(lambda t: self.worker_finished(run_id, t))
 
     def worker_finished(self, run_id, task):
+        heartbeat = self.heartbeats.pop(run_id, None)
+        if heartbeat:
+            heartbeat.cancel()
         self.workers.pop(run_id, None)
         self.entries.pop(run_id, None)
         if not task.cancelled() and task.exception() is not None:
@@ -347,6 +391,11 @@ class Workflows(Recovery, Lifecycle, Artifacts):
             run_id = text(payload.get("run_id"), 64)
             record = await asyncio.to_thread(self.store.get, owner, run_id)
             entry = self.entries.get(run_id)
+            if self.clustered and record["status"] not in TERMINAL:
+                await self.remote_command(owner, record, context, {"kind": "cancel"})
+                return {"run_id": run_id, "status": "cancelling"}
+            if self.clustered and record["status"] == "recoverable":
+                return await self.cancel_recovered(owner, run_id, context)
             if entry:
                 entry["cancel"].set()
                 entry["suspending"] = False
@@ -454,7 +503,7 @@ class Workflows(Recovery, Lifecycle, Artifacts):
                 }
                 record["steps"].append(row)
                 await self.save(owner, record)
-            async with entry["slots"], self.global_slots:
+            async with entry["slots"], self.global_slots, self.cluster_slot(entry, row):
                 if entry["cancel"].is_set() or entry["fault"]:
                     row["status"] = "cancelled"
                     raise ValueError("Workflow stopping")
@@ -464,6 +513,8 @@ class Workflows(Recovery, Lifecycle, Artifacts):
                     except Exception:
                         entry["fault"] = "Agent configuration changed or unavailable"
                         row["status"] = "failed"
+                        if row.get("run_id") is None:
+                            row["admission_rejected"] = True
                         raise
                 if row["status"] == "queued":
                     row["status"] = "creating_thread"
@@ -485,6 +536,7 @@ class Workflows(Recovery, Lifecycle, Artifacts):
                             thread_id=thread_id,
                             input=input,
                             idempotency_key=row["idempotency_key"],
+                            **self.dispatch_fence(record),
                         )
                     row.update(
                         run_id=run.run_id,
@@ -496,7 +548,8 @@ class Workflows(Recovery, Lifecycle, Artifacts):
                     run = await runs.get(thread_id=thread_id, run_id=row["run_id"])
                 while True:
                     if entry["cancel"].is_set() or entry["fault"]:
-                        await self.cancel_child(runs, row)
+                        if not entry.get("lease_lost"):
+                            await self.cancel_child(runs, row, **({"record": record} if self.clustered else {}))
                         raise ValueError("Workflow stopping")
                     async with asyncio.timeout(5):
                         run = await runs.get(thread_id=thread_id, run_id=run.run_id)
@@ -570,6 +623,8 @@ class Workflows(Recovery, Lifecycle, Artifacts):
             response["error"] = entry["fault"]
         except AgentRunError as exc:
             if row:
+                if row.get("run_id") is None and exc.status_code in (400, 403, 404, 409, 422):
+                    row["admission_rejected"] = True
                 row["status"] = "failed" if exc.status_code in (400, 403, 404, 409, 422) else "needs_reconciliation"
             response["error"] = f"AgentRuns rejected operation ({exc.status_code})"
             entry["fault"] = response["error"]
@@ -600,12 +655,12 @@ class Workflows(Recovery, Lifecycle, Artifacts):
             "status": "success",
         }
 
-    async def cancel_child(self, runs, row):
+    async def cancel_child(self, runs, row, record=None):
         try:
             async with asyncio.timeout(5):
                 run = await runs.get(thread_id=row["thread_id"], run_id=row["run_id"])
                 if run.status in ("pending", "running"):
-                    await runs.cancel(thread_id=row["thread_id"], run_id=row["run_id"])
+                    await runs.cancel(thread_id=row["thread_id"], run_id=row["run_id"], **(self.dispatch_fence(record) if record is not None else {}))
                     run = await runs.wait(thread_id=row["thread_id"], run_id=row["run_id"], timeout=4)
                 row["child_status"] = run.status
                 if row["status"] == "running":
@@ -617,6 +672,7 @@ class Workflows(Recovery, Lifecycle, Artifacts):
         owner, record, runs = entry["owner"], entry["record"], entry["runs"]
         process = None
         workspace = None
+        final_state = {}
         try:
             if record.get("budget_deadline") is not None:
                 record["remaining_seconds"] = max(0, record["budget_deadline"] - time.time())
@@ -717,7 +773,7 @@ class Workflows(Recovery, Lifecycle, Artifacts):
                             message = outcome.get("message")
                             raise ValueError(message[:240] if isinstance(message, str) else "Script failed or exceeded limits")
                         encoded(outcome["value"], 12000)
-                        record.update(status="completed", result=outcome["value"])
+                        final_state.update(status="completed", result=outcome["value"])
                         break
                     # Poll cancel/fault/worker exit while a response is pending. An idle worker can only progress
                     # on a response, so keep waiting here instead of sending empty frames (turns).
@@ -741,15 +797,15 @@ class Workflows(Recovery, Lifecycle, Artifacts):
         except TimeoutError:
             # Keep this outside asyncio.timeout: its own cancellation must first
             # leave the context manager so it can be translated to TimeoutError.
-            record.update(
+            final_state.update(
                 status="failed",
                 error="Checkpoint wait deadline exceeded" if record["status"] in ("paused", "waiting_approval") else "Execution deadline exceeded",
             )
         except asyncio.CancelledError:
             entry["cancel"].set()
-            record.update(status="interrupted", error="Host interrupted; child cleanup required")
+            final_state.update(status="interrupted", error="Host interrupted; child cleanup required")
         except Exception as exc:
-            record.update(
+            final_state.update(
                 status="cancelled" if entry["cancel"].is_set() else "waiting_input" if entry["fault"] == "waiting_input" else "failed",
                 error=str(exc)[:240],
             )
@@ -768,9 +824,18 @@ class Workflows(Recovery, Lifecycle, Artifacts):
             # Admission tasks run to a bounded completion; no lost response on workflow cancel.
             if entry["tasks"]:
                 await asyncio.gather(*entry["tasks"], return_exceptions=True)
-            cleanup = [self.cancel_child(runs, row) for row in record["steps"] if row.get("run_id") and row["status"] not in ("completed", "waiting_input", "cancelled")]
+            if entry.get("lease_lost"):
+                return
+            cleanup = [self.cancel_child(runs, row, **({"record": record} if self.clustered else {})) for row in record["steps"] if row.get("run_id") and row["status"] not in ("completed", "waiting_input", "cancelled")]
             if cleanup:
                 await asyncio.gather(*cleanup)
+            if self.clustered:
+                for row in record["steps"]:
+                    if self.slot_releasable(row):
+                        await asyncio.to_thread(self.store.release_slot, owner, record, row["step_id"])
+            # Child saves must not publish a terminal workflow and retire its
+            # lease before all fenced cleanup and reservation releases finish.
+            record.update(final_state)
             if any(s["status"] == "needs_reconciliation" for s in record["steps"]):
                 record.update(
                     status="needs_reconciliation",
