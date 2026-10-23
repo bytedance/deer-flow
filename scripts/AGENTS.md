@@ -51,6 +51,13 @@ trimming its contents. Offline CLI coverage:
 
 ## Service Startup Contracts
 
+`serve.sh` uses `DEER_FLOW_GATEWAY_STARTUP_TIMEOUT` for the local Gateway's
+port-readiness wait (positive integer seconds, default 30). Read it after the
+root `.env`, and reject invalid values before any service cleanup or startup;
+`--stop` bypasses this startup-only validation. Keep frontend/nginx deadlines
+unchanged. `backend/tests/test_serve_gateway_startup_timeout.py` runs the full
+launcher and real wait loop with process launches, readiness and time stubbed.
+
 Both launchers call `sandbox-mode.sh` via Bash; keep it Bash/awk-only.
 Dev passes `$PROJECT_ROOT/config.yaml`; prod passes `$DEER_FLOW_CONFIG_PATH`.
 For AIO, omitted/blank/empty-quoted/YAML-null URLs (including comments) select
@@ -81,6 +88,15 @@ with or without a leading BOM so the first section remains detectable.
 `DEER_FLOW_PROJECT_ROOT/config.yaml`, before the legacy checkout candidates.
 Keep this lookup standard-library-only; test shadowing checkout configs and
 the CLI under `python -S` in `backend/tests/test_detect_uv_extras.py`.
+For Discord and Buzz, detect the provider extra when either legacy
+`channels.<provider>.enabled` is true or both `channel_connections.enabled`
+and `channel_connections.<provider>.enabled` are true. Keep these gates aligned
+with `enabled_transport_providers()` in the channel service, including setup
+wizard output. The provider set includes only channel providers declared in
+`backend/pyproject.toml` under `[project.optional-dependencies]`; update it when
+a channel gains or loses an extra. Providers whose SDKs are core dependencies
+must not be added to this set. Nonempty `UV_EXTRAS` continues to override
+config-derived extras.
 `serve.sh`'s config-presence gate also accepts the project-root file when the
 checkout has no config. `tests/test_serve_config_presence.py` runs the full
 launcher through dependency detection with service operations stubbed.

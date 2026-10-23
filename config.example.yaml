@@ -888,6 +888,19 @@ tools:
   #   group: knowledge
   #   use: deerflow.community.ragflow.tools:list_knowledge_bases_tool
 
+  # Jsonify dataset rows (read-only). Jsonify pipelines run on a schedule,
+  # repair themselves when a source changes, and publish the result as a
+  # dataset. Each dataset has a serve URL (Integrations > REST API in Jsonify)
+  # that returns its latest rows as JSON. The URL is the credential: keep it in
+  # an env var, never in the prompt. Name each dataset; the model picks by name.
+  # - name: jsonify_dataset_rows
+  #   group: data
+  #   use: deerflow.community.jsonify.tools:dataset_rows_tool
+  #   datasets:
+  #     llm_api_pricing: $JSONIFY_LLM_PRICING_URL  # https://factory.jsonify.com/api/serve/<id>
+  #   max_rows: 100   # Cap per call; the model's limit is clamped to this
+  #   timeout: 30
+
   # LightRAG knowledge retrieval (read-only). Alternative provider for the same
   # knowledge_search tool; uncomment this entry instead of the RAGFlow one —
   # duplicate names keep the first entry, so configure exactly one. Requires

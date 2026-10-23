@@ -318,6 +318,76 @@ def test_detect_from_config_combines_discord_with_postgres(tmp_path):
     assert detect.detect_from_config(cfg) == ["discord", "postgres"]
 
 
+@pytest.mark.parametrize("provider", ["discord", "buzz"])
+@pytest.mark.parametrize(
+    ("global_enabled", "provider_enabled", "expected"),
+    [("true", "true", True), ("false", "true", False), (None, "true", False), ("true", "false", False), ("true", None, False)],
+)
+def test_detect_from_config_channel_connections_requires_both_flags(tmp_path, provider, global_enabled, provider_enabled, expected):
+    cfg = tmp_path / "config.yaml"
+    content = "channel_connections:\n"
+    if global_enabled is not None:
+        content += f"  enabled: {global_enabled}\n"
+    content += f"  {provider}:\n    enabled: {provider_enabled}\n" if provider_enabled is not None else f"  {provider}: {{}}\n"
+    cfg.write_text(content, encoding="utf-8")
+
+    assert detect.detect_from_config(cfg) == ([provider] if expected else [])
+
+
+@pytest.mark.parametrize("provider", ["discord", "buzz"])
+@pytest.mark.parametrize("connections_enabled", ["true", "false"])
+def test_detect_from_config_preserves_and_deduplicates_legacy_channels(tmp_path, provider, connections_enabled):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        f"channels:\n  {provider}:\n    enabled: true\nchannel_connections:\n  enabled: {connections_enabled}\n  {provider}:\n    enabled: true\n",
+        encoding="utf-8",
+    )
+
+    assert detect.detect_from_config(cfg) == [provider]
+
+
+def test_detect_from_config_combines_channel_connections_with_other_extras(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "database:\n  backend: postgres\nchannels:\n  discord:\n    enabled: false\n  buzz:\n    enabled: false\nchannel_connections:\n  enabled: true\n  discord:\n    enabled: true\n  buzz:\n    enabled: true\n",
+        encoding="utf-8",
+    )
+
+    assert detect.detect_from_config(cfg) == ["buzz", "discord", "postgres"]
+
+
+@pytest.mark.parametrize("provider", ["discord", "buzz"])
+def test_detect_from_config_ignores_commented_channel_connections(tmp_path, provider):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        f"channel_connections:\n  enabled: true\n  # {provider}:\n  #   enabled: true\n",
+        encoding="utf-8",
+    )
+
+    assert detect.detect_from_config(cfg) == []
+
+
+def test_detect_discord_in_setup_wizard_output_without_site_packages(isolated_cwd):
+    from wizard.writer import build_minimal_config
+
+    cfg = isolated_cwd / "config.yaml"
+    cfg.write_text(
+        build_minimal_config(
+            provider_use="langchain_openai:ChatOpenAI",
+            model_name="test-model",
+            display_name="Test model",
+            api_key_field="api_key",
+            env_var=None,
+            channel_connection_providers=["discord"],
+        ),
+        encoding="utf-8",
+    )
+
+    assert detect.detect_from_config(cfg) == ["discord"]
+    result = subprocess.run([sys.executable, "-S", str(DETECT_SCRIPT_PATH)], capture_output=True, text=True, check=True)
+    assert result.stdout == "--extra discord"
+
+
 def test_detect_from_config_memory_stream_bridge_returns_no_extras(tmp_path):
     cfg = tmp_path / "config.yaml"
     cfg.write_text("stream_bridge:\n  type: memory\n  queue_maxsize: 256\n")
