@@ -1018,11 +1018,12 @@ _STDERR_ACP_AGENT_SCRIPT = """\
 import asyncio
 import os
 import sys
+import time
 
 import acp
 from acp.schema import InitializeResponse, NewSessionResponse, PromptResponse
 
-# argv: <phase to exit in, or ""> <stderr bytes to write per phase>
+# argv: <phase to stop in, or ""> <stderr bytes to write per phase> <"exit" or "hang">
 
 
 class _TestAgent:
@@ -1033,10 +1034,14 @@ class _TestAgent:
         line = f"{phase}: " + "x" * 200 + "\\n"
         for _ in range(int(sys.argv[2]) // len(line) + 1):
             sys.stderr.write(line)
-        if phase == sys.argv[1]:
+        if phase == sys.argv[1] and sys.argv[3] == "exit":
             sys.stderr.write(f"fatal: cannot {phase} without credentials\\n")
             sys.stderr.flush()
             os._exit(3)
+        if phase == sys.argv[1]:
+            sys.stderr.write(f"stalled: waiting for {phase} login\\n")
+            sys.stderr.flush()
+            time.sleep(3600)
         sys.stderr.flush()
 
     async def initialize(self, protocol_version, client_capabilities=None, client_info=None, **kwargs):
@@ -1069,12 +1074,12 @@ def acp_stderr_tool(monkeypatch, tmp_path):
     script_path = tmp_path / "stderr_acp_agent.py"
     script_path.write_text(_STDERR_ACP_AGENT_SCRIPT, encoding="utf-8")
 
-    def build_tool(exit_phase="", stderr_bytes=0, timeout_seconds=60):
+    def build_tool(stop_phase="", stderr_bytes=0, stop="exit", timeout_seconds=60):
         return build_invoke_acp_agent_tool(
             {
                 "test": ACPAgentConfig(
                     command=sys.executable,
-                    args=[str(script_path), exit_phase, str(stderr_bytes)],
+                    args=[str(script_path), stop_phase, str(stderr_bytes), stop],
                     description="Test ACP agent",
                     timeout_seconds=timeout_seconds,
                 )
@@ -1087,7 +1092,9 @@ def acp_stderr_tool(monkeypatch, tmp_path):
 @pytest.mark.anyio
 @pytest.mark.parametrize("phase", ["initialize", "new_session", "prompt"])
 async def test_invoke_acp_agent_reports_an_agent_that_exits_mid_invocation(acp_stderr_tool, caplog, phase):
-    tool = acp_stderr_tool(exit_phase=phase)
+    # More stderr than the retained tail, so the fatal line (written last) is
+    # only logged if the tail keeps the end of the stream rather than its start.
+    tool = acp_stderr_tool(stop_phase=phase, stderr_bytes=40 * 1024)
     start = time.monotonic()
     with caplog.at_level(logging.ERROR, logger="deerflow.tools.builtins.invoke_acp_agent_tool"):
         # The tool's own 60s budget must not be what ends the call.
@@ -1098,6 +1105,17 @@ async def test_invoke_acp_agent_reports_an_agent_that_exits_mid_invocation(acp_s
     # The agent's diagnostics reach the operator log, not the model.
     assert f"fatal: cannot {phase} without credentials" in caplog.text
     assert "credentials" not in result
+
+
+@pytest.mark.anyio
+async def test_invoke_acp_agent_logs_the_stderr_of_a_stalled_agent(acp_stderr_tool, caplog):
+    tool = acp_stderr_tool(stop_phase="prompt", stderr_bytes=40 * 1024, stop="hang", timeout_seconds=3)
+    with caplog.at_level(logging.ERROR, logger="deerflow.tools.builtins.invoke_acp_agent_tool"):
+        result = await asyncio.wait_for(tool.coroutine(agent="test", prompt="do work"), timeout=30)
+    assert "timed out after 3 seconds" in result
+    # The last line the agent wrote before stalling is the one an operator needs.
+    assert "stalled: waiting for prompt login" in caplog.text
+    assert "login" not in result
 
 
 @pytest.mark.anyio

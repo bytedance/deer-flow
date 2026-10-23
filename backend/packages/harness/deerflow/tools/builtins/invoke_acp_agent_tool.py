@@ -379,6 +379,7 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
             )
 
         stderr_tail: _StderrTail | None = None
+        timed_out = False
         try:
             from acp import spawn_agent_process
 
@@ -391,17 +392,9 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
                 except TimeoutError:
                     if not deadline.expired():
                         raise
-                    logger.error(
-                        "ACP agent '%s' timed out after %s seconds during initialization, session creation, or prompt; terminating subprocess. stderr tail:\n%s",
-                        agent,
-                        agent_config.timeout_seconds,
-                        await stderr_tail.text(),
-                    )
-                    return (
-                        f"Error: ACP agent '{agent}' timed out after {agent_config.timeout_seconds} seconds "
-                        "without completing the ACP invocation. The agent subprocess has been terminated. If this agent handles "
-                        f"long-running tasks, increase acp_agents.{agent}.timeout_seconds in config.yaml."
-                    )
+                    # Leave the SDK context first: it terminates and reaps the
+                    # agent, so the lines a stalled agent wrote last reach the tail.
+                    timed_out = True
                 except _AgentExitedError as exc:
                     status = f"exited with code {exc.returncode}" if exc.returncode is not None else "closed its ACP connection"
                     logger.error(
@@ -415,6 +408,18 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
                         f"Check that the agent is installed and authenticated and that acp_agents.{agent} in config.yaml is correct; "
                         "the agent's stderr is recorded in the Gateway log."
                     )
+            if timed_out:
+                logger.error(
+                    "ACP agent '%s' timed out after %s seconds during initialization, session creation, or prompt; subprocess terminated. stderr tail:\n%s",
+                    agent,
+                    agent_config.timeout_seconds,
+                    await stderr_tail.text(wait=_EXIT_DRAIN_SECONDS),
+                )
+                return (
+                    f"Error: ACP agent '{agent}' timed out after {agent_config.timeout_seconds} seconds "
+                    "without completing the ACP invocation. The agent subprocess has been terminated. If this agent handles "
+                    f"long-running tasks, increase acp_agents.{agent}.timeout_seconds in config.yaml."
+                )
             result = client.collected_text
             logger.info("ACP agent '%s' returned %s", agent, result[:1000])
             logger.info("ACP agent '%s' returned %d characters", agent, len(result))
