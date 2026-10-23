@@ -228,26 +228,33 @@ def test_user_scoped_write_creates_subdirectory(tmp_path, user_storage):
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows sharing semantics")
-def test_write_retries_while_target_is_briefly_held_open(tmp_path, storage):
-    import threading
+@pytest.mark.parametrize("storage_fixture", ["storage", "user_storage"])
+def test_write_retries_while_target_is_briefly_held_open(monkeypatch, request, storage_fixture):
+    import importlib
+    from functools import partial
 
-    target = tmp_path / "custom" / "demo-skill" / "SKILL.md"
-    target.parent.mkdir(parents=True)
+    from deerflow.utils.file_lock import replace_with_retry
+
+    skill_storage = request.getfixturevalue(storage_fixture)
+    target = skill_storage.get_custom_skill_file("demo-skill")
+    target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(b"old")
-    release = threading.Event()
+    sleeps = []
 
-    def hold():
-        with target.open("rb"):
-            release.wait(0.25)
+    with target.open("rb") as held_target:
 
-    holder = threading.Thread(target=hold)
-    holder.start()
-    try:
-        storage.write_custom_skill("demo-skill", "SKILL.md", "new\n")
-    finally:
-        release.set()
-        holder.join(5)
+        def release_target(delay):
+            # Release only after the real os.replace has observed the held handle.
+            # This proves contention without timing a worker against the writer.
+            sleeps.append(delay)
+            held_target.close()
 
+        storage_module = importlib.import_module(type(skill_storage).__module__)
+        monkeypatch.setattr(storage_module, "replace_with_retry", partial(replace_with_retry, sleep=release_target))
+        skill_storage.write_custom_skill("demo-skill", "SKILL.md", "new\n")
+
+    assert sleeps
+    assert all(delay == 0.05 for delay in sleeps)
     assert target.read_bytes() == b"new\n"
 
 
@@ -309,3 +316,37 @@ def test_user_scoped_rejects_dotdot_escape(user_storage):
 def test_user_scoped_rejects_invalid_skill_name(user_storage):
     with pytest.raises(ValueError, match="hyphen-case"):
         user_storage.get_custom_skill_dir("../../escaped")
+
+
+@pytest.mark.parametrize("storage_fixture", ["storage", "user_storage"])
+@pytest.mark.parametrize("relative_path", ["SKILL.md", "references/notes.md"])
+@pytest.mark.parametrize("content", ["first\nsecond\n", "first\r\nsecond\r\n", "中文\nsecond\r\nthird\r", "no final newline", ""])
+@pytest.mark.parametrize("existing", [False, True])
+def test_storage_preserves_caller_bytes(request, storage_fixture, relative_path, content, existing):
+    skill_storage = request.getfixturevalue(storage_fixture)
+    target = skill_storage.get_custom_skill_dir("demo-skill") / relative_path
+    if existing:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"legacy\r\ncontent\r\n")
+
+    skill_storage.write_custom_skill("demo-skill", relative_path, content)
+
+    assert target.read_bytes() == content.encode("utf-8")
+
+
+def test_frontmatter_validation_temp_preserves_exact_content_bytes(monkeypatch):
+    from deerflow.skills import validation
+    from deerflow.skills.storage.skill_storage import SkillStorage
+
+    content = "---\nname: demo-skill\ndescription: Byte fixture.\n---\n\n# 中文\n"
+    observed = []
+    validate = validation._validate_skill_frontmatter
+
+    def capture(skill_dir):
+        observed.append((skill_dir / "SKILL.md").read_bytes())
+        return validate(skill_dir)
+
+    monkeypatch.setattr(validation, "_validate_skill_frontmatter", capture)
+    SkillStorage.validate_skill_markdown_content("demo-skill", content)
+
+    assert observed == [content.encode("utf-8")]

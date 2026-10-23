@@ -2,6 +2,7 @@
 
 import asyncio
 import errno
+from types import SimpleNamespace
 
 import pytest
 
@@ -97,7 +98,8 @@ def test_check_errors_are_not_treated_as_lock_contention():
     assert attempts == sleeps == []
 
 
-def test_replace_with_retry_retries_windows_sharing_errors(monkeypatch):
+@pytest.mark.parametrize("winerror", [5, 32])
+def test_replace_with_retry_retries_windows_sharing_errors(monkeypatch, winerror):
     from deerflow.utils import file_lock
 
     attempts = []
@@ -107,14 +109,11 @@ def test_replace_with_retry_retries_windows_sharing_errors(monkeypatch):
         attempts.append(True)
         if len(attempts) < 3:
             error = PermissionError(13, "busy")
-            error.winerror = 5
+            error.winerror = winerror
             raise error
 
-    monkeypatch.setattr(file_lock.os, "name", "nt")
-    monkeypatch.setattr(file_lock.os, "replace", replace)
-    monkeypatch.setattr(file_lock.time, "sleep", sleeps.append)
-
-    file_lock.replace_with_retry("source", "target")
+    monkeypatch.setattr(file_lock, "os", SimpleNamespace(name="nt", replace=replace))
+    file_lock.replace_with_retry("source", "target", sleep=sleeps.append)
 
     assert len(attempts) == 3
     assert sleeps == [0.05, 0.05]
@@ -131,8 +130,7 @@ def test_replace_with_retry_does_not_treat_fake_winerror_as_sharing_error_on_pos
         calls.append(True)
         raise error
 
-    monkeypatch.setattr(file_lock.os, "name", "posix")
-    monkeypatch.setattr(file_lock.os, "replace", replace)
+    monkeypatch.setattr(file_lock, "os", SimpleNamespace(name="posix", replace=replace))
 
     with pytest.raises(PermissionError) as caught:
         file_lock.replace_with_retry("source", "target")
@@ -141,7 +139,8 @@ def test_replace_with_retry_does_not_treat_fake_winerror_as_sharing_error_on_pos
     assert calls == [True]
 
 
-def test_replace_with_retry_does_not_retry_permanent_errors(monkeypatch):
+@pytest.mark.parametrize("platform", ["nt", "posix"])
+def test_replace_with_retry_does_not_retry_after_deadline(monkeypatch, platform):
     from deerflow.utils import file_lock
 
     error = PermissionError(13, "access denied")
@@ -152,10 +151,66 @@ def test_replace_with_retry_does_not_retry_permanent_errors(monkeypatch):
         calls.append(True)
         raise error
 
-    monkeypatch.setattr(file_lock.os, "replace", replace)
+    sleeps = []
+    monkeypatch.setattr(file_lock, "os", SimpleNamespace(name=platform, replace=replace))
 
     with pytest.raises(PermissionError) as caught:
-        file_lock.replace_with_retry("source", "target", deadline_seconds=0)
+        file_lock.replace_with_retry("source", "target", deadline_seconds=0, sleep=sleeps.append)
 
     assert caught.value is error
     assert len(calls) == 1
+    assert sleeps == []
+
+
+@pytest.mark.parametrize("winerror", [None, 2, 3, 87])
+def test_replace_with_retry_does_not_retry_other_windows_errors(monkeypatch, winerror):
+    from deerflow.utils import file_lock
+
+    error = PermissionError(errno.EACCES, "permanent")
+    if winerror is not None:
+        error.winerror = winerror
+    calls = []
+    sleeps = []
+
+    def replace(source, target):
+        calls.append((source, target))
+        raise error
+
+    monkeypatch.setattr(file_lock, "os", SimpleNamespace(name="nt", replace=replace))
+
+    with pytest.raises(PermissionError) as caught:
+        file_lock.replace_with_retry("source", "target", sleep=sleeps.append)
+
+    assert caught.value is error
+    assert calls == [("source", "target")]
+    assert sleeps == []
+
+
+@pytest.mark.parametrize("winerror", [5, 32])
+def test_replace_with_retry_caps_deadline_and_preserves_original_error(monkeypatch, winerror):
+    from deerflow.utils import file_lock
+
+    now = 0.0
+    sleeps = []
+    calls = []
+    error = PermissionError(errno.EACCES, "still held")
+    error.winerror = winerror
+
+    def replace(source, target):
+        calls.append((source, target))
+        raise error
+
+    def sleep(delay):
+        nonlocal now
+        sleeps.append(delay)
+        now += delay
+
+    monkeypatch.setattr(file_lock, "os", SimpleNamespace(name="nt", replace=replace))
+
+    with pytest.raises(PermissionError) as caught:
+        file_lock.replace_with_retry("source", "target", deadline_seconds=0.12, sleep=sleep, monotonic=lambda: now)
+
+    assert caught.value is error
+    assert sleeps == pytest.approx([0.05, 0.05, 0.02])
+    assert calls == [("source", "target")] * 4
+    assert now == pytest.approx(0.12)

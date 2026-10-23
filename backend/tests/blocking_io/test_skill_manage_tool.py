@@ -49,7 +49,7 @@ def _install_skill() -> Path:
     skill_dir = get_paths().user_custom_skills_dir("default") / _SKILL_NAME
     skill_dir.mkdir(parents=True, exist_ok=True)
     skill_file = skill_dir / "SKILL.md"
-    skill_file.write_text(_SKILL_MD, encoding="utf-8")
+    skill_file.write_text(_SKILL_MD, encoding="utf-8", newline="")
     return skill_file
 
 

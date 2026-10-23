@@ -15,6 +15,10 @@ _REQUIRED_PATHS = {
     "backend/packages/harness/deerflow/utils/file_lock.py",
     "backend/tests/test_file_lock_retry.py",
     "backend/tests/test_local_skill_storage_write.py",
+    "backend/tests/test_skills_custom_router.py",
+    "backend/tests/test_skill_persistence_windows_workflow.py",
+    "backend/tests/blocking_io/test_agents_router.py",
+    "backend/tests/blocking_io/test_skill_manage_tool.py",
 }
 
 _REQUIRED_NODES = {
@@ -28,6 +32,9 @@ _REQUIRED_NODES = {
     "tests/blocking_io/test_skill_manage_tool.py",
     "tests/blocking_io/test_agents_router.py",
     "tests/test_skills_custom_multiprocess.py",
+    "tests/test_skills_custom_router.py::test_static_skill_scan_receives_exact_content_bytes",
+    "tests/test_skills_custom_router.py::test_custom_skill_rollback_history_survives_concurrent_put",
+    "tests/test_skill_persistence_windows_workflow.py",
 }
 
 
