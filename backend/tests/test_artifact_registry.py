@@ -810,3 +810,89 @@ def test_json_escaped_path_deduplicates_against_a_structured_reference():
 
 def test_escaped_sandbox_path_requires_a_matching_escaped_closer():
     assert _detect_refs_in_text(r'Created \"/mnt/user-data/outputs/quarterly report.pdf" successfully.') == []
+
+
+_LINE_BREAKS = ["\n", "\r", "\r\n", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"]
+_CJK_QUOTE_PAIRS = [("“", "”"), ("‘", "’")]
+
+
+@pytest.mark.parametrize("separator", [*_LINE_BREAKS, "\t"])
+@pytest.mark.parametrize(("opener", "closer"), _CJK_QUOTE_PAIRS)
+def test_delimited_sandbox_paths_reject_line_breaks_and_tabs(separator, opener, closer):
+    path = f"/mnt/user-data/outputs/quarterly{separator}report.pdf"
+
+    assert _detect_refs_in_text(f"Created {opener}{path}{closer}.") == []
+
+
+@pytest.mark.parametrize("separator", _LINE_BREAKS)
+def test_unterminated_path_does_not_swallow_a_reference_on_the_next_line(separator):
+    valid = "/mnt/user-data/outputs/next.pdf"
+    text = f'Created "/mnt/user-data/outputs/unfinished report.pdf{separator}Saved {valid}"'
+
+    assert [ref["ref"] for ref in _detect_refs_in_text(text)] == [valid]
+
+
+@pytest.mark.parametrize("delimiter", ['"', "'", "`"])
+@pytest.mark.parametrize("escape_count", [3])
+@pytest.mark.parametrize(("path", "display"), [("/mnt/user-data/outputs/a b.pdf", "a b.pdf"), (r"/mnt/user-data/outputs/folder\name report.pdf", "name report.pdf")])
+def test_escaped_quote_wrappers_do_not_append_backslashes(delimiter, escape_count, path, display):
+    marker = "\\" * escape_count + delimiter
+
+    refs = _detect_refs_in_text(f"log: {marker}{path}{marker} done")
+
+    assert [ref["ref"] for ref in refs] == [path]
+    assert refs[0]["display"] == display
+
+
+@pytest.mark.parametrize(("opener", "closer"), [("“", "”"), ("‘", "’")])
+def test_cjk_quote_pairs_keep_the_entire_sandbox_path(opener, closer):
+    path = "/mnt/user-data/outputs/输出 报告（最终）.pdf"
+
+    refs = _detect_refs_in_text(f"已创建 {opener}{path}{closer}，完成。")
+
+    assert [ref["ref"] for ref in refs] == [path]
+    assert refs[0]["display"] == "输出 报告（最终）.pdf"
+
+
+@pytest.mark.parametrize("opener", ["“", "‘"])
+def test_unterminated_cjk_quotes_do_not_register_prefixes(opener):
+    assert _detect_refs_in_text(f"已创建 {opener}/mnt/user-data/outputs/输出 报告.pdf") == []
+
+
+def test_even_backslashes_before_a_quote_preserve_literal_path_backslashes():
+    prefix = "\\" * 2
+    path = "/mnt/user-data/outputs/a b\\"
+
+    assert [ref["ref"] for ref in _detect_refs_in_text(f'{prefix}"{path}"')] == [path]
+
+
+@pytest.mark.parametrize(("opener", "closer"), [('\\"', '\\"'), ("“", "”"), ("‘", "’")])
+@pytest.mark.parametrize("text_block", [False, True])
+def test_review_quote_wrappers_deduplicate_structured_refs_and_keep_order(opener, closer, text_block):
+    first = "/mnt/user-data/outputs/输出 报告.pdf"
+    second = "/mnt/user-data/outputs/second report.csv"
+    text = f"Created {opener}{first}{closer}, then {opener}{second}{closer}, then {opener}{first}{closer}."
+    message = ToolMessage(
+        content=[{"type": "text", "text": text}] if text_block else text,
+        artifact={"structured_content": {"path": first}},
+        tool_call_id="export-review",
+        name="export_report",
+    )
+
+    entries = extract_artifacts_from_result(message, thread_id="demo")
+
+    assert [entry["real_ref"] for entry in entries] == [first, second]
+    assert [entry["display_name"] for entry in entries] == ["输出 报告.pdf", "second report.csv"]
+    assert len({entry["handle"] for entry in entries}) == 2
+
+
+@pytest.mark.parametrize("text_block", [False, True])
+def test_raw_json_text_preserves_a_quoted_sandbox_path(text_block):
+    path = "/mnt/user-data/outputs/quarterly report.pdf"
+    text = json.dumps({"message": f'Created "{path}" successfully.'})
+    message = ToolMessage(content=[{"type": "text", "text": text}] if text_block else text, tool_call_id="export-json", name="export_report")
+
+    entries = extract_artifacts_from_result(message, thread_id="demo")
+
+    assert [entry["real_ref"] for entry in entries] == [path]
+    assert entries[0]["display_name"] == "quarterly report.pdf"

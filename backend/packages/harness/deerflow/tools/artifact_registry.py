@@ -34,7 +34,8 @@ _SANDBOX_PATH_PATTERN = re.compile(r"/mnt/user-data/\S+")
 # Delimiters a tool result may wrap a path in. A delimited span is one value, so a
 # filename inside it keeps its spaces; the bare token scan below keeps its
 # whitespace boundary, because nothing tells it where such a name would end.
-_REF_QUOTE_DELIMITERS = frozenset("\"'`")
+_REF_QUOTE_DELIMITERS = {'"': '"', "'": "'", "`": "`", "“": "”", "‘": "’"}
+_REF_LINE_BOUNDARY_PATTERN = re.compile(r"[\r\n\v\f\x1c-\x1e\x85\u2028\u2029]")
 _SPAN_BARE = "bare"
 _SPAN_QUOTED = "quoted"
 _SPAN_UNTERMINATED = "unterminated"
@@ -168,12 +169,16 @@ def _classify_span(text: str, start: int) -> tuple[str, int | None]:
     opener = text[start - 1] if start else ""
     if opener not in _REF_QUOTE_DELIMITERS:
         return _SPAN_BARE, None
-    line_end = text.find("\n", start)
-    if line_end == -1:
-        line_end = len(text)
-    # Match escaped wrappers together, excluding their backslash from the path.
-    delimiter = "\\" + opener if start > 1 and text[start - 2] == "\\" else opener
-    closer = text.find(delimiter, start, line_end)
+    line_break = _REF_LINE_BOUNDARY_PATTERN.search(text, start)
+    line_end = line_break.start() if line_break else len(text)
+    # Odd backslash runs escape the wrapper; even runs leave it unescaped.
+    # Exclude only the wrapper marker, without decoding backslashes in the path.
+    escape_start = start - 1
+    while escape_start and text[escape_start - 1] == "\\":
+        escape_start -= 1
+    escape_prefix = text[escape_start : start - 1]
+    closer_marker = (escape_prefix if len(escape_prefix) % 2 else "") + _REF_QUOTE_DELIMITERS[opener]
+    closer = text.find(closer_marker, start, line_end)
     if closer == -1:
         return _SPAN_UNTERMINATED, None
     return _SPAN_QUOTED, closer
@@ -187,7 +192,7 @@ def _is_referenceable_sandbox_path(raw: str) -> bool:
     """
     if not raw.startswith(_SANDBOX_PATH_PREFIX) or len(raw) == len(_SANDBOX_PATH_PREFIX):
         return False
-    if "\t" in raw or raw.splitlines() != [raw] or raw != raw.strip():
+    if _REF_LINE_BOUNDARY_PATTERN.search(raw) or "\t" in raw or raw != raw.strip():
         return False
     try:
         return len(raw.encode("utf-8")) <= _STRUCTURED_DATA_MAX_BYTES
