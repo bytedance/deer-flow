@@ -1397,6 +1397,12 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
 
 ### Fixed
 
+- **tui:** Quitting after `Ctrl+C` interrupted a run no longer hangs on the
+  step that run is still finishing. The run thread was joined on exit, so the
+  TUI closed but the shell prompt stayed blocked until a long tool call or model
+  request returned, and further `Ctrl+C` only printed a traceback. Quitting now
+  says it is waiting for that step and closes when it finishes; press `Ctrl+C`
+  again to quit at once. ([#7326])
 - **sandbox:** Release an E2B VM's ownership lease when acquire finds it gone
   (a dead cached client or a warm-pool VM reaped while parked). The lease was
   kept and renewed until Gateway shutdown, so every reaped VM left a tracked
@@ -13020,3 +13026,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7255]: https://github.com/bytedance/deer-flow/pull/7255
 [#7258]: https://github.com/bytedance/deer-flow/pull/7258
 [#7277]: https://github.com/bytedance/deer-flow/pull/7277
+[#7326]: https://github.com/bytedance/deer-flow/pull/7326
