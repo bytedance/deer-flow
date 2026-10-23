@@ -366,12 +366,29 @@ def test_format_visible_conversation_keeps_a_long_request_whole_when_it_fits():
     assert lines[1] == f"User: {request}"
 
 
+def test_format_visible_conversation_uses_spare_budget_for_long_user_input_at_the_cap():
+    request = "Review the supplied data. " + "x" * 5000 + " IMPORTANT SOURCE ROW: 314159 "
+    request += "y" * (10000 - len(request))
+    answer = "The result is " + "a" * (goal.MAX_GOAL_CONVERSATION_CHARS - len(f"User: {request}\n\nAssistant: The result is  done.")) + " done."
+    assert len(f"User: {request}\n\nAssistant: {answer}") == goal.MAX_GOAL_CONVERSATION_CHARS
+
+    for text in (answer, answer.replace("The result", "The  result", 1)):
+        formatted = goal.format_visible_conversation([HumanMessage(content=request), AIMessage(content=text)])
+        lines = _evidence_lines(formatted)
+        # Crossing the cap by one character must not discard most of the input
+        # while leaving room unused. Preserve the selected recent answer too.
+        assert "IMPORTANT SOURCE ROW: 314159" in lines[0]
+        assert len(lines[0]) >= 9900
+        assert lines[-1] == f"Assistant: {text}"
+        assert len(formatted) >= goal.MAX_GOAL_CONVERSATION_CHARS - 64
+
+
 def test_format_visible_conversation_shortens_a_request_that_does_not_fit():
     request = "Build the table. " + "r" * 5000
     lines = _evidence_lines(goal.format_visible_conversation(_report_run(request)))
 
     assert lines[0].startswith("User: Build the table. ") and lines[0].endswith(" more chars]")
-    assert len(lines[0]) < goal.MAX_GOAL_REQUEST_CHARS + 40
+    assert len(lines[0]) < len(f"User: {request}")
 
 
 def test_format_visible_conversation_marks_the_cut_when_no_request_is_in_the_window():

@@ -306,7 +306,8 @@ def _cap_evidence(lines: list[str]) -> str:
     that work answers, and so is the latest Human Input Card answer left out. Each is shortened
     only when it and the lines after it do not fit whole. If the next assistant message back
     does not fit whole, its end fills the room left. A marker says how many lines were left
-    out. No line starts midway without a label.
+    out. Spare room then restores shortened user input without displacing the selected
+    recent work. No line starts midway without a label.
     """
     conversation = "\n\n".join(lines)
     if len(conversation) <= MAX_GOAL_CONVERSATION_CHARS:
@@ -345,6 +346,13 @@ def _cap_evidence(lines: list[str]) -> str:
         start = boundary
     omitted = start - len(head)
     marker = [f"[{omitted} earlier evidence lines omitted]"] if omitted else []
+    spare = MAX_GOAL_CONVERSATION_CHARS - len("\n\n".join([*head, *marker, *kept]))
+    for offset, index in enumerate(picks if head else []):
+        if spare <= 0:
+            break
+        expanded = _truncate(lines[index], MAX_GOAL_REQUEST_CHARS + spare)
+        spare += len(head[offset]) - len(expanded)
+        head[offset] = expanded
     return "\n\n".join([*head, *marker, *kept])
 
 
