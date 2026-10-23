@@ -76,6 +76,10 @@ export const zhCN: Translations = {
         description:
           "使用固定示例文档演示只读检索与结构化工具结果，不连接外部知识库。",
       },
+      lightrag: {
+        title: "LightRAG",
+        description: "从 LightRAG 检索文档与实体关系，并使用统一的来源引用。",
+      },
       weknora: {
         title: "WeKnora 知识检索",
         description:
@@ -227,6 +231,15 @@ export const zhCN: Translations = {
     showArtifacts: "查看此对话的文件",
     browser: "浏览器",
     showBrowser: "打开浏览器面板",
+  },
+
+  browserStream: {
+    connecting: "正在连接…",
+    disconnected: "连接已断开",
+    handshakeTimeout:
+      "实时浏览器连接超时。请检查网络或代理设置，然后关闭并重新开启 Live 以重试。",
+    connectionFailed:
+      "实时浏览器连接失败或已关闭。请检查网络连接和访问权限，然后关闭并重新开启 Live 以重试。",
   },
 
   skillUsage: {

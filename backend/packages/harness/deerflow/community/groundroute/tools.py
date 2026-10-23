@@ -16,6 +16,7 @@ Langflow component:
 `web_fetch` reads one URL via GroundRoute mode=page and returns its extracted text.
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -23,6 +24,7 @@ import os
 import httpx
 from langchain.tools import tool
 
+from deerflow.community.url_safety import safe_public_result_url
 from deerflow.config import get_app_config
 
 logger = logging.getLogger(__name__)
@@ -37,19 +39,29 @@ _FETCH_SNIPPET_LIMIT = 4096
 _api_key_warned: set[str] = set()
 
 
-def _get_api_key(tool_name: str) -> str | None:
-    """Resolve the GroundRoute key from a given tool's config block, then the env var.
+def _resolve_tool_settings(tool_name: str) -> tuple[str | None, object]:
+    """Resolve the API key and the configured `max_results` in one config read.
 
-    `tool_name` is the config section to read (web_search vs web_fetch) so a flow that
-    runs GroundRoute for fetch but a different engine for search still reads the right
-    key. Mirrors serper/exa/firecrawl, which all take the tool name.
+    Config resolution stats the config file, so callers must run this off the
+    agent event loop. Reading the key and the result count from a single
+    resolution keeps the tool from touching the config file twice per call.
+
+    `tool_name` is the config section to read (web_search vs web_fetch) so a
+    flow that runs GroundRoute for fetch but a different engine for search
+    still reads the right key.
     """
-    config = get_app_config().get_tool_config(tool_name)
-    if config is not None:
-        api_key = (config.model_extra or {}).get("api_key")
-        if isinstance(api_key, str) and api_key.strip():
-            return api_key.strip()
-    return os.getenv("GROUNDROUTE_API_KEY")
+    tool_config = get_app_config().get_tool_config(tool_name)
+    max_results = None
+    api_key = None
+    if tool_config is not None:
+        extra = tool_config.model_extra or {}
+        max_results = extra.get("max_results")
+        candidate = extra.get("api_key")
+        if isinstance(candidate, str) and candidate.strip():
+            api_key = candidate.strip()
+    if api_key is None:
+        api_key = os.getenv("GROUNDROUTE_API_KEY")
+    return api_key, max_results
 
 
 def _coerce_max_results(value: object, *, default: int = _DEFAULT_MAX_RESULTS) -> int:
@@ -99,9 +111,9 @@ def _response_results(data: object) -> list[dict] | None:
     return usable
 
 
-def _post_search(api_key: str, body: dict) -> dict:
-    with httpx.Client(timeout=_TIMEOUT_S) as client:
-        response = client.post(
+async def _post_search(api_key: str, body: dict) -> dict:
+    async with httpx.AsyncClient(timeout=_TIMEOUT_S) as client:
+        response = await client.post(
             _GROUNDROUTE_ENDPOINT,
             json=body,
             headers={"Authorization": f"Bearer {api_key}"},
@@ -111,7 +123,7 @@ def _post_search(api_key: str, body: dict) -> dict:
 
 
 @tool("web_search", parse_docstring=True)
-def web_search_tool(query: str, max_results: int | None = None) -> str:
+async def web_search_tool(query: str, max_results: int | None = None) -> str:
     """Search the web for information using GroundRoute.
 
     GroundRoute routes the query across six search engines and returns the result
@@ -121,19 +133,18 @@ def web_search_tool(query: str, max_results: int | None = None) -> str:
         query: Search keywords describing what you want to find. Be specific for better results.
         max_results: Maximum number of search results to return. If omitted, uses the configured value (default 5). Clamped to 1-50.
     """
+    # Config resolution can read files; keep it off the event loop.
+    api_key, configured_max_results = await asyncio.to_thread(_resolve_tool_settings, "web_search")
     # Honor the caller-supplied max_results; fall back to config only when omitted.
     if max_results is None:
-        config = get_app_config().get_tool_config("web_search")
-        if config is not None:
-            max_results = (config.model_extra or {}).get("max_results")
+        max_results = configured_max_results
     count = _DEFAULT_MAX_RESULTS if max_results is None else _coerce_max_results(max_results)
 
-    api_key = _get_api_key("web_search")
     if not api_key:
         return _missing_key_error("web_search", query=query)
 
     try:
-        data = _post_search(api_key, {"query": query, "max_results": count})
+        data = await _post_search(api_key, {"query": query, "max_results": count})
     except httpx.HTTPStatusError as e:
         logger.error("GroundRoute API returned HTTP %s: %s", e.response.status_code, e.response.text)
         return json.dumps(
@@ -153,7 +164,7 @@ def web_search_tool(query: str, max_results: int | None = None) -> str:
     normalized_results = [
         {
             "title": r.get("title", ""),
-            "url": r.get("url", ""),
+            "url": safe_public_result_url(r.get("url")),
             "snippet": r.get("snippet", ""),
             "source_engine": r.get("source_engine", ""),
         }
@@ -163,7 +174,7 @@ def web_search_tool(query: str, max_results: int | None = None) -> str:
 
 
 @tool("web_fetch", parse_docstring=True)
-def web_fetch_tool(url: str) -> str:
+async def web_fetch_tool(url: str) -> str:
     """Fetch the contents of a web page at a given URL via GroundRoute.
     Only fetch EXACT URLs that have been provided directly by the user or have been returned in results from the web_search and web_fetch tools.
     This tool can NOT access content that requires authentication, such as private Google Docs or pages behind login walls.
@@ -173,12 +184,12 @@ def web_fetch_tool(url: str) -> str:
     Args:
         url: The URL to fetch the contents of.
     """
-    api_key = _get_api_key("web_fetch")
+    api_key, _ = await asyncio.to_thread(_resolve_tool_settings, "web_fetch")
     if not api_key:
         return _missing_key_error("web_fetch", url=url)
 
     try:
-        data = _post_search(api_key, {"query": url, "mode": "page", "max_results": 1})
+        data = await _post_search(api_key, {"query": url, "mode": "page", "max_results": 1})
     except httpx.HTTPStatusError as e:
         logger.error("GroundRoute fetch returned HTTP %s: %s", e.response.status_code, e.response.text)
         return f"Error: GroundRoute API error: HTTP {e.response.status_code}"

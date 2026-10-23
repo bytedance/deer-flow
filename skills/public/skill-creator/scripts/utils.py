@@ -6,7 +6,9 @@ from pathlib import Path
 
 def parse_skill_md(skill_path: Path) -> tuple[str, str, str]:
     """Parse a SKILL.md file, returning (name, description, full_content)."""
-    content = (skill_path / "SKILL.md").read_text(encoding="utf-8")
+    # utf-8-sig strips the BOM that Windows editors prepend, matching the
+    # runtime parser and quick_validate.py.
+    content = (skill_path / "SKILL.md").read_text(encoding="utf-8-sig")
     lines = content.split("\n")
 
     if lines[0].strip() != "---":

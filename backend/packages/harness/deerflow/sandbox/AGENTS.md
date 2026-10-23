@@ -2,6 +2,10 @@
 
 Sandbox restore requires a thread ID, even forks.
 
+On Linux/macOS, local non-append text saves use `_publish_file_revision` and the shared atomic byte publisher. Check write access without truncation and keep the source descriptor open through metadata transfer. Resolve symlinks under existing mapping rules; publish only regular files. Failure before replace retains the old file and cleans staging. Append and other platforms keep their in-place behavior. Replacement requires parent-directory write and metadata-preservation permissions; inode identity changes, so hard-link aliases retain the old version. It is not concurrent-writer arbitration or power-loss recovery. Regressions: `tests/test_local_sandbox_atomic_writes.py`.
+
+PowerShell command mapping escapes host-path whitespace/metacharacters for the caller's quote context in both user-data and provider mappings. Preserve wildcards; Bash/cmd mapping stays unchanged. Keep portable string assertions alongside native Windows smoke tests. The public bash tool's existing POSIX-quoted cwd prefix requires PowerShell 7 (`&&`) and workspace paths without apostrophes; mapping does not repair that prefix.
+
 Local `grep` skips non-regular entries before reading. File reads and directory scans propagate errors, except `ENOENT`/`ENOTDIR`/`ELOOP`/`EISDIR`/`ESTALE` races (`ESTALE` when available). Error filenames are reverse-resolved at the local sandbox boundary, including custom mounts; permission errors identify the virtual failing path.
 
 **Network approval policy**: `SandboxMiddleware` uses

@@ -130,7 +130,7 @@ class ChannelRuntimeConfigStore:
         if self._path.exists():
             try:
                 raw = json.loads(self._path.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
+            except (json.JSONDecodeError, OSError, UnicodeDecodeError):
                 if fallback is not None:
                     logger.warning("Corrupt channel runtime config store at %s, rewriting it from this process's copy", self._path)
                     return {name: dict(config) for name, config in fallback.items()}
@@ -162,6 +162,7 @@ class ChannelRuntimeConfigStore:
         fd = tempfile.NamedTemporaryFile(
             mode="w",
             encoding="utf-8",
+            newline="",
             dir=self._path.parent,
             prefix=credential_staging_prefix(self._path),
             suffix=".tmp",
@@ -367,6 +368,9 @@ def _read_legacy_file(path: Path) -> dict[str, Any] | None:
     try:
         raw = path.read_text(encoding="utf-8")
     except FileNotFoundError:
+        return None
+    except UnicodeDecodeError:
+        logger.warning("Corrupt channel runtime config %s; skipping the import (file kept)", path)
         return None
     except OSError:
         logger.warning("Cannot read channel runtime config %s; skipping the import (file kept)", path, exc_info=True)

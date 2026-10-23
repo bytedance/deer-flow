@@ -21,17 +21,14 @@ def compare_snapshots(
     limits: WorkspaceChangeLimits | None = None,
 ) -> WorkspaceChangeResult:
     resolved_limits = limits or WorkspaceChangeLimits()
-    all_paths = sorted(set(before.files) | set(after.files))
     changes: list[WorkspaceFileChange] = []
     created = modified = deleted = symlink_created = additions = deletions = 0
     total_diff_bytes = 0
     truncated = before.truncated or after.truncated
 
-    for path in all_paths:
+    for path in sorted(get_changed_paths(before, after)):
         before_file = before.files.get(path)
         after_file = after.files.get(path)
-        if before_file and after_file and _same_file(before_file, after_file):
-            continue
 
         status = _status(before_file, after_file)
         if status == "created":
@@ -103,6 +100,9 @@ def get_changed_paths(before: WorkspaceSnapshot, after: WorkspaceSnapshot) -> se
     for path in set(before.files) | set(after.files):
         before_file = before.files.get(path)
         after_file = after.files.get(path)
+        # Absence from a partial scan does not prove creation or deletion.
+        if (before_file is None and before.truncated) or (after_file is None and after.truncated):
+            continue
         if before_file and after_file and _same_file(before_file, after_file):
             continue
         changed.add(path)
@@ -110,7 +110,13 @@ def get_changed_paths(before: WorkspaceSnapshot, after: WorkspaceSnapshot) -> se
 
 
 def get_changed_output_paths(before: WorkspaceSnapshot, after: WorkspaceSnapshot) -> list[str]:
-    """Return created or modified regular files under the outputs root."""
+    """Return regular output changes established by the bounded snapshots.
+
+    Paths absent from a truncated before snapshot are omitted, including
+    genuinely new files; modifications observed in both snapshots are retained.
+    The worker's delivery check relies on this list and is skipped when it is
+    empty, so an empty result does not prove that the run produced no outputs.
+    """
     paths: list[str] = []
     for path in sorted(get_changed_paths(before, after)):
         snapshot = after.files.get(path)
@@ -198,7 +204,11 @@ def _snapshot_text(file: FileSnapshot | None) -> str | None:
         return file.text
     if file.text_path:
         try:
-            with open(file.text_path, encoding="utf-8") as cached:
+            # The cache is published byte-exactly (the scanner pins
+            # newline="\n"), so read it back without newline translation:
+            # universal newlines would silently rewrite a decoded CRLF
+            # snapshot into LF text and corrupt the served content.
+            with open(file.text_path, encoding="utf-8", newline="") as cached:
                 return cached.read()
         except OSError:
             return None
