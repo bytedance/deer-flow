@@ -181,6 +181,10 @@ gitignored. Never commit them.
 ### Run a single test
 
 ```bash
+# Public skill scripts (from the repository root)
+python -m pip install -r tests/skills/requirements.txt
+python -m pytest tests/skills -q
+
 # Backend (pytest); run one file or one test function
 cd backend && python -m pytest tests/test_compose_default_bind_host.py -q
 cd backend && python -m pytest tests/path/to/test.py::test_func -q
@@ -188,6 +192,9 @@ cd backend && python -m pytest tests/path/to/test.py::test_func -q
 # Frontend (rstest)
 cd frontend && pnpm rstest run <pattern>     # e.g. pnpm rstest run my-component
 ```
+
+`.github/workflows/public-skill-tests.yml` runs the public skill suite when
+public skills, their tests/dependencies, or the workflow itself change.
 
 ### Logs
 

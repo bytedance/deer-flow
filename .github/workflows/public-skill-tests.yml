@@ -1,0 +1,45 @@
+name: Public Skill Tests
+
+on:
+  push:
+    branches: ['main', '*-dev']
+    paths:
+      - 'skills/public/**'
+      - 'tests/skills/**'
+      - '.github/workflows/public-skill-tests.yml'
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - 'skills/public/**'
+      - 'tests/skills/**'
+      - '.github/workflows/public-skill-tests.yml'
+
+concurrency:
+  group: public-skill-tests-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  public-skill-tests:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: tests/skills/requirements.txt
+
+      - name: Install public skill test dependencies
+        run: python -m pip install -r tests/skills/requirements.txt
+
+      - name: Run public skill tests
+        run: python -m pytest tests/skills -q
