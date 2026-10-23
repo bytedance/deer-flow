@@ -76,6 +76,10 @@ class GoalWriteConflict(RuntimeError):
     """Raised when a goal write is based on a stale checkpoint."""
 
 
+class GoalEvaluationFormatError(ValueError):
+    """A normally completed evaluator response did not contain a valid verdict."""
+
+
 def goal_thread_lock(thread_id: str) -> AbstractAsyncContextManager[None]:
     """Serialize goal read-modify-write sequences within the current event loop."""
     return _goal_locks.hold(thread_id)
@@ -555,7 +559,20 @@ async def evaluate_goal_completion(
             invoke=invoke_with_usage,
             task_store=task_store,
         )
-    return parse_goal_evaluation_response(_extract_response_text(response.content), require_assumption_attribution=interaction_policy is not None and not interaction_policy.allows_clarification)
+    try:
+        return parse_goal_evaluation_response(_extract_response_text(response.content), require_assumption_attribution=interaction_policy is not None and not interaction_policy.allows_clarification)
+    except ValueError as exc:
+        metadata = getattr(response, "response_metadata", None)
+        reasons = [metadata[key] for key in ("finish_reason", "stop_reason") if key in metadata] if isinstance(metadata, Mapping) else []
+        blocks = response.content if isinstance(response.content, list) else []
+        refusal = _additional_kwargs(response).get("refusal") or any(
+            isinstance(block, Mapping) and (block.get("type") == "refusal" or (block.get("type") == "non_standard" and isinstance(block.get("value"), Mapping) and block["value"].get("refusal"))) for block in blocks
+        )
+        # Explicit refusal wins even when an adapter also reports normal stop.
+        # Length/safety stops and unknown outcomes retain their failure behavior.
+        if not refusal and reasons and all(isinstance(reason, str) and reason.casefold() in {"stop", "end_turn"} for reason in reasons):
+            raise GoalEvaluationFormatError("The completed goal evaluator response was malformed.") from exc
+        raise
 
 
 def _goal_evaluator_usage_record(response: Any, *, source_id: str, model_name: str | None, model: Any) -> dict[str, int | str | None]:

@@ -481,6 +481,28 @@ def test_make_goal_continuation_message_is_hidden_from_ui():
     assert "Tests have not run" in message.content
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("metadata", "answer", "extra", "retryable"),
+    [
+        ({"finish_reason": "stop"}, '{"satisfied":', {}, True),
+        ({"stop_reason": "end_turn"}, '{"satisfied": "yes"}', {}, True),
+        ({"status": "completed", "finish_reason": "length"}, '{"satisfied":', {}, False),
+        ({"finish_reason": "content_filter"}, "refused", {}, False),
+        ({"stop_reason": "refusal"}, "refused", {}, False),
+        ({}, '{"satisfied":', {}, False),
+        ({"finish_reason": "stop"}, "", {"refusal": "Not allowed"}, False),
+        ({"finish_reason": "stop"}, [{"type": "refusal", "refusal": "Not allowed"}], {}, False),
+    ],
+)
+async def test_evaluator_format_retry_requires_a_normal_completion(metadata, answer, extra, retryable):
+    model = SimpleNamespace(ainvoke=AsyncMock(return_value=AIMessage(content=answer, response_metadata=metadata, additional_kwargs=extra)))
+    with pytest.raises(ValueError) as error:
+        await goal.evaluate_goal_completion(goal.build_goal_state("Report"), [HumanMessage(content="Report"), AIMessage(content="Done")], model=model)
+    assert isinstance(error.value, goal.GoalEvaluationFormatError) is retryable
+    model.ainvoke.assert_awaited_once()
+
+
 def test_evaluate_goal_completion_uses_non_thinking_model(monkeypatch):
     fake_model = MagicMock()
     fake_model.ainvoke = AsyncMock(return_value=SimpleNamespace(content='{"satisfied": true, "reason": "Done", "evidence_summary": "Done"}'))
