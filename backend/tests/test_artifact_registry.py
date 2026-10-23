@@ -813,7 +813,7 @@ def test_escaped_sandbox_path_requires_a_matching_escaped_closer():
 
 
 _LINE_BREAKS = ["\n", "\r", "\r\n", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"]
-_CJK_QUOTE_PAIRS = [("“", "”"), ("‘", "’")]
+_CJK_QUOTE_PAIRS = [("“", "”"), ("‘", "’"), ("「", "」"), ("『", "』")]
 
 
 @pytest.mark.parametrize("separator", [*_LINE_BREAKS, "\t"])
@@ -844,7 +844,7 @@ def test_escaped_quote_wrappers_do_not_append_backslashes(delimiter, escape_coun
     assert refs[0]["display"] == display
 
 
-@pytest.mark.parametrize(("opener", "closer"), [("“", "”"), ("‘", "’")])
+@pytest.mark.parametrize(("opener", "closer"), _CJK_QUOTE_PAIRS)
 def test_cjk_quote_pairs_keep_the_entire_sandbox_path(opener, closer):
     path = "/mnt/user-data/outputs/输出 报告（最终）.pdf"
 
@@ -854,7 +854,14 @@ def test_cjk_quote_pairs_keep_the_entire_sandbox_path(opener, closer):
     assert refs[0]["display"] == "输出 报告（最终）.pdf"
 
 
-@pytest.mark.parametrize("opener", ["“", "‘"])
+@pytest.mark.parametrize(("opener", "closer"), _CJK_QUOTE_PAIRS)
+def test_cjk_quotes_without_spaces_do_not_become_part_of_the_path(opener, closer):
+    path = "/mnt/user-data/outputs/报告.pdf"
+
+    assert [ref["ref"] for ref in _detect_refs_in_text(f"已创建{opener}{path}{closer}，完成。")] == [path]
+
+
+@pytest.mark.parametrize("opener", [pair[0] for pair in _CJK_QUOTE_PAIRS])
 def test_unterminated_cjk_quotes_do_not_register_prefixes(opener):
     assert _detect_refs_in_text(f"已创建 {opener}/mnt/user-data/outputs/输出 报告.pdf") == []
 
@@ -866,7 +873,7 @@ def test_even_backslashes_before_a_quote_preserve_literal_path_backslashes():
     assert [ref["ref"] for ref in _detect_refs_in_text(f'{prefix}"{path}"')] == [path]
 
 
-@pytest.mark.parametrize(("opener", "closer"), [('\\"', '\\"'), ("“", "”"), ("‘", "’")])
+@pytest.mark.parametrize(("opener", "closer"), [('\\"', '\\"'), *_CJK_QUOTE_PAIRS])
 @pytest.mark.parametrize("text_block", [False, True])
 def test_review_quote_wrappers_deduplicate_structured_refs_and_keep_order(opener, closer, text_block):
     first = "/mnt/user-data/outputs/输出 报告.pdf"

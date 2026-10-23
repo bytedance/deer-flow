@@ -34,7 +34,7 @@ _SANDBOX_PATH_PATTERN = re.compile(r"/mnt/user-data/\S+")
 # Delimiters a tool result may wrap a path in. A delimited span is one value, so a
 # filename inside it keeps its spaces; the bare token scan below keeps its
 # whitespace boundary, because nothing tells it where such a name would end.
-_REF_QUOTE_DELIMITERS = {'"': '"', "'": "'", "`": "`", "“": "”", "‘": "’"}
+_REF_QUOTE_DELIMITERS = {'"': '"', "'": "'", "`": "`", "“": "”", "‘": "’", "「": "」", "『": "』"}
 _REF_LINE_BOUNDARY_PATTERN = re.compile(r"[\r\n\v\f\x1c-\x1e\x85\u2028\u2029]")
 _SPAN_BARE = "bare"
 _SPAN_QUOTED = "quoted"
