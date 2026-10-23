@@ -321,7 +321,8 @@ Use the earliest source review deadline for its next review.
 #### Remote backends
 
 Mem0 search and management convert facts inside the read-policy boundary.
-Invalid score/categories/metadata fields raise value-free `Mem0APIError`s;
+Invalid score/categories/metadata fields omit field values from `Mem0APIError`s.
+Diagnostics carry only bounded opaque record IDs, otherwise `<unavailable>`;
 missing/null defaults stay compatible and local programming errors propagate.
 
 Strict reads use the backend-neutral `MemoryReadError`.

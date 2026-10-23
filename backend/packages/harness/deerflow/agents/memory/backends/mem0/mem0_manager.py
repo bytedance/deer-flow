@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from math import isfinite
 from typing import Any, ClassVar, Literal
 
@@ -51,6 +52,16 @@ def _build_filters(
     return {"AND": parts}
 
 
+def _record_error(record: dict[str, Any], message: str) -> Mem0APIError:
+    """Identify a bad record without echoing field values or arbitrary IDs."""
+    record_id = record.get("id")
+    # IDs arrive from the remote service too. Keep diagnostics bounded and
+    # single-line; do not stringify containers or truncate into a different ID.
+    if not isinstance(record_id, str) or re.fullmatch(r"[A-Za-z0-9_-]{1,128}", record_id) is None:
+        record_id = "<unavailable>"
+    return Mem0APIError(f"{message} (record id={record_id})")
+
+
 def _to_fact(record: dict[str, Any]) -> dict[str, Any]:
     """Map a mem0 record to the backend-neutral fact shape consumed by the
     host (agents/memory/tools.py): id/content/category/confidence/createdAt/
@@ -59,21 +70,21 @@ def _to_fact(record: dict[str, Any]) -> dict[str, Any]:
     if categories is None:
         categories = []
     if not isinstance(categories, list) or any(not isinstance(category, str) for category in categories):
-        raise Mem0APIError("mem0 memory field categories must be a list of strings")
+        raise _record_error(record, "mem0 memory field categories must be a list of strings")
     metadata = record.get("metadata")
     if metadata is None:
         metadata = {}
     if not isinstance(metadata, dict):
-        raise Mem0APIError("mem0 memory field metadata must be an object")
+        raise _record_error(record, "mem0 memory field metadata must be an object")
     score = record.get("score")
     try:
         confidence = float(0.0 if score is None or score == "" else score)
     except (TypeError, ValueError, OverflowError):
         # Remote field values can contain private data; do not echo the value
         # or retain the conversion exception in the user-visible error chain.
-        raise Mem0APIError("mem0 memory field score must be a finite number") from None
+        raise _record_error(record, "mem0 memory field score must be a finite number") from None
     if not isfinite(confidence):
-        raise Mem0APIError("mem0 memory field score must be a finite number")
+        raise _record_error(record, "mem0 memory field score must be a finite number")
     return {
         "id": str(record.get("id", "")),
         "content": str(record.get("memory", "")),

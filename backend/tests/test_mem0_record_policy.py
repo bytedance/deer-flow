@@ -90,10 +90,12 @@ def test_invalid_record_fields_follow_read_policy(monkeypatch: pytest.MonkeyPatc
         if policy == "fail_open":
             assert _read(manager, operation) == ([] if operation in {"search", "asearch"} else {"facts": []})
             assert field in caplog.text
+            assert "record id=invalid" in caplog.text
         else:
             with pytest.raises(MemoryReadError, match=field) as error:
                 _read(manager, operation)
             assert isinstance(error.value.__cause__, Mem0APIError)
+            assert "record id=invalid" in str(error.value)
             assert PRIVATE_CONTENT not in str(error.value)
             assert "private-" not in str(error.value)
         assert len(requests) == 1  # Read errors do not introduce a retry.
@@ -187,7 +189,8 @@ def test_record_policy_through_memory_tool_handlers(monkeypatch: pytest.MonkeyPa
         raw = tools.memory_search_tool.func(runtime, "preferences") if tool_name == "search" else tools.memory_get_tool.func(runtime, "m1")
         result = json.loads(raw)
         if invalid and policy == "fail_closed":
-            assert result == {"error": "mem0 read failed: mem0 memory field score must be a finite number"}
+            assert result == {"error": "mem0 read failed: mem0 memory field score must be a finite number (record id=m1)"}
+            assert "record id=m1" in caplog.text
         elif tool_name == "search":
             assert result["count"] == (0 if invalid else 1)
             assert [fact["id"] for fact in result["results"]] == ([] if invalid else ["m1"])
@@ -200,3 +203,29 @@ def test_record_policy_through_memory_tool_handlers(monkeypatch: pytest.MonkeyPa
     assert "private-" not in raw
     assert "private-" not in caplog.text
     assert PRIVATE_CONTENT not in caplog.text
+
+
+@pytest.mark.parametrize("policy", POLICIES)
+@pytest.mark.parametrize("record_id", [None, "", 123, ["private-id"], {"private-id": "value"}, "private-id\nforged-log", "private-id\x1b[31m", "private-id/path", "私密标识", "private-id" * 15])
+def test_unusable_record_ids_are_omitted_from_diagnostics(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, policy: str, record_id: Any) -> None:
+    with _manager(monkeypatch, [_record(id=record_id, score="private-score")], policy) as (manager, requests):
+        if policy == "fail_open":
+            assert _read(manager, "search") == []
+            diagnostic = caplog.text
+        else:
+            with pytest.raises(MemoryReadError) as error:
+                _read(manager, "search")
+            diagnostic = str(error.value)
+        assert "record id=<unavailable>" in diagnostic
+        assert "private-" not in diagnostic
+        assert PRIVATE_CONTENT not in diagnostic
+        assert len(requests) == 1
+
+
+@pytest.mark.parametrize("record_id", ["123e4567-e89b-12d3-a456-426614174000", "a" * 128])
+def test_bounded_opaque_record_ids_remain_actionable(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, record_id: str) -> None:
+    with _manager(monkeypatch, [_record(id=record_id, score="private-score")], "fail_open") as (manager, requests):
+        assert _read(manager, "search") == []
+        assert f"record id={record_id}" in caplog.text
+        assert "private-" not in caplog.text
+        assert len(requests) == 1
