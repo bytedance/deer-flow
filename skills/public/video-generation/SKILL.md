@@ -51,7 +51,7 @@ python /mnt/skills/public/video-generation/scripts/generate.py \
 Parameters:
 
 - `--prompt-file`: Absolute path to JSON prompt file (required)
-- `--reference-images`: Absolute paths to reference image (optional)
+- `--reference-images`: Absolute paths to reference images (optional). For Gemini, use PNG or JPEG files with extensions matching their contents; the request preserves each image's MIME type without converting its bytes.
 - `--output-file`: Absolute path to output image file (required)
 - `--aspect-ratio`: Aspect ratio of the generated image (optional, default: 16:9)
 
