@@ -45,6 +45,10 @@ export const zhCN: Translations = {
         description:
           "保存版本化 Agent 工作流，在同一 Gateway 进程内恢复，并确认确切的保留输出版本。不支持重启回放或硬金额预算。",
       },
+      reportSections: {
+        title: "分段长文写作",
+        description: "逐段撰写长报告，并将各章节汇总为可下载的 Markdown 文档。",
+      },
       agentTeams: {
         title: "Agent 团队",
         description: "让完整 Custom Agent 通过 @成员、共享记录与任务交接协作。",
