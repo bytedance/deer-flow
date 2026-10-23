@@ -82,6 +82,33 @@ def _consume_empty_response_retry(request: ModelRequest) -> bool:
     return True
 
 
+def _trim_trailing_error_fallbacks(messages: list[Any]) -> list[Any] | None:
+    """Drop trailing error-fallback assistant messages from the request copy.
+
+    A run that ended on a failed model call persists a user-facing fallback
+    ``AIMessage`` (``deerflow_error_fallback``) as the thread's last message.
+    A continuation then sends it as the final assistant turn, and providers
+    without assistant prefill reject the request outright. Only the DeepSeek
+    wrapper filtered these markers so far; this trims the trailing run of
+    them from the outgoing request for every provider. Mid-history fallbacks
+    and a request made only of fallbacks are left untouched, and the
+    persisted thread history keeps its messages — the trim applies to this
+    request copy only.
+    """
+    if not isinstance(messages, list):
+        return None
+    end = len(messages)
+    while end > 0:
+        message = messages[end - 1]
+        if isinstance(message, AIMessage) and (message.additional_kwargs or {}).get("deerflow_error_fallback"):
+            end -= 1
+            continue
+        break
+    if end == len(messages) or end == 0:
+        return None
+    return messages[:end]
+
+
 _RETRIABLE_STATUS_CODES = {408, 409, 425, 429, 500, 502, 503, 504, 529}
 _BUSY_PATTERNS = (
     "server busy",
@@ -948,6 +975,9 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         request: ModelRequest,
         handler: Callable[[ModelRequest], ModelResponse],
     ) -> ModelCallResult:
+        trimmed = _trim_trailing_error_fallbacks(getattr(request, "messages", None))
+        if trimmed is not None:
+            request = request.override(messages=trimmed)
         admission = _CircuitAdmission()
         if self._check_circuit(probe_token=admission):
             return self._build_error_fallback_message(
@@ -1012,6 +1042,9 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         request: ModelRequest,
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelCallResult:
+        trimmed = _trim_trailing_error_fallbacks(getattr(request, "messages", None))
+        if trimmed is not None:
+            request = request.override(messages=trimmed)
         admission = _CircuitAdmission()
         if self._check_circuit(probe_token=admission):
             return self._build_error_fallback_message(
