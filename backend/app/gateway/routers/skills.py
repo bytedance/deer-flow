@@ -702,7 +702,7 @@ async def download_custom_skill_export(
 ) -> Response:
     await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
     try:
-        archive, lease = await run_export_work(lambda cancel: build_skill_export(_get_user_skill_storage(config), skill_name, expected_revision, cancel), request)
+        archive, lease = await run_export_work(lambda cancel: build_skill_export(_get_user_skill_storage(config), skill_name, expected_revision, cancel), request, skill_name=skill_name)
     except ExportClientDisconnected:
         return Response(status_code=204)
     except SkillExportError as error:

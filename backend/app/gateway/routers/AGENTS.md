@@ -66,3 +66,11 @@ external filesystem writers do not participate in this history guarantee.
 Plugin actions stamp `ActionContext.interaction=session` only from authenticated
 session provenance. Never accept it from payloads or propagate it to model tools;
 extensions use it to distinguish owner review from model/tool output.
+
+Skill export request cleanup drains archive-close workers before releasing the
+process slot. Ordinary close or diagnostic errors are best-effort and preserve
+the completed transfer, disconnect, or cancellation; interruption signals remain
+outside exception suppression. Cover both unclaimed worker results and ASGI
+response teardown in `tests/test_skill_export_cleanup_outcomes.py`. Pass the skill
+name to cleanup diagnostics for downloads and unclaimed worker results; guard
+non-I/O close bugs too, since they can replace the same caller outcome.
