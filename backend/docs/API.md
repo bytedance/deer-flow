@@ -273,6 +273,16 @@ may be requested on a new thread after `/new`. Stateless `/api/langgraph/runs/*`
 endpoints do not support this header because requests without an explicit thread
 create a new temporary conversation.
 
+When an `input.messages` entry has no usable `id`, the Gateway assigns one
+before persisting the run input and invoking the graph. The same ID then appears
+in the run record and checkpoint, so a client rejoining an active run can match
+the two copies. Caller-supplied nonempty IDs are preserved. For keyed requests,
+the generated IDs are stable for retries with the same thread and key; unkeyed
+runs receive fresh IDs. During a rolling upgrade, route keyed requests with
+ID-less input and their retries to upgraded Gateway workers until all workers
+are upgraded. An older worker may reject a retry against a newly stamped run
+record with 409.
+
 **Rolling upgrades and keyed resume:** route all initial submissions and retries
 containing both `command.resume` and `Idempotency-Key` to upgraded Gateway workers
 only, across `/runs`, `/runs/stream` and `/runs/wait`, until every worker serving

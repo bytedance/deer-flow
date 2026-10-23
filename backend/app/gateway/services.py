@@ -743,6 +743,40 @@ def normalize_input(raw_input: dict[str, Any] | None, *, trusted_internal: bool 
     return result
 
 
+def _assign_missing_run_input_message_ids(graph_input: dict[str, Any], *, thread_id: str, idempotency_key: str | None) -> dict[str, Any]:
+    """Give the run record and graph the same IDs before add_messages runs.
+
+    Keyed retries must produce the same IDs before run admission compares their
+    input. Unkeyed runs get fresh IDs so repeated text remains a new turn.
+    Caller-supplied IDs and the original request objects are left untouched.
+    """
+    messages = graph_input.get("messages")
+    if not isinstance(messages, list):
+        return graph_input
+
+    used_ids = {message.id for message in messages if isinstance(message, BaseMessage) and message.id}
+    assigned = []
+    changed = False
+    for index, message in enumerate(messages):
+        if not isinstance(message, BaseMessage) or message.id:
+            assigned.append(message)
+            continue
+        attempt = 0
+        while True:
+            if idempotency_key is None:
+                message_id = str(uuid.uuid4())
+            else:
+                name = f"deerflow:run-input:{thread_id}:{idempotency_key}:{index}:{attempt}"
+                message_id = str(uuid.uuid5(uuid.NAMESPACE_URL, name))
+            if message_id not in used_ids:
+                break
+            attempt += 1
+        used_ids.add(message_id)
+        assigned.append(message.model_copy(update={"id": message_id}))
+        changed = True
+    return {**graph_input, "messages": assigned} if changed else graph_input
+
+
 def _canonical_run_record_input(
     raw_input: dict[str, Any] | None,
     graph_input: object,
@@ -2161,6 +2195,13 @@ async def start_run(
             graph_input = Command(resume=command["resume"])
         else:
             graph_input = normalized_input
+        # Keep the idempotency identity in the caller's pre-stamp shape. A
+        # keyed retry can then reuse a run even though its stored run input has
+        # Gateway-issued IDs, and old id-less run records remain comparable.
+        request_input = _canonical_run_record_input(body.input, graph_input) if idempotency_key else None
+        knowledge_default_request_hash = hashlib.sha256(json.dumps(request_input, sort_keys=True, ensure_ascii=False).encode()).hexdigest() if idempotency_key else None
+        if isinstance(graph_input, dict):
+            graph_input = _assign_missing_run_input_message_ids(graph_input, thread_id=thread_id, idempotency_key=idempotency_key)
         # deerflow_trace_id is server-issued, so the caller's value is replaced
         # here at the trust boundary. body.metadata forks two ways -- through
         # build_run_config into config["metadata"], which the run worker
@@ -2241,8 +2282,6 @@ async def start_run(
         # Keep the pre-default identity even when the agent is initially
         # unbound: adding a default must not reject an already-accepted retry.
         # The durable input still exposes the original accepted scope.
-        request_input = _canonical_run_record_input(body.input, graph_input) if idempotency_key else None
-        knowledge_default_request_hash = hashlib.sha256(json.dumps(request_input, sort_keys=True, ensure_ascii=False).encode()).hexdigest() if idempotency_key else None
         accepts_knowledge_default = not is_scope_recovery and not current_message_has_scope and knowledge_default_request_hash is not None
         admitted_knowledge_scope = admit_message_knowledge_scope(
             scope_graph_input,
@@ -2579,7 +2618,7 @@ async def start_run(
                         # today's default; explicit scopes and recovery do not use
                         # this compatibility path.
                         matches_legacy_default_request = accepts_knowledge_default and "knowledge_default_request_hash" not in stored and stored_input == request_input
-                        matches_input = matches_default_request or matches_legacy_default_request or stored_input == body.input or stored_input == run_record_input
+                        matches_input = matches_default_request or matches_legacy_default_request or stored_input == body.input or stored_input == request_input or stored_input == run_record_input
                     if not matches_idempotency_request or not matches_input or record.assistant_id != body.assistant_id or stored.get("conversation_references", []) != conversation_references:
                         raise HTTPException(
                             status_code=409,
