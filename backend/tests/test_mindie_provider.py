@@ -503,11 +503,20 @@ class TestPatchResult:
         patched = model._patch_result_with_tools(result)
         assert patched.generations[0].message.content == "line1\nline2"
 
-    def test_escaped_newlines_inside_code_fence_preserved(self):
+    @pytest.mark.parametrize("delimiter", ["```", "~~~"], ids=["backticks", "tildes"])
+    def test_escaped_newlines_inside_code_fence_preserved(self, delimiter):
         model = self._model()
-        result = _make_chat_result('text\\n```json\n{"k":"a\\\\nb"}\n```\\nend')
+        result = _make_chat_result(f'text\\n{delimiter}json\n{{"k":"a\\\\nb"}}\n{delimiter}\\nend')
         patched = model._patch_result_with_tools(result)
-        assert patched.generations[0].message.content == 'text\n```json\n{"k":"a\\\\nb"}\n```\nend'
+        assert patched.generations[0].message.content == f'text\n{delimiter}json\n{{"k":"a\\\\nb"}}\n{delimiter}\nend'
+
+    @pytest.mark.parametrize(("outer", "inner"), [("~~~", "```"), ("```", "~~~")], ids=["tilde-outer", "backtick-outer"])
+    def test_unterminated_fence_preserves_other_delimiter_pair(self, outer, inner):
+        content = f"intro\\n{outer}python\\nouter\\n{inner}json\\ninner\\n{inner}\\ntail\\n"
+
+        decoded = _decode_escaped_newlines_outside_fences(content)
+
+        assert decoded == f"intro\n{outer}python\\nouter\\n{inner}json\\ninner\\n{inner}\\ntail\\n"
 
     def test_xml_tool_calls_extracted(self):
         model = self._model()
@@ -761,7 +770,8 @@ class TestAStream:
         assert chunks[0].message.content == "a\nb"
 
     @pytest.mark.asyncio
-    async def test_no_tools_stream_keeps_escaped_newlines_inside_fences(self):
+    @pytest.mark.parametrize("delimiter", ["```", "~~~"], ids=["backticks", "tildes"])
+    async def test_no_tools_stream_keeps_escaped_newlines_inside_fences(self, delimiter):
         """A fence spanning several chunks must still protect its literal `\\n`.
 
         The one-shot decode needs a complete ```...``` pair to tell fenced code
@@ -773,7 +783,7 @@ class TestAStream:
         from langchain_core.messages import AIMessageChunk
         from langchain_core.outputs import ChatGenerationChunk
 
-        raw_chunks = ['intro\\n```python\\nprint("a\\nb")', "\\n```\\noutro\\nend"]
+        raw_chunks = [f'intro\\n{delimiter}python\\nprint("a\\nb")', f"\\n{delimiter}\\noutro\\nend"]
 
         async def fake_stream(*args, **kwargs):
             for text in raw_chunks:
@@ -802,10 +812,25 @@ class TestAStream:
             ["outside\\", "ncode"],
             # Fence delimiter itself split across the chunk boundary.
             ["text\\n``", "`python\\nx\\ny", "\\n```\\nend"],
+            # Tilde fence delimiter split across the chunk boundary.
+            ["text\\n~~", "~python\\nx\\ny", "\\n~~~\\nend"],
             # Two fences with prose between them, escaped prose still decodes.
             ["```a\\n1```\\nmid\\n```b\\n2", "```\\ntail\\nend"],
+            # An unterminated tilde fence protects a complete backtick pair.
+            ["intro\\n~~~python\\nouter\\n```json", "\\ninner\\n```\\ntail\\n"],
+            # An unterminated backtick fence protects a complete tilde pair.
+            ["intro\\n```python\\nouter\\n~~~json", "\\ninner\\n~~~\\ntail\\n"],
         ],
-        ids=["single-chunk-fence", "fence-spans-chunks", "escape-split-across-chunks", "fence-delimiter-split", "two-fences"],
+        ids=[
+            "single-chunk-fence",
+            "fence-spans-chunks",
+            "escape-split-across-chunks",
+            "fence-delimiter-split",
+            "tilde-delimiter-split",
+            "two-fences",
+            "unterminated-tilde-with-backtick-pair",
+            "unterminated-backtick-with-tilde-pair",
+        ],
     )
     async def test_no_tools_stream_decode_matches_non_streaming(self, raw_chunks):
         """The joined native stream equals the one-shot decode of the full reply."""
