@@ -86,6 +86,26 @@ def test_placeholder_inside_a_document_is_left_alone():
     assert _call_write_file(content=body) == "OK"
 
 
+@pytest.mark.parametrize(
+    "content",
+    [
+        "[content elided: example for a user guide]\nThis is real file content.\n",
+        PLACEHOLDER.format(chars=5000) + "\nThis is real file content.\n",
+        PLACEHOLDER.format(chars=5000) + " additional text",
+        PLACEHOLDER,
+        PLACEHOLDER.format(chars=""),
+        PLACEHOLDER.format(chars="-1"),
+        PLACEHOLDER.format(chars="1.5"),
+        PLACEHOLDER.format(chars="example"),
+        PLACEHOLDER.format(chars="１２３"),
+        PLACEHOLDER.format(chars=5000)[:-1],
+    ],
+    ids=["prefix-only", "leading-quote", "trailing-text", "template", "empty-count", "negative-count", "decimal-count", "text-count", "unicode-count", "missing-suffix"],
+)
+def test_placeholder_prefix_in_real_content_is_allowed(content: str) -> None:
+    assert tools_module._reject_elision_placeholder_content(content) is None
+
+
 def test_rejection_does_not_reach_the_sandbox():
     """The guard runs before any filesystem work, so a rejected write leaves no trace."""
     fn = getattr(write_file_tool, "func", write_file_tool)

@@ -85,3 +85,6 @@ deliverable that is ~200 bytes of placeholder (#7319). The match is
 whole-payload on purpose: a substring guard would block legitimate edits to
 this repository, whose `constants.py` and docs quote the template verbatim.
 Rendering and rejection derive from that one constant so they cannot drift.
+The character count must be an ASCII non-negative integer. A document beginning
+with the same prefix, including a quoted placeholder followed by more content,
+is allowed.

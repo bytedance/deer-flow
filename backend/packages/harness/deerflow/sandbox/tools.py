@@ -3332,25 +3332,9 @@ read_file_tool.coroutine = _read_file_tool_async
 
 
 def _reject_elision_placeholder_content(content: str) -> str | None:
-    """Return an actionable error if ``content`` *is* the elision placeholder, else ``None``.
-
-    The tool-output budget middleware replaces the ``content`` of a superseded
-    ``write_file`` call with ``WRITE_ELISION_PLACEHOLDER_TEMPLATE`` in the
-    model-bound request only. That placeholder is framework-owned text the
-    model sees in its own history, so it can be imitated and submitted as real
-    content — issue #7319 reports a delivered file that was 194 bytes of
-    placeholder. Writing that is never intentional, so reject it and say how to
-    recover.
-
-    The check is deliberately narrow: the placeholder must be the *whole*
-    payload, allowing only surrounding whitespace. A substring match would
-    block legitimate work on this very codebase (the template lives in
-    ``constants.py`` and is quoted in the persistence docs), and the reported
-    failure is a whole-file copy, not a snippet. Matching the template's stable
-    prefix covers the interpolated character count without pinning a number.
-    """
-    sentinel = WRITE_ELISION_PLACEHOLDER_TEMPLATE.split("{", 1)[0]
-    if not content.strip().startswith(sentinel):
+    """Reject a complete framework placeholder, allowing surrounding whitespace."""
+    pattern = re.escape(WRITE_ELISION_PLACEHOLDER_TEMPLATE).replace(re.escape("{chars}"), r"[0-9]+")
+    if re.fullmatch(pattern, content.strip()) is None:
         return None
     return (
         "Error: write_file content is the tool-output elision placeholder, which is "
