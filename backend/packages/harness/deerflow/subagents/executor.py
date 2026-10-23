@@ -180,6 +180,7 @@ class SubagentResult:
     _knowledge_messages: list[Any] = field(default_factory=list, init=False, repr=False)
     cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
     execution_done_event: threading.Event = field(default_factory=threading.Event, init=False, repr=False)
+    tool_output_chunks: list[dict[str, Any]] = field(default_factory=list)
     _state_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
     def __post_init__(self):
@@ -257,6 +258,18 @@ class SubagentResult:
             for source in sources:
                 merged[source.id] = source.model_dump(mode="json", exclude_none=True)
             self.knowledge_sources = list(merged.values())[-100:]
+
+    def append_tool_output_chunk(self, chunk: dict[str, Any]) -> None:
+        """Append a custom stream chunk under the terminal-state lock."""
+        with self._state_lock:
+            self.tool_output_chunks.append(chunk)
+
+    def drain_tool_output_chunks(self) -> tuple[list[dict[str, Any]], SubagentStatus]:
+        """Atomically drain pending chunks and snapshot the current status."""
+        with self._state_lock:
+            chunks = self.tool_output_chunks
+            self.tool_output_chunks = []
+            return chunks, self.status
 
     def try_set_terminal(
         self,
@@ -1853,9 +1866,20 @@ class SubagentExecutor:
                 return result
 
             cancelled_during_stream = False
-            stream = agent.astream(state, config=run_config, context=context, stream_mode="values")  # type: ignore[arg-type]
+            stream = agent.astream(state, config=run_config, context=context, stream_mode=["values", "custom"])  # type: ignore[arg-type]
             try:
-                async for chunk in stream:
+                async for item in stream:
+                    # When stream_mode is a list/tuple, LangGraph yields (mode, chunk)
+                    # tuples. Custom events (emitted by middlewares via get_stream_writer)
+                    # carry tool output chunks that need to propagate to the parent
+                    # stream so they are not lost inside the subagent context (#4150).
+                    if isinstance(item, tuple) and len(item) == 2:
+                        mode, chunk = item
+                        if mode == "custom":
+                            result.append_tool_output_chunk(chunk)
+                            continue
+                    else:
+                        chunk = item
                     # A yielded values chunk is already executed state.  Retain it
                     # before observing cooperative cancellation so terminal receipt
                     # harvesting includes a tool result that completed while the
