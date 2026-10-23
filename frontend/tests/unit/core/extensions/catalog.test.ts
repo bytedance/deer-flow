@@ -145,3 +145,33 @@ test("workflow metadata is localized, explains Phase 2 limits and merges its reg
     expect(matches[0]?.loaded).toBe(workflow);
   }
 });
+
+test("WeKnora discovery is localized without implying runtime activation", () => {
+  for (const [copy, title] of [
+    [enUS.extensions.catalog, "WeKnora knowledge retrieval"],
+    [zhCN.extensions.catalog, "WeKnora 知识检索"],
+  ] as const) {
+    const entry = extensionDirectory([], copy).find(
+      (item) => item.package === "deerflow-extension-weknora",
+    );
+    expect(entry).toMatchObject({
+      id: "catalog/weknora",
+      title,
+      guide:
+        "https://github.com/bytedance/deer-flow/tree/main/examples/deerflow-extension-weknora#readme",
+    });
+    expect(entry?.description).toBeTruthy();
+    expect(entry?.loaded).toBeUndefined();
+  }
+});
+
+test("LightRAG discovery is localized without claiming a runtime registration", () => {
+  for (const copy of [enUS.extensions.catalog, zhCN.extensions.catalog]) {
+    const entry = extensionDirectory([], copy).find(
+      (item) => item.package === "deerflow-extension-lightrag",
+    );
+    expect(entry?.title).toBe("LightRAG");
+    expect(entry?.description).toBe(copy.lightrag.description);
+    expect(entry?.loaded).toBeUndefined();
+  }
+});

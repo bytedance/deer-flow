@@ -19,6 +19,7 @@ https://github.com/user-attachments/assets/a8bcadc4-e040-4cf2-8fda-dd768b999c18
 ## 官网
 
 想了解更多，或者直接看**真实演示**，可以访问[**官网**](https://deerflow.tech)。
+首页精选案例已配置为免登录白名单只读演示。
 
 ## 姐妹项目
 
@@ -34,6 +35,8 @@ https://github.com/user-attachments/assets/a8bcadc4-e040-4cf2-8fda-dd768b999c18
 
 ## InfoQuest
 
+InfoQuest 的 reader、网页搜索与图片搜索采用 30 秒 HTTP 连接/读取非活动超时。抓取配置中的 `timeout` 和 `navigation_timeout` 仍为独立的服务端参数，不控制本地 HTTP 超时。
+
 DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[InfoQuest（支持免费在线体验）](https://docs.byteplus.com/en/docs/InfoQuest/What_is_Info_Quest)
 
 <a href="https://docs.byteplus.com/en/docs/InfoQuest/What_is_Info_Quest" target="_blank">
@@ -46,6 +49,7 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
 
 - [🦌 DeerFlow - 2.0](#-deerflow---20)
   - [官网](#官网)
+  - [姐妹项目](#姐妹项目)
   - [字节跳动火山引擎方舟 Coding Plan](#字节跳动火山引擎方舟-coding-plan)
   - [InfoQuest](#infoquest)
   - [目录](#目录)
@@ -179,6 +183,13 @@ YAML 同名模型优先，已有任务保留原配置快照。托管模型使用
        api_key: $OPPER_API_KEY
        base_url: https://api.opper.ai/v3/compat
 
+     - name: api-route-gpt-6.1-sol
+       display_name: GPT 6.1 Sol (API Route)
+       use: langchain_openai:ChatOpenAI
+       model: gpt-6.1-sol
+       api_key: $API_ROUTE_API_KEY
+       base_url: https://global.api-route.com/v1
+
      - name: gpt-5-responses
        display_name: GPT-5 (Responses API)
        use: langchain_openai:ChatOpenAI
@@ -201,6 +212,8 @@ YAML 同名模型优先，已有任务保留原配置快照。托管模型使用
    ```
 
    OpenRouter 以及类似的 OpenAI 兼容网关，建议通过 `langchain_openai:ChatOpenAI` 配合 `base_url` 来配置。如果你更想用 provider 自己的环境变量名，也可以直接把 `api_key` 指向对应变量，例如 `api_key: $OPENROUTER_API_KEY`。
+
+   Setup Wizard 也支持 [API Route](https://www.api-route.com)，会将密钥保存为 `API_ROUTE_API_KEY`，并使用上面的 Chat Completions 端点。可用模型取决于密钥所属组别和权限；修改 `config.yaml` 中的模型前，请先查询需要认证的 `GET https://global.api-route.com/v1/models` 模型目录，并原样使用返回的模型 ID，不要添加上游 provider 前缀。
 
    如果要让 OpenAI 模型走 `/v1/responses`，继续使用 `langchain_openai:ChatOpenAI`，并设置 `use_responses_api: true` 和 `output_version: responses/v1`。
 
@@ -292,7 +305,7 @@ make docker-init    # 拉取 sandbox 镜像（首次运行或镜像更新时执�
 make docker-start   # 启动服务（会根据 config.yaml 自动判断 sandbox 模式）
 ```
 
-如果 `config.yaml` 使用的是 provisioner 模式（`sandbox.use: deerflow.community.aio_sandbox:AioSandboxProvider` 且配置了 `provisioner_url`），`make docker-start` 才会启动 `provisioner`。
+如果 `config.yaml` 使用的是 provisioner 模式（`sandbox.use: deerflow.community.aio_sandbox:AioSandboxProvider` 且配置了 `provisioner_url`），`make docker-start` 才会启动 `provisioner`。直接使用 Docker Compose 的用户可以在 dev 命令中加入 `--profile provisioner` 来启用相同模式；默认栈不需要 Kubernetes。
 
 **生产模式**（本地构建镜像，并挂载运行期配置与数据）：
 
@@ -420,6 +433,8 @@ DeerFlow 支持可配置的 MCP Server 和 skills，用来扩展能力。
 
 DeerFlow 支持从即时通讯应用接收任务。只要配置完成，对应渠道会自动启动，而且都不需要公网 IP。
 
+`channels/store.json` 含无效 UTF-8 字节时，采用与 JSON 格式损坏相同的恢复方式：SQL 迁移记录警告并跳过，保留原文件，让渠道可以继续启动；memory 后端的 JSON 存储记录警告并从空状态开始，在下次写入时替换该文件。
+
 DeerFlow 还可以在 workspace UI 里暴露用户自有的 IM 渠道连接。启用 `channel_connections` 后，已登录用户可以从侧边栏 / Settings > Channels 绑定 Telegram、Slack、Discord、Feishu/Lark、DingTalk、WeChat、WeCom、QQ 或 Buzz。它复用现有的 `channels.*` 出站传输，因此不需要公网 IP 或 provider 回调地址。入站 IM 消息会以所连接的 DeerFlow 用户身份运行。设置和安全注意事项参见 [IM Channel Connections](backend/docs/IM_CHANNEL_CONNECTIONS.md)。
 
 | 渠道 | 传输方式 | 上手难度 |
@@ -432,6 +447,8 @@ DeerFlow 还可以在 workspace UI 里暴露用户自有的 IM 渠道连接。�
 | 钉钉 | Stream Push（WebSocket） | 中等 |
 | QQ | WebSocket（仅文本私聊及群 @；每条来源消息最多回复 4 / 5 条） | 中等 |
 | Buzz | Nostr relay（WebSocket，NIP-42） | 中等 |
+
+飞书和钉钉在附件同步完成后，会将独立的临时沙箱归还资源池，不会中断仍在运行的任务。
 
 **`config.yaml` 中的配置示例：**
 
@@ -562,6 +579,10 @@ DINGTALK_CLIENT_SECRET=your_client_secret
 3. 在 **事件订阅** 中订阅 `im.message.receive_v1`，连接方式选择 **长连接**。
 4. 复制 App ID 和 App Secret，在 `.env` 中设置 `FEISHU_APP_ID` 和 `FEISHU_APP_SECRET`，并在 `config.yaml` 中启用该渠道。
 5. _（可选）_ 交互式澄清卡片：在 `channels.feishu` 下设置 `card_interaction_enabled: true`，让 agent 的选项式提问渲染为可点击的按钮卡片，并在问题前保留背景说明。随后在开发者后台打开 **回调配置**（与「事件订阅」是不同的标签页），订阅 `card.action.trigger` 并选择 **长连接**，最后发布新版本。点击按钮等同于输入该选项作答；只有触发该次提问的用户才能操作对应卡片。按钮答案会保存到对话历史中，后续澄清继续在同一会话内进行。
+
+如果 SDK 反复记录 `CERTIFICATE_VERIFY_FAILED`，参见 [Feishu / Lark TLS 故障排查](backend/docs/IM_CHANNEL_CONNECTIONS.md#feishu--lark-tls-troubleshooting)，检查 Gateway 的 CA 信任配置。
+
+定时任务的执行结果和生命周期通知也可以主动推送给已绑定的飞书/Lark 用户，无需用户先发送新消息。它们与企业微信共用通知发件箱和本地化摘要机制。应用必须具备向该用户发送消息的权限，参见[飞书定时任务通知](backend/docs/IM_CHANNEL_CONNECTIONS.md#feishu-scheduled-task-notifications)。
 
 **WeChat 配置**
 
@@ -718,6 +739,11 @@ DeerFlow 可连接租户级 RAGFlow，并通过 `knowledge_search` 按 embedding
 
 本版不在工作区侧边栏增加独立的“知识库”入口，也不提供 DeerFlow 知识库管理页面；知识库和文件的创建、上传、解析与删除仍直接在 RAGFlow 中完成。
 
+运维还可独立安装 [WeKnora 只读扩展](examples/deerflow-extension-weknora/README.md)，
+对接 WeKnora v0.8.3，使用知识库/文档范围选择器和共享检索引用。
+需显式配置 DeerFlow 用户到 WeKnora 工作空间的凭据绑定；资源授权仍由 WeKnora 执行。
+安装与配置步骤见扩展目录中的英文指南。
+
 Gateway 生成后续建议时，现在会先把普通字符串输出和 block/list 风格的富文本内容统一归一化，再去解析 JSON 数组响应，因此不同 provider 的内容包装方式不会再悄悄把建议吞掉。
 
 Web UI 支持从已完成的 assistant 回复分叉出一个新的主对话。自动继承的分叉标题会使用下一个空闲的数字后缀（`标题 (2)`、`标题 (3)`……）；显式指定或手动重命名得到的同名后缀也会占号，即使它没有生成序号 metadata，后续自动分叉也不会与它重名。API 调用方显式提供的标题保持不变；重命名会清除旧的生成序号，因此从新标题继续自动分叉时会重新从 `(2)` 开始。最近对话列表还会把已加载的分叉直接排列在已加载的父对话下方，并显示低干扰的树形连接线。父对话尚未加载、谱系数据错误或成环、父子置顶状态不一致时，分叉会安全地保留在顶层，不会被隐藏或跨越置顶边界移动。新 thread 会保留该轮回复的 checkpoint 以及用户消息之前的重放 checkpoint，因此分叉后可以立即重新生成该回复。对于缺少 checkpoint 父链接的旧历史或导入历史，Gateway 会进行有界的时间顺序查找；如果不存在更早的重放 checkpoint，分叉仍会按旧版单-checkpoint 形态成功创建，但无法重新生成继承的回复。已有的单-checkpoint 分叉会保持不变，不会通过不安全的 checkpoint 复制尝试修复。只有从最新回合分叉时才会尽力复制当前 thread 的工作区文件；从历史回合分叉不会带入后续时间线创建的文件。
@@ -837,6 +863,12 @@ DeerFlow 不只是“会说它能做”，它是真的有一台自己的“电�
 ```
 
 ### Agentic Browser Control
+
+浏览器截图与 Browserless 网页截屏（captures）支持原子化完整内容发布。新创建的文件使用宿主机的常规文件权限（通常为 `0644`），覆盖已有文件时会保留已有权限，以便沙箱代码在权限允许时能够读取截图。
+
+Browserless 会通过空占位文件提前预留截屏文件名，以防并发截屏相互覆盖。如果发布失败会自动释放该占位符；若清理失败，Gateway 会记录带有路径的告警日志，并保留原始的发布错误或中断信息。
+
+浏览器依赖自动检测支持在工具配置项中以任意顺序指定 `name`、`group` 与 `use`，且兼容缩进或非缩进风格的 YAML 列表。
 
 读取页面和真正“使用”页面不是一回事。除了只读的 `web_fetch` 和 `web_capture` 工具外，DeerFlow 还提供一组可选的 agentic browser 工具，为每次对话保持一个实时浏览器会话，让 agent 真正操作页面——导航、读取可交互元素、点击、输入、提交表单，并在重度 JavaScript 站点上完成多步流程。
 

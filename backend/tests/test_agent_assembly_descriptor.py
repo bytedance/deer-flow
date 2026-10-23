@@ -740,6 +740,28 @@ class TestSkillCatalogHashesContent:
         assert before.fingerprint != after.fingerprint
         assert before.enabled_skills == after.enabled_skills  # the catalog's visible identity is unchanged
 
+    def test_a_bom_does_not_change_the_fingerprint(self, tmp_path):
+        """A BOM is the editor's, not the skill's.
+
+        ``_skill_content_hash`` digests the body ``SkillActivationMiddleware``
+        injects — its docstring says so and points at ``_read_skill_content`` —
+        and the middleware reads that file ``utf-8-sig``. The two must therefore
+        agree for a SKILL.md a Windows editor saved with a BOM, or the descriptor
+        would fingerprint content the agent never receives.
+        """
+        skill_dir = tmp_path / "my-skill"
+        skill_dir.mkdir()
+        skill = self._skill(skill_dir)
+        body = "---\nname: my-skill\n---\nSame instructions.\n"
+
+        (skill_dir / "SKILL.md").write_text(body, encoding="utf-8")
+        without_bom = self._build([skill])
+
+        (skill_dir / "SKILL.md").write_text("\ufeff" + body, encoding="utf-8")
+        with_bom = self._build([skill])
+
+        assert with_bom.fingerprint == without_bom.fingerprint
+
     def test_required_secrets_flag_changes_the_fingerprint(self):
         from deerflow.skills.types import SecretRequirement
 

@@ -1,4 +1,4 @@
-# Script workflows (Phase 2)
+# Script workflows (Phase 3)
 
 An opt-in packaged extension that runs inspectable JavaScript orchestration in the
 background. Scripts call full DeerFlow Agents through the public `AgentRuns`
@@ -9,12 +9,12 @@ progress, child conversation/run identities, and final result.
 Versioned definitions, retained output snapshots, explicit same-process pause/resume,
 and authenticated human checkpoints support staged inspection reports. Agent success,
 script verdicts, tool permission approval and human output approval remain separate facts.
-No arbitrary JavaScript continuation serialization, restart replay or hard monetary
-budget is provided.
+Compatible workflows can be recovered explicitly after a single Gateway restart.
+No arbitrary JavaScript continuation serialization or hard monetary budget is provided.
 
 ## Install and enable
 
-Requires a POSIX Gateway (Linux/macOS), Python 3.12+, the public extension API 0.2.7,
+Requires a POSIX Gateway (Linux/macOS), Python 3.12+, the public extension API 0.2.8,
 and a **single Gateway process per storage file**. Windows execution is unsupported.
 The package holds an exclusive process lock; another process using that same file
 fails service startup rather than recovering another worker's live workflows.
@@ -115,6 +115,11 @@ API; validate verdicts in the script before branching. Every Agent call must be
 awaited, including fan-out calls. Returning while child promises are outstanding
 fails the workflow and interrupts tracked children.
 
+Agent task inputs allow 16,000 serialized JSON bytes, including wrapping fields
+and file references; step outputs allow 12,000. This leaves room to pass a saved
+output to the next Agent with a short task instruction. JSON escaping counts
+toward these limits. Larger material must use the file workflow described below.
+
 `parallel()` takes lazy thunks and preserves order. The service, independently of
 JavaScript promises, bounds admitted children per workflow and globally. A rejected
 call rejects its promise; failures are not silently converted to null. Scripts may
@@ -156,14 +161,15 @@ unique step-ID namespace; each attempt is 1 and has at most one decision. Up to
 A pause retains the same isolated worker and its live JS variables. **Resume this
 checkpoint** continues there, reusing completed values without reading newer thread
 state or replaying earlier script code. It cannot retry a failed/cancelled workflow,
-answer a child's graph interrupt, change script/arguments, or resume after restart.
+answer a child's graph interrupt or change script/arguments. After restart use
+**Recover workflow** first, then resume or decide the retained checkpoint.
 An old resume request names its exact step/attempt and cannot release a later pause.
 Paused workers consume normal active workflow slots and memory; cancel unused waits.
 The execution wall budget is suspended while waiting; each wait has its own
 `pause_timeout_seconds` deadline (default 24 hours, maximum 7 days). CPU, call and
-log limits remain cumulative. Expiry fails closed and never approves anything.
+log limits remain cumulative; worker CPU limits apply per worker incarnation. Expiry fails closed and never approves anything.
 
-The host records an opaque process-local **declarative configuration revision**:
+The host records an opaque durable **declarative configuration revision**:
 app configuration, extension configuration, and allowed Custom Agent config/SOUL.
 It rechecks this revision before each new child and when continuing a checkpoint;
 changes require a new workflow. Operator limits/allowlist changes also invalidate
@@ -215,9 +221,9 @@ service state, runtime tool results or deterministic replay.
 
 The UI exposes retained outputs one at a time to keep responses bounded. Checkpoint
 receipts retain who decided, when, source attempt and output version. On restart
-these records remain inspectable but execution is interrupted; there is no automatic
-replay, authorization reattachment or continuation serialization. Start a new run
-only after considering prior external effects.
+these records remain inspectable. Compatible runs become `recoverable`; a fresh
+authenticated browser session must explicitly recover them. No credentials or
+capability handles are serialized. Start new work only after considering prior effects.
 
 ## Limits and status
 
@@ -232,6 +238,13 @@ zero file-write size allowance, a temporary working directory and a minimal
 credential-free environment. The parent kills/reaps it on termination. This is a
 capability-restricted JS interpreter in a separate process, not a general OS
 sandbox or a guarantee against native engine vulnerabilities.
+
+Wall time (`timeout_seconds`) is the only clock bound on a run. A separate cap
+of 10,000 worker turns stops scripts that spin the JS job queue; idle waits on
+pending Agent calls do not exchange frames with the worker and do not consume
+turns, so long child runs are limited only by the wall deadline.
+The local wait checks worker exits every 20 ms alongside cancellation and faults;
+an exit triggers prompt failure handling and cleanup of pending child runs.
 
 IPC frames are bounded to 48 KiB. Script JSON encoding is at most 16,000 bytes,
 arguments 4,000 bytes, task 8,000 bytes, each captured Agent output/final result
@@ -255,7 +268,8 @@ reservation/enforcement contract before advertising that guarantee.
 | paused / waiting_approval | Live worker retained at an explicit script checkpoint; occupies an active workflow slot |
 | waiting_input | Child has a graph interrupt or human-input artifact; downstream stopped |
 | needs_reconciliation | Admission/cancellation outcome uncertain; inspect child identities before new work |
-| interrupted | Supervisor externally cancelled, or unfinished record recovered after Gateway restart; no execution replay |
+| recoverable | Restart/shutdown retained a compatible execution; sign in and select Recover workflow |
+| interrupted | Legacy record, cancelled startup record, or externally interrupted supervisor; inspect child effects |
 
 Wall-clock expiry reports `failed` with `Execution deadline exceeded` and cleans
 up tracked children and the worker. A timeout after child admission reports child
@@ -279,6 +293,11 @@ Caller cancellation during launch does not abandon a committed record: the servi
 owns persistence through supervisor publication, including shutdown coordination.
 A matching retry returns that same supervised record rather than an unowned queued
 launch. This does not add execution replay or resume.
+Cancellation of a recoverable workflow is also service-owned: disconnecting the
+caller does not abandon child cleanup or its final status write. Shutdown drains
+that cleanup before releasing the store's process lock.
+If a background action fails after disconnection, the Gateway logs its exception
+type at error level so operators can inspect retained workflow and child records.
 
 Result collection anchors on the visible human input, including the host's canonical
 `__user` rewrite after dynamic context injection. Hidden system/memory reminders
@@ -288,9 +307,9 @@ human turn, because `get_state()` is the thread's latest state, not immutable ru
 output. Results are copied before further script calls. Per-step inputs remain private. Owner-scoped `get_step` returns one immutable retained
 output with its attempt and artifact version; run inspection returns bounded metadata. Child conversations remain accessible through normal host authorization.
 
-At startup, unfinished records become `interrupted`; retained IDs do not recreate
-a capability or arbitrary JS continuation. Gateway revokes handles during shutdown,
-so cleanup may require reconciliation. Paused/approval records also become interrupted; their old decisions cannot resume a new worker. Neither graph resume nor tool permission
+At startup, compatible unfinished records become `recoverable`; legacy or cancelling
+records become `interrupted`. Retained IDs do not recreate a capability by themselves. Gateway revokes handles during shutdown,
+so cleanup may require reconciliation. Paused/approval records become recoverable; committed decisions retain their exact version and can continue through the recovery contract below. Neither graph resume nor tool permission
 approval is interpreted as authenticated approval of an artifact version.
 
 ## Verify
@@ -323,3 +342,63 @@ races, limits, owner scope, service shutdown and restart records.
 The implementation uses an original small JSON bridge. `deer-workflow` was evaluated
 for API shapes but is not imported or copied: its dynamic Node module loader,
 unbounded fan-out and external CLI Agent adapters are not used here.
+
+
+## Phase 3 recovery contract
+
+Recovery is explicit and owner-scoped. In **Script workflows**, select a
+`recoverable` run and **Recover workflow**. This is a browser action, not a model
+tool. It obtains a fresh session-bound AgentRuns capability and checks current
+permissions, declarative configuration, operator limits, script/arguments, and
+runtime compatibility before starting a replacement worker. Recovery itself does
+not approve pending human output; review the same retained version and approve
+or reject it separately. Duplicate recovery requests share one active worker.
+
+The extension persists a versioned bridge journal: each emitted request frame is
+committed before host operations; each response batch is committed before it is
+returned to JavaScript. Recovery evaluates the unchanged script from its start,
+verifies its request frames against that journal, and feeds back recorded responses
+in their original order. Confirmed Agent results are reused rather than dispatched
+again. It reconstructs script variables without serializing a JS heap. `Date` and
+`Math.random` are unavailable; pass timestamps/random values in `args`. A divergent
+history stops before issuing new effects. The journal is bounded at 4 MiB and the complete record at
+8 MiB per run; the worker has a 10,000-round limit.
+
+Crash boundaries have explicit outcomes:
+
+| Boundary | Recovery behavior |
+| --- | --- |
+| Before child admission intent | A queued step may be admitted with its original identity/input/key |
+| After admission intent, before run ID is stored | `needs_reconciliation`; never resubmit an uncertain Agent call |
+| Known child run, before result is stored | Observe that run without starting it again; validate success, message attribution and host evidence before retaining the result |
+| Child interrupted/failed or external outcome uncertain | Stop; inspect child identities and reconcile effects before starting new work |
+| Approval persisted, before downstream dispatch | Reuse that exact decision and continue through the recorded boundary |
+| File captured, before workflow metadata is stored | Recover the immutable stored bytes by capture step; never overwrite with a newer source |
+
+There is no automatic retry or operator override of uncertain external effects.
+Cancellation requests interruption of known children and cannot undo committed
+business effects. Recovery does not resume a child's interrupted graph. Legacy
+Phase 1/2 records have no replay journal and remain inspection-only after restart.
+Normal shutdown preserves compatible pending waits; interrupted active children
+may require reconciliation.
+
+Execution time remaining is retained. A crash during active execution consumes
+elapsed wall time including downtime; a persisted human/pause wait suspends the
+execution budget, but its original absolute wait expiry still applies. Replay
+also consumes the remaining execution budget. The CPU limit is per worker;
+Agent-call and log quotas are retained across recovery.
+
+The workflow runtime source and QuickJS version must match. Incompatible code,
+script/arguments, configuration or operator-limit changes reject recovery rather
+than silently migrating execution. The durable configuration digest uses a
+purpose-separated HMAC derived from the host's persisted signing secret. Preserve
+that secret and the Gateway's durable run/thread/checkpoint data across restart;
+secret rotation invalidates recovery. Stored assembly evidence remains historical
+and is distinct from this configuration preflight check.
+
+Phase 3 and Phase 4 share the design: stable step/attempt and idempotency identities,
+conditional record revisions, a durable intent/result journal, and fresh authority
+are the foundations for later leases and fenced dispatch. **Phase 3 still requires
+one Gateway process per workflow store.** It does not implement replica routing,
+leases, automatic takeover or cluster-wide quotas; these belong to Phase 4. Keep
+the exclusive process lock until those guarantees exist.

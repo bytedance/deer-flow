@@ -16,6 +16,17 @@ create-only: collisions return 409, never overwrite or upsert. Ordinary creation
 and import share `_persist_new_agent`, which uses `run_drained_write` so a
 cancelled request still drains the owned persistence worker.
 
+`GET /api/skills`, `/api/skills/custom` and `/api/skills/{name}` serve every
+signed-in user, so their unexpected-failure 500s return a fixed detail. Load
+errors (e.g. a malformed `extensions_config.json`) carry host paths and stay in
+the server log.
+
+Thread upload, upload delete and shelf attach-to-thread 500s name the file but
+not the cause: staging and unlink `OSError`s carry host paths and stay in the
+server log.
+
+Skill mutation operation lists return `next_cursor: null` when `has_more` is false, including empty pages after a supplied `after_id`. The next cursor is the final returned operation only when a further page exists.
+
 `GET /api/agent-tool-groups` projects only configured group names for the
 custom-Agent settings allowlist. Never expose tool provider paths, credentials,
 or raw tool configuration through this catalog.
@@ -24,6 +35,13 @@ Custom Agent update guards apply legacy shared-file checks only when the
 resolved store is `FileAgentStore`, including the `update_agent` tool. DB
 imports retain source files for rollback; those files cannot veto SQL updates.
 Keep store resolution and filesystem checks off-loop in the HTTP route.
+Agent PUT uses `preserve_non_managed_fields(..., new_tool_groups=...)` to clear
+an inherited knowledge default when changed groups remove knowledge access.
+Explicit scope/null updates still win; unchanged groups are not a migration.
+
+Agent/profile and deployment/personal MCP mutation 500s plus the
+scheduled-task `invalid_assistant` 422 use fixed text. Log exceptions
+server-side; they can carry host paths.
 
 Committed MCP reconciliation failures are logged once by
 `fail_mcp_reconciliation`, with only the underlying exception type.

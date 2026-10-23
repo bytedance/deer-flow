@@ -156,7 +156,7 @@ ModelTool(name, description, input_schema, handler, group="extensions")
 - **限制。** 宿主会按 schema 校验每次调用的输入，上限 256 KiB。处理函数必须在 30 秒内返回，JSON 编码后的结果不能超过 64 KiB。
 - **上下文。** 处理函数收到一个 `ToolContext`：`settings`、`thread_id`（不在会话中时为 `None`）和 `principal`。对工具来说，principal **只**带 `user_id`，`is_admin` 恒为 `False`，`roles` 为空。不要让工具的授权依赖它们。
 - **错误。** 任何失败都以通用工具错误的形式交给模型：`Invalid plugin tool input.`、`Plugin result exceeds 64 KiB.`、`Plugin disabled by administrator.` 或 `Plugin tool unavailable or input rejected.`。Gateway 日志会记录插件、工具和异常类型。
-- **组装与策略。** 插件工具加入常规的工具组装流程。通过 `tool_groups` 限制过的 Agent，只有在列表包含该工具的 `group`（默认为 `extensions`）时才会拿到它。宿主之后的授权和技能工具策略与其他工具一样适用。
+- **组装与策略。** 插件工具加入常规的工具组装流程。通过 `tool_groups` 限制过的 Agent，只有在列表包含该工具的 `group`（默认为 `extensions`）时才会拿到它。宿主之后的授权与其他工具一样适用。
 
 工具描述就是提示词。写清楚工具返回什么、返回的是数据而不是指令，以及它是否只读。
 

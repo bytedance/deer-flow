@@ -68,6 +68,27 @@ def test_structural_blockers(package, kind):
     assert manifest["blockers"]
 
 
+@pytest.mark.parametrize(
+    ("filler", "magic"),
+    [
+        (b"\n", b"\x7fELF"),
+        (b"\xef\xbb\xbf", b"\x7fELF"),
+        (b" " * 63, b"\xbf\xba\xfe\xca"),
+    ],
+    ids=["newline-elf", "bom-elf", "max-offset-macho-fat64-le"],
+)
+@requires_safe_capture
+def test_filler_prefixed_binary_is_blocked(package, filler, magic):
+    storage, root = package
+    (root / "payload").write_bytes(filler + magic + b"\x00" * 64)
+
+    manifest = export.export_manifest(storage, "sample")
+
+    assert not manifest["can_export"]
+    assert manifest["revision"] is None
+    assert manifest["blockers"][0]["code"] == "skill_export_executable_binary"
+
+
 @requires_safe_capture
 def test_limits_are_not_truncated(package, monkeypatch):
     storage, root = package
@@ -319,7 +340,7 @@ def test_temp_creation_and_cleanup_within_mutation(tmp_path, monkeypatch, user_s
     active = False
 
     @contextmanager
-    def locked():
+    def locked(*, names=()):
         nonlocal active
         assert not root.exists()
         active = True

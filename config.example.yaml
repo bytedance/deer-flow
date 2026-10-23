@@ -20,7 +20,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 60
+config_version: 61
 
 # Optional operator-owned literal prompt extensions (see CONFIGURATION.md):
 # lead_prompt_overlay:
@@ -157,6 +157,8 @@ models:
   # Example: Volcengine (Doubao) model
   # - name: doubao-seed-1.8
   #   display_name: Doubao-Seed-1.8
+  #   aliases: [doubao, seed 1.8]  # Optional names for selecting this model in chat
+  #   # Model-name aliases differ from reasoning.effort.aliases (effort values).
   #   use: deerflow.models.patched_deepseek:PatchedChatDeepSeek
   #   model: doubao-seed-1-8-251228
   #   api_base: https://ark.cn-beijing.volces.com/api/v3
@@ -885,6 +887,19 @@ tools:
   # - name: list_knowledge_bases
   #   group: knowledge
   #   use: deerflow.community.ragflow.tools:list_knowledge_bases_tool
+
+  # Jsonify dataset rows (read-only). Jsonify pipelines run on a schedule,
+  # repair themselves when a source changes, and publish the result as a
+  # dataset. Each dataset has a serve URL (Integrations > REST API in Jsonify)
+  # that returns its latest rows as JSON. The URL is the credential: keep it in
+  # an env var, never in the prompt. Name each dataset; the model picks by name.
+  # - name: jsonify_dataset_rows
+  #   group: data
+  #   use: deerflow.community.jsonify.tools:dataset_rows_tool
+  #   datasets:
+  #     llm_api_pricing: $JSONIFY_LLM_PRICING_URL  # https://factory.jsonify.com/api/serve/<id>
+  #   max_rows: 100   # Cap per call; the model's limit is clamped to this
+  #   timeout: 30
 
   # LightRAG knowledge retrieval (read-only). Alternative provider for the same
   # knowledge_search tool; uncomment this entry instead of the RAGFlow one —
@@ -1703,6 +1718,13 @@ sandbox:
   # not a secure isolation boundary for shell access. Enable only for fully
   # trusted, single-user local workflows.
   allow_host_bash: false
+  # For AioSandboxProvider only: overlap likely sandbox work with the first
+  # model call. It is disabled by default and ignored by other providers.
+  prewarm: false
+  # Bound pending/ready-unused speculation per provider instance, per process.
+  # A full budget skips prewarming; foreground tools still acquire normally.
+  # This is not a total container or deployment-wide capacity limit.
+  prewarm_max_concurrent: 1
   # Optional: Mount additional host directories into the sandbox.
   # Each mount maps a host path to a virtual container path accessible by the agent.
   # Note: with LocalSandboxProvider under `make up` (docker-compose), host_path is
@@ -2953,6 +2975,11 @@ run_ownership:
 #   stream_ttl_seconds: 86400    # rolling TTL for retained stream buffers.
 #                                # Refreshed on each publish/publish_end; set 0
 #                                # to disable. This is not a run timeout.
+#   producer_lease_recovery_enabled: false  # restart-required activation gate.
+#                                # First roll this binary to every Gateway and
+#                                # drain pre-upgrade runs; then enable on every
+#                                # instance together. Never enable during a
+#                                # mixed-version rollout.
 #   recovered_stream_cleanup_delay_seconds: 60  # seconds to wait after
 #                                # publishing END for a recovered orphan run
 #                                # before deleting the stream key (max: 86400).
@@ -3283,6 +3310,24 @@ run_ownership:
 #       #           max_state_chars / cache_size / cache_ttl_seconds /
 #       #           instructions / criteria
 
+# --- Option 4b: the same risk gate over OpenAI Decisions -------------------
+#   Same provider semantics, another endpoint: one `predicate` question about the
+#   call to POST /v1/decisions, denied when its probability reaches `threshold`.
+#   Nothing in the gate is re-decided -- the strict-JSON local preflight, the
+#   character-count limit, the cache and fail_closed are the Option 4 ones, and
+#   every other Option 4 setting below applies here unchanged.
+# guardrails:
+#   enabled: true
+#   fail_closed: true
+#   provider:
+#     use: deerflow.guardrails.openai_decisions:OpenAIDecisionsGuardrailProvider
+#     config:
+#       model: <name the decision model this deployment uses>   # required: this
+#           # backend ships no default model, so batches cannot go to a model nobody chose
+#       api_key_env: OPENAI_API_KEY        # default; base_url defaults to https://api.openai.com
+#       threshold: 0.5
+#       tools: ["bash"]
+
 # ============================================================================
 # TypeSafe (Jev) Client Defaults (optional)
 # ============================================================================
@@ -3583,6 +3628,19 @@ authorization:
 #     package: deerflow-extension-example # Python distribution managed by uv
 #     use: deerflow_extension_example:install
 #     enabled: true                       # false skips import and registration
+#     # Optional, restart-required host grants. Omit for legacy behavior.
+#     # Requires durable database + run_events.backend: db for automatic updates.
+#     # Only enable on one POSIX host with local disk and ALL writers upgraded.
+#     # SQLite additionally requires exactly one Gateway process.
+#     # host_access:
+#     #   evidence:
+#     #     owners: ["exact-user-id"]
+#     #   skill_mutations:
+#     #     owners: ["exact-user-id"]     # subset of evidence.owners
+#     #     operations: [stage, check, commit, revert]
+#     #     trigger_agents: [lead_agent]  # canonical agent name, not display name
+#     #     target_skills: [example-skill]
+#     #     topology: single_host_local   # operator assertion; excludes NFS/CSI
 #     required: false                     # true makes load failure abort Gateway startup
 #                                         # (install --required opts in)
 #     host_access:                        # optional host-owned grants (restart required)

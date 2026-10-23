@@ -193,6 +193,44 @@ async def test_cancel_is_preserved_when_guarded_flush_fails(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_stream_producer_lease_brackets_terminal_commit_and_end(monkeypatch):
+    run_store = MemoryRunStore()
+    order = []
+
+    class TrackingBridge(MemoryStreamBridge):
+        async def start_producer_lease(self, run_id):
+            order.append(("start", (await run_store.get(run_id))["status"]))
+            return True
+
+        async def publish_end(self, run_id):
+            order.append(("end", (await run_store.get(run_id))["status"]))
+            await super().publish_end(run_id)
+
+        def transfer_producer_lease(self, run_id, owner_task):
+            order.append(("transfer", owner_task.get_name()))
+
+        async def finish_producer_lease(self, run_id):
+            order.append(("finish", (await run_store.get(run_id))["status"]))
+
+    run = await start_run(
+        monkeypatch,
+        event_store=MemoryRunEventStore(),
+        run_store=run_store,
+        bridge=TrackingBridge(),
+    )
+    try:
+        await asyncio.wait_for(run.worker, timeout=5)
+        assert order == [
+            ("start", "running"),
+            ("transfer", f"run-finalization-{run.record.run_id}"),
+            ("end", "success"),
+            ("finish", "success"),
+        ]
+    finally:
+        await reap(run)
+
+
+@pytest.mark.asyncio
 async def test_failed_finalizer_preserves_host_cancellation_as_primary():
     entered, release = asyncio.Event(), asyncio.Event()
     failure = OSError("finalizer failed during cancellation drain")
