@@ -81,6 +81,11 @@ class RedisCheckpointHistoryCache:
                 entry = self._serde.loads_typed((tag.decode(), payload))
                 if not isinstance(entry, dict) or not isinstance(entry.get("writes"), list):
                     raise ValueError("invalid checkpoint history entry shape")
+                # Delta materialization unpacks each pending write as a triple.
+                # A three-character string also unpacks, silently inventing a
+                # channel value, so validate the record rather than just len().
+                if any(not isinstance(write, (tuple, list)) or len(write) != 3 or not isinstance(write[0], str) or not isinstance(write[1], str) for write in entry["writes"]):
+                    raise ValueError("invalid checkpoint history write record")
             except Exception as exc:
                 # Cached history is optional. A malformed entry must not prevent
                 # rebuilding history from authoritative checkpoints.

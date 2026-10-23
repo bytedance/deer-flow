@@ -542,7 +542,9 @@ cache is performance-only — results are identical with it disabled — so it i
 never frozen and workers sharing one checkpoint database may safely run
 different cache settings. Redis thread cleanup treats a configured `key_prefix`
 as literal text, including glob metacharacters, so deletion stays within that
-namespace and thread.
+namespace and thread. Malformed Redis write records are cache misses: the whole
+entry is rebuilt from authoritative checkpoints instead of replaying partial or
+invalid history.
 
 Gateway checkpoint cleanup runs when the next run wins durable same-thread
 admission, before its first checkpoint read. It checks only the root head and
