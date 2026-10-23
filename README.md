@@ -3015,6 +3015,11 @@ become available in the next batch, when rejected additions can be retried.
 
 ### Long-Term Memory
 
+Mem0 search and management reads apply `failure_policy.read` to invalid record
+scores, categories, and metadata. `fail_open` returns an empty result;
+`fail_closed` reports a read error. A malformed later record never returns a
+partial memory list.
+
 Settings > Memory keeps successful clear, import, and fact edits visible even
 when an older background read finishes afterward. Later reads still refresh
 the view normally; failed actions preserve the existing cached memory.
