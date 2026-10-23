@@ -45,10 +45,10 @@ _RISKY_SUBSTITUTION = rf"(?:[$<]\(\s*|`\s*){_RISKY_SUBSTITUTION_EXECUTABLES}"
 # alternation cannot backtrack on long input.
 _CODE_STRING_INTERPRETERS = r"(?:(?:ba|da|k|z)?sh|python[\d.]*|perl|ruby|node|php)"
 _LEADING_FLAGS = r"(?:-\w+\s+){0,4}"
-# Flags before a stdin-redirect program also include the bare `-` ("read the
-# program from stdin") and long forms. A flag taking its value as the next word
-# (`-o pipefail`, `--rcfile f`) still hides the redirect; that spelling stays a
-# documented gap, because its value is indistinguishable from a script argument.
+# Flags before a stdin redirect or program operand also include the bare `-`
+# ("read the program from stdin") and long forms. A flag taking its value as the
+# next word (`-o pipefail`, `--rcfile f`) can hide either form; its value is
+# indistinguishable from a script argument in this heuristic (a documented gap).
 _STDIN_SCRIPT_FLAGS = r"(?:--?[-\w]*\s+){0,4}"
 
 # A command position is not always the first character: POSIX shell allows leading
