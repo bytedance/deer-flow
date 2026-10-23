@@ -90,6 +90,7 @@ from deerflow.runtime.goal import (
     visible_conversation_signature,
     write_thread_goal,
 )
+from deerflow.runtime.goal_progress import observe_goal_operations
 from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
 from deerflow.runtime.runs.stream_cleanup import close_agent_stream
 from deerflow.runtime.serialization import serialize
@@ -2483,6 +2484,7 @@ async def _persist_goal_evaluation(
     continuation_count: int | None = None,
     stand_down_reason: str | None = None,
     evidence_signature: str = "",
+    operation_progress: dict[str, Any] | None = None,
 ) -> GoalState | None:
     try:
         async with goal_thread_lock(thread_id):
@@ -2512,6 +2514,7 @@ async def _persist_goal_evaluation(
                 no_progress_count=no_progress_count,
                 stand_down_reason=stand_down_reason,
                 evidence_signature=evidence_signature,
+                operation_progress=operation_progress,
             )
             values = await write_thread_goal(
                 checkpointer,
@@ -2604,6 +2607,7 @@ async def _prepare_goal_continuation_input(
             continuation_count=continuation_count,
             stand_down_reason=stand_down_reason,
             evidence_signature=evidence_signature,
+            operation_progress=operation_progress,
         )
         if updated is not None and verdict_callback is not None:
             verdict_callback(updated, evaluation, stand_down_reason)
@@ -2622,6 +2626,7 @@ async def _prepare_goal_continuation_input(
         messages = await _materialized_checkpoint_messages(accessor, thread_id)
         conversation_signature_before = visible_conversation_signature(messages)
         evidence_signature = latest_visible_assistant_signature(messages)
+        operation_progress = observe_goal_operations(goal, messages)
 
         if _ends_on_human_input_request(messages):
             # The agent asked the user something. Continuing would tell it to keep
@@ -2632,7 +2637,7 @@ async def _prepare_goal_continuation_input(
                 reason="The turn ended on a question to the user that has not been answered.",
                 evidence_summary="",
             )
-            no_progress_count = compute_no_progress_count(goal, evaluation, evidence_signature=evidence_signature)
+            no_progress_count = compute_no_progress_count(goal, evaluation, evidence_signature=evidence_signature, operation_progress=operation_progress)
             await _persist(goal, evaluation, no_progress_count, stand_down_reason=_stand_down_reason(goal, evaluation, no_progress_count))
             return None
 
@@ -2643,7 +2648,7 @@ async def _prepare_goal_continuation_input(
                 reason="No durable assistant end-of-turn receipt was available.",
                 evidence_summary="",
             )
-            no_progress_count = compute_no_progress_count(goal, evaluation, evidence_signature=evidence_signature)
+            no_progress_count = compute_no_progress_count(goal, evaluation, evidence_signature=evidence_signature, operation_progress=operation_progress)
             await _persist(goal, evaluation, no_progress_count, stand_down_reason="no_durable_end_of_turn")
             return None
 
@@ -2682,13 +2687,13 @@ async def _prepare_goal_continuation_input(
             reason=f"The goal evaluator did not return a verdict ({type(exc).__name__}).",
             evidence_summary="",
         )
-        no_progress_count = compute_no_progress_count(goal, evaluation, evidence_signature=evidence_signature)
+        no_progress_count = compute_no_progress_count(goal, evaluation, evidence_signature=evidence_signature, operation_progress=operation_progress)
         await _persist(goal, evaluation, no_progress_count, stand_down_reason="evaluator_failed")
         return None
     if abort_event is not None and abort_event.is_set():
         return None
 
-    no_progress_count = compute_no_progress_count(goal, evaluation, evidence_signature=evidence_signature)
+    no_progress_count = compute_no_progress_count(goal, evaluation, evidence_signature=evidence_signature, operation_progress=operation_progress)
 
     # Re-check that neither the goal nor the visible conversation changed while the
     # evaluator ran — a user message or /goal clear racing the evaluation must win.
@@ -2735,7 +2740,7 @@ async def _prepare_goal_continuation_input(
             reason=f"The goal continuation could not be redacted ({type(exc).__name__}).",
             evidence_summary="",
         )
-        await _persist(goal, evaluation, compute_no_progress_count(goal, evaluation, evidence_signature=evidence_signature), stand_down_reason="evaluator_failed")
+        await _persist(goal, evaluation, compute_no_progress_count(goal, evaluation, evidence_signature=evidence_signature, operation_progress=operation_progress), stand_down_reason="evaluator_failed")
         return None
 
     next_count = int(goal.get("continuation_count", 0)) + 1

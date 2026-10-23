@@ -1673,6 +1673,16 @@ POST   /api/scheduled-tasks/preview-cron
 | `stop_condition` | string \| null | The user's "stop when …" rule, stored in its own field. Whitespace collapses to single spaces; at most 500 characters; blank means none. It is never part of `prompt`: each launch appends it as an instruction to call `stop_scheduled_task` (or, with `scheduler.tool_enabled` off, to report a met rule). |
 | `notification_group_connection_id` | string \| null | One additional connected Feishu group belonging to the task owner. Select a group binding returned by `GET /api/channels/connections`; it must record `chat_type=group` and a matching chat/workspace ID. Omitted in PATCH preserves the target; null clears it. Invalid choices return `invalid_notification_group` (422), lookup outages return `scheduler_unavailable` (503). |
 
+For one-time `schedule_spec.run_at` and `end_at` without an offset, a local time
+skipped by a timezone clock change is rejected: `422 invalid_schedule` for
+`run_at`, or `422 invalid_request` for `end_at`, including an end-time renewal
+on Resume. This applies to REST and conversation scheduling. Ambiguous local
+times retain the earlier occurrence (`fold=0`); explicit offsets preserve the
+specified instant. Unchanged live once definitions keep their previously
+accepted execution time; a changed definition or a PATCH that rearms a terminal
+task is validated again. Ordinary Resume retains the admitted stored schedule
+without revalidating its wall time; a renewed `end_at` is still checked.
+
 In a PATCH, sending `null` clears `goal_objective`, `max_runs`, `end_at` or
 `stop_condition` or `notification_group_connection_id`; for every other field `null` means unchanged (`assistant_id:
 null` restores `lead_agent`). PATCH may change `schedule_type` together with

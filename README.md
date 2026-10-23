@@ -756,6 +756,19 @@ Local services always use their internal ports (`8001`, `3000`, and `2026`).
 The root `.env` variable `PORT` configures only the published Docker ingress;
 it does not change the Next.js port used by `make dev`.
 
+Local startup waits up to 30 seconds for the Gateway port. On a slow cold start,
+set a longer wait without editing the launcher:
+
+```bash
+DEER_FLOW_GATEWAY_STARTUP_TIMEOUT=240 make dev
+```
+
+The value must be a positive integer in seconds. You can also set it in the
+root `.env`, whose value takes precedence over the shell. It applies to local
+`make dev`, `make start`, and their daemon variants, not Docker health checks
+or LLM request timeouts. Check `logs/gateway.log` for startup errors before
+increasing the wait; an expired deadline still stops the services.
+
 #### Startup Modes
 
 DeerFlow runs the agent runtime inside the Gateway API. Development mode enables hot-reload; production mode uses a pre-built frontend.
@@ -972,6 +985,7 @@ downloading a partial transcript. Public demos export their bundled messages.
 Capability Center groups plugins by office collaboration, documents and knowledge, search and research, business and data, and development and operations. The directory includes setup references alongside existing MCP configurations and Lark. Recommended integrations and built-in support do not imply an installed or verified connection; the Installed filter shows configured MCP entries and installed Lark only.
 
 Personal MCP connections configured in the web interface are persisted per user.
+Unexpected failures when changing deployment or personal MCP configuration return fixed error messages; exception details stay in server logs.
 Deployment tools remain shared. Administrators can add, edit, enable, disable and delete shared MCP servers under **Platform provided**; ordinary users see their status without controls. Personal plugin switches affect only the signed-in user's connections. See [connection ownership](docs/capability-center.md#personal-and-deployment-mcp-configuration).
 
 For plugin manifests, adapter registration, and Agent capability selection, see
@@ -1051,6 +1065,12 @@ staging files older than 24 hours. Fresh files, symlinks and unrelated files are
 anonymous `tmp*.tmp` files require manual inspection because their writer cannot be identified safely.
 
 DeerFlow can also expose user-owned IM channel connections in the workspace UI. When `channel_connections` is enabled, logged-in users can bind Telegram, Slack, Discord, Feishu/Lark, DingTalk, WeChat, WeCom, QQ, or Buzz from the sidebar / Settings > Channels. It reuses the existing outbound `channels.*` transports, so no public IP or provider callback URL is required. Incoming IM messages then run under the connected DeerFlow user account. See [IM Channel Connections](backend/docs/IM_CHANNEL_CONNECTIONS.md) for setup and security notes. Buzz backlog paging stops with a warning if timestamp-based queries cannot advance, and channel removal closes both live and backlog subscriptions.
+
+For Discord and Buzz, the local and Docker launchers detect the required optional
+dependencies when both `channel_connections.enabled` and the corresponding
+`channel_connections.<provider>.enabled` are `true`. Selecting Discord in
+`make setup` sets these flags. A nonempty `UV_EXTRAS` overrides configuration
+auto-detection, so include `discord` or `buzz` there if you set it manually.
 
 | Channel | Transport | Difficulty |
 |---------|-----------|------------|
@@ -2246,7 +2266,7 @@ Supported commands:
 
 After each Gateway-backed run, DeerFlow evaluates the visible conversation, including the assistant's tool calls and shortened tool results, against the active goal with a non-thinking evaluator model. A successful tool result alone does not satisfy a goal, and when the assistant had to guess missing or ambiguous information the evaluator reports `needs_user_input`. The evaluator must return a typed blocker (`missing_evidence`, `needs_user_input`, `run_failed`, `external_wait`, or `goal_not_met_yet`) plus visible evidence. DeerFlow only injects a hidden continuation when the latest assistant turn is durably checkpointed, the blocker is `goal_not_met_yet`, the thread did not change during evaluation, and the no-progress breaker has not fired. The safety cap defaults to 8 hidden continuations, and repeated identical non-progress evaluations stop after 2 attempts. `/goal clear` and any user-authored new input win over queued continuations. When the evaluator considers the goal satisfied, DeerFlow clears it after the run successfully finalizes and publishes the updated thread state. The same checkpoint records the completion as `goal_outcome`, which stays until the next goal change. If required artifact delivery or its receipt persistence fails, the run reports an error and the goal remains active for a later retry; this does not start another hidden continuation.
 
-An unmet goal also stops automatic continuation after a token or loop-detection hard stop; it stays active for a later user turn.
+For tool-using turns, successful operation results drive the no-progress count: changing only reply wording or a sandbox tool's UI explanation does not reset it, while newly observed work can keep it going. Text-only turns keep their reply-based check. An unmet goal still stops automatic continuation after a token or loop-detection hard stop and stays active for a later user turn.
 
 Regenerating an earlier response keeps the goal currently set for the chat and its used continuation budget. It does not restore a goal that was cleared or achieved. The earlier answer's completion record is removed when its historical checkpoint is replayed.
 
@@ -2692,6 +2712,8 @@ DeerFlow doesn't just *talk* about doing things. It has its own computer.
 Each task gets its own execution environment with a full filesystem view — skills, workspace, uploads, outputs. The agent reads, writes, and edits files. It can view images and, when configured safely, execute shell commands.
 
 The read-before-write gate ties each read mark to that `read_file` call's result, including custom tools returning multi-message `Command` updates. An unrelated result cannot authorize a write after a failed read or hide a successful read.
+
+On Linux and macOS, local sandbox `write_file` replacements and `str_replace` stage complete text before replacing the destination, so write, flush or publication errors retain the previous file. Existing write access is checked; ownership, permission bits, ACLs and extended attributes are transferred before writing staging content. Failure to transfer metadata aborts the save. Successful revisions get a fresh modification time, including empty saves; source-descriptor cleanup errors are warnings and do not change the save result. Files with set-id bits, macOS file flags or content-bound Linux privilege attributes are refused unchanged. Replacement requires parent-directory write access and publishes a new inode; other hard links retain the previous version. Symlinks follow the existing path-validation rules. Append writes, other host platforms (including Windows), shell writes and remote providers keep their existing behavior. This is not a concurrent-writer or power-loss recovery guarantee.
 
 Loop warnings let agents save collected results before their final answer. If the save is blocked by the read-before-write gate, the agent may read the target file and retry the save once. A looping or stopped tool must be replaced by an available alternative; if no permitted save path exists or the retry fails, the final answer includes the collected results and reports that the file was not saved. Recovery calls still count toward the loop limits, and a hard stop prevents further tool execution.
 
@@ -3410,6 +3432,7 @@ schedule tools keep their existing inputs. See the [group delivery guide](backen
 ### Lifecycle, safety caps and stop conditions
 
 - The tasks page and the REST API (`POST` / `PATCH /api/scheduled-tasks`) accept the same per-run goal (`goal_objective`), safety cap (`max_runs`, `end_at`) and stop condition (`stop_condition`) as a conversation. Sending `null` in a PATCH clears any of these four; an `end_at` without a UTC offset is wall-clock time in the task's timezone.
+- New or changed one-time `run_at` values and submitted `end_at` values without an offset must exist in the chosen timezone. For these fields, a time skipped by a daylight-saving transition is rejected; choose a valid local time or supply an explicit instant with a UTC offset. Repeated local times keep the earlier occurrence unless an offset selects the later one. Recurring cron schedules keep their existing runtime behavior: a fixed-time occurrence in a skipped local time fires at the shifted time that day.
 - A stop condition is the user's "stop when …" rule. It is stored in its own field (migration `0031`), never inside the task instructions. Only when a run starts does DeerFlow append it to that run's message and ask the run to call `stop_scheduled_task` when the rule holds. While `scheduler.tool_enabled` is on, every scheduled run can stop its own schedule, whether a chat or the tasks page created the task; with it off, the run is asked to report a met rule instead of calling a tool it does not have.
 - Goal tasks created on the tasks page are now evaluated like chat-created ones, and their runs also receive the saved notes and the previous-run reference.
 - Resume computes the next run from now, so a long pause never causes a catch-up run. A one-time task whose time has passed returns `422 once_time_passed` and needs a new time. Resuming an active task changes nothing; pausing a finished task returns `409 task_finished`.
