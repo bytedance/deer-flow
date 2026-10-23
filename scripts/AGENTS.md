@@ -51,6 +51,12 @@ trimming its contents. Offline CLI coverage:
 
 ## Service Startup Contracts
 
+`serve.sh` reads `DEER_FLOW_GATEWAY_STARTUP_TIMEOUT` after root `.env` for
+local Gateway port readiness (positive integer seconds, default 30). Reject
+invalid values before cleanup/startup except `--stop`; keep frontend/nginx waits.
+Launcher/wait-loop tests (processes, readiness and time stubbed):
+`backend/tests/test_serve_gateway_startup_timeout.py`.
+
 Both launchers call `sandbox-mode.sh` via Bash; keep it Bash/awk-only.
 Dev passes `$PROJECT_ROOT/config.yaml`; prod passes `$DEER_FLOW_CONFIG_PATH`.
 For AIO, omitted/blank/empty-quoted/YAML-null URLs (including comments) select
@@ -81,6 +87,15 @@ with or without a leading BOM so the first section remains detectable.
 `DEER_FLOW_PROJECT_ROOT/config.yaml`, before the legacy checkout candidates.
 Keep this lookup standard-library-only; test shadowing checkout configs and
 the CLI under `python -S` in `backend/tests/test_detect_uv_extras.py`.
+For Discord and Buzz, detect the provider extra when either legacy
+`channels.<provider>.enabled` is true or both `channel_connections.enabled`
+and `channel_connections.<provider>.enabled` are true. Keep these gates aligned
+with `enabled_transport_providers()` in the channel service, including setup
+wizard output. The provider set includes only channel providers declared in
+`backend/pyproject.toml` under `[project.optional-dependencies]`; update it when
+a channel gains or loses an extra. Providers whose SDKs are core dependencies
+must not be added to this set. Nonempty `UV_EXTRAS` continues to override
+config-derived extras.
 `serve.sh`'s config-presence gate also accepts the project-root file when the
 checkout has no config. `tests/test_serve_config_presence.py` runs the full
 launcher through dependency detection with service operations stubbed.
@@ -458,7 +473,7 @@ Memory backend async boundary:
   `failure_policy.read: fail_closed`; other recall errors preserve the existing
   log-and-empty-context behavior.
 
-CI runs these regression tests for every pull request via [.github/workflows/backend-unit-tests.yml](../.github/workflows/backend-unit-tests.yml).
+CI: `.github/workflows/backend-unit-tests.yml` runs these tests on every PR.
 
 Agentic browser sessions are process-local. Browser use is refused when the Gateway runs
 more than one worker process, because ordinary uvicorn worker dispatch does not provide

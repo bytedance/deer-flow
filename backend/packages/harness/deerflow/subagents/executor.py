@@ -5,7 +5,6 @@ import atexit
 import json
 import logging
 import os
-import re
 import sys
 import threading
 import uuid
@@ -62,6 +61,7 @@ from deerflow.tracing import (
     build_tracing_callbacks,
     inject_langfuse_metadata,
 )
+from deerflow.utils.bash_exit import BASH_TOOL_NAMES, bash_exit_status
 from deerflow.utils.messages import message_content_to_text
 
 if TYPE_CHECKING:
@@ -471,22 +471,12 @@ def _harvest_tool_receipts(
 
 
 #: Bash-family tool names whose calls count as recorded command executions.
-_BASH_EVIDENCE_TOOL_NAMES = frozenset({"bash", "bash_tool"})
+_BASH_EVIDENCE_TOOL_NAMES = BASH_TOOL_NAMES
 #: Bounds for the harvested evidence: only the newest few executions travel,
 #: with command/output text capped (test summaries print at the tail).
 _BASH_EVIDENCE_MAX_ENTRIES = 20
 _BASH_EVIDENCE_COMMAND_CHARS = 500
 _BASH_EVIDENCE_OUTPUT_TAIL_CHARS = 1000
-
-#: Exit-status markers in bash *output text*: a nonzero exit does not raise —
-#: local sandboxes append ``Exit Code: N``; e2b/opensandbox emit
-#: ``Command exited with code N`` when the command produced no output.
-_BASH_EXIT_CODE_MARKER_RE = re.compile(r"Exit Code: (-?\d+)\s*$")
-#: Remote providers emit ``Command exited with code N`` ONLY as the complete
-#: output of a silent command — anchor it to the whole (trimmed) content so
-#: a successful command that merely prints the phrase while exercising an
-#: error path is not misrecorded as failed.
-_BASH_EXITED_WITH_CODE_RE = re.compile(r"Command exited with code (-?\d+)")
 
 
 def _bash_evidence_status(content: str, meta_status: str) -> tuple[str, str | None]:
@@ -495,16 +485,10 @@ def _bash_evidence_status(content: str, meta_status: str) -> tuple[str, str | No
     Returns ``(status, marker)``: the marker text actually seen (e.g. ``Exit
     Code: 5``), so consumers can report it instead of asserting a failure the
     harness cannot distinguish from the command's own trailing text. The
-    explicit marker is authoritative: ``deerflow_tool_meta`` reports the
-    generic ToolMessage status, which stays ``success`` for a nonzero exit
-    rendered as ordinary output text.
+    explicit marker takes precedence over generic metadata in old checkpoints
+    or provider stamps that report ``success`` for a nonzero shell exit.
     """
-    match = _BASH_EXIT_CODE_MARKER_RE.search(content) or _BASH_EXITED_WITH_CODE_RE.fullmatch(content.strip())
-    if match is None:
-        return meta_status, None
-    # Signal-killed local subprocesses report signed codes (Exit Code: -9);
-    # only an exact zero is a success.
-    return ("success" if int(match.group(1)) == 0 else "error"), " ".join(match.group(0).split())
+    return bash_exit_status(content) or (meta_status, None)
 
 
 def _harvest_shell_persistence(final_state: Any) -> bool | None:
@@ -1038,9 +1022,10 @@ class SubagentExecutor:
         # this exact set so a subagent cannot activate an undisclosed skill.
         self._available_skill_names: set[str] = set()
         # Guard middlewares that expose ``consume_stop_reason`` (currently
-        # ``TokenBudgetMiddleware`` and ``LoopDetectionMiddleware``), captured in
-        # ``_create_agent`` so ``_aexecute`` can read each after the run and
-        # surface whichever cap fired (token_capped / loop_capped) to the lead
+        # ``TokenBudgetMiddleware``, ``LoopDetectionMiddleware`` and
+        # ``ModelLengthFinishReasonMiddleware``), captured in ``_create_agent``
+        # so ``_aexecute`` can read each after the run and surface whichever
+        # cap fired (token_capped / loop_capped / model_length_capped) to the lead
         # (#3875 Phase 2). Collected as a list — every guard must be checked,
         # not just the first — because the v2 contract advertises more than one
         # cap reason.
@@ -1185,7 +1170,8 @@ class SubagentExecutor:
                 self.config.name,
             )
         # Collect every guard middleware that exposes ``consume_stop_reason``
-        # (TokenBudgetMiddleware, LoopDetectionMiddleware) so _aexecute can read
+        # (TokenBudgetMiddleware, LoopDetectionMiddleware,
+        # ModelLengthFinishReasonMiddleware) so _aexecute can read
         # each after the run and surface whichever cap fired. Duck-typed
         # (``hasattr``) so this file needs no import of the middleware classes;
         # a list (not ``next(...)``) so every guard is checked and a later one
@@ -1344,7 +1330,9 @@ class SubagentExecutor:
         Checks every guard middleware that exposes ``consume_stop_reason``
         (collected in :meth:`_create_agent`) and returns the first non-``None``
         reason — ``"token_capped"`` when the token-budget hard stop fired,
-        ``"loop_capped"`` when loop detection forced a stop, otherwise ``None``.
+        ``"loop_capped"`` when loop detection forced a stop,
+        ``"model_length_capped"`` when the provider cut the response at its
+        output limit, otherwise ``None``.
         Each guard's cap does not raise (the run still completes with a final
         answer), so this is how the executor learns a completion was actually
         capped. Typically at most one guard fires per run, but checking all of

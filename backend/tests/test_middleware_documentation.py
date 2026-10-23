@@ -88,9 +88,9 @@ def test_lifecycle_return_contract_is_explicit(path: Path) -> None:
 def test_middleware_placement_scope_is_explicit(path: Path) -> None:
     content = (REPO_ROOT / path).read_text(encoding="utf-8")
     marker = (
-        "对于主 Agent 链，它位于终态响应、模型长度、安全和澄清尾部之前；子 Agent 链没有终态响应、模型长度或澄清阶段"
+        "对于主 Agent 链，它位于终态响应、模型长度、安全和澄清尾部之前；子 Agent 链没有终态响应或澄清阶段"
         if "/zh/" in path.as_posix()
-        else "On the lead-agent pipeline, it runs before the terminal-response, model-length, safety, and clarification tail; subagents have no terminal-response, model-length, or clarification stage"
+        else "On the lead-agent pipeline, it runs before the terminal-response, model-length, safety, and clarification tail; subagents have no terminal-response or clarification stage"
     )
     assert marker in " ".join(content.split())
 
@@ -128,9 +128,12 @@ def test_middleware_order_includes_configured_extension_tail(path: Path) -> None
 def test_subagent_summarization_optionality_is_explicit(path: Path) -> None:
     content = " ".join((REPO_ROOT / path).read_text(encoding="utf-8").split())
     marker = (
-        "因此配置中间件之后会继续执行可选的安全防护、`DurableContextMiddleware`、可选的 `SummarizationMiddleware`，随后是 `SubagentDateContextMiddleware` 和 `SystemMessageCoalescingMiddleware`。"
+        "因此配置中间件之后会继续执行模型长度防护、可选的安全防护、`DurableContextMiddleware`、可选的 `SummarizationMiddleware`，随后是 `SubagentDateContextMiddleware` 和 `SystemMessageCoalescingMiddleware`。"
         if "/zh/" in path.as_posix()
-        else "so configured middleware is followed by the optional safety guard, `DurableContextMiddleware`, optional `SummarizationMiddleware`, then `SubagentDateContextMiddleware` and `SystemMessageCoalescingMiddleware`."
+        else (
+            "so configured middleware is followed by the model-length guard, the optional safety guard, `DurableContextMiddleware`, "
+            "optional `SummarizationMiddleware`, then `SubagentDateContextMiddleware` and `SystemMessageCoalescingMiddleware`."
+        )
     )
     assert marker in content
 
