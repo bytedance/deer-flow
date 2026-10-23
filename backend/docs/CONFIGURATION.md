@@ -1126,6 +1126,34 @@ is resolved once before transport so it can remain constant across retry attempt
 Override debug diagnostics show the effective endpoint without URL credentials,
 query or fragment; result-URL guards do not restrict the operator's API host.
 
+#### Exa endpoints
+
+To use an Exa-compatible provider for the Exa `web_search` and `web_fetch`
+tools, set `EXA_BASE_URL` to its base URL (without `/search` or `/contents`)
+and `EXA_API_KEY` to that provider's key. Each tool entry can instead set its
+own `base_url`; a non-blank string there takes precedence over `EXA_BASE_URL`.
+When neither is set, the SDK default `https://api.exa.ai` is used.
+
+```yaml
+tools:
+  - name: web_search
+    group: web
+    use: deerflow.community.exa.tools:web_search_tool
+    base_url: https://exa-compatible.example
+    api_key: $EXA_COMPATIBLE_API_KEY
+```
+
+Overrides must be absolute `http://` or `https://` URLs with a host and valid
+port, without a query string or fragment. Surrounding whitespace and trailing
+slashes are removed. An invalid override returns a configuration error that
+does not echo the configured value and does not fall back to another host. The
+key is sent to the configured host in the `x-api-key` header.
+
+The endpoint fetches pages for `web_fetch` in its own network, so `web_fetch`
+screens a configured base URL like the other delegated fetch backends: a host
+that resolves to a loopback, private or unverifiable address is refused unless
+the tool entry sets `network_isolation_confirmed: true`.
+
 #### Serper source filters
 
 ```yaml
@@ -1946,6 +1974,8 @@ models:
 - `BRAVE_SEARCH_API_KEY` - Brave Search API key for `web_search` and `image_search`
 - `SERPER_API_KEY` - Serper (Google Search/Images API) key for `web_search` and `image_search`
 - `SERPER_BASE_URL` - Optional operator-controlled Serper-compatible base URL for both tools; each tool's `base_url` takes precedence. The provider key is sent to the configured host in `X-API-KEY`, never a query parameter. See [Serper endpoints](#serper-endpoints).
+- `EXA_API_KEY` - [Exa](https://exa.ai) key for `web_search` and `web_fetch`
+- `EXA_BASE_URL` - Optional operator-controlled Exa-compatible base URL for both Exa tools; each tool's `base_url` takes precedence. See [Exa endpoints](#exa-endpoints).
 - `SERPLY_API_KEY` - [Serply](https://serply.io) key for `web_search` (Google Search, plus Google News and Google Scholar via `vertical`)
 - `GROUNDROUTE_API_KEY` - GroundRoute meta-search API key for `web_search` and `web_fetch` (routes across Serper, Brave, Exa, Tavily, Firecrawl, Perplexity with gain-share pricing)
 - `SOFYA_API_KEY` - [Sofya](https://sofya.co) key for `web_search` and `web_fetch`
