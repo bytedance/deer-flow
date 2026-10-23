@@ -245,3 +245,31 @@ class PendingCardRegistry:
             tokens = [token for token, entry in self._entries.items() if (entry["chat_id"], entry["originator_open_id"], entry["card_message_id"]) == (chat_id, originator_open_id, card_message_id)]
             for token in tokens:
                 del self._entries[token]
+
+    def discard_thread(self, thread_id: str) -> int:
+        """Retire all pending cards registered for a given thread."""
+        with self._lock:
+            tokens = [token for token, entry in self._entries.items() if entry.get("thread_id") == thread_id]
+            for token in tokens:
+                del self._entries[token]
+            return len(tokens)
+
+    def prune_expired(self, now: float | None = None) -> int:
+        """Prune all expired entries from the registry and return the count."""
+        now = time.time() if now is None else now
+        with self._lock:
+            expired = [token for token, pending in self._entries.items() if now - pending.get("created_at", 0) > self._ttl_seconds]
+            for token in expired:
+                del self._entries[token]
+            return len(expired)
+
+    def get_pending_entry(self, callback_token: str) -> PendingCardEntry | None:
+        """Read-only lookup of a pending entry without consuming it."""
+        with self._lock:
+            entry = self._entries.get(callback_token)
+            return dict(entry) if entry is not None else None  # type: ignore[return-value]
+
+    def __len__(self) -> int:
+        """Return the number of tracked pending cards."""
+        with self._lock:
+            return len(self._entries)

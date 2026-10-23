@@ -196,6 +196,42 @@ class TestPendingCardRegistry:
             entry, _ = registry.consume_if_originator(f"callback-{index}", "ou_originator", option_id="option-1", option_value="Alpha")
             assert entry is not None
 
+    def test_discard_thread_retires_all_matching_cards(self):
+        registry = PendingCardRegistry()
+        registry.register(**self._entry(callback_token="cb-1", thread_id="thread-target"))
+        registry.register(**self._entry(callback_token="cb-2", thread_id="thread-target"))
+        registry.register(**self._entry(callback_token="cb-3", thread_id="thread-other"))
+        assert len(registry) == 3
+
+        pruned = registry.discard_thread("thread-target")
+        assert pruned == 2
+        assert len(registry) == 1
+        entry, _ = registry.consume_if_originator("cb-3", "ou_originator", option_id="option-1", option_value="Alpha")
+        assert entry is not None
+
+    def test_prune_expired_removes_stale_cards_and_returns_count(self):
+        registry = PendingCardRegistry(ttl_seconds=10)
+        registry.register(**self._entry(callback_token="cb-fresh"))
+        registry.register(**self._entry(callback_token="cb-stale"))
+        registry._entries["cb-stale"]["created_at"] -= 15
+
+        cleaned = registry.prune_expired()
+        assert cleaned == 1
+        assert len(registry) == 1
+        assert "cb-fresh" in registry._entries
+        assert "cb-stale" not in registry._entries
+
+    def test_get_pending_entry_provides_read_only_view(self):
+        registry = PendingCardRegistry()
+        registry.register(**self._entry(callback_token="cb-inspect", thread_id="th-100"))
+        view = registry.get_pending_entry("cb-inspect")
+        assert view is not None
+        assert view["thread_id"] == "th-100"
+        assert len(registry) == 1
+        consumed, _ = registry.consume_if_originator("cb-inspect", "ou_originator", option_id="option-1", option_value="Alpha")
+        assert consumed is not None
+        assert registry.get_pending_entry("cb-inspect") is None
+
 
 class TestFeishuChannelButtonCardWiring:
     """Channel-level wiring: when the flag and payload line up, final
