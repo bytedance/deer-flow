@@ -8,7 +8,7 @@ import yaml
 
 import deerflow.config.app_config as app_config_module
 from deerflow.config.app_config import get_app_config, reload_app_config, reset_app_config, set_app_config
-from deerflow.config.extensions_config import reset_extensions_config, set_extensions_config
+from deerflow.config.extensions_config import reset_extensions_config
 
 
 def _write_extensions_config(path: Path) -> None:
