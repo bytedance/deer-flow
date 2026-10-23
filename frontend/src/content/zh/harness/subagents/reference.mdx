@@ -75,7 +75,7 @@ invoke_acp_agent(...)   # 外部 ACP Agent，见子 Agent 目录
 | 字段                      | 取值                                                                  |
 | ------------------------- | --------------------------------------------------------------------- |
 | `subagent_status`         | `completed`、`failed`、`cancelled`、`timed_out`、`polling_timed_out` |
-| `subagent_stop_reason`    | `token_capped`、`turn_capped`、`loop_capped`                          |
+| `subagent_stop_reason`    | `token_capped`、`turn_capped`、`loop_capped`、`model_length_capped`   |
 | 验收 leaf                 | `checked` 与 `holds` 两个布尔；渲染为 `holds` / `does not hold` / `UNVERIFIED` |
 | 回执核对                  | `resolved`、`failed`、`unknown`、`no_citation_claims`                 |
 | 委派账本状态              | `in_progress` 加上述五个终态                                          |

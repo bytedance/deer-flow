@@ -114,7 +114,7 @@ through additive `stop_reason`, never a new status enum.
 
 `_aexecute` duck-types every middleware's per-run `consume_stop_reason(run_id)`
 and uses the first non-`None` reason. Usable final answers or turn-cap partials
-remain `completed` with `token_capped|turn_capped|loop_capped`; a turn cap without
+remain `completed` with `token_capped|turn_capped|loop_capped|model_length_capped`; a turn cap without
 usable work is `failed` with `turn_capped`. `SubagentResult.stop_reason` flows
 through `_task_result_command`, `format_subagent_result_message` (capped labels),
 and `make_subagent_additional_kwargs` (`subagent_stop_reason` alongside status).

@@ -14,7 +14,7 @@ export interface SubtaskResultUpdate {
   usage?: Subtask["usage"];
   /**
    * Why a guardrail cap ended the run early (``token_capped`` / ``turn_capped``
-   * / ``loop_capped``), when the backend stamps ``subagent_stop_reason``. A
+   * / ``loop_capped`` / ``model_length_capped``), when the backend stamps ``subagent_stop_reason``. A
    * capped run keeps a normal pill status — ``completed`` when it produced a
    * final answer, ``failed`` when it did not — so this field is the only
    * signal that distinguishes "finished" from "capped" (#3875 Phase 2).
@@ -54,6 +54,7 @@ const SUBAGENT_STOP_REASON_VALUES = [
   "token_capped",
   "turn_capped",
   "loop_capped",
+  "model_length_capped",
 ] as const;
 const STRUCTURED_SUBAGENT_KEYS = [
   SUBAGENT_STATUS_KEY,

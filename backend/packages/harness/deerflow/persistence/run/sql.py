@@ -807,17 +807,22 @@ class RunRepository(RunStore):
             return LeaseRenewal(renewed=False)
         return LeaseRenewal(renewed=True, cancel_action=row.cancel_action)
 
-    async def request_cancel(self, run_id: str, *, action: str) -> str | None:
+    async def request_cancel(self, run_id: str, *, action: str, execution_fence=None, user_id=None) -> str | None:
         """Atomically persist the first cancellation action on an active run."""
         if action not in ("interrupt", "rollback"):
             raise ValueError(f"Unsupported cancellation action: {action}")
         now = datetime.now(UTC)
         async with self._sf() as session:
             change_seq = await self._next_change_seq(session)
+            if execution_fence is not None:
+                from deerflow.persistence.extension_leases.fence import lock_execution_fence
+
+                await lock_execution_fence(session, execution_fence, user_id)
             result = await session.execute(
                 update(RunRow)
                 .where(
                     RunRow.run_id == run_id,
+                    *([RunRow.user_id == user_id] if execution_fence is not None else []),
                     RunRow.status.in_(("pending", "running")),
                 )
                 .values(
@@ -1008,6 +1013,7 @@ class RunRepository(RunStore):
         evidence_origin: str = "unknown",
         evidence_agent_id: str | None = None,
         idempotency_request: dict[str, Any] | None = None,
+        execution_fence=None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """Atomically create a run with cross-process thread-uniqueness.
 
@@ -1057,6 +1063,10 @@ class RunRepository(RunStore):
             # mutator. One position covers this atomic set of changes; run_id
             # provides deterministic ordering within the position.
             change_seq = await self._next_change_seq(session)
+            if execution_fence is not None:
+                from deerflow.persistence.extension_leases.fence import lock_execution_fence
+
+                await lock_execution_fence(session, execution_fence, resolved_user_id)
             claimed: list[dict[str, Any]] = []
 
             if idempotency_key is not None:

@@ -71,6 +71,7 @@ from deerflow.runtime.events.message_identity import attach_message_seq, message
 from deerflow.runtime.goal import (
     DEFAULT_MAX_GOAL_CONTINUATIONS,
     DEFAULT_MAX_NO_PROGRESS_CONTINUATIONS,
+    GoalEvaluationFormatError,
     GoalWriteConflict,
     _call_checkpointer_method,
     _is_visible_message,
@@ -2660,20 +2661,36 @@ async def _prepare_goal_continuation_input(
 
     try:
         evaluator_model = evaluator_model_factory() if evaluator_model_factory is not None else None
-        evaluation = await evaluate_goal_completion(
-            goal,
-            messages,
-            model=evaluator_model,
-            model_name=model_name,
-            app_config=app_config,
-            thread_id=thread_id,
-            user_id=user_id,
-            deerflow_trace_id=deerflow_trace_id,
-            task_store=task_store,
-            extensions=extensions,
-            interaction_policy=interaction_policy,
-            usage_callback=usage_callback,
-        )
+        for attempt in range(2):
+            try:
+                evaluation = await evaluate_goal_completion(
+                    goal,
+                    messages,
+                    model=evaluator_model,
+                    model_name=model_name,
+                    app_config=app_config,
+                    thread_id=thread_id,
+                    user_id=user_id,
+                    deerflow_trace_id=deerflow_trace_id,
+                    task_store=task_store,
+                    extensions=extensions,
+                    interaction_policy=interaction_policy,
+                    usage_callback=usage_callback,
+                )
+                break
+            except GoalEvaluationFormatError:
+                if attempt:
+                    raise
+                if abort_event is not None and abort_event.is_set():
+                    return None
+                current_goal, current_checkpoint = await _reread_goal_and_checkpoint(checkpointer, thread_id)
+                if not _goal_instance_matches(goal, current_goal) or current_checkpoint is None:
+                    return None
+                if _checkpoint_id(current_checkpoint) != checkpoint_id_before or visible_conversation_signature(await _materialized_checkpoint_messages(accessor, thread_id)) != conversation_signature_before:
+                    return None
+                if abort_event is not None and abort_event.is_set():
+                    return None
+                logger.info("Retrying one malformed goal evaluation for thread %s after run %s", thread_id, run_id)
     except Exception as exc:
         logger.warning("Goal evaluator failed for thread %s after run %s", thread_id, run_id, exc_info=True)
         if abort_event is not None and abort_event.is_set():

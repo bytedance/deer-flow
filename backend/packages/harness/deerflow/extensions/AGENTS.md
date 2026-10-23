@@ -22,11 +22,18 @@ Packaged extensions use one PEP 621 entry point in the
 `deerflow.extensions` group, for example
 `example = "deerflow_extension_example:install"`. The operator CLI is dispatched from
 the existing `deerflow` console script to `extensions/cli.py` and exposes only these
-surfaces: `install SOURCE [--yes]`, `upgrade SOURCE [--yes]`, `list`, `enable NAME`,
+surfaces: `install SOURCE [--yes]`, `upgrade SOURCE [--yes]`, `list [--json]`, `enable NAME`,
 `disable NAME`, and `remove NAME`. `NAME` resolves against the entry-point name, distribution name, or
 `module:install` value. The root `make extension-*` targets are convenience wrappers;
 because they execute from `backend/`, documentation should use absolute local source
 paths with `SOURCE=` unless backend-relative behavior is intentional.
+
+`list --json` serializes the existing `list_configured()` inventory as an ordered
+array with only `name`, `package`, `entry_point`, `enabled`, and `required`. Keep
+the manager's `"-"` package fallback and schema defaults/coercion. Validate the
+whole inventory before writing stdout; failures use the existing stderr/non-zero
+path. Listing must not resolve entry points, mutate files, or expose private config
+or source metadata. CLI coverage lives in `tests/test_extension_list_json.py`.
 
 `ExtensionManager` owns the package/config transaction. Install runs a controlled
 `uv add --project <backend> --group extensions --no-workspace --no-sync -- <source>`, updates the dedicated
@@ -465,6 +472,9 @@ idempotency isolation; request-resolved handles use `for_plugin` explicitly.
 `configuration_revision` (API 0.2.7) rechecks grants and returns a process-local
 HMAC of declarative app/extensions and Agent config/SOUL, not effective assembly,
 memory, referenced files or provider state. Never expose raw secret configuration.
+Durable revisions use the shared host signing secret. Preserve Python set identity
+until canonical encoding: unordered config sets must hash identically across
+process hash seeds, while ordered model/tool lists must retain their order.
 `configuration_evidence` reads persisted, run-bound actual assembly versions; the
 worker captures descriptors even without observers and persists before execution.
 `read_artifact` authorizes bounded output bytes off-loop; extensions retain immutable
@@ -480,3 +490,9 @@ plugin boundary, and the lifecycle hook would be a durable core contract with
 a single consumer. The generator sits behind the narrow `enqueue_summary`
 interface so a future document-lifecycle hook can lift generation into an
 extension without touching schema or rendering.
+
+Extension API 0.2.9 adds `ExecutionFence` to AgentRuns.start/cancel. Accept only the
+capability's plugin namespace and recheck the authenticated user as usual. Stamp
+fences on internal request state, never HTTP context/config. Forward admission to
+the RunStore transaction; require run heartbeats and a shared stream bridge. Fenced
+cancel uses the durable cancellation request, consumed by the existing child owner.
