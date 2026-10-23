@@ -110,6 +110,7 @@ def test_replace_with_retry_retries_windows_sharing_errors(monkeypatch):
             error.winerror = 5
             raise error
 
+    monkeypatch.setattr(file_lock.os, "name", "nt")
     monkeypatch.setattr(file_lock.os, "replace", replace)
     monkeypatch.setattr(file_lock.time, "sleep", sleeps.append)
 
@@ -117,6 +118,27 @@ def test_replace_with_retry_retries_windows_sharing_errors(monkeypatch):
 
     assert len(attempts) == 3
     assert sleeps == [0.05, 0.05]
+
+
+def test_replace_with_retry_does_not_treat_fake_winerror_as_sharing_error_on_posix(monkeypatch):
+    from deerflow.utils import file_lock
+
+    error = PermissionError(13, "posix permission denied")
+    error.winerror = 5
+    calls = []
+
+    def replace(_source, _target):
+        calls.append(True)
+        raise error
+
+    monkeypatch.setattr(file_lock.os, "name", "posix")
+    monkeypatch.setattr(file_lock.os, "replace", replace)
+
+    with pytest.raises(PermissionError) as caught:
+        file_lock.replace_with_retry("source", "target")
+
+    assert caught.value is error
+    assert calls == [True]
 
 
 def test_replace_with_retry_does_not_retry_permanent_errors(monkeypatch):
