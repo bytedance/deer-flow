@@ -31,13 +31,61 @@ class Remote:
 
 
 @pytest.fixture
-def provider(monkeypatch):
+def exit_callbacks(monkeypatch):
+    callbacks = []
+    monkeypatch.setattr("deerflow.community.tenki.provider.atexit.register", callbacks.append)
+    return callbacks
+
+
+@pytest.fixture
+def provider(monkeypatch, exit_callbacks):
     config = dict(idle_timeout=0, replicas=3, api_key=None, base_url=None, workspace_id="synthetic", sticky=False, max_duration=60, image=None, cpu_cores=None, memory_mb=None, environment={}, home_dir="/home/tenki")
     monkeypatch.setattr(TenkiSandboxProvider, "_load_config", lambda self: config)
-    monkeypatch.setattr("deerflow.community.tenki.provider.atexit.register", lambda callback: None)
     value = TenkiSandboxProvider()
     yield value
     value.shutdown()
+
+
+def test_atexit_logs_incomplete_cleanup_without_losing_retry(provider, exit_callbacks, caplog):
+    remote = Remote([OSError("synthetic termination unavailable") for _ in range(2)])
+    box = TenkiSandbox("synthetic", remote)
+    provider._sandboxes[box.id] = box
+    with pytest.raises(RuntimeError, match="Tenki shutdown incomplete"):
+        provider.shutdown()
+
+    caplog.clear()
+    exit_callbacks[0]()
+    assert remote.calls == 2
+    assert provider._pending_closes[id(box)] is box
+    assert not provider._shutdown_complete
+    assert not provider._accepting
+    assert "Tenki shutdown incomplete: 0 acquires and 1 terminations pending" in caplog.text
+    assert all(record.exc_info is None for record in caplog.records)
+
+    provider.shutdown()
+    assert remote.closed
+    assert remote.calls == 3
+    assert provider._shutdown_complete
+    assert not provider._pending_closes
+
+
+def test_atexit_success_is_quiet(provider, exit_callbacks, caplog):
+    remote = Remote()
+    box = TenkiSandbox("synthetic", remote)
+    provider._sandboxes[box.id] = box
+    exit_callbacks[0]()
+    exit_callbacks[0]()
+    assert remote.closed
+    assert remote.calls == 1
+    assert provider._shutdown_complete
+    assert not caplog.records
+
+
+def test_atexit_preserves_unexpected_shutdown_errors(provider, exit_callbacks, monkeypatch):
+    with monkeypatch.context() as patch:
+        patch.setattr(provider, "_stop_idle_checker", lambda: (_ for _ in ()).throw(RuntimeError("reaper still running")))
+        with pytest.raises(RuntimeError, match="reaper still running"):
+            exit_callbacks[0]()
 
 
 @pytest.mark.parametrize("replacement_location", ["active", "warm"])

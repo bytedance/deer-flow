@@ -873,6 +873,7 @@ The optional [Tenki provider](backend/packages/harness/deerflow/community/tenki/
 retains failed termination handles for retry and rejects late acquisitions after
 reset or shutdown. If shutdown reports outstanding work, retry after its SDK
 workers finish or the remote service recovers.
+At process exit, outstanding cleanup is logged without an exception traceback.
 
 Sandbox references in conversation state are server-owned. External run and
 thread-state APIs reject caller-supplied `sandbox` values; when restoring a

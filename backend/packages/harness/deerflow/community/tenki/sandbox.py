@@ -137,6 +137,8 @@ class TenkiSandbox(Sandbox):
         confirms the session is already gone. This does not wait for physical
         VM termination. Ambiguous transport failures stay retryable instead of
         silently abandoning a possibly running (billed) sandbox.
+        Holding the adapter lock across the RPC serializes close attempts;
+        other operations checking this lock wait for that network call too.
         """
         with self._lock:
             if self._closed:

@@ -99,6 +99,10 @@ def _import_client() -> type[Client]:
     return Client
 
 
+class _ShutdownIncompleteError(RuntimeError):
+    """Cleanup still owns acquisitions or remote terminations that need retry."""
+
+
 class TenkiSandboxProvider(WarmPoolLifecycleMixin[TenkiSandbox], SandboxProvider):
     """Run each DeerFlow sandbox as a Tenki cloud microVM."""
 
@@ -140,7 +144,7 @@ class TenkiSandboxProvider(WarmPoolLifecycleMixin[TenkiSandbox], SandboxProvider
         self._closing: set[int] = set()
         self._client: Client | None = None
         self._config = self._load_config()
-        atexit.register(self.shutdown)
+        atexit.register(self._shutdown_at_exit)
         self._start_idle_checker()
 
     def _load_config(self) -> dict[str, Any]:
@@ -525,6 +529,12 @@ class TenkiSandboxProvider(WarmPoolLifecycleMixin[TenkiSandbox], SandboxProvider
             self._thread_sandboxes.clear()
             self._acquire_serializer.close()
 
+    def _shutdown_at_exit(self) -> None:
+        try:
+            self.shutdown()
+        except _ShutdownIncompleteError as e:
+            logger.warning("%s", e)
+
     def shutdown(self) -> None:
         # Shutdown retries cleanup but never reopens admission. An SDK call
         # cannot be forcibly cancelled: its worker retains ownership and closes
@@ -549,5 +559,5 @@ class TenkiSandboxProvider(WarmPoolLifecycleMixin[TenkiSandbox], SandboxProvider
                 self._close_quietly(sandbox, context="shutdown")
             with self._lock:
                 if self._acquires or self._pending_closes:
-                    raise RuntimeError(f"Tenki shutdown incomplete: {self._acquires} acquires and {len(self._pending_closes)} terminations pending; retry shutdown")
+                    raise _ShutdownIncompleteError(f"Tenki shutdown incomplete: {self._acquires} acquires and {len(self._pending_closes)} terminations pending; retry shutdown")
                 self._shutdown_complete = True

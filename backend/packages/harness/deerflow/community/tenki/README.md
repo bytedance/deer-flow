@@ -98,6 +98,8 @@ SDK worker. If the provider remains open, the completed acquire can still be reu
 by the same scope. Accepted termination requests do not prove that a remote VM
 has physically stopped. Pending handles are process-local and do not survive a
 Gateway crash; cross-process orphan recovery remains outside this contract.
+The process-exit hook logs outstanding cleanup without an exception traceback;
+explicit `shutdown()` calls still raise so callers can retry.
 
 The warm-pool health probe accepts an exact `ok` line alongside login-shell
 profile output or stderr warnings. Timeout, nonzero-exit, and command-error
