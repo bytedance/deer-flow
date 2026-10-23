@@ -288,3 +288,13 @@ def test_unsupported_options_fail_before_creating_resources(transport, extra):
     with pytest.raises(SystemExit, match="opensandbox"):
         bench.main(["--provider", "opensandbox", *extra])
     assert not transport.remotes
+
+
+@pytest.mark.parametrize("provider", ["opensandbox", "boxlite", "aio"])
+def test_negative_idle_timeout_fails_before_provider_creation(monkeypatch, provider):
+    def unexpected_provider(*args, **kwargs):
+        pytest.fail("invalid idle timeout must be rejected before provisioning")
+
+    monkeypatch.setitem(bench.PROVIDER_FACTORIES, provider, unexpected_provider)
+    with pytest.raises(SystemExit, match="idle timeout must be nonnegative"):
+        bench.main(["--provider", provider, "--scenario", "warm_same_thread", "--idle-timeout", "-5"])
