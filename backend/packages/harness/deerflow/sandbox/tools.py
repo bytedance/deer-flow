@@ -215,11 +215,26 @@ _WINDOWS_OPERATOR_CHARS = frozenset(";&|()<>`")
 # PowerShell names are matched lowercased.
 _WINDOWS_PATTERN_COMMANDS = frozenset({"grep", "egrep", "fgrep", "rg", "ag", "ack", "findstr", "sed", "awk", "gawk", "mawk", "nawk", "perl", "select-string", "sls"})
 _WINDOWS_PATTERN_SOURCE_OPTIONS = frozenset("-e --regexp --expression".split())
+# ``-f``/``--file`` supplies the pattern from a file, so the first positional is
+# an input file again; the file itself is a path, not pattern text.
+_WINDOWS_PATTERN_FILE_OPTIONS = frozenset("-f --file".split())
 _WINDOWS_PATTERN_PARAMETERS = frozenset("-pattern --pattern -filter --filter".split())
 _WINDOWS_PATTERN_VALUE_OPTIONS = frozenset("-g -t -T --glob --iglob --type --type-not --include --exclude".split())
+# The long spellings are glob or type filters in every tool that has them
+# (``rsync --exclude=\*.py``, ``tar --include``), not only in a regex tool.
+_WINDOWS_GLOB_FILTER_OPTIONS = frozenset("--glob --iglob --type --type-not --include --exclude".split())
+# The value roles ``_windows_option_role`` returns: which of them hold text, and
+# which of them supply the pattern so the first positional is a file again.
+_WINDOWS_TEXT_OPTION_ROLES = frozenset({"regex", "glob"})
+_WINDOWS_PATTERN_FILLING_ROLES = frozenset({"regex", "script"})
 # A subcommand launcher's first positional names the command that runs the rest
 # (``git grep -E …``), so it opens the argument context like a wrapper does.
 _WINDOWS_SUBCOMMAND_LAUNCHERS = frozenset({"git", "gh", "npm", "npx", "pnpm", "yarn", "cargo", "go", "uv", "poetry", "docker", "kubectl"})
+# Commands that run another command, so their own flags and values are not
+# argument positions of it (``env -u VAR grep``, ``xargs -n 1 grep``).
+_WINDOWS_COMMAND_WRAPPERS = _LOCAL_BASH_COMMAND_WRAPPERS | frozenset({"env", "nice", "nohup", "stdbuf", "time", "xargs"})
+# ``find`` predicates after which the next word is a command, not an operand.
+_WINDOWS_FIND_EXEC_OPTIONS = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
 # Options that consume a value without supplying the pattern, so the pattern
 # stays the first positional (``rg -m 5 '\Aclass' .``).
 _WINDOWS_VALUE_OPTIONS = frozenset(
@@ -227,12 +242,16 @@ _WINDOWS_VALUE_OPTIONS = frozenset(
     "-r --replace -E --encoding --engine --pre --sort -f --file -l --line-length -I -path --path -literalpath --literalpath "
     "-o --output".split()
 )  # Commands that only print their arguments, so a colon or escape word in them is
-# ``-E`` is ``--encoding`` only for ripgrep; in the grep family it selects
-# extended regex mode and takes no value, so the pattern after it stays the
-# first positional argument (``grep -E '\bword\b' file``).
-_WINDOWS_ENCODING_VALUE_COMMANDS = frozenset({"rg"})
+# ``-E`` and ``-r`` are ``--encoding`` and ``--replace`` only for ripgrep; in the
+# grep family they select extended regex / recursive mode and in sed ``-r`` is
+# extended mode, so the pattern after them stays the first positional argument
+# (``grep -E '\bword\b' file``, ``grep -r TODO \Windows\win.ini``).
+_WINDOWS_RG_VALUE_COMMANDS = frozenset({"rg"})
+_WINDOWS_RG_VALUE_OPTIONS = frozenset({"-E", "-r"})
 # text (``echo a:b``).
 _WINDOWS_TEXT_ONLY_COMMANDS = frozenset({"echo", "printf", "write-output", "write-host"})
+# The commands this pass can read arguments for; a wrapper's preamble ends here.
+_WINDOWS_WRAPPED_COMMANDS = _WINDOWS_PATTERN_COMMANDS | _WINDOWS_TEXT_ONLY_COMMANDS
 # Working-directory commands beyond ``_LOCAL_BASH_CWD_COMMANDS``: cmd.exe is
 # case-insensitive and knows ``chdir``; PowerShell spells the same operation
 # ``Set-Location``/``Push-Location`` (alias ``sl``).
@@ -1306,45 +1325,123 @@ def _windows_text_roles(words: list[str]) -> list[bool]:
     """Mark the words whose argument position holds regex, glob or printed text.
 
     Those are the only positions where a backslash root (``\\Afoo``) or a colon
-    word (``a:b``) is text rather than a host path. Value-taking options are
+    word (``a:b``) is text rather than a host path. A value-taking option is
     consumed so the pattern stays the first positional argument, which is what
-    makes ``rg -g '*.py' '\\Aclass' .`` a search and not a host read.
+    makes ``rg -m 5 '\\Aclass' .`` a search and not a host read. An option that
+    supplies the pattern itself closes that slot, whether the value is attached
+    (``-efoo``, ``-fprog.awk``, ``-ieX``) or the next word
+    (``grep -f patterns.txt``), so the file after it is a file again.
     """
     roles = [False] * len(words)
     index = 0
     while index < len(words):
-        name = words[index].strip("'\"").rsplit("/", 1)[-1].rsplit("\\", 1)[-1].lower()
-        if name in _LOCAL_BASH_COMMAND_WRAPPERS or name in _LOCAL_BASH_COMMAND_PREFIX_KEYWORDS or name in _WINDOWS_SUBCOMMAND_LAUNCHERS or words[index].startswith("-"):
+        if words[index][0] in _WINDOWS_OPERATOR_CHARS:
             index += 1
+            continue
+        name = _windows_word_name(words[index])
+        if name in _LOCAL_BASH_COMMAND_PREFIX_KEYWORDS or name in _WINDOWS_SUBCOMMAND_LAUNCHERS or words[index].startswith("-"):
+            index += 1
+            continue
+        if name in _WINDOWS_COMMAND_WRAPPERS:
+            # A wrapper runs the command after its own flags and values
+            # (``env -u VAR grep``, ``nice -n 5 grep``, ``xargs -n 1 grep``),
+            # and only the wrapped command's arguments decide text.
+            index = _windows_wrapped_command_start(words, index + 1)
             continue
         text_only = name in _WINDOWS_TEXT_ONLY_COMMANDS
         pattern_command = name in _WINDOWS_PATTERN_COMMANDS
         index += 1
-        first_positional = True
+        pattern_open = True
         while index < len(words) and words[index][0] not in _WINDOWS_OPERATOR_CHARS:
             word = words[index]
+            if word in _WINDOWS_FIND_EXEC_OPTIONS:
+                # ``find . -exec grep '\\Afoo' {} +`` runs the command after the
+                # predicate, so its arguments open a new context.
+                index = _windows_wrapped_command_start(words, index + 1)
+                break
             if word.startswith("-") and word != "-":
-                option = word.split("=", 1)[0].split(":", 1)[0]
-                parameter = _windows_is_option(option, _WINDOWS_PATTERN_PARAMETERS)
-                source_option = parameter or (_windows_is_option(option, _WINDOWS_PATTERN_SOURCE_OPTIONS) and pattern_command)
-                # An attached value (``--glob=*.py``) is inside this token, a
-                # separate one is the next word.
-                if source_option or (pattern_command and _windows_is_option(option, _WINDOWS_PATTERN_VALUE_OPTIONS)):
-                    if option != word:
-                        roles[index] = True
-                    elif index + 1 < len(words):
-                        roles[index + 1] = True
+                kind, value = _windows_option_role(word, name, pattern_command)
+                if kind is not None:
+                    text = kind in _WINDOWS_TEXT_OPTION_ROLES
+                    if value is not None:
+                        # The value sits inside this token (``--glob=*.py``,
+                        # ``-e's/x/y/'``, ``-fprog.awk``).
+                        roles[index] = text
+                    elif index + 1 < len(words) and words[index + 1][0] not in _WINDOWS_OPERATOR_CHARS:
+                        # The next word is the value: pattern text is text, but
+                        # a script or output file stays a host path
+                        # (``grep -f \\Windows\\patterns.txt``).
+                        roles[index + 1] = text
                         index += 1
-                elif _windows_takes_value(name, option) and index + 1 < len(words) and words[index + 1][0] not in _WINDOWS_OPERATOR_CHARS:
-                    index += 1
-                if source_option:
-                    first_positional = False
+                    pattern_open = pattern_open and kind not in _WINDOWS_PATTERN_FILLING_ROLES
                 index += 1
                 continue
-            roles[index] = text_only or (pattern_command and first_positional)
-            first_positional = False
+            roles[index] = text_only or (pattern_command and pattern_open)
+            pattern_open = False
             index += 1
     return roles
+
+
+def _windows_word_name(word: str) -> str:
+    """Return *word*'s command name without quotes and a directory prefix."""
+    return word.strip("'\"").rsplit("/", 1)[-1].rsplit("\\", 1)[-1].lower()
+
+
+def _windows_wrapped_command_start(words: list[str], start: int) -> int:
+    """Return the index of the command a wrapper or a ``find -exec`` runs.
+
+    The wrapper's flags and their values sit before it (``nice -n 5 grep``), so
+    the first word this pass knows as a command ends that preamble; when none
+    follows, the index lands on the operator and the rest stays path-checked.
+    """
+    while start < len(words) and words[start][0] not in _WINDOWS_OPERATOR_CHARS:
+        if _windows_word_name(words[start]) in _WINDOWS_WRAPPED_COMMANDS:
+            break
+        start += 1
+    return start
+
+
+def _windows_option_role(word: str, command_name: str, pattern_command: bool) -> tuple[str | None, str | None]:
+    """Classify the value an option token carries, for the text-role pass.
+
+    Returns ``(kind, attached)``. ``kind`` is ``"regex"`` for the pattern itself,
+    ``"glob"`` for glob/type/field-separator text that leaves the pattern
+    positional, ``"script"`` for the file the pattern is read from, ``"value"``
+    for every other value and None for a flag; ``attached`` is that value when it
+    sits inside *word*, else None (the value is the next word). A short cluster
+    is walked letter by letter because the letter that takes a value owns the
+    rest of the token (``-ieX`` is ``-i`` plus ``-e X``).
+    """
+    option = word.split("=", 1)[0].split(":", 1)[0]
+    kind = _windows_value_role(option, command_name, pattern_command)
+    if kind is not None:
+        return kind, ("" if option != word else None)
+    if not word.startswith("--"):
+        for position, letter in enumerate(word[1:]):
+            if not letter.isalpha():
+                break
+            kind = _windows_value_role("-" + letter, command_name, pattern_command)
+            if kind is not None:
+                return kind, word[position + 2 :]
+    return None, None
+
+
+def _windows_value_role(option: str, command_name: str, pattern_command: bool) -> str | None:
+    """Return how one option spelling's value is read, or None when it is a flag."""
+    if _windows_is_option(option, _WINDOWS_PATTERN_PARAMETERS):
+        return "regex"
+    if _windows_is_option(option, _WINDOWS_GLOB_FILTER_OPTIONS):
+        return "glob"
+    if pattern_command:
+        if _windows_is_option(option, _WINDOWS_PATTERN_SOURCE_OPTIONS):
+            return "regex"
+        if _windows_is_option(option, _WINDOWS_PATTERN_VALUE_OPTIONS) or (option == "-F" and command_name in _AWK_COMMAND_NAMES):
+            return "glob"
+        if _windows_is_option(option, _WINDOWS_PATTERN_FILE_OPTIONS):
+            return "script"
+    if _windows_takes_value(command_name, option):
+        return "value"
+    return None
 
 
 def _windows_is_option(option: str, names: frozenset[str]) -> bool:
@@ -1355,12 +1452,14 @@ def _windows_is_option(option: str, names: frozenset[str]) -> bool:
 def _windows_takes_value(command_name: str, option: str) -> bool:
     """Return True when *option* consumes the next word as its value.
 
-    ``-E`` is the one tool-specific spelling: ripgrep reads it as ``--encoding``
-    and takes a value, while the grep family reads it as extended-regex mode and
-    keeps the pattern positional (``grep -E '\bword\b' file``).
+    ``-E`` and ``-r`` are the tool-specific spellings, resolved through
+    ``_WINDOWS_RG_VALUE_OPTIONS``: ripgrep reads them as ``--encoding`` and
+    ``--replace``, while the grep family reads them as extended-regex and
+    recursive mode and sed reads ``-r`` as extended mode, so the pattern after
+    them stays the first positional argument.
     """
-    if option == "-E":
-        return command_name in _WINDOWS_ENCODING_VALUE_COMMANDS
+    if option in _WINDOWS_RG_VALUE_OPTIONS:
+        return command_name in _WINDOWS_RG_VALUE_COMMANDS
     return _windows_is_option(option, _WINDOWS_VALUE_OPTIONS)
 
 
@@ -1391,6 +1490,12 @@ def _windows_host_path_word(word: str, start: int, *, text_role: bool, url_spans
     bare = word.strip("'\"")
     if not bare:
         return None
+    if text_role:
+        # Regex, glob or printed text: ``-e/foo/d``, ``awk -F/``, a pattern
+        # holding ``x=\\Afoo``. The drive and device scans above still apply.
+        return None
+    # cmd.exe treats ``,`` and ``=`` as argument delimiters (``curl ,-o\\Users``).
+    bare = bare.lstrip(",=")
     # A root marker behind an option, assignment or provider prefix
     # (``-Path:\\Windows``, ``--output=\\\\server\\share``, ``curl -o\\Users``).
     # A bare ``/``-rooted word is left to ``_ABSOLUTE_PATH_PATTERN``.
@@ -1406,10 +1511,7 @@ def _windows_host_path_word(word: str, start: int, *, text_role: bool, url_spans
             if _is_allowed_local_bash_absolute_path(bare, allowed_paths, allow_system_paths=True, thread_data=thread_data):
                 return None
             return bare
-    else:
-        # cmd.exe treats ``,`` and ``=`` as argument delimiters.
-        bare = bare.lstrip(",=")
-    if not bare or text_role:
+    if not bare:
         return None
     # A drive reference keeps its meaning inside an interpreted string
     # (``node -e "…('a:b')"``), at a shell-word boundary after a quote or ``=``.
@@ -1421,25 +1523,34 @@ def _windows_host_path_word(word: str, start: int, *, text_role: bool, url_spans
     # the word is judged, not only its start.
     for match in _WINDOWS_ROOTED_WORD_PATTERN.finditer(bare):
         rooted = match.group()
-        if _WINDOWS_ESCAPE_WORD_PATTERN.match(rooted) is None or _WINDOWS_ROOTED_COLON_PATTERN.search(rooted):
+        if _WINDOWS_ESCAPE_WORD_PATTERN.fullmatch(rooted) is None or _WINDOWS_ROOTED_COLON_PATTERN.search(rooted):
             return rooted
     return None
 
 
-def _windows_raw_host_paths(command: str, allowed_paths: list[str], thread_data: ThreadDataState | None) -> list[str]:
+def _windows_raw_host_paths(command: str, allowed_paths: list[str], thread_data: ThreadDataState | None, *, escaped_from: str | None = None) -> list[str]:
     """Return the Windows host paths *command* reaches that no POSIX scan sees.
 
     Judged on the raw text because the shlex token stream drops unquoted
     backslashes, which is how ``\\\\server\\share`` and ``\\Windows`` reach the
     host unnoticed. A drive match inside a larger URL is URL text, but one that
     starts the URL-like span (``C://Windows``) is still a drive path.
+
+    *escaped_from* names the command this text was decoded from. A word that is
+    a different spelling there and holds regex text in this reading was escaped
+    text (``grep 'C^:/foo'``), so the argument the tool receives is a pattern and
+    no part of it is a host path.
     """
     words = _windows_raw_words(command)
     roles = _windows_text_roles([word for word, _ in words])
+    escaped = [word for word, _ in _windows_raw_words(escaped_from)] if escaped_from is not None else []
+    aligned = len(escaped) == len(words)
     url_spans = _non_file_url_spans(command)
     paths: list[str] = []
-    for (word, start), text_role in zip(words, roles):
+    for position, ((word, start), text_role) in enumerate(zip(words, roles)):
         if word[0] in _WINDOWS_OPERATOR_CHARS:
+            continue
+        if aligned and text_role and escaped[position] != word:
             continue
         # A drive match inside a larger URL is URL text, but one that starts the
         # URL-like span (``C://Windows``) is still a drive path; the word scan
@@ -2259,9 +2370,10 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
     # repeated on a ``^``/``\:``-decoded copy; delayed expansion (``!NAME!``) is
     # out of scope because it needs the non-default delayed-expansion mode.
     if _is_windows():
-        for text in (command, _windows_escaped_command(command)):
-            if text:
-                unsafe_paths.extend(_windows_raw_host_paths(text, allowed_paths, thread_data))
+        unsafe_paths.extend(_windows_raw_host_paths(command, allowed_paths, thread_data))
+        escaped = _windows_escaped_command(command)
+        if escaped:
+            unsafe_paths.extend(_windows_raw_host_paths(escaped, allowed_paths, thread_data, escaped_from=command))
 
     if unsafe_paths:
         unsafe = ", ".join(sorted(dict.fromkeys(unsafe_paths)))

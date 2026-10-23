@@ -16,12 +16,21 @@ These cases drive the Python validator, not a real Windows shell, so the host
 gate is patched through fixtures and the whole file runs on every host -
 including the Ubuntu CI jobs, which otherwise never reach the Windows branches.
 
-Known limit, kept deliberately: the escape-word exemption treats any
-single-letter C/regex escape as text, so ``grep -E '\C'`` stays allowed where
-the pre-reduction patch rejected it as a rooted name. The same applies to an
-escape atom followed by a separator (``sed -E 's/(a)\1/b/'``). Both are regex
-arguments, never a host read, and rejecting them would need the per-tool escape
-tables this guard was reduced away from.
+Known limits, kept deliberately rather than re-bloating the guard:
+
+* The escape-word exemption treats a word built from C/regex escape atoms as
+  text wherever it stands, so ``grep -E '\C'``, ``sed -E 's/(a)\1/b/'``,
+  ``type \C`` and ``type \d\n`` stay allowed where the pre-reduction patch
+  rejected them as rooted names. They are regex/format arguments, never a host
+  read, and telling them apart from a rooted name would need the per-tool
+  escape tables this guard was reduced away from. The same rule rejects an
+  assignment of regex text (``X=\bfoo``) that the pre-reduction patch allowed.
+* ``_WINDOWS_VALUE_OPTIONS`` is shared by every tool, so ``-l``/``-o`` keep
+  consuming their next word even on ``grep``/``rg``, where they are flags
+  (``grep -l foo \Windows\win.ini`` reads the file). Closing that needs the
+  per-family option tables the reduction removed.
+* ``grep '\bfoo' /mnt/user-data/workspace/a.txt`` is allowed: the file is an
+  allowed mount, which the pre-reduction patch rejected as a rooted name.
 """
 
 import pytest
@@ -395,6 +404,130 @@ def test_allows_ripgrep_pattern_arguments(command: str) -> None:
     ],
 )
 def test_still_blocks_host_paths_in_pattern_tool_arguments(command: str) -> None:
+    with pytest.raises(PermissionError, match="Unsafe absolute paths"):
+        validate_local_bash_command_paths(command, _THREAD_DATA)
+
+
+@pytest.mark.usefixtures("windows_host")
+@pytest.mark.parametrize(
+    "command",
+    [
+        # An option that supplies the pattern closes the pattern slot, attached
+        # (``-efoo``, ``--regexp=foo``) or as the next word (``-f x``), so the
+        # file after it is a file again; the script file itself is a path.
+        "grep -efoo \\Windows\\win.ini",
+        "sed -e's/x/y/' \\Windows\\win.ini",
+        "grep -f x \\Windows\\win.ini",
+        "awk -fprog.awk \\Windows\\win.ini",
+        "grep --regexp=foo \\Windows\\win.ini",
+        "grep -efoo \\\\server\\share\\secret.txt",
+        "grep -f\\Windows\\patterns.txt file",
+    ],
+)
+def test_blocks_file_after_a_pattern_supplying_option(command: str) -> None:
+    with pytest.raises(PermissionError, match="Unsafe absolute paths"):
+        validate_local_bash_command_paths(command, _THREAD_DATA)
+
+
+@pytest.mark.usefixtures("windows_host")
+@pytest.mark.parametrize(
+    "command",
+    [
+        # A short cluster is walked letter by letter: the letter that takes a
+        # value owns the rest of the token (``-ieX`` is ``-i`` plus ``-e X``).
+        "grep -iefoo \\Windows\\win.ini",
+        "grep -ifpatterns \\Windows\\win.ini",
+        "sed -ne's/x/y/' \\Windows\\win.ini",
+    ],
+)
+def test_blocks_file_after_a_short_option_cluster(command: str) -> None:
+    with pytest.raises(PermissionError, match="Unsafe absolute paths"):
+        validate_local_bash_command_paths(command, _THREAD_DATA)
+
+
+@pytest.mark.usefixtures("windows_host")
+@pytest.mark.parametrize(
+    "command",
+    [
+        # The raw ``..\`` scan runs on file positions, so closing the pattern
+        # slot restores it there too.
+        "grep -ex ..\\..\\secret.txt",
+        "grep -iefoo ..\\..\\secret.txt",
+    ],
+)
+def test_blocks_traversal_after_a_pattern_option(command: str) -> None:
+    with pytest.raises(PermissionError, match="path traversal"):
+        validate_local_bash_command_paths(command, _THREAD_DATA)
+
+
+@pytest.mark.usefixtures("windows_host")
+@pytest.mark.parametrize(
+    "command",
+    [
+        # A wrapper runs the command after its own flags and values, so the
+        # wrapped command's argument roles are the ones that decide.
+        "env grep -efoo \\Windows\\win.ini",
+        "nice -n 5 grep -efoo \\Windows\\win.ini",
+        "xargs -n 1 grep -efoo \\Windows\\win.ini",
+        "find . -exec env grep -efoo \\Windows\\win.ini {} +",
+        "nohup cat \\Windows\\win.ini",
+    ],
+)
+def test_blocks_host_path_through_command_wrappers(command: str) -> None:
+    with pytest.raises(PermissionError, match="Unsafe absolute paths"):
+        validate_local_bash_command_paths(command, _THREAD_DATA)
+
+
+@pytest.mark.usefixtures("windows_host")
+@pytest.mark.parametrize(
+    "command",
+    [
+        # The same wrappers must not turn regex text into a path: the pattern is
+        # still the first positional argument of the wrapped command.
+        "env grep '\\Afoo' file",
+        "nice -n 5 grep '\\Afoo' file",
+        "xargs -n1 grep '\\Afoo' file",
+        "find . -name x -exec grep '\\Afoo' {} ;",
+    ],
+)
+def test_allows_pattern_text_through_command_wrappers(command: str) -> None:
+    validate_local_bash_command_paths(command, _THREAD_DATA)
+
+
+@pytest.mark.usefixtures("windows_host")
+@pytest.mark.parametrize(
+    "command",
+    [
+        # A ``/``-rooted attached pattern value is text (awk's field separator,
+        # sed's script, a regex after ``-e``), an attached ``=`` value consumes
+        # only its own token, a long glob filter is text for every tool, and
+        # cmd.exe decodes the caret before the tool sees the pattern.
+        "awk -F/ '{print $1}' /mnt/user-data/workspace/a.txt",
+        "sed -e/foo/d /mnt/user-data/workspace/a.txt",
+        "rg -e'\\Aclass' .",
+        "grep --max-count=1 '\\Afoo' file",
+        "tar --exclude='*.py' -czf out.tgz .",
+        "grep 'C^:/foo' /mnt/user-data/workspace/a.txt",
+    ],
+)
+def test_allows_attached_pattern_and_glob_values(command: str) -> None:
+    validate_local_bash_command_paths(command, _THREAD_DATA)
+
+
+@pytest.mark.usefixtures("windows_host")
+@pytest.mark.parametrize(
+    "command",
+    [
+        # An escape atom followed by a name is a rooted file, not text; ``-r``
+        # is ripgrep's ``--replace`` only there; cmd.exe strips ``,`` and ``=``
+        # before an attached option.
+        "X=\\$Recycle.Bin",
+        "type \\$Recycle.Bin",
+        "grep -r TODO \\Windows\\win.ini",
+        "curl ,-o\\Users\\Public\\evil.exe",
+    ],
+)
+def test_blocks_host_paths_after_pattern_and_delimiter_shapes(command: str) -> None:
     with pytest.raises(PermissionError, match="Unsafe absolute paths"):
         validate_local_bash_command_paths(command, _THREAD_DATA)
 
