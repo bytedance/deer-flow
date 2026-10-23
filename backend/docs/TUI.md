@@ -88,7 +88,7 @@ for trusted embedded CLI runs.
 | `PageUp` / `PageDown` | Scroll the transcript without moving focus from the composer |
 | `Tab` | Complete the highlighted command (adds a trailing space) |
 | `Esc` | Close the palette / overlay |
-| `Ctrl+C` | Interrupt the active run, or quit when idle |
+| `Ctrl+C` | Interrupt the active run, or quit when idle (again to skip waiting for an interrupted step) |
 | `Ctrl+L` | Redraw · `Ctrl+U` clear composer |
 
 At the last input row, `↓` preserves the current draft unless you are browsing
@@ -125,6 +125,9 @@ An interrupted run cannot be stopped mid-step, so a tool call already in progres
 same conversation shows a notice instead of starting a second run there — two runs
 on one thread would overwrite each other's history. Send again once it finishes,
 or use `/new` or `/resume` to continue in another conversation meanwhile.
+Quitting (`Ctrl+C` or `/quit`) also waits for that step, or for a finished run
+still saving its title, with a notice; the TUI closes as soon as it is done.
+Press `Ctrl+C` again to quit at once; the unfinished step is then not saved.
 If a run cannot start, the TUI reports an error and returns to idle so you can retry.
 
 Use `/goal <condition>` to set the active thread goal, `/goal` to show it, and

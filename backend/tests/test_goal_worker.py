@@ -15,6 +15,41 @@ from deerflow.runtime.runs.manager import RunRecord, RunStartOutcome
 from deerflow.runtime.runs.schemas import DisconnectMode, RunStatus
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("successful_work", [True, False], ids=["new-work-same-reply", "failed-work-paraphrased-reply"])
+async def test_goal_progress_uses_operation_results_instead_of_reply_wording(monkeypatch, successful_work):
+    saver = InMemorySaver()
+    thread_id = "operation-progress-behavior"
+    await _seed_goal_thread(saver, thread_id=thread_id, goal_text="Finish the controlled task")
+    goal = await read_thread_goal(saver, thread_id)
+    goal["max_continuations"] = 8
+    await write_thread_goal(saver, thread_id, goal)
+
+    async def fixed_evaluator(*_args, **_kwargs):
+        return GoalEvaluation(satisfied=False, blocker="goal_not_met_yet", reason="Work remains", evidence_summary="Fixed local result")
+
+    monkeypatch.setattr(worker, "evaluate_goal_completion", fixed_evaluator)
+    messages = [HumanMessage(content="Finish the controlled task")]
+    decisions = []
+    for turn in range(3):
+        call = {"id": f"call-{turn}", "name": "write_file" if successful_work else "read_file", "args": {"path": f"/outputs/part-{turn}.txt"}}
+        if turn:
+            messages.append(HumanMessage(content="Continue", additional_kwargs={"hide_from_ui": True, "deerflow_goal_continuation": True}))
+        messages.extend(
+            [
+                AIMessage(content="", tool_calls=[call]),
+                ToolMessage(content=f"Created part {turn}" if successful_work else "File not found", tool_call_id=call["id"], name=call["name"], status="success" if successful_work else "error"),
+                AIMessage(content="More work remains." if successful_work else f"Investigating another approach, attempt {turn}."),
+            ]
+        )
+        await _write_messages(saver, thread_id=thread_id, messages=messages)
+        result = await worker._prepare_goal_continuation_input(accessor=_full_accessor(saver), bridge=_CollectingBridge(), checkpointer=saver, thread_id=thread_id, run_id="controlled-run", model_name=None, app_config=None)
+        decisions.append(result is not None)
+    saved = await read_thread_goal(saver, thread_id)
+    assert decisions == ([True, True, True] if successful_work else [True, True, False])
+    assert saved["no_progress_count"] == (0 if successful_work else 2)
+
+
 def _full_accessor(checkpointer) -> CheckpointStateAccessor:
     """Bind a full-mode accessor over a state-only graph for materialized reads."""
     graph = build_state_mutation_graph("goal_evaluator", "full")
@@ -147,7 +182,8 @@ async def _write_messages(checkpointer: InMemorySaver, *, thread_id: str, messag
 
 
 @pytest.mark.asyncio
-async def test_goal_worker_returns_hidden_continuation_when_goal_is_unmet(monkeypatch):
+@pytest.mark.parametrize("run_stop_reason", [None, "subagent_limit_capped", "unknown_reason"])
+async def test_goal_worker_returns_hidden_continuation_when_goal_is_unmet(monkeypatch, run_stop_reason):
     checkpointer = InMemorySaver()
     thread_id = "goal-thread"
     await _seed_goal_thread(checkpointer, thread_id=thread_id, goal_text="Finish all tests")
@@ -177,6 +213,7 @@ async def test_goal_worker_returns_hidden_continuation_when_goal_is_unmet(monkey
         run_id="run-1",
         model_name="test-model",
         app_config=None,
+        run_stop_reason=run_stop_reason,
         task_store=task_store,
         extensions=extensions,
     )
@@ -275,7 +312,8 @@ async def test_goal_worker_evaluates_materialized_messages_in_delta_mode(monkeyp
 
 
 @pytest.mark.asyncio
-async def test_goal_worker_stands_down_for_non_continuable_blocker(monkeypatch):
+@pytest.mark.parametrize("run_stop_reason", [None, "loop_capped"])
+async def test_goal_worker_stands_down_for_non_continuable_blocker(monkeypatch, run_stop_reason):
     checkpointer = InMemorySaver()
     thread_id = "blocked-goal-thread"
     await _seed_goal_thread(checkpointer, thread_id=thread_id, goal_text="Finish all tests")
@@ -299,6 +337,7 @@ async def test_goal_worker_stands_down_for_non_continuable_blocker(monkeypatch):
         run_id="run-3",
         model_name="test-model",
         app_config=None,
+        run_stop_reason=run_stop_reason,
     )
 
     assert continuation is None
@@ -310,9 +349,10 @@ async def test_goal_worker_stands_down_for_non_continuable_blocker(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_goal_worker_stands_down_after_the_run_hit_its_token_budget(monkeypatch):
+@pytest.mark.parametrize("run_stop_reason", ["token_capped", "loop_capped"])
+async def test_goal_worker_stands_down_after_run_hard_stop(monkeypatch, run_stop_reason):
     checkpointer = InMemorySaver()
-    thread_id = "token-capped-goal-thread"
+    thread_id = "hard-stop-goal-thread"
     await _seed_goal_thread(checkpointer, thread_id=thread_id, goal_text="Finish all tests")
     bridge = _CollectingBridge()
 
@@ -334,7 +374,7 @@ async def test_goal_worker_stands_down_after_the_run_hit_its_token_budget(monkey
         run_id="run-capped",
         model_name="test-model",
         app_config=None,
-        run_stop_reason="token_capped",
+        run_stop_reason=run_stop_reason,
     )
 
     assert continuation is None
@@ -342,7 +382,7 @@ async def test_goal_worker_stands_down_after_the_run_hit_its_token_budget(monkey
     assert latest_goal is not None
     assert latest_goal["continuation_count"] == 0
     assert latest_goal["last_evaluation"]["blocker"] == "goal_not_met_yet"
-    assert latest_goal["last_evaluation"]["stand_down_reason"] == "token_capped"
+    assert latest_goal["last_evaluation"]["stand_down_reason"] == run_stop_reason
 
 
 @pytest.mark.asyncio
@@ -457,7 +497,8 @@ async def test_goal_worker_resumes_after_the_user_answers_clarification(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_goal_worker_defers_satisfied_goal_completion_even_after_token_cap(monkeypatch):
+@pytest.mark.parametrize("run_stop_reason", ["token_capped", "loop_capped"])
+async def test_goal_worker_defers_satisfied_goal_completion_even_after_hard_stop(monkeypatch, run_stop_reason):
     checkpointer = InMemorySaver()
     thread_id = "token-capped-done-goal-thread"
     await _seed_goal_thread(checkpointer, thread_id=thread_id, goal_text="Finish all tests")
@@ -481,10 +522,10 @@ async def test_goal_worker_defers_satisfied_goal_completion_even_after_token_cap
         run_id="run-capped-done",
         model_name="test-model",
         app_config=None,
-        run_stop_reason="token_capped",
+        run_stop_reason=run_stop_reason,
     )
 
-    # A token cap does not veto completion, but delivery must still succeed.
+    # A hard stop does not veto completion, but delivery must still succeed.
     assert isinstance(continuation, worker._GoalCompletionCandidate)
     assert await read_thread_goal(checkpointer, thread_id) == continuation.goal
 
@@ -761,7 +802,8 @@ async def test_goal_worker_stands_down_without_durable_assistant_receipt():
 class _FailingEvaluatorModel:
     """Evaluator chat model whose provider call raises, or whose answer is not valid JSON."""
 
-    def __init__(self, outcome: Exception | str, before=None) -> None:
+    def __init__(self, outcome: Exception | str, before=None, *, normal_completion=False) -> None:
+        self._normal_completion = normal_completion
         self._outcome = outcome
         self._before = before
         self.calls = 0
@@ -772,7 +814,7 @@ class _FailingEvaluatorModel:
             await self._before()
         if isinstance(self._outcome, Exception):
             raise self._outcome
-        return AIMessage(content=self._outcome)
+        return AIMessage(content=self._outcome, response_metadata={"finish_reason": "stop"} if self._normal_completion else {})
 
 
 @pytest.mark.asyncio
@@ -821,6 +863,46 @@ async def test_goal_worker_records_a_failed_evaluator_call(outcome, error_type, 
     assert "request-detail-7f3a" not in repr(latest_goal)
     assert [event for event, _ in bridge.events] == ["values"]
     assert "request-detail-7f3a" not in repr(bridge.events)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("user_change", ["abort", "clear", "replace", "message"])
+async def test_goal_format_retry_does_not_outlive_a_user_change(user_change):
+    saver = InMemorySaver()
+    thread_id = "format-retry-user-change"
+    await _seed_goal_thread(saver, thread_id=thread_id, goal_text="Finish the report")
+    abort_event = asyncio.Event()
+
+    async def change():
+        if user_change == "abort":
+            abort_event.set()
+        elif user_change == "clear":
+            await write_thread_goal(saver, thread_id, None)
+        elif user_change == "replace":
+            await write_thread_goal(saver, thread_id, build_goal_state("A different request"))
+        else:
+            await _write_messages(saver, thread_id=thread_id, messages=[HumanMessage(content="Actually, wait for me.")])
+
+    critic = _FailingEvaluatorModel("{PRIVATE_CRITIC", before=change, normal_completion=True)
+    result = await worker._prepare_goal_continuation_input(
+        accessor=_full_accessor(saver),
+        bridge=_CollectingBridge(),
+        checkpointer=saver,
+        thread_id=thread_id,
+        run_id="format-retry",
+        model_name=None,
+        app_config=None,
+        evaluator_model_factory=lambda: critic,
+        abort_event=abort_event,
+    )
+    assert result is None
+    assert critic.calls == 1
+    current_goal = await read_thread_goal(saver, thread_id)
+    if user_change == "clear":
+        assert current_goal is None
+    else:
+        assert current_goal["continuation_count"] == current_goal["no_progress_count"] == 0
+        assert "last_evaluation" not in current_goal
 
 
 @pytest.mark.asyncio

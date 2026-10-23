@@ -69,6 +69,7 @@ from deerflow.runtime import (
     ConflictError,
     DisconnectMode,
     RunContext,
+    RunIdempotencyKeyMismatch,
     RunIdempotencyUnsupported,
     RunManager,
     RunRecord,
@@ -918,6 +919,9 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: frozenset[str] = (
 # they are internal-only as well — see :data:`_INTERNAL_ONLY_CONTEXT_KEYS`.
 _CONTEXT_RUNTIME_ONLY_KEYS: frozenset[str] = frozenset({"github_token", "disable_clarification", "channel_name"})
 
+# Public run-only controls are accepted through body.context, not body.config.
+_MODEL_SELECTION_CONTEXT_KEYS = frozenset({"subagent_model_name", "model_selection_requested"})
+
 # Every run-context key an external client may never supply, in either section.
 # The two sets differ only in *where* a legitimate internal caller's value lands
 # (both sections vs. ``context`` alone); their trust requirement is identical.
@@ -993,6 +997,10 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
         # and ``configurable`` is persisted in checkpoints.
         existing_configurable.pop("client", None)
     existing_runtime_context = config.get("context")
+    for section in (existing_configurable, existing_runtime_context):
+        if isinstance(section, dict):
+            for key in _MODEL_SELECTION_CONTEXT_KEYS:
+                section.pop(key, None)
     if isinstance(existing_runtime_context, dict) and "client" in existing_runtime_context:
         existing_client_context = _sanitize_request_client_context(existing_runtime_context.get("client"))
         if existing_client_context is None:
@@ -1012,6 +1020,18 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
                 configurable.setdefault(key, context[key])
             if isinstance(runtime_context, dict):
                 runtime_context.setdefault(key, context[key])
+    # Explicit choices belong to this run, never to checkpoint defaults. Model
+    # use is authorized against the authenticated identity during assembly and
+    # again at child dispatch; these fields grant no additional permissions.
+    for key in _MODEL_SELECTION_CONTEXT_KEYS:
+        if key in context:
+            value = context[key]
+            if not isinstance(value, str) or not value.strip() or len(value) > 200:
+                raise HTTPException(status_code=400, detail="A configured model name is required.")
+            if isinstance(runtime_context, dict):
+                runtime_context[key] = value
+    if "model_selection_requested" in context and (context.get("model_name") != context["model_selection_requested"] or not isinstance(runtime_context, dict) or runtime_context.get("model_name") != context["model_selection_requested"]):
+        raise HTTPException(status_code=400, detail="model_selection_requested must match model_name in context.")
     # Context-only keys (secrets / runtime flags) land in ``config['context']``
     # only — never ``configurable`` (which is persisted in checkpoints) — and only
     # for internal callers, the sole legitimate producers.
@@ -1373,6 +1393,7 @@ def build_checkpoint_state_mutation_accessor(
     thread_id: str,
     as_node: str,
     checkpoint_id: str | None = None,
+    checkpoint_ns: str = "",
     state_schema: Any | None = None,
 ) -> tuple[CheckpointStateAccessor, dict[str, Any]]:
     """Build a state-only graph whose writer node finishes immediately.
@@ -1386,7 +1407,7 @@ def build_checkpoint_state_mutation_accessor(
     config: dict[str, Any] = {
         "configurable": {
             "thread_id": thread_id,
-            "checkpoint_ns": "",
+            "checkpoint_ns": checkpoint_ns,
         }
     }
     if checkpoint_id is not None:
@@ -1399,6 +1420,7 @@ def build_checkpoint_state_mutation_accessor(
         get_checkpointer(request),
         store=getattr(request.app.state, "store", None),
         mode=mode,
+        direct_namespace=True,
     )
     return accessor, config
 
@@ -1563,12 +1585,13 @@ def build_checkpoint_state_accessor(
     thread_id: str,
     assistant_id: str | None = None,
     checkpoint_id: str | None = None,
+    checkpoint_ns: str = "",
 ) -> tuple[CheckpointStateAccessor, dict[str, Any]]:
     """Build the mode-selected lead graph used for materialized checkpoint state."""
     ctx = get_run_context(request)
     config = build_run_config(thread_id, None, None, assistant_id=assistant_id)
     configurable = config.setdefault("configurable", {})
-    configurable["checkpoint_ns"] = ""
+    configurable["checkpoint_ns"] = checkpoint_ns
     if checkpoint_id is not None:
         configurable["checkpoint_id"] = checkpoint_id
 
@@ -1614,6 +1637,7 @@ async def abuild_checkpoint_state_accessor(
     thread_id: str,
     assistant_id: str | None = None,
     checkpoint_id: str | None = None,
+    checkpoint_ns: str = "",
 ) -> tuple[CheckpointStateAccessor, dict[str, Any]]:
     """Async variant of :func:`build_checkpoint_state_accessor`.
 
@@ -1627,13 +1651,14 @@ async def abuild_checkpoint_state_accessor(
     identity changed while it waited rebuilds instead of reusing the
     winner's graph.
     """
-    return await run_assembly(
-        build_checkpoint_state_accessor,
-        request,
-        thread_id=thread_id,
-        assistant_id=assistant_id,
-        checkpoint_id=checkpoint_id,
-    )
+    kwargs: dict[str, Any] = {
+        "thread_id": thread_id,
+        "assistant_id": assistant_id,
+        "checkpoint_id": checkpoint_id,
+    }
+    if checkpoint_ns:
+        kwargs["checkpoint_ns"] = checkpoint_ns
+    return await run_assembly(build_checkpoint_state_accessor, request, **kwargs)
 
 
 async def resolve_thread_assistant_id(
@@ -1666,6 +1691,7 @@ async def build_thread_checkpoint_state_accessor(
     *,
     thread_id: str,
     checkpoint_id: str | None = None,
+    checkpoint_ns: str = "",
     fail_closed: bool = False,
 ) -> tuple[CheckpointStateAccessor, dict[str, Any]]:
     """Single resolution boundary for state endpoints.
@@ -1675,12 +1701,14 @@ async def build_thread_checkpoint_state_accessor(
     ``AgentMiddleware.state_schema`` from the response.
     """
     assistant_id = await resolve_thread_assistant_id(request, thread_id, fail_closed=fail_closed)
-    return await abuild_checkpoint_state_accessor(
-        request,
-        thread_id=thread_id,
-        assistant_id=assistant_id,
-        checkpoint_id=checkpoint_id,
-    )
+    kwargs: dict[str, Any] = {
+        "thread_id": thread_id,
+        "assistant_id": assistant_id,
+        "checkpoint_id": checkpoint_id,
+    }
+    if checkpoint_ns:
+        kwargs["checkpoint_ns"] = checkpoint_ns
+    return await abuild_checkpoint_state_accessor(request, **kwargs)
 
 
 async def build_thread_checkpoint_state_mutation_accessor(
@@ -1689,6 +1717,7 @@ async def build_thread_checkpoint_state_mutation_accessor(
     thread_id: str,
     as_node: str,
     checkpoint_id: str | None = None,
+    checkpoint_ns: str = "",
 ) -> tuple[CheckpointStateAccessor, dict[str, Any]]:
     """Mutation accessor compiled with the thread's effective state schema.
 
@@ -1696,20 +1725,24 @@ async def build_thread_checkpoint_state_mutation_accessor(
     so writes carrying materialized state do not silently discard
     extension-owned channels.
     """
-    read_accessor, _read_config = await build_thread_checkpoint_state_accessor(
-        request,
-        thread_id=thread_id,
-        checkpoint_id=checkpoint_id,
-        fail_closed=True,
-    )
+    read_kwargs: dict[str, Any] = {
+        "thread_id": thread_id,
+        "checkpoint_id": checkpoint_id,
+        "fail_closed": True,
+    }
+    if checkpoint_ns:
+        read_kwargs["checkpoint_ns"] = checkpoint_ns
+    read_accessor, _read_config = await build_thread_checkpoint_state_accessor(request, **read_kwargs)
     state_schema = graph_state_schema(getattr(read_accessor, "graph", None))
-    return build_checkpoint_state_mutation_accessor(
-        request,
-        thread_id=thread_id,
-        as_node=as_node,
-        checkpoint_id=checkpoint_id,
-        state_schema=state_schema,
-    )
+    mutation_kwargs: dict[str, Any] = {
+        "thread_id": thread_id,
+        "as_node": as_node,
+        "checkpoint_id": checkpoint_id,
+        "state_schema": state_schema,
+    }
+    if checkpoint_ns:
+        mutation_kwargs["checkpoint_ns"] = checkpoint_ns
+    return build_checkpoint_state_mutation_accessor(request, **mutation_kwargs)
 
 
 async def apply_checkpoint_to_run_config(
@@ -2530,9 +2563,15 @@ async def start_run(
                         # Bootstrap and unresolved legacy identities stay read-only.
                         evidence_agent_id=(None if scope_runtime_config.get("is_bootstrap") else (_DEFAULT_ASSISTANT_ID if scope_assistant_id == _DEFAULT_ASSISTANT_ID else getattr(agent_config, "name", None))),
                         run_id=admission_run_id,
+                        **({"execution_fence": request.state.extension_execution_fence} if getattr(request.state, "extension_execution_fence", None) is not None else {}),
                     )
                 except RunIdempotencyUnsupported as exc:
                     raise HTTPException(status_code=503, detail=str(exc)) from exc
+                except RunIdempotencyKeyMismatch as exc:
+                    # A trusted internal key is scoped by owner, not thread: the
+                    # same message requested on another thread (IM ``/new``) is
+                    # a different request for the run already admitted.
+                    raise HTTPException(status_code=409, detail="Idempotency-Key already used with a different request") from exc
 
                 if record.idempotency_reused:
                     stored = record.kwargs or {}

@@ -15,6 +15,7 @@ import shutil
 import tempfile
 import time
 from collections.abc import Mapping
+from contextlib import suppress
 from enum import IntEnum
 from functools import partial
 from pathlib import Path
@@ -29,6 +30,7 @@ from app.channels.allowed_users import parse_allowed_users
 from app.channels.base import Channel, ChannelUnavailable
 from app.channels.commands import is_known_channel_command
 from app.channels.connection_identity import attach_connection_identity
+from app.channels.credential_staging import cleanup_stale_credential_staging, credential_staging_prefix
 from app.channels.message_bus import INBOUND_FILE_CLEANUP_KEY, InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment, cleanup_inbound_files
 from deerflow.utils.file_io import await_drained
 
@@ -1693,7 +1695,7 @@ class WechatChannel(Channel):
             return
         try:
             data = json.loads(self._cursor_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
             logger.warning("[WeChat] failed to read cursor state from %s", self._cursor_path)
             return
         cursor = data.get("get_updates_buf")
@@ -1705,16 +1707,19 @@ class WechatChannel(Channel):
             return
         try:
             self._cursor_path.parent.mkdir(parents=True, exist_ok=True)
-            self._cursor_path.write_text(json.dumps({"get_updates_buf": self._get_updates_buf}, ensure_ascii=False, indent=2), encoding="utf-8")
+            self._cursor_path.write_text(json.dumps({"get_updates_buf": self._get_updates_buf}, ensure_ascii=False, indent=2), encoding="utf-8", newline="")
         except OSError:
             logger.warning("[WeChat] failed to persist cursor state to %s", self._cursor_path)
 
     def _load_auth_state(self) -> None:
-        if not self._auth_path or not self._auth_path.exists():
+        if not self._auth_path:
+            return
+        cleanup_stale_credential_staging(self._auth_path)
+        if not self._auth_path.exists():
             return
         try:
             data = json.loads(self._auth_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
             logger.warning("[WeChat] failed to read auth state from %s", self._auth_path)
             return
         if not isinstance(data, dict):
@@ -1769,17 +1774,28 @@ class WechatChannel(Channel):
                 # iLink bot_token is never briefly readable at umask defaults
                 # (mirrors ChannelRuntimeConfigStore._save). NamedTemporaryFile
                 # uses mkstemp, which creates the file at 0o600 from the start.
-                fd = tempfile.NamedTemporaryFile(mode="w", dir=self._auth_path.parent, suffix=".tmp", delete=False, encoding="utf-8")
+                fd = tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", newline="", dir=self._auth_path.parent, prefix=credential_staging_prefix(self._auth_path), suffix=".tmp", delete=False)
                 try:
                     json.dump(data, fd, ensure_ascii=False, indent=2)
                     fd.close()
                     Path(fd.name).replace(self._auth_path)
                 except BaseException:
-                    fd.close()
-                    Path(fd.name).unlink(missing_ok=True)
+                    # Cleanup is best-effort: a failing close or unlink must not take
+                    # the original persist error with it, and the unlink is still
+                    # attempted after a failed close.
+                    try:
+                        fd.close()
+                    except OSError:
+                        with suppress(Exception):
+                            logger.warning("Failed to close temporary WeChat auth state file %s", fd.name, exc_info=True)
+                    try:
+                        Path(fd.name).unlink(missing_ok=True)
+                    except OSError:
+                        with suppress(Exception):
+                            logger.warning("Failed to remove temporary WeChat auth state file %s", fd.name, exc_info=True)
                     raise
             except OSError:
-                logger.warning("[WeChat] failed to persist auth state to %s", self._auth_path)
+                logger.warning("[WeChat] failed to persist auth state to %s", self._auth_path, exc_info=True)
             else:
                 # Hardening only; the destination already inherits 0o600 from the
                 # temp file. A chmod failure on filesystems without POSIX perms

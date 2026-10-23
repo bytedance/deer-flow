@@ -80,6 +80,11 @@ export const enUS: Translations = {
         description:
           "Demonstrate read-only retrieval and structured tool results using fixed sample documents, without an external knowledge service.",
       },
+      lightrag: {
+        title: "LightRAG",
+        description:
+          "Retrieve documents and entity relations from LightRAG with shared source citations.",
+      },
       weknora: {
         title: "WeKnora knowledge retrieval",
         description:
@@ -238,6 +243,15 @@ export const enUS: Translations = {
     showArtifacts: "Show artifacts of this conversation",
     browser: "Browser",
     showBrowser: "Open browser panel",
+  },
+
+  browserStream: {
+    connecting: "Connecting…",
+    disconnected: "Disconnected",
+    handshakeTimeout:
+      "Live browser connection timed out. Check your network or proxy, then turn Live off and on to retry.",
+    connectionFailed:
+      "Live browser connection failed or closed. Check your connection and access permissions, then turn Live off and on to retry.",
   },
 
   skillUsage: {
@@ -545,6 +559,8 @@ export const enUS: Translations = {
           "No progress between turns. Reply with what's missing, or rephrase the goal with /goal.",
         tokenCapped:
           "Token budget reached. Send a message to continue; a new run starts with a fresh budget.",
+        loopCapped:
+          "Repeated tool calls triggered a safety stop. Adjust the approach and send a new message to retry; your goal stays active.",
         missingEvidence:
           "Goal check: evidence missing. Ask it to show the result or explain what's missing; if the goal no longer applies, run /goal clear.",
         runFailed:
@@ -1212,6 +1228,7 @@ export const enUS: Translations = {
         maxContinuations: "Continuation limit reached",
         noProgress: "No progress between turns",
         tokenCapped: "Token budget reached",
+        loopCapped: "Repeated tool calls reached the safety limit",
         evaluatorFailed: "Couldn't check the goal; the run itself may be fine",
         noDurableEndOfTurn: "Couldn't check the goal: no final reply was saved",
         threadChanged:

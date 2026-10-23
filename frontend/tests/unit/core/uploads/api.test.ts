@@ -40,6 +40,72 @@ beforeEach(() => {
 });
 
 describe("uploads api", () => {
+  test("returns a successful upload response unchanged", async () => {
+    const result = {
+      success: true,
+      files: [],
+      message: "Successfully uploaded 0 file(s)",
+      skipped_files: [],
+    };
+    mockedFetch.mockResolvedValueOnce(jsonResponse(200, result));
+
+    await expect(uploadFiles("thread-1", [])).resolves.toEqual(result);
+  });
+
+  test.each([
+    ["all skipped", []],
+    [
+      "partially uploaded",
+      [
+        {
+          filename: "accepted.txt",
+          size: 5,
+          path: "/data/uploads/accepted.txt",
+          virtual_path: "/mnt/user-data/uploads/accepted.txt",
+          artifact_url: "/api/threads/thread-1/artifacts/accepted.txt",
+        },
+      ],
+    ],
+  ])("rejects an unsuccessful HTTP 200 upload (%s)", async (_label, files) => {
+    const message = `Successfully uploaded ${files.length} file(s); skipped 1 unsafe file(s)`;
+    const error = await uploadError(
+      jsonResponse(200, {
+        success: false,
+        files,
+        message,
+        skipped_files: ["report.pdf"],
+      }),
+    );
+
+    expect(error.message).toContain("Upload incomplete");
+    expect(error.message).toContain(message);
+  });
+
+  test("uses the upload fallback when an unsuccessful response has no message", async () => {
+    const error = await uploadError(
+      jsonResponse(200, {
+        success: false,
+        files: [],
+        message: "",
+        skipped_files: ["report.pdf"],
+      }),
+    );
+
+    expect(error.message).toBe("Upload failed");
+  });
+
+  test("uses the upload fallback when an unsuccessful response omits the message", async () => {
+    const error = await uploadError(
+      jsonResponse(200, {
+        success: false,
+        files: [],
+        skipped_files: ["report.pdf"],
+      }),
+    );
+
+    expect(error.message).toBe("Upload failed");
+  });
+
   test("preserves string error details", async () => {
     const error = await uploadError(
       jsonResponse(413, { detail: "File exceeds the upload limit" }),

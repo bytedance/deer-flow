@@ -23,6 +23,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 from langchain_core.outputs import ChatGeneration, ChatResult
 
 from deerflow.models.credential_loader import CodexCliCredential, load_codex_cli_credential
+from deerflow.utils.retry_after import bounded_retry_after_ms, parse_retry_after_date_ms
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,42 @@ CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
 def _is_valid_call_id(call_id: Any) -> bool:
     """Check call/result correlation IDs without rewriting non-blank values."""
     return isinstance(call_id, str) and bool(call_id.strip())
+
+
+def _retry_after_ms(error: Exception) -> int | None:
+    """Read a bounded retry hint from the error's response headers, if there is one."""
+    response = getattr(error, "response", None)
+    if response is None:
+        return None
+    headers = getattr(response, "headers", None)
+    if not headers:
+        return None
+
+    for header in ("retry-after-ms", "Retry-After-Ms", "retry-after", "Retry-After"):
+        raw = headers.get(header)
+        if not raw:
+            continue
+        try:
+            milliseconds = float(raw) * 1000 if "ms" not in (header.lower()) else float(raw)
+        except (TypeError, ValueError, OverflowError):
+            if "ms" in header.lower():
+                continue
+            milliseconds = parse_retry_after_date_ms(str(raw), now=time.time())
+            if milliseconds is None:
+                continue
+        bounded = bounded_retry_after_ms(milliseconds)
+        if bounded is not None:
+            return bounded
+    return None
+
+
+def _calc_backoff_ms(attempt: int, error: Exception | None = None) -> int:
+    """Prefer the server's retry hint, falling back to the local exponential schedule."""
+    if error is not None:
+        hint_ms = _retry_after_ms(error)
+        if hint_ms is not None:
+            return hint_ms
+    return 2000 * (1 << (attempt - 1))
 
 
 def _convert_tool_choice(tool_choice: str | dict | bool | None) -> str | dict | None:
@@ -297,7 +334,7 @@ class CodexChatModel(BaseChatModel):
                 if e.response.status_code in (429, 500, 529):
                     if attempt >= self.retry_max_attempts:
                         raise
-                    wait_ms = 2000 * (1 << (attempt - 1))
+                    wait_ms = _calc_backoff_ms(attempt, e)
                     logger.warning(f"Codex API error {e.response.status_code}, retrying {attempt}/{self.retry_max_attempts} after {wait_ms}ms")
                     time.sleep(wait_ms / 1000)
                 else:

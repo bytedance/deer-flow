@@ -395,28 +395,35 @@ test.describe("Thread message ordering", () => {
     });
     // DOM relative order, not viewport coordinates: stick-to-bottom smooth
     // scrolling makes two separate boundingBox reads race each other.
-    const questionBeforeAnswer = await page.evaluate(() => {
-      const list = document.querySelector('[data-testid="main-message-list"]');
-      if (!list) {
-        return null;
-      }
-      const leaf = (text: string) =>
-        [...list.querySelectorAll("div, p")].find(
-          (element) =>
-            element.children.length === 0 && element.textContent === text,
-        );
-      const question = leaf("final-turn question");
-      const answer = leaf("final-turn answer");
-      if (!question || !answer) {
-        return null;
-      }
-      return (
-        (question.compareDocumentPosition(answer) &
-          Node.DOCUMENT_POSITION_FOLLOWING) !==
-        0
-      );
-    });
-    expect(questionBeforeAnswer).toBe(true);
+    // Compaction and the finishing history refetch can briefly replace
+    // these nodes. Re-read both in one DOM snapshot until they settle.
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const list = document.querySelector(
+            '[data-testid="main-message-list"]',
+          );
+          if (!list) {
+            return null;
+          }
+          const leaf = (text: string) =>
+            [...list.querySelectorAll("div, p")].find(
+              (element) =>
+                element.children.length === 0 && element.textContent === text,
+            );
+          const question = leaf("final-turn question");
+          const answer = leaf("final-turn answer");
+          if (!question || !answer) {
+            return null;
+          }
+          return (
+            (question.compareDocumentPosition(answer) &
+              Node.DOCUMENT_POSITION_FOLLOWING) !==
+            0
+          );
+        }),
+      )
+      .toBe(true);
 
     // The finishing refetch observed the extended feed; the established
     // order — including the compacted head — is unchanged.

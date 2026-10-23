@@ -76,6 +76,10 @@ export const zhCN: Translations = {
         description:
           "使用固定示例文档演示只读检索与结构化工具结果，不连接外部知识库。",
       },
+      lightrag: {
+        title: "LightRAG",
+        description: "从 LightRAG 检索文档与实体关系，并使用统一的来源引用。",
+      },
       weknora: {
         title: "WeKnora 知识检索",
         description:
@@ -227,6 +231,15 @@ export const zhCN: Translations = {
     showArtifacts: "查看此对话的文件",
     browser: "浏览器",
     showBrowser: "打开浏览器面板",
+  },
+
+  browserStream: {
+    connecting: "正在连接…",
+    disconnected: "连接已断开",
+    handshakeTimeout:
+      "实时浏览器连接超时。请检查网络或代理设置，然后关闭并重新开启 Live 以重试。",
+    connectionFailed:
+      "实时浏览器连接失败或已关闭。请检查网络连接和访问权限，然后关闭并重新开启 Live 以重试。",
   },
 
   skillUsage: {
@@ -508,6 +521,8 @@ export const zhCN: Translations = {
           "连续几轮没有进展。回复说明还缺什么，或用 /goal 换个说法重新设置目标。",
         tokenCapped:
           "已达到 token 预算。发送消息即可继续，新的运行会重新计算预算。",
+        loopCapped:
+          "重复工具调用触发了安全停止。调整要求后发送新消息即可重试，目标会保留。",
         missingEvidence:
           "目标检查：缺少依据。可以让它展示结果或说明卡在哪里；如果目标已不适用，用 /goal clear 清除目标。",
         runFailed:
@@ -1140,6 +1155,7 @@ export const zhCN: Translations = {
         maxContinuations: "已达到继续处理的次数上限",
         noProgress: "连续多轮没有进展",
         tokenCapped: "已达到 token 预算",
+        loopCapped: "重复工具调用触发了安全停止",
         evaluatorFailed: "未能检查目标，这次运行本身可能没问题",
         noDurableEndOfTurn: "未能检查目标：没有保存最终回复",
         threadChanged: "未能检查目标：检查期间对话发生了变化",

@@ -10,7 +10,6 @@ import {
   SidebarGroupLabel,
   SidebarMenu,
   SidebarMenuItem,
-  useSidebar,
 } from "@/components/ui/sidebar";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
@@ -33,6 +32,8 @@ import type { ChannelProvider } from "@/core/channels/types";
 import { useI18n } from "@/core/i18n/hooks";
 import { cn } from "@/lib/utils";
 
+import { useWorkspaceSidebarExpanded } from "../workspace-sidebar-frame";
+
 import { ChannelProviderIcon } from "./channel-provider-icon";
 import { ChannelRuntimeConfigDialog } from "./channel-runtime-config-dialog";
 import { ChannelScheduledUpdates } from "./channel-scheduled-updates";
@@ -54,7 +55,7 @@ function getProviderUnavailableReason(
 }
 
 export function WorkspaceChannelsList() {
-  const { open: isSidebarOpen } = useSidebar();
+  const isSidebarOpen = useWorkspaceSidebarExpanded();
   const { t } = useI18n();
   const { enabled, providers, isLoading, error } = useChannelProviders();
   const connectMutation = useConnectChannelProvider();
