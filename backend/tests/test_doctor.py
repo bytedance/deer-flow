@@ -721,6 +721,22 @@ class TestCheckWebSearch:
         assert result.status == "warn"
         assert "SERPLY_API_KEY" in (result.fix or "")
 
+    def test_searchapi_with_key_ok(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SEARCHAPI_API_KEY", "test-key")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.searchapi.tools:web_search_tool\n")
+        result = doctor.check_web_search(cfg)
+        assert result.status == "ok"
+        assert "searchapi" in result.detail
+
+    def test_searchapi_without_key_warns(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("SEARCHAPI_API_KEY", raising=False)
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.searchapi.tools:web_search_tool\n")
+        result = doctor.check_web_search(cfg)
+        assert result.status == "warn"
+        assert "SEARCHAPI_API_KEY" in (result.fix or "")
+
     def test_no_search_tool_warns(self, tmp_path):
         cfg = tmp_path / "config.yaml"
         cfg.write_text("config_version: 5\ntools: []\n")
