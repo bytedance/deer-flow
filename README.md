@@ -549,7 +549,7 @@ Gateway checkpoint cleanup runs when the next run wins durable same-thread
 admission, before its first checkpoint read. It checks only the root head and
 its parent, removes at most one metadata-only duration leaf without pending
 writes, and preserves explicit checkpoint selections and delta replay state.
-See [checkpoint operations](https://deerflow.tech/docs/harness/checkpoints/operations)
+See [checkpoint operations](frontend/src/content/en/harness/checkpoints/operations.mdx)
 for the retention constraints.
 
 > [!TIP]
