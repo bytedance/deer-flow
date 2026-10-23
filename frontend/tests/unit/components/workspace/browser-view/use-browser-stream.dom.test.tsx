@@ -287,8 +287,84 @@ describe("useBrowserStream", () => {
       void rs.advanceTimersByTime(300_000);
     });
     expect(FakeWebSocket.instances).toHaveLength(7);
+    expect(result.current.closedReason).toBe("handshake_timeout");
     expect(result.current.status).toBe("closed");
     expect(rs.getTimerCount()).toBe(0);
+  });
+
+  test("preserves a timeout reason through retries and stale events until open", () => {
+    rs.useFakeTimers();
+    rs.stubGlobal("WebSocket", FakeWebSocket as unknown as typeof WebSocket);
+
+    const { result } = renderHook(() => useBrowserStream("thread-1", true));
+    const first = FakeWebSocket.instances[0]!;
+    expect(result.current.closedReason).toBeNull();
+    act(() => {
+      void rs.advanceTimersByTime(10_000);
+      first.onerror?.();
+      first.disconnect();
+      first.open();
+    });
+    expect(result.current.closedReason).toBe("handshake_timeout");
+
+    act(() => {
+      void rs.advanceTimersByTime(800);
+      first.onerror?.();
+    });
+    expect(result.current.status).toBe("connecting");
+    expect(result.current.closedReason).toBe("handshake_timeout");
+    act(() => FakeWebSocket.instances[1]!.open());
+    expect(result.current.status).toBe("open");
+    expect(result.current.closedReason).toBeNull();
+  });
+
+  test.each(["error", "close"] as const)(
+    "reports a socket %s separately from a handshake timeout",
+    (event) => {
+      rs.useFakeTimers();
+      rs.stubGlobal("WebSocket", FakeWebSocket as unknown as typeof WebSocket);
+
+      const { result } = renderHook(() => useBrowserStream("thread-1", true));
+      const socket = FakeWebSocket.instances[0]!;
+      act(() => {
+        if (event === "error") socket.onerror?.();
+        else socket.disconnect();
+      });
+      expect(result.current.status).toBe("closed");
+      expect(result.current.closedReason).toBe("connection_failed");
+      act(() => {
+        void rs.advanceTimersByTime(800);
+      });
+      act(() => FakeWebSocket.instances[1]!.open());
+      expect(result.current.closedReason).toBeNull();
+    },
+  );
+
+  test("clears the failure reason when disabled or moved to another thread", () => {
+    rs.useFakeTimers();
+    rs.stubGlobal("WebSocket", FakeWebSocket as unknown as typeof WebSocket);
+
+    const { result, rerender } = renderHook(
+      ({ threadId, enabled }) => useBrowserStream(threadId, enabled),
+      { initialProps: { threadId: "thread-1", enabled: true } },
+    );
+    act(() => {
+      void rs.advanceTimersByTime(10_000);
+    });
+    expect(result.current.closedReason).toBe("handshake_timeout");
+    rerender({ threadId: "thread-1", enabled: false });
+    expect(result.current.closedReason).toBeNull();
+    rerender({ threadId: "thread-1", enabled: true });
+    expect(result.current.closedReason).toBeNull();
+    act(() => {
+      void rs.advanceTimersByTime(10_000);
+    });
+    expect(result.current.closedReason).toBe("handshake_timeout");
+    const retired = FakeWebSocket.instances.at(-1)!;
+    rerender({ threadId: "thread-2", enabled: true });
+    act(() => retired.onerror?.());
+    expect(result.current.status).toBe("connecting");
+    expect(result.current.closedReason).toBeNull();
   });
 
   test("keeps a successfully reconnected socket instead of recreating it", async () => {

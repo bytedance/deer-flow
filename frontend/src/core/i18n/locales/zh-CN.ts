@@ -233,6 +233,15 @@ export const zhCN: Translations = {
     showBrowser: "打开浏览器面板",
   },
 
+  browserStream: {
+    connecting: "正在连接…",
+    disconnected: "连接已断开",
+    handshakeTimeout:
+      "实时浏览器连接超时。请检查网络或代理设置，然后关闭并重新开启 Live 以重试。",
+    connectionFailed:
+      "实时浏览器连接失败或已关闭。请检查网络连接和访问权限，然后关闭并重新开启 Live 以重试。",
+  },
+
   skillUsage: {
     used: "使用的技能",
     title: "技能",

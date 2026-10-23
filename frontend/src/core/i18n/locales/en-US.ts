@@ -245,6 +245,15 @@ export const enUS: Translations = {
     showBrowser: "Open browser panel",
   },
 
+  browserStream: {
+    connecting: "Connecting…",
+    disconnected: "Disconnected",
+    handshakeTimeout:
+      "Live browser connection timed out. Check your network or proxy, then turn Live off and on to retry.",
+    connectionFailed:
+      "Live browser connection failed or closed. Check your connection and access permissions, then turn Live off and on to retry.",
+  },
+
   skillUsage: {
     used: "Skills used",
     title: "Skills",
