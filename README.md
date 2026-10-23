@@ -2039,6 +2039,22 @@ Git URLs are rejected because the stock Docker builder does not forward host SSH
 credentials. Installing from a loopback URL is allowed for local tooling but warns, because
 `127.0.0.1` recorded in the lock is a different machine inside the Docker builder.
 
+For scripts, `deerflow extensions list --json` returns a JSON array in configuration
+order, with `name`, `package`, `entry_point`, `enabled`, and `required` fields. An
+unspecified package is `"-"`; an empty inventory is `[]`. Private plugin configuration
+and source metadata are excluded. The default `list` output remains a table.
+For example, from `backend/`, check that `demo` is configured as enabled and required:
+
+```bash
+inventory=$(uv run --frozen --no-group extensions deerflow extensions list --json) || exit 1
+printf '%s\n' "$inventory" |
+  jq -e 'any(.[]; .name == "demo" and .enabled == true and .required == true)'
+```
+
+This reports configured state without executing plugins or changing files; it does
+not verify package installation or successful Gateway loading. Configuration errors
+exit non-zero with diagnostics on stderr and no inventory on stdout.
+
 A managed package declares exactly one standard PEP 621 entry point:
 
 ```toml

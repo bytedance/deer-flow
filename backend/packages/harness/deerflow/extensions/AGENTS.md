@@ -22,11 +22,18 @@ Packaged extensions use one PEP 621 entry point in the
 `deerflow.extensions` group, for example
 `example = "deerflow_extension_example:install"`. The operator CLI is dispatched from
 the existing `deerflow` console script to `extensions/cli.py` and exposes only these
-surfaces: `install SOURCE [--yes]`, `upgrade SOURCE [--yes]`, `list`, `enable NAME`,
+surfaces: `install SOURCE [--yes]`, `upgrade SOURCE [--yes]`, `list [--json]`, `enable NAME`,
 `disable NAME`, and `remove NAME`. `NAME` resolves against the entry-point name, distribution name, or
 `module:install` value. The root `make extension-*` targets are convenience wrappers;
 because they execute from `backend/`, documentation should use absolute local source
 paths with `SOURCE=` unless backend-relative behavior is intentional.
+
+`list --json` serializes the existing `list_configured()` inventory as an ordered
+array with only `name`, `package`, `entry_point`, `enabled`, and `required`. Keep
+the manager's `"-"` package fallback and schema defaults/coercion. Validate the
+whole inventory before writing stdout; failures use the existing stderr/non-zero
+path. Listing must not resolve entry points, mutate files, or expose private config
+or source metadata. CLI coverage lives in `tests/test_extension_list_json.py`.
 
 `ExtensionManager` owns the package/config transaction. Install runs a controlled
 `uv add --project <backend> --group extensions --no-workspace --no-sync -- <source>`, updates the dedicated
