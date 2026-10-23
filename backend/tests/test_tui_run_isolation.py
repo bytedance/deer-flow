@@ -231,15 +231,15 @@ async def test_worker_start_failure_restores_idle_state_and_allows_retry(monkeyp
     client.release_new.set()
     app = DeerFlowTUI(Session(client=client, writer=writer), LaunchPlan(mode="tui", thread_id="thread-a"))
     failed_runs = []
-    original_start = app.run_worker
+    original_start = app._start_run_thread
 
     def fail_first_agent_worker(*args, **kwargs):
-        if kwargs.get("group") == "agent" and not failed_runs:
+        if not failed_runs:
             failed_runs.append(app._run)
             raise RuntimeError("private worker startup detail")
         return original_start(*args, **kwargs)
 
-    monkeypatch.setattr(app, "run_worker", fail_first_agent_worker)
+    monkeypatch.setattr(app, "_start_run_thread", fail_first_agent_worker)
     async with app.run_test() as pilot:
         app.query_one("#composer").value = "old question"
         await pilot.press("enter")
@@ -273,14 +273,11 @@ async def test_worker_start_failure_restores_idle_state_and_allows_retry(monkeyp
 async def test_launch_message_that_fails_to_start_stays_in_the_composer(monkeypatch):
     client = _Client()
     app = DeerFlowTUI(Session(client=client), LaunchPlan(mode="tui", thread_id="thread-a", message="launch question"))
-    original_start = app.run_worker
 
     def fail_agent_worker(*args, **kwargs):
-        if kwargs.get("group") == "agent":
-            raise RuntimeError("Cannot start the launch worker")
-        return original_start(*args, **kwargs)
+        raise RuntimeError("Cannot start the launch worker")
 
-    monkeypatch.setattr(app, "run_worker", fail_agent_worker)
+    monkeypatch.setattr(app, "_start_run_thread", fail_agent_worker)
     async with app.run_test() as pilot:
         await pilot.pause()
         assert not app._streaming
@@ -360,7 +357,7 @@ async def test_completed_run_keeps_title_write_after_ui_moves_on(monkeypatch, ne
                 def fail_to_start(*args, **kwargs):
                     raise RuntimeError("Cannot start the next worker")
 
-                monkeypatch.setattr(app, "run_worker", fail_to_start)
+                monkeypatch.setattr(app, "_start_run_thread", fail_to_start)
             app.query_one("#composer").value = "/resume thread-b" if next_action == "switch" else "new question"
             await pilot.press("enter")
             if next_action == "failed-send":
