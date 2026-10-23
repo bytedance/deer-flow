@@ -268,6 +268,7 @@ def test_timeout_uses_saved_process_group_id_if_leader_exits(monkeypatch):
     assert returncode == 0
     assert calls == [(process.pid, signal.SIGKILL)]
 
+
 @posix_only
 def test_process_group_lookup_failure_falls_back_to_direct_child_kill(monkeypatch):
     """A vanished process group is tolerated by killing/reaping the direct child."""
@@ -298,4 +299,3 @@ def test_process_group_lookup_failure_falls_back_to_direct_child_kill(monkeypatc
         ("kill-child",),
         ("wait", 10),
     ]
-
