@@ -4,6 +4,12 @@ Shared scheduled-task update validation preserves an unchanged future `once`
 instant on a live task inside `scheduler.min_once_delay_seconds`; new/changed
 instants and terminal reactivation still enforce the minimum delay.
 
+Scheduled-task admission rejects nonexistent naive `run_at` and `end_at`
+wall times through the shared Gateway datetime resolver. Keep this check out
+of runtime `next_run_at`: legacy tasks retain their accepted execution time,
+including unchanged live once definitions. Explicit offsets retain their instant;
+ambiguous naive times keep the existing fold choice.
+
 The MCP task list accepts optional `TaskStatus` and `active_only` query filters.
 Pass both to the repository before its limit; preserve `threads:read`, owner
 checks, current-thread incarnation scoping, and the unfiltered array response.
