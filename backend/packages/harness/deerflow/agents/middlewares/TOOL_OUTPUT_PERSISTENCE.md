@@ -76,3 +76,12 @@ after a later successful same-path `read_file`, `write_file`, or `str_replace`
 writes. Use the shared `tool_call_args` helpers (`pair_tool_call_results` and
 argument rewriting). Controls: `elide_superseded_writes` and
 `superseded_write_min_chars`.
+
+The placeholder is framework-owned text that the model can see in its own
+history, so it can be imitated. `write_file` therefore rejects a payload that
+*is* the placeholder rendered from `WRITE_ELISION_PLACEHOLDER_TEMPLATE`
+(`constants.py`), allowing only surrounding whitespace, instead of writing a
+deliverable that is ~200 bytes of placeholder (#7319). The match is
+whole-payload on purpose: a substring guard would block legitimate edits to
+this repository, whose `constants.py` and docs quote the template verbatim.
+Rendering and rejection derive from that one constant so they cannot drift.
