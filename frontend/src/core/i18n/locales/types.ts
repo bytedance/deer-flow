@@ -36,6 +36,7 @@ export interface Translations {
       | "retrieval"
       | "knowledge"
       | "weknora"
+      | "lightrag"
       | "example",
       { title: string; description: string }
     >;
