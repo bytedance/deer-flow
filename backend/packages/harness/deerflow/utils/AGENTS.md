@@ -14,6 +14,10 @@ temporary; pass a raw descriptor only until `fdopen` succeeds, or an explicitly
 transferred duplicate descriptor owned by the cleanup caller. Shelf discards
 must preserve both a rejected project's 404 and a dedup hit's 200 response.
 Callers retain their own serialization, permissions and publication policy.
+Shelf `stage_document_bytes` drains preparation, writes, close and failure
+cleanup before propagating cancellation. Retain the opened handle across its
+handoff, but leave waiting for incoming chunks cancellable; regressions in
+`tests/test_project_document_staging_cancellation.py` cover both shelf entry points.
 Local Linux/macOS text revisions opt into a short `temporary_prefix` and
 `preserve_metadata_from` (a caller-owned descriptor). Staging starts at `0600`;
 `file_revision_metadata` transfers ownership, mode, ACLs and xattrs before data.
