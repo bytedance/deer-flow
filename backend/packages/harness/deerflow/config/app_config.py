@@ -731,6 +731,14 @@ _app_config_path: Path | None = None
 _app_config_mtime: float | None = None
 _app_config_signature: _ConfigSignature | None = None
 _app_config_is_custom = False
+# The explicit ``config_path`` the cached revision was loaded from, when
+# ``reload_app_config(config_path=...)`` chose a file that default resolution
+# would not. ``get_app_config()`` keeps following that file (its later edits
+# are still revalidated) until ``reset_app_config()``, ``set_app_config()``,
+# or an argument-less reload; resolving through the default search instead
+# would either flip the cache back to the ambient default file or raise for
+# the same explicit file that was just loaded.
+_app_config_source: str | None = None
 # The ``get_extensions_config()`` instance the cached AppConfig's ``extensions``
 # snapshot was built from. That singleton is replaced only when the shared
 # ``extensions_config.json`` changes (or a writer reloads it), so identity is
@@ -769,7 +777,7 @@ def _load_and_cache_app_config(config_path: str | None = None, *, extensions_sou
     is one extra reload on the next call.
     """
     global _app_config, _app_config_path, _app_config_mtime, _app_config_signature, _app_config_is_custom
-    global _app_config_extensions_source
+    global _app_config_extensions_source, _app_config_source
 
     resolved_path = AppConfig.resolve_config_path(config_path)
     if extensions_source is None:
@@ -782,6 +790,7 @@ def _load_and_cache_app_config(config_path: str | None = None, *, extensions_sou
     _app_config_signature = signature
     _app_config_is_custom = False
     _app_config_extensions_source = extensions_source
+    _app_config_source = config_path or None
     return _app_config
 
 
@@ -794,8 +803,13 @@ def get_app_config() -> AppConfig:
     the shared ``extensions_config.json`` changed, so the ``extensions``
     snapshot follows that file too. Use `reload_app_config()` to force a
     reload, or `reset_app_config()` to clear the cache.
+
+    After an explicit ``reload_app_config(config_path)``, resolution follows
+    that pinned file instead of the default search, so an ambient sibling
+    ``config.yaml`` cannot win and a host without one cannot raise.
     """
     global _app_config, _app_config_path, _app_config_mtime, _app_config_signature
+    global _app_config_source
 
     runtime_override = _current_app_config.get()
     if runtime_override is not None:
@@ -804,7 +818,7 @@ def get_app_config() -> AppConfig:
     if _app_config is not None and _app_config_is_custom:
         return _app_config
 
-    resolved_path = AppConfig.resolve_config_path()
+    resolved_path = AppConfig.resolve_config_path(_app_config_source)
     current_mtime = _get_config_mtime(resolved_path)
     current_signature = _get_config_signature(resolved_path)
     current_extensions_source = get_extensions_config()
@@ -821,7 +835,12 @@ def get_app_config() -> AppConfig:
             logger.info("Config file content signature changed, reloading AppConfig")
         elif _app_config_path == resolved_path:
             logger.info("Extensions config changed, reloading AppConfig")
-        _load_and_cache_app_config(str(resolved_path), extensions_source=current_extensions_source)
+        # Pass the existing pin through, not the resolved path: a default-flow
+        # load (env var or ambient search) must record no pin, or the first
+        # re-cache would freeze that resolved path over later env-var changes
+        # and project-root re-detection. Only a caller-supplied explicit path
+        # ever pins.
+        _load_and_cache_app_config(_app_config_source, extensions_source=current_extensions_source)
     from deerflow.config.managed_models import merge_managed_models
 
     return merge_managed_models(_app_config)
@@ -835,7 +854,12 @@ def reload_app_config(config_path: str | None = None) -> AppConfig:
 
     Args:
         config_path: Optional path to config file. If not provided,
-                     uses the default resolution strategy.
+                     uses the default resolution strategy. When given, the
+                     cache keeps following that file — later
+                     ``get_app_config()`` calls revalidate it and do not
+                     consult default resolution — until
+                     ``reset_app_config()``, ``set_app_config()``, or an
+                     argument-less reload.
 
     Returns:
         The newly loaded AppConfig instance.
@@ -853,13 +877,14 @@ def reset_app_config() -> None:
     or when switching between different configurations.
     """
     global _app_config, _app_config_path, _app_config_mtime, _app_config_signature, _app_config_is_custom
-    global _app_config_extensions_source
+    global _app_config_extensions_source, _app_config_source
     _app_config = None
     _app_config_path = None
     _app_config_mtime = None
     _app_config_signature = None
     _app_config_is_custom = False
     _app_config_extensions_source = None
+    _app_config_source = None
 
 
 def set_app_config(config: AppConfig) -> None:
@@ -871,13 +896,14 @@ def set_app_config(config: AppConfig) -> None:
         config: The AppConfig instance to use.
     """
     global _app_config, _app_config_path, _app_config_mtime, _app_config_signature, _app_config_is_custom
-    global _app_config_extensions_source
+    global _app_config_extensions_source, _app_config_source
     _app_config = config
     _app_config_path = None
     _app_config_mtime = None
     _app_config_signature = None
     _app_config_is_custom = True
     _app_config_extensions_source = None
+    _app_config_source = None
 
 
 def peek_current_app_config() -> AppConfig | None:
