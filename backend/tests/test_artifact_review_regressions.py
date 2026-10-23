@@ -168,7 +168,7 @@ def test_all_model_visible_artifact_labels_are_redacted_without_mutating_state(f
     model = FakeToolCallingModel(responses=[AIMessage(content="done")])
     request = ModelRequest(model=model, messages=[], state=state, runtime=runtime(), tools=[])
     middleware = DurableContextMiddleware(pii_redaction_config=PiiRedactionConfig(enabled=True, token_secret="synthetic-test-secret"))
-    projected = middleware._inject(request)
+    projected = middleware._prepare_request(request)[0]
     data = next(m.content for m in projected.messages if m.additional_kwargs.get("durable_context_data"))
     assert "alice@example.com" not in data and "sk-" + "a" * 24 not in data
     assert entry[field] == secret and entry["real_ref"] == "https://host/private.pdf"

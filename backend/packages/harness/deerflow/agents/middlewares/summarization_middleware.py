@@ -21,6 +21,7 @@ from langgraph.constants import TAG_NOSTREAM
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.runtime import Runtime
 
+from deerflow.agents.middlewares.durable_context_middleware import durable_context_messages_to_rescue
 from deerflow.agents.middlewares.dynamic_context_middleware import is_dynamic_context_reminder
 from deerflow.agents.middlewares.message_utils import is_genuine_user_message
 from deerflow.agents.middlewares.pii_redaction_middleware import redact_text
@@ -1002,13 +1003,21 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         first-turn long analysis keeps its ``__user`` request while its early
         AI/Tool turns still compress.
 
+        Durable-context data messages ride along the same way. They are the
+        persisted summary/ledger/registry view, and compressing them would make
+        the next request silently lose it — the block is append-only history, so
+        there is no later re-render to fall back on. Only the reconstructable
+        tail is rescued (the last full refresh plus the updates after it);
+        blocks a later refresh supersedes compress with the history.
+
         Rescuing the whole partition is legitimate: ``_prepare_compaction``
         skips compaction when there is no history left to summarize.
         """
+        rescued_durable = set(map(id, durable_context_messages_to_rescue(messages_to_summarize, later=preserved_messages)))
         rescued: list[AnyMessage] = []
         remaining: list[AnyMessage] = []
         for msg in messages_to_summarize:
-            if isinstance(msg, SystemMessage) or is_dynamic_context_reminder(msg) or (latest_user_id is not None and msg.id == latest_user_id):
+            if isinstance(msg, SystemMessage) or is_dynamic_context_reminder(msg) or (latest_user_id is not None and msg.id == latest_user_id) or id(msg) in rescued_durable:
                 rescued.append(msg)
             else:
                 remaining.append(msg)
