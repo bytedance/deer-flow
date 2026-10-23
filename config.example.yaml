@@ -1726,11 +1726,14 @@ sandbox:
   # This is not a total container or deployment-wide capacity limit.
   prewarm_max_concurrent: 1
   # Optional: Mount additional host directories into the sandbox.
-  # Each mount maps a host path to a virtual container path accessible by the agent.
+  # host_path: existing absolute source path; container_path: agent-facing /mnt/... path.
+  # Native Windows source example: 'D:/data'; WSL source example: /mnt/d/data.
+  # Keep container_path POSIX-style on every OS (for example, /mnt/my-project).
   # Note: with LocalSandboxProvider under `make up` (docker-compose), host_path is
   # checked from inside the deer-flow-gateway container — you must also bind-mount
   # the same directory into services.gateway.volumes in docker/docker-compose.yaml
-  # for this mount to take effect (see issue #3244).
+  # for this mount to take effect. AIO Docker mounts instead use Docker-host paths.
+  # Platform examples: backend/docs/CONFIGURATION.md#skills-and-sandbox-paths
   # mounts:
   #   - host_path: /home/user/my-project    # Absolute path; see note above for Docker mode
   #     container_path: /mnt/my-project     # Virtual path inside the sandbox
@@ -2145,13 +2148,17 @@ verification:
 # Configure skills directory for specialized agent workflows
 
 skills:
-  # Path to skills directory on the host (relative to project root or absolute)
-  # Default: skills under the project root
+  # Skills source root read by the Gateway (contains public/ and legacy custom/).
+  # Absolute, or relative to DEER_FLOW_PROJECT_ROOT (process cwd when unset).
+  # Default: skills under that root, with a source-checkout fallback to repo skills/.
   # Override with DEER_FLOW_SKILLS_PATH when this field is omitted.
+  # In Docker, use a Gateway-visible path, such as the bundled /app/skills mount.
+  # Native Windows: 'D:/deer-flow/skills'; WSL: /mnt/d/deer-flow/skills.
+  # See backend/docs/CONFIGURATION.md#skills-and-sandbox-paths for mappings.
   # Uncomment to customize:
   # path: /absolute/path/to/custom/skills
 
-  # Path where skills are mounted in the sandbox container
+  # Agent-facing POSIX path; keep /mnt/skills even when the Gateway runs on Windows.
   # This is used by the agent to access skills in both local and Docker sandbox
   # AIO/provisioner and E2B modes require a canonical absolute non-root path
   # that does not overlap reserved platform mounts. Providers snapshot this
