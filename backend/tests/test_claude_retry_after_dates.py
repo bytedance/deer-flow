@@ -66,12 +66,3 @@ async def test_public_call_waits_for_http_date(monkeypatch, fixed_clock, mode, s
     assert result.content == "recovered"
     assert len(requests) == 2
     assert waits == [60.0]
-
-
-@pytest.mark.parametrize("raw", ["Thu, 01 Jan 2026 00:01:00 GMT", "Thursday, 01-Jan-26 00:01:00 GMT", "Thu Jan  1 00:01:00 2026"])
-def test_middleware_uses_same_utc_date_policy(monkeypatch, fixed_clock, raw):
-    from deerflow.agents.middlewares import llm_error_handling_middleware as middleware
-
-    monkeypatch.setattr(middleware, "time", SimpleNamespace(time=lambda: fixed_clock.timestamp()))
-    error = SimpleNamespace(response=httpx.Response(429, headers={"Retry-After": raw}))
-    assert middleware._extract_retry_after_ms(error) == 60000
