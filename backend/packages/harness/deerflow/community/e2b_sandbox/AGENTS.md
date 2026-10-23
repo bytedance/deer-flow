@@ -45,6 +45,9 @@ Release only needs the VM lock while leaving active state; do not hold it
 during output sync, which must not prevent ownership heartbeats.
 Track that release in `_remote_ops_in_progress` until it completes so
 reconciliation cannot probe or re-adopt a VM between active and warm states.
+Acquire drops the lease of a VM it finds gone (dead cached client, reaped
+warm entry): no later path sees that ID, and the renewer re-claims any lapsed
+lease it still tracks.
 
 Shutdown owns both maintenance workers as well as sandbox registries. After
 signalling the lease-renewal and reconciliation threads, a bounded join is only
