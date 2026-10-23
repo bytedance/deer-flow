@@ -755,6 +755,8 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("opensandbox benchmarks do not support --fault-inject or nonzero --health-check-skip-seconds")
     if min(args.concurrency, args.users, args.replicas) < 1 or min(args.iterations, args.warmup_iterations) < 0:
         raise SystemExit("concurrency, users and replicas must be positive; iteration counts must be nonnegative")
+    if args.idle_timeout < 0:
+        raise SystemExit("idle timeout must be nonnegative")
     if args.fault_inject is not None and (args.concurrency != 1 or args.no_warmpool or args.scenario != "warm_same_thread"):
         raise SystemExit("fault injection requires warm_same_thread, concurrency=1 and an enabled warm pool")
     if args.fault_inject is not None and not 0 <= args.fault_inject < args.iterations:
