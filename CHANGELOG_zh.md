@@ -1112,6 +1112,10 @@
 
 ### 修复
 
+- **沙箱：** acquire 发现 E2B VM 已不存在（缓存客户端已失效，或暖池中的 VM 在停放期间被
+  回收）时，释放该 VM 的所有权租约。此前租约会一直保留并续约到 Gateway 关闭，每个被回收的
+  VM 都会留下一个跟踪 ID 和一个持续续约的所有权键。([#7277])
+  
 - **认证：** OIDC 提供方以 `200` 返回非预期 JSON 对象的响应体（例如维护中的 HTML
   页面）时，SSO 登录与回调不再以 `500` 失败。discovery、token、JWKS 与 UserInfo
   响应体、格式错误的 ID token 头以及缺少可用端点的 discovery 文档，现在都走既有的
@@ -10388,3 +10392,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7217]: https://github.com/bytedance/deer-flow/pull/7217
 [#7255]: https://github.com/bytedance/deer-flow/pull/7255
 [#7258]: https://github.com/bytedance/deer-flow/pull/7258
+[#7277]: https://github.com/bytedance/deer-flow/pull/7277
