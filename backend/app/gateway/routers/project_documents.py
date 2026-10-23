@@ -419,7 +419,7 @@ async def attach_project_document_to_thread(
         except Exception as exc:
             logger.error(f"Failed to attach {row['name']} to thread {thread_id}: {exc}")
             await service.cleanup_written()
-            raise HTTPException(status_code=500, detail=f"Failed to upload {row['name']}: {exc}")
+            raise HTTPException(status_code=500, detail=f"Failed to upload {row['name']}.")
         # Sync-phase failures (permissions/provider sync) follow ordinary
         # uploads: they propagate and the host files stay in place.
         await service.finalize()

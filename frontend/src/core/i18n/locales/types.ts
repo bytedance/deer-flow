@@ -36,6 +36,7 @@ export interface Translations {
       | "retrieval"
       | "knowledge"
       | "weknora"
+      | "lightrag"
       | "example",
       { title: string; description: string }
     >;
@@ -174,6 +175,13 @@ export interface Translations {
     showArtifacts: string;
     browser: string;
     showBrowser: string;
+  };
+
+  browserStream: {
+    connecting: string;
+    disconnected: string;
+    handshakeTimeout: string;
+    connectionFailed: string;
   };
 
   skillUsage: {

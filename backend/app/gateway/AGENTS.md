@@ -69,6 +69,7 @@ and OIDC callbacks. A small `HttpOnly` preference cookie preserves the choice.
 Logout clears auth cookies and suppresses CSRF re-issue.
 
 OIDC redirects retain existing endpoint query bytes (RFC 6749 section 3.1).
+Malformed IdP bodies raise `OIDCError` (502/`sso_failed`).
 `tests/test_oidc_auth.py` pins query, state-cookie, nonce and PKCE agreement.
 
 Personal Access Tokens (`app.gateway.auth.pat`, `Authorization: Bearer dfp_...`) run as their owning user: an invalid Bearer is a hard 401 with no cookie fallback, which keeps `CSRFMiddleware`'s Bearer skip safe (origin checks still run). Scopes narrow within the allowlisted threads/runs/projects routes (including `POST /api/threads/{id}/move`); every other authenticated route 403s PAT callers (admin included). PAT management and `/change-password` require session auth; only SHA-256 digests are stored (`0017`).

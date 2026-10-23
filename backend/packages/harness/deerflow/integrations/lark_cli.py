@@ -91,6 +91,7 @@ from deerflow.skills.package_files import EXEC_SNIFF_BYTES, is_executable_binary
 from deerflow.skills.parser import parse_skill_file
 from deerflow.skills.permissions import make_skill_tree_sandbox_readable
 from deerflow.skills.types import SKILL_MD_FILE, SkillCategory
+from deerflow.utils.atomic_write import cleanup_failed_atomic_write
 
 logger = logging.getLogger(__name__)
 
@@ -1272,15 +1273,18 @@ def _publish_bytes_atomically(path: Path, content: bytes) -> None:
     ``make_skill_tree_sandbox_readable``. The parent directory is not fsynced,
     so this helper alone does not guarantee publication survives power loss.
     """
-    fd, temporary = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+    fd, temporary_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+    temporary = Path(temporary_name)
     try:
-        with os.fdopen(fd, "wb") as handle:
+        handle = os.fdopen(fd, "wb")
+        fd = None  # The file object now owns the descriptor.
+        with handle:
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
     except BaseException:
-        Path(temporary).unlink(missing_ok=True)
+        cleanup_failed_atomic_write(temporary, fd)
         raise
 
 
@@ -3468,10 +3472,10 @@ def _download_lark_archive(version: str) -> Path:
                         raise ValueError("Lark CLI source archive is too large.")
                     out.write(chunk)
     except ValueError:
-        archive_path.unlink(missing_ok=True)
+        cleanup_failed_atomic_write(archive_path)
         raise
     except Exception as exc:  # noqa: BLE001 - network boundary
-        archive_path.unlink(missing_ok=True)
+        cleanup_failed_atomic_write(archive_path)
         raise ValueError(f"Could not download the Lark skill pack ({version}) from GitHub. Check the Gateway's internet access, or pre-stage the archive via {LARK_CLI_SOURCE_ARCHIVE_ENV}.") from exc
     return archive_path
 

@@ -902,6 +902,20 @@ def test_main_reports_invalid_thread_id_without_traceback(tmp_path, capsys):
     assert "Traceback" not in captured.err
 
 
+def test_main_reports_directory_out_without_traceback(tmp_path, capsys):
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    out_dir = tmp_path / "bundles"
+    out_dir.mkdir()
+
+    exit_code = support_bundle.main(["--project-root", str(project_root), "--out", str(out_dir)])
+
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert "--out must be a file path, not a directory" in captured.err
+    assert "Traceback" not in captured.err
+
+
 def test_main_prints_reporter_next_steps_and_optional_upload(tmp_path, capsys):
     project_root = tmp_path / "project"
     project_root.mkdir()

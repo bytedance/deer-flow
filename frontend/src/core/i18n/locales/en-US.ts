@@ -80,6 +80,11 @@ export const enUS: Translations = {
         description:
           "Demonstrate read-only retrieval and structured tool results using fixed sample documents, without an external knowledge service.",
       },
+      lightrag: {
+        title: "LightRAG",
+        description:
+          "Retrieve documents and entity relations from LightRAG with shared source citations.",
+      },
       weknora: {
         title: "WeKnora knowledge retrieval",
         description:
@@ -238,6 +243,15 @@ export const enUS: Translations = {
     showArtifacts: "Show artifacts of this conversation",
     browser: "Browser",
     showBrowser: "Open browser panel",
+  },
+
+  browserStream: {
+    connecting: "Connecting…",
+    disconnected: "Disconnected",
+    handshakeTimeout:
+      "Live browser connection timed out. Check your network or proxy, then turn Live off and on to retry.",
+    connectionFailed:
+      "Live browser connection failed or closed. Check your connection and access permissions, then turn Live off and on to retry.",
   },
 
   skillUsage: {

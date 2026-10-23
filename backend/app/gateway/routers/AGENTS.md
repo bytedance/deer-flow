@@ -4,6 +4,12 @@ Shared scheduled-task update validation preserves an unchanged future `once`
 instant on a live task inside `scheduler.min_once_delay_seconds`; new/changed
 instants and terminal reactivation still enforce the minimum delay.
 
+Scheduled-task admission rejects nonexistent naive `run_at` and `end_at`
+wall times through the shared Gateway datetime resolver. Keep this check out
+of runtime `next_run_at`: legacy tasks retain their accepted execution time,
+including unchanged live once definitions. Explicit offsets retain their instant;
+ambiguous naive times keep the existing fold choice.
+
 The MCP task list accepts optional `TaskStatus` and `active_only` query filters.
 Pass both to the repository before its limit; preserve `threads:read`, owner
 checks, current-thread incarnation scoping, and the unfiltered array response.
@@ -21,6 +27,10 @@ signed-in user, so their unexpected-failure 500s return a fixed detail. Load
 errors (e.g. a malformed `extensions_config.json`) carry host paths and stay in
 the server log.
 
+Thread upload, upload delete and shelf attach-to-thread 500s name the file but
+not the cause: staging and unlink `OSError`s carry host paths and stay in the
+server log.
+
 Skill mutation operation lists return `next_cursor: null` when `has_more` is false, including empty pages after a supplied `after_id`. The next cursor is the final returned operation only when a further page exists.
 
 `GET /api/agent-tool-groups` projects only configured group names for the
@@ -35,9 +45,9 @@ Agent PUT uses `preserve_non_managed_fields(..., new_tool_groups=...)` to clear
 an inherited knowledge default when changed groups remove knowledge access.
 Explicit scope/null updates still win; unchanged groups are not a migration.
 
-Custom-agent and user-profile 500s and the scheduled-task `invalid_assistant`
-422 use fixed text: agent config parse errors and `OSError`s carry host paths
-and stay in the server log.
+Agent/profile and deployment/personal MCP mutation 500s plus the
+scheduled-task `invalid_assistant` 422 use fixed text. Log exceptions
+server-side; they can carry host paths.
 
 Committed MCP reconciliation failures are logged once by
 `fail_mcp_reconciliation`, with only the underlying exception type.
