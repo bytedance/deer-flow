@@ -2960,6 +2960,11 @@ The workspace Browser Live client negotiates binary JPEG WebSocket frames,
 keeps only the newest pending frame per display refresh, and revokes replaced
 object URLs. Gateway control messages remain JSON, and clients that do not
 request the binary capability retain the legacy JSON/base64 frame protocol.
+Opening a Live connection has a 10-second handshake deadline. A stalled
+handshake enters the existing capped backoff, with up to six reconnects;
+successful connections reset that retry budget. The panel distinguishes connection
+timeouts from other connection failures and shows recovery guidance, including
+when retries are exhausted. Turn Live off and on to start a fresh retry budget.
 
 ### Context Engineering
 

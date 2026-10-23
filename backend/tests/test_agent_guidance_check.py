@@ -53,6 +53,7 @@ EXPECTED_GUIDANCE_PATHS = {
     "backend/packages/harness/deerflow/uploads/AGENTS.md",
     "backend/packages/harness/deerflow/utils/AGENTS.md",
     "frontend/src/AGENTS.md",
+    "frontend/src/components/workspace/browser-view/AGENTS.md",
     "frontend/src/core/memory/AGENTS.md",
     "frontend/tests/e2e/AGENTS.md",
     "scripts/AGENTS.md",
