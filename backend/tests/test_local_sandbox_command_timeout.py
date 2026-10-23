@@ -224,6 +224,7 @@ def test_bash_tool_description_guides_safe_cross_platform_local_environment_prob
     assert "do not repeat the rejected command" in description
     assert "command-only probes" in description
 
+
 @posix_only
 def test_timeout_uses_saved_process_group_id_if_leader_exits(monkeypatch):
     """Timeout cleanup must target the saved group even if the leader has exited."""
