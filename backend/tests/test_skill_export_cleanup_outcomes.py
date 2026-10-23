@@ -12,9 +12,13 @@ from deerflow.skills.export import SkillExportArchive
 
 
 class CloseFailure(BytesIO):
+    def __init__(self, data, error_type=OSError):
+        super().__init__(data)
+        self.error_type = error_type
+
     def close(self):
         super().close()
-        raise OSError("injected archive close failure")
+        raise self.error_type("injected archive close failure")
 
 
 @pytest.fixture
@@ -28,8 +32,13 @@ def slots(monkeypatch):
     assert not budget.acquire(blocking=False), "an export slot was released twice"
 
 
+@pytest.fixture(params=[OSError, AttributeError], ids=["io-error", "non-io-error"])
+def close_error(request):
+    return request.param
+
+
 @pytest.fixture(params=[False, True], ids=["close-failure", "close-and-log-failure"])
-def close_failure(request, monkeypatch):
+def close_failure(request, monkeypatch, close_error):
     if request.param:
 
         def fail(*args, **kwargs):
@@ -39,7 +48,7 @@ def close_failure(request, monkeypatch):
         import logging
 
         monkeypatch.setattr(logging.getLogger(service.__name__), "warning", fail)
-    return CloseFailure(b"zip")
+    return CloseFailure(b"zip", close_error)
 
 
 @pytest.mark.asyncio
@@ -180,4 +189,51 @@ async def test_repeated_cancellation_does_not_release_slot_before_close_finishes
         finish.set()
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+        BytesIO.close(file)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ["response", "unclaimed-worker"])
+async def test_cleanup_diagnostic_identifies_skill(slots, caplog, boundary):
+    file = CloseFailure(b"zip")
+    archive = SkillExportArchive(file, 3)
+    try:
+        if boundary == "response":
+            response = service.SkillExportResponse(archive, "demo", service.ExportLease.acquire())
+            messages = []
+
+            async def receive():
+                await asyncio.Event().wait()
+
+            async def send(message):
+                messages.append(message)
+
+            await response({"type": "http", "asgi": {"spec_version": "2.4"}}, receive, send)
+            assert messages[0]["status"] == 200
+            assert b"".join(m.get("body", b"") for m in messages) == b"zip"
+        else:
+            started = asyncio.Event()
+            loop = asyncio.get_running_loop()
+
+            def work(cancel):
+                loop.call_soon_threadsafe(started.set)
+                assert cancel.wait(3)
+                return archive
+
+            task = asyncio.create_task(service.run_export_work(work, skill_name="demo"))
+            try:
+                await asyncio.wait_for(started.wait(), 3)
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+                assert task.cancelled()
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+        records = [record for record in caplog.records if record.name == service.__name__]
+        assert len(records) == 1
+        assert "'demo'" in records[0].getMessage()
+        assert isinstance(records[0].exc_info[1], OSError)
+        assert file.closed
+    finally:
         BytesIO.close(file)

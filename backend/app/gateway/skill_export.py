@@ -104,15 +104,15 @@ async def _finish_io(func: Callable, *args):
         raise
 
 
-def _close_archive_best_effort(archive: SkillExportArchive) -> None:
-    """A cleanup failure cannot change the transfer or request outcome."""
+def _close_archive_best_effort(archive: SkillExportArchive, skill_name: str | None = None) -> None:
+    """Preserve outcomes even for non-OSError bugs in close(); let interruption signals propagate."""
     try:
         archive.close()
     except Exception:
         # Logging handlers are application code and can fail too. Keep this
         # guard narrow so interruption signals still propagate normally.
         with suppress(Exception):
-            logger.warning("Could not close skill export archive", exc_info=True)
+            logger.warning("Could not close skill export archive (skill=%r)", skill_name, exc_info=True)
 
 
 async def _disconnected(request: Request) -> None:
@@ -120,7 +120,7 @@ async def _disconnected(request: Request) -> None:
         pass
 
 
-async def run_export_work(work: Callable[[threading.Event], Any], request: Request | None = None) -> tuple[Any, ExportLease]:
+async def run_export_work(work: Callable[[threading.Event], Any], request: Request | None = None, *, skill_name: str | None = None) -> tuple[Any, ExportLease]:
     """Transfer a successful result AND lease, or drain/clean them before raising."""
     lease = ExportLease.acquire()
     cancel_event = threading.Event()
@@ -143,7 +143,7 @@ async def run_export_work(work: Callable[[threading.Event], Any], request: Reque
                     pass
                 else:
                     if isinstance(result, SkillExportArchive):
-                        await _finish_io(_close_archive_best_effort, result)
+                        await _finish_io(_close_archive_best_effort, result, skill_name)
         finally:
             lease.release()
         raise
@@ -158,6 +158,7 @@ class SkillExportResponse(StreamingResponse):
 
     def __init__(self, archive: SkillExportArchive, name: str, lease: ExportLease) -> None:
         self.archive, self.lease = archive, lease
+        self.skill_name = name
         super().__init__(
             self._chunks(),
             media_type="application/zip",
@@ -191,7 +192,7 @@ class SkillExportResponse(StreamingResponse):
                 raise ClientDisconnect from None
         finally:
             try:
-                await _finish_io(_close_archive_best_effort, self.archive)
+                await _finish_io(_close_archive_best_effort, self.archive, self.skill_name)
             finally:
                 self.lease.release()
 
