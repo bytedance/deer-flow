@@ -14,8 +14,8 @@ from deerflow.community.browserless import browserless_client, tools
 @pytest.mark.asyncio
 @pytest.mark.parametrize("tool_name", ["web_fetch", "web_capture"])
 @pytest.mark.parametrize("key", ["timeout_s", "timeout"])
-@pytest.mark.parametrize("value", ["0", "-1", ".nan", ".inf", "-.inf", '"NaN"', '"Infinity"'])
-async def test_invalid_timeout_uses_default_in_http_request(monkeypatch, tmp_path, tool_name, key, value):
+@pytest.mark.parametrize("value", ["0", "-1", ".nan", ".inf", "-.inf", '"NaN"', '"Infinity"', "true", "false", "", "null", "{}", "[]", '"typo"'])
+async def test_invalid_timeout_uses_default_in_http_request(monkeypatch, tmp_path, caplog, tool_name, key, value):
     cfg = yaml.safe_load(f"{key}: {value}\nallow_private_addresses: true\nnetwork_isolation_confirmed: true")
     monkeypatch.setattr(tools, "_get_tool_config", lambda name: cfg)
     monkeypatch.delenv("BROWSERLESS_TOKEN", raising=False)
@@ -41,11 +41,17 @@ async def test_invalid_timeout_uses_default_in_http_request(monkeypatch, tmp_pat
 
     assert len(requests) == 1
     assert requests[0].extensions["timeout"] == dict.fromkeys(["connect", "read", "write", "pool"], 30.0)
+    assert any(record.name == tools.__name__ and "invalid timeout" in record.message for record in caplog.records)
 
 
 @pytest.mark.parametrize("value", [0.25, 45, "2.5", " 60 "])
 def test_positive_finite_timeouts_are_preserved(value):
     assert tools._get_browserless_client(cfg={"timeout_s": value}).timeout_s == float(value)
+
+
+def test_missing_timeout_uses_default_without_warning(caplog):
+    assert tools._get_browserless_client(cfg={}).timeout_s == 30.0
+    assert not any(record.name == tools.__name__ and "invalid timeout" in record.message for record in caplog.records)
 
 
 @pytest.mark.asyncio

@@ -50,15 +50,12 @@ def _get_tool_config(tool_name: str) -> dict | None:
 def _coerce_timeout(value: object, default: float) -> float:
     """Coerce a config timeout into seconds, falling back to ``default`` on bad input.
 
-    Mirrors ``crawl4ai._coerce_timeout`` / ``jina_ai._coerce_timeout``: booleans and
-    non-numeric strings fall back to the default, so ``timeout_s: off`` (YAML ``False``)
-    does not become ``0.0`` and time out every request against a healthy server, and a
-    typo'd value does not raise out of tool construction. Non-positive and
-    non-finite values also fall back so HTTP requests keep a usable timeout.
+    Like the sibling providers, reject booleans and non-numeric strings. Browserless
+    additionally requires positive, finite seconds so HTTP requests keep a usable
+    timeout. Warn for every invalid configured value, including empty YAML values;
+    an omitted timeout is handled separately by ``_resolve_timeout``.
     """
-    if isinstance(value, bool):
-        return default
-    if isinstance(value, (int, float, str)):
+    if not isinstance(value, bool) and isinstance(value, (int, float, str)):
         try:
             timeout = float(value)
         except (ValueError, OverflowError):
@@ -66,7 +63,7 @@ def _coerce_timeout(value: object, default: float) -> float:
         else:
             if math.isfinite(timeout) and timeout > 0:
                 return timeout
-        logger.warning("Browserless: invalid timeout %r in config; using %ss", value, default)
+    logger.warning("Browserless: invalid timeout %r in config; using %ss", value, default)
     return default
 
 
