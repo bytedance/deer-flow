@@ -53,7 +53,11 @@ import { FlipDisplay } from "../flip-display";
 import { Tooltip } from "../tooltip";
 
 import { MarkdownContent } from "./markdown-content";
-import { isSafeHref, UnsafeLink } from "./markdown-link";
+import {
+  createMarkdownLinkComponent,
+  isSafeHref,
+  UnsafeLink,
+} from "./markdown-link";
 import { MessageReasoning } from "./message-reasoning";
 import { ToolCallDetails } from "./tool-call-details";
 
@@ -81,6 +85,10 @@ function MessageGroupComponent({
   toolArtifacts,
 }: MessageGroupProps) {
   const { t } = useI18n();
+  const markdownComponents = useMemo(
+    () => ({ a: createMarkdownLinkComponent(threadId) }),
+    [threadId],
+  );
   const [showAbove, setShowAbove] = useState(
     env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true",
   );
@@ -303,7 +311,13 @@ function MessageGroupComponent({
     <ChainOfThoughtStep
       key={step.id}
       icon={MessageSquareTextIcon}
-      label={<MarkdownContent content={step.content} isLoading={isLoading} />}
+      label={
+        <MarkdownContent
+          content={step.content}
+          isLoading={isLoading}
+          components={markdownComponents}
+        />
+      }
     ></ChainOfThoughtStep>
   );
 
@@ -324,6 +338,7 @@ function MessageGroupComponent({
             <MarkdownContent
               content={step.reasoning ?? ""}
               isLoading={isLoading}
+              components={markdownComponents}
             />
           }
         ></ChainOfThoughtStep>,
@@ -479,6 +494,7 @@ function MessageGroupComponent({
                       <MarkdownContent
                         content={lastReasoningStep.reasoning ?? ""}
                         isLoading={isLoading}
+                        components={markdownComponents}
                       />
                     }
                   ></ChainOfThoughtStep>
@@ -501,7 +517,11 @@ function MessageGroupComponent({
       {processingPanel}
       {clarificationTextSteps.map((step) => (
         <div key={step.id} className="w-full">
-          <MarkdownContent content={step.content} isLoading={isLoading} />
+          <MarkdownContent
+            content={step.content}
+            isLoading={isLoading}
+            components={markdownComponents}
+          />
         </div>
       ))}
     </>

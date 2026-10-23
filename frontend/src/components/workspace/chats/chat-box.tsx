@@ -22,7 +22,10 @@ import {
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet";
-import { collectThreadArtifactPaths } from "@/core/artifacts/utils";
+import {
+  areStringArraysEqual,
+  collectThreadArtifactPaths,
+} from "@/core/artifacts/utils";
 import { useI18n } from "@/core/i18n/hooks";
 import { env } from "@/env";
 import { useIsMobile } from "@/hooks/use-mobile";
@@ -86,13 +89,6 @@ const RIGHT_PANEL_ANIMATION_MS = 280;
 const RIGHT_PANEL_DEFAULT_SIZE = "40%";
 
 type RightPanelKind = "sidecar" | "artifacts" | "browser" | "details";
-
-function sameStrings(previous: readonly string[], next: readonly string[]) {
-  return (
-    previous.length === next.length &&
-    previous.every((value, index) => value === next[index])
-  );
-}
 
 interface ChatBoxProps {
   children: React.ReactNode;
@@ -168,7 +164,7 @@ const ChatBoxContent: React.FC<ChatBoxProps> = ({
     // Update artifacts from the current thread
     // An empty initial state must not erase artifacts restored by the provider
     // before the persisted thread state has arrived.
-    if (threadArtifacts && !sameStrings(artifacts, threadArtifacts)) {
+    if (threadArtifacts && !areStringArraysEqual(artifacts, threadArtifacts)) {
       setArtifacts(threadArtifacts);
     }
 

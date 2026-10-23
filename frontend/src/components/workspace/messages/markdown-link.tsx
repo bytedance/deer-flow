@@ -6,7 +6,7 @@ import {
 } from "react";
 
 import {
-  isRelativeArtifactReference,
+  isPotentialRelativeArtifactReference,
   resolveMarkdownArtifactURL,
   resolveRelativeArtifactURL,
 } from "@/core/artifacts/utils";
@@ -178,7 +178,7 @@ export function createMarkdownLinkComponent(
       threadId &&
       artifactPaths &&
       href &&
-      isRelativeArtifactReference(href)
+      isPotentialRelativeArtifactReference(href)
     ) {
       const artifactURL = resolveRelativeArtifactURL(
         href,

@@ -7,6 +7,16 @@ import type { AgentThreadState } from "../threads";
 
 const EMPTY_ARTIFACT_PATHS: readonly string[] = [];
 
+export function areStringArraysEqual(
+  previous: readonly string[],
+  next: readonly string[],
+) {
+  return (
+    previous.length === next.length &&
+    previous.every((value, index) => value === next[index])
+  );
+}
+
 function decodePathSegment(segment: string) {
   try {
     return decodeURIComponent(segment);
@@ -183,16 +193,34 @@ export function resolveArtifactImageURL(
 function parseRelativeArtifactReference(src: string) {
   const { path: relativePath, suffix } = splitPathSuffix(src);
   const normalizedPath = relativePath.replace(/^(?:\.\/)+/, "");
+  const decodedPath = decodeRelativeArtifactPath(normalizedPath);
   if (
     !normalizedPath ||
     normalizedPath.startsWith("/") ||
     /^[a-z][a-z\d+.-]*:/i.test(normalizedPath) ||
     normalizedPath.startsWith("//") ||
-    normalizedPath.split("/").includes("..")
+    normalizedPath.split("/").includes("..") ||
+    decodedPath.split("/").includes("..")
   ) {
     return null;
   }
-  return { decodedPath: decodeRelativeArtifactPath(normalizedPath), suffix };
+  return { decodedPath, suffix };
+}
+
+/**
+ * True for a scheme-less relative path, including invalid artifact paths such
+ * as `../report.md`. Message links in this category must either resolve to a
+ * known artifact or render inert instead of navigating relative to the chat
+ * route.
+ */
+export function isPotentialRelativeArtifactReference(src: string) {
+  const { path } = splitPathSuffix(src);
+  return (
+    Boolean(path) &&
+    !path.startsWith("/") &&
+    !path.startsWith("//") &&
+    !/^[a-z][a-z\d+.-]*:/i.test(path)
+  );
 }
 
 /**

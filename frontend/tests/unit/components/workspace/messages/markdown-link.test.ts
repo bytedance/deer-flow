@@ -29,6 +29,7 @@ describe("isSafeHref", () => {
 
   it("rejects executable, local, and protocol-relative URLs", () => {
     expect(isSafeHref("javascript:alert(1)")).toBe(false);
+    expect(isSafeHref("java\tscript:alert(1)")).toBe(false);
     expect(isSafeHref("data:text/html,<script>alert(1)</script>")).toBe(false);
     expect(isSafeHref("file:///etc/passwd")).toBe(false);
     expect(isSafeHref("//example.com/path")).toBe(false);
@@ -163,9 +164,13 @@ describe("MarkdownLink relative artifact links", () => {
     expect(render("notes.md", [])).not.toContain("href=");
   });
 
-  it("does not rewrite .. segments, external, anchor or absolute links", () => {
-    expect(render("../notes.md")).toContain('href="../notes.md"');
-    expect(render("../notes.md")).not.toContain("/api/threads/");
+  it("renders traversal paths inert and preserves non-artifact links", () => {
+    for (const href of ["../notes.md", "..%2fnotes.md"]) {
+      const html = render(href);
+      expect(html).not.toContain("<a");
+      expect(html).not.toContain("href=");
+      expect(html).not.toContain("/api/threads/");
+    }
     const external = render("https://example.com/notes.md");
     expect(external).toContain('href="https://example.com/notes.md"');
     expect(external).toContain('target="_blank"');
