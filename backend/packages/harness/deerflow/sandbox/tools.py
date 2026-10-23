@@ -218,11 +218,19 @@ _WINDOWS_PATTERN_SOURCE_OPTIONS = frozenset("-e --regexp --expression".split())
 # ``-f``/``--file`` supplies the pattern from a file, so the first positional is
 # an input file again; the file itself is a path, not pattern text.
 _WINDOWS_PATTERN_FILE_OPTIONS = frozenset("-f --file".split())
+# awk spells that role ``-E``/``--exec`` (``gawk -E prog.awk data``), while grep
+# and sed read ``-E`` as extended-regex mode and rg as ``--encoding``.
+_WINDOWS_AWK_SCRIPT_OPTIONS = frozenset("-E --exec".split())
 _WINDOWS_PATTERN_PARAMETERS = frozenset("-pattern --pattern -filter --filter".split())
-_WINDOWS_PATTERN_VALUE_OPTIONS = frozenset("-g -t -T --glob --iglob --type --type-not --include --exclude".split())
-# The long spellings are glob or type filters in every tool that has them
-# (``rsync --exclude=\*.py``, ``tar --include``), not only in a regex tool.
-_WINDOWS_GLOB_FILTER_OPTIONS = frozenset("--glob --iglob --type --type-not --include --exclude".split())
+# Glob filters that take such a value for every tool that has them (``grep
+# --include=GLOB``, ``rsync --exclude``); gawk's ``--include`` names a file.
+_WINDOWS_GLOB_FILTER_OPTIONS = frozenset("--include --exclude".split())
+# rg's glob and type filters are rg's alone: grep has no ``-g``/``-t`` and its
+# ``-T`` is ``--initial-tab``, while gawk reads ``-g``/``-t`` as flags too.
+_WINDOWS_RG_GLOB_OPTIONS = frozenset("-g --glob --iglob -t --type -T --type-not".split())
+# awk's field separator and ``-v`` assignment are program data, never a path
+# (``awk -F/``, ``awk -v re=\\bfoo``); ``-F`` is ``--fixed-strings`` elsewhere.
+_WINDOWS_AWK_TEXT_OPTIONS = frozenset("-F --field-separator -v --assign".split())
 # The value roles ``_windows_option_role`` returns: which of them hold text, and
 # which of them supply the pattern so the first positional is a file again.
 _WINDOWS_TEXT_OPTION_ROLES = frozenset({"regex", "glob"})
@@ -235,19 +243,29 @@ _WINDOWS_SUBCOMMAND_LAUNCHERS = frozenset({"git", "gh", "npm", "npx", "pnpm", "y
 _WINDOWS_COMMAND_WRAPPERS = _LOCAL_BASH_COMMAND_WRAPPERS | frozenset({"env", "nice", "nohup", "stdbuf", "time", "xargs"})
 # ``find`` predicates after which the next word is a command, not an operand.
 _WINDOWS_FIND_EXEC_OPTIONS = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
-# Options that consume a value without supplying the pattern, so the pattern
-# stays the first positional (``rg -m 5 '\Aclass' .``).
-_WINDOWS_VALUE_OPTIONS = frozenset(
-    "-m --max-count -A -B -C --context --after-context --before-context -d --max-depth -j --threads -M --max-columns "
-    "-r --replace -E --encoding --engine --pre --sort -f --file -l --line-length -I -path --path -literalpath --literalpath "
-    "-o --output".split()
-)  # Commands that only print their arguments, so a colon or escape word in them is
-# ``-E`` and ``-r`` are ``--encoding`` and ``--replace`` only for ripgrep; in the
-# grep family they select extended regex / recursive mode and in sed ``-r`` is
-# extended mode, so the pattern after them stays the first positional argument
-# (``grep -E '\bword\b' file``, ``grep -r TODO \Windows\win.ini``).
-_WINDOWS_RG_VALUE_COMMANDS = frozenset({"rg"})
-_WINDOWS_RG_VALUE_OPTIONS = frozenset({"-E", "-r"})
+# Options that consume a value without supplying the pattern (``rg -m 5
+# '\Aclass' .``). Arity is per tool because the same letter differs: ``-l`` is a
+# flag for grep/rg but a line length for sed and a library for gawk, ``-o``
+# matches only for grep/rg but names an output file for curl. Reading a flag as
+# value-taking is the only mistake here that hides a host path -- it moves the
+# pattern one word right, so ``grep -l foo \Windows\win.ini`` checked every word
+# but the file. A command outside the table consumes no value (``--help`` rows).
+_WINDOWS_GREP_VALUE_OPTIONS = frozenset("-m --max-count -A --after-context -B --before-context -C --context -d --directories".split())
+_WINDOWS_RG_VALUE_OPTIONS = frozenset("-m --max-count -A --after-context -B --before-context -C --context -d --max-depth -j --threads -M --max-columns -r --replace -E --encoding --engine --pre --sort".split())
+_WINDOWS_AWK_VALUE_OPTIONS = frozenset("-l --load -i --include".split())
+_WINDOWS_POWERSHELL_VALUE_OPTIONS = frozenset("-path --path -literalpath --literalpath".split())
+_WINDOWS_VALUE_OPTIONS_BY_COMMAND = {
+    **dict.fromkeys(("grep", "egrep", "fgrep"), _WINDOWS_GREP_VALUE_OPTIONS),
+    **dict.fromkeys(("awk", "gawk", "mawk", "nawk"), _WINDOWS_AWK_VALUE_OPTIONS),
+    **dict.fromkeys(("select-string", "sls"), _WINDOWS_POWERSHELL_VALUE_OPTIONS),
+    "rg": _WINDOWS_RG_VALUE_OPTIONS,
+    "sed": frozenset("-l --line-length".split()),
+    "perl": frozenset({"-I"}),
+}
+# Text-valued spellings for the prefix scan, which has no command name; ``-f``/
+# ``--file`` stay out because their value is a path.
+_WINDOWS_TEXT_VALUE_OPTION_NAMES = _WINDOWS_PATTERN_SOURCE_OPTIONS | _WINDOWS_GLOB_FILTER_OPTIONS | _WINDOWS_RG_GLOB_OPTIONS | _WINDOWS_PATTERN_PARAMETERS
+# Commands that only print their arguments, so a colon or escape word in them is
 # text (``echo a:b``).
 _WINDOWS_TEXT_ONLY_COMMANDS = frozenset({"echo", "printf", "write-output", "write-host"})
 # The commands this pass can read arguments for; a wrapper's preamble ends here.
@@ -1430,15 +1448,20 @@ def _windows_value_role(option: str, command_name: str, pattern_command: bool) -
     """Return how one option spelling's value is read, or None when it is a flag."""
     if _windows_is_option(option, _WINDOWS_PATTERN_PARAMETERS):
         return "regex"
-    if _windows_is_option(option, _WINDOWS_GLOB_FILTER_OPTIONS):
+    if command_name not in _AWK_COMMAND_NAMES and _windows_is_option(option, _WINDOWS_GLOB_FILTER_OPTIONS):
+        # gawk's ``--include`` names a file to read, so it is a path, not a glob.
         return "glob"
     if pattern_command:
         if _windows_is_option(option, _WINDOWS_PATTERN_SOURCE_OPTIONS):
             return "regex"
-        if _windows_is_option(option, _WINDOWS_PATTERN_VALUE_OPTIONS) or (option == "-F" and command_name in _AWK_COMMAND_NAMES):
-            return "glob"
         if _windows_is_option(option, _WINDOWS_PATTERN_FILE_OPTIONS):
             return "script"
+        if command_name in _AWK_COMMAND_NAMES and _windows_is_option(option, _WINDOWS_AWK_SCRIPT_OPTIONS):
+            return "script"
+        if command_name in _AWK_COMMAND_NAMES and _windows_is_option(option, _WINDOWS_AWK_TEXT_OPTIONS):
+            return "glob"
+        if command_name == "rg" and _windows_is_option(option, _WINDOWS_RG_GLOB_OPTIONS):
+            return "glob"
     if _windows_takes_value(command_name, option):
         return "value"
     return None
@@ -1452,15 +1475,11 @@ def _windows_is_option(option: str, names: frozenset[str]) -> bool:
 def _windows_takes_value(command_name: str, option: str) -> bool:
     """Return True when *option* consumes the next word as its value.
 
-    ``-E`` and ``-r`` are the tool-specific spellings, resolved through
-    ``_WINDOWS_RG_VALUE_OPTIONS``: ripgrep reads them as ``--encoding`` and
-    ``--replace``, while the grep family reads them as extended-regex and
-    recursive mode and sed reads ``-r`` as extended mode, so the pattern after
-    them stays the first positional argument.
+    Arity comes from ``_WINDOWS_VALUE_OPTIONS_BY_COMMAND``, never one shared set.
+    A command outside the table consumes no value, which keeps the word after an
+    unknown option a checked positional.
     """
-    if option in _WINDOWS_RG_VALUE_OPTIONS:
-        return command_name in _WINDOWS_RG_VALUE_COMMANDS
-    return _windows_is_option(option, _WINDOWS_VALUE_OPTIONS)
+    return _windows_is_option(option, _WINDOWS_VALUE_OPTIONS_BY_COMMAND.get(command_name, frozenset()))
 
 
 def _windows_host_path_word(word: str, start: int, *, text_role: bool, url_spans: list[tuple[int, int]], allowed_paths: list[str], thread_data: ThreadDataState | None) -> str | None:
@@ -1502,7 +1521,7 @@ def _windows_host_path_word(word: str, start: int, *, text_role: bool, url_spans
     prefix = _WINDOWS_VALUE_PREFIX_PATTERN.match(bare) or _WINDOWS_ATTACHED_OPTION_PATTERN.match(bare)
     if prefix is not None:
         option = prefix.group("option")
-        if _windows_is_option(option, _WINDOWS_PATTERN_VALUE_OPTIONS) or _windows_is_option(option, _WINDOWS_PATTERN_SOURCE_OPTIONS) or _windows_is_option(option, _WINDOWS_PATTERN_PARAMETERS):
+        if _windows_is_option(option, _WINDOWS_TEXT_VALUE_OPTION_NAMES):
             return None
         bare = prefix.group("path")
         if bare.startswith("/"):

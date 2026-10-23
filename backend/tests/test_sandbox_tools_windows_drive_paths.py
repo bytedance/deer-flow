@@ -16,6 +16,11 @@ These cases drive the Python validator, not a real Windows shell, so the host
 gate is patched through fixtures and the whole file runs on every host -
 including the Ubuntu CI jobs, which otherwise never reach the Windows branches.
 
+Option arity is per tool, not one shared set: ``-l``/``-o``/``-I``/``-T`` are flags
+for grep and rg but values in sed, gawk and perl. Reading a flag as value-taking
+moves the pattern one word right, so ``grep -l foo \Windows\win.ini`` checked every
+word except the file (``_WINDOWS_VALUE_OPTIONS_BY_COMMAND``).
+
 Known limits, kept deliberately rather than re-bloating the guard:
 
 * The escape-word exemption treats a word built from C/regex escape atoms as
@@ -25,10 +30,6 @@ Known limits, kept deliberately rather than re-bloating the guard:
   read, and telling them apart from a rooted name would need the per-tool
   escape tables this guard was reduced away from. The same rule rejects an
   assignment of regex text (``X=\bfoo``) that the pre-reduction patch allowed.
-* ``_WINDOWS_VALUE_OPTIONS`` is shared by every tool, so ``-l``/``-o`` keep
-  consuming their next word even on ``grep``/``rg``, where they are flags
-  (``grep -l foo \Windows\win.ini`` reads the file). Closing that needs the
-  per-family option tables the reduction removed.
 * ``grep '\bfoo' /mnt/user-data/workspace/a.txt`` is allowed: the file is an
   allowed mount, which the pre-reduction patch rejected as a rooted name.
 """
@@ -365,6 +366,8 @@ def test_allows_escape_and_format_text(command: str) -> None:
         "grep -iE '\\btodo\\b' .",
         "sed -E 's/x/\\t/' file.txt",
         "rg -E utf-8 '\\Aclass' .",
+        "grep -l foo file.txt",
+        "grep -T foo file.txt",
     ],
 )
 def test_allows_grep_extended_regex_patterns(command: str) -> None:
@@ -384,6 +387,9 @@ def test_allows_grep_extended_regex_patterns(command: str) -> None:
         "rg -g '*.py' -e '\\Aclass' .",
         "rg -m 5 '\\Aclass' .",
         "rg -j 2 '\\Aclass' /mnt/user-data/workspace",
+        "rg -o foo file.txt",
+        "rg -I foo file.txt",
+        "rg -T py foo file.txt",
     ],
 )
 def test_allows_ripgrep_pattern_arguments(command: str) -> None:
@@ -401,6 +407,12 @@ def test_allows_ripgrep_pattern_arguments(command: str) -> None:
         "grep -e x \\Windows\\win.ini",
         "grep -F '\\d' \\Windows\\win.ini",
         "sed -n p '\\Bootmgr'",
+        # Value-taking options keep consuming their value per tool.
+        "sed -l 200 -n p \\Windows\\win.ini",
+        "rg -T py foo \\Windows\\win.ini",
+        "rg -E utf-8 foo \\Windows\\win.ini",
+        "perl -I \\Windows\\inc -e 'print 1'",
+        "Select-String -Path \\Windows\\win.ini -Pattern x",
     ],
 )
 def test_still_blocks_host_paths_in_pattern_tool_arguments(command: str) -> None:
@@ -422,9 +434,41 @@ def test_still_blocks_host_paths_in_pattern_tool_arguments(command: str) -> None
         "grep --regexp=foo \\Windows\\win.ini",
         "grep -efoo \\\\server\\share\\secret.txt",
         "grep -f\\Windows\\patterns.txt file",
+        # awk reads ``-E``/``--exec`` as a program file and ``-i``/``--include``
+        # as a source file, so those values are host paths; ``-E`` is grep's
+        # flag and rg's ``--encoding``, never awk's script there.
+        "gawk -E \\Windows\\prog.awk data.txt",
+        "gawk -i \\Windows\\prog.awk '{print}' data.txt",
+        "gawk -E prog.awk \\Windows\\win.ini",
     ],
 )
 def test_blocks_file_after_a_pattern_supplying_option(command: str) -> None:
+    with pytest.raises(PermissionError, match="Unsafe absolute paths"):
+        validate_local_bash_command_paths(command, _THREAD_DATA)
+
+
+@pytest.mark.usefixtures("windows_host")
+@pytest.mark.parametrize(
+    "command",
+    [
+        # ``-l``/``-o``/``-I``/``-T`` take no value for grep and rg (``grep
+        # --help``: ``-l, --files-with-matches``, ``-o, --only-matching``,
+        # ``-I`` alone, ``-T, --initial-tab``), so the next word is the pattern
+        # and the word after it is a file again; ``sed -l N`` takes a value.
+        "grep -l foo \\Windows\\win.ini",
+        "grep --files-with-matches foo \\Windows\\win.ini",
+        "grep -o foo \\Windows\\win.ini",
+        "grep -I foo \\Windows\\win.ini",
+        "grep -T foo \\Windows\\win.ini",
+        "grep -il foo \\Windows\\win.ini",
+        "rg -l foo \\Windows\\win.ini",
+        "rg -o foo \\Windows\\win.ini",
+        "rg -I foo \\Windows\\win.ini",
+        "git grep -l foo \\Windows\\win.ini",
+        "find . -exec grep -l foo \\Windows\\win.ini {} +",
+    ],
+)
+def test_blocks_host_files_behind_flag_only_options(command: str) -> None:
     with pytest.raises(PermissionError, match="Unsafe absolute paths"):
         validate_local_bash_command_paths(command, _THREAD_DATA)
 
@@ -488,6 +532,8 @@ def test_blocks_host_path_through_command_wrappers(command: str) -> None:
         "nice -n 5 grep '\\Afoo' file",
         "xargs -n1 grep '\\Afoo' file",
         "find . -name x -exec grep '\\Afoo' {} ;",
+        # ``-l`` is a flag, so this word is the wrapped command's PATTERN.
+        "find . -exec grep -l \\Windows\\win.ini {} +",
     ],
 )
 def test_allows_pattern_text_through_command_wrappers(command: str) -> None:
@@ -508,6 +554,9 @@ def test_allows_pattern_text_through_command_wrappers(command: str) -> None:
         "grep --max-count=1 '\\Afoo' file",
         "tar --exclude='*.py' -czf out.tgz .",
         "grep 'C^:/foo' /mnt/user-data/workspace/a.txt",
+        # awk's program-file and assignment values are not paths to read.
+        "gawk -E prog.awk data.txt",
+        "gawk -v re=\\bfoo '{print}' /mnt/user-data/workspace/a.txt",
     ],
 )
 def test_allows_attached_pattern_and_glob_values(command: str) -> None:
