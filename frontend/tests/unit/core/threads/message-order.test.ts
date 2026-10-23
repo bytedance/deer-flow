@@ -2,6 +2,7 @@ import type { Message } from "@langchain/langgraph-sdk";
 import { expect, test } from "@rstest/core";
 
 import { getMessageRunId } from "@/core/messages/run-duration";
+import { isHiddenFromUIMessage } from "@/core/messages/utils";
 import {
   buildVisibleHistoryMessages,
   mergeRenderedMessageLedger,
@@ -414,6 +415,53 @@ test("dedupeMessagesByIdentity keeps the last visible copy per identity", () => 
   });
   const visible = msg("x", "human", "visible");
   expect(dedupeMessagesByIdentity([hidden, visible])).toEqual([visible]);
+});
+
+test("dedupe keeps the visible human twin regardless of hidden-copy arrival order", () => {
+  // DynamicContextMiddleware shape: the hidden SystemMessage(id=X) reminder and
+  // the visible HumanMessage(id=X__user) share one identity. Whichever order
+  // the checkpoint window delivers them in, the surviving copy is the visible
+  // user turn — the hidden control copy must never squeeze it out (#7332).
+  const hiddenControl = withKwargs(msg("req-1", "system", "reminder"), {
+    hide_from_ui: true,
+  });
+  const visibleHuman = msg("req-1__user", "human", "real question");
+
+  expect(dedupeMessagesByIdentity([visibleHuman, hiddenControl])).toEqual([
+    visibleHuman,
+  ]);
+  expect(dedupeMessagesByIdentity([hiddenControl, visibleHuman])).toEqual([
+    visibleHuman,
+  ]);
+});
+
+test("a hidden control copy sharing the optimistic identity never displaces the optimistic user turn", () => {
+  // Optimistic-to-confirmed handoff (#7332): the reminder re-uses the
+  // submitted human's id, so a checkpoint frame that carries only the hidden
+  // control copy must not remove the still-unconfirmed optimistic input from
+  // the merged view.
+  const optimisticHuman = msg("local-human-1", "human", "the user question");
+  const hiddenControl = withKwargs(msg("local-human-1", "system", "reminder"), {
+    hide_from_ui: true,
+  });
+  const streamingStep = msg("step-1", "ai", "partial answer");
+
+  const merged = mergeMessages(
+    [],
+    [hiddenControl, streamingStep],
+    [optimisticHuman],
+  );
+
+  // Pure merge has no turn-order repair (that is the hooks layer's
+  // restoreLocalTurnMessageOrder); the invariant here is visibility: the
+  // hidden control copy is dropped and the user's question survives.
+  const visible = merged.filter((message) => !isHiddenFromUIMessage(message));
+  expect([...idsOf(visible)].sort()).toEqual(["local-human-1", "step-1"]);
+  const survivingHuman = visible.find(
+    (message) => message.id === "local-human-1",
+  );
+  expect(survivingHuman?.type).toBe("human");
+  expect(survivingHuman?.content).toBe("the user question");
 });
 
 test("a seq carried only by a hidden control copy still positions its visible twin", () => {
