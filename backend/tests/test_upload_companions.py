@@ -94,6 +94,23 @@ def test_each_source_timestamp_invalidates_companion(converted_upload, monkeypat
     assert "source identity or version timestamps do not match" in caplog.text
 
 
+def test_same_size_markdown_edit_invalidates_companion_on_windows(converted_upload, monkeypatch):
+    original, markdown = converted_upload
+    before = markdown.stat()
+    real_stat = Path.stat
+
+    def changed_markdown_stat(path, *args, **kwargs):
+        result = real_stat(path, *args, **kwargs)
+        if path == markdown:
+            fields = {name: getattr(before, name) for name in ("st_mode", "st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")}
+            fields["st_mtime_ns"] += 2_000_000_000
+            return SimpleNamespace(**fields)
+        return result
+
+    monkeypatch.setattr(Path, "stat", changed_markdown_stat)
+    assert resolve_companion(original) is None
+
+
 def test_legacy_source_record_requires_reregistration(converted_upload, caplog):
     original, markdown = converted_upload
     record = next((original.parent.parent.parent / "upload-companions").glob("*.json"))
