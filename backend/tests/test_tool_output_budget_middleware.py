@@ -21,6 +21,7 @@ import re
 import sys
 import tempfile
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 from langchain.agents.middleware.types import ModelRequest
@@ -2501,6 +2502,46 @@ class TestSupersededWriteElision:
         request, forwarded = self._forward(mw, [w1, r1, w2, r2, w3, r3])
 
         assert forwarded is request
+
+    def test_write_representation_is_frozen_after_its_first_model_request(self):
+        """A later read must not rewrite a write already sent to the model."""
+        mw = self._middleware()
+        payload = "x" * 5000
+        human = HumanMessage(content="go")
+        w1, r1 = _write("call-1", self.PATH, payload)
+        w1 = w1.model_copy(update={"id": f"write-message-{uuid4()}"})
+
+        _request, first = self._forward(mw, [human, w1, r1])
+        assert first.messages[1].tool_calls[0]["args"]["content"] == payload
+
+        # Checkpoint restoration can re-create message objects while retaining
+        # their stable IDs, so identity must not depend on Python object id.
+        restored_w1 = w1.model_copy(deep=True)
+        restored_r1 = r1.model_copy(deep=True)
+        rd, rr = _read("call-2", self.PATH)
+        w2, r2 = _write("call-3", self.PATH, "y" * 5000)
+        _request, later = self._forward(self._middleware(), [human, restored_w1, restored_r1, rd, rr, w2, r2])
+
+        assert later.messages[1].tool_calls[0]["args"]["content"] == payload
+        assert [message.model_dump() for message in later.messages[: len(first.messages)]] == [message.model_dump() for message in first.messages]
+
+    def test_first_seen_elision_remains_stable_after_history_is_compacted(self):
+        mw = self._middleware()
+        w1, r1 = _write("call-1", self.PATH, "x" * 5000)
+        w1 = w1.model_copy(update={"id": f"write-message-{uuid4()}"})
+        rd, rr = _read("call-2", self.PATH)
+        w2, r2 = _write("call-3", self.OTHER, "tiny")
+
+        _request, first = self._forward(mw, [w1, r1, rd, rr, w2, r2])
+        placeholder = first.messages[0].tool_calls[0]["args"]["content"]
+        assert placeholder.startswith("[content elided: 5000 chars")
+
+        # A compacted checkpoint can omit the read that originally justified
+        # elision; the frozen representation must survive that reconstruction.
+        restored_w1 = w1.model_copy(deep=True)
+        restored_r1 = r1.model_copy(deep=True)
+        _request, later = self._forward(self._middleware(), [restored_w1, restored_r1])
+        assert later.messages[0].tool_calls[0]["args"]["content"] == placeholder
 
     def test_newest_write_is_kept_even_when_superseded(self):
         w1, r1 = _write("call-1", self.PATH, "x" * 5000)

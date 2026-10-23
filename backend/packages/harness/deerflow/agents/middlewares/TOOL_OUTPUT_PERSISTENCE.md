@@ -70,9 +70,13 @@ writers' files based on a TTL.
 
 ## Model-bound write elision
 
-`wrap_model_call` elides successful `write_file` content only in model requests
-after a later successful same-path `read_file`, `write_file`, or `str_replace`
-(#5328); disk remains the reference. `keep_recent_writes` preserves the newest
-writes. Use the shared `tool_call_args` helpers (`pair_tool_call_results` and
-argument rewriting). Controls: `elide_superseded_writes` and
+`wrap_model_call` can elide successful `write_file` content only in model
+requests after a later successful same-path `read_file`, `write_file`, or
+`str_replace` (#5328); disk remains the reference. The first model-bound
+appearance freezes each large successful write as either full content or an
+elision placeholder, so later reads or writes cannot rewrite the cached
+prefix. A bounded process-local cache shares these decisions across middleware
+instances on one Gateway worker. `keep_recent_writes` is applied when a write
+first appears. Use the shared `tool_call_args` helpers (`pair_tool_call_results`
+and argument rewriting). Controls: `elide_superseded_writes` and
 `superseded_write_min_chars`.
