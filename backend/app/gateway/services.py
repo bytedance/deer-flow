@@ -599,8 +599,10 @@ def _normalize_input_messages(
     for index, item in enumerate(messages):
         try:
             message = convert_to_messages([item])[0]
-        except (ValueError, TypeError, NotImplementedError, KeyError) as exc:
-            # LangChain's error may contain the complete caller message.
+        except (ValueError, TypeError, NotImplementedError, KeyError, AttributeError) as exc:
+            # LangChain's error may contain the complete caller message. Its
+            # message validators raise AttributeError for some wrong-typed
+            # fields, e.g. a string ``tool_calls`` on an AI message.
             raise HTTPException(
                 status_code=400,
                 detail=f"Invalid message at {location}[{index}]",
@@ -1290,6 +1292,9 @@ def build_run_config(
     default_recursion_limit, max_recursion_limit = _resolve_gateway_recursion_limits()
     config: dict[str, Any] = {"recursion_limit": default_recursion_limit}
     if request_config:
+        caller_configurable = request_config.get("configurable")
+        if caller_configurable is not None and not isinstance(caller_configurable, Mapping):
+            raise ValueError("request config 'configurable' must be a mapping or null.")
         # LangGraph >= 0.6.0 introduced ``context`` as the preferred way to
         # pass thread-level data and rejects requests that include both
         # ``configurable`` and ``context``.  If the caller already sends
@@ -1299,7 +1304,7 @@ def build_run_config(
                 logger.warning(
                     "build_run_config: client sent both 'context' and 'configurable'; preferring 'context' (LangGraph >= 0.6.0). thread_id=%s, caller_configurable keys=%s",
                     thread_id,
-                    list((request_config.get("configurable") or {}).keys()),
+                    list((caller_configurable or {}).keys()),
                 )
             context_value = request_config["context"]
             if context_value is None:
@@ -1326,7 +1331,7 @@ def build_run_config(
             config["configurable"] = {"thread_id": thread_id}
         else:
             configurable = {"thread_id": thread_id}
-            configurable.update(request_config.get("configurable") or {})
+            configurable.update(caller_configurable or {})
             configurable["thread_id"] = thread_id
             config["configurable"] = configurable
         for k, v in request_config.items():
@@ -1946,13 +1951,16 @@ def _current_human_message(graph_input: object) -> HumanMessage | None:
 
 async def _load_scope_agent_config(
     *,
-    assistant_id: str | None,
+    assistant_id: object,
     user_id: str | None,
 ) -> Any | None:
     if not assistant_id or assistant_id == _DEFAULT_ASSISTANT_ID:
         return None
-    normalized = assistant_id.strip().lower().replace("_", "-")
     try:
+        # The caller's config/context ``agent_name`` arrives here unvalidated.
+        if not isinstance(assistant_id, str):
+            raise ValueError("agent_name must be a string")
+        normalized = assistant_id.strip().lower().replace("_", "-")
         return await asyncio.to_thread(
             load_agent_config,
             normalized,
@@ -2181,7 +2189,11 @@ async def start_run(
             run_metadata[DEERFLOW_ORIGIN_KEY] = origin
         run_metadata[DEERFLOW_TRACE_METADATA_KEY] = ensure_trace_id()
 
-        config = build_run_config(thread_id, body.config, run_metadata, assistant_id=body.assistant_id)
+        try:
+            config = build_run_config(thread_id, body.config, run_metadata, assistant_id=body.assistant_id)
+        except ValueError as exc:
+            # Raised only for the caller's own config sections or assistant_id.
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         if isinstance(config.get("metadata"), dict):
             config["metadata"] = _admit_scheduler_metadata(config["metadata"], trusted=scheduled_task_runtime is not None)
             config["metadata"].pop(DEERFLOW_ORIGIN_KEY, None)

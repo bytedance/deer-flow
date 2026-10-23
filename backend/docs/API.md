@@ -339,6 +339,12 @@ does not accept this header and keeps the existing missing-stream close of
 - `stream_resumable=false` is accepted: it is the LangGraph SDK's default and requests the non-resumable stream DeerFlow already serves
 - Undeclared SDK options, including `checkpoint_during` and `durability`, also return `422` instead of being silently discarded
 
+**Request Validation:**
+- `config.configurable` and `config.context` must be objects or `null`; any other value returns `422` (`invalid_run_config_section`)
+- An `assistant_id` that does not normalize to letters, digits and hyphens returns `422`, as does a non-string `agent_name` in `config.configurable`, `config.context` or `context`
+- A message in `input.messages` that cannot be parsed returns `400` naming its index
+- These checks run before a run is created
+
 When outputs changed during the run, `run.delivery` events retain the Slice 1
 facts (`presented`, `paths`, and `by_tool`) and add `produced_paths`,
 `presented_paths`, `matched_paths`, plus an explicit verdict: `verification`,
