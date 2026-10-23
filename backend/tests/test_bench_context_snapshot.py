@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.benchmark.context_snapshot.cases import CASES
+from scripts.benchmark.context_snapshot.cases import CASES, Case
 from scripts.benchmark.context_snapshot.grading import passed, score
 from scripts.benchmark.context_snapshot.report import clean_success, summarize, usage
 
@@ -29,6 +29,37 @@ def test_invoice_grader_allows_divmod_and_detects_rounding_errors():
 """
     assert passed(score(case, correct))
     assert not passed(score(case, correct.replace("r >= 5000", "r > 5000")))
+    assert not passed(score(case, correct.replace("return total", "return total if total else False")))
+
+
+@pytest.mark.parametrize("kind", ["json", "python"])
+@pytest.mark.parametrize(
+    ("actual", "expected"),
+    [(False, 0), (True, 1), ([False], [0]), ({"total": True}, {"total": 1}), ({"rows": [{"done": 0}]}, {"rows": [{"done": False}]})],
+)
+def test_grader_rejects_boolean_numeric_substitutions(kind, actual, expected):
+    case = Case("typed_result", "grading", kind, "", [], expected={"value": expected}, function="answer", checks=[{"args": [], "want": expected}])
+    artifact = json.dumps({"value": actual}) if kind == "json" else f"def answer(): return {actual!r}"
+    assert not passed(score(case, artifact))
+
+
+@pytest.mark.parametrize("kind", ["json", "python"])
+@pytest.mark.parametrize(("actual", "expected"), [(False, False), (True, True), (0, 0), (1.0, 1), ({"values": [True, 1.0]}, {"values": [True, 1]})])
+def test_grader_preserves_valid_booleans_and_numeric_equality(kind, actual, expected):
+    case = Case("typed_result", "grading", kind, "", [], expected={"value": expected}, function="answer", checks=[{"args": [], "want": expected}])
+    artifact = json.dumps({"value": actual}) if kind == "json" else f"def answer(): return {actual!r}"
+    assert passed(score(case, artifact))
+
+
+@pytest.mark.parametrize("raises", [False, True])
+def test_grader_detects_boolean_numeric_input_mutation(raises):
+    check = {"args": [[0]], "raises": "ValueError"} if raises else {"args": [[0]], "want": 7}
+    case = Case("input_mutation", "grading", "python", "", [], function="answer", checks=[check])
+    ending = "raise ValueError()" if raises else "return 7"
+    grade = score(case, f"def answer(values):\n    values[0] = False\n    {ending}")
+    assert not passed(grade)
+    if not raises:
+        assert grade["checks"][0]["mutated_input"]
 
 
 @pytest.mark.parametrize("content", ["[]", "null", '"text"', '{"unexpected":1}', "invalid"])

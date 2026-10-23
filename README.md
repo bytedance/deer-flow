@@ -417,6 +417,7 @@ streams simulate chunks from a non-streaming response, while no-tool streams sta
    - ACP agent entries are separate from model providers — if you configure `acp_agents.codex`, point it at a Codex ACP adapter such as `npx -y @zed-industries/codex-acp`
    - A bare or absolute ACP agent `command` is resolved before the agent starts, so npm-installed launchers work on Windows too: `npx` or `mcode` is spawned as its `npx.cmd`/`mcode.cmd` shim instead of failing with a command-not-found error, and an absolute path such as `C:\Users\me\AppData\Roaming\npm\mcode` resolves to the `mcode.cmd` shim beside npm's extensionless shell script instead of failing with `WinError 193`. The lookup uses the `PATH` the agent subprocess will actually see (`acp_agents.<name>.env.PATH` when set, otherwise the Gateway's) and hands the spawn an absolute path, so a relative `PATH` entry cannot be re-interpreted inside the agent's own workspace. A relative `command` (for example `bin/mcode`) is used as configured, and a command that cannot be resolved is still reported with the install guidance below.
    - Each ACP agent's `timeout_seconds` (default: 1800) is one shared budget for initialization, session creation, and the prompt, starting after the subprocess launches. On timeout, DeerFlow aborts the invocation and closes the subprocess before returning an error. Workspace/MCP preparation and subprocess cleanup are outside this budget. A `TimeoutError` raised by the SDK before this deadline expires retains its own error message.
+   - If an ACP agent exits before answering (for example because it is not authenticated or a configured argument is wrong), DeerFlow reports its exit code within a few seconds instead of waiting for `timeout_seconds`, and records the end of the agent's stderr in the Gateway log. Agent stderr is read continuously, so an agent that logs heavily cannot stall on a full pipe.
    - MiniMax Code speaks ACP directly. Install and authenticate it, then add it as an ACP agent:
 
    ```bash
@@ -883,6 +884,14 @@ DeerFlow supports multiple sandbox execution modes:
 - **Local Execution** (runs sandbox code directly on the host machine)
 - **Docker Execution** (runs sandbox code in isolated Docker containers)
 - **Docker Execution with Kubernetes** (runs sandbox code in Kubernetes pods via provisioner service)
+
+In Local Execution, `glob` and `grep` can search the skills root (default
+`/mnt/skills`) across its mounted categories. Patterns stay relative to that
+root, and one result limit covers all categories. User isolation, disabled-skill
+filtering and read-only mounts still apply. Configured category mounts such as
+`build` or `logs` remain searchable; ignore rules apply inside each mount. A broken
+category mount stops the root search, and the Gateway warning log identifies its
+virtual path.
 
 Sandbox references in conversation state are server-owned. External run and
 thread-state APIs reject caller-supplied `sandbox` values; when restoring a
@@ -1497,6 +1506,16 @@ The Agents gallery header wraps to the available width so its import and create
 actions remain visible beside the compact sidebar on narrow screens.
 
 ### Skills & Tools
+
+Agents can call the read-only `inspect_run_status` tool to inspect visible run
+token usage, message and tool-call counts, an approximate context-window fill,
+and whether a summary or unfinished to-dos exist. It returns counts only, not
+conversation or to-do text. Token counts depend on provider usage metadata;
+compaction can remove earlier messages, and context fill is unavailable when
+the model has no configured `context_window` or its latest response reports no
+input usage. It is also unavailable after a subagent dispatch because subagent
+usage may be attributed to that response. The result identifies whether a
+current-run boundary is known.
 
 Open **Capability Center** from the workspace sidebar to manage **Plugins**
 (MCP servers and Lark/Feishu integration) and **Skills**. Both catalogs support

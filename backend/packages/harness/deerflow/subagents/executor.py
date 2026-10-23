@@ -1022,9 +1022,10 @@ class SubagentExecutor:
         # this exact set so a subagent cannot activate an undisclosed skill.
         self._available_skill_names: set[str] = set()
         # Guard middlewares that expose ``consume_stop_reason`` (currently
-        # ``TokenBudgetMiddleware`` and ``LoopDetectionMiddleware``), captured in
-        # ``_create_agent`` so ``_aexecute`` can read each after the run and
-        # surface whichever cap fired (token_capped / loop_capped) to the lead
+        # ``TokenBudgetMiddleware``, ``LoopDetectionMiddleware`` and
+        # ``ModelLengthFinishReasonMiddleware``), captured in ``_create_agent``
+        # so ``_aexecute`` can read each after the run and surface whichever
+        # cap fired (token_capped / loop_capped / model_length_capped) to the lead
         # (#3875 Phase 2). Collected as a list — every guard must be checked,
         # not just the first — because the v2 contract advertises more than one
         # cap reason.
@@ -1169,7 +1170,8 @@ class SubagentExecutor:
                 self.config.name,
             )
         # Collect every guard middleware that exposes ``consume_stop_reason``
-        # (TokenBudgetMiddleware, LoopDetectionMiddleware) so _aexecute can read
+        # (TokenBudgetMiddleware, LoopDetectionMiddleware,
+        # ModelLengthFinishReasonMiddleware) so _aexecute can read
         # each after the run and surface whichever cap fired. Duck-typed
         # (``hasattr``) so this file needs no import of the middleware classes;
         # a list (not ``next(...)``) so every guard is checked and a later one
@@ -1328,7 +1330,9 @@ class SubagentExecutor:
         Checks every guard middleware that exposes ``consume_stop_reason``
         (collected in :meth:`_create_agent`) and returns the first non-``None``
         reason — ``"token_capped"`` when the token-budget hard stop fired,
-        ``"loop_capped"`` when loop detection forced a stop, otherwise ``None``.
+        ``"loop_capped"`` when loop detection forced a stop,
+        ``"model_length_capped"`` when the provider cut the response at its
+        output limit, otherwise ``None``.
         Each guard's cap does not raise (the run still completes with a final
         answer), so this is how the executor learns a completion was actually
         capped. Typically at most one guard fires per run, but checking all of

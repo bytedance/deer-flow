@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, rs } from "@rstest/core";
 import { createElement, type ComponentProps } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
+import { MessageArtifactPathsContext } from "@/components/workspace/messages/markdown-link";
 import {
   MessageGroup,
   scheduleToolLabel,
@@ -37,6 +38,24 @@ afterEach(() => {
 });
 
 describe("MessageGroup", () => {
+  it("resolves relative artifact links in chain-of-thought assistant text", () => {
+    const html = renderGroup(
+      [
+        {
+          id: "ai-1",
+          type: "ai",
+          content: "Inspect the [report](report.md).",
+        } as Message,
+      ],
+      { isLoading: true, threadId: "thread-1" },
+      ["/mnt/user-data/outputs/report.md"],
+    );
+
+    expect(html).toContain(
+      'href="/api/threads/thread-1/artifacts/mnt/user-data/outputs/report.md"',
+    );
+  });
+
   it.each(["array", "webz"])(
     "retains valid search links when %s results contain malformed entries",
     (shape) => {
@@ -879,7 +898,9 @@ function expectRenderedInOrder(html: string, needles: string[]) {
 function renderGroup(
   messages: Message[],
   props: Omit<ComponentProps<typeof MessageGroup>, "messages"> = {},
+  artifactPaths: readonly string[] | null = null,
 ) {
+  const group = createElement(MessageGroup, { ...props, messages });
   return renderToStaticMarkup(
     createElement(
       I18nContext.Provider,
@@ -890,7 +911,13 @@ function renderGroup(
           t: enUS,
         },
       },
-      createElement(MessageGroup, { ...props, messages }),
+      artifactPaths === null
+        ? group
+        : createElement(
+            MessageArtifactPathsContext.Provider,
+            { value: artifactPaths },
+            group,
+          ),
     ),
   );
 }
