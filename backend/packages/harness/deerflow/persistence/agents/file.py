@@ -64,6 +64,9 @@ class FileAgentStore(AgentStore):
         return paths.user_agent_dir(effective_user, name).exists() or paths.agent_dir(name).exists()
 
     def get_soul(self, name: str, *, user_id: str | None = None) -> str | None:
+        # Every other read/write method validates the name; without this, a
+        # ".." segment reaches resolve_agent_dir and escapes the user's tree.
+        name = validate_agent_name(name)
         agent_dir = resolve_agent_dir(name, user_id=user_id)
         soul_path = agent_dir / SOUL_FILENAME
         # resolve_agent_dir requires config.yaml; SOUL.md loading does not, so
