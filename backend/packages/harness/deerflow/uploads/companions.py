@@ -50,7 +50,7 @@ def register_companion(original: Path, markdown: Path) -> None:
                     "original": original.name,
                     "markdown": markdown.name,
                     "source_identity": [source_stat.st_dev, source_stat.st_ino, source_stat.st_size, source_stat.st_mtime_ns, source_stat.st_ctime_ns],
-                    "markdown_identity": [markdown_stat.st_dev, markdown_stat.st_ino, markdown_stat.st_size, markdown_stat.st_ctime_ns],
+                    "markdown_identity": [markdown_stat.st_dev, markdown_stat.st_ino, markdown_stat.st_size, markdown_stat.st_mtime_ns, markdown_stat.st_ctime_ns],
                 },
                 output,
             )
@@ -108,7 +108,7 @@ def resolve_companion(original: Path) -> Path | None:
         if not markdown.is_file() or markdown.is_symlink():
             return None
         markdown_stat = markdown.stat(follow_symlinks=False)
-        if data.get("markdown_identity") != [markdown_stat.st_dev, markdown_stat.st_ino, markdown_stat.st_size, markdown_stat.st_ctime_ns]:
+        if data.get("markdown_identity") != [markdown_stat.st_dev, markdown_stat.st_ino, markdown_stat.st_size, markdown_stat.st_mtime_ns, markdown_stat.st_ctime_ns]:
             logger.debug("Rejected upload companion for %r: Markdown identity or version timestamp does not match", original.name)
             return None
         return markdown
