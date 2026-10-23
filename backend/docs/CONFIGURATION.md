@@ -1844,9 +1844,10 @@ sandbox:
 Keep both `container_path` values unchanged. For example, an agent reads
 `/mnt/shared/report.csv`; native Windows resolves that to `D:/data/report.csv`,
 while WSL resolves it to `/mnt/d/data/report.csv`. WSL-native files can instead
-use `/home/alice/...`. Native Windows paths should use forward slashes as above,
-or YAML single quotes around backslashes (`'D:\data'`), so YAML does not interpret
-backslash escapes. These are path examples; the [local development prerequisites](../../README.md#option-2-local-development)
+use `/home/alice/...`. Native Windows paths can use forward slashes as above,
+or single-quoted backslashes (`'D:\data'`). Plain, unquoted YAML scalars also keep
+backslashes literal; only double-quoted scalars interpret backslash escapes.
+These are path examples; the [local development prerequisites](../../README.md#option-2-local-development)
 still apply, including the documented WSL limitations of the startup scripts.
 
 **Gateway in Docker:** both bundled Compose files mount the repository's
