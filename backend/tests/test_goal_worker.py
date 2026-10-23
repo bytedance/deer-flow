@@ -15,6 +15,41 @@ from deerflow.runtime.runs.manager import RunRecord, RunStartOutcome
 from deerflow.runtime.runs.schemas import DisconnectMode, RunStatus
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("successful_work", [True, False], ids=["new-work-same-reply", "failed-work-paraphrased-reply"])
+async def test_goal_progress_uses_operation_results_instead_of_reply_wording(monkeypatch, successful_work):
+    saver = InMemorySaver()
+    thread_id = "operation-progress-behavior"
+    await _seed_goal_thread(saver, thread_id=thread_id, goal_text="Finish the controlled task")
+    goal = await read_thread_goal(saver, thread_id)
+    goal["max_continuations"] = 8
+    await write_thread_goal(saver, thread_id, goal)
+
+    async def fixed_evaluator(*_args, **_kwargs):
+        return GoalEvaluation(satisfied=False, blocker="goal_not_met_yet", reason="Work remains", evidence_summary="Fixed local result")
+
+    monkeypatch.setattr(worker, "evaluate_goal_completion", fixed_evaluator)
+    messages = [HumanMessage(content="Finish the controlled task")]
+    decisions = []
+    for turn in range(3):
+        call = {"id": f"call-{turn}", "name": "write_file" if successful_work else "read_file", "args": {"path": f"/outputs/part-{turn}.txt"}}
+        if turn:
+            messages.append(HumanMessage(content="Continue", additional_kwargs={"hide_from_ui": True, "deerflow_goal_continuation": True}))
+        messages.extend(
+            [
+                AIMessage(content="", tool_calls=[call]),
+                ToolMessage(content=f"Created part {turn}" if successful_work else "File not found", tool_call_id=call["id"], name=call["name"], status="success" if successful_work else "error"),
+                AIMessage(content="More work remains." if successful_work else f"Investigating another approach, attempt {turn}."),
+            ]
+        )
+        await _write_messages(saver, thread_id=thread_id, messages=messages)
+        result = await worker._prepare_goal_continuation_input(accessor=_full_accessor(saver), bridge=_CollectingBridge(), checkpointer=saver, thread_id=thread_id, run_id="controlled-run", model_name=None, app_config=None)
+        decisions.append(result is not None)
+    saved = await read_thread_goal(saver, thread_id)
+    assert decisions == ([True, True, True] if successful_work else [True, True, False])
+    assert saved["no_progress_count"] == (0 if successful_work else 2)
+
+
 def _full_accessor(checkpointer) -> CheckpointStateAccessor:
     """Bind a full-mode accessor over a state-only graph for materialized reads."""
     graph = build_state_mutation_graph("goal_evaluator", "full")

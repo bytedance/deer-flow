@@ -17,6 +17,7 @@ from deerflow.workspace_changes import (
     capture_workspace_snapshot,
     compare_snapshots,
     get_changed_output_paths,
+    get_changed_paths,
     record_workspace_changes,
     scan_workspace_roots,
 )
@@ -174,6 +175,55 @@ def test_get_changed_output_paths_returns_only_created_or_modified_regular_outpu
     ]
 
 
+@pytest.mark.parametrize(
+    ("before_contents", "after_contents", "expected_statuses"),
+    [
+        pytest.param(
+            {"b.txt": "before", "c.txt": "unchanged"},
+            {"a.txt": "new", "b.txt": "before", "c.txt": "unchanged"},
+            {"a.txt": "created"},
+            id="insertion-pushes-existing-file-out-of-scan",
+        ),
+        pytest.param(
+            {"a.txt": "removed", "b.txt": "before", "c.txt": "unchanged"},
+            {"b.txt": "before", "c.txt": "unchanged"},
+            {"a.txt": "deleted"},
+            id="deletion-brings-existing-file-into-scan",
+        ),
+        pytest.param(
+            {"a.txt": "removed", "b.txt": "before", "c.txt": "unchanged"},
+            {"b.txt": "after", "c.txt": "unchanged", "d.txt": "new"},
+            {"b.txt": "modified"},
+            id="both-truncated-preserve-observed-modifications",
+        ),
+    ],
+)
+def test_workspace_changes_do_not_infer_absence_from_truncated_snapshots(tmp_path, before_contents, after_contents, expected_statuses):
+    roots = _roots(tmp_path)
+    outputs = roots[1].host_path
+    limits = WorkspaceChangeLimits(max_scanned_files=2)
+    for name, content in before_contents.items():
+        (outputs / name).write_text(content, encoding="utf-8")
+    before = scan_workspace_roots(roots, limits=limits)
+
+    for name in before_contents.keys() - after_contents.keys():
+        (outputs / name).unlink()
+    for name, content in after_contents.items():
+        (outputs / name).write_text(content, encoding="utf-8")
+    after = scan_workspace_roots(roots, limits=limits)
+
+    result = compare_snapshots(before, after, limits=limits)
+
+    expected = {f"/mnt/user-data/outputs/{name}": status for name, status in expected_statuses.items()}
+    assert {change.path: change.status for change in result.files} == expected
+    assert result.summary.created == list(expected.values()).count("created")
+    assert result.summary.modified == list(expected.values()).count("modified")
+    assert result.summary.deleted == list(expected.values()).count("deleted")
+    assert result.summary.truncated is True
+    assert get_changed_paths(before, after) == set(expected)
+    assert get_changed_output_paths(before, after) == sorted(path for path, status in expected.items() if status != "deleted")
+
+
 def test_compare_snapshots_treats_utf16_markdown_as_text(tmp_path):
     roots = _roots(tmp_path)
     workspace = roots[0].host_path
@@ -311,6 +361,28 @@ def test_count_diff_lines_counts_content_starting_with_dashes_or_pluses():
 
     assert additions == 1
     assert deletions == 1
+
+
+def test_scan_workspace_roots_walks_subdirectories_in_sorted_order(tmp_path, monkeypatch):
+    # The truncation boundary must not depend on the filesystem's directory order.
+    roots = _roots(tmp_path)
+    workspace = roots[0].host_path
+    for name in ("a", "b"):
+        (workspace / name).mkdir()
+        (workspace / name / "file.txt").write_text(name, encoding="utf-8")
+    real_walk = os.walk
+
+    def reversed_walk(top, *args, **kwargs):
+        for dirpath, dirnames, filenames in real_walk(top, *args, **kwargs):
+            dirnames.sort(reverse=True)
+            yield dirpath, dirnames, filenames
+
+    monkeypatch.setattr(scanner.os, "walk", reversed_walk)
+
+    snapshot = scan_workspace_roots(roots, limits=WorkspaceChangeLimits(max_scanned_files=1))
+
+    assert snapshot.truncated is True
+    assert list(snapshot.files) == ["/mnt/user-data/workspace/a/file.txt"]
 
 
 def test_scan_workspace_roots_skips_excluded_directories(tmp_path):

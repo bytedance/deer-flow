@@ -14,6 +14,17 @@ temporary; pass a raw descriptor only until `fdopen` succeeds, or an explicitly
 transferred duplicate descriptor owned by the cleanup caller. Shelf discards
 must preserve both a rejected project's 404 and a dedup hit's 200 response.
 Callers retain their own serialization, permissions and publication policy.
+Local Linux/macOS text revisions opt into a short `temporary_prefix` and
+`preserve_metadata_from` (a caller-owned descriptor). Staging starts at `0600`;
+`file_revision_metadata` transfers ownership, mode, ACLs and xattrs before data.
+macOS uses native descriptor ACL APIs and `fcopyfile(COPYFILE_XATTR)`; Linux uses
+descriptor xattrs, including its access ACL, removing inherited extras. Errors
+abort; never ignore metadata permission failures. Refuse set-id bits, macOS file
+flags and content-bound privilege attributes rather than reattach stale privileges to new
+content. Other publisher callers retain their existing mode-only contract.
+Do not restore old timestamps on a content revision, including an empty save.
+Source-descriptor close failures are best-effort warnings, not save failures;
+guard diagnostics so the publication result or original interruption survives.
 Failure cleanup must preserve the original publication exception, including
 interruptions. Descriptor close and sibling unlink are separate best-effort
 operations: a close failure must not prevent the unlink attempt.

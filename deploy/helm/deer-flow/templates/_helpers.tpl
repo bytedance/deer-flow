@@ -133,6 +133,20 @@ imagePullSecrets:
 {{- printf "%s-postgres" (include "deer-flow.fullname" .) -}}
 {{- end -}}
 
+{{/* Name of the operator-managed postgres Secret, or empty when the chart owns
+     the credentials. This is the only place the precedence chain is encoded:
+     databaseUrlSecret, the gateway's DATABASE_URL, the StatefulSet's
+     POSTGRES_PASSWORD and postgres-secret.yaml's render gate all read it, so a
+     source added here cannot make them disagree.
+
+     `default` rather than `or`: `or` returns its last operand even when falsy,
+     so `existingSecret: false` (or `0`) would render the literal name
+     "false". Chaining `default` keeps the old if/else-if truthiness and yields
+     an empty string for any falsy value. */}}
+{{- define "deer-flow.databaseUserSecret" -}}
+{{- .Values.postgresql.external.existingSecret | default .Values.postgresql.existingSecret | default "" -}}
+{{- end -}}
+
 {{/* Name of the Secret holding DATABASE_URL (and, in bundled mode, the
      postgres superuser password). Resolution order:
        1. postgresql.external.existingSecret (user-managed, key=database-url)
@@ -140,9 +154,7 @@ imagePullSecrets:
        3. chart-managed secret `<release>-postgres`
      Only #3 is created by this chart; #1/#2 must exist already. */}}
 {{- define "deer-flow.databaseUrlSecret" -}}
-{{- if .Values.postgresql.external.existingSecret -}}{{- .Values.postgresql.external.existingSecret -}}
-{{- else if .Values.postgresql.existingSecret -}}{{- .Values.postgresql.existingSecret -}}
-{{- else -}}{{- include "deer-flow.postgresFullname" . -}}{{- end -}}
+{{- include "deer-flow.databaseUserSecret" . | default (include "deer-flow.postgresFullname" .) -}}
 {{- end -}}
 
 {{/* Name of the redis StatefulSet/Service. */}}
@@ -163,9 +175,13 @@ imagePullSecrets:
 {{/* Name of the operator-managed redis Secret, or empty when the chart owns the
      credentials. Only the chart-managed Secret is created by this chart, and
      only there is the AUTH password known at render time — a user-managed
-     Secret may or may not carry `redis-password`. */}}
+     Secret may or may not carry `redis-password`.
+
+     Same truthiness rule as databaseUserSecret: `default` (not `or`) so a
+     falsy `existingSecret` yields an empty string instead of the literal name
+     "false". */}}
 {{- define "deer-flow.redisUserSecret" -}}
-{{- or .Values.redis.external.existingSecret .Values.redis.existingSecret -}}
+{{- .Values.redis.external.existingSecret | default .Values.redis.existingSecret | default "" -}}
 {{- end -}}
 
 {{/* Args for the bundled redis container. With a user-managed Secret the
@@ -201,7 +217,7 @@ redis-cli ping
      external URL, or a user-managed Secret). Drives the env injection in the
      gateway deployment. */}}
 {{- define "deer-flow.redisConfigured" -}}
-{{- or .Values.redis.enabled .Values.redis.external.redisUrl .Values.redis.external.existingSecret .Values.redis.existingSecret -}}
+{{- or .Values.redis.enabled .Values.redis.external.redisUrl (include "deer-flow.redisUserSecret" .) -}}
 {{- end -}}
 
 {{/* SHA256 checksums of the ConfigMaps. Mount these as pod-template

@@ -1335,6 +1335,8 @@ Content-Type: multipart/form-data
 
 ```
 
+**Error behavior:** an unexpected storage failure answers `500` with `{"detail": "Failed to upload <filename>."}`; the underlying error, which can name host paths, stays in server logs.
+
 **Name collisions:** filenames are claimed unique against the thread's existing uploads and reserved atomically — a same-name upload never replaces the existing file; it lands as `document_1.pdf` (the response's `filename`/`original_filename` reflect the claimed name). Use the artifacts `PUT` endpoint for sanctioned in-place updates.
 
 **Supported Document Formats** (converted to Markdown only when automatic conversion is enabled):
@@ -1380,6 +1382,8 @@ DELETE /api/threads/{thread_id}/uploads/{filename}
   "message": "Deleted document.pdf"
 }
 ```
+
+**Error behavior:** an unexpected storage failure answers `500` with `{"detail": "Failed to delete <filename>."}`; the underlying error stays in server logs.
 
 ### Thread Cleanup
 
@@ -1540,7 +1544,7 @@ POST /api/projects/{project_id}/documents/{document_id}/attach-to-thread/{thread
 
 Materializes an independent copy of a live shelf document into the target thread's uploads directory through the same ingestion pipeline as an ordinary upload (filename claiming, size checks, optional conversion under `uploads.auto_convert_documents`, sandbox-readable permissions, and sandbox sync for non-mounted providers; a caller denied `sandbox:execute` keeps the host upload without allocating a sandbox). Reading an archived source project's shelf is allowed and does not mutate it; a missing/foreign document, or a target thread the caller cannot write, is `404`. A row whose original bytes are missing or size-mismatched answers `409` `"content_missing"`.
 
-**Response:** `200 OK` with `{"filename", "size_bytes", "virtual_path", "artifact_url"}` — returned only after ingestion succeeds.
+**Response:** `200 OK` with `{"filename", "size_bytes", "virtual_path", "artifact_url"}` — returned only after ingestion succeeds. An unexpected ingestion failure answers `500` with `{"detail": "Failed to upload <name>."}`; the underlying error stays in server logs.
 
 #### Get Document Content
 
@@ -1668,6 +1672,16 @@ POST   /api/scheduled-tasks/preview-cron
 | `end_at` | date-time \| null | Safety cap: no automatic run after this time. Without a UTC offset it is wall-clock time in the task's timezone. |
 | `stop_condition` | string \| null | The user's "stop when …" rule, stored in its own field. Whitespace collapses to single spaces; at most 500 characters; blank means none. It is never part of `prompt`: each launch appends it as an instruction to call `stop_scheduled_task` (or, with `scheduler.tool_enabled` off, to report a met rule). |
 | `notification_group_connection_id` | string \| null | One additional connected Feishu group belonging to the task owner. Select a group binding returned by `GET /api/channels/connections`; it must record `chat_type=group` and a matching chat/workspace ID. Omitted in PATCH preserves the target; null clears it. Invalid choices return `invalid_notification_group` (422), lookup outages return `scheduler_unavailable` (503). |
+
+For one-time `schedule_spec.run_at` and `end_at` without an offset, a local time
+skipped by a timezone clock change is rejected: `422 invalid_schedule` for
+`run_at`, or `422 invalid_request` for `end_at`, including an end-time renewal
+on Resume. This applies to REST and conversation scheduling. Ambiguous local
+times retain the earlier occurrence (`fold=0`); explicit offsets preserve the
+specified instant. Unchanged live once definitions keep their previously
+accepted execution time; a changed definition or a PATCH that rearms a terminal
+task is validated again. Ordinary Resume retains the admitted stored schedule
+without revalidating its wall time; a renewed `end_at` is still checked.
 
 In a PATCH, sending `null` clears `goal_objective`, `max_runs`, `end_at` or
 `stop_condition` or `notification_group_connection_id`; for every other field `null` means unchanged (`assistant_id:

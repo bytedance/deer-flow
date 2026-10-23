@@ -7,8 +7,11 @@ import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
+import sys
 import threading
+from contextlib import suppress
 from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
@@ -21,6 +24,7 @@ from deerflow.sandbox.local.list_dir import list_dir
 from deerflow.sandbox.path_patterns import replace_output_path_matches
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
 from deerflow.sandbox.search import GrepMatch, find_glob_matches, find_grep_matches
+from deerflow.utils.atomic_write import publish_bytes_atomically
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +36,28 @@ logger = logging.getLogger(__name__)
 DEFAULT_COMMAND_TIMEOUT_SECONDS = 600
 _COMMAND_CAPTURE_LIMIT_BYTES = 10 * 1024 * 1024
 _PIPE_DRAIN_JOIN_TIMEOUT_SECONDS = 0.2
+
+
+def _publish_file_revision(path: str, content: str) -> None:
+    target = Path(os.path.realpath(path))
+    # Rename checks the parent, not the target's write permission. Check the
+    # existing file without truncating it before staging a replacement inode.
+    try:
+        fd = os.open(target, os.O_WRONLY | getattr(os, "O_NONBLOCK", 0))
+    except FileNotFoundError:
+        fd = None
+    try:
+        if fd is not None:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise OSError(errno.EINVAL, "Text revisions require a regular file", path)
+        publish_bytes_atomically(target, content.encode("utf-8"), temporary_prefix=".deerflow-write-", preserve_metadata_from=fd)
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                with suppress(Exception):
+                    logger.warning("Failed to close file revision source descriptor for %s", target, exc_info=True)
 
 
 class _BoundedPipeCapture:
@@ -1194,11 +1220,12 @@ class LocalSandbox(Sandbox):
             # Resolve container paths in content to local paths
             # using the content-specific resolver (forward-slash safe)
             resolved_content = self._resolve_paths_in_content(content)
-            mode = "a" if append else "w"
-            # newline="" writes the content as given; the default would turn
-            # every "\n" into "\r\n" on Windows (breaking `bash run.sh`).
-            with open(resolved_path, mode, encoding="utf-8", newline="") as f:
-                f.write(resolved_content)
+            if append or sys.platform not in {"darwin", "linux"}:
+                # Other hosts retain their existing write/ACL semantics.
+                with open(resolved_path, "a" if append else "w", encoding="utf-8", newline="") as f:
+                    f.write(resolved_content)
+            else:
+                _publish_file_revision(resolved_path, resolved_content)
             # Track this path so read_file knows to reverse-resolve on read.
             # Only agent-written files get reverse-resolved; user uploads and
             # external tool output are left untouched.

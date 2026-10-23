@@ -29,7 +29,7 @@ from deerflow.persistence.user.model import UserPreferenceRow
 from deerflow.runtime import ConflictError, RunRecord
 from deerflow.runtime.run_origin import origin_kind_of
 from deerflow.scheduler.host_notes import RUN_ERROR_DELETED_WHILE_QUEUED, RUN_ERROR_INTERRUPTED, RUN_ERROR_LEASE_LOST, RUN_ERROR_PAUSED_WHILE_QUEUED, RUN_ERROR_QUEUE_TIMEOUT, RUN_ERROR_RESTARTED
-from deerflow.scheduler.schedules import next_run_at
+from deerflow.scheduler.schedules import next_run_at, should_advance_schedule_cursor
 from deerflow.scheduler.stop_rule import launch_prompt
 from deerflow.trace_context import ensure_trace_context
 from deerflow.utils.thread_id import validate_thread_id
@@ -515,6 +515,28 @@ class ScheduledTaskService:
             return "paused"
         return "enabled"
 
+    @staticmethod
+    def _next_run_at_after_launch(
+        task: dict[str, Any],
+        *,
+        trigger: str,
+        now: datetime,
+    ) -> datetime | str | None:
+        """Keep a recurring task's cadence when a manual trial launches.
+
+        A manual run is an extra trial and must not consume the task's next
+        scheduled occurrence. One-time tasks retain their existing boundary
+        semantics, so only recurring manual launches keep the stored value.
+        """
+        if not should_advance_schedule_cursor(task["schedule_type"], trigger=trigger):
+            return task.get("next_run_at")
+        return next_run_at(
+            task["schedule_type"],
+            task["schedule_spec"],
+            task["timezone"],
+            now=now,
+        )
+
     async def dispatch_task(
         self,
         task: dict[str, Any],
@@ -543,12 +565,7 @@ class ScheduledTaskService:
             await self._task_repo.update_after_launch(
                 task["id"],
                 status=task_status,
-                next_run_at=next_run_at(
-                    task["schedule_type"],
-                    task["schedule_spec"],
-                    task["timezone"],
-                    now=now,
-                ),
+                next_run_at=self._next_run_at_after_launch(task, trigger=trigger, now=now),
                 last_run_at=now,
                 last_run_id=None,
                 last_thread_id=execution_thread_id,
@@ -706,12 +723,7 @@ class ScheduledTaskService:
             launch_succeeded = True
             launched_run_id = result["run_id"]
             launched_thread_id = result["thread_id"]
-            next_at = next_run_at(
-                task["schedule_type"],
-                task["schedule_spec"],
-                task["timezone"],
-                now=now,
-            )
+            next_at = self._next_run_at_after_launch(task, trigger=trigger, now=now)
             task_status = self._task_status_for_launch(task, trigger=trigger, next_at=next_at)
             await self._record_launched_run(
                 task_run_id=task_run_id,
@@ -749,12 +761,7 @@ class ScheduledTaskService:
                 )
                 return self._queued_result(task_run_id, execution_thread_id, error=str(exc))
 
-            next_at = next_run_at(
-                task["schedule_type"],
-                task["schedule_spec"],
-                task["timezone"],
-                now=now,
-            )
+            next_at = self._next_run_at_after_launch(task, trigger=trigger, now=now)
 
             if launch_succeeded:
                 # _launch_run succeeded, so a run is live even though
