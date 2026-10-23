@@ -64,7 +64,7 @@ def test_teardown_survives_the_directory_disappearing_before_the_listing(tmp_pat
 
     `_exists()` reported the directory, then the peer unlinked every record and
     removed it, so the listing itself fails with FileNotFoundError. The
-    `_has_record_for()` listing two methods above already treats this exact
+    `contains()` listing two methods above already treats this exact
     interleaving as "the fence is gone"; neither teardown loop does.
     """
     store = SandboxQuarantine(tmp_path, "provisioner")
