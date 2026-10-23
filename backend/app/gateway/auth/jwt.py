@@ -3,7 +3,7 @@
 from datetime import UTC, datetime, timedelta
 
 import jwt
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from app.gateway.auth.config import get_auth_config
 from app.gateway.auth.errors import TokenError
@@ -51,5 +51,8 @@ def decode_token(token: str) -> TokenPayload | TokenError:
         return TokenError.EXPIRED
     except jwt.InvalidSignatureError:
         return TokenError.INVALID_SIGNATURE
-    except jwt.PyJWTError:
+    except (jwt.PyJWTError, ValidationError):
+        # A correctly signed token with the wrong claims (e.g. the OIDC state
+        # cookie, which shares jwt_secret but has no sub/exp) is malformed, not
+        # a server error.
         return TokenError.MALFORMED

@@ -371,6 +371,18 @@ and both probe commands with argument-recording Redis stubs through
 `redis.auth.password` values, Secret precedence, external mode and shell
 metacharacters covered.
 Render tests skip when Helm is unavailable; they need no Kubernetes cluster.
+A falsy `existingSecret` (`false` is how people spell "not set") must fall
+through to the chart-managed Secret, not name the Secret after the value.
+
+## Helm postgres Secret precedence
+
+`test_helm_database_secret_precedence.py` pins that the gateway's `DATABASE_URL`
+and the postgres StatefulSet's `POSTGRES_PASSWORD` resolve the same Secret in
+every branch of `deer-flow.databaseUserSecret`, and that only the chart-managed
+branch renders a Secret. Teaching one consumer a new Secret source without the
+other has to fail here. The falsy cases exist because `or` returns its last
+operand even when falsy, which would name the Secret `false`.
+
 ## Multi-instance harness
 
 Multi-instance harness tests use `support.shell.require_script_bash()` for shell

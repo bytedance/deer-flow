@@ -237,6 +237,31 @@ async def test_create_uses_bound_origin_and_echoes_goal_and_stop_details(monkeyp
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("action", "field"), [("create", "run_at"), ("update", "run_at"), ("create", "end_at"), ("update", "end_at"), ("resume", "end_at")])
+async def test_conversation_rejects_nonexistent_local_time_before_persistence(monkeypatch, action, field):
+    from app.gateway import scheduled_task_access as access
+
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 10, 22, tzinfo=UTC)
+
+    monkeypatch.setattr(access, "datetime", FixedDatetime)
+    task = _task(timezone="America/New_York", status="paused" if action == "resume" else "enabled", next_run_at="2026-10-23T00:00:00+00:00")
+    prepare, repo, *_ = _setup(monkeypatch, task=task)
+    capability = await prepare(client_timezone="America/New_York")
+    wall_time = "2027-03-14T02:30:00"
+    fields = {"schedule_type": "once", "schedule_spec": {"run_at": wall_time}} if field == "run_at" else {"end_at": wall_time}
+    payload = {"title": "Report", "prompt": "Write the report", "schedule_type": "interval", "schedule_spec": {"every_seconds": 3600}} if action == "create" else {"task_id": "task-1"}
+    result = await capability.manage(action=action, request={**payload, **fields})
+    assert result.get("status_code") == 422, result
+    assert result["code"] == ("invalid_schedule" if field == "run_at" else "invalid_request")
+    assert "does not exist" in result["error"]
+    repo.create.assert_not_awaited()
+    repo.update.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("objective", ["", " \t\n ", "g" * 4001])
 async def test_create_rejects_invalid_goal_before_persisting_schedule(monkeypatch, objective):
     prepare, repo, *_ = _setup(monkeypatch)

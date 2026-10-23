@@ -218,8 +218,9 @@ Repo-wide conventions:
   frontend tests live in `frontend/tests/`.
   Skill-creator tests must preserve YAML values/body, restore bytecode settings,
   and check invalid metadata through offline CLI subprocesses.
-  Public skill script regressions live in `tests/skills/`; exercise dependency fallbacks
-  with the optional import unavailable and mock HTTP transport to keep tests offline.
+  Public skill script regressions live in `tests/skills/` and run in Skill Review CI
+  independently of package review. Exercise dependency fallbacks with the optional
+  import unavailable and mock HTTP transport to keep tests offline.
 - **Before pushing** — backend `make format`, frontend `pnpm check`.
   Backend CI enforces `ruff format --check`.
 - **Skill text encoding** — use explicit UTF-8 for textual skill resources.
