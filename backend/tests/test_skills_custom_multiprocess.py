@@ -80,11 +80,11 @@ def test_custom_skill_history_serializes_independent_processes(tmp_path, action,
     skill_file = custom_root / "demo-skill" / "SKILL.md"
     skill_file.parent.mkdir(parents=True)
     initial, restored, edited, concurrent = (_content(label) for label in ("Initial", "Restored", "Edited", "Concurrent"))
-    skill_file.write_text(initial, encoding="utf-8")
+    skill_file.write_text(initial, encoding="utf-8", newline="")
     history_file = custom_root / ".history" / "demo-skill.jsonl"
     history_file.parent.mkdir()
     prior = [{"action": "human_edit", "prev_content": restored, "new_content": initial}] if action == "rollback" else []
-    history_file.write_text("".join(json.dumps(entry) + "\n" for entry in prior), encoding="utf-8")
+    history_file.write_text("".join(json.dumps(entry) + "\n" for entry in prior), encoding="utf-8", newline="")
 
     context = multiprocessing.get_context("spawn")
     parked, release = context.Event(), context.Event()
@@ -133,4 +133,7 @@ def test_custom_skill_history_serializes_independent_processes(tmp_path, action,
     assert entries[len(prior)]["new_content"] == first_content
     assert entries[-1]["prev_content"] == first_content
     assert entries[-1]["new_content"] == concurrent
-    assert skill_file.read_text(encoding="utf-8") == concurrent
+    assert skill_file.read_bytes() == concurrent.encode("utf-8")
+    history_bytes = history_file.read_bytes()
+    assert b"\r\n" not in history_bytes
+    assert history_bytes.endswith(b"\n")

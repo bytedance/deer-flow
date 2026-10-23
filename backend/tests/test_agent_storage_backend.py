@@ -78,6 +78,27 @@ def test_validation_warns_on_file_under_multiworker_postgres(monkeypatch, caplog
     assert any("not visible across workers" in r.message for r in caplog.records)
 
 
+# -- FileAgentStore byte contract ------------------------------------------
+
+
+def test_file_agent_store_writes_exact_config_and_soul_bytes(tmp_path, monkeypatch):
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    from deerflow.config import paths as paths_module
+
+    monkeypatch.setattr(paths_module, "_paths", None)
+    store = FileAgentStore()
+    config = {"name": "reviewer", "description": "reviews\ncarefully"}
+    soul = "Review\ncarefully.\n"
+
+    store.create("reviewer", config, soul, user_id="u1")
+
+    agent_dir = tmp_path / "users" / "u1" / "agents" / "reviewer"
+    assert (agent_dir / "SOUL.md").read_bytes() == soul.encode("utf-8")
+    config_bytes = (agent_dir / "config.yaml").read_bytes()
+    assert b"\r\n" not in config_bytes
+    assert config_bytes == yaml.dump(config, default_flow_style=False, allow_unicode=True, sort_keys=False).encode("utf-8")
+
+
 # -- importer: file layout → db --------------------------------------------
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import stat
 from unittest.mock import patch
 
@@ -56,13 +57,15 @@ def user_skill_dir(tmp_path, user_storage):
 
 
 def test_write_creates_file(tmp_path, storage):
-    storage.write_custom_skill("demo-skill", "SKILL.md", "# hello")
-    assert (tmp_path / "custom" / "demo-skill" / "SKILL.md").read_text() == "# hello"
+    content = "---\nname: demo-skill\n---\n\n# hello\n"
+    storage.write_custom_skill("demo-skill", "SKILL.md", content)
+    assert (tmp_path / "custom" / "demo-skill" / "SKILL.md").read_bytes() == content.encode("utf-8")
 
 
 def test_write_creates_subdirectory(tmp_path, storage):
-    storage.write_custom_skill("demo-skill", "references/ref.md", "# ref")
-    assert (tmp_path / "custom" / "demo-skill" / "references" / "ref.md").exists()
+    content = "# ref\nline\n"
+    storage.write_custom_skill("demo-skill", "references/ref.md", content)
+    assert (tmp_path / "custom" / "demo-skill" / "references" / "ref.md").read_bytes() == content.encode("utf-8")
 
 
 def test_write_is_atomic_overwrite(tmp_path, storage):
@@ -210,16 +213,88 @@ def test_rejects_invalid_skill_name_in_path_helpers(storage, name, method_name):
 
 
 def test_user_scoped_write_creates_file_in_user_dir(tmp_path, user_storage):
-    user_storage.write_custom_skill("demo-skill", "SKILL.md", "# hello")
+    content = "---\nname: demo-skill\n---\n\n# hello\n"
+    user_storage.write_custom_skill("demo-skill", "SKILL.md", content)
     user_file = tmp_path / "users" / "test-user" / "skills" / "custom" / "demo-skill" / "SKILL.md"
-    assert user_file.read_text() == "# hello"
+    assert user_file.read_bytes() == content.encode("utf-8")
     # Does not create in global custom
     assert not (tmp_path / "custom" / "demo-skill" / "SKILL.md").exists()
 
 
 def test_user_scoped_write_creates_subdirectory(tmp_path, user_storage):
-    user_storage.write_custom_skill("demo-skill", "references/ref.md", "# ref")
-    assert (tmp_path / "users" / "test-user" / "skills" / "custom" / "demo-skill" / "references" / "ref.md").exists()
+    content = "# ref\nline\n"
+    user_storage.write_custom_skill("demo-skill", "references/ref.md", content)
+    assert (tmp_path / "users" / "test-user" / "skills" / "custom" / "demo-skill" / "references" / "ref.md").read_bytes() == content.encode("utf-8")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows sharing semantics")
+@pytest.mark.parametrize("storage_fixture", ["storage", "user_storage"])
+def test_write_retries_while_target_is_briefly_held_open(monkeypatch, request, storage_fixture):
+    import importlib
+    from functools import partial
+
+    from deerflow.utils.file_lock import replace_with_retry
+
+    skill_storage = request.getfixturevalue(storage_fixture)
+    target = skill_storage.get_custom_skill_file("demo-skill")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"old")
+    sleeps = []
+
+    with target.open("rb") as held_target:
+
+        def release_target(delay):
+            # Release only after the real os.replace has observed the held handle.
+            # This proves contention without timing a worker against the writer.
+            sleeps.append(delay)
+            held_target.close()
+
+        storage_module = importlib.import_module(type(skill_storage).__module__)
+        monkeypatch.setattr(storage_module, "replace_with_retry", partial(replace_with_retry, sleep=release_target))
+        skill_storage.write_custom_skill("demo-skill", "SKILL.md", "new\n")
+
+    assert sleeps
+    assert all(delay == 0.05 for delay in sleeps)
+    assert target.read_bytes() == b"new\n"
+
+
+def test_both_storage_backends_publish_identical_bytes(tmp_path, storage, user_storage):
+    content = "---\nname: demo-skill\ndescription: Same bytes\n---\n\n# Body\nline two\n"
+
+    storage.write_custom_skill("demo-skill", "SKILL.md", content)
+    user_storage.write_custom_skill("demo-skill", "SKILL.md", content)
+
+    global_file = tmp_path / "custom" / "demo-skill" / "SKILL.md"
+    user_file = tmp_path / "users" / "test-user" / "skills" / "custom" / "demo-skill" / "SKILL.md"
+    assert global_file.read_bytes() == user_file.read_bytes() == content.encode("utf-8")
+
+
+def test_existing_crlf_skill_remains_readable_and_is_rewritten_as_lf(tmp_path, storage):
+    skill_file = tmp_path / "custom" / "demo-skill" / "SKILL.md"
+    skill_file.parent.mkdir(parents=True)
+    legacy = b"---\r\nname: demo-skill\r\n---\r\n\r\n# hello\r\n"
+    skill_file.write_bytes(legacy)
+
+    assert storage.read_custom_skill("demo-skill") == "---\nname: demo-skill\n---\n\n# hello\n"
+
+    replacement = "---\nname: demo-skill\n---\n\n# rewritten\n"
+    storage.write_custom_skill("demo-skill", "SKILL.md", replacement)
+    assert skill_file.read_bytes() == replacement.encode("utf-8")
+    assert storage.read_custom_skill("demo-skill") == replacement
+
+
+def test_existing_crlf_user_skill_remains_readable_and_is_rewritten_as_lf(tmp_path, user_storage):
+    skill_file = tmp_path / "users" / "test-user" / "skills" / "custom" / "demo-skill" / "SKILL.md"
+    skill_file.parent.mkdir(parents=True)
+    legacy = b"---\r\nname: demo-skill\r\n---\r\n\r\n# hello\r\n"
+    skill_file.write_bytes(legacy)
+
+    assert user_storage.read_custom_skill("demo-skill") == "---\nname: demo-skill\n---\n\n# hello\n"
+
+    replacement = "---\nname: demo-skill\n---\n\n# rewritten\n"
+    user_storage.write_custom_skill("demo-skill", "SKILL.md", replacement)
+    assert skill_file.read_bytes() == replacement.encode("utf-8")
+    assert user_storage.read_custom_skill("demo-skill") == replacement
 
 
 def test_user_scoped_write_is_atomic_overwrite(tmp_path, user_storage):
@@ -241,3 +316,37 @@ def test_user_scoped_rejects_dotdot_escape(user_storage):
 def test_user_scoped_rejects_invalid_skill_name(user_storage):
     with pytest.raises(ValueError, match="hyphen-case"):
         user_storage.get_custom_skill_dir("../../escaped")
+
+
+@pytest.mark.parametrize("storage_fixture", ["storage", "user_storage"])
+@pytest.mark.parametrize("relative_path", ["SKILL.md", "references/notes.md"])
+@pytest.mark.parametrize("content", ["first\nsecond\n", "first\r\nsecond\r\n", "中文\nsecond\r\nthird\r", "no final newline", ""])
+@pytest.mark.parametrize("existing", [False, True])
+def test_storage_preserves_caller_bytes(request, storage_fixture, relative_path, content, existing):
+    skill_storage = request.getfixturevalue(storage_fixture)
+    target = skill_storage.get_custom_skill_dir("demo-skill") / relative_path
+    if existing:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"legacy\r\ncontent\r\n")
+
+    skill_storage.write_custom_skill("demo-skill", relative_path, content)
+
+    assert target.read_bytes() == content.encode("utf-8")
+
+
+def test_frontmatter_validation_temp_preserves_exact_content_bytes(monkeypatch):
+    from deerflow.skills import validation
+    from deerflow.skills.storage.skill_storage import SkillStorage
+
+    content = "---\nname: demo-skill\ndescription: Byte fixture.\n---\n\n# 中文\n"
+    observed = []
+    validate = validation._validate_skill_frontmatter
+
+    def capture(skill_dir):
+        observed.append((skill_dir / "SKILL.md").read_bytes())
+        return validate(skill_dir)
+
+    monkeypatch.setattr(validation, "_validate_skill_frontmatter", capture)
+    SkillStorage.validate_skill_markdown_content("demo-skill", content)
+
+    assert observed == [content.encode("utf-8")]

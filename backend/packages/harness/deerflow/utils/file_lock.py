@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import errno
+import os
 import time
 from collections.abc import Callable
+from pathlib import Path
 
 LOCK_RETRY_INTERVAL_SECONDS = 0.2
 
@@ -42,3 +44,41 @@ def retry_until_locked(
                     raise TimeoutError(timeout_message) from None
                 delay = min(delay, remaining)
             sleep(delay)
+
+
+_REPLACE_RETRY_SECONDS = 5.0
+_REPLACE_RETRY_INTERVAL_SECONDS = 0.05
+_WINDOWS_SHARING_ERRORS = {5, 32}  # ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION
+
+
+def replace_with_retry(
+    source: str | Path,
+    target: str | Path,
+    *,
+    deadline_seconds: float = _REPLACE_RETRY_SECONDS,
+    interval: float = _REPLACE_RETRY_INTERVAL_SECONDS,
+    sleep: Callable[[float], None] | None = None,
+    monotonic: Callable[[], float] | None = None,
+) -> None:
+    """Atomically replace *target* with *source*, retrying Windows sharing errors.
+
+    On Windows, ``os.replace`` fails with ``ERROR_ACCESS_DENIED`` or
+    ``ERROR_SHARING_VIOLATION`` while another process holds the target open.
+    Those are transient sharing conflicts, not permission changes, so retry
+    only them for a short bounded period. Every other error (including POSIX
+    ``EACCES``) is raised immediately.
+    """
+    sleep = sleep or time.sleep
+    monotonic = monotonic or time.monotonic
+    deadline = monotonic() + deadline_seconds
+    while True:
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError as error:
+            if os.name != "nt" or getattr(error, "winerror", None) not in _WINDOWS_SHARING_ERRORS:
+                raise
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                raise
+            sleep(min(interval, remaining))

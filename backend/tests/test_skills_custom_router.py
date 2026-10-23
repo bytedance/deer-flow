@@ -503,12 +503,14 @@ def test_custom_skills_router_lifecycle(monkeypatch, tmp_path):
         assert get_response.status_code == 200
         assert "# demo-skill" in get_response.json()["content"]
 
+        edited_content = _skill_content("demo-skill", "Edited skill")
         update_response = client.put(
             "/api/skills/custom/demo-skill",
-            json={"content": _skill_content("demo-skill", "Edited skill")},
+            json={"content": edited_content},
         )
         assert update_response.status_code == 200
         assert update_response.json()["description"] == "Edited skill"
+        assert (custom_dir / "SKILL.md").read_bytes() == edited_content.encode("utf-8")
         assert stat.S_IMODE((custom_dir / "SKILL.md").stat().st_mode) & 0o044 == 0o044
 
         history_response = client.get("/api/skills/custom/demo-skill/history")
@@ -520,6 +522,23 @@ def test_custom_skills_router_lifecycle(monkeypatch, tmp_path):
         assert rollback_response.json()["description"] == "Demo skill"
         assert stat.S_IMODE((custom_dir / "SKILL.md").stat().st_mode) & 0o044 == 0o044
         assert refresh_calls == [("refresh", "default"), ("refresh", "default")]
+
+
+@pytest.mark.asyncio
+async def test_static_skill_scan_receives_exact_content_bytes(monkeypatch):
+    content = _skill_content("demo-skill", "Line one\nLine two")
+    observed = {}
+
+    def _capture_bytes(skill_dir, *, skill_name=None, app_config=None):
+        observed["bytes"] = (skill_dir / "SKILL.md").read_bytes()
+        return []
+
+    monkeypatch.setattr(skills_router, "enforce_static_scan", _capture_bytes)
+
+    findings = await skills_router._scan_static_skill_markdown_or_raise("demo-skill", content, app_config=SimpleNamespace())
+
+    assert findings == []
+    assert observed["bytes"] == content.encode("utf-8")
 
 
 def test_custom_skill_update_static_scan_failure_blocks_edit_before_llm(monkeypatch, tmp_path):
@@ -2053,7 +2072,7 @@ def test_custom_skill_rollback_history_survives_concurrent_put(monkeypatch, tmp_
     original_content = _skill_content("demo-skill")
     current_content = _skill_content("demo-skill", "Current skill")
     concurrent_content = _skill_content("demo-skill", "Concurrent edit")
-    (custom_dir / "SKILL.md").write_text(current_content, encoding="utf-8")
+    (custom_dir / "SKILL.md").write_text(current_content, encoding="utf-8", newline="")
 
     config = SimpleNamespace(
         skills=SimpleNamespace(get_skills_path=lambda: skills_root, container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage"),

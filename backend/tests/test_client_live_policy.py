@@ -98,6 +98,8 @@ def _collect_live_tests(
         env=env,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         check=False,
     )
 
@@ -116,6 +118,8 @@ def _dry_run_make_target(target: str, *extra: str) -> str:
         cwd=BACKEND_ROOT,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         check=False,
     )
     output = result.stdout + result.stderr

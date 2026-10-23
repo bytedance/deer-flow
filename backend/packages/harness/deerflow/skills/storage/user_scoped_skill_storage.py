@@ -45,6 +45,7 @@ from deerflow.skills.permissions import make_skill_written_path_sandbox_readable
 from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
 from deerflow.skills.storage.skill_storage import SKILL_MD_FILE, walk_skill_directories
 from deerflow.skills.types import SkillCategory
+from deerflow.utils.file_lock import replace_with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -413,10 +414,10 @@ class UserScopedSkillStorage(LocalSkillStorage):
             target.parent.mkdir(parents=True, exist_ok=True)
             tmp_path = None
             try:
-                with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, dir=str(target.parent)) as tmp_file:
+                with tempfile.NamedTemporaryFile("w", encoding="utf-8", newline="", delete=False, dir=str(target.parent)) as tmp_file:
                     tmp_path = Path(tmp_file.name)
                     tmp_file.write(content)
-                tmp_path.replace(target)
+                replace_with_retry(tmp_path, target)
                 make_skill_written_path_sandbox_readable(self.get_custom_skill_dir(name), target)
             finally:
                 if tmp_path is not None:

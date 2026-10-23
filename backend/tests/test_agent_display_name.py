@@ -46,6 +46,26 @@ def test_bootstrap_preserves_owner_display_name(tmp_path, monkeypatch, backend, 
     assert config.skills == ["test-skill"]
     assert store.get_soul("reviewer", user_id=owner) == "new soul"
     assert store.get("reviewer", user_id="other").display_name == "Other owner"
+    if backend == "file":
+        soul_path = tmp_path / "users" / owner / "agents" / "reviewer" / "SOUL.md"
+        assert soul_path.read_bytes() == b"new soul"
+
+
+def test_default_setup_agent_publishes_exact_soul_bytes(tmp_path, monkeypatch):
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    from deerflow.config import paths as paths_module
+
+    monkeypatch.setattr(paths_module, "_paths", None)
+    soul = "Default persona\nwith LF.\n"
+
+    result = setup_agent.func(
+        soul=soul,
+        description="default",
+        runtime=SimpleNamespace(context={}, tool_call_id="test"),
+    )
+
+    assert result.update["created_agent_name"] is None
+    assert (tmp_path / "SOUL.md").read_bytes() == soul.encode("utf-8")
 
 
 @pytest.mark.parametrize("model", [AgentConfig, AgentCreateRequest, AgentUpdateRequest])

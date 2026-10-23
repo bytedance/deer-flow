@@ -34,6 +34,15 @@ def test_append_read_round_trip_preserves_unicode_separators(storage, separator,
     assert all(record["ts"] for record in actual)
 
 
+def test_append_history_writes_lf_jsonl_bytes(storage):
+    storage.append_history("demo-skill", {"new_content": "first\nsecond"})
+
+    raw = storage.get_skill_history_file("demo-skill").read_bytes()
+    assert b"\r\n" not in raw
+    assert raw.endswith(b"\n")
+    assert len(raw.split(b"\n")) == 2
+
+
 @pytest.mark.parametrize("ending", ["\n", "\r\n"])
 def test_physical_lines_keep_blank_lines_and_unterminated_final_record(storage, ending):
     path = storage.get_skill_history_file("demo-skill")
