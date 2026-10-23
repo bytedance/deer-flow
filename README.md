@@ -884,6 +884,14 @@ DeerFlow supports multiple sandbox execution modes:
 - **Docker Execution** (runs sandbox code in isolated Docker containers)
 - **Docker Execution with Kubernetes** (runs sandbox code in Kubernetes pods via provisioner service)
 
+In Local Execution, `glob` and `grep` can search the skills root (default
+`/mnt/skills`) across its mounted categories. Patterns stay relative to that
+root, and one result limit covers all categories. User isolation, disabled-skill
+filtering and read-only mounts still apply. Configured category mounts such as
+`build` or `logs` remain searchable; ignore rules apply inside each mount. A broken
+category mount stops the root search, and the Gateway warning log identifies its
+virtual path.
+
 Sandbox references in conversation state are server-owned. External run and
 thread-state APIs reject caller-supplied `sandbox` values; when restoring a
 checkpoint, the runtime resolves the reference against the authenticated user
@@ -960,7 +968,7 @@ already received by the browser, without an additional secret-redaction layer.
 
 In plan mode, malformed TODO statuses return normal tool-validation errors without aborting token attribution, so the agent can correct the call.
 
-Tool-produced paths and URLs can be retained as short artifact handles across context compaction (`tool_artifacts` in `config.yaml`). Handles distinguish separate tool-result occurrences, even when a provider reuses call IDs. Standard MCP image URLs are captured alongside file references, including results from stdio and HTTP servers. Detected file URLs preserve their query strings and fragments. Free-text artifact references retain balanced ASCII and CJK brackets in literal paths and URLs while trimming surrounding prose punctuation. When PII redaction is enabled, model-visible artifact labels follow that policy; internal references stay intact for tool argument resolution. The configured registry limit retains the newest artifacts, while checkpointed processing identities prevent evicted results from being recaptured after restart. Resolution runs before authorization and write-safety checks; unknown or expired handles return an error without executing the tool. Small unknown structured results may be retained as complete JSON up to 4096 UTF-8 bytes; empty or oversized payloads are skipped. Handles are agent-local: task arguments resolve parent handles to concrete references, and delegated reports must return concrete references rather than child-local handles. A truncated model projection reports how many handles are omitted.
+Tool-produced paths and URLs can be retained as short artifact handles across context compaction (`tool_artifacts` in `config.yaml`). Handles distinguish separate tool-result occurrences, even when a provider reuses call IDs. Standard MCP image URLs are captured alongside file references, including results from stdio and HTTP servers. Detected file URLs preserve their query strings and fragments. Free-text sandbox paths retain spaces inside matching ASCII quotes, backticks, or curly quote pairs, including backslash-escaped wrappers. Unterminated spans and delimited values containing a line break or tab are skipped. Free-text artifact references retain balanced ASCII and CJK brackets in literal paths and URLs while trimming surrounding prose punctuation. When PII redaction is enabled, model-visible artifact labels follow that policy; internal references stay intact for tool argument resolution. The configured registry limit retains the newest artifacts, while checkpointed processing identities prevent evicted results from being recaptured after restart. Resolution runs before authorization and write-safety checks; unknown or expired handles return an error without executing the tool. Small unknown structured results may be retained as complete JSON up to 4096 UTF-8 bytes; empty or oversized payloads are skipped. Handles are agent-local: task arguments resolve parent handles to concrete references, and delegated reports must return concrete references rather than child-local handles. A truncated model projection reports how many handles are omitted.
 
 DeerFlow supports configurable MCP servers and skills to extend its capabilities.
 When durable MCP background tasks are enabled, agents can use `list_background_tasks(status="failed")` or `status="input_required"` to find failed tasks or tasks awaiting input in the current chat. Other supported statuses are `submitted`, `working`, `completed`, and `cancelled`; omitting the status preserves existing behavior. The database applies the filter before limiting results to the 20 most recent matching tasks. When combined with `active_only=true`, both filters apply: active statuses are `submitted`, `working`, and `input_required`, so terminal statuses return an empty list. `GET /api/threads/{thread_id}/mcp-tasks` supports the same `status` and `active_only` filters before its `limit` (default 50, range 1–100); for example, `?status=failed&limit=20`. Unknown statuses return 422, and omitting the filters preserves the existing response.
@@ -2278,6 +2286,9 @@ Supported commands:
 
 After each Gateway-backed run, DeerFlow evaluates the visible conversation, including the assistant's tool calls and shortened tool results, against the active goal with a non-thinking evaluator model. A successful tool result alone does not satisfy a goal, and when the assistant had to guess missing or ambiguous information the evaluator reports `needs_user_input`. The evaluator must return a typed blocker (`missing_evidence`, `needs_user_input`, `run_failed`, `external_wait`, or `goal_not_met_yet`) plus visible evidence. DeerFlow only injects a hidden continuation when the latest assistant turn is durably checkpointed, the blocker is `goal_not_met_yet`, the thread did not change during evaluation, and the no-progress breaker has not fired. The safety cap defaults to 8 hidden continuations, and repeated identical non-progress evaluations stop after 2 attempts. `/goal clear` and any user-authored new input win over queued continuations. When the evaluator considers the goal satisfied, DeerFlow clears it after the run successfully finalizes and publishes the updated thread state. The same checkpoint records the completion as `goal_outcome`, which stays until the next goal change. If required artifact delivery or its receipt persistence fails, the run reports an error and the goal remains active for a later retry; this does not start another hidden continuation.
 
+The evaluator keeps recent work and the latest user request within a fixed evidence budget, using spare room to retain more of long user input.
+If a normally completed evaluator response has an invalid verdict format, DeerFlow evaluates the same evidence once more unless you cancel or change the thread. Both calls are counted; a second failure stops automatic continuation without repeating the task or its tools.
+
 For tool-using turns, successful operation results drive the no-progress count: changing only reply wording or a sandbox tool's UI explanation does not reset it, while newly observed work can keep it going. Text-only turns keep their reply-based check. An unmet goal still stops automatic continuation after a token or loop-detection hard stop and stays active for a later user turn.
 
 Regenerating an earlier response keeps the goal currently set for the chat and its used continuation budget. It does not restore a goal that was cleared or achieved. The earlier answer's completion record is removed when its historical checkpoint is replayed.
@@ -3025,6 +3036,11 @@ become available in the next batch, when rejected additions can be retried.
 
 ### Long-Term Memory
 
+Mem0 search and management reads apply `failure_policy.read` to invalid record
+scores, categories, and metadata. `fail_open` returns an empty result;
+`fail_closed` reports a read error. A malformed later record never returns a
+partial memory list.
+
 Settings > Memory keeps successful clear, import, and fact edits visible even
 when an older background read finishes afterward. Later reads still refresh
 the view normally; failed actions preserve the existing cached memory.
@@ -3103,6 +3119,12 @@ available for the hosted mem0 Platform API or API-compatible self-hosted
 servers. Its token-bearing `base_url` must use HTTPS by default; plaintext HTTP
 requires an explicit local-development opt-in. See the
 [mem0 backend guide](backend/packages/harness/deerflow/agents/memory/backends/mem0/README.md).
+
+Malformed, undecodable, or excessively nested mem0 JSON responses, non-object
+envelopes, and invalid result containers follow the configured read failure
+policy: `fail_open` returns empty recall data, while `fail_closed` raises a
+memory read error. An invalid later page does not return a partial list.
+Listing format errors identify the failing page.
 
 An opt-in `honcho` backend is available for self-hosted or hosted Honcho (v3
 API). It builds user-model memory — long-term preferences and a cross-session
@@ -3606,7 +3628,8 @@ After an interrupt, late stream actions from the previous run cannot change the
 next run's display or status, even when both prompts use the same conversation.
 A tool call already in progress still finishes, so until it does a new prompt in
 that conversation is held back with a notice instead of racing it; `/new` and
-`/resume` stay available.
+`/resume` stay available. Quitting waits for that step as well and closes the TUI
+once it finishes; press `Ctrl+C` again to quit at once without saving it.
 If a run cannot start, the TUI reports an error and returns to idle so you can retry.
 A message that is held back or cannot start stays in the composer, so `Enter` resends it.
 

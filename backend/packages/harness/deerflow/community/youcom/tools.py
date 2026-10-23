@@ -25,8 +25,21 @@ Both endpoints return the same body — ``{"results": {"web": [...], "news":
 This module is self-contained (httpx only, no You.com SDK and no new
 dependency). Requests to You.com carry a ``User-Agent`` identifying DeerFlow so
 You.com can attribute integration traffic; it is sent only to You.com hosts.
+
+The tool is a coroutine and sends its request through ``httpx.AsyncClient``. A
+sync client would run the whole tool on the default executor and hold one of
+that pool's threads for the network round-trip, so several providers queried in
+parallel queued behind each other. Two things in this module read from disk,
+and both are resolved off the event loop: the tool config (which stats the
+config file) always runs on an executor thread, and the ``User-Agent`` (which
+reads the installed package metadata) does so on its first, cold call only.
+Later calls hit the in-memory cache and are read directly, so the hot path
+does not pay an executor round-trip for a string it already has.
+``backend/tests/blocking_io/test_youcom_search_async.py`` pins the result — the
+request is awaited on the loop thread, and neither disk read runs there.
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -69,21 +82,42 @@ def _user_agent() -> str:
     return f"deerflow-harness/{harness_version} youdotcom-integration/bytedance-deer-flow"
 
 
-def _get_api_key(tool_name: str = "web_search") -> str | None:
-    """Resolve the You.com key from the tool's config block, then the env var.
+def _resolve_tool_settings(tool_name: str) -> tuple[str | None, object]:
+    """Resolve the API key and the configured `max_results` in one config read.
 
-    Returns None when neither is set, which is not an error here: the caller
-    falls back to the keyless endpoint.
+    Config resolution stats the config file, so callers must run this off the
+    agent event loop. Reading the key and the result count from a single
+    resolution keeps the tool from touching the config file twice per call.
+
+    The key is None when neither the config nor the environment sets one,
+    which is not an error here: the caller falls back to the keyless endpoint.
     """
     config = get_app_config().get_tool_config(tool_name)
+    max_results = None
+    api_key = None
     if config is not None:
-        api_key = (config.model_extra or {}).get("api_key")
-        if isinstance(api_key, str) and api_key.strip():
-            return api_key.strip()
-    env_key = os.getenv("YDC_API_KEY")
-    if isinstance(env_key, str) and env_key.strip():
-        return env_key.strip()
-    return None
+        extra = config.model_extra or {}
+        max_results = extra.get("max_results")
+        candidate = extra.get("api_key")
+        if isinstance(candidate, str) and candidate.strip():
+            api_key = candidate.strip()
+    if api_key is None:
+        env_key = os.getenv("YDC_API_KEY")
+        if isinstance(env_key, str) and env_key.strip():
+            api_key = env_key.strip()
+    return api_key, max_results
+
+
+async def _resolve_user_agent() -> str:
+    """Return the DeerFlow User-Agent, keeping the cold metadata read off the loop.
+
+    The first call reads the installed package metadata from disk, so it runs
+    on an executor thread. Every later call is an in-memory cache hit and is
+    read directly, so the hot path costs no executor round-trip.
+    """
+    if _user_agent.cache_info().currsize:
+        return _user_agent()
+    return await asyncio.to_thread(_user_agent)
 
 
 def _count_for_request(value: object) -> int:
@@ -100,17 +134,17 @@ def _count_for_request(value: object) -> int:
     )
 
 
-def _search(api_key: str | None, query: str, count: int) -> dict:
+async def _search(api_key: str | None, query: str, count: int) -> dict:
     """GET the keyed endpoint when a key is configured, else the keyless one."""
-    headers = {"Accept": "application/json", "User-Agent": _user_agent()}
+    headers = {"Accept": "application/json", "User-Agent": await _resolve_user_agent()}
     if api_key:
         endpoint = _YOUCOM_SEARCH_ENDPOINT
         headers["X-API-Key"] = api_key
     else:
         endpoint = _YOUCOM_KEYLESS_ENDPOINT
 
-    with httpx.Client(timeout=_TIMEOUT_S) as client:
-        response = client.get(endpoint, params={"query": query, "count": count}, headers=headers)
+    async with httpx.AsyncClient(timeout=_TIMEOUT_S) as client:
+        response = await client.get(endpoint, params={"query": query, "count": count}, headers=headers)
     response.raise_for_status()
     return response.json()
 
@@ -130,7 +164,7 @@ def _snippet(result: dict) -> str:
 
 
 @tool("web_search", parse_docstring=True)
-def web_search_tool(query: str, max_results: int | None = None) -> str:
+async def web_search_tool(query: str, max_results: int | None = None) -> str:
     """Search the web for information using You.com.
 
     Each result carries extracted snippets from the page, not just a meta
@@ -140,17 +174,15 @@ def web_search_tool(query: str, max_results: int | None = None) -> str:
         query: Search keywords describing what you want to find. Be specific for better results.
         max_results: Maximum number of search results to return. If omitted, uses the configured value (default 5). Clamped to 1-100.
     """
+    # Config resolution can read files; keep it off the event loop.
+    api_key, configured_max_results = await asyncio.to_thread(_resolve_tool_settings, "web_search")
     # Honor the caller-supplied max_results; fall back to config only when omitted.
     if max_results is None:
-        config = get_app_config().get_tool_config("web_search")
-        if config is not None:
-            max_results = (config.model_extra or {}).get("max_results")
+        max_results = configured_max_results
     count = _DEFAULT_MAX_RESULTS if max_results is None else _count_for_request(max_results)
 
-    api_key = _get_api_key("web_search")
-
     try:
-        data = _search(api_key, query, count)
+        data = await _search(api_key, query, count)
     except httpx.HTTPStatusError as e:
         status = e.response.status_code
         logger.error("You.com API returned HTTP %s: %s", status, e.response.text)
