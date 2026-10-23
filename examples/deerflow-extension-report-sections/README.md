@@ -61,5 +61,5 @@ artifact.
 From the DeerFlow checkout root with the backend environment prepared:
 
 ```sh
-uv run --project backend --no-sync python -m pytest examples/deerflow-extension-report-sections/tests -q
+uv run --project backend --no-sync python -m pytest backend/tests/test_report_sections_extension.py -q
 ```
