@@ -10,11 +10,21 @@ drops tool calls that may have been truncated at the output boundary before
 they can execute. The stamped ``model_length_termination`` marker tells
 downstream guards (notably ``TodoMiddleware``) to stand down rather than
 re-engage a capped turn.
+
+Stop-reason surfacing for subagents:
+  The lead worker reads ``stop_reason`` from ``runtime.context``. The subagent
+  executor cannot, so each detected cap is also recorded per context
+  ``run_id`` (``None`` included, exactly as the executor passes it back) and
+  exposed via :meth:`consume_stop_reason`, the same duck-typed channel
+  ``TokenBudgetMiddleware`` and ``LoopDetectionMiddleware`` use. A capped
+  subagent then reaches the lead as ``completed`` +
+  ``stop_reason=model_length_capped`` instead of a clean ``completed``.
 """
 
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Any, override
 
 from langchain.agents import AgentState
@@ -22,6 +32,7 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import AIMessage
 from langgraph.runtime import Runtime
 
+from deerflow.agents.middlewares._bounded_dict import BoundedDict
 from deerflow.agents.middlewares.model_length_termination_detectors import (
     ModelLengthTermination,
     ModelLengthTerminationDetector,
@@ -72,6 +83,20 @@ class ModelLengthFinishReasonMiddleware(AgentMiddleware[AgentState]):
     def __init__(self, detectors: list[ModelLengthTerminationDetector] | None = None) -> None:
         super().__init__()
         self._detectors: list[ModelLengthTerminationDetector] = list(detectors) if detectors else default_detectors()
+        # Consumed by the subagent executor after the run returns; bounded
+        # because the lead chain's shared instance never consumes it.
+        self._lock = threading.Lock()
+        self._stop_reason: BoundedDict[str | None, str] = BoundedDict(1000)
+
+    def consume_stop_reason(self, run_id: str | None) -> str | None:
+        """Pop and return ``"model_length_capped"`` if a cap was detected for this run.
+
+        The subagent executor calls this after the run returns, alongside the
+        token-budget and loop-detection guards, so a length-capped completion
+        carries the cap to the lead.
+        """
+        with self._lock:
+            return self._stop_reason.pop(run_id, None)
 
     def release_policy_parameters(self) -> dict[str, object]:
         from deerflow_extension_api import canonical_hash
@@ -106,6 +131,9 @@ class ModelLengthFinishReasonMiddleware(AgentMiddleware[AgentState]):
         thread_id = ctx.get("thread_id") if isinstance(ctx, dict) else None
         run_id = ctx.get("run_id") if isinstance(ctx, dict) else None
         stamped_stop_reason = False
+        if isinstance(ctx, dict) and "run_id" in ctx:
+            with self._lock:
+                self._stop_reason[run_id] = MODEL_LENGTH_CAPPED_STOP_REASON
         if isinstance(ctx, dict):
             # Preserve any earlier cap reason carried across hidden continuation turns.
             if "stop_reason" not in ctx:
