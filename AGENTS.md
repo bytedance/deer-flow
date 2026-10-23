@@ -219,6 +219,8 @@ Repo-wide conventions:
   Public skill script regressions live in `tests/skills/` and run in Skill Review CI
   independently of package review. Exercise dependency fallbacks with the optional
   import unavailable and mock HTTP transport to keep tests offline.
+  Video-generation CLI failures must exit non-zero and write diagnostics to stderr;
+  keep success output on stdout and test the CLI boundary with offline transport.
 - **Before pushing** — backend `make format`, frontend `pnpm check`.
   Backend CI enforces `ruff format --check`.
 - **Skill text encoding** — use explicit UTF-8 for textual skill resources.
