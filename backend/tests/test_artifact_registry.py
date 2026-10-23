@@ -755,3 +755,58 @@ def test_extraction_registers_the_full_delimited_path_once():
     assert [entry["real_ref"] for entry in entries] == [path]
     assert entries[0]["display_name"] == "quarterly report.pdf"
     assert entries[0]["artifact_type"] == "file"
+
+
+@pytest.mark.parametrize("separator", ["\n", "\r", "\r\n", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029", "\t"])
+@pytest.mark.parametrize("delimiter", ['"', "'", "`"])
+def test_delimited_sandbox_path_rejects_line_breaks_and_tabs(separator, delimiter):
+    message = ToolMessage(
+        content=f"Created {delimiter}/mnt/user-data/outputs/quarterly{separator}report.pdf{delimiter}.",
+        tool_call_id="export-multiline",
+        name="export_report",
+    )
+
+    assert extract_artifacts_from_result(message, thread_id="demo") == []
+
+
+@pytest.mark.parametrize("delimiter", ['"', "'", "`"])
+@pytest.mark.parametrize("content_block", [False, True])
+def test_backslash_escaped_delimiters_keep_the_full_sandbox_path(delimiter, content_block):
+    path = "/mnt/user-data/outputs/quarterly report (final).pdf"
+    text = f"log: \\{delimiter}{path}\\{delimiter} done"
+    message = ToolMessage(
+        content=[{"type": "text", "text": text}] if content_block else text,
+        tool_call_id="export-escaped",
+        name="export_report",
+    )
+
+    entries = extract_artifacts_from_result(message, thread_id="demo")
+
+    assert [entry["real_ref"] for entry in entries] == [path]
+    assert entries[0]["display_name"] == "quarterly report (final).pdf"
+
+
+@pytest.mark.parametrize("escaped", [False, True])
+def test_delimited_sandbox_path_keeps_a_literal_trailing_backslash(escaped):
+    path = "/mnt/user-data/outputs/report \\"
+    delimiter = '\\"' if escaped else '"'
+
+    assert [ref["ref"] for ref in _detect_refs_in_text(f"Created {delimiter}{path}{delimiter}.")] == [path]
+
+
+def test_json_escaped_path_deduplicates_against_a_structured_reference():
+    path = "/mnt/user-data/outputs/quarterly report.pdf"
+    message = ToolMessage(
+        content=json.dumps(f'Created "{path}" successfully.'),
+        tool_call_id="export-json",
+        name="export_report",
+        artifact={"structured_content": {"path": path}},
+    )
+
+    entries = extract_artifacts_from_result(message, thread_id="demo")
+
+    assert [entry["real_ref"] for entry in entries] == [path]
+
+
+def test_escaped_sandbox_path_requires_a_matching_escaped_closer():
+    assert _detect_refs_in_text(r'Created \"/mnt/user-data/outputs/quarterly report.pdf" successfully.') == []

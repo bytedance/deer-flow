@@ -171,7 +171,9 @@ def _classify_span(text: str, start: int) -> tuple[str, int | None]:
     line_end = text.find("\n", start)
     if line_end == -1:
         line_end = len(text)
-    closer = text.find(opener, start, line_end)
+    # Match escaped wrappers together, excluding their backslash from the path.
+    delimiter = "\\" + opener if start > 1 and text[start - 2] == "\\" else opener
+    closer = text.find(delimiter, start, line_end)
     if closer == -1:
         return _SPAN_UNTERMINATED, None
     return _SPAN_QUOTED, closer
@@ -185,7 +187,7 @@ def _is_referenceable_sandbox_path(raw: str) -> bool:
     """
     if not raw.startswith(_SANDBOX_PATH_PREFIX) or len(raw) == len(_SANDBOX_PATH_PREFIX):
         return False
-    if any(character in raw for character in "\r\n\t") or raw != raw.strip():
+    if "\t" in raw or raw.splitlines() != [raw] or raw != raw.strip():
         return False
     try:
         return len(raw.encode("utf-8")) <= _STRUCTURED_DATA_MAX_BYTES

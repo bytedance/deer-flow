@@ -5,6 +5,11 @@ legacy `source.url`/`source.mime_type`. A present top-level `url` selects that
 shape, even when invalid; never mix its MIME metadata with a conflicting legacy
 source. Both shapes use the existing referenceability gate and per-result deduplication.
 
+Free-text sandbox paths retain spaces inside matching ASCII quotes/backticks or
+backslash-escaped wrappers. Exclude wrapper escapes without stripping literal
+path backslashes. Reject all `str.splitlines()` boundaries and tabs; preserve
+bare-token boundaries and structured refs. Tests: `tests/test_artifact_registry.py`.
+
 `artifact_registry.py` checks remote file suffixes against the complete parsed
 URL path without case sensitivity. Free-text URL and sandbox-path extraction
 strips common trailing ASCII/CJK prose punctuation while preserving ASCII
