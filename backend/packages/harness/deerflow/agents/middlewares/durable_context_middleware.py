@@ -14,12 +14,16 @@ new request starts with the entire previous request stopped hitting its prefix
 cache as soon as a tool batch touched the artifact registry. The block after
 the system prompt is therefore a frozen snapshot — rendered once into
 ``durable_context_snapshot``, re-sent byte-identical — and every later change
-is one new hidden message appended before the latest turn that supersedes the
+is one new hidden message appended after the latest turn that supersedes the
 fields it restates. Consecutive model requests then share the whole previous
-request as a prefix. The authority contract itself stays a request-time
+request as a prefix. Updates never re-key an existing message: the identity,
+injection-guard and artifact-occurrence consumers key on message ids, and the
+tool-message ordering contract forbids inserting between an assistant tool-call
+message and its results. The authority contract itself stays a request-time
 SystemMessage: it is text-stable across calls, and SystemMessages are coalesced
 into the leading prompt, so a persisted one would move the whole system block
-whenever it changed.
+whenever it changed. It is only sent once any durable block exists, so threads
+that never use durable state keep their original prompt.
 """
 
 from __future__ import annotations
@@ -58,12 +62,12 @@ _DURABLE_CONTEXT_DATA_KEY = "durable_context_data"
 # message's record, so a compaction that drops the earlier messages re-triggers
 # a full refresh instead of silently losing the updates they carried.
 _DURABLE_CONTEXT_SECTIONS_KEY = "durable_context_sections"
-# The copied latest message keeps the original content under a suffixed id so
-# the emitted block can take its slot and stay immediately before the latest
-# turn. Distinct from DynamicContext's ``__user`` suffix: this one must not be
-# stripped back to the original id by the message-edit replay path, which keys
-# user turns, not framework data.
-_INJECTED_DURABLE_ID_SUFFIX = "__durable"
+# Consolidation budget for the update tail: every update since the last full
+# refresh is rescued from every compaction, so past this many updates (or this
+# many accumulated bytes) the next emission restates everything still in effect
+# and the superseded updates become compressible (#7334 review).
+_UPDATE_CONSOLIDATION_LIMIT = 8
+_UPDATE_CONSOLIDATION_BYTES = 32 * 1024
 _DATA_BLOCK_OPEN = "<durable_context_data>"
 _DATA_BLOCK_CLOSE = "</durable_context_data>"
 _UPDATE_BLOCK_OPEN = "<durable_context_update>"
@@ -244,40 +248,17 @@ def durable_context_messages_to_rescue(candidates: list[AnyMessage], *, later: l
     return [message for index, message in enumerate(candidates) if index >= last_refresh and is_durable_context_data(message)]
 
 
-def _placed_before_latest_turn(messages: list[AnyMessage], data_message: HumanMessage, runtime: Runtime | None) -> list[AnyMessage]:
-    """Return the messages that land *data_message* immediately before the latest message.
-
-    The messages reducer only appends new ids, so the block cannot be inserted
-    at a position directly. It takes the latest message's id instead — the
-    reducer replaces that slot in place — and the latest message itself is
-    re-appended under a suffixed id. The latest turn therefore stays last and
-    nothing is appended after it, matching the placement rule in
-    ``message_utils``.
-
-    Swapping is only sound for a message no earlier request contained: the
-    replacement rewrites that message's slot. The latest message always is one
-    (it arrives after the previous model call), except on a resumed run whose
-    tail predates the run. There the block is appended instead — still
-    append-only for the prefix cache, just after the tail rather than before it.
-
-    A two-element return is the swap form and must replace the latest message
-    in the request history; a one-element return is the append form.
-    """
-    last = messages[-1] if messages else None
-    last_id = _message_id(last)
-    if last is None or last_id is None:
-        return [data_message]
-    pre_existing = _runtime_pre_existing_message_ids(runtime)
-    if pre_existing and last_id in pre_existing:
-        return [data_message]
-    data_message.id = last_id
-    return [data_message, last.model_copy(update={"id": f"{last_id}{_INJECTED_DURABLE_ID_SUFFIX}"})]
-
-
 def _apply_to_history(messages: list[AnyMessage], pending: list[AnyMessage]) -> list[AnyMessage]:
-    """Return *messages* with the pending block placed the way the reducer will."""
-    if len(pending) == 2:
-        return [*messages[:-1], *pending]
+    """Return *messages* with the pending block appended at the end.
+
+    The block always lands after the whole latest turn — including any trailing
+    tool-result batch — and never re-keys an existing message: re-keying the
+    latest message under a suffix breaks the user-turn identity consumers
+    (frontend/backend dedupe and the dynamic-context injection guard) and the
+    artifact occurrence registry that keys on ToolMessage ids, and inserting
+    between the assistant tool-call message and its results violates the
+    tool-message ordering contract strict providers enforce (#7334 review).
+    """
     return [*messages, *pending]
 
 
@@ -597,7 +578,7 @@ class DurableContextMiddleware(AgentMiddleware[AgentState]):
         The frozen block is rendered once per session and re-sent verbatim after
         the system prompt on every call: a byte-stable prefix is what lets a
         provider reuse the previous request's cached prompt (#7320). Anything
-        that changes afterwards is a new hidden message appended before the
+        that changes afterwards is a new hidden message appended after the whole
         latest turn, so the request stream keeps growing instead of diverging.
         """
         sections = self._durable_sections(state, runtime)
@@ -627,8 +608,15 @@ class DurableContextMiddleware(AgentMiddleware[AgentState]):
             # A block that only adds or edits fields carries just those, leaving
             # earlier values standing. One that ends a field — or the first one,
             # when nothing was ever shown — restates everything still in effect
-            # so omission can carry the removal.
-            replace = bool(removed) or (last_data is None and not snapshot.get("content"))
+            # so omission can carry the removal. So does one that follows a long
+            # update chain: every update since the last full refresh is rescued
+            # from every compaction, so past a budget the tail is consolidated
+            # into a refresh and the superseded updates become compressible.
+            tail = durable_context_messages_to_rescue(messages)
+            tail_updates = [message for message in tail if not is_durable_context_refresh(message)]
+            tail_bytes = sum(len(str(message.content)) for message in tail_updates)
+            consolidate = len(tail_updates) >= _UPDATE_CONSOLIDATION_LIMIT or tail_bytes >= _UPDATE_CONSOLIDATION_BYTES
+            replace = bool(removed) or (last_data is None and not snapshot.get("content")) or consolidate
             names = list(sections) if replace else changed
             data_message = HumanMessage(
                 content=_render_data_block(sections, names, replace=replace),
@@ -639,7 +627,7 @@ class DurableContextMiddleware(AgentMiddleware[AgentState]):
                     **provenance_kwargs(ContentKind.DURABLE_CONTEXT, "durable_context_data"),
                 },
             )
-            pending = _placed_before_latest_turn(messages, data_message, runtime)
+            pending = [data_message]
         return anchor_message, anchor_write, pending
 
     def _contract_text(self, *, goal_present: bool) -> str:
@@ -684,10 +672,18 @@ class DurableContextMiddleware(AgentMiddleware[AgentState]):
         history = list(request.messages)
         anchor, anchor_write, pending = self._plan_emission(state, history, request.runtime)
         placed = _apply_to_history(history, pending)
-        contract = SystemMessage(
-            content=self._contract_text(goal_present=self._goal_present_for_contract(state, placed, anchor)),
-            additional_kwargs=provenance_kwargs(ContentKind.MIDDLEWARE_INJECTION, "durable_context"),
-        )
+        # The authority contract rides only when durable content exists on the
+        # wire (a frozen anchor, a pending update, or an earlier data message):
+        # sending it on every request would change the effective system prompt
+        # of threads that never use durable state, for a fixed token cost each
+        # call (#7334 review). Once any durable block exists the contract is
+        # static, so prefix stability is unaffected.
+        contract = None
+        if anchor is not None or pending or any(is_durable_context_data(message) for message in placed):
+            contract = SystemMessage(
+                content=self._contract_text(goal_present=self._goal_present_for_contract(state, placed, anchor)),
+                additional_kwargs=provenance_kwargs(ContentKind.MIDDLEWARE_INJECTION, "durable_context"),
+            )
         return request.override(messages=insert_after_leading_system_messages(placed, [message for message in (contract, anchor) if message is not None])), pending, anchor_write
 
     @override

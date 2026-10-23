@@ -1712,10 +1712,15 @@ class TestRequestPrefixStability:
         assert len(model.received) == 2
         first = _request_view(model.received[0])
         second = _request_view(model.received[1])
-        # The second call sees the delegation ledger the first one did not have,
-        # and still starts with everything the first call sent.
-        assert second[: len(first)] == first
-        assert any("## Work already delegated" in content for _kind, content in second[len(first) :])
+        # The first call carries no durable content, so it has no authority
+        # contract; the second prepends it once the delegation ledger exists,
+        # then keeps the whole first request in order behind it, with the
+        # update appended after everything — including the tool batch, whose
+        # assistant/tool adjacency the ordering contract requires.
+        assert second[1 : 1 + len(first)] == first
+        ai_index = next(index for index, (kind, _content) in enumerate(second) if kind == "ai")
+        assert second[ai_index + 1][0] == "tool"
+        assert second[-1][0] == "human" and "## Work already delegated" in second[-1][1]
 
     def test_frozen_block_is_not_rewritten_across_calls(self):
         model = RecordingFakeModel(
@@ -1764,5 +1769,59 @@ class TestRequestPrefixStability:
         assert len(model.received) == 2
         first = _request_view(model.received[0])
         second = _request_view(model.received[1])
-        assert second[: len(first)] == first
-        assert any("## Work already delegated" in content for _kind, content in second[len(first) :])
+        # Turn one sent no durable content and therefore no contract; turn two
+        # prepends it, replays the first request in order behind it, and puts
+        # the ledger update at the very end rather than rewriting anything.
+        assert second[1 : 1 + len(first)] == first
+        assert second[-1][0] == "human" and "## Work already delegated" in second[-1][1]
+
+
+class TestConsolidationAndContractGating:
+    """#7334 review: the update tail must consolidate, and the authority
+    contract must not ride requests that carry no durable content at all."""
+
+    def test_update_tail_consolidates_into_a_full_refresh(self):
+        model = RecordingFakeModel(responses=[AIMessage(content="ok")] * 12)
+        agent = create_agent(
+            model=model,
+            tools=[],
+            middleware=[DurableContextMiddleware(task_continuity_enabled=True)],
+            state_schema=ThreadState,
+            checkpointer=InMemorySaver(),
+        )
+        config = {"configurable": {"thread_id": "consolidation"}}
+        for turn in range(10):
+            agent.invoke(
+                {
+                    "messages": [HumanMessage(content=f"turn {turn}")],
+                    "task_notes": {"next": {"content": f"note {turn}", "source_ids": [], "authority": "model_report"}},
+                },
+                config,
+            )
+
+        last = _request_view(model.received[-1])
+        updates = [content for kind, content in last if content.startswith("<durable_context_update>")]
+        refreshes = [content for kind, content in last if content.startswith("<durable_context_data>")]
+        # The tail never grows past the consolidation budget, and once it fills
+        # the newest durable message is a full refresh carrying the current note.
+        assert len(updates) <= 8
+        assert refreshes and "note 9" in refreshes[-1]
+
+    def test_fresh_thread_carries_no_contract_or_block(self):
+        model = RecordingFakeModel(responses=[AIMessage(content="ok")])
+        agent = create_agent(model=model, tools=[], middleware=[DurableContextMiddleware()], state_schema=ThreadState)
+
+        agent.invoke({"messages": [HumanMessage(content="hi")]})
+
+        received = model.received[0]
+        assert not any("## Durable context authority contract" in str(message.content) for message in received)
+        assert not any(message.additional_kwargs.get("durable_context_data") for message in received)
+
+    def test_thread_with_durable_state_carries_the_contract(self):
+        model = RecordingFakeModel(responses=[AIMessage(content="ok")])
+        agent = create_agent(model=model, tools=[], middleware=[DurableContextMiddleware()], state_schema=ThreadState)
+
+        agent.invoke({"messages": [HumanMessage(content="hi")], "summary_text": "EARLIER_SUMMARY"})
+
+        received = model.received[0]
+        assert any("## Durable context authority contract" in str(message.content) for message in received)

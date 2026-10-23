@@ -173,3 +173,70 @@ def test_all_model_visible_artifact_labels_are_redacted_without_mutating_state(f
     assert "alice@example.com" not in data and "sk-" + "a" * 24 not in data
     assert entry[field] == secret and entry["real_ref"] == "https://host/private.pdf"
     assert entry["handle"] in data
+
+
+def test_durable_emission_does_not_rekey_captured_tool_messages():
+    """#7334 review: the durable update must not re-key an existing ToolMessage.
+
+    The occurrence key and the generated handles include the message id, so a
+    re-keyed result reads as a new occurrence on the next capture: duplicate
+    handles are minted and the originals trim out under the entry cap, after
+    which the handles the model already saw stop resolving. The ToolMessage has
+    to be produced mid-run by a real tool call: an input-fed one is pre-existing
+    and never took the swap path.
+    """
+    from langchain_core.tools import tool
+    from langgraph.prebuilt.tool_node import ToolCallRequest
+
+    from deerflow.agents.middlewares.artifact_resolution_middleware import ArtifactResolutionMiddleware
+
+    paths = [f"/x/f{i}.pdf" for i in range(10)]
+
+    @tool(response_format="content_and_artifact")
+    def make_files() -> tuple[str, dict]:
+        """Make ten files."""
+        return "made", {"structured_content": {"files": paths}}
+
+    @tool
+    def noop() -> str:
+        """Do nothing."""
+        return "ok"
+
+    saver = InMemorySaver()
+    model = FakeToolCallingModel(
+        responses=[
+            AIMessage(content="", tool_calls=[{"name": "make_files", "args": {}, "id": "call-1", "type": "tool_call"}]),
+            AIMessage(content="made them"),
+            AIMessage(content="", tool_calls=[{"name": "noop", "args": {}, "id": "call-2", "type": "tool_call"}]),
+            AIMessage(content="done"),
+        ]
+    )
+    graph = create_agent(
+        model=model,
+        tools=[make_files, noop],
+        middleware=[ArtifactCaptureMiddleware(ToolArtifactConfig(max_entries=10)), DurableContextMiddleware()],
+        state_schema=ThreadState,
+        checkpointer=saver,
+    )
+    config = {"configurable": {"thread_id": "review-thread"}}
+    first = graph.invoke({"messages": [HumanMessage(content="make")]}, config, context={"thread_id": "review-thread"})
+    handles = [entry["handle"] for entry in first["tool_artifacts"]]
+    assert len(handles) == 10
+
+    second = graph.invoke({"messages": [HumanMessage(content="noop")]}, config, context={"thread_id": "review-thread"})
+    # The same result must not register twice: no new handles, nothing trimmed,
+    # and the captured ToolMessage keeps its original id.
+    assert [entry["handle"] for entry in second["tool_artifacts"]] == handles
+    tool_ids = [message.id for message in second["messages"] if isinstance(message, ToolMessage)]
+    assert not any(message_id and message_id.endswith("__durable") for message_id in tool_ids)
+
+    @tool
+    def read_file(path: str) -> str:
+        """Read a file back."""
+        return path
+
+    resolver = ArtifactResolutionMiddleware()
+    for entry in second["tool_artifacts"]:
+        request = ToolCallRequest(tool_call={"name": "read_file", "args": {"path": entry["handle"]}, "id": "read", "type": "tool_call"}, tool=read_file, state=second, runtime=runtime())
+        resolved = resolver.wrap_tool_call(request, lambda r: ToolMessage(content=r.tool_call["args"]["path"], tool_call_id="read"))
+        assert resolved.content == entry["real_ref"]
