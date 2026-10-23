@@ -290,8 +290,10 @@ def test_unsupported_options_fail_before_creating_resources(transport, extra):
     assert not transport.remotes
 
 
-@pytest.mark.parametrize("provider", ["opensandbox", "boxlite", "aio"])
+@pytest.mark.parametrize("provider", ["opensandbox", "boxlite", "aio-docker"])
 def test_negative_idle_timeout_fails_before_provider_creation(monkeypatch, provider):
+    assert provider in bench.PROVIDER_FACTORIES
+
     def unexpected_provider(*args, **kwargs):
         pytest.fail("invalid idle timeout must be rejected before provisioning")
 
