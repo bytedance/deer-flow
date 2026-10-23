@@ -7,8 +7,11 @@ import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
+import sys
 import threading
+from contextlib import suppress
 from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
@@ -20,7 +23,8 @@ from deerflow.sandbox.env_policy import build_sandbox_env
 from deerflow.sandbox.local.list_dir import list_dir
 from deerflow.sandbox.path_patterns import replace_output_path_matches
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
-from deerflow.sandbox.search import GrepMatch, find_glob_matches, find_grep_matches
+from deerflow.sandbox.search import GrepMatch, find_glob_matches, find_grep_matches, path_matches
+from deerflow.utils.atomic_write import publish_bytes_atomically
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +36,28 @@ logger = logging.getLogger(__name__)
 DEFAULT_COMMAND_TIMEOUT_SECONDS = 600
 _COMMAND_CAPTURE_LIMIT_BYTES = 10 * 1024 * 1024
 _PIPE_DRAIN_JOIN_TIMEOUT_SECONDS = 0.2
+
+
+def _publish_file_revision(path: str, content: str) -> None:
+    target = Path(os.path.realpath(path))
+    # Rename checks the parent, not the target's write permission. Check the
+    # existing file without truncating it before staging a replacement inode.
+    try:
+        fd = os.open(target, os.O_WRONLY | getattr(os, "O_NONBLOCK", 0))
+    except FileNotFoundError:
+        fd = None
+    try:
+        if fd is not None:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise OSError(errno.EINVAL, "Text revisions require a regular file", path)
+        publish_bytes_atomically(target, content.encode("utf-8"), temporary_prefix=".deerflow-write-", preserve_metadata_from=fd)
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                with suppress(Exception):
+                    logger.warning("Failed to close file revision source descriptor for %s", target, exc_info=True)
 
 
 class _BoundedPipeCapture:
@@ -182,6 +208,59 @@ class PathMapping:
 class ResolvedPath(NamedTuple):
     path: str
     mapping: PathMapping | None
+
+
+_POWERSHELL_QUOTE_TRANSLATION = str.maketrans("\u2018\u2019\u201c\u201d", "''\"\"")
+
+
+def escape_powershell_path(match: re.Match[str], path: str) -> str:
+    """Keep mapped paths literal in the caller's quote context, preserving wildcards."""
+    quote = None
+    escaped = False
+    subexpressions: list[str | None] = []
+    prefix = match.string[: match.start()]
+    index = 0
+    while index < len(prefix):
+        char = prefix[index].translate(_POWERSHELL_QUOTE_TRANSLATION)
+        if escaped:
+            escaped = False
+        elif char == "`" and quote != "'":
+            escaped = True
+        elif quote is None and prefix[index : index + 2] == "<#":
+            end = prefix.find("#>", index + 2)
+            index = len(prefix) if end < 0 else end + 1
+        elif quote is None and char == "#" and (index == 0 or prefix[index - 1].isspace() or prefix[index - 1] in ";|&(){}="):
+            end = prefix.find("\n", index)
+            index = len(prefix) if end < 0 else end
+        elif quote is None and prefix[index : index + 2] in ("@'", '@"'):
+            delimiter = prefix[index + 1]
+            end = re.search(rf"(?m)^{delimiter}@", prefix[index + 2 :])
+            if end is None:
+                if delimiter == "'":
+                    return path
+                quote = '@"'
+                index += 1
+            else:
+                index += end.end() + 1
+        elif char == "$" and prefix[index : index + 2] == "$(" and quote != "'":
+            subexpressions.append(quote)
+            quote = None
+            index += 1
+        elif char in "\"'" and quote in (None, char):
+            quote = None if quote else char
+        elif quote is None and char == "(":
+            subexpressions.append(None)
+        elif quote is None and char == ")" and subexpressions:
+            quote = subexpressions.pop()
+        index += 1
+    # The path matcher includes a caller's closing smart quote in its tail.
+    closing_quote = path[-1:] if quote in ("'", '"') and match.group()[-1:].translate(_POWERSHELL_QUOTE_TRANSLATION) == quote else ""
+    if closing_quote:
+        path = path[:-1]
+    if quote == "'":
+        return re.sub(r"['\u2018\u2019]", lambda char: char.group() * 2, path) + closing_quote
+    characters = r'[`$"\u201c\u201d]' if quote is not None else r"[ \t`$'\";&,()@{}#\u2018\u2019\u201c\u201d]"
+    return re.sub(characters, lambda char: "`" + char.group(), path) + closing_quote
 
 
 class LocalSandbox(Sandbox):
@@ -561,12 +640,13 @@ class LocalSandbox(Sandbox):
 
         return result
 
-    def _resolve_paths_in_command(self, command: str) -> str:
+    def _resolve_paths_in_command(self, command: str, *, shell: str | None = None) -> str:
         """
         Resolve container paths to local paths in a command string.
 
         Args:
             command: Command string that may contain container paths
+            shell: Execution shell, or None for unescaped path resolution
 
         Returns:
             Command with container paths resolved to local paths
@@ -583,10 +663,14 @@ class LocalSandbox(Sandbox):
                 # canonicalizing the truncated prefix would follow an
                 # unrelated symlink and reassemble a path to a different
                 # file, so substitute textually there.
-                return self._resolve_path_textually(matched_path).replace("\\", "/")
+                resolved = self._resolve_path_textually(matched_path).replace("\\", "/")
+            else:
+                resolved = self._resolve_path(matched_path).replace("\\", "/")
             # Normalize to forward slashes so bash doesn't interpret Windows
             # backslash sequences (\\U, \\a, \\d, \\s, \\n, \\t) as escapes.
-            return self._resolve_path(matched_path).replace("\\", "/")
+            if self._is_powershell(shell or ""):
+                return escape_powershell_path(match, resolved)
+            return resolved
 
         return pattern.sub(replace_match, command)
 
@@ -683,8 +767,8 @@ class LocalSandbox(Sandbox):
         # any new caller to use safe key names.
         _validate_extra_env(env)
         # Resolve container paths in command before execution
-        resolved_command = self._resolve_paths_in_command(command)
         shell = self._get_shell()
+        resolved_command = self._resolve_paths_in_command(command, shell=shell)
         if timeout is None:
             timeout = DEFAULT_COMMAND_TIMEOUT_SECONDS
 
@@ -937,6 +1021,9 @@ class LocalSandbox(Sandbox):
                 start_new_session=True,
                 env=env,
             )
+            # With start_new_session=True, the new process is also the
+            # process-group leader, so its PID is the stable group identifier.
+            process_group_id = process.pid
         except Exception:
             for fd in (stdout_read_fd, stdout_write_fd, stderr_read_fd, stderr_write_fd):
                 try:
@@ -956,16 +1043,11 @@ class LocalSandbox(Sandbox):
         stdout_capture, stdout_thread = LocalSandbox._start_pipe_drain(stdout_read_fd, "deerflow-bash-stdout-drain")
         stderr_capture, stderr_thread = LocalSandbox._start_pipe_drain(stderr_read_fd, "deerflow-bash-stderr-drain")
         try:
-            process_group_id = os.getpgid(process.pid)
-        except OSError:
-            process_group_id = None
-
-        try:
             try:
                 process.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
                 timed_out = True
-                LocalSandbox._terminate_process_group(process)
+                LocalSandbox._terminate_process_group(process, process_group_id)
             returncode = process.returncode if process.returncode is not None else 0
         finally:
             join_timeout = 10 if timed_out or not LocalSandbox._process_group_exists(process_group_id) else _PIPE_DRAIN_JOIN_TIMEOUT_SECONDS
@@ -979,14 +1061,14 @@ class LocalSandbox(Sandbox):
         return stdout, stderr, returncode, timed_out
 
     @staticmethod
-    def _terminate_process_group(process: subprocess.Popen) -> None:
+    def _terminate_process_group(process: subprocess.Popen, process_group_id: int) -> None:
         """Kill the command's whole process group, then reap it.
 
         Falls back to killing just the direct child if the group is already
         gone (e.g. the command exited between the timeout and this call).
         """
         try:
-            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+            os.killpg(process_group_id, signal.SIGKILL)
         except (ProcessLookupError, PermissionError, OSError):
             # The process group is already gone (the command exited in the race
             # between the timeout and this call); fall back to killing just the
@@ -1029,6 +1111,13 @@ class LocalSandbox(Sandbox):
             if not virtual_children or os.path.exists(resolved_path):
                 raise
             entries = []
+        except OSError as e:
+            if e.filename is None:
+                raise
+            # Keep custom-mount host paths out of public listing errors.
+            filename = self._reverse_resolve_path(os.fsdecode(e.filename))
+            filename2 = self._reverse_resolve_path(os.fsdecode(e.filename2)) if e.filename2 is not None else None
+            raise type(e)(e.errno, e.strerror, filename, getattr(e, "winerror", None), filename2) from None
         # Reverse resolve local paths back to container paths and preserve
         # list_dir's trailing "/" marker for directories.
         result: list[str] = []
@@ -1129,11 +1218,12 @@ class LocalSandbox(Sandbox):
             # Resolve container paths in content to local paths
             # using the content-specific resolver (forward-slash safe)
             resolved_content = self._resolve_paths_in_content(content)
-            mode = "a" if append else "w"
-            # newline="" writes the content as given; the default would turn
-            # every "\n" into "\r\n" on Windows (breaking `bash run.sh`).
-            with open(resolved_path, mode, encoding="utf-8", newline="") as f:
-                f.write(resolved_content)
+            if append or sys.platform not in {"darwin", "linux"}:
+                # Other hosts retain their existing write/ACL semantics.
+                with open(resolved_path, "a" if append else "w", encoding="utf-8", newline="") as f:
+                    f.write(resolved_content)
+            else:
+                _publish_file_revision(resolved_path, resolved_content)
             # Track this path so read_file knows to reverse-resolve on read.
             # Only agent-written files get reverse-resolved; user uploads and
             # external tool output are left untouched.
@@ -1142,9 +1232,72 @@ class LocalSandbox(Sandbox):
             # Re-raise with the original path for clearer error messages, hiding internal resolved paths
             raise type(e)(e.errno, e.strerror, path) from None
 
+    def _virtual_search_mounts(self, path: str) -> list[tuple[str, Path]] | None:
+        """Search only mounted children of an unmapped virtual parent.
+
+        Default skills have four category mounts, not an aggregate host root.
+        Never substitute an incidental host directory for that virtual view.
+        Mapped roots (including policy-scoped skill views) keep their normal walk.
+        """
+        if self._find_path_mapping(path) is not None:
+            return None
+        prefix = path.rstrip("/") + "/"
+        mounts = None
+        for mapping in self.path_mappings:
+            if not mapping.container_path.startswith(prefix):
+                continue
+            child = mapping.container_path[len(prefix) :]
+            if not child or "/" in child:
+                continue
+            if mounts is None:
+                mounts = []
+            # Explicit mounts stay visible; ignore rules apply within each mount.
+            root = Path(self._resolved_local_paths[mapping])
+            # A broken mount is an error, not permission to walk the host parent.
+            try:
+                if not stat.S_ISDIR(root.stat().st_mode):
+                    raise NotADirectoryError(mapping.container_path)
+            except OSError:
+                logger.warning("Could not search virtual mount %s", mapping.container_path, exc_info=True)
+                raise
+            mounts.append((child, root))
+        if mounts is not None:
+            # As with list_dir, an existing host file is not a virtual directory.
+            try:
+                mode = Path(path).stat().st_mode
+            except FileNotFoundError:
+                pass
+            else:
+                if not stat.S_ISDIR(mode):
+                    raise NotADirectoryError(path)
+        return mounts
+
     def glob(self, path: str, pattern: str, *, include_dirs: bool = False, max_results: int = 200) -> tuple[list[str], bool]:
-        resolved_path = Path(self._resolve_path(path))
-        matches, truncated = find_glob_matches(resolved_path, pattern, include_dirs=include_dirs, max_results=max_results)
+        try:
+            mounts = self._virtual_search_mounts(path)
+            if mounts is not None:
+                results = []
+                for child, root in mounts:
+                    virtual_dir = f"{path.rstrip('/')}/{child}"
+                    if include_dirs and path_matches(pattern, child):
+                        results.append(virtual_dir)
+                    if len(results) <= max_results:
+                        # One lookahead match proves whether the combined view
+                        # exceeds the cap, without collecting a cap per mount.
+                        matches, _ = find_glob_matches(root, pattern, include_dirs=include_dirs, max_results=max_results - len(results) + 1, relative_prefix=child)
+                        results.extend(f"{virtual_dir}/{Path(match).relative_to(root).as_posix()}" for match in matches)
+                    if len(results) > max_results:
+                        return results[:max_results], True
+                return results, False
+            resolved_path = Path(self._resolve_path(path))
+            matches, truncated = find_glob_matches(resolved_path, pattern, include_dirs=include_dirs, max_results=max_results)
+        except OSError as e:
+            if e.filename is None:
+                raise
+            # Keep custom-mount host paths out of public search errors.
+            filename = self._reverse_resolve_path(os.fsdecode(e.filename))
+            filename2 = self._reverse_resolve_path(os.fsdecode(e.filename2)) if e.filename2 is not None else None
+            raise type(e)(e.errno, e.strerror, filename, getattr(e, "winerror", None), filename2) from None
         return [self._reverse_resolve_path(match) for match in matches], truncated
 
     def grep(
@@ -1157,8 +1310,25 @@ class LocalSandbox(Sandbox):
         case_sensitive: bool = False,
         max_results: int = 100,
     ) -> tuple[list[GrepMatch], bool]:
-        resolved_path = Path(self._resolve_path(path))
         try:
+            mounts = self._virtual_search_mounts(path)
+            if mounts is not None:
+                results = []
+                for child, root in mounts:
+                    matches, _ = find_grep_matches(
+                        root,
+                        pattern,
+                        glob_pattern=glob,
+                        literal=literal,
+                        case_sensitive=case_sensitive,
+                        max_results=max_results - len(results) + 1,
+                        relative_prefix=child,
+                    )
+                    results.extend(GrepMatch(path=f"{path.rstrip('/')}/{child}/{Path(match.path).relative_to(root).as_posix()}", line_number=match.line_number, line=match.line) for match in matches)
+                    if len(results) > max_results:
+                        return results[:max_results], True
+                return results, False
+            resolved_path = Path(self._resolve_path(path))
             matches, truncated = find_grep_matches(
                 resolved_path,
                 pattern,

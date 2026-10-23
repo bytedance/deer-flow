@@ -26,36 +26,20 @@ The LangGraph backend provides sandbox execution, persistent memory, subagent de
 - Gateway MCP/skill updates write `extensions_config.json` at runtime. Production Compose mounts it read-write (`config.yaml` stays `:ro`); Helm seeds a writable home-volume copy. Hold both `extensions_config_write_lock` and the sidecar advisory `extensions_config_file_lock` during read-modify-write to prevent lost updates across workers. `atomic_write_extensions_config` uses temp-file replacement; only mount-point `EBUSY` permits a non-atomic in-place overwrite (crashes can truncate). Warn about this fallback once per target; propagate other errors. `get_extensions_config()` revalidates reads by file signature; see [config caching](packages/harness/deerflow/config/AGENTS.md). Tests: `tests/test_compose_extensions_config_writable.py`, `tests/test_extensions_config_atomic_write.py`, `tests/test_helm_extensions_config_writable.py`.
 - MCP cache reset scope and discovery fencing: [MCP guide](packages/harness/deerflow/mcp/AGENTS.md).
 
-**Project Structure** (backend/ subtree; the root guide maps the full repo):
-```
-backend/
-├── Makefile                    # Backend-only commands (dev, gateway, lint)
-├── langgraph.json              # LangGraph Studio graph configuration
-├── packages/
-│   ├── extension-api/          # public, host-independent extension contracts (import: deerflow_extension_api.*)
-│   └── harness/                # deerflow-harness package (import: deerflow.*)
-│       └── deerflow/
-│           ├── agents/         # LangGraph agent system (lead_agent/, middlewares/ — see Middleware Chain, memory/, thread_state.py)
-│           ├── sandbox/        # Sandbox execution system
-│           ├── subagents/      # Subagent delegation (builtins/, executor.py, registry.py)
-│           ├── tools/builtins/ # Built-in tools (present_files, ask_clarification, view_image, review_skill_package)
-│           ├── mcp/            # MCP integration (tools, cache, client)
-│           ├── integrations/   # Managed first-party integration installers (e.g. Lark CLI skill pack)
-│           ├── extensions/     # Python plugin loader, registry, placement, and isolation
-│           ├── models/         # Model factory with thinking/vision support
-│           ├── skills/         # Skills discovery, loading, parsing
-│           ├── config/         # Configuration system
-│           ├── community/      # Community tools (search/fetch/scrape, image search, AIO sandbox)
-│           ├── reflection/     # Dynamic module loading (resolve_variable, resolve_class)
-│           ├── utils/          # Utilities (network, readability)
-│           └── client.py       # Embedded Python client (DeerFlowClient)
-├── app/                        # Application layer (import: app.*)
-│   ├── gateway/                # FastAPI Gateway API (app.py, routers/)
-│   └── channels/               # IM platform integrations
-├── scripts/benchmark/          # Standalone reproducible backend benchmarks
-├── tests/                      # Test suite
-└── docs/                       # Documentation
-```
+**Project Structure** (relative to `backend/`; see the root guide for the full repo):
+
+- `Makefile`: backend commands; `langgraph.json`: LangGraph Studio configuration.
+- `packages/extension-api/`: public extension contracts (`deerflow_extension_api.*`).
+- `packages/harness/deerflow/`: publishable framework (`deerflow.*`):
+  `agents/` (lead agent, middleware, memory, thread state), `sandbox/`, `subagents/`
+  (builtins, executor, registry), `tools/builtins/` (file presentation, clarification,
+  images, skill review), `mcp/`, `integrations/` (Lark CLI skill pack), `extensions/`,
+  `models/`, `skills/`, `config/`, `community/` (search, fetch, scrape, images,
+  AIO sandbox), `reflection/`, `utils/`, and the embedded `client.py`.
+- `app/`: application layer (`app.*`), including `gateway/` (FastAPI app and routers)
+  and `channels/` (IM integrations).
+- `scripts/benchmark/`: standalone backend benchmarks; `tests/`: test suite;
+  `docs/`: backend documentation.
 
 ## Important Development Guidelines
 
@@ -165,7 +149,8 @@ Read the nearest scoped `AGENTS.md` for subsystem ownership.
 
 ## Architecture
 
-Read-only knowledge: [contract](docs/KNOWLEDGE.md).
+Read-only knowledge: [contract](docs/KNOWLEDGE.md) covers independent retrieval
+tools, scope intersection and extension-owned providers.
 
 ### Harness / App Split
 

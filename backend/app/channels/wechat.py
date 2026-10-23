@@ -1695,7 +1695,7 @@ class WechatChannel(Channel):
             return
         try:
             data = json.loads(self._cursor_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
             logger.warning("[WeChat] failed to read cursor state from %s", self._cursor_path)
             return
         cursor = data.get("get_updates_buf")
@@ -1707,7 +1707,7 @@ class WechatChannel(Channel):
             return
         try:
             self._cursor_path.parent.mkdir(parents=True, exist_ok=True)
-            self._cursor_path.write_text(json.dumps({"get_updates_buf": self._get_updates_buf}, ensure_ascii=False, indent=2), encoding="utf-8")
+            self._cursor_path.write_text(json.dumps({"get_updates_buf": self._get_updates_buf}, ensure_ascii=False, indent=2), encoding="utf-8", newline="")
         except OSError:
             logger.warning("[WeChat] failed to persist cursor state to %s", self._cursor_path)
 
@@ -1719,7 +1719,7 @@ class WechatChannel(Channel):
             return
         try:
             data = json.loads(self._auth_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
             logger.warning("[WeChat] failed to read auth state from %s", self._auth_path)
             return
         if not isinstance(data, dict):
@@ -1774,7 +1774,7 @@ class WechatChannel(Channel):
                 # iLink bot_token is never briefly readable at umask defaults
                 # (mirrors ChannelRuntimeConfigStore._save). NamedTemporaryFile
                 # uses mkstemp, which creates the file at 0o600 from the start.
-                fd = tempfile.NamedTemporaryFile(mode="w", dir=self._auth_path.parent, prefix=credential_staging_prefix(self._auth_path), suffix=".tmp", delete=False, encoding="utf-8")
+                fd = tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", newline="", dir=self._auth_path.parent, prefix=credential_staging_prefix(self._auth_path), suffix=".tmp", delete=False)
                 try:
                     json.dump(data, fd, ensure_ascii=False, indent=2)
                     fd.close()

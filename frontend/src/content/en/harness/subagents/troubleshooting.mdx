@@ -33,6 +33,12 @@ Expected. A failed subagent is an ordinary tool result; the parent run does not 
 
 **Fix**: first check the step timeline for the same tool being called over and over. If more budget is genuinely needed, adjust `subagents.token_budget.max_tokens` or `loop_detection.tool_freq_overrides`. Note that the default token ceiling is coupled to `summarization.enabled`; an explicit value is not.
 
+### The result is marked `model_length_capped`
+
+**Cause**: the provider stopped the subagent's response at the model's output limit, so the answer is incomplete and any tool call in that response was dropped.
+
+**Fix**: raise the output limit (`max_tokens`) of the model the subagent uses, or ask for shorter output, for example by splitting the task or writing long content to a file in several steps.
+
 ### Status `failed` with the error `Reached max_turns=N`
 
 The turns ran out and the last assistant message had no usable text; the result reads `Task failed (capped: turn budget). Error: Reached max_turns=N`. Same fix as above.

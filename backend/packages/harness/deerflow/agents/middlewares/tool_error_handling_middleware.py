@@ -701,6 +701,17 @@ def build_subagent_runtime_middlewares(
 
     middlewares.extend(load_configured_extension_middlewares(app_config))
 
+    # Same provider output-length guard the lead agent uses. A subagent answer
+    # cut off at the model's output limit would otherwise reach the lead as a
+    # clean ``completed``, and a tool call truncated at that boundary would
+    # still execute. The middleware drops such tool calls and exposes
+    # ``consume_stop_reason`` so the executor marks the result
+    # ``model_length_capped``. Registered before Safety, as on the lead chain,
+    # so reverse-order after_model dispatch runs Safety first.
+    from deerflow.agents.middlewares.model_length_finish_reason_middleware import ModelLengthFinishReasonMiddleware
+
+    middlewares.append(ModelLengthFinishReasonMiddleware())
+
     # Same provider safety-termination guard the lead agent uses — subagents
     # are equally exposed to truncated tool_calls returned with
     # finish_reason=content_filter (and friends), and the bad call would then

@@ -6,6 +6,7 @@ loop: keypress -> submit -> worker thread -> stream_actions -> reducer -> state.
 
 import asyncio
 import threading
+import time
 
 import pytest
 from textual import events
@@ -363,29 +364,32 @@ async def test_quit_interrupts_an_active_stream_before_exiting():
     which checks ``self._streaming`` and interrupts before any teardown.
     Left unfixed, the worker thread survives the app's exit; its next
     ``call_from_thread`` call then fails silently and the in-flight turn is
-    abandoned without a trace.
+    abandoned without a trace. The interrupted worker is still inside its
+    step, so the app says it is waiting and exits once that step returns.
     """
     session = _BlockedSession()
     app = DeerFlowTUI(session, LaunchPlan(mode="tui"))
     async with app.run_test() as pilot:
-        await pilot.pause()
-        await pilot.press("h", "i")
-        await pilot.press("enter")
-        await _wait_until(lambda: app._streaming, pilot)
+        try:
+            await pilot.pause()
+            await pilot.press("h", "i")
+            await pilot.press("enter")
+            await _wait_until(lambda: app._streaming, pilot)
 
-        for ch in "/quit":
-            await pilot.press(ch)
-        await pilot.press("enter")
-        await pilot.pause()
+            for ch in "/quit":
+                await pilot.press(ch)
+            await pilot.press("enter")
+            await pilot.pause()
 
-        # The run must be interrupted (state cleaned up, message surfaced)
-        # before the app is allowed to exit — /quit still quits, but safely.
-        assert app._streaming is False
-        assert any(r.kind == "system" and "Interrupt" in r.text for r in app.state.rows)
-        assert app._exit is True
+            assert app._streaming is False
+            assert any(r.kind == "system" and "Interrupt" in r.text for r in app.state.rows)
+            assert any(r.kind == "system" and "Press Ctrl+C again to quit now" in r.text for r in app.state.rows)
+            assert app._exit is False
 
-    # Unblock the worker thread so it doesn't leak past the test.
-    session.client.release.set()
+            session.client.release.set()
+            assert await _wait_until(lambda: app._exit, pilot)
+        finally:
+            session.client.release.set()
 
 
 @pytest.mark.asyncio
@@ -407,6 +411,173 @@ async def test_ctrl_c_interrupts_an_active_stream_without_exiting():
         assert app._exit is False
 
     session.client.release.set()
+
+
+@pytest.mark.asyncio
+async def test_ctrl_c_quit_waits_for_the_interrupted_run_and_refuses_new_sends():
+    session = _BlockedSession()
+    app = DeerFlowTUI(session, LaunchPlan(mode="tui"))
+    async with app.run_test() as pilot:
+        try:
+            await pilot.pause()
+            await pilot.press("h", "i")
+            await pilot.press("enter")
+            await _wait_until(lambda: app._streaming, pilot)
+
+            await pilot.press("ctrl+c")  # interrupt
+            # Another thread is free to send to, but not while quitting: the
+            # exit would cut that new run off as soon as the old one stops.
+            app._handle_submit("/new")
+            await pilot.press("ctrl+c")  # quit
+            await pilot.pause()
+            assert app._exit is False
+            assert any(r.kind == "system" and "Press Ctrl+C again to quit now" in r.text for r in app.state.rows)
+
+            app.query_one("#composer").value = "one more"
+            await pilot.press("enter")
+            await pilot.pause()
+            assert not app._streaming
+            assert app.query_one("#composer").value == "one more"
+            assert not any(r.kind == "user" and r.text == "one more" for r in app.state.rows)
+
+            session.client.release.set()
+            assert await _wait_until(lambda: app._exit, pilot)
+        finally:
+            session.client.release.set()
+
+
+@pytest.mark.asyncio
+async def test_second_quit_request_exits_without_waiting_for_the_interrupted_run():
+    session = _BlockedSession()
+    app = DeerFlowTUI(session, LaunchPlan(mode="tui"))
+    async with app.run_test() as pilot:
+        try:
+            await pilot.pause()
+            await pilot.press("h", "i")
+            await pilot.press("enter")
+            await _wait_until(lambda: app._streaming, pilot)
+
+            await pilot.press("ctrl+c")  # interrupt
+            await pilot.press("ctrl+c")  # quit: waits
+            await pilot.press("ctrl+c")  # quit now
+            await pilot.pause()
+
+            assert app._exit is True
+            assert app._run.worker_running()
+        finally:
+            session.client.release.set()
+
+
+@pytest.mark.asyncio
+async def test_quit_waits_for_a_completed_run_still_saving_its_title():
+    class _BlockingTitleWriter:
+        def __init__(self):
+            self.writing = threading.Event()
+            self.release = threading.Event()
+            self.titles = []
+
+        def ensure_created(self, *args, **kwargs):
+            pass
+
+        def set_title(self, thread_id, title):
+            self.writing.set()
+            self.release.wait(5)
+            self.titles.append(title)
+
+    class _TitledClient(_FakeClient):
+        def stream(self, message, *, thread_id=None, **kwargs):
+            yield StreamEvent(type="values", data={"title": "Saved title"})
+            yield StreamEvent(type="end", data={"usage": {}})
+
+    session = _FakeSession()
+    session.client = _TitledClient()
+    session.writer = _BlockingTitleWriter()
+    app = DeerFlowTUI(session, LaunchPlan(mode="tui"))
+    async with app.run_test() as pilot:
+        try:
+            await pilot.pause()
+            await pilot.press("h", "i")
+            await pilot.press("enter")
+            assert await _wait_until(lambda: session.writer.writing.is_set() and not app._streaming, pilot)
+
+            await pilot.press("ctrl+c")
+            await pilot.pause()
+            assert app._exit is False
+
+            session.writer.release.set()
+            assert await _wait_until(lambda: app._exit, pilot)
+            assert session.writer.titles == ["Saved title"]
+        finally:
+            session.writer.release.set()
+
+
+@pytest.mark.asyncio
+async def test_unexpected_worker_failure_ends_the_run_with_an_error_row():
+    class _FailingWriter:
+        def ensure_created(self, *args, **kwargs):
+            raise RuntimeError("thread store exploded")
+
+    session = _FakeSession()
+    session.writer = _FailingWriter()
+    app = DeerFlowTUI(session, LaunchPlan(mode="tui"))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("h", "i")
+        await pilot.press("enter")
+        assert await _wait_until(lambda: not app._streaming, pilot)
+
+        assert any(r.kind == "assistant" and r.error and "thread store exploded" in r.text for r in app.state.rows)
+        assert app._run.stopped.is_set()
+        assert session.client.stream_calls == []
+
+
+_FORCE_QUIT_SCRIPT = """
+import threading, time
+from deerflow.client import StreamEvent
+from deerflow.tui.app import DeerFlowTUI
+from deerflow.tui.cli import LaunchPlan
+from deerflow.tui.session import Session
+
+in_step = threading.Event()
+
+class Client:
+    def list_models(self): return {"models": []}
+    def list_skills(self, **kwargs): return {"skills": []}
+    def stream(self, message, *, thread_id=None, **kwargs):
+        yield StreamEvent(type="messages-tuple", data={"type": "ai", "content": "working", "id": "m1"})
+        in_step.set()
+        time.sleep(60)  # a long tool step that emits no event
+        yield StreamEvent(type="end", data={"usage": {}})
+
+class App(DeerFlowTUI):
+    def on_mount(self):
+        super().on_mount()
+        self._send_to_agent("q")
+        self.set_interval(0.05, self._press_ctrl_c_once_in_step)
+
+    def _press_ctrl_c_once_in_step(self):
+        if in_step.is_set() and not self._exit:
+            for _ in range(3):  # interrupt, quit, quit now
+                self.action_interrupt()
+
+App(Session(client=Client(), writer=None), LaunchPlan(mode="tui", thread_id="t-1")).run(headless=True)
+print("exited")
+"""
+
+
+def test_quit_now_exits_the_process_while_the_interrupted_step_is_still_running():
+    """Drive the real ``App.run()``: a Textual thread worker would be joined by
+    asyncio's default-executor shutdown and again at interpreter exit, holding
+    the process until the 60 s step ended."""
+    import subprocess
+    import sys
+
+    started = time.monotonic()
+    result = subprocess.run([sys.executable, "-c", _FORCE_QUIT_SCRIPT], capture_output=True, text=True, timeout=45)
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip().endswith("exited")
+    assert time.monotonic() - started < 30
 
 
 @pytest.mark.asyncio

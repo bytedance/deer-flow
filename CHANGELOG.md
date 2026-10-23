@@ -1397,6 +1397,56 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
 
 ### Fixed
 
+- **tui:** Quitting after `Ctrl+C` interrupted a run no longer hangs on the
+  step that run is still finishing. The run thread was joined on exit, so the
+  TUI closed but the shell prompt stayed blocked until a long tool call or model
+  request returned, and further `Ctrl+C` only printed a traceback. Quitting now
+  says it is waiting for that step and closes when it finishes; press `Ctrl+C`
+  again to quit at once. ([#7326])
+  
+- **tui:** The streamed transcript no longer drops tokens that repeat or extend
+  the text already shown. Deltas were merged by prefix, so `ha` + `ha` rendered
+  as `ha`, `1` + `10` as `10`, and an answer that opened with a Markdown marker
+  lost every later standalone copy of it (closing `**`, list bullets, table
+  pipes, closing code fences). Each delta is now appended as sent. ([#7325])
+
+- **sandbox:** Release an E2B VM's ownership lease when acquire finds it gone
+  (a dead cached client or a warm-pool VM reaped while parked). The lease was
+  kept and renewed until Gateway shutdown, so every reaped VM left a tracked
+  ID and a renewed ownership key behind. ([#7277])
+  
+- **auth:** SSO login and callback no longer fail with a `500` when the OIDC
+  provider answers `200` with a body that is not the expected JSON object, such
+  as a maintenance HTML page. Discovery, token, JWKS and UserInfo bodies, a
+  malformed ID token header and a discovery document without a usable endpoint
+  now take the existing `502` / `/login?error=sso_failed` path, and a rejected
+  discovery document is no longer cached. A malformed UserInfo body is skipped
+  like a failed UserInfo request instead of aborting a login whose ID token is
+  valid. ([#7258])
+
+- **mcp:** MCP servers using the OAuth `refresh_token` grant keep working
+  across Gateway restarts, tool-cache resets, repeated personal-connection runs
+  and multiple Gateway instances when the provider rotates refresh tokens
+  (Auth0, Okta, Google). Tokens lived only in process memory, so every new
+  process or manager started again from the configured refresh token, which
+  the first refresh had already consumed, and got `invalid_grant`. With
+  `database.backend: sqlite` or `postgres`, each connection's access token and
+  latest refresh token now live in the new `mcp_oauth_tokens` table (migration
+  `0047_mcp_oauth_tokens`), encrypted with `DEER_FLOW_CREDENTIALS_KEY` and keyed
+  per deployment server or per personal-connection owner. A refresh re-reads
+  the row first and is claimed with a short lease (renewed while the token
+  request runs) plus a version compare-and-set, so concurrent instances call
+  the token endpoint once and adopt each other's result; a rotation that could
+  not be stored is kept and stored before the next refresh. Changing the configured seed, token endpoint,
+  client, scope or audience starts a new chain from the configuration.
+  `client_credentials` tokens stay in process. Saving an MCP configuration
+  deletes the stored tokens of connections it no longer has, and a rejected
+  refresh token now fails the tool call with an error asking for a new refresh
+  token (adding, when the instance could not decrypt the stored chain, that
+  every instance needs the same key). A declared multi-instance deployment with
+  an enabled `refresh_token` OAuth server now refuses to start without
+  `DEER_FLOW_CREDENTIALS_KEY`. ([#7207])
+
 - **community:** Reject booleans in numeric LightRAG and RAGFlow
   `knowledge_search` settings instead of silently treating `true` as a
   one-second timeout, one result or one character of output. Invalid settings
@@ -2063,6 +2113,7 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
   `channel_conversations` / `channel_thread_bindings`: the instance that loses
   adopts the winner's thread and deletes its own empty one, and `/new` still
   rebinds. (issue #7103, [#7104])
+  
 - **skills:** A skill the agent creates, edits, patches or deletes with the
   `skill_manage` tool now reaches every Gateway process sharing the home
   volume, as a change made through the skills API already did. The tool
@@ -2074,12 +2125,14 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
   this or a peer process serving the stale list. When the marker cannot be
   written, the tool reports that the change was applied but other processes
   were not notified, instead of reading as a failed write. ([#7099])
+  
 - **provisioner:** When two provisioner replicas start together and
   `K8S_NAMESPACE` does not exist yet, the one that loses the create race no
   longer crashes at startup: its `409 AlreadyExists` now counts as the
   namespace existing, as the Pod and Service creates already did. Helm
   deployments, where the provisioner runs inside the namespace it manages,
   never took this path. ([#7099])
+  
 - **projects:** A shelf upload or save-from-thread into a project the caller
   cannot write no longer leaves a directory behind or answers `500`. Both
   routes staged the body under `users/{user_id}/projects/{project_id}/` before
@@ -2089,6 +2142,18 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
   now check for an owned, active project first and answer the same `404`
   without writing; the shelf insert still re-checks under the project row lock.
   ([#7040])
+  
+- **skills:** Toggling a skill when no `extensions_config.json` exists yet now
+  creates the file in the project root (`DEER_FLOW_PROJECT_ROOT`, else the
+  working directory), where the MCP editor already creates it and where config
+  resolution looks first. The toggle used the working directory's parent
+  instead: with the Gateway started from anywhere but `backend/`, the new file
+  landed outside the search path, so the toggle was silently lost after reload
+  and the next MCP edit created a second file. Both routers now share
+  `ExtensionsConfig.default_config_path()`. Docker and `make dev` were not
+  affected: they set the config path, or a project root equal to that parent.
+  ([#7048])
+
 - **workflows:** A script workflow waiting on a long child Agent run no longer
   fails with `Worker turn limit` after about 209 seconds regardless of
   `timeout_seconds`. The supervisor re-sent an empty frame to the QuickJS worker
@@ -2097,7 +2162,8 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
   and the supervisor then waits on the pending calls locally (still checking
   cancellation, faults and worker exits every 20 ms) without exchanging frames,
   so idle waits no longer consume turns and `timeout_seconds` is the only wall-clock bound;
-  scripts that spin the job queue still hit the turn cap. (issue #7022, [#7024])
+  scripts that spin the job queue still hit the turn cap. (issue [#7022], [#7024])
+  
 - **browser:** `browser_screenshot` no longer replaces a file that already
   exists in the thread's outputs directory. A screenshot saved as
   `report.png` used to overwrite the user's own `report.png`, an earlier
@@ -6876,6 +6942,23 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
   reject the root, because a search would read every file below it. ([#6991])
 
 ### Security
+
+- **uploads:** Thread uploads (`POST /api/threads/{thread_id}/uploads`), upload
+  deletes (`DELETE /api/threads/{thread_id}/uploads/{filename}`) and shelf
+  attach-to-thread no longer put the raw `OSError` text in their `500` detail. A
+  permission error, or a disk too full to create the staging file, answered with
+  the absolute host path of the thread's uploads directory, including the user
+  and thread IDs. They now return `Failed to upload <name>.` /
+  `Failed to delete <name>.`, and the full error stays in the Gateway log. ([#7217])
+  
+- **agents:** The custom-agent and user-profile routes no longer put the raw
+  exception text in their `500` detail. An unparsable agent `config.yaml` or a
+  filesystem error (`[Errno 13]` and the like) made them answer with the
+  absolute host path under `users/<user_id>/`. They now return a fixed
+  `Failed to <action>` detail, matching agent import and export, and the full
+  error stays in the Gateway log. Scheduled-task create and update keep the
+  `invalid_assistant` 422 for an unloadable agent config but no longer echo
+  the parse error, which also reached the scheduler tool result. ([#7255])
 
 - **infoquest:** Screen organic, news and image result URLs through the shared
   public-URL policy, dropping non-public and unsafe references before they
@@ -12188,6 +12271,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5634]: https://github.com/bytedance/deer-flow/pull/5634
 [#5640]: https://github.com/bytedance/deer-flow/pull/5640
 [#5643]: https://github.com/bytedance/deer-flow/pull/5643
+[#5645]: https://github.com/bytedance/deer-flow/pull/5645
 [#5647]: https://github.com/bytedance/deer-flow/pull/5647
 [#5648]: https://github.com/bytedance/deer-flow/pull/5648
 [#5649]: https://github.com/bytedance/deer-flow/pull/5649
@@ -12391,6 +12475,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6045]: https://github.com/bytedance/deer-flow/pull/6045
 [#6046]: https://github.com/bytedance/deer-flow/pull/6046
 [#6048]: https://github.com/bytedance/deer-flow/pull/6048
+[#6051]: https://github.com/bytedance/deer-flow/pull/6051
 [#6054]: https://github.com/bytedance/deer-flow/pull/6054
 [#6056]: https://github.com/bytedance/deer-flow/pull/6056
 [#6057]: https://github.com/bytedance/deer-flow/pull/6057
@@ -12611,6 +12696,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6433]: https://github.com/bytedance/deer-flow/pull/6433
 [#6435]: https://github.com/bytedance/deer-flow/pull/6435
 [#6436]: https://github.com/bytedance/deer-flow/pull/6436
+[#6439]: https://github.com/bytedance/deer-flow/pull/6439
 [#6441]: https://github.com/bytedance/deer-flow/pull/6441
 [#6443]: https://github.com/bytedance/deer-flow/pull/6443
 [#6445]: https://github.com/bytedance/deer-flow/pull/6445
@@ -12630,6 +12716,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6477]: https://github.com/bytedance/deer-flow/pull/6477
 [#6478]: https://github.com/bytedance/deer-flow/pull/6478
 [#6481]: https://github.com/bytedance/deer-flow/pull/6481
+[#6483]: https://github.com/bytedance/deer-flow/pull/6483
 [#6484]: https://github.com/bytedance/deer-flow/pull/6484
 [#6485]: https://github.com/bytedance/deer-flow/pull/6485
 [#6486]: https://github.com/bytedance/deer-flow/pull/6486
@@ -12684,6 +12771,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6571]: https://github.com/bytedance/deer-flow/pull/6571
 [#6573]: https://github.com/bytedance/deer-flow/pull/6573
 [#6574]: https://github.com/bytedance/deer-flow/pull/6574
+[#6579]: https://github.com/bytedance/deer-flow/pull/6579
 [#6580]: https://github.com/bytedance/deer-flow/pull/6580
 [#6581]: https://github.com/bytedance/deer-flow/pull/6581
 [#6582]: https://github.com/bytedance/deer-flow/pull/6582
@@ -12707,12 +12795,15 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6619]: https://github.com/bytedance/deer-flow/pull/6619
 [#6620]: https://github.com/bytedance/deer-flow/pull/6620
 [#6623]: https://github.com/bytedance/deer-flow/pull/6623
+[#6628]: https://github.com/bytedance/deer-flow/pull/6628
+[#6630]: https://github.com/bytedance/deer-flow/pull/6630
 [#6635]: https://github.com/bytedance/deer-flow/pull/6635
 [#6636]: https://github.com/bytedance/deer-flow/pull/6636
 [#6638]: https://github.com/bytedance/deer-flow/pull/6638
 [#6639]: https://github.com/bytedance/deer-flow/pull/6639
 [#6641]: https://github.com/bytedance/deer-flow/pull/6641
 [#6645]: https://github.com/bytedance/deer-flow/pull/6645
+[#6648]: https://github.com/bytedance/deer-flow/pull/6648
 [#6656]: https://github.com/bytedance/deer-flow/pull/6656
 [#6659]: https://github.com/bytedance/deer-flow/pull/6659
 [#6661]: https://github.com/bytedance/deer-flow/pull/6661
@@ -12721,6 +12812,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6665]: https://github.com/bytedance/deer-flow/pull/6665
 [#6666]: https://github.com/bytedance/deer-flow/pull/6666
 [#6668]: https://github.com/bytedance/deer-flow/pull/6668
+[#6669]: https://github.com/bytedance/deer-flow/pull/6669
 [#6670]: https://github.com/bytedance/deer-flow/pull/6670
 [#6671]: https://github.com/bytedance/deer-flow/pull/6671
 [#6672]: https://github.com/bytedance/deer-flow/pull/6672
@@ -12731,47 +12823,15 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6683]: https://github.com/bytedance/deer-flow/pull/6683
 [#6685]: https://github.com/bytedance/deer-flow/pull/6685
 [#6689]: https://github.com/bytedance/deer-flow/pull/6689
+[#6690]: https://github.com/bytedance/deer-flow/pull/6690
 [#6691]: https://github.com/bytedance/deer-flow/pull/6691
 [#6692]: https://github.com/bytedance/deer-flow/pull/6692
-[#6702]: https://github.com/bytedance/deer-flow/pull/6702
-[#6706]: https://github.com/bytedance/deer-flow/pull/6706
-[#6746]: https://github.com/bytedance/deer-flow/pull/6746
-[#6781]: https://github.com/bytedance/deer-flow/pull/6781
-[#6785]: https://github.com/bytedance/deer-flow/pull/6785
-[#6798]: https://github.com/bytedance/deer-flow/pull/6798
-[#6836]: https://github.com/bytedance/deer-flow/pull/6836
-[#6843]: https://github.com/bytedance/deer-flow/pull/6843
-[#6844]: https://github.com/bytedance/deer-flow/pull/6844
-[#6852]: https://github.com/bytedance/deer-flow/pull/6852
-[#6859]: https://github.com/bytedance/deer-flow/pull/6859
-[#6865]: https://github.com/bytedance/deer-flow/pull/6865
-[#6876]: https://github.com/bytedance/deer-flow/pull/6876
-[#6897]: https://github.com/bytedance/deer-flow/pull/6897
-[#6909]: https://github.com/bytedance/deer-flow/pull/6909
-[#6913]: https://github.com/bytedance/deer-flow/pull/6913
-[#6930]: https://github.com/bytedance/deer-flow/pull/6930
-[#6988]: https://github.com/bytedance/deer-flow/pull/6988
-[#6991]: https://github.com/bytedance/deer-flow/pull/6991
-[#7040]: https://github.com/bytedance/deer-flow/pull/7040
-[#7099]: https://github.com/bytedance/deer-flow/pull/7099
-[#7104]: https://github.com/bytedance/deer-flow/pull/7104
-[#7123]: https://github.com/bytedance/deer-flow/pull/7123
-[#7155]: https://github.com/bytedance/deer-flow/pull/7155
-[#7205]: https://github.com/bytedance/deer-flow/pull/7205
-[#5645]: https://github.com/bytedance/deer-flow/pull/5645
-[#6051]: https://github.com/bytedance/deer-flow/pull/6051
-[#6439]: https://github.com/bytedance/deer-flow/pull/6439
-[#6483]: https://github.com/bytedance/deer-flow/pull/6483
-[#6579]: https://github.com/bytedance/deer-flow/pull/6579
-[#6628]: https://github.com/bytedance/deer-flow/pull/6628
-[#6630]: https://github.com/bytedance/deer-flow/pull/6630
-[#6648]: https://github.com/bytedance/deer-flow/pull/6648
-[#6669]: https://github.com/bytedance/deer-flow/pull/6669
-[#6690]: https://github.com/bytedance/deer-flow/pull/6690
 [#6693]: https://github.com/bytedance/deer-flow/pull/6693
 [#6699]: https://github.com/bytedance/deer-flow/pull/6699
 [#6700]: https://github.com/bytedance/deer-flow/pull/6700
 [#6701]: https://github.com/bytedance/deer-flow/pull/6701
+[#6702]: https://github.com/bytedance/deer-flow/pull/6702
+[#6706]: https://github.com/bytedance/deer-flow/pull/6706
 [#6709]: https://github.com/bytedance/deer-flow/pull/6709
 [#6714]: https://github.com/bytedance/deer-flow/pull/6714
 [#6716]: https://github.com/bytedance/deer-flow/pull/6716
@@ -12788,6 +12848,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6740]: https://github.com/bytedance/deer-flow/pull/6740
 [#6741]: https://github.com/bytedance/deer-flow/pull/6741
 [#6742]: https://github.com/bytedance/deer-flow/pull/6742
+[#6746]: https://github.com/bytedance/deer-flow/pull/6746
 [#6747]: https://github.com/bytedance/deer-flow/pull/6747
 [#6749]: https://github.com/bytedance/deer-flow/pull/6749
 [#6753]: https://github.com/bytedance/deer-flow/pull/6753
@@ -12802,8 +12863,10 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6774]: https://github.com/bytedance/deer-flow/pull/6774
 [#6776]: https://github.com/bytedance/deer-flow/pull/6776
 [#6779]: https://github.com/bytedance/deer-flow/pull/6779
+[#6781]: https://github.com/bytedance/deer-flow/pull/6781
 [#6782]: https://github.com/bytedance/deer-flow/pull/6782
 [#6783]: https://github.com/bytedance/deer-flow/pull/6783
+[#6785]: https://github.com/bytedance/deer-flow/pull/6785
 [#6787]: https://github.com/bytedance/deer-flow/pull/6787
 [#6788]: https://github.com/bytedance/deer-flow/pull/6788
 [#6791]: https://github.com/bytedance/deer-flow/pull/6791
@@ -12811,6 +12874,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6794]: https://github.com/bytedance/deer-flow/pull/6794
 [#6795]: https://github.com/bytedance/deer-flow/pull/6795
 [#6796]: https://github.com/bytedance/deer-flow/pull/6796
+[#6798]: https://github.com/bytedance/deer-flow/pull/6798
 [#6799]: https://github.com/bytedance/deer-flow/pull/6799
 [#6800]: https://github.com/bytedance/deer-flow/pull/6800
 [#6803]: https://github.com/bytedance/deer-flow/pull/6803
@@ -12832,20 +12896,27 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6831]: https://github.com/bytedance/deer-flow/pull/6831
 [#6832]: https://github.com/bytedance/deer-flow/pull/6832
 [#6834]: https://github.com/bytedance/deer-flow/pull/6834
+[#6836]: https://github.com/bytedance/deer-flow/pull/6836
 [#6838]: https://github.com/bytedance/deer-flow/pull/6838
 [#6839]: https://github.com/bytedance/deer-flow/pull/6839
+[#6843]: https://github.com/bytedance/deer-flow/pull/6843
+[#6844]: https://github.com/bytedance/deer-flow/pull/6844
 [#6845]: https://github.com/bytedance/deer-flow/pull/6845
 [#6846]: https://github.com/bytedance/deer-flow/pull/6846
 [#6848]: https://github.com/bytedance/deer-flow/pull/6848
 [#6850]: https://github.com/bytedance/deer-flow/pull/6850
+[#6852]: https://github.com/bytedance/deer-flow/pull/6852
 [#6855]: https://github.com/bytedance/deer-flow/pull/6855
 [#6857]: https://github.com/bytedance/deer-flow/pull/6857
 [#6858]: https://github.com/bytedance/deer-flow/pull/6858
+[#6859]: https://github.com/bytedance/deer-flow/pull/6859
 [#6861]: https://github.com/bytedance/deer-flow/pull/6861
 [#6863]: https://github.com/bytedance/deer-flow/pull/6863
+[#6865]: https://github.com/bytedance/deer-flow/pull/6865
 [#6868]: https://github.com/bytedance/deer-flow/pull/6868
 [#6870]: https://github.com/bytedance/deer-flow/pull/6870
 [#6871]: https://github.com/bytedance/deer-flow/pull/6871
+[#6876]: https://github.com/bytedance/deer-flow/pull/6876
 [#6878]: https://github.com/bytedance/deer-flow/pull/6878
 [#6880]: https://github.com/bytedance/deer-flow/pull/6880
 [#6882]: https://github.com/bytedance/deer-flow/pull/6882
@@ -12854,13 +12925,16 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6891]: https://github.com/bytedance/deer-flow/pull/6891
 [#6893]: https://github.com/bytedance/deer-flow/pull/6893
 [#6894]: https://github.com/bytedance/deer-flow/pull/6894
+[#6897]: https://github.com/bytedance/deer-flow/pull/6897
 [#6898]: https://github.com/bytedance/deer-flow/pull/6898
 [#6900]: https://github.com/bytedance/deer-flow/pull/6900
 [#6901]: https://github.com/bytedance/deer-flow/pull/6901
 [#6903]: https://github.com/bytedance/deer-flow/pull/6903
 [#6904]: https://github.com/bytedance/deer-flow/pull/6904
 [#6907]: https://github.com/bytedance/deer-flow/pull/6907
+[#6909]: https://github.com/bytedance/deer-flow/pull/6909
 [#6910]: https://github.com/bytedance/deer-flow/pull/6910
+[#6913]: https://github.com/bytedance/deer-flow/pull/6913
 [#6914]: https://github.com/bytedance/deer-flow/pull/6914
 [#6916]: https://github.com/bytedance/deer-flow/pull/6916
 [#6917]: https://github.com/bytedance/deer-flow/pull/6917
@@ -12871,6 +12945,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6924]: https://github.com/bytedance/deer-flow/pull/6924
 [#6927]: https://github.com/bytedance/deer-flow/pull/6927
 [#6929]: https://github.com/bytedance/deer-flow/pull/6929
+[#6930]: https://github.com/bytedance/deer-flow/pull/6930
 [#6931]: https://github.com/bytedance/deer-flow/pull/6931
 [#6932]: https://github.com/bytedance/deer-flow/pull/6932
 [#6934]: https://github.com/bytedance/deer-flow/pull/6934
@@ -12895,7 +12970,9 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6980]: https://github.com/bytedance/deer-flow/pull/6980
 [#6981]: https://github.com/bytedance/deer-flow/pull/6981
 [#6984]: https://github.com/bytedance/deer-flow/pull/6984
+[#6988]: https://github.com/bytedance/deer-flow/pull/6988
 [#6990]: https://github.com/bytedance/deer-flow/pull/6990
+[#6991]: https://github.com/bytedance/deer-flow/pull/6991
 [#6992]: https://github.com/bytedance/deer-flow/pull/6992
 [#6995]: https://github.com/bytedance/deer-flow/pull/6995
 [#6998]: https://github.com/bytedance/deer-flow/pull/6998
@@ -12912,6 +12989,8 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7033]: https://github.com/bytedance/deer-flow/pull/7033
 [#7035]: https://github.com/bytedance/deer-flow/pull/7035
 [#7039]: https://github.com/bytedance/deer-flow/pull/7039
+[#7040]: https://github.com/bytedance/deer-flow/pull/7040
+[#7048]: https://github.com/bytedance/deer-flow/pull/7048
 [#7042]: https://github.com/bytedance/deer-flow/pull/7042
 [#7051]: https://github.com/bytedance/deer-flow/pull/7051
 [#7053]: https://github.com/bytedance/deer-flow/pull/7053
@@ -12926,12 +13005,15 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7078]: https://github.com/bytedance/deer-flow/pull/7078
 [#7084]: https://github.com/bytedance/deer-flow/pull/7084
 [#7093]: https://github.com/bytedance/deer-flow/pull/7093
+[#7099]: https://github.com/bytedance/deer-flow/pull/7099
+[#7104]: https://github.com/bytedance/deer-flow/pull/7104
 [#7106]: https://github.com/bytedance/deer-flow/pull/7106
 [#7108]: https://github.com/bytedance/deer-flow/pull/7108
 [#7112]: https://github.com/bytedance/deer-flow/pull/7112
 [#7116]: https://github.com/bytedance/deer-flow/pull/7116
 [#7117]: https://github.com/bytedance/deer-flow/pull/7117
 [#7122]: https://github.com/bytedance/deer-flow/pull/7122
+[#7123]: https://github.com/bytedance/deer-flow/pull/7123
 [#7127]: https://github.com/bytedance/deer-flow/pull/7127
 [#7140]: https://github.com/bytedance/deer-flow/pull/7140
 [#7141]: https://github.com/bytedance/deer-flow/pull/7141
@@ -12941,6 +13023,15 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7151]: https://github.com/bytedance/deer-flow/pull/7151
 [#7152]: https://github.com/bytedance/deer-flow/pull/7152
 [#7154]: https://github.com/bytedance/deer-flow/pull/7154
+[#7155]: https://github.com/bytedance/deer-flow/pull/7155
 [#7163]: https://github.com/bytedance/deer-flow/pull/7163
 [#7167]: https://github.com/bytedance/deer-flow/pull/7167
 [#7170]: https://github.com/bytedance/deer-flow/pull/7170
+[#7205]: https://github.com/bytedance/deer-flow/pull/7205
+[#7207]: https://github.com/bytedance/deer-flow/pull/7207
+[#7217]: https://github.com/bytedance/deer-flow/pull/7217
+[#7255]: https://github.com/bytedance/deer-flow/pull/7255
+[#7258]: https://github.com/bytedance/deer-flow/pull/7258
+[#7277]: https://github.com/bytedance/deer-flow/pull/7277
+[#7325]: https://github.com/bytedance/deer-flow/pull/7325
+[#7326]: https://github.com/bytedance/deer-flow/pull/7326
