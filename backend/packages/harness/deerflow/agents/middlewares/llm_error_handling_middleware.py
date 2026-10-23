@@ -11,7 +11,6 @@ import time
 from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from email.utils import parsedate_to_datetime
 from typing import Any, override
 
 from langchain.agents import AgentState
@@ -28,7 +27,7 @@ from deerflow.agents.middlewares.model_response import append_visible_text, fini
 from deerflow.config.app_config import AppConfig
 from deerflow.models.request_admission import AdmissionError
 from deerflow.utils.custom_events import aemit_custom_event, emit_custom_event
-from deerflow.utils.retry_after import bounded_retry_after_ms
+from deerflow.utils.retry_after import bounded_retry_after_ms, parse_retry_after_date_ms
 
 logger = logging.getLogger(__name__)
 
@@ -1180,12 +1179,7 @@ def _extract_retry_after_ms(exc: BaseException) -> int | None:
         multiplier = 1 if "ms" in header_name.lower() else 1000
         return bounded_retry_after_ms(float(raw) * multiplier)
     except (TypeError, ValueError, OverflowError):
-        try:
-            target = parsedate_to_datetime(str(raw))
-            delta = target.timestamp() - time.time()
-            return bounded_retry_after_ms(delta * 1000)
-        except (TypeError, ValueError, OverflowError):
-            return None
+        return parse_retry_after_date_ms(str(raw), now=time.time())
 
 
 def _extract_error_detail(exc: BaseException) -> str:

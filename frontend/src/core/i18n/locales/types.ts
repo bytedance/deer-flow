@@ -177,6 +177,13 @@ export interface Translations {
     showBrowser: string;
   };
 
+  browserStream: {
+    connecting: string;
+    disconnected: string;
+    handshakeTimeout: string;
+    connectionFailed: string;
+  };
+
   skillUsage: {
     used: string;
     title: string;

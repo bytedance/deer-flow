@@ -297,6 +297,11 @@ fi
 # not tear down a running stack. Gateway and frontend always bind loopback;
 # nginx is the only entry point, as in the Docker stack.
 if [ "$ACTION" != "stop" ]; then
+    GATEWAY_STARTUP_TIMEOUT="${DEER_FLOW_GATEWAY_STARTUP_TIMEOUT-30}"
+    if [[ ! "$GATEWAY_STARTUP_TIMEOUT" =~ ^[0-9]+$ ]] || ! [ "$GATEWAY_STARTUP_TIMEOUT" -gt 0 ] 2>/dev/null; then
+        echo "✗ DEER_FLOW_GATEWAY_STARTUP_TIMEOUT must be a positive integer (seconds)." >&2
+        exit 1
+    fi
     NGINX_CONF="$(bash "$REPO_ROOT/scripts/nginx-local-conf.sh")" || exit 1
 fi
 
@@ -494,6 +499,10 @@ run_service() {
         local logfile="logs/$(echo "$name" | tr '[:upper:]' '[:lower:]' | tr ' ' '-').log"
         echo "✗ $name failed to start."
         [ -f "$logfile" ] && tail -20 "$logfile"
+        if [ "$name" = "Gateway" ]; then
+            echo "  Check logs/gateway.log for startup errors. If Gateway is still initializing,"
+            echo "  increase DEER_FLOW_GATEWAY_STARTUP_TIMEOUT (seconds; current: $GATEWAY_STARTUP_TIMEOUT)."
+        fi
         cleanup 1
     }
     echo "✓ $name started on localhost:$port"
@@ -507,7 +516,7 @@ mkdir -p temp/client_body_temp temp/proxy_temp temp/fastcgi_temp temp/uwsgi_temp
 # 1. Gateway API
 run_service "Gateway" \
     "cd backend && PYTHONPATH=. uv run --no-sync uvicorn app.gateway.app:app --host 127.0.0.1 --port 8001 $GATEWAY_EXTRA_FLAGS > ../logs/gateway.log 2>&1" \
-    8001 30
+    8001 "$GATEWAY_STARTUP_TIMEOUT"
 
 # 2. Frontend
 run_service "Frontend" \
