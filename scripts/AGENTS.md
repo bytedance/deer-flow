@@ -473,7 +473,7 @@ Memory backend async boundary:
   `failure_policy.read: fail_closed`; other recall errors preserve the existing
   log-and-empty-context behavior.
 
-CI runs these regression tests for every pull request via [.github/workflows/backend-unit-tests.yml](../.github/workflows/backend-unit-tests.yml).
+CI: `.github/workflows/backend-unit-tests.yml` runs these tests on every PR.
 
 Agentic browser sessions are process-local. Browser use is refused when the Gateway runs
 more than one worker process, because ordinary uvicorn worker dispatch does not provide

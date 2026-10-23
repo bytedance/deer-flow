@@ -424,7 +424,7 @@ class DbRunEventStore(RunEventStore):
         stmt = select(RunEventRow).where(RunEventRow.thread_id == thread_id, RunEventRow.run_id == run_id)
         if resolved_user_id is not None:
             stmt = stmt.where(RunEventRow.user_id == resolved_user_id)
-        if event_types:
+        if event_types is not None:
             stmt = stmt.where(RunEventRow.event_type.in_(event_types))
         if task_id is not None:
             # Filter on metadata["task_id"] in SQL (before LIMIT) so cursor

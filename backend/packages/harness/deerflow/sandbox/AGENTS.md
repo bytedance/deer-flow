@@ -8,6 +8,14 @@ PowerShell command mapping escapes host-path whitespace/metacharacters for the c
 
 Local `grep` skips non-regular entries before reading. File reads and directory scans propagate errors, except `ENOENT`/`ENOTDIR`/`ELOOP`/`EISDIR`/`ESTALE` races (`ESTALE` when available). Error filenames are reverse-resolved at the local sandbox boundary, including custom mounts; permission errors identify the virtual failing path.
 
+Unmapped virtual parents such as the default skills root search only direct
+category mounts, never incidental host files. Shared search helpers accept a
+relative prefix for root-anchored patterns; combine mounts under one result cap
+with one lookahead match. Mapped roots keep their existing walk. Explicit
+mounts bypass name ignores; descendants retain shared ignore rules. Warn with
+an unavailable or non-directory mount's container path and re-raise; never
+fall back to the host parent. Regression: `tests/test_local_sandbox_skill_search.py`.
+
 **Network approval policy**: `SandboxMiddleware` uses
 `resolve_run_interaction_policy()`. Autonomous, webhook, scheduled, legacy
 unattended and GitHub-fallback runs auto-deny; explicit interactive overrides

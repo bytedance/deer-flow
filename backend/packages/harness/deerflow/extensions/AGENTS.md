@@ -458,6 +458,9 @@ idempotency isolation; request-resolved handles use `for_plugin` explicitly.
 `configuration_revision` (API 0.2.7) rechecks grants and returns a process-local
 HMAC of declarative app/extensions and Agent config/SOUL, not effective assembly,
 memory, referenced files or provider state. Never expose raw secret configuration.
+Durable revisions use the shared host signing secret. Preserve Python set identity
+until canonical encoding: unordered config sets must hash identically across
+process hash seeds, while ordered model/tool lists must retain their order.
 `configuration_evidence` reads persisted, run-bound actual assembly versions; the
 worker captures descriptors even without observers and persists before execution.
 `read_artifact` authorizes bounded output bytes off-loop; extensions retain immutable
@@ -473,3 +476,9 @@ plugin boundary, and the lifecycle hook would be a durable core contract with
 a single consumer. The generator sits behind the narrow `enqueue_summary`
 interface so a future document-lifecycle hook can lift generation into an
 extension without touching schema or rendering.
+
+Extension API 0.2.9 adds `ExecutionFence` to AgentRuns.start/cancel. Accept only the
+capability's plugin namespace and recheck the authenticated user as usual. Stamp
+fences on internal request state, never HTTP context/config. Forward admission to
+the RunStore transaction; require run heartbeats and a shared stream bridge. Fenced
+cancel uses the durable cancellation request, consumed by the existing child owner.
