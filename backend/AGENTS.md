@@ -198,7 +198,10 @@ float filters accept integer or real JSON numbers through `json_value_matches`.
 
 Gate server-owned run context on both client feeds (`body.context` and
 `body.config`): `merge_run_context_overrides` admits it only for `internal=True`,
-while `strip_internal_context_keys` scrubs both destinations. Treat
+while `strip_internal_context_keys` scrubs both destinations. A validated
+`context.locale` (`en-US` / `zh-CN`) is a runtime-only language preference for
+replies and memory writes; it never persists into checkpoint `configurable`,
+and an explicit invalid/null top-level value clears a legacy preference. Treat
 `disable_clarification` like `non_interactive`. Before run/state writes,
 `_normalize_input_messages` rejects canonical external system/developer roles;
 only `AUTH_SOURCE_INTERNAL` run input may retain them.

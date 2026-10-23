@@ -3008,6 +3008,12 @@ become available in the next batch, when rejected additions can be retried.
 
 ### Long-Term Memory
 
+Settings > Appearance > Language also supplies the preferred language for replies
+and new automatic DeerMem facts and summary updates on subsequent chat turns and
+replays. Explicit user language requests take precedence. Existing memories are
+not bulk translated, and other memory backends retain their own language policy.
+Model-native reasoning text may still use another language.
+
 Settings > Memory keeps successful clear, import, and fact edits visible even
 when an older background read finishes afterward. Later reads still refresh
 the view normally; failed actions preserve the existing cached memory.
