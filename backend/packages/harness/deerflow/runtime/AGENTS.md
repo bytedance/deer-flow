@@ -363,6 +363,16 @@ so recovery need not inspect mutable thread state. All non-interactive policies
 allow disclosed, low-risk reversible assumptions only with achievement evidence;
 their evaluator responses must explicitly provide the assumption boolean.
 
+Goal evidence stays within 12,000 characters. Keep the selected recent work and
+omission labels intact; use remaining space to restore shortened user input
+rather than treating the 2,000-character request reservation as a hard cap.
+
+Only a malformed verdict from an explicitly normal model completion may retry,
+once, with the original evidence. Recheck cancellation, Goal identity and
+checkpoint/messages first. Each complete evaluator invocation keeps its own usage
+ID and observer call; one final decision updates Goal counters. Valid verdicts,
+length/safety stops, and transport/configuration errors are not format retries.
+
 Goal evaluator usage crosses a JSON-safe sink into
 `RunJournal.record_external_llm_usage_records` before response parsing or observer
 notification can fail. Critic tokens/cache reads and distinct calls belong to

@@ -23,7 +23,7 @@ from deerflow.sandbox.env_policy import build_sandbox_env
 from deerflow.sandbox.local.list_dir import list_dir
 from deerflow.sandbox.path_patterns import replace_output_path_matches
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
-from deerflow.sandbox.search import GrepMatch, find_glob_matches, find_grep_matches
+from deerflow.sandbox.search import GrepMatch, find_glob_matches, find_grep_matches, path_matches
 from deerflow.utils.atomic_write import publish_bytes_atomically
 
 logger = logging.getLogger(__name__)
@@ -1234,9 +1234,64 @@ class LocalSandbox(Sandbox):
             # Re-raise with the original path for clearer error messages, hiding internal resolved paths
             raise type(e)(e.errno, e.strerror, path) from None
 
+    def _virtual_search_mounts(self, path: str) -> list[tuple[str, Path]] | None:
+        """Search only mounted children of an unmapped virtual parent.
+
+        Default skills have four category mounts, not an aggregate host root.
+        Never substitute an incidental host directory for that virtual view.
+        Mapped roots (including policy-scoped skill views) keep their normal walk.
+        """
+        if self._find_path_mapping(path) is not None:
+            return None
+        prefix = path.rstrip("/") + "/"
+        mounts = None
+        for mapping in self.path_mappings:
+            if not mapping.container_path.startswith(prefix):
+                continue
+            child = mapping.container_path[len(prefix) :]
+            if not child or "/" in child:
+                continue
+            if mounts is None:
+                mounts = []
+            # Explicit mounts stay visible; ignore rules apply within each mount.
+            root = Path(self._resolved_local_paths[mapping])
+            # A broken mount is an error, not permission to walk the host parent.
+            try:
+                if not stat.S_ISDIR(root.stat().st_mode):
+                    raise NotADirectoryError(mapping.container_path)
+            except OSError:
+                logger.warning("Could not search virtual mount %s", mapping.container_path, exc_info=True)
+                raise
+            mounts.append((child, root))
+        if mounts is not None:
+            # As with list_dir, an existing host file is not a virtual directory.
+            try:
+                mode = Path(path).stat().st_mode
+            except FileNotFoundError:
+                pass
+            else:
+                if not stat.S_ISDIR(mode):
+                    raise NotADirectoryError(path)
+        return mounts
+
     def glob(self, path: str, pattern: str, *, include_dirs: bool = False, max_results: int = 200) -> tuple[list[str], bool]:
-        resolved_path = Path(self._resolve_path(path))
         try:
+            mounts = self._virtual_search_mounts(path)
+            if mounts is not None:
+                results = []
+                for child, root in mounts:
+                    virtual_dir = f"{path.rstrip('/')}/{child}"
+                    if include_dirs and path_matches(pattern, child):
+                        results.append(virtual_dir)
+                    if len(results) <= max_results:
+                        # One lookahead match proves whether the combined view
+                        # exceeds the cap, without collecting a cap per mount.
+                        matches, _ = find_glob_matches(root, pattern, include_dirs=include_dirs, max_results=max_results - len(results) + 1, relative_prefix=child)
+                        results.extend(f"{virtual_dir}/{Path(match).relative_to(root).as_posix()}" for match in matches)
+                    if len(results) > max_results:
+                        return results[:max_results], True
+                return results, False
+            resolved_path = Path(self._resolve_path(path))
             matches, truncated = find_glob_matches(resolved_path, pattern, include_dirs=include_dirs, max_results=max_results)
         except OSError as e:
             if e.filename is None:
@@ -1257,8 +1312,25 @@ class LocalSandbox(Sandbox):
         case_sensitive: bool = False,
         max_results: int = 100,
     ) -> tuple[list[GrepMatch], bool]:
-        resolved_path = Path(self._resolve_path(path))
         try:
+            mounts = self._virtual_search_mounts(path)
+            if mounts is not None:
+                results = []
+                for child, root in mounts:
+                    matches, _ = find_grep_matches(
+                        root,
+                        pattern,
+                        glob_pattern=glob,
+                        literal=literal,
+                        case_sensitive=case_sensitive,
+                        max_results=max_results - len(results) + 1,
+                        relative_prefix=child,
+                    )
+                    results.extend(GrepMatch(path=f"{path.rstrip('/')}/{child}/{Path(match.path).relative_to(root).as_posix()}", line_number=match.line_number, line=match.line) for match in matches)
+                    if len(results) > max_results:
+                        return results[:max_results], True
+                return results, False
+            resolved_path = Path(self._resolve_path(path))
             matches, truncated = find_grep_matches(
                 resolved_path,
                 pattern,
