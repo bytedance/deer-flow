@@ -3575,7 +3575,8 @@ After an interrupt, late stream actions from the previous run cannot change the
 next run's display or status, even when both prompts use the same conversation.
 A tool call already in progress still finishes, so until it does a new prompt in
 that conversation is held back with a notice instead of racing it; `/new` and
-`/resume` stay available.
+`/resume` stay available. Quitting waits for that step as well and closes the TUI
+once it finishes; press `Ctrl+C` again to quit at once without saving it.
 If a run cannot start, the TUI reports an error and returns to idle so you can retry.
 A message that is held back or cannot start stays in the composer, so `Enter` resends it.
 
