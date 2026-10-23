@@ -1402,7 +1402,7 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
   as `ha`, `1` + `10` as `10`, and an answer that opened with a Markdown marker
   lost every later standalone copy of it (closing `**`, list bullets, table
   pipes, closing code fences). Each delta is now appended as sent. ([#7325])
-  
+
 - **sandbox:** Release an E2B VM's ownership lease when acquire finds it gone
   (a dead cached client or a warm-pool VM reaped while parked). The lease was
   kept and renewed until Gateway shutdown, so every reaped VM left a tracked
