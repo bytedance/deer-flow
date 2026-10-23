@@ -66,3 +66,8 @@ external filesystem writers do not participate in this history guarantee.
 Plugin actions stamp `ActionContext.interaction=session` only from authenticated
 session provenance. Never accept it from payloads or propagate it to model tools;
 extensions use it to distinguish owner review from model/tool output.
+
+State updates synchronize titles into thread metadata only for the root checkpoint
+namespace. Nonroot writes preserve the conversation title, branch-title sequence
+and activity timestamp. `tests/test_threads_router.py` checks metadata/search
+isolation and root title synchronization in full and delta modes.
