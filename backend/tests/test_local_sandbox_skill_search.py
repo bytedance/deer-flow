@@ -1,6 +1,8 @@
 """Search the default provider's category-only skill mounts through public tools."""
 
 import errno
+import logging
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -96,7 +98,7 @@ def test_glob_can_match_category_directories(skill_search):
 
 
 @pytest.mark.parametrize("method", ["glob", "grep"])
-@pytest.mark.parametrize("limit", [1, 3, 10])
+@pytest.mark.parametrize("limit", [1, 2, 3, 10])
 def test_search_has_one_budget_across_category_mounts(skill_search, method, limit):
     sandbox = skill_search.sandboxes["alice"]
     pattern = "**/SKILL.md" if method == "glob" else "NEEDLE"
@@ -210,12 +212,53 @@ def test_missing_mount_cannot_fall_back_to_unmounted_host_files(tmp_path, method
 
 
 @pytest.mark.parametrize("method", ["glob", "grep"])
-def test_ignored_mount_cannot_fall_back_to_unmounted_host_files(tmp_path, method):
+@pytest.mark.parametrize("mount_name", ["node_modules", "build", "dist", "out", "logs", "env", "target"])
+def test_explicit_mount_with_ignored_name_is_searchable(tmp_path, method, mount_name):
     parent = tmp_path / "virtual-parent"
     parent.mkdir()
     (parent / "unmounted.md").write_text("NEEDLE private host file", encoding="utf-8")
     mounted = tmp_path / "mounted"
-    _write_skill(mounted, "ignored")
+    _write_skill(mounted, "allowed")
+    _write_skill(mounted / "node_modules", "hidden")
+    (mounted / "ignored.log").write_text("NEEDLE ignored file", encoding="utf-8")
     virtual = parent.as_posix()
-    sandbox = LocalSandbox("local:ignored-mount", path_mappings=[PathMapping(f"{virtual}/node_modules", str(mounted), read_only=True)])
-    assert getattr(sandbox, method)(virtual, "*") == ([], False)
+    mount_path = f"{virtual}/{mount_name}"
+    sandbox = LocalSandbox("local:explicit-mount", path_mappings=[PathMapping(mount_path, str(mounted), read_only=True)])
+    expected = [f"{mount_path}/allowed/SKILL.md"]
+    assert f"{mount_path}/" in sandbox.list_dir(virtual)
+    assert "NEEDLE allowed" in sandbox.read_file(expected[0])
+
+    pattern = "**/*" if method == "glob" else "NEEDLE"
+    matches, truncated = getattr(sandbox, method)(virtual, pattern)
+    result_paths = matches if method == "glob" else [match.path for match in matches]
+    assert result_paths == expected
+    assert not truncated
+    root_pattern = f"{mount_name}/**/SKILL.md"
+    if method == "glob":
+        assert sandbox.glob(virtual, root_pattern) == (expected, False)
+        assert sandbox.glob(virtual, mount_name, include_dirs=True) == ([mount_path], False)
+    else:
+        matches, truncated = sandbox.grep(virtual, "NEEDLE", glob=root_pattern)
+        assert [match.path for match in matches] == expected
+        assert not truncated
+
+
+@pytest.mark.parametrize("method", ["glob", "grep"])
+@pytest.mark.parametrize("mount_state", ["missing", "file"])
+def test_broken_mount_warns_with_its_virtual_category(skill_search, caplog, method, mount_state):
+    sandbox = skill_search.sandboxes["alice"]
+    mapping = next(mapping for mapping in sandbox.path_mappings if mapping.container_path == "/mnt/skills/public")
+    root = Path(mapping.local_path)
+    root.rename(root.with_name("public-backup"))
+    if mount_state == "file":
+        root.write_text("not a directory", encoding="utf-8")
+    tool = tools.glob_tool if method == "glob" else tools.grep_tool
+    pattern = "**/SKILL.md" if method == "glob" else "NEEDLE"
+    with caplog.at_level(logging.WARNING, logger="deerflow.sandbox.local.local_sandbox"):
+        result = tool.func(runtime=skill_search.runtime(), path="/mnt/skills", pattern=pattern)
+    expected_error = "Directory not found" if mount_state == "missing" else "Path is not a directory"
+    assert result == f"Error: {expected_error}: /mnt/skills"
+    warnings = [record for record in caplog.records if record.name == "deerflow.sandbox.local.local_sandbox" and record.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert mapping.container_path in warnings[0].getMessage()
+    assert str(root) not in result
