@@ -1831,6 +1831,9 @@ async def create_run_artifact_archive(
     )
 
 
+MAX_EVENT_TYPE_FILTERS = 100
+
+
 @router.get("/{thread_id}/runs/{run_id}/events")
 @require_permission("runs", "read", owner_check=True)
 async def list_run_events(
@@ -1850,7 +1853,15 @@ async def list_run_events(
     await _require_run_visible_to_scope(run_id, thread_id, request)
     user_id = await _run_scope_user_id(request, thread_id)
     event_store = get_run_event_store(request)
-    types = event_types.split(",") if event_types else None
+    if event_types:
+        types = event_types.split(",")
+        if len(types) > MAX_EVENT_TYPE_FILTERS:
+            raise HTTPException(
+                status_code=422,
+                detail=f"event_types accepts at most {MAX_EVENT_TYPE_FILTERS} values",
+            )
+    else:
+        types = None
     events = await event_store.list_events(
         thread_id,
         run_id,
