@@ -156,10 +156,11 @@ entry, the manager owns the controlled locked sync.
 
 The public package is `packages/extension-api/` and must never import `deerflow` or carry
 framework dependencies. Extensions declare any FastAPI, LangChain, or LangGraph imports
-themselves. Its registry contract exposes eight contribution kinds: middleware
+themselves. Its registry contract exposes nine contribution kinds: middleware
 contributors, task-lifecycle contributors, system-model-call observers, agent-assembly
-observers, context-compaction observers, Gateway-lifetime services, eager routers, and
-experimental full-stack plugins (`registry.plugin()`, see `docs/full-stack-plugins.md`). Middleware contributions declare lead/subagent scope, stable
+observers, context-compaction observers, Gateway-lifetime services, eager routers,
+experimental full-stack plugins (`registry.plugin()`, see `docs/full-stack-plugins.md`),
+and read-only knowledge providers (`registry.knowledge_provider()`, above). Middleware contributions declare lead/subagent scope, stable
 order, and a semantic placement (`MODEL_LOGICAL`, `MODEL_PHYSICAL`, `TOOL_VISIBLE`,
 `TOOL_RAW`, or `STANDARD`) rather than a fragile list index. `extensions/stack.py` is the
 single final composition point; do not inject inside
