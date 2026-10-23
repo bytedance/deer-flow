@@ -50,7 +50,7 @@ def register_companion(original: Path, markdown: Path) -> None:
                     "original": original.name,
                     "markdown": markdown.name,
                     "source_identity": [source_stat.st_dev, source_stat.st_ino, source_stat.st_size, source_stat.st_mtime_ns, source_stat.st_ctime_ns],
-                    "markdown_identity": [markdown_stat.st_dev, markdown_stat.st_ino, markdown_stat.st_size, markdown_stat.st_ctime_ns],
+                    "markdown_identity": [markdown_stat.st_dev, markdown_stat.st_ino, markdown_stat.st_size, markdown_stat.st_mtime_ns, markdown_stat.st_ctime_ns],
                 },
                 output,
             )
@@ -108,8 +108,18 @@ def resolve_companion(original: Path) -> Path | None:
         if not markdown.is_file() or markdown.is_symlink():
             return None
         markdown_stat = markdown.stat(follow_symlinks=False)
-        if data.get("markdown_identity") != [markdown_stat.st_dev, markdown_stat.st_ino, markdown_stat.st_size, markdown_stat.st_ctime_ns]:
-            logger.debug("Rejected upload companion for %r: Markdown identity or version timestamp does not match", original.name)
+        # ``st_mtime_ns`` is part of the identity because NTFS exposes
+        # ``st_ctime_ns`` as the creation time: an equal-size in-place edit of
+        # the converted Markdown changes mtime only, and without this field
+        # the edited file keeps validating as the source's companion (#7339).
+        # Legacy four-field records lack the mtime and cannot establish whether
+        # such an edit happened; reject them rather than backfilling.
+        markdown_identity = data.get("markdown_identity")
+        if markdown_identity != [markdown_stat.st_dev, markdown_stat.st_ino, markdown_stat.st_size, markdown_stat.st_mtime_ns, markdown_stat.st_ctime_ns]:
+            if isinstance(markdown_identity, list) and len(markdown_identity) == 4:
+                logger.debug("Rejected upload companion for %r: legacy Markdown identity lacks the modification timestamp", original.name)
+            else:
+                logger.debug("Rejected upload companion for %r: Markdown identity or version timestamp does not match", original.name)
             return None
         return markdown
     except (OSError, ValueError, KeyError, TypeError):
