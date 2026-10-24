@@ -68,13 +68,15 @@ async def test_jsonl_run_event_store_async_api_does_not_block_event_loop(tmp_pat
 
     # reads: list_messages / list_events / list_messages_by_run / count_messages.
     # list_events is exercised both without and with the event_types filter so
-    # the filter branch runs after _read_run_events' filesystem IO.
+    # the filter branch consumes run records inside the off-thread selector.
     assert isinstance(await store.list_messages("t1"), list)
     assert isinstance(await store.list_events("t1", "r1"), list)
     assert isinstance(await store.list_events("t1", "r1", event_types=["message"]), list)
     assert isinstance(await store.list_messages_by_run("t1", "r2"), list)
     assert isinstance(await store.get_last_visible_ai_seq_by_run("t1", {"r1", "r2"}, user_id="user-1"), dict)
     assert await store.count_messages("t1") >= 1
+    assert await store.get_message_seqs("t1", {"message:missing"}) == {}
+    assert await store.find_latest_ai_message_run_ids("t1", {"missing"}) == {}
 
     # deletes: delete_by_run (single file) then delete_by_thread (remaining)
     assert await store.delete_by_run("t1", "r2") >= 1
