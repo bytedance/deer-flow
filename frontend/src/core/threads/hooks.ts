@@ -2804,9 +2804,6 @@ export function useThreadStream({
             // custom events, while subgraph frames would leak a delegated
             // subagent's values/messages into the thread view (#4399).
             streamResumable: true,
-            config: {
-              recursion_limit: 1000,
-            },
             context: buildRunContext({
               settings: context,
               threadId,
@@ -2943,9 +2940,6 @@ export function useThreadStream({
           metadata: prepared.metadata,
           // No streamSubgraphs — same contract as the main submit path (#4399).
           streamResumable: true,
-          config: {
-            recursion_limit: 1000,
-          },
           // Replaying a turn never carries conversation references: the grant
           // is per send, so a regenerate or edit runs without them unless the
           // user attaches them again.

@@ -139,7 +139,8 @@ the Gateway logs one warning per such revision.
 
 Gateway runs use the top-level `recursion_limit` as their LangGraph super-step
 budget when the request does not include an explicit value. It defaults to
-`100`; raise it for deployments whose normal tasks need longer agent loops.
+`1000`, matching the web UI and scheduled-run budgets; lower it to constrain
+default Gateway runs.
 Valid request values take precedence, while invalid values fall back to the
 configured default. `max_recursion_limit` (default `1000`) caps both sources to
 limit runaway LLM cost. Both settings are read per run, so changes apply to the

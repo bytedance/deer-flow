@@ -1074,7 +1074,7 @@ def test_build_run_config_basic():
 
     config = build_run_config("thread-1", None, None)
     assert config["configurable"]["thread_id"] == "thread-1"
-    assert config["recursion_limit"] == 100
+    assert config["recursion_limit"] == 1000
 
 
 def test_build_run_config_uses_configured_default_recursion_limit(_stub_app_config):
@@ -1247,7 +1247,7 @@ def test_build_run_config_logs_and_uses_fallback_when_app_config_unavailable(mon
     config = services.build_run_config("thread-1", {"recursion_limit": 0}, None)
 
     assert config["recursion_limit"] == services._DEFAULT_RECURSION_LIMIT
-    assert any("failed to load app config; falling back to recursion_limit=100" in record.message for record in caplog.records)
+    assert any("failed to load app config; falling back to recursion_limit=1000" in record.message for record in caplog.records)
 
 
 def test_build_run_config_invalid_client_recursion_limit_uses_configured_default(_stub_app_config):
@@ -4142,8 +4142,8 @@ def test_launch_scheduled_thread_run_falls_back_when_config_unloadable(_stub_app
 
     caplog.set_level(logging.WARNING, logger="app.gateway.services")
     captured = asyncio.run(_scenario())
-    assert captured["config"] == {"recursion_limit": 100}
-    assert any("failed to load app config; falling back to recursion_limit=100" in r.message for r in caplog.records)
+    assert captured["config"] == {"recursion_limit": 1000}
+    assert any("failed to load app config; falling back to recursion_limit=1000" in r.message for r in caplog.records)
 
 
 def test_launch_scheduled_thread_run_rejects_legacy_auth_token():
@@ -4521,7 +4521,7 @@ def test_build_run_config_with_context():
     assert config["context"]["thread_id"] == "thread-1"
     # configurable carries thread_id for the checkpointer; user context stays in context.
     assert config["configurable"] == {"thread_id": "thread-1"}
-    assert config["recursion_limit"] == 100
+    assert config["recursion_limit"] == 1000
 
 
 def test_build_run_config_context_injects_thread_id():
