@@ -3378,6 +3378,8 @@ from the project page's Documents section:
   Oversized uploads return `413`; deduplicated uploads return `200`. Staging
   cleanup failures are logged without replacing these outcomes or a missing,
   foreign, or archived project's `404` response.
+  Cancelling a shelf upload discards its partial file after any active disk
+  operation finishes; waiting for further upload data remains cancellable.
 - **List** entries with name, size, modified time, and provenance (uploaded vs.
   saved from a conversation), and preview or download any entry.
 - **Save to project** from a thread file: the read-only conversation-files
