@@ -14,7 +14,9 @@ from __future__ import annotations
 import logging
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
+
+from deerflow.config._boolean_guards import reject_boolean
 
 logger = logging.getLogger(__name__)
 
@@ -175,6 +177,11 @@ class MemoryConfig(BaseModel):
         default_factory=MemorySignalClassificationConfig,
         description="Signal-classification hints (off by default): reinforcement/correction labels from the batch text, plus a narrow veto over a pre-screen skip.",
     )
+
+    @field_validator("shutdown_flush_timeout_seconds", mode="before")
+    @classmethod
+    def _reject_boolean_shutdown_flush_timeout(cls, value: object, info: ValidationInfo) -> object:
+        return reject_boolean(value, info, kind="a number of seconds")
 
     @model_validator(mode="after")
     def _check_judging_slots_are_usable(self) -> MemoryConfig:
