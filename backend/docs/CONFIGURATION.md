@@ -453,7 +453,8 @@ backslash. The existing Python-literal fallback also parses the original value.
 
 Non-JSON raw-string parameters retain the gateway's multiline compatibility:
 literal `\n` outside fenced code becomes a real newline, and surrounding
-whitespace is trimmed. Escapes inside fenced code remain unchanged. This keeps
+whitespace is trimmed. Escapes inside matching triple-backtick or triple-tilde
+fences remain unchanged; an unclosed fence preserves the rest of the reply. This keeps
 multi-line file content and commands working. Raw strings cannot distinguish an
 intended literal `\n` from a gateway-escaped newline; structured JSON parameters
 avoid that ambiguity. Numeric conversion failures and unsafe Python-literal
