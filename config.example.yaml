@@ -1082,6 +1082,18 @@ tools:
   #   max_results: 5                  # Clamped to 1-100 by You.com
   #   # api_key: $YDC_API_KEY         # Omit to use the keyless free tier
 
+  # Web search tool (uses Keenable; KEENABLE_API_KEY optional)
+  # Keenable runs its own web index and returns an extracted snippet of page
+  # text per result (capped at 1500 characters), so results are usable without
+  # a follow-up fetch. With no key it uses the keyless endpoint (rate limited
+  # per IP, currently 10 requests/second and 1000/hour); set KEENABLE_API_KEY
+  # for higher limits. Get a key at https://keenable.ai
+  # - name: web_search
+  #   group: web
+  #   use: deerflow.community.keenable.tools:web_search_tool
+  #   max_results: 5                  # Capped at 50 by Keenable
+  #   # api_key: $KEENABLE_API_KEY    # Omit to use the keyless endpoint
+
   # Web fetch tool (uses Browserless - headless Chrome, self-hosted or cloud)
   # Browserless renders pages with a real headless Chrome, ideal for JavaScript-heavy
   # sites and SPAs. Deploy your own: https://github.com/browserless/browserless
