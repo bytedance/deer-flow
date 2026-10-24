@@ -88,3 +88,6 @@ Rendering and rejection derive from that one constant so they cannot drift.
 The character count must be an ASCII non-negative integer. A document beginning
 with the same prefix, including a quoted placeholder followed by more content,
 is allowed.
+
+This rejection applies only to `write_file`; `str_replace` does not validate
+`new_str` against the placeholder template.
