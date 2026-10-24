@@ -105,7 +105,23 @@ class _Node:
     duration_only: bool
     metadata_source: str | None = None
     carries_run_durations: bool = False
-    versions: frozenset = frozenset()
+    # Preserve channel identity as well as the version token.  Comparing only
+    # values can make {"messages": v1, "goal": v2} look identical to a
+    # state-changing {"messages": v2, "goal": v1} checkpoint.
+    versions: frozenset[tuple[str, Any]] = frozenset()
+
+
+def _freeze_channel_versions(channel_versions: Any) -> frozenset[tuple[str, Any]]:
+    """Return an immutable channel-to-version mapping for exact comparisons.
+
+    Version tokens are hashable by the LangGraph saver contract.  Keeping the
+    items, rather than only their values, is essential for destructive
+    classification: a duration checkpoint must copy every channel's version
+    verbatim from its parent.
+    """
+    if not isinstance(channel_versions, dict):
+        return frozenset()
+    return frozenset(channel_versions.items())
 
 
 def _thread_config(thread_id: str) -> dict[str, Any]:
@@ -452,7 +468,7 @@ async def enforce_thread_retention(
                 duration_only=is_duration_only_checkpoint(tuple_, stamp_fallback=False),
                 metadata_source=metadata.get("source"),
                 carries_run_durations=isinstance(run_durations, dict) and bool(run_durations),
-                versions=frozenset(channel_versions.values()) if isinstance(channel_versions, dict) else frozenset(),
+                versions=_freeze_channel_versions(channel_versions),
             )
         if not nodes:
             # Nothing to classify: an empty (or unknown) thread is a no-op, but
@@ -615,7 +631,7 @@ async def enforce_trailing_duration_retention(
             duration_only=is_duration_only_checkpoint(latest),
             metadata_source=metadata.get("source"),
             carries_run_durations=isinstance(run_durations, dict) and bool(run_durations),
-            versions=frozenset(latest_versions.values()),
+            versions=_freeze_channel_versions(latest_versions),
         )
         parent_node = _Node(ns="", cp_id=parent_id, parent_ns=None, parent_id=None, duration_only=False, versions=latest_node.versions)
         _mark_duration_leaves_without_the_marker({("", latest_id): latest_node, ("", parent_id): parent_node})
