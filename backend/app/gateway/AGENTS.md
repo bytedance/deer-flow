@@ -21,10 +21,10 @@ resources unwind; each service `stop()` has a 30-second `asyncio.timeout`.
 Routers with persistent writes drain through
 `app.gateway.persistent_writes.run_drained_write`.
 
-Gateway lifespan closes the MCP session pool after `langgraph_runtime` exits:
-its run drain and extension-service teardown can still make MCP calls during
-earlier shutdown hooks. Keep the pool close bounded and failure-isolated, but
-do not move it ahead of those session producers.
+After `langgraph_runtime` exits (run drain and extension teardown), close MCP
+bounded and failure-isolated. Then drain off-thread
+`shutdown_sandbox_provider()` in `finally`, including cancellation. Never
+initialize for cleanup; log failures and retain native retryability.
 
 Retention holds durable thread admission and the checkpoint lock before
 checkpoint reads. Inspect root head/parent and leaf writes only; protect selectors,
@@ -69,6 +69,7 @@ and OIDC callbacks. A small `HttpOnly` preference cookie preserves the choice.
 Logout clears auth cookies and suppresses CSRF re-issue.
 
 OIDC redirects retain existing endpoint query bytes (RFC 6749 section 3.1).
+Malformed IdP bodies raise `OIDCError` (502/`sso_failed`).
 `tests/test_oidc_auth.py` pins query, state-cookie, nonce and PKCE agreement.
 
 Personal Access Tokens (`app.gateway.auth.pat`, `Authorization: Bearer dfp_...`) run as their owning user: an invalid Bearer is a hard 401 with no cookie fallback, which keeps `CSRFMiddleware`'s Bearer skip safe (origin checks still run). Scopes narrow within the allowlisted threads/runs/projects routes (including `POST /api/threads/{id}/move`); every other authenticated route 403s PAT callers (admin included). PAT management and `/change-password` require session auth; only SHA-256 digests are stored (`0017`).

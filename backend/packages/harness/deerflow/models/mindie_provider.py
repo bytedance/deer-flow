@@ -234,14 +234,19 @@ def _decode_escaped_newlines_outside_fences(content: str) -> str:
             break
 
         start, delimiter = min(candidates)
-        parts.append(content[cursor:start].replace("\\n", "\n"))
         end = content.find(delimiter, start + len(delimiter))
         if end < 0:
-            # An unclosed fence protects the remainder, including other delimiters.
+            # An unterminated Markdown fence extends to the end of the reply.
+            # Preserve it verbatim, including any complete pair that uses the
+            # other supported delimiter, to match the streaming decoder.
+            parts.append(content[cursor:start].replace("\\n", "\n"))
             parts.append(content[start:])
             break
-        cursor = end + len(delimiter)
-        parts.append(content[start:cursor])
+
+        parts.append(content[cursor:start].replace("\\n", "\n"))
+        end += len(delimiter)
+        parts.append(content[start:end])
+        cursor = end
     return "".join(parts)
 
 
@@ -258,33 +263,8 @@ class _EscapedNewlineStreamDecoder:
     """
 
     def __init__(self) -> None:
-        self._inside_fence = False
-        self._fence_delim = ""
+        self._fence_delimiter: str | None = None
         self._pending = ""
-
-    # Triple-backtick and triple-tilde are the two markdown fence delimiters;
-    # a fence opened with one closes only with the same one.
-    _DELIMS = ("```", "~~~")
-
-    def _find_open(self, data: str) -> tuple[int, str]:
-        """Return (index, delimiter) of the earliest fence opener, or (-1, "")."""
-        best = -1
-        best_d = ""
-        for d in self._DELIMS:
-            i = data.find(d)
-            if i != -1 and (best == -1 or i < best):
-                best, best_d = i, d
-        return best, best_d
-
-    def _hold_outside(self, data: str) -> int:
-        """Characters that may still grow into a delimiter or an escape."""
-        hold = len(data) - len(data.rstrip("`\\~"))
-        return hold
-
-    def _hold_inside(self, data: str, delim: str) -> int:
-        """Characters that may still grow into the closing delimiter."""
-        hold = len(data) - len(data.rstrip(delim[0]))
-        return hold
 
     def push(self, text: str) -> str:
         """Return the text decodable so far, holding back an undecided tail."""
@@ -292,36 +272,36 @@ class _EscapedNewlineStreamDecoder:
         self._pending = ""
         out = []
         while data:
-            if self._inside_fence:
-                delim = self._fence_delim
-                fence = data.find(delim)
+            if self._fence_delimiter is not None:
+                fence = data.find(self._fence_delimiter)
                 if fence == -1:
-                    # The closing delimiter may be split across chunks: emit
+                    # The closing delimiter may be split across chunks: emit the
                     # fenced code verbatim and keep a partial closer pending.
-                    hold = self._hold_inside(data, delim)
+                    hold = len(data) - len(data.rstrip(self._fence_delimiter[0]))
                     out.append(data[: len(data) - hold])
                     self._pending = data[len(data) - hold :]
                     break
-                # Fenced code up to and including its closing delimiter stays verbatim.
-                out.append(data[: fence + len(delim)])
-                data = data[fence + len(delim) :]
-                self._inside_fence = False
-                self._fence_delim = ""
+                # Fenced code through its matching closer stays verbatim.
+                delimiter_length = len(self._fence_delimiter)
+                out.append(data[: fence + delimiter_length])
+                data = data[fence + delimiter_length :]
+                self._fence_delimiter = None
                 continue
-            fence, delim = self._find_open(data)
-            if fence == -1:
-                # Outside a fence the tail may still grow into a delimiter or
-                # an escape split across the boundary; hold back, decode rest.
-                hold = self._hold_outside(data)
+
+            candidates = [(position, delimiter) for delimiter in ("```", "~~~") if (position := data.find(delimiter)) >= 0]
+            if not candidates:
+                # Outside a fence the tail may still grow into a delimiter or an
+                # escape split across the boundary; hold it back, decode the rest.
+                hold = len(data) - len(data.rstrip("`~\\"))
                 out.append(_decode_escaped_newlines_outside_fences(data[: len(data) - hold]))
                 self._pending = data[len(data) - hold :]
                 break
+            fence, delimiter = min(candidates)
             # Prose before the opening delimiter decodes; the fence itself does not.
             out.append(_decode_escaped_newlines_outside_fences(data[:fence]))
-            out.append(data[fence : fence + len(delim)])
-            data = data[fence + len(delim) :]
-            self._inside_fence = True
-            self._fence_delim = delim
+            out.append(delimiter)
+            data = data[fence + len(delimiter) :]
+            self._fence_delimiter = delimiter
         return "".join(out)
 
     def flush(self) -> str:

@@ -105,6 +105,22 @@ Browserless reservation cleanup tests require a warning with the leftover path
 and unlink error while preserving the original publication exception, including
 interruption. Successful cleanup stays quiet.
 
+Extension snapshot rollback and the managed plugins-block rewrite preserve the
+original publish error when temporary cleanup or its warning log fails.
+`tests/test_extension_atomic_write_cleanup.py` covers both writers, including
+interruptions, an `fdopen` failure whose descriptor close also fails, a plugins
+rewrite that fails while writing, a successful plugins rewrite's bytes and
+mode, and a delete-branch restore whose unlink failure still lets a later
+snapshot restore.
+Skill archive upload copies do the same in
+`tests/test_skill_archive_upload_cleanup.py`: a size-limit or read error stays
+visible, a successful copy returns the original bytes, and the upload route's
+post-install discard cannot replace a successful install or an install error.
+A form-close failure cannot replace that outcome or skip the discard.
+Custom-skill file writes and per-user skill-state writes do the same in
+`tests/test_skill_storage_atomic_write_cleanup.py`, including
+`KeyboardInterrupt` during a skill-state replace.
+
 `blocking_io/test_web_tool_url_validation.py` resolves a synthetic `.invalid`
 hostname to loopback by patching `_socket.getaddrinfo`, below the real
 `socket.getaddrinfo` wrapper. Do not replace that wrapper or the production URL
@@ -179,7 +195,10 @@ the real installer: the previous installed tree must stay byte-identical while
 the write is still in staging and after it fails, with no staging or backup
 tree left behind. Do not replace these behavioral checks with assertions about
 source formatting or duplicate the runtime publication control in
-`test_lark_cli_atomic_publish.py`.
+`test_lark_cli_atomic_publish.py`. That runtime publisher must also keep the
+original publish error when temporary cleanup or its warning log fails,
+including interruptions. A successful publish still replaces the bytes, leaves
+no temporary file, and keeps the temporary file's mode; callers chmod afterward.
 
 ## Channel staging cleanup
 
@@ -371,6 +390,18 @@ and both probe commands with argument-recording Redis stubs through
 `redis.auth.password` values, Secret precedence, external mode and shell
 metacharacters covered.
 Render tests skip when Helm is unavailable; they need no Kubernetes cluster.
+A falsy `existingSecret` (`false` is how people spell "not set") must fall
+through to the chart-managed Secret, not name the Secret after the value.
+
+## Helm postgres Secret precedence
+
+`test_helm_database_secret_precedence.py` pins that the gateway's `DATABASE_URL`
+and the postgres StatefulSet's `POSTGRES_PASSWORD` resolve the same Secret in
+every branch of `deer-flow.databaseUserSecret`, and that only the chart-managed
+branch renders a Secret. Teaching one consumer a new Secret source without the
+other has to fail here. The falsy cases exist because `or` returns its last
+operand even when falsy, which would name the Secret `false`.
+
 ## Multi-instance harness
 
 Multi-instance harness tests use `support.shell.require_script_bash()` for shell

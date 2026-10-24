@@ -25,6 +25,14 @@ import {
 } from "@/core/tasks/subtask-render";
 import type { Subtask } from "@/core/tasks/types";
 
+import { FlipDisplay as StaticFlipDisplay } from "../../../helpers/flip-display";
+
+rs.mock("@/components/workspace/flip-display", () => ({
+  FlipDisplay: (props: Parameters<typeof StaticFlipDisplay>[0]) => (
+    <StaticFlipDisplay {...props} />
+  ),
+}));
+
 rs.mock("@/core/tasks/api", () => ({ fetchSubtaskSteps: rs.fn() }));
 
 afterEach(() => {

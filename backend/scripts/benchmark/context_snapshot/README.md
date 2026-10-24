@@ -61,8 +61,12 @@ with standard computational builtins and a three-second subprocess timeout;
 that grader is not an operating-system sandbox. Run model-generated code in a
 disposable development environment.
 
-`artifact_correct` means all predeclared task checks pass. `clean_success`
-additionally requires a fresh public check of the final revision, completed
+`artifact_correct` means all predeclared task checks pass.
+Grading distinguishes booleans from numbers in scalar and nested JSON/Python
+values, including input-mutation checks; `false` cannot stand in for `0`.
+Ordinary numeric equality, such as `1.0 == 1`, remains unchanged.
+
+`clean_success` additionally requires a fresh public check of the final revision, completed
 executor status, no stop reason and no exception. A correct artifact at the
 turn cap counts only in the first metric. Costs include parent and worker
 requests, including failed/capped runs. Missing provider usage is marked

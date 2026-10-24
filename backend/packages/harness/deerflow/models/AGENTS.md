@@ -155,9 +155,11 @@ in `tests/test_codex_retry_after.py` includes public sync/async HTTP retries.
 ### Claude Retry Delays (`claude_provider.py`)
 
 `_calc_backoff_ms` uses `utils.retry_after.bounded_retry_after_ms` for integer-second
-provider hints. Invalid or over-24-hour values retain local exponential backoff;
-finite negative values clamp to zero. Sync/async 429/500 regressions live in
-`tests/test_claude_provider_retry_after.py` and use offline provider doubles.
+provider hints and HTTP-date hints (including obsolete forms interpreted in UTC).
+Invalid or over-24-hour values retain local exponential backoff; finite negative
+values and past dates clamp to zero. Sync/async 429/500 regressions live in
+`tests/test_claude_provider_retry_after.py`; `tests/test_claude_retry_after_dates.py`
+exercises public invocation through real SDK clients with offline HTTP transports.
 
 ### Provider Retry Admission (`claude_provider.py`, `openai_codex_provider.py`)
 

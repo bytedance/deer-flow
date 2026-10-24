@@ -3,6 +3,7 @@
 import asyncio
 import ipaddress
 import json
+import logging
 import os
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -699,3 +700,41 @@ def test_personal_config_save_survives_an_unavailable_token_store(personal_clien
         set_mcp_oauth_token_store(previous)
     assert "github" in read_user_mcp_config("alice")["mcpServers"]
     store.forget_unconfigured.assert_called_once()
+
+
+@pytest.mark.parametrize("failure_stage", ["resolve", "read", "write"])
+@pytest.mark.parametrize(
+    ("method", "url", "body", "expected_detail"),
+    [
+        ("POST", "/api/mcp/personal/config/servers", {"mcp_servers": {"new": {"type": "http", "url": "https://example.com/new"}}}, "Failed to add personal MCP servers"),
+        ("PUT", "/api/mcp/personal/config/server", {"server_name": "github", "server": {"type": "http", "url": "https://example.com/updated"}}, "Failed to update personal MCP server"),
+        ("PATCH", "/api/mcp/personal/config", {"server_name": "github", "enabled": False}, "Failed to update personal MCP server state"),
+        ("DELETE", "/api/mcp/personal/config/servers/github", None, "Failed to delete personal MCP server"),
+    ],
+    ids=["create", "update", "state", "delete"],
+)
+def test_personal_mutation_storage_errors_have_fixed_details_and_server_logs(personal_client, monkeypatch, caplog, failure_stage, method, url, body, expected_detail):
+    assert create(personal_client, "alice").status_code == 200
+    path = user_mcp_config_path("alice")
+    before = path.read_bytes()
+    host_path = "/srv/private/deer-flow/users/alice/extensions_config.json"
+    error = PermissionError(13, "Permission denied", host_path)
+
+    def fail(*_args, **_kwargs):
+        raise error
+
+    boundary = {"resolve": "user_mcp_config_path", "read": "read_user_mcp_config", "write": "atomic_write_extensions_config"}[failure_stage]
+    monkeypatch.setattr(personal_mcp, boundary, fail)
+    with TestClient(personal_client.app, raise_server_exceptions=False) as client:
+        with caplog.at_level(logging.ERROR, logger="app.gateway.routers.personal_mcp"):
+            response = client.request(method, url, headers={"test-user": "alice"}, json=body)
+
+    assert response.status_code == 500
+    assert response.headers["content-type"].startswith("application/json"), response.text
+    assert response.json() == {"detail": expected_detail}
+    assert host_path not in response.text
+    assert path.read_bytes() == before
+    records = [record for record in caplog.records if record.name == "app.gateway.routers.personal_mcp"]
+    assert len(records) == 1
+    assert records[0].exc_info[1] is error
+    assert host_path in caplog.text

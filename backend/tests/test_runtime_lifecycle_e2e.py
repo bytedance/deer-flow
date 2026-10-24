@@ -567,6 +567,75 @@ def test_stream_run_completes_and_persists_runtime_state(isolated_app):
         assert any(row["content"]["content"] == "Lifecycle complete." for row in message_events if row["event_type"] == "llm.ai.response")
 
 
+_CONFIG_SECTION_ERROR = "invalid_run_config_section"
+_UNRESOLVED_AGENT_DETAIL = "knowledge_scope assistant configuration could not be resolved"
+
+
+@pytest.mark.parametrize(
+    ("overrides", "status_code", "detail"),
+    [
+        pytest.param({"config": {"configurable": [1]}}, 422, _CONFIG_SECTION_ERROR, id="configurable-list"),
+        pytest.param({"config": {"configurable": "ab"}}, 422, _CONFIG_SECTION_ERROR, id="configurable-string"),
+        pytest.param({"config": {"configurable": [["k", "v"]]}}, 422, _CONFIG_SECTION_ERROR, id="configurable-pairs"),
+        pytest.param({"config": {"context": [1]}}, 422, _CONFIG_SECTION_ERROR, id="context-list"),
+        pytest.param({"config": {"context": "x", "configurable": [1]}}, 422, _CONFIG_SECTION_ERROR, id="both-sections"),
+        pytest.param(
+            {"assistant_id": "bad name!"},
+            422,
+            "Invalid assistant_id 'bad name!': must contain only letters, digits, and hyphens after normalization.",
+            id="assistant-id-characters",
+        ),
+        pytest.param(
+            {"assistant_id": "   "},
+            422,
+            "Invalid assistant_id '   ': must contain only letters, digits, and hyphens after normalization.",
+            id="assistant-id-blank",
+        ),
+        pytest.param({"config": {"configurable": {"agent_name": 1}}}, 422, _UNRESOLVED_AGENT_DETAIL, id="configurable-agent-name"),
+        pytest.param({"config": {"context": {"agent_name": 1}}}, 422, _UNRESOLVED_AGENT_DETAIL, id="config-context-agent-name"),
+        pytest.param({"context": {"agent_name": 1}}, 422, _UNRESOLVED_AGENT_DETAIL, id="context-agent-name"),
+        pytest.param(
+            {"input": {"messages": [{"role": "user", "content": "hi"}, {"role": "ai", "content": "", "tool_calls": "x"}]}},
+            400,
+            "Invalid message at input.messages[1]",
+            id="tool-calls-string",
+        ),
+    ],
+)
+@pytest.mark.parametrize("route", ["thread", "stateless"])
+def test_malformed_run_body_is_rejected_before_a_run_is_created(isolated_app, overrides, status_code, detail, route):
+    """Bodies the request model accepts must still fail as client errors.
+
+    Each shape used to escape run admission as an unmapped exception and
+    answer 500. The thread route also proves nothing was admitted.
+    """
+    from starlette.testclient import TestClient
+
+    controller = _RunController()
+    factory = _make_agent_factory(controller, title="Rejected", answer="never")
+
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=factory),
+        TestClient(isolated_app, raise_server_exceptions=False) as client,
+    ):
+        csrf_token = _register_user(client)
+        thread_id = _create_thread(client, csrf_token)
+        path = f"/api/threads/{thread_id}/runs/wait" if route == "thread" else "/api/runs/wait"
+
+        response = client.post(path, json=_run_body(**overrides), headers={"X-CSRF-Token": csrf_token})
+
+        assert response.status_code == status_code, response.text
+        body = response.json()
+        if detail == _CONFIG_SECTION_ERROR:
+            assert [error["type"] for error in body["detail"]] == [_CONFIG_SECTION_ERROR]
+        else:
+            assert body == {"detail": detail}
+        assert not controller.started.is_set()
+        runs = client.get(f"/api/threads/{thread_id}/runs")
+        assert runs.status_code == 200, runs.text
+        assert runs.json() == []
+
+
 def test_stream_run_executes_real_lead_agent_setup_agent_business_path(isolated_app, isolated_deer_flow_home: Path):
     """A runtime stream should execute real lead-agent business code and tools."""
     from starlette.testclient import TestClient
