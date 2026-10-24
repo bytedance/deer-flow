@@ -1116,6 +1116,13 @@
   `knowledge_provider()`，不再满足 `ExtensionRegistry` 协议，按 README 运行
   `pytest` 会失败。Extension Package Check 现在也会运行自带测试的内置示例的测试，
   因此破坏这些测试的契约变更会在其 PR 中失败。([#7364])
+  
+- **网关：** 请求体格式错误的运行请求现在返回客户端错误，而不是
+  `500 Internal Server Error`。此前 `config.configurable` 或 `config.context`
+  不是对象、`assistant_id` 无效、`agent_name` 不是字符串，或 AI 消息的 `tool_calls`
+  不是对象列表时，运行准入会抛出未处理的异常。现在这些请求在创建运行之前即返回
+  `422`（消息问题返回 `400`）。在线程路由上，此前会被接受的 `config.configurable`
+  取值 `[]`、`""`、`0`、`false` 或键值对列表，现在同样返回 `422`。([#7362])
 
 - **TUI：** 按 `Ctrl+C` 中断运行后再退出，不再卡在该运行仍在完成的步骤上。此前运行
   线程会在退出时被等待，TUI 已关闭但 shell 提示符一直阻塞，直到较长的工具调用或模型请求
@@ -10410,4 +10417,5 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7277]: https://github.com/bytedance/deer-flow/pull/7277
 [#7325]: https://github.com/bytedance/deer-flow/pull/7325
 [#7326]: https://github.com/bytedance/deer-flow/pull/7326
+[#7362]: https://github.com/bytedance/deer-flow/pull/7362
 [#7364]: https://github.com/bytedance/deer-flow/pull/7364

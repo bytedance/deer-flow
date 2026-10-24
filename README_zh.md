@@ -744,6 +744,12 @@ DeerFlow 可连接租户级 RAGFlow，并通过 `knowledge_search` 按 embedding
 需显式配置 DeerFlow 用户到 WeKnora 工作空间的凭据绑定；资源授权仍由 WeKnora 执行。
 安装与配置步骤见扩展目录中的英文指南。
 
+可选的[知识入库与处理扩展](examples/deerflow-extension-knowledge-management/README.md)
+通过 WeKnora 提供管理员授权的文件、网址和手工文本入库、处理状态查询、重新处理与取消。
+解析、索引及可选的 Wiki/图谱生成由上游负责。扩展默认关闭，需明确配置资源与操作授权，
+不包含管理页面。Provider 无关的 API 由离线契约测试覆盖；真实入库、GLM-5.3/BGE
+联调、浏览器引用回放及已知限制见[验收报告](examples/deerflow-extension-knowledge-management/VALIDATION.md)。
+
 Gateway 生成后续建议时，现在会先把普通字符串输出和 block/list 风格的富文本内容统一归一化，再去解析 JSON 数组响应，因此不同 provider 的内容包装方式不会再悄悄把建议吞掉。
 
 Web UI 支持从已完成的 assistant 回复分叉出一个新的主对话。自动继承的分叉标题会使用下一个空闲的数字后缀（`标题 (2)`、`标题 (3)`……）；显式指定或手动重命名得到的同名后缀也会占号，即使它没有生成序号 metadata，后续自动分叉也不会与它重名。API 调用方显式提供的标题保持不变；重命名会清除旧的生成序号，因此从新标题继续自动分叉时会重新从 `(2)` 开始。最近对话列表还会把已加载的分叉直接排列在已加载的父对话下方，并显示低干扰的树形连接线。父对话尚未加载、谱系数据错误或成环、父子置顶状态不一致时，分叉会安全地保留在顶层，不会被隐藏或跨越置顶边界移动。新 thread 会保留该轮回复的 checkpoint 以及用户消息之前的重放 checkpoint，因此分叉后可以立即重新生成该回复。对于缺少 checkpoint 父链接的旧历史或导入历史，Gateway 会进行有界的时间顺序查找；如果不存在更早的重放 checkpoint，分叉仍会按旧版单-checkpoint 形态成功创建，但无法重新生成继承的回复。已有的单-checkpoint 分叉会保持不变，不会通过不安全的 checkpoint 复制尝试修复。只有从最新回合分叉时才会尽力复制当前 thread 的工作区文件；从历史回合分叉不会带入后续时间线创建的文件。

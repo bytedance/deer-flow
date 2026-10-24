@@ -28,6 +28,7 @@ export interface Translations {
     installationGuide: string;
     catalog: Record<
       | "workflows"
+      | "reportSections"
       | "agentTeams"
       | "bookmarks"
       | "context"
@@ -35,6 +36,7 @@ export interface Translations {
       | "screening"
       | "retrieval"
       | "knowledge"
+      | "knowledgeManagement"
       | "weknora"
       | "lightrag"
       | "example",

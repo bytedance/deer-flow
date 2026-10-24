@@ -584,29 +584,40 @@ async def _start_scheduled_task_notification_delivery(app: FastAPI, startup_conf
 
 @asynccontextmanager
 async def _runtime_with_mcp_pool_shutdown(app: FastAPI, startup_config: AppConfig) -> AsyncGenerator[None, None]:
-    """Close pooled MCP transports after runtime producers have stopped."""
+    """Close MCP transports and initialized sandboxes after runtime shutdown."""
     try:
         async with langgraph_runtime(app, startup_config):
             yield
     finally:
-        # RunManager drains active graph tasks when langgraph_runtime exits.
-        # Those tasks can still acquire new MCP sessions during earlier
-        # shutdown hooks, so closing the pool inside the runtime leaves fresh
-        # owner tasks and transports alive after the only close pass.
         try:
-            from deerflow.mcp.session_pool import get_session_pool
+            # RunManager drains active graph tasks when langgraph_runtime exits.
+            # Those tasks can still acquire new MCP sessions during earlier
+            # shutdown hooks, so closing the pool inside the runtime leaves fresh
+            # owner tasks and transports alive after the only close pass.
+            try:
+                from deerflow.mcp.session_pool import get_session_pool
 
-            await asyncio.wait_for(
-                get_session_pool().close_all(),
-                timeout=_SHUTDOWN_HOOK_TIMEOUT_SECONDS,
-            )
-        except TimeoutError:
-            logger.warning(
-                "MCP session pool shutdown exceeded %.1fs; proceeding with worker exit.",
-                _SHUTDOWN_HOOK_TIMEOUT_SECONDS,
-            )
-        except Exception:
-            logger.exception("Failed to close MCP sessions")
+                await asyncio.wait_for(
+                    get_session_pool().close_all(),
+                    timeout=_SHUTDOWN_HOOK_TIMEOUT_SECONDS,
+                )
+            except TimeoutError:
+                logger.warning(
+                    "MCP session pool shutdown exceeded %.1fs; proceeding with worker exit.",
+                    _SHUTDOWN_HOOK_TIMEOUT_SECONDS,
+                )
+            except Exception:
+                logger.exception("Failed to close MCP sessions")
+        finally:
+            # Lazy tool initialization may run off the main thread, where a
+            # provider cannot install signal handlers. Close only the existing
+            # provider after runtime shutdown and MCP teardown, without allocating.
+            try:
+                from deerflow.sandbox.sandbox_provider import shutdown_sandbox_provider
+
+                await await_drained(asyncio.to_thread(shutdown_sandbox_provider))
+            except Exception:
+                logger.exception("Failed to shut down sandbox provider")
 
 
 @asynccontextmanager
