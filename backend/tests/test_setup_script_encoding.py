@@ -127,6 +127,53 @@ def test_interactive_setup_completes_with_restricted_stdout(setup_checkout: Path
         assert "· Writing configuration" in result.stdout
 
 
+@pytest.fixture
+def labels_checkout(tmp_path: Path) -> Path:
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    shutil.copyfile(REPO_ROOT / "scripts" / "sync_labels.py", scripts / "sync_labels.py")
+    github = tmp_path / ".github"
+    github.mkdir()
+    shutil.copyfile(REPO_ROOT / ".github" / "labels.yml", github / "labels.yml")
+    return tmp_path
+
+
+@pytest.mark.parametrize("encoding", ENCODINGS)
+@pytest.mark.parametrize("gh_fails", [False, True], ids=["synced", "failed"])
+def test_label_sync_survives_restricted_output(labels_checkout: Path, encoding: str, gh_fails: bool):
+    result = run_setup_script(
+        labels_checkout,
+        encoding,
+        f"""
+        import subprocess
+        import sys
+        import sync_labels
+
+        def fake_run(cmd, **kwargs):
+            class Result:
+                returncode = 1 if {gh_fails!r} else 0
+                stderr = "label already exists with different color"
+                stdout = ""
+            return Result()
+
+        sys.argv = ["sync_labels.py"]
+        subprocess.run = fake_run
+        sys.exit(sync_labels.main())
+        """,
+    )
+
+    assert result.returncode == int(gh_fails), result.stderr
+    assert "Traceback" not in result.stderr
+    assert "Syncing" in result.stdout
+    if gh_fails:
+        assert "label(s) failed to sync" in result.stderr
+        assert "label already exists" in result.stderr
+    else:
+        assert "labels in sync" in result.stdout
+    if encoding == "utf-8" and not gh_fails:
+        assert "✓" in result.stdout
+
+
 @pytest.mark.parametrize("encoding", ENCODINGS)
 def test_setup_still_requires_an_interactive_terminal(setup_checkout: Path, encoding: str):
     result = run_setup_script(
