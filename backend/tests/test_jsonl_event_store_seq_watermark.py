@@ -142,6 +142,45 @@ async def test_watermark_matches_run_permissions_before_publication(tmp_path, mo
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("run_mode", [0o400, 0o444])
+async def test_read_only_runs_keep_publishing_cursor(tmp_path, run_mode):
+    """Publication must survive the restrictive modes it copies (Windows cannot replace a read-only file)."""
+    store = JsonlRunEventStore(tmp_path)
+    runs = tmp_path / "threads" / "t1" / "runs"
+    watermark = runs / ".seq-watermark"
+    for run_id in ("r1", "r2"):
+        last = await store.put(**event(run_id))
+        (runs / f"{run_id}.jsonl").chmod(run_mode)
+        assert await store.delete_by_run("t1", run_id) == 1
+        assert watermark.read_text(encoding="utf-8") == str(last["seq"])
+        assert not watermark.stat().st_mode & 0o200
+        assert not (runs / f"{run_id}.jsonl").exists()
+    assert not list(runs.glob(".seq-*.tmp"))
+    reopened = JsonlRunEventStore(tmp_path)
+    last = await reopened.put(**event("r3"))
+    (runs / "r3.jsonl").chmod(run_mode)
+    assert last["seq"] == 3
+    assert await reopened.delete_by_run("t1", "r3") == 1
+    assert watermark.read_text(encoding="utf-8") == "3"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("run_mode", [0o400, 0o444])
+async def test_thread_deletion_removes_read_only_runs_and_watermark(tmp_path, run_mode):
+    """Deleting the thread unlinks the read-only files publication preserves (Windows refuses otherwise)."""
+    store = JsonlRunEventStore(tmp_path)
+    runs = tmp_path / "threads" / "t1" / "runs"
+    await store.put(**event("r1"))
+    await store.put(**event("r2"))
+    assert await store.delete_by_run("t1", "r2") == 1
+    watermark = runs / ".seq-watermark"
+    watermark.chmod(run_mode)
+    (runs / "r1.jsonl").chmod(run_mode)
+    assert await store.delete_by_thread("t1") == 1
+    assert list(runs.iterdir()) == []
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize("replace_existing", [False, True])
 async def test_failed_watermark_permissions_keep_previous_floor_and_run(tmp_path, monkeypatch, replace_existing):
     store = JsonlRunEventStore(tmp_path)

@@ -222,7 +222,10 @@ allocation floor with atomic replacement of `runs/.seq-watermark`, off-loop unde
 the existing mutation fence. Recovery takes the maximum of that floor and surviving
 run files, including legacy directories without a watermark. Copy the deleted run's
 permission bits onto the temporary watermark before publication, preserving both
-shared-read and restrictive modes. Failed permission setup or publication must leave
+shared-read and restrictive modes. Windows rejects unlinking a read-only run file and
+replacing a read-only watermark, so every unlink and watermark publication clears the
+owner write bit for that operation, restoring the run's mode when the run survives.
+Failed permission setup or publication must leave
 the run intact; unreadable/corrupt watermarks fail closed. Complete
 thread deletion removes the watermark only after deleting all run files, including
 when no events remain. This does not add multi-process JSONL support. Coverage:
