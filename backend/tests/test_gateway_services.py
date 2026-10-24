@@ -381,6 +381,57 @@ def test_canonical_run_record_input_uses_admitted_message_snapshot():
     assert stored["messages"][0]["additional_kwargs"]["knowledge_scope"]["dataset_ids"] == ["dataset-1"]
 
 
+@pytest.mark.parametrize("idempotency_key", [None, "retry-key"])
+@pytest.mark.asyncio
+async def test_run_input_ids_match_the_checkpoint_and_record(_stub_app_config, idempotency_key):
+    """An id-less API input must not become a second user turn on reconnect."""
+    from unittest.mock import patch
+
+    from langgraph.graph.message import add_messages
+
+    from app.gateway.routers.thread_runs import RunCreateRequest
+    from app.gateway.services import start_run
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    body = RunCreateRequest(
+        input={
+            "messages": [
+                {"role": "user", "content": "same question"},
+                {"role": "user", "content": "same question"},
+                {"role": "user", "content": "empty id", "id": ""},
+                {"role": "user", "content": "client id", "id": "client-human"},
+            ]
+        }
+    )
+    request = _make_start_run_request(RunManager(store=MemoryRunStore()))
+    captured = {}
+
+    async def fake_run_agent(*_args, **kwargs):
+        captured["messages"] = kwargs["graph_input"]["messages"]
+
+    with patch("app.gateway.services.resolve_agent_factory", return_value=object()), patch("app.gateway.services.run_agent", side_effect=fake_run_agent):
+        record = await start_run(body, "thread-idless-input", request, idempotency_key=idempotency_key)
+        await record.task
+
+        graph_messages = captured["messages"]
+        recorded_messages = record.kwargs["input"]["messages"]
+        ids = [message["id"] for message in recorded_messages]
+        assert len(ids) == 4
+        assert all(isinstance(message_id, str) and message_id for message_id in ids)
+        assert len(set(ids)) == 4
+        assert ids[3] == "client-human"
+        assert [message.id for message in graph_messages] == ids
+        assert [message.id for message in add_messages([], graph_messages)] == ids
+        assert "id" not in body.input["messages"][0]
+        assert body.input["messages"][2]["id"] == ""
+
+        if idempotency_key is not None:
+            reused = await start_run(body, "thread-idless-input", request, idempotency_key=idempotency_key)
+            assert reused.run_id == record.run_id
+            assert [message["id"] for message in reused.kwargs["input"]["messages"]] == ids
+
+
 @pytest.mark.parametrize(
     "forged_original",
     ["spoofed audit text", [{"type": "text", "text": "spoofed audit text"}]],

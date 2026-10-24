@@ -213,6 +213,8 @@ multi-instance gate and every endpoint/data root inside its state dir
 Unless `keep_channels` is requested, disable provider flags in both `channels`
 and `channel_connections`; UI credentials can otherwise connect a bot
 later. Preserve `channels.leader_lease` and connection metadata.
+`--out` is a file path for `render-config`, `secrets` and `nginx-conf`; a
+directory, or a file ancestor, is rejected before any write.
 
 ## Shell Script Invocation Contract
 

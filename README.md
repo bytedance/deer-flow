@@ -154,6 +154,8 @@ For MindIE XML tool calls, see the
 [argument parsing and newline compatibility guide](backend/docs/CONFIGURATION.md#mindie-xml-tool-arguments).
 Both synchronous and asynchronous streams retain this compatibility: tool-enabled
 streams simulate chunks from a non-streaming response, while no-tool streams stay native.
+Newline compatibility preserves literal escapes inside backtick and tilde code
+fences, including unclosed fences, in complete and streamed replies.
 
 1. **Clone the DeerFlow repository**
 
@@ -701,6 +703,13 @@ Keyed input and resume requests return HTTP 503 before run admission when the
 store cannot guarantee that support. The built-in Memory and SQL stores support
 both fields; older custom stores with an explicit `idempotency_key` parameter
 continue to accept keyed input requests.
+
+Gateway runs also assign IDs to input messages that omit one before storing the
+run record and invoking the graph. This keeps the message visible as one turn
+when the Web UI reconnects to an active run started by an API client. During a
+rolling upgrade, route keyed runs with ID-less input and their retries to
+upgraded workers until all Gateway workers are upgraded; older workers may
+reject those retries with 409. See the [run API contract](backend/docs/API.md#create-run).
 
 #### Option 2: Local Development
 
@@ -1684,6 +1693,12 @@ A skill's `allowed-tools` frontmatter is compatibility metadata carried for inte
 When you install `.skill` archives through the Gateway, DeerFlow accepts standard space-separated `allowed-tools`, optional frontmatter metadata, and the Claude-compatible `argument-hint` field instead of rejecting otherwise valid external skills. YAML lists remain supported for `allowed-tools` and preserve exact runtime names. Exact portable spellings such as `WebFetch`, `WebSearch`, `Glob`, `Grep`, and `Read` map to DeerFlow's `web_fetch`, `web_search`, `glob`, `grep`, and `read_file` tools; lowercase or otherwise unknown scalar names remain unchanged so custom and MCP tools keep their exact runtime spelling. Parenthesized entries such as `Bash(tvly *)` are tokenized as one literal entry, including spaces, quoted text, and escaped parentheses; such scoped declarations remain literal compatibility metadata and do not authorize or restrict commands — DeerFlow's Agent configuration and authorization, not tool arguments, decide what may run.
 
 Disabling a skill also removes it from the sandbox filesystem view, so shell commands and structured file tools follow the same enabled state. Local, Docker/AIO, hostPath provisioner, and newly created E2B sandboxes source `/mnt/skills` from enabled-only projections that update when public, custom, legacy, or managed integration skills are toggled, edited, created, deleted, or installed. Structured `read_file` calls (including line ranges and read-before-write checks) use the sandbox provider's mount mapping, so the user identity captured when the sandbox was acquired remains authoritative. Managed integration packages remain shared, while their projected filesystem visibility follows each user's enabled state. Multi-worker Gateways re-read on-disk enable state while rebuilding user projections, so a toggle handled by one worker is honored by another worker's next sandbox acquire. Existing E2B sandboxes retain their creation-time snapshot until they are recreated. PVC-backed provisioner skills keep their configured PVC snapshot/layout for now; dynamic PVC materialization is tracked separately.
+
+Chat-specific skill views used by an Agent's skill allowlist verify copied file
+contents before sandbox reuse. Edited instructions, missing or injected files,
+and changed links are repaired from the canonical skills on the next acquire;
+inode and timestamp drift on shared storage does not force a rebuild. Integrity
+checks read the projected files, so larger packages increase acquire-time read I/O.
 
 Skill projection manifest saves preserve the original error or interruption even if temporary-file cleanup or its logging also fails. Manifest files retain their private filesystem permissions.
 
