@@ -24,7 +24,13 @@ case "$PORT" in
         ;;
 esac
 
-if [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
+# Trim leading zeros, then bound the digit count before any numeric
+# comparison: Bash reports "integer expression expected" for digit strings
+# that overflow its integer range, which used to let the invalid port fall
+# through to the probe loop (#7188).
+PORT_VALUE="${PORT#"${PORT%%[!0]*}"}"
+PORT_VALUE="${PORT_VALUE:-0}"
+if [ "${#PORT_VALUE}" -gt 5 ] || [ "$PORT_VALUE" -lt 1 ] || [ "$PORT_VALUE" -gt 65535 ]; then
     echo "Port must be between 1 and 65535: $PORT" >&2
     exit 1
 fi
