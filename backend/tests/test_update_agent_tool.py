@@ -473,6 +473,79 @@ def test_update_agent_soul_failure_does_not_replace_config(tmp_path, patched_pat
     assert list(agent_dir.glob("*.tmp")) == [], "staged config.yaml temp must be cleaned up on SOUL.md failure"
 
 
+@pytest.mark.parametrize("winerror", [5, 32, 33])
+@pytest.mark.parametrize("filename", ["config.yaml", "SOUL.md"])
+def test_agent_store_atomic_replace_retries_windows_sharing_errors(tmp_path, monkeypatch, winerror, filename):
+    from deerflow.persistence.agents import file as agent_file
+
+    agent_dir = _seed_agent(tmp_path)
+    target = agent_dir / filename
+    original = target.read_bytes()
+    real_replace = Path.replace
+    attempts = []
+    sleeps = []
+
+    def replace(source, destination):
+        assert destination == target
+        assert target.read_bytes() == original, "retry must not truncate the existing file"
+        attempts.append((source, source.read_bytes()))
+        if len(attempts) < 3:
+            error = PermissionError("transient Windows sharing violation")
+            error.winerror = winerror
+            raise error
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(agent_file, "sys", SimpleNamespace(platform="win32"))
+    monkeypatch.setattr(agent_file, "time", SimpleNamespace(sleep=sleeps.append))
+    monkeypatch.setattr(Path, "replace", replace)
+    agent_file.FileAgentStore._write(agent_dir, {"name": "test-agent", "description": "new desc"} if filename == "config.yaml" else None, "new soul" if filename == "SOUL.md" else None)
+
+    assert len(attempts) == 3
+    assert attempts[0] == attempts[1] == attempts[2], "retry the same complete staged file"
+    assert sleeps == [0.005, 0.01]
+    if filename == "config.yaml":
+        assert yaml.safe_load(target.read_text(encoding="utf-8"))["description"] == "new desc"
+    else:
+        assert target.read_text(encoding="utf-8") == "new soul"
+    assert list(agent_dir.glob("*.tmp")) == []
+
+
+@pytest.mark.parametrize(
+    ("platform", "winerror", "expected_attempts"),
+    [("win32", 5, 8), ("win32", 32, 8), ("win32", 33, 8), ("win32", 112, 1), ("win32", None, 1), ("linux", 5, 1)],
+)
+def test_agent_store_atomic_replace_raises_final_or_unrelated_errors(tmp_path, monkeypatch, platform, winerror, expected_attempts):
+    from deerflow.persistence.agents import file as agent_file
+
+    agent_dir = _seed_agent(tmp_path)
+    config = agent_dir / "config.yaml"
+    original = config.read_bytes()
+    error = PermissionError("replace denied")
+    if winerror is not None:
+        error.winerror = winerror
+    attempts = []
+    sleeps = []
+
+    def replace(source, destination):
+        attempts.append(source)
+        assert destination == config
+        assert config.read_bytes() == original
+        raise error
+
+    monkeypatch.setattr(agent_file, "sys", SimpleNamespace(platform=platform))
+    monkeypatch.setattr(agent_file, "time", SimpleNamespace(sleep=sleeps.append))
+    monkeypatch.setattr(Path, "replace", replace)
+    with pytest.raises(PermissionError) as caught:
+        agent_file.FileAgentStore._write(agent_dir, {"description": "must not overwrite"}, None)
+
+    assert caught.value is error
+    assert len(attempts) == expected_attempts
+    assert sleeps == [0.005 * attempt for attempt in range(1, expected_attempts)]
+    assert config.read_bytes() == original
+    assert (agent_dir / "SOUL.md").read_text(encoding="utf-8") == "old soul"
+    assert list(agent_dir.glob("*.tmp")) == [], "exhausted retries must clean the staged file"
+
+
 # --- Per-user isolation ---
 
 

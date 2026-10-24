@@ -91,7 +91,7 @@ from deerflow.skills.package_files import EXEC_SNIFF_BYTES, is_executable_binary
 from deerflow.skills.parser import parse_skill_file
 from deerflow.skills.permissions import make_skill_tree_sandbox_readable
 from deerflow.skills.types import SKILL_MD_FILE, SkillCategory
-from deerflow.utils.atomic_write import cleanup_failed_atomic_write
+from deerflow.utils.atomic_write import cleanup_failed_atomic_write, retry_windows_atomic_operation
 
 logger = logging.getLogger(__name__)
 
@@ -1505,6 +1505,16 @@ def _ensure_managed_sandbox_lark_cli(version: str) -> Path:
         return _ensure_managed_sandbox_lark_cli_locked(tag, target, parent)
 
 
+def _rename_sandbox_runtime(source: Path, target: Path) -> None:
+    """Keep atomic publication under the install lock through short NT handle contention.
+
+    Access denied may be transient on Windows (e.g. a scanner holds the newly
+    staged directory). A permanent denial still raises after 140 ms total wait;
+    never fall back to a non-atomic copy or change permission/ACL policy.
+    """
+    retry_windows_atomic_operation(lambda: source.rename(target), windows=os.name == "nt", sleep=time.sleep)
+
+
 def _ensure_managed_sandbox_lark_cli_locked(tag: str, target: Path, parent: Path) -> Path:
     manifest = _read_json_object_file(target / LARK_CLI_RUNTIME_MANIFEST_FILE)
     if manifest and manifest.get("version") == tag:
@@ -1540,14 +1550,21 @@ def _ensure_managed_sandbox_lark_cli_locked(tag: str, target: Path, parent: Path
             backup = parent / f".replacing-sandbox-cli-{os.getpid()}"
             if backup.exists():
                 shutil.rmtree(backup, ignore_errors=True)
-            target.rename(backup)
-        staging.rename(target)
+            _rename_sandbox_runtime(target, backup)
+        _rename_sandbox_runtime(staging, target)
         if backup is not None:
             shutil.rmtree(backup, ignore_errors=True)
         return target
     except Exception:
-        if backup is not None and backup.exists() and not target.exists():
-            backup.rename(target)
+        try:
+            if backup is not None and backup.exists() and not target.exists():
+                _rename_sandbox_runtime(backup, target)
+        except Exception:
+            # A failed restore must not replace the original publish error.
+            # Keep the previous runtime in backup for recovery, and make even
+            # a broken diagnostic handler independent of the caller's outcome.
+            with suppress(Exception):
+                logger.exception("Sandbox runtime rollback failed; previous runtime may remain in %s", backup)
         raise
     finally:
         shutil.rmtree(staging, ignore_errors=True)

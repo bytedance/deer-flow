@@ -46,6 +46,17 @@ replace the original publication error, including interruptions. Callers own
 final file modes: runtime artifacts executable, skill bodies and manifests
 read-only. Coverage: `tests/test_lark_cli_atomic_publish.py`.
 
+Managed sandbox runtime publication keeps its install lock across atomic rename
+and rollback. Only Windows access/sharing errors (winerror 5/32/33) get eight
+attempts with 140 ms total backoff; permanent denials and unrelated errors still
+raise, without copy fallback or permission/ACL changes. The shared
+`utils.atomic_write.retry_windows_atomic_operation` owns the attempt budget,
+winerror filter and delay; both runtime rename and Agent replace use it.
+Rollback/check/logging failures must not replace the original publication error;
+retain a failed-restore backup and log its path with guarded diagnostics.
+Regression coverage: `tests/test_lark_cli_integration.py` and
+`tests/test_windows_atomic_retry_policy.py`.
+
 App registration and direct app switching replace the per-user Lark credential
 tree transactionally. Clear the old OAuth data before `lark-cli config init`:
 on Linux it writes the new app secret into the file-backed keychain under the
@@ -57,6 +68,16 @@ logout and restores the complete old tree on any switch failure.
 
 Offload config/DDGS together. Only returned empties mean `No images found`;
 the SDK sentinel can hide timeouts. See `tests/test_image_search_errors.py`.
+
+### File Agent atomic writes (`persistence/agents/file.py`)
+
+Config and SOUL writes stage UTF-8 temporary files in the owning directory and
+publish by atomic replace. Windows sharing/access errors 5/32/33 retry only that
+same staged replace, at most eight attempts and 140 ms total wait; other errors
+and exhausted attempts still propagate. Keep cleanup and do not substitute
+in-place writes or permission changes. Use the shared atomic retry helper rather
+than duplicating its loop. Regressions: `tests/test_update_agent_tool.py` and
+`tests/test_windows_atomic_retry_policy.py`.
 
 ### Browser Progress Screenshots (`community/browser_automation/`)
 
