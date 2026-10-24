@@ -339,6 +339,13 @@ against DeepSeek only with `DEER_FLOW_RUN_LIVE_TESTS=1` and
 committed evidence. A passing connectivity probe does not establish full agent
 compatibility; distinguish protocol assertions from observed live behavior.
 
+## Readability fallback regressions
+
+`test_web_fetch_relative_links.py` simulates degraded extraction without requiring
+Windows. The link-free article companion must retain the extractor's exact HTML
+and exclude resolved navigation links from Markdown; checking for raw `href=`
+attributes after Markdown conversion cannot detect an unwanted fallback.
+
 ## Classification request packing
 
 Pin the Jev example's outbound byte budget against captured HTTP request bodies.
