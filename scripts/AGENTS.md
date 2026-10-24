@@ -36,7 +36,8 @@ Tests: `backend/tests/test_check_script.py`.
 
 `doctor.py` and `setup_wizard.py` configure stdout with `errors="replace"` at
 the start of `main`, preserving its encoding so legacy terminals and pipes can
-finish reports and setup. Guard `reconfigure` for embedded/captured streams.
+finish reports and setup; `sync_labels.py` applies the same guard to stdout
+and stderr. Guard `reconfigure` for embedded/captured streams.
 Offline subprocess coverage: `backend/tests/test_setup_script_encoding.py`.
 
 ## Manual Claude OAuth Export
