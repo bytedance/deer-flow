@@ -128,6 +128,91 @@ def test_json_export_preserves_unique_and_case_distinct_keys(analysis, tmp_path)
     ]
 
 
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "'NaN'::DOUBLE",
+        "'Infinity'::DOUBLE",
+        "'-Infinity'::DOUBLE",
+        "[1.0, 'NaN'::DOUBLE]",
+        "{'nested': 'Infinity'::DOUBLE}",
+    ],
+)
+@pytest.mark.parametrize("existing", [False, True])
+def test_json_export_rejects_nonfinite_values_before_writing(
+    analysis, tmp_path, expression, existing
+):
+    output = tmp_path / "result.json"
+    original = b'[{"previous": "keep me"}]\n'
+    if existing:
+        output.write_bytes(original)
+
+    with duckdb.connect() as con:
+        with pytest.raises(ValueError, match="Out of range float values"):
+            analysis["action_query"](
+                con, f"SELECT {expression} AS value", {}, str(output)
+            )
+
+    if existing:
+        assert output.read_bytes() == original
+    else:
+        assert not output.exists()
+
+
+def test_json_export_keeps_finite_numbers_nulls_and_nonfinite_text(analysis, tmp_path):
+    output = tmp_path / "result.json"
+    with duckdb.connect() as con:
+        analysis["action_query"](
+            con,
+            "SELECT 1.25::DOUBLE AS amount, NULL AS missing, "
+            "['NaN', 'Infinity'] AS labels",
+            {},
+            str(output),
+        )
+    assert json.loads(output.read_text(encoding="utf-8")) == [
+        {"amount": 1.25, "missing": None, "labels": ["NaN", "Infinity"]}
+    ]
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_cli_rejects_nonfinite_json_without_overwriting(
+    cached_source, tmp_path, existing
+):
+    source, temp_root = cached_source
+    output = tmp_path / "result.json"
+    original = b'[{"previous": "keep me"}]\n'
+    if existing:
+        output.write_bytes(original)
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--files",
+            str(source),
+            "--action",
+            "query",
+            "--sql",
+            "SELECT 1.0 / 0.0 AS ratio FROM input",
+            "--output-file",
+            str(output),
+        ],
+        env={**os.environ, "TMPDIR": str(temp_root)},
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=30,
+    )
+
+    assert completed.returncode == 1
+    assert "Error: Out of range float values" in completed.stderr
+    assert "Traceback" not in completed.stderr
+    assert "Results exported" not in completed.stdout
+    if existing:
+        assert output.read_bytes() == original
+    else:
+        assert not output.exists()
+
+
 @pytest.mark.parametrize("extension", ["csv", "md"])
 def test_non_json_exports_keep_duplicate_columns(analysis, tmp_path, extension):
     output = tmp_path / f"result.{extension}"
