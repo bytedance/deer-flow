@@ -21,7 +21,9 @@ def _workflow() -> dict:
 
 def _test_step() -> dict:
     steps = _workflow()["jobs"]["check-packages"]["steps"]
-    return next(step for step in steps if step.get("name") == TEST_STEP)
+    step = next((step for step in steps if step.get("name") == TEST_STEP), None)
+    assert step is not None, f"workflow step {TEST_STEP!r} not found in extension-package-check.yml"
+    return step
 
 
 def _tested_packages() -> list[Path]:
