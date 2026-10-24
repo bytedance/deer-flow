@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import os
 import shutil
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
@@ -952,3 +954,129 @@ def test_projection_read_windows_lock_retries_only_contention(tmp_path, monkeypa
                 pytest.fail("Must not enter after a permanent lock error")
         assert caught.value.errno == errno.EBADF
         assert calls == [FakeMsvcrt.LK_NBLCK]
+
+
+def test_thread_projection_stays_fresh_when_view_metadata_drifts(projection_env) -> None:
+    """Identical bytes with new inodes/timestamps never trigger another copy."""
+    from deerflow.skills import projection as projection_module
+
+    env = projection_env
+    _write_skill(env.skills_root / "public", "alpha")
+    projected = ensure_thread_skill_projection(env.storage, "thread-view-drift", {"alpha"})
+    target = projected.public / "alpha" / "SKILL.md"
+    original = target.read_bytes()
+    with patch.object(projection_module, "_rebuild_thread_locked", wraps=projection_module._rebuild_thread_locked) as rebuild:
+        for offset in range(3):
+            replacement = target.with_suffix(".tmp")
+            replacement.write_bytes(original)
+            replacement.chmod(target.stat().st_mode)
+            replacement.replace(target)
+            os.utime(target, ns=(1_000_000_000 + offset, 2_000_000_000 + offset))
+            ensure_thread_skill_projection(env.storage, "thread-view-drift", {"alpha"})
+    assert not rebuild.called
+
+
+def test_thread_projection_rebuilds_when_a_source_skill_changes(projection_env) -> None:
+    from deerflow.skills import projection as projection_module
+
+    env = projection_env
+    _write_skill(env.skills_root / "public", "alpha", "v1")
+    allowed = {"alpha"}
+    ensure_thread_skill_projection(env.storage, "thread-source-change", allowed)
+
+    _write_skill(env.skills_root / "public", "alpha", "a longer replacement body")
+
+    with patch.object(
+        projection_module,
+        "_rebuild_thread_locked",
+        wraps=projection_module._rebuild_thread_locked,
+    ) as rebuild:
+        ensure_thread_skill_projection(env.storage, "thread-source-change", allowed)
+
+    assert rebuild.called
+
+
+@pytest.mark.parametrize("category", ["public", "custom", "legacy", "integrations"])
+def test_thread_view_instruction_tampering_is_repaired(projection_env, category) -> None:
+    env = projection_env
+    roots = {
+        "public": env.skills_root / "public",
+        "custom": env.storage.get_user_custom_root(),
+        "legacy": env.skills_root / "custom",
+        "integrations": env.paths.integration_skills_dir() / "provider",
+    }
+    source = _write_skill(roots[category], "alpha")
+    projected = ensure_thread_skill_projection(env.storage, "thread-tamper", {"alpha"})
+    relative = Path("provider/alpha/SKILL.md") if category == "integrations" else Path("alpha/SKILL.md")
+    target = getattr(projected, category) / relative
+    target.write_text("MUTATED\n", encoding="utf-8")
+
+    ensure_thread_skill_projection(env.storage, "thread-tamper", {"alpha"})
+
+    assert target.read_bytes() == source.read_bytes()
+
+
+@pytest.mark.parametrize("damage", ["overwrite", "delete", "inject_file", "inject_directory", "symlink", "fifo", "executable"])
+def test_thread_view_support_tampering_is_repaired(projection_env, damage) -> None:
+    env = projection_env
+    source = _write_skill(env.skills_root / "public", "alpha").parent
+    (source / "run.py").write_text("print('original')\n", encoding="utf-8")
+    (source / "run.py").chmod(0o755)
+    projected = ensure_thread_skill_projection(env.storage, "thread-support-tamper", {"alpha"})
+    package = projected.public / "alpha"
+    target = package / "run.py"
+    external = env.root / "external.txt"
+    external.write_text("outside the projection", encoding="utf-8")
+    if damage == "overwrite":
+        metadata = target.stat()
+        target.write_text("print('modified')\n", encoding="utf-8")
+        os.utime(target, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
+    elif damage == "delete":
+        target.unlink()
+    elif damage == "inject_file":
+        (package / "injected.txt").write_text("injected", encoding="utf-8")
+    elif damage == "inject_directory":
+        (package / "injected").mkdir()
+    elif damage == "symlink":
+        target.unlink()
+        try:
+            target.symlink_to(external)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == 1314:
+                pytest.skip("Windows symlink creation requires SeCreateSymbolicLinkPrivilege")
+            raise
+    elif damage == "fifo":
+        if not hasattr(os, "mkfifo"):
+            pytest.skip("FIFOs require POSIX")
+        target.unlink()
+        os.mkfifo(target)
+    elif damage == "executable":
+        if os.name == "nt":
+            pytest.skip("Windows chmod does not expose POSIX executable bits")
+        target.chmod(0o644)
+
+    ensure_thread_skill_projection(env.storage, "thread-support-tamper", {"alpha"})
+
+    assert not target.is_symlink()
+    assert target.is_file()
+    assert target.read_bytes() == (source / "run.py").read_bytes()
+    assert sorted(path.name for path in package.iterdir()) == ["SKILL.md", "run.py"]
+    if os.name != "nt":
+        assert target.stat().st_mode & 0o111 == 0o111
+    assert external.read_text(encoding="utf-8") == "outside the projection"
+
+
+def test_thread_projection_upgrades_metadata_only_manifest(projection_env) -> None:
+    env = projection_env
+    source = _write_skill(env.skills_root / "public", "alpha")
+    projected = ensure_thread_skill_projection(env.storage, "thread-old-manifest", {"alpha"})
+    target = projected.public / "alpha" / "SKILL.md"
+    manifest_path = projected.public.parent / ".projection-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["view_signature"] = "old-metadata-only-signature"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    target.write_text("MUTATED\n", encoding="utf-8")
+
+    ensure_thread_skill_projection(env.storage, "thread-old-manifest", {"alpha"})
+
+    assert target.read_bytes() == source.read_bytes()

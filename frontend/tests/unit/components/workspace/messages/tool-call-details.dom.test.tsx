@@ -14,6 +14,14 @@ import { I18nContext } from "@/core/i18n/context";
 import { enUS } from "@/core/i18n/locales/en-US";
 import type { ArtifactEntry } from "@/core/threads/types";
 
+import { FlipDisplay as StaticFlipDisplay } from "../../../helpers/flip-display";
+
+rs.mock("@/components/workspace/flip-display", () => ({
+  FlipDisplay: (props: Parameters<typeof StaticFlipDisplay>[0]) => (
+    <StaticFlipDisplay {...props} />
+  ),
+}));
+
 rs.mock("@/components/workspace/artifacts", () => ({
   useArtifacts: () => ({ setOpen: () => undefined, select: () => undefined }),
 }));

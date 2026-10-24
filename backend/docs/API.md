@@ -273,6 +273,16 @@ may be requested on a new thread after `/new`. Stateless `/api/langgraph/runs/*`
 endpoints do not support this header because requests without an explicit thread
 create a new temporary conversation.
 
+When an `input.messages` entry has no usable `id`, the Gateway assigns one
+before persisting the run input and invoking the graph. The same ID then appears
+in the run record and checkpoint, so a client rejoining an active run can match
+the two copies. Caller-supplied nonempty IDs are preserved. For keyed requests,
+the generated IDs are stable for retries with the same thread and key; unkeyed
+runs receive fresh IDs. During a rolling upgrade, route keyed requests with
+ID-less input and their retries to upgraded Gateway workers until all workers
+are upgraded. An older worker may reject a retry against a newly stamped run
+record with 409.
+
 **Rolling upgrades and keyed resume:** route all initial submissions and retries
 containing both `command.resume` and `Idempotency-Key` to upgraded Gateway workers
 only, across `/runs`, `/runs/stream` and `/runs/wait`, until every worker serving
@@ -338,6 +348,12 @@ does not accept this header and keeps the existing missing-stream close of
 - Unsupported options return `422`: `webhook`, `stream_resumable=true`, `after_seconds`, `feedback_keys`, any non-null `on_completion` value (including the SDK values `"complete"` and `"continue"`), `if_not_exists="reject"`, and `multitask_strategy="enqueue"`
 - `stream_resumable=false` is accepted: it is the LangGraph SDK's default and requests the non-resumable stream DeerFlow already serves
 - Undeclared SDK options, including `checkpoint_during` and `durability`, also return `422` instead of being silently discarded
+
+**Request Validation:**
+- `config.configurable` and `config.context` must be objects or `null`; any other value returns `422` (`invalid_run_config_section`)
+- An `assistant_id` that does not normalize to letters, digits and hyphens returns `422`, as does a non-string `agent_name` in `config.configurable`, `config.context` or `context`
+- A message in `input.messages` that cannot be parsed returns `400` naming its index
+- These checks run before a run is created
 
 When outputs changed during the run, `run.delivery` events retain the Slice 1
 facts (`presented`, `paths`, and `by_tool`) and add `produced_paths`,

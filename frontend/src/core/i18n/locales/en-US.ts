@@ -45,6 +45,11 @@ export const enUS: Translations = {
         description:
           "Save versioned Agent workflows, resume within the same Gateway process and review exact retained output versions. No restart replay or hard monetary budget.",
       },
+      reportSections: {
+        title: "Sectioned long-form writing",
+        description:
+          "Write long reports section by section and assemble them into a downloadable Markdown document.",
+      },
       agentTeams: {
         title: "Agent teams",
         description:
@@ -84,6 +89,11 @@ export const enUS: Translations = {
         title: "LightRAG",
         description:
           "Retrieve documents and entity relations from LightRAG with shared source citations.",
+      },
+      knowledgeManagement: {
+        title: "Knowledge ingestion and processing",
+        description:
+          "Ingest files, URLs and text through WeKnora and manage processing with explicit administrator grants. Requires installation and configuration; no management page is included.",
       },
       weknora: {
         title: "WeKnora knowledge retrieval",

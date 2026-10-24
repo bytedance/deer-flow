@@ -1112,6 +1112,29 @@
 
 ### 修复
 
+- **持久化：** 在已存在的数据库中 PostgreSQL 启动初始化失败时，现在会报告原始错误。
+  此前 Gateway 会把任何包含 "does not exist" 的错误（例如迁移时缺少列或表）当作数据库
+  不存在并执行 `CREATE DATABASE`，启动随之以 `database ... already exists` 或
+  `permission denied to create database` 失败，原始错误也不会出现在 traceback 中。
+  现在只有数据库确实不存在（SQLSTATE `3D000`）时才会自动创建。([#7410])
+
+- **MCP：** 普通用户现在可以在“能力中心 → 插件”中安装钉钉、企业微信和 HubSpot。
+  此前非管理员保存这些内置连接（包括之后编辑或启用）会返回
+  `500 Internal Server Error`，因为个人连接检查读取了请求模型未声明的 `cwd` 字段。
+  设置了工作目录的内置连接仍需管理员权限。([#7400])
+
+- **示例：** 扩展示例的包测试重新通过。其测试用 registry 缺少
+  `knowledge_provider()`，不再满足 `ExtensionRegistry` 协议，按 README 运行
+  `pytest` 会失败。Extension Package Check 现在也会运行自带测试的内置示例的测试，
+  因此破坏这些测试的契约变更会在其 PR 中失败。([#7364])
+
+- **网关：** 请求体格式错误的运行请求现在返回客户端错误，而不是
+  `500 Internal Server Error`。此前 `config.configurable` 或 `config.context`
+  不是对象、`assistant_id` 无效、`agent_name` 不是字符串，或 AI 消息的 `tool_calls`
+  不是对象列表时，运行准入会抛出未处理的异常。现在这些请求在创建运行之前即返回
+  `422`（消息问题返回 `400`）。在线程路由上，此前会被接受的 `config.configurable`
+  取值 `[]`、`""`、`0`、`false` 或键值对列表，现在同样返回 `422`。([#7362])
+
 - **TUI：** 按 `Ctrl+C` 中断运行后再退出，不再卡在该运行仍在完成的步骤上。此前运行
   线程会在退出时被等待，TUI 已关闭但 shell 提示符一直阻塞，直到较长的工具调用或模型请求
   返回，再按 `Ctrl+C` 也只会打印 traceback。现在退出时会提示正在等待该步骤，并在其完成后
@@ -10405,3 +10428,7 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7277]: https://github.com/bytedance/deer-flow/pull/7277
 [#7325]: https://github.com/bytedance/deer-flow/pull/7325
 [#7326]: https://github.com/bytedance/deer-flow/pull/7326
+[#7362]: https://github.com/bytedance/deer-flow/pull/7362
+[#7364]: https://github.com/bytedance/deer-flow/pull/7364
+[#7400]: https://github.com/bytedance/deer-flow/pull/7400
+[#7410]: https://github.com/bytedance/deer-flow/pull/7410

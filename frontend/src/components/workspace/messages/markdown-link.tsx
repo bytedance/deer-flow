@@ -1,6 +1,15 @@
-import type { AnchorHTMLAttributes, ComponentProps } from "react";
+import {
+  type AnchorHTMLAttributes,
+  type ComponentProps,
+  createContext,
+  useContext,
+} from "react";
 
-import { resolveMarkdownArtifactURL } from "@/core/artifacts/utils";
+import {
+  isPotentialRelativeArtifactReference,
+  resolveMarkdownArtifactURL,
+  resolveRelativeArtifactURL,
+} from "@/core/artifacts/utils";
 import {
   retrievalSourceId,
   type RetrievalSource,
@@ -87,8 +96,23 @@ function isExternalUrl(href: string | undefined): boolean {
 }
 
 /**
+ * The current thread's artifact paths, provided by the message list. Inside
+ * it, a link rendered with a `threadId` resolves relative destinations
+ * (`report.md`, `./out/a.md`) to the artifact they name.
+ *
+ * This is a context rather than a factory argument because Streamdown
+ * memoizes its root without comparing `components`: a link renderer created
+ * before the artifact list arrives would keep the stale list, while a context
+ * change still reaches it.
+ */
+export const MessageArtifactPathsContext = createContext<
+  readonly string[] | null
+>(null);
+
+/**
  * Builds the `a` renderer shared by message content and generic markdown.
- * Passing a `threadId` also resolves `/mnt/` artifact links; without it those
+ * Passing a `threadId` also resolves `/mnt/` artifact links, plus relative
+ * artifact links inside a `MessageArtifactPathsContext`; without it those
  * links fall through to the default external-link handling.
  */
 export function createMarkdownLinkComponent(
@@ -99,6 +123,7 @@ export function createMarkdownLinkComponent(
     href,
     ...props
   }: AnchorHTMLAttributes<HTMLAnchorElement>) {
+    const artifactPaths = useContext(MessageArtifactPathsContext);
     if (/^#(?:user-content-)?knowledge-source-/.test(href ?? "")) {
       const id = retrievalSourceId(href);
       const source = knowledgeSources.find((item) => item.id === id);
@@ -142,28 +167,55 @@ export function createMarkdownLinkComponent(
         );
       }
     }
+    // Artifact links (`/mnt/…`, or relative inside the message list) open in a
+    // new tab, styled like any other link so they read as clickable.
+    let resolvedHref = href;
+    let opensArtifact = false;
     if (threadId && href?.startsWith("/mnt/")) {
-      return (
-        <a
-          {...props}
-          href={resolveMarkdownArtifactURL(href, threadId)}
-          target="_blank"
-          rel="noopener noreferrer"
-        />
+      resolvedHref = resolveMarkdownArtifactURL(href, threadId);
+      opensArtifact = true;
+    } else if (
+      threadId &&
+      artifactPaths &&
+      href &&
+      isPotentialRelativeArtifactReference(href)
+    ) {
+      const artifactURL = resolveRelativeArtifactURL(
+        href,
+        threadId,
+        artifactPaths,
       );
+      if (!artifactURL) {
+        // Left as-is, the browser would resolve the href against the chat
+        // route (/workspace/chats/<file>) and open a broken "thread".
+        const { className, children } = props;
+        return (
+          <span
+            className={cn(
+              "text-muted-foreground underline decoration-dotted underline-offset-2",
+              className,
+            )}
+            title={`No single artifact in this conversation matches ${href}`}
+          >
+            {children}
+          </span>
+        );
+      }
+      resolvedHref = artifactURL;
+      opensArtifact = true;
     }
     const { className, target, rel, ...rest } = props;
-    const external = isExternalUrl(href);
+    const opensNewTab = opensArtifact || isExternalUrl(href);
     return (
       <a
         {...rest}
-        href={href}
+        href={resolvedHref}
         className={cn(
           "text-primary decoration-primary/30 hover:decoration-primary/60 underline underline-offset-2 transition-colors",
           className,
         )}
-        target={target ?? (external ? "_blank" : undefined)}
-        rel={rel ?? (external ? "noopener noreferrer" : undefined)}
+        target={target ?? (opensNewTab ? "_blank" : undefined)}
+        rel={rel ?? (opensNewTab ? "noopener noreferrer" : undefined)}
       />
     );
   };

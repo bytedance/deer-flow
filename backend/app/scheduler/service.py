@@ -454,6 +454,15 @@ class ScheduledTaskService:
                 error=_LEASE_RECOVERY_ERROR,
                 now=now,
             )
+            try:
+                finalized = await self._task_repo.reconcile_terminal_runs(now=now)
+                if finalized:
+                    logger.info("Finalized %d scheduled occurrence(s) from terminal durable runs", finalized)
+            except Exception:
+                # The pass already isolates per-occurrence failures; a remaining
+                # failure (e.g. the candidate query) must not skip admission or
+                # queue draining for this poll.
+                logger.exception("Failed to reconcile terminal scheduled runs")
         await self._expire_waiting_runs(now=now)
         await self._drain_queue(now=now)
         # Admission and execution capacity are separate. Due occurrences are

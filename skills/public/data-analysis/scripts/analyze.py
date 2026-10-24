@@ -13,6 +13,7 @@ import os
 import re
 import sys
 import tempfile
+from collections import Counter
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
@@ -363,6 +364,13 @@ def _export_results(columns: list[str], rows: list[tuple], output_file: str) -> 
             writer.writerows(rows)
 
     elif ext == ".json":
+        duplicates = [name for name, count in Counter(columns).items() if count > 1]
+        if duplicates:
+            raise ValueError(
+                "JSON export requires unique column names; duplicates: "
+                + ", ".join(repr(name) for name in duplicates)
+                + ". Use SQL aliases (AS) to give each result column a distinct name."
+            )
         records = []
         for row in rows:
             record = {}
@@ -585,15 +593,17 @@ def main():
         )
         logger.info(f"Cached database saved to: {db_path}")
 
-    # Perform action
-    if args.action == "inspect":
-        action_inspect(con, table_map)
-    elif args.action == "query":
-        action_query(con, args.sql, table_map, args.output_file)
-    elif args.action == "summary":
-        action_summary(con, args.table, table_map)
-
-    con.close()
+    try:
+        if args.action == "inspect":
+            action_inspect(con, table_map)
+        elif args.action == "query":
+            action_query(con, args.sql, table_map, args.output_file)
+        elif args.action == "summary":
+            action_summary(con, args.table, table_map)
+    except ValueError as exc:
+        sys.exit(f"Error: {exc}")
+    finally:
+        con.close()
 
 
 if __name__ == "__main__":

@@ -288,6 +288,70 @@ def test_untrusted_users_cannot_launch_packages_or_connect_to_private_hosts(pers
     assert read_user_mcp_config("alice")["mcpServers"]["github"]["personal_public_network"] is True
 
 
+@pytest.mark.parametrize(
+    "provider,credentials",
+    [
+        ("dingtalk", {"access_token": "robot-token", "sign_secret": "SEC-secret"}),
+        ("wecom", {"webhook_key": "webhook-secret"}),
+        ("hubspot", {"access_token": "private-token"}),
+    ],
+)
+def test_ordinary_users_install_and_manage_bundled_connections(personal_client, monkeypatch, tmp_path, provider, credentials):
+    from app.gateway.deps import get_config
+    from app.gateway.routers import capabilities
+    from deerflow.capabilities.business import is_bundled_connection
+    from deerflow.mcp.personal_access import requires_admin
+
+    app = personal_client.app
+    app.include_router(capabilities.router)
+    app.dependency_overrides[get_config] = lambda: SimpleNamespace()
+    platform = tmp_path / "deployment.json"
+    platform.write_text(json.dumps({"mcpServers": {}}))
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(platform))
+    user = {"test-user": "alice", "test-role": "user"}
+    name = "my-" + provider
+    # The web UI installs every catalog connection with scope "user".
+    response = personal_client.post("/api/capabilities/installations", headers=user, json={"plugin_id": provider, "name": name, "scope": "user", "configuration": credentials})
+    assert response.status_code == 200, response.text
+    assert [item["name"] for item in response.json()["items"]] == [name]
+    for secret in credentials.values():
+        assert secret not in response.text
+    saved = next(iter(load_user_mcp_config("alice").mcp_servers.values()))
+    assert is_bundled_connection(saved.command, saved.args, saved.env)
+    assert set(saved.env.values()) == set(credentials.values())
+    # Saved under ordinary-user policy, so discovery and calls need no admin role.
+    assert not requires_admin(saved)
+
+    masked = personal_client.get("/api/mcp/personal/config", headers=user).json()["mcp_servers"][name]
+    masked["description"] = "Team notifications"
+    assert personal_client.put("/api/mcp/personal/config/server", headers=user, json={"server_name": name, "server": masked}).status_code == 200
+    for enabled in (False, True):
+        assert personal_client.patch("/api/mcp/personal/config", headers=user, json={"server_name": name, "enabled": enabled}).status_code == 200
+    saved = next(iter(load_user_mcp_config("alice").mcp_servers.values()))
+    assert saved.description == "Team notifications"
+    assert set(saved.env.values()) == set(credentials.values())
+    assert personal_client.delete("/api/mcp/personal/config/servers/" + name, headers=user).status_code == 200
+    assert read_user_mcp_config("alice")["mcpServers"] == {}
+
+
+def test_bundled_launcher_with_a_working_directory_requires_an_administrator(personal_client):
+    from deerflow.capabilities.business import connection_config
+
+    definition = {**connection_config("hubspot", {"access_token": "private-token"}), "cwd": "/srv"}
+    user = {"test-user": "alice", "test-role": "user"}
+    response = personal_client.post("/api/mcp/personal/config/servers", headers=user, json={"mcp_servers": {"crm": definition}})
+    assert response.status_code == 403
+    assert read_user_mcp_config("alice")["mcpServers"] == {}
+
+    assert personal_client.post("/api/mcp/personal/config/servers", headers={"test-user": "alice"}, json={"mcp_servers": {"crm": definition}}).status_code == 200
+    before = user_mcp_config_path("alice").read_bytes()
+    masked = personal_client.get("/api/mcp/personal/config", headers=user).json()["mcp_servers"]["crm"]
+    assert masked["cwd"] == "/srv"
+    assert personal_client.put("/api/mcp/personal/config/server", headers=user, json={"server_name": "crm", "server": masked}).status_code == 403
+    assert personal_client.patch("/api/mcp/personal/config", headers=user, json={"server_name": "crm", "enabled": True}).status_code == 403
+    assert user_mcp_config_path("alice").read_bytes() == before
+
+
 @pytest.mark.asyncio
 async def test_personal_network_rechecks_destination_before_each_request(monkeypatch):
     from deerflow.mcp import personal_network

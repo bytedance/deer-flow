@@ -374,6 +374,84 @@ describe("artifact URL helpers", () => {
     ).toBe("https://example.com/image.png");
   });
 
+  test("resolveRelativeArtifactURL returns null when it cannot resolve", async () => {
+    const { isRelativeArtifactReference, resolveRelativeArtifactURL } =
+      await loadFreshArtifactUtils();
+    const artifacts = [
+      "/mnt/user-data/outputs/report.md",
+      "/mnt/user-data/outputs/a/dup.md",
+      "/mnt/user-data/outputs/b/dup.md",
+    ];
+
+    expect(
+      resolveRelativeArtifactURL("./report.md#s1", "thread-1", artifacts),
+    ).toBe(
+      "/api/threads/thread-1/artifacts/mnt/user-data/outputs/report.md#s1",
+    );
+    expect(resolveRelativeArtifactURL("dup.md", "thread-1", artifacts)).toBe(
+      null,
+    );
+    expect(resolveRelativeArtifactURL("none.md", "thread-1", artifacts)).toBe(
+      null,
+    );
+    expect(
+      resolveRelativeArtifactURL("../report.md", "thread-1", artifacts),
+    ).toBe(null);
+
+    expect(isRelativeArtifactReference("report.md")).toBe(true);
+    expect(isRelativeArtifactReference("./a/b.md?x=1")).toBe(true);
+    for (const href of [
+      "../report.md",
+      "/workspace/chats/x",
+      "/mnt/user-data/outputs/report.md",
+      "https://example.com/report.md",
+      "mailto:a@example.com",
+      "#section",
+      "?q=1",
+      "",
+    ]) {
+      expect(isRelativeArtifactReference(href)).toBe(false);
+    }
+  });
+
+  test("collectThreadArtifactPaths adds present_files paths missing from state", async () => {
+    const { collectThreadArtifactPaths } = await loadFreshArtifactUtils();
+    const state = ["/mnt/user-data/outputs/a.md"];
+    const messages = [
+      { type: "human", id: "h", content: "go" },
+      {
+        type: "ai",
+        id: "a1",
+        content: "",
+        tool_calls: [
+          {
+            id: "p1",
+            name: "present_files",
+            args: {
+              filepaths: [
+                "/mnt/user-data/outputs/a.md",
+                "/mnt/user-data/outputs/b.zip",
+                "outputs/relative-is-ignored.md",
+              ],
+            },
+          },
+        ],
+      },
+    ] as Parameters<typeof collectThreadArtifactPaths>[1];
+
+    // Reopened thread: the /history head carries no artifacts.
+    expect(collectThreadArtifactPaths([], messages)).toEqual([
+      "/mnt/user-data/outputs/a.md",
+      "/mnt/user-data/outputs/b.zip",
+    ]);
+    expect(collectThreadArtifactPaths(state, messages)).toEqual([
+      "/mnt/user-data/outputs/a.md",
+      "/mnt/user-data/outputs/b.zip",
+    ]);
+    // Without present_files the state array is returned as-is.
+    expect(collectThreadArtifactPaths(state, [messages[0]!])).toBe(state);
+  });
+
   test("builds encoded write-file URLs without undefined query parameters", async () => {
     const { buildWriteFileArtifactURL } = await loadFreshArtifactUtils();
     const filepath = "/mnt/user-data/outputs/a b#c?%20.md";
