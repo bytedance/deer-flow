@@ -90,6 +90,11 @@ export const enUS: Translations = {
         description:
           "Retrieve documents and entity relations from LightRAG with shared source citations.",
       },
+      knowledgePlatform: {
+        title: "Knowledge spaces and connections",
+        description:
+          "Manage hierarchical spaces, resource sharing and inherited policies with explicit administrator grants. Requires installation and configuration; no management page or global retrieval ACL is included.",
+      },
       knowledgeManagement: {
         title: "Knowledge ingestion and processing",
         description:

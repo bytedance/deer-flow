@@ -1619,6 +1619,11 @@ retrieval citations. Configure explicit user-to-workspace credential bindings;
 resource authorization remains with WeKnora. The extension directory includes
 its installation guide.
 
+The optional [knowledge platform extension](examples/deerflow-extension-knowledge-platform/README.md)
+adds connection policies, hierarchical spaces, members and explicit resource sharing.
+Space-routed management retains existing administrator and Provider grants. It is
+disabled by default and includes no management page or global chat retrieval ACL.
+
 The optional [knowledge management extension](examples/deerflow-extension-knowledge-management/README.md)
 adds administrator-authorized file, URL and manual ingestion, processing status,
 reprocessing and cancellation through WeKnora. Parsing, indexing and optional
