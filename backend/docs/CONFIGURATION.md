@@ -1619,6 +1619,8 @@ sandbox:
 
 When you configure `sandbox.mounts`, DeerFlow exposes those `container_path` values in the agent prompt so the agent can discover and operate on mounted directories directly instead of assuming everything must live under `/mnt/user-data`. See [Skills and sandbox paths](#skills-and-sandbox-paths) for Windows, WSL, and Docker path examples.
 
+Trailing slashes in `container_path` are normalized when the config is loaded (`/mnt/reports/` behaves like `/mnt/reports`), and the container root `/` is rejected — mount a specific directory instead.
+
 #### Sandbox network policy
 
 Local Docker AIO sandboxes can opt into an outbound policy:

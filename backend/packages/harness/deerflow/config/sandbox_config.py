@@ -165,6 +165,18 @@ class VolumeMountConfig(BaseModel):
     container_path: str = Field(..., description="Path inside the container")
     read_only: bool = Field(default=False, description="Whether the mount is read-only")
 
+    @field_validator("container_path")
+    @classmethod
+    def _normalize_container_path(cls, value: str) -> str:
+        # LocalSandboxProvider strips trailing slashes when building path
+        # mappings, but the tool path gates compare the configured value as-is;
+        # normalizing here keeps a natural "/mnt/reports/" spelling from
+        # producing a mount the gates reject with a confusing PermissionError.
+        normalized = value.rstrip("/")
+        if not normalized:
+            raise ValueError("container_path must be a mount point below the container root, not '/'")
+        return normalized
+
 
 class SandboxConfig(BaseModel):
     """Config section for a sandbox.
