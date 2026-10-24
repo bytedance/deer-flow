@@ -568,6 +568,7 @@ def _build_extra_volumes(
     *,
     skills_container_path: str = DEFAULT_SKILLS_CONTAINER_PATH,
 ) -> list[k8s_client.V1Volume]:
+    """Build hostPath extras; _build_volumes alone declares the user-data PVC."""
     volumes: list[k8s_client.V1Volume] = []
     for index, mount in enumerate(
         _validated_extra_mounts(
@@ -597,6 +598,7 @@ def _build_extra_volume_mounts(
     *,
     skills_container_path: str = DEFAULT_SKILLS_CONTAINER_PATH,
 ) -> list[k8s_client.V1VolumeMount]:
+    """Reference the shared PVC declared by _build_volumes, or hostPath extras."""
     mounts: list[k8s_client.V1VolumeMount] = []
     for index, mount in enumerate(
         _validated_extra_mounts(
@@ -768,16 +770,15 @@ def _build_volumes(
                 # Broker credentials use their own subPaths on user-data;
                 # only the broker container receives these mounts.
                 continue
-            else:
-                volumes.append(
-                    k8s_client.V1Volume(
-                        name=volume_name,
-                        host_path=k8s_client.V1HostPathVolumeSource(
-                            path=mount.host_path,
-                            type="Directory" if mount.read_only else "DirectoryOrCreate",
-                        ),
-                    )
+            volumes.append(
+                k8s_client.V1Volume(
+                    name=volume_name,
+                    host_path=k8s_client.V1HostPathVolumeSource(
+                        path=mount.host_path,
+                        type="Directory" if mount.read_only else "DirectoryOrCreate",
+                    ),
                 )
+            )
     return volumes
 
 
@@ -936,6 +937,7 @@ def _build_lark_cli_broker_sidecars(
     container), so the plaintext app secret / OAuth tokens stay out of the
     sandbox filesystem. The config root is read-only and its nested locks mount
     is writable. The broker serves the command surface on loopback.
+    PVC mounts reuse the user-data volume declared solely by _build_volumes.
     """
     if not _lark_cli_broker_enabled(provision_lark_cli_broker):
         return []
