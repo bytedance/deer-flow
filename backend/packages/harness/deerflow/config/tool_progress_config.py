@@ -1,6 +1,8 @@
 """Configuration for tool progress tracking middleware."""
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationInfo, field_validator
+
+from deerflow.config._boolean_guards import reject_boolean
 
 
 class ToolProgressConfig(BaseModel):
@@ -32,6 +34,7 @@ class ToolProgressConfig(BaseModel):
     )
     min_word_count_for_similarity: int = Field(
         default=10,
+        ge=1,
         description="Minimum unique word count to apply Jaccard check; shorter content skips near-duplicate detection entirely",
     )
     exempt_tools: set[str] = Field(
@@ -43,3 +46,8 @@ class ToolProgressConfig(BaseModel):
         ge=1,
         description="Maximum number of thread histories to keep in memory (LRU eviction)",
     )
+
+    @field_validator("min_word_count_for_similarity", mode="before")
+    @classmethod
+    def reject_boolean_min_word_count(cls, value: object, info: ValidationInfo) -> object:
+        return reject_boolean(value, info, kind="an integer")
