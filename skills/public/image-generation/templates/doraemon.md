@@ -99,7 +99,7 @@ Right column: x=540, width=450
       "color": "#0095D9",
       "text_align": "center"
     }
-  },
+  }
 }
 ```
 
