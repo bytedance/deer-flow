@@ -229,14 +229,23 @@ async def test_router_upload_is_bounded_and_errors_are_sanitized(api, monkeypatc
         assert len(calls) == 1
 
 
+@pytest.mark.parametrize(
+    "content_type",
+    [
+        "Application/Octet-Stream; charset=binary",
+        "application/octet-stream ; charset=binary",
+        "APPLICATION/OCTET-STREAM",
+    ],
+    ids=["mixed-case-with-parameter", "space-before-parameter", "uppercase"],
+)
 @pytest.mark.asyncio
-async def test_router_upload_accepts_case_insensitive_media_type(api):
+async def test_router_upload_accepts_normalized_media_type(api, content_type):
     app, _, calls, _ = api
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post(
             API_BASE + "/files?filename=guide.txt",
             content=b"knowledge",
-            headers={"content-type": "Application/Octet-Stream; charset=binary"},
+            headers={"content-type": content_type},
         )
 
     assert response.status_code == 202
