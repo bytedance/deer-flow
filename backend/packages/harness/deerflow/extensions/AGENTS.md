@@ -170,10 +170,11 @@ entry, the manager owns the controlled locked sync.
 
 The public package is `packages/extension-api/` and must never import `deerflow` or carry
 framework dependencies. Extensions declare any FastAPI, LangChain, or LangGraph imports
-themselves. Its registry contract exposes eight contribution kinds: middleware
+themselves. Its registry contract exposes nine contribution kinds: middleware
 contributors, task-lifecycle contributors, system-model-call observers, agent-assembly
-observers, context-compaction observers, Gateway-lifetime services, eager routers, and
-experimental full-stack plugins (`registry.plugin()`, see `docs/full-stack-plugins.md`). Middleware contributions declare lead/subagent scope, stable
+observers, context-compaction observers, Gateway-lifetime services, eager routers,
+experimental full-stack plugins (`registry.plugin()`, see `docs/full-stack-plugins.md`),
+and read-only knowledge providers (`registry.knowledge_provider()`, above). Middleware contributions declare lead/subagent scope, stable
 order, and a semantic placement (`MODEL_LOGICAL`, `MODEL_PHYSICAL`, `TOOL_VISIBLE`,
 `TOOL_RAW`, or `STANDARD`) rather than a fragile list index. `extensions/stack.py` is the
 single final composition point; do not inject inside
@@ -283,7 +284,11 @@ snapshot immutable in fact rather than only by declaration. Gateway registers on
 hooks and async system observations are dispatched to that loop even when the caller is a
 subagent's isolated loop, while synchronous system callbacks submit fire-and-forget work
 there. Shutdown stops accepting detached observations before the memory shutdown flush and
-resets the loop only after in-flight run/subagent drain ordering is complete.
+resets the loop only after in-flight run/subagent drain ordering is complete. The
+synchronous dispatch admission check, submission, and pending-future registration share
+a process-local lock with suspension; draining snapshots the set only after suspension
+acquires that lock, so an accepted observation cannot be registered after the shutdown
+snapshot. Completion callbacks take the same lock before removing futures.
 
 `ContextCompactionObserver` reports the one moment a lossy context transform can still be
 described: `DeerFlowSummarizationMiddleware.compact_state()` / `acompact_state()` hash each
