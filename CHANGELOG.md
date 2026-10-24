@@ -1397,12 +1397,19 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
 
 ### Fixed
 
+- **mcp:** Ordinary users can now install DingTalk, WeCom and HubSpot from
+  **Capability Center → Plugins**. Saving one of these bundled
+  connections as a non-administrator, including editing or enabling it later,
+  failed with `500 Internal Server Error` because the personal-connection check
+  read a `cwd` field the request model does not declare. A bundled connection
+  with a working directory still requires an administrator. ([#7400])
+
 - **examples:** The extension example's package tests pass again. Its test
   registry lacked `knowledge_provider()`, so it no longer matched the
   `ExtensionRegistry` protocol and the README's `pytest` run failed. Extension
   Package Check now also runs the tests of bundled examples that ship them,
   so a contract change that breaks them fails its pull request. ([#7364])
-  
+
 - **gateway:** Run requests with a malformed body now get a client error
   instead of `500 Internal Server Error`. A `config.configurable` or
   `config.context` that is not an object, an invalid `assistant_id`, a
@@ -13052,3 +13059,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7326]: https://github.com/bytedance/deer-flow/pull/7326
 [#7362]: https://github.com/bytedance/deer-flow/pull/7362
 [#7364]: https://github.com/bytedance/deer-flow/pull/7364
+[#7400]: https://github.com/bytedance/deer-flow/pull/7400
