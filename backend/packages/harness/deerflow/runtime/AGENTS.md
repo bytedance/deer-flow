@@ -228,6 +228,17 @@ thread deletion removes the watermark only after deleting all run files, includi
 when no events remain. This does not add multi-process JSONL support. Coverage:
 `tests/test_jsonl_event_store_seq_watermark.py` and the mutation cancellation suite.
 
+**In-memory RunEvent snapshot ownership** (`runtime/events/store/memory.py`):
+The thread- and run-keyed indexes deliberately share their internal event dicts,
+but caller-owned `content` and `metadata` must be copied at admission, and
+public put/read results must be detached snapshots. Otherwise mutating a write
+receipt or a paged read silently rewrites later RunEvent replay and every shared
+message projection. The cross-backend contract is also documented on the
+`RunEventStore` ABC in `runtime/events/store/base.py`; alternate and extension
+backends must honor the same input, receipt, and read-snapshot isolation. Keep the
+copy outside the internal indexes; see
+`tests/test_memory_run_event_snapshot_isolation.py`.
+
 **Targeted run-event attribution** (`runtime/events/store/`):
 `RunEventStore.find_latest_ai_message_run_ids()` has a complete-or-error
 contract. Its default implementation walks `list_messages()` backward in
