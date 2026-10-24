@@ -6,6 +6,8 @@ import path from "node:path";
 
 import { expect, test } from "@playwright/test";
 
+import { extensionCatalog } from "@/core/extensions/catalog";
+
 import { mockLangGraphAPI, MOCK_THREAD_ID } from "./utils/mock-api";
 
 let gateway: ChildProcess;
@@ -448,7 +450,7 @@ for (const locale of ["en-US", "zh-CN"]) {
         exact: true,
       }),
     ).toBeVisible();
-    await expect(page.getByRole("article")).toHaveCount(11);
+    await expect(page.getByRole("article")).toHaveCount(extensionCatalog.length);
     const lightrag = page.getByRole("article").filter({ hasText: "LightRAG" });
     await expect(lightrag).toHaveCount(1);
     await expect(lightrag).toContainText(
@@ -672,10 +674,10 @@ test("catalog remains discoverable when runtime discovery fails", async ({
   await expect(
     page.getByRole("alert").filter({ hasText: "Extensions unavailable." }),
   ).toBeVisible();
-  await expect(page.getByRole("article")).toHaveCount(11);
+  await expect(page.getByRole("article")).toHaveCount(extensionCatalog.length);
   await expect(
     page.getByRole("article").filter({ hasText: "Catalog extension" }),
-  ).toHaveCount(11);
+  ).toHaveCount(extensionCatalog.length);
   await expect(
     page.getByRole("article").filter({ hasText: "Script workflows" }),
   ).toHaveCount(1);
