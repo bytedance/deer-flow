@@ -2,6 +2,8 @@
 
 English | [中文](./README_zh.md) | [日本語](./README_ja.md) | [Français](./README_fr.md) | [Русский](./README_ru.md) | [Português](./README_pt.md)
 
+Tenant workspace development: [current progress and next steps (2026-10-24)](docs/tenant-workspaces-status-2026-10-24.md). The shared B/C pool main has development verification; tenant activation and self-service release remain incomplete and disabled.
+
 [![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](./backend/pyproject.toml)
 [![Node.js](https://img.shields.io/badge/Node.js-22%2B-339933?logo=node.js&logoColor=white)](./Makefile)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
