@@ -45,6 +45,11 @@ export const enUS: Translations = {
         description:
           "Save versioned Agent workflows, resume within the same Gateway process and review exact retained output versions. No restart replay or hard monetary budget.",
       },
+      reportSections: {
+        title: "Sectioned long-form writing",
+        description:
+          "Write long reports section by section and assemble them into a downloadable Markdown document.",
+      },
       agentTeams: {
         title: "Agent teams",
         description:
