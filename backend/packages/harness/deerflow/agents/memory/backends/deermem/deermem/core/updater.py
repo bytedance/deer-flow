@@ -363,7 +363,10 @@ def _normalize_memory_update_data(update_data: dict[str, Any]) -> dict[str, Any]
             # apply path never silently writes a zero-delta extension.
             raw_extend = entry.get("extend_by_days")
             if isinstance(raw_extend, (int, float)) and not isinstance(raw_extend, bool):
-                extend_by = int(raw_extend)
+                # int() raises on a non-finite float (a JSON number such as 1e400 parses
+                # to inf), which would fail the whole batch; drop it like any other
+                # unusable value. An int is kept as-is, including values beyond float range.
+                extend_by = int(raw_extend) if isinstance(raw_extend, int) or math.isfinite(raw_extend) else 0
                 if extend_by > 0:
                     reason = entry.get("reason", "")
                     normalized_stale_extensions.append(
@@ -402,7 +405,12 @@ def _normalize_memory_update_data(update_data: dict[str, Any]) -> dict[str, Any]
             if isinstance(_raw_conf, bool) or not isinstance(_raw_conf, (int, float)):
                 _norm_conf = 0.9
             else:
-                _f = float(_raw_conf)
+                # float() raises on an unbounded JSON integer such as 10**400, which
+                # would fail the whole batch; fall back like any other invalid value.
+                try:
+                    _f = float(_raw_conf)
+                except OverflowError:
+                    _f = math.inf
                 _norm_conf = _f if math.isfinite(_f) else 0.9
             _raw_cat = consolidated.get("category")
             _norm_cat = _raw_cat.strip() if isinstance(_raw_cat, str) and _raw_cat.strip() else "context"
