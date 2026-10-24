@@ -276,8 +276,9 @@ export function briefReason(summary: string, max = 120): string {
   const sentenceEnd = /[。！？]|[.!?](?=\s|$)/.exec(text);
   const first = sentenceEnd ? text.slice(0, sentenceEnd.index + 1) : text;
   const bare = first.replace(/[\s。．.！!？?；;，,、:：]+$/u, "");
-  if (bare.length <= max) {
+  const chars = Array.from(bare);
+  if (chars.length <= max) {
     return bare;
   }
-  return `${bare.slice(0, max - 1).trimEnd()}…`;
+  return `${chars.slice(0, max - 1).join("").trimEnd()}…`;
 }
