@@ -280,11 +280,13 @@ test("keeps early streamed steps behind a local user message after finish", asyn
     content: "Reading the presentation skill",
   } as Message;
   // The server keeps the client-submitted id and the runtime injects the
-  // visible copy as `<id>__user`; both normalize onto the same identity.
+  // visible copy as `<id>__user`; both normalize onto the same identity. The
+  // persisted copy carries its trusted feed position.
   const injectedHuman = {
     id: `${submittedId}__user`,
     type: "human",
     content: "Build a presentation",
+    additional_kwargs: { deerflow_seq: 1 },
   } as Message;
   streamMockState.messages = [earlyAssistantStep, injectedHuman];
   streamMockState.isLoading = true;
@@ -346,6 +348,7 @@ test.each([false, true])(
     const serverHuman = humanMessage(
       `${submittedId}__user`,
       "Continue the work",
+      { deerflow_seq: 1 },
     );
     streamMockState.messages = [
       ...streamMockState.messages,
@@ -432,6 +435,7 @@ test("keeps established history order while the submitted human is outside the r
     type: "human",
     content: "Continue the work",
     run_id: "run-new",
+    additional_kwargs: { deerflow_seq: 5 },
   } as Message;
   streamMockState.messages = [
     RECENT_HUMAN,
@@ -450,7 +454,8 @@ test("keeps established history order while the submitted human is outside the r
   ]);
 
   // Frame 3: the throttled snapshot catches up; the confirmed server copy
-  // takes over the same identity exactly once.
+  // (persisted, so stamped with its feed seq) takes over the same identity
+  // exactly once.
   await act(async () => {
     await rs.advanceTimersByTimeAsync(100);
   });
@@ -468,6 +473,216 @@ test("keeps established history order while the submitted human is outside the r
   rows = [
     ...seededHistoryRows(),
     historyRow(5, "run-new", serverHuman),
+    historyRow(6, "run-new", newStep),
+  ];
+  await act(async () => {
+    streamMockState.onFinish?.({
+      values: { messages: streamMockState.messages },
+    });
+    streamMockState.isLoading = false;
+  });
+  rerender();
+  await flushFrames();
+  expect(visibleMessageIds(result.current.thread.messages)).toEqual([
+    "earlier-answer",
+    "old-human",
+    "recent-human",
+    "recent-answer",
+    `${submittedId}__user`,
+    "new-step",
+  ]);
+});
+
+test("keeps the submitted user message visible while only the hidden control copy has arrived", async () => {
+  rs.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  let rows = seededHistoryRows();
+  streamMockState.messages = checkpointMessages();
+  const { rerender, result } = await renderSeededThread({
+    historyRows: () => rows,
+  });
+
+  const submittedId = await submitVisibleTurn(result);
+  expect(visibleMessageIds(result.current.thread.messages)).toEqual([
+    "earlier-answer",
+    "old-human",
+    "recent-human",
+    "recent-answer",
+    submittedId,
+  ]);
+
+  // DynamicContextMiddleware re-keys the submitted human: the hidden control
+  // SystemMessage takes the original id and the visible copy becomes
+  // `<id>__user`. Out-of-order delivery can drop the hidden control copy into
+  // the render snapshot before the visible copy (#7332). The local input must
+  // stay on screen and the streaming answer must follow it — not the previous
+  // turn's question.
+  const reminderCopy = {
+    id: submittedId,
+    type: "system",
+    content: "dynamic context reminder",
+    additional_kwargs: { hide_from_ui: true, deerflow_seq: 5 },
+  } as Message;
+  const newStep = aiMessage("new-step", "Working on the follow-up", {
+    run_id: "run-new",
+  });
+  streamMockState.messages = [
+    RECENT_HUMAN,
+    RECENT_ANSWER,
+    reminderCopy,
+    newStep,
+  ];
+  streamMockState.isLoading = true;
+  rerender();
+  await act(async () => {
+    await rs.advanceTimersByTimeAsync(100);
+  });
+  expect(visibleMessageIds(result.current.thread.messages)).toEqual([
+    "earlier-answer",
+    "old-human",
+    "recent-human",
+    "recent-answer",
+    submittedId,
+    "new-step",
+  ]);
+
+  // The positioned visible copy lands afterwards and takes over the turn.
+  const serverHuman = {
+    id: `${submittedId}__user`,
+    type: "human",
+    content: "Continue the work",
+    run_id: "run-new",
+    additional_kwargs: { deerflow_seq: 5 },
+  } as Message;
+  streamMockState.messages = [
+    RECENT_HUMAN,
+    RECENT_ANSWER,
+    reminderCopy,
+    serverHuman,
+    newStep,
+  ];
+  rerender();
+  await act(async () => {
+    await rs.advanceTimersByTimeAsync(100);
+  });
+  expect(visibleMessageIds(result.current.thread.messages)).toEqual([
+    "earlier-answer",
+    "old-human",
+    "recent-human",
+    "recent-answer",
+    `${submittedId}__user`,
+    "new-step",
+  ]);
+
+  // Finishing refetches history and the display converges to feed order.
+  rows = [
+    ...seededHistoryRows(),
+    historyRow(5, "run-new", serverHuman),
+    historyRow(6, "run-new", newStep),
+  ];
+  await act(async () => {
+    streamMockState.onFinish?.({
+      values: { messages: streamMockState.messages },
+    });
+    streamMockState.isLoading = false;
+  });
+  rerender();
+  await flushFrames();
+  expect(visibleMessageIds(result.current.thread.messages)).toEqual([
+    "earlier-answer",
+    "old-human",
+    "recent-human",
+    "recent-answer",
+    `${submittedId}__user`,
+    "new-step",
+  ]);
+});
+
+test("keeps the submitted user message until a positioned confirmed copy sticks", async () => {
+  rs.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  let rows = seededHistoryRows();
+  streamMockState.messages = checkpointMessages();
+  const { rerender, result } = await renderSeededThread({
+    historyRows: () => rows,
+  });
+
+  const submittedId = await submitVisibleTurn(result);
+  const newStep = aiMessage("new-step", "Working on the follow-up", {
+    run_id: "run-new",
+  });
+
+  // Frame 1: an unpositioned visible copy reaches the snapshot. It must not
+  // withdraw the local input: a checkpoint window can drop an unpositioned
+  // copy again before the REST page confirms the turn (#7332).
+  const unpositionedHuman = {
+    id: `${submittedId}__user`,
+    type: "human",
+    content: "Continue the work",
+    run_id: "run-new",
+  } as Message;
+  streamMockState.messages = [
+    RECENT_HUMAN,
+    RECENT_ANSWER,
+    newStep,
+    unpositionedHuman,
+  ];
+  streamMockState.isLoading = true;
+  rerender();
+  await act(async () => {
+    await rs.advanceTimersByTimeAsync(100);
+  });
+  expect(visibleMessageIds(result.current.thread.messages)).toEqual([
+    "earlier-answer",
+    "old-human",
+    "recent-human",
+    "recent-answer",
+    submittedId,
+    "new-step",
+  ]);
+
+  // Frame 2: the unpositioned copy vanishes from the checkpoint window before
+  // the history refetch. The local input is the only remaining copy of the
+  // user's question and must stay visible above its answer.
+  streamMockState.messages = [RECENT_HUMAN, RECENT_ANSWER, newStep];
+  rerender();
+  await act(async () => {
+    await rs.advanceTimersByTimeAsync(100);
+  });
+  expect(visibleMessageIds(result.current.thread.messages)).toEqual([
+    "earlier-answer",
+    "old-human",
+    "recent-human",
+    "recent-answer",
+    submittedId,
+    "new-step",
+  ]);
+
+  // Frame 3: the positioned confirmed copy arrives and takes over the turn.
+  const positionedHuman = {
+    ...unpositionedHuman,
+    additional_kwargs: { deerflow_seq: 5 },
+  } as Message;
+  streamMockState.messages = [
+    RECENT_HUMAN,
+    RECENT_ANSWER,
+    newStep,
+    positionedHuman,
+  ];
+  rerender();
+  await act(async () => {
+    await rs.advanceTimersByTimeAsync(100);
+  });
+  expect(visibleMessageIds(result.current.thread.messages)).toEqual([
+    "earlier-answer",
+    "old-human",
+    "recent-human",
+    "recent-answer",
+    `${submittedId}__user`,
+    "new-step",
+  ]);
+
+  rows = [
+    ...seededHistoryRows(),
+    historyRow(5, "run-new", positionedHuman),
     historyRow(6, "run-new", newStep),
   ];
   await act(async () => {
@@ -572,6 +787,7 @@ test("keeps a pre-submit older-turn rescue above the submitted human", async () 
     type: "human",
     content: "Continue the work",
     run_id: "run-current",
+    additional_kwargs: { deerflow_seq: 5 },
   } as Message;
   const currentStep = aiMessage("current-step", "Current step", {
     run_id: "run-current",
@@ -620,6 +836,7 @@ test("keeps a transiently rescued current-turn step behind its submitted human",
     type: "human",
     content: "Continue the work",
     run_id: "run-current",
+    additional_kwargs: { deerflow_seq: 3 },
   } as Message;
   // Deliberately omit run_id: this is the streamed step whose ownership has
   // not yet been restored by canonical history.
@@ -1103,6 +1320,7 @@ test("keeps the submitted turn anchored through stop and the final history refre
     type: "human",
     content: "Continue the work",
     run_id: "run-new",
+    additional_kwargs: { deerflow_seq: 5 },
   } as Message;
   streamMockState.messages = [
     RECENT_HUMAN,
@@ -1178,6 +1396,7 @@ test("keeps history stable when the stream errors after the human was confirmed"
     type: "human",
     content: "Continue the work",
     run_id: "run-new",
+    additional_kwargs: { deerflow_seq: 5 },
   } as Message;
   streamMockState.messages = [
     RECENT_HUMAN,
