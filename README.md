@@ -954,6 +954,12 @@ BoxLite shutdown rejects late VM registration and keeps its SDK loop open while
 in-flight acquisitions finish. If they cannot drain within five seconds,
 shutdown fails with resources still owned and can be retried.
 
+Successful `read_file` calls treat a JSON document's `error` field as file data,
+not a failure of the read tool. This keeps receipts accurate when inspecting
+saved API error responses and avoids blocking later reads when the optional
+`tool_progress` guard is enabled. Actual read failures and output truncation
+still retain their error or partial-result status.
+
 #### MCP Server
 
 In the chat UI, enable **Token Usage → Debug** to inspect generic/MCP tool calls.
