@@ -12,12 +12,11 @@ Core dependencies: `@langchain/langgraph-sdk` ^1.5.3 for orchestration/streaming
 `@langchain/core` ^1.1.15, and `@tanstack/react-query` ^5.90.17 for server state.
 Registry UI: Shadcn, MagicUI, React Bits, Vercel AI SDK (see Code Style).
 
-`pnpm-workspace.yaml` overrides `@xmldom/xmldom` 0.9.x to 0.9.12
-(GHSA-965w-775f-mr7g): Nextra pulls 0.9.8 through MathJax and
-`speech-rule-engine@4.1.2`. Remove once upstream resolves a patched version.
-Nextra 4.6.1 and its docs theme keep Zod 4.3.6 until upstream fixes missing
-`children` validation. App Zod 4.6.6 records need explicit key schemas.
-Refresh lockfiles and verify docs builds after override changes.
+`pnpm-workspace.yaml` pins vulnerable `@xmldom/xmldom` 0.9.x to patched
+0.9.12 (GHSA-965w-775f-mr7g) and Nextra 4.6.1's Zod dependencies to 4.3.6
+until upstream fixes missing-`children` validation. App schemas use Zod 4.6.6.
+Remove each override after its upstream fix; refresh the lockfile and test
+docs builds after changes.
 
 ## Commands
 
