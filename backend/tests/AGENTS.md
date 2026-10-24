@@ -83,6 +83,11 @@ Upload case-collision coverage uses separate HTTP requests and preserves both
 reported payloads. Observe real filename-claim inputs to pin the disk seed;
 case-insensitive hosts can otherwise mask a missing seed through link retries.
 
+Same-name upload concurrency coverage synchronizes threads at the first real
+`os.open` claim, after pre-open checks. Verify unique saved paths and every
+caller's exact payload on both native and no-`O_NOFOLLOW` paths; drain workers
+and abort the barrier on failure rather than relying on scheduling or sleeps.
+
 Channel reload cancellation regressions must assert the worker returned the
 stale snapshot before checking that newer runtime config survived. Completion
 alone cannot prove the race: loader exceptions are caught and return `None`.

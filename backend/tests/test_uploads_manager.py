@@ -6,7 +6,9 @@ import os
 import shutil
 import stat
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
+from threading import Barrier
 from unittest.mock import patch
 
 import pytest
@@ -308,6 +310,36 @@ class TestWriteUploadFileNoSymlink:
 
         assert result == tmp_path / "notes_2.txt"
         assert {p.read_bytes() for p in tmp_path.glob("notes*.txt")} == {b"v1", b"v2", b"v3"}
+
+    @pytest.mark.parametrize("without_nofollow", [False, True], ids=["native", "without-nofollow"])
+    def test_concurrent_same_name_uploads_keep_every_payload(self, tmp_path, monkeypatch, without_nofollow):
+        if without_nofollow:
+            monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
+        filename = "notes.txt"
+        payloads = [f"upload-{index}:".encode() + bytes([index]) * 4096 for index in range(12)]
+        first_claim = Barrier(len(payloads), timeout=15)
+        real_open = os.open
+
+        def synchronized_open(path, flags, *args, **kwargs):
+            if os.path.basename(path) == filename and flags & os.O_CREAT:
+                # All writers complete their pre-open checks before any can
+                # create the shared name. Keep the actual filesystem open.
+                first_claim.wait()
+            return real_open(path, flags, *args, **kwargs)
+
+        monkeypatch.setattr(os, "open", synchronized_open)
+        with ThreadPoolExecutor(max_workers=len(payloads)) as executor:
+            futures = [executor.submit(write_upload_file_no_symlink, tmp_path, filename, payload) for payload in payloads]
+            try:
+                paths = [future.result(timeout=20) for future in futures]
+            finally:
+                first_claim.abort()
+
+        assert len(set(paths)) == len(payloads)
+        assert {path.name for path in paths} == {filename, *(f"notes_{index}.txt" for index in range(1, len(payloads)))}
+        assert set(tmp_path.iterdir()) == set(paths)
+        for path, payload in zip(paths, payloads, strict=True):
+            assert path.read_bytes() == payload
 
     def test_collision_fallback_without_no_follow_support_preserves_existing_file(self, tmp_path, monkeypatch):
         # When O_NOFOLLOW is absent (Windows), the function falls back to a
