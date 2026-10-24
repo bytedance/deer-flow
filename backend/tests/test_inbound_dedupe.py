@@ -196,6 +196,20 @@ def test_factory_treats_a_blank_gateway_workers_as_unset(monkeypatch, caplog):
     assert any("Multi-worker deployment detected" in r.message for r in caplog.records)
 
 
+@pytest.mark.asyncio
+async def test_memory_store_respects_max_entries_bound():
+    # The memory store must hold at most ``max_entries`` keys. The capacity check
+    # used to run *before* insertion with a ``>`` bound, so at steady state it held
+    # ``max_entries + 1`` entries. A 3-entry bound must keep exactly the 3 newest
+    # of 5 distinct keys (the two oldest are evicted).
+    store = MemoryInboundDedupeStore(ttl_seconds=600, max_entries=3)
+    keys = [("test", "w", "c", f"m{i}") for i in range(5)]
+    for key in keys:
+        assert await store.try_record(key) is False
+    assert len(store._store) == 3
+    assert set(store._store) == {keys[2], keys[3], keys[4]}
+
+
 # ---------------------------------------------------------------------------
 # PostgresInboundDedupeStore (unit, mocked session factory)
 # ---------------------------------------------------------------------------
