@@ -32,6 +32,16 @@ def test_fetch_reports_redirect_destination_for_target_failure(monkeypatch, stru
 
 
 @pytest.mark.parametrize("structured", [False, True], ids=["text", "structured"])
+def test_fetch_bounds_redirect_destination(monkeypatch, structured):
+    final_url = "https://example.invalid/?next=" + "x" * 10_000
+
+    result = _fetch(monkeypatch, structured, {"statusCode": 404}, finalUrl=final_url)
+
+    assert final_url[:500] in result
+    assert final_url[:501] not in result
+
+
+@pytest.mark.parametrize("structured", [False, True], ids=["text", "structured"])
 @pytest.mark.parametrize("final_url", [None, "", "   ", 42, {}, []])
 def test_fetch_ignores_empty_or_non_string_final_url(monkeypatch, structured, final_url):
     result = _fetch(monkeypatch, structured, {"statusCode": 404}, finalUrl=final_url)

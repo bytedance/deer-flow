@@ -24,6 +24,7 @@ _UNBROWSE_MCP_URL = "https://unbrowse.ai/api/mcp"
 _UNBROWSE_SCRAPE_TOOL = "unbrowse.scrape"
 _UNBROWSE_TIMEOUT = 90
 _UNBROWSE_FETCH_MAX_CHARS = 4096
+_UNBROWSE_FINAL_URL_MAX_CHARS = 500
 _DEFAULT_RENDER = "auto"
 _RENDER_MODES = ("auto", "never", "always")
 _api_key_warned: set[str] = set()
@@ -172,7 +173,7 @@ def web_fetch_tool(url: str) -> str:
         failure = f"target page responded with HTTP {status}"
         final_url = data.get("finalUrl")
         if isinstance(final_url, str) and final_url.strip():
-            failure += f" (final URL: {final_url.strip()})"
+            failure += f" (final URL: {_clip(final_url.strip(), _UNBROWSE_FINAL_URL_MAX_CHARS)})"
 
     content = _clip(data.get("markdown") or "", _UNBROWSE_FETCH_MAX_CHARS)
     if not content:
