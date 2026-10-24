@@ -36,7 +36,12 @@ and occurrence locks, recheck launch status and lease expiry before recovery.
 A busy launch may have requeued and a manual trigger reclaimed the same row
 while recovery waited; the new claim can have the same process owner. Preserve
 its full row and execution-budget slot. A lease equal to scan time is still live;
-missing or strictly older leases remain recoverable.
+missing or strictly older leases remain recoverable. Late launch bookkeeping is
+also generation-fenced: `claim_queued_run` increments `attempt_count`, and the
+service passes that value to `requeue_claimed_run`/`fail_launching_run`, so an
+expired attempt that resurfaces after a same-owner reclaim cannot clear the
+fresh claim's lease or free its execution slot. The fence is optional for
+legacy/custom repositories.
 
 ## MCP task notifications
 
