@@ -181,6 +181,10 @@ Content-Type: application/json
 }
 ```
 
+Optional `assistant_id` binds the thread to `lead_agent` or a custom agent.
+After trimming, lowercasing and mapping `_` to `-`, a custom name must contain
+only letters, digits and hyphens; any other value is rejected with `422`.
+
 **Response:**
 ```json
 {

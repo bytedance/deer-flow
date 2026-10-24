@@ -16,6 +16,7 @@ import threading
 import time
 import uuid
 from contextlib import suppress
+from functools import partial
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -634,6 +635,71 @@ def test_malformed_run_body_is_rejected_before_a_run_is_created(isolated_app, ov
         runs = client.get(f"/api/threads/{thread_id}/runs")
         assert runs.status_code == 200, runs.text
         assert runs.json() == []
+
+
+@pytest.mark.parametrize("assistant_id", ["bad name!", "   ", "a/b", "../etc"])
+def test_thread_create_rejects_an_assistant_id_that_names_no_agent(isolated_app, assistant_id):
+    """Such an id used to be stored, and every state read of the thread then answered 500."""
+    from starlette.testclient import TestClient
+
+    with TestClient(isolated_app, raise_server_exceptions=False) as client:
+        csrf_token = _register_user(client)
+        thread_id = str(uuid.uuid4())
+
+        response = client.post(
+            "/api/threads",
+            json={"thread_id": thread_id, "assistant_id": assistant_id},
+            headers={"X-CSRF-Token": csrf_token},
+        )
+
+        assert response.status_code == 422, response.text
+        [error] = response.json()["detail"]
+        assert error["loc"] == ["body", "assistant_id"]
+        assert f"Invalid assistant_id {assistant_id!r}" in error["msg"]
+        assert client.portal.call(partial(isolated_app.state.thread_store.get, thread_id, user_id=None)) is None
+
+
+@pytest.mark.parametrize("assistant_id", [None, "", "lead_agent", "Research_Agent"])
+def test_thread_create_keeps_a_valid_assistant_id_as_sent(isolated_app, assistant_id):
+    from starlette.testclient import TestClient
+
+    with TestClient(isolated_app, raise_server_exceptions=False) as client:
+        csrf_token = _register_user(client)
+        thread_id = str(uuid.uuid4())
+
+        response = client.post(
+            "/api/threads",
+            json={"thread_id": thread_id, "assistant_id": assistant_id},
+            headers={"X-CSRF-Token": csrf_token},
+        )
+
+        assert response.status_code == 200, response.text
+        assert client.portal.call(partial(isolated_app.state.thread_store.get, thread_id, user_id=None))["assistant_id"] == assistant_id
+        assert client.get(f"/api/threads/{thread_id}/state").status_code == 200
+
+
+def test_thread_recorded_with_an_invalid_assistant_id_stays_readable(isolated_app):
+    """A record written before creation validated assistant_id must not keep answering 500."""
+    from starlette.testclient import TestClient
+
+    with TestClient(isolated_app, raise_server_exceptions=False) as client:
+        csrf_token = _register_user(client)
+        user_id = client.get("/api/v1/auth/me").json()["id"]
+        thread_id = str(uuid.uuid4())
+        client.portal.call(partial(isolated_app.state.thread_store.create, thread_id, assistant_id="bad name!", user_id=user_id))
+        state = {"messages": [HumanMessage(content="hello", id="legacy-human")], "title": "Legacy thread"}
+        client.portal.call(partial(_write_checkpoint, isolated_app.state.checkpointer, thread_id=thread_id, state=state))
+
+        thread = client.get(f"/api/threads/{thread_id}")
+        thread_state = client.get(f"/api/threads/{thread_id}/state")
+        history = client.post(f"/api/threads/{thread_id}/history", json={}, headers={"X-CSRF-Token": csrf_token})
+
+        assert thread.status_code == 200, thread.text
+        assert thread.json()["values"]["title"] == "Legacy thread"
+        assert thread_state.status_code == 200, thread_state.text
+        assert thread_state.json()["values"]["title"] == "Legacy thread"
+        assert history.status_code == 200, history.text
+        assert [entry["values"]["title"] for entry in history.json()] == ["Legacy thread"]
 
 
 def test_stream_run_executes_real_lead_agent_setup_agent_business_path(isolated_app, isolated_deer_flow_home: Path):
