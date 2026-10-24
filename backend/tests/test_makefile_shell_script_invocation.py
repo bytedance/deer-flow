@@ -189,6 +189,29 @@ def test_clean_runtime_data_script_deletes_runtime_tree_and_logs(tmp_path: Path)
     assert not (logs / "gateway.log").exists()
 
 
+def test_clean_runtime_data_script_removes_a_directory_named_like_a_log(tmp_path: Path) -> None:
+    """The old ``rm -rf logs/*.log`` also removed matching directories; keep that scope.
+
+    A stray ``logs/x.log/`` directory must not abort the script — with ``set -e``
+    that would fail ``make clean`` after ``make stop`` has already stopped the
+    stack.
+    """
+    bash = require_script_bash()
+    script = _stage_cleanup_script(tmp_path)
+    runtime = tmp_path / "backend" / ".deer-flow"
+    runtime.mkdir(parents=True)
+    logs = tmp_path / "logs"
+    stray_directory = logs / "x.log"
+    stray_directory.mkdir(parents=True)
+    (stray_directory / "nested.txt").write_text("x\n", encoding="utf-8")
+
+    result = subprocess.run([bash, str(script)], capture_output=True, text=True, timeout=30)
+
+    assert result.returncode == 0, result.stderr
+    assert not runtime.exists()
+    assert not stray_directory.exists()
+
+
 def test_clean_runtime_data_script_tolerates_a_missing_logs_directory(tmp_path: Path) -> None:
     """A fresh checkout may have no logs yet; the script must still succeed."""
     bash = require_script_bash()

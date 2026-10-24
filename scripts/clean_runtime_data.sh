@@ -15,4 +15,6 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 rm -rf "${REPO_ROOT}/backend/.deer-flow"
-rm -f "${REPO_ROOT}"/logs/*.log
+# -r keeps the old recipe's scope: a stray directory named like a log is
+# removed too instead of aborting the script under set -e.
+rm -rf "${REPO_ROOT}"/logs/*.log
