@@ -80,3 +80,15 @@ Unsupported owned calls fail closed; single-worker legacy calls remain supported
 These are scoped guards, not a generation
 protocol covering every mutation. Contract/lock-wait tests live in
 `tests/test_terminal_store_contract.py` (Postgres uses `TEST_POSTGRES_URI`).
+
+## Extension execution fences
+
+Migration 0047 owns `extension_execution_leases`. Public `ExecutionFence` carries
+namespace/resource/holder/epoch, not authority: Gateway binds it to the current
+plugin and user. SQL run admission and fenced cancellation take the run change
+clock first, then lock the lease row and check the database clock after lock wait,
+retaining that lock through commit. Unsupported stores fail closed. Fenced cancel
+persists a request for the existing run owner; never fall back to local cancellation
+when the extension generation is stale. Extension-owned state/quota/control logic
+stays in its package. Tests: `test_extension_execution_fence.py` (PostgreSQL via
+`DEERFLOW_TEST_WORKFLOW_POSTGRES`).

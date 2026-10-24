@@ -2,6 +2,7 @@
 
 import json
 import os
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -47,15 +48,23 @@ def test_companion_record_accepts_uppercase_markdown_suffix(tmp_path):
     assert extract_outline_for_file(original)[0] == [{"title": "Uppercase suffix", "line": 1}]
 
 
-def test_same_size_sandbox_rewrite_rejects_stale_outline(converted_upload):
+@pytest.mark.parametrize("writer", ["in_place", "sandbox"])
+def test_same_size_rewrite_rejects_stale_outline(converted_upload, writer):
     original, markdown = converted_upload
     before = original.stat()
-    sandbox = LocalSandbox("repro", [PathMapping("/mnt/user-data", str(original.parent.parent))])
-    sandbox.write_file("/mnt/user-data/uploads/report.pdf", "%PDF REPLACED B")
+    if writer == "in_place":
+        original.write_text("%PDF REPLACED B", encoding="utf-8")
+    else:
+        sandbox = LocalSandbox("repro", [PathMapping("/mnt/user-data", str(original.parent.parent))])
+        sandbox.write_file("/mnt/user-data/uploads/report.pdf", "%PDF REPLACED B")
     # Force a distinct modification time even on coarse-resolution filesystems.
     os.utime(original, ns=(before.st_atime_ns, before.st_mtime_ns + 2_000_000_000))
     after = original.stat()
-    assert (before.st_dev, before.st_ino, before.st_size) == (after.st_dev, after.st_ino, after.st_size)
+    assert (before.st_dev, before.st_size) == (after.st_dev, after.st_size)
+    if writer == "sandbox" and sys.platform in {"darwin", "linux"}:
+        assert before.st_ino != after.st_ino
+    else:
+        assert before.st_ino == after.st_ino
 
     assert resolve_companion(original) is None
     assert companion_names(original.parent) == set()

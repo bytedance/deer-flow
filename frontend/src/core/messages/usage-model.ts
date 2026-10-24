@@ -3,7 +3,7 @@ import type { Message } from "@langchain/langgraph-sdk";
 import type { Translations } from "@/core/i18n/locales/types";
 
 import { getUsageMetadata, type TokenUsage } from "./usage";
-import { hasContent } from "./utils";
+import { extractContentFromMessage } from "./utils";
 
 export type TokenUsageInlineMode = "off" | "per_turn" | "step_debug";
 
@@ -166,7 +166,8 @@ export function buildTokenDebugSteps(
     }
 
     if (actionLabels.length === 0) {
-      if (hasContent(message)) {
+      // Thinking-only blocks (Anthropic) carry no visible answer content.
+      if (extractContentFromMessage(message).length > 0) {
         actionLabels.push(t.tokenUsage.finalAnswer);
       } else {
         actionLabels.push(t.common.thinking);

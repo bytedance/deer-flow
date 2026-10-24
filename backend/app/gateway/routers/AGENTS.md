@@ -4,6 +4,12 @@ Shared scheduled-task update validation preserves an unchanged future `once`
 instant on a live task inside `scheduler.min_once_delay_seconds`; new/changed
 instants and terminal reactivation still enforce the minimum delay.
 
+Scheduled-task admission rejects nonexistent naive `run_at` and `end_at`
+wall times through the shared Gateway datetime resolver. Keep this check out
+of runtime `next_run_at`: legacy tasks retain their accepted execution time,
+including unchanged live once definitions. Explicit offsets retain their instant;
+ambiguous naive times keep the existing fold choice.
+
 The MCP task list accepts optional `TaskStatus` and `active_only` query filters.
 Pass both to the repository before its limit; preserve `threads:read`, owner
 checks, current-thread incarnation scoping, and the unfiltered array response.
@@ -39,9 +45,9 @@ Agent PUT uses `preserve_non_managed_fields(..., new_tool_groups=...)` to clear
 an inherited knowledge default when changed groups remove knowledge access.
 Explicit scope/null updates still win; unchanged groups are not a migration.
 
-Custom-agent and user-profile 500s and the scheduled-task `invalid_assistant`
-422 use fixed text: agent config parse errors and `OSError`s carry host paths
-and stay in the server log.
+Agent/profile and deployment/personal MCP mutation 500s plus the
+scheduled-task `invalid_assistant` 422 use fixed text. Log exceptions
+server-side; they can carry host paths.
 
 Committed MCP reconciliation failures are logged once by
 `fail_mcp_reconciliation`, with only the underlying exception type.
@@ -60,3 +66,16 @@ external filesystem writers do not participate in this history guarantee.
 Plugin actions stamp `ActionContext.interaction=session` only from authenticated
 session provenance. Never accept it from payloads or propagate it to model tools;
 extensions use it to distinguish owner review from model/tool output.
+
+Skill archive upload copies (`_copy_uploaded_skill_archive`) report the original
+size-limit or read error when temporary cleanup or its warning log fails.
+Successful copies still return the uploaded bytes unchanged. The upload route's
+`finally` discards that archive through the same helper before closing the
+multipart form. Form close is suppressed, so a close, cleanup, or warning
+failure cannot turn a successful install into a 500, replace an install
+error, or skip the discard. Coverage: `tests/test_skill_archive_upload_cleanup.py`.
+
+State updates synchronize titles into thread metadata only for the root checkpoint
+namespace. Nonroot writes preserve the conversation title, branch-title sequence
+and activity timestamp. `tests/test_threads_router.py` checks metadata/search
+isolation and root title synchronization in full and delta modes.
