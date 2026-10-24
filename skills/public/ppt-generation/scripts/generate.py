@@ -4,7 +4,7 @@ from io import BytesIO
 
 from PIL import Image
 from pptx import Presentation
-from pptx.util import Inches
+from pptx.util import Emu, Inches
 
 
 def generate_ppt(
@@ -24,7 +24,7 @@ def generate_ppt(
         Status message
     """
     # Load presentation plan
-    with open(plan_file, "r", encoding="utf-8") as f:
+    with open(plan_file, encoding="utf-8") as f:
         plan = json.load(f)
 
     # Determine slide dimensions based on aspect ratio
@@ -77,14 +77,14 @@ def generate_ppt(
                 # Image is wider - fit to width
                 new_width_emu = slide_width_emu
                 new_height_emu = int(slide_width_emu / img_aspect)
-                left = Inches(0)
-                top = Inches((slide_height_emu - new_height_emu) / 914400)
+                left = Emu(0)
+                top = Emu((slide_height_emu - new_height_emu) // 2)
             else:
                 # Image is taller - fit to height
                 new_height_emu = slide_height_emu
                 new_width_emu = int(slide_height_emu * img_aspect)
-                left = Inches((slide_width_emu - new_width_emu) / 914400)
-                top = Inches(0)
+                left = Emu((slide_width_emu - new_width_emu) // 2)
+                top = Emu(0)
 
             # Save processed image to bytes
             img_bytes = BytesIO()
@@ -92,9 +92,7 @@ def generate_ppt(
             img_bytes.seek(0)
 
             # Add image to slide
-            slide.shapes.add_picture(
-                img_bytes, left, top, Inches(new_width_emu / 914400), Inches(new_height_emu / 914400)
-            )
+            slide.shapes.add_picture(img_bytes, left, top, Emu(new_width_emu), Emu(new_height_emu))
 
         # Add speaker notes if available in plan
         if i < len(slides_info):
@@ -127,9 +125,7 @@ def generate_ppt(
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(
-        description="Generate PowerPoint presentation from slide images"
-    )
+    parser = argparse.ArgumentParser(description="Generate PowerPoint presentation from slide images")
     parser.add_argument(
         "--plan-file",
         required=True,

@@ -146,6 +146,8 @@ python /mnt/skills/public/image-generation/scripts/generate.py \
 
 After all slide images are generated, call the composition script:
 
+Images are fitted to the slide without cropping or stretching. When an image's aspect ratio differs from the slide, it is centered with equal margins on opposite sides.
+
 ```bash
 python /mnt/skills/public/ppt-generation/scripts/generate.py \
   --plan-file /mnt/user-data/workspace/presentation-plan.json \
