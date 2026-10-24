@@ -50,6 +50,12 @@ legacy provider settings out of `knowledge_base` remains specific to the
 RAGFlow `knowledge_search` tool; LightRAG and other knowledge providers keep
 their tool-local settings unchanged.
 
+Legacy top-level DeerMem settings migrate in `MemoryConfig`'s before-validator,
+before Pydantic can discard them as unknown fields. YAML/AppConfig loading and
+the singleton loader share that migration; explicit `backend_config` values win.
+File-style legacy storage paths ending in `.json` are warned and dropped.
+Regression coverage lives in `tests/test_app_config_reload.py`.
+
 Top-level `recursion_limit` and `max_recursion_limit` are hot-reloaded per Gateway run. The former supplies the default when a request omits or provides an invalid value; the latter caps both configured and client-provided budgets.
 
 `tool_output` character/count limits and every `tool_overrides` value share
@@ -93,6 +99,11 @@ Config values starting with `$` are resolved as environment variables (e.g., `$O
 This happens once, at load: consumers such as sandbox providers and ACP `env` use the values verbatim,
 because a resolved secret may itself start with `$` (`tests/test_sandbox_environment_passthrough.py`).
 `ModelConfig` also declares `use_responses_api` and `output_version` so OpenAI `/v1/responses` can be enabled explicitly while still using `langchain_openai:ChatOpenAI`.
+
+Legacy `memory.model_name` migrates to `backend_config.model_name`, a host
+profile selector consumed by the host LLM factory. It must not become
+`backend_config.model.model` (a provider model ID), which loses profile settings.
+An explicit backend model or host LLM keeps precedence over the legacy selector.
 
 `ModelConfig.request_admission` is optional and is not a provider parameter.
 Its positive RPM, finite wait deadline, queue bound and optional quota-group name
