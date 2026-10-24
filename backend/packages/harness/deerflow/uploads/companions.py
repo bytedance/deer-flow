@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import tempfile
+from contextlib import suppress
 from pathlib import Path
 
 from deerflow.utils.atomic_write import cleanup_failed_atomic_write
@@ -60,8 +61,31 @@ def register_companion(original: Path, markdown: Path) -> None:
         raise
 
 
+def _warn_record_removal_failed(target: Path, *, exc_info: bool) -> None:
+    """Report a record we could not remove without adding a new failure.
+
+    Diagnostics are best-effort, exactly like ``cleanup_failed_atomic_write``:
+    a logging handler that raises must not become the caller's error.
+    """
+    with suppress(Exception):
+        logger.warning("Failed to remove upload companion record for %s", target, exc_info=exc_info)
+
+
 def unregister_companion(original: Path) -> None:
-    _record_path(original.parent, original.name).unlink(missing_ok=True)
+    """Forget the ownership record for ``original``, best-effort.
+
+    Callers run this on paths whose real outcome is already decided: an upload
+    that has just been published, or a rejected request being cleaned up. A
+    record that cannot be removed (a Windows handle still open, a read-only
+    mount) must not turn that outcome into an error. Dropping the removal is
+    safe rather than merely convenient: ``resolve_companion`` validates the
+    recorded source identity, so a leftover record fails validation instead of
+    resolving to the wrong companion.
+    """
+    try:
+        _record_path(original.parent, original.name).unlink(missing_ok=True)
+    except OSError:
+        _warn_record_removal_failed(original, exc_info=True)
 
 
 def invalidate_overwritten_upload(path: Path) -> None:
@@ -77,7 +101,12 @@ def invalidate_overwritten_upload(path: Path) -> None:
             if record.is_symlink():
                 continue
             if json.loads(record.read_text(encoding="utf-8")).get("markdown") == path.name:
-                record.unlink(missing_ok=True)
+                try:
+                    record.unlink(missing_ok=True)
+                except OSError:
+                    # The upload already succeeded; report the orphan instead of
+                    # replacing that outcome, as ``unregister_companion`` does.
+                    _warn_record_removal_failed(record, exc_info=True)
         except (OSError, ValueError, AttributeError):
             continue
 
