@@ -11,6 +11,7 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
+from deerflow.skills.diagnostics import SkillLoadDiagnostic
 from deerflow.skills.types import SKILL_MD_FILE, Skill, SkillCategory  # noqa: F401
 from deerflow.utils.host_paths import windows_incompatible_segment
 
@@ -68,6 +69,10 @@ class SkillStorage(ABC):
 
     def __init__(self, container_path: str = DEFAULT_SKILLS_CONTAINER_PATH) -> None:
         self._container_root = container_path
+
+    def load_custom_skill_diagnostics(self) -> list[SkillLoadDiagnostic]:
+        """No diagnostics unless storage explicitly establishes caller ownership."""
+        return []
 
     # ------------------------------------------------------------------
     # Static protocol helpers (not storage-specific)

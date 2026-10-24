@@ -13,11 +13,13 @@ import asyncio
 import logging
 import threading
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from deerflow.sandbox.acquire_serialization import AcquireSerializer
+from deerflow.sandbox.exceptions import SandboxNotFoundError
 
 if TYPE_CHECKING:
     from deerflow.sandbox.sandbox_provider import SandboxProvider
@@ -25,11 +27,16 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+SANDBOX_PREWARM_CONTEXT_KEY = "__deerflow_sandbox_prewarm"
+SANDBOX_PREWARM_CLEANUP_CONTEXT_KEY = "__deerflow_sandbox_prewarm_cleanup"
+_PREWARM_CLEANUP_MARKER = object()
 SANDBOX_LEASE_OWNER_CONTEXT_KEY = "sandbox_lease_owner_id"
 SANDBOX_COMMAND_SCOPE_CONTEXT_KEY = "sandbox_command_scope_id"
 SANDBOX_SERVER_OWNED_CONTEXT_KEYS = frozenset(
     {
         SANDBOX_LEASE_OWNER_CONTEXT_KEY,
+        SANDBOX_PREWARM_CONTEXT_KEY,
+        SANDBOX_PREWARM_CLEANUP_CONTEXT_KEY,
         SANDBOX_COMMAND_SCOPE_CONTEXT_KEY,
     }
 )
@@ -140,6 +147,31 @@ class _LeaseBinding:
     release_on_last: bool = True
 
 
+@dataclass(slots=True)
+class _ClientLifecycleObservation:
+    revision: int = 0
+    readers: int = 0
+
+
+class SandboxClientTeardownInProgressError(RuntimeError):
+    """A new holder must wait until the reserved client lifecycle finishes."""
+
+    def __init__(self, sandbox_id: str):
+        super().__init__(f"sandbox {sandbox_id} is reserved for teardown; retry after cleanup completes")
+        self.sandbox_id = sandbox_id
+
+
+class SandboxClientUnavailableError(SandboxNotFoundError):
+    """Admission failed without a new holder; its acquire was reconciled.
+
+    Existing borrowers can still defer provider release. This subtype lets
+    request callers distinguish that reconciled failure from provider errors.
+    """
+
+    def __init__(self, sandbox_id: str):
+        super().__init__("Sandbox not found after acquisition", sandbox_id=sandbox_id)
+
+
 class SandboxLeaseManager:
     """Coordinate active agent users of one sandbox provider.
 
@@ -157,6 +189,8 @@ class SandboxLeaseManager:
         self._bindings_by_owner: dict[str, _LeaseBinding] = {}
         self._owners_by_sandbox: dict[str, set[str]] = {}
         self._release_pending_by_sandbox: set[str] = set()
+        self._teardowns_by_sandbox: dict[str, tuple[int, int]] = {}
+        self._client_lifecycle_observations: dict[str, _ClientLifecycleObservation] = {}
 
     @staticmethod
     def _thread_key(thread_id: str, user_id: str) -> tuple[str, str]:
@@ -180,14 +214,12 @@ class SandboxLeaseManager:
         owners = self._owners_by_sandbox.get(binding.sandbox_id)
         if owners is None:
             release_provider = binding.sandbox_id in self._release_pending_by_sandbox
-            self._release_pending_by_sandbox.discard(binding.sandbox_id)
             return binding, release_provider
         owners.discard(owner_id)
         if owners:
             return binding, False
         self._owners_by_sandbox.pop(binding.sandbox_id, None)
         release_provider = binding.sandbox_id in self._release_pending_by_sandbox
-        self._release_pending_by_sandbox.discard(binding.sandbox_id)
         return binding, release_provider
 
     def _bind_locked(
@@ -198,6 +230,8 @@ class SandboxLeaseManager:
         *,
         release_on_last: bool,
     ) -> tuple[_LeaseBinding | None, bool]:
+        if sandbox_id in self._teardowns_by_sandbox:
+            raise SandboxClientTeardownInProgressError(sandbox_id)
         existing = self._bindings_by_owner.get(owner_id)
         if existing is not None and existing.thread_key != key:
             raise RuntimeError(f"Sandbox lease owner {owner_id!r} cannot move between thread identities")
@@ -237,8 +271,81 @@ class SandboxLeaseManager:
         them.
         """
         with self._metadata_lock:
-            has_owners = bool(self._owners_by_sandbox.get(sandbox_id))
-        if not has_owners:
+            # An unbound/cancelled acquire still owns cleanup responsibility.
+            # A fork may already have borrowed its client with release_on_last
+            # disabled; preserve the request until that borrower also drains.
+            self._release_pending_by_sandbox.add(sandbox_id)
+        self._release_if_idle(sandbox_id)
+
+    @contextmanager
+    def reserve_idle_teardown(self, sandbox_id: str) -> Iterator[bool]:
+        """Atomically exclude holders without holding metadata locks over IO.
+
+        New bindings, including forks with different thread keys, are rejected
+        until the reservation exits. Synchronous provider cleanup can nest on
+        the same worker thread; another worker must defer instead of waiting.
+        Never acquire the per-thread serializer from this provider-facing hook.
+        """
+        worker = threading.get_ident()
+        with self._metadata_lock:
+            current = self._teardowns_by_sandbox.get(sandbox_id)
+            granted = not self._owners_by_sandbox.get(sandbox_id) and (current is None or current[0] == worker)
+            if granted:
+                if current is None and (observation := self._client_lifecycle_observations.get(sandbox_id)) is not None:
+                    observation.revision += 1
+                self._teardowns_by_sandbox[sandbox_id] = (worker, current[1] + 1 if current else 1)
+        try:
+            yield bool(granted)
+        finally:
+            if granted:
+                with self._metadata_lock:
+                    _, depth = self._teardowns_by_sandbox[sandbox_id]
+                    if depth == 1:
+                        del self._teardowns_by_sandbox[sandbox_id]
+                    else:
+                        self._teardowns_by_sandbox[sandbox_id] = (worker, depth - 1)
+
+    @contextmanager
+    def _observe_client_lifecycle(self, sandbox_id: str) -> Iterator[tuple[_ClientLifecycleObservation, int]]:
+        """Keep teardown history only while a client lookup is in flight."""
+        with self._metadata_lock:
+            if sandbox_id in self._teardowns_by_sandbox:
+                raise SandboxClientTeardownInProgressError(sandbox_id)
+            observation = self._client_lifecycle_observations.setdefault(sandbox_id, _ClientLifecycleObservation())
+            observation.readers += 1
+            revision = observation.revision
+        try:
+            yield observation, revision
+        finally:
+            with self._metadata_lock:
+                observation.readers -= 1
+                if observation.readers == 0:
+                    del self._client_lifecycle_observations[sandbox_id]
+
+    def _bind_live_client(
+        self,
+        owner_id: str,
+        sandbox_id: str,
+        key: tuple[str, str],
+        *,
+        release_on_last: bool,
+        allow_unscoped_borrow: bool,
+    ) -> tuple[_LeaseBinding | None, bool] | None:
+        with self._observe_client_lifecycle(sandbox_id) as (observation, revision):
+            sandbox = self._provider.get(sandbox_id) if allow_unscoped_borrow else self._provider.get_scoped(sandbox_id, thread_id=key[1], user_id=key[0])
+            with self._metadata_lock:
+                # A fork's different serializer cannot protect its earlier
+                # lookup from a parent finishing teardown before this bind.
+                if sandbox is None or observation.revision != revision:
+                    return None
+                return self._bind_locked(owner_id, sandbox_id, key, release_on_last=release_on_last)
+
+    def _release_if_idle(self, sandbox_id: str) -> None:
+        with self.reserve_idle_teardown(sandbox_id) as reserved:
+            if not reserved:
+                return
+            with self._metadata_lock:
+                self._release_pending_by_sandbox.discard(sandbox_id)
             self._provider.release(sandbox_id)
 
     def _active_owner_binding(
@@ -286,15 +393,18 @@ class SandboxLeaseManager:
         release_on_last: bool,
     ) -> str:
         sandbox_id = self._provider.acquire(thread_id, user_id=user_id)
-        with self._metadata_lock:
-            previous, release_previous = self._bind_locked(
-                owner_id,
-                sandbox_id,
-                key,
-                release_on_last=release_on_last,
-            )
+        try:
+            # Observe after acquire: its own inline replacement may legitimately
+            # have torn down the old generation with this same logical id.
+            binding = self._bind_live_client(owner_id, sandbox_id, key, release_on_last=release_on_last, allow_unscoped_borrow=True)
+            if binding is None:
+                raise SandboxClientUnavailableError(sandbox_id)
+            previous, release_previous = binding
+        except BaseException:
+            self._release_unbound_acquire(sandbox_id)
+            raise
         if release_previous and previous is not None:
-            self._provider.release(previous.sandbox_id)
+            self._release_if_idle(previous.sandbox_id)
         return sandbox_id
 
     async def _acquire_and_bind_async(
@@ -335,16 +445,17 @@ class SandboxLeaseManager:
                     exc_info=True,
                 )
             raise cancellation
-        with self._metadata_lock:
-            previous, release_previous = self._bind_locked(
-                owner_id,
-                sandbox_id,
-                key,
-                release_on_last=release_on_last,
-            )
+        try:
+            binding = self._bind_live_client(owner_id, sandbox_id, key, release_on_last=release_on_last, allow_unscoped_borrow=True)
+            if binding is None:
+                raise SandboxClientUnavailableError(sandbox_id)
+            previous, release_previous = binding
+        except BaseException:
+            await run_sync_lifecycle_operation(self._release_unbound_acquire, sandbox_id)
+            raise
         if release_previous and previous is not None:
             await run_sync_lifecycle_operation(
-                self._provider.release,
+                self._release_if_idle,
                 previous.sandbox_id,
             )
         return sandbox_id
@@ -374,7 +485,7 @@ class SandboxLeaseManager:
                     release_on_last=release_on_last,
                 )
             if release_previous and previous is not None:
-                self._provider.release(previous.sandbox_id)
+                self._release_if_idle(previous.sandbox_id)
 
     async def retain_async(
         self,
@@ -397,7 +508,7 @@ class SandboxLeaseManager:
                 )
             if release_previous and previous is not None:
                 await run_sync_lifecycle_operation(
-                    self._provider.release,
+                    self._release_if_idle,
                     previous.sandbox_id,
                 )
 
@@ -456,25 +567,11 @@ class SandboxLeaseManager:
             if existing_sandbox_id is not None:
                 return existing_sandbox_id
 
-            sandbox = (
-                self._provider.get(sandbox_id)
-                if allow_unscoped_borrow
-                else self._provider.get_scoped(
-                    sandbox_id,
-                    thread_id=thread_id,
-                    user_id=user_id,
-                )
-            )
-            if sandbox is not None:
-                with self._metadata_lock:
-                    previous, release_previous = self._bind_locked(
-                        owner_id,
-                        sandbox_id,
-                        key,
-                        release_on_last=release_on_last,
-                    )
+            binding = self._bind_live_client(owner_id, sandbox_id, key, release_on_last=release_on_last, allow_unscoped_borrow=allow_unscoped_borrow)
+            if binding is not None:
+                previous, release_previous = binding
                 if release_previous and previous is not None:
-                    self._provider.release(previous.sandbox_id)
+                    self._release_if_idle(previous.sandbox_id)
                 return sandbox_id
 
             return self._acquire_and_bind(
@@ -533,26 +630,12 @@ class SandboxLeaseManager:
             if existing_sandbox_id is not None:
                 return existing_sandbox_id
 
-            sandbox = (
-                self._provider.get(sandbox_id)
-                if allow_unscoped_borrow
-                else self._provider.get_scoped(
-                    sandbox_id,
-                    thread_id=thread_id,
-                    user_id=user_id,
-                )
-            )
-            if sandbox is not None:
-                with self._metadata_lock:
-                    previous, release_previous = self._bind_locked(
-                        owner_id,
-                        sandbox_id,
-                        key,
-                        release_on_last=release_on_last,
-                    )
+            binding = self._bind_live_client(owner_id, sandbox_id, key, release_on_last=release_on_last, allow_unscoped_borrow=allow_unscoped_borrow)
+            if binding is not None:
+                previous, release_previous = binding
                 if release_previous and previous is not None:
                     await run_sync_lifecycle_operation(
-                        self._provider.release,
+                        self._release_if_idle,
                         previous.sandbox_id,
                     )
                 return sandbox_id
@@ -577,16 +660,19 @@ class SandboxLeaseManager:
                 current = self._bindings_by_owner.get(owner_id)
                 if current is None:
                     return
-                binding, release_provider = self._remove_binding_locked(owner_id)
-            assert binding is not None
-
+                binding = current
             try:
                 sandbox = self._provider.get(binding.sandbox_id)
                 if sandbox is not None:
                     sandbox.release_command_scope(owner_id)
             finally:
+                # Scope cleanup still uses the client: keep the holder until
+                # it drains, then atomically decide whether parking is pending.
+                with self._metadata_lock:
+                    binding, release_provider = self._remove_binding_locked(owner_id)
                 if release_provider:
-                    self._provider.release(binding.sandbox_id)
+                    assert binding is not None
+                    self._release_if_idle(binding.sandbox_id)
 
     async def release_async(self, owner_id: str) -> None:
         """Release a lease without blocking the caller's event loop."""
@@ -653,6 +739,16 @@ def discard_sandbox_lease_manager(provider: SandboxProvider) -> None:
         manager.close()
 
 
+def register_sandbox_prewarm_cleanup(context: dict[str, Any]) -> None:
+    """Admit prewarm only inside an unconditional async lease-release finally."""
+    context[SANDBOX_PREWARM_CLEANUP_CONTEXT_KEY] = _PREWARM_CLEANUP_MARKER
+
+
+def sandbox_prewarm_cleanup_registered(context: Any) -> bool:
+    """Do not accept a serialized caller flag as an execution cleanup boundary."""
+    return isinstance(context, dict) and context.get(SANDBOX_PREWARM_CLEANUP_CONTEXT_KEY) is _PREWARM_CLEANUP_MARKER
+
+
 def ensure_sandbox_lease_owner(context: Any) -> str | None:
     """Create one ephemeral owner id in a mutable runtime context."""
     if not isinstance(context, dict):
@@ -708,13 +804,22 @@ def release_sandbox_execution_lease(context: Any) -> None:
 
 
 async def release_sandbox_execution_lease_async(context: Any) -> None:
-    """Async counterpart to :func:`release_sandbox_execution_lease`."""
-    lease = _sandbox_execution_lease(context)
-    if lease is None:
-        return
+    """Drain speculative work before releasing the ordinary execution lease."""
+    from deerflow.sandbox.prewarm import close_sandbox_prewarm_context
 
-    from deerflow.sandbox.sandbox_provider import get_sandbox_provider
+    if isinstance(context, dict):
+        context.pop(SANDBOX_PREWARM_CLEANUP_CONTEXT_KEY, None)
+    try:
+        await close_sandbox_prewarm_context(context)
+    finally:
+        # Disabled/skipped speculation may own no lease while a later real tool
+        # does. Its cleanup can re-raise cancellation after draining, or fail;
+        # neither may bypass that ordinary execution's release. Do not return
+        # from this finally: cancellation must survive even without a binding.
+        lease = _sandbox_execution_lease(context)
+        if lease is not None:
+            from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 
-    owner_id, _sandbox_id = lease
-    provider = get_sandbox_provider()
-    await get_sandbox_lease_manager(provider).release_async(owner_id)
+            owner_id, _sandbox_id = lease
+            provider = get_sandbox_provider()
+            await get_sandbox_lease_manager(provider).release_async(owner_id)

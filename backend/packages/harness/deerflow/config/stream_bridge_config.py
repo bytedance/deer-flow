@@ -4,6 +4,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, ValidationInfo, field_validator
 
+from deerflow.config._boolean_guards import reject_boolean
+
 StreamBridgeType = Literal["memory", "redis"]
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 15.0
 MAX_HEARTBEAT_INTERVAL_SECONDS = 86_400.0
@@ -52,6 +54,10 @@ class StreamBridgeConfig(BaseModel):
             "even if cleanup never runs. Set to 0 to disable. Only applies to the redis bridge."
         ),
     )
+    producer_lease_recovery_enabled: bool = Field(
+        default=False,
+        description=("Allow terminal Redis consumers to recover a missing END from an expired producer lease. Enable only after every Gateway writer has been upgraded and pre-upgrade runs have drained."),
+    )
     recovered_stream_cleanup_delay_seconds: float = Field(
         default=60.0,
         ge=0,
@@ -66,9 +72,7 @@ class StreamBridgeConfig(BaseModel):
     @classmethod
     def reject_boolean_seconds(cls, value: Any, info: ValidationInfo) -> Any:
         """Reject booleans before Pydantic coerces them to floats."""
-        if isinstance(value, bool):
-            raise ValueError(f"{info.field_name} must be a number, not a boolean")
-        return value
+        return reject_boolean(value, info, kind="a number")
 
 
 # Global configuration instance — None means no stream bridge is configured

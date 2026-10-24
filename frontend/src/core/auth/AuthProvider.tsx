@@ -10,9 +10,18 @@ import React, {
   type ReactNode,
 } from "react";
 
+import { useArtifactDraftOwner } from "@/core/artifacts/draft-context";
+
 import { isStaticWebsiteOnly } from "../static-mode";
 
-import { type User, buildLoginUrl } from "./types";
+import { AuthQueryScopeContext } from "./query-scope";
+import {
+  ACCOUNT_DISABLED_LOGIN_URL,
+  type User,
+  buildLoginUrl,
+  currentReturnPath,
+  parseAuthError,
+} from "./types";
 
 // Re-export for consumers
 export type { User };
@@ -31,9 +40,20 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
+/**
+ * True when the SSR auth verdict for this auth-page render was
+ * `account_disabled`: the visitor holds a live session cookie for a
+ * suspended account, so /login states the known reason immediately instead
+ * of waiting for a login attempt the backend deliberately answers with the
+ * generic invalid-credentials message (#4063 gap 3).
+ */
+export const AuthDisabledContext = createContext(false);
+
 interface AuthProviderProps {
   children: ReactNode;
   initialUser: User | null;
+  /** The Gateway could not determine authentication; null is not a confirmed logout. */
+  initialAuthUnknown?: boolean;
 }
 
 /**
@@ -44,9 +64,18 @@ interface AuthProviderProps {
  * - initialUser comes from server-side guard, avoiding client flicker
  * - Provides logout and refresh capabilities
  */
-export function AuthProvider({ children, initialUser }: AuthProviderProps) {
+export function AuthProvider({
+  children,
+  initialUser,
+  initialAuthUnknown = false,
+}: AuthProviderProps) {
   const [user, setUser] = useState<User | null>(initialUser);
+  const [authKnown, setAuthKnown] = useState(!initialAuthUnknown);
+  const authQueryScope = authKnown ? (user?.id ?? null) : undefined;
+  useArtifactDraftOwner(authQueryScope);
   const [isLoading, setIsLoading] = useState(false);
+  // Logout and externally confirmed users supersede pending auth refreshes.
+  const authRequestRef = React.useRef(0);
   const router = useRouter();
   const pathname = usePathname();
   const staticMode = isStaticWebsiteOnly();
@@ -59,7 +88,10 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
    * so consumers don't reach into React internals.
    */
   const applyUser = useCallback((next: User | null) => {
+    authRequestRef.current++;
     setUser(next);
+    setAuthKnown(true);
+    setIsLoading(false);
   }, []);
 
   /**
@@ -68,29 +100,46 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
    */
   const refreshUser = useCallback(async () => {
     if (staticMode) return;
+    const requestId = ++authRequestRef.current;
 
     try {
       setIsLoading(true);
       const res = await fetch("/api/v1/auth/me", {
         credentials: "include",
       });
+      if (requestId !== authRequestRef.current) return;
 
       if (res.ok) {
         const data = await res.json();
+        if (requestId !== authRequestRef.current) return;
         setUser(data);
+        setAuthKnown(true);
       } else if (res.status === 401) {
-        // Session expired or invalid
         setUser(null);
-        // Redirect to login if on a protected route
-        if (pathname?.startsWith("/workspace")) {
-          router.push(buildLoginUrl(pathname));
+        setAuthKnown(true);
+        const code = await res
+          .json()
+          .then((data) => parseAuthError(data).code)
+          .catch(() => null);
+        if (requestId !== authRequestRef.current) return;
+        if (code === "account_disabled") {
+          // Operator-disabled account (#4063 gap 3): the login page states
+          // the reason. Unlike an expired session there is nothing to come
+          // back to, so no `next` is preserved and the path gate does not
+          // apply — every authenticated page is equally unreachable.
+          router.push(ACCOUNT_DISABLED_LOGIN_URL);
+        } else if (pathname?.startsWith("/workspace")) {
+          // Session expired or invalid — redirect on protected routes
+          router.push(buildLoginUrl(currentReturnPath()));
         }
       }
     } catch (err) {
+      if (requestId !== authRequestRef.current) return;
       console.error("Failed to refresh user:", err);
       setUser(null);
+      setAuthKnown(false);
     } finally {
-      setIsLoading(false);
+      if (requestId === authRequestRef.current) setIsLoading(false);
     }
   }, [staticMode, pathname, router]);
 
@@ -107,7 +156,10 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
    */
   const logout = useCallback(async () => {
     // Immediately clear local state to prevent UI flicker
+    authRequestRef.current++;
     setUser(null);
+    setAuthKnown(true);
+    setIsLoading(false);
 
     if (staticMode) {
       router.push("/");
@@ -169,7 +221,13 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
     applyUser,
   };
 
-  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
+  return (
+    <AuthContext.Provider value={value}>
+      <AuthQueryScopeContext.Provider value={authQueryScope}>
+        {children}
+      </AuthQueryScopeContext.Provider>
+    </AuthContext.Provider>
+  );
 }
 
 /**
@@ -198,7 +256,7 @@ export function useRequireAuth(): AuthContextType {
 
     // Only redirect if we're sure user is not authenticated (not just loading)
     if (!auth.isLoading && !auth.isAuthenticated) {
-      router.push(buildLoginUrl(pathname || "/workspace"));
+      router.push(buildLoginUrl(currentReturnPath()));
     }
   }, [auth.isAuthenticated, auth.isLoading, router, pathname]);
 

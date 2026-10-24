@@ -9,6 +9,20 @@ import { Callout, Steps } from "nextra/components";
 
 本章完整走一遍一个名为 `hello` 的扩展。它贡献一个中间件，为每次工具调用计时，调用慢于配置阈值时记录一条警告。读完你会把它打包、在不依赖 DeerFlow 的情况下做单元测试、安装进一个 checkout，并看到它运行。
 
+## 从现有示例开始
+
+如果要修改已有代码，后端扩展从 `examples/deerflow-extension-example` 开始；
+带页面、后端 action 和模型工具的插件从 `examples/deerflow-extension-bookmarks` 开始。
+[示例上手路径](https://github.com/bytedance/deer-flow/blob/main/examples/README.md)
+列出了对应的测试和安装步骤。准备好后端环境后，在 checkout 根目录运行打包检查：
+
+```bash
+uv run --project backend --no-sync python scripts/check_extension.py /absolute/path/to/your-extension
+```
+
+脚本会构建并检查临时 wheel，不导入扩展，也不修改部署配置。
+随后继续运行示例测试，并验证安装后的功能。若要从零写一个最小中间件，接着阅读下面的教程。
+
 ## 前提
 
 - 一个能用 `make dev` 运行的 DeerFlow checkout。见[快速上手](/docs/application/quick-start)。

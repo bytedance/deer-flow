@@ -4,6 +4,12 @@ Regression coverage for GitHub issue #3597: Playwright MCP (and similar stdio
 servers) write files to a path the sandbox/artifact API cannot resolve. The MCP
 tool wrapper pins stdio cwd/temp under the thread's mounted user-data tree and
 rewrites returned file references to ``/mnt/user-data/...`` virtual paths.
+
+``ResourceLink`` conversion contract: links never become URL-sourced ``file``
+blocks — Chat Completions message serialization rejects those, and a
+checkpointed block would fail every later turn of the thread. ``http(s)``
+image links stay image blocks; every other link becomes a text placeholder,
+with the original link preserved in the artifact under ``resource_links``.
 """
 
 import os
@@ -143,7 +149,9 @@ class TestLocalUriToVirtualPath:
     @pytest.mark.skipif(os.name != "nt", reason="exercises the file:///C:/... drive-qualified URI form")
     def test_windows_file_uri_translates_to_virtual_path(self, paths: Paths):
         src = _workspace_file(paths, "shot.png")
-        assert src.as_uri().startswith("file:///C:/")
+        # The checkout and temp dirs may live on any drive, so derive the
+        # expected drive instead of hardcoding "C:".
+        assert src.as_uri().startswith(f"file:///{src.drive}/")
 
         with _patch_paths(paths):
             result = mcp_tools._local_uri_to_virtual_path(src.as_uri(), thread_id="t1", user_id="u1")
@@ -372,7 +380,7 @@ class TestRewriteLocalPathsInText:
     def test_windows_two_slash_file_uri_in_text_is_rewritten(self, paths: Paths):
         src = _workspace_file(paths, "shot.png")
         two_slash_uri = src.as_uri().replace("file:///", "file://", 1)
-        assert two_slash_uri.startswith("file://C:")
+        assert two_slash_uri.startswith(f"file://{src.drive}")
 
         with _patch_paths(paths):
             result = mcp_tools._rewrite_local_paths_in_text(f"Saved as {two_slash_uri}", thread_id="t1", user_id="u1")
@@ -581,6 +589,288 @@ class TestRewriteLocalPathsInText:
 
         assert result == text
 
+    @pytest.mark.parametrize("filename", ["report.pdf", "report with spaces.pdf"])
+    @pytest.mark.parametrize("spelling", ["relative", "bare", "absolute", "file_uri"])
+    def test_colon_label_does_not_hide_local_file_reference(self, paths: Paths, filename: str, spelling: str):
+        workspace = paths.sandbox_work_dir("t1", user_id="u1")
+        src = _workspace_file(paths, f"temp/{filename}")
+        reference = {"relative": f"temp/{filename}", "bare": filename, "absolute": str(src), "file_uri": src.as_uri()}[spelling]
+
+        with _patch_paths(paths):
+            content, _ = mcp_tools._convert_call_tool_result(
+                CallToolResult(content=[TextContent(type="text", text=f"Saved:{reference}")]),
+                thread_id="t1",
+                user_id="u1",
+                source_base_dir=workspace,
+                changed_files=[src],
+            )
+
+        assert content[0]["text"] == f"Saved:{VIRTUAL_PATH_PREFIX}/workspace/temp/{filename}"
+
+    @pytest.mark.parametrize("separator", ["|", ""])
+    @pytest.mark.parametrize("leading_whitespace", ["", "  ", "\n"])
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://example.com/download",
+            "https://example.com/download?filename=temp/report.pdf",
+            "https://example.com/download?filter=(original(nested))&filename=report.pdf",
+            r"https://example.com/download?filter=original\)&filename=report.pdf",
+        ],
+    )
+    def test_remote_markdown_link_does_not_hide_adjacent_local_link(self, paths: Paths, url: str, separator: str, leading_whitespace: str):
+        workspace = paths.sandbox_work_dir("t1", user_id="u1")
+        src = _workspace_file(paths, "temp/report.pdf")
+        text = f"[remote]({leading_whitespace}{url}){separator}[local](temp/report.pdf)"
+
+        with _patch_paths(paths):
+            content, _ = mcp_tools._convert_call_tool_result(
+                CallToolResult(content=[TextContent(type="text", text=text)]),
+                thread_id="t1",
+                user_id="u1",
+                source_base_dir=workspace,
+                changed_files=[src],
+            )
+
+        assert content[0]["text"] == f"[remote]({leading_whitespace}{url}){separator}[local]({VIRTUAL_PATH_PREFIX}/workspace/temp/report.pdf)"
+
+    @pytest.mark.parametrize("quote", ["'", '"'])
+    @pytest.mark.parametrize("query", ["filename=report.pdf", "label=owner's&filename=report.pdf"])
+    def test_quoted_remote_url_does_not_hide_local_file_reference(self, paths: Paths, quote: str, query: str):
+        workspace = paths.sandbox_work_dir("t1", user_id="u1")
+        src = _workspace_file(paths, "temp/report.pdf")
+        url = f"https://example.com/download?{query}".replace(quote, f"\\{quote}")
+        remote_field = f"{quote}url{quote}:{quote}{url}{quote}"
+        text = f"{{{remote_field},{quote}file{quote}:{quote}temp/report.pdf{quote}}}"
+
+        with _patch_paths(paths):
+            content, _ = mcp_tools._convert_call_tool_result(
+                CallToolResult(content=[TextContent(type="text", text=text)]),
+                thread_id="t1",
+                user_id="u1",
+                source_base_dir=workspace,
+                changed_files=[src],
+            )
+
+        assert content[0]["text"] == f"{{{remote_field},{quote}file{quote}:{quote}{VIRTUAL_PATH_PREFIX}/workspace/temp/report.pdf{quote}}}"
+
+    @pytest.mark.parametrize(
+        "url, markup",
+        [
+            (r"https://example.com/download?label=\"q\"&filename=report.pdf", '{{"url":"{}","file":"temp/report.pdf"}}'),
+            (r"https://example.com/a\|b?filename=report.pdf", "| {} | temp/report.pdf |"),
+        ],
+    )
+    def test_escaped_remote_url_delimiters_do_not_hide_local_file_reference(self, paths: Paths, url: str, markup: str):
+        workspace = paths.sandbox_work_dir("t1", user_id="u1")
+        src = _workspace_file(paths, "temp/report.pdf")
+
+        with _patch_paths(paths):
+            content, _ = mcp_tools._convert_call_tool_result(
+                CallToolResult(content=[TextContent(type="text", text=markup.format(url))]),
+                thread_id="t1",
+                user_id="u1",
+                source_base_dir=workspace,
+                changed_files=[src],
+            )
+
+        assert content[0]["text"] == markup.replace("temp/report.pdf", f"{VIRTUAL_PATH_PREFIX}/workspace/temp/report.pdf").format(url)
+
+    @pytest.mark.parametrize("delimiter", ['"', "<", ">", "`", "|"])
+    @pytest.mark.parametrize("backslash_count", [0, 1, 2, 3])
+    def test_remote_url_delimiter_respects_escape_parity(self, paths: Paths, delimiter: str, backslash_count: int):
+        workspace = paths.sandbox_work_dir("t1", user_id="u1")
+        src = _workspace_file(paths, "temp/report.pdf")
+        prefix = "https://example.com/download" + "\\" * backslash_count + delimiter
+
+        with _patch_paths(paths):
+            content, _ = mcp_tools._convert_call_tool_result(
+                CallToolResult(content=[TextContent(type="text", text=f"{prefix}report.pdf")]),
+                thread_id="t1",
+                user_id="u1",
+                source_base_dir=workspace,
+                changed_files=[src],
+            )
+
+        expected_reference = "report.pdf" if backslash_count % 2 else f"{VIRTUAL_PATH_PREFIX}/workspace/temp/report.pdf"
+        assert content[0]["text"] == f"{prefix}{expected_reference}"
+
+    @pytest.mark.parametrize("whitespace", [" ", "\t", "\n"])
+    def test_remote_url_whitespace_boundary_is_not_escaped(self, paths: Paths, whitespace: str):
+        workspace = paths.sandbox_work_dir("t1", user_id="u1")
+        src = _workspace_file(paths, "temp/report.pdf")
+        prefix = f"https://example.com/download\\{whitespace}"
+
+        with _patch_paths(paths):
+            content, _ = mcp_tools._convert_call_tool_result(
+                CallToolResult(content=[TextContent(type="text", text=f"{prefix}report.pdf")]),
+                thread_id="t1",
+                user_id="u1",
+                source_base_dir=workspace,
+                changed_files=[src],
+            )
+
+        assert content[0]["text"] == f"{prefix}{VIRTUAL_PATH_PREFIX}/workspace/temp/report.pdf"
+
+    def test_adjacent_remote_markdown_links_preserve_each_destination(self, paths: Paths):
+        workspace = paths.sandbox_work_dir("t1", user_id="u1")
+        src = _workspace_file(paths, "temp/report.pdf")
+        links = "[source](https://example.com/download?filename=report.pdf)[mirror](https://example.org/download?filename=temp/report.pdf)"
+        text = f"{links}|[local](temp/report.pdf)"
+
+        with _patch_paths(paths):
+            content, _ = mcp_tools._convert_call_tool_result(
+                CallToolResult(content=[TextContent(type="text", text=text)]),
+                thread_id="t1",
+                user_id="u1",
+                source_base_dir=workspace,
+                changed_files=[src],
+            )
+
+        assert content[0]["text"] == f"{links}|[local]({VIRTUAL_PATH_PREFIX}/workspace/temp/report.pdf)"
+
+    def test_remote_markdown_link_does_not_hide_adjacent_spaced_local_path(self, paths: Paths):
+        workspace = paths.sandbox_work_dir("t1", user_id="u1")
+        src = _workspace_file(paths, "final reports/report.pdf")
+        link = "[remote](https://example.com/download?filename=final%20reports/report.pdf)"
+        text = f"{link}|[local](final reports/report.pdf)"
+
+        with _patch_paths(paths):
+            content, _ = mcp_tools._convert_call_tool_result(
+                CallToolResult(content=[TextContent(type="text", text=text)]),
+                thread_id="t1",
+                user_id="u1",
+                source_base_dir=workspace,
+                changed_files=[src],
+            )
+
+        assert content[0]["text"] == f"{link}|[local]({VIRTUAL_PATH_PREFIX}/workspace/final reports/report.pdf)"
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://example.com/download?filename=report.pdf",
+            "https://example.com/download#report.pdf",
+            "https://example.com/download?filename=temp/report.pdf",
+            "https://example.com/download?filename=temp/report.pdf&signature=unchanged",
+            "https://example.com/download#temp/report.pdf",
+            "https://example.com/download?filter=(original)&filename=report.pdf",
+            "https://example.com/download?label=owner's&filename=report.pdf",
+            "https://example.com/download?label=owner's&filename=temp/report.pdf",
+            "HTTPS://example.com/download?filename=report.pdf",
+            "s3://example-bucket/download?filename=report.pdf",
+            "blob:https://example.com/report.pdf?filename=report.pdf",
+        ],
+    )
+    @pytest.mark.parametrize("markup", ["{}", "[download]({})", "<{}>", "`{}`"])
+    def test_remote_url_is_not_rewritten_as_a_generated_file(self, paths: Paths, url: str, markup: str):
+        workspace = paths.sandbox_work_dir("t1", user_id="u1")
+        src = _workspace_file(paths, "temp/report.pdf")
+        link = markup.format(url)
+        text = f"Source: {link}\nSaved as report.pdf. Local copy: [download](temp/report.pdf)"
+
+        with _patch_paths(paths):
+            content, _ = mcp_tools._convert_call_tool_result(
+                CallToolResult(content=[TextContent(type="text", text=text)]),
+                thread_id="t1",
+                user_id="u1",
+                source_base_dir=workspace,
+                changed_files=[src],
+            )
+
+        virtual_path = f"{VIRTUAL_PATH_PREFIX}/workspace/temp/report.pdf"
+        assert content[0]["text"] == f"Source: {link}\nSaved as {virtual_path}. Local copy: [download]({virtual_path})"
+
+    def test_remote_url_query_is_preserved_without_changed_files(self, paths: Paths):
+        workspace = paths.sandbox_work_dir("t1", user_id="u1")
+        _workspace_file(paths, "temp/report.pdf")
+        url = "https://example.com/download?filename=temp/report.pdf"
+        text = f"Source: {url}\nSaved as temp/report.pdf"
+
+        with _patch_paths(paths):
+            content, _ = mcp_tools._convert_call_tool_result(
+                CallToolResult(content=[TextContent(type="text", text=text)]),
+                thread_id="t1",
+                user_id="u1",
+                source_base_dir=workspace,
+            )
+
+        assert content[0]["text"] == f"Source: {url}\nSaved as {VIRTUAL_PATH_PREFIX}/workspace/temp/report.pdf"
+
+    def test_multiple_remote_urls_preserve_nested_file_uri_queries(self, paths: Paths):
+        workspace = paths.sandbox_work_dir("t1", user_id="u1")
+        src = _workspace_file(paths, "report.pdf")
+        first_url = f"https://example.com/download?source={src.as_uri()}"
+        second_url = "https://example.org/download?filename=report.pdf"
+        text = f"{first_url}\nSaved as report.pdf; mirror: <{second_url}>\nLocal copy: {src.as_uri()}"
+
+        with _patch_paths(paths):
+            content, _ = mcp_tools._convert_call_tool_result(
+                CallToolResult(content=[TextContent(type="text", text=text)]),
+                thread_id="t1",
+                user_id="u1",
+                source_base_dir=workspace,
+                changed_files=[src],
+            )
+
+        virtual_path = f"{VIRTUAL_PATH_PREFIX}/workspace/report.pdf"
+        assert content[0]["text"] == f"{first_url}\nSaved as {virtual_path}; mirror: <{second_url}>\nLocal copy: {virtual_path}"
+
+    def test_remote_url_keeps_a_path_prefix_containing_encoded_spaces(self, paths: Paths):
+        workspace = paths.sandbox_work_dir("t1", user_id="u1")
+        spaced = _workspace_file(paths, "final reports/report.pdf")
+        url = "https://example.com/download?filename=final%20reports/report.pdf"
+        text = f"Source: {url}\nSaved as final reports/report.pdf."
+
+        with _patch_paths(paths):
+            content, _ = mcp_tools._convert_call_tool_result(
+                CallToolResult(content=[TextContent(type="text", text=text)]),
+                thread_id="t1",
+                user_id="u1",
+                source_base_dir=workspace,
+                changed_files=[spaced],
+            )
+
+        assert content[0]["text"] == f"Source: {url}\nSaved as {VIRTUAL_PATH_PREFIX}/workspace/final reports/report.pdf."
+
+    def test_remote_url_keeps_a_filename_containing_percent_encoded_spaces(self, paths: Paths):
+        workspace = paths.sandbox_work_dir("t1", user_id="u1")
+        src = _workspace_file(paths, "report%20final.pdf")
+        url = "https://example.com/download?filename=report%20final.pdf"
+        text = f"Source: {url}\nSaved as report%20final.pdf"
+
+        with _patch_paths(paths):
+            content, _ = mcp_tools._convert_call_tool_result(
+                CallToolResult(content=[TextContent(type="text", text=text)]),
+                thread_id="t1",
+                user_id="u1",
+                source_base_dir=workspace,
+                changed_files=[src],
+            )
+
+        assert content[0]["text"] == f"Source: {url}\nSaved as {VIRTUAL_PATH_PREFIX}/workspace/report%20final.pdf"
+
+    def test_embedded_text_preserves_remote_urls_and_local_file_uris(self, paths: Paths):
+        from mcp.types import EmbeddedResource, TextResourceContents
+
+        workspace = paths.sandbox_work_dir("t1", user_id="u1")
+        src = _workspace_file(paths, "report with spaces.pdf")
+        url = "https://example.com/download?filename=report%20with%20spaces.pdf"
+        text = f"Source: {url}\nLocal copy: {src.as_uri()}\nSaved as report with spaces.pdf"
+        result = CallToolResult(content=[EmbeddedResource(type="resource", resource=TextResourceContents(uri="resource://download-result", mimeType="text/plain", text=text))])
+
+        with _patch_paths(paths):
+            content, _ = mcp_tools._convert_call_tool_result(
+                result,
+                thread_id="t1",
+                user_id="u1",
+                source_base_dir=workspace,
+                changed_files=[src],
+            )
+
+        virtual_path = f"{VIRTUAL_PATH_PREFIX}/workspace/report with spaces.pdf"
+        assert content[0]["text"] == f"Source: {url}\nLocal copy: {virtual_path}\nSaved as {virtual_path}"
+
     def test_bare_filename_not_rewritten_when_used_as_directory_segment(self, paths: Paths):
         workspace = paths.sandbox_work_dir("t1", user_id="u1")
         src = _workspace_file(paths, "page.yml")
@@ -717,7 +1007,7 @@ class TestResultHasTextContent:
 
 
 class TestConvertCallToolResultRewrites:
-    def test_resource_link_image_inside_workspace_rewritten(self, paths: Paths):
+    def test_local_image_resource_link_becomes_text_placeholder(self, paths: Paths):
         src = _workspace_file(paths, "page.png", content=b"png")
         result = CallToolResult(
             content=[ResourceLink(type="resource_link", name="page", uri=src.as_uri(), mimeType="image/png")],
@@ -725,12 +1015,16 @@ class TestConvertCallToolResultRewrites:
         )
 
         with _patch_paths(paths):
-            content, _ = mcp_tools._convert_call_tool_result(result, thread_id="t1", user_id="u1")
+            content, artifact = mcp_tools._convert_call_tool_result(result, thread_id="t1", user_id="u1")
 
-        assert content[0]["type"] == "image"
-        assert content[0]["url"] == f"{VIRTUAL_PATH_PREFIX}/workspace/page.png"
+        # Local images are downgraded too: the provider cannot fetch virtual
+        # paths — the view-image tool is the intended path for local images.
+        virtual = f"{VIRTUAL_PATH_PREFIX}/workspace/page.png"
+        assert content[0]["type"] == "text"
+        assert content[0]["text"] == f"[Resource: page (image/png) available at {virtual}]"
+        assert artifact == {"resource_links": [{"name": "page", "uri": virtual, "mime_type": "image/png"}]}
 
-    def test_resource_link_file_inside_outputs_rewritten(self, paths: Paths):
+    def test_local_file_resource_link_becomes_text_placeholder(self, paths: Paths):
         outputs = paths.sandbox_outputs_dir("t1", user_id="u1")
         outputs.mkdir(parents=True)
         src = outputs / "doc.pdf"
@@ -741,12 +1035,14 @@ class TestConvertCallToolResultRewrites:
         )
 
         with _patch_paths(paths):
-            content, _ = mcp_tools._convert_call_tool_result(result, thread_id="t1", user_id="u1")
+            content, artifact = mcp_tools._convert_call_tool_result(result, thread_id="t1", user_id="u1")
 
-        assert content[0]["type"] == "file"
-        assert content[0]["url"] == f"{VIRTUAL_PATH_PREFIX}/outputs/doc.pdf"
+        virtual = f"{VIRTUAL_PATH_PREFIX}/outputs/doc.pdf"
+        assert content[0]["type"] == "text"
+        assert content[0]["text"] == f"[Resource: doc (application/pdf) available at {virtual}]"
+        assert artifact == {"resource_links": [{"name": "doc", "uri": virtual, "mime_type": "application/pdf"}]}
 
-    def test_resource_link_outside_user_data_untouched(self, tmp_path: Path, paths: Paths):
+    def test_resource_link_outside_user_data_becomes_text_placeholder(self, tmp_path: Path, paths: Paths):
         src = tmp_path / "page.png"
         src.write_bytes(b"png")
         uri = src.as_uri()
@@ -756,11 +1052,18 @@ class TestConvertCallToolResultRewrites:
         )
 
         with _patch_paths(paths):
-            content, _ = mcp_tools._convert_call_tool_result(result, thread_id="t1", user_id="u1")
+            content, artifact = mcp_tools._convert_call_tool_result(result, thread_id="t1", user_id="u1")
 
-        assert content[0]["url"] == uri
+        # The URI stays unresolved outside the user-data tree, but the link is
+        # still downgraded — a ``file://`` URL block is equally fatal. The raw
+        # host path is withheld from model-visible text (US-16); it survives
+        # only in the artifact channel, which the model never sees.
+        assert content[0]["type"] == "text"
+        assert content[0]["text"] == "[Resource: page (image/png)]"
+        assert all("file://" not in block.get("text", "") for block in content)
+        assert artifact == {"resource_links": [{"name": "page", "uri": uri, "mime_type": "image/png"}]}
 
-    def test_remote_resource_link_untouched(self, paths: Paths):
+    def test_remote_image_resource_link_stays_image_block(self, paths: Paths):
         url = "https://example.com/remote.png"
         result = CallToolResult(
             content=[ResourceLink(type="resource_link", name="r", uri=url, mimeType="image/png")],
@@ -768,9 +1071,177 @@ class TestConvertCallToolResultRewrites:
         )
 
         with _patch_paths(paths):
-            content, _ = mcp_tools._convert_call_tool_result(result, thread_id="t1", user_id="u1")
+            content, artifact = mcp_tools._convert_call_tool_result(result, thread_id="t1", user_id="u1")
 
+        assert content[0]["type"] == "image"
         assert content[0]["url"] == url
+        assert artifact is None
+
+    def test_remote_image_resource_link_with_uppercase_scheme_stays_image_block(self, paths: Paths):
+        url = "HTTPS://example.com/remote.png"
+        result = CallToolResult(
+            content=[ResourceLink(type="resource_link", name="r", uri=url, mimeType="image/png")],
+            isError=False,
+        )
+
+        with _patch_paths(paths):
+            content, artifact = mcp_tools._convert_call_tool_result(result, thread_id="t1", user_id="u1")
+
+        # Scheme matching is case-insensitive: the link stays an image block,
+        # not a text placeholder. The block's URL validation normalizes the
+        # scheme to lowercase; the passthrough itself is what matters.
+        assert content[0]["type"] == "image"
+        assert content[0]["url"] == "https://example.com/remote.png"
+        assert artifact is None
+
+    def test_ui_resource_link_becomes_text_placeholder(self, paths: Paths):
+        # Regression guard: an MCP Apps UI card must not produce any block the
+        # Chat Completions translator rejects (any URL-sourced file block).
+        url = "ui://app/card.html"
+        mime = "text/html;profile=mcp-app"
+        result = CallToolResult(
+            content=[ResourceLink(type="resource_link", name="card", uri=url, mimeType=mime)],
+            isError=False,
+        )
+
+        with _patch_paths(paths):
+            content, artifact = mcp_tools._convert_call_tool_result(result, thread_id="t1", user_id="u1")
+
+        assert content[0]["type"] == "text"
+        assert content[0]["text"] == f"[Resource: card ({mime}) available at {url}]"
+        assert all(not (block.get("type") == "file" and "url" in block) for block in content)
+        assert artifact == {"resource_links": [{"name": "card", "uri": url, "mime_type": mime}]}
+
+    def test_remote_non_image_resource_link_becomes_text_placeholder(self, paths: Paths):
+        url = "https://example.com/report.pdf"
+        result = CallToolResult(
+            content=[ResourceLink(type="resource_link", name="report", uri=url, mimeType="application/pdf")],
+            isError=False,
+        )
+
+        with _patch_paths(paths):
+            content, artifact = mcp_tools._convert_call_tool_result(result, thread_id="t1", user_id="u1")
+
+        assert content[0]["type"] == "text"
+        assert content[0]["text"] == f"[Resource: report (application/pdf) available at {url}]"
+        assert artifact == {"resource_links": [{"name": "report", "uri": url, "mime_type": "application/pdf"}]}
+
+    def test_unknown_scheme_resource_link_without_name_or_mime_uses_fallbacks(self, paths: Paths):
+        url = "s3://bucket/report.pdf"
+        result = CallToolResult(
+            content=[ResourceLink(type="resource_link", name="", uri=url, mimeType=None)],
+            isError=False,
+        )
+
+        with _patch_paths(paths):
+            content, artifact = mcp_tools._convert_call_tool_result(result, thread_id="t1", user_id="u1")
+
+        assert content[0]["type"] == "text"
+        assert content[0]["text"] == f"[Resource: unnamed (unknown type) available at {url}]"
+        assert artifact == {"resource_links": [{"name": "", "uri": url, "mime_type": None}]}
+
+    def test_data_uri_resource_link_never_enters_model_text_or_state(self, paths: Paths):
+        payload = "QUFB" + "A" * 500
+        url = f"data:application/pdf;base64,{payload}"
+        result = CallToolResult(
+            content=[
+                ResourceLink(type="resource_link", name="report", uri=url, mimeType="application/pdf"),
+                ResourceLink(type="resource_link", name="", uri="data:image/png;base64,QUJD", mimeType=None),
+            ],
+            isError=False,
+        )
+
+        with _patch_paths(paths):
+            content, artifact = mcp_tools._convert_call_tool_result(result, thread_id="t1", user_id="u1")
+
+        # The URI embeds the whole payload: it must not be inlined into the
+        # model-visible text nor checkpointed inside resource_links. The
+        # placeholder is the canonical location-less form.
+        assert content[0]["type"] == "text"
+        assert content[0]["text"] == "[Resource: report (application/pdf)]"
+        assert content[1]["type"] == "text"
+        assert content[1]["text"] == "[Resource: unnamed (unknown type)]"
+        assert all(payload not in block.get("text", "") for block in content)
+        assert all("data:" not in block.get("text", "") for block in content)
+        assert artifact is None
+
+    def test_image_mime_data_uri_resource_link_is_downgraded(self, paths: Paths):
+        """An ``image/*`` ``data:`` link is downgraded too, by design: the
+        conversion layer keeps new inline payloads out of state, even though
+        the read-time middleware lets persisted ``data:`` image blocks pass."""
+        result = CallToolResult(
+            content=[ResourceLink(type="resource_link", name="shot", uri="data:image/png;base64,QUJD", mimeType="image/png")],
+            isError=False,
+        )
+
+        with _patch_paths(paths):
+            content, artifact = mcp_tools._convert_call_tool_result(result, thread_id="t1", user_id="u1")
+
+        assert content[0]["type"] == "text"
+        assert content[0]["text"] == "[Resource: shot (image/png)]"
+        assert all("data:" not in block.get("text", "") for block in content)
+        assert artifact is None
+
+    def test_blob_uri_resource_link_never_enters_model_text_or_state(self, paths: Paths):
+        url = "blob:https://example.com/550e8400-e29b-41d4-a716-446655440000"
+        result = CallToolResult(
+            content=[ResourceLink(type="resource_link", name="report", uri=url, mimeType="application/pdf")],
+            isError=False,
+        )
+
+        with _patch_paths(paths):
+            content, artifact = mcp_tools._convert_call_tool_result(result, thread_id="t1", user_id="u1")
+
+        # A ``blob:`` URI names a browser-local object nothing else can
+        # dereference: like ``data:`` it never enters checkpointed state, and
+        # the placeholder carries no location segment.
+        assert content[0]["type"] == "text"
+        assert content[0]["text"] == "[Resource: report (application/pdf)]"
+        assert all("blob:" not in block.get("text", "") for block in content)
+        assert artifact is None
+
+    def test_resource_links_merge_with_structured_content_artifact(self, paths: Paths):
+        url = "https://example.com/report.pdf"
+        result = CallToolResult(
+            content=[
+                TextContent(type="text", text="done"),
+                ResourceLink(type="resource_link", name="report", uri=url, mimeType="application/pdf"),
+            ],
+            structuredContent={"k": "v"},
+            isError=False,
+        )
+
+        with _patch_paths(paths):
+            _, artifact = mcp_tools._convert_call_tool_result(result, thread_id="t1", user_id="u1")
+
+        assert artifact == {
+            "structured_content": {"k": "v"},
+            "resource_links": [{"name": "report", "uri": url, "mime_type": "application/pdf"}],
+        }
+
+    def test_multiple_resource_links_preserve_order(self, paths: Paths):
+        first = "https://example.com/a.pdf"
+        second = "ui://app/card.html"
+        result = CallToolResult(
+            content=[
+                ResourceLink(type="resource_link", name="a", uri=first, mimeType="application/pdf"),
+                ResourceLink(type="resource_link", name="b", uri=second, mimeType="text/html"),
+            ],
+            isError=False,
+        )
+
+        with _patch_paths(paths):
+            content, artifact = mcp_tools._convert_call_tool_result(result, thread_id="t1", user_id="u1")
+
+        assert [block["type"] for block in content] == ["text", "text"]
+        assert content[0]["text"] == f"[Resource: a (application/pdf) available at {first}]"
+        assert content[1]["text"] == f"[Resource: b (text/html) available at {second}]"
+        assert artifact == {
+            "resource_links": [
+                {"name": "a", "uri": first, "mime_type": "application/pdf"},
+                {"name": "b", "uri": second, "mime_type": "text/html"},
+            ]
+        }
 
     def test_text_review_case_rewritten(self, paths: Paths):
         workspace = paths.sandbox_work_dir("t1", user_id="u1")
@@ -817,7 +1288,7 @@ class TestConvertCallToolResultRewrites:
 
         assert content[0]["text"] == f"Saved as {VIRTUAL_PATH_PREFIX}/workspace/report with spaces.txt"
 
-    def test_no_context_does_not_rewrite(self, paths: Paths):
+    def test_no_context_resource_link_still_becomes_text_placeholder(self, paths: Paths):
         src = _workspace_file(paths, "x.png", content=b"png")
         uri = src.as_uri()
         result = CallToolResult(
@@ -826,9 +1297,32 @@ class TestConvertCallToolResultRewrites:
         )
 
         with _patch_paths(paths):
-            content, _ = mcp_tools._convert_call_tool_result(result)
+            content, artifact = mcp_tools._convert_call_tool_result(result)
 
-        assert content[0]["url"] == uri
+        # Without thread context the URI is not virtualized, but the downgrade
+        # still applies — a ``file://`` URL image block is not fetchable. The
+        # host path stays out of model-visible text (US-16).
+        assert content[0]["type"] == "text"
+        assert content[0]["text"] == "[Resource: x (image/png)]"
+        assert all("file://" not in block.get("text", "") for block in content)
+        assert artifact == {"resource_links": [{"name": "x", "uri": uri, "mime_type": "image/png"}]}
+
+    def test_windows_drive_resource_link_omits_host_path_from_placeholder(self, paths: Paths):
+        uri = "C:\\Users\\shots\\page.png"
+        result = CallToolResult(
+            content=[ResourceLink(type="resource_link", name="page", uri=uri, mimeType="image/png")],
+            isError=False,
+        )
+
+        with _patch_paths(paths):
+            content, artifact = mcp_tools._convert_call_tool_result(result, thread_id="t1", user_id="u1")
+
+        # urlparse reads the drive prefix as a single-letter scheme; a bare
+        # Windows host path must not reach model-visible text either.
+        assert content[0]["type"] == "text"
+        assert content[0]["text"] == "[Resource: page (image/png)]"
+        assert all(":\\" not in block.get("text", "") for block in content)
+        assert artifact == {"resource_links": [{"name": "page", "uri": "c:\\Users\\shots\\page.png", "mime_type": "image/png"}]}
 
     def test_text_content_passthrough(self, paths: Paths):
         result = CallToolResult(content=[TextContent(type="text", text="hello")], isError=False)

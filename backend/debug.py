@@ -20,6 +20,8 @@ import logging
 
 from dotenv import load_dotenv
 
+from deerflow.env import load_selected_env_file
+
 try:
     from prompt_toolkit import PromptSession
     from prompt_toolkit.history import InMemoryHistory
@@ -28,7 +30,8 @@ try:
 except ImportError:
     _HAS_PROMPT_TOOLKIT = False
 
-load_dotenv()
+if not load_selected_env_file():
+    load_dotenv()
 
 _LOG_FMT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 _LOG_DATEFMT = "%Y-%m-%d %H:%M:%S"

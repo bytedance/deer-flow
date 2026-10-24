@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 
 import pytest
 
+from deerflow.sandbox.exceptions import SandboxNotFoundError
 from deerflow.sandbox.lease import (
     SandboxLeaseManager,
     discard_sandbox_lease_manager,
@@ -154,6 +155,157 @@ def test_last_execution_lease_is_the_only_provider_releaser() -> None:
     manager.release("child-b")
     assert provider.release_calls == ["shared"]
     assert provider.sandbox.released_scopes == ["child-a", "parent", "child-b"]
+
+
+def test_idle_teardown_reservation_excludes_live_holders_and_fork_retention() -> None:
+    provider = _LeaseProvider()
+    manager = SandboxLeaseManager(provider)
+    try:
+        manager.retain("parent", "shared", thread_id="parent-thread", user_id="user")
+        with manager.reserve_idle_teardown("shared") as reserved:
+            assert reserved is False
+        manager.release("parent")
+
+        with manager.reserve_idle_teardown("shared") as reserved:
+            assert reserved is True
+            with manager.reserve_idle_teardown("shared") as nested:
+                assert nested is True
+            errors: list[Exception] = []
+
+            def retain_fork():
+                try:
+                    manager.retain("fork", "shared", thread_id="fork-thread", user_id="user", release_on_last=False)
+                except Exception as error:
+                    errors.append(error)
+
+            borrower = threading.Thread(target=retain_fork)
+            borrower.start()
+            borrower.join(timeout=5)
+            assert not borrower.is_alive()
+            assert len(errors) == 1 and "teardown" in str(errors[0])
+            assert manager.binding_for("fork") is None
+        manager.retain("fork", "shared", thread_id="fork-thread", user_id="user", release_on_last=False)
+        assert manager.binding_for("fork") == "shared"
+    finally:
+        manager.close()
+
+
+def test_failed_rebind_to_teardown_keeps_the_previous_execution_binding() -> None:
+    manager = SandboxLeaseManager(_LeaseProvider())
+    try:
+        manager.retain("owner", "previous", thread_id="thread", user_id="user")
+        with manager.reserve_idle_teardown("shared") as reserved:
+            assert reserved is True
+            with pytest.raises(RuntimeError, match="teardown"):
+                manager.retain("owner", "shared", thread_id="thread", user_id="user")
+            assert manager.binding_for("owner") == "previous"
+    finally:
+        manager.close()
+
+
+def test_execution_holder_survives_scope_cleanup_and_new_fork_defers_parking() -> None:
+    provider = _LeaseProvider()
+    manager = SandboxLeaseManager(provider)
+    manager.retain("parent", "shared", thread_id="parent-thread", user_id="user")
+    ordinary_cleanup = provider.sandbox.release_command_scope
+
+    def cleanup(scope_id):
+        if scope_id == "parent":
+            assert manager.binding_for("parent") == "shared"
+            with manager.reserve_idle_teardown("shared") as reserved:
+                assert reserved is False
+            manager.retain("fork", "shared", thread_id="fork-thread", user_id="user", release_on_last=False)
+        ordinary_cleanup(scope_id)
+
+    provider.sandbox.release_command_scope = cleanup
+    try:
+        manager.release("parent")
+        assert provider.release_calls == []
+        assert manager.binding_for("fork") == "shared"
+        manager.release("fork")
+        assert provider.release_calls == ["shared"]
+        assert provider.sandbox.released_scopes == ["parent", "fork"]
+    finally:
+        manager.close()
+
+
+@pytest.mark.parametrize("async_restore", [False, True], ids=["sync", "async"])
+def test_late_fork_lookup_cannot_bind_a_client_after_parent_parks_it(async_restore) -> None:
+    captured = threading.Event()
+    resume = threading.Event()
+
+    class ParkingProvider(_LeaseProvider):
+        active = True
+
+        def get(self, sandbox_id):
+            client = super().get(sandbox_id) if self.active else None
+            if threading.current_thread().name == "late-fork" and not captured.is_set():
+                captured.set()
+                assert resume.wait(timeout=5)
+            return client
+
+        def release(self, sandbox_id):
+            super().release(sandbox_id)
+            self.active = False
+
+        def acquire(self, thread_id=None, *, user_id=None):
+            self.sandbox = _LeaseSandbox("replacement")
+            self.active = True
+            return super().acquire(thread_id, user_id=user_id)
+
+    provider = ParkingProvider()
+    manager = SandboxLeaseManager(provider)
+    manager.retain("parent", "shared", thread_id="parent-thread", user_id="user")
+    results: list[str] = []
+    errors: list[BaseException] = []
+
+    def restore_fork():
+        try:
+            options = dict(thread_id="fork-thread", user_id="user", release_on_last=False, allow_unscoped_borrow=True)
+            result = asyncio.run(manager.reuse_or_acquire_async("fork", "shared", **options)) if async_restore else manager.reuse_or_acquire("fork", "shared", **options)
+            results.append(result)
+        except BaseException as error:
+            errors.append(error)
+
+    fork = threading.Thread(target=restore_fork, name="late-fork")
+    fork.start()
+    try:
+        assert captured.wait(timeout=5)
+        manager.release("parent")
+        assert provider.release_calls == ["shared"]
+        resume.set()
+        fork.join(timeout=5)
+        assert not fork.is_alive()
+        assert errors == []
+        assert results == ["replacement"]
+        assert manager.binding_for("fork") == "replacement"
+        assert provider.get("replacement") is provider.sandbox
+        manager.release("fork")
+        assert provider.release_calls == ["shared", "replacement"]
+    finally:
+        resume.set()
+        fork.join(timeout=5)
+        manager.close()
+
+
+@pytest.mark.parametrize("async_acquire", [False, True], ids=["sync", "async"])
+def test_acquire_does_not_bind_a_client_that_disappeared_before_admission(async_acquire) -> None:
+    class MissingClientProvider(_LeaseProvider):
+        def get(self, sandbox_id):
+            return None
+
+    provider = MissingClientProvider()
+    manager = SandboxLeaseManager(provider)
+    try:
+        with pytest.raises(SandboxNotFoundError, match="Sandbox not found after acquisition"):
+            if async_acquire:
+                asyncio.run(manager.acquire_async("owner", "thread", user_id="user"))
+            else:
+                manager.acquire("owner", "thread", user_id="user")
+        assert manager.binding_for("owner") is None
+        assert provider.release_calls == ["shared"]
+    finally:
+        manager.close()
 
 
 def test_non_releasing_holder_defers_parent_release_until_its_scope_is_clean() -> None:
@@ -454,6 +606,39 @@ async def test_cancelled_async_acquire_releases_unbound_provider_result() -> Non
 
     assert manager.binding_for("child") is None
     assert provider.release_calls == ["shared"]
+
+
+@pytest.mark.anyio
+async def test_cancelled_acquire_defers_rollback_until_a_fork_borrower_drains() -> None:
+    started = asyncio.Event()
+    finish = asyncio.Event()
+
+    class BlockingProvider(_LeaseProvider):
+        async def acquire_async(self, thread_id=None, *, user_id=None):
+            started.set()
+            await finish.wait()
+            return self.sandbox.id
+
+    provider = BlockingProvider()
+    manager = SandboxLeaseManager(provider)
+    task = asyncio.create_task(manager.acquire_async("cancelled", "parent-thread", user_id="user"))
+    try:
+        await started.wait()
+        manager.retain("fork", "shared", thread_id="fork-thread", user_id="user", release_on_last=False)
+        task.cancel()
+        finish.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert provider.release_calls == []
+        await manager.release_async("fork")
+        assert provider.release_calls == ["shared"]
+        assert provider.sandbox.released_scopes == ["fork"]
+    finally:
+        finish.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        manager.close()
 
 
 @pytest.mark.anyio

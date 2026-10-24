@@ -7,8 +7,10 @@ wiring PR for issue #4189 item 2.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
+import sys
 import threading
 from pathlib import Path
 
@@ -32,6 +34,7 @@ from deerflow.storage import (
 )
 from deerflow.storage import contract as contract_module
 from deerflow.storage.backends.local_fs import LocalFsBlobStore
+from deerflow.storage.backends.local_fs import local_fs_store as local_fs_module
 
 
 @pytest.fixture(autouse=True)
@@ -273,6 +276,63 @@ def test_put_survives_a_lost_sidecar(store: LocalFsBlobStore):
     assert store.get_bytes(ref) == data
 
 
+@pytest.mark.parametrize("existing", [False, True], ids=["new-put", "retry-put"])
+def test_put_survives_sidecar_allocation_failure(store: LocalFsBlobStore, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, existing: bool):
+    """Even creating the advisory sidecar may fail after publishing content."""
+    data = b"content survives an unavailable sidecar"
+    if existing:
+        previous = store.put_bytes(data, kind="tool-output")
+        store._paths_for(previous)[1].unlink()
+    original_mkstemp = local_fs_module.tempfile.mkstemp
+
+    def fail_sidecar_allocation(*args, **kwargs):
+        if kwargs.get("prefix") == ".meta-":
+            raise OSError(errno.ENOSPC, "sidecar allocation failed")
+        return original_mkstemp(*args, **kwargs)
+
+    monkeypatch.setattr(local_fs_module.tempfile, "mkstemp", fail_sidecar_allocation)
+    ref = store.put_bytes(data, kind="tool-output")
+
+    assert store.get_bytes(ref) == data
+    assert not store._paths_for(ref)[1].exists()
+    assert not list(store._root.rglob("*.tmp"))
+    assert "Could not write blob sidecar" in caplog.text
+
+
+@pytest.mark.parametrize("existing", [False, True], ids=["new-put", "retry-put"])
+def test_put_survives_sidecar_publish_failure(store: LocalFsBlobStore, monkeypatch: pytest.MonkeyPatch, existing: bool):
+    """A failed sidecar replacement still removes its temporary file."""
+    data = b"content survives a failed sidecar replacement"
+    if existing:
+        previous = store.put_bytes(data, kind="tool-output")
+        store._paths_for(previous)[1].unlink()
+    original_replace = local_fs_module.os.replace
+
+    def fail_sidecar_publish(source, destination):
+        if Path(destination).suffix == ".json":
+            raise OSError(errno.ENOSPC, "sidecar replacement failed")
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(local_fs_module.os, "replace", fail_sidecar_publish)
+    ref = store.put_bytes(data, kind="tool-output")
+
+    assert store.get_bytes(ref) == data
+    assert not store._paths_for(ref)[1].exists()
+    assert not list(store._root.rglob("*.tmp"))
+
+
+def test_content_allocation_failure_still_fails_put(store: LocalFsBlobStore, monkeypatch: pytest.MonkeyPatch):
+    """Only metadata failures are advisory; missing content remains an error."""
+
+    def fail_allocation(*args, **kwargs):
+        raise OSError(errno.ENOSPC, "content allocation failed")
+
+    monkeypatch.setattr(local_fs_module.tempfile, "mkstemp", fail_allocation)
+    with pytest.raises(BlobWriteError, match="content allocation failed"):
+        store.put_bytes(b"not published", kind="tool-output")
+    assert not any(path.is_file() for path in store._root.rglob("*"))
+
+
 # ---------------------------------------------------------------------------
 # Factory + config wiring
 # ---------------------------------------------------------------------------
@@ -388,6 +448,31 @@ def test_dotted_import_path_backend(tmp_path: Path):
     )
     reset_blob_store()
     assert isinstance(get_blob_store(), LocalFsBlobStore)
+
+
+@pytest.mark.parametrize("separator", [".", ":"])
+def test_single_module_import_path_backend(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, separator: str):
+    module_name = "deployment_blob_backend"
+    (tmp_path / f"{module_name}.py").write_text(
+        "from deerflow.storage.backends.local_fs import LocalFsBlobStore\n\nclass DeploymentBlobStore(LocalFsBlobStore):\n    pass\n",
+        encoding="utf-8",
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    bsc.set_blob_storage_config(
+        bsc.BlobStorageConfig(
+            enabled=True,
+            backend=f"{module_name}{separator}DeploymentBlobStore",
+            backend_config={"root": str(tmp_path / "blobs")},
+        )
+    )
+    try:
+        store = get_blob_store()
+        assert type(store).__module__ == module_name
+        ref = store.put_bytes(b"custom backend content", kind="tool-output")
+        assert store.get_bytes(ref) == b"custom backend content"
+        assert get_blob_store_if_enabled() is store
+    finally:
+        sys.modules.pop(module_name, None)
 
 
 def test_relative_root_is_resolved_against_runtime_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

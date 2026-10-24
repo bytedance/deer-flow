@@ -6,8 +6,10 @@ loop: keypress -> submit -> worker thread -> stream_actions -> reducer -> state.
 
 import asyncio
 import threading
+import time
 
 import pytest
+from textual import events
 from textual.containers import VerticalScroll
 
 from deerflow.client import StreamEvent
@@ -80,6 +82,109 @@ async def test_app_runs_a_turn_and_renders_streamed_assistant():
     assistant = [r for r in app.state.rows if r.kind == "assistant"][-1]
     assert assistant.text == "Hello world"
     assert app.state.usage == {"total_tokens": 3}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prefix", ["", "/tdd\n", "/tdd\t"])
+async def test_multiline_paste_reaches_agent_without_dropping_lines(prefix):
+    session = _FakeSession()
+    app = DeerFlowTUI(session, LaunchPlan(mode="tui"))
+    pasted = prefix + 'Traceback:\n  File "worker.py", line 7\nRuntimeError: boom'
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.post_message(events.Paste(pasted))
+        await pilot.pause()
+        await pilot.press("enter")
+        assert await _wait_until(lambda: bool(session.client.stream_calls), pilot)
+
+    assert session.client.stream_calls[0][0] == pasted
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("separator", [" ", "\t", "\n", "\u00a0", "\u2003", "\u202f", "\u3000"])
+async def test_pasted_whitespace_closes_palette_and_enter_submits_skill(separator):
+    session = _FakeSession()
+    app = DeerFlowTUI(session, LaunchPlan(mode="tui"))
+    pasted = f"/tdd{separator}"
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("slash", "t", "d", "d")
+        assert app._palette_open
+        app.post_message(events.Paste(separator))
+        await pilot.pause()
+        assert app.query_one("#composer").value == pasted
+        palette_open_after_separator = app._palette_open
+
+        await pilot.press("enter")
+        assert await _wait_until(lambda: bool(session.client.stream_calls), pilot)
+        assert not palette_open_after_separator
+        assert not app._palette_open
+
+    assert len(session.client.stream_calls) == 1
+    assert session.client.stream_calls[0][0] == "/tdd"
+    assert app._history.entries() == ["/tdd"]
+
+
+@pytest.mark.asyncio
+async def test_multiline_arrows_move_lines_before_input_history():
+    app = DeerFlowTUI(_FakeSession(), LaunchPlan(mode="tui"))
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._history.add("previous prompt")
+        app.post_message(events.Paste("first line\nsecond line"))
+        await pilot.pause()
+        composer = app.query_one("#composer")
+
+        assert composer.cursor_location == (1, 11)
+        await pilot.press("up")
+        await pilot.pause()
+        assert composer.value == "first line\nsecond line"
+        assert composer.cursor_location[0] == 0
+
+        await pilot.press("down")
+        await pilot.pause()
+        assert composer.value == "first line\nsecond line"
+        assert composer.cursor_location[0] == 1
+
+        composer.cursor_position = 0
+        await pilot.press("up")
+        await pilot.pause()
+        assert composer.value == "previous prompt"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("draft", ["unsent question", "first line\nsecond line"])
+async def test_up_with_empty_history_preserves_draft_and_cursor(draft):
+    app = DeerFlowTUI(_FakeSession(), LaunchPlan(mode="tui"))
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.post_message(events.Paste(draft))
+        await pilot.pause()
+        composer = app.query_one("#composer")
+        location = (0, 2)
+        composer.move_cursor(location)
+
+        await pilot.press("up", "up")
+        await pilot.pause()
+        assert composer.value == draft
+        assert composer.cursor_location == location
+
+
+@pytest.mark.asyncio
+async def test_up_with_empty_history_preserves_undo():
+    app = DeerFlowTUI(_FakeSession(), LaunchPlan(mode="tui"))
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.post_message(events.Paste("unsent question"))
+        await pilot.pause()
+        await pilot.press("up", "ctrl+z")
+        await pilot.pause()
+        assert app.query_one("#composer").value == ""
 
 
 @pytest.mark.asyncio
@@ -259,29 +364,32 @@ async def test_quit_interrupts_an_active_stream_before_exiting():
     which checks ``self._streaming`` and interrupts before any teardown.
     Left unfixed, the worker thread survives the app's exit; its next
     ``call_from_thread`` call then fails silently and the in-flight turn is
-    abandoned without a trace.
+    abandoned without a trace. The interrupted worker is still inside its
+    step, so the app says it is waiting and exits once that step returns.
     """
     session = _BlockedSession()
     app = DeerFlowTUI(session, LaunchPlan(mode="tui"))
     async with app.run_test() as pilot:
-        await pilot.pause()
-        await pilot.press("h", "i")
-        await pilot.press("enter")
-        await _wait_until(lambda: app._streaming, pilot)
+        try:
+            await pilot.pause()
+            await pilot.press("h", "i")
+            await pilot.press("enter")
+            await _wait_until(lambda: app._streaming, pilot)
 
-        for ch in "/quit":
-            await pilot.press(ch)
-        await pilot.press("enter")
-        await pilot.pause()
+            for ch in "/quit":
+                await pilot.press(ch)
+            await pilot.press("enter")
+            await pilot.pause()
 
-        # The run must be interrupted (state cleaned up, message surfaced)
-        # before the app is allowed to exit — /quit still quits, but safely.
-        assert app._streaming is False
-        assert any(r.kind == "system" and "Interrupt" in r.text for r in app.state.rows)
-        assert app._exit is True
+            assert app._streaming is False
+            assert any(r.kind == "system" and "Interrupt" in r.text for r in app.state.rows)
+            assert any(r.kind == "system" and "Press Ctrl+C again to quit now" in r.text for r in app.state.rows)
+            assert app._exit is False
 
-    # Unblock the worker thread so it doesn't leak past the test.
-    session.client.release.set()
+            session.client.release.set()
+            assert await _wait_until(lambda: app._exit, pilot)
+        finally:
+            session.client.release.set()
 
 
 @pytest.mark.asyncio
@@ -303,6 +411,173 @@ async def test_ctrl_c_interrupts_an_active_stream_without_exiting():
         assert app._exit is False
 
     session.client.release.set()
+
+
+@pytest.mark.asyncio
+async def test_ctrl_c_quit_waits_for_the_interrupted_run_and_refuses_new_sends():
+    session = _BlockedSession()
+    app = DeerFlowTUI(session, LaunchPlan(mode="tui"))
+    async with app.run_test() as pilot:
+        try:
+            await pilot.pause()
+            await pilot.press("h", "i")
+            await pilot.press("enter")
+            await _wait_until(lambda: app._streaming, pilot)
+
+            await pilot.press("ctrl+c")  # interrupt
+            # Another thread is free to send to, but not while quitting: the
+            # exit would cut that new run off as soon as the old one stops.
+            app._handle_submit("/new")
+            await pilot.press("ctrl+c")  # quit
+            await pilot.pause()
+            assert app._exit is False
+            assert any(r.kind == "system" and "Press Ctrl+C again to quit now" in r.text for r in app.state.rows)
+
+            app.query_one("#composer").value = "one more"
+            await pilot.press("enter")
+            await pilot.pause()
+            assert not app._streaming
+            assert app.query_one("#composer").value == "one more"
+            assert not any(r.kind == "user" and r.text == "one more" for r in app.state.rows)
+
+            session.client.release.set()
+            assert await _wait_until(lambda: app._exit, pilot)
+        finally:
+            session.client.release.set()
+
+
+@pytest.mark.asyncio
+async def test_second_quit_request_exits_without_waiting_for_the_interrupted_run():
+    session = _BlockedSession()
+    app = DeerFlowTUI(session, LaunchPlan(mode="tui"))
+    async with app.run_test() as pilot:
+        try:
+            await pilot.pause()
+            await pilot.press("h", "i")
+            await pilot.press("enter")
+            await _wait_until(lambda: app._streaming, pilot)
+
+            await pilot.press("ctrl+c")  # interrupt
+            await pilot.press("ctrl+c")  # quit: waits
+            await pilot.press("ctrl+c")  # quit now
+            await pilot.pause()
+
+            assert app._exit is True
+            assert app._run.worker_running()
+        finally:
+            session.client.release.set()
+
+
+@pytest.mark.asyncio
+async def test_quit_waits_for_a_completed_run_still_saving_its_title():
+    class _BlockingTitleWriter:
+        def __init__(self):
+            self.writing = threading.Event()
+            self.release = threading.Event()
+            self.titles = []
+
+        def ensure_created(self, *args, **kwargs):
+            pass
+
+        def set_title(self, thread_id, title):
+            self.writing.set()
+            self.release.wait(5)
+            self.titles.append(title)
+
+    class _TitledClient(_FakeClient):
+        def stream(self, message, *, thread_id=None, **kwargs):
+            yield StreamEvent(type="values", data={"title": "Saved title"})
+            yield StreamEvent(type="end", data={"usage": {}})
+
+    session = _FakeSession()
+    session.client = _TitledClient()
+    session.writer = _BlockingTitleWriter()
+    app = DeerFlowTUI(session, LaunchPlan(mode="tui"))
+    async with app.run_test() as pilot:
+        try:
+            await pilot.pause()
+            await pilot.press("h", "i")
+            await pilot.press("enter")
+            assert await _wait_until(lambda: session.writer.writing.is_set() and not app._streaming, pilot)
+
+            await pilot.press("ctrl+c")
+            await pilot.pause()
+            assert app._exit is False
+
+            session.writer.release.set()
+            assert await _wait_until(lambda: app._exit, pilot)
+            assert session.writer.titles == ["Saved title"]
+        finally:
+            session.writer.release.set()
+
+
+@pytest.mark.asyncio
+async def test_unexpected_worker_failure_ends_the_run_with_an_error_row():
+    class _FailingWriter:
+        def ensure_created(self, *args, **kwargs):
+            raise RuntimeError("thread store exploded")
+
+    session = _FakeSession()
+    session.writer = _FailingWriter()
+    app = DeerFlowTUI(session, LaunchPlan(mode="tui"))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("h", "i")
+        await pilot.press("enter")
+        assert await _wait_until(lambda: not app._streaming, pilot)
+
+        assert any(r.kind == "assistant" and r.error and "thread store exploded" in r.text for r in app.state.rows)
+        assert app._run.stopped.is_set()
+        assert session.client.stream_calls == []
+
+
+_FORCE_QUIT_SCRIPT = """
+import threading, time
+from deerflow.client import StreamEvent
+from deerflow.tui.app import DeerFlowTUI
+from deerflow.tui.cli import LaunchPlan
+from deerflow.tui.session import Session
+
+in_step = threading.Event()
+
+class Client:
+    def list_models(self): return {"models": []}
+    def list_skills(self, **kwargs): return {"skills": []}
+    def stream(self, message, *, thread_id=None, **kwargs):
+        yield StreamEvent(type="messages-tuple", data={"type": "ai", "content": "working", "id": "m1"})
+        in_step.set()
+        time.sleep(60)  # a long tool step that emits no event
+        yield StreamEvent(type="end", data={"usage": {}})
+
+class App(DeerFlowTUI):
+    def on_mount(self):
+        super().on_mount()
+        self._send_to_agent("q")
+        self.set_interval(0.05, self._press_ctrl_c_once_in_step)
+
+    def _press_ctrl_c_once_in_step(self):
+        if in_step.is_set() and not self._exit:
+            for _ in range(3):  # interrupt, quit, quit now
+                self.action_interrupt()
+
+App(Session(client=Client(), writer=None), LaunchPlan(mode="tui", thread_id="t-1")).run(headless=True)
+print("exited")
+"""
+
+
+def test_quit_now_exits_the_process_while_the_interrupted_step_is_still_running():
+    """Drive the real ``App.run()``: a Textual thread worker would be joined by
+    asyncio's default-executor shutdown and again at interpreter exit, holding
+    the process until the 60 s step ended."""
+    import subprocess
+    import sys
+
+    started = time.monotonic()
+    result = subprocess.run([sys.executable, "-c", _FORCE_QUIT_SCRIPT], capture_output=True, text=True, timeout=45)
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip().endswith("exited")
+    assert time.monotonic() - started < 30
 
 
 @pytest.mark.asyncio
@@ -525,3 +800,282 @@ async def test_goal_set_failure_shows_error_tone():
         await pilot.pause()
     errors = [r for r in _system_rows(app) if r.tone == "error"]
     assert any("Could not set goal." in r.text for r in errors)
+
+
+@pytest.mark.asyncio
+async def test_multiline_paste_keeps_leading_indentation_and_trailing_newline():
+    session = _FakeSession()
+    app = DeerFlowTUI(session, LaunchPlan(mode="tui"))
+    pasted = "    def f():\n        return 1\n"
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.post_message(events.Paste(pasted))
+        await pilot.pause()
+        await pilot.press("enter")
+        await _wait_until(lambda: bool(session.client.stream_calls), pilot)
+
+    assert session.client.stream_calls[0][0] == pasted
+    assert app._history.entries() == [pasted]
+
+
+@pytest.mark.asyncio
+async def test_whitespace_only_input_is_not_submitted():
+    session = _FakeSession()
+    app = DeerFlowTUI(session, LaunchPlan(mode="tui"))
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.post_message(events.Paste("  \n\t\n"))
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+
+    assert session.client.stream_calls == []
+    assert app._history.entries() == []
+
+
+@pytest.mark.asyncio
+async def test_message_refused_during_a_run_stays_in_the_composer():
+    session = _FakeSession()
+    app = DeerFlowTUI(session, LaunchPlan(mode="tui"))
+    pasted = "    def f():\n        return 1\n"
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._streaming = True
+        app.post_message(events.Paste(pasted))
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        composer = app.query_one("#composer")
+        assert composer.value == pasted
+        assert composer.cursor_position == len(pasted)
+        assert any(r.kind == "system" and "Still working" in r.text for r in app.state.rows)
+        assert session.client.stream_calls == []
+
+        app._streaming = False
+        await pilot.press("enter")
+        await _wait_until(lambda: bool(session.client.stream_calls), pilot)
+        assert composer.value == ""
+
+    assert session.client.stream_calls[0][0] == pasted
+    assert app._history.entries() == [pasted]
+
+
+@pytest.mark.asyncio
+async def test_refused_bare_skill_activation_is_restored_without_reopening_the_palette():
+    """Restoring "/tdd" must not reopen the palette, or Enter would fill it instead of resending."""
+    session = _FakeSession()
+    app = DeerFlowTUI(session, LaunchPlan(mode="tui"))
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._streaming = True
+        await pilot.press("/", "t", "d", "d", "escape", "enter")
+        await pilot.pause()
+        composer = app.query_one("#composer")
+        assert composer.value == "/tdd"
+        assert app._palette_open is False
+
+        app._streaming = False
+        await pilot.press("enter")
+        await _wait_until(lambda: bool(session.client.stream_calls), pilot)
+        assert composer.value == ""
+
+    assert session.client.stream_calls[0][0] == "/tdd"
+
+
+@pytest.mark.asyncio
+async def test_editing_a_restored_slash_draft_reopens_the_palette():
+    app = DeerFlowTUI(_FakeSession(), LaunchPlan(mode="tui"))
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._streaming = True
+        await pilot.press("/", "t", "d", "d", "escape", "enter")
+        await pilot.pause()
+        await pilot.press("backspace")
+        await pilot.pause()
+        assert app.query_one("#composer").value == "/td"
+        assert app._palette_open is True
+
+        # Once edited, the draft is ordinary input again, even if retyped back.
+        await pilot.press("d")
+        await pilot.pause()
+        assert app.query_one("#composer").value == "/tdd"
+        assert app._palette_open is True
+
+
+@pytest.mark.asyncio
+async def test_refused_skill_activation_is_restored_as_recorded_in_history():
+    app = DeerFlowTUI(_FakeSession(), LaunchPlan(mode="tui"))
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._streaming = True
+        app.post_message(events.Paste("  /tdd write tests  "))
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.query_one("#composer").value == "/tdd write tests"
+
+    assert app._history.entries() == ["/tdd write tests"]
+
+
+@pytest.mark.asyncio
+async def test_down_on_last_line_of_multiline_input_falls_back_to_history():
+    app = DeerFlowTUI(_FakeSession(), LaunchPlan(mode="tui"))
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._history.add("first line\nsecond line")
+        await pilot.press("up")
+        await pilot.pause()
+        composer = app.query_one("#composer")
+        assert composer.value == "first line\nsecond line"
+        assert composer.cursor_location[0] == 1
+
+        # Already on the last document line: Down leaves the recalled entry for the draft.
+        await pilot.press("down")
+        await pilot.pause()
+        assert composer.value == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("history", [[], ["previous prompt"]])
+@pytest.mark.parametrize("draft", ["unsent question", "first line\nsecond line"])
+async def test_down_without_history_navigation_preserves_draft_and_cursor(history, draft):
+    app = DeerFlowTUI(_FakeSession(), LaunchPlan(mode="tui"))
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        for entry in history:
+            app._history.add(entry)
+        app.post_message(events.Paste(draft))
+        await pilot.pause()
+        composer = app.query_one("#composer")
+        location = (len(draft.splitlines()) - 1, 2)
+        composer.move_cursor(location)
+
+        await pilot.press("down", "down")
+        await pilot.pause()
+        assert composer.value == draft
+        assert composer.cursor_location == location
+        await pilot.press("ctrl+z")
+        await pilot.pause()
+        assert composer.value == ""
+
+
+@pytest.mark.asyncio
+async def test_history_round_trip_restores_draft_and_idle_down_keeps_later_edits():
+    app = DeerFlowTUI(_FakeSession(), LaunchPlan(mode="tui"))
+    draft = "first line\nsecond line"
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._history.add("older prompt")
+        app._history.add("newer prompt")
+        app.post_message(events.Paste(draft))
+        await pilot.pause()
+        composer = app.query_one("#composer")
+        composer.cursor_position = 0
+
+        await pilot.press("up")
+        await pilot.pause()
+        assert composer.value == "newer prompt"
+        await pilot.press("up")
+        await pilot.pause()
+        assert composer.value == "older prompt"
+        await pilot.press("down")
+        await pilot.pause()
+        assert composer.value == "newer prompt"
+        await pilot.press("down")
+        await pilot.pause()
+        assert composer.value == draft
+
+        app.post_message(events.Paste(" edited"))
+        await pilot.pause()
+        await pilot.press("down")
+        await pilot.pause()
+        assert composer.value == draft + " edited"
+
+
+@pytest.mark.asyncio
+async def test_slash_command_with_surrounding_whitespace_still_runs_as_command():
+    session = _FakeSession()
+    app = DeerFlowTUI(session, LaunchPlan(mode="tui"))
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.post_message(events.Paste("  /help\n"))
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+
+    assert session.client.stream_calls == []
+    assert app._history.entries() == ["/help"]
+
+
+_LONG_PROMPT = " ".join(f"word{i}" for i in range(60))  # one logical line that soft-wraps
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("direction", ["up", "down"])
+async def test_equal_history_recall_preserves_cursor_and_undo(direction):
+    app = DeerFlowTUI(_FakeSession(), LaunchPlan(mode="tui"))
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._history.add("same prompt")
+        if direction == "down":
+            # Down will restore the same draft that Up saved.
+            app._history.up("same prompt")
+        app.post_message(events.Paste("same prompt"))
+        await pilot.pause()
+        composer = app.query_one("#composer")
+        composer.move_cursor((0, 2))
+
+        await pilot.press(direction)
+        await pilot.pause()
+        assert composer.cursor_location == (0, 2)
+        await pilot.press("ctrl+z")
+        await pilot.pause()
+        assert composer.value == ""
+
+
+@pytest.mark.asyncio
+async def test_up_inside_a_soft_wrapped_line_moves_the_cursor_not_history():
+    app = DeerFlowTUI(_FakeSession(), LaunchPlan(mode="tui"))
+
+    async with app.run_test(size=(60, 24)) as pilot:
+        await pilot.pause()
+        app._history.add("previous prompt")
+        composer = app.query_one("#composer")
+        composer.value = _LONG_PROMPT
+        composer.cursor_position = len(_LONG_PROMPT)
+        await pilot.pause()
+        assert len(composer.wrapped_document.get_offsets(0)) >= 1  # really wrapped
+
+        await pilot.press("up")
+        await pilot.pause()
+        assert composer.value == _LONG_PROMPT
+        assert composer.cursor_position < len(_LONG_PROMPT)
+
+
+@pytest.mark.asyncio
+async def test_down_inside_a_soft_wrapped_line_moves_the_cursor_not_history():
+    app = DeerFlowTUI(_FakeSession(), LaunchPlan(mode="tui"))
+
+    async with app.run_test(size=(60, 24)) as pilot:
+        await pilot.pause()
+        composer = app.query_one("#composer")
+        composer.value = _LONG_PROMPT
+        composer.cursor_position = 0
+        await pilot.pause()
+        assert len(composer.wrapped_document.get_offsets(0)) >= 1
+
+        await pilot.press("down")
+        await pilot.pause()
+        assert composer.value == _LONG_PROMPT
+        assert composer.cursor_position > 0

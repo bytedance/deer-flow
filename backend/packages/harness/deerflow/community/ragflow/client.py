@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import httpx
+
+from deerflow.community.provider_credentials import redact_secret
 
 _DATASET_PAGE_SIZE = 100
 _MAX_DATASET_PAGES = 100
@@ -52,10 +55,7 @@ class RAGFlowClient:
         self._transport = transport
 
     def _redact(self, value: object) -> str:
-        text = str(value)
-        if self._api_key:
-            text = text.replace(self._api_key, "[REDACTED]")
-        return text
+        return redact_secret(value, self._api_key)
 
     async def _request(
         self,
@@ -164,6 +164,11 @@ class RAGFlowClient:
         params: list[tuple[str, str]],
     ) -> dict[str, Any]:
         """Proxy one document-list request for a dataset."""
+        # Generic knowledge IDs are opaque. RAGFlow IDs must remain a single
+        # literal segment: reject traversal, URL delimiters and encoded paths
+        # here so both catalog browsing and selected-document validation agree.
+        if not isinstance(dataset_id, str) or re.fullmatch(r"[A-Za-z0-9_-]+", dataset_id) is None:
+            raise ValueError("Invalid RAGFlow dataset ID.")
         return await self._request("GET", f"/datasets/{dataset_id}/documents", params=params)
 
     async def retrieve(

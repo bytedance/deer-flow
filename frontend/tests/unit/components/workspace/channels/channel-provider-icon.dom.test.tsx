@@ -5,6 +5,21 @@ import { ChannelProviderIcon } from "@/components/workspace/channels/channel-pro
 
 afterEach(cleanup);
 
+test("renders QQ with caller-provided accessible label and styling", () => {
+  const { getByRole } = render(
+    <ChannelProviderIcon
+      provider="QQ"
+      role="img"
+      aria-label="QQ"
+      aria-hidden={false}
+      className="size-8"
+    />,
+  );
+  expect(getByRole("img", { name: "QQ" }).getAttribute("class")).toContain(
+    "size-8",
+  );
+});
+
 test("renders collision-safe official Buzz marks", () => {
   const { container } = render(
     <>

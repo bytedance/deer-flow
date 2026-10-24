@@ -1,7 +1,9 @@
 import re
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, ValidationInfo, field_validator, model_validator
+
+from deerflow.config._boolean_guards import reject_boolean
 
 _INTEGER_LITERAL_PATTERN = re.compile(r"[0-9]+")
 
@@ -135,6 +137,7 @@ class ModelConfig(BaseModel):
     name: str = Field(..., description="Unique name for the model")
     request_admission: RequestAdmissionConfig | None = Field(default=None, description="Opt-in process-local RPM pacing. Changing an active group's policy requires a process restart.")
     display_name: str | None = Field(..., default_factory=lambda: None, description="Display name for the model")
+    aliases: list[str] = Field(default_factory=list, max_length=16, description="Optional names users can use when selecting this configured model")
     description: str | None = Field(..., default_factory=lambda: None, description="Description for the model")
     use: str = Field(
         ...,
@@ -197,10 +200,8 @@ class ModelConfig(BaseModel):
 
     @field_validator("stream_chunk_timeout", "context_window", mode="before")
     @classmethod
-    def _reject_boolean_numeric_settings(cls, value: object) -> object:
-        if isinstance(value, bool):
-            raise ValueError("must be a number, not a boolean")
-        return value
+    def _reject_boolean_numeric_settings(cls, value: object, info: ValidationInfo) -> object:
+        return reject_boolean(value, info, kind="a number")
 
     thinking: dict | None = Field(
         default_factory=lambda: None,

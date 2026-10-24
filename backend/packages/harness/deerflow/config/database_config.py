@@ -35,8 +35,9 @@ import logging
 import os
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
 
+from deerflow.config._boolean_guards import reject_boolean
 from deerflow.config.postgres_schema import POSTGRES_SCHEMA_PATTERN, validate_postgres_schema
 
 logger = logging.getLogger(__name__)
@@ -217,17 +218,13 @@ class DatabaseConfig(BaseModel):
 
     @field_validator("pool_size", "pool_recycle", mode="before")
     @classmethod
-    def _reject_boolean_pool_settings(cls, value: object) -> object:
-        if isinstance(value, bool):
-            raise ValueError("must be an integer, not a boolean")
-        return value
+    def _reject_boolean_pool_settings(cls, value: object, info: ValidationInfo) -> object:
+        return reject_boolean(value, info, kind="an integer")
 
     @field_validator("command_timeout", mode="before")
     @classmethod
-    def _reject_boolean_command_timeout(cls, value: object) -> object:
-        if isinstance(value, bool):
-            raise ValueError("command_timeout must be a number of seconds or null, not a boolean")
-        return value
+    def _reject_boolean_command_timeout(cls, value: object, info: ValidationInfo) -> object:
+        return reject_boolean(value, info, kind="a number of seconds or null")
 
     # -- Legacy key migration (not user-configured) --
 

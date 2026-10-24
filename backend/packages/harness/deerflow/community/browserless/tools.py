@@ -12,10 +12,12 @@ from langchain_core.messages import ToolMessage
 from langgraph.types import Command
 
 from deerflow.community.url_safety import resolve_host_addresses as _resolve_host_addresses
-from deerflow.community.url_safety import validate_public_http_url
+from deerflow.community.url_safety import validate_delegated_backend_url, validate_public_http_url
 from deerflow.config import get_app_config
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.tools.types import Runtime
+from deerflow.utils.atomic_write import publish_bytes_atomically as _publish_bytes_atomically
+from deerflow.utils.output_names import output_name_candidates
 from deerflow.utils.readability import ReadabilityExtractor
 
 from .browserless_client import BrowserlessClient, BrowserlessFetchResult, BrowserlessScreenshotResult
@@ -31,8 +33,8 @@ _OUTPUT_FORMAT_TO_EXTENSION = {
     "webp": "webp",
 }
 _SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
-# Cap collision-suffix probing so a saturated outputs directory cannot spin forever.
-_MAX_FILENAME_COLLISION_PROBES = 1000
+DEFAULT_BASE_URL = "http://localhost:3032"
+_UNSET = object()
 
 
 def _get_tool_config(tool_name: str) -> dict | None:
@@ -79,9 +81,10 @@ def _resolve_timeout(cfg: dict, default: float) -> float:
     return default
 
 
-def _get_browserless_client(tool_name: str = "web_fetch") -> BrowserlessClient:
-    cfg = _get_tool_config(tool_name)
-    base_url = "http://localhost:3032"
+def _get_browserless_client(tool_name: str = "web_fetch", cfg: dict | None = _UNSET) -> BrowserlessClient:
+    if cfg is _UNSET:
+        cfg = _get_tool_config(tool_name)
+    base_url = DEFAULT_BASE_URL
     token = os.getenv("BROWSERLESS_TOKEN", "")
     timeout_s = 30.0
     if cfg is not None:
@@ -101,6 +104,27 @@ def _as_bool(value: object, default: bool) -> bool:
         if lowered in {"0", "false", "no", "off"}:
             return False
     return default
+
+
+def _validate_backend_base_url(cfg: dict | None) -> str | None:
+    """Refuse delegation to a self-hosted backend unless its egress is isolated.
+
+    Browserless resolves the target URL, follows redirects, and loads subresources
+    in the Browserless service's own network namespace, so the target-URL screen
+    cannot be enforced end-to-end. Delegation is only safe when the backend's
+    outbound network is isolated from private and metadata networks, which the
+    operator confirms via ``network_isolation_confirmed``. A public backend
+    (Browserless Cloud) needs no confirmation. Blocking; call via
+    ``asyncio.to_thread``.
+    """
+    cfg = cfg or {}
+    base_url = cfg.get("base_url", DEFAULT_BASE_URL)
+    network_isolation_confirmed = _as_bool(cfg.get("network_isolation_confirmed"), False)
+    return validate_delegated_backend_url(
+        base_url,
+        network_isolation_confirmed=network_isolation_confirmed,
+        resolver=_resolve_host_addresses,
+    )
 
 
 def _as_int(value: object, default: int) -> int:
@@ -196,34 +220,59 @@ def _tool_message(content: str, tool_call_id: str) -> Command:
     return Command(update={"messages": [ToolMessage(content, tool_call_id=tool_call_id)]})
 
 
-def _dedupe_output_name(outputs_path: Path, output_name: str) -> str:
-    """Return a non-colliding filename under ``outputs_path``.
+def _reserve_output_name(outputs_path: Path, name: str) -> bool:
+    """Claim ``name`` for this capture, returning False when it is already held.
 
-    Keeps the original name when free, otherwise appends ``-1``, ``-2``, ...
-    before the extension so an explicit filename never silently overwrites an
-    earlier capture. Falls back to a timestamp suffix if the directory is
-    saturated with the bounded probe range.
+    The claim is an ``O_CREAT | O_EXCL`` open that leaves an empty placeholder
+    behind, not an existence check: two writers that merely *observe* a free name
+    would both go on to publish to it, and the second ``os.replace`` would
+    silently replace the first capture (#6883). ``0o666`` is passed explicitly
+    because ``publish_bytes_atomically`` preserves an existing file's mode, and
+    ``os.open`` would otherwise default the placeholder to ``0o777 & ~umask`` and
+    make every capture executable instead of the ``0o666 & ~umask`` a new file
+    gets from ``Path.write_bytes``.
     """
-    candidate = outputs_path / output_name
-    if not candidate.exists():
-        return output_name
+    try:
+        descriptor = os.open(outputs_path / name, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666)
+    except FileExistsError:
+        return False
+    os.close(descriptor)
+    return True
 
-    stem = Path(output_name).stem
-    suffix = Path(output_name).suffix
-    for index in range(1, _MAX_FILENAME_COLLISION_PROBES + 1):
-        probe = f"{stem}-{index}{suffix}"
-        if not (outputs_path / probe).exists():
-            return probe
 
-    timestamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S-%f")
-    return f"{stem}-{timestamp}{suffix}"
+def _dedupe_output_name(outputs_path: Path, output_name: str) -> str:
+    """Reserve and return a non-colliding filename under ``outputs_path``.
+
+    Keeps the original name when it can be claimed, otherwise appends ``-1``,
+    ``-2``, ... before the extension so an explicit filename never silently
+    overwrites an earlier capture. Falls back to a timestamp suffix if the
+    directory is saturated with the bounded probe range.
+
+    Raises:
+        RuntimeError: when even the timestamped names cannot be claimed, which
+            means another writer is holding them; returning a name anyway would
+            reintroduce the silent overwrite this function exists to prevent.
+    """
+    for candidate in output_name_candidates(output_name):
+        if _reserve_output_name(outputs_path, candidate):
+            return candidate
+
+    raise RuntimeError(f"could not reserve an output filename for {output_name!r} in {outputs_path}")
 
 
 def _write_capture_output(outputs_path: Path, output_name: str, content: bytes) -> str:
     """Write ``content`` into ``outputs_path`` and return the actual filename used."""
     outputs_path.mkdir(parents=True, exist_ok=True)
     final_name = _dedupe_output_name(outputs_path, output_name)
-    (outputs_path / final_name).write_bytes(content)
+    destination = outputs_path / final_name
+    try:
+        _publish_bytes_atomically(destination, content)
+    except BaseException:
+        try:
+            destination.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("Could not release the reserved capture name %s", destination, exc_info=True)
+        raise
     return final_name
 
 
@@ -266,6 +315,10 @@ async def web_fetch_tool(url: str) -> str:
         if url_error:
             return url_error
 
+        backend_error = await asyncio.to_thread(_validate_backend_base_url, cfg)
+        if backend_error:
+            return backend_error
+
         wait_for_event = ""
         wait_for_timeout_ms = 0
         wait_for_selector = ""
@@ -278,7 +331,7 @@ async def web_fetch_tool(url: str) -> str:
         wait_for_selector = cfg.get("wait_for_selector", wait_for_selector)
         wait_for_selector_timeout_ms = _as_int(cfg.get("wait_for_selector_timeout_ms"), wait_for_selector_timeout_ms)
 
-        client = _get_browserless_client("web_fetch")
+        client = _get_browserless_client("web_fetch", cfg)
         result = await client.fetch_html_with_status(
             url=url,
             wait_for_event=wait_for_event,
@@ -333,6 +386,10 @@ async def web_capture_tool(
         if url_error:
             return _tool_message(url_error, tool_call_id)
 
+        backend_error = await asyncio.to_thread(_validate_backend_base_url, cfg)
+        if backend_error:
+            return _tool_message(backend_error, tool_call_id)
+
         outputs_path = _thread_outputs_path(runtime)
         if isinstance(outputs_path, str):
             return _tool_message(outputs_path, tool_call_id)
@@ -349,7 +406,7 @@ async def web_capture_tool(
 
         output_name = _safe_capture_filename(filename, url, final_format)
 
-        client = _get_browserless_client("web_capture")
+        client = _get_browserless_client("web_capture", cfg)
         result = await client.capture_screenshot(
             url=url,
             full_page=final_full_page,

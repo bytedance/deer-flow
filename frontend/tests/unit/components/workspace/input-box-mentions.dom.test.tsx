@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, rs } from "@rstest/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -11,7 +12,12 @@ import type { ComponentProps, ReactNode } from "react";
 
 import { PromptInputProvider } from "@/components/ai-elements/prompt-input";
 import { InputBox } from "@/components/workspace/input-box";
-import { referenceToken } from "@/components/workspace/mentions/inline-references";
+import {
+  focusReferenceAt,
+  readReferenceEditor,
+  referenceCaret,
+  referenceToken,
+} from "@/components/workspace/mentions/inline-references";
 import { ThreadContext } from "@/components/workspace/messages/context";
 import { AuthProvider } from "@/core/auth/AuthProvider";
 import { DEFAULT_LOCALE } from "@/core/i18n";
@@ -37,6 +43,33 @@ rs.mock("@/core/models/hooks", () => ({
     refetch: rs.fn(),
   }),
 }));
+
+const pluginSearch = rs.fn();
+rs.mock("@/core/extensions/hooks", () => ({
+  useFrontendExtensions: () => ({
+    data: pluginEntries,
+    isPending: false,
+    isError: false,
+  }),
+}));
+const pluginEntries = [
+  {
+    namespace: "community.team",
+    viewer_id: "user-1",
+    module: "team",
+    entry: null,
+    title: "Team",
+    description: "",
+    settings: { enabled: true },
+    extension: {
+      apiVersion: 1,
+      module: "team",
+      mentionProviders: [
+        { id: "people", label: "People", search: pluginSearch },
+      ],
+    },
+  },
+];
 
 const skillCatalog = [
   {
@@ -73,7 +106,7 @@ function renderComposer(
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
-  const tree: ReactNode = (
+  const tree = (currentThreadId: string): ReactNode => (
     <I18nProvider initialLocale={DEFAULT_LOCALE}>
       <QueryClientProvider client={queryClient}>
         <AuthProvider
@@ -90,7 +123,7 @@ function renderComposer(
           >
             <PromptInputProvider>
               <InputBox
-                threadId={threadId}
+                threadId={currentThreadId}
                 projectId="project-1"
                 onSubmit={onSubmit}
                 onPrepareThread={onPrepareThread}
@@ -104,7 +137,12 @@ function renderComposer(
       </QueryClientProvider>
     </I18nProvider>
   );
-  return render(tree);
+  const rendered = render(tree(threadId));
+  return {
+    ...rendered,
+    rerenderThread: (currentThreadId: string) =>
+      rendered.rerender(tree(currentThreadId)),
+  };
 }
 
 const attach = rs.fn();
@@ -168,6 +206,8 @@ rs.mock("@/core/threads/hooks", () => ({
 }));
 
 beforeEach(() => {
+  pluginSearch.mockReset();
+  pluginSearch.mockResolvedValue([]);
   skillCatalog.splice(1);
   capability.enabled = true;
   capability.maxReferences = 3;
@@ -219,7 +259,232 @@ function enterMention(
   return input;
 }
 
+function holdAnimationFrames() {
+  let nextId = 0;
+  const pending = new Map<number, FrameRequestCallback>();
+  rs.spyOn(globalThis, "requestAnimationFrame").mockImplementation(
+    (callback) => {
+      const id = ++nextId;
+      pending.set(id, callback);
+      return id;
+    },
+  );
+  rs.spyOn(globalThis, "cancelAnimationFrame").mockImplementation((id) => {
+    pending.delete(id);
+  });
+  return {
+    flush() {
+      const callbacks = [...pending.values()];
+      pending.clear();
+      for (const callback of callbacks) callback(performance.now());
+    },
+  };
+}
+
+describe("mention selection focus", () => {
+  it("focuses the replacement editor at the canonical insertion caret before the next animation frame", () => {
+    const { container } = renderComposer("mention-focus-before-frame");
+    const input = enterMention(container, "Use @res carefully", 8);
+    act(() => input.focus());
+    holdAnimationFrames();
+
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    const editor = container.querySelector<HTMLElement>(
+      '[contenteditable="true"]',
+    )!;
+    const token = referenceToken("skill", "research", "research");
+    expect({
+      focused: document.activeElement === editor,
+      caret: referenceCaret(editor),
+      text: readReferenceEditor(editor),
+    }).toEqual({
+      focused: true,
+      caret: "Use ".length + token.length + 1,
+      text: `Use ${token}  carefully`,
+    });
+  });
+
+  it("does not overwrite a user's subsequent caret move with a late mention callback", () => {
+    const { container } = renderComposer("mention-late-frame-caret");
+    const input = enterMention(container, "Use @res carefully", 8);
+    act(() => input.focus());
+    const frames = holdAnimationFrames();
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    const editor = container.querySelector<HTMLElement>(
+      '[contenteditable="true"]',
+    )!;
+    act(() => focusReferenceAt(editor, 1));
+    fireEvent.keyUp(editor, { key: "ArrowLeft" });
+    expect(referenceCaret(editor)).toBe(1);
+
+    act(() => frames.flush());
+
+    expect(document.activeElement).toBe(editor);
+    expect(referenceCaret(editor)).toBe(1);
+  });
+
+  it("keeps focus and the canonical caret when the last selected reference is toggled off", () => {
+    const token = referenceToken("skill", "research", "research");
+    saveDraft("last-reference-focus", `Start ${token} end`);
+    const { container } = renderComposer("last-reference-focus");
+    const editor = container.querySelector<HTMLElement>(
+      '[contenteditable="true"]',
+    )!;
+    act(() => focusReferenceAt(editor, 2));
+    const picker = screen.getByTestId("add-attachments-button");
+    act(() => picker.focus());
+    holdAnimationFrames();
+    fireEvent.click(picker);
+    fireEvent.click(
+      screen.getByRole("option", { name: "research Research a topic" }),
+    );
+
+    // The composer intentionally retains its inline editor after the last
+    // reference; no textarea remount is required to preserve native undo.
+    expect(screen.queryByTestId("inline-skill-reference")).toBeNull();
+    expect(container.querySelector('[contenteditable="true"]')).toBe(editor);
+    expect({
+      focused: document.activeElement === editor,
+      caret: referenceCaret(editor),
+      text: readReferenceEditor(editor),
+    }).toEqual({ focused: true, caret: 2, text: "Start  end" });
+  });
+});
+
 describe("unified composer mentions", () => {
+  it("submits a plugin selection as readable text and structured metadata", async () => {
+    pluginSearch.mockResolvedValue([{ id: "alice", label: "Alice" }]);
+    const submit = rs.fn();
+    const { container } = renderComposer("plugin-mention", submit);
+    enterMention(container, "Ask @ali");
+    fireEvent.click(
+      await screen.findByRole("option", { name: "Alice People" }),
+    );
+    expect(screen.getByTestId("extension-mention-chip")).toBeTruthy();
+    fireEvent.keyDown(container.querySelector('[contenteditable="true"]')!, {
+      key: "Enter",
+    });
+    await waitFor(() => expect(submit).toHaveBeenCalled());
+    expect(submit.mock.calls[0]![0].text).toBe("Ask @Alice ");
+    expect(
+      submit.mock.calls[0]![1].additionalKwargs.extension_mentions,
+    ).toEqual([
+      {
+        namespace: "community.team",
+        provider: "people",
+        id: "alice",
+        label: "Alice",
+      },
+    ]);
+  });
+  it("drops metadata when a plugin reference is toggled off", async () => {
+    pluginSearch.mockResolvedValue([{ id: "alice", label: "Alice" }]);
+    const submit = rs.fn();
+    const { container } = renderComposer("remove-plugin-mention", submit);
+    enterMention(container, "Ask @ali");
+    fireEvent.click(
+      await screen.findByRole("option", { name: "Alice People" }),
+    );
+    enterMention(container, "@ali");
+    fireEvent.click(
+      await screen.findByRole("option", { name: "Alice People" }),
+    );
+    expect(screen.queryByTestId("extension-mention-chip")).toBeNull();
+    fireEvent.keyDown(container.querySelector('[contenteditable="true"]')!, {
+      key: "Enter",
+    });
+    await waitFor(() => expect(submit).toHaveBeenCalled());
+    expect(
+      submit.mock.calls[0]![1].additionalKwargs?.extension_mentions,
+    ).toBeUndefined();
+  });
+  it("clears cached conversation metadata when the draft owner changes", async () => {
+    const submit = rs.fn();
+    const rendered = renderComposer("cache-first", submit);
+    enterMention(rendered.container, "@Writer");
+    fireEvent.click(screen.getByRole("option", { name: "Writer brief" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("conversation-reference-chip")).toBeTruthy(),
+    );
+    rendered.rerenderThread("cache-next");
+    await waitFor(() =>
+      expect(screen.queryByTestId("conversation-reference-chip")).toBeNull(),
+    );
+    const token = referenceToken("conversation", "source-1", "Pasted title");
+    enterMention(rendered.container, token + " summarize");
+    await waitFor(() =>
+      expect(screen.getByTestId("conversation-reference-chip")).toBeTruthy(),
+    );
+    fireEvent.input(screen.getByRole("textbox"));
+    fireEvent.submit(rendered.container.querySelector("form")!);
+    await waitFor(() => expect(submit).toHaveBeenCalled());
+    expect(
+      submit.mock.calls[0]![1].additionalKwargs.conversation_references,
+    ).toEqual([{ thread_id: "source-1", title: "Pasted title" }]);
+  });
+  it("restores custom-agent metadata after a conversation reference is removed and undone", async () => {
+    const submit = rs.fn();
+    const { container } = renderComposer("conversation-undo", submit);
+    enterMention(container, "Review @Writer");
+    fireEvent.click(screen.getByRole("option", { name: "Writer brief" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("conversation-reference-chip")).toBeTruthy(),
+    );
+    const editor = screen.getByRole("textbox");
+    const original = editor.cloneNode(true);
+    editor.querySelector("[data-reference]")!.remove();
+    fireEvent.input(editor);
+    await waitFor(() =>
+      expect(screen.queryByTestId("conversation-reference-chip")).toBeNull(),
+    );
+    editor.replaceChildren(...Array.from(original.childNodes));
+    fireEvent.input(editor);
+    fireEvent.submit(container.querySelector("form")!);
+    await waitFor(() => expect(submit).toHaveBeenCalled());
+    expect(
+      submit.mock.calls[0]![1].additionalKwargs.conversation_references,
+    ).toEqual([
+      { thread_id: "source-1", title: "Writer brief", agent_name: "writer" },
+    ]);
+  });
+  for (const props of [
+    { ctrlKey: true },
+    { altKey: true },
+    { metaKey: true },
+    { shiftKey: true },
+    { keyCode: 229 },
+  ]) {
+    it(`leaves reference selection to modified/composing deletion: ${JSON.stringify(props)}`, async () => {
+      const token = referenceToken("skill", "research", "research");
+      const id = `reference-delete-${JSON.stringify(props)}`;
+      saveDraft(id, token);
+      renderComposer(id);
+      await waitFor(() =>
+        expect(screen.getByTestId("inline-skill-reference")).toBeTruthy(),
+      );
+      const editor = screen.getByRole("textbox");
+      focusReferenceAt(editor, token.length);
+      fireEvent.keyDown(editor, { key: "Backspace", ...props });
+      expect(window.getSelection()?.isCollapsed).toBe(true);
+      expect(screen.getByTestId("inline-skill-reference")).toBeTruthy();
+    });
+  }
+
+  it("does not select a reference for deletion while the composer is locked", async () => {
+    const token = referenceToken("skill", "research", "research");
+    saveDraft("locked-delete", token);
+    renderComposer("locked-delete", rs.fn(), rs.fn(), { disabled: true });
+    await waitFor(() =>
+      expect(screen.getByTestId("inline-skill-reference")).toBeTruthy(),
+    );
+    const editor = screen.getByRole("textbox");
+    focusReferenceAt(editor, token.length);
+    fireEvent.keyDown(editor, { key: "Backspace" });
+    expect(window.getSelection()?.isCollapsed).toBe(true);
+    expect(screen.getByTestId("inline-skill-reference")).toBeTruthy();
+  });
   it("offers only backend-accepted skill names while allowing compact in the mention picker", () => {
     const rejectedNames = ["a--b", "a_b", "Research", "a-", "goal", "status"];
     for (const name of [...rejectedNames, "compact"]) {

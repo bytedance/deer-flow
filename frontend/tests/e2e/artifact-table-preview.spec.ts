@@ -189,6 +189,22 @@ test("rejects malformed quotes and keeps source available", async ({
   await expect(panel.locator(".cm-editor")).toBeVisible();
 });
 
+test("previews complete rows when a range response splits a quoted row's CRLF", async ({
+  page,
+}) => {
+  const panel = await setup(
+    page,
+    'ID,Note\r\n00123,complete\r\n002,"partial"\r',
+    true,
+  );
+  await expect(panel.getByRole("table")).toBeVisible({ timeout: 20000 });
+  await expect(panel.getByText("00123", { exact: true })).toBeVisible();
+  await expect(panel.getByText("002", { exact: true })).toHaveCount(0);
+  await expect(
+    panel.getByText("Preview of first 1 rows", { exact: true }),
+  ).toBeVisible();
+});
+
 test("previews an unsaved draft and preserves it after a save conflict", async ({
   page,
 }) => {

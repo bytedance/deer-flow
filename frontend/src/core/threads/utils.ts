@@ -1,5 +1,8 @@
 import type { Message } from "@langchain/langgraph-sdk";
 
+import type { Translations } from "@/core/i18n/locales/types";
+import { modelControlDisplayText } from "@/core/messages/model-control";
+
 import type { AgentThread, AgentThreadContext } from "./types";
 
 // Namespaced to match other internal metadata keys (``deerflow_sidecar``,
@@ -65,6 +68,8 @@ export function pathOfThread(
 }
 
 export function textOfMessage(message: Message) {
+  const selectedModelText = modelControlDisplayText(message);
+  if (selectedModelText !== null) return selectedModelText;
   if (typeof message.content === "string") {
     return message.content;
   } else if (Array.isArray(message.content)) {
@@ -80,8 +85,12 @@ export function textOfMessage(message: Message) {
   return null;
 }
 
-export function titleOfThread(thread: AgentThread) {
-  return thread.values?.title ?? "Untitled";
+/**
+ * The thread's title, or `untitledLabel` when it has none. UI callers pass
+ * the localized `t.pages.untitled`; export filenames keep the English default.
+ */
+export function titleOfThread(thread: AgentThread, untitledLabel = "Untitled") {
+  return thread.values?.title ?? untitledLabel;
 }
 
 export function isThreadPinned(thread: Pick<AgentThread, "metadata">) {
@@ -111,23 +120,45 @@ export function sortPinnedThreads<T extends Pick<AgentThread, "metadata">>(
     .map(({ thread }) => thread);
 }
 
+/**
+ * English fallback names for providers without a localized
+ * `threads.origin.providers.*` entry (and for callers without translations).
+ */
 const CHANNEL_PROVIDER_LABELS: Record<string, string> = {
   buzz: "Buzz",
   dingtalk: "DingTalk",
   discord: "Discord",
   feishu: "Feishu",
+  github: "GitHub",
+  qq: "QQ",
   slack: "Slack",
   telegram: "Telegram",
   wechat: "WeChat",
   wecom: "WeCom",
 };
 
-function labelOfChannelProvider(provider: string) {
-  return CHANNEL_PROVIDER_LABELS[provider] ?? provider;
+/**
+ * A provider's display name: the localized `threads.origin.providers.*` entry
+ * when `t` is given and knows it, else the English name, else the raw id (an
+ * unknown provider only).
+ */
+export function labelOfChannelProvider(
+  provider: string,
+  t?: Pick<Translations, "threads">,
+): string {
+  const localized: Record<string, string> | undefined =
+    t?.threads.origin.providers;
+  if (localized && Object.hasOwn(localized, provider)) {
+    return localized[provider]!;
+  }
+  return Object.hasOwn(CHANNEL_PROVIDER_LABELS, provider)
+    ? CHANNEL_PROVIDER_LABELS[provider]!
+    : provider;
 }
 
 export function channelSourceOfThread(
   thread: Pick<AgentThread, "metadata">,
+  t?: Pick<Translations, "threads">,
 ): ChannelThreadSource | null {
   const source = thread.metadata?.channel_source;
   if (!source || typeof source !== "object" || Array.isArray(source)) {
@@ -147,6 +178,6 @@ export function channelSourceOfThread(
   return {
     type: "im_channel",
     provider: normalizedProvider,
-    label: labelOfChannelProvider(normalizedProvider),
+    label: labelOfChannelProvider(normalizedProvider, t),
   };
 }

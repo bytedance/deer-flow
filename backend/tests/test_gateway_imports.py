@@ -72,3 +72,27 @@ def test_subagent_package_public_executor_exports_are_lazy_importable() -> None:
     )
     assert result.returncode == 0, result.stderr
     assert "SubagentExecutor SubagentResult" in result.stdout
+
+
+def test_workspace_changes_package_imports_standalone() -> None:
+    """The workspace-changes package must import as the process's first import.
+
+    ``workspace_changes.api`` reads ``deerflow.runtime.user_context`` for the
+    ``AUTO`` sentinel, which runs ``deerflow.runtime``'s package init and imports
+    ``.runs`` -> ``worker`` -> ``deerflow.workspace_changes`` again. Importing
+    ``.api`` before this package bound its own names made that re-entrant import
+    fail with ImportError whenever ``deerflow.runtime`` had not been imported
+    yet.
+    """
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import deerflow.workspace_changes as w; print(w.scan_workspace_roots.__name__, w.get_workspace_changes_response.__name__)",
+        ],
+        capture_output=True,
+        text=True,
+        env=_gateway_import_env(),
+    )
+    assert result.returncode == 0, result.stderr
+    assert "scan_workspace_roots get_workspace_changes_response" in result.stdout

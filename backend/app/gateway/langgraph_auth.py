@@ -71,7 +71,9 @@ def _scrub_run_incarnation(value: dict) -> None:
     if not isinstance(context, dict):
         context = {}
         kwargs["context"] = context
-    runtime_keys = (*lifecycle_keys, "user_id", "thread_id", "run_id")
+    # Child execution identity is installed only by SubagentExecutor. Public
+    # runs must not impersonate a child when providers evaluate agent access.
+    runtime_keys = (*lifecycle_keys, "user_id", "thread_id", "run_id", "is_subagent", "agent_id")
     for key in runtime_keys:
         context.pop(key, None)
     config = kwargs.get("config")
@@ -198,6 +200,10 @@ async def _bind_standalone_run_incarnation(ctx, value: dict) -> None:
         assert is_valid_thread_incarnation(incarnation)
 
     context = value["kwargs"]["context"]
+    # Assistant defaults are merged after admission. Explicit primary-run
+    # values also override forged fields saved by older server versions.
+    context["is_subagent"] = False
+    context["agent_id"] = None
     context["user_id"] = ctx.user.identity
     if thread_id is not None:
         context["thread_id"] = str(thread_id)
@@ -276,10 +282,17 @@ async def authenticate(request):
             status_code=401,
             detail="User not found",
         )
-    if user.token_version != payload.ver:
+    # Same post-lookup verdicts as every other JWT surface — including
+    # account suspension, so a disabled user's still-valid cookie is
+    # rejected here exactly as the Gateway's HTTP dependency rejects it.
+    from app.gateway.auth.errors import AuthErrorCode
+    from app.gateway.deps import validate_resolved_session_user
+
+    failure = validate_resolved_session_user(user, payload)
+    if failure is not None:
         raise Auth.exceptions.HTTPException(
             status_code=401,
-            detail="Token revoked (password changed)",
+            detail="Token revoked (password changed)" if failure is AuthErrorCode.TOKEN_INVALID else "Account disabled",
         )
 
     return payload.sub
@@ -323,6 +336,14 @@ async def add_owner_filter(ctx: Auth.types.AuthContext, value: dict):
             metadata.pop(THREAD_INCARNATION_CONTEXT_KEY, None)
     if ctx.resource == "assistants" and ctx.action in {"create", "update"}:
         metadata["created_by"] = "user"
+        sections = [value.get("context")]
+        config = value.get("config")
+        if isinstance(config, dict):
+            sections.extend(config.get(key) for key in ("context", "configurable", "metadata"))
+        for section in sections:
+            if isinstance(section, dict):
+                section.pop("is_subagent", None)
+                section.pop("agent_id", None)
 
     # Return filter dict — LangGraph applies it to search/read/delete
     return {"user_id": ctx.user.identity}

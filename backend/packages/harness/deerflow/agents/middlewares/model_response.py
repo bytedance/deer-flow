@@ -36,7 +36,10 @@ def has_visible_content(message: AIMessage) -> bool:
     for block in content:
         if isinstance(block, str) and block.strip():
             return True
-        if not isinstance(block, dict) or block.get("type") not in {"text", "output_text"}:
+        # Probe by equality, not set membership: `type: []` / `type: {}` are
+        # legal JSON from a provider, and hashing an unhashable value would
+        # raise TypeError out of the middleware chain instead of skipping.
+        if not isinstance(block, dict) or block.get("type") not in ("text", "output_text"):
             continue
         text = block.get("text")
         if isinstance(text, str) and text.strip():

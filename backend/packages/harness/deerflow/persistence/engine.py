@@ -224,7 +224,7 @@ async def init_engine(
             # Rebuild engine against the now-existing database. The rebuilt
             # engine MUST keep the same connect_args so the retried bootstrap
             # lands in the target schema, not the default one.
-            await _engine.dispose()
+            await await_drained(_engine.dispose())
             _engine = create_async_engine(
                 url,
                 **_postgres_engine_kwargs(

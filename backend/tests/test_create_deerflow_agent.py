@@ -311,7 +311,7 @@ def test_explicit_subagent_runtime_aligns_factory_middleware_and_tools(mock_crea
     assert limit.max_concurrent == 7
     assert limit.max_total == 12
     tool_names = {tool.name for tool in call_kwargs["tools"]}
-    assert {"task", "batch_task", "batch_status", "cancel_batch"} <= tool_names
+    assert {"task", "batch_task", "batch_status", "cancel_batch", "read_batch_result"} <= tool_names
 
 
 def test_explicit_subagent_runtime_requires_the_subagent_feature() -> None:
@@ -808,7 +808,9 @@ def test_loop_detection_before_clarification(mock_create_agent):
     loop_idx = mw_types.index("LoopDetectionMiddleware")
     clar_idx = mw_types.index("ClarificationMiddleware")
     assert loop_idx < clar_idx
-    assert loop_idx == clar_idx - 1
+    # The read-time sanitizer owns the slot immediately before Clarification.
+    assert mw_types[clar_idx - 1] == "ModelContentCompatibilityMiddleware"
+    assert loop_idx == clar_idx - 2
 
 
 # ---------------------------------------------------------------------------
@@ -851,9 +853,11 @@ def test_loop_detection_custom_middleware(mock_create_agent):
     mw_types = [type(m).__name__ for m in middleware]
     # Default LoopDetectionMiddleware must not also appear.
     assert "LoopDetectionMiddleware" not in mw_types
-    # Custom replacement sits immediately before TokenBudgetMiddleware and ClarificationMiddleware.
+    # Custom replacement sits after TokenBudgetMiddleware's slot, with only the
+    # read-time sanitizer between it and ClarificationMiddleware.
     assert mw_types[-1] == "ClarificationMiddleware"
-    assert mw_types[-2] == "MyLoopDetection"
+    assert mw_types[-2] == "ModelContentCompatibilityMiddleware"
+    assert mw_types[-3] == "MyLoopDetection"
 
 
 # ---------------------------------------------------------------------------
@@ -987,6 +991,7 @@ def test_full_chain_order(mock_create_agent):
         "ViewImageMiddleware",
         "SubagentLimitMiddleware",
         "LoopDetectionMiddleware",
+        "ModelContentCompatibilityMiddleware",
         "ClarificationMiddleware",
     ]
     assert mw_types == expected_order

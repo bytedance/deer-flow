@@ -1,3 +1,5 @@
+import { inlineReferences } from "./inline-references";
+
 export type MentionQuery = { start: number; end: number; query: string };
 
 /** Only a standalone @ at the caret opens the picker, never an email or URL. */
@@ -10,5 +12,10 @@ export function getMentionQuery(
   const match = /(?:^|[\s（(，,。:：])@([^\s@/\\]*)$/u.exec(before);
   if (!match) return null;
   const query = match[1] ?? "";
-  return { start: caret - query.length - 1, end: caret, query };
+  const start = caret - query.length - 1;
+  if (
+    inlineReferences(text).some((ref) => start >= ref.start && start < ref.end)
+  )
+    return null;
+  return { start, end: caret, query };
 }

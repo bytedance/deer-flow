@@ -70,7 +70,8 @@ def test_successful_write_publishes_the_whole_content(tmp_path):
 
 
 @pytest.mark.parametrize("second_publish_fails", [False, True])
-def test_concurrent_externalizations_do_not_share_temporary_files(tmp_path, monkeypatch, second_publish_fails):
+@pytest.mark.parametrize("second_content", ["A" * 1000, "B" * 200], ids=["identical-output", "different-output"])
+def test_concurrent_externalizations_do_not_share_temporary_files(tmp_path, monkeypatch, second_publish_fails, second_content):
     first_ready = threading.Event()
     release_first = threading.Event()
     real_replace = mw.os.replace
@@ -90,31 +91,38 @@ def test_concurrent_externalizations_do_not_share_temporary_files(tmp_path, monk
         first = executor.submit(mw._externalize, "A" * 1000, **kwargs)
         try:
             assert first_ready.wait(timeout=10)
-            second_path = mw._externalize("B" * 200, **kwargs)
+            second_path = mw._externalize(second_content, **kwargs)
         finally:
             # Always release the worker, including when the second call fails.
             release_first.set()
         first_path = first.result(timeout=10)
 
-    assert first_path == "/mnt/user-data/outputs/sub/bash-same_call.log"
-    assert second_path == (None if second_publish_fails else first_path)
+    assert first_path is not None
+    if second_publish_fails:
+        assert second_path is None
+    else:
+        assert second_path is not None
+        assert (first_path == second_path) is (second_content == "A" * 1000)
     written = [p for p in tmp_path.rglob("*") if p.is_file()]
-    assert len(written) == 1
-    # The last successful publisher wins, without mixed bytes or leftover temps.
-    assert written[0].read_text(encoding="utf-8") == "A" * 1000
+    assert len(written) == (2 if second_path is not None and second_path != first_path else 1)
+    # Every advertised path retains its complete bytes, with no leftover temps.
+    assert (tmp_path / "sub" / first_path.rsplit("/", 1)[1]).read_text(encoding="utf-8") == "A" * 1000
+    if second_path is not None:
+        assert (tmp_path / "sub" / second_path.rsplit("/", 1)[1]).read_text(encoding="utf-8") == second_content
 
 
 def test_temporary_file_creation_failure_preserves_existing_output(tmp_path, monkeypatch):
     storage_dir = tmp_path / "sub"
-    storage_dir.mkdir()
-    published = storage_dir / "bash-call_1.log"
-    published.write_text("Previous complete output", encoding="utf-8")
+    content = "Previous complete output"
+    path = mw._externalize(content, tool_name="bash", tool_call_id="call_1", outputs_path=str(tmp_path), storage_subdir="sub")
+    assert path is not None
+    published = storage_dir / path.rsplit("/", 1)[1]
 
     def fail_to_create(*args, **kwargs):
         raise OSError("Cannot create temporary file")
 
     monkeypatch.setattr(mw, "open", fail_to_create, raising=False)
-    result = mw._externalize("New output", tool_name="bash", tool_call_id="call_1", outputs_path=str(tmp_path), storage_subdir="sub")
+    result = mw._externalize(content, tool_name="bash", tool_call_id="call_1", outputs_path=str(tmp_path), storage_subdir="sub")
 
     assert result is None
     assert list(storage_dir.iterdir()) == [published]
@@ -135,29 +143,32 @@ from deerflow.agents.middlewares import tool_output_budget_middleware as mw
 
 os.umask(int(sys.argv[2]))
 kwargs = dict(tool_name="bash", tool_call_id="mode", outputs_path=sys.argv[1], storage_subdir="sub")
-assert mw._externalize("First complete output", **kwargs) is not None
-published = pathlib.Path(sys.argv[1]) / "sub/bash-mode.log"
+content = "Complete output"
+first_path = mw._externalize(content, **kwargs)
+assert first_path is not None
+published = pathlib.Path(sys.argv[1]) / "sub" / first_path.rsplit("/", 1)[1]
 initial_mode = stat.S_IMODE(published.stat().st_mode)
 os.chmod(published, 0o600)
-assert mw._externalize("Second complete output", **kwargs) is not None
+assert mw._externalize(content, **kwargs) == first_path
 print(json.dumps({"modes": [initial_mode, stat.S_IMODE(published.stat().st_mode)], "content": published.read_text(encoding="utf-8")}))
 """
     completed = subprocess.run([sys.executable, "-c", script, str(tmp_path), str(mask)], capture_output=True, text=True, timeout=30, check=True)
     observed = json.loads(completed.stdout)
-    assert observed["content"] == "Second complete output"
+    assert observed["content"] == "Complete output"
     assert observed["modes"] == [0o666 & ~mask] * 2
 
 
 def test_exclusive_creation_collision_preserves_other_writers_temp(tmp_path, monkeypatch):
     storage_dir = tmp_path / "sub"
-    storage_dir.mkdir()
+    content = "Previous complete output"
+    path = mw._externalize(content, tool_name="bash", tool_call_id="call_1", outputs_path=str(tmp_path), storage_subdir="sub")
+    assert path is not None
     owned_by_other_writer = storage_dir / ".tool-output-collision.tmp"
     owned_by_other_writer.write_text("Other writer's pending output", encoding="utf-8")
-    published = storage_dir / "bash-call_1.log"
-    published.write_text("Previous complete output", encoding="utf-8")
+    published = storage_dir / path.rsplit("/", 1)[1]
     monkeypatch.setattr(mw, "uuid", SimpleNamespace(uuid4=lambda: SimpleNamespace(hex="collision")), raising=False)
 
-    result = mw._externalize("New output", tool_name="bash", tool_call_id="call_1", outputs_path=str(tmp_path), storage_subdir="sub")
+    result = mw._externalize(content, tool_name="bash", tool_call_id="call_1", outputs_path=str(tmp_path), storage_subdir="sub")
 
     assert result is None
     assert set(storage_dir.iterdir()) == {owned_by_other_writer, published}
