@@ -29,9 +29,7 @@ CLEANUP_ERRNO = 28
 # so accept the platform's blocked-rename error and assert it is not the
 # cleanup error instead of hard-coding errno 21 (which failed on Windows dev
 # hosts).
-BLOCKED_RENAME_ERRORS: tuple[type[BaseException], ...] = (
-    (IsADirectoryError, PermissionError) if os.name == "nt" else (IsADirectoryError,)
-)
+BLOCKED_RENAME_ERRORS: tuple[type[BaseException], ...] = (IsADirectoryError, PermissionError) if os.name == "nt" else (IsADirectoryError,)
 
 
 def _assert_blocked_rename_error(exc: BaseException) -> None:
