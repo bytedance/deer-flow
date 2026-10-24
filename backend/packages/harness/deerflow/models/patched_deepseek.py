@@ -9,8 +9,10 @@ on all assistant messages when thinking mode is enabled.
 
 from typing import Any
 
+import openai
 from langchain_core.language_models import LanguageModelInput
 from langchain_core.messages import AIMessage
+from langchain_core.outputs import ChatResult
 from langchain_deepseek import ChatDeepSeek
 
 from deerflow.models.assistant_payload_replay import restore_assistant_payloads, restore_reasoning_content
@@ -100,3 +102,33 @@ class PatchedChatDeepSeek(ChatDeepSeek):
         )
 
         return payload
+
+    def _create_chat_result(
+        self,
+        response: dict | openai.BaseModel,
+        generation_info: dict | None = None,
+    ) -> ChatResult:
+        """Preserve Moonshot's ``cache_write_tokens`` in the usage metadata.
+
+        The locked ``langchain-openai==1.2.1`` conversion reads
+        ``prompt_tokens_details.cached_tokens`` (mapped to ``cache_read``) but
+        not ``cache_write_tokens``, so providers such as Kimi K3.1 lose their
+        cache-creation count before it reaches the usage journal (#7426).
+        Restore it as ``input_token_details["cache_creation"]`` from the raw
+        SDK response.
+        """
+        result = super()._create_chat_result(response, generation_info)
+
+        if not isinstance(response, openai.BaseModel):
+            return result
+        prompt_details = getattr(getattr(response, "usage", None), "prompt_tokens_details", None)
+        cache_write_tokens = getattr(prompt_details, "cache_write_tokens", None)
+        if cache_write_tokens is None:
+            return result
+        for generation in result.generations:
+            usage = getattr(generation.message, "usage_metadata", None)
+            if not usage:
+                continue
+            input_details = usage.setdefault("input_token_details", {})
+            input_details["cache_creation"] = cache_write_tokens
+        return result
