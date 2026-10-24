@@ -50,7 +50,7 @@ This command:
 - imports through the configured memory storage provider; and
 - rejects `database.backend: memory`, which has no persistent user registry.
 
-Bulk loading replaces every registered user's memory. Do not run it against an environment containing memory you need to preserve. Pass `--no-backup` only when losing the existing memory is acceptable.
+Bulk loading replaces every registered user's memory. Do not run it against an environment containing memory you need to preserve. Backups accumulate until removed manually. On POSIX, each new backup directory is private to the creating OS user (mode 0700); restoring as another user may require adjusting permissions. Pass `--no-backup` only when losing the existing memory is acceptable.
 
 ## Minimal Manual Test
 

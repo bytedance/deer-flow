@@ -66,9 +66,7 @@ def require_persistent_database(backend: str) -> None:
 def create_target_backup(target: Path) -> Path:
     """Reserve a unique sidecar before copying so earlier backups survive."""
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    fd, name = tempfile.mkstemp(
-        prefix=f"{target.name}.bak-{timestamp}-", dir=target.parent
-    )
+    fd, name = tempfile.mkstemp(prefix=f"{target.name}.bak-{timestamp}-", dir=target.parent)
     os.close(fd)
     backup = Path(name)
     try:
@@ -100,16 +98,8 @@ def load_sample_for_users(
         return 0
 
     sample_facts = sample.get("facts", [])
-    expected_ids = {
-        str(fact["id"])
-        for fact in sample_facts
-        if isinstance(fact, dict) and fact.get("id")
-    }
-    expected_contents = {
-        str(fact["content"])
-        for fact in sample_facts
-        if isinstance(fact, dict) and not fact.get("id") and fact.get("content")
-    }
+    expected_ids = {str(fact["id"]) for fact in sample_facts if isinstance(fact, dict) and fact.get("id")}
+    expected_contents = {str(fact["content"]) for fact in sample_facts if isinstance(fact, dict) and not fact.get("id") and fact.get("content")}
 
     if not no_backup:
         if backup_root is None:
@@ -128,20 +118,9 @@ def load_sample_for_users(
         except OSError as exc:
             raise OSError(f"Failed to import memory for user {user_id}: {exc}") from exc
         imported_facts = imported.get("facts", []) if isinstance(imported, dict) else []
-        imported_ids = {
-            str(fact["id"])
-            for fact in imported_facts
-            if isinstance(fact, dict) and fact.get("id")
-        }
-        imported_contents = {
-            str(fact["content"])
-            for fact in imported_facts
-            if isinstance(fact, dict) and fact.get("content")
-        }
-        if (
-            not expected_ids <= imported_ids
-            or not expected_contents <= imported_contents
-        ):
+        imported_ids = {str(fact["id"]) for fact in imported_facts if isinstance(fact, dict) and fact.get("id")}
+        imported_contents = {str(fact["content"]) for fact in imported_facts if isinstance(fact, dict) and fact.get("content")}
+        if not expected_ids <= imported_ids or not expected_contents <= imported_contents:
             raise OSError(f"Imported memory was not persisted for user {user_id}")
 
     return len(user_ids)
@@ -180,9 +159,7 @@ async def load_sample_for_all_users(
         user_ids = await SQLiteUserRepository(session_factory).list_user_ids()
         backup_root = None
         if user_ids and not no_backup:
-            backup_root = await asyncio.to_thread(
-                reserve_bulk_backup_root, get_paths().base_dir
-            )
+            backup_root = await asyncio.to_thread(reserve_bulk_backup_root, get_paths().base_dir)
 
         count = await asyncio.to_thread(
             load_sample_for_users,
