@@ -110,7 +110,7 @@ tools:
 
 ### 网络搜索
 
-<Tabs items={["DuckDuckGo（默认）", "Tavily", "Brave", "Serply", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya", "You.com"]}>
+<Tabs items={["DuckDuckGo（默认）", "Tavily", "Brave", "Serply", "SearchApi", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya", "You.com"]}>
   <Tabs.Tab>
 ```yaml
 tools:
@@ -148,6 +148,18 @@ tools:
     # vertical: news   # 或 scholar；默认为普通 Google 搜索
 ```
 以 JSON 形式返回实时 Google 搜索结果。需要 [Serply](https://serply.io) API Key。设置 `vertical: news` 或 `vertical: scholar` 可用同一个 Key 搜索 Google News 或 Google Scholar；`gl` 和 `hl` 用于设置结果的国家和语言。详见 [Serply 文档](https://serply.io/docs)。
+
+无需额外依赖。
+
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - use: deerflow.community.searchapi.tools:web_search_tool
+    api_key: $SEARCHAPI_API_KEY
+    # vertical: news   # 或 scholar；默认为普通 Google 搜索
+```
+以 JSON 形式返回实时 Google 搜索结果。需要 [SearchApi](https://www.searchapi.io) API Key。设置 `vertical: news` 或 `vertical: scholar` 可用同一个 Key 搜索 Google News 或 Google Scholar；`gl` 和 `hl` 用于设置结果的国家和语言；Agent 的 `time_range` 会映射为 Google 的时间筛选。详见 [SearchApi 文档](https://www.searchapi.io/docs/google)。
 
 无需额外依赖。
 

@@ -282,6 +282,7 @@ When using `make dev` from root, the frontend automatically connects through ngi
 Optional `web_search` `time_range=day|week|month|year` mappings:
 DDG → `d|w|m|y`; Brave → `pd|pw|pm|py`; Tavily/SearXNG → unchanged;
 Sofya → unchanged in `freshness`; Serper → `qdr:d|w|m|y` in `tbs`.
+SearchApi → `last_day|last_week|last_month|last_year` in `time_period` (Google Scholar has no window, so it is omitted there).
 Omission preserves request shape; Serper null also omits `tbs`. Image search is unchanged.
 DDGS 9.14.1 recency uses only enabled Brave/DuckDuckGo/Yahoo engines honoring
 `timelimit`: `auto`/`all` selects this set; drop incompatible engines and fall back

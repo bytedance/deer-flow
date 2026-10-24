@@ -693,6 +693,14 @@ SEARCH_PROVIDERS: list[SearchProvider] = [
         extra_config={"max_results": 5},
     ),
     SearchProvider(
+        name="searchapi",
+        display_name="SearchApi",
+        description="Google Search, News and Scholar results, API key required",
+        use="deerflow.community.searchapi.tools:web_search_tool",
+        env_var="SEARCHAPI_API_KEY",
+        extra_config={"max_results": 5},
+    ),
+    SearchProvider(
         name="sofya",
         display_name="Sofya",
         description="Search results include page content, API key required",
