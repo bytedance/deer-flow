@@ -1397,8 +1397,8 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
 
 ### Fixed
 
-- **mcp:** Ordinary users can install DingTalk, WeCom and HubSpot from
-  **Capability Center → Plugins** again. Saving one of these bundled
+- **mcp:** Ordinary users can now install DingTalk, WeCom and HubSpot from
+  **Capability Center → Plugins**. Saving one of these bundled
   connections as a non-administrator, including editing or enabling it later,
   failed with `500 Internal Server Error` because the personal-connection check
   read a `cwd` field the request model does not declare. A bundled connection
