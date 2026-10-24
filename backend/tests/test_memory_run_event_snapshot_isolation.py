@@ -38,37 +38,53 @@ async def test_persisted_events_do_not_alias_writer_inputs_or_receipts(writer):
     assert stored["metadata"] == {"audit": {"labels": ["original"]}}
 
 
+@pytest.mark.parametrize(
+    ("reader", "cursor"),
+    [
+        pytest.param("list_events", {}, id="list-events-latest"),
+        pytest.param("list_events", {"after_seq": 1, "limit": 1}, id="list-events-after-seq"),
+        pytest.param("list_messages", {}, id="list-messages-latest"),
+        pytest.param("list_messages", {"before_seq": 3, "limit": 1}, id="list-messages-before-seq"),
+        pytest.param("list_messages", {"after_seq": 1, "limit": 1}, id="list-messages-after-seq"),
+        pytest.param("list_messages_by_run", {}, id="list-messages-by-run-latest"),
+        pytest.param("list_messages_by_run", {"before_seq": 3, "limit": 1}, id="list-messages-by-run-before-seq"),
+        pytest.param("list_messages_by_run", {"after_seq": 1, "limit": 1}, id="list-messages-by-run-after-seq"),
+    ],
+)
 @pytest.mark.asyncio
-@pytest.mark.parametrize("reader", ["list_events", "list_messages", "list_messages_by_run"])
-async def test_readers_cannot_mutate_shared_event_projections(reader):
+async def test_reader_results_are_detached_snapshots(reader, cursor):
     store = MemoryRunEventStore()
-    await store.put(
-        thread_id="thread",
-        run_id="run",
-        event_type="llm.ai.response",
-        category="message",
-        content={"parts": ["saved"]},
-        metadata={"audit": {"tags": ["saved"]}},
-    )
+    for seq in range(1, 4):
+        await store.put(
+            thread_id="thread",
+            run_id="run",
+            event_type="llm.ai.response",
+            category="message",
+            content={"parts": [f"saved-{seq}"]},
+            metadata={"audit": {"tags": [f"saved-{seq}"]}},
+        )
 
     if reader == "list_events":
-        results = await store.list_events("thread", "run")
+        results = await store.list_events("thread", "run", **cursor)
     elif reader == "list_messages":
-        results = await store.list_messages("thread")
+        results = await store.list_messages("thread", **cursor)
     else:
-        results = await store.list_messages_by_run("thread", "run")
+        results = await store.list_messages_by_run("thread", "run", **cursor)
 
+    assert results
     results[0]["content"]["parts"].append("changed by reader")
     results[0]["metadata"]["audit"]["tags"].append("changed by reader")
     results[0]["seq"] = -1
 
-    stored = (await store.list_events("thread", "run"))[0]
-    assert stored["content"] == {"parts": ["saved"]}
-    assert stored["metadata"] == {"audit": {"tags": ["saved"]}}
-    assert stored["seq"] == 1
-    assert (await store.list_messages("thread"))[0]["seq"] == 1
-    assert (await store.list_messages_by_run("thread", "run"))[0]["seq"] == 1
+    stored = await store.list_events("thread", "run")
+    assert [event["seq"] for event in stored] == [1, 2, 3]
+    for event in stored:
+        seq = event["seq"]
+        assert event["content"] == {"parts": [f"saved-{seq}"]}
+        assert event["metadata"] == {"audit": {"tags": [f"saved-{seq}"]}}
 
+    assert [event["seq"] for event in await store.list_messages("thread")] == [1, 2, 3]
+    assert [event["seq"] for event in await store.list_messages_by_run("thread", "run")] == [1, 2, 3]
 
 @pytest.mark.asyncio
 async def test_put_if_absent_existing_receipt_is_not_the_stored_event():
@@ -81,9 +97,7 @@ async def test_put_if_absent_existing_receipt_is_not_the_stored_event():
         content={"status": "success"},
         metadata={"audit": {"source": "worker"}},
     )
-    existing, created = await store.put_if_absent(
-        thread_id="thread", run_id="run", event_type="run.end", category="lifecycle"
-    )
+    existing, created = await store.put_if_absent(thread_id="thread", run_id="run", event_type="run.end", category="lifecycle")
     assert not created
     existing["metadata"]["audit"]["source"] = "modified"
     existing["content"]["status"] = "error"

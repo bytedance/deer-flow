@@ -768,7 +768,7 @@ such a checkout, use `bash ./scripts/<name>.sh ...`.
    uv run python ../scripts/load_memory_sample.py --all-users
    ```
 
-   Bulk mode supports SQLite/PostgreSQL user registries, creates timestamped backups under `.deer-flow/memory-sample-backups/`, and rejects the non-persistent `database.backend: memory` mode. See [backend/docs/MEMORY_SETTINGS_REVIEW.md](backend/docs/MEMORY_SETTINGS_REVIEW.md) for the complete review flow.
+   Bulk mode supports SQLite/PostgreSQL user registries, creates a distinct timestamped backup directory for every import under `.deer-flow/memory-sample-backups/`, and rejects the non-persistent `database.backend: memory` mode. See [backend/docs/MEMORY_SETTINGS_REVIEW.md](backend/docs/MEMORY_SETTINGS_REVIEW.md) for the complete review flow.
 
 Local services always use their internal ports (`8001`, `3000`, and `2026`).
 The root `.env` variable `PORT` configures only the published Docker ingress;
@@ -1125,6 +1125,9 @@ Attachments saved by the shared IM ingestion pipeline or Feishu/DingTalk's
 embedded downloads keep distinct filenames, including when concurrent uploads
 choose the same name. The final filename is passed to the agent and used for
 sandbox sync; an existing conversation file is not overwritten.
+Embedded client uploads also keep earlier same-name files under distinct names.
+Renamed originals and Markdown companions retain private source snapshots and
+become visible only after the complete copy is published.
 
 Feishu and DingTalk attachment transfers return standalone temporary sandboxes
 to the pool after synchronization, without interrupting an active run.
@@ -1633,6 +1636,12 @@ recorded in the [acceptance report](examples/deerflow-extension-knowledge-manage
 Skills are what make DeerFlow do *almost anything*.
 
 A standard Agent Skill is a structured capability module — a Markdown file that defines a workflow, best practices, and references to supporting resources. DeerFlow ships with built-in skills for research, report generation, slide creation, web pages, image and video generation, and more. But the real power is extensibility: add your own skills, replace the built-in ones, or combine them into compound workflows.
+
+The video-generation skill derives reference-image MIME metadata from `.png`,
+`.jpg`, `.jpeg`, `.webp`, and `.gif` filename extensions (case-insensitive). A
+submitted reference with a missing or unrecognized extension raises a clear error
+before API submission. Filenames must match their contents; image bytes are not
+validated or converted, and provider-specific format restrictions still apply.
 
 The [music-generation skill](skills/public/music-generation/SKILL.md#output-handling) preserves existing output when the provider returns malformed, empty or unrecognized audio.
 
@@ -3290,6 +3299,11 @@ editing the saved agent configuration to refresh the selection.
 
 DeerFlow can be used as an embedded Python library without running the full HTTP services. The `DeerFlowClient` provides direct in-process access to all agent and Gateway capabilities, returning the same response schemas as the HTTP Gateway API. The HTTP Gateway also exposes `DELETE /api/threads/{thread_id}` to remove DeerFlow-managed local thread data after the LangGraph thread itself has been deleted:
 
+An embedded `DeerFlowClient(config_path="custom/config.yaml")` keeps the process
+config singleton on that file, even after a working-directory change. Later edits
+to the file are still detected. Call `reload_app_config()` without a path to resume
+ambient config discovery, or `reset_app_config()` to clear the cached selection.
+
 For database-backed run events, deleting a run preserves its thread's sequence watermark. Thread deletion removes that watermark once no events remain, allowing a recreated thread to restart at sequence 1. Owner-scoped deletion preserves the watermark when another owner's events remain.
 
 Single-process JSONL event storage also retains the thread sequence watermark
@@ -3478,6 +3492,7 @@ Current MVP capabilities:
 - Run background scheduled executions as non-interactive DeerFlow runs (`ask_clarification` is not exposed there)
 - Persist a due execution as `queued` when its reused thread or the global execution budget is busy, then launch it when capacity is available; queued occurrences survive Gateway restarts and fail after `scheduler.queue_timeout_seconds`
 - Retrying a busy scheduled task keeps its execution slot while an earlier recovery pass is still in progress.
+- A scheduled run whose completion hook fails is finalized from its durable terminal run on the next scheduler poll instead of staying `running` until a restart.
 - Share execution slots fairly between task owners: one owner may have at most `scheduler.max_concurrent_runs_per_user` scheduled runs starting or running at a time (default 2, never more than `max_concurrent_runs`; `0` turns the per-owner cap off), and the waiting queue is drained owner by owner, so one owner's backlog never holds back another owner's run. A run that waits longer than `scheduler.queue_timeout_seconds` is skipped, and its history reads "Skipped: it waited too long for a free slot"
 - Freeze a task's definition while an occurrence is `queued`, `launching`, or `running`, so a durable occurrence cannot silently pick up a different prompt, thread, or schedule; transitioning a task to paused or deleting it cancels an existing waiting occurrence, while `launching`/`running` work must finish before those mutations are retried and an explicit manual trigger may still wait and run without resuming a paused schedule
 - Pause, resume, trigger, inspect history, and delete tasks

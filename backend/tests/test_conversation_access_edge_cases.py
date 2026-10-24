@@ -50,7 +50,7 @@ def test_visible_text_is_parsed_once_per_scan_and_refreshed_on_the_next_read(mon
         await threads.create("source", user_id="alice")
         await _put(events, "oldest")
         await _put(events, "<think>private</think>older")
-        newest = await _put(events, [{"type": "text", "text": "newest"}, {"type": "text", "text": "answer"}])
+        await _put(events, [{"type": "text", "text": "newest"}, {"type": "text", "text": "answer"}])
         reader, _ = prepare(["source"])
 
         page = json.loads(await reader(thread_id="source", limit=1))
@@ -59,7 +59,8 @@ def test_visible_text_is_parsed_once_per_scan_and_refreshed_on_the_next_read(mon
         assert calls == {3: 1, 2: 1}
 
         calls.clear()
-        newest["content"]["content"] = "updated answer"
+        # Model a store-side content refresh; the public receipt is intentionally detached.
+        events._events["source"][2]["content"]["content"] = "updated answer"
         refreshed = json.loads(await reader(thread_id="source", limit=1))
         assert refreshed["messages"][0]["text"] == "updated answer"
         assert calls == {3: 1, 2: 1}

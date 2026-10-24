@@ -233,7 +233,10 @@ The thread- and run-keyed indexes deliberately share their internal event dicts,
 but caller-owned `content` and `metadata` must be copied at admission, and
 public put/read results must be detached snapshots. Otherwise mutating a write
 receipt or a paged read silently rewrites later RunEvent replay and every shared
-message projection. Keep the copy outside the internal indexes; see
+message projection. The cross-backend contract is also documented on the
+`RunEventStore` ABC in `runtime/events/store/base.py`; alternate and extension
+backends must honor the same input, receipt, and read-snapshot isolation. Keep the
+copy outside the internal indexes; see
 `tests/test_memory_run_event_snapshot_isolation.py`.
 
 **Targeted run-event attribution** (`runtime/events/store/`):

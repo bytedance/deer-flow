@@ -34,7 +34,7 @@ _SANDBOX_PATH_PATTERN = re.compile(r"/mnt/user-data/\S+")
 # Delimiters a tool result may wrap a path in. A delimited span is one value, so a
 # filename inside it keeps its spaces; the bare token scan below keeps its
 # whitespace boundary, because nothing tells it where such a name would end.
-_REF_QUOTE_DELIMITERS = {'"': '"', "'": "'", "`": "`", "“": "”", "‘": "’"}
+_REF_QUOTE_DELIMITERS = {'"': '"', "'": "'", "`": "`", "“": "”", "‘": "’", "「": "」", "『": "』"}
 _REF_LINE_BOUNDARY_PATTERN = re.compile(r"[\r\n\v\f\x1c-\x1e\x85\u2028\u2029]")
 _SPAN_BARE = "bare"
 _SPAN_QUOTED = "quoted"
@@ -57,8 +57,8 @@ _STRUCTURED_TASK_KEYS = frozenset({"task_id", "job_id"})
 # quotes/brackets/backticks that markdown- and JSON-formatted tool output
 # commonly wraps paths in, including CJK punctuation. `\S+` would otherwise
 # consume them into `real_ref`.
-_REF_TRAILING_NOISE_CHARS = ".,;:)]}\"'`\u3002\uff0c\uff1b\uff1a\u3001\uff09\u3011\u300b\u201d\u2019"
-_REF_CLOSING_DELIMITERS = {")": "(", "]": "[", "}": "{", "）": "（", "】": "【", "》": "《", "”": "“", "’": "‘"}
+_REF_TRAILING_NOISE_CHARS = ".,;:)]}\"'`\u3002\uff0c\uff1b\uff1a\u3001\uff09\u3011\u300b\u300d\u300f\u201d\u2019"
+_REF_CLOSING_DELIMITERS = {")": "(", "]": "[", "}": "{", "）": "（", "】": "【", "》": "《", "」": "「", "』": "『", "”": "“", "’": "‘"}
 
 # Content-block and structured-key refs are trusted only in these shapes.
 # `data:`/`blob:` URIs can carry arbitrarily large embedded payloads (MCP
