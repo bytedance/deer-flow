@@ -12,6 +12,7 @@ https://unbrowse.ai/app.
 import json
 import logging
 import os
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 from langchain.tools import tool
@@ -142,6 +143,17 @@ def _clip(value: object, limit: int) -> str:
     return text if limit <= 0 else text[:limit]
 
 
+def _strip_url_userinfo(url: str) -> str:
+    """Remove credentials from a URL while preserving its destination."""
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        return url
+    if "@" not in parsed.netloc:
+        return url
+    return urlunsplit(parsed._replace(netloc=parsed.netloc.rsplit("@", 1)[-1]))
+
+
 @tool("web_fetch", parse_docstring=True)
 def web_fetch_tool(url: str) -> str:
     """Fetch the contents of a web page at a given URL.
@@ -173,7 +185,8 @@ def web_fetch_tool(url: str) -> str:
         failure = f"target page responded with HTTP {status}"
         final_url = data.get("finalUrl")
         if isinstance(final_url, str) and final_url.strip():
-            failure += f" (final URL: {_clip(final_url.strip(), _UNBROWSE_FINAL_URL_MAX_CHARS)})"
+            safe_final_url = _strip_url_userinfo(final_url.strip())
+            failure += f" (final URL: {_clip(safe_final_url, _UNBROWSE_FINAL_URL_MAX_CHARS)})"
 
     content = _clip(data.get("markdown") or "", _UNBROWSE_FETCH_MAX_CHARS)
     if not content:
