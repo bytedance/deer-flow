@@ -25,8 +25,12 @@ from app.gateway.authz import require_permission
 from app.gateway.deps import get_config, get_project_document_repo, get_project_repo, get_thread_store
 from app.gateway.routers.uploads import DEFAULT_MAX_FILE_SIZE, UPLOAD_CHUNK_SIZE, _get_upload_limit
 from app.gateway.upload_ingestion import ThreadUploadIngestionService, UnsafeFilenameError, UnsafeUploadDestinationError
+from app.gateway.workspaces.dependencies import workspace_resource_scope
+from app.gateway.workspaces.file_response import WorkspaceFileResponse
+from deerflow.authz.workspace import get_current_workspace
 from deerflow.config.app_config import AppConfig
 from deerflow.config.paths import Paths, get_paths
+from deerflow.persistence.workspaces.sql import WorkspaceAccessDenied
 from deerflow.projects.documents import (
     ShelfContentMissingError,
     ShelfUploadTooLargeError,
@@ -41,7 +45,7 @@ from deerflow.projects.documents import (
 )
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.uploads.manager import normalize_filename
-from deerflow.utils.file_io import run_file_io
+from deerflow.utils.file_io import await_drained, run_file_io
 from deerflow.utils.text_detection import _is_active_content_mime_type, is_text_file_by_content
 from deerflow.utils.thread_id import ThreadId
 
@@ -124,11 +128,16 @@ def _is_inline_viewable_mime_type(media_type: str) -> bool:
     return media_type.startswith("text/") or media_type == "application/pdf" or media_type.startswith(_INLINE_VIEWABLE_MIME_PREFIXES)
 
 
-async def _require_project(request: Request, project_id: str) -> dict:
+async def _require_project(request: Request, project_id: str, *, action="read") -> dict:
     """Owned project row in any status (archived keeps read access, §8.4), else 404."""
     row = await get_project_repo(request).get(project_id)
     if row is None:
         raise _not_found()
+    context = get_current_workspace()
+    if context is not None:
+        await request.app.state.workspace_service.authorize_resource(
+            context, request.state.auth, resource_workspace_id=row["workspace_id"], owner_user_id=row["user_id"], visibility=row["visibility"], action=action, native_permission="projects:" + action
+        )
     return row
 
 
@@ -139,6 +148,7 @@ async def _stream_upload(file: UploadFile) -> AsyncIterator[bytes]:
 
 @router.get("", response_model=ProjectDocumentListResponse)
 @require_permission("projects", "read")
+@workspace_resource_scope()
 async def list_project_documents(
     project_id: str,
     request: Request,
@@ -163,6 +173,7 @@ async def list_project_documents(
 
 @router.post("", response_model=ProjectDocumentUploadResponse, status_code=201)
 @require_permission("projects", "write")
+@workspace_resource_scope()
 async def upload_project_document(
     project_id: str,
     request: Request,
@@ -180,6 +191,9 @@ async def upload_project_document(
     separator-bearing, or over 255 UTF-8 bytes). Size reuses
     ``uploads.max_file_size`` (413, mirroring the uploads router).
     """
+    project = await _require_project(request, project_id, action="write")
+    if project["status"] != "active":
+        raise _not_found()
     try:
         display_name = validate_shelf_filename(name) if name is not None else validate_shelf_filename(normalize_filename(file.filename or ""))
     except ValueError as exc:
@@ -199,14 +213,16 @@ async def upload_project_document(
         await run_file_io(staged.staging_path.unlink, True)
         raise HTTPException(status_code=400, detail="Empty file")
 
-    result = await add_staged_document(
-        get_project_document_repo(request),
-        paths,
-        user_id=user_id,
-        project_id=project_id,
-        name=display_name,
-        staged=staged,
-        source_kind="upload",
+    result = await await_drained(
+        add_staged_document(
+            get_project_document_repo(request),
+            paths,
+            user_id=user_id,
+            project_id=project_id,
+            name=display_name,
+            staged=staged,
+            source_kind="upload",
+        )
     )
     if result is None:
         raise _not_found()
@@ -267,6 +283,7 @@ def _resolve_thread_source(paths: Paths, *, user_id: str, thread_id: str, kind: 
 @router.post("/from-thread", response_model=ProjectDocumentUploadResponse, status_code=201)
 @require_permission("projects", "write")
 @require_permission("threads", "read")
+@workspace_resource_scope()
 async def promote_thread_file_to_shelf(
     project_id: str,
     body: PromoteThreadFileRequest,
@@ -285,6 +302,7 @@ async def promote_thread_file_to_shelf(
     Response mirrors upload: 201 created, 200 on a content dedup hit (the
     existing row keeps its own name and provenance, §10.9).
     """
+    await _require_project(request, project_id, action="write")
     if await get_thread_store(request).get(body.thread_id) is None:
         raise _not_found()
     repo = get_project_document_repo(request)
@@ -333,6 +351,7 @@ async def promote_thread_file_to_shelf(
 
 
 @router.post("/{document_id}/attach-to-thread/{thread_id}", response_model=AttachDocumentResponse)
+@workspace_resource_scope(private_thread_read=True)
 @require_permission("projects", "write")
 @require_permission("threads", "write", owner_check=True, require_existing=True)
 async def attach_project_document_to_thread(
@@ -374,7 +393,12 @@ async def attach_project_document_to_thread(
         raise _not_found()
     row, staged_path = staged
 
-    service = ThreadUploadIngestionService(request=request, thread_id=thread_id, user_id=user_id, app_config=config)
+    async def check_source():
+        current = await repo.get(document_id, user_id=user_id)
+        if current is None or current["project_id"] != project_id:
+            raise _not_found()
+
+    service = ThreadUploadIngestionService(request=request, thread_id=thread_id, user_id=user_id, app_config=config, publication_check=check_source if get_current_workspace() is not None else None)
     try:
         try:
             await service.open()
@@ -387,6 +411,9 @@ async def attach_project_document_to_thread(
             await service.cleanup_written()
             raise HTTPException(status_code=500, detail=f"Failed to upload {row['name']}: {exc}")
         except HTTPException:
+            await service.cleanup_written()
+            raise
+        except WorkspaceAccessDenied:
             await service.cleanup_written()
             raise
         except Exception as exc:
@@ -409,11 +436,13 @@ async def attach_project_document_to_thread(
 
 @router.get("/{document_id}/content")
 @require_permission("projects", "read")
+@workspace_resource_scope(allow_query_selector=True)
 async def get_project_document_content(
     project_id: str,
     document_id: str,
     request: Request,
     download: bool = Query(default=False),
+    workspace_id: str | None = Query(default=None),
 ) -> FileResponse:
     """Inline text or attachment for one active shelf document (§6.5).
 
@@ -470,8 +499,21 @@ async def get_project_document_content(
     # regardless of ``download``, exactly like the artifacts router, and
     # ``download=true`` attaches everything.
     inline = not download and media_type is not None and _is_inline_viewable_mime_type(media_type)
-    return FileResponse(
+    context = get_current_workspace()
+    response_class = FileResponse
+    scope_arguments = {}
+    if context is not None:
+        response_class = WorkspaceFileResponse
+        scope_arguments = {
+            "workspace_service": request.app.state.workspace_service,
+            "repository": get_project_document_repo(request),
+            "context": context,
+            "project_id": project_id,
+            "document_id": document_id,
+        }
+    return response_class(
         serving_path,
+        **scope_arguments,
         media_type=media_type or "application/octet-stream",
         filename=filename,
         # nosniff: a declared PDF/image/etc. must never be reinterpreted as
@@ -483,12 +525,13 @@ async def get_project_document_content(
 
 @router.delete("/{document_id}", status_code=204)
 @require_permission("projects", "delete")
+@workspace_resource_scope()
 async def delete_project_document(project_id: str, document_id: str, request: Request) -> None:
     """Move one document to trash (204). Restore/purge are the Slice-D trash tier.
 
     Archived shelves reject the write inside the repository's locked
     transaction, so they surface as the same fail-closed 404 (§8.4).
     """
-    await _require_project(request, project_id)
-    if not await get_project_document_repo(request).trash(document_id, project_id=project_id):
+    await _require_project(request, project_id, action="delete")
+    if not await await_drained(get_project_document_repo(request).trash(document_id, project_id=project_id)):
         raise _not_found()

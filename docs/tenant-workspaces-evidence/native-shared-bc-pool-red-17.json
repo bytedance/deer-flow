@@ -1,0 +1,87 @@
+{
+  "phase": "m4-native-shared-bc-pool-red-20261019-46",
+  "job": "deerflow-tenant-execution-m4-physical",
+  "queue": 1124,
+  "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+  "artifacts": [
+    {
+      "relativePath": "m4-native-shared-bc-pool-red-20261019-46.log"
+    },
+    {
+      "relativePath": "physical-17/cleanup.json"
+    },
+    {
+      "relativePath": "physical-17/deerflow-tenant-execution-m4-physical-17-db-volumes.txt"
+    },
+    {
+      "relativePath": "physical-17/evidence.json"
+    },
+    {
+      "relativePath": "physical-17/owned.json"
+    }
+  ],
+  "building": false,
+  "duration": 40440,
+  "number": 17,
+  "result": "FAILURE",
+  "source_sha256": "15f3a005b60b8da782368042178f030819c3e803fd3fe029df00a9846da432e5",
+  "pipeline_sha256": "9e8ab43f973875a6260bced2056bfd407b8af20983f5ebe89038e5f76ceffe1d",
+  "artifacts_dir": "/private/tmp/native-shared-bc-pool-red17-artifacts",
+  "first_error": "Original scoped B was not admitted through the real shared pool RPC; claim None",
+  "classification": "business RED; native committed/queued B reached actual OutboundStore RPC; no B Docker created",
+  "cleanup": {
+    "build": 17,
+    "read_only": true,
+    "cleanup": [
+      {
+        "kind": "container",
+        "name": "deerflow-tenant-execution-m4-physical-17",
+        "exit": 1,
+        "stderr": "Error response from daemon: No such container: deerflow-tenant-execution-m4-physical-17"
+      },
+      {
+        "kind": "container",
+        "name": "deerflow-tenant-execution-m4-physical-17-db",
+        "exit": 1,
+        "stderr": "Error response from daemon: No such container: deerflow-tenant-execution-m4-physical-17-db"
+      },
+      {
+        "kind": "network",
+        "name": "deerflow-tenant-execution-m4-physical-17",
+        "exit": 1,
+        "stderr": "Error response from daemon: network deerflow-tenant-execution-m4-physical-17 not found"
+      },
+      {
+        "kind": "container",
+        "name": "deerflow-exec-21ad5bcf24914acd96120c8e53880d5d",
+        "exit": 1,
+        "stderr": "Error response from daemon: No such container: deerflow-exec-21ad5bcf24914acd96120c8e53880d5d"
+      }
+    ]
+  },
+  "build": 17,
+  "log_sha256": "7f7b512d6309a398bf7a8c65db3043f0db64264d418fc162a9238f301fa871eb",
+  "approved_test_patch_sha256": "8cf833b9e008ccfd1066c9330a65d9af8e8d4d125142897f777c9b76ae09d663",
+  "business_evidence": {
+    "scope": "shared-B-C-pool-OutboundStore-ASGI",
+    "image": "sha256:4f269f6b0e50f9579e099e91a23df868ff1b1a49c03cc9b138beac02dafb3f01",
+    "b_database": "tenant_executor_b5c17831b88744d9866b0c602bde01aa",
+    "finally_removed": false,
+    "b_job_id": "21ad5bcf24914acd96120c8e53880d5d",
+    "b_spec_digest": "245a9d2e54326464fc9ef82fe4dc9d6e506bf7596dd5168efb53c6abd9467984",
+    "committed_and_queued": true
+  },
+  "source_archive_exact_match": {
+    "backend/packages/ecs-executor/ecs_executor/scheduling.py": "d44ca56c7376c8b86df23191b898622bf91269aec30a4f636a39008a5c96da2a",
+    "backend/packages/ecs-executor/ecs_executor/dispatch.py": "38add9786695db40e5a635322c86380f8043ff29fa1cb354d53b1ed5bc63f188",
+    "backend/packages/ecs-executor/ecs_executor/mcp_server.py": "5a1fc4a1c1dbe2e9c8b811173861a4581ee8c174b23156c691514e4164f40694",
+    "backend/packages/ecs-executor/ecs_executor/jobs.py": "3a1b1170ad7e1e63c128a8ec883f937e0a3625b97768c5abad393578270f7361",
+    "backend/tests/test_workspace_native_dependencies.py": "f674bc95619b84d136c9f5876093dd8c417f67128fb9c0c72b9348fcaa5c5156",
+    "backend/tests/test_workspace_execution_physical.py": "aeb785e0775c993541a120d13006860d97cb1469a452160653627b68e4ee575f",
+    "scripts/render_tenant_physical_pipeline.py": "c40ce9dd4c999ab8b404d55931879ebb0fdd7e8112708a994093688c67171db8",
+    "examples/ecs-native/deploy/Jenkinsfile.tenant-physical.in": "11ed3e167d8e7b5b324c8652c2a4e287a1b373e2c80d5535a7a13a642906013d"
+  },
+  "root_review": "Root reviewed exact test/CI and four product files, independently read live terminal/log/business/normal-STOP artifacts and checked exact container/network absence. Verified archive and pipeline hashes, eight source bytes and approved product AST logic. Unknown/control/restart/CLI/two-host runtime gates remain open.",
+  "tests": "1 failed in 22.10s",
+  "production_unchanged_base": "4a407d1b3"
+}

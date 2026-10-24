@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useMemo } from "react";
 
@@ -13,6 +12,7 @@ import {
   BreadcrumbSeparator,
 } from "@/components/ui/breadcrumb";
 import { SidebarTrigger } from "@/components/ui/sidebar";
+import Link from "@/components/workspace/workspace-link";
 import { useI18n } from "@/core/i18n/hooks";
 import { cn } from "@/lib/utils";
 

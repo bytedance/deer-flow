@@ -1,0 +1,52 @@
+{
+  "build": 155,
+  "queue": 1118,
+  "phase": "m4-native-scheduler-revoked-queued-control-20261018-43",
+  "result": "SUCCESS",
+  "duration_ms": 39858,
+  "pytest": "1 passed in 17.49s",
+  "ruff": "All checks passed; 67 files already formatted",
+  "production_unchanged_base": "52446f3f9",
+  "source_sha256": "0b4a0462364d14a2564a7bdb912a617d54828d192e705ea0026439437fdab83f",
+  "pipeline_sha256": "538e8be19d4e224b15914648f55cff4d974ca95efa95fbf4aae4ec388a1a0639",
+  "source_archive_exact_match": {
+    "backend/tests/test_workspace_native_dependencies.py": "4d59c9687e311c9d05f3c100b924f1444569df0ce552d40325211dd17ad94773",
+    "scripts/render_tenant_run_control_pipeline.py": "33cc45b5fd5aeee4c78c1fb3a895def3e4214fa2f324161431e847a6c4aebcdf"
+  },
+  "approved_test_patch_sha256": "1fd1cdcc16ec5d6b3f1efa86130b8b0d1a728e1e1c1577eee53ba87a78675f2e",
+  "log_path": "/private/tmp/m4-native-scheduler-revoked-queued-control-20261018-43.log",
+  "log_sha256": "b7e58b8a4ec4816f2ef19558462928dd296daecdda0a5a42c7eabc3541f359c6",
+  "cleanup_path": "/private/tmp/native-scheduler-revoked-queued-control-build155-cleanup.json",
+  "scope": "One PostgreSQL story with two tasks and occurrences created/queued by real Scheduler dispatch. One exact NoStart, one SQL launch_accounted=NULL unknown. Real transfer-owner/member removal. Actual installed control retires only NoStart and writes one audit, unknown task/occ full columns remain unchanged. Original snapshot/accounting/counts, normal Run IDs, events, full executor ledger, parent revoke operations and pending scheduler domain preserved. Business reads and physical STOP/report failguards untouched, repeated control idempotent. No C/model/B run, product change, physical proof, field/dialect matrix, or parent-domain completion claimed.",
+  "job": "deerflow-tenant-execution-m4-sql",
+  "cleanup": {
+    "build": 155,
+    "read_only": true,
+    "cleanup": [
+      {
+        "kind": "container",
+        "name": "deerflow-tenant-execution-m4-sql-155",
+        "exit": 1,
+        "stderr": "Error response from daemon: No such container: deerflow-tenant-execution-m4-sql-155"
+      },
+      {
+        "kind": "container",
+        "name": "deerflow-tenant-execution-m4-sql-155-db",
+        "exit": 1,
+        "stderr": "Error response from daemon: No such container: deerflow-tenant-execution-m4-sql-155-db"
+      },
+      {
+        "kind": "network",
+        "name": "deerflow-tenant-execution-m4-sql-155",
+        "exit": 1,
+        "stderr": "Error response from daemon: network deerflow-tenant-execution-m4-sql-155 not found"
+      }
+    ]
+  },
+  "root_review": "Root reviewed exact single queue-story test; independently read live terminal, SHA-verified archive and byte-matched both files, checked exact owned fixture resources absent and product unchanged from 52446f3f9.",
+  "limits": [
+    "One PG queue story, two actual durable occurrences: known NoStart versus launch_accounted=None only. No unknown-field/dialect matrix, executing/transferred/lifetime/physical or transport-failure proof.",
+    "No model/C adoption/B runtime or physical operation; entire executor ledger and native Run/event baselines unchanged. Parent/scheduler revoke domain remains pending.",
+    "Complete M4/M0-M11, actual B wire/physical, IM/recovery and other domains remain open. No product changes, deployment/push/local runtime; activation false."
+  ]
+}

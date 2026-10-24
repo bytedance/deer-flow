@@ -12,8 +12,6 @@ import {
   CopyPlus,
   RotateCcw,
 } from "lucide-react";
-import Link from "next/link";
-import { useRouter } from "next/navigation";
 import {
   useLayoutEffect,
   useRef,
@@ -36,6 +34,7 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import Link from "@/components/workspace/workspace-link";
 import { GatewayApiError } from "@/core/api/errors";
 import { useI18n } from "@/core/i18n/hooks";
 import type { Translations } from "@/core/i18n/locales/types";
@@ -67,6 +66,7 @@ import {
   taskStatusLabel,
 } from "@/core/scheduled-tasks/status";
 import { isTaskBusy, type ScheduledTask } from "@/core/scheduled-tasks/types";
+import { useWorkspaceRouter as useRouter } from "@/core/workspaces/navigation";
 import { cn } from "@/lib/utils";
 
 import { DeleteTaskDialog } from "./delete-task-dialog";

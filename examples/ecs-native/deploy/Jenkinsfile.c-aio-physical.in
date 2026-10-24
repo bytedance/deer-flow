@@ -1,0 +1,71 @@
+pipeline {
+ agent { node { label 'shanghai-builder'; customWorkspace '/data/jenkins-agent/deerflow/tenant-execution-m4-sql' } }
+ options { disableConcurrentBuilds(); skipDefaultCheckout(true); timeout(time: 12, unit: 'MINUTES'); timestamps() }
+ stages { stage('Scoped C real AIO captured STOP') { steps {
+  withCredentials([sshUserPrivateKey(credentialsId: 'shanghai-deploy-ssh', keyFileVariable: 'AIO_C_SSH_KEY', usernameVariable: 'AIO_C_SSH_USER')]) {
+   sh '''set +x
+set -eu
+umask 077
+[ "${JOB_NAME:-}" = "deerflow-tenant-execution-m4-sql" ]
+[ "$PWD" = "/data/jenkins-agent/deerflow/tenant-execution-m4-sql" ]
+[ "$AIO_C_SSH_USER" = root ]
+printf '%s  %s\n' '@@INPUTS_SHA256@@' c-aio-inputs.sha256 | sha256sum --check
+sha256sum --check c-aio-inputs.sha256
+run_id=$(python3 -c 'import uuid;print(uuid.uuid4().hex[:24])')
+input_dir="/var/tmp/deer-c-aio-input-$run_id"
+owned_root="/var/tmp/deer-c-aio-$run_id"
+results="$PWD/c-aio-${BUILD_NUMBER}"
+mkdir -m 700 "$results"
+printf '%s\n' "$run_id" > "$results/run-id.txt"
+cp PREFLIGHT-RECEIPT.json c-aio-inputs.sha256 "$results/"
+ssh_worker() {
+ ssh -i "$AIO_C_SSH_KEY" -o BatchMode=yes -o StrictHostKeyChecking=yes \
+  -o "UserKnownHostsFile=$PWD/worker-known_hosts" -o HostKeyAlias=47.117.149.57 \
+  -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=2 \
+  "$AIO_C_SSH_USER@192.168.0.189" "$@"
+}
+scp_worker() {
+ scp -i "$AIO_C_SSH_KEY" -o BatchMode=yes -o StrictHostKeyChecking=yes \
+  -o "UserKnownHostsFile=$PWD/worker-known_hosts" -o HostKeyAlias=47.117.149.57 \
+  -o ConnectTimeout=10 "$@"
+}
+# Read-only host and immutable-image checks precede all AIO provisioning.
+ssh_worker sh -s > "$results/remote-preflight.log" 2>&1 <<'REMOTE_PREFLIGHT'
+set -eu
+python3 - <<'MEMORY_CHECK'
+from pathlib import Path
+values = dict(line.split(":", 1) for line in Path("/proc/meminfo").read_text().splitlines())
+assert int(values["MemAvailable"].split()[0]) >= 2560*1024, "Insufficient available RAM"
+MEMORY_CHECK
+docker image inspect --format '{{.Id}} {{.Architecture}}' @@NATIVE_IMAGE_ID@@ @@AIO_IMAGE_ID@@
+REMOTE_PREFLIGHT
+ssh_worker "umask 077; test ! -e '$input_dir' && mkdir -m 700 '$input_dir'"
+scp_worker @@PHASE@@-source.tar.gz run_worker.sh cleanup_exact.py "$AIO_C_SSH_USER@192.168.0.189:$input_dir/"
+set +e
+ssh_worker "sh '$input_dir/run_worker.sh' '$input_dir/@@PHASE@@-source.tar.gz' '@@SOURCE_SHA256@@' '@@NATIVE_IMAGE_ID@@' '@@AIO_IMAGE_ID@@' '$run_id'" > "$results/orchestration.log" 2>&1
+run_status=$?
+# Always attempt retrieval; no credential, source tree or business path copied.
+fetch_status=0
+for name in test.log evidence.json cleanup.json cleanup.log images.txt; do
+ scp_worker "$AIO_C_SSH_USER@192.168.0.189:$owned_root/$name" "$results/$name" >> "$results/orchestration.log" 2>&1 || fetch_status=1
+done
+ssh_worker "docker ps -a --filter 'label=org.deerflow.tenant.owned=deer-c-aio-$run_id' --format '{{.ID}} {{.Names}} {{.Status}}'" > "$results/leftovers.log" 2>&1
+inspect_status=$?
+set -e
+printf '%s\n' "$run_status" > "$results/ssh-exit.txt"
+[ "$run_status" -eq 0 ] && [ "$fetch_status" -eq 0 ] && [ "$inspect_status" -eq 0 ]
+[ ! -s "$results/leftovers.log" ]
+python3 - "$results/evidence.json" "$results/cleanup.json" <<'PY'
+import json,sys
+row=json.load(open(sys.argv[1]));cleanup=json.load(open(sys.argv[2]))
+assert row['normal_stop_confirmed'] and row['missing_exact_id_after_stop']
+assert row['running_after_unknown'] and row['capacity_after_unknown']==1
+assert row['capacity_before_report']==1 and row['capacity_after_report']==0
+assert row['native_status']=='success'
+assert cleanup['normal_acceptance_evidence'] is False
+PY
+'''
+  }
+ } } }
+ post { always { archiveArtifacts artifacts: "c-aio-${env.BUILD_NUMBER}/**", allowEmptyArchive: true, fingerprint: true } }
+}

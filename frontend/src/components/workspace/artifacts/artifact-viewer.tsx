@@ -7,8 +7,15 @@ import { useStandaloneArtifactContent } from "@/core/artifacts/hooks";
 import { getTabularDelimiter } from "@/core/artifacts/preview";
 import { urlOfArtifact } from "@/core/artifacts/utils";
 import { resolveStoredArtifactLanguage } from "@/core/artifacts/viewer";
+import { AuthProvider, type User } from "@/core/auth/AuthProvider";
 import { useI18n } from "@/core/i18n/hooks";
 import { getFileIcon, getFileName } from "@/core/utils/files";
+import {
+  WorkspaceProvider,
+  WorkspaceReadyBoundary,
+  useWorkspaceContext,
+  useWorkspaceLifetime,
+} from "@/core/workspaces/context";
 
 import {
   formatArtifactBytes,
@@ -26,6 +33,8 @@ export function ArtifactViewer({
   isMock?: boolean;
 }) {
   const { t } = useI18n();
+  const lifetime = useWorkspaceLifetime();
+  const workspaceId = lifetime?.scope.workspaceId;
   const filename = getFileName(filepath);
   const language = resolveStoredArtifactLanguage(filepath) ?? "text";
   const isTabular = getTabularDelimiter(language) !== null;
@@ -59,7 +68,7 @@ export function ArtifactViewer({
         </div>
         <Button variant="ghost" size="sm" asChild>
           <a
-            href={urlOfArtifact({ filepath, threadId, isMock })}
+            href={urlOfArtifact({ filepath, threadId, isMock, workspaceId })}
             target="_blank"
             rel="noopener noreferrer"
           >
@@ -74,6 +83,7 @@ export function ArtifactViewer({
               threadId,
               isMock,
               download: true,
+              workspaceId,
             })}
           >
             <DownloadIcon className="size-4" />
@@ -125,5 +135,44 @@ export function ArtifactViewer({
         )}
       </main>
     </div>
+  );
+}
+
+function ArtifactWorkspaceStatus() {
+  const context = useWorkspaceContext();
+  const { t } = useI18n();
+  const pending = context?.state.status === "loading";
+  return (
+    <main
+      role={pending ? "status" : "alert"}
+      className="flex h-screen items-center justify-center p-6"
+    >
+      <p className="text-muted-foreground text-sm">
+        {pending ? t.artifactPreview.loading : t.artifactPreview.unavailable}
+      </p>
+    </main>
+  );
+}
+
+/** `enabled` has already been confirmed by the server page, never the URL. */
+export function WorkspaceArtifactViewer({
+  initialUser,
+  workspaceId,
+  ...target
+}: {
+  initialUser: User;
+  workspaceId?: string;
+  filepath: string;
+  threadId: string;
+  isMock?: boolean;
+}) {
+  return (
+    <AuthProvider key={initialUser.id} initialUser={initialUser}>
+      <WorkspaceProvider enabled initialWorkspaceId={workspaceId}>
+        <WorkspaceReadyBoundary fallback={<ArtifactWorkspaceStatus />}>
+          <ArtifactViewer {...target} />
+        </WorkspaceReadyBoundary>
+      </WorkspaceProvider>
+    </AuthProvider>
   );
 }

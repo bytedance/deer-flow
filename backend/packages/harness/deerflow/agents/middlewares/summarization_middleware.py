@@ -17,6 +17,7 @@ from langchain.agents.middleware import SummarizationMiddleware
 from langchain_core.messages import AnyMessage, HumanMessage, RemoveMessage, SystemMessage, get_buffer_string, trim_messages
 from langgraph.config import get_config
 from langgraph.constants import TAG_NOSTREAM
+from langgraph.errors import GraphBubbleUp
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.runtime import Runtime
 
@@ -31,6 +32,7 @@ from deerflow.extensions.notify import notify_context_compacted
 from deerflow.models import create_chat_model
 from deerflow.models.reasoning import resolve_reasoning_contract
 from deerflow.runtime.events.catalog import MIDDLEWARE_SUMMARIZE_TAG
+from deerflow.runtime.invocation import invoke_worker_model
 
 logger = logging.getLogger(__name__)
 _SUMMARY_TRIGGER_MESSAGE_NAME = "summary"
@@ -271,6 +273,8 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
                 attach_tracing=False,
             )
             built = self._tag_nostream(model.with_config(tags=["middleware:summarize"]))
+        except GraphBubbleUp:
+            raise
         except Exception:
             logger.exception("Failed to build summary model %r; trying the next candidate", name)
             built = None
@@ -437,6 +441,8 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         try:
             response = model.invoke(prompt, config={"metadata": {"lc_source": "summarization"}})
             return self._checked_summary(response, last)
+        except GraphBubbleUp:
+            raise
         except Exception:
             self._log_summary_error(last)
             return None
@@ -457,7 +463,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             invoke_config = {"metadata": {"lc_source": "summarization"}}
             extensions = getattr(self, "_extensions", None)
             if extensions is None:
-                response = await model.ainvoke(prompt, config=invoke_config)
+                response = await invoke_worker_model(lambda: model.ainvoke(prompt, config=invoke_config))
             else:
                 from deerflow_extension_api import SystemOperationKind
 
@@ -469,10 +475,12 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
                     messages=prompt,
                     model_name=model_name,
                     invoke_config=invoke_config,
-                    invoke=lambda: model.ainvoke(prompt, config=invoke_config),
+                    invoke=lambda: invoke_worker_model(lambda: model.ainvoke(prompt, config=invoke_config)),
                     task_store=task_store,
                 )
             return self._checked_summary(response, last)
+        except GraphBubbleUp:
+            raise
         except Exception:
             self._log_summary_error(last)
             return None

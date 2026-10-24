@@ -8,7 +8,6 @@ import {
   MoreHorizontalIcon,
   SaveIcon,
 } from "lucide-react";
-import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
@@ -46,6 +45,7 @@ import {
 import { safeLocalStorage } from "@/core/settings/local";
 import { hasToolResult, useThreadStream } from "@/core/threads/hooks";
 import { uuid } from "@/core/utils/uuid";
+import { useWorkspaceRouter as useRouter } from "@/core/workspaces/navigation";
 import { isIMEComposing } from "@/lib/ime";
 import { cn } from "@/lib/utils";
 

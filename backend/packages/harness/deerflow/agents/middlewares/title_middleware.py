@@ -11,12 +11,14 @@ from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langgraph.config import get_config
 from langgraph.constants import TAG_NOSTREAM
+from langgraph.errors import GraphBubbleUp
 from langgraph.runtime import Runtime
 
 from deerflow.agents.middlewares.dynamic_context_middleware import is_dynamic_context_reminder
 from deerflow.agents.middlewares.pii_redaction_middleware import redact_texts
 from deerflow.config.title_config import get_title_config
 from deerflow.models import create_chat_model
+from deerflow.runtime.invocation import invoke_worker_model
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, get_original_user_content_text
 
 if TYPE_CHECKING:
@@ -359,12 +361,14 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
                 messages=prompt,
                 model_name=config.model_name,
                 invoke_config=invoke_config,
-                invoke=lambda: model.ainvoke(prompt, config=invoke_config),
+                invoke=lambda: invoke_worker_model(lambda: model.ainvoke(prompt, config=invoke_config)),
                 task_store=task_store,
             )
             title = self._parse_title(response.content)
             if title:
                 return {"title": title}
+        except GraphBubbleUp:
+            raise
         except Exception:
             logger.debug("Failed to generate async title; falling back to local title", exc_info=True)
         return {"title": self._fallback_title(user_msg)}

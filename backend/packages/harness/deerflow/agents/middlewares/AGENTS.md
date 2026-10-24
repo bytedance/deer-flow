@@ -143,3 +143,38 @@ Resolve the whole batch through user storage, enabled state and agent allowlist
 before activation; reject any invalid entry. Keep bodies in escaped HumanMessage
 context with task text once. Authenticated paths feed secrets/tool policy; record usage per skill.
 Legacy slash syntax is unchanged.
+
+Outer host execution admission now encloses the numbered request-rewrite chain:
+WorkspaceExecutionMiddleware is first in the shared lead/subagent runtime base.
+InputSanitization remains the first content-rewriting wrapper. The host gate
+checks before-agent/model hooks and model/tool handlers from a private bound
+worker guard; no guard leaves legacy behavior unchanged, never infers authority
+from a selected workspace. Declarative ordering in extensions/ordering.py keeps
+it outside native IO, receipt and ordinary error normalization. Revocation
+raises GraphBubbleUp through the existing ToolErrorHandling/LLMErrorHandling
+control path; it is not an ordinary error ToolMessage or retry prompt.
+
+Actual full native chain/Agent/report-file tests verify tool admission and the
+next model after legitimate work. Model-local callback/queue protection also
+covers independent factory model calls. System title/summary/goal fallback STOP and named direct/extension provider-task
+lifetimes are now integrated and verified separately. Admission is not physical
+isolation or rollback of prior IO.
+
+Title async provider fallback and summary construction/sync/async provider fallback
+must rethrow GraphBubbleUp before generic Exception handling. Native STOP is not
+a candidate failure, a local title fallback or an ordinary summary skip. Existing
+provider-failure fallback stays intact; observer failures remain observational.
+The shared model wrapper and async title/summary invoke through
+invoke_worker_model: retain actual native work in the original Run and drain it
+before actual lifetime close. Sync/embedded and arbitrary provider streaming or
+transport internals are not granted equivalent cleanup proof. Tool wrapper
+currently rechecks admission only; actual tool effects need their own lifetime
+and publication protocol.
+
+
+ReadBeforeWriteMiddleware rethrows GraphBubbleUp alongside SandboxAuthorizationError
+in _check_write_gate and _attach_read_mark; only ordinary inspection errors retain
+the historical fail-open/skip-mark behavior. Native sandbox tools repeat private
+Run checks after readiness and before sync body dispatch, reusing native lease
+and drain. #88 verifies actual report writes/refusal and the complete SDK chain;
+cache identity and process/network/publication protocols remain separate work.

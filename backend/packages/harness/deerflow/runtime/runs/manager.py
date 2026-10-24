@@ -10,13 +10,16 @@ import sqlite3
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy.exc import IntegrityError as SAIntegrityError
 
+from deerflow.authz.workspace import WorkspaceContext, get_current_workspace, reset_current_workspace, set_current_workspace
+from deerflow.persistence.workspaces.scope import resolve_resource_scope
+from deerflow.persistence.workspaces.sql import WorkspaceAccessDenied
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, get_current_user, resolve_user_id
 from deerflow.utils.time import is_lease_expired
 from deerflow.utils.time import now_iso as _now_iso
@@ -197,6 +200,9 @@ class RunRecord:
     metadata: dict = field(default_factory=dict)
     kwargs: dict = field(default_factory=dict)
     user_id: str | None = None
+    workspace_id: str | None = None
+    workspace_context: WorkspaceContext | None = None
+    thread_incarnation: str | None = None
     created_at: str = ""
     updated_at: str = ""
     task: asyncio.Task | None = field(default=None, repr=False)
@@ -226,6 +232,11 @@ class RunRecord:
     # further durable run/thread finalization because its lease ownership is
     # either known to be lost or could not be confirmed before expiry.
     ownership_lost: bool = False
+    workspace_stop_requested: bool = False
+    workspace_execution_closed: bool = False
+    workspace_cleanup_uncertain: bool = False
+    workspace_stop_confirmed: bool = False
+    workspace_lifetime_confirmed: bool = False
     stop_reason: str | None = None
     goal_verdict: dict[str, Any] | None = None
     # Process-local finalization barrier for a worker-installed scheduled goal.
@@ -412,6 +423,14 @@ class RunManager:
             self._store_put_payload(record, error=error),
         )
 
+    @staticmethod
+    def _worker_write_kwargs(record):
+        if record is None or record.workspace_context is None:
+            return {}
+        from deerflow.persistence.workspaces.run_control import NativeRunStopTarget
+
+        return {"worker_target": NativeRunStopTarget.from_record(record)}
+
     async def _persist_status(self, record: RunRecord, status: RunStatus, *, error: str | None = None, stop_reason: str | None = None) -> bool:
         """Best-effort persist a status transition to the backing store."""
         if record.ownership_lost:
@@ -425,10 +444,15 @@ class RunManager:
             return True
         row_recovery_payload = self._store_put_payload(record, error=error, stop_reason=stop_reason)
         try:
+            if record.workspace_context is not None and status == RunStatus.interrupted:
+                from deerflow.persistence.workspaces.run_control import NativeRunStopTarget
+
+                if await self._call_store_with_retry("mark_worker_interrupted", record.run_id, lambda: self._store.mark_worker_interrupted(NativeRunStopTarget.from_record(record))):
+                    return True
             updated = await self._call_store_with_retry(
                 "update_status",
                 record.run_id,
-                lambda: self._store.update_status(record.run_id, status.value, error=error, stop_reason=stop_reason, **({"goal_verdict": record.goal_verdict} if record.goal_verdict is not None else {})),
+                lambda: self._store.update_status(record.run_id, status.value, error=error, stop_reason=stop_reason, **self._worker_write_kwargs(record), **({"goal_verdict": record.goal_verdict} if record.goal_verdict is not None else {})),
             )
             if updated is False:
                 # ``update_status`` is now guarded by ``status IN ('pending','running')``.
@@ -474,6 +498,24 @@ class RunManager:
             return False
 
     @staticmethod
+    def _workspace_context_from_store(row: dict[str, Any]) -> WorkspaceContext | None:
+        snapshot = row.get("workspace_context_json")
+        if snapshot is None:
+            if row.get("thread_incarnation") is not None:
+                raise WorkspaceAccessDenied("Run workspace identity is incomplete")
+            return None
+        if not isinstance(snapshot, dict):
+            raise WorkspaceAccessDenied("Run workspace identity is invalid")
+        try:
+            context = WorkspaceContext(**snapshot)
+        except (TypeError, ValueError):
+            raise WorkspaceAccessDenied("Run workspace identity is invalid") from None
+        incarnation = row.get("thread_incarnation")
+        if context.workspace_id != row.get("workspace_id") or context.actor_user_id != row.get("user_id") or not isinstance(incarnation, str) or not 1 <= len(incarnation) <= 32 or any(ord(c) < 32 or ord(c) == 127 for c in incarnation):
+            raise WorkspaceAccessDenied("Run workspace identity does not match its persisted owner")
+        return context
+
+    @staticmethod
     def _record_from_store(row: dict[str, Any]) -> RunRecord:
         """Build a read-only runtime record from a serialized store row.
 
@@ -497,6 +539,9 @@ class RunManager:
             created_at=row.get("created_at") or "",
             updated_at=row.get("updated_at") or "",
             user_id=row.get("user_id"),
+            workspace_id=row.get("workspace_id"),
+            workspace_context=RunManager._workspace_context_from_store(row),
+            thread_incarnation=row.get("thread_incarnation"),
             error=row.get("error"),
             model_name=row.get("model_name"),
             store_only=True,
@@ -546,7 +591,7 @@ class RunManager:
             updated = await self._call_store_with_retry(
                 "update_run_completion",
                 run_id,
-                lambda: self._store.update_run_completion(run_id, **kwargs),
+                lambda: self._store.update_run_completion(run_id, **kwargs, **self._worker_write_kwargs(record)),
             )
             if updated is False:
                 existing = await self._store.get(run_id)
@@ -573,7 +618,7 @@ class RunManager:
                 recovered = await self._call_store_with_retry(
                     "update_run_completion",
                     run_id,
-                    lambda: self._store.update_run_completion(run_id, **kwargs),
+                    lambda: self._store.update_run_completion(run_id, **kwargs, **self._worker_write_kwargs(record)),
                 )
                 if recovered is False:
                     logger.warning("Run completion update for %s affected no rows after row recreation", run_id)
@@ -594,7 +639,7 @@ class RunManager:
                 record.updated_at = _now_iso()
         if should_persist and self._store is not None:
             try:
-                await self._store.update_run_progress(run_id, **kwargs)
+                await self._store.update_run_progress(run_id, **kwargs, **self._worker_write_kwargs(record))
             except Exception:
                 logger.warning("Failed to persist run progress for %s", run_id, exc_info=True)
 
@@ -614,7 +659,7 @@ class RunManager:
             try:
                 # The local status is already staged as terminal, but the store
                 # row intentionally remains running until checkpoint finalization.
-                await self._store.update_run_progress(run_id, **kwargs)
+                await self._store.update_run_progress(run_id, **kwargs, **self._worker_write_kwargs(record))
             except Exception:
                 logger.warning("Failed to persist finalizing progress for %s", run_id, exc_info=True)
 
@@ -641,6 +686,8 @@ class RunManager:
         run_id = str(uuid.uuid4())
         now = _now_iso()
         user_id = _resolve_record_user_id(user_id)
+        if resolve_resource_scope(None, user_id, required=getattr(self._store, "workspace_scope_required", False)) is not None:
+            raise WorkspaceAccessDenied("workspace runs require trusted atomic admission")
         lease_expires_at = self._compute_lease_expires_at()
         record = RunRecord(
             run_id=run_id,
@@ -675,6 +722,43 @@ class RunManager:
         logger.info("Run created: run_id=%s thread_id=%s", run_id, thread_id)
         return record
 
+    def _workspace_read_required(self, user_id: str | None) -> bool:
+        if get_current_workspace() is None and getattr(self._store, "workspace_scope_required", False) is not True:
+            return False
+        resolve_resource_scope(None, user_id, required=True)
+        if getattr(self._store, "supports_workspace_reads", False) is not True:
+            raise WorkspaceAccessDenied("workspace reads require a scoped durable Run store")
+        return True
+
+    @staticmethod
+    def _resident_matches_durable(record: RunRecord, row: dict) -> bool:
+        return (
+            record.run_id == row.get("run_id")
+            and record.thread_id == row.get("thread_id")
+            and record.user_id == row.get("user_id")
+            and record.workspace_id == row.get("workspace_id")
+            and record.thread_incarnation == row.get("thread_incarnation")
+            and record.workspace_context == RunManager._workspace_context_from_store(row)
+            and record.operation_kind.value == row.get("operation_kind", "run")
+            and canonical_run_created_at(record.created_at) == canonical_run_created_at(row["created_at"])
+        )
+
+    async def _authorized_resident_records(self, records: list[RunRecord], user_id: str | None) -> list[RunRecord]:
+        """Keep native live controls only after durable private-scope admission.
+
+        Query only resident IDs, not whole histories. SQL/provider errors must
+        propagate; missing/deleted/revoked rows cannot resurrect from memory.
+        """
+        if not self._workspace_read_required(user_id):
+            return records
+        groups: dict[str, set[str]] = {}
+        for record in records:
+            groups.setdefault(record.thread_id, set()).add(record.run_id)
+        allowed = {}
+        for thread_id, run_ids in groups.items():
+            allowed.update(await self._store.get_many_by_thread(thread_id, run_ids, user_id=user_id))
+        return [record for record in records if record.run_id in allowed and self._resident_matches_durable(record, allowed[record.run_id])]
+
     async def get(
         self,
         run_id: str,
@@ -690,6 +774,15 @@ class RunManager:
             raise_on_store_error: Propagate store hydration/mapping failures so
                 lifecycle callers can distinguish them from a missing run.
         """
+        if self._workspace_read_required(user_id):
+            row = await self._store.get(run_id, user_id=user_id)
+            if row is None:
+                return None
+            async with self._lock:
+                record = self._runs.get(run_id)
+            if record is not None and self._resident_matches_durable(record, row):
+                return record
+            return self._record_from_store(row)
         async with self._lock:
             record = self._runs.get(run_id)
         if record is not None:
@@ -786,6 +879,8 @@ class RunManager:
                     before_run_id=before_run_id,
                 )
             ]
+        scoped = self._workspace_read_required(user_id)
+        memory_records = await self._authorized_resident_records(memory_records, user_id)
         if self._store is None:
             return _page(memory_records)
         records_by_id = {record.run_id: record for record in memory_records}
@@ -802,6 +897,8 @@ class RunManager:
         try:
             rows = await self._store.list_by_thread(thread_id, **store_kwargs)
         except Exception:
+            if scoped:
+                raise
             logger.warning("Failed to hydrate runs for thread %s from store", thread_id, exc_info=True)
             return _page(memory_records)
         for row in rows:
@@ -831,6 +928,7 @@ class RunManager:
         async with self._lock:
             memory_records = [record for record in self._thread_records_locked(thread_id) if record.operation_kind == ThreadOperationKind.run and (resolved_user_id is None or record.user_id == resolved_user_id)]
 
+        memory_records = await self._authorized_resident_records(memory_records, resolved_user_id)
         sources = set(await self._store.list_successful_regenerate_sources(thread_id, user_id=resolved_user_id)) if self._store is not None else set()
         # _thread_records_locked preserves the insertion order of the thread
         # index. Applying records oldest-to-newest makes the latest in-memory
@@ -901,10 +999,23 @@ class RunManager:
 
         async with self._lock:
             memory_records = [record for record in self._thread_records_locked(thread_id) if resolved_user_id is None or record.user_id == resolved_user_id]
+        memory_records = await self._authorized_resident_records(memory_records, resolved_user_id)
         for record in memory_records:
             records_by_id[record.run_id] = record
 
         return self._compute_edit_replay_visibility(list(records_by_id.values()))
+
+    @staticmethod
+    def _workspace_transition_kwargs(record: RunRecord) -> dict[str, Any]:
+        context = record.workspace_context
+        if context is None:
+            if record.workspace_id is not None:
+                raise WorkspaceAccessDenied("historical Run lacks captured execution authority")
+            return {}
+        if type(context) is not WorkspaceContext:
+            raise WorkspaceAccessDenied("Run execution authority is invalid")
+        RunManager._workspace_context_from_store({"workspace_context_json": asdict(context), "workspace_id": record.workspace_id, "user_id": record.user_id, "thread_incarnation": record.thread_incarnation})
+        return {"workspace_context": context, "thread_incarnation": record.thread_incarnation}
 
     async def handoff_pending(self, run_id: str, *, owner_worker_id: str) -> None:
         """Detach an unstarted admission after a durable owner CAS.
@@ -925,12 +1036,26 @@ class RunManager:
                 record.ownership_lost = True
             try:
                 updated = await self._store.transfer_pending(
-                    run_id, thread_id=record.thread_id, user_id=record.user_id, expected_owner_worker_id=self._worker_id, owner_worker_id=owner_worker_id, lease_expires_at=self._compute_lease_expires_at()
+                    run_id,
+                    thread_id=record.thread_id,
+                    user_id=record.user_id,
+                    expected_owner_worker_id=self._worker_id,
+                    owner_worker_id=owner_worker_id,
+                    lease_expires_at=self._compute_lease_expires_at(),
+                    **self._workspace_transition_kwargs(record),
                 )
+            except WorkspaceAccessDenied:
+                record.ownership_lost = False
+                raise
             except BaseException:
                 # A cancelled/ambiguous CAS cannot safely restore local write
                 # authority. Resolve its durable owner before clearing the fence.
-                row = await self._store.get(run_id, user_id=record.user_id)
+                scope_token = set_current_workspace(record.workspace_context) if record.workspace_context is not None else None
+                try:
+                    row = await self._store.get(run_id, user_id=record.user_id)
+                finally:
+                    if scope_token is not None:
+                        reset_current_workspace(scope_token)
                 if row is not None and row.get("owner_worker_id") == self._worker_id:
                     record.ownership_lost = False
                 raise
@@ -941,7 +1066,21 @@ class RunManager:
                 self._runs.pop(run_id)
                 self._unindex_run_locked(run_id, record.thread_id)
 
-    async def adopt_pending(self, run_id: str, *, thread_id: str, user_id: str, expected_owner_worker_id: str) -> RunRecord:
+    async def adopt_pending(self, run_id: str, *, thread_id: str, user_id: str, expected_owner_worker_id: str, workspace_context: WorkspaceContext | None = None) -> RunRecord:
+        """Adopt after authenticating the launch capability, preserving its identity.
+
+        Explicit workspace_context belongs to the trusted receiver. A browser
+        selection or this internal ownership CAS never authenticates a launch.
+        """
+        context = resolve_resource_scope(workspace_context, user_id, required=getattr(self._store, "workspace_scope_required", False))
+        token = set_current_workspace(context) if context is not None else None
+        try:
+            return await self._adopt_pending(run_id, thread_id=thread_id, user_id=user_id, expected_owner_worker_id=expected_owner_worker_id)
+        finally:
+            if token is not None:
+                reset_current_workspace(token)
+
+    async def _adopt_pending(self, run_id: str, *, thread_id: str, user_id: str, expected_owner_worker_id: str) -> RunRecord:
         """Adopt an existing admission, without changing its admitted payload.
 
         The caller must first authenticate the signed launch capability. This
@@ -953,7 +1092,17 @@ class RunManager:
             if run_id in self._runs:
                 raise RunStartupError("Run already registered locally")
         expiry = self._compute_lease_expires_at()
-        if not await self._store.transfer_pending(run_id, thread_id=thread_id, user_id=user_id, expected_owner_worker_id=expected_owner_worker_id, owner_worker_id=self._worker_id, lease_expires_at=expiry):
+        transition_kwargs = {}
+        context = get_current_workspace()
+        if context is not None:
+            previous = await self._store.get(run_id, user_id=user_id)
+            if previous is None:
+                raise WorkspaceAccessDenied("pending adoption workspace is unavailable")
+            captured = self._record_from_store(previous)
+            if captured.workspace_context != context or captured.thread_id != thread_id:
+                raise WorkspaceAccessDenied("pending adoption workspace identity differs")
+            transition_kwargs = self._workspace_transition_kwargs(captured)
+        if not await self._store.transfer_pending(run_id, thread_id=thread_id, user_id=user_id, expected_owner_worker_id=expected_owner_worker_id, owner_worker_id=self._worker_id, lease_expires_at=expiry, **transition_kwargs):
             raise RunStartupError("Pending adoption lost ownership or was cancelled")
         row = await self._store.get(run_id, user_id=user_id)
         if row is None or row.get("owner_worker_id") != self._worker_id:
@@ -982,7 +1131,11 @@ class RunManager:
                     updated = await self._call_store_with_retry(
                         "start_run",
                         run_id,
-                        lambda: self._store.start_run(run_id, owner_worker_id=self._worker_id),
+                        lambda: self._store.start_run(
+                            run_id,
+                            owner_worker_id=self._worker_id,
+                            **({"user_id": record.user_id, "thread_id": record.thread_id, **self._workspace_transition_kwargs(record)} if record.workspace_id is not None or record.workspace_context is not None else {}),
+                        ),
                     )
                 except Exception as exc:
                     raise RunStartupError(f"Failed to start run {run_id}: {exc}") from exc
@@ -1036,13 +1189,16 @@ class RunManager:
         user_id: str | None | _AutoSentinel = AUTO,
     ) -> dict[str, RunRecord]:
         """Batch-load selected thread runs with in-memory records preferred."""
+        resolved_user_id = resolve_user_id(user_id, method_name="RunManager.get_many_by_thread")
+        scoped = self._workspace_read_required(resolved_user_id)
         if not run_ids:
             return {}
-        resolved_user_id = resolve_user_id(user_id, method_name="RunManager.get_many_by_thread")
         async with self._lock:
             records_by_id = {
                 record.run_id: record for record in self._thread_records_locked(thread_id) if record.operation_kind == ThreadOperationKind.run and record.run_id in run_ids and (resolved_user_id is None or record.user_id == resolved_user_id)
             }
+        records = await self._authorized_resident_records(list(records_by_id.values()), resolved_user_id)
+        records_by_id = {record.run_id: record for record in records}
         if self._store is None:
             return records_by_id
 
@@ -1052,6 +1208,8 @@ class RunManager:
         try:
             rows = await self._store.get_many_by_thread(thread_id, set(remaining), user_id=resolved_user_id)
         except Exception:
+            if scoped:
+                raise
             logger.warning("Failed to batch-hydrate runs for thread %s", thread_id, exc_info=True)
             return records_by_id
         for run_id, row in rows.items():
@@ -1147,6 +1305,8 @@ class RunManager:
             )
             return None
 
+        async with self._lock:
+            record = self._runs.get(run_id)
         try:
             result = await self._call_store_with_retry(
                 "finalize_if_not_cancelled",
@@ -1156,9 +1316,18 @@ class RunManager:
                     status=status.value,
                     error=error,
                     stop_reason=stop_reason,
+                    **self._worker_write_kwargs(record),
                     **({"goal_verdict": goal_verdict} if goal_verdict is not None else {}),
                 ),
             )
+        except WorkspaceAccessDenied:
+            # Known denied business effects are not unknown cleanup. The owning
+            # worker still drains and acknowledges only its actual close boundary.
+            if record is not None and record.workspace_context is not None:
+                record.abort_action = "interrupt"
+                record.abort_event.set()
+                return "interrupt"
+            raise
         except Exception:
             async with self._lock:
                 record = self._runs.get(run_id)
@@ -1283,7 +1452,7 @@ class RunManager:
             await self._call_store_with_retry(
                 "update_model_name",
                 run_id,
-                lambda: self._store.update_model_name(run_id, model_name),
+                lambda: self._store.update_model_name(run_id, model_name, **self._worker_write_kwargs(self._runs.get(run_id))),
             )
         except Exception:
             logger.warning("Failed to persist model_name update for run %s", run_id, exc_info=True)
@@ -1323,6 +1492,8 @@ class RunManager:
                 run_id,
             )
             return CancelOutcome.lease_valid_elsewhere, None
+        except WorkspaceAccessDenied:
+            raise
         except Exception:
             logger.warning(
                 "Failed to persist cancellation request for run %s",
@@ -1332,6 +1503,10 @@ class RunManager:
             return CancelOutcome.unknown, None
 
         if winning_action is not None:
+            if winning_action == "rollback" and get_current_workspace() is not None:
+                # Scoped rollback is admitted only while still pending. No
+                # native work began, so preserve prior checkpoint state.
+                winning_action = "interrupt"
             logger.info(
                 "Run %s cancellation requested (requested=%s,winner=%s)",
                 run_id,
@@ -1344,7 +1519,8 @@ class RunManager:
         # guarded cancellation UPDATE. Re-read so the API reports that precise
         # terminal result rather than claiming the request was accepted.
         try:
-            fresh = await self._store.get(run_id)
+            scope = get_current_workspace()
+            fresh = await self._store.get(run_id, **({"user_id": scope.actor_user_id} if scope is not None else {}))
         except Exception:
             fresh = None
         if fresh is None:
@@ -1377,7 +1553,7 @@ class RunManager:
         """Set process-local abort state without status persistence or cleanup."""
         async with self._lock:
             record = self._runs.get(run_id)
-            if record is None or (record.status not in (RunStatus.pending, RunStatus.running) and not record.scheduled_goal_cleanup_pending) or record.abort_event.is_set():
+            if record is None or (record.status not in (RunStatus.pending, RunStatus.running) and not record.scheduled_goal_cleanup_pending and not self._awaits_workspace_lifetime(record)) or record.abort_event.is_set():
                 return
 
             record.abort_action = action
@@ -1418,6 +1594,14 @@ class RunManager:
         Returns:
             A :class:`CancelOutcome` enum describing what happened.
         """
+        context = get_current_workspace()
+        async with self._lock:
+            cached = self._runs.get(run_id)
+            cached_scoped = cached is not None and (cached.workspace_id is not None or cached.workspace_context is not None)
+        if getattr(self._store, "workspace_scope_required", False) or context is not None or cached_scoped:
+            context = resolve_resource_scope(None, context.actor_user_id if context is not None else None, required=True)
+            if await self.get(run_id, user_id=context.actor_user_id, raise_on_store_error=True) is None:
+                return CancelOutcome.unknown
         # ------------------------------------------------------------------
         # Local path — this worker owns the run in-memory.
         # ------------------------------------------------------------------
@@ -1451,7 +1635,7 @@ class RunManager:
             if record is not None:
                 if record.status == RunStatus.interrupted or record.abort_event.is_set():
                     return CancelOutcome.cancelled
-                if record.status not in (RunStatus.pending, RunStatus.running) and not record.scheduled_goal_cleanup_pending:
+                if record.status not in (RunStatus.pending, RunStatus.running) and not record.scheduled_goal_cleanup_pending and not self._awaits_workspace_lifetime(record):
                     return CancelOutcome.cancelled if durable_cancel_won else CancelOutcome.not_cancellable
                 record.abort_action = action
                 record.abort_event.set()
@@ -1464,7 +1648,7 @@ class RunManager:
 
         # Persist outside the lock so store calls don't block other mutations.
         if record is not None:
-            if record.scheduled_goal_cleanup_pending:
+            if record.scheduled_goal_cleanup_pending or self._awaits_workspace_lifetime(record):
                 # The worker must remove its scheduled goal before releasing
                 # the real durable slot. Abort/request state already records
                 # cancellation; ordinary runs retain immediate persistence.
@@ -1477,7 +1661,7 @@ class RunManager:
                 # guarded ``update_status``. If so, surface ``taken_over``
                 # so the client sees a status consistent with the store.
                 try:
-                    existing = await self._store.get(run_id)
+                    existing = await self._store.get(run_id, **({"user_id": context.actor_user_id} if context is not None else {}))
                 except Exception:
                     existing = None
                 if existing is not None and existing.get("status") == "error":
@@ -1494,6 +1678,10 @@ class RunManager:
 
         if durable_cancel_won:
             return CancelOutcome.cancelled
+        if context is not None:
+            # Expiry never proves a scoped execution stopped. Keep its native
+            # lifetime and request owner cleanup instead of legacy takeover.
+            return await self._request_remote_cancel(run_id, action=action)
 
         # ------------------------------------------------------------------
         # Non-local path — no in-memory record, must consult the store.
@@ -1506,7 +1694,7 @@ class RunManager:
             return CancelOutcome.unknown
 
         try:
-            row = await self._store.get(run_id)
+            row = await self._store.get(run_id, **({"user_id": context.actor_user_id} if context is not None else {}))
         except Exception:
             logger.warning("Failed to fetch run %s from store during cancel", run_id, exc_info=True)
             return CancelOutcome.unknown
@@ -1552,7 +1740,7 @@ class RunManager:
         #       → not_cancellable or taken_over.
         # Re-read to distinguish.
         try:
-            fresh = await self._store.get(run_id)
+            fresh = await self._store.get(run_id, **({"user_id": context.actor_user_id} if context is not None else {}))
         except Exception:
             fresh = None
         if fresh is None:
@@ -1594,6 +1782,7 @@ class RunManager:
         model_name: str | None = None,
         user_id: str | None = None,
         idempotency_key: str | None = None,
+        scheduled_admission=None,
     ) -> RunRecord:
         """Atomically admit a normal agent run for a thread."""
         return await self._admit_thread_operation(
@@ -1607,6 +1796,7 @@ class RunManager:
             model_name=model_name,
             user_id=user_id,
             idempotency_key=idempotency_key,
+            scheduled_admission=scheduled_admission,
         )
 
     async def _close_cancelled_admission(self, record: RunRecord) -> None:
@@ -1667,6 +1857,7 @@ class RunManager:
         model_name: str | None = None,
         user_id: str | None = None,
         idempotency_key: str | None = None,
+        scheduled_admission=None,
     ) -> RunRecord:
         """Atomically check for inflight runs and create a new one.
 
@@ -1686,6 +1877,9 @@ class RunManager:
         now = _now_iso()
         # Resolve before the idempotency checks below compare it with stored rows.
         user_id = _resolve_record_user_id(user_id)
+        workspace_context = resolve_resource_scope(None, user_id, required=getattr(self._store, "workspace_scope_required", False))
+        if workspace_context is not None and getattr(self._store, "supports_workspace_admission", False) is not True:
+            raise WorkspaceAccessDenied("workspace admission requires a scoped durable Run store")
 
         _supported_strategies = ("reject", "interrupt", "rollback")
         if multitask_strategy not in _supported_strategies:
@@ -1721,6 +1915,16 @@ class RunManager:
                         continue
                     if existing.thread_id != thread_id or existing.user_id != user_id:
                         raise RuntimeError("Run idempotency key resolved to a different thread or user")
+                    if workspace_context is not None:
+                        if existing.workspace_context != workspace_context or existing.operation_kind != operation_kind:
+                            raise WorkspaceAccessDenied("Run idempotency workspace identity differs")
+                        durable = await self._store.find_by_idempotency_key(idempotency_key, user_id=user_id, thread_id=thread_id)
+                        if durable is None or not self._resident_matches_durable(existing, durable):
+                            raise WorkspaceAccessDenied("Run idempotency workspace authorization changed")
+                    elif existing.workspace_id is not None:
+                        raise WorkspaceAccessDenied("Run idempotency requires workspace authority")
+                    if scheduled_admission is not None:
+                        await self._store.validate_scheduled_admission(scheduled_admission, run_id=existing.run_id, workspace_context=workspace_context)
                     existing.idempotency_reused = True
                     return existing
 
@@ -1735,6 +1939,11 @@ class RunManager:
                 existing = self._record_from_store(conflict.existing)
                 if existing.thread_id != thread_id or existing.user_id != user_id:
                     raise RuntimeError("Run idempotency key resolved to a different thread or user") from conflict
+                if workspace_context is not None:
+                    if existing.workspace_context != workspace_context or existing.operation_kind != operation_kind:
+                        raise WorkspaceAccessDenied("Run idempotency workspace identity differs") from conflict
+                elif existing.workspace_id is not None:
+                    raise WorkspaceAccessDenied("Run idempotency requires workspace authority") from conflict
                 existing.idempotency_reused = True
                 return existing
 
@@ -1778,17 +1987,23 @@ class RunManager:
                         "created_at": now,
                         "grace_seconds": grace_seconds,
                     }
+                    if scheduled_admission is not None:
+                        create_kwargs["scheduled_admission"] = scheduled_admission
                     if idempotency_key is not None:
                         create_kwargs["idempotency_key"] = idempotency_key
+                    if workspace_context is not None:
+                        create_kwargs["workspace_context"] = workspace_context
                     try:
-                        await self._call_store_with_retry(
+                        stored_result = await self._call_store_with_retry(
                             "create_thread_operation_atomic",
                             run_id,
                             lambda: self._store.create_thread_operation_atomic(**create_kwargs),
                         )
                     except RunIdempotencyConflict as exc:
+                        if scheduled_admission is not None:
+                            await self._store.validate_scheduled_admission(scheduled_admission, run_id=exc.existing["run_id"], workspace_context=workspace_context)
                         return reuse_idempotent_run(exc)
-                    except ConflictError:
+                    except (ConflictError, WorkspaceAccessDenied):
                         raise
                     except Exception as exc:
                         if _is_unique_violation(exc):
@@ -1812,13 +2027,15 @@ class RunManager:
                     }
                     if idempotency_key is not None:
                         create_kwargs["idempotency_key"] = idempotency_key
+                    if workspace_context is not None:
+                        create_kwargs["workspace_context"] = workspace_context
                     # Interrupt / rollback: store-side claim + insert in one
                     # transaction. Retry on IntegrityError in case another
                     # worker races us between our SELECT FOR UPDATE and INSERT.
                     max_retries = 3
                     for attempt in range(max_retries):
                         try:
-                            await self._call_store_with_retry(
+                            stored_result = await self._call_store_with_retry(
                                 "create_thread_operation_atomic",
                                 run_id,
                                 lambda: self._store.create_thread_operation_atomic(**create_kwargs),
@@ -1826,6 +2043,8 @@ class RunManager:
                             break
                         except RunIdempotencyConflict as exc:
                             return reuse_idempotent_run(exc)
+                        except WorkspaceAccessDenied:
+                            raise
                         except Exception as exc:
                             is_unique = _is_unique_violation(exc)
                             if is_unique and attempt + 1 < max_retries:
@@ -1840,6 +2059,15 @@ class RunManager:
                     # ``create_thread_operation_atomic`` already marked any claimed store
                     # rows as interrupted in the same transaction; no extra
                     # store write is needed for them.
+
+            if workspace_context is not None:
+                # Only the durable lock-fenced admission result establishes identity.
+                captured = self._record_from_store(stored_result[0])
+                if captured.workspace_context != workspace_context:
+                    raise WorkspaceAccessDenied("Run admission changed captured workspace identity")
+                record.workspace_id = captured.workspace_id
+                record.workspace_context = captured.workspace_context
+                record.thread_incarnation = captured.thread_incarnation
 
             # 3) Only now safe to register locally — store insert succeeded.
             self._runs[run_id] = record
@@ -1905,6 +2133,7 @@ class RunManager:
         """
         if kind == ThreadOperationKind.run:
             raise ValueError("Normal runs must be admitted with create_or_reject()")
+        workspace_context = get_current_workspace()
         record = await self._admit_thread_operation(
             thread_id,
             operation_kind=kind,
@@ -1931,10 +2160,13 @@ class RunManager:
             try:
                 if self._store is not None:
                     try:
+                        cleanup_kwargs = {"user_id": record.user_id}
+                        if workspace_context is not None:
+                            cleanup_kwargs.update(workspace_context=workspace_context, owner_worker_id=record.owner_worker_id)
                         await self._call_store_with_retry(
                             "release thread operation",
                             record.run_id,
-                            lambda: self._store.delete_thread_operation(record.run_id, user_id=record.user_id),
+                            lambda: self._store.delete_thread_operation(record.run_id, **cleanup_kwargs),
                         )
                     except Exception:
                         logger.warning(
@@ -2301,6 +2533,79 @@ class RunManager:
             logger.warning("Unable to verify terminal commit for run %s", record.run_id, exc_info=True)
         return False
 
+    @staticmethod
+    def _awaits_workspace_lifetime(record: RunRecord) -> bool:
+        return record.workspace_context is not None and record.operation_kind == "run" and not record.store_only and not record.workspace_lifetime_confirmed
+
+    async def _confirm_workspace_execution_closed(self, record: RunRecord) -> bool:
+        """Called only at native closure, or to retry that captured proof."""
+        if record.workspace_context is None:
+            return True
+        if not record.workspace_execution_closed or record.workspace_cleanup_uncertain or record.ownership_lost:
+            return False
+        confirm = getattr(self._store, "confirm_workspace_execution", None)
+        if confirm is None:
+            return False
+        from deerflow.persistence.workspaces.run_control import NativeRunStopTarget
+
+        async with record.start_lock:
+            async with self._lock:
+                if self._runs.get(record.run_id) is not record or record.owner_worker_id != self._worker_id or record.ownership_lost:
+                    return False
+            try:
+                result = await self._call_store_with_retry("confirm_workspace_execution", record.run_id, lambda: confirm(NativeRunStopTarget.from_record(record)))
+            except Exception:
+                logger.warning("Native execution closure acknowledgement deferred")
+                return False
+            if result is None:
+                return False
+            record.workspace_lifetime_confirmed = True
+            record.finalizing = False
+            if result["status"] == "interrupted":
+                record.status = RunStatus.interrupted
+                record.abort_action = "interrupt"
+                record.abort_event.set()
+            return True
+
+    @staticmethod
+    def _awaits_workspace_stop(record: RunRecord) -> bool:
+        return record.workspace_context is not None and record.workspace_stop_requested and not record.workspace_stop_confirmed
+
+    async def _confirm_finished_workspace_stops(self) -> None:
+        confirm = getattr(self._store, "confirm_workspace_run_stop", None)
+        if confirm is None:
+            return
+        from deerflow.persistence.workspaces.run_control import NativeRunStopTarget
+
+        async with self._lock:
+            candidates = [
+                record
+                for record in self._runs.values()
+                if record.workspace_context is not None and record.abort_event.is_set() and not record.ownership_lost and not record.workspace_stop_confirmed and record.owner_worker_id == self._worker_id
+            ]
+        for record in candidates:
+            async with record.start_lock:
+                async with self._lock:
+                    if self._runs.get(record.run_id) is not record or record.owner_worker_id != self._worker_id or record.ownership_lost:
+                        continue
+                evidence = None
+                if record.task is None and record.status in (RunStatus.pending, RunStatus.interrupted) and not record.store_only and not record.workspace_execution_closed:
+                    evidence = "native_not_started"
+                elif record.workspace_execution_closed and (record.task is None or record.task.done()):
+                    evidence = "native_worker_closed"
+                if evidence is None:
+                    continue
+                try:
+                    target = NativeRunStopTarget.from_record(record)
+                    if await self._call_store_with_retry("confirm_workspace_run_stop", record.run_id, lambda: confirm(target, evidence=evidence)):
+                        record.workspace_stop_confirmed = True
+                        record.workspace_lifetime_confirmed = True
+                        record.abort_action = "interrupt"
+                        record.finalizing = False
+                        record.status = RunStatus.interrupted
+                except Exception:
+                    logger.warning("Native Run stop acknowledgement deferred; durable barrier retained")
+
     async def _renew_leases(self) -> None:
         """Renew locally-owned leases, failing closed at their deadlines.
 
@@ -2313,6 +2618,10 @@ class RunManager:
             return
         lease_seconds = self._run_ownership_config.lease_seconds
         cancellations: list[tuple[str, str]] = []
+        async with self._lock:
+            closed = [record for record in self._runs.values() if self._awaits_workspace_lifetime(record) and record.workspace_execution_closed and record.owner_worker_id == self._worker_id]
+        for record in closed:
+            await self._confirm_workspace_execution_closed(record)
 
         async with self._lock:
             # Renew any pending/running run owned by this worker unless its
@@ -2330,22 +2639,24 @@ class RunManager:
             active_runs = [
                 (rid, record)
                 for rid, record in self._runs.items()
-                if (record.status in (RunStatus.pending, RunStatus.running) or self._awaits_terminal_commit(record)) and record.owner_worker_id == self._worker_id and (record.task is None or not record.task.done())
+                if (record.status in (RunStatus.pending, RunStatus.running) or self._awaits_terminal_commit(record) or self._awaits_workspace_stop(record) or self._awaits_workspace_lifetime(record))
+                and record.owner_worker_id == self._worker_id
+                and (record.task is None or not record.task.done() or self._awaits_workspace_lifetime(record))
             ]
 
         for run_id, record in active_runs:
-            if record.status not in (RunStatus.pending, RunStatus.running) and not self._awaits_terminal_commit(record):
+            if record.status not in (RunStatus.pending, RunStatus.running) and not self._awaits_terminal_commit(record) and not self._awaits_workspace_stop(record) and not self._awaits_workspace_lifetime(record):
                 continue
             confirmed_deadline = self._parse_lease_deadline(record.lease_expires_at)
-            if self._awaits_terminal_commit(record) and record.status not in (RunStatus.pending, RunStatus.running):
+            if not self._awaits_workspace_lifetime(record) and not self._awaits_workspace_stop(record) and self._awaits_terminal_commit(record) and record.status not in (RunStatus.pending, RunStatus.running):
                 # The DB may have committed the terminal CAS while the worker
                 # is still receiving its acknowledgement. It no longer needs
                 # renewal and must not be mistaken for a peer takeover.
                 remaining = (confirmed_deadline - datetime.now(UTC)).total_seconds() if confirmed_deadline is not None else 0
-                if await self._release_confirmed_terminal_barrier(record, timeout=remaining if remaining > 0 else lease_seconds):
+                if not self._awaits_workspace_lifetime(record) and await self._release_confirmed_terminal_barrier(record, timeout=remaining if remaining > 0 else lease_seconds):
                     continue
             if confirmed_deadline is None or confirmed_deadline <= datetime.now(UTC):
-                if await self._release_confirmed_terminal_barrier(record, timeout=lease_seconds):
+                if not self._awaits_workspace_lifetime(record) and await self._release_confirmed_terminal_barrier(record, timeout=lease_seconds):
                     continue
                 await self._mark_ownership_lost(
                     record,
@@ -2368,8 +2679,10 @@ class RunManager:
                         ),
                     )
                 if renewal.renewed:
+                    if getattr(renewal, "workspace_stop_requested", False):
+                        record.workspace_stop_requested = True
                     if confirmed_deadline <= datetime.now(UTC):
-                        if await self._release_confirmed_terminal_barrier(record, timeout=lease_seconds):
+                        if not self._awaits_workspace_lifetime(record) and await self._release_confirmed_terminal_barrier(record, timeout=lease_seconds):
                             continue
                         await self._mark_ownership_lost(
                             record,
@@ -2403,15 +2716,15 @@ class RunManager:
                     async with self._lock:
                         still_active = (
                             self._runs.get(run_id) is record
-                            and (record.status in (RunStatus.pending, RunStatus.running) or self._awaits_terminal_commit(record))
+                            and (record.status in (RunStatus.pending, RunStatus.running) or self._awaits_terminal_commit(record) or self._awaits_workspace_stop(record) or self._awaits_workspace_lifetime(record))
                             and record.owner_worker_id == self._worker_id
-                            and (record.task is None or not record.task.done())
+                            and (record.task is None or not record.task.done() or self._awaits_workspace_lifetime(record))
                         )
                     if still_active:
                         # A detached precheck may have observed running just
                         # before our terminal CAS committed. Re-read before
                         # treating the rejected renewal as lost ownership.
-                        if await self._release_confirmed_terminal_barrier(record, timeout=lease_seconds):
+                        if not self._awaits_workspace_lifetime(record) and await self._release_confirmed_terminal_barrier(record, timeout=lease_seconds):
                             continue
                         logger.warning(
                             "Run %s lease renewal failed (status=%s,owner=%s) – worker likely taken over; aborting local task",
@@ -2426,7 +2739,7 @@ class RunManager:
                         )
             except Exception:
                 if confirmed_deadline <= datetime.now(UTC):
-                    if await self._release_confirmed_terminal_barrier(record, timeout=lease_seconds):
+                    if not self._awaits_workspace_lifetime(record) and await self._release_confirmed_terminal_barrier(record, timeout=lease_seconds):
                         continue
                     await self._mark_ownership_lost(
                         record,
@@ -2448,6 +2761,7 @@ class RunManager:
                 run_id,
                 action=action,
             )
+        await self._confirm_finished_workspace_stops()
 
     async def _reconcile_orphans_periodic(self) -> None:
         """Sweep for expired leases owned by dead peers.

@@ -1,0 +1,53 @@
+{
+  "build": 119,
+  "result": "SUCCESS",
+  "duration_ms": 39880,
+  "phase": "m4-native-dependency-revocation-20261018-07",
+  "files": {
+    "source": {
+      "path": "/private/tmp/m4-native-dependency-revocation-20261018-07-source.tar.gz",
+      "sha256": "235d01090acc2c85dd002d62ffb421eb99f1b050a0f6e2957a1eaeb72641c900"
+    },
+    "pipeline": {
+      "path": "/private/tmp/Jenkinsfile.m4-native-dependency-revocation-20261018-07",
+      "sha256": "6c6299dcaaf7f318f1f3d33d9bbbbaa52e85fba3c9b73d14db2177873f23138c"
+    },
+    "test": {
+      "path": "/Users/wenbinwang/.codex/worktrees/ecs-native-reuse/deerflow2/backend/tests/test_workspace_native_dependencies.py",
+      "sha256": "4f1b088ef603605e224c9171e843e348bdc65c06664dd8c6fa3c6b30882c405c"
+    },
+    "renderer": {
+      "path": "/Users/wenbinwang/.codex/worktrees/ecs-native-reuse/deerflow2/scripts/render_tenant_run_control_pipeline.py",
+      "sha256": "ba181ea3f992b961b9fc6f46a8779e5b372cd3693354cad15eacbd7af69b0cb7"
+    },
+    "log": {
+      "path": "/private/tmp/m4-native-dependency-revocation-20261018-07.log",
+      "sha256": "633a33a90087c73bab39808d3160e285b4bc17577efec16a56644875d54b544a"
+    }
+  },
+  "cleanup": {
+    "read_only": true,
+    "containers_absent": [
+      "deerflow-tenant-execution-m4-sql-119",
+      "deerflow-tenant-execution-m4-sql-119-db"
+    ],
+    "network_absent": "deerflow-tenant-execution-m4-sql-119",
+    "all_inspect_exit_codes": 1
+  },
+  "scope": "Single PostgreSQL notification receive-time membership revocation; no dispatched recovery acceptance.",
+  "job": "deerflow-tenant-execution-m4-sql",
+  "tests": "1 passed in 18.49s",
+  "static": "Ruff check passed; 50 files formatted",
+  "verified": [
+    "Membership version revoked after worker signs request, before controller receives it",
+    "Independent controller SQL authority rejects HTTP403",
+    "Only original successful Run exists; no continuation launch",
+    "Exact notification lease clears to dead_letter; notified_version remains zero",
+    "Pool unreleased capacity remains zero"
+  ],
+  "limits": [
+    "No physical B or two-host HTTP proof",
+    "Dispatched notification recovery settlement after revocation remains open"
+  ],
+  "production_matches_main_build": 118
+}

@@ -1,0 +1,64 @@
+{
+  "job": "deerflow-tenant-execution-m4-sql",
+  "red": {
+    "build": 126,
+    "queue": 1058,
+    "phase": "m4-native-schema-compat-red-20261018-14",
+    "result": "FAILURE",
+    "duration_ms": 39977,
+    "pytest": "1 failed, 1 error in 20.47s",
+    "business_red": "ExecutionJobs.__init__ -> NativeSubmissionAuthority.validate_mode refused actual bootstrap 0041_scheduler_workspace schema.",
+    "teardown_error": "ObjectInUse dropping owned executor DB: JobStore engine created before receiver initialization failure never enters existing helper finally. No fixture or force-session cleanup modification; outer exact Docker cleanup confirmed absent.",
+    "source_sha256": "fbf5e49c2c8c61be1061ccc87dcab31901bb8c3786469eca1fbb370a23cf8911",
+    "pipeline_sha256": "e6b9ebb6e587abed025659e9bc415511601163f4d99dca3431edfe01d485af90",
+    "log_path": "/private/tmp/m4-native-schema-compat-red-20261018-14.log",
+    "log_sha256": "9396c629537f23a3182f0b7a07b8b037e4707c35dc8a1076aa2ceff308dd5507",
+    "cleanup_path": "/private/tmp/native-schema-build126-cleanup.json"
+  },
+  "green": {
+    "build": 127,
+    "result": "SUCCESS",
+    "duration_ms": 33197,
+    "tests": "1 passed, 2 deprecation warnings in 16.49s",
+    "static": "Ruff check passed; 64 files already formatted"
+  },
+  "source_sha256": "7d07b19b7e1e6a926a65fcb8bf1ea3840506b9c0f8d0281e74e172dabecf740a",
+  "pipeline_sha256": "773a23c088e6948733921fb1db3b3614e5aaf79286917390d02ba629ef22b405",
+  "root_archive_comparison": "All four changed files independently byte-matched to the successful archive. Root independently read Jenkins terminal and complete test output.",
+  "source_files": {
+    "backend/packages/ecs-executor/ecs_executor/control.py": "87d1b979ca703d7e685a58d3c59bfa268d6ba71b136d3f2a35f69375d0fe5632",
+    "backend/packages/ecs-executor/ecs_executor/native_authority.py": "e906efff37e16aa3042898e36867448d2cc28e606e1a043d43a6e0073a2da008",
+    "backend/tests/test_workspace_execution_wire.py": "63af13f60877be9b06ba4172fe58431a7e1166a4e33da28bd5df72c6228518e0",
+    "examples/ecs-native/deploy/Jenkinsfile.tenant-run-control.in": "5acd788a11f4bc6fcc07a7c590b4843c1e4c14863315ee9b9afde8f395d4c6d3"
+  },
+  "cleanup": {
+    "build": 127,
+    "read_only": true,
+    "cleanup": [
+      {
+        "kind": "container",
+        "name": "deerflow-tenant-execution-m4-sql-127",
+        "exit": 1,
+        "stderr": "Error response from daemon: No such container: deerflow-tenant-execution-m4-sql-127"
+      },
+      {
+        "kind": "container",
+        "name": "deerflow-tenant-execution-m4-sql-127-db",
+        "exit": 1,
+        "stderr": "Error response from daemon: No such container: deerflow-tenant-execution-m4-sql-127-db"
+      },
+      {
+        "kind": "network",
+        "name": "deerflow-tenant-execution-m4-sql-127",
+        "exit": 1,
+        "stderr": "Error response from daemon: network deerflow-tenant-execution-m4-sql-127 not found"
+      }
+    ]
+  },
+  "scope": "One real PostgreSQL native ToolNode/durable MCP/HTTP B submit and background poll story on actual 0041. Actual control start/run_once/stop; 0040 stamp simulation accepted; unknown and two known heads rejected; original version rows restored; full execution-job baseline unchanged. No physical worker or model calls.",
+  "remaining": "0040 stopped-writer backfill/export/import receipt pins unchanged; no old-library migration, full Scheduler, physical B/two-host, tenant rollout or full M0–M11 acceptance.",
+  "files": {
+    "/private/tmp/m4-native-schema-compat-green-20261018-15.log": "f8102fd2a1cd8da63264661e5c1960bc42432997dcc5e5c9720c54e4c680de66",
+    "/private/tmp/m4-native-schema-compat-green-20261018-15-source.tar.gz": "7d07b19b7e1e6a926a65fcb8bf1ea3840506b9c0f8d0281e74e172dabecf740a"
+  }
+}

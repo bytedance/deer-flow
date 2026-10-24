@@ -777,7 +777,7 @@ def test_delete_thread_route_holds_reservation_until_cancelled_removal_finishes(
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(run_manager=RecordingRunManager(), checkpointer=None)))
 
     async def scenario() -> None:
-        task = asyncio.create_task(threads.delete_thread_data.__wrapped__("thread-cancelled-delete", request))
+        task = asyncio.create_task(threads._delete_thread_data_authorized.__wrapped__("thread-cancelled-delete", request))
         assert await asyncio.to_thread(removal_started.wait, 5)
         task.cancel()
         await asyncio.sleep(0.05)

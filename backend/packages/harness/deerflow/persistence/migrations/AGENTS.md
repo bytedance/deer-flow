@@ -29,7 +29,7 @@ The empty-DB path keeps using `create_all` because `Base.metadata` is the only a
 `0028_parked_attempts` → `0029_scheduler_agent_tasks` →
 `0030_notification_claim_tokens` → `0031_scheduled_streak_boundary` →
 `0032_activity_and_task_events` → `0033_batch_result_artifact` → `0034_run_event_seq_watermark`
-(current head). The preference
+(upstream segment; the integrated head is documented below). The preference
 revision adds a separate owner/key table with a cascading users foreign key and
 does not alter users; the project-documents revision adds a new owner-scoped
 shelf table, and the MCP lease-token revision adds two nullable token columns to
@@ -192,3 +192,45 @@ deletion or downgrade exists. The fresh hybrid ORM bootstrap need not create the
 unused historical table/column; a real Alembic fresh upgrade does create them.
 Both have no intent to replay. Executor metadata belongs in a dedicated database
 and private Alembic chain, never `Base.metadata`. See the root integration guide.
+
+The tenant foundation appends `0036_tenant_workspaces` after `0035`; it adds
+control-plane tables and nullable native resource scope, plus unverified email
+and account status fields. No automatic ownership backfill is performed. The
+executor still has its separate schema chain; native DDL is not proof that the
+two-database tenant rollout is ready. Downgrade refuses destructive scope loss.
+
+
+`0037_project_visibility` is the project-sharing child of unchanged 0036. It adds
+non-null private-default projects.visibility and ck_project_visibility in an
+Alembic batch so legacy projects do not become shared. ORM fresh bootstrap has
+the same default/constraint. Destructive downgrade refuses; restore the matched
+backup generation instead. Old source ancestry/release receipts are unchanged.
+
+0038_workspace_read_clocks follows unchanged 0037 (the head is now 0039). It creates
+only workspace_thread_read_versions (workspace_id,user_id primary key; version
+BIGINT non-null default 0), without modifying or copying legacy read counters
+or inventing workspace ownership. ORM fresh bootstrap registers the same table.
+Downgrade refuses discarding workspace clock data; restore a matched generation.
+Native backfill/export and executor import require the latest reviewed revision while
+executor schema remains e0002. Historical deployment receipts are unchanged.
+
+
+0039_run_workspace_identity follows unchanged 0038 and adds only nullable JSON
+runs.workspace_context_json and VARCHAR(32) runs.thread_incarnation with the
+idempotent safe_add_column helper. Fresh ORM has the same shape. Existing rows
+remain NULL and retain their content/ownership; missing historical authority
+must not be reconstructed from a current request. Downgrade refuses and requires
+matched restore. Native/export/executor attribution currently requires 0040/e0002.
+Alembic env disposes its owned async engine in finally even when DDL or a refused
+downgrade raises; do not conceal leaked migration sessions by forcing database
+drop or terminating unrelated connections in tests.
+
+
+0040_mcp_workspace_identity follows unchanged 0039 and adds only nullable JSON
+mcp_tasks.workspace_context_json via safe_add_column. Fresh ORM and parent
+upgrade agree. Existing task content, remote handles and leases stay unchanged;
+NULL history must not be assigned current membership authority. Repeat upgrade
+is idempotent; destructive downgrade refuses and requires matched restore.
+Native/backfill/export/executor attribution revisions are pinned to 0040/e0002.
+Historical release receipts remain immutable; do not reinterpret them as the
+new candidate's stop/restore proof or bypass the closed tenant startup guard.

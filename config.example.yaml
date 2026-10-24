@@ -20,7 +20,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 56
+config_version: 57
 
 # Optional operator-owned literal prompt extensions (see CONFIGURATION.md):
 # lead_prompt_overlay:
@@ -3489,3 +3489,9 @@ authorization:
 #                                         # also match a host-owned table name.
 #     config:
 #       label: example                    # extension-private values, if any
+
+# Workspace authorization is startup-only. This build refuses activation until
+# resource/background integration and paired rollout gates are implemented.
+# A database containing any team cannot start in legacy authorization mode.
+workspaces:
+  enabled: false

@@ -21,6 +21,9 @@ from deerflow.persistence.base import Base
 class ScheduledTaskEventRow(Base):
     __tablename__ = "scheduled_task_events"
 
+    workspace_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    thread_incarnation: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
     id: Mapped[str] = mapped_column(String(64), nullable=False)
     user_id: Mapped[str] = mapped_column(String(64), nullable=False)
     task_id: Mapped[str] = mapped_column(String(64), nullable=False)

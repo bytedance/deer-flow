@@ -1,0 +1,54 @@
+{
+  "build": 154,
+  "queue": 1116,
+  "phase": "m4-native-scheduler-revoked-control-green-20261018-42",
+  "result": "SUCCESS",
+  "duration_ms": 39868,
+  "pytest": "1 passed in 21.23s",
+  "ruff": "All checks passed; 67 files already formatted",
+  "source_sha256": "8f1391fde9dcaa2786b445f0e0f94ecbc23b39d30efd1d41987ec72cd007507a",
+  "pipeline_sha256": "5213eab576b6866d313e1cdc69b56f3fb7098b122b9183540c4d6c73e6fd1d48",
+  "source_archive_exact_match": {
+    "backend/packages/harness/deerflow/persistence/scheduled_task_runs/sql.py": "d42e8a697aa4e7c3de49e796a017589366cbf34ea6881317c530aad1501cb655",
+    "backend/app/scheduler/service.py": "2cf930d0752832e3926ccc074102c2a61f9c67db9378285754211da9d3de62ef",
+    "backend/tests/test_workspace_native_dependencies.py": "c86172e46414310855f9130ef6f205db30ee81cda20b3f6d95b1c9643673b7d2",
+    "scripts/render_tenant_run_control_pipeline.py": "92232c9bea330885c3021553c6f9bea8a5f2733a8608418c958f2bca144279b9"
+  },
+  "approved_patch_sha256": "751601b40aedd4288db7554d4c2ba1a0b86b9ae17adad5a71c003a36be4685bf",
+  "log_path": "/private/tmp/m4-native-scheduler-revoked-control-green-20261018-42.log",
+  "log_sha256": "97401912a7e272ed26969bb3a8193ce87156e2cbdb0c824f7d3612c352491cca",
+  "cleanup_path": "/private/tmp/native-scheduler-revoked-control-build154-cleanup.json",
+  "scope": "One PostgreSQL installed Scheduler C1 wait after native execution lifetime completed and no-sandbox STOP/report, real transfer-owner plus member removal, then control-only logical occurrence/task retirement and exact ledger wait inactive. Business checkpoint/goal/result/Run read guards untouched; source/lifetime/snapshot/counter/events/pool fields and parent revoke payloads preserved; repeat audit/first-terminal idempotent. Parent revoke and scheduler domain remain pending. Native logical closure is not physical STOP proof. Queued NoStart production branch was statically reviewed but this one runtime story covers closed initial C1 only. No active/transfer/unknown settlement or physical/model/B wire acceptance claimed.",
+  "job": "deerflow-tenant-execution-m4-sql",
+  "cleanup": {
+    "build": 154,
+    "read_only": true,
+    "cleanup": [
+      {
+        "kind": "container",
+        "name": "deerflow-tenant-execution-m4-sql-154",
+        "exit": 1,
+        "stderr": "Error response from daemon: No such container: deerflow-tenant-execution-m4-sql-154"
+      },
+      {
+        "kind": "container",
+        "name": "deerflow-tenant-execution-m4-sql-154-db",
+        "exit": 1,
+        "stderr": "Error response from daemon: No such container: deerflow-tenant-execution-m4-sql-154-db"
+      },
+      {
+        "kind": "network",
+        "name": "deerflow-tenant-execution-m4-sql-154",
+        "exit": 1,
+        "stderr": "Error response from daemon: network deerflow-tenant-execution-m4-sql-154 not found"
+      }
+    ]
+  },
+  "root_review": "Root reviewed the precise test and two-file product patch, requested and verified future-version upper fences before application, independently read live terminal, SHA-verified source archive and byte-matched changed files, and verified exact owned fixture cleanup.",
+  "limits": [
+    "One real membership-removal story after closed+reported initial C1. Queued explicit NoStart, active/transferred/unknown lifetime, pending physical STOP, interrupted host transport replay and large pagination were code-reviewed but not separately exercised here.",
+    "Native terminal/completed execution lifetime permits logical Scheduler settlement, not physical STOP inference. Physical pool reservation/release remains exclusively native stop_owned/report. This SQL sweep never modifies pool jobs or capacity.",
+    "Parent workspace_revoke and scheduler domain remain pending. Complete revoke domains/private-parent/account/workspace lifecycle, actual B wire/physical, IM/recovery and full M0-M11 remain required. No deployment/push/local runtime; tenant activation false."
+  ],
+  "red_evidence": "docs/tenant-workspaces-evidence/native-scheduler-revoked-control-red-153.json"
+}

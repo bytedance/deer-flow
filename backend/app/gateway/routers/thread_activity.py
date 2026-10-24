@@ -22,6 +22,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from app.gateway.authz import require_permission
+from app.gateway.workspaces.dependencies import workspace_resource_scope
 from deerflow.runtime.user_context import get_effective_user_id
 
 router = APIRouter(prefix="/api/thread-activity", tags=["threads"])
@@ -68,6 +69,7 @@ def _format_cursor(change_seq: int, run_id: str) -> str:
 
 
 @router.get("", response_model=ThreadActivityResponse)
+@workspace_resource_scope()
 @require_permission("threads", "read")
 async def list_thread_activity(
     request: Request,

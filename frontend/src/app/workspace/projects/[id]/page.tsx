@@ -7,8 +7,7 @@ import {
   RotateCcw,
   Trash2,
 } from "lucide-react";
-import Link from "next/link";
-import { useParams, useRouter } from "next/navigation";
+import { useParams } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
@@ -39,6 +38,7 @@ import {
   WorkspaceContainer,
   WorkspaceHeader,
 } from "@/components/workspace/workspace-container";
+import Link from "@/components/workspace/workspace-link";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   PROJECTS_CONFIG_DEFAULT,
@@ -52,6 +52,7 @@ import {
   type Project,
 } from "@/core/projects";
 import { isStaticWebsiteOnly } from "@/core/static-mode";
+import { useWorkspaceRouter as useRouter } from "@/core/workspaces/navigation";
 import { isIMEComposing } from "@/lib/ime";
 import { cn } from "@/lib/utils";
 

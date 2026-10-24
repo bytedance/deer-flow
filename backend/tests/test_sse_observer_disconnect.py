@@ -309,3 +309,35 @@ def test_join_routes_wire_sse_consumer_as_observers():
     # stateless create-and-stream — creator on_disconnect policy, not the retry gap
     assert "sse_consumer(bridge, record, request, run_mgr, apply_on_disconnect=False)" not in runs_source
     assert "emit_gap_on_missing_stream" not in runs_source
+
+
+def test_creator_cancellation_is_not_delayed_by_subscription_close():
+    """Connection teardown can block; creator cancellation must precede it."""
+
+    async def scenario():
+        started, release = asyncio.Event(), asyncio.Event()
+
+        class SlowClosingBridge(_StubBridge):
+            def subscribe(self, run_id, last_event_id=None):
+                async def frames():
+                    try:
+                        yield SimpleNamespace(event="message", data="{}", id="1")
+                    finally:
+                        started.set()
+                        await release.wait()
+
+                return frames()
+
+        recorder = _CancelRecorder()
+        consumer = sse_consumer(SlowClosingBridge(), _running_record(), _request(), recorder)
+        await anext(consumer)
+        closing = asyncio.create_task(consumer.aclose())
+        try:
+            await asyncio.wait_for(started.wait(), timeout=5)
+            assert recorder.cancelled == ["run-1"], "subscription cleanup blocked the creator's cancellation intent"
+            assert not closing.done(), "the owned subscription close must still drain"
+        finally:
+            release.set()
+            await closing
+
+    asyncio.run(scenario())

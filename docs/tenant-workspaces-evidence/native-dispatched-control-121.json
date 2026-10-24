@@ -1,0 +1,80 @@
+{
+  "red": {
+    "build": 120,
+    "result": "FAILURE",
+    "test_seconds": 19.24,
+    "first_error": "Revoked dispatched notification remained stranded: dispatched"
+  },
+  "green": {
+    "build": 121,
+    "result": "SUCCESS",
+    "duration_ms": 39775,
+    "tests": "1 passed in 19.78s",
+    "static": "Ruff check and 50-file format check passed"
+  },
+  "scope": "Single PostgreSQL dispatched_member branch. Control-only dead_letter leaves second Run pending and pool reservation=1; does not acknowledge STOP.",
+  "files": {
+    "/private/tmp/m4-native-dispatched-revocation-green-20261018-09-source.tar.gz": "44b981b6d657281c20c8f97987916cf9dc013495d62cb1116a198ea536d53cc9",
+    "/private/tmp/Jenkinsfile.m4-native-dispatched-revocation-green-20261018-09": "386ae28f694f6869c57516a075aa50bdce3e7fc23b4ae911c56b55986780ae0d",
+    "/private/tmp/m4-native-dispatched-revocation-green-20261018-09.log": "a4216e4259cc4b7063cd78c3c83a5de42dcf5a66d31c69d096479fa6fbbc3c8f",
+    "/private/tmp/m4-native-dispatched-revocation-red-20261018-08.log": "46303ca91df62dd8b4759ce24dfc3c6ca78f3b6173f440429387575d25a84aa2",
+    "/private/tmp/native-dispatched-control-cleanup120-121.json": "261d2523654274c52b3c345235afbc6c567ab92e8831e9c07e714a65717164b8",
+    "/Users/wenbinwang/.codex/worktrees/ecs-native-reuse/deerflow2/backend/app/mcp_tasks/service.py": "384c78f7872db18c5f6b8ecfb4d00cb0db6942b5f1d3b87c9387c27ca174ab6a",
+    "/Users/wenbinwang/.codex/worktrees/ecs-native-reuse/deerflow2/backend/packages/harness/deerflow/persistence/mcp_tasks/sql.py": "eecb7e8169db52872abd61dcf0d9011fa6b0bdffd5b46cce8dec4a04e3554abf",
+    "/Users/wenbinwang/.codex/worktrees/ecs-native-reuse/deerflow2/backend/tests/test_workspace_native_dependencies.py": "a7a2fdda6414d2c8cba5a41c06c3c1ded8d8233306595cb1d1ca9f2be5bfd2a3",
+    "/Users/wenbinwang/.codex/worktrees/ecs-native-reuse/deerflow2/scripts/render_tenant_run_control_pipeline.py": "542e7b333334eef1731cfe6fcfae6b8416e94b747f80f7f1fdf078c977c53c88"
+  },
+  "cleanup": {
+    "read_only": true,
+    "exact_objects": [
+      {
+        "build": 120,
+        "kind": "container",
+        "name": "deerflow-tenant-execution-m4-sql-120",
+        "exit": 1,
+        "stderr": "Error response from daemon: No such container: deerflow-tenant-execution-m4-sql-120"
+      },
+      {
+        "build": 120,
+        "kind": "container",
+        "name": "deerflow-tenant-execution-m4-sql-120-db",
+        "exit": 1,
+        "stderr": "Error response from daemon: No such container: deerflow-tenant-execution-m4-sql-120-db"
+      },
+      {
+        "build": 120,
+        "kind": "network",
+        "name": "deerflow-tenant-execution-m4-sql-120",
+        "exit": 1,
+        "stderr": "Error response from daemon: network deerflow-tenant-execution-m4-sql-120 not found"
+      },
+      {
+        "build": 121,
+        "kind": "container",
+        "name": "deerflow-tenant-execution-m4-sql-121",
+        "exit": 1,
+        "stderr": "Error response from daemon: No such container: deerflow-tenant-execution-m4-sql-121"
+      },
+      {
+        "build": 121,
+        "kind": "container",
+        "name": "deerflow-tenant-execution-m4-sql-121-db",
+        "exit": 1,
+        "stderr": "Error response from daemon: No such container: deerflow-tenant-execution-m4-sql-121-db"
+      },
+      {
+        "build": 121,
+        "kind": "network",
+        "name": "deerflow-tenant-execution-m4-sql-121",
+        "exit": 1,
+        "stderr": "Error response from daemon: network deerflow-tenant-execution-m4-sql-121 not found"
+      }
+    ]
+  },
+  "job": "deerflow-tenant-execution-m4-sql",
+  "limits": [
+    "One PostgreSQL story; deterministic RemoteIO/graph; ASGI control transport",
+    "No physical B or two-host network acceptance",
+    "Notification retirement does not stop pending Run or release physical capacity"
+  ]
+}

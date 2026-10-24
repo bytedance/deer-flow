@@ -7,10 +7,10 @@ import {
   TriangleAlert,
   type LucideIcon,
 } from "lucide-react";
-import Link from "next/link";
 import type { ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
+import Link from "@/components/workspace/workspace-link";
 import { useI18n } from "@/core/i18n/hooks";
 import { briefReason, formatTaskTime } from "@/core/scheduled-tasks/format";
 import type { TaskOutcome } from "@/core/scheduled-tasks/goal-outcome";

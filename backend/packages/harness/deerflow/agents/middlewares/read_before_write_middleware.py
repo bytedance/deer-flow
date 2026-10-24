@@ -46,6 +46,7 @@ from typing import Any, override
 from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse
 from langchain_core.messages import AIMessage, ToolMessage
+from langgraph.errors import GraphBubbleUp
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
@@ -296,7 +297,7 @@ class ReadBeforeWriteMiddleware(AgentMiddleware):
         except FileNotFoundError:
             # write_file creates the file; str_replace surfaces its own error.
             return None
-        except SandboxAuthorizationError:
+        except (SandboxAuthorizationError, GraphBubbleUp):
             raise
         except Exception:
             logger.warning("read-before-write gate could not inspect %r; allowing the write (fail-open)", path, exc_info=True)
@@ -425,7 +426,7 @@ class ReadBeforeWriteMiddleware(AgentMiddleware):
             return
         try:
             content = self._content_reader(request.runtime, path)
-        except SandboxAuthorizationError:
+        except (SandboxAuthorizationError, GraphBubbleUp):
             raise
         except Exception:
             logger.debug("read-before-write mark skipped for %r: file not hashable", path, exc_info=True)

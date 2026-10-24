@@ -63,6 +63,7 @@ from deerflow.config.tool_progress_config import ToolProgressConfig
 from deerflow.config.tool_search_config import ToolSearchConfig, load_tool_search_config_from_dict
 from deerflow.config.typesafe_config import TypeSafeConfig, load_typesafe_config_from_dict
 from deerflow.config.verification_config import VerificationConfig
+from deerflow.config.workspaces_config import WorkspacesConfig
 from deerflow.env import load_selected_env_file
 from deerflow.extensions.loader import ExtensionSpec
 
@@ -323,6 +324,7 @@ class AppConfig(BaseModel):
     pii_redaction: PiiRedactionConfig = Field(default_factory=PiiRedactionConfig, description="PII redaction middleware configuration (issue #3190)")
     safety_finish_reason: SafetyFinishReasonConfig = Field(default_factory=SafetyFinishReasonConfig, description="Provider safety-filter finish_reason interception middleware configuration")
     auth: AuthAppConfig = Field(default_factory=AuthAppConfig, description="Authentication configuration (local + OIDC SSO)")
+    workspaces: WorkspacesConfig = Field(default_factory=WorkspacesConfig, description=format_field_description("workspaces", field_doc="Operator-owned workspace authorization activation; incomplete builds refuse activation."))
     model_config = ConfigDict(extra="allow")
     database: DatabaseConfig = Field(
         default_factory=DatabaseConfig,

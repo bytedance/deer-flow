@@ -11,6 +11,11 @@ works across workers and devices and never depends on wall-clock time.
 whenever a marker actually moves forward. The activity feed returns it, so
 another device notices a read even when no run changed.
 
+Scoped runs additionally require matching private thread/workspace ownership.
+Workspace clocks are separate from legacy per-user clocks; marker mutations
+serialize with workspace and actor revocation. Lifecycle cleanup is refused
+until its scoped thread deletion transaction is integrated.
+
 Every method takes an explicit ``user_id`` string (never ``None`` or the
 ``AUTO`` sentinel): the router resolves the caller once.
 """
@@ -25,8 +30,14 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from deerflow.authz.workspace import get_current_workspace
 from deerflow.persistence.run.model import RunRow
-from deerflow.persistence.thread_reads.model import ThreadReadMarkerRow, ThreadReadVersionRow
+from deerflow.persistence.thread_meta import ThreadMetaRepository
+from deerflow.persistence.thread_meta.model import ThreadMetaRow
+from deerflow.persistence.thread_reads.model import ThreadReadMarkerRow, ThreadReadVersionRow, WorkspaceThreadReadVersionRow
+from deerflow.persistence.workspaces.model import WorkspaceRow
+from deerflow.persistence.workspaces.scope import live_workspace_predicate, lock_resource_scope, resolve_resource_scope
+from deerflow.persistence.workspaces.sql import WorkspaceAccessDenied
 
 
 def _insert_for(session: AsyncSession):
@@ -41,8 +52,19 @@ def _insert_for(session: AsyncSession):
 class ThreadReadRepository:
     """Persistence facade for ``thread_read_markers`` and ``thread_read_versions``."""
 
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession], *, workspace_required=False) -> None:
         self._sf = session_factory
+        self._workspace_required = workspace_required
+
+    def _scope(self, user_id):
+        return resolve_resource_scope(None, user_id, required=self._workspace_required)
+
+    @staticmethod
+    def _runs_scope(stmt, user_id, context):
+        if context is None:
+            return stmt
+        parent = ThreadMetaRepository._owned_scope(select(ThreadMetaRow.thread_id).where(ThreadMetaRow.thread_id == RunRow.thread_id), user_id, context).correlate(RunRow).exists()
+        return stmt.where(RunRow.workspace_id == context.workspace_id, parent)
 
     async def mark_read(self, *, user_id: str, thread_id: str) -> int:
         """Mark the thread read up to the user's newest run change; returns the stored position.
@@ -53,13 +75,20 @@ class ThreadReadRepository:
         bump, so other tabs and devices do not refetch. A thread without any
         run of this user has nothing to read and gets no marker.
         """
+        context = self._scope(user_id)
         async with self._sf() as session:
+            if context is not None:
+                await lock_resource_scope(session, context)
+                thread = ThreadMetaRepository._owned_scope(select(ThreadMetaRow.thread_id).where(ThreadMetaRow.thread_id == thread_id), user_id, context)
+                if await session.scalar(thread.with_for_update()) is None:
+                    raise WorkspaceAccessDenied("private thread read marker is unavailable")
             insert = _insert_for(session)
             seen = int(
                 await session.scalar(
-                    select(func.coalesce(func.max(RunRow.change_seq), 0)).where(
-                        RunRow.thread_id == thread_id,
-                        RunRow.user_id == user_id,
+                    self._runs_scope(
+                        select(func.coalesce(func.max(RunRow.change_seq), 0)).where(RunRow.thread_id == thread_id, RunRow.user_id == user_id),
+                        user_id,
+                        context,
                     )
                 )
                 or 0
@@ -79,11 +108,14 @@ class ThreadReadRepository:
                 ).returning(ThreadReadMarkerRow.seen_change_seq)
                 raised = (await session.execute(stmt)).scalar_one_or_none()
             if raised is not None:
-                version = insert(ThreadReadVersionRow).values(user_id=user_id, version=1)
-                version = version.on_conflict_do_update(
-                    index_elements=[ThreadReadVersionRow.user_id],
-                    set_={"version": ThreadReadVersionRow.version + 1},
-                )
+                clock_model = WorkspaceThreadReadVersionRow if context is not None else ThreadReadVersionRow
+                clock_values = {"user_id": user_id, "version": 1}
+                clock_key = [clock_model.user_id]
+                if context is not None:
+                    clock_values["workspace_id"] = context.workspace_id
+                    clock_key = [clock_model.workspace_id, clock_model.user_id]
+                version = insert(clock_model).values(**clock_values)
+                version = version.on_conflict_do_update(index_elements=clock_key, set_={"version": clock_model.version + 1})
                 await session.execute(version)
                 await session.commit()
                 return int(raised)
@@ -103,6 +135,7 @@ class ThreadReadRepository:
         interactive runs, legacy rows (``origin_kind`` NULL) and other users'
         runs in a shared thread never make a thread unread.
         """
+        context = self._scope(user_id)
         ids = list(dict.fromkeys(thread_ids))
         if not ids:
             return set()
@@ -123,16 +156,29 @@ class ThreadReadRepository:
             )
         )
         async with self._sf() as session:
-            return {str(thread_id) for thread_id in (await session.execute(stmt)).scalars()}
+            return {str(thread_id) for thread_id in (await session.execute(self._runs_scope(stmt, user_id, context))).scalars()}
 
     async def read_version(self, *, user_id: str) -> int:
         """The user's read clock; 0 when they never marked anything read."""
+        context = self._scope(user_id)
         async with self._sf() as session:
-            version = await session.scalar(select(ThreadReadVersionRow.version).where(ThreadReadVersionRow.user_id == user_id))
+            if context is None:
+                version = await session.scalar(select(ThreadReadVersionRow.version).where(ThreadReadVersionRow.user_id == user_id))
+            else:
+                version = await session.scalar(
+                    select(func.coalesce(WorkspaceThreadReadVersionRow.version, 0))
+                    .select_from(WorkspaceRow)
+                    .outerjoin(WorkspaceThreadReadVersionRow, and_(WorkspaceThreadReadVersionRow.workspace_id == WorkspaceRow.id, WorkspaceThreadReadVersionRow.user_id == user_id))
+                    .where(WorkspaceRow.id == context.workspace_id, live_workspace_predicate(context))
+                )
+                if version is None:
+                    raise WorkspaceAccessDenied("workspace read clock is unavailable")
         return int(version or 0)
 
     async def delete_by_thread(self, thread_id: str) -> None:
         """Drop every user's marker for a deleted thread."""
+        if self._workspace_required or get_current_workspace() is not None:
+            raise WorkspaceAccessDenied("workspace marker cleanup requires scoped thread lifecycle integration")
         async with self._sf() as session:
             await session.execute(delete(ThreadReadMarkerRow).where(ThreadReadMarkerRow.thread_id == thread_id))
             await session.commit()

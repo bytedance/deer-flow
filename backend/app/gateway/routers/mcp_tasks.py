@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 
 from app.gateway.authz import require_permission
 from app.gateway.deps import get_current_user, get_mcp_task_repo, get_mcp_task_service, get_thread_store
+from deerflow.mcp.tasks.control import McpTaskControlUnavailable
 from deerflow.mcp_scope import is_valid_thread_incarnation
 from deerflow.utils.thread_id import ThreadId
 
@@ -159,12 +160,15 @@ async def cancel_mcp_task(
         # mcp_tasks.enabled=true. Recording cancel_requested_at without a
         # worker would acknowledge a cancellation nobody will ever perform.
         raise HTTPException(status_code=503, detail="MCP task cancellation worker is not running")
-    record = await service.cancel_task(
-        task_id=task_id,
-        thread_id=thread_id,
-        user_id=user_id,
-        thread_incarnation=thread_incarnation,
-    )
+    try:
+        record = await service.cancel_task(
+            task_id=task_id,
+            thread_id=thread_id,
+            user_id=user_id,
+            thread_incarnation=thread_incarnation,
+        )
+    except McpTaskControlUnavailable as exc:
+        raise HTTPException(status_code=503, detail="MCP task control worker is not running") from exc
     if record is None:
         raise HTTPException(status_code=404, detail="MCP task not found")
     return _detail(record, threshold=service.tracking_degraded_after_errors)

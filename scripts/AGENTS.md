@@ -404,3 +404,28 @@ Keep exit codes, timeouts and redaction intact; do not rely on the host locale.
 Regressions use real local children, including ASCII/GBK capture defaults,
 nonzero exits, surrogate characters and malformed output, without invoking
 provider diagnostics. Doctor covers both `_run` streams and pnpm runner capture.
+
+## Tenant maintenance attribution
+
+`tenant_migration.py` is an offline metadata consumer, not a deployment or schema
+upgrade tool. URLs arrive through private environment variables; public output
+never includes driver errors, ownership exports or evidence contents. Owned
+0700 directories and 0600 no-symlink inputs bind a maintenance generation to
+both independent databases. Apply/verify require pinned drain and backup/restore
+receipts; M10 owns physical collection and operational verification. Preserve
+separate native/executor commit receipts and idempotent recovery, and never
+convert `metadata_verified` into permission to activate runtime admission.
+See `docs/tenant-workspaces-migration.md`; real-database contract tests use
+synthetic receipts and cannot be cited as a cloud backup or physical-stop proof.
+
+
+## Tenant physical CI rendering
+
+`render_tenant_physical_pipeline.py` is standard-library-only text rendering and
+never invokes Docker or imports the application. It validates phase and SHA256,
+then fills `examples/ecs-native/deploy/Jenkinsfile.tenant-physical.in`. The template
+runs only the fixed Shanghai job/workspace, pins existing image IDs, uses an
+internal fixture database and job-owned shared paths, and checks exact job/spec
+labels before cleanup. Physical tests are opt-in before fixture setup. This is
+test orchestration, not production deployment or tenant activation. See
+`docs/tenant-workspaces-testing.md` for rerun instructions and acceptance limits.

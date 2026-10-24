@@ -1,7 +1,6 @@
 "use client";
 
 import { ArchiveRestore } from "lucide-react";
-import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -21,6 +20,7 @@ import {
   WorkspaceContainer,
   WorkspaceHeader,
 } from "@/components/workspace/workspace-container";
+import Link from "@/components/workspace/workspace-link";
 import { useI18n } from "@/core/i18n/hooks";
 import { useInfiniteThreads } from "@/core/threads/hooks";
 import { threadOriginOf } from "@/core/threads/origin";

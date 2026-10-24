@@ -1,12 +1,13 @@
 """One durable, transactionally serialized B/C resource ledger."""
 
+import math
 import time
 import uuid
 from contextlib import contextmanager
 
 from sqlalchemy import JSON, Column, MetaData, String, Table, func, select, text, update
 
-from ecs_executor.job_store import _JOBS
+from ecs_executor.job_store import _JOBS, _validated_record
 
 _METADATA = MetaData()
 _NODES = Table("ecs_execution_nodes", _METADATA, Column("id", String(64), primary_key=True), Column("record", JSON, nullable=False))
@@ -80,24 +81,30 @@ class Scheduling:
             and job["profile"]["memory_mib"] <= node.memory_mib - node.resident_memory_mib
         )
 
+    def _available(self, connection, node_id, kind):
+        node = self.nodes[node_id]
+        persisted = connection.execute(select(_NODES.c.record).where(_NODES.c.id == node_id)).scalar_one()
+        connection.execute(update(_NODES).where(_NODES.c.id == node_id).values(record={**persisted, "heartbeat_at": time.time()}))
+        unreleased = (_JOBS.c.record["node_id"].as_string() == node_id, func.coalesce(_JOBS.c.record["physical_stopped"].as_boolean(), False).is_(False))
+        count, cpu, memory = connection.execute(
+            select(func.count(), func.coalesce(func.sum(_JOBS.c.record["profile"]["cpu_millis"].as_integer()), 0), func.coalesce(func.sum(_JOBS.c.record["profile"]["memory_mib"].as_integer()), 0)).where(*unreleased)
+        ).one()
+        if node.drain or persisted.get("operator_drain", False) or kind not in node.kinds or count >= node.max_concurrency:
+            return None
+        return node.cpu_millis - node.resident_cpu_millis - cpu, node.memory_mib - node.resident_memory_mib - memory
+
     def claim(self, node_id, owner, *, kind="B"):
         node = self.nodes[node_id]
         with self.transaction() as connection:
-            persisted = connection.execute(select(_NODES.c.record).where(_NODES.c.id == node_id)).scalar_one()
-            connection.execute(update(_NODES).where(_NODES.c.id == node_id).values(record={**persisted, "heartbeat_at": time.time()}))
-            # Aggregate only resource scalars, never historical input snapshots.
-            unreleased = (_JOBS.c.record["node_id"].as_string() == node_id, func.coalesce(_JOBS.c.record["physical_stopped"].as_boolean(), False).is_(False))
-            count, cpu, memory = connection.execute(
-                select(func.count(), func.coalesce(func.sum(_JOBS.c.record["profile"]["cpu_millis"].as_integer()), 0), func.coalesce(func.sum(_JOBS.c.record["profile"]["memory_mib"].as_integer()), 0)).where(*unreleased)
-            ).one()
-            available_cpu = node.cpu_millis - node.resident_cpu_millis - cpu
-            available_memory = node.memory_mib - node.resident_memory_mib - memory
-            if node.drain or persisted.get("operator_drain", False) or kind not in node.kinds or count >= node.max_concurrency:
+            available = self._available(connection, node_id, kind)
+            if available is None:
                 return None
+            available_cpu, available_memory = available
             query = (
                 select(_JOBS)
                 .where(
                     _JOBS.c.state == "queued",
+                    _JOBS.c.workspace_id.is_(None),
                     func.coalesce(_JOBS.c.record["affinity_node"].as_string(), node_id) == node_id,
                     func.coalesce(_JOBS.c.record["kind"].as_string(), "B") == kind,
                     _JOBS.c.record["spec"]["profile"].as_string().in_(node.profiles),
@@ -108,12 +115,148 @@ class Scheduling:
                 .limit(1)
             )
             for row in connection.execute(query):
-                job = dict(row.record)
+                job = _validated_record(row)
                 job.update(state="starting", node_id=node_id, worker_owner=owner, generation=uuid.uuid4().hex, attempt=1, lease_until=time.time() + self.lease_seconds)
                 result = connection.execute(update(_JOBS).where(_JOBS.c.id == row.id, _JOBS.c.version == row.version, _JOBS.c.state == "queued").values(record=job, state="starting", version=row.version + 1))
                 if result.rowcount:
                     return job
         return None
+
+    def scoped_native_candidates(self, node_id):
+        """Internal ledger snapshots only; these are never execution grants."""
+        with self.store.engine.connect() as connection:
+            query = (
+                select(_JOBS)
+                .where(
+                    _JOBS.c.workspace_id.is_not(None),
+                    _JOBS.c.record["kind"].as_string() == "C",
+                    _JOBS.c.state.in_(("queued", "starting", "running", "uncertain")),
+                    _JOBS.c.record["affinity_node"].as_string() == node_id,
+                    func.coalesce(_JOBS.c.record["physical_stopped"].as_boolean(), False).is_(False),
+                )
+                .order_by(_JOBS.c.record["created_at"].as_float(), _JOBS.c.id)
+            )
+            return [(row.version, _validated_record(row)) for row in connection.execute(query)]
+
+    def claim_scoped_native(self, node_id, owner, *, expected, version):
+        """Exact C candidate reservation, after independent native preflight.
+
+        Reuse the ordinary pool's transaction and capacity accounting. Native
+        authority must be checked again before signing and at receiver adoption.
+        """
+        if not owner or expected.get("workspace_id") is None or expected.get("kind") != "C":
+            raise ValueError("Scoped native claim requires an exact C candidate")
+        with self.transaction() as connection:
+            row = connection.execute(select(_JOBS).where(_JOBS.c.id == expected["id"], _JOBS.c.version == version, _JOBS.c.state == "queued", _JOBS.c.workspace_id.is_not(None))).first()
+            if row is None:
+                return None
+            job = _validated_record(row)
+            if (
+                job != expected
+                or not self.eligible(node_id, job)
+                or job.get("cancel_requested")
+                or (job.get("start_intent") is not None and job.get("start_intent") is not False)
+                or job.get("physical_stopped") is not False
+                or any(job.get(key) is not None for key in ("node_id", "worker_owner", "generation"))
+                or not (job.get("attempt") is None or type(job.get("attempt")) is int and job["attempt"] == 0)
+            ):
+                return None
+            available = self._available(connection, node_id, "C")
+            if available is None or job["profile"]["cpu_millis"] > available[0] or job["profile"]["memory_mib"] > available[1]:
+                return None
+            job.update(state="starting", node_id=node_id, worker_owner=owner, generation=uuid.uuid4().hex, attempt=1, lease_until=time.time() + self.lease_seconds)
+            result = connection.execute(update(_JOBS).where(_JOBS.c.id == row.id, _JOBS.c.version == version, _JOBS.c.state == "queued").values(record=job, state="starting", version=version + 1))
+            return job if result.rowcount else None
+
+    def renew_scoped_native(self, node_id, owner, *, expected, version):
+        """Retain one reservation; recovery itself never permits a graph replay."""
+        with self.transaction() as connection:
+            row = connection.execute(select(_JOBS).where(_JOBS.c.id == expected["id"], _JOBS.c.version == version, _JOBS.c.workspace_id.is_not(None))).first()
+            if row is None:
+                return None
+            job = _validated_record(row)
+            if job != expected or job.get("kind") != "C" or job.get("node_id") != node_id or job.get("state") not in ("starting", "running", "uncertain") or job.get("physical_stopped"):
+                return None
+            if job["worker_owner"] != owner:
+                if job["lease_until"] > time.time():
+                    return None
+                job.update(worker_owner=owner, generation=uuid.uuid4().hex)
+            job["lease_until"] = time.time() + self.lease_seconds
+            result = connection.execute(update(_JOBS).where(_JOBS.c.id == row.id, _JOBS.c.version == version).values(record=job, version=version + 1))
+            return job if result.rowcount else None
+
+    def scoped_b_candidates(self, node_id):
+        """Internal immutable snapshots, never payload or launch authority."""
+        with self.store.engine.connect() as connection:
+            query = (
+                select(_JOBS)
+                .where(
+                    _JOBS.c.workspace_id.is_not(None),
+                    _JOBS.c.record["kind"].as_string() == "B",
+                    _JOBS.c.state.in_(("queued", "starting", "running", "uncertain", "completed", "failed", "cancelled")),
+                    func.coalesce(_JOBS.c.record["affinity_node"].as_string(), node_id) == node_id,
+                    func.coalesce(_JOBS.c.record["physical_stopped"].as_boolean(), False).is_(False),
+                )
+                .order_by(_JOBS.c.record["created_at"].as_float(), _JOBS.c.id)
+            )
+            return [(row.version, _validated_record(row)) for row in connection.execute(query)]
+
+    def claim_scoped_b(self, node_id, owner, *, expected, version):
+        """Exact B reservation while the caller holds native business fencing."""
+        if not owner or expected.get("workspace_id") is None or expected.get("kind") != "B":
+            raise ValueError("Scoped B claim requires an exact candidate")
+        with self.transaction() as connection:
+            row = connection.execute(select(_JOBS).where(_JOBS.c.id == expected["id"], _JOBS.c.version == version, _JOBS.c.state == "queued", _JOBS.c.workspace_id.is_not(None))).first()
+            if row is None:
+                return None
+            job = _validated_record(row)
+            if (
+                job != expected
+                or job.get("state") != "queued"
+                or not self.eligible(node_id, job)
+                or (job.get("cancel_requested") is not None and job.get("cancel_requested") is not False)
+                or job.get("start_intent") is not False
+                or job.get("started_at") is not None
+                or job.get("physical_stopped") is not False
+                or any(job.get(key) is not None for key in ("node_id", "worker_owner", "generation", "lease_until"))
+                or not (type(job.get("attempt")) is int and job["attempt"] == 0)
+            ):
+                return None
+            available = self._available(connection, node_id, "B")
+            if available is None or job["profile"]["cpu_millis"] > available[0] or job["profile"]["memory_mib"] > available[1]:
+                return None
+            job.update(state="starting", node_id=node_id, worker_owner=owner, generation=uuid.uuid4().hex, attempt=1, lease_until=time.time() + self.lease_seconds)
+            result = connection.execute(update(_JOBS).where(_JOBS.c.id == row.id, _JOBS.c.version == version, _JOBS.c.state == "queued").values(record=job, state="starting", version=version + 1))
+            return job if result.rowcount else None
+
+    def renew_scoped_b(self, node_id, owner, *, expected, version):
+        """Control ownership only; expired/restarted work is never a new claim."""
+        with self.transaction() as connection:
+            row = connection.execute(select(_JOBS).where(_JOBS.c.id == expected["id"], _JOBS.c.version == version, _JOBS.c.workspace_id.is_not(None))).first()
+            if row is None:
+                return None
+            job = _validated_record(row)
+            if (
+                job != expected
+                or job.get("state") != row.state
+                or job.get("state") not in {"starting", "running", "uncertain", "completed", "failed", "cancelled"}
+                or job.get("kind") != "B"
+                or job.get("node_id") != node_id
+                or job.get("physical_stopped") is not False
+            ):
+                return None
+            if not isinstance(job.get("worker_owner"), str) or not job["worker_owner"] or not isinstance(job.get("generation"), str) or not job["generation"]:
+                return None
+            lease = job.get("lease_until")
+            if type(lease) not in (int, float) or not math.isfinite(lease):
+                return None
+            if job["worker_owner"] != owner:
+                if lease > time.time():
+                    return None
+                job.update(worker_owner=owner, generation=uuid.uuid4().hex)
+            job["lease_until"] = time.time() + self.lease_seconds
+            result = connection.execute(update(_JOBS).where(_JOBS.c.id == row.id, _JOBS.c.version == version).values(record=job, version=version + 1))
+            return job if result.rowcount else None
 
     def owned(self, node_id, owner, *, kind="B"):
         # Expiration never releases/reassigns a reservation. Restart only adopts
@@ -121,12 +264,15 @@ class Scheduling:
         with self.transaction() as connection:
             jobs = []
             query = select(_JOBS).where(
+                # Ordinary recovery is not scoped payload/launch authority.
+                # Scoped reservations remain counted until control proves STOP.
+                _JOBS.c.workspace_id.is_(None),
                 _JOBS.c.record["node_id"].as_string() == node_id,
                 func.coalesce(_JOBS.c.record["kind"].as_string(), "B") == kind,
                 func.coalesce(_JOBS.c.record["physical_stopped"].as_boolean(), False).is_(False),
             )
             for row in connection.execute(query):
-                job = dict(row.record)
+                job = _validated_record(row)
                 if job.get("kind", "B") != kind or job.get("node_id") != node_id or job.get("physical_stopped"):
                     continue
                 if job["worker_owner"] != owner:
@@ -140,10 +286,20 @@ class Scheduling:
             return jobs
 
     def report(self, node_id, owner, job_id, generation, changes, expected=None):
-        if not set(changes) <= _FIELDS:
+        return self._report(node_id, owner, job_id, generation, changes, expected)
+
+    def report_scoped_b(self, node_id, owner, job_id, generation, changes, expected):
+        if expected.get("workspace_id") is None or expected.get("kind") != "B" or ("cancel_requested" in changes and changes["cancel_requested"] is not True):
+            raise ValueError("Scoped B control report denied")
+        return self._report(node_id, owner, job_id, generation, changes, expected, scoped_b=True)
+
+    def _report(self, node_id, owner, job_id, generation, changes, expected, *, scoped_b=False):
+        if not set(changes) <= (_FIELDS | {"cancel_requested"} if scoped_b else _FIELDS):
             raise ValueError("Worker report contains immutable authority fields")
 
         def apply(record):
+            if scoped_b and (record.get("workspace_id") is None or record.get("kind") != "B"):
+                raise ValueError("Scoped B control identity changed")
             if record.get("node_id") != node_id or record.get("worker_owner") != owner or record.get("generation") != generation:
                 raise ValueError("Worker assignment fence mismatch")
             if expected is not None and record != expected:

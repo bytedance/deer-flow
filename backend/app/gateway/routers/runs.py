@@ -24,6 +24,8 @@ from app.gateway.services import (
     wait_for_run_completion,
 )
 from app.gateway.sse_headers import sse_response_headers
+from app.gateway.workspaces.dependencies import workspace_resource_scope
+from deerflow.authz.workspace import get_current_workspace
 from deerflow.runtime import RunStatus, serialize_channel_values_for_api
 from deerflow.utils.thread_id import resolve_thread_id
 
@@ -104,13 +106,15 @@ async def stateless_wait(body: RunCreateRequest, request: Request) -> dict:
 async def _resolve_run(run_id: str, request: Request) -> dict:
     """Fetch run by run_id with user ownership check. Raises 404 if not found."""
     run_store = get_run_store(request)
-    record = await run_store.get(run_id)  # user_id=AUTO filters by contextvar
+    context = get_current_workspace()
+    record = await run_store.get(run_id, user_id=context.actor_user_id) if context is not None else await run_store.get(run_id)
     if record is None:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
     return record
 
 
 @router.get("/{run_id}/messages")
+@workspace_resource_scope()
 @require_permission("runs", "read")
 async def run_messages(
     run_id: str,
@@ -129,22 +133,46 @@ async def run_messages(
     Response: { data: [...], has_more: bool }
     """
     run = await _resolve_run(run_id, request)
+    return await _run_messages_in_thread(run["thread_id"], run_id, request, limit=limit, before_seq=before_seq, after_seq=after_seq)
+
+
+@workspace_resource_scope(private_thread_read=True)
+async def _run_messages_in_thread(thread_id: str, run_id: str, request: Request, *, limit: int, before_seq: int | None, after_seq: int | None) -> dict:
+    # The global Run locator discovers the thread; capture its private entry
+    # identity before reading payloads, then recheck that association under scope.
+    context = get_current_workspace()
+    if context is not None:
+        run = await _resolve_run(run_id, request)
+        if run["thread_id"] != thread_id:
+            raise HTTPException(status_code=404, detail="Run not found")
     event_store = get_run_event_store(request)
     rows = await event_store.list_messages_by_run(
-        run["thread_id"],
+        thread_id,
         run_id,
         limit=limit + 1,
         before_seq=before_seq,
         after_seq=after_seq,
+        **({"user_id": context.actor_user_id} if context is not None else {}),
     )
     data, has_more = trim_run_message_page(rows, limit=limit, after_seq=after_seq)
     return {"data": data, "has_more": has_more}
 
 
 @router.get("/{run_id}/feedback")
+@workspace_resource_scope()
 @require_permission("runs", "read")
 async def run_feedback(run_id: str, request: Request) -> list[dict]:
     """Return all feedback for a run."""
     run = await _resolve_run(run_id, request)
+    return await _run_feedback_in_thread(run["thread_id"], run_id, request)
+
+
+@workspace_resource_scope(private_thread_read=True)
+async def _run_feedback_in_thread(thread_id: str, run_id: str, request: Request) -> list[dict]:
+    context = get_current_workspace()
+    if context is not None:
+        run = await _resolve_run(run_id, request)
+        if run["thread_id"] != thread_id:
+            raise HTTPException(status_code=404, detail="Run not found")
     feedback_repo = get_feedback_repo(request)
-    return await feedback_repo.list_by_run(run["thread_id"], run_id)
+    return await feedback_repo.list_by_run(thread_id, run_id, **({"user_id": context.actor_user_id} if context is not None else {}))

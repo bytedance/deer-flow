@@ -1,0 +1,141 @@
+{
+  "phase": "m4-native-shared-bc-pool-green-20261019-47",
+  "job": "deerflow-tenant-execution-m4-physical",
+  "queue": 1126,
+  "_class": "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+  "artifacts": [
+    {
+      "relativePath": "m4-native-shared-bc-pool-green-20261019-47.log"
+    },
+    {
+      "relativePath": "physical-18/cleanup.json"
+    },
+    {
+      "relativePath": "physical-18/deerflow-tenant-execution-m4-physical-18-db-volumes.txt"
+    },
+    {
+      "relativePath": "physical-18/evidence.json"
+    },
+    {
+      "relativePath": "physical-18/owned.json"
+    }
+  ],
+  "building": false,
+  "duration": 47854,
+  "number": 18,
+  "result": "SUCCESS",
+  "source_sha256": "e2150fa98fb8285872cf31233620007088a703533c911dad5a4ce74256eb6400",
+  "pipeline_sha256": "d18c78a34118a388a462f1c88b0b4f777198255ea5dd36eb6d319b83cb94777e",
+  "artifacts_dir": "/private/tmp/native-shared-bc-pool-green18-artifacts",
+  "first_error": null,
+  "classification": "GREEN real shared B/C pool OutboundStore ASGI + real B Docker/C2; no physical C sandbox or two-host TCP acceptance",
+  "cleanup": {
+    "build": 18,
+    "read_only": true,
+    "cleanup": [
+      {
+        "kind": "container",
+        "name": "deerflow-tenant-execution-m4-physical-18",
+        "exit": 1,
+        "stderr": "Error response from daemon: No such container: deerflow-tenant-execution-m4-physical-18"
+      },
+      {
+        "kind": "container",
+        "name": "deerflow-tenant-execution-m4-physical-18-db",
+        "exit": 1,
+        "stderr": "Error response from daemon: No such container: deerflow-tenant-execution-m4-physical-18-db"
+      },
+      {
+        "kind": "network",
+        "name": "deerflow-tenant-execution-m4-physical-18",
+        "exit": 1,
+        "stderr": "Error response from daemon: network deerflow-tenant-execution-m4-physical-18 not found"
+      },
+      {
+        "kind": "container",
+        "name": "deerflow-exec-752c052566724675a1e952abc59a6870",
+        "exit": 1,
+        "stderr": "Error response from daemon: No such container: deerflow-exec-752c052566724675a1e952abc59a6870"
+      },
+      {
+        "kind": "container",
+        "name": "6ef0a5cbe78818368227769f7d34edd071706ef88e5d702829e9050a1ea8e07a",
+        "exit": 1,
+        "stderr": "Error response from daemon: No such container: 6ef0a5cbe78818368227769f7d34edd071706ef88e5d702829e9050a1ea8e07a"
+      }
+    ]
+  },
+  "tests": "2 passed in 28.00s",
+  "ruff": "All checks passed; 7 files already formatted",
+  "files": {
+    "backend/packages/ecs-executor/ecs_executor/scheduling.py": "5fd165ba5c02cc5c830f7ec4c7a783442f4188ee3138bbaf98a62b593651782c",
+    "backend/packages/ecs-executor/ecs_executor/dispatch.py": "994e8ce6b0bfaf0a4a8286b0808bc02d172d5e5cbd4a22264e30691ba1a82fd0",
+    "backend/packages/ecs-executor/ecs_executor/mcp_server.py": "7a68f97e7dc0de29033e72046ef0c312e28ab26b3fe80e741c7f5ec4ec2fee44",
+    "backend/packages/ecs-executor/ecs_executor/jobs.py": "98ae8de2891e881438715470ac25bb99889441393231cdb183f998070a9a96db",
+    "backend/tests/test_workspace_native_dependencies.py": "f674bc95619b84d136c9f5876093dd8c417f67128fb9c0c72b9348fcaa5c5156",
+    "backend/tests/test_workspace_execution_physical.py": "aeb785e0775c993541a120d13006860d97cb1469a452160653627b68e4ee575f",
+    "scripts/render_tenant_physical_pipeline.py": "4755ceef7c77d5d2ff2bf7df1e6acd26f6e626998e6b32163342db15f6243441",
+    "examples/ecs-native/deploy/Jenkinsfile.tenant-physical.in": "e68e5ed29c9c70a4a84d682cda43bdb47ce31efd40fae6afd4f8f56acaaa94e6"
+  },
+  "archive_matches_actual_all_8": true,
+  "output": {
+    "path": "/data/jenkins-agent/deerflow/tenant-execution-m4-physical/physical-18/tests/test_scoped_shared_pool_c_real0/owned-files/workspaces/1bc14984-6e32-4f3c-baa9-8cb1ba5a8fb5/users/11111111-1111-4111-8111-111111111111/threads/fa650edb-9bbe-4182-b6d9-3cf36d807f09/user-data/outputs/752c052566724675a1e952abc59a6870/files/report.md",
+    "content": "owned dependency report",
+    "sha256": "23f51bf97557e4f1ac5ae988bfa927d4386ef098f98f1ef6fc9065ccfd1aa5f9"
+  },
+  "final_evidence": "/private/tmp/native-shared-bc-pool-green18-final-evidence.json",
+  "business_evidence": {
+    "scope": "shared-B-C-pool-OutboundStore-ASGI",
+    "image": "sha256:4f269f6b0e50f9579e099e91a23df868ff1b1a49c03cc9b138beac02dafb3f01",
+    "b_database": "tenant_executor_c9bd998af0884f86ad634bfe22c8b7d0",
+    "finally_removed": false,
+    "b_job_id": "752c052566724675a1e952abc59a6870",
+    "b_spec_digest": "245a9d2e54326464fc9ef82fe4dc9d6e506bf7596dd5168efb53c6abd9467984",
+    "committed_and_queued": true,
+    "b_shared_pool_reserved": true,
+    "container_id": "6ef0a5cbe78818368227769f7d34edd071706ef88e5d702829e9050a1ea8e07a",
+    "created_with_restricted_profile": true,
+    "other_workspace_output_absent": true,
+    "pending_c2_blocked_until_b_stop": true,
+    "b_shared_pool_stop_released": true,
+    "normal_stop_exact_id_absent": true,
+    "native_publication": true,
+    "output_sha256": "23f51bf97557e4f1ac5ae988bfa927d4386ef098f98f1ef6fc9065ccfd1aa5f9",
+    "c2_shared_pool_reserved": true,
+    "c2_read_actual_published_report": true,
+    "c1_run_id": "88463fbb-0089-4b52-bb9b-914e6abdba79",
+    "c2_run_id": "206891d5-3e25-43c6-accf-c1c7e84bdd4d",
+    "occurrence_id": "task-run-cd4fbb4e90f24b258fe876b5b3a21c64",
+    "task_id": "task-installed-dependency",
+    "final_occurrence_status": "success",
+    "task_run_count": 1
+  },
+  "red_receipt": "/private/tmp/native-shared-bc-pool-red17-receipt.json",
+  "runtime_limits": [
+    "ASGI network bridge; no two-host TCP acceptance",
+    "Real B Docker/no C AIO sandbox; native C NoSandbox STOP/report is not physical C STOP proof",
+    "Scoped B withdrawal/restart/unknown/transport-loss branches only reviewed; no independent runtime boundary test",
+    "No production deployment, model call, image pull, tenant activation or commit by agent"
+  ],
+  "human_approval": "Explicit user: 批准上传并运行这一次复测; exact frozen source/pipeline and owned Shanghai job",
+  "build": 18,
+  "log_sha256": "453f7feaeb5b85ad6b46eb5c346986f5c4d3d6f92b7748a240fda8d99bb992b0",
+  "approved_test_patch_sha256": "8cf833b9e008ccfd1066c9330a65d9af8e8d4d125142897f777c9b76ae09d663",
+  "source_archive_exact_match": {
+    "backend/packages/ecs-executor/ecs_executor/scheduling.py": "5fd165ba5c02cc5c830f7ec4c7a783442f4188ee3138bbaf98a62b593651782c",
+    "backend/packages/ecs-executor/ecs_executor/dispatch.py": "994e8ce6b0bfaf0a4a8286b0808bc02d172d5e5cbd4a22264e30691ba1a82fd0",
+    "backend/packages/ecs-executor/ecs_executor/mcp_server.py": "7a68f97e7dc0de29033e72046ef0c312e28ab26b3fe80e741c7f5ec4ec2fee44",
+    "backend/packages/ecs-executor/ecs_executor/jobs.py": "98ae8de2891e881438715470ac25bb99889441393231cdb183f998070a9a96db",
+    "backend/tests/test_workspace_native_dependencies.py": "f674bc95619b84d136c9f5876093dd8c417f67128fb9c0c72b9348fcaa5c5156",
+    "backend/tests/test_workspace_execution_physical.py": "aeb785e0775c993541a120d13006860d97cb1469a452160653627b68e4ee575f",
+    "scripts/render_tenant_physical_pipeline.py": "4755ceef7c77d5d2ff2bf7df1e6acd26f6e626998e6b32163342db15f6243441",
+    "examples/ecs-native/deploy/Jenkinsfile.tenant-physical.in": "e68e5ed29c9c70a4a84d682cda43bdb47ce31efd40fae6afd4f8f56acaaa94e6"
+  },
+  "root_review": "Root reviewed exact test/CI and four product files, independently read live terminal/log/business/normal-STOP artifacts and checked exact container/network absence. Verified archive and pipeline hashes, eight source bytes and approved product AST logic. Unknown/control/restart/CLI/two-host runtime gates remain open.",
+  "approved_product_patch_sha256": "0fde80325dc2bdb62cceac40b39be296c7a8e589db97cbe3462739e014543b8f",
+  "root_independent_output_sha256": "23f51bf97557e4f1ac5ae988bfa927d4386ef098f98f1ef6fc9065ccfd1aa5f9",
+  "root_independent_absent_volumes": [
+    "dbecaae0e1e02ea6905602f4051ca67bd92e8b6dfcd8787a34bff507d80951fe",
+    "10fc588fe956578cd0d6f042e0f0882b9f5e5d448d326a6a345c4ce4357ecbaa"
+  ]
+}

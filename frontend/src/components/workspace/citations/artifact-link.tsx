@@ -1,6 +1,8 @@
 import type { AnchorHTMLAttributes } from "react";
 
+import { resolveScopedArtifactResource } from "@/core/artifacts/utils";
 import { knowledgeSourceId } from "@/core/knowledge/sources";
+import { useWorkspaceLifetime } from "@/core/workspaces/context";
 import { cn } from "@/lib/utils";
 
 import { isSafeHref, UnsafeLink } from "../messages/markdown-link";
@@ -12,7 +14,26 @@ function isExternalUrl(href: string | undefined): boolean {
 }
 
 /** Knowledge destinations and citation-prefixed links use the source renderer. */
-export function ArtifactLink(props: AnchorHTMLAttributes<HTMLAnchorElement>) {
+export function ArtifactLink({
+  resourceBaseURL,
+  ...original
+}: AnchorHTMLAttributes<HTMLAnchorElement> & { resourceBaseURL?: string }) {
+  const lifetime = useWorkspaceLifetime();
+  const href =
+    original.href === undefined
+      ? undefined
+      : resolveScopedArtifactResource(
+          original.href,
+          resourceBaseURL,
+          lifetime?.scope.workspaceId,
+        );
+  if (original.href !== undefined && href === undefined)
+    return (
+      <UnsafeLink href={original.href} className={original.className}>
+        {original.children}
+      </UnsafeLink>
+    );
+  const props = { ...original, href };
   // Reject unsafe schemes so prompt-injected [label](javascript:...) in a .md
   // artifact preview cannot execute in the main document, matching the guard in
   // createMarkdownLinkComponent (markdown-link.tsx).

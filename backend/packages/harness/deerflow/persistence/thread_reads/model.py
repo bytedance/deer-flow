@@ -38,3 +38,15 @@ class ThreadReadVersionRow(Base):
     version: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default=text("0"))
 
     __table_args__ = (PrimaryKeyConstraint("user_id", name="pk_thread_read_versions"),)
+
+
+class WorkspaceThreadReadVersionRow(Base):
+    """Per-space viewer clock; legacy user clocks remain unchanged."""
+
+    __tablename__ = "workspace_thread_read_versions"
+
+    workspace_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    user_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    version: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default=text("0"))
+
+    __table_args__ = (PrimaryKeyConstraint("workspace_id", "user_id", name="pk_workspace_thread_read_versions"),)

@@ -2,9 +2,17 @@
 
 import { DownloadIcon } from "lucide-react";
 import dynamic from "next/dynamic";
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  type ComponentProps,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { defaultUrlTransform, type UrlTransform } from "streamdown";
 
 import { Button } from "@/components/ui/button";
+import { createHTMLArtifactResourceSession } from "@/core/artifacts/html-resource-session";
 import {
   getTabularDelimiter,
   appendHtmlPreviewBaseHref,
@@ -12,7 +20,10 @@ import {
   createHtmlPreviewScrollKey,
   HTML_PREVIEW_SCROLL_MESSAGE_SOURCE,
 } from "@/core/artifacts/preview";
-import { urlOfArtifact } from "@/core/artifacts/utils";
+import {
+  resolveScopedArtifactResource,
+  urlOfArtifact,
+} from "@/core/artifacts/utils";
 import { extractCitationSources } from "@/core/citations/sources";
 import {
   SafeStreamdown,
@@ -23,6 +34,8 @@ import {
   getFileIcon,
   getFileName,
 } from "@/core/utils/files";
+import { useWorkspaceLifetime } from "@/core/workspaces/context";
+import { useCurrentWorkspaceView } from "@/core/workspaces/view-lifetime";
 
 import { ArtifactLink } from "../citations/artifact-link";
 import { CitationSourcesPanel } from "../citations/citation-sources-panel";
@@ -42,6 +55,7 @@ export function ArtifactPreviewError({
   message: string;
   downloadLabel: string;
 }) {
+  const lifetime = useWorkspaceLifetime();
   return (
     <div className="flex size-full items-center justify-center p-6">
       <div className="flex max-w-sm flex-col items-center gap-4 text-center">
@@ -53,6 +67,7 @@ export function ArtifactPreviewError({
               threadId,
               download: true,
               isMock,
+              workspaceId: lifetime?.scope.workspaceId,
             })}
             target="_blank"
             rel="noopener noreferrer"
@@ -82,6 +97,7 @@ export function ArtifactDownloadFallback({
   threadId: string;
   isMock?: boolean;
 }) {
+  const lifetime = useWorkspaceLifetime();
   const filename = getFileName(filepath);
   const fileType = getFileExtensionDisplayName(filepath);
 
@@ -105,6 +121,7 @@ export function ArtifactDownloadFallback({
               threadId,
               download: true,
               isMock,
+              workspaceId: lifetime?.scope.workspaceId,
             })}
             target="_blank"
             rel="noopener noreferrer"
@@ -139,13 +156,43 @@ export function ArtifactFilePreview({
   truncated?: boolean;
   active?: boolean;
 }) {
+  const lifetime = useWorkspaceLifetime();
+  const components = useMemo(
+    () =>
+      toStreamdownComponents({
+        a: (props: ComponentProps<"a">) => (
+          <ArtifactLink {...props} resourceBaseURL={url} />
+        ),
+      }),
+    [url],
+  );
+  const urlTransform = useMemo<UrlTransform>(() => {
+    if (!lifetime) return defaultUrlTransform;
+    return (src, key, node) => {
+      const safe = defaultUrlTransform(src, key, node);
+      if (!safe || key !== "src" || node.tagName !== "img") return safe;
+      return resolveScopedArtifactResource(
+        safe,
+        url,
+        lifetime.scope.workspaceId,
+      );
+    };
+  }, [url, lifetime]);
+  const documentIdentity = useMemo(
+    () => ({ content, language, scrollKey, url, active, lifetime }),
+    [content, language, scrollKey, url, active, lifetime],
+  );
+  const isCurrentDocument = useCurrentWorkspaceView(documentIdentity);
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const scrollPositionRef = useRef({ x: 0, y: 0 });
   const scrollMessageKey = useMemo(
     () => createHtmlPreviewScrollKey(scrollKey),
     [scrollKey],
   );
-  const [htmlPreviewUrl, setHtmlPreviewUrl] = useState<string>();
+  const [htmlPreviewUrl, setHtmlPreviewUrl] = useState<{
+    url: string;
+    owner: object;
+  }>();
   const citationSources = useMemo(
     () =>
       language === "markdown" ? extractCitationSources(content ?? "") : [],
@@ -157,7 +204,7 @@ export function ArtifactFilePreview({
   }, [scrollMessageKey]);
 
   useEffect(() => {
-    if (language !== "html") {
+    if (language !== "html" || lifetime) {
       return;
     }
 
@@ -193,12 +240,27 @@ export function ArtifactFilePreview({
     return () => {
       window.removeEventListener("message", handleMessage);
     };
-  }, [language, scrollMessageKey]);
+  }, [language, scrollMessageKey, lifetime]);
 
   useEffect(() => {
-    if (language !== "html") {
+    if (language !== "html" || !active) {
       setHtmlPreviewUrl(undefined);
       return;
+    }
+
+    if (lifetime) {
+      setHtmlPreviewUrl(undefined);
+      if (!url) return;
+      const session = createHTMLArtifactResourceSession({
+        content: content ?? "",
+        sourceURL: url,
+        lifetime,
+        iframe: () => iframeRef.current,
+        isCurrent: isCurrentDocument,
+        position: scrollPositionRef,
+      });
+      setHtmlPreviewUrl({ url: session.url, owner: documentIdentity });
+      return session.dispose;
     }
 
     const previewContent = appendHtmlPreviewScrollRestoration(
@@ -209,12 +271,21 @@ export function ArtifactFilePreview({
       type: "text/html;charset=utf-8",
     });
     const objectUrl = URL.createObjectURL(blob);
-    setHtmlPreviewUrl(objectUrl);
+    setHtmlPreviewUrl({ url: objectUrl, owner: documentIdentity });
 
     return () => {
       URL.revokeObjectURL(objectUrl);
     };
-  }, [content, language, scrollKey, url]);
+  }, [
+    content,
+    language,
+    scrollKey,
+    url,
+    active,
+    lifetime,
+    isCurrentDocument,
+    documentIdentity,
+  ]);
 
   const delimiter = getTabularDelimiter(language);
   if (delimiter !== null) {
@@ -234,11 +305,16 @@ export function ArtifactFilePreview({
         <SafeStreamdown
           className="min-w-0"
           {...artifactMarkdownPlugins}
-          components={toStreamdownComponents({ a: ArtifactLink })}
+          components={components}
+          urlTransform={urlTransform}
         >
           {content ?? ""}
         </SafeStreamdown>
-        <CitationSourcesPanel sources={citationSources} className="mb-4" />
+        <CitationSourcesPanel
+          sources={citationSources}
+          resourceKey={JSON.stringify([scrollKey, active])}
+          className="mb-4"
+        />
       </div>
     );
   }
@@ -254,7 +330,11 @@ export function ArtifactFilePreview({
         // opaque origin prevents access to parent.document and cookies,
         // and postMessage(..., "*") works fine from it.
         sandbox="allow-scripts allow-forms"
-        src={htmlPreviewUrl}
+        src={
+          htmlPreviewUrl?.owner === documentIdentity
+            ? htmlPreviewUrl.url
+            : undefined
+        }
       />
     );
   }

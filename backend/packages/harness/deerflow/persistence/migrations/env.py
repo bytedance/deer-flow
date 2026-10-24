@@ -120,9 +120,12 @@ async def run_migrations_online() -> None:
             finally:
                 cursor.close()
 
-    async with connectable.connect() as connection:
-        await connection.run_sync(do_run_migrations)
-    await connectable.dispose()
+    try:
+        async with connectable.connect() as connection:
+            await connection.run_sync(do_run_migrations)
+    finally:
+        # A refused downgrade or failed DDL must release its own pool too.
+        await connectable.dispose()
 
 
 if context.is_offline_mode():

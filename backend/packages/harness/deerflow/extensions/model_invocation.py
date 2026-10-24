@@ -25,8 +25,11 @@ from deerflow_extension_api import (
     ModelUsage,
 )
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langgraph.errors import GraphBubbleUp
 
 from deerflow.models import create_chat_model
+from deerflow.runtime.invocation import check_invocation, get_invocation_guard
+from deerflow.utils.file_io import await_drained
 
 logger = logging.getLogger(__name__)
 _MESSAGE_TYPES = {"system": SystemMessage, "user": HumanMessage, "assistant": AIMessage}
@@ -132,6 +135,7 @@ class HostModelInvoker:
             raise ModelInvocationUnavailable("Model invocation capability has stopped")
         if asyncio.get_running_loop() is not self._loop:
             raise ModelInvocationUnavailable("Model invocation requires the service event loop")
+        await check_invocation()
         if self._budget.admitted >= self._budget.capacity:
             raise ModelInvocationFailed("Model invocation capacity exceeded")
         self._budget.admitted += 1
@@ -164,6 +168,8 @@ class HostModelInvoker:
             failure = type(exc)(str(exc))
         except TimeoutError:
             failure = ModelInvocationFailed("Model invocation timed out" if deadline is not None and deadline.expired() else "Model provider timed out")
+        except GraphBubbleUp:
+            raise
         except Exception as exc:
             logger.warning("Extension model invocation failed for %s (%s)", self._source, type(exc).__name__)
             failure = ModelInvocationFailed("Model invocation failed")
@@ -185,15 +191,18 @@ class HostModelInvoker:
     async def _provider_call(self, name, messages, role, purpose, call):
         # Neither to_thread construction nor a sync-backed ainvoke is cancellable.
         # The caller may leave, but the real work keeps its admission/slot until done.
-        model = await asyncio.to_thread(create_chat_model, name, app_config=self._app_config)
+        model = await await_drained(asyncio.to_thread(create_chat_model, name, app_config=self._app_config))
         if self._closed or call.abandoned:
             raise ModelInvocationUnavailable("Model invocation capability has stopped")
-        return await model.ainvoke(
-            messages,
-            config={"run_name": "extension_model_invocation", "metadata": {"extension_source": self._source, "extension_model_role": role, "extension_purpose": purpose}},
+        return await await_drained(
+            model.ainvoke(
+                messages,
+                config={"run_name": "extension_model_invocation", "metadata": {"extension_source": self._source, "extension_model_role": role, "extension_purpose": purpose}},
+            )
         )
 
     async def _invoke(self, request, call):
+        await check_invocation()
         role = request.model_role if request.model_role is not None else "default"
         if not isinstance(role, str) or role not in self._grant.roles:
             raise ModelInvocationUnauthorized("Model role is not granted to this extension")
@@ -233,6 +242,9 @@ class HostModelInvoker:
         if self._closed:
             raise ModelInvocationUnavailable("Model invocation capability has stopped")
         call.provider = asyncio.create_task(self._provider_call(name, messages, role, request.purpose, call))
+        guard = get_invocation_guard()
+        if guard is not None:
+            guard.track(call.provider)
         self._budget.retain(call.provider)
         response = await asyncio.shield(call.provider)
 

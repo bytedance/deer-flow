@@ -1,6 +1,5 @@
 "use client";
 
-import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 
 import { useAuth } from "@/core/auth/AuthProvider";
@@ -19,6 +18,7 @@ import {
 } from "@/core/extensions/services";
 import { mountSurface } from "@/core/extensions/surfaces";
 import { useI18n } from "@/core/i18n/hooks";
+import { useWorkspaceRouter as useRouter } from "@/core/workspaces/navigation";
 
 function Surface({
   entry,

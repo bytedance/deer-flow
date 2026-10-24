@@ -1,0 +1,25 @@
+{
+  "job": "deerflow-tenant-execution-m4-sql",
+  "build": 118,
+  "result": "SUCCESS",
+  "tests": "1 passed in 19.91s",
+  "duration_ms": 40379,
+  "source_archive_sha256": "c4e612c02c8743c75e61f3b8f1d00331dcf88a41bfa0075dfc4a757c3805c294",
+  "pipeline_sha256": "c1da350b0e2e4f71c93075fbd78c4aac36993348171612f01f7b8fa3340f6f34",
+  "test_sha256": "b101eaa9696da1bc00ee58b9885ee56270f313af354af2f485e146d607e9e4e5",
+  "static": "Ruff check passed; 50 files formatted",
+  "cleanup": "Agent independently inspected exact build 113–118 harness/db/network: absent",
+  "verified_scope": [
+    "Original source succeeds and persists dependency wait",
+    "Actual MCP polling and notification claims",
+    "Signed v2 controller receive with independent SQL authority",
+    "Actual start_run continuation and native pool adoption",
+    "Two runs preserve workspace/incarnation/original goal; notification delivered; no repeat launch"
+  ],
+  "limits": [
+    "Deterministic remote IO and graph; not physical B or model API acceptance",
+    "ASGI controller transport, not two-host HTTP",
+    "Withdrawal and dispatched recovery settlement not covered by this main",
+    "No tenant activation, deployment or push"
+  ]
+}

@@ -8,14 +8,22 @@ minutes -- we don't hold connections across long execution.
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import and_, case, delete, func, or_, select, update
+from sqlalchemy import and_, case, delete, func, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from deerflow.authz.workspace import WorkspaceContext, get_current_workspace
 from deerflow.persistence.run.model import RunChangeClockRow, RunRow
+from deerflow.persistence.thread_meta.model import ThreadMetaRow
+from deerflow.persistence.thread_meta.sql import ThreadMetaRepository
+from deerflow.persistence.user.model import UserRow
+from deerflow.persistence.workspaces.run_control import NativeRunStopTarget, create_execution_lifetime, execution_lifetime, pending_execution_barrier, pending_run_stop, revocation_run_stop
+from deerflow.persistence.workspaces.scope import resolve_resource_scope
+from deerflow.persistence.workspaces.sql import WorkspaceAccessDenied
 from deerflow.runtime.run_origin import origin_kind_of
 from deerflow.runtime.runs.store.base import (
     LeaseRenewal,
@@ -44,14 +52,49 @@ def _origin_kind(operation_kind: str, metadata: Any) -> str | None:
 
 
 class RunRepository(RunStore):
+    supports_workspace_reads = True
+    supports_workspace_admission = True
+
     async def find_by_idempotency_key(self, key: str, *, user_id: str, thread_id: str) -> dict[str, Any] | None:
         """Owner-scoped recovery of an admission whose acknowledgement was lost."""
         async with self._sf() as session:
-            row = await session.scalar(select(RunRow).where(RunRow.idempotency_key == key, RunRow.user_id == user_id, RunRow.thread_id == thread_id))
+            row = await session.scalar(self._read_scope(select(RunRow).where(RunRow.idempotency_key == key, RunRow.thread_id == thread_id), user_id, require_run_incarnation=True))
             return self._row_to_dict(row) if row is not None else None
 
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession], *, workspace_required=False) -> None:
         self._sf = session_factory
+        self._workspace_required = workspace_required
+        self.workspace_scope_required = bool(workspace_required)
+
+    def _read_scope(self, stmt, user_id, *, thread_incarnation=None, require_run_incarnation=False):
+        context = resolve_resource_scope(None, user_id, required=self._workspace_required)
+        if user_id is not None:
+            stmt = stmt.where(RunRow.user_id == user_id)
+        if context is not None:
+            # Filter before cursors, limits or reduction. A matching run alone
+            # cannot authorize an incompatible or missing private thread parent.
+            parent_query = ThreadMetaRepository._owned_scope(select(ThreadMetaRow.thread_id).where(ThreadMetaRow.thread_id == RunRow.thread_id), user_id, context)
+            if thread_incarnation is not None:
+                parent_query = parent_query.where(ThreadMetaRow.incarnation == thread_incarnation)
+            if require_run_incarnation:
+                parent_query = parent_query.where(ThreadMetaRow.incarnation == RunRow.thread_incarnation)
+            parent = parent_query.correlate(RunRow).exists()
+            stmt = stmt.where(RunRow.workspace_id == context.workspace_id, parent)
+        return stmt
+
+    async def can_observe_private_run(self, run_id, *, thread_id, incarnation, user_id, token_version, system_role, oauth_provider, oauth_id):
+        """One read-only SQL fence for a captured browser observer capability."""
+        resolve_resource_scope(None, user_id, required=True)
+        if not incarnation:
+            raise WorkspaceAccessDenied("observer requires captured thread identity")
+        principal = (
+            select(UserRow.id)
+            .where(UserRow.id == user_id, UserRow.token_version == token_version, UserRow.needs_setup.is_(False), UserRow.system_role == system_role, UserRow.oauth_provider == oauth_provider, UserRow.oauth_id == oauth_id)
+            .exists()
+        )
+        stmt = self._read_scope(select(RunRow.run_id).where(RunRow.run_id == run_id, RunRow.thread_id == thread_id, RunRow.operation_kind == "run", principal), user_id, thread_incarnation=incarnation)
+        async with self._sf() as session:
+            return await session.scalar(stmt) is not None
 
     @staticmethod
     async def _next_change_seq(session: AsyncSession) -> int:
@@ -151,6 +194,8 @@ class RunRepository(RunStore):
         commit from turning the retry into a primary-key failure.
         """
         resolved_user_id = resolve_user_id(user_id, method_name="RunRepository.put")
+        if resolve_resource_scope(None, resolved_user_id, required=self._workspace_required) is not None:
+            raise WorkspaceAccessDenied("workspace Run upserts require scoped lifecycle integration")
         now = datetime.now(UTC)
         created = datetime.fromisoformat(created_at) if created_at else now
         lease_dt = datetime.fromisoformat(lease_expires_at) if lease_expires_at else None
@@ -177,6 +222,8 @@ class RunRepository(RunStore):
         async with self._sf() as session:
             values["change_seq"] = await self._next_change_seq(session)
             row = await session.get(RunRow, run_id)
+            if row is not None and row.workspace_id is not None:
+                raise WorkspaceAccessDenied("legacy upsert cannot mutate a workspace Run")
             if row is None:
                 session.add(RunRow(run_id=run_id, created_at=created, **values))
             else:
@@ -192,12 +239,8 @@ class RunRepository(RunStore):
     ):
         resolved_user_id = resolve_user_id(user_id, method_name="RunRepository.get")
         async with self._sf() as session:
-            row = await session.get(RunRow, run_id)
-            if row is None:
-                return None
-            if resolved_user_id is not None and row.user_id != resolved_user_id:
-                return None
-            return self._row_to_dict(row)
+            row = await session.scalar(self._read_scope(select(RunRow).where(RunRow.run_id == run_id), resolved_user_id))
+            return self._row_to_dict(row) if row is not None else None
 
     async def list_changed(
         self,
@@ -215,8 +258,7 @@ class RunRepository(RunStore):
                 and_(RunRow.change_seq == after_change_seq, RunRow.run_id > after_run_id),
             ),
         )
-        if resolved_user_id is not None:
-            stmt = stmt.where(RunRow.user_id == resolved_user_id)
+        stmt = self._read_scope(stmt, resolved_user_id)
         stmt = stmt.order_by(RunRow.change_seq.asc(), RunRow.run_id.asc()).limit(limit)
         async with self._sf() as session:
             result = await session.execute(stmt)
@@ -228,7 +270,7 @@ class RunRepository(RunStore):
         Seeds the activity feed cursor: one backward seek on
         ``ix_runs_user_change_seq``. ``user_id`` is always an explicit owner id.
         """
-        stmt = select(RunRow.change_seq, RunRow.run_id).where(RunRow.user_id == user_id).order_by(RunRow.change_seq.desc(), RunRow.run_id.desc()).limit(1)
+        stmt = self._read_scope(select(RunRow.change_seq, RunRow.run_id), user_id).order_by(RunRow.change_seq.desc(), RunRow.run_id.desc()).limit(1)
         async with self._sf() as session:
             row = (await session.execute(stmt)).first()
         return (int(row.change_seq), str(row.run_id)) if row is not None else None
@@ -244,8 +286,7 @@ class RunRepository(RunStore):
     ):
         resolved_user_id = resolve_user_id(user_id, method_name="RunRepository.list_by_thread")
         stmt = select(RunRow).where(RunRow.thread_id == thread_id, RunRow.operation_kind == "run")
-        if resolved_user_id is not None:
-            stmt = stmt.where(RunRow.user_id == resolved_user_id)
+        stmt = self._read_scope(stmt, resolved_user_id)
         if before_created_at and before_run_id:
             cursor_dt = datetime.fromisoformat(normalize_run_created_at_iso(before_created_at))
             if cursor_dt.tzinfo is None:
@@ -270,7 +311,7 @@ class RunRepository(RunStore):
     async def list_by_thread_created_at(self, thread_id, *, user_id, created_at):
         timestamp = datetime.fromisoformat(canonical_run_created_at(created_at))
         async with self._sf() as session:
-            result = await session.execute(select(RunRow).where(RunRow.thread_id == thread_id, RunRow.user_id == user_id, RunRow.created_at == timestamp))
+            result = await session.execute(self._read_scope(select(RunRow).where(RunRow.thread_id == thread_id, RunRow.created_at == timestamp), user_id))
             return [self._row_to_dict(row) for row in result.scalars()]
 
     async def list_successful_regenerate_sources(
@@ -288,8 +329,7 @@ class RunRepository(RunStore):
             source.is_not(None),
             source != "",
         )
-        if resolved_user_id is not None:
-            stmt = stmt.where(RunRow.user_id == resolved_user_id)
+        stmt = self._read_scope(stmt, resolved_user_id)
         async with self._sf() as session:
             result = await session.execute(stmt)
             return {value for value in result.scalars() if isinstance(value, str) and value}
@@ -309,8 +349,7 @@ class RunRepository(RunStore):
             source.is_not(None),
             source != "",
         )
-        if resolved_user_id is not None:
-            stmt = stmt.where(RunRow.user_id == resolved_user_id)
+        stmt = self._read_scope(stmt, resolved_user_id)
         stmt = stmt.order_by(RunRow.created_at.asc())
         async with self._sf() as session:
             result = await session.execute(stmt)
@@ -323,17 +362,16 @@ class RunRepository(RunStore):
         *,
         user_id: str | None | _AutoSentinel = AUTO,
     ):
-        if not run_ids:
-            return {}
         resolved_user_id = resolve_user_id(user_id, method_name="RunRepository.get_many_by_thread")
         stmt = select(RunRow).where(RunRow.thread_id == thread_id, RunRow.operation_kind == "run", RunRow.run_id.in_(run_ids))
-        if resolved_user_id is not None:
-            stmt = stmt.where(RunRow.user_id == resolved_user_id)
+        stmt = self._read_scope(stmt, resolved_user_id)
+        if not run_ids:
+            return {}
         async with self._sf() as session:
             result = await session.execute(stmt)
             return {row.run_id: self._row_to_dict(row) for row in result.scalars()}
 
-    async def update_status(self, run_id, status, *, error=None, stop_reason=None, goal_verdict=None) -> bool:
+    async def update_status(self, run_id, status, *, error=None, stop_reason=None, goal_verdict=None, worker_target=None) -> bool:
         values: dict[str, Any] = {"status": status, "updated_at": datetime.now(UTC)}
         if error is not None:
             values["error"] = error
@@ -347,19 +385,117 @@ class RunRepository(RunStore):
         # ``error`` and ``success`` remain locked so a peer's takeover (or a
         # completed run) cannot be overwritten by a late writer.
         async with self._sf() as session:
-            values["change_seq"] = await self._next_change_seq(session)
-            result = await session.execute(update(RunRow).where(RunRow.run_id == run_id, RunRow.status.in_(("pending", "running", "interrupted"))).values(**values))
+            values["change_seq"], scope = await self._worker_write_scope(session, run_id, worker_target)
+            result = await session.execute(update(RunRow).where(RunRow.run_id == run_id, *scope, RunRow.status.in_(("pending", "running", "interrupted"))).values(**values))
             await session.commit()
             return result.rowcount != 0
 
-    async def start_run(self, run_id: str, *, owner_worker_id: str | None = None) -> bool:
+    async def _pending_transition_scope(self, session, run_id, *, user_id, thread_id, thread_incarnation, workspace_context):
+        context = resolve_resource_scope(workspace_context, user_id, required=self._workspace_required)
+        if context is None:
+            return await self._next_change_seq(session), [RunRow.workspace_id.is_(None)]
+        if not isinstance(thread_id, str) or not isinstance(thread_incarnation, str) or not thread_incarnation:
+            raise WorkspaceAccessDenied("pending Run transition requires captured parent identity")
+        parent = await ThreadMetaRepository(self._sf)._locked_row(session, thread_id, user_id, context)
+        if parent is None or parent.incarnation != thread_incarnation:
+            raise WorkspaceAccessDenied("pending Run parent identity changed")
+        # Keep workspace -> actor -> parent -> clock -> Run lock order.
+        change_seq = await self._next_change_seq(session)
+        row = await session.scalar(select(RunRow).where(RunRow.run_id == run_id).with_for_update())
+        if row is None or row.workspace_id != context.workspace_id or row.user_id != user_id or row.thread_id != thread_id or row.thread_incarnation != thread_incarnation or row.operation_kind != "run":
+            raise WorkspaceAccessDenied("pending Run identity is unavailable")
+        try:
+            captured = WorkspaceContext(**row.workspace_context_json)
+        except (TypeError, ValueError):
+            raise WorkspaceAccessDenied("pending Run workspace snapshot is invalid") from None
+        if captured != context:
+            raise WorkspaceAccessDenied("pending Run workspace authorization changed")
+        try:
+            await execution_lifetime(session, NativeRunStopTarget.from_row(row))
+        except ValueError as exc:
+            raise WorkspaceAccessDenied("pending Run lifetime is unavailable") from exc
+        return change_seq, [RunRow.workspace_id == context.workspace_id, RunRow.user_id == user_id, RunRow.thread_id == thread_id, RunRow.thread_incarnation == thread_incarnation]
+
+    async def lock_worker_effect(self, session, target: NativeRunStopTarget, *, change_clock=False):
+        """Lock captured execution authority in the caller's short transaction."""
+        if type(target) is not NativeRunStopTarget:
+            raise WorkspaceAccessDenied("worker effect requires captured native Run identity")
+        parent = await ThreadMetaRepository(self._sf)._locked_row(session, target.thread_id, target.user_id, target.workspace_context)
+        if parent is None or parent.incarnation != target.thread_incarnation:
+            raise WorkspaceAccessDenied("worker effect parent changed")
+        return await self._lock_worker_effect_after_parent(session, target, change_clock=change_clock)
+
+    async def _lock_worker_effect_after_parent(self, session, target: NativeRunStopTarget, *, change_clock=False):
+        """Internal: caller holds the original live workspace/actor/parent locks."""
+        sequence = await self._next_change_seq(session) if change_clock else None
+        row = await session.scalar(select(RunRow).where(RunRow.run_id == target.run_id).with_for_update())
+        try:
+            if row is None or NativeRunStopTarget.from_row(row) != target or row.operation_kind != "run":
+                raise ValueError("worker effect Run differs")
+            await execution_lifetime(session, target)
+        except ValueError as exc:
+            raise WorkspaceAccessDenied("worker effect execution changed") from exc
+        if await session.scalar(select(pending_run_stop(run_id=target.run_id))):
+            raise WorkspaceAccessDenied("worker effect stop is pending")
+        lease = row.lease_expires_at
+        if lease is not None and lease.tzinfo is None:
+            lease = lease.replace(tzinfo=UTC)
+        if row.status not in ("running", "success", "error", "timeout", "interrupted") or row.cancel_action is not None or lease is None or lease <= datetime.now(UTC):
+            raise WorkspaceAccessDenied("worker effect execution is no longer live")
+        return row, sequence
+
+    async def _worker_write_scope(self, session, run_id, target, *, change_clock=True):
+        if target is None:
+            if self._workspace_required or get_current_workspace() is not None:
+                raise WorkspaceAccessDenied("workspace worker write requires captured execution identity")
+            return (await self._next_change_seq(session) if change_clock else None), [RunRow.workspace_id.is_(None)]
+        if type(target) is not NativeRunStopTarget or target.run_id != run_id:
+            raise WorkspaceAccessDenied("worker write Run differs from captured identity")
+        _, sequence = await self.lock_worker_effect(session, target, change_clock=change_clock)
+        return sequence, [RunRow.workspace_id == target.workspace_id]
+
+    async def check_worker_invocation(self, target):
+        """Authorize admission only; release all SQL locks before handler IO."""
+        async with self._sf() as session:
+            await self.lock_worker_effect(session, target)
+            await session.commit()
+
+    async def commit_worker_io(self, target: NativeRunStopTarget, *, commit):
+        """Drain prepared native checkpoint/queue IO, never graph/model/tool work.
+
+        This serializes authority, not a distributed checkpoint transaction.
+        Cleanup and rollback after withdrawal need separate control authority.
+        """
+        from deerflow.utils.file_io import await_drained
+
+        async with self._sf() as session:
+            await self.lock_worker_effect(session, target)
+            result = await await_drained(commit())
+            await session.commit()
+            return result
+
+    async def commit_worker_checkpoint(self, target: NativeRunStopTarget, *, commit):
+        return await self.commit_worker_io(target, commit=commit)
+
+    async def signal_worker_stream_end(self, target, *, signal):
+        from deerflow.persistence.workspaces.run_control import signal_owned_stream_end
+
+        return await signal_owned_stream_end(self._sf, target, signal=signal)
+
+    async def cleanup_worker_stream(self, target, *, cleanup):
+        from deerflow.persistence.workspaces.run_control import signal_owned_stream_end
+
+        return await signal_owned_stream_end(self._sf, target, signal=cleanup, closed_only=True)
+
+    async def start_run(self, run_id: str, *, owner_worker_id: str | None = None, user_id: str | None = None, thread_id: str | None = None, thread_incarnation: str | None = None, workspace_context: WorkspaceContext | None = None) -> bool:
         """Start only a still-pending run; cancelled rows must not be resurrected."""
         async with self._sf() as session:
-            change_seq = await self._next_change_seq(session)
+            change_seq, scope_conditions = await self._pending_transition_scope(session, run_id, user_id=user_id, thread_id=thread_id, thread_incarnation=thread_incarnation, workspace_context=workspace_context)
             result = await session.execute(
                 update(RunRow)
                 .where(
                     RunRow.run_id == run_id,
+                    *scope_conditions,
                     RunRow.status == "pending",
                     RunRow.cancel_action.is_(None),
                     *([RunRow.owner_worker_id == owner_worker_id] if owner_worker_id is not None else []),
@@ -372,11 +508,13 @@ class RunRepository(RunStore):
     async def finish_dispatch_pending(self, run_id: str, *, owner_worker_id: str, error: str | None = None) -> bool:
         """Terminalize a queued dispatch admission only before worker adoption.
 
-        The dispatch host must first fence its job against claim/start. The
-        pending owner CAS makes adoption and this terminal commit exclusive.
+        Unscoped compatibility only. Scoped consumers require captured native
+        NoStart control, not this payload-bearing terminal update. The dispatch
+        host must first fence its job against claim/start; pending owner CAS
+        makes adoption and this terminal commit exclusive.
         """
         async with self._sf() as session:
-            conditions = [RunRow.run_id == run_id, RunRow.owner_worker_id == owner_worker_id, RunRow.status == "pending"]
+            conditions = [RunRow.run_id == run_id, RunRow.workspace_id.is_(None), RunRow.owner_worker_id == owner_worker_id, RunRow.status == "pending"]
             if error is None:
                 conditions.append(RunRow.cancel_action.is_not(None))
             else:
@@ -386,24 +524,39 @@ class RunRepository(RunStore):
             await session.commit()
             return result.rowcount != 0
 
-    async def transfer_pending(self, run_id: str, *, thread_id: str, user_id: str | None, expected_owner_worker_id: str, owner_worker_id: str, lease_expires_at: str | None) -> bool:
+    async def transfer_pending(
+        self, run_id: str, *, thread_id: str, user_id: str | None, expected_owner_worker_id: str, owner_worker_id: str, lease_expires_at: str | None, workspace_context: WorkspaceContext | None = None, thread_incarnation: str | None = None
+    ) -> bool:
         """Transfer only the exact uncancelled admission; keep its identity and payload."""
         async with self._sf() as session:
-            change_seq = await self._next_change_seq(session)
+            change_seq, scope_conditions = await self._pending_transition_scope(session, run_id, user_id=user_id, thread_id=thread_id, thread_incarnation=thread_incarnation, workspace_context=workspace_context)
+            if expected_owner_worker_id.startswith("dispatch:"):
+                # The receiver preflight is read-only. Fence lease expiry and
+                # durable STOP again at the scoped adoption's locked owner CAS.
+                scope_conditions.append(or_(RunRow.workspace_id.is_(None), and_(RunRow.lease_expires_at > datetime.now(UTC), ~pending_run_stop(run_id=run_id))))
             result = await session.execute(
                 update(RunRow)
-                .where(RunRow.run_id == run_id, RunRow.thread_id == thread_id, RunRow.user_id == user_id, RunRow.status == "pending", RunRow.cancel_action.is_(None), RunRow.owner_worker_id == expected_owner_worker_id)
+                .where(*scope_conditions, RunRow.run_id == run_id, RunRow.thread_id == thread_id, RunRow.user_id == user_id, RunRow.status == "pending", RunRow.cancel_action.is_(None), RunRow.owner_worker_id == expected_owner_worker_id)
                 .values(owner_worker_id=owner_worker_id, lease_expires_at=datetime.fromisoformat(lease_expires_at) if lease_expires_at else None, updated_at=datetime.now(UTC), change_seq=change_seq)
             )
+            if result.rowcount:
+                row = await session.get(RunRow, run_id)
+            if result.rowcount and row.workspace_id is not None:
+                # transfer_pending has already changed the row owner under the
+                # native workspace/clock/Run locks; rebind only this same lifetime.
+                target = NativeRunStopTarget.from_row(row)
+                previous = NativeRunStopTarget(**{**{name: getattr(target, name) for name in target.__dataclass_fields__}, "owner_worker_id": expected_owner_worker_id})
+                lifetime = await execution_lifetime(session, previous)
+                lifetime.payload = {**lifetime.payload, "owner_worker_id": owner_worker_id}
             await session.commit()
             return result.rowcount != 0
 
-    async def update_model_name(self, run_id, model_name):
+    async def update_model_name(self, run_id, model_name, *, worker_target=None):
         async with self._sf() as session:
-            change_seq = await self._next_change_seq(session)
+            change_seq, scope = await self._worker_write_scope(session, run_id, worker_target)
             await session.execute(
                 update(RunRow)
-                .where(RunRow.run_id == run_id)
+                .where(RunRow.run_id == run_id, *scope)
                 .values(
                     model_name=self._normalize_model_name(model_name),
                     updated_at=datetime.now(UTC),
@@ -466,9 +619,23 @@ class RunRepository(RunStore):
             await session.commit()
             return count
 
-    async def delete_thread_operation(self, run_id: str, *, user_id: str | None) -> None:
-        """Release a reservation using its captured owner, not request context."""
-        await self.delete(run_id, user_id=user_id)
+    async def delete_thread_operation(self, run_id: str, *, user_id: str | None, workspace_context=None, owner_worker_id: str | None = None) -> None:
+        """Release only the captured reservation, even after live revocation.
+
+        This cleanup grants no content read or new work. A scoped caller must
+        supply the admitting worker, and cannot delete normal agent runs.
+        """
+        context = resolve_resource_scope(workspace_context, user_id, required=self._workspace_required)
+        conditions = [RunRow.run_id == run_id, RunRow.operation_kind != "run"]
+        if user_id is not None:
+            conditions.append(RunRow.user_id == user_id)
+        if context is not None:
+            if not owner_worker_id:
+                raise WorkspaceAccessDenied("reservation cleanup requires its captured worker")
+            conditions.extend((RunRow.workspace_id == context.workspace_id, RunRow.owner_worker_id == owner_worker_id))
+        async with self._sf() as session:
+            await session.execute(delete(RunRow).where(*conditions))
+            await session.commit()
 
     async def list_pending(self, *, before=None):
         if before is None:
@@ -495,6 +662,7 @@ class RunRepository(RunStore):
             .where(
                 RunRow.status.in_(("pending", "running")),
                 RunRow.created_at <= before_dt,
+                RunRow.workspace_id.is_(None),
             )
             .order_by(RunRow.created_at.asc())
         )
@@ -507,6 +675,7 @@ class RunRepository(RunStore):
         run_id: str,
         *,
         status: str,
+        worker_target=None,
         total_input_tokens: int = 0,
         total_output_tokens: int = 0,
         total_tokens: int = 0,
@@ -553,11 +722,12 @@ class RunRepository(RunStore):
         if status == "error" and "interrupted" not in allowed_sources:
             allowed_sources.append("interrupted")
         async with self._sf() as session:
-            values["change_seq"] = await self._next_change_seq(session)
+            values["change_seq"], scope = await self._worker_write_scope(session, run_id, worker_target)
             result = await session.execute(
                 update(RunRow)
                 .where(
                     RunRow.run_id == run_id,
+                    *scope,
                     RunRow.status.in_(tuple(allowed_sources)),
                 )
                 .values(**values)
@@ -569,6 +739,7 @@ class RunRepository(RunStore):
         self,
         run_id: str,
         *,
+        worker_target=None,
         total_input_tokens: int | None = None,
         total_output_tokens: int | None = None,
         total_tokens: int | None = None,
@@ -603,7 +774,8 @@ class RunRepository(RunStore):
         if first_human_message is not None:
             values["first_human_message"] = first_human_message[:2000]
         async with self._sf() as session:
-            await session.execute(update(RunRow).where(RunRow.run_id == run_id, RunRow.status == "running").values(**values))
+            _, scope = await self._worker_write_scope(session, run_id, worker_target, change_clock=False)
+            await session.execute(update(RunRow).where(RunRow.run_id == run_id, *scope, RunRow.status == "running").values(**values))
             await session.commit()
 
     async def aggregate_tokens_by_thread(
@@ -642,8 +814,7 @@ class RunRepository(RunStore):
             RunRow.middleware_tokens,
             RunRow.token_usage_by_model,
         ).where(_thread, _run_operation, _completed)
-        if resolved_user_id is not None:
-            stmt = stmt.where(RunRow.user_id == resolved_user_id)
+        stmt = self._read_scope(stmt, resolved_user_id)
 
         async with self._sf() as session:
             rows = (await session.execute(stmt)).all()
@@ -706,43 +877,178 @@ class RunRepository(RunStore):
             "updated_at": datetime.now(UTC),
         }
         async with self._sf() as session:
-            result = await session.execute(update(RunRow).where(RunRow.run_id == run_id, RunRow.owner_worker_id == owner_worker_id, RunRow.status.in_(("pending", "running"))).values(**values))
+            result = await session.execute(update(RunRow).where(RunRow.run_id == run_id, RunRow.workspace_id.is_(None), RunRow.owner_worker_id == owner_worker_id, RunRow.status.in_(("pending", "running"))).values(**values))
             await session.commit()
             return result.rowcount != 0
 
-    async def renew_lease(
-        self,
-        run_id: str,
-        *,
-        owner_worker_id: str,
-        lease_expires_at: str,
-    ) -> LeaseRenewal:
-        """Renew the owner lease and read cancellation intent atomically."""
-        lease_dt = datetime.fromisoformat(lease_expires_at)
+    async def inspect_dispatch_control(self, *, identity, owner_worker_id):
+        if not isinstance(owner_worker_id, str) or not owner_worker_id:
+            raise ValueError("Native dispatch control requires an exact owner")
+        return await self._inspect_native_control(identity=identity, owner_worker_id=owner_worker_id)
+
+    async def inspect_native_execution_control(self, *, identity):
+        """Control-only facts after adoption; never a pending launch grant.
+
+        Exact immutable identity remains mandatory, but the canonical current
+        owner may have moved from dispatcher to native worker. No Run payload
+        is returned and callers must not infer launch permission from this API.
+        """
+        return await self._inspect_native_control(identity=identity, owner_worker_id=None)
+
+    async def _inspect_native_control(self, *, identity, owner_worker_id):
+        """Inspect an exact durable dispatch target without a member data grant.
+
+        Locators are expectations from the immutable C ledger. Resolve the
+        captured context from native SQL, compare EVERY original binding, and
+        return control facts only; no kwargs, metadata, results or model data.
+        """
+        columns = (
+            RunRow.run_id,
+            RunRow.user_id,
+            RunRow.workspace_id,
+            RunRow.thread_id,
+            RunRow.thread_incarnation,
+            RunRow.owner_worker_id,
+            RunRow.created_at,
+            RunRow.workspace_context_json,
+            RunRow.status,
+            RunRow.cancel_action,
+            RunRow.lease_expires_at,
+            RunRow.operation_kind,
+        )
         async with self._sf() as session:
-            result = await session.execute(
-                update(RunRow)
-                .where(
-                    RunRow.run_id == run_id,
-                    RunRow.owner_worker_id == owner_worker_id,
-                    RunRow.status.in_(("pending", "running")),
-                )
-                .values(
-                    lease_expires_at=lease_dt,
-                    updated_at=datetime.now(UTC),
-                )
-                .returning(RunRow.run_id, RunRow.cancel_action)
+            statement = select(*columns).where(RunRow.run_id == identity.get("run_id"))
+            if owner_worker_id is not None:
+                statement = statement.where(RunRow.owner_worker_id == owner_worker_id)
+            row = (await session.execute(statement)).first()
+            try:
+                if row is None or row.operation_kind != "run":
+                    return None
+                target = NativeRunStopTarget.from_row(row)
+                expected = {
+                    "run_id": target.run_id,
+                    "user_id": target.user_id,
+                    "workspace_id": target.workspace_id,
+                    "thread_id": target.thread_id,
+                    "incarnation": target.thread_incarnation,
+                    "workspace_context": target.as_payload()["workspace_context"],
+                    "created_at": target.created_at,
+                }
+                if identity != expected:
+                    return None
+                lifetime = await execution_lifetime(session, target, open_only=False)
+            except ValueError:
+                return None
+            live = await session.scalar(
+                ThreadMetaRepository._owned_scope(select(ThreadMetaRow.thread_id).where(ThreadMetaRow.thread_id == target.thread_id, ThreadMetaRow.incarnation == target.thread_incarnation), target.user_id, target.workspace_context)
             )
-            row = result.first()
+            from deerflow.persistence.workspaces.model import WorkspaceOperationOutboxRow
+
+            stop = await session.get(WorkspaceOperationOutboxRow, target.operation_id)
+            stop_recorded = (
+                stop is not None
+                and stop.kind == "run_stop"
+                and stop.workspace_id == target.workspace_id
+                and stop.user_id == target.user_id
+                and stop.state in ("pending", "completed")
+                and isinstance(stop.payload, dict)
+                and stop.payload.get("target") == target.as_payload()
+            )
+            deadline = row.lease_expires_at
+            if deadline is not None and deadline.tzinfo is None:
+                deadline = deadline.replace(tzinfo=UTC)
+            return {
+                "target": target,
+                "status": row.status,
+                "cancel_action": row.cancel_action,
+                "live": bool(live),
+                "stop_recorded": stop_recorded,
+                "lifetime_completed": lifetime.state == "completed",
+                "lease_active": deadline is not None and deadline > datetime.now(UTC),
+            }
+
+    async def renew_lease(self, run_id: str, *, owner_worker_id: str, lease_expires_at: str, dispatch_target: NativeRunStopTarget | None = None) -> LeaseRenewal:
+        lease_dt = datetime.fromisoformat(lease_expires_at)
+        now = datetime.now(UTC)
+        async with self._sf() as session:
+            if session.get_bind().dialect.name == "sqlite":
+                await session.execute(text("BEGIN IMMEDIATE"))
+            row = await session.scalar(select(RunRow).where(RunRow.run_id == run_id).with_for_update())
+            if row is None or row.owner_worker_id != owner_worker_id:
+                return LeaseRenewal(renewed=False)
+            if dispatch_target is not None:
+                try:
+                    if type(dispatch_target) is not NativeRunStopTarget or NativeRunStopTarget.from_row(row) != dispatch_target or row.status != "pending":
+                        return LeaseRenewal(renewed=False)
+                except ValueError:
+                    return LeaseRenewal(renewed=False)
+            if row.workspace_id is not None:
+                try:
+                    await execution_lifetime(session, NativeRunStopTarget.from_row(row))
+                except ValueError:
+                    return LeaseRenewal(renewed=False)
+                old_deadline = row.lease_expires_at
+                if old_deadline is None or (old_deadline.replace(tzinfo=UTC) if old_deadline.tzinfo is None else old_deadline) <= now:
+                    return LeaseRenewal(renewed=False)
+            elif self._workspace_required or row.status not in ("pending", "running"):
+                return LeaseRenewal(renewed=False)
+            stopping = bool(await session.scalar(select(pending_run_stop(run_id=row.run_id, workspace_id=row.workspace_id)))) if row.workspace_id is not None else False
+            revoked = bool(await session.scalar(select(revocation_run_stop(run_id=row.run_id, workspace_id=row.workspace_id)))) if stopping else False
+            row.lease_expires_at, row.updated_at = lease_dt, now
+            native_no_start = row.workspace_id is not None and row.status == "pending" and row.cancel_action == "rollback"
+            action = "interrupt" if revoked or native_no_start else row.cancel_action
             await session.commit()
-        if row is None:
-            return LeaseRenewal(renewed=False)
-        return LeaseRenewal(renewed=True, cancel_action=row.cancel_action)
+            return LeaseRenewal(renewed=True, cancel_action=action, workspace_stop_requested=stopping)
+
+    async def mark_worker_interrupted(self, target):
+        from deerflow.persistence.workspaces.run_control import mark_owner_interrupted
+
+        return await mark_owner_interrupted(self._sf, target)
+
+    async def confirm_workspace_execution(self, target):
+        from deerflow.persistence.workspaces.run_control import confirm_local_execution
+
+        return await confirm_local_execution(self._sf, target)
+
+    async def confirm_workspace_run_stop(self, target, *, evidence):
+        from deerflow.persistence.workspaces.run_control import confirm_local_run_stop
+
+        return await confirm_local_run_stop(self._sf, target, evidence=evidence)
 
     async def request_cancel(self, run_id: str, *, action: str) -> str | None:
         """Atomically persist the first cancellation action on an active run."""
         if action not in ("interrupt", "rollback"):
             raise ValueError(f"Unsupported cancellation action: {action}")
+        current = get_current_workspace()
+        if self._workspace_required or current is not None:
+            context = resolve_resource_scope(None, current.actor_user_id if current is not None else None, required=True)
+            async with self._sf() as session:
+                locator = await session.scalar(select(RunRow).where(RunRow.run_id == run_id, RunRow.workspace_id == context.workspace_id, RunRow.user_id == context.actor_user_id))
+                if locator is None:
+                    return None
+                located = (locator.thread_id, locator.thread_incarnation, locator.created_at)
+                parent = await ThreadMetaRepository(self._sf)._locked_row(session, located[0], context.actor_user_id, context)
+                if parent is None or parent.incarnation != located[1]:
+                    raise WorkspaceAccessDenied("cancel Run private parent changed")
+                sequence = await self._next_change_seq(session)
+                row = await session.scalar(select(RunRow).where(RunRow.run_id == run_id).with_for_update().execution_options(populate_existing=True))
+                if row is None or row.workspace_id != context.workspace_id or row.user_id != context.actor_user_id or (row.thread_id, row.thread_incarnation, row.created_at) != located or row.operation_kind != "run":
+                    raise WorkspaceAccessDenied("cancel Run identity changed while locking")
+                target = NativeRunStopTarget.from_row(row)
+                try:
+                    await execution_lifetime(session, target)
+                except ValueError:
+                    return None
+                if action == "rollback" and row.status != "pending":
+                    raise WorkspaceAccessDenied("workspace checkpoint rollback requires its publication fence")
+                from deerflow.persistence.workspaces.run_control import enqueue_run_stop
+
+                now = datetime.now(UTC)
+                row.cancel_action = row.cancel_action or action
+                await enqueue_run_stop(session, row, reason="user", now=now, invalid_identity=target.workspace_context.membership_version > context.membership_version or target.workspace_context.policy_version > context.policy_version)
+                row.updated_at, row.change_seq = now, sequence
+                await session.commit()
+                return row.cancel_action
         now = datetime.now(UTC)
         async with self._sf() as session:
             change_seq = await self._next_change_seq(session)
@@ -750,6 +1056,7 @@ class RunRepository(RunStore):
                 update(RunRow)
                 .where(
                     RunRow.run_id == run_id,
+                    RunRow.workspace_id.is_(None),
                     RunRow.status.in_(("pending", "running")),
                 )
                 .values(
@@ -775,6 +1082,7 @@ class RunRepository(RunStore):
         run_id: str,
         *,
         status: str,
+        worker_target=None,
         error: str | None = None,
         stop_reason: str | None = None,
         goal_verdict: dict[str, Any] | None = None,
@@ -792,11 +1100,12 @@ class RunRepository(RunStore):
             values["goal_verdict"] = self._safe_json(goal_verdict)
 
         async with self._sf() as session:
-            values["change_seq"] = await self._next_change_seq(session)
+            values["change_seq"], scope = await self._worker_write_scope(session, run_id, worker_target)
             result = await session.execute(
                 update(RunRow)
                 .where(
                     RunRow.run_id == run_id,
+                    *scope,
                     RunRow.status.in_(("pending", "running")),
                     RunRow.cancel_action.is_(None),
                 )
@@ -807,7 +1116,7 @@ class RunRepository(RunStore):
                 await session.commit()
                 return StatusFinalization(finalized=True)
 
-            current = await session.execute(select(RunRow.cancel_action).where(RunRow.run_id == run_id))
+            current = await session.execute(select(case((revocation_run_stop(run_id=RunRow.run_id, workspace_id=RunRow.workspace_id), "interrupt"), else_=RunRow.cancel_action)).where(RunRow.run_id == run_id, *scope))
             cancel_action = current.scalar_one_or_none()
             await session.commit()
             return StatusFinalization(
@@ -839,6 +1148,7 @@ class RunRepository(RunStore):
                     RunRow.run_id == run_id,
                     RunRow.status.in_(("pending", "running")),
                     _lease_expired_or_null(RunRow.lease_expires_at, cutoff),
+                    RunRow.workspace_id.is_(None),
                 )
                 .values(**values)
             )
@@ -863,6 +1173,7 @@ class RunRepository(RunStore):
             .where(
                 RunRow.status.in_(("pending", "running")),
                 RunRow.created_at <= before_dt,
+                RunRow.workspace_id.is_(None),
                 _lease_expired_or_null(RunRow.lease_expires_at, cutoff),
             )
             .order_by(RunRow.created_at.asc())
@@ -870,6 +1181,32 @@ class RunRepository(RunStore):
         async with self._sf() as session:
             result = await session.execute(stmt)
             return [self._row_to_dict(r) for r in result.scalars()]
+
+    async def validate_scheduled_admission(self, receipt, *, run_id, workspace_context):
+        from deerflow.persistence.scheduled_task_runs.scope import ScheduledAdmissionReceipt, lock_scheduled_identity
+
+        if type(receipt) is not ScheduledAdmissionReceipt or workspace_context is None:
+            raise WorkspaceAccessDenied("Scheduler idempotent receipt is invalid")
+        async with self._sf() as session:
+            task, occurrence, original = await lock_scheduled_identity(session, self._sf, receipt.task_id, occurrence_id=receipt.occurrence_id)
+            native = await session.get(RunRow, run_id)
+            if (
+                original != workspace_context
+                or occurrence.run_id != run_id
+                or occurrence.attempt_count != receipt.attempt_count
+                or native is None
+                or native.workspace_context_json != asdict(original)
+                or native.workspace_id != task.workspace_id
+                or native.user_id != task.user_id
+                or native.thread_id != occurrence.thread_id
+                or native.thread_incarnation != occurrence.thread_incarnation
+                or native.operation_kind != "run"
+                or native.idempotency_key != "scheduled-task:" + occurrence.id
+                or (native.metadata_json or {}).get("scheduled_task_id") != task.id
+                or (native.metadata_json or {}).get("scheduled_task_run_id") != occurrence.id
+            ):
+                raise WorkspaceAccessDenied("Scheduler idempotent Run binding differs")
+            await session.commit()
 
     async def create_thread_operation_atomic(
         self,
@@ -888,6 +1225,8 @@ class RunRepository(RunStore):
         created_at: str | None = None,
         grace_seconds: int = 10,
         idempotency_key: str | None = None,
+        workspace_context: WorkspaceContext | None = None,
+        scheduled_admission=None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """Atomically create a run with cross-process thread-uniqueness.
 
@@ -905,6 +1244,9 @@ class RunRepository(RunStore):
         from deerflow.runtime.runs.manager import ConflictError
 
         resolved_user_id = resolve_user_id(user_id or AUTO, method_name="RunRepository.create_thread_operation_atomic")
+        context = resolve_resource_scope(workspace_context, resolved_user_id, required=self._workspace_required)
+        if context is not None and multitask_strategy != "reject":
+            raise WorkspaceAccessDenied("workspace interrupt admission requires lifecycle integration")
         now = datetime.now(UTC)
         created = datetime.fromisoformat(created_at) if created_at else now
         lease_dt = datetime.fromisoformat(lease_expires_at) if lease_expires_at else None
@@ -928,7 +1270,66 @@ class RunRepository(RunStore):
             "updated_at": now,
         }
 
+        if context is not None:
+            values["workspace_id"] = context.workspace_id
         async with self._sf() as session:
+            if scheduled_admission is not None:
+                from deerflow.persistence.scheduled_task_runs.scope import ScheduledAdmissionReceipt, lock_scheduled_identity, permits_occurrence_launch
+
+                if type(scheduled_admission) is not ScheduledAdmissionReceipt or context is None or operation_kind != "run" or multitask_strategy != "reject":
+                    raise WorkspaceAccessDenied("Scheduler admission requires a scoped normal Run")
+
+                task, occurrence, original = await lock_scheduled_identity(session, self._sf, scheduled_admission.task_id, occurrence_id=scheduled_admission.occurrence_id, receipt=scheduled_admission)
+                if context != original or occurrence.thread_id != thread_id or idempotency_key != "scheduled-task:" + occurrence.id or not permits_occurrence_launch(task, occurrence):
+                    raise WorkspaceAccessDenied("Scheduler native admission identity differs")
+                if occurrence.run_id is not None:
+                    existing = await session.get(RunRow, occurrence.run_id)
+                    if (
+                        existing is None
+                        or existing.operation_kind != "run"
+                        or existing.workspace_id != task.workspace_id
+                        or existing.user_id != task.user_id
+                        or existing.idempotency_key != idempotency_key
+                        or existing.workspace_context_json != asdict(original)
+                        or existing.thread_id != thread_id
+                        or existing.thread_incarnation != occurrence.thread_incarnation
+                        or (existing.metadata_json or {}).get("scheduled_task_id") != task.id
+                        or (existing.metadata_json or {}).get("scheduled_task_run_id") != occurrence.id
+                    ):
+                        raise WorkspaceAccessDenied("Scheduler existing admission is unknown")
+                    raise RunIdempotencyConflict(self._row_to_dict(existing))
+                occurrence.run_id = run_id
+            if context is not None:
+                # Short admission only: workspace -> actor -> private thread,
+                # then the existing global clock -> Run row order. No checkpoint
+                # or model IO is held under this database transaction.
+                if scheduled_admission is not None:
+                    # The receipt helper already locked scope and every parent
+                    # in canonical order; do not begin the writer a second time.
+                    thread = await session.scalar(ThreadMetaRepository._owned_scope(select(ThreadMetaRow).where(ThreadMetaRow.thread_id == thread_id), resolved_user_id, context).with_for_update())
+                else:
+                    thread = await ThreadMetaRepository(self._sf)._locked_row(session, thread_id, resolved_user_id, context, include_deleting=operation_kind == "delete")
+                if thread is None or not thread.incarnation:
+                    raise WorkspaceAccessDenied("private thread is unavailable")
+                values["workspace_context_json"] = asdict(context)
+                values["thread_incarnation"] = thread.incarnation
+                if scheduled_admission is None and operation_kind == "run" and idempotency_key is not None:
+                    existing = await session.scalar(
+                        select(RunRow).where(
+                            RunRow.idempotency_key == idempotency_key,
+                            RunRow.user_id == resolved_user_id,
+                            RunRow.thread_id == thread_id,
+                            RunRow.operation_kind == "run",
+                            RunRow.workspace_id == context.workspace_id,
+                            RunRow.thread_incarnation == thread.incarnation,
+                        )
+                    )
+                    if existing is not None and existing.workspace_context_json == asdict(context):
+                        # Durable retry observes its original admission; it
+                        # grants no new work and changes no execution receipt.
+                        raise RunIdempotencyConflict(self._row_to_dict(existing))
+                if await session.scalar(select(pending_execution_barrier(workspace_id=context.workspace_id, user_id=resolved_user_id, thread_id=thread_id))):
+                    raise ConflictError("Thread has native execution cleanup awaiting confirmation")
             # Keep the global clock -> run-row lock order used by every other
             # mutator. One position covers this atomic set of changes; run_id
             # provides deterministic ordering within the position.
@@ -979,13 +1380,23 @@ class RunRepository(RunStore):
             values["change_seq"] = change_seq
             session.add(RunRow(run_id=run_id, **values))
             try:
+                await session.flush()
+                if context is not None and operation_kind == "run":
+                    await create_execution_lifetime(session, await session.get(RunRow, run_id))
                 await session.commit()
             except IntegrityError as exc:
                 await session.rollback()
                 if idempotency_key is not None:
-                    existing = (await session.execute(select(RunRow).where(RunRow.idempotency_key == idempotency_key))).scalar_one_or_none()
+                    query = select(RunRow).where(RunRow.idempotency_key == idempotency_key)
+                    if context is not None:
+                        query = self._read_scope(query.where(RunRow.thread_id == thread_id, RunRow.operation_kind == operation_kind), resolved_user_id, require_run_incarnation=True)
+                    existing = (await session.execute(query)).scalar_one_or_none()
                     if existing is not None:
                         raise RunIdempotencyConflict(self._row_to_dict(existing)) from exc
+                    if context is not None:
+                        # A global key collision must not return another space's
+                        # payload or identifiers, even when acknowledgement was lost.
+                        raise WorkspaceAccessDenied("reservation conflict is unavailable") from None
                 raise
 
             new_row = await session.get(RunRow, run_id)

@@ -19,8 +19,13 @@ import {
   type SidecarContext,
   type SidecarReferenceStateItem,
 } from "@/core/sidecar";
-import { findLatestSidecarThread } from "@/core/sidecar/api";
+import {
+  findLatestSidecarThread,
+  type SidecarThreadSearchClient,
+} from "@/core/sidecar/api";
 import type { ThreadStreamOptions } from "@/core/threads/hooks";
+import type { AgentThreadState } from "@/core/threads/types";
+import { useWorkspaceLifetime } from "@/core/workspaces/context";
 
 export type SidecarReference = SidecarReferenceStateItem;
 
@@ -63,6 +68,7 @@ export function SidecarProvider({
   context: ThreadStreamOptions["context"];
   isMock?: boolean;
 }) {
+  const lifetime = useWorkspaceLifetime();
   const [open, setOpen] = useState(false);
   const [activeReferences, setActiveReferences] = useState<SidecarReference[]>(
     [],
@@ -108,6 +114,7 @@ export function SidecarProvider({
 
   const restoreSidecarThread = useCallback(
     async (options?: { force?: boolean }) => {
+      if (lifetime?.scope.signal.aborted) return null;
       // A non-forced restore trusts the cached id; a forced restore always
       // re-queries the backend so a sidecar deleted elsewhere reconciles to
       // null instead of pointing the trigger at a dead thread (#3555).
@@ -120,13 +127,27 @@ export function SidecarProvider({
         return restoreRequest.promise;
       }
 
+      const apiClient: SidecarThreadSearchClient | undefined = lifetime
+        ? {
+            threads: {
+              search: (query) =>
+                lifetime.sdk.threads.search<AgentThreadState>(query),
+            },
+          }
+        : undefined;
       const promise = findLatestSidecarThread({
         parentThreadId,
         isMock,
+        ...(lifetime && apiClient
+          ? { apiClient, signal: lifetime.scope.signal }
+          : {}),
       })
         .then((thread) => {
           const threadId = thread?.thread_id ?? null;
-          if (parentThreadIdRef.current !== parentThreadId) {
+          if (
+            lifetime?.scope.signal.aborted ||
+            parentThreadIdRef.current !== parentThreadId
+          ) {
             return null;
           }
           // Reconcile the cache with the backend: adopt a freshly found
@@ -155,7 +176,7 @@ export function SidecarProvider({
 
       return promise;
     },
-    [isMock, parentThreadId, updateSidecarThreadId],
+    [isMock, parentThreadId, updateSidecarThreadId, lifetime],
   );
 
   useEffect(() => {

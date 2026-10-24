@@ -28,7 +28,7 @@ import weakref
 from collections.abc import Callable, Coroutine, Mapping
 from contextlib import AbstractAsyncContextManager
 from contextvars import Context
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from functools import lru_cache
 from typing import Any, Final, Literal, cast
@@ -40,6 +40,7 @@ from langgraph.types import Overwrite
 from deerflow.agents.goal_state import GoalEvaluation, GoalState
 from deerflow.agents.interaction_policy import RunInteractionPolicy, resolve_run_interaction_policy
 from deerflow.agents.middlewares.input_sanitization_middleware import neutralize_untrusted_tags
+from deerflow.authz.workspace import WorkspaceContext, get_current_workspace, reset_current_workspace, set_current_workspace
 from deerflow.config.app_config import AppConfig
 from deerflow.config.database_config import CheckpointChannelMode
 from deerflow.constants import CONVERSATION_READER_CONTEXT_KEY, TOOL_RESULTS_DIRNAME
@@ -48,6 +49,7 @@ from deerflow.mcp_scope import (
     THREAD_INCARNATION_CONTEXT_KEY,
     THREAD_INCARNATION_METADATA_GUARD_KEY,
 )
+from deerflow.persistence.workspaces.sql import WorkspaceAccessDenied
 from deerflow.runtime.checkpoint_mode import (
     aensure_checkpoint_mode_compatible,
     inject_checkpoint_mode,
@@ -65,6 +67,7 @@ from deerflow.runtime.context_keys import (
     DEFAULT_AGENT_NAME_METADATA_VALUE,
     NOTIFICATION_ONLY_CONTEXT_KEY,
     PROJECT_CONTEXT_KEY,
+    RUN_OWNER_WORKER_CONTEXT_KEY,
     checkpoint_agent_binding_metadata,
 )
 from deerflow.runtime.events.message_identity import attach_message_seq, message_identity
@@ -88,6 +91,7 @@ from deerflow.runtime.goal import (
     visible_conversation_signature,
     write_thread_goal,
 )
+from deerflow.runtime.invocation import WorkerInvocationDenied
 from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
 from deerflow.runtime.runs.stream_cleanup import close_agent_stream
 from deerflow.runtime.serialization import serialize
@@ -218,6 +222,7 @@ def _release_run_scoped_references(
     configs: list[dict[str, Any]],
     runtime_context: dict[str, Any] | None,
     journal: Any | None,
+    invocation_callback: Any | None = None,
 ) -> None:
     """Remove worker-owned graph references once durable finalization is done."""
     internal_context_keys = {
@@ -241,7 +246,7 @@ def _release_run_scoped_references(
         pass
 
     seen_configs: set[int] = set()
-    handlers = [journal] if journal is not None else []
+    handlers = [handler for handler in (journal, invocation_callback) if handler is not None]
     for runnable_config in configs:
         if not isinstance(runnable_config, dict) or id(runnable_config) in seen_configs:
             continue
@@ -249,6 +254,7 @@ def _release_run_scoped_references(
         configurable = runnable_config.get("configurable")
         if isinstance(configurable, dict):
             configurable.pop("__pregel_runtime", None)
+            configurable.pop(RUN_OWNER_WORKER_CONTEXT_KEY, None)
             configurable.pop(CONVERSATION_READER_CONTEXT_KEY, None)
             configurable.pop(SCHEDULER_CAPABILITY_CONTEXT_KEY, None)
             configurable.pop(AGENT_RUNS_CONTEXT_KEY, None)
@@ -311,6 +317,10 @@ async def _persist_delivery_receipt(
                 content=content,
             )
             return True
+        except WorkspaceAccessDenied:
+            # Authorization refusal is final; never retry it as infrastructure
+            # failure or manufacture a zero receipt after revocation.
+            return False
         except Exception:
             if attempt == attempts - 1:
                 logger.warning(
@@ -542,10 +552,14 @@ class _LargeFileToolChunkBatcher:
 # strips ``__``-prefixed keys in build_run_config, but embedded harness callers
 # have no such filter and ``deerflow_trace_id`` carries no prefix to be caught
 # by it anyway.
+_WORKSPACE_CONTEXT_KEYS = frozenset({"workspace_id", "actor_user_id", "membership_version", "policy_version", "workspace_context"})
+
+
 _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: Final[frozenset[str]] = (
     frozenset(
         {
             CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
+            RUN_OWNER_WORKER_CONTEXT_KEY,
             DEERFLOW_TRACE_METADATA_KEY,
             CONVERSATION_READER_CONTEXT_KEY,
             SCHEDULER_CAPABILITY_CONTEXT_KEY,
@@ -565,6 +579,7 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: Final[frozenset[str]] = (
         }
     )
     | SANDBOX_SERVER_OWNED_CONTEXT_KEYS
+    | _WORKSPACE_CONTEXT_KEYS
 )
 
 
@@ -580,6 +595,7 @@ def _build_runtime_context(
     *,
     thread_incarnation: str | None | object = _THREAD_INCARNATION_UNSET,
     scheduler_capability: SchedulerRunCapability | None = None,
+    workspace_context: WorkspaceContext | None = None,
 ) -> dict[str, Any]:
     """Build the dict that becomes ``ToolRuntime.context`` for the run.
 
@@ -601,6 +617,10 @@ def _build_runtime_context(
             if key in _SERVER_OWNED_RUNTIME_CONTEXT_KEYS:
                 continue
             runtime_ctx.setdefault(key, value)
+    if workspace_context is not None:
+        if type(workspace_context) is not WorkspaceContext:
+            raise ValueError("runtime workspace requires a trusted immutable identity")
+        runtime_ctx.update(asdict(workspace_context), workspace_context=workspace_context, user_id=workspace_context.actor_user_id)
     if app_config is not None:
         runtime_ctx["app_config"] = app_config
     if agent_runs is not None:
@@ -675,6 +695,8 @@ class RunContext:
     scheduler_capability: SchedulerRunCapability | None = field(default=None)
     # Server-selected occurrence identity. Metadata alone never activates a goal.
     scheduled_task_runtime: Mapping[str, Any] | None = field(default=None)
+    # Bound by the host from the admitted Run, never request config or selection.
+    workspace_context: WorkspaceContext | None = field(default=None)
 
 
 def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> None:
@@ -682,6 +704,11 @@ def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> N
     # persistence; the reader capability belongs only to host-owned context.
     configurable = config.get("configurable")
     if isinstance(configurable, dict):
+        for key in _WORKSPACE_CONTEXT_KEYS:
+            configurable.pop(key, None)
+        if "workspace_context" in runtime_context:
+            configurable["user_id"] = runtime_context["workspace_context"].actor_user_id
+        configurable.pop(RUN_OWNER_WORKER_CONTEXT_KEY, None)
         configurable.pop(CONVERSATION_READER_CONTEXT_KEY, None)
         configurable.pop(SCHEDULER_CAPABILITY_CONTEXT_KEY, None)
         configurable.pop(AGENT_RUNS_CONTEXT_KEY, None)
@@ -986,6 +1013,10 @@ async def run_agent(
         restore_checkpoint: bool = True,
     ) -> None:
         nonlocal checkpoint_rollback_completed
+        if record.workspace_context is not None and not started:
+            # An unstarted execution has no captured pre-run state. None here
+            # must never mean permission to delete the prior conversation.
+            action = "interrupt"
         await run_manager.set_finalizing(run_id, True)
         if action == "rollback":
             await run_manager.set_status(
@@ -1024,7 +1055,58 @@ async def run_agent(
             )
             logger.info("Run %s was cancelled", run_id)
 
+    workspace_token = None
+    invocation_guard = None
+    invocation_token = None
+    invocation_callback = None
     try:
+        workspace_context = ctx.workspace_context
+        if record.workspace_id is not None or record.workspace_context is not None or workspace_context is not None:
+            if (
+                type(workspace_context) is not WorkspaceContext
+                or workspace_context != record.workspace_context
+                or workspace_context.workspace_id != record.workspace_id
+                or workspace_context.actor_user_id != record.user_id
+                or thread_incarnation != record.thread_incarnation
+            ):
+                raise RuntimeError("worker workspace identity differs from the admitted Run")
+            run_manager._workspace_transition_kwargs(record)
+            if not run_manager.heartbeat_enabled:
+                raise RuntimeError("workspace execution requires native ownership heartbeats")
+            principal = get_current_user()
+            if principal is None or str(principal.id) != workspace_context.actor_user_id:
+                raise RuntimeError("worker workspace actor requires its native authenticated principal")
+            workspace_token = set_current_workspace(workspace_context)
+            from deerflow.persistence.workspaces.run_control import NativeRunStopTarget
+            from deerflow.runtime.stream_bridge.scoped_worker import ScopedWorkerBridge
+
+            target = NativeRunStopTarget.from_record(record)
+            from deerflow.runtime.invocation import WorkerInvocationGuard, bind_invocation_guard, install_invocation_callback
+
+            if not callable(getattr(run_manager._store, "check_worker_invocation", None)):
+                raise RuntimeError("workspace invocation requires native execution admission")
+            invocation_guard = WorkerInvocationGuard(run_manager._store, target)
+            invocation_token = bind_invocation_guard(invocation_guard)
+            invocation_callback = install_invocation_callback(config)
+            if not callable(getattr(run_manager._store, "commit_worker_io", None)) or not callable(getattr(run_manager._store, "signal_worker_stream_end", None)):
+                raise RuntimeError("workspace stream requires native execution fencing")
+            bridge = ScopedWorkerBridge(bridge, run_manager._store, target)
+            if thread_store is not None:
+                if not callable(getattr(thread_store, "bind_worker", None)):
+                    raise RuntimeError("workspace thread metadata requires native execution fencing")
+                thread_store = thread_store.bind_worker(target)
+            if checkpointer is not None:
+                from deerflow.runtime.checkpointer.scoped_run import ScopedRunSaver
+
+                if not callable(getattr(run_manager._store, "commit_worker_checkpoint", None)):
+                    raise RuntimeError("workspace checkpoint execution requires a durable native fence")
+                checkpointer = ScopedRunSaver(checkpointer, run_manager._store, target)
+            if event_store is not None:
+                if not callable(getattr(event_store, "bind_worker", None)):
+                    raise RuntimeError("workspace journal requires native durable execution fencing")
+                event_store = event_store.bind_worker(target)
+        elif get_current_workspace() is not None:
+            raise RuntimeError("unscoped Run cannot inherit ambient workspace authority")
         normalized_stream_modes = normalize_stream_modes(stream_modes)
         requested_modes: set[str] = set(normalized_stream_modes)
         lg_modes = to_langgraph_stream_modes(normalized_stream_modes)
@@ -1183,7 +1265,10 @@ async def run_agent(
             ctx.agent_runs,
             thread_incarnation=thread_incarnation,
             scheduler_capability=ctx.scheduler_capability,
+            workspace_context=ctx.workspace_context,
         )
+        if ctx.workspace_context is not None:
+            runtime_ctx[RUN_OWNER_WORKER_CONTEXT_KEY] = record.owner_worker_id
         # Bind every checkpoint produced by this run to the effective agent
         # identity that produced its state. Manual compaction uses only this
         # server-overwritten value for memory policy; request metadata cannot
@@ -1430,6 +1515,8 @@ async def run_agent(
                             try:
                                 await close_agent_stream(stream)
                             except asyncio.CancelledError as exc:
+                                if exc.__cause__ is not None:
+                                    record.workspace_cleanup_uncertain = True
                                 _log_cancelled_stream_close_failure(
                                     exc,
                                     run_id=run_id,
@@ -1437,6 +1524,7 @@ async def run_agent(
                                 )
                                 raise
                             except Exception:
+                                record.workspace_cleanup_uncertain = True
                                 abort_requested = broke_on_abort or record.abort_event.is_set()
                                 if close_error is None and not abort_requested:
                                     raise
@@ -1486,6 +1574,8 @@ async def run_agent(
                         try:
                             await close_agent_stream(stream)
                         except asyncio.CancelledError as exc:
+                            if exc.__cause__ is not None:
+                                record.workspace_cleanup_uncertain = True
                             _log_cancelled_stream_close_failure(
                                 exc,
                                 run_id=run_id,
@@ -1493,6 +1583,7 @@ async def run_agent(
                             )
                             raise
                         except Exception:
+                            record.workspace_cleanup_uncertain = True
                             abort_requested = broke_on_abort or record.abort_event.is_set()
                             if close_error is None and not abort_requested:
                                 raise
@@ -1622,6 +1713,13 @@ async def run_agent(
     except asyncio.CancelledError:
         await _finish_cancellation(record.abort_action)
 
+    except (WorkspaceAccessDenied, WorkerInvocationDenied):
+        # Known effect refusal is not a model error payload. Stop through the
+        # original native control path while still draining actual execution.
+        record.abort_action = "interrupt"
+        record.abort_event.set()
+        await _finish_cancellation("interrupt")
+
     except Exception as exc:
         error_msg = f"{exc}"
         logger.exception("Run %s failed: %s", run_id, error_msg)
@@ -1635,17 +1733,27 @@ async def run_agent(
         if cancel_action is not None:
             await _finish_cancellation(cancel_action)
         else:
-            await bridge.publish(
-                run_id,
-                "error",
-                {
-                    "message": error_msg,
-                    "name": type(exc).__name__,
-                },
-            )
+            try:
+                await bridge.publish(
+                    run_id,
+                    "error",
+                    {"message": error_msg, "name": type(exc).__name__},
+                )
+            except WorkspaceAccessDenied:
+                record.abort_action = "interrupt"
+                record.abort_event.set()
+                await _finish_cancellation("interrupt")
 
     finally:
         try:
+            # Keep the native lifetime and heartbeat until abandoned body calls
+            # stop. Completion hooks may still legitimately invoke models.
+            if invocation_guard is not None:
+                try:
+                    await invocation_guard.drain()
+                except BaseException as exc:
+                    record.workspace_cleanup_uncertain = True
+                    deferred_finalization_interrupt = _defer_finalization_interrupt(deferred_finalization_interrupt, exc)
             if record.ownership_lost:
                 logger.warning(
                     "Skipping durable finalization for run %s because this worker no longer owns its lease",
@@ -1891,8 +1999,10 @@ async def run_agent(
                 try:
                     await ctx.on_run_completed(record)
                 except Exception:
+                    record.workspace_cleanup_uncertain = True
                     logger.warning("Run completion hook failed for %s (non-fatal)", run_id, exc_info=True)
                 except BaseException as exc:
+                    record.workspace_cleanup_uncertain = True
                     # A terminal hook must not leave replacement runs blocked or
                     # stream consumers waiting indefinitely.
                     deferred_finalization_interrupt = _defer_finalization_interrupt(
@@ -1926,12 +2036,14 @@ async def run_agent(
                         deferred_finalization_interrupt,
                     )
                 except Exception:
+                    record.workspace_cleanup_uncertain = True
                     logger.warning(
                         "Extension task-stop notification failed for run %s (non-fatal)",
                         run_id,
                         exc_info=True,
                     )
                 except BaseException as exc:
+                    record.workspace_cleanup_uncertain = True
                     # Cancellation here must not strand the finalizing barrier or
                     # leave stream consumers waiting for the end frame.
                     deferred_finalization_interrupt = _defer_finalization_interrupt(
@@ -1950,21 +2062,35 @@ async def run_agent(
             if deferred_finalization_interrupt is not None:
                 raise deferred_finalization_interrupt
         finally:
+            # Stop new service calls, then drain work left by completion hooks
+            # before any local resource or durable lifetime can be released.
+            provider_cleanup_interrupt = None
+            if invocation_guard is not None:
+                try:
+                    await invocation_guard.aclose()
+                except BaseException as exc:
+                    record.workspace_cleanup_uncertain = True
+                    provider_cleanup_interrupt = exc
+            workspace_journal_closed = journal is None
             try:
                 if journal is not None:
                     try:
                         await journal.close(flush=not record.ownership_lost)
+                        workspace_journal_closed = True
                     except Exception:
                         logger.warning("Failed to close journal for run %s", run_id, exc_info=True)
             finally:
                 lease_cleanup_interrupt: BaseException | None = None
+                workspace_cleanup_ok = workspace_journal_closed and not record.workspace_cleanup_uncertain
                 try:
                     from deerflow.sandbox.lease import release_sandbox_execution_lease_async
 
                     await release_sandbox_execution_lease_async(runtime_ctx)
                 except Exception:
+                    workspace_cleanup_ok = False
                     logger.warning("Failed to release sandbox execution lease for run %s", run_id, exc_info=True)
                 except BaseException as exc:
+                    workspace_cleanup_ok = False
                     # release_async completes the underlying cleanup before it
                     # re-raises cancellation. Defer that interruption until the
                     # worker has dropped all other run-scoped references too.
@@ -1974,11 +2100,22 @@ async def run_agent(
                         run_id,
                     )
                 finally:
-                    _release_run_scoped_references(
-                        runnable_configs,
-                        runtime_ctx,
-                        journal,
-                    )
+                    try:
+                        _release_run_scoped_references(
+                            runnable_configs,
+                            runtime_ctx,
+                            journal,
+                            invocation_callback,
+                        )
+                    finally:
+                        if invocation_guard is not None:
+                            invocation_guard.close()
+                        if invocation_token is not None:
+                            from deerflow.runtime.invocation import reset_invocation_guard
+
+                            reset_invocation_guard(invocation_token)
+                        if workspace_token is not None:
+                            reset_current_workspace(workspace_token)
                 # Drop graph and per-run payload references before the terminal
                 # worker task itself becomes collectable.
                 agent = None
@@ -2008,8 +2145,13 @@ async def run_agent(
                 _create_contextless_task(run_manager.cleanup(run_id))
                 _schedule_terminal_cycle_collection()
 
+                if record.workspace_context is not None and workspace_cleanup_ok:
+                    record.workspace_execution_closed = True
+                    await run_manager._confirm_workspace_execution_closed(record)
                 if lease_cleanup_interrupt is not None:
                     raise lease_cleanup_interrupt
+                if provider_cleanup_interrupt is not None:
+                    raise provider_cleanup_interrupt
 
 
 # ---------------------------------------------------------------------------
@@ -2325,6 +2467,8 @@ async def _persist_goal_evaluation(
         return updated_goal
     except GoalWriteConflict:
         return None
+    except (WorkspaceAccessDenied, WorkerInvocationDenied):
+        raise
     except Exception:
         logger.warning("Could not persist goal evaluation for thread %s", thread_id, exc_info=True)
         return None
@@ -2377,6 +2521,8 @@ async def _prepare_goal_continuation_input(
 
     try:
         goal = await read_thread_goal(checkpointer, thread_id)
+    except (WorkspaceAccessDenied, WorkerInvocationDenied):
+        raise
     except Exception:
         logger.warning("Could not read goal for thread %s after run %s", thread_id, run_id, exc_info=True)
         return None
@@ -2450,6 +2596,8 @@ async def _prepare_goal_continuation_input(
 
         if abort_event is not None and abort_event.is_set():
             return None
+    except (WorkspaceAccessDenied, WorkerInvocationDenied):
+        raise
     except Exception:
         logger.warning("Could not prepare goal evaluation for thread %s after run %s", thread_id, run_id, exc_info=True)
         return None
@@ -2470,6 +2618,8 @@ async def _prepare_goal_continuation_input(
             interaction_policy=interaction_policy,
             usage_callback=usage_callback,
         )
+    except (WorkspaceAccessDenied, WorkerInvocationDenied):
+        raise
     except Exception as exc:
         logger.warning("Goal evaluator failed for thread %s after run %s", thread_id, run_id, exc_info=True)
         if abort_event is not None and abort_event.is_set():
@@ -2495,6 +2645,8 @@ async def _prepare_goal_continuation_input(
     # evaluator ran — a user message or /goal clear racing the evaluation must win.
     try:
         current_goal, current_checkpoint_tuple = await _reread_goal_and_checkpoint(checkpointer, thread_id)
+    except (WorkspaceAccessDenied, WorkerInvocationDenied):
+        raise
     except Exception:
         logger.warning("Could not re-check goal state for thread %s after evaluation", thread_id, exc_info=True)
         return None
@@ -2532,6 +2684,8 @@ async def _prepare_goal_continuation_input(
     # conversation signature is meaningful for detecting a racing user turn here.
     try:
         latest_goal, latest_checkpoint_tuple = await _reread_goal_and_checkpoint(checkpointer, thread_id)
+    except (WorkspaceAccessDenied, WorkerInvocationDenied):
+        raise
     except Exception:
         logger.warning("Could not verify queued goal continuation for thread %s", thread_id, exc_info=True)
         return None

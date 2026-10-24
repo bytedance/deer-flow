@@ -102,7 +102,7 @@ import {
 } from "@/core/models/reasoning";
 import { attachProjectDocument } from "@/core/projects/api";
 import {
-  retireProjectAttachments,
+  useProjectAttachmentStore,
   useStagedProjectAttachments,
 } from "@/core/projects/composer-attach";
 import {
@@ -117,6 +117,7 @@ import type { AgentThreadContext, GoalState } from "@/core/threads";
 import { compactThreadContext } from "@/core/threads/api";
 import {
   buildComposerDraftKey,
+  createWorkspaceComposerDraftStorage,
   clearComposerDraft,
   getSessionComposerDraftStorage,
   readComposerDraft,
@@ -145,6 +146,7 @@ import {
   type BrowserSpeechRecognition,
   type SpeechRecognitionErrorKind,
 } from "@/core/voice-input/speech-recognition";
+import { useWorkspaceLifetime } from "@/core/workspaces/context";
 import { isCompositionConfirmEnter, isIMEComposing } from "@/lib/ime";
 import { cn } from "@/lib/utils";
 
@@ -427,6 +429,7 @@ export function InputBox({
 }) {
   const { locale, t } = useI18n();
   const queryClient = useQueryClient();
+  const lifetime = useWorkspaceLifetime();
   const searchParams = useSearchParams();
   const mentionListId = useId();
   const mentionPickerRef = useRef<MentionPickerHandle>(null);
@@ -475,6 +478,7 @@ export function InputBox({
   // and includes them in the next send without a re-upload. Staged only on
   // attach success; the hook consumes the staged entry once per thread and
   // keeps it across a Strict-Mode effect replay.
+  const projectAttachmentStore = useProjectAttachmentStore();
   const [projectAttachments, setProjectAttachments] =
     useStagedProjectAttachments(threadId);
   const {
@@ -871,16 +875,22 @@ export function InputBox({
     [t],
   );
 
+  const scopedDraftStorage = useMemo(
+    () =>
+      lifetime ? createWorkspaceComposerDraftStorage(lifetime.scope) : null,
+    [lifetime],
+  );
   const draftKey = useMemo(
     () =>
       buildComposerDraftKey({
-        userId: user?.id ?? "anonymous",
+        userId: lifetime?.scope.actorUserId ?? user?.id ?? "anonymous",
+        ...(lifetime ? { workspaceId: lifetime.scope.workspaceId } : {}),
         agentName:
           draftAgentName ??
           (typeof context.agent_name === "string" ? context.agent_name : null),
         threadId: draftThreadId,
       }),
-    [context.agent_name, draftAgentName, draftThreadId, user?.id],
+    [context.agent_name, draftAgentName, draftThreadId, user?.id, lifetime],
   );
   const agentScopedSkills = useMemo(
     () =>
@@ -960,6 +970,12 @@ export function InputBox({
       latestDraftRef.current = { key, draft };
       cancelDraftSaveTimer();
       draftSaveGenerationRef.current += 1;
+      // Switching closes the scope before React cleanup. Persist this visible
+      // snapshot while active; late timers/cleanup cannot regain write access.
+      if (scopedDraftStorage) {
+        writeComposerDraft(scopedDraftStorage, key, draft);
+        return null;
+      }
       const generation = draftSaveGenerationRef.current;
       const timer = window.setTimeout(() => {
         if (
@@ -969,13 +985,18 @@ export function InputBox({
           return;
         }
         draftSaveTimerRef.current = null;
-        writeComposerDraft(getSessionComposerDraftStorage(), key, draft);
+        writeComposerDraft(
+          scopedDraftStorage ?? getSessionComposerDraftStorage(),
+          key,
+          draft,
+        );
       }, COMPOSER_DRAFT_SAVE_DELAY_MS);
       draftSaveTimerRef.current = timer;
       return timer;
     },
     [
       cancelDraftSaveTimer,
+      scopedDraftStorage,
       draftKey,
       conversationReferences,
       conversationCapability,
@@ -990,12 +1011,12 @@ export function InputBox({
       }
       cancelDraftSaveTimer();
       writeComposerDraft(
-        getSessionComposerDraftStorage(),
+        scopedDraftStorage ?? getSessionComposerDraftStorage(),
         latest.key,
         latest.draft,
       );
     },
-    [cancelDraftSaveTimer],
+    [cancelDraftSaveTimer, scopedDraftStorage],
   );
 
   const promptHistory = useMemo(() => {
@@ -1061,7 +1082,7 @@ export function InputBox({
     }
 
     const savedDraft = readComposerDraft(
-      getSessionComposerDraftStorage(),
+      scopedDraftStorage ?? getSessionComposerDraftStorage(),
       draftKey,
     );
     if (!savedDraft) {
@@ -1108,6 +1129,7 @@ export function InputBox({
     initialValue,
     setTextInput,
     agentScopedSkills,
+    scopedDraftStorage,
     agentSkillsLoading,
     skillsLoading,
     textInput.value,
@@ -1216,24 +1238,35 @@ export function InputBox({
 
   const handleGoalCommand = useCallback(
     async (command: GoalCommand): Promise<boolean> => {
+      if (lifetime?.scope.signal.aborted) return false;
+      const readResponse = async (response: Response, includeGoal = true) => {
+        const decode = async (response: Response) => {
+          if (!response.ok) {
+            throw new Error(await readGoalResponseError(response));
+          }
+          return includeGoal
+            ? (((await response.json()) as { goal?: GoalState | null }).goal ??
+                null)
+            : null;
+        };
+        return lifetime
+          ? lifetime.rest.consume(response, decode)
+          : decode(response);
+      };
       const request = beginGoalRequest(goalRequestStateRef.current, threadId);
       const signal = request.controller.signal;
       try {
         let goal: GoalState | null = null;
         if (command.kind === "status") {
-          const response = await fetch(
+          const response = await (lifetime?.rest.fetch ?? fetch)(
             `${getBackendBaseURL()}/api/threads/${encodeURIComponent(
               threadId,
             )}/goal`,
             { method: "GET", signal },
           );
-          if (!response.ok) {
-            throw new Error(await readGoalResponseError(response));
-          }
-          goal =
-            ((await response.json()) as { goal?: GoalState | null }).goal ??
-            null;
+          goal = await readResponse(response);
           if (
+            lifetime?.scope.signal.aborted ||
             !isCurrentGoalRequest(
               goalRequestStateRef.current,
               request,
@@ -1252,16 +1285,15 @@ export function InputBox({
           );
           onGoalChange?.(goal);
         } else if (command.kind === "clear") {
-          const response = await fetch(
+          const response = await (lifetime?.rest.fetch ?? fetch)(
             `${getBackendBaseURL()}/api/threads/${encodeURIComponent(
               threadId,
             )}/goal`,
             { method: "DELETE", signal },
           );
-          if (!response.ok) {
-            throw new Error(await readGoalResponseError(response));
-          }
+          await readResponse(response, false);
           if (
+            lifetime?.scope.signal.aborted ||
             !isCurrentGoalRequest(
               goalRequestStateRef.current,
               request,
@@ -1273,7 +1305,7 @@ export function InputBox({
           toast.success(t.inputBox.goalCleared);
           onGoalChange?.(null);
         } else {
-          const response = await fetch(
+          const response = await (lifetime?.rest.fetch ?? fetch)(
             `${getBackendBaseURL()}/api/threads/${encodeURIComponent(
               threadId,
             )}/goal`,
@@ -1284,13 +1316,9 @@ export function InputBox({
               signal,
             },
           );
-          if (!response.ok) {
-            throw new Error(await readGoalResponseError(response));
-          }
-          goal =
-            ((await response.json()) as { goal?: GoalState | null }).goal ??
-            null;
+          goal = await readResponse(response);
           if (
+            lifetime?.scope.signal.aborted ||
             !isCurrentGoalRequest(
               goalRequestStateRef.current,
               request,
@@ -1302,10 +1330,12 @@ export function InputBox({
           toast.success(t.inputBox.goalSet);
           onGoalChange?.(goal);
         }
+        if (lifetime?.scope.signal.aborted) return false;
         textInput.setInput("");
         return true;
       } catch (error) {
         if (
+          lifetime?.scope.signal.aborted ||
           isAbortError(error) ||
           !isCurrentGoalRequest(goalRequestStateRef.current, request, threadId)
         ) {
@@ -1320,6 +1350,7 @@ export function InputBox({
       }
     },
     [
+      lifetime,
       onGoalChange,
       t.inputBox.goalActive,
       t.inputBox.goalCleared,
@@ -1332,6 +1363,7 @@ export function InputBox({
   );
 
   const handleCompactCommand = useCallback(async (): Promise<void> => {
+    if (lifetime?.scope.signal.aborted) return;
     if (isWelcomeMode) {
       textInput.setInput("");
       toast.info(t.inputBox.compactSkipped);
@@ -1341,6 +1373,7 @@ export function InputBox({
     const signal = request.controller.signal;
     try {
       const result = await compactThreadContext(threadId, {
+        ...(lifetime ? { rest: lifetime.rest } : {}),
         signal,
         agentName:
           typeof context.agent_name === "string" ? context.agent_name : null,
@@ -1348,6 +1381,7 @@ export function InputBox({
           typeof context.model_name === "string" ? context.model_name : null,
       });
       if (
+        lifetime?.scope.signal.aborted ||
         !isCurrentGoalRequest(compactRequestStateRef.current, request, threadId)
       ) {
         return;
@@ -1371,6 +1405,7 @@ export function InputBox({
       }
     } catch (error) {
       if (
+        lifetime?.scope.signal.aborted ||
         isAbortError(error) ||
         !isCurrentGoalRequest(compactRequestStateRef.current, request, threadId)
       ) {
@@ -1385,6 +1420,7 @@ export function InputBox({
   }, [
     context.agent_name,
     context.model_name,
+    lifetime,
     queryClient,
     t.inputBox.compactFailed,
     t.inputBox.compactSkipped,
@@ -1396,6 +1432,7 @@ export function InputBox({
 
   const submitThreadMessage = useCallback(
     (message: PromptInputMessage) => {
+      lifetime?.scope.signal.throwIfAborted();
       const files = message.files.flatMap((file) =>
         file.file instanceof File ? [file.file] : [],
       );
@@ -1528,17 +1565,18 @@ export function InputBox({
         // `onSent` never fires for a dropped send or a failed attachment
         // upload, so a retry keeps its quotes, references and staged files.
         onSent: () => {
+          if (lifetime?.scope.signal.aborted) return;
           if (composerLifetimeRef.current !== sendingLifetime) {
             // The upload finished after the composer moved to another
             // conversation or unmounted. Leave live state alone and retire
             // only what this send persisted, keeping anything a later
             // composer saved or staged since.
             retireSentComposerDraft(
-              getSessionComposerDraftStorage(),
+              scopedDraftStorage ?? getSessionComposerDraftStorage(),
               draftKey,
               sentDraftTexts,
             );
-            retireProjectAttachments(threadId, projectAttachments);
+            projectAttachmentStore.retire(threadId, projectAttachments);
             return;
           }
           setMentionQuery(null);
@@ -1552,7 +1590,10 @@ export function InputBox({
             pendingDraftSubmissionRef.current = null;
             latestDraftRef.current = null;
             invalidateDraftSaveTimer();
-            clearComposerDraft(getSessionComposerDraftStorage(), draftKey);
+            clearComposerDraft(
+              scopedDraftStorage ?? getSessionComposerDraftStorage(),
+              draftKey,
+            );
           }
           sidecar?.clearConversationQuotes(quoteIds);
           setConversationReferences([]);
@@ -1594,6 +1635,9 @@ export function InputBox({
       onContextChange,
       onSubmit,
       projectAttachments,
+      projectAttachmentStore,
+      scopedDraftStorage,
+      lifetime,
       setProjectAttachments,
       reportUploadLimitViolations,
       resolvedModelName,
@@ -1628,6 +1672,7 @@ export function InputBox({
 
   const handleSubmit = useCallback(
     async (message: PromptInputMessage) => {
+      lifetime?.scope.signal.throwIfAborted();
       if (mentionInFlight.current)
         return Promise.reject(new Error("Reference is loading"));
       if (status === "streaming") {
@@ -1698,6 +1743,7 @@ export function InputBox({
                 : new Error("thread preparation failed"),
             );
           }
+          lifetime?.scope.signal.throwIfAborted();
           if (goalRequestStateRef.current.sequence !== requestEpoch) {
             // Reject (not resolve) so PromptInput keeps the current
             // conversation's composer text untouched.
@@ -1710,6 +1756,7 @@ export function InputBox({
         setFollowupsHidden(false);
         setFollowupsLoading(false);
         const saved = await handleGoalCommand(submitAction.command);
+        if (lifetime?.scope.signal.aborted) return;
         // Only start a run when a goal was actually saved; status/clear never run.
         if (saved && submitAction.command.kind === "set") {
           return submitThreadMessage({
@@ -1733,6 +1780,7 @@ export function InputBox({
       canCreateRuns,
       handleCompactCommand,
       handleGoalCommand,
+      lifetime,
       onPrepareThread,
       projectAttachments.length,
       conversationReferences.length,
@@ -1885,6 +1933,7 @@ export function InputBox({
   }, []);
   const selectMention = useCallback(
     async (selection: MentionSelection) => {
+      if (lifetime?.scope.signal.aborted) return;
       if (mentionInFlight.current || disabled || polishingInput) return;
       const epoch = mentionEpoch.current;
       const originalText = textInput.value;
@@ -1987,13 +2036,28 @@ export function InputBox({
           setMentionError(null);
           try {
             await onPrepareThread?.();
-            if (epoch !== mentionEpoch.current) return;
-            const attached = await attachProjectDocument(
-              projectId,
-              selection.document.id,
-              threadId,
-            );
-            if (epoch !== mentionEpoch.current) return;
+            if (
+              lifetime?.scope.signal.aborted ||
+              epoch !== mentionEpoch.current
+            )
+              return;
+            const attached = lifetime
+              ? await attachProjectDocument(
+                  projectId,
+                  selection.document.id,
+                  threadId,
+                  { rest: lifetime.rest, signal: lifetime.scope.signal },
+                )
+              : await attachProjectDocument(
+                  projectId,
+                  selection.document.id,
+                  threadId,
+                );
+            if (
+              lifetime?.scope.signal.aborted ||
+              epoch !== mentionEpoch.current
+            )
+              return;
             setProjectAttachments((previous) => [
               ...previous.filter(
                 (file) => file.virtual_path !== attached.virtual_path,
@@ -2005,11 +2069,17 @@ export function InputBox({
               },
             ]);
           } catch {
-            if (epoch === mentionEpoch.current)
+            if (
+              !lifetime?.scope.signal.aborted &&
+              epoch === mentionEpoch.current
+            )
               setMentionError(t.inputBox.mentionAttachFailed);
             return;
           } finally {
-            if (epoch === mentionEpoch.current) {
+            if (
+              !lifetime?.scope.signal.aborted &&
+              epoch === mentionEpoch.current
+            ) {
               mentionInFlight.current = false;
               setMentionBusy(false);
             }
@@ -2034,9 +2104,10 @@ export function InputBox({
       ) {
         // A prepared new conversation now owns real files. Move its draft to
         // the durable identity before the page replaces /new with that ID.
-        const storage = getSessionComposerDraftStorage();
+        const storage = scopedDraftStorage ?? getSessionComposerDraftStorage();
         const nextKey = buildComposerDraftKey({
-          userId: user?.id ?? "anonymous",
+          userId: lifetime?.scope.actorUserId ?? user?.id ?? "anonymous",
+          ...(lifetime ? { workspaceId: lifetime.scope.workspaceId } : {}),
           agentName:
             draftAgentName ??
             (typeof context.agent_name === "string"
@@ -2076,6 +2147,8 @@ export function InputBox({
       onPrepareThread,
       polishingInput,
       projectAttachments,
+      scopedDraftStorage,
+      lifetime,
       projectId,
       setProjectAttachments,
       t,

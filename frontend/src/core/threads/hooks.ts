@@ -14,6 +14,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
+import { useWorkspaceLifetime } from "@/core/workspaces/context";
+import {
+  createWorkspaceRunStorage,
+  type WorkspaceRunStorage,
+} from "@/core/workspaces/run-storage";
 
 import { getAPIClient } from "../api";
 import { fetch } from "../api/fetcher";
@@ -42,6 +47,7 @@ import {
   patchThreadMetadata,
   searchThreadsByArchive,
   type ThreadMetadataPatch,
+  type ThreadRequestOptions,
 } from "./api";
 import {
   dedupeMessagesByIdentity,
@@ -333,28 +339,40 @@ function createActiveRunRejoinState(
   };
 }
 
-function readReconnectRun(threadId: string): string | null {
+function readReconnectRun(
+  threadId: string,
+  storage?: WorkspaceRunStorage,
+): string | null {
   try {
-    return window.sessionStorage.getItem(`lg:stream:${threadId}`);
+    return (storage ?? window.sessionStorage).getItem(`lg:stream:${threadId}`);
   } catch {
     return null;
   }
 }
 
-function rememberReconnectRun(threadId: string, runId: string): void {
+function rememberReconnectRun(
+  threadId: string,
+  runId: string,
+  storage?: WorkspaceRunStorage,
+): void {
   try {
-    window.sessionStorage.setItem(`lg:stream:${threadId}`, runId);
+    (storage ?? window.sessionStorage).setItem(`lg:stream:${threadId}`, runId);
   } catch {
     // The stream can still be joined, but SDK stop cannot cancel it without
     // the tab-local run pointer.
   }
 }
 
-function clearReconnectRun(threadId: string, runId: string): void {
+function clearReconnectRun(
+  threadId: string,
+  runId: string,
+  storage?: WorkspaceRunStorage,
+): void {
   try {
-    const key = `lg:stream:${threadId}`;
-    if (window.sessionStorage.getItem(key) === runId) {
-      window.sessionStorage.removeItem(key);
+    const key = `lg:stream:${threadId}` as const;
+    const target = storage ?? window.sessionStorage;
+    if (target.getItem(key) === runId) {
+      target.removeItem(key);
     }
   } catch {
     // Storage access is best-effort and must never block stream cleanup.
@@ -1892,6 +1910,15 @@ export function useThreadStream({
   onFinish,
 }: ThreadStreamOptions) {
   const { t } = useI18n();
+  const lifetime = useWorkspaceLifetime();
+  const apiClient = lifetime && !isMock ? lifetime.sdk : getAPIClient(isMock);
+  const runStorage = useMemo(
+    () =>
+      lifetime && !isMock
+        ? createWorkspaceRunStorage(lifetime.scope)
+        : undefined,
+    [lifetime, isMock],
+  );
   const currentViewThreadId = displayThreadId ?? threadId ?? null;
   const currentViewThreadIdRef = useRef(currentViewThreadId);
   currentViewThreadIdRef.current = currentViewThreadId;
@@ -2009,6 +2036,7 @@ export function useThreadStream({
 
   const scheduleActiveRunRejoinRetry = useCallback(
     (run: Pick<Run, "thread_id" | "run_id"> | undefined) => {
+      if (lifetime?.scope.signal.aborted) return;
       const rejoin = activeRunRejoinRef.current;
       // SDK 1.6.0 LGP joinStream errors include { thread_id, run_id }; history
       // errors omit it. Re-verify this callback contract when upgrading the SDK.
@@ -2016,12 +2044,12 @@ export function useThreadStream({
         run &&
         !rejoin.inFlight &&
         run.run_id !== submittedRunIdRef.current &&
-        readReconnectRun(run.thread_id) === run.run_id
+        readReconnectRun(run.thread_id, runStorage) === run.run_id
       ) {
         // The SDK's same-tab reconnect tries once and keeps its pointer on
         // error, so the recovery effect would keep deferring to a stream that
         // no longer exists. Release the pointer and let recovery take over.
-        clearReconnectRun(run.thread_id, run.run_id);
+        clearReconnectRun(run.thread_id, run.run_id, runStorage);
         setActiveRunRejoinRetry((current) => current + 1);
         return;
       }
@@ -2036,18 +2064,19 @@ export function useThreadStream({
       }
 
       rejoin.inFlight = false;
-      clearReconnectRun(rejoin.threadId, rejoin.runId);
+      clearReconnectRun(rejoin.threadId, rejoin.runId, runStorage);
       const retryDelay = ACTIVE_RUN_REJOIN_RETRY_DELAYS_MS[rejoin.attempts - 1];
       if (retryDelay === undefined) {
         return;
       }
 
       rejoin.retryTimer = setTimeout(() => {
+        if (lifetime?.scope.signal.aborted) return;
         rejoin.retryTimer = null;
         setActiveRunRejoinRetry((current) => current + 1);
       }, retryDelay);
     },
-    [],
+    [lifetime, runStorage],
   );
 
   const settleActiveRunRejoin = useCallback(() => {
@@ -2082,10 +2111,10 @@ export function useThreadStream({
   );
 
   const thread = useStream<AgentThreadState>({
-    client: getAPIClient(isMock),
+    client: apiClient,
     assistantId,
     threadId: onStreamThreadId,
-    reconnectOnMount: true,
+    reconnectOnMount: runStorage ? () => runStorage : true,
     fetchStateHistory: { limit: 1 },
     // Batch stream updates received in the same macrotask without adding a
     // fixed debounce interval that could delay a continuously active stream.
@@ -2095,6 +2124,7 @@ export function useThreadStream({
     // Keep explicit: SDK types claim @default true, but runtime uses throttle ?? false.
     throttle: true,
     onCreated(meta) {
+      if (lifetime?.scope.signal.aborted) return;
       submittedRunIdRef.current = meta.run_id;
       handleStreamStart(meta.thread_id, meta.run_id);
       const now = new Date().toISOString();
@@ -2125,14 +2155,15 @@ export function useThreadStream({
         interrupts: {},
       });
       if (context.agent_name && !isMock) {
-        void getAPIClient()
-          .threads.update(meta.thread_id, {
+        void apiClient.threads
+          .update(meta.thread_id, {
             metadata: { agent_name: context.agent_name },
           })
           .catch(() => ({}));
       }
     },
     onUpdateEvent(data, { mutate }) {
+      if (lifetime?.scope.signal.aborted) return;
       if (hasRenderedThreadStateUpdate(data)) {
         mutate((previous) => reduceThreadStateUpdates(previous, data) ?? {});
       }
@@ -2180,6 +2211,7 @@ export function useThreadStream({
       }
     },
     onCustomEvent(event: unknown) {
+      if (lifetime?.scope.signal.aborted) return;
       // Narrow `event.type` once; taskEventToSubtaskUpdate already validated the
       // task_* events, so the per-branch re-narrowing below reads this single
       // source of truth instead of re-checking the object shape each time.
@@ -2239,6 +2271,7 @@ export function useThreadStream({
       }
     },
     onError(error, run) {
+      if (lifetime?.scope.signal.aborted) return;
       scheduleActiveRunRejoinRetry(run);
       setOptimisticMessages([]);
       setOptimisticThreadId(null);
@@ -2262,6 +2295,7 @@ export function useThreadStream({
       }
     },
     onFinish(state, run) {
+      if (lifetime?.scope.signal.aborted) return;
       if (run) {
         completedRunIdsRef.current.add(run.run_id);
       }
@@ -2282,6 +2316,7 @@ export function useThreadStream({
   // sessionStorage. A reopened browser or a new tab has no pointer, so recover
   // the newest active run from the server and join its resumable SSE stream.
   useEffect(() => {
+    if (lifetime?.scope.signal.aborted) return;
     const resolvedThreadId = onStreamThreadId ?? null;
     const resolvedRunId = activeRunId ?? null;
     let rejoin = activeRunRejoinRef.current;
@@ -2294,7 +2329,7 @@ export function useThreadStream({
         clearTimeout(rejoin.retryTimer);
       }
       if (rejoin.attempts > 0 && rejoin.threadId && rejoin.runId) {
-        clearReconnectRun(rejoin.threadId, rejoin.runId);
+        clearReconnectRun(rejoin.threadId, rejoin.runId, runStorage);
       }
       rejoin = createActiveRunRejoinState(resolvedThreadId, resolvedRunId);
       activeRunRejoinRef.current = rejoin;
@@ -2316,13 +2351,13 @@ export function useThreadStream({
     // A matching pointer means the SDK's native same-tab reconnect owns this
     // run. Do not create a second SSE consumer; if that reconnect fails,
     // scheduleActiveRunRejoinRetry releases the pointer.
-    if (readReconnectRun(resolvedThreadId) === resolvedRunId) {
+    if (readReconnectRun(resolvedThreadId, runStorage) === resolvedRunId) {
       return;
     }
 
     rejoin.attempts += 1;
     rejoin.inFlight = true;
-    rememberReconnectRun(resolvedThreadId, resolvedRunId);
+    rememberReconnectRun(resolvedThreadId, resolvedRunId, runStorage);
     void joinStream(resolvedRunId);
   }, [
     activeRunId,
@@ -2330,6 +2365,8 @@ export function useThreadStream({
     isThreadLoading,
     joinStream,
     onStreamThreadId,
+    lifetime,
+    runStorage,
   ]);
 
   useEffect(
@@ -2342,11 +2379,11 @@ export function useThreadStream({
         clearTimeout(rejoin.retryTimer);
       }
       if (rejoin.attempts > 0 && rejoin.threadId && rejoin.runId) {
-        clearReconnectRun(rejoin.threadId, rejoin.runId);
+        clearReconnectRun(rejoin.threadId, rejoin.runId, runStorage);
       }
       activeRunRejoinRef.current = createActiveRunRejoinState();
     },
-    [onStreamThreadId],
+    [onStreamThreadId, runStorage],
   );
 
   const stopThread = useCallback(async () => {
@@ -2551,6 +2588,7 @@ export function useThreadStream({
       extraContext?: Record<string, unknown>,
       options?: SendMessageOptions,
     ) => {
+      lifetime?.scope.signal.throwIfAborted();
       if (sendInFlightRef.current) {
         return;
       }
@@ -2636,6 +2674,7 @@ export function useThreadStream({
       let uploadedFiles: FileInMessage[] = [];
 
       try {
+        lifetime?.scope.signal.throwIfAborted();
         // Upload files first if any
         if (message.files && message.files.length > 0) {
           setIsUploading(true);
@@ -2645,6 +2684,7 @@ export function useThreadStream({
             );
 
             const conversionResults = await Promise.all(filePromises);
+            lifetime?.scope.signal.throwIfAborted();
             const files = conversionResults.filter(
               (file): file is File => file !== null,
             );
@@ -2661,7 +2701,10 @@ export function useThreadStream({
             }
 
             if (files.length > 0) {
-              const uploadResponse = await uploadFiles(threadId, files);
+              const uploadResponse = lifetime
+                ? await uploadFiles(threadId, files, { rest: lifetime.rest })
+                : await uploadFiles(threadId, files);
+              lifetime?.scope.signal.throwIfAborted();
               uploadedFiles = uploadResponse.files.map((info) => ({
                 filename: info.filename,
                 size: info.size,
@@ -2692,7 +2735,7 @@ export function useThreadStream({
               error instanceof Error
                 ? error.message
                 : "Failed to upload files.";
-            toast.error(errorMessage);
+            if (!lifetime?.scope.signal.aborted) toast.error(errorMessage);
             setOptimisticMessages([]);
             setOptimisticThreadId(null);
             setLiveMessagesThreadId(null);
@@ -2705,7 +2748,9 @@ export function useThreadStream({
         // Attachments are uploaded, so the send is genuinely dispatched and
         // callers can drop one-time state. A failed upload rejected above
         // without reaching here, leaving that state for a retry.
+        lifetime?.scope.signal.throwIfAborted();
         options?.onSent?.();
+        lifetime?.scope.signal.throwIfAborted();
         await thread.submit(
           {
             messages: buildThreadSubmitMessages({
@@ -2733,6 +2778,7 @@ export function useThreadStream({
             }),
           },
         );
+        lifetime?.scope.signal.throwIfAborted();
         void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
         void queryClient.invalidateQueries({
           queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
@@ -2750,6 +2796,7 @@ export function useThreadStream({
     },
     [
       thread,
+      lifetime,
       t.uploads.uploadingFiles,
       context,
       queryClient,
@@ -2771,7 +2818,11 @@ export function useThreadStream({
       getSupersededMessageIds: (prepared: TPrepared) => string[];
       getOptimisticMessages?: (prepared: TPrepared) => Message[];
     }) => {
-      if (sendInFlightRef.current || !threadId) {
+      if (
+        lifetime?.scope.signal.aborted ||
+        sendInFlightRef.current ||
+        !threadId
+      ) {
         return false;
       }
       sendInFlightRef.current = true;
@@ -2809,6 +2860,7 @@ export function useThreadStream({
 
       try {
         const prepared = await prepare();
+        lifetime?.scope.signal.throwIfAborted();
         preparedSupersededRunId = prepared.target_run_id;
         preparedSupersededMessageIds = getSupersededMessageIds(prepared);
         prevHumanMsgCountRef.current = countHumanMessagesExcludingSuperseded(
@@ -2855,6 +2907,7 @@ export function useThreadStream({
           setOptimisticMessages(nextOptimisticMessages);
         }
 
+        lifetime?.scope.signal.throwIfAborted();
         await thread.submit(prepared.input, {
           threadId,
           checkpoint: prepared.checkpoint,
@@ -2869,6 +2922,7 @@ export function useThreadStream({
           // user attaches them again.
           context: buildRunContext({ settings: context, threadId }),
         });
+        lifetime?.scope.signal.throwIfAborted();
         void queryClient.invalidateQueries({ queryKey: ["thread", threadId] });
         void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
         void queryClient.invalidateQueries({
@@ -2882,6 +2936,7 @@ export function useThreadStream({
         });
         return true;
       } catch (error) {
+        if (lifetime?.scope.signal.aborted) return false;
         setOptimisticMessages([]);
         setOptimisticThreadId(null);
         setLiveMessagesThreadId(null);
@@ -2905,6 +2960,7 @@ export function useThreadStream({
     [
       context,
       humanMessageCount,
+      lifetime,
       persistedMessages,
       queryClient,
       thread,
@@ -2924,7 +2980,7 @@ export function useThreadStream({
       return submitPreparedReplay({
         threadId,
         prepare: async () => {
-          const response = await fetch(
+          const response = await (lifetime?.rest.fetch ?? fetch)(
             `${getBackendBaseURL()}/api/threads/${encodeURIComponent(
               threadId,
             )}/runs/regenerate/prepare`,
@@ -2937,15 +2993,20 @@ export function useThreadStream({
               body: JSON.stringify({ message_id: messageId }),
             },
           );
-          if (!response.ok) {
-            throw new Error(await readResponseErrorMessage(response));
-          }
-          return (await response.json()) as RegeneratePrepareResponse;
+          const read = async (response: Response) => {
+            if (!response.ok) {
+              throw new Error(await readResponseErrorMessage(response));
+            }
+            return (await response.json()) as RegeneratePrepareResponse;
+          };
+          return lifetime
+            ? lifetime.rest.consume(response, read)
+            : read(response);
         },
         getSupersededMessageIds: () => supersededMessageIds,
       });
     },
-    [submitPreparedReplay],
+    [lifetime, submitPreparedReplay],
   );
 
   const editAndRegenerateMessage = useCallback(
@@ -2961,7 +3022,7 @@ export function useThreadStream({
       return submitPreparedReplay<EditRegeneratePrepareResponse>({
         threadId,
         prepare: async () => {
-          const response = await fetch(
+          const response = await (lifetime?.rest.fetch ?? fetch)(
             `${getBackendBaseURL()}/api/threads/${encodeURIComponent(
               threadId,
             )}/runs/edit-regenerate/prepare`,
@@ -2977,11 +3038,15 @@ export function useThreadStream({
               }),
             },
           );
-          if (!response.ok) {
-            throw new Error(await readResponseErrorMessage(response));
-          }
-          const prepared =
-            (await response.json()) as EditRegeneratePrepareResponse;
+          const read = async (response: Response) => {
+            if (!response.ok) {
+              throw new Error(await readResponseErrorMessage(response));
+            }
+            return (await response.json()) as EditRegeneratePrepareResponse;
+          };
+          const prepared = await (lifetime
+            ? lifetime.rest.consume(response, read)
+            : read(response));
           if (!additionalKwargs || !Array.isArray(prepared.input.messages)) {
             return prepared;
           }
@@ -3004,7 +3069,7 @@ export function useThreadStream({
         getOptimisticMessages: (prepared) => prepared.input.messages ?? [],
       });
     },
-    [submitPreparedReplay],
+    [lifetime, submitPreparedReplay],
   );
 
   // Cache the latest thread messages in a ref to compare against incoming history messages for deduplication,
@@ -3221,6 +3286,7 @@ export function useThreadHistory(
   threadId: string,
   { enabled = true, pendingSupersededRunIds }: ThreadHistoryOptions = {},
 ) {
+  const lifetime = useWorkspaceLifetime();
   const historyQuery = useInfiniteQuery<
     ThreadMessagesPageResponse,
     Error,
@@ -3238,7 +3304,7 @@ export function useThreadHistory(
         threadId,
         pageParam ?? undefined,
       );
-      const response = await fetch(url, {
+      const response = await (lifetime?.rest.fetch ?? fetch)(url, {
         method: "GET",
         headers: {
           "Content-Type": "application/json",
@@ -3246,15 +3312,19 @@ export function useThreadHistory(
         credentials: "include",
         signal,
       });
-      if (!response.ok) {
-        throw new Error(
-          await readResponseErrorMessage(
-            response,
-            "Failed to load thread history.",
-          ),
-        );
-      }
-      return parseThreadMessagesPageResponse(await response.json());
+      const decode = async (response: Response) => {
+        if (!response.ok)
+          throw new Error(
+            await readResponseErrorMessage(
+              response,
+              "Failed to load thread history.",
+            ),
+          );
+        return parseThreadMessagesPageResponse(await response.json());
+      };
+      return lifetime
+        ? lifetime.rest.consume(response, decode)
+        : decode(response);
     },
     getNextPageParam: getThreadHistoryNextPageParam,
   });
@@ -3304,11 +3374,11 @@ export function useThreadHistory(
   }, [messageRows, pendingSupersededRunIds]);
 
   useEffect(() => {
-    if (historyQuery.error) {
+    if (historyQuery.error && !lifetime?.scope.signal.aborted) {
       console.error(historyQuery.error);
       toast.error("Failed to load thread history.");
     }
-  }, [historyQuery.error]);
+  }, [historyQuery.error, lifetime]);
 
   return {
     messages,
@@ -3321,9 +3391,17 @@ export function useThreadHistory(
 export function useThreads(
   params: ThreadSearchParams = DEFAULT_THREAD_SEARCH_PARAMS,
 ) {
-  const apiClient = getAPIClient();
+  const lifetime = useWorkspaceLifetime();
+  const apiClient = lifetime?.sdk ?? getAPIClient();
+  const options = buildThreadsSearchQueryOptions(apiClient, params);
   return useQuery<AgentThread[]>({
-    ...buildThreadsSearchQueryOptions(apiClient, params),
+    ...options,
+    queryFn: async () => {
+      lifetime?.scope.signal.throwIfAborted();
+      const rows = await options.queryFn();
+      lifetime?.scope.signal.throwIfAborted();
+      return rows;
+    },
   });
 }
 
@@ -3368,7 +3446,13 @@ export async function fetchInfiniteThreadsPage(
   params: InfiniteThreadsParams,
   pageParam: number,
   pageSize: number = INFINITE_THREADS_PAGE_SIZE,
+  options?: ThreadRequestOptions,
 ): Promise<AgentThread[]> {
+  options?.signal?.throwIfAborted();
+  const archiveSearch = options
+    ? (params: Parameters<typeof searchThreadsByArchive>[0]) =>
+        searchThreadsByArchive(params, options)
+    : searchThreadsByArchive;
   const threads: AgentThread[] = [];
   let offset = pageParam;
   let nextPageParam: number | undefined;
@@ -3382,7 +3466,7 @@ export async function fetchInfiniteThreadsPage(
             limit: currentLimit,
             offset,
           })) as AgentThread[])
-        : await searchThreadsByArchive({
+        : await archiveSearch({
             ...params,
             archived: params.archived,
             metadata: params.metadata ?? undefined,
@@ -3390,6 +3474,7 @@ export async function fetchInfiniteThreadsPage(
             offset,
           });
 
+    options?.signal?.throwIfAborted();
     threads.push(...filterThreadSearchResults(response, params));
     offset += response.length;
 
@@ -3549,7 +3634,8 @@ export function useInfiniteThreads(
   },
   { enabled = true }: { enabled?: boolean } = {},
 ) {
-  const apiClient = getAPIClient();
+  const lifetime = useWorkspaceLifetime();
+  const apiClient = lifetime?.sdk ?? getAPIClient();
   return useInfiniteQuery<
     AgentThread[],
     Error,
@@ -3559,13 +3645,28 @@ export function useInfiniteThreads(
   >({
     queryKey: [...INFINITE_THREADS_QUERY_KEY_PREFIX, params],
     initialPageParam: 0,
-    queryFn: async ({ pageParam }) =>
-      fetchInfiniteThreadsPage(
-        apiClient,
-        params,
-        pageParam,
-        INFINITE_THREADS_PAGE_SIZE,
-      ),
+    queryFn: async ({ pageParam, signal }) => {
+      lifetime?.scope.signal.throwIfAborted();
+      const rows = lifetime
+        ? await fetchInfiniteThreadsPage(
+            apiClient,
+            params,
+            pageParam,
+            INFINITE_THREADS_PAGE_SIZE,
+            {
+              rest: lifetime.rest,
+              signal: AbortSignal.any([signal, lifetime.scope.signal]),
+            },
+          )
+        : await fetchInfiniteThreadsPage(
+            apiClient,
+            params,
+            pageParam,
+            INFINITE_THREADS_PAGE_SIZE,
+          );
+      lifetime?.scope.signal.throwIfAborted();
+      return rows;
+    },
     getNextPageParam: (lastPage, allPages) =>
       getInfiniteThreadsNextPageParam(lastPage, allPages),
     refetchOnWindowFocus: false,
@@ -3577,7 +3678,8 @@ export function useThreadRuns(
   threadId?: string,
   { enabled = true }: { enabled?: boolean } = {},
 ) {
-  const apiClient = getAPIClient();
+  const lifetime = useWorkspaceLifetime();
+  const apiClient = lifetime?.sdk ?? getAPIClient();
   return useQuery<Run[]>({
     queryKey: ["thread", threadId],
     queryFn: async () => {
@@ -3585,6 +3687,7 @@ export function useThreadRuns(
         return [];
       }
       const response = await apiClient.runs.list(threadId);
+      lifetime?.scope.signal.throwIfAborted();
       return response;
     },
     enabled: enabled && Boolean(threadId),
@@ -3600,7 +3703,8 @@ export function useThreadMetadata(
     isMock = false,
   }: { enabled?: boolean; isMock?: boolean } = {},
 ) {
-  const apiClient = getAPIClient(isMock);
+  const lifetime = useWorkspaceLifetime();
+  const apiClient = lifetime && !isMock ? lifetime.sdk : getAPIClient(isMock);
   return useQuery<AgentThread | null>({
     queryKey: ["thread", "metadata", threadId, isMock],
     queryFn: async () => {
@@ -3609,8 +3713,10 @@ export function useThreadMetadata(
       }
       try {
         const response = await apiClient.threads.get(threadId);
+        lifetime?.scope.signal.throwIfAborted();
         return response as AgentThread;
       } catch (error) {
+        lifetime?.scope.signal.throwIfAborted();
         if (isThreadMissingError(error)) {
           return null;
         }
@@ -3627,13 +3733,16 @@ export function useThreadTokenUsage(
   threadId?: string | null,
   { enabled = true }: { enabled?: boolean } = {},
 ) {
+  const lifetime = useWorkspaceLifetime();
   return useQuery<ThreadTokenUsageResponse | null>({
     queryKey: threadTokenUsageQueryKey(threadId),
     queryFn: async () => {
       if (!threadId) {
         return null;
       }
-      return fetchThreadTokenUsage(threadId);
+      return lifetime
+        ? fetchThreadTokenUsage(threadId, { rest: lifetime.rest })
+        : fetchThreadTokenUsage(threadId);
     },
     enabled: enabled && Boolean(threadId),
     retry: false,
@@ -3646,6 +3755,7 @@ export function useThreadTokenUsage(
 }
 
 export function useBranchThread() {
+  const lifetime = useWorkspaceLifetime();
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async ({
@@ -3658,8 +3768,16 @@ export function useBranchThread() {
       messageId: string;
       messageIds?: string[];
       title?: string;
-    }) => branchThreadFromTurn(threadId, { messageId, messageIds, title }),
+    }) =>
+      lifetime
+        ? branchThreadFromTurn(
+            threadId,
+            { messageId, messageIds, title },
+            { rest: lifetime.rest, signal: lifetime.scope.signal },
+          )
+        : branchThreadFromTurn(threadId, { messageId, messageIds, title }),
     onSuccess(response, { threadId }) {
+      lifetime?.scope.signal.throwIfAborted();
       void queryClient.invalidateQueries({
         queryKey: ["thread", "metadata", response.thread_id],
       });
@@ -3675,6 +3793,7 @@ export function useBranchThread() {
 }
 
 export function usePinThread() {
+  const lifetime = useWorkspaceLifetime();
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async ({
@@ -3683,16 +3802,23 @@ export function usePinThread() {
     }: {
       threadId: string;
       pinned: boolean;
-    }) =>
-      patchThreadMetadata(threadId, {
-        [THREAD_PINNED_METADATA_KEY]: pinned,
-      }),
+    }) => {
+      const metadata = { [THREAD_PINNED_METADATA_KEY]: pinned };
+      return lifetime
+        ? patchThreadMetadata(threadId, metadata, {
+            rest: lifetime.rest,
+            signal: lifetime.scope.signal,
+          })
+        : patchThreadMetadata(threadId, metadata);
+    },
     onSuccess(_response, { threadId, pinned }) {
+      lifetime?.scope.signal.throwIfAborted();
       setThreadMetadataInCaches(queryClient, threadId, {
         [THREAD_PINNED_METADATA_KEY]: pinned,
       });
     },
     onSettled() {
+      if (lifetime?.scope.signal.aborted) return;
       void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
       void queryClient.invalidateQueries({
         queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
@@ -3714,6 +3840,7 @@ export function useMoveThreadToProject(options?: {
     variables: { threadId: string; projectId: string | null },
   ) => void;
 }) {
+  const lifetime = useWorkspaceLifetime();
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async ({
@@ -3722,24 +3849,36 @@ export function useMoveThreadToProject(options?: {
     }: {
       threadId: string;
       projectId: string | null;
-    }) => moveThreadToProject(threadId, projectId),
+    }) =>
+      lifetime
+        ? moveThreadToProject(threadId, projectId, {
+            rest: lifetime.rest,
+            signal: lifetime.scope.signal,
+          })
+        : moveThreadToProject(threadId, projectId),
     // Hook-level error handler: survives the caller's dropdown unmounting,
     // unlike a per-mutate `onError` passed from inside a closing menu.
-    onError: options?.onError,
+    onError: (error, variables) => {
+      if (!lifetime?.scope.signal.aborted) options?.onError?.(error, variables);
+    },
     async onSuccess(_response, { threadId, projectId }) {
+      lifetime?.scope.signal.throwIfAborted();
       // An older GET must not overwrite the confirmed affiliation. Match all
       // metadata variants, including an initial read with no cached snapshot.
       await queryClient.cancelQueries({
         queryKey: ["thread", "metadata", threadId],
       });
+      lifetime?.scope.signal.throwIfAborted();
       setThreadMetadataInCaches(queryClient, threadId, {
         [THREAD_PROJECT_METADATA_KEY]: projectId,
       });
       await queryClient.invalidateQueries({
         queryKey: ["thread", "metadata", threadId],
       });
+      lifetime?.scope.signal.throwIfAborted();
     },
     onSettled() {
+      if (lifetime?.scope.signal.aborted) return;
       void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
       void queryClient.invalidateQueries({
         queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
@@ -3754,42 +3893,56 @@ export function useMoveThreadToProject(options?: {
 }
 
 export function useRunDetail(threadId: string, runId: string) {
-  const apiClient = getAPIClient();
+  const lifetime = useWorkspaceLifetime();
+  const apiClient = lifetime?.sdk ?? getAPIClient();
   return useQuery<Run>({
     queryKey: ["thread", threadId, "run", runId],
     queryFn: async () => {
       const response = await apiClient.runs.get(threadId, runId);
+      lifetime?.scope.signal.throwIfAborted();
       return response;
     },
     refetchOnWindowFocus: false,
   });
 }
 
-async function deleteLocalThreadData(threadId: string) {
-  const response = await fetch(
+async function deleteLocalThreadData(
+  threadId: string,
+  options?: ThreadRequestOptions,
+) {
+  const response = await (options?.rest.fetch ?? fetch)(
     `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}`,
     {
       method: "DELETE",
+      ...(options?.signal ? { signal: options.signal } : {}),
     },
   );
 
-  // A 404 means the thread is already gone — the desired end state. The prior
-  // `apiClient.threads.delete` call hits the same gateway handler (nginx
-  // rewrites /api/langgraph/threads/* to /api/threads/*) and removes the
-  // thread_meta row, so this second delete's ownership guard 404s. Treat it as
-  // success to keep the delete idempotent.
-  if (!response.ok && response.status !== 404) {
-    const error = await response
-      .json()
-      .catch(() => ({ detail: "Failed to delete local thread data." }));
-    throw new Error(error.detail ?? "Failed to delete local thread data.");
-  }
+  const decode = async (response: Response) => {
+    // A 404 is idempotent success. In the native unscoped compatibility path,
+    // the preceding SDK delete can already have removed the metadata row.
+    // Scoped callers use this canonical Gateway endpoint only once.
+    if (!response.ok && response.status !== 404) {
+      const error = await response
+        .json()
+        .catch(() => ({ detail: "Failed to delete local thread data." }));
+      throw new Error(error.detail ?? "Failed to delete local thread data.");
+    }
+  };
+  return options ? options.rest.consume(response, decode) : decode(response);
 }
 
 async function deleteThreadEverywhere(
   apiClient: ThreadDeleteClient,
   threadId: string,
+  options?: ThreadRequestOptions,
 ) {
+  if (options) {
+    // The scoped Gateway is the canonical owner of metadata, Run and file
+    // cleanup. Avoid a second fresh DELETE after SDK deletion of the same ID.
+    await deleteLocalThreadData(threadId, options);
+    return;
+  }
   try {
     await apiClient.threads.delete(threadId);
   } catch (error) {
@@ -3803,7 +3956,9 @@ async function deleteThreadEverywhere(
 export async function findSidecarThreadIdsForParent(
   apiClient: ThreadSidecarSearchClient,
   parentThreadId: string,
+  signal?: AbortSignal,
 ) {
+  signal?.throwIfAborted();
   const threadIds: string[] = [];
   const limit = 100;
   let offset = 0;
@@ -3821,6 +3976,7 @@ export async function findSidecarThreadIdsForParent(
       select: ["thread_id", "metadata"],
     });
 
+    signal?.throwIfAborted();
     for (const thread of response) {
       if (
         isSidecarThread(thread) &&
@@ -3842,14 +3998,17 @@ export async function findSidecarThreadIdsForParent(
 async function deleteSidecarThreadsForParent(
   apiClient: ThreadDeleteClient,
   parentThreadId: string,
+  options?: ThreadRequestOptions,
 ) {
   let sidecarThreadIds: string[];
   try {
     sidecarThreadIds = await findSidecarThreadIdsForParent(
       apiClient,
       parentThreadId,
+      options?.signal,
     );
   } catch (err) {
+    options?.signal?.throwIfAborted();
     console.warn(
       `Failed to look up sidecar threads for parent ${parentThreadId}; skipping cascade cleanup. Orphaned sidecar threads may remain.`,
       err,
@@ -3857,12 +4016,14 @@ async function deleteSidecarThreadsForParent(
     return [];
   }
 
+  options?.signal?.throwIfAborted();
   const results = await Promise.allSettled(
     sidecarThreadIds.map((threadId) =>
-      deleteThreadEverywhere(apiClient, threadId),
+      deleteThreadEverywhere(apiClient, threadId, options),
     ),
   );
 
+  options?.signal?.throwIfAborted();
   const failedDeletions = results
     .map((result, index) =>
       result.status === "rejected"
@@ -3886,8 +4047,9 @@ async function deleteSidecarThreadsForParent(
 }
 
 export function useDeleteThread() {
+  const lifetime = useWorkspaceLifetime();
   const queryClient = useQueryClient();
-  const apiClient = getAPIClient() as ThreadDeleteClient;
+  const apiClient = (lifetime?.sdk ?? getAPIClient()) as ThreadDeleteClient;
   return useMutation({
     mutationFn: async ({
       threadId,
@@ -3896,15 +4058,23 @@ export function useDeleteThread() {
       threadId: string;
       onDeleted?: () => void;
     }) => {
+      lifetime?.scope.signal.throwIfAborted();
+      const options = lifetime
+        ? { rest: lifetime.rest, signal: lifetime.scope.signal }
+        : undefined;
       const deletedSidecarThreadIds = await deleteSidecarThreadsForParent(
         apiClient,
         threadId,
+        options,
       );
-      await deleteThreadEverywhere(apiClient, threadId);
+      lifetime?.scope.signal.throwIfAborted();
+      await deleteThreadEverywhere(apiClient, threadId, options);
+      lifetime?.scope.signal.throwIfAborted();
       onDeleted?.();
       return deletedSidecarThreadIds;
     },
     onSuccess(deletedSidecarThreadIds, { threadId }) {
+      lifetime?.scope.signal.throwIfAborted();
       const deletedThreadIds = new Set([threadId, ...deletedSidecarThreadIds]);
       queryClient.setQueriesData(
         {
@@ -3932,6 +4102,7 @@ export function useDeleteThread() {
     },
 
     onSettled() {
+      if (lifetime?.scope.signal.aborted) return;
       void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
       void queryClient.invalidateQueries({
         queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
@@ -3946,8 +4117,9 @@ export function useDeleteThread() {
 }
 
 export function useRenameThread() {
+  const lifetime = useWorkspaceLifetime();
   const queryClient = useQueryClient();
-  const apiClient = getAPIClient();
+  const apiClient = lifetime?.sdk ?? getAPIClient();
   return useMutation({
     mutationFn: async ({
       threadId,
@@ -3956,11 +4128,14 @@ export function useRenameThread() {
       threadId: string;
       title: string;
     }) => {
+      lifetime?.scope.signal.throwIfAborted();
       await apiClient.threads.updateState(threadId, {
         values: { title },
       });
+      lifetime?.scope.signal.throwIfAborted();
     },
     async onSuccess(_, { threadId, title }) {
+      lifetime?.scope.signal.throwIfAborted();
       const filters: QueryFilters[] = Object.values(
         getThreadSnapshotCacheFilters(threadId),
       );
@@ -3969,6 +4144,7 @@ export function useRenameThread() {
       await Promise.all(
         filters.map((filter) => queryClient.cancelQueries(filter)),
       );
+      lifetime?.scope.signal.throwIfAborted();
       setThreadTitleInCaches(queryClient, threadId, title);
       for (const filter of filters) {
         void queryClient.invalidateQueries(filter);

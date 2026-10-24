@@ -324,11 +324,33 @@ class ScheduledTaskService:
         origin_thread_id = getattr(task, "origin_thread_id", None)
         if not isinstance(origin_thread_id, str) or not origin_thread_id:
             return
-        if await session.scalar(_origin_thread_share_lock(origin_thread_id)) is None:
+        native_identity = {}
+        workspace_id = getattr(task, "workspace_id", None)
+        if workspace_id is not None:
+            from deerflow.persistence.scheduled_task_runs.scope import captured_context
+            from deerflow.persistence.thread_meta.sql import ThreadMetaRepository
+
+            context = captured_context(task)
+            parent = await session.scalar(ThreadMetaRepository._owned_scope(select(ThreadMetaRow).where(ThreadMetaRow.thread_id == origin_thread_id, ThreadMetaRow.incarnation == task.origin_thread_incarnation), task.user_id, context))
+            if parent is None:
+                return
+            native_identity = {"workspace_context": context, "thread_incarnation": task.origin_thread_incarnation}
+        elif await session.scalar(_origin_thread_share_lock(origin_thread_id)) is None:
             return
         now = _event_time(task, occurrence)
         anchor = lifecycle_anchor(task, occurrence, now=now)
-        after_run_id = await session.scalar(select(RunRow.run_id).where(RunRow.thread_id == origin_thread_id, RunRow.operation_kind == "run").order_by(RunRow.created_at.desc(), RunRow.run_id.desc()).limit(1))
+        after_run_id = await session.scalar(
+            select(RunRow.run_id)
+            .where(
+                RunRow.thread_id == origin_thread_id,
+                RunRow.operation_kind == "run",
+                RunRow.workspace_id.is_(None) if workspace_id is None else RunRow.workspace_id == workspace_id,
+                RunRow.user_id == task.user_id,
+                RunRow.thread_incarnation.is_(None) if workspace_id is None else RunRow.thread_incarnation == task.origin_thread_incarnation,
+            )
+            .order_by(RunRow.created_at.desc(), RunRow.run_id.desc())
+            .limit(1)
+        )
         run_number = None
         if occurrence is not None:
             value = await session.scalar(select(run_number_expression(ScheduledTaskRunRow)).where(ScheduledTaskRunRow.id == occurrence.id))
@@ -338,6 +360,7 @@ class ScheduledTaskService:
             await ScheduledTaskEventRepository.record_in_session(
                 session,
                 user_id=task.user_id,
+                **native_identity,
                 task_id=task.id,
                 thread_id=origin_thread_id,
                 occurrence_id=occurrence.id if occurrence is not None else None,
@@ -357,6 +380,10 @@ class ScheduledTaskService:
         without proactive push get no row. Plain manual trials reach here
         without run events and send nothing; interrupted runs have no event.
         """
+        if getattr(task, "workspace_id", None) is not None:
+            # Existing channel bindings have no workspace authority. Do not
+            # fan a private scheduled result out to every binding of the user.
+            return
         now = _event_time(task, occurrence)
         selected = _notice_event(task, occurrence, events, now=now)
         if selected is None:
@@ -466,12 +493,52 @@ class ScheduledTaskService:
             return "paused"
         return "enabled"
 
-    async def dispatch_task(
+    async def dispatch_task(self, task, *, now, trigger, worker_target=None, expected_token_version=None):
+        if not getattr(self._task_repo, "workspace_scope_required", False):
+            return await self._dispatch_task_in_workspace(task, now=now, trigger=trigger)
+        from deerflow.persistence.workspaces.sql import WorkspaceAccessDenied
+
+        if trigger == "manual":
+            from deerflow.authz.workspace import get_current_workspace
+
+            manual_context = get_current_workspace()
+            if manual_context is None or manual_context.actor_user_id != task.get("user_id"):
+                raise WorkspaceAccessDenied("Manual Scheduler requires current resource identity")
+            accepted = await self._task_repo.validate_manual_task(
+                task["id"], user_id=task["user_id"], expected_status=task.get("status"), expected_updated_at=task.get("updated_at"), worker_target=worker_target, expected_token_version=expected_token_version
+            )
+            if not accepted:
+                return {"outcome": "not_found", "task_run_id": None, "run_id": None, "thread_id": None, "error": "Scheduled task not found"}
+            # Preserve the caller's exact confirmation for final SQL CAS;
+            # get_internal must never silently replace status/updated_at.
+            return await self._dispatch_task_in_workspace(task, now=now, trigger=trigger, manual_context=manual_context, worker_target=worker_target, expected_token_version=expected_token_version)
+        if trigger != "scheduled" or worker_target is not None or expected_token_version is not None:
+            raise WorkspaceAccessDenied("Scheduler dispatch source differs")
+        return await self._run_in_original_workspace(task["id"], lambda canonical: self._dispatch_task_in_workspace(canonical, now=now, trigger=trigger))
+
+    async def _run_in_original_workspace(self, task_id, operation):
+        from deerflow.authz.workspace import WorkspaceContext, reset_current_workspace, set_current_workspace
+        from deerflow.persistence.workspaces.sql import WorkspaceAccessDenied
+
+        canonical = await self._task_repo.get_internal(task_id)
+        if canonical is None:
+            raise WorkspaceAccessDenied("Scheduled original task is unavailable")
+        context = WorkspaceContext(**canonical["workspace_context_json"])
+        token = set_current_workspace(context)
+        try:
+            return await operation(canonical)
+        finally:
+            reset_current_workspace(token)
+
+    async def _dispatch_task_in_workspace(
         self,
         task: dict[str, Any],
         *,
         now: datetime,
         trigger: str,
+        manual_context=None,
+        worker_target=None,
+        expected_token_version=None,
     ) -> dict[str, Any]:
         end_check = getattr(self._task_repo, "complete_if_ended", None)
         if trigger == "scheduled" and callable(end_check) and await end_check(task["id"], user_id=task.get("user_id"), now=now):
@@ -535,6 +602,7 @@ class ScheduledTaskService:
                 expected_task_updated_at=task.get("updated_at") if trigger == "manual" else None,
                 expected_task_lease_owner=self._lease_owner if trigger == "scheduled" else None,
                 release_task_lease_status="enabled" if trigger == "scheduled" else None,
+                **({"manual_context": manual_context, "worker_target": worker_target, "expected_token_version": expected_token_version} if manual_context is not None else {}),
             )
         except ActiveScheduledRunConflict:
             active = await self._task_run_repo.get_active_run(task["id"])
@@ -583,7 +651,12 @@ class ScheduledTaskService:
             status=status,
         )
 
-    async def _attempt_queued_run(
+    async def _attempt_queued_run(self, task, queued, *, now):
+        if getattr(self._task_repo, "workspace_scope_required", False):
+            return await self._run_in_original_workspace(task["id"], lambda canonical: self._attempt_queued_run_in_workspace(canonical, queued, now=now))
+        return await self._attempt_queued_run_in_workspace(task, queued, now=now)
+
+    async def _attempt_queued_run_in_workspace(
         self,
         task: dict[str, Any],
         queued: dict[str, Any],
@@ -647,6 +720,11 @@ class ScheduledTaskService:
                 if previous is not None and previous.get("thread_id") != execution_thread_id:
                     metadata["scheduled_previous_thread_id"] = previous["thread_id"]
             origin, title = await self._launch_provenance(task, queued, now=now)
+            launch_fence = {}
+            if getattr(self._task_run_repo, "workspace_scope_required", False):
+                from deerflow.persistence.scheduled_task_runs.scope import ScheduledAdmissionReceipt
+
+                launch_fence["scheduled_admission"] = ScheduledAdmissionReceipt(task["id"], task_run_id, self._lease_owner, claimed["attempt_count"])
             result = await self._launch_run(
                 thread_id=execution_thread_id,
                 assistant_id=task.get("assistant_id"),
@@ -655,6 +733,7 @@ class ScheduledTaskService:
                 metadata=metadata,
                 origin=origin,
                 title=title,
+                **launch_fence,
             )
             launch_succeeded = True
             launched_run_id = result["run_id"]
@@ -694,6 +773,14 @@ class ScheduledTaskService:
                 "error": None,
             }
         except Exception as exc:
+            from deerflow.persistence.workspaces.sql import WorkspaceAccessDenied
+
+            if getattr(self._task_run_repo, "workspace_scope_required", False) and not launch_succeeded and isinstance(exc, WorkspaceAccessDenied):
+                # Admission may have lost its lease or authority, including an
+                # unknown commit outcome. Preserve SQL ownership/accounting;
+                # legacy failure settlement cannot prove that no Run exists.
+                logger.warning("Scoped scheduled task-run %s admission was fenced; preserving recovery-owned state", task_run_id)
+                return self._queued_result(task_run_id, execution_thread_id, error="Scheduled admission unavailable; state retained")
             if not launch_succeeded and self._is_overlap_conflict(exc):
                 await self._task_run_repo.requeue_claimed_run(
                     task_run_id,
@@ -1034,6 +1121,13 @@ class ScheduledTaskService:
     async def _reconcile_active_state(self, *, now: datetime) -> None:
         error = _LEASE_RECOVERY_ERROR
         try:
+            # Original revoke receipts have control authority only. Keep their
+            # locators out of the live checked/valid business source sets.
+            retire = getattr(self._task_run_repo, "retire_revoked_control_occurrences", None)
+            if getattr(self._task_run_repo, "workspace_scope_required", False) and retire is not None:
+                retired_sources = await retire(now=now)
+                if retired_sources and self._dependency_wait_reconciler is not None:
+                    await self._dependency_wait_reconciler(retired_sources)
             dependency_kwargs = {}
             if self._dependency_wait_reconciler is not None:
                 checked = await self._task_run_repo.dependency_wait_sources()

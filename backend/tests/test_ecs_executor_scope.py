@@ -190,3 +190,33 @@ def test_ambient_runtime_retains_native_incarnation_metadata_guard(monkeypatch):
     with pytest.raises(ToolException, match="trusted execution scope"):
         asyncio.run(graph.ainvoke(state, config={"metadata": {"thread_incarnation": "stale-generation"}}, context=context))
     handler.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_scoped_submit_uses_original_runtime_identity_and_cannot_downgrade(monkeypatch):
+    from dataclasses import asdict
+
+    from ecs_executor.scope import SCOPE_HEADER
+
+    from deerflow.authz.workspace import WorkspaceContext, reset_current_workspace, set_current_workspace
+
+    original = WorkspaceContext("22222222-2222-2222-2222-222222222222", "alice", 2, 3)
+    other = WorkspaceContext("33333333-3333-3333-3333-333333333333", "alice", 4, 5)
+    interceptor, _ = _builder(monkeypatch)
+    handler = AsyncMock(return_value="ok")
+    token = set_current_workspace(other)
+    try:
+        context = {**CONTEXT, **asdict(original), "workspace_context": original}
+        await interceptor(MCPToolCallRequest(name="submit", args=ARGS, server_name="ecs", runtime=SimpleNamespace(context=context)), handler)
+        signed = handler.call_args.args[0].headers[SCOPE_HEADER]
+        claims = _verify(signed, expected_workspace_context=original)
+        assert claims["version"] == 2 and claims["workspace_context"] == asdict(original)
+        with pytest.raises(ValueError, match="workspace"):
+            _verify(signed)  # a receiver without tenant authorization cannot accept it
+        for invalid in ({**CONTEXT}, {**context, "workspace_context": asdict(original)}, {**context, "workspace_context": None}):
+            denied = AsyncMock()
+            with pytest.raises(ToolException, match="trusted execution scope"):
+                await interceptor(MCPToolCallRequest(name="submit", args=ARGS, server_name="ecs", runtime=SimpleNamespace(context=invalid)), denied)
+            denied.assert_not_called()
+    finally:
+        reset_current_workspace(token)

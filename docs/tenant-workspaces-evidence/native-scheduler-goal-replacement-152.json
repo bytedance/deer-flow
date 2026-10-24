@@ -1,0 +1,52 @@
+{
+  "build": 152,
+  "queue": 1112,
+  "phase": "m4-native-scheduler-goal-replacement-20261018-40",
+  "result": "SUCCESS",
+  "duration_ms": 40030,
+  "pytest": "1 passed in 21.57s",
+  "ruff": "All checks passed; 67 files already formatted",
+  "source_sha256": "9bafe092f822a6442d85448904837032221928715fb409f3d38246a68c0d7bb1",
+  "pipeline_sha256": "abe0c9535c745e4c48b1bace9858e722caf6087e9d5b000b55ad7f0907f4ad3e",
+  "source_archive_exact_match": {
+    "backend/tests/test_workspace_native_dependencies.py": "ad10b805cf1ec2c4f576ff18d9636ba540a02bd6b58bd084e92a609c8765f873",
+    "scripts/render_tenant_run_control_pipeline.py": "6eeedf72cdd451902cae16a8eb5764c7ff2d732505937385a7963994397c21e0"
+  },
+  "approved_test_patch_sha256": "f5d8c336c3177ea26e84712d406747611159d2a42e68a0b6b0c7b4a57bfc7a0f",
+  "production_unchanged_base": "3119eddf3",
+  "log_path": "/private/tmp/m4-native-scheduler-goal-replacement-20261018-40.log",
+  "log_sha256": "624898f75d320fa9758f95563d3533a38b40d82c0ce828d87508564d820270c5",
+  "cleanup_path": "/private/tmp/native-scheduler-goal-replacement-build152-cleanup.json",
+  "scope": "One PostgreSQL real JWT goal PUT with ambient UI-other after installed scheduled C1 dependency wait and no-sandbox STOP/report. Existing native path settles occurrence interrupted/once task cancelled without changing canonical C1, counts, new goal or normal Run/C job identities. Repeat is first-terminal. Actual late deterministic MCP result retained; old notification dead-lettered with notified_version0 and no continuation. No product changes, no physical B/AIO proof. Member-revoked/unknown wait settlement remains unverified.",
+  "job": "deerflow-tenant-execution-m4-sql",
+  "cleanup": {
+    "build": 152,
+    "read_only": true,
+    "cleanup": [
+      {
+        "kind": "container",
+        "name": "deerflow-tenant-execution-m4-sql-152",
+        "exit": 1,
+        "stderr": "Error response from daemon: No such container: deerflow-tenant-execution-m4-sql-152"
+      },
+      {
+        "kind": "container",
+        "name": "deerflow-tenant-execution-m4-sql-152-db",
+        "exit": 1,
+        "stderr": "Error response from daemon: No such container: deerflow-tenant-execution-m4-sql-152-db"
+      },
+      {
+        "kind": "network",
+        "name": "deerflow-tenant-execution-m4-sql-152",
+        "exit": 1,
+        "stderr": "Error response from daemon: network deerflow-tenant-execution-m4-sql-152 not found"
+      }
+    ]
+  },
+  "root_review": "Root reviewed final single-story test diff including actual late notification, independently read live terminal, SHA-verified archive and byte-matched both changed source files, checked exact resources absent and no backend/app or backend/packages product diff from 3119eddf3.",
+  "limits": [
+    "Live original-scope target replacement only; member-revoked/private-parent-retired and unknown receipts remain separate control/recovery requirements.",
+    "Actual native goal/JWT/CSRF/SQL/MCP notification paths, deterministic graph/remote IO; no physical B/AIO/provider/two-host claim. Other selectors were not rerun.",
+    "No product code changes, deployment/push/local runtime or tenant activation. Full M0-M11 remains open."
+  ]
+}

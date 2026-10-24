@@ -436,3 +436,16 @@ and revoked before host shutdown; PAT/internal grants remain unsupported.
 Unstamped internal launches receive no handle and must still start normally.
 Action/tool dispatch scopes handles to each registered plugin namespace for
 idempotency isolation; request-resolved handles use `for_plugin` explicitly.
+
+Native invocation admission is host policy outside extension error isolation.
+core_ordering_constraints keeps WorkspaceExecutionMiddleware outside native
+model/tool error handling, receipt and IO-related wrappers. It is not a system
+model observer: observer failures remain observational and cannot grant or revoke
+execution. The private worker guard checks fresh native SQL before invocation.
+HostModelInvoker retains shielded provider tasks by service budget AND registers
+actual work with the native caller's private Run guard. Recheck at entry and after
+the concurrency queue; preserve GraphBubbleUp instead of normalizing native STOP.
+Construction and invocation drain actual work after cancellation; caller return
+alone does not release its native lifetime. Per-Run cleanup must not drain a shared
+service's unrelated runs. Direct model transports/non-Run entrypoints and remote C
+still need their own proof; service shutdown is not physical STOP.

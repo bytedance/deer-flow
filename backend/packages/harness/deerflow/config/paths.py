@@ -337,6 +337,14 @@ class Paths:
             ValueError: If `thread_id` or `user_id` contains unsafe characters (path
                         separators or `..`) that could cause directory traversal.
         """
+        from deerflow.authz.workspace import get_current_workspace
+
+        context = get_current_workspace()
+        if context is not None:
+            owner = context.actor_user_id if user_id is None else user_id
+            if owner != context.actor_user_id:
+                raise ValueError("Workspace actor does not match thread path owner")
+            return extended_length_path(self.base_dir / "workspaces" / context.workspace_id / "users" / _validate_user_id(owner) / "threads" / _validate_thread_id(thread_id))
         if user_id is not None:
             return self.user_dir(user_id) / "threads" / _validate_thread_id(thread_id)
         return self.base_dir / "threads" / _validate_thread_id(thread_id)
@@ -366,7 +374,15 @@ class Paths:
         return self.thread_dir(thread_id, user_id=user_id) / "user-data" / "outputs"
 
     def user_projects_dir(self, user_id: str) -> Path:
-        """Host path root for one user's project shelves: ``users/{user_id}/projects/``."""
+        """Project root in the trusted workspace; legacy calls use the user root."""
+        _validate_user_id(user_id)
+        from deerflow.authz.workspace import get_current_workspace
+
+        context = get_current_workspace()
+        if context is not None:
+            if context.actor_user_id != user_id:
+                raise ValueError("Workspace actor does not match project path owner")
+            return extended_length_path(self.base_dir / "workspaces" / context.workspace_id / "projects")
         return extended_length_path(self.user_dir(user_id) / "projects")
 
     def user_project_dir(self, user_id: str, project_id: str) -> Path:
@@ -423,6 +439,14 @@ class Paths:
 
     def host_thread_dir(self, thread_id: str, *, user_id: str | None = None) -> str:
         """Host path for a thread directory, preserving Windows path syntax."""
+        from deerflow.authz.workspace import get_current_workspace
+
+        context = get_current_workspace()
+        if context is not None:
+            owner = context.actor_user_id if user_id is None else user_id
+            if owner != context.actor_user_id:
+                raise ValueError("Workspace actor does not match host thread path owner")
+            return _join_host_path(self._host_base_dir_str(), "workspaces", context.workspace_id, "users", _validate_user_id(owner), "threads", _validate_thread_id(thread_id))
         if user_id is not None:
             return _join_host_path(self._host_base_dir_str(), "users", _validate_user_id(user_id), "threads", _validate_thread_id(thread_id))
         return _join_host_path(self._host_base_dir_str(), "threads", _validate_thread_id(thread_id))

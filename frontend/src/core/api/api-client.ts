@@ -13,6 +13,13 @@ import {
   staticDemoThreadState,
 } from "../threads/static-demo";
 import type { AgentThreadState } from "../threads/types";
+import {
+  captureWorkspaceRequestScope,
+  createWorkspaceFetch,
+  guardWorkspaceStream,
+  prepareWorkspaceRequest,
+  type WorkspaceRequestScope,
+} from "../workspaces/request-scope";
 
 import { isStateChangingMethod, readCsrfCookie } from "./fetcher";
 import { forceChatRunStreamOptions } from "./stream-mode";
@@ -304,13 +311,22 @@ async function getReconnectRun(
   }
 }
 
+export function reconnectRunStorageKey(
+  threadId: string,
+  workspaceScope?: WorkspaceRequestScope | null,
+): string {
+  if (!workspaceScope) return `lg:stream:${threadId}`;
+  return `lg:stream:workspace:${encodeURIComponent(workspaceScope.actorUserId)}:${workspaceScope.workspaceId}:${encodeURIComponent(threadId)}`;
+}
+
 export function clearReconnectRun(
   threadId: string | null | undefined,
   runId: string,
+  workspaceScope?: WorkspaceRequestScope | null,
 ): void {
   if (typeof window === "undefined" || !threadId) return;
 
-  const key = `lg:stream:${threadId}`;
+  const key = reconnectRunStorageKey(threadId, workspaceScope);
   try {
     const storage = window.sessionStorage;
     if (storage.getItem(key) === runId) {
@@ -324,11 +340,15 @@ export function clearReconnectRun(
 function rememberReconnectRun(
   threadId: string | null | undefined,
   runId: string,
+  workspaceScope?: WorkspaceRequestScope | null,
 ): void {
   if (typeof window === "undefined" || !threadId) return;
 
   try {
-    window.sessionStorage.setItem(`lg:stream:${threadId}`, runId);
+    window.sessionStorage.setItem(
+      reconnectRunStorageKey(threadId, workspaceScope),
+      runId,
+    );
   } catch {
     // Ignore storage access failures so gap recovery remains usable.
   }
@@ -342,7 +362,9 @@ async function* recoverStreamReplayGaps({
   resume,
   signal,
   reconnectRun,
+  workspaceScope,
 }: {
+  workspaceScope?: WorkspaceRequestScope | null;
   client: LangGraphClient;
   threadId: string | null | undefined;
   expectedRunId: () => string | undefined;
@@ -383,7 +405,7 @@ async function* recoverStreamReplayGaps({
     // normal finish. Surface a custom control event to DeerFlow's hook, reload
     // durable values, then resume after the retained tail when it exists
     // (or rejoin without a cursor if the buffer is empty).
-    clearReconnectRun(threadId, runId);
+    clearReconnectRun(threadId, runId, workspaceScope);
     yield {
       event: "custom",
       data: { type: "stream_replay_gap", ...gap },
@@ -417,7 +439,7 @@ async function* recoverStreamReplayGaps({
       };
     }
 
-    rememberReconnectRun(threadId, runId);
+    rememberReconnectRun(threadId, runId, workspaceScope);
     stream = resume(runId, gap.latest_available_event_id ?? undefined);
   }
 }
@@ -426,17 +448,19 @@ async function* handleInactiveRunStream({
   threadId,
   expectedRunId,
   stream,
+  workspaceScope,
 }: {
   threadId: string | null | undefined;
   expectedRunId: () => string | undefined;
   stream: AsyncIterable<StreamPart>;
+  workspaceScope?: WorkspaceRequestScope | null;
 }): AsyncGenerator<StreamPart> {
   try {
     yield* stream;
   } catch (error) {
     const runId = expectedRunId();
     if (runId && isInactiveRunStreamError(error)) {
-      clearReconnectRun(threadId, runId);
+      clearReconnectRun(threadId, runId, workspaceScope);
       return;
     }
     throw error;
@@ -451,22 +475,50 @@ class StreamRecoveryClient extends RunsClient {
   }
 }
 
-function createCompatibleClient(isMock?: boolean): LangGraphClient {
+function bindWorkspaceSignal(
+  workspaceScope: WorkspaceRequestScope,
+  callerSignal?: AbortSignal,
+): AbortSignal {
+  return callerSignal && callerSignal !== workspaceScope.signal
+    ? AbortSignal.any([workspaceScope.signal, callerSignal])
+    : workspaceScope.signal;
+}
+
+function createCompatibleClient(
+  isMock?: boolean,
+  workspaceScope?: WorkspaceRequestScope,
+): LangGraphClient {
   if (isStaticWebsiteOnly() && !isMock) {
     return createStaticClient();
   }
 
   const apiUrl = getLangGraphBaseURL(isMock);
+  const workspaceFetch = workspaceScope
+    ? createWorkspaceFetch(workspaceScope, apiUrl)
+    : undefined;
+  const onRequest = workspaceScope
+    ? (url: URL, init: RequestInit) =>
+        prepareWorkspaceRequest(
+          workspaceScope,
+          apiUrl,
+          url,
+          injectCsrfHeader(url, init),
+        )
+    : injectCsrfHeader;
   const client = new LangGraphClient({
     apiUrl,
-    onRequest: injectCsrfHeader,
+    onRequest,
+    ...(workspaceFetch ? { callerOptions: { fetch: workspaceFetch } } : {}),
   });
 
   // Creating a run is not idempotent. Retrying an ambiguous gateway failure
   // can create the same run more than once after the backend accepted the
   // original request. The SDK also uses this client's transport for recovery
   // GETs, which must retain normal HTTP retries (including transient 5xx).
-  const streamRecoveryClient = new StreamRecoveryClient({ apiUrl });
+  const streamRecoveryClient = new StreamRecoveryClient({
+    apiUrl,
+    ...(workspaceFetch ? { callerOptions: { fetch: workspaceFetch } } : {}),
+  });
   const runCreationClient = new RunsClient({
     apiUrl,
     callerOptions: {
@@ -474,9 +526,11 @@ function createCompatibleClient(isMock?: boolean): LangGraphClient {
       fetch: (...args: Parameters<typeof fetch>) =>
         args[1]?.method === "GET"
           ? streamRecoveryClient.fetchWithRetries(...args)
-          : fetch(...args),
+          : workspaceFetch
+            ? workspaceFetch(...args)
+            : fetch(...args),
     },
-    onRequest: injectCsrfHeader,
+    onRequest,
   });
   const originalRunStream = runCreationClient.stream.bind(runCreationClient);
   const originalJoinStream = client.runs.joinStream.bind(client.runs);
@@ -484,18 +538,29 @@ function createCompatibleClient(isMock?: boolean): LangGraphClient {
   // this return value with `for await`, so run creation still starts on first
   // iteration rather than when `runs.stream()` is called.
   client.runs.stream = async function* (threadId, assistantId, payload) {
-    const sanitizedPayload = forceChatRunStreamOptions(payload);
+    const sanitizedPayload = workspaceScope
+      ? {
+          ...forceChatRunStreamOptions(payload),
+          onDisconnect: "continue" as const,
+          signal: bindWorkspaceSignal(
+            workspaceScope,
+            streamOptionSignal(payload),
+          ),
+        }
+      : forceChatRunStreamOptions(payload);
     const originalOnRunCreated = sanitizedPayload?.onRunCreated;
     let runId: string | undefined;
     const initialStream = originalRunStream(threadId, assistantId, {
       ...sanitizedPayload,
       onRunCreated(meta) {
+        workspaceScope?.signal.throwIfAborted();
         runId = meta.run_id;
         originalOnRunCreated?.(meta);
       },
     });
 
     const recoveredStream = recoverStreamReplayGaps({
+      workspaceScope,
       client,
       threadId,
       expectedRunId: () => runId,
@@ -514,6 +579,7 @@ function createCompatibleClient(isMock?: boolean): LangGraphClient {
       },
     });
     yield* handleInactiveRunStream({
+      workspaceScope,
       threadId,
       expectedRunId: () => runId,
       stream: recoveredStream,
@@ -532,7 +598,7 @@ function createCompatibleClient(isMock?: boolean): LangGraphClient {
         // doesn't surface as an unhandled rejection, and clear the now-stale
         // reconnect key. clearReconnectRun only removes the key when it still
         // matches this runId, so a newer run's key is never touched.
-        clearReconnectRun(threadId, runId);
+        clearReconnectRun(threadId, runId, workspaceScope);
         return;
       }
       throw error;
@@ -544,12 +610,14 @@ function createCompatibleClient(isMock?: boolean): LangGraphClient {
     // reload after the backend's stream bridge is reaped blocks forever on a
     // drained condition variable, pinning ``isLoading`` true so the first
     // post-reload message is routed to ``stop`` instead of ``submit``.
-    const reconnectSignal = streamOptionSignal(options);
+    const reconnectSignal = workspaceScope
+      ? bindWorkspaceSignal(workspaceScope, streamOptionSignal(options))
+      : streamOptionSignal(options);
     const reconnectRun = threadId
       ? await getReconnectRun(client, threadId, runId, reconnectSignal)
       : undefined;
     if (reconnectRun && TERMINAL_RUN_STATUSES.has(reconnectRun.status)) {
-      clearReconnectRun(threadId, runId);
+      clearReconnectRun(threadId, runId, workspaceScope);
       return;
     }
     if (threadId && reconnectRun) {
@@ -569,11 +637,15 @@ function createCompatibleClient(isMock?: boolean): LangGraphClient {
         yield { event: "values", data: reconnectSnapshot };
       }
     }
-    const sanitizedOptions = forceChatRunStreamOptions(options);
+    const sanitizedOptions = workspaceScope
+      ? { ...forceChatRunStreamOptions(options), signal: reconnectSignal }
+      : forceChatRunStreamOptions(options);
     yield* handleInactiveRunStream({
+      workspaceScope,
       threadId,
       expectedRunId: () => runId,
       stream: recoverStreamReplayGaps({
+        workspaceScope,
         client,
         threadId,
         expectedRunId: () => runId,
@@ -589,6 +661,20 @@ function createCompatibleClient(isMock?: boolean): LangGraphClient {
     });
   } as typeof client.runs.joinStream;
 
+  if (workspaceScope) {
+    const stream = client.runs.stream.bind(client.runs);
+    const joinStream = client.runs.joinStream.bind(client.runs);
+    client.runs.stream = ((...args: Parameters<typeof stream>) =>
+      guardWorkspaceStream(
+        workspaceScope,
+        stream(...args),
+      )) as typeof client.runs.stream;
+    client.runs.joinStream = ((...args: Parameters<typeof joinStream>) =>
+      guardWorkspaceStream(
+        workspaceScope,
+        joinStream(...args),
+      )) as typeof client.runs.joinStream;
+  }
   return client;
 }
 
@@ -631,7 +717,35 @@ function createStaticClient(): LangGraphClient {
 }
 
 const _clients = new Map<string, LangGraphClient>();
-export function getAPIClient(isMock?: boolean): LangGraphClient {
+const _workspaceClients = new WeakMap<
+  WorkspaceRequestScope,
+  { snapshot: WorkspaceRequestScope; client: LangGraphClient }
+>();
+export function getAPIClient(
+  isMock?: boolean,
+  workspaceScope?: WorkspaceRequestScope | null,
+): LangGraphClient {
+  if (workspaceScope) {
+    if (isMock || isStaticWebsiteOnly())
+      throw new Error("Workspace clients are unavailable in demo mode");
+    const entry = _workspaceClients.get(workspaceScope);
+    if (entry) {
+      if (
+        entry.snapshot.workspaceId !== workspaceScope.workspaceId ||
+        entry.snapshot.actorUserId !== workspaceScope.actorUserId ||
+        entry.snapshot.signal !== workspaceScope.signal
+      ) {
+        throw new Error(
+          "Workspace lifetime metadata changed; create a fresh scope",
+        );
+      }
+      return entry.client;
+    }
+    const snapshot = captureWorkspaceRequestScope(workspaceScope);
+    const client = createCompatibleClient(false, snapshot);
+    _workspaceClients.set(workspaceScope, { snapshot, client });
+    return client;
+  }
   const cacheKey = isMock ? "mock" : "default";
   let client = _clients.get(cacheKey);
 

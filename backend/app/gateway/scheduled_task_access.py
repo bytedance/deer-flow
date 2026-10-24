@@ -21,14 +21,18 @@ from zoneinfo import ZoneInfo
 from fastapi import HTTPException, Request
 
 from app.gateway.auth_disabled import AUTH_DISABLED_USER_ID, AUTH_SOURCE_AUTH_DISABLED, AUTH_SOURCE_INTERNAL, AUTH_SOURCE_SESSION, get_auth_disabled_user, is_auth_disabled
-from app.gateway.authz import resolve_route_permissions
+from app.gateway.authz import AuthContext, resolve_route_permissions
 from app.gateway.deps import get_config, get_local_provider, get_scheduled_task_repo, get_scheduled_task_run_repo, get_scheduled_task_service, get_thread_store
 from app.gateway.internal_auth import INTERNAL_SYSTEM_ROLE
 from app.gateway.scheduled_task_errors import active_occurrence_error, repository_error, scheduler_error, tool_error_payload
 from app.gateway.scheduled_task_validation import prepare_resume_updates, validate_scheduled_task_create, validate_scheduled_task_update
 from app.scheduler.service import TASK_CHANGED_ERROR
 from deerflow.agents.interaction_policy import RunInteractionMode, RunInteractionPolicy
+from deerflow.authz.workspace import WorkspaceContext, get_current_workspace, reset_current_workspace, set_current_workspace
 from deerflow.persistence.scheduled_tasks import ActiveScheduledTaskMutationConflict
+from deerflow.persistence.workspaces.run_control import NativeRunStopTarget
+from deerflow.runtime import RunRecord
+from deerflow.runtime.invocation import WorkerInvocationDenied, WorkerInvocationGuard, get_invocation_guard
 from deerflow.scheduler import host_notes
 from deerflow.scheduler.runtime import SchedulerCapabilityMode, SchedulerRunCapability, scheduler_tools_enabled
 
@@ -311,6 +315,94 @@ async def _owner(owner_id: str, token_version: int, *, auth_disabled_owner: bool
     return user
 
 
+SCHEDULER_ORIGIN_KEY = "scheduler_origin"
+_SCHEDULER_ORIGIN_FIELDS = frozenset({"version", "source", "actor_user_id", "token_version", "permission_ceiling"})
+
+
+def capture_scheduler_origin(request, *, user_id, app_config):
+    """Freeze only the original authenticated session, never caller JSON or fresh role IO."""
+    context = get_current_workspace()
+    state = getattr(request, "state", None)
+    auth, user = getattr(state, "auth", None), getattr(state, "user", None)
+    if not scheduler_tools_enabled(app_config) or type(context) is not WorkspaceContext or getattr(state, "auth_source", None) != AUTH_SOURCE_SESSION:
+        return None
+    if not isinstance(auth, AuthContext) or not auth.is_authenticated or user is None:
+        return None
+    actor = str(auth.user.id)
+    if actor != str(user.id) or actor != user_id or actor != context.actor_user_id:
+        return None
+    version = getattr(auth.user, "token_version", None)
+    if type(version) is not int or version < 0 or getattr(user, "token_version", None) != version:
+        return None
+    permissions = auth.permissions
+    if type(permissions) is not list or any(type(value) is not str or not value for value in permissions):
+        return None
+    return {"version": 1, "source": AUTH_SOURCE_SESSION, "actor_user_id": actor, "token_version": version, "permission_ceiling": sorted(set(permissions))}
+
+
+@dataclass(frozen=True, repr=False)
+class _SchedulerOrigin:
+    token_version: int
+    permission_ceiling: frozenset[str]
+
+    @classmethod
+    def from_record(cls, record):
+        if type(record) is not RunRecord or type(record.kwargs) is not dict:
+            return None
+        value = record.kwargs.get(SCHEDULER_ORIGIN_KEY)
+        if type(value) is not dict or value.keys() != _SCHEDULER_ORIGIN_FIELDS:
+            return None
+        if type(value["version"]) is not int or value["version"] != 1 or value["source"] != AUTH_SOURCE_SESSION or type(value["actor_user_id"]) is not str or value["actor_user_id"] != record.user_id:
+            return None
+        version, permissions = value["token_version"], value["permission_ceiling"]
+        if type(version) is not int or version < 0 or type(permissions) is not list or any(type(permission) is not str or not permission for permission in permissions):
+            return None
+        if permissions != sorted(set(permissions)):
+            return None
+        return cls(version, frozenset(permissions))
+
+
+@dataclass(frozen=True, repr=False)
+class _SchedulerRunBinding:
+    """Original server Run identity only; the actual worker guard grants IO."""
+
+    workspace_context: WorkspaceContext
+    user_id: str
+    run_id: str
+    thread_id: str
+    thread_incarnation: str
+    created_at: str
+
+    @classmethod
+    def capture(cls, record, *, owner_id, run_id, thread_id):
+        if type(record) is not RunRecord or type(record.workspace_context) is not WorkspaceContext:
+            raise ValueError("Scheduler scope requires its admitted native Run")
+        context = record.workspace_context
+        if record.user_id != owner_id or context.actor_user_id != owner_id or record.workspace_id != context.workspace_id or record.run_id != run_id or record.thread_id != thread_id:
+            raise ValueError("Scheduler Run identity differs")
+        if not isinstance(record.thread_incarnation, str) or not record.thread_incarnation:
+            raise ValueError("Scheduler Run parent is unavailable")
+        created = datetime.fromisoformat(record.created_at)
+        if created.tzinfo is None:
+            raise ValueError("Scheduler Run creation time is unavailable")
+        return cls(context, owner_id, run_id, thread_id, record.thread_incarnation, created.astimezone(UTC).isoformat())
+
+    async def check(self):
+        guard = get_invocation_guard()
+        target = guard.target if type(guard) is WorkerInvocationGuard else None
+        if type(target) is not NativeRunStopTarget or (target.workspace_context, target.user_id, target.run_id, target.thread_id, target.thread_incarnation, target.created_at) != (
+            self.workspace_context,
+            self.user_id,
+            self.run_id,
+            self.thread_id,
+            self.thread_incarnation,
+            self.created_at,
+        ):
+            raise WorkerInvocationDenied("Scheduler list requires its original live native worker")
+        await guard.check()
+        return guard
+
+
 @dataclass(frozen=True, repr=False)
 class _SchedulerCapability:
     mode: SchedulerCapabilityMode
@@ -334,6 +426,7 @@ class _SchedulerCapability:
     _display: str = "text"
     # The browser timezone sent with this turn; only new tasks default to it.
     _client_timezone: str | None = None
+    _run_binding: _SchedulerRunBinding | None = None
 
     async def _require(self, permissions: frozenset[str], *, check_origin: bool = True) -> None:
         if not scheduler_tools_enabled(await asyncio.to_thread(get_config)):
@@ -358,7 +451,10 @@ class _SchedulerCapability:
             raise scheduler_error(404, "task_not_found", "Scheduled task not found")
         if task.get("origin_thread_id") != self._origin_thread_id:
             # Re-queried on every call, never cached in the grant.
-            run_task_ids = await self._task_run_repo.task_ids_for_thread(self._origin_thread_id, user_id=self._owner_id) if self._origin_thread_id else []
+            if self._run_binding is not None:
+                run_task_ids = [value["id"] for value in await self._task_repo.list_manageable_from_thread(self._owner_id, self._origin_thread_id)] if self._origin_thread_id else []
+            else:
+                run_task_ids = await self._task_run_repo.task_ids_for_thread(self._origin_thread_id, user_id=self._owner_id) if self._origin_thread_id else []
             if task_id not in run_task_ids:
                 raise scheduler_error(404, "task_not_found", "Scheduled task not found")
         return task
@@ -380,6 +476,23 @@ class _SchedulerCapability:
         return {"action": action, "display": self._display, **values}
 
     async def manage(self, *, action: str, request: dict[str, Any]) -> dict[str, Any]:
+        if self._run_binding is None:
+            if getattr(self._task_repo, "workspace_scope_required", False) or get_current_workspace() is not None:
+                raise WorkerInvocationDenied("Scoped Scheduler calls require their original native Run binding")
+            return await self._manage(action=action, request=request)
+        guard = await self._run_binding.check()
+        token = set_current_workspace(self._run_binding.workspace_context)
+        try:
+            if action not in {"list", "create", "update", "pause", "resume", "delete", "note", "trial"}:
+                result = tool_error_payload(scheduler_error(503, "scheduler_scoped_management_unavailable", "Scoped schedule management requires its native integration"))
+            else:
+                result = await self._manage(action=action, request=request, worker_target=guard.target if action != "list" else None)
+            await guard.check()
+            return result
+        finally:
+            reset_current_workspace(token)
+
+    async def _manage(self, *, action: str, request: dict[str, Any], worker_target: NativeRunStopTarget | None = None) -> dict[str, Any]:
         try:
             if self.mode != "interactive":
                 raise scheduler_error(403, "interactive_run_required", "Schedule management requires an interactive run")
@@ -389,11 +502,11 @@ class _SchedulerCapability:
             if not isinstance(request, dict):
                 raise scheduler_error(422, "unsupported_fields", "Unsupported scheduled task fields")
             if action == "create":
-                return await self._create(request)
+                return await self._create(request, worker_target=worker_target)
             if action == "update":
-                return await self._update(request)
+                return await self._update(request, worker_target=worker_target)
             if action == "resume":
-                return await self._resume(request)
+                return await self._resume(request, worker_target=worker_target)
             allowed = {"task_id", "note"} if action == "note" else {"task_id"} if action != "list" else set()
             if request.keys() - allowed:
                 raise scheduler_error(422, "unsupported_fields", "Unsupported scheduled task fields")
@@ -401,10 +514,10 @@ class _SchedulerCapability:
                 return await self._list()
             task = await self._task(request.get("task_id"))
             if action == "note":
-                return await self._note(task, request.get("note"))
+                return await self._note(task, request.get("note"), worker_target=worker_target)
             if action == "trial":
-                return await self._trial(task)
-            return await self._pause_or_delete(action, task)
+                return await self._trial(task, worker_target=worker_target)
+            return await self._pause_or_delete(action, task, worker_target=worker_target)
         except HTTPException as exc:
             return tool_error_payload(exc)
         except (ActiveScheduledTaskMutationConflict, ValueError) as exc:
@@ -434,7 +547,7 @@ class _SchedulerCapability:
             return "UTC", "not_needed"
         raise _with_now_local(_timezone_required(), None)
 
-    async def _create(self, request: dict[str, Any]) -> dict[str, Any]:
+    async def _create(self, request: dict[str, Any], *, worker_target: NativeRunStopTarget | None = None) -> dict[str, Any]:
         from app.gateway.routers.scheduled_tasks import ScheduledTaskCreateRequest, resolve_scheduled_task_assistant_id
 
         if request.keys() - _CREATE_FIELDS:
@@ -460,12 +573,19 @@ class _SchedulerCapability:
             )
         except HTTPException as exc:
             raise _with_now_local(exc, timezone) from None
-        task = await self._task_repo.create(task_id=f"task-{uuid.uuid4().hex}", user_id=self._owner_id, origin_thread_id=self._origin_thread_id, standing_notes=None, **definition)
+        task = await self._task_repo.create(
+            task_id=f"task-{uuid.uuid4().hex}",
+            user_id=self._owner_id,
+            origin_thread_id=self._origin_thread_id,
+            standing_notes=None,
+            **({"worker_target": worker_target, "expected_token_version": self._token_version} if worker_target is not None else {}),
+            **definition,
+        )
         browser = self._client_timezone if timezone_source == "explicit" and self._client_timezone and self._client_timezone != timezone else None
         view = _task_view(task, used=0, active_run_status=None, timezone_source=timezone_source, browser_timezone=browser)
         return self._result("create", task=view, now_local=_now_local(timezone))
 
-    async def _update(self, request: dict[str, Any]) -> dict[str, Any]:
+    async def _update(self, request: dict[str, Any], *, worker_target: NativeRunStopTarget | None = None) -> dict[str, Any]:
         from app.gateway.routers.scheduled_tasks import ScheduledTaskUpdateRequest, resolve_scheduled_task_assistant_id
 
         if request.keys() - _UPDATE_FIELDS:
@@ -500,7 +620,7 @@ class _SchedulerCapability:
             )
         except HTTPException as exc:
             raise _with_now_local(exc, timezone) from None
-        updated = await self._task_repo.update(task["id"], user_id=self._owner_id, updates=updates, require_mutable=True)
+        updated = await self._task_repo.update(task["id"], user_id=self._owner_id, updates=updates, require_mutable=True, **self._worker_arguments(worker_target))
         if updated is None:
             raise scheduler_error(404, "task_not_found", "Scheduled task not found")
         source = "explicit" if explicit is not None else "saved"
@@ -508,7 +628,7 @@ class _SchedulerCapability:
         view = await self._view(updated, timezone_source=source, browser_timezone=browser)
         return self._result("update", task=view, now_local=_now_local(updated.get("timezone")))
 
-    async def _resume(self, request: dict[str, Any]) -> dict[str, Any]:
+    async def _resume(self, request: dict[str, Any], *, worker_target: NativeRunStopTarget | None = None) -> dict[str, Any]:
         from app.gateway.routers.scheduled_tasks import ScheduledTaskResumeRequest
 
         if request.keys() - _RESUME_FIELDS:
@@ -524,30 +644,32 @@ class _SchedulerCapability:
         try:
             renewal = ScheduledTaskResumeRequest(**fields).model_dump(include=set(fields))
             await self._ensure_mutable(task)
-            if task.get("status") == "enabled":
+            if task.get("status") == "enabled" and self._run_binding is None:
                 return self._result("resume", task=await self._view(task))
             used = (await self._task_repo.automatic_runs_used_for([task["id"]])).get(task["id"], 0)
             updates = await asyncio.to_thread(prepare_resume_updates, task, renewal, used=used, now=datetime.now(UTC))
+            if self._run_binding is not None:
+                updates.setdefault("status", "enabled")
         except HTTPException as exc:
             raise _with_now_local(exc, task.get("timezone")) from None
-        updated = await self._task_repo.update(task["id"], user_id=self._owner_id, updates=updates, require_mutable=True)
+        updated = await self._task_repo.update(task["id"], user_id=self._owner_id, updates=updates, require_mutable=True, **self._worker_arguments(worker_target))
         if updated is None:
             raise scheduler_error(404, "task_not_found", "Scheduled task not found")
         return self._result("resume", task=await self._view(updated))
 
-    async def _note(self, task: dict[str, Any], note: Any) -> dict[str, Any]:
+    async def _note(self, task: dict[str, Any], note: Any, *, worker_target: NativeRunStopTarget | None = None) -> dict[str, Any]:
         if not isinstance(note, str) or not note.strip() or len(note) > 500 or note not in self._original_user_text:
             raise scheduler_error(422, "note_not_verbatim", "A standing note must be the current user's explicit words verbatim, at most 500 characters")
         # _task() already authorized this task for the conversation.
-        updated = await self._task_repo.append_standing_note(task["id"], user_id=self._owner_id, note=note)
+        updated = await self._task_repo.append_standing_note(task["id"], user_id=self._owner_id, note=note, **self._worker_arguments(worker_target))
         if updated is None:
             raise scheduler_error(404, "task_not_found", "Scheduled task not found")
         return self._result("note", task=await self._view(updated))
 
-    async def _trial(self, task: dict[str, Any]) -> dict[str, Any]:
+    async def _trial(self, task: dict[str, Any], *, worker_target: NativeRunStopTarget | None = None) -> dict[str, Any]:
         if not _has_explicit_trial_request(self._original_user_text, task):
             raise scheduler_error(403, "trial_requires_direct_request", "A trial requires a direct request in the current user turn, such as 'Run this task now' or '先跑一次'; a task mention or bare confirmation is insufficient")
-        result = await self._service.dispatch_task(task, now=datetime.now(UTC), trigger="manual")
+        result = await self._service.dispatch_task(task, now=datetime.now(UTC), trigger="manual", **self._worker_arguments(worker_target))
         outcome = result.get("outcome")
         error = result.get("error") or "Scheduled task trial could not be dispatched"
         if outcome == "not_found":
@@ -561,14 +683,17 @@ class _SchedulerCapability:
         trial = {"outcome": outcome, "existing": bool(result.get("existing")), "thread_id": thread_id if isinstance(thread_id, str) else None}
         return self._result("trial", task=await self._view(current), trial=trial)
 
-    async def _pause_or_delete(self, action: str, task: dict[str, Any]) -> dict[str, Any]:
+    def _worker_arguments(self, target):
+        return {"worker_target": target, "expected_token_version": self._token_version} if target is not None else {}
+
+    async def _pause_or_delete(self, action: str, task: dict[str, Any], *, worker_target: NativeRunStopTarget | None = None) -> dict[str, Any]:
         task_id = task["id"]
         if action == "pause" and task.get("status") == "running":
             raise scheduler_error(409, "task_running", "Scheduled task is currently running; retry after the active execution finishes")
         if action == "pause":
-            outcome = await self._task_repo.pause_with_queue_cancellation(task_id, user_id=self._owner_id, error=host_notes.RUN_ERROR_PAUSED_WHILE_QUEUED, now=datetime.now(UTC))
+            outcome = await self._task_repo.pause_with_queue_cancellation(task_id, user_id=self._owner_id, error=host_notes.RUN_ERROR_PAUSED_WHILE_QUEUED, now=datetime.now(UTC), **self._worker_arguments(worker_target))
         else:
-            outcome = await self._task_repo.delete_with_queue_cancellation(task_id, user_id=self._owner_id, error=host_notes.RUN_ERROR_DELETED_WHILE_QUEUED, now=datetime.now(UTC))
+            outcome = await self._task_repo.delete_with_queue_cancellation(task_id, user_id=self._owner_id, error=host_notes.RUN_ERROR_DELETED_WHILE_QUEUED, now=datetime.now(UTC), **self._worker_arguments(worker_target))
         if outcome == "not_found":
             raise scheduler_error(404, "task_not_found", "Scheduled task not found")
         if outcome == "executing":
@@ -583,6 +708,10 @@ class _SchedulerCapability:
         return self._result("pause", task=await self._view(paused))
 
     async def stop_current_schedule(self) -> dict[str, Any]:
+        if self._run_binding is None and (getattr(self._task_repo, "workspace_scope_required", False) or get_current_workspace() is not None):
+            raise WorkerInvocationDenied("Scoped Scheduler calls require their original native Run binding")
+        if self._run_binding is not None:
+            return tool_error_payload(scheduler_error(503, "scheduler_scoped_stop_unavailable", "Scoped own-schedule stop requires its native integration"))
         try:
             if self.mode != "scheduled" or not self._task_id or not self._occurrence_id:
                 raise scheduler_error(403, "no_stop_authority", "This run has no own-schedule stop authority")
@@ -600,6 +729,36 @@ class _SchedulerCapability:
             return tool_error_payload(exc)
 
 
+@dataclass(frozen=True, repr=False)
+class _ScopedOwnStopCapability:
+    """Only the canonical occurrence's own deferred-stop control operation."""
+
+    _binding: _SchedulerRunBinding
+    _task_id: str
+    _occurrence_id: str
+    _occurrences: Any
+    mode: SchedulerCapabilityMode = "scheduled"
+
+    async def manage(self, *, action: str, request: dict[str, Any]):
+        return tool_error_payload(scheduler_error(403, "scheduled_control_only", "This run may only stop its own schedule"))
+
+    async def stop_current_schedule(self):
+        if not scheduler_tools_enabled(await asyncio.to_thread(get_config)):
+            return tool_error_payload(scheduler_error(503, "scheduler_tools_disabled", "Conversation schedule tools are disabled"))
+        guard = await self._binding.check()
+        token = set_current_workspace(self._binding.workspace_context)
+        try:
+            requested = await self._occurrences.request_stop(self._occurrence_id, task_id=self._task_id, run_id=self._binding.run_id, user_id=self._binding.user_id, worker_target=guard.target)
+            await guard.check()
+            if not requested:
+                return tool_error_payload(scheduler_error(409, "occurrence_not_active", "The scheduled occurrence is no longer active"))
+            return {"action": "stop", "stop_requested": True}
+        except ValueError as exc:
+            return tool_error_payload(repository_error(exc))
+        finally:
+            reset_current_workspace(token)
+
+
 async def prepare_scheduler_capability(
     request: Request,
     *,
@@ -611,6 +770,75 @@ async def prepare_scheduler_capability(
     interaction_policy: RunInteractionPolicy,
     scheduled_task_runtime: Mapping[str, Any] | None = None,
     client_timezone: str | None = None,
+    run_record: RunRecord | None = None,
+) -> SchedulerRunCapability | None:
+    """Capture only server admission; never reconstruct scope from request data."""
+    state = getattr(getattr(request, "app", None), "state", None)
+    scoped_repository = getattr(getattr(state, "scheduled_task_repo", None), "workspace_scope_required", False)
+    binding = None
+    if run_record is not None and getattr(run_record, "workspace_context", None) is not None:
+        try:
+            binding = _SchedulerRunBinding.capture(run_record, owner_id=str(user.id), run_id=run_id, thread_id=thread_id)
+        except (ValueError, TypeError, AttributeError):
+            return None
+    elif scoped_repository or get_current_workspace() is not None:
+        return None
+    if binding is not None and interaction_policy.mode is RunInteractionMode.SCHEDULED:
+        # This is SQL-bound lifecycle control, not original Session eligibility.
+        # Transport/runtime declarations alone never mint an own-stop grant.
+        if getattr(request.state, "auth_source", None) != AUTH_SOURCE_INTERNAL or not scheduler_tools_enabled(await asyncio.to_thread(get_config)):
+            return None
+        metadata = run_record.metadata
+        task_id, occurrence_id = metadata.get("scheduled_task_id"), metadata.get("scheduled_task_run_id")
+        if not isinstance(task_id, str) or not isinstance(occurrence_id, str):
+            return None
+        try:
+            occurrences = get_scheduled_task_run_repo(request)
+            if not getattr(occurrences, "workspace_scope_required", False):
+                return None
+            await occurrences.validate_own_stop(task_id=task_id, occurrence_id=occurrence_id, worker_target=NativeRunStopTarget.from_record(run_record))
+        except (HTTPException, ValueError):
+            return None
+        return _ScopedOwnStopCapability(binding, task_id, occurrence_id, occurrences)
+    origin = _SchedulerOrigin.from_record(run_record) if binding is not None else None
+    if binding is not None:
+        # Internal transport is not a session. Only the canonical admitted
+        # Run's persisted origin can preserve original session eligibility.
+        if origin is None or getattr(request.state, "auth_source", None) not in {AUTH_SOURCE_SESSION, AUTH_SOURCE_INTERNAL}:
+            return None
+    token = set_current_workspace(binding.workspace_context) if binding is not None else None
+    try:
+        return await _prepare_scheduler_capability(
+            request,
+            user=user,
+            thread_id=thread_id,
+            run_id=run_id,
+            assistant_id=assistant_id,
+            original_user_text=original_user_text,
+            interaction_policy=interaction_policy,
+            scheduled_task_runtime=scheduled_task_runtime,
+            client_timezone=client_timezone,
+            run_binding=binding,
+            admitted_origin=origin,
+        )
+    finally:
+        if token is not None:
+            reset_current_workspace(token)
+
+
+async def _prepare_scheduler_capability(
+    request: Request,
+    *,
+    user: Any,
+    thread_id: str,
+    run_id: str,
+    assistant_id: str,
+    original_user_text: str,
+    interaction_policy: RunInteractionPolicy,
+    scheduled_task_runtime: Mapping[str, Any] | None = None,
+    client_timezone: str | None = None,
+    run_binding: _SchedulerRunBinding | None = None,
+    admitted_origin: _SchedulerOrigin | None = None,
 ) -> SchedulerRunCapability | None:
     """Bind private host authority; do not retain the Request or internal user.
 
@@ -626,11 +854,13 @@ async def prepare_scheduler_capability(
     auth_disabled_owner = owner_id == AUTH_DISABLED_USER_ID and is_auth_disabled()
     if source == AUTH_SOURCE_AUTH_DISABLED and not auth_disabled_owner:
         return None
-    token_version = getattr(user, "token_version", 0)
+    token_version = admitted_origin.token_version if admitted_origin is not None else getattr(user, "token_version", 0)
     current = await _owner(owner_id, token_version, auth_disabled_owner=auth_disabled_owner)
     if current is None:
         return None
     ceiling = frozenset(await resolve_route_permissions(current, is_internal=False))
+    if admitted_origin is not None:
+        ceiling &= admitted_origin.permission_ceiling
     if source != AUTH_SOURCE_INTERNAL:
         auth = getattr(request.state, "auth", None)
         request_user = getattr(request.state, "user", None)
@@ -684,6 +914,7 @@ async def prepare_scheduler_capability(
         _service=service,
         _task_id=task_id,
         _occurrence_id=occurrence_id,
-        _display="card" if source in {AUTH_SOURCE_SESSION, AUTH_SOURCE_AUTH_DISABLED} else "text",
+        _display="card" if admitted_origin is not None or source in {AUTH_SOURCE_SESSION, AUTH_SOURCE_AUTH_DISABLED} else "text",
         _client_timezone=client_timezone if isinstance(client_timezone, str) and client_timezone else None,
+        _run_binding=run_binding,
     )

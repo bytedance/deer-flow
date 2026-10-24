@@ -138,6 +138,21 @@ async function settle() {
 }
 
 beforeEach(() => {
+  rs.stubGlobal("fetch", async (input: RequestInfo | URL) => {
+    const url =
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.href
+          : input.url;
+    if (url.endsWith("/uploads/limits"))
+      return Response.json({
+        max_files: 5,
+        max_file_size: 1000,
+        max_total_size: 5000,
+      });
+    throw new Error(`Unexpected native sidecar fixture request ${url}`);
+  });
   mocks.createSidecarThread.mockReset();
   mocks.sendMessage.mockReset();
   mocks.toastError.mockReset();
@@ -145,6 +160,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  rs.unstubAllGlobals();
 });
 
 describe("SidecarPanel keeps the draft when a send fails", () => {

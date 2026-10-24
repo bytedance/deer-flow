@@ -1,7 +1,15 @@
-import { fetch as fetchWithAuth } from "@/core/api/fetcher";
+import {
+  fetch as fetchWithAuth,
+  type WorkspaceRESTClient,
+} from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
 
 import type { AgentThread, ThreadTokenUsageResponse } from "./types";
+
+export type ThreadRequestOptions = {
+  rest: WorkspaceRESTClient;
+  signal?: AbortSignal;
+};
 
 export type ThreadCompactResponse = {
   thread_id: string;
@@ -15,6 +23,7 @@ export type ThreadCompactResponse = {
 };
 
 export type CompactThreadContextOptions = {
+  rest?: WorkspaceRESTClient;
   signal?: AbortSignal;
   agentName?: string | null;
   modelName?: string | null;
@@ -62,34 +71,53 @@ async function readThreadAPIError(
   return fallback;
 }
 
+async function readThreadResponse<T>(
+  response: Response,
+  fallback: string,
+  rest?: WorkspaceRESTClient,
+): Promise<T> {
+  const decode = async (response: Response): Promise<T> => {
+    if (!response.ok)
+      throw new Error(await readThreadAPIError(response, fallback));
+    return response.json();
+  };
+  return rest ? rest.consume(response, decode) : decode(response);
+}
+
 export async function fetchThreadTokenUsage(
   threadId: string,
+  options?: ThreadRequestOptions,
 ): Promise<ThreadTokenUsageResponse | null> {
-  const response = await fetchWithAuth(
+  const response = await (options?.rest.fetch ?? fetchWithAuth)(
     `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}/token-usage`,
     {
       method: "GET",
+      ...(options?.signal ? { signal: options.signal } : {}),
     },
   );
 
-  if (!response.ok) {
-    if (response.status === 403 || response.status === 404) {
-      return null;
+  const decode = async (
+    response: Response,
+  ): Promise<ThreadTokenUsageResponse | null> => {
+    if (!response.ok) {
+      if (response.status === 403 || response.status === 404) return null;
+      throw new Error("Failed to load thread token usage.");
     }
-    throw new Error("Failed to load thread token usage.");
-  }
-
-  return (await response.json()) as ThreadTokenUsageResponse;
+    return (await response.json()) as ThreadTokenUsageResponse;
+  };
+  return options ? options.rest.consume(response, decode) : decode(response);
 }
 
 export async function branchThreadFromTurn(
   threadId: string,
   input: BranchThreadFromTurnInput,
+  options?: ThreadRequestOptions,
 ): Promise<ThreadBranchResponse> {
-  const response = await fetchWithAuth(
+  const response = await (options?.rest.fetch ?? fetchWithAuth)(
     `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}/branches`,
     {
       method: "POST",
+      ...(options?.signal ? { signal: options.signal } : {}),
       headers: {
         "Content-Type": "application/json",
       },
@@ -101,23 +129,23 @@ export async function branchThreadFromTurn(
     },
   );
 
-  if (!response.ok) {
-    throw new Error(
-      await readThreadAPIError(response, "Failed to branch conversation."),
-    );
-  }
-
-  return (await response.json()) as ThreadBranchResponse;
+  return readThreadResponse<ThreadBranchResponse>(
+    response,
+    "Failed to branch conversation.",
+    options?.rest,
+  );
 }
 
 export async function patchThreadMetadata(
   threadId: string,
   metadata: ThreadMetadataPatch,
+  options?: ThreadRequestOptions,
 ): Promise<ThreadMetadataPatchResponse> {
-  const response = await fetchWithAuth(
+  const response = await (options?.rest.fetch ?? fetchWithAuth)(
     `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}`,
     {
       method: "PATCH",
+      ...(options?.signal ? { signal: options.signal } : {}),
       headers: {
         "Content-Type": "application/json",
       },
@@ -125,47 +153,50 @@ export async function patchThreadMetadata(
     },
   );
 
-  if (!response.ok) {
-    throw new Error(
-      await readThreadAPIError(response, "Failed to update conversation."),
-    );
-  }
-
-  return (await response.json()) as ThreadMetadataPatchResponse;
+  return readThreadResponse<ThreadMetadataPatchResponse>(
+    response,
+    "Failed to update conversation.",
+    options?.rest,
+  );
 }
 
 export async function createThread(
   threadId: string,
   projectId?: string,
+  options?: ThreadRequestOptions,
 ): Promise<AgentThread> {
-  const response = await fetchWithAuth(`${getBackendBaseURL()}/api/threads`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
+  const response = await (options?.rest.fetch ?? fetchWithAuth)(
+    `${getBackendBaseURL()}/api/threads`,
+    {
+      method: "POST",
+      ...(options?.signal ? { signal: options.signal } : {}),
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        thread_id: threadId,
+        ...(projectId ? { project_id: projectId } : {}),
+      }),
     },
-    body: JSON.stringify({
-      thread_id: threadId,
-      ...(projectId ? { project_id: projectId } : {}),
-    }),
-  });
+  );
 
-  if (!response.ok) {
-    throw new Error(
-      await readThreadAPIError(response, "Failed to create conversation."),
-    );
-  }
-
-  return (await response.json()) as AgentThread;
+  return readThreadResponse<AgentThread>(
+    response,
+    "Failed to create conversation.",
+    options?.rest,
+  );
 }
 
 export async function moveThreadToProject(
   threadId: string,
   projectId: string | null,
+  options?: ThreadRequestOptions,
 ): Promise<ThreadMetadataPatchResponse> {
-  const response = await fetchWithAuth(
+  const response = await (options?.rest.fetch ?? fetchWithAuth)(
     `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}/move`,
     {
       method: "POST",
+      ...(options?.signal ? { signal: options.signal } : {}),
       headers: {
         "Content-Type": "application/json",
       },
@@ -173,20 +204,18 @@ export async function moveThreadToProject(
     },
   );
 
-  if (!response.ok) {
-    throw new Error(
-      await readThreadAPIError(response, "Failed to move conversation."),
-    );
-  }
-
-  return (await response.json()) as ThreadMetadataPatchResponse;
+  return readThreadResponse<ThreadMetadataPatchResponse>(
+    response,
+    "Failed to move conversation.",
+    options?.rest,
+  );
 }
 
 export async function compactThreadContext(
   threadId: string,
   options: CompactThreadContextOptions = {},
 ): Promise<ThreadCompactResponse> {
-  const response = await fetchWithAuth(
+  const response = await (options.rest?.fetch ?? fetchWithAuth)(
     `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}/compact`,
     {
       method: "POST",
@@ -202,41 +231,42 @@ export async function compactThreadContext(
     },
   );
 
-  if (!response.ok) {
-    throw new Error(
-      await readThreadAPIError(response, "Failed to compact context."),
-    );
-  }
-
-  return (await response.json()) as ThreadCompactResponse;
+  return readThreadResponse<ThreadCompactResponse>(
+    response,
+    "Failed to compact context.",
+    options.rest,
+  );
 }
 
 /** Gateway extension not forwarded by the LangGraph SDK's search method. */
-export async function searchThreadsByArchive({
-  archived,
-  metadata,
-  status,
-  limit,
-  offset,
-}: {
-  archived: boolean;
-  metadata?: Record<string, unknown>;
-  status?: string;
-  limit: number;
-  offset: number;
-}): Promise<AgentThread[]> {
-  const response = await fetchWithAuth(
+export async function searchThreadsByArchive(
+  {
+    archived,
+    metadata,
+    status,
+    limit,
+    offset,
+  }: {
+    archived: boolean;
+    metadata?: Record<string, unknown>;
+    status?: string;
+    limit: number;
+    offset: number;
+  },
+  options?: ThreadRequestOptions,
+): Promise<AgentThread[]> {
+  const response = await (options?.rest.fetch ?? fetchWithAuth)(
     `${getBackendBaseURL()}/api/threads/search`,
     {
       method: "POST",
+      ...(options?.signal ? { signal: options.signal } : {}),
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ archived, metadata, status, limit, offset }),
     },
   );
-  if (!response.ok) {
-    throw new Error(
-      await readThreadAPIError(response, "Failed to load conversations."),
-    );
-  }
-  return (await response.json()) as AgentThread[];
+  return readThreadResponse<AgentThread[]>(
+    response,
+    "Failed to load conversations.",
+    options?.rest,
+  );
 }

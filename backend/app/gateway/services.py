@@ -91,6 +91,7 @@ from deerflow.runtime.journal import build_checkpoint_history_seed_events
 from deerflow.runtime.keyed_lock import KeyedLockTable
 from deerflow.runtime.run_origin import DEERFLOW_ORIGIN_KEY, make_origin
 from deerflow.runtime.runs.naming import resolve_root_run_name
+from deerflow.runtime.runs.stream_cleanup import close_agent_stream
 from deerflow.runtime.secret_context import (
     LegacyRunMetadataSecretError,
     redact_config_secrets,
@@ -647,6 +648,12 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: frozenset[str] = (
         {
             "is_internal",
             "authz_attributes",
+            # Reserved for server-side workspace membership resolution.
+            "workspace_id",
+            "actor_user_id",
+            "workspace_context",
+            "membership_version",
+            "policy_version",
             "channel_user_id",
             "is_subagent",
             "agent_id",
@@ -1524,15 +1531,20 @@ async def ensure_checkpoint_history_seeded(
     the observability hook for that decision — when it stops appearing, the
     shim is dead.
     """
+    from deerflow.authz.workspace import get_current_workspace
+
     event_store = request.app.state.run_event_store
-    # The emptiness check is deliberately thread-scoped, never user-scoped:
-    # seed rows may be stamped with a different principal (NULL for ownerless
-    # seeds, or another user on a shared NULL-owner thread), so a user-scoped
-    # query would miss them and re-seed a duplicate history per principal.
-    # Passing user_id=None also opts out of AUTO resolution explicitly, which
-    # would raise when no user contextvar is set (e.g. the scheduler launch
-    # path for ownerless internal tasks).
-    if await event_store.list_messages(thread_id, limit=1, user_id=None):
+    workspace = get_current_workspace()
+    # Legacy feeds retain the thread-only lookup for shared/NULL-owner seeds.
+    # Scoped feeds use the bound actor; the event store still independently
+    # checks live membership and the original private thread before reading.
+    seed_user_id = workspace.actor_user_id if workspace is not None else None
+    if await event_store.list_messages(thread_id, limit=1, user_id=seed_user_id):
+        return
+    if workspace is not None:
+        # An empty native message feed can be a valid run without an LLM call.
+        # Only SQL-adopted workers write scoped journals; this checkpoint-only
+        # migration is legacy-only and cannot invent a scoped worker grant.
         return
 
     checkpoint_config = {
@@ -1879,6 +1891,7 @@ async def execute_admitted_native_run(
         try:
             scheduler_capability = await prepare_scheduler_capability(
                 request,
+                run_record=record,
                 user=internal_owner_user or user,
                 thread_id=thread_id,
                 run_id=record.run_id,
@@ -1890,7 +1903,9 @@ async def execute_admitted_native_run(
             )
         except Exception:
             logger.warning("Scheduler tool capability is unavailable for this run", exc_info=True)
-    execution_context = replace(run_ctx, scheduler_capability=scheduler_capability) if scheduler_capability is not None else run_ctx
+    execution_context = replace(run_ctx, workspace_context=record.workspace_context)
+    if scheduler_capability is not None:
+        execution_context = replace(execution_context, scheduler_capability=scheduler_capability)
     await run_agent(
         bridge,
         run_mgr,
@@ -1916,6 +1931,7 @@ async def start_run(
     idempotency_key: str | None = None,
     require_existing_thread: bool = False,
     scheduled_task_runtime: Mapping[str, Any] | None = None,
+    scheduled_admission=None,
     dependency_continuation: Mapping[str, Any] | None = None,
 ) -> RunRecord:
     """Create a RunRecord and launch the background agent task.
@@ -2254,6 +2270,9 @@ async def start_run(
                 # cannot both succeed across Gateway workers.
                 if require_existing_thread and not await thread_access_allowed():
                     raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
+                from app.gateway.scheduled_task_access import SCHEDULER_ORIGIN_KEY, capture_scheduler_origin
+
+                scheduler_origin = capture_scheduler_origin(request, user_id=owner_user_id or (str(user.id) if user is not None else None), app_config=run_ctx.app_config or get_app_config())
                 record = await run_mgr.create_or_reject(
                     thread_id,
                     body.assistant_id,
@@ -2265,6 +2284,10 @@ async def start_run(
                     # config built above keeps the secrets for the actual run.
                     kwargs={
                         "input": run_record_input,
+                        # Immutable server admission data: a client config key
+                        # cannot select this top-level origin. Idempotent reuse
+                        # keeps the already-persisted record and its old receipt.
+                        **({SCHEDULER_ORIGIN_KEY: scheduler_origin} if scheduler_origin is not None else {}),
                         **({"knowledge_default_request_hash": knowledge_default_request_hash} if accepts_knowledge_default else {}),
                         "config": redact_config_secrets(body.config),
                         **({"conversation_references": conversation_references} if conversation_references else {}),
@@ -2273,6 +2296,7 @@ async def start_run(
                     model_name=model_name,
                     user_id=owner_user_id,
                     idempotency_key=idempotency_key,
+                    **({"scheduled_admission": scheduled_admission} if scheduled_admission is not None else {}),
                 )
 
                 if record.idempotency_reused:
@@ -2305,7 +2329,7 @@ async def start_run(
                     return await make_native_snapshot(
                         request,
                         record,
-                        run_ctx=run_ctx,
+                        run_ctx=replace(run_ctx, workspace_context=record.workspace_context),
                         body=body,
                         config=config,
                         graph_input=graph_input,
@@ -2344,6 +2368,7 @@ async def launch_scheduled_thread_run(
     metadata: dict[str, Any] | None = None,
     origin: dict[str, Any] | None = None,
     title: str | None = None,
+    scheduled_admission=None,
 ) -> dict[str, Any]:
     """Start one scheduled occurrence as an internal run.
 
@@ -2352,6 +2377,23 @@ async def launch_scheduled_thread_run(
     ``SCHEDULED_ORIGIN_KEY`` metadata the run thread renders. ``title``
     pre-sets a fresh run thread's title, so no title is generated.
     """
+    from deerflow.authz.workspace import get_current_workspace, reset_current_workspace, set_current_workspace
+    from deerflow.persistence.workspaces.sql import WorkspaceAccessDenied
+
+    if request is None and app is None:
+        raise ValueError("launch_scheduled_thread_run requires request or app")
+    target_app = app if request is None else request.app
+    occurrences = getattr(target_app.state, "scheduled_task_run_repo", None)
+    context = None
+    if getattr(occurrences, "workspace_scope_required", False):
+        authority = await occurrences.resolve_launch_authority(scheduled_admission)
+        if authority["thread_id"] != thread_id or authority["user_id"] != owner_user_id:
+            raise WorkspaceAccessDenied("Scheduled launcher differs from original occurrence")
+        if (metadata or {}).get("scheduled_task_id") != scheduled_admission.task_id or (metadata or {}).get("scheduled_task_run_id") != scheduled_admission.occurrence_id:
+            raise WorkspaceAccessDenied("Scheduled metadata differs from canonical occurrence")
+        context = authority["context"]
+    elif scheduled_admission is not None or get_current_workspace() is not None:
+        raise WorkspaceAccessDenied("Legacy Scheduler cannot inherit workspace authority")
     if request is None:
         if app is None:
             raise ValueError("launch_scheduled_thread_run requires request or app")
@@ -2359,7 +2401,7 @@ async def launch_scheduled_thread_run(
             app=app,
             headers=({INTERNAL_OWNER_USER_ID_HEADER_NAME: owner_user_id} if owner_user_id else {}),
             state=SimpleNamespace(
-                user=get_internal_user(),
+                user=get_internal_user(owner_user_id) if context is not None else get_internal_user(),
                 auth_source=AUTH_SOURCE_INTERNAL,
                 # Every trigger (schedule or "Run now") is server-started.
                 run_origin=make_origin("schedule"),
@@ -2416,14 +2458,20 @@ async def launch_scheduled_thread_run(
     # one id. Reached from inside an HTTP request -- a manual trigger, or the
     # scheduler service's own per-occurrence scope -- ensure_trace_context
     # keeps that trace instead of minting a competing one.
-    with ensure_trace_context():
-        record = await start_run(
-            body,
-            thread_id,
-            request,
-            idempotency_key=idempotency_key,
-            scheduled_task_runtime=scheduled_task_runtime,
-        )
+    token = set_current_workspace(context) if context is not None else None
+    try:
+        with ensure_trace_context():
+            record = await start_run(
+                body,
+                thread_id,
+                request,
+                idempotency_key=idempotency_key,
+                scheduled_task_runtime=scheduled_task_runtime,
+                **({"scheduled_admission": scheduled_admission} if scheduled_admission is not None else {}),
+            )
+    finally:
+        if token is not None:
+            reset_current_workspace(token)
     return {"run_id": record.run_id, "thread_id": record.thread_id}
 
 
@@ -2451,6 +2499,41 @@ async def launch_mcp_task_notification_run(
     dispatch_attempt: int,
     event: dict[str, Any],
 ) -> dict[str, Any]:
+    """Authorize original native SQL task scope before notification business."""
+    from deerflow.authz.workspace import get_current_workspace, reset_current_workspace, set_current_workspace
+    from deerflow.mcp.tasks import TaskReference
+    from deerflow.persistence.workspaces.sql import WorkspaceAccessDenied
+
+    notification = dict(app=app, thread_id=thread_id, assistant_id=assistant_id, owner_user_id=owner_user_id, task_id=task_id, dispatch_version=dispatch_version, dispatch_attempt=dispatch_attempt, event=event)
+    repo = getattr(app.state, "mcp_task_repo", None)
+    context = None
+    if getattr(repo, "workspace_scope_required", False):
+        try:
+            task = await repo.resolve_notification_authority(notification["task_id"], user_id=notification["owner_user_id"], thread_id=notification["thread_id"], notification=notification)
+            context = TaskReference.from_record(task).workspace_context
+        except WorkspaceAccessDenied as exc:
+            raise PermanentNotificationError("Notification source authority is unavailable") from exc
+    elif get_current_workspace() is not None:
+        raise PermanentNotificationError("Legacy notification cannot inherit workspace authority")
+    token = set_current_workspace(context) if context is not None else None
+    try:
+        return await _launch_mcp_task_notification_run(**notification)
+    finally:
+        if token is not None:
+            reset_current_workspace(token)
+
+
+async def _launch_mcp_task_notification_run(
+    *,
+    app: Any,
+    thread_id: str,
+    assistant_id: str | None,
+    owner_user_id: str,
+    task_id: str,
+    dispatch_version: int,
+    dispatch_attempt: int,
+    event: dict[str, Any],
+) -> dict[str, Any]:
     """Idempotently launch the Agent run that delivers one task event."""
     host = getattr(app.state, "native_run_admission_host", None)
     notification = dict(thread_id=thread_id, assistant_id=assistant_id, owner_user_id=owner_user_id, task_id=task_id, dispatch_version=dispatch_version, dispatch_attempt=dispatch_attempt, event=event)
@@ -2466,7 +2549,7 @@ async def launch_mcp_task_notification_run(
     request = SimpleNamespace(
         app=app,
         headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: owner_user_id},
-        state=SimpleNamespace(user=get_internal_user(), auth_source=AUTH_SOURCE_INTERNAL, run_origin=make_origin("mcp_notification")),
+        state=SimpleNamespace(user=get_internal_user(owner_user_id), auth_source=AUTH_SOURCE_INTERNAL, run_origin=make_origin("mcp_notification")),
         cookies={},
     )
     body = RunCreateRequest(
@@ -2587,8 +2670,9 @@ async def sse_consumer(
     gap_emitted = False
     terminal_emitted = False
     disconnect_observed = False
+    subscription = bridge.subscribe(record.run_id, last_event_id=last_event_id)
     try:
-        async for entry in bridge.subscribe(record.run_id, last_event_id=last_event_id):
+        async for entry in subscription:
             if await request.is_disconnected():
                 disconnect_observed = True
                 break
@@ -2632,14 +2716,17 @@ async def sse_consumer(
         disconnect_observed = True
         raise
     finally:
-        # store_only records are cross-worker observation handles. An explicit
-        # cancel-then-stream action has already persisted its request before
-        # subscribing; a plain join disconnect must not invent a new
-        # cancellation request. Only apply on_disconnect to locally-owned runs,
-        # and only on the creator's own stream — never on an observer join.
-        if disconnect_observed and apply_on_disconnect and not gap_emitted and not terminal_emitted and not record.store_only and record.status in (RunStatus.pending, RunStatus.running):
-            if record.on_disconnect == DisconnectMode.cancel:
-                await await_drained(run_mgr.cancel(record.run_id))
+        try:
+            # store_only records are cross-worker observation handles. An explicit
+            # cancel-then-stream action has already persisted its request before
+            # subscribing; a plain join disconnect must not invent a new
+            # cancellation request. Only apply on_disconnect to locally-owned runs,
+            # and only on the creator's own stream — never on an observer join.
+            if disconnect_observed and apply_on_disconnect and not gap_emitted and not terminal_emitted and not record.store_only and record.status in (RunStatus.pending, RunStatus.running):
+                if record.on_disconnect == DisconnectMode.cancel:
+                    await await_drained(run_mgr.cancel(record.run_id))
+        finally:
+            await close_agent_stream(subscription)
 
 
 def serialize_wait_run_status(record: RunRecord) -> dict[str, Any]:

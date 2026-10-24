@@ -1,7 +1,6 @@
 "use client";
 
 import { MessageSquarePlus } from "lucide-react";
-import Link from "next/link";
 import { usePathname } from "next/navigation";
 
 import {
@@ -11,9 +10,12 @@ import {
   SidebarTrigger,
   useSidebar,
 } from "@/components/ui/sidebar";
+import Link from "@/components/workspace/workspace-link";
 import { useI18n } from "@/core/i18n/hooks";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
+
+import { WorkspaceSwitcher } from "./workspace-switcher";
 
 export function WorkspaceHeader({ className }: { className?: string }) {
   const { t } = useI18n();
@@ -49,6 +51,7 @@ export function WorkspaceHeader({ className }: { className?: string }) {
           </div>
         )}
       </div>
+      <WorkspaceSwitcher />
       <SidebarMenu>
         <SidebarMenuItem>
           <SidebarMenuButton

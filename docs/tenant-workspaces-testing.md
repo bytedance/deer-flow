@@ -1,0 +1,849 @@
+# 租户空间测试与上海复现
+
+当前实现按 `docs/superpowers/plans/2026-10-13-tenant-workspaces.md` 顺序推进。
+本文件覆盖隔离测试复现；完整 M0–M11 验收、发布和回滚仍以计划、迁移文档及
+`tenant-workspaces-progress.json` 的最新回执为准。租户启动门禁保持关闭。
+
+## 本轮单机 B 主干
+
+实际原生 ToolNode 和 durable wrapper 提交任务，经 ordinary driver、MCP HTTP
+客户端/服务端、B 执行账本和原生 SQL 持久任务，再由真实 Docker worker 生成报告。
+源 Run 已结束，调用方已切换空间；后台仍使用任务保存的原始空间。
+
+| 检查 | 当前证据 |
+| --- | --- |
+| SQLite / PostgreSQL | 每种数据库都执行相同真实主干 |
+| 输入 | 原生文件 SHA256 快照；修改源文件后仍执行原始字节 |
+| Docker | 预载固定镜像，非 root 用户、禁网、只读根、CPU/内存/PID 限额 |
+| 发布与回流 | 受原生权限锁保护的原线程输出；原 MCP 任务得到 completed 和 artifact URI |
+| 清理 | 实际观察容器移除后，才记录 physical_stopped |
+| 创建后撤权 | 已创建但未启动的容器被移除，没有 start 调用 |
+| 运行中撤权 | 一次观测故障保留运行/未确认停止事实；恢复观测并移除后才确认 STOP |
+| 取消与发布 | 原生 task 已有取消意图时，发布被拒绝；撤权任务没有成功结果 |
+| 历史 | 未知旧记录的状态 uncertain、版本 7 保持原值 |
+
+原生权限锁只覆盖短的启动意图/结果 SQL 写入，不跨 Docker/HTTP 调用。
+启动意图是准入线性化点；其后撤权需要控制通道完成实际 STOP。
+单机 worker 会在后续观测时发现权限失效并持久化停止意图。
+持久 revocation outbox、原生 task 的控制结算、pool 远端协议仍在 M4 待办中。
+
+## 固定执行环境
+
+- Jenkins 专属任务：`deerflow-tenant-execution-m4-physical`。
+- 节点标签：`shanghai-builder`。
+- 工作目录：`/data/jenkins-agent/deerflow/tenant-execution-m4-physical`。
+- 模板：`examples/ecs-native/deploy/Jenkinsfile.tenant-physical.in`。
+- 渲染器：`scripts/render_tenant_physical_pipeline.py`，仅使用 Python 标准库。
+- 工具及执行镜像：`sha256:4f269f6b0e50f9579e099e91a23df868ff1b1a49c03cc9b138beac02dafb3f01`。
+- PostgreSQL 镜像：`sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea`。
+
+模板检查任务名、目录和源包摘要。所有镜像必须已加载，使用 `--pull=never`。
+测试容器仅获得专属共享目录、Docker CLI/socket 和内部 fixture 数据库；不挂生产
+配置、模型凭据或 NAS。Docker socket 仅用于可信源码的专属测试任务。
+执行任务容器只挂自己的 inputs/outputs，不获得 Docker socket。
+
+## 重跑
+
+在已提交的版本上打包和渲染。以下操作只处理 Git 源码和模板，可在本地完成；
+应用、pytest、Docker、浏览器验证只在上海执行。
+
+```bash
+tenant_phase=m4-b-physical-recheck
+tenant_archive=/private/tmp/${tenant_phase}-source.tar.gz
+git archive HEAD | gzip > "$tenant_archive"
+tenant_sha=$(shasum -a 256 "$tenant_archive" | cut -d ' ' -f 1)
+python scripts/render_tenant_physical_pipeline.py "$tenant_phase" "$tenant_sha" > /private/tmp/tenant-physical.Jenkinsfile
+```
+
+1. 使用现有 SSH 配置上传源包至该任务目录，保留相同文件名；Jenkins builder
+   必须可读（现有 UID/GID 为 999:987，文件 0600）。先确认该任务没有运行或排队。
+2. 将渲染后的流水线用于上述专属任务，先校验 Jenkinsfile，再启动构建。
+   密码仅在 Jenkins 本机使用，不写源码、不复制到测试容器。
+3. 流水线设置 `ECS_EXECUTOR_SCOPE_PHYSICAL_TEST=1`、固定镜像和 owned manifest，
+   在容器内执行 `backend/tests/test_workspace_execution_physical.py`。
+   默认未 opt-in 时，在 fixture 建立前跳过物理测试。
+4. 测试目录在 host/container 使用相同绝对路径，保证真实 Docker bind mount
+   指向同一份快照。结果和 manifest 位于 `physical-<BUILD_NUMBER>/`。
+5. 测试和 CI trap 均按 manifest 中的 job/spec 标签核对后清理；观测不可用或标签
+   不匹配时，不宣称清理完成，不触碰其他容器，不执行全局 prune。专属 fixture 删除时一并清理它自己的匿名卷，卷名保留在
+   `*-volumes.txt` 供回执核对；未记录归属的旧卷不自动删除。
+6. 保存终态、源包/代码/日志 SHA256、固定镜像 ID 和空自有容器/网络回执。
+   最新回执见 progress JSON 的 `native_b_single_host_physical`。
+
+同一测试有三种场景，各执行两种数据库，共六项。先跑主干，再跑必要边界；旧路径
+只回归本次受影响的领取、重启、不重放、文件和清理逻辑。
+
+## 后续验收
+
+- MCP 协议当前使用进程内 ASGI transport；TCP、真实 NAS 和 OS 重启仍待验。
+- CurrentUser/bootstrap 为可信内部 fixture，数据库角色拥有 fixture 库；公开 JWT、
+  最小 SQL 权限和真实 Gateway 租户启动未获此测试证明。
+- 单机 B 的物理主干已验证；pool、其他资源域撤权、原生 MCP 的完整 HTTP 入口、C 启动/
+  恢复/通知及完整 C→B→C 仍须实施。撤权后的缺少可信 STOP 回执时原生 task 保持原状态，
+  不通过被撤销的成员授权写业务结果。
+- 原生权限 fence 会锁 workspace、actor、私有线程、Run 和 task；M10 需要验证实际
+  数据库角色的查询/行锁权限，配对备份恢复和镜像/配置清单。
+- 实际资料、研究、带来源报告及持续跟进的模型业务验收属于 M9。
+  本测试不调用模型，也不替代完整产品验收。
+
+
+## 原生 MCP 持久取消与停止回执（本轮 M4）
+
+沿用上面的上海物理专属任务与固定镜像。渲染流水线时增加
+`--suite control`，运行 `backend/tests/test_workspace_execution_control.py`。
+默认不设置物理 opt-in 时，在 fixture 创建前跳过。不要在本机 Docker Desktop
+运行，也不需要生产 key 或真实模型。
+
+先跑通主干，再做必要边界。本轮主干是：原生工具持久提交 B，真实容器启动，
+源 Run 结束且 UI 切换空间，原生所有权转移使旧成员版本失效；同一事务写入停止
+意图并阻断旧轮询结果；独立控制服务请求 STOP；worker 真正移除容器后返回签名
+回执，原生 outbox 和原 task 才结算。另一个场景验证排队用户取消、不启动容器、
+缺少服务时拒绝、重复意图、伪造/过期/错用途回执拒绝、租约过期和服务重启。
+
+控制凭据只允许 STOP，不能提交或读输出。回执只携带目标绑定、规格摘要、观察
+时间和停止证据；取消/撤权事务不做远程 IO。根撤权事件仍 pending，不能用 MCP
+子项完成替代 Run、browser、Scheduler、credential 等资源域的撤权验收。
+
+当前链路用 ASGI 与可信内部准入 fixture；真实 Gateway/JWT、网络/NAS、pool、
+远程 C、通知、账号/策略撤权和重启故障仍待实施。总租户门禁保持关闭。执行回执
+追加在 progress JSON 的 `native_mcp_stop_control`，保留失败历史和最终源码摘要。
+
+A historical/ordinary terminal B state without `physical_stopped` remains pending.
+The control request now persists `cleanup_pending` for the existing worker to
+verify exact owned-container absence/removal. Terminal metadata alone cannot
+produce a STOP receipt or settle native cancellation; a running or unobservable
+object still retains uncertainty. The companion test uses actual Docker
+observation after the old ordinary queued-cancel path.
+
+## 原生 Run 成员撤权与清理阻塞（M4）
+
+测试入口是 `backend/tests/test_workspace_revocation.py`。这是原生 LangGraph/RunManager
+与 SQLite/PostgreSQL 的确定性检查，不调用模型；测试容器不需要 Docker socket。
+可信内部 principal/准入 fixture 不代表公开 Gateway/JWT 已接通。
+
+先验证实际 graph 运行，成员版本在原生事务中变化，持久 cancel intent 与 run_stop
+同时提交；UI 选择另一个空间后，原生心跳仍消费原始 Run 的 interrupt。分别持有
+图清理和 native completion hook：即使 Run 元数据已 interrupted，另一个 worker
+也不能建立新 Run，原 owner 仍可为清理续约。实际 worker task 退出、stream/
+journal/生命周期/sandbox lease 清理成功且 owner 租约有效后，才能确认 native
+execution closed。失败或未知保留阻塞，绝不从租约过期推断 STOP。
+
+共三类场景，各覆盖两种数据库：正常主干、同一主干的真实 finalizer 报错分支、
+排队且未附 worker task 的 NoStart。排队检查同时覆盖错误 owner/原始快照/父代次/
+创建时间、过期租约、普通孤儿回收拒绝、重建父线程不被旧清理改写和幂等确认。
+这里的 NoStart 只描述 native graph 未开始；C 容器停止仍必须由执行账本证明。
+
+可复跑的专属 SQL CI：
+
+```bash
+# 保存本地提交后生成只含版本库文件的源码归档；不包含私有配置或 key。
+git archive --format=tar.gz HEAD -o /private/tmp/tenant-run-control-source.tar.gz
+shasum -a 256 /private/tmp/tenant-run-control-source.tar.gz
+python scripts/render_tenant_run_control_pipeline.py tenant-run-control <归档SHA256> \
+  > /private/tmp/Jenkinsfile.tenant-run-control
+```
+
+将源码包以 `tenant-run-control-source.tar.gz` 上传到上海 Jenkins 专属任务目录，
+使用渲染的 Jenkinsfile 更新 `deerflow-tenant-execution-m4-sql`，先验证再构建。
+目标工作目录固定 `/data/jenkins-agent/deerflow/tenant-execution-m4-sql`；先确认没有
+本任务正在运行/排队。认证仅在 Jenkins 本机，权限沿用已授权范围。
+
+仓库模板 `examples/ecs-native/deploy/Jenkinsfile.tenant-run-control.in` 校验源码 SHA，
+固定 tools/PG 镜像 ID、内部网络及 CPU/内存；容器只读挂载源码包。Python/SQL/graph
+在上海运行，不挂生产/NAS/模型凭据、不发布服务端口。宿主仅启动带本次精确标签
+的测试容器，清理并记录专属 PG 匿名卷，保留日志与 `run-control-<BUILD_NUMBER>/`
+中的卷名回执。旧未记录卷不推测归属，不做全局 prune。
+
+新增控制记录复用通用 outbox，无 ORM 迁移（native 0040/executor e0003）。实际
+运行需要 native ownership heartbeats；失败的关闭确认保留 pending，完整故障恢复
+仍在 M10/M11。完整 Run HTTP/JWT、直接用户取消、checkpoint/journal/工具发布权限
+栅栏，以及先进入终态再撤权的生命周期窗口尚未完成；不要据此启用租户总门禁。
+其他执行域、browser、Scheduler、凭据和完整 C→B→C 仍需实施。
+
+## Run 从准入到关闭的持久生命周期
+
+`run_execution` 在新 scoped normal Run 准入的同一事务中建立；原生 Run 仍是执行
+权威，该记录只保存“尚未确认关闭”的事实。pending handoff/adopt 仅同事务转移
+native owner，不改原始用户、空间、线程代次、创建时间和授权快照。历史缺失记录
+不自动补。没有新增表或迁移（native 0040 / executor e0003）。
+
+`Run.status=success/interrupted` 不等于清理已结束。生命周期未关闭时，另一个
+worker 仍不能准入；原 owner 可为清理续约。正常结束、终态清理期撤权和另一
+worker 发起 interrupt 均由实际 native graph/heartbeat 验证。外空间或已撤销
+成员不能复用缓存来取消。只有原生最后关闭边界和有效 owner 绑定能关闭 OPEN
+记录；已提交的精确回执可幂等识别，过期租约不能新释放资源。
+
+另一个真实状态检查覆盖未启动 rollback：记录最初请求，但只消费 interrupt，
+明确 NoStart 后，迟到消费者也不能恢复或删除 checkpoint。测试用实际 SQLite
+checkpointer，检查前后 checkpoint ID 和内容。正在运行的 scoped rollback
+仍拒绝，直到完整 checkpoint 权限栅栏接通；不把未实现能力当已支持。
+
+复跑时沿用上一节源码包/专属任务步骤，渲染命令增加白名单 suite：
+
+```bash
+python scripts/render_tenant_run_control_pipeline.py tenant-run-lifetime <归档SHA256> \
+  --suite lifetime > /private/tmp/Jenkinsfile.tenant-run-lifetime
+```
+
+源码包须命名 `tenant-run-lifetime-source.tar.gz`，与 phase 对齐。该套件共十四项：
+八项生命周期/真实 checkpoint 检查，加原有六项 Run 撤权/失败清理/NoStart 检查。
+新增场景先跑主干，之后回归既有实现；不把完整后台功能当已完成。应用测试只在上海；本机仅做标准库打包/渲染、Git、OpenSpec 和静态格式检查。
+复跑需要的镜像、内部 PG 和精确卷清理仍由同一仓库模板管理。
+
+全部 scoped Run 都不走旧的“租约过期即孤儿释放”，即便历史生命周期记录缺失。
+仍需完成受认证的 owner/实例恢复与远程 C 物理 STOP。M8 配额必须计入未关闭
+生命周期。清理通过原始 workspace-first 锁序避开审计 FK 与成员变更的反向等待，
+不依赖仍有效的成员授权；锁 workspace 也不授予执行或读取结果权限。
+
+完整 worker checkpoint/journal/goal/外部工具写入权限、真实 JWT/HTTP、account/
+policy/Scheduler/browser/credential 撤权、实际 C→B→C 和成套恢复仍未验收。
+本轮仅内部确定性 graph/SQL/SQLite-checkpoint 及已有 MCP 物理回归，没有真实模型、
+新公开接口或租户启用。最新回执将记录在 `native_run_execution_lifetime`。
+
+## 原生 worker 的 checkpoint 提交保护
+
+本轮复用 native Run/graph 与 AsyncSqliteSaver，并先保存已有私人报告。正常生成
+可以追加报告；成员版本变更、用户 interrupt、native lease 过期或 owner 更换后，
+迟到输出不能改变 checkpoint 的 ID、内容和 pending writes。失去 owner/lease
+不等于可以关闭生命周期，持久阻塞记录仍保留。
+
+Jenkins SQL #53 先复现撤权漏洞，#54 主干四项通过。#55 的旧输入 checkpoint
+尚在后台落盘，#56 的同步 SQLite 夹具写阻塞异步事务：测试现改为观察真实 saver
+commit，并用 async session 建账号。#57 十项通过（34.16 秒）；#58 复用已有
+十九项撤权、生命周期和 worker context 回归，没有增加其他场景。所有证据/hash
+及精确资源清理见 `native_worker_checkpoint_fence`。本机没有运行应用或测试。
+
+复跑沿用同一专属 SQL 任务及固定镜像，先渲染 checkpoint 主干，再跑旧回归：
+
+```bash
+python scripts/render_tenant_run_control_pipeline.py tenant-worker-checkpoint <归档SHA256> \
+  --suite checkpoint > /private/tmp/Jenkinsfile.tenant-worker-checkpoint
+python scripts/render_tenant_run_control_pipeline.py tenant-worker-regression <归档SHA256> \
+  --suite checkpoint-regression > /private/tmp/Jenkinsfile.tenant-worker-regression
+```
+
+每次 source tar 的 `<phase>-source.tar.gz`、SHA 和实际上传 phase 必须相符，沿用
+前述本机 Jenkins 凭据、own-job busy 检查、只读源码/internal PG 及精确卷清理；
+不挂 Docker socket、NAS、生产凭据或真实模型配置。
+
+该保护核验原始 workspace/actor/线程代次/Run 创建时间/worker、open lifetime、
+实时成员权限及 native lease；只在准备好的 saver IO 期间持 SQL 锁并 drain，
+不会锁住模型推理。取消/撤权不能变成新的 checkpoint 清理授权；active rollback、
+copy/prune/delete 仍拒绝。普通 Run 的 goal/duration 若经过该 saver，也受同一
+保护；其他 producer 仍需独立接入。
+
+这是 full-mode SQLite checkpoint + SQLite/PostgreSQL 元数据库证据，尚未覆盖
+PostgreSQL checkpoint、delta/cache、同文件 SQLite、跨库事务/崩溃未知结果。
+Journal/SSE/发布、通用 Run 状态/进度、工具和其他权限效应、真实 HTTP/JWT、
+远端 C 与 C→B→C 仍未完成；不能据此开启租户功能或声明整条业务已验收。
+
+## 原生 SQL 日志与普通 Run 元数据写入
+
+这一步用实际 `run_agent`、编译图、异步 `BaseChatModel` 回调和 SQL 日志跑通
+正常报告，再持住生成过程，分别撤权、取消、让 native lease 过期或更换 owner。
+模型输出为确定性夹具，没有调用 DeepSeek 或其他真实服务。两种元数据库都验证
+正常日志保存原 user/workspace，迟到正文和 Run 完成统计被拒绝。失去 owner/lease
+不能确认清理完成；取消/撤权在实际 native 关闭后才解除生命周期屏障。
+
+#59 RED 四项复现缺失空间及撤权后落库；#60 主干四项通过（21.81s），#61 必要
+边界十项通过（33.04s），含空 Context 中旧接口不得覆盖 scoped Run 或写入私人
+日志。#62 原有回归暴露四项逻辑 interrupted 状态被一并拒绝（27 passed）。新增
+仅消费精确 pending STOP 的控制状态通道后，保留原断言；#63 最终 46 passed
+（96.58s），十三文件 Ruff。它复用先前的生命周期、checkpoint、事件读取检查
+及五项直接相关旧路径回归，没有增加其他业务场景。
+
+日志/普通 Run 元数据在各自原生数据库事务内重查原始执行权；只持有短 SQL 锁，
+不会锁住模型或工具。已知权限拒绝会丢弃被拒绝的缓冲并 drain/detach，不把正文
+重新排队；真正 IO 失败仍保留既有重试与未知清理语义。逻辑 interrupted 不能写
+正文/统计/错误/goal，也不能作为 STOP 回执或提前释放准入。
+
+同一固定模板提供两个白名单 suite：`--suite effects` 跑本轮业务主干和边界，
+`--suite effects-final` 跑最终固定组合。示例：
+
+```bash
+python scripts/render_tenant_run_control_pipeline.py tenant-worker-effects <归档SHA256> \
+  --suite effects-final > /private/tmp/Jenkinsfile.tenant-worker-effects
+```
+
+源码包、phase、SHA 对齐，使用同一专属 SQL job、固定镜像、内部 PG 和精确 label/
+匿名卷清理。回执 `native_worker_journal_metadata_fence` 含每次构建、归档/日志哈希、
+最终源码和已移除资源，不猜测旧无记录卷归属，不做全局 prune。
+
+未涵盖 SSE/缓存/发布、ThreadMeta 标题和状态、模型工具调用及外部副作用、scoped
+pending dispatch 和 owner/实例恢复、active rollback、真实 HTTP/JWT/browser、
+quota/billing 或远端 C。被拒绝的 token 统计不能作为完整计费证据。仍需完成所有
+撤权域及真实 C→B→C；启动旗标和 schema fence 不变，不据此启用租户功能。
+
+## 原生流生产与线程状态保护
+
+这一步直接扩展上一节的同一业务用例，用 `MemoryStreamBridge.subscribe` 读取实际
+重放队列，并检查 ThreadMeta。没有新增场景矩阵。#64 RED：正常两项通过，但
+撤权后迟到的完整 AI 响应仍在原生流队列中（两种元数据库各失败一项，21.19s），
+说明 SQL 日志保护不能替代流生产保护。#65 主干四项通过（21.50s）；#66 原有
+固定 46 项全部通过（97.72s），十五文件云端 Ruff。
+
+取消/撤权后，迟到正文不能进入队列；实际 native 结束后可发无载荷 end，并更新
+原私有线程的结束状态。lease 过期或 owner 被替换后，旧 worker 不能写迟到帧、
+结束新 owner 的流或覆盖其 idle 状态/标题，生命周期仍保持 open。实际关闭的
+状态回写不依赖已撤销的成员权限，只能针对原始线程代次；title writer 接同一
+效应 fence，但这里没有宣称完整 held-title 发布/UI 已验收。
+
+短 SQL fence 只包住准备好的原生队列写入并 drain，不包模型、工具或 SSE
+subscriber 的 socket 发送。它不能让独立的 SQL/Redis 变为一个分布式事务。
+生产者 view 不提供 subscribe/删除权限；消费端仍需既有 fresh observer 验证。
+
+复跑先用 `--suite stream-main` 运行同一用例的正常/撤权对照，再用原有
+`--suite effects-final` 固定组合覆盖已有取消/过期/换 owner 和旧路径回归：
+
+```bash
+python scripts/render_tenant_run_control_pipeline.py tenant-worker-stream <归档SHA256> \
+  --suite stream-main > /private/tmp/Jenkinsfile.tenant-worker-stream
+```
+
+沿用同一专属 SQL job、源码包 phase/SHA 核验、固定镜像与精确 label/匿名卷清理。
+所有构建、源码/日志哈希、已移除的精确资源见 `native_worker_stream_thread_fence`。
+本机只做 Git/标准库打包/OpenSpec/静态格式，没有运行应用或测试。
+
+验证限于 MemoryStreamBridge 生产/重放与 SQL，不是 Redis、HTTP/JWT/browser
+socket、跨进程 generation、背压/故障/重启或跨库未知结果验收。模型/工具调用
+发生前的权限、文件/发布/网络等外部效应、scoped dispatch/recovery/active rollback
+和远端 C 仍待完成。不得把丢弃输出当成已阻止工具副作用或开启租户的依据。
+
+## 普通异步原生模型与工具的调用前检查
+
+本轮用真正的 `run_agent`、`create_agent`、完整共享 lead runtime middleware、模型
+工厂、BaseTool 以及实际临时文件，检查调用发生前的权限。provider 为确定性夹具，
+没有调用外部模型服务。#67 RED 两项撤权用例显示排队 handler 仍执行；#68 进一步
+用实际文件存在断言复现副作用，并抓到上一轮流 view 拒绝全部 cleanup 的回归。
+#69 主干 14 passed（42.48s）；主干通过后再补三个直接模型边界，#70 共
+26 passed（66.74s）；#71 最终固定 63 passed（133.41s），22 文件云端 Ruff。
+
+四个调用点都检查正常/成员版本撤销及两种元数据库：排队工具、合法工具完成后的
+第二次模型、显式 callbacks=[] 的独立工厂模型、限流队列放行。被拒绝的新 handler
+和 provider 不进入，工具不会新写文件；第二次模型场景保留先前合法生成的文件。
+正常业务仍完成。模型工厂保留 provider 类型及原 limiter，暴露的 max_retries
+字段归零，避免 SDK 隐式 retry 绕过 native 调用准入。缓存 worker 模型在没有
+当前 worker 的情况下也拒绝调用。此处不是实际 DeepSeek/429/SDK 网络重试证据。
+
+十个既有流/元数据用例新增精确 cleanup 断言：completed 原 Run 可清理本 lane，
+open/失去 owner/过期生命周期保留，foreign lane 拒绝。旧版生产者直接拒绝延迟
+cleanup 的后台异常现已修复。延迟在 SQL 锁之外，延迟后再检查回执和原绑定。
+六项相关旧检查覆盖原生 lead/subagent 顺序、模型默认选择/追踪、FIFO 及声明式
+排序。现有 middleware 数量/索引断言同步到新的最外层门禁，没有放宽控制/权限。
+
+复跑仍使用同一固定 SQL job/镜像/internal PG/RO 归档和精确 label/匿名卷清理：
+
+```bash
+python scripts/render_tenant_run_control_pipeline.py tenant-invocation <归档SHA256> \
+  --suite invocation > /private/tmp/Jenkinsfile.tenant-invocation
+python scripts/render_tenant_run_control_pipeline.py tenant-invocation-final <归档SHA256> \
+  --suite invocation-final > /private/tmp/Jenkinsfile.tenant-invocation-final
+```
+
+phase/source tar/SHA 必须一一对应；凭据仍仅 Jenkins 本机使用，不挂生产/NAS/
+模型密钥。完整构建、归档/日志/源码哈希和已清理精确资源：
+`native_invocation_admission_fence`。本机没有执行应用或测试。
+
+SQL 检查完成后才进入 handler/provider，模型与工具 IO 不持 SQL 锁。当前仅验证
+普通 async run_agent 主体；已准入 IO、HostModelInvoker 的 shielded 实际 provider
+任务、title/summary/goal 的 fallback 控制信号、非 Run/嵌入/同步模型入口及各类
+SDK/transport/cache 仍须审计。Scoped callback 要求原生所属 async loop；不能
+用缺少上下文推导出权限。账户/token/policy 等撤权域、外部效应、scoped dispatch/
+recovery、真实 HTTP/JWT/browser/Redis/NAS/C、计费配额和完整租户验收继续保留。
+
+
+## M4 模型服务实际生命周期与停止信号（2026-10-17）
+
+上海 `deerflow-tenant-execution-m4-sql`：#72 是夹具签名错误，不能作为业务 RED；
+修正后 #73 在两种数据库复现四处提前退出，#74 再复现六处停止信号被吞。
+#75 主干先通过 12 项；#76 增加必要边界后 14 项通过；#77 最终 `85 passed, 4 warnings in 166.83s (0:02:46)`，
+二十六文件云端 Ruff check/format 通过。原有 63 项复用，新增本轮 14 项，
+另复用 8 项直接相关的模型服务/标题/摘要旧检查；没有扩展到全套后端测试。
+
+真实 native Run、SQL 成员变更/心跳、HostModelInvoker、模型工厂及 BaseChatModel
+继承的线程执行链：调用者退出后实际线程仍被持有，同线程替代任务被拒绝，lease
+持续续租；不同空间在同一个服务/预算上可独立完成报告。provider Task 被直接
+cancel 也须等真实线程停止；正常 completion hook 仍可调用模型收尾。先 drain
+主体遗留调用，完成钩子后再封住新调用并 drain，最后才清日志/沙箱和确认 native
+生命周期关闭。模型构造/执行不持 SQL 锁，不以全局服务预算阻塞其他 Run。
+
+扩展服务、异步标题 fallback、摘要构造及同步/异步 fallback 保留 GraphBubbleUp；
+撤权不会转成普通 provider failure、None 或本地标题后继续执行。普通失败仍保留
+原有清洗/降级语义。本轮 title/summary 的证明是停止信号，**不是其直接模型调用
+底层线程生命周期的完整验收**；goal fallback、直接 lead/system 模型 lifetime、
+非 Run/同步/嵌入入口和外部传输仍待接通。
+
+固定复跑入口：
+
+```bash
+python scripts/render_tenant_run_control_pipeline.py tenant-service <归档SHA256> \
+  --suite service-lifetime > /private/tmp/Jenkinsfile.tenant-service
+python scripts/render_tenant_run_control_pipeline.py tenant-service-final <归档SHA256> \
+  --suite service-final > /private/tmp/Jenkinsfile.tenant-service-final
+```
+
+同一上海 internal PostgreSQL/RO 归档/固定镜像、专属 job，无生产挂载或模型密钥；
+精确容器/网络/匿名卷清理与源码/日志/归档哈希见 `native_model_service_lifetime`。
+LangChain inline callback 拒绝时存在 `ahandle_event was never awaited` 警告，
+RED/GREEN 均可见，未隐瞒或声称无警告。未调用真实 DeepSeek，也没有 physical C、
+HTTP/JWT/browser/Redis/NAS/计费及完整租户验收；M0–M11 父项保留，启动关闭。
+
+
+## M4 原生直接模型生命周期与目标停止信号（2026-10-17）
+
+上海 SQL job #78 先复现 lead/title 取消后仍有真实线程、native worker 却已关闭：
+四失败、四正常对照通过。#79 目标评估实际吞掉 WorkerInvocationDenied 并写入普通
+失败 verdict：两失败、六个既有命名 STOP 路径通过。#80 主干先 8 passed；#82
+复用同一夹具补 summary/goal 与必要边界，36 passed；#83 最终 `114 passed in 226.63s (0:03:46)`，
+二十七文件云端 Ruff check/format 通过。旧 85 项复用，本轮仅二十个直接入口用例、
+两个目标 STOP 用例及七个相关目标旧回归；不跑无关全套。
+
+invoke_worker_model 仅在 host 私有 guard 内保留实际工作，调用前核验、登记原 Run
+任务并 shield；被保留任务本身取消时也 drain。普通 lead 全共享 middleware、
+异步 title/summary、goal evaluator 接入同一入口。目标 usage sink 随实际调用一起
+执行；未绑定 guard 的旧入口保留原语义。模型类型/算力服务/观测协议没有替换。
+目标的读/准备/评估/持久化/重读路径保留原生权限拒绝与停止信号，普通 provider
+及 JSON 错误仍按原规则记录评估失败。停止信号不是普通 verdict。
+
+正常/取消覆盖四入口和两种数据库；#81 的两失败仅为 fixture 错把 provider 自身取消预期为用户中断；LangGraph 正确以
+NodeCancelledError 记为 error，线程等待/隔离已通过；#82 修正预期后全通过。
+这些用例同时覆盖 lead 成员版本撤销、title 保留任务被直接
+cancel 两处必要边界。复用原有续租、同线程拒绝、另一个空间独立完成、实际线程
+退出后清理、合法 completion 模型收尾断言。不以全局任务 drain 代替按 Run 所有权。
+
+```bash
+python scripts/render_tenant_run_control_pipeline.py direct-main <归档SHA256> \
+  --suite direct-main > /private/tmp/Jenkinsfile.direct-main
+python scripts/render_tenant_run_control_pipeline.py direct-final <归档SHA256> \
+  --suite direct-final > /private/tmp/Jenkinsfile.direct-final
+```
+
+仍是固定上海 internal PG/RO 源码/既有镜像/专属 job、精确资源清理，没有本机应用/
+pytest/Docker；归档、日志、源码哈希和清理回执：`native_direct_model_lifetime`。
+目标 STOP 场景使用实际内存 saver/accessor 加真实 SQL 成员权限；不是完整持久化
+scoped goal continuation/recovery 验收。确定性同步线程模型证明已命名调用点的
+生命周期，不证明任意外部 SDK、网络流或物理 C。工具/FS/进程/网络/发布效应、
+其他撤权域、dispatcher/recovery、HTTP/JWT/browser/Redis/NAS/配额和完整 M0–M11
+仍须推进；租户启动关闭，不推送、不部署。
+
+后续源码检查已确认 sandbox.lease.run_sync_lifecycle_operation 本来就 shield/drain
+实际同步线程，sandbox.tools 的异步原生工具也在使用它。下一步先复用、验收原始
+Run/私有空间绑定、延迟调用准入和输出效应，不重写沙箱执行器。该阅读结论不算
+scoped 工具业务验收。
+
+
+## 2026-10-18 原生沙箱调用与写入前检查验收
+
+恢复后核验暂停前的同一 Jenkins #88，没有重启测试。`sandbox-final` 固定回归
+**134 passed in 250.07s**，30 文件 Ruff 检查/格式通过；当前 33 个相关源码文件
+与归档逐字节一致。上海专属 job：`deerflow-tenant-execution-m4-sql`。
+
+- #84 RED：2 failed / 2 passed（21.23s），实际就绪等待后撤权仍写出报告。
+- #85 主干：4 passed（20.84s），实际原生 owner 与租约释放断言通过。
+- #86 RED：2 failed / 6 passed（28.93s），写入前检查吞掉原生 STOP 并 fail-open。
+- #87 必要边界：12 passed（36.83s），包括完整 create_agent 共享 middleware。
+- #88 固定回归：沿用此前 114 项，加本轮 12 项及八项既有沙箱兼容检查。
+
+工具就绪/复用返回及同步线程执行前重新检查私有 Run guard；先记录 sandbox_id
+以允许拒绝时正确退还已有租约。复用原生 run_sync_lifecycle_operation 的 drain，
+没有新造执行器。工具错误归一化与 read-before-write 检查/读标记保留 GraphBubbleUp；
+旧 sandbox 授权 provider 的单次判断及普通写入保护不变。
+
+用例复用实际 SQL 成员版本、原生 Run、LocalSandbox、真实报告文件与原生租约。
+正常报告内容正确，撤权后文件不存在、停止未被转成普通工具错误、owner 无遗留。
+外层切换空间不会改变原 Run 捕获的身份。确定性模型只用于触发实际 SDK 工具链。
+
+复跑入口（仅上海；归档摘要需匹配本次源码）：
+
+```bash
+python scripts/render_tenant_run_control_pipeline.py sandbox-main <归档SHA256> --suite sandbox-main
+python scripts/render_tenant_run_control_pipeline.py sandbox-final <归档SHA256> --suite sandbox-final
+```
+
+归档/日志/33 文件摘要、五轮精确移除的 PG 临时卷、空容器/网络和固定镜像回执见
+`progress.json -> native_sandbox_dispatch_fence`。#88 归档：
+`1ea76044aef8e18c7526c307b4c35b4df3514a7c37655690675a8f61c65b18cb`。
+仅核实已记录的临时卷，没有推断旧卷所有权或全局 prune。
+
+这不是主机文件系统隔离、进程/网络/外部发布原子性、任意 provider SDK、远端 C
+物理停止或全部缓存命名空间验收。下一步审计实际 provider 的空间/线程代次身份
+及旧缓存复用，先证明主干问题再修。完整 M0–M11、其他撤权域、scoped dispatcher/
+recovery/API 和产品验收仍待推进。租户开关 false、启动 schema fence 不变；
+没有本机应用/pytest/Node/浏览器/Docker 测试、真实模型调用、部署或推送。
+
+
+## 2026-10-18 原生 Local 删除重建主干：复用现有机制
+
+上海 `deerflow-tenant-execution-m4-sql #90 SUCCESS`，**4 passed in 23.64s**，
+30 文件 Ruff 检查和格式通过。SQLite/PostgreSQL 各运行正常续跑和真实删除重建：
+
+1. 实际原生 Run、LocalSandbox 和 write_file 写出报告并成功关闭、退还租约。
+2. 同一线程代次正常续跑，可读回完整报告。
+3. 走真实 `delete_private_thread`：持有原生删除预约，使用生命周期回执完成文件/
+   checkpoint/session/metadata 清理。然后同 ID 重建，确认 incarnation 改变。
+4. 新 Run 即使携带原先 sandbox ID，也无法读回旧报告；成功状态与 owner 清理明确断言。
+
+首轮 #89 四项失败是夹具漏开必需的 ownership heartbeat，业务节点未执行，不是
+产品 RED；#90 按原生配置启用心跳、120 秒 lease，并显式等待实际 worker task。
+最初仅从缓存键推断的泄漏没有被真实 Local 删除主干证实。直接删除 SQL 行会绕过
+原生文件清理，不能作为产品故障证据；本次没有据此改生产命名空间或旧 token 契约。
+
+```bash
+python scripts/render_tenant_run_control_pipeline.py sandbox-recreation <归档SHA256> --suite sandbox-reuse
+```
+
+#90 归档 SHA256：`a27912fab097f3b7e78a1beae44f62459cfc7e47dab577345034fbce22f3447c`。
+32 个源码摘要与当前版本匹配；renderer 随后只格式化原有 tuple，实际生成的
+Jenkinsfile 与 #90 逐字节相同，另存摘要。本文件此前 12 项用例未改，沿用 #88 的固定
+134 项回归证据，不因新增四项夹具重复跑全部。归档、日志、精确移除的两个 PG
+临时卷及空容器/网络回执见 `native_sandbox_recreation_main`。
+
+这是实际内部删除入口和本机 Local 沙箱证据，不是完整 HTTP/JWT/browser、崩溃/
+撤权中清理、任意自定义 provider、AIO/远端 C、NAS 或进程隔离验收。继续按计划
+接 scoped dispatcher/远端 C 准入与恢复；AIO namespace、外部效应及 account/token/
+policy 等撤权域保留未完成。M4/M0–M11 父项不勾选、租户启动 false、启动 schema
+fence 不变；无部署、推送、真实模型请求或本机应用/pytest/Node/浏览器/Docker 运行。
+
+
+## 2026-10-18 原生 C 快照、持久暂存与 pending 所有权交接
+
+上海 `deerflow-tenant-execution-m4-sql #95 SUCCESS`：**13 passed in 27.75s**，
+35 文件 Ruff 检查/格式通过。当前 38 个相关源码摘要与归档一致，五轮测试专属
+容器/网络及精确记录的 PG 临时卷均已移除。证据：`native_c_dispatch_staging`。
+
+- #91 两失败仅是新夹具缺少 AppConfig 必填 sandbox；未执行派发，不算产品 RED。
+- #92 两种数据库真实 RED：切换空间后，派发使用当前选择读取线程，无法读取原准入线程。
+- #93 主干两项通过（18.55s）：实际 SQL Run/线程 → 原生 snapshot → C 账本/亲和性 → pending owner CAS。
+- #94 仅在主干后加必要边界：交接前成员版本变化的两项通过；外层空间字段被剥离后内层 scoped C 仍按 legacy 创建，两项失败（22.35s）。
+- #95 四项原生主干/撤权边界，加六项既有 B 账本/迁移检查及三项旧签名/接收/操作策略检查，固定十三项通过。没有重跑无关完整套件。
+
+`native_admission_workspace` 只绑定已准入 Run 的私有快照并在 finally 恢复之前的选择；
+它的形状检查不授予新权限。读取仍须通过实时空间/成员/父线程检查，交接使用既有
+原生短事务 CAS，再检查原代次与 lifetime。SQL 锁不跨快照/外部 IO。
+
+`make_native_snapshot` 保留 workspace_id/context，校对 RunContext 与实际线程；
+派发不从 token/客户端 JSON 补授权。既有 e0003 独立 execution_identity 列扩展到
+C，绑定整个原生 payload、profile、固定 resident budget 与 affinity。修改身份或
+剥离外层空间字段不能降级。亲和性保存原 workspace，已有冲突/未归属行不自动赋权。
+B 身份摘要规则和既有旧格式继续回归，无新增表或迁移。
+
+```bash
+python scripts/render_tenant_run_control_pipeline.py native-c-stage <归档SHA256> --suite native-dispatch
+python scripts/render_tenant_run_control_pipeline.py native-c-stage-final <归档SHA256> --suite native-dispatch-final
+```
+
+#95 归档 SHA256：`f07ba8655ed92830ce513e5e712eb8c165d44f44bf2b7d9e1f40c6a0bd2fbd17`。
+旧 operator policy 用例改用实际 RunRecord，原有 remote_all 必须为字面 true 的断言保留。
+定向用例中 app 容器只是实际依赖的装配；存储/准入/CAS/账本/亲和性不替换为授权 mock。
+
+**限制：这不是已可使用的远端 C。** 本轮到持久暂存/交接为止；旧池仍拒绝领取
+scoped C。队列续租与 staged/孤儿/拒绝清理必须先接原生持久控制，撤权不能靠旧空间
+读取或猜测 NoStart/STOP。随后才接 scoped claim/owned、v2 原生 launch 的独立 SQL
+接收校验、worker RunContext/adoption、重启恢复和物理 C→B→C。这里没有 v2 launch、
+远端 worker、AIO、实际网络/模型或物理停止证明。其他撤权域、完整 M0–M11 仍未验收。
+租户开关 false，启动 schema fence 不变；无部署、推送或本机应用/pytest/Node/浏览器/
+Docker Desktop 运行。串行自审，不代表独立全量审计。
+
+
+## M4 C queue control checkpoint — 2026-10-18
+
+Shanghai Jenkins #96 reproduced missing workspace scope on dispatcher restart
+(two failures). #97 queue main passed two cases. #98 exposed scoped legacy
+terminal-update and missing NoStart settlement (four failed/four passed).
+#99 passed 20 focused tests in 49.50s and 35-file Ruff checks. Exact archive,
+source/log hashes and removed fixture-volume evidence: progress JSON
+`native_c_queue_control`; 38 source hashes match the working tree. No owned
+fixture containers/networks remain. No repeated 134-case regression.
+
+Control reads compare immutable C locators against canonical native SQL and
+return only control facts. Exact original pending ownership renews without an
+ambient member context. Revocation can settle NoStart only after ledger CAS
+confirms no assignment/attempt/generation/start; native Stop/lifetime/END use
+existing captured-target helpers. Legacy finish_dispatch_pending rejects scoped
+Runs. Assigned-work fixture retains its native lifetime and pending Stop;
+this is not physical STOP evidence. Acknowledged settlement replay is covered;
+lost-END acknowledgement on this new scoped path was not separately injected.
+
+Next: scoped claim/owned, independent v2 SQL authorization, receiver context and
+adoption, then physical C execution/recovery. Full M0–M11 remains open; activation
+false and startup schema fence unchanged. No deployment, push, model call or
+local application runtime.
+
+
+## M4 scoped C receiver checkpoint — 2026-10-18
+
+#100 reproduced scoped legacy-token acceptance and ordinary pool recovery
+returning scoped assignments: six failures. #101 passed seven cases, but the
+legacy adoption case failed because set_current_workspace rejects None. Fixed
+legacy admission to avoid that setter and reject inherited ambient workspace.
+#102 passed all eight focused cases and 37-file Ruff checks. Exact timings,
+archive/log/source hashes and owned cleanup: progress JSON `native_c_receiver`.
+Forty source hashes match the verified tree. No full-suite repeat.
+
+Receiver independently reads canonical native SQL pending authority before
+checking v2 claims; admission binds that context through reads, RunContext,
+owner CAS and task creation. CAS rechecks scoped lease and pending STOP under
+native locks. Ordinary owned recovery filters scoped payloads without releasing
+their capacity. Worker/browser entry uses the same preflight; scoped refusal
+retains uncertain capacity instead of using legacy settlement.
+
+Evidence limit: real SQL handoff/adoption and captured task context, but the
+execution entry is a context-observation stub. Membership-version withdrawal is
+an SQL fixture; this does not claim full removal lifecycle, actual graph/model,
+physical STOP, browser isolation or distributed delivery. Scoped claim/owned
+integration, actual C execution/recovery and C->B->C remain next. Full M0–M11
+and activation remain open/closed respectively; no push or deployment.
+
+
+## M4 scoped C pool-to-native execution — 2026-10-18
+
+#103: four failures at missing poll_envelopes after real native staging/handoff;
+this RED proves the missing dispatch entry, not every subsequent boundary.
+#104: seven passed in 25.83s, 37-file cloud Ruff. Forty source hashes match the
+verified checkout. Exact archive/log/source and removed fixture volume evidence:
+progress JSON `native_c_pool_main`; no owned fixture container/network remains.
+
+Real FastAPI ASGI poll/get/report now drives scoped exact-version pool claim,
+v2 envelope, original native receiver/adoption, execute_admitted_native_run and
+run_agent with a deterministic asynchronous model. SQL Run succeeds with the
+private report and 12 tokens; journal rows retain original workspace/user even
+when UI selection differs. Running polls carry no launch token or native payload.
+Control get/report preserve original assignment/expected-snapshot CAS without
+returning inputs/secrets/results; worker retains only its already-held snapshot.
+After this in-process graph drains, completion reporting releases its reservation
+and a subsequent poll does not relaunch. Membership-version withdrawal prevents
+claim; ordinary pool isolation and legacy capability regression also pass.
+
+Defaults still exclude scoped work. Only the explicit C path independently
+reauthorizes native pending ownership before/after exact ledger reservation and
+before signing. General post-adoption control reads never authorize launch;
+unknown ownership/work keeps capacity. Scoped wait/refuse are explicitly rejected
+until their lifecycle integration is complete.
+
+Limits: ASGI and deterministic model are in one isolated CI process, not two-host
+TCP, real model, AIO sandbox, provider namespace, physical STOP or crash/restart
+acceptance. The withdrawal fixture changes SQL membership version; earlier #99
+contains actual member-operation NoStart evidence. Next physical C lifecycle and
+scoped C->B->C dependencies/notifications, then remaining M4 domains and M0–M11.
+Activation remains false; no deployment/push or local runtime.
+
+
+## Captured native C STOP — #105 / #106 (2026-10-18)
+
+#105 reproduces false STOP against a missing legacy name (one failing regression).
+#106 passes eight focused cases in 25.67s plus 44-file Ruff: actual provider acquire/reuse/warm tracking, first STOP failure retains tracking and second STOP consumes the captured Docker ID, late acquisition denied; text NoStart only after native drain; existing cancellation sharing/ownership retention; actual SQL/ASGI/graph via worker adoption confirms receiver capture wiring. Only physical backend state is simulated. Actual ECS AIO lifecycle, restart recovery and scoped dependencies remain pending. Exact archive/source hashes and cleanup are in progress JSON `native_c_physical_stop_wip.green`; activation remains closed.
+
+
+## 2026-10-18 — real AIO captured STOP acceptance (#112)
+
+Shanghai Jenkins `deerflow-tenant-execution-m4-sql #112 SUCCESS`: one test passed
+in 53.79s (build 82.725s). Committed production baseline
+`92341ced649c5a531a48eb7afb33f005d9a57149` plus one physical test overlay;
+archive SHA256 `d99fff6b601987de5350a75647b487ce6522fdb86ba46e9012f0193736619006`.
+
+Real AIO acquire, shell marker write/read, warm release and captured-ID STOP ran
+on Shanghai worker. Injected before-destroy failure left the same container
+running and reservation 1. Successful STOP proved that exact ID absent while
+reservation stayed 1; native report CAS then released it to 0. Finally cleanup
+removed no objects and owned leftovers were empty: hygiene did not substitute
+for normal STOP evidence. No model API, local Docker or service deployment.
+
+#110 failed because the harness name shared the sandbox discovery prefix;
+Docker events showed API SIGTERM/SIGKILL, not an OOM event. #111 reached acquire
+but its test fixture omitted skill projection category directories. The runner
+now uses a distinct harness name/role, and the test calls native empty-allowlist
+skill projection. Neither failure required a production-code change.
+
+Scope: one worker with real Docker AIO and SQLite/ASGI native control. Two-host
+HTTP execution, crash/restart recovery, full C→B→C, remaining resource domains
+and M0–M11 remain open. Tenant activation and schema fences remain unchanged.
+The separate dependency-notification proposal remains unapplied pending its
+specific approval; this test archive excludes those uncommitted SQL changes.
+
+### 复用 #112 的真实 AIO 验收
+
+- 测试：`backend/tests/test_scoped_c_aio_physical.py`，仅显式设置 `ECS_C_AIO_PHYSICAL_TEST=1` 时执行。
+- 执行及精确清理：`scripts/ecs-native-c-aio/run_worker.sh`、同目录 `cleanup_exact.py`。
+- Jenkins 模板：`examples/ecs-native/deploy/Jenkinsfile.c-aio-physical.in`；沿用 DeerFlow 专属任务和 `shanghai-deploy-ssh`，严格校验 Worker 主机公钥。
+- 固化证据：`docs/tenant-workspaces-evidence/native-c-aio-112.json`，含已验证源码、镜像和脚本摘要；原始日志在 Jenkins #112 的 `c-aio-112/` artifacts。
+
+重新执行时先打包指定提交及已审测试，计算源码包摘要；将两个脚本、专用 `worker-known_hosts` 公钥文件、预检回执和源码包放在 Jenkins 工作目录，并生成 `c-aio-inputs.sha256`。模板的 `PHASE` 对应源码包文件名前缀，`INPUTS_SHA256` 对应清单摘要，`SOURCE_SHA256` 对应源码包摘要，`NATIVE_IMAGE_ID`/`AIO_IMAGE_ID` 必须是已存在镜像的完整不可变 ID。替换所有 `@@...@@` 后再提交，禁止复用旧摘要冒充新源码。
+
+运行仅使用 Worker 内网 `192.168.0.189` 和唯一 `/var/tmp` 测试目录；公网地址重启后可变。需至少 2560 MiB 可用内存。harness 和 AIO 各限制 1 GiB；harness 名称必须保持 `deer-c-harness-*`，不能与 `deer-c-aio-*` 沙箱发现前缀重合。脚本不安装、拉取或构建镜像，不挂载业务 NAS，不启动正式 Gateway。失败后先读取本次日志和精确容器状态，不因超时重新启动同一次任务。
+
+## 2026-10-18 — 原工作区异步依赖续跑
+
+Jenkins `deerflow-tenant-execution-m4-sql`：#118 主流程 1 passed / 19.91s；#119 接收前撤权 1 passed / 18.49s。两次均通过 Ruff 和 50 文件格式检查。证据见 `tenant-workspaces-evidence/native-dependency-118.json`、`native-dependency-119.json`。
+
+复用 `scripts/render_tenant_run_control_pipeline.py`：`--suite native-dependency-main` 只选 `[normal-postgres]`，`--suite native-dependency-revocation` 只选 `[notification_member-postgres]`。沿用现有 Jenkins 隔离 PostgreSQL 工具镜像和资源限额；不运行全矩阵。主流程使用真实 SQL、MCP 通知服务、签名接收、start_run 和 native adoption，模型图/RemoteIO 确定性替代，控制传输为 ASGI。
+
+撤权用例在已签名请求送达前真实增加成员版本，独立 SQL 观察无续跑和精确租约收尾。已 dispatched 后撤权的恢复收尾仍待实现；此处不证明真实 B 容器或两机网络。scoped 启动不执行 legacy checkpoint 补写，checkpoint-only 导入需单独授权迁移。
+
+### 已派发后撤权的通知收尾
+
+#120 复现滞留，#121 单条 PostgreSQL 回归通过（19.78s），Ruff/50 文件通过。`--suite native-dependency-dispatched-revocation` 只运行 `[dispatched_member-postgres]`。用例先通过真实通知派发，再撤权，调用实际 service `run_once` 两次确认幂等收尾；同时禁止业务读取、checkpoint 访问和再次启动。第二个 Run 保持 pending，容量保持 1。证据：`tenant-workspaces-evidence/native-dispatched-control-121.json`。不重复主流程或扩展数据库矩阵。
+
+## Scheduler 原工作区主干（#123）
+
+`--suite native-scheduler-main` 精确选择 `tests/test_workspace_native_scheduler.py::test_scoped_scheduler_occurrence_keeps_original_workspace[normal-postgres]`。#122 真实创建写NULL空间失败，#123 单次主干通过（19.61s），Ruff/61文件通过。沿用既有上海隔离 PostgreSQL、native工具镜像与资源限额；不运行本地runtime或多数据库矩阵。证据见 `tenant-workspaces-evidence/native-scheduler-123.json`。
+
+真实链：会话来源任务创建→持久队列→切换UI空间→control service dispatch→真实launcher/start_run/原子Run关联→native pool/receiver/graph→真实completion→原会话事件。模型图确定性、无sandbox、控制传输ASGI。必须以 `native-scheduler-entry-matrix.md` 判断完整Scheduler剩余入口，不以此单主干推断全包完成。必要撤权/租约检查随后单独选择。
+
+
+### 2026-10-18 — Scheduler necessary boundaries (#125)
+
+Jenkins `deerflow-tenant-execution-m4-sql #125 SUCCESS`: only queued-member withdrawal and pre-insert occurrence lease takeover passed (2 tests, 21.04s); Ruff check and 61-file format check passed. #124 failed because its test incorrectly assumed empty fixture tables; the retry preserves and compares every seeded Run/event/executor job. No product change was made to accommodate those seeds. Root independently matched all three changed source files to the successful archive; exact fixture containers/network are absent.
+
+Withdrawal retains the original queued row without launching. Lease takeover reaches the real atomic insert, rejects the stale receipt, and retains the successor launching lease without creating a Run, job or event, or releasing capacity. This does not prove STOP, queue retirement, full Scheduler, physical execution or migration compatibility. Evidence: `docs/tenant-workspaces-evidence/native-scheduler-boundaries-125.json`. Next: the two runtime gates still reject native schema 0041; fix and verify that compatibility separately. Tenant activation remains false; no deployment or push.
+
+Current `--suite native-scheduler-boundaries` selects only `[queued_member-postgres]` and `[launch_lease-postgres]`; the main selector is now `[normal-postgres]`. #123 used the historical `[postgres]` name before parameterization.
+
+
+### 2026-10-18 — Native 0041 B/control runtime compatibility (#127)
+
+Jenkins `deerflow-tenant-execution-m4-sql #126` reproduced actual B construction rejecting 0041; its initialization-failure fixture also left an engine open and produced a teardown error, retained in the evidence. Two runtime checks now accept exactly one known native head, 0040 or 0041. `#127 SUCCESS`: one real PostgreSQL ToolNode → durable MCP → HTTP B submission/background status flow and actual control start/run_once/stop passed (16.49s); unknown/multiple heads refused, original version rows restored and all existing ledger rows preserved. The 0040 stamp probe is only a startup-gate simulation on the 0041 fixture. Ruff and 64-file format checks passed; root independently matched all four changed files to the archive. Exact containers/network are absent and normal teardown passed.
+
+Evidence: `docs/tenant-workspaces-evidence/native-schema-compatibility-127.json`. Offline backfill/export/import receipt pins remain unchanged; this is not migration/release or physical execution acceptance. Next: scoped Scheduler create response, list/detail/history with current resource authority, without renewing original execution snapshots. M4/M0–M11 remain partial, activation false, no deployment or push.
+
+
+### 2026-10-18 — Scheduler HTTP create/list/detail (#130)
+
+`deerflow-tenant-execution-m4-sql #130 SUCCESS`: one PostgreSQL authenticated ASGI story passed in 17.57s, Ruff and 65-file formatting passed. #128 was a fixture constructor error, not business evidence; #129 reached actual POST persistence and failed during response enrichment. The reviewed patch only scopes three HTTP endpoints and four read methods. Current membership/private parent checks filter task/occurrence rows before aggregation; resource reads never renew original background execution snapshots.
+
+The story verifies real JWT/session + CSRF + workspace resolution, private reuse-thread POST/enriched response, actual due claim/foreground durable queue, queued list/detail after fresh membership versions, other-workspace empty list/404 detail, and preserved original snapshot/no launched Run. Root independently matched five changed files to the archive; exact containers/network are absent. Evidence: `docs/tenant-workspaces-evidence/native-scheduler-resource-130.json`; selector `--suite native-scheduler-resource-http`.
+
+History/thread relations/tool listing, management/manual dispatch, installed Scheduler dependency/own-stop, IM and timeout/unknown recovery remain open. This is not full Scheduler/M4 or M0–M11 acceptance. Tenant activation stays false; no deployment, remote push or local application/test runtime.
+
+`--suite native-scheduler-history-http` selects only the new story; `--suite native-scheduler-history-http-final` selects it plus the existing create/list/detail regression.
+
+
+### 2026-10-18 — Scheduler HTTP history/thread relations (#132)
+
+`deerflow-tenant-execution-m4-sql #131` completed the real native Run and persisted the deterministic model reply plus 12 tokens, then the original history handler returned 404 because it had not bound the request workspace. `#132 SUCCESS`: the new native-completion/authenticated HTTP history/thread-relations story and existing #130 create/list/detail regression passed (2 tests, 24.55s); Ruff and 65-file format checks passed. No provider API was called.
+
+Shared alias-aware predicates filter current resource workspace/private parents and original occurrence identity before history pagination, public number counts and thread latest-run LIMIT. Summary/token LEFT JOIN requires exact normal native Run identity/snapshot/task+occurrence metadata. The story keeps a hidden newest history row out of page/count, reads canonical reply/usage, rejects a temporary foreign Run payload sentinel, restores original seed values, and verifies fresh membership reads/unchanged execution snapshot/other-space 404. Background original-authority numbering remains unchanged. Root independently matched all six changed source files to the archive; exact fixture containers/network are absent. Evidence: `docs/tenant-workspaces-evidence/native-scheduler-history-132.json`.
+
+Only HTTP history and thread relations are newly accepted. Tool capability/listing, management/manual/own-stop, installed dependency, IM, timeout/unknown recovery and full M0–M11 remain open. Next: capture original native Run identity in the trusted scheduler capability, reuse actual WorkerInvocationGuard per call, and restore the caller scope afterward. Activation false; no deployment/push or local application/test runtime.
+
+`--suite native-scheduler-tool-list` selects only the local-session ToolNode story. The origin task is seeded through the real repository with an origin thread; page reuse alone does not confer a conversation-management relationship.
+
+
+### 2026-10-18 — Original-Run Scheduler tool list (#136)
+
+`deerflow-tenant-execution-m4-sql #134` showed the exact tool error: preparation was enabled/session/interactive/present, but the scoped list repository returned its withheld-integration error. #133 had weaker KeyError-only observation. #135 then exposed a fixture lookup under the other workspace; that correct denial was fixed only in the test, with original-scope lookup and immediate restoration. `#136 SUCCESS`: one real PostgreSQL local-session production Run POST → native worker → actual ToolNode schedule_task.list → canonical completion/journal story passed (18.54s); Ruff and 67-file format checks passed.
+
+The host captures a server RunRecord descriptor (original typed context, Run/user/thread/incarnation/creation time), matches the real WorkerInvocationGuard target and SQL rechecks before/after list, then restores the caller scope. Missing descriptors cannot fall back to legacy in scoped mode. The actual production background Run POST now binds workspace before owner checks; the fixture invokes that route with caller/UI scope other and header original. One legitimate origin-task repository fixture plus an other-space HTTP task demonstrates the list/journal contain only the original task; the capability fails with WorkerInvocationDenied after worker closure. No provider API is called. Root independently matched all seven changed source files to the successful archive; exact fixture containers/network are absent. Evidence: `docs/tenant-workspaces-evidence/native-scheduler-tool-136.json`.
+
+Remote internal interactive preparation remains explicitly closed: its snapshot lacks original session/PAT eligibility and credential permission ceiling. Next, bind that provenance to immutable server-owned Run kwargs and verify it on adoption, rather than trusting internal transport or client config. Management/manual/own-stop, other Run creation variants, installed dependency, IM, timeout/recovery and complete M0–M11 remain required. Activation false; no deployment/push or local application/test runtime.
+
+
+### 2026-10-18 — Remote original-session Scheduler main (#139)
+
+`deerflow-tenant-execution-m4-sql #139 SUCCESS`: remote pool/adoption/ToolNode list main plus existing local main passed (2 tests, 24.47s); Ruff and 67-file formatting passed. #137 exposed missing original-session provenance; #138 exposed durable pending same-key retry incorrectly hitting the cleanup barrier. The reviewed fix performs read-only exact workspace/user/thread/incarnation/context idempotent reuse before the unchanged new-work barrier. Same-key retry preserves the original Run/receipt; a different key remains 409 with the claimed pool slot charged.
+
+First admission now records only the server-owned strict session actor/token-version/permission ceiling in top-level Run kwargs. Signed native snapshots and independent SQL comparison carry that receipt to remote adoption. Internal transport remains internal; capability permissions intersect original and current native-owner permissions, with original token-version checks and the actual invocation guard preserved. Client context/config cannot replace the receipt. Canonical journal lists only the original conversation task; scope restores and post-worker capability reuse fails. No physical sandbox or model provider call is represented.
+
+Root independently read live terminal and byte-matched six source/template files to the successful archive. Exact fixture containers/network are absent. Evidence: `docs/tenant-workspaces-evidence/native-scheduler-origin-139.json`. Next run only two necessary PG boundaries: original-token revocation and later permission widening. Scoped management/manual/own-stop, other Run entry variants, installed dependency, IM/recovery and full M0–M11 remain required. Activation false; no deployment/push/local application runtime.
+
+
+### 2026-10-18 — Original Scheduler credential boundaries (#140)
+
+`deerflow-tenant-execution-m4-sql #140 SUCCESS`: only two PostgreSQL nodes passed (24.63s), with Ruff/67-file formatting. Production code is unchanged from `248a0de70`. After real SQL token version 0→1, a fresh valid cookie can retry the same admitted Run, but never replaces its original receipt0; remote Scheduler preparation refuses that expired original authority. After real RBAC expands to include threads:read, the originally narrow ceiling still yields permission_denied. Actual remote pool/adoption/ToolNode journals contain refusal codes and no private task IDs/titles. Canonical Run completes intentionally; this is Scheduler attenuation, not complete password-reset or whole-Run revocation proof.
+
+Root independently checked terminal, all five source bytes and exact fixture cleanup. No sandbox/provider call or physical STOP claim. Evidence: `docs/tenant-workspaces-evidence/native-scheduler-origin-boundaries-140.json`. Next: conversation tool-create → durable task/due queue main, using original Run identity and native live execution checks in the same SQL write transaction. Other management/manual/own-stop, remaining entries, installed dependencies/IM/recovery and full M0–M11 stay open; activation false, no deployment/push/local runtime.
+
+
+### 2026-10-18 — Conversation Scheduler create/due-queue main (#143)
+
+`deerflow-tenant-execution-m4-sql #143 SUCCESS`: one PostgreSQL remote production Run/ToolNode create → original-space task → real due claim/durable queued occurrence passed (20.65s), Ruff/67-file format passed. #141 was an exact withheld-management RED. #142 reached durable queue but failed on a nonexistent occurrence.user_id fixture field; #143 verifies ownership via the actual related ScheduledTaskRow instead. The root-reviewed final patch also restricts new task creation to running Runs while keeping generic native finalizer checks unchanged.
+
+Only list/create are open. The tool passes the actual original native target and token version through server-only arguments. The task writer retains workspace/actor → sorted parents → quota → Run order, compares the original nonce and locked actor token, and checks native lifetime/STOP/lease/running status before insert. The old public native guard keeps its original checks through a shared internal after-parent helper; ordinary HTTP resource creation is unchanged. UI-other cannot redirect ownership. The main verifies fresh-thread task identity/limit and queued original occurrence with no second native Run. Native no-sandbox STOP/report releases the original reservation; no physical execution or provider API is claimed.
+
+Root independently checked terminal and six archive/source bytes; exact fixture resources are absent. Evidence: `docs/tenant-workspaces-evidence/native-scheduler-tool-create-143.json`. Next only one terminal-between-validation-and-writer refusal probe; nonce/token transaction refusal paths are not separately proved by this main. Other task management/manual/own-stop and full M0–M11 remain open. Activation false; no deployment/push/local runtime.
+
+
+### 2026-10-18 — Conversation create terminal write window (#144)
+
+`deerflow-tenant-execution-m4-sql #144 SUCCESS`: one PostgreSQL boundary passed (19.79s), Ruff/67-file format passed; production code unchanged from `0be0a16d3`. After actual ToolNode guard/permission/validation succeeds, a thin test wrapper changes only authoritative source Run status from running to success, retaining exact owner, effective lease and open execution lifetime. The real task writer rejects with `Scheduler create requires its running native execution`. All task and occurrence columns remain unchanged; canonical journal contains the coded refusal, and the original native no-sandbox STOP/report releases its reservation. This proves the new business-write fence separately from generic native finalizer authority.
+
+Root independently checked terminal, five source/archive bytes and exact fixture cleanup. Evidence: `docs/tenant-workspaces-evidence/native-scheduler-tool-create-terminal-144.json`. No added test matrix or physical sandbox. Origin-incarnation/token-version atomic-window refusals remain code-reviewed only. Next business slice is task management/pause/resume/manual/own-stop with original authority; remaining entry, installed dependency, IM/recovery and full M0–M11 stay required. Activation false; no deployment/push/local runtime.
+
+
+### 2026-10-18 — HTTP and remote tool Scheduler management mains (#146)
+
+`deerflow-tenant-execution-m4-sql #146 SUCCESS`: two PostgreSQL business stories passed (25.21s), Ruff/67-file formatting passed. Authenticated HTTP and remote actual ToolNode each complete create → update → real due queue → pause → resume → new due occurrence → delete. #145 reproduced HTTP PATCH 404 without resource binding and the remote tool's explicit withheld-update refusal; later actions were not reached in that RED.
+
+Shared scoped writers preserve current private-resource access and immutable original task snapshots. They lock workspace/actor, sorted original/proposed/occurrence/source parents, optional quota, task, occurrence and original tool Run in order; they recheck active identity after locks, guard protected update fields and reuse original target/token/running/lease/lifetime/STOP fences. A waiting row is cancellable only with no native Run, explicit unaccounted state, no start and no lease. Invalid original execution authority cannot be renewed through resume/rearm. Legacy branches remain unchanged; note/manual/own-stop are still withheld.
+
+The stories use a deterministic business scheduling clock while native lease/SQL/STOP time remains real. Old queued occurrences stay interrupted, resume does not replay them, and the next due claim creates a new id/sequence2. No scheduled execution is launched; run_count/automatic use stay0 and original task snapshot remains unchanged. The HTTP main also changes fresh mode to an existing private reuse parent and verifies its nonce. Native Run ID sets do not grow during management; the remote source reservation remains1 before its own no-sandbox STOP/report and0 afterward. No physical sandbox/provider API is represented.
+
+Root independently checked terminal, six source/archive bytes and exact cleanup. Evidence: `docs/tenant-workspaces-evidence/native-scheduler-management-146.json`. Next only two necessary boundaries: unknown queued accounting must be retained; after original snapshot expiry, current resource pause/delete may work but resume/rearm must explicitly require new/copy. Full M4/M0–M11, note/manual/own-stop, installed dependencies, IM/recovery and physical gates remain open. Activation false; no deployment/push/local runtime.
+
+
+### 2026-10-18 — Scheduler management control boundaries (#147)
+
+`deerflow-tenant-execution-m4-sql #147 SUCCESS`: exactly two PostgreSQL HTTP boundaries passed (20.02s), Ruff/67-file formatting passed; production unchanged from `7a7f2022b`. A real queued occurrence changed only to unknown launch_accounted=None rejects both pause and delete with409/task_running; every task/occurrence column and native Run ID set remains unchanged. No restoration to False hides the unknown state.
+
+A real membership-version increment produces a fresh context through actual WorkspaceService/session requests while UI context remains other. Current resource authority still pauses the original queue. Resume and a valid schedule update both reject with422/invalid_request and the visible message `Original task authority expired; create/copy a new task`. All task/occurrence columns, original snapshot, counters and native Run IDs stay unchanged across these refusals. Current resource delete still succeeds, leaving the old occurrence interrupted with its original identity.
+
+Root independently read terminal, byte-matched six source files to the SHA-verified archive and checked exact fixture resources absent. Evidence: `docs/tenant-workspaces-evidence/native-scheduler-management-boundaries-147.json`. This is one representative unknown-accounting probe and a stale-original-snapshot probe, not every unknown field/race, native execution, provider API, physical STOP or browser acceptance. Next: native note/manual trial/own-stop, then remaining Scheduler dependency/IM/recovery and full M0–M11 gates. No added matrix, deployment, push, local runtime or tenant activation.
+
+
+### 2026-10-18 — Native Scheduler notes/manual trials/own-stop main (#149)
+
+`deerflow-tenant-execution-m4-sql #149 SUCCESS`: one PostgreSQL business story passed (25.61s), Ruff/67-file formatting passed. #148 first reproduced the explicit withheld-note 503. The same story now executes four real native pool/adopt/ToolNode Runs: meaningful verbatim note turn; strict standalone explicit trial turn creates q1; HTTP repeat reuses q1, pause/resume cancels it, HTTP creates q2; control launches q2 and real own-stop completion pauses the task/emits one origin event; HTTP explicitly trials the paused task again as q3 with exact previous q2 thread, preserving pause and event uniqueness. Total manual launches2, automatic use0, original snapshot/note preserved. Each actual no-sandbox STOP/report releases its reservation.
+
+Manual preflight preserves the caller's status/updated-at confirmation; final queue SQL rechecks it and original source target/token/parent/Run authority. Canonical occurrence trigger controls queue/native admission/launch accounting, retaining paused manual semantics and fast-completion protection. HTTP trigger binds current resource scope. Notes reuse the original management writer fences. Scheduled own-stop is a separate narrow capability verified against canonical SQL task/occurrence/normal Run metadata: pending/running identity may be assembled before execution, but the actual request requires live running worker authority and changes only that occurrence's stop-request field. Normal finalization owns pause/events. It grants no Session eligibility or general task-management authority.
+
+Root reviewed the precise seven-file patch, independently checked terminal, SHA-verified archive and byte-matched nine source files; exact fixture resources absent. Evidence: `docs/tenant-workspaces-evidence/native-scheduler-manual-own-stop-149.json`. No provider/model or physical sandbox acceptance. Own-stop management refusal and manual revocation windows are code-reviewed only; no new boundary matrix. Installed scheduled C→B→C, IM/recovery and remaining full M0–M11 gates stay open; activation false, no deployment/push/local runtime.
+
+
+### 2026-10-18 — Installed Scheduler dependency main (#151)
+
+`deerflow-tenant-execution-m4-sql #151 SUCCESS`: one PostgreSQL story passed (21.58s), Ruff/67-file formatting passed. #150 reached real Scheduler→C1 external wait→no-sandbox STOP/report, then reproduced the scoped source-query refusal; the installed reconciler was never invoked. The same story is now green: the actual host reconciler examines/protects C1, real MCP result notification creates C2, native admission transfers the same occurrence and its last Run association, C2 completes the goal/task with one occurrence/automatic launch/count and one origin event. Late C1 completion cannot overwrite C2; repeated notification/control drain does not add Runs. UI-other cannot change original execution ownership.
+
+The sole product file adds original-live/private/exact normal Run/trigger source locators and scoped transfer under workspace/actor→sorted parents→task→occurrence→sorted Run locks. Transfer checks original immutable context, metadata and canonical dependency idempotency, successful waiting C1 with closed native execution lifetime, and pending live/open C2 with no cancellation/STOP. It changes only occurrence.run_id and eligible task.last_run_id. It does not re-admit a schedule, count another occurrence, renew a lease or infer physical STOP.
+
+Root reviewed the exact patch, independently checked terminal and SHA/three archive source bytes plus exact fixture cleanup. Evidence: `docs/tenant-workspaces-evidence/native-scheduler-installed-dependency-151.json`. MCP service/SQL/notification/native launches are real; graph and remote IO are deterministic. No actual B wire/physical/provider/two-host acceptance. Shared helper extraction preserves existing branches; the three non-scheduled selectors were not rerun. Invalid/unexamined waits remain held and need subsequent control settlement; IM/recovery and full M0–M11 remain open, activation false. No deployment/push/local runtime.
+
+
+### 2026-10-18 — Existing native goal-replacement settlement (#152)
+
+`deerflow-tenant-execution-m4-sql #152 SUCCESS`: exactly one PostgreSQL business boundary passed (21.57s), Ruff/67-file formatting passed. Product code is unchanged from `3119eddf3`; no new control API was needed. After real installed scheduled C1 wait, no-sandbox STOP/report and actual reconciler protection, a real JWT/CSRF PUT replaces the native goal while ambient UI scope remains other. Control reconciliation settles the old occurrence as interrupted/once task cancelled, retires the old wait and preserves canonical C1's complete SQL row, original launch accounting/count1/automatic1, normal Run/C job identities and the complete replacement goal. A repeat retains exact first-terminal rows and the original silent interrupted-once event baseline.
+
+The same story then completes the actual MCP poll/result/notification path with deterministic remote IO. The result remains stored, the superseded notification becomes dead_letter/notified_version0 without a continuation Run, and the replacement goal/source rows stay unchanged. Native checkpoint-write reservations are legitimate control rows and are excluded from normal-model Run counting.
+
+Root reviewed the exact test, independently checked live terminal, SHA/two source bytes and exact cleanup; backend/app and backend/packages have no product diff. Evidence: `docs/tenant-workspaces-evidence/native-scheduler-goal-replacement-152.json`. This verifies the existing live-original-scope path; member-revoked/private-parent-retired/unknown control settlement and full recovery remain open. No actual B wire/physical/provider/two-host acceptance, no other selectors rerun. Full M0–M11 remains open; activation false, no deployment/push/local runtime.
+
+
+### 2026-10-18 — Revoked closed Scheduler control main (#154)
+
+`deerflow-tenant-execution-m4-sql #154 SUCCESS`: one PostgreSQL business story passed (21.23s), Ruff/67-file formatting passed. #153 first reproduced an already closed initial C1 remaining running after actual native owner transfer and member removal. The same installed control story now settles its original occurrence as interrupted/once task cancelled, retires only the old ledger wait and writes one control audit. Checkpoint/goal/result/business Run entry points are guarded to fail if called; none were called. Canonical C1, normal Run IDs, execution lifetime, original context/count/accounting, event baseline and parent revoke rows stay unchanged. Repeated control adds no audit or job/physical change.
+
+The SQL sweep selects finite control columns and validates canonical workspace_revoke identity, original task/occurrence/native binding and strict captured-version bounds against locked current member/workspace versions. It changes only derived occurrence/task control state and audit, with no business finalizer/observer/publication. Fresh candidates and historical audit replay use separate keyset pages; exact retired source locators go independently through existing host control reauthorization, outside SQL transactions and outside live checked/valid source sets. Parent revoke and scheduler domain remain pending.
+
+Native terminal status plus completed run_execution lifetime proves logical execution closure, not physical STOP. Existing normal completion has the same logical-before-host-STOP ordering. Physical pool reservations remain exclusively stop_owned/report; this sweep never releases capacity or changes native/physical receipts. Initial active/transferred/unknown native rows stay held.
+
+Root reviewed the precise patch (including a required future-version upper fence), independently checked terminal, SHA/four archive files and exact cleanup. Evidence: `docs/tenant-workspaces-evidence/native-scheduler-revoked-control-154.json`. This runtime proof is closed+report C1 only. Queued explicit NoStart, active/transfer/unknown, pending physical STOP, transport-failure replay and large pagination were not separately tested. Complete revoked/private-parent/account/workspace domains, actual B wire/physical, IM/recovery and M0–M11 remain open. Activation false; no deployment/push/local runtime.
+
+
+#155 SUCCESS: one PG actual queue story (17.49s), product unchanged from `52446f3f9`. Revoked explicit NoStart retires; accounting None retains every task/occurrence field; no native Run, event, executor job or physical action is added. Repeat is idempotent, parent domains pending. Root verified source/terminal/exact cleanup. Evidence: `docs/tenant-workspaces-evidence/native-scheduler-revoked-queued-control-155.json`. This is one representative unknown boundary, not full domain/physical acceptance. Next prioritize actual B wire/physical continuation main.
+
+
+### 2026-10-18 — Real B Docker drives scheduled C continuation (#16)
+
+Shanghai physical job #15 reproduced output publication into ambient UI-other. The minimal publication fix derives input/output paths from the captured job context, restores the caller before existing SQL/no-follow authorization and IO, and explicitly isolates legacy path calculation. Physical #16 passes the same main plus the existing nonroot publication permission case (two tests). Actual ToolNode → Ordinary MCP HTTP serialization (ASGI transport) → dedicated B ledger/LocalWorker/Docker → original-space output → native notification/C2 completes one original occurrence/count. The admitted input snapshot survives later upload changes; UI-other output is absent; repeated drain adds no Run. Exact B container normal cleanup succeeds without finally removal. C1/C2 use native no-sandbox STOP/report, not C physical STOP.
+
+Evidence: `docs/tenant-workspaces-evidence/native-scheduler-real-b-physical-16.json`; RED: `docs/tenant-workspaces-evidence/native-scheduler-real-b-physical-red-15.json`. Root independently reviewed source/terminal/cleanup. This proves single-host B with a separate owned B ledger, not shared B/C pool, two-host TCP, model/C AIO, OS restart, full control/recovery/IM or M0–M11 completion. Tenant activation remains false; no deployment or push.
+
+
+### 2026-10-19 — Scoped B joins the existing shared B/C pool (#18)
+
+Physical #17 reached actual MCP submission and OutboundStore RPC, then reproduced B claim=None. Physical #18 passes the same PostgreSQL main plus the existing ordinary pool filter check (2 passed, 28.00s; seven-file Ruff/format). One executor ledger/node budget now covers C1, real B Docker and C2: C1 releases through native no-sandbox STOP/report; B reserves; actual notification transfers C2 while B still retains capacity, so C2 remains pending; normal exact B removal releases capacity; only then C2 reserves and completes the original occurrence/count1. Input snapshot bytes survive later upload changes, actual published report remains in the original workspace, UI-other output is absent, and the historical unknown row is unchanged. Finally cleanup was not needed for B.
+
+The opt-in B pool path reuses native SQL authority and exact version/assignment CAS. New scoped B records explicitly start with physical_stopped=False/start_intent=False/attempt0; absent history stays unknown. Ordinary NULL-only claim/owned remain unchanged, and scope-required polling cannot start historical NULL work. Live payload/new external effects/results require original SQL authority; finite control get/report and terminal cleanup do not disclose argv/inputs/results. The remote worker never holds native SQL across HTTP. Known assignment caches merge only finite controls; unknown restarted jobs retain capacity. CLI validates fixed scope/native-server/publication configuration.
+
+Root independently verified terminal/log/source/pipeline, real output SHA and exact containers/network/anonymous-volume absence. Evidence: `docs/tenant-workspaces-evidence/native-shared-bc-pool-18.json`; RED: `docs/tenant-workspaces-evidence/native-shared-bc-pool-red-17.json`. Runtime acceptance here is normal shared-pool plus one legacy filter only. Withdrawal/control CAS, unknown/restarted recovery, CLI boot, two-host TCP/C AIO physical, complete resource-domain recovery/IM and M0–M11 remain required. ASGI replaces only network plumbing; C uses no physical sandbox. Tenant activation false, no production deployment/push or local runtime.
+
+
+2026-10-19 step39 prepared, NOT runtime verified: one real shared-pool membership withdrawal/STOP test and exact CI selector are applied; product code is unchanged from `c6e9b9e88`. The test requires actual private output before revoke, dedicated signed control/outbox, physical STOP before pool release, no native publication/C2 through two actual notification drains, and unchanged native/unknown snapshots. Static Ruff/format/AST/diff checks passed. No upload or build yet: waiting for explicit user approval of frozen archive `73d729dbfa606c5ac0cb0d08c41339317d2d477da89970e3498c5dd0b0a48b4d` and pipeline `95bf48030996aed3327c064c355a906b5382b81f2f039290a3244f30fdaefe8f` to user-owned Jenkins 106.14.210.163, only `deerflow-tenant-execution-m4-physical`. Earlier automatic review required exact payload/destination approval; #18 approval was for its single prior run. Pending receipt: `docs/tenant-workspaces-evidence/native-shared-bc-revocation-pending-approval.json`. Use frozen `/private/tmp/submit-native-shared-bc-revocation.py` only after this approval and exact hash/idle checks. Full step39 and parent gates remain unchecked; no production deployment/push/tenant activation/local runtime.

@@ -7,6 +7,7 @@ at ``max_trace_content`` bytes to avoid bloating the database.
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import logging
 import re
@@ -17,7 +18,15 @@ from typing import Any
 from sqlalchemy import delete, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from deerflow.authz.workspace import get_current_workspace
 from deerflow.persistence.models.run_event import RunEventRow, RunEventThreadSeqRow
+from deerflow.persistence.run.model import RunRow
+from deerflow.persistence.run.sql import RunRepository
+from deerflow.persistence.thread_meta.model import ThreadMetaRow
+from deerflow.persistence.thread_meta.sql import ThreadMetaRepository
+from deerflow.persistence.workspaces.run_control import NativeRunStopTarget
+from deerflow.persistence.workspaces.scope import resolve_resource_scope
+from deerflow.persistence.workspaces.sql import WorkspaceAccessDenied
 from deerflow.runtime.events.message_identity import message_identity
 from deerflow.runtime.events.store.base import RunEventStore
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, get_current_user, resolve_user_id
@@ -27,9 +36,11 @@ logger = logging.getLogger(__name__)
 
 
 class DbRunEventStore(RunEventStore):
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession], *, max_trace_content: int = 10240):
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession], *, max_trace_content: int = 10240, workspace_required: bool = False):
         self._sf = session_factory
         self._max_trace_content = max_trace_content
+        self._workspace_required = workspace_required
+        self._worker_target = None
         # Per-thread asyncio locks serialize seq assignment for concurrent
         # in-process writers on the same thread. The DB-level FOR UPDATE /
         # advisory lock guards cross-process races; this guards the common
@@ -43,6 +54,33 @@ class DbRunEventStore(RunEventStore):
         # the generation alive until they drain.
         self._write_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
         self._write_lock_pins: dict[str, asyncio.Lock] = {}
+
+    def bind_worker(self, target):
+        """Private immutable per-Run view; every write rechecks native SQL."""
+        if type(target) is not NativeRunStopTarget:
+            raise WorkspaceAccessDenied("journal requires captured native Run identity")
+        bound = copy.copy(self)
+        bound._worker_target = target
+        return bound
+
+    async def _authorize_worker_write(self, session, events):
+        target = self._worker_target
+        if target is None:
+            if self._workspace_required or get_current_workspace() is not None:
+                raise WorkspaceAccessDenied("workspace journal requires a bound worker")
+            # A legacy/unbound store cannot stamp NULL over private resources.
+            thread_ids = {e["thread_id"] for e in events}
+            run_ids = {e["run_id"] for e in events}
+            private_parent = await session.scalar(select(ThreadMetaRow.thread_id).where(ThreadMetaRow.thread_id.in_(thread_ids), ThreadMetaRow.workspace_id.is_not(None)).limit(1))
+            private_run = await session.scalar(select(RunRow.run_id).where(RunRow.run_id.in_(run_ids), RunRow.workspace_id.is_not(None)).limit(1))
+            if private_parent is not None or private_run is not None:
+                raise WorkspaceAccessDenied("unbound journal cannot write a private Run")
+            return None
+        for event in events:
+            if event["thread_id"] != target.thread_id or event["run_id"] != target.run_id or event.get("user_id", target.user_id) != target.user_id or event.get("workspace_id", target.workspace_id) != target.workspace_id:
+                raise WorkspaceAccessDenied("journal batch differs from captured Run identity")
+        await RunRepository(self._sf).lock_worker_effect(session, target)
+        return target.workspace_id
 
     def _get_write_lock(self, thread_id: str) -> asyncio.Lock:
         """Return (creating if needed) the per-thread seq-assignment lock."""
@@ -212,16 +250,18 @@ class DbRunEventStore(RunEventStore):
         """
         content, metadata = self._truncate_trace(category, content, metadata)
         db_content, metadata = self._content_to_db(content, metadata)
-        user_id = self._user_id_from_context()
+        user_id = self._worker_target.user_id if self._worker_target is not None else self._user_id_from_context()
         async with self._get_write_lock(thread_id):
             async with self._sf() as session:
                 async with session.begin():
+                    workspace_id = await self._authorize_worker_write(session, [{"thread_id": thread_id, "run_id": run_id}])
                     max_seq = await self._max_seq_for_thread(session, thread_id)
                     seq = (max_seq or 0) + 1
                     row = RunEventRow(
                         thread_id=thread_id,
                         run_id=run_id,
                         user_id=user_id,
+                        workspace_id=workspace_id,
                         event_type=event_type,
                         category=category,
                         content=db_content,
@@ -239,12 +279,13 @@ class DbRunEventStore(RunEventStore):
         thread_ids = {e["thread_id"] for e in events}
         if len(thread_ids) > 1:
             raise ValueError(f"put_batch requires all events to belong to the same thread; got {thread_ids!r}")
-        user_id = self._user_id_from_context()
+        user_id = self._worker_target.user_id if self._worker_target is not None else self._user_id_from_context()
         # All events belong to the same thread (validated above).
         thread_id = events[0]["thread_id"]
         async with self._get_write_lock(thread_id):
             async with self._sf() as session:
                 async with session.begin():
+                    workspace_id = await self._authorize_worker_write(session, events)
                     max_seq = await self._max_seq_for_thread(session, thread_id)
                     seq = max_seq or 0
                     rows = []
@@ -258,7 +299,8 @@ class DbRunEventStore(RunEventStore):
                         row = RunEventRow(
                             thread_id=e["thread_id"],
                             run_id=e["run_id"],
-                            user_id=e.get("user_id", user_id),
+                            user_id=user_id if self._worker_target is not None else e.get("user_id", user_id),
+                            workspace_id=workspace_id,
                             event_type=e["event_type"],
                             category=category,
                             content=db_content,
@@ -292,10 +334,11 @@ class DbRunEventStore(RunEventStore):
         """
         content, metadata = self._truncate_trace(category, content, metadata)
         db_content, metadata = self._content_to_db(content, metadata)
-        user_id = self._user_id_from_context()
+        user_id = self._worker_target.user_id if self._worker_target is not None else self._user_id_from_context()
         async with self._get_write_lock(thread_id):
             async with self._sf() as session:
                 async with session.begin():
+                    workspace_id = await self._authorize_worker_write(session, [{"thread_id": thread_id, "run_id": run_id}])
                     max_seq = await self._max_seq_for_thread(session, thread_id)
                     stmt = (
                         select(RunEventRow)
@@ -314,6 +357,7 @@ class DbRunEventStore(RunEventStore):
                         thread_id=thread_id,
                         run_id=run_id,
                         user_id=user_id,
+                        workspace_id=workspace_id,
                         event_type=event_type,
                         category=category,
                         content=db_content,
@@ -324,6 +368,20 @@ class DbRunEventStore(RunEventStore):
                     session.add(row)
                     await self._raise_seq_watermark(session, thread_id, row.seq)
                 return self._row_to_dict(row), True
+
+    def _read_context(self, user_id):
+        return resolve_resource_scope(None, user_id, required=self._workspace_required)
+
+    def _read_scope(self, stmt, user_id):
+        context = self._read_context(user_id)
+        if user_id is not None:
+            stmt = stmt.where(RunEventRow.user_id == user_id)
+        if context is not None:
+            # Branch history may use synthetic seed Run IDs. Its authority is
+            # the event's own scope and private thread, not a copied Run row.
+            parent = ThreadMetaRepository._owned_scope(select(ThreadMetaRow.thread_id).where(ThreadMetaRow.thread_id == RunEventRow.thread_id), user_id, context).correlate(RunEventRow).exists()
+            stmt = stmt.where(RunEventRow.workspace_id == context.workspace_id, parent)
+        return stmt
 
     async def list_messages(
         self,
@@ -336,8 +394,7 @@ class DbRunEventStore(RunEventStore):
     ):
         resolved_user_id = resolve_user_id(user_id, method_name="DbRunEventStore.list_messages")
         stmt = select(RunEventRow).where(RunEventRow.thread_id == thread_id, RunEventRow.category == "message")
-        if resolved_user_id is not None:
-            stmt = stmt.where(RunEventRow.user_id == resolved_user_id)
+        stmt = self._read_scope(stmt, resolved_user_id)
         if before_seq is not None:
             stmt = stmt.where(RunEventRow.seq < before_seq)
         if after_seq is not None:
@@ -370,8 +427,7 @@ class DbRunEventStore(RunEventStore):
     ):
         resolved_user_id = resolve_user_id(user_id, method_name="DbRunEventStore.list_events")
         stmt = select(RunEventRow).where(RunEventRow.thread_id == thread_id, RunEventRow.run_id == run_id)
-        if resolved_user_id is not None:
-            stmt = stmt.where(RunEventRow.user_id == resolved_user_id)
+        stmt = self._read_scope(stmt, resolved_user_id)
         if event_types:
             stmt = stmt.where(RunEventRow.event_type.in_(event_types))
         if task_id is not None:
@@ -404,8 +460,7 @@ class DbRunEventStore(RunEventStore):
             RunEventRow.run_id == run_id,
             RunEventRow.category == "message",
         )
-        if resolved_user_id is not None:
-            stmt = stmt.where(RunEventRow.user_id == resolved_user_id)
+        stmt = self._read_scope(stmt, resolved_user_id)
         if before_seq is not None:
             stmt = stmt.where(RunEventRow.seq < before_seq)
         if after_seq is not None:
@@ -430,9 +485,10 @@ class DbRunEventStore(RunEventStore):
         *,
         user_id: str | None | _AutoSentinel = AUTO,
     ):
+        resolved_user_id = resolve_user_id(user_id, method_name="DbRunEventStore.get_last_visible_ai_seq_by_run")
+        self._read_context(resolved_user_id)
         if not run_ids:
             return {}
-        resolved_user_id = resolve_user_id(user_id, method_name="DbRunEventStore.get_last_visible_ai_seq_by_run")
         caller = RunEventRow.event_metadata["caller"].as_string()
         # RunJournal canonically persists AI message rows as
         # ``llm.ai.response``; ``ai_message`` remains for legacy compatibility.
@@ -447,8 +503,7 @@ class DbRunEventStore(RunEventStore):
             )
             .group_by(RunEventRow.run_id)
         )
-        if resolved_user_id is not None:
-            stmt = stmt.where(RunEventRow.user_id == resolved_user_id)
+        stmt = self._read_scope(stmt, resolved_user_id)
         async with self._sf() as session:
             result = await session.execute(stmt)
             return {run_id: seq for run_id, seq in result if isinstance(seq, int)}
@@ -461,8 +516,7 @@ class DbRunEventStore(RunEventStore):
     ):
         resolved_user_id = resolve_user_id(user_id, method_name="DbRunEventStore.count_messages")
         stmt = select(func.count()).select_from(RunEventRow).where(RunEventRow.thread_id == thread_id, RunEventRow.category == "message")
-        if resolved_user_id is not None:
-            stmt = stmt.where(RunEventRow.user_id == resolved_user_id)
+        stmt = self._read_scope(stmt, resolved_user_id)
         async with self._sf() as session:
             return await session.scalar(stmt) or 0
 
@@ -473,10 +527,11 @@ class DbRunEventStore(RunEventStore):
         *,
         user_id: str | None | _AutoSentinel = AUTO,
     ):
+        resolved_user_id = resolve_user_id(user_id, method_name="DbRunEventStore.get_message_seqs")
+        self._read_context(resolved_user_id)
         wanted = set(identities)
         if not wanted:
             return {}
-        resolved_user_id = resolve_user_id(user_id, method_name="DbRunEventStore.get_message_seqs")
         # ``content`` is a TEXT column holding a JSON *string* (see
         # ``_content_to_db``), not a JSON column, so the identity fields cannot
         # be projected in SQL — matching rows are decoded here instead. The
@@ -489,8 +544,7 @@ class DbRunEventStore(RunEventStore):
         # ``message_identity``; ids the prefilter cannot express fall back to
         # the full scan).
         stmt = select(RunEventRow.seq, RunEventRow.content).where(RunEventRow.thread_id == thread_id, RunEventRow.category == "message").order_by(RunEventRow.seq)
-        if resolved_user_id is not None:
-            stmt = stmt.where(RunEventRow.user_id == resolved_user_id)
+        stmt = self._read_scope(stmt, resolved_user_id)
         prefilter_ids = self._prefilter_substrings(wanted)
         if prefilter_ids is not None:
             stmt = stmt.where(or_(*[RunEventRow.content.like(f"%{i.replace('%', '\\%').replace('_', '\\_')}%", escape="\\") for i in prefilter_ids]))

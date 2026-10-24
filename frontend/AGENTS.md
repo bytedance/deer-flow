@@ -352,3 +352,430 @@ locked during attachment. Deleting an object removes its context; undo restores
 references already attached to the draft. Labels grant no read authority. IME,
 caret, thread changes and attachment fences apply to editor and picker. The `@`
 and attachment buttons share the picker.
+
+The API fetch wrapper must forward native Request inputs intact, including body,
+method, explicit workspace header and AbortSignal. Derive CSRF from the effective
+RequestInit/Request method; caller RequestInit headers override inherited ones,
+and clone before adding CSRF. Never reduce a Request to just its URL. Workspace
+Request tests normalize Headers at the happy-dom fetch-double boundary because
+its Request constructor does not consume the worker Headers instance like native
+fetch; keep actual selector/body/signal assertions. Shanghai frontend #6 verifies
+this foundation and full check, not automatic workspace/client/cache switching.
+All frontend tests/typecheck here run in Shanghai, not local Docker/Node runtime.
+
+
+The SDK factory accepts an explicit `WorkspaceRequestScope` as its second
+argument: actor ID, canonical workspace UUID and AbortSignal for one page
+lifetime. It snapshots metadata and memoizes only by that lifetime object;
+never mutate an existing scope to switch workspaces. Main, run-creation and
+recovery transports all bind the same selector and combined signal. Creation
+keeps zero retries; recovery GETs retain the native retry budget. Workspace
+streams use `onDisconnect: "continue"` so detaching a page does not implicitly
+cancel its background Run. Stream and join/recovery options must carry the
+combined lifetime signal into the SDK's own reconnect loop, not just fetch.
+SDK 1.6 classifies fetch cancellation by message prefix: normalize aborted
+fetch failures to an Error named AbortError with an AbortError-prefixed message
+so it never waits through network retry backoff. Keep native unscoped/demo
+behavior unchanged. SDK reconnect markers are actor/workspace/thread-keyed;
+the React hook's own resumable storage and provider/cache integration remain
+unwired and must not be described as full tab isolation.
+
+
+QueryClientProvider owns a lazily created QueryClient per mounted page tree.
+It reads optional AuthProvider display identity and keys the query subtree by
+actor ID plus an explicit `cacheKey`; account changes/logout immediately render
+a fresh cache, including when the workspace key stays the same. Public artifact
+and showcase trees can omit authentication context and still get independent
+caches. The future workspace provider must pass a stable key for one validated
+workspace lifetime and renew it on workspace/credential/policy lifetime changes;
+a mutable browser-global current-workspace value is not a cache identity.
+Genuine unmount clears query/mutation caches and cancels queries. Cleanup uses
+a captured generation object and a microtask to distinguish real unmount from
+React StrictMode's immediate effect replay; do not clear the still-live cache
+during that replay. Cache removal does not cancel server-side Runs, physical
+work or arbitrary mutation callbacks; their request/publication lifetimes remain
+separate required fences. This foundation does not wire the workspace selector.
+
+
+Browser workspace REST callers use `createWorkspaceRESTClient(scope)` from the
+shared fetcher. The factory copies the actor/workspace/signal and configured API
+root once; its fetch keeps native Request body/method, CSRF and live-401 behavior
+while binding the selector and cancellation through the shared transport.
+Prefer its `json()` for materialized JSON: it checks the captured combined signal
+after decoding and before returning data or a parsed GatewayApiError, so late
+results/errors cannot survive a cancelled lifetime. Native domain decoders use consume(response, reader), which accepts only
+a Response returned by this exact client and checks its combined signal before
+and after the whole success/error decoder, including caught parse failures.
+The Response itself remains native. Raw fetch consumers that skip consume()
+still own their post-decode/publication fences. Returning a value does not fence
+a caller that starts another await before applying it. Native unscoped fetch and
+static demos retain their original behavior; explicit workspace clients reject
+demo mode. RequestInit signal:null clears an inherited Request signal, never the
+workspace lifetime. Shared scoped fetch dispatches the resolved/validated absolute
+URL (or original native Request), not a raw relative string that the browser
+would resolve against a different page/base URL. No actor header is invented.
+The workspace selector/context and consumer wiring remain required work.
+
+
+`core/workspaces/context.tsx` provides the opt-in WorkspaceProvider and
+WorkspaceReadyBoundary. Provider enablement must come from server runtime
+capability; disabled nested wrappers preserve an existing parent context.
+Each native actor owns one WorkspaceSession; its read-only metadata adapter
+validates the active list, unique own personal workspace and current actor,
+selector and membership/policy versions before publishing any new names/roles
+or constructing REST/SDK clients. Selection aborts the previous lifetime first;
+a stale completion cannot overwrite a later selection. Snapshot data and
+client scope are immutable; the per-entry cacheKey includes the versions and
+a local epoch. Refcounted microtask release keeps StrictMode's immediate effect
+replay alive but permanently closes a genuinely unmounted store.
+Controls may read useWorkspaceContext while pending; all resource consumers
+belong under WorkspaceReadyBoundary. useWorkspaceLifetime returns null only
+without enabled context and refuses pending/denied context, rather than falling
+back to native unscoped clients. Ready content owns the matching query cache.
+This component is not yet mounted in the app shell: runtime capability/bootstrap,
+consumer clients, selector UI and stored thread/artifact/reconnect metadata still
+need integration. No automatic membership/session watcher is installed here;
+selection and explicit refresh revalidate. Cross-tab credentials/native principal
+consistency and physical Run behavior remain M4/M6/M11 requirements.
+
+
+Native upload hooks capture useWorkspaceLifetime and pass its REST client into
+upload/list/limits/delete APIs. Scoped list/limits queries consume their query
+AbortSignal; mutation cache effects skip expired lifetimes. The on-submit helper
+checks again after awaiting upload. Optional request options preserve native
+unscoped callers. Ordinary chat's separate direct uploadFiles path also captures
+the confirmed REST client. Replay and other resource actions still need integration;
+upload-hook checks alone do not prove complete chat isolation.
+
+
+Native ordinary chat consumers now capture useWorkspaceLifetime: useThreadStream
+uses its SDK for streaming/agent metadata and its REST client for direct upload;
+per-thread history, metadata, Runs and token-usage reads use the same lifetime.
+Check again after conversion/upload/submit awaits before publication. Expired
+stream callbacks must not send UI notifications or update task/cache state.
+The SDK-supported reconnectOnMount storage factory uses core/workspaces/run-storage:
+map only lg:stream keys to actor/workspace/thread keys, refuse operations after
+scope abort, and leave native unscoped keys untouched. Recovery helpers use this
+same adapter. A stored marker is only a hint; server-side Run/resource ownership
+must be revalidated. Switching workspace must not cancel background Runs.
+Sidebar search/CRUD hooks have captured lifetime bindings, verified with
+Shanghai frontend #35; see the 2026-10-15 resume checkpoint. Replay/compact, UI caller
+publication, remaining resources/stores and shell activation are still pending.
+Do not infer complete client isolation from network-double tests.
+
+
+Scoped thread actions use optional ThreadRequestOptions for REST domain
+decoding and captures the SDK for search/Run detail/rename. Recheck expiry after
+async cache cancellation before publishing mutation effects. Sidecar lookup
+cancellation must not fall through to best-effort parent deletion. Scoped delete
+uses the canonical Gateway REST endpoint once per normally enumerated thread;
+retain SDK-plus-local-cleanup only for native unscoped compatibility. The 50 hook/network tests and full frontend check pass in #35. Actual
+backend/browser acceptance remains pending; tenant activation stays closed.
+
+
+Regenerate/edit replay now captures the confirmed REST client and fences the
+whole native prepare success/error decoder plus entry/prepare/submit boundaries.
+Expired replay callbacks return false quietly; existing replay masks and native
+ordering remain intact. Shanghai frontend #39 verifies 20 hook/network tests and
+full pnpm check. Compact/project creation, page callbacks and remaining resource/
+storage/shell integration still precede activation and actual browser acceptance.
+
+
+createThread accepts optional third ThreadRequestOptions; compactThreadContext
+accepts options.rest. Both preserve native no-options requests/errors and fence
+full decoding through the fixed REST client (#43, 17 tests/full check). ChatPage project creation/branch is integrated in #47; ancillary InputBox
+paths and the remaining resource/storage/shell integration still precede activation.
+The actual delete dialog separately fences retained open/delete callbacks,
+reset/router, post-await publication, error feedback and focus by its lifetime.
+
+
+InputBox goal GET/PUT/DELETE and compact commands capture useWorkspaceLifetime
+(#45: 21 tests/full check). Preserve command AbortController/epoch checks and
+prepare→save→run ordering alongside scope fences. Goal decoders include native
+error reads; clear accepts an empty success body. Guard before publication and
+follow-up submit, not only fetch. Ancillary reference/input-polish/voice paths
+and draft/attachment stores still require integration before activation.
+
+
+ChatPage precreation captures the confirmed REST client (#47: three page/
+Context mains/full check), preserves native no-options behavior and refuses
+stale preparation/cache writes. Keep the native conversation epoch alongside
+scope guards. Branch callbacks guard entry, after await and errors; reference
+attachment routing checks expiry. Leaf UI/stream/branch operations are doubled
+in the page fixture; this is not actual browser/backend authorization proof.
+
+
+Sidecar scoped main/create/delete publication is verified in Shanghai #54
+(three real panel/context/SDK/REST mains + ten native regressions/full check).
+Provider restore uses the fixed SDK and checks the decoded result. Optional
+ThreadRequestOptions binds create; namespace pending creates by REST client
+(WeakMap), not a global parent ID. Keep legacy no-options coalescing and native
+errors. Panel/trigger await continuations check expiry; first-send queue rejects
+typed AbortError on scope close and removes listeners after settling. Native
+unknown send failures retain their localized fallback. Actual same-space parent
+change/unmount/quiet-stream fault audit, other clients/stores and browser/backend
+acceptance still precede activation; do not infer them from these network doubles.
+
+
+Activity/read hooks bind the confirmed REST lifetime (#57: two scoped mains
+and 20 native regressions/full check). Polling combines Query/workspace abort
+signals and fences cursor/read clock updates and invalid-cursor recovery.
+Read callbacks/timers refuse expired scope; late decoded success/errors cannot
+update clocks or invalidate lists. Preserve native no-options clients, 15s
+polling, 1s debounce, optimistic unread patches and monotonic read versions.
+Real hooks/Context/REST with HTTP doubles are not browser/backend acceptance.
+
+
+Project APIs accept optional ProjectRequestOptions (#61: two scoped mains,
+38 native regressions/full check). Keep native no-options argument lists and
+request/error/Range/PDF/binary behavior; the shared helper owns the whole
+decoder with fixed REST. All project hooks capture that lifetime, combine
+Query/scope cancellation, and guard onSettled invalidations. Actual page
+callbacks, upload loops, preview effects and direct URLs still require scope
+binding/publication guards. HTML preview base stripping of search means a
+top-level workspace query cannot scope relative resources by itself.
+
+
+Shelf handoff uses useProjectAttachmentStore (#65: three real shelf/InputBox
+scenarios + 105 native regressions/full check). Captured actor/workspace/thread
+keys preserve remount/reload; legacy keys are never adopted. Old handles are
+inert and hook setters fence mounted thread/store identity. Keep retire-only-
+sent semantics; InputBox onSent uses its captured store and checks scope.
+Shelf preview owns full REST decoding plus effect/scope abort; content/download
+URLs carry the existing workspace_id selector, which never grants access.
+Distinct shelf/files project keys and current-view guards stop stale file-loop
+continuations and publication. Other project callers, composer text/reference
+stores, artifact URLs/HTML relatives and real browser/backend acceptance remain.
+
+
+Composer text/reference drafts (#69: three UI mains + 75 existing regressions/
+full check) use a disjoint actor/workspace/agent/thread key and captured
+Storage adapter; expired/foreign/legacy keys are inert. Route every InputBox
+save/read/flush/retire/clear and new-thread transfer through it. Persist the
+scoped visible snapshot while active, since selection closes scope before
+unmount cleanup; unscoped mode keeps native keys/300ms debounce. Do not adopt
+legacy drafts. Original project/settings/sidebar/NewProjectDialog positive
+P/T workflows pass with their source unchanged. Real browser/backend/Run/
+principal and remaining artifact/store/publication fault acceptance stay open.
+
+
+Artifact panel requests (#73: three workspace scenarios + 47 native regressions/
+full check) accept optional ArtifactRequestOptions with captured REST/signal.
+Keep the complete native byte/hash/error/JSON/Blob decoder inside consume,
+not just fetch; preserve no-options calls and Range/ETag/416/409/412 behavior.
+Queries combine request/lifetime cancellation. Save and ZIP publication/
+pending flags use useCurrentWorkspaceView resource incarnations; expired
+callbacks, including same-space A/B/A, are inert. ArtifactsProvider uses
+disjoint actor/workspace/path storage and guarded setters; reset owned state
+in place instead of remounting live chat on route navigation. Draft buffers
+remain memory-only; never adopt legacy panel keys. Direct URLs, standalone/
+new-window, nested HTML resources, operator skill installation and actual
+browser/backend/two-tab acceptance remain distinct open gates.
+
+
+Standalone artifact workspace bootstrap uses a server-read /api/features
+capability, followed by the existing tab-local WorkspaceSession catalog/current
+handshake. URL workspace_id is only a locator; it cannot enable mode. Missing
+legacy capability keeps native unscoped links working; supported auth-disabled
+development and static mode skip capability HTTP because they cannot activate
+tenant mode. Scoped locators still fail closed in those modes. Malformed/unavailable
+capability or a scoped target on a legacy server cannot fall back. Preserve
+workspace_id through viewer URL parsing/building and login next, rejecting
+malformed/repeated selectors and mock+workspace combinations. Initial workspace
+selection is immutable per provider actor/target key and precedes all content
+reads. Key the standalone AuthProvider by actor so a new SSR principal replaces
+the old display identity; ReadyBoundary owns the scoped query cache. Keep rich
+content styles and the public allowlisted showcase bypass. Direct source,
+download, fallback and PDF URLs carry only the confirmed workspace locator;
+backend membership checks remain the authority. Nested HTML/CSS and remaining
+Markdown/message/media URL paths still require their own integration/proof.
+
+
+Message/report resources bind file locators to the confirmed workspace: native
+/mnt links, uniquely matched artifact images, uploaded images, tool/browser
+screenshots and file-change links all use that captured selector. Preserve
+query/fragment and literal percent semantics; content-authored workspace_id
+values cannot override it. Only configured-Gateway artifact URLs are rebound;
+web/contact references and fragment links retain native handling. Scoped report
+relative resources resolve within their source thread's artifact route; omit
+paths that escape it rather than fetching the app/default workspace. Use the
+source file base for scoped successful write_file previews too; native unscoped
+preview behavior remains unchanged. Original citation/safe-href guards stay. Resolve file locators
+before message citation early returns. Use Streamdown defaultUrlTransform before
+scoped image resolution, keeping its default image renderer and controls.
+CitationSourcesPanel file links and copied Markdown references use the same
+captured locator, preserving external sources and the native clipboard helper.
+Pass the owning thread/message or artifact scrollKey/active state as resourceKey:
+two reports can cite the same URL while owning different pending copy actions.
+Copied feedback, success/error toasts and reset timers use the captured source/view
+incarnation. Old cleanup cannot clear a replacement timer. Omit unbindable native
+file destinations and disable their copy control; do not fall back to a default
+workspace. These guards fence UI publication, not an already-issued OS clipboard
+operation. HTML and actual browser/backend/principal acceptance remain open.
+
+core/api/request.ts owns optional WorkspaceRequestOptions and the whole-decoder
+requestWithWorkspace boundary. Artifact request exports remain aliases; feedback
+and file-change APIs use the same captured REST/consume/signal contract while
+preserving no-options payloads, status handling and native calls. Query cancellation
+reaches file-change reads. Feedback publication/pending state belongs to one
+resource view incarnation, so old same-space completion/finally cannot alter a
+replacement view. DELETE 404 remains a successful local feedback clear.
+
+HTML remains a distinct open gate. scripts/tenant_artifact_html_probe.py uses
+archived native preview helpers, pinned existing images and a strict localhost
+cookie/scope fixture: query/path locators and parent-created Blob resources
+failed in the opaque iframe; transferred bytes made into child-owned Blobs
+loaded image/CSS/JSON without changing sandbox flags. This is a transport
+prototype, not production HTML integration or Gateway authorization proof.
+Keep allow-same-origin absent, preserve native Cookie policy, and implement
+remaining HTML resource delivery through the captured parent REST client.
+
+
+The parent HTML byte boundary is core/artifacts/html-resource-reader.ts. Create
+one reader per report document using its native source URL and captured
+WorkspaceLifetime scope/rest. It snapshots source/space/client, restricts byte
+requests to that thread's configured-Gateway artifact route, and owns GET/no-store
+whole ArrayBuffer decoding. HTTP status/MIME are retained without forwarding
+response headers or credentials. Inspect structural path normalization without
+rewriting the actual encoded filename. A read signal cancels only that read;
+dispose cancels the report reader, not other reports or background agent work.
+Scope retirement rejects held decoders before byte publication. This is source
+identity binding, not an atomic multi-file snapshot.
+
+Scoped ArtifactFilePreview now connects that reader through html-resource-session
+and a one-document MessageChannel. Bind the initial handshake to the iframe's
+WindowProxy and a random document nonce; connect once, fence every read/publication
+by the captured view/lifetime, and retire its ports, reads and bootstrap Blob on
+cleanup. The opaque child owns resource Blobs and its private port; it receives
+bytes/MIME/status/locator only. parse5 prepares inert HTML and PostCSS/value-parser
+prepare nested stylesheet references; parser-executed classic scripts and local
+read-only fetch use the captured file boundary. document.open clears listeners:
+reinstall the private child runtime before author scripts. Scoped scroll messages
+use a document nonce; legacy preview keeps its existing key. Keep the sandbox
+allow-scripts/allow-forms without allow-same-origin and keep Cookie policy unchanged.
+
+scripts/tenant_artifact_html_bridge_probe.py bundles the actual React preview,
+Auth/Workspace providers and REST client into the pinned Shanghai browser image.
+The HTTP cookie/scope server and navigation/env modules are fixtures, not Next or
+Gateway acceptance. The rich-report P/T main precedes retirement/read-only route
+boundaries. Full module/import-map fidelity, XHR/dynamically-created elements, srcset, external
+base/fragment handling, broader CSS/media/error fidelity and actual backend/
+principal/two-tab acceptance remain open. M3 is partial; runtime activation stays
+closed. Do not advertise general HTML resource support from this checkpoint.
+
+
+html-module-plan parses static import/re-export, dynamic import and import.meta
+syntax with Babel; do not rewrite JavaScript by matching text inside strings or
+comments. Parent module reads use the existing same-thread captured byte reader.
+The child builds a registry by canonical resource URL, gives every graph edge a
+stable import-map ID before execution, then creates its own Blobs. The browser
+owns module evaluation, cycles, top-level await, JSON import attributes and module
+instance caching. Serialize graph preparation, not module evaluation. Dynamic
+local imports extend the map; external URLs/bare names retain native handling.
+Keep the original MIME: a file read being authorized must not turn text/plain
+into executable module code. import.meta keeps its native object identity with
+logical source URL/resolution; it grants no extra file authority.
+
+The native React browser fixture uses confirmed-space/resource/module output as
+readiness. #103 recorded networkidle timeout with no outstanding network requests;
+#104 passed the unchanged production code using those functional assertions. Do
+not equate global networkidle with report completion. Catch initial navigation
+failures inside the diagnostic result path; retain errors and pending requests.
+Remaining compatibility includes authored/scoped import maps, classic-script
+dynamic imports, preload/dynamic DOM/media/CSS fidelity and browser matrix/Next/
+real Gateway/principal acceptance. Full M3/general HTML acceptance stays open;
+latest exact check receipts are in docs/tenant-workspaces-progress.json.
+
+
+WorkspaceHeader includes WorkspaceSwitcher, using the existing Sidebar and
+DropdownMenu radio primitives plus en-US/zh-CN labels. It renders nothing without
+WorkspaceContext and never enables the mode or fetches its own catalog. Display
+only the confirmed active row; a pending selection has no active row, retains
+available controls and delegates to WorkspaceSession.select. Error actions are
+explicit: refresh the requested selector, choose the current actor's personal
+space through select(undefined), or use native sign-in. Never recover from denial
+by silently selecting personal scope. Keep controls outside ready-only content
+when integrating the shell: the pending/failed view must not mount resource reads.
+The isolated browser fixture now mounts real WorkspaceHeader/SidebarProvider and
+uses the real dropdown instead of test-only P/T selection buttons. Declare UTF-8
+for its HTML and define build-time process.env for native Next Link. These are
+fixture setup, not replacements for compiled Next/shell/backend acceptance.
+The native WorkspaceContent server boundary now loads the capability before
+WorkspaceShell mounts scoped content; compiled Next/real backend acceptance and
+activation remain pending.
+
+
+WorkspaceContent reads only the server workspace capability (unknown/failed and
+enabled-but-unavailable fail closed with retry/sign-in). It never enables tenant
+mode from a URL or local storage. WorkspaceShell owns one QueryClient per confirmed
+WorkspaceSession lifetime for both sidebar and page. WorkspaceContentBoundary is
+a mount-only gate for those regions; it must be under this cache owner. Keep the
+standalone WorkspaceReadyBoundary, which still owns its separate viewer cache.
+Header/switcher/rail remain outside private region gates. Activity polling and
+the delete-dialog owner mount inside the confirmed sidebar, alongside private
+nav/projects/recent/footer; page, extensions bootstrap, commands/settings/deep-link
+features are confirmed-only too. Pending/denied scope clears the active cache and
+unmounts private consumers before another lifetime mounts.
+
+The legacy UserPreferencesBoundary remains on the legacy path only. Do not start
+its account-level synchronizer in tenant mode or copy personal model/preferences
+into a team; scoped settings/global-store isolation remains an M5/M3 release gate.
+Initial shell scope is the server-confirmed personal workspace; copied workspace
+route locators, switching away from a private thread URL, sign-in return intent
+and compiled Next/real Gateway/two-tab/principal validation remain required.
+Keep the runtime activation guard false until all plan gates are accepted.
+
+
+Workspace routes use workspace_id only as a locator. WorkspaceShell passes it to
+the actor-keyed WorkspaceProvider; WorkspaceRouteBoundary masks a ready lifetime
+unless it matches the URL. An absent selector is explicitly confirmed as personal
+and canonicalized before private consumers mount, preserving the native new-chat
+history no-remount contract. Invalid/duplicate selectors remain errors; an explicit
+selector cannot activate a legacy installation. Switching uses existing session
+select to retire the old scope immediately, then Next replace to a new chat in
+the requested space. Routing can cause a short aborted metadata read before the
+new keyed provider confirms; it does not transfer a lifetime or cancel a Run.
+
+Use WorkspaceLink and useWorkspaceRouter in workspace views rather than raw Next
+navigation. They retain Next behavior while decorating only local /workspace URLs
+that have no explicit selector, preserving query/fragment and object hrefs. Do
+not append locators to foreign/protocol-relative/backslash-authority/API/public/
+auth URLs. No actor/auth grant is serialized. Native stream-created thread IDs
+use router.replaceHistory(pathOfThread(...)), retaining history rather than a
+Next remount. Old captured lifetime callbacks cannot navigate after abort.
+The /workspace server entry preserves query entries, including duplicate/invalid
+selectors, for the shell to reject; never clean an invalid selector into absence.
+
+Root error sign-in links retain route intent. AuthProvider client 401 and auth
+guard redirects read browser pathname/search/hash at redirect time. The workspace
+layout's unauthenticated server redirect and auth layout's already-authenticated
+return handling still require integration before claiming full sign-in/deep-link
+acceptance. Compiled Next/browser history/hydration and real Gateway/business,
+principal/two-tab/physical/global-store checks remain open; activation stays false.
+
+The client mount gates do not prevent server/RSC children from evaluating. All
+server-side private reads still require trusted backend workspace authorization;
+never treat WorkspaceContentBoundary or a URL locator as that authorization.
+
+
+SSR return-address integration (#126/#127 native Next): src/proxy.ts overwrites
+x-deerflow-request-route with the actual request path/query for workspace and
+auth entry routes, stripping only Next's transient _rsc parameter. It sets a
+request header through NextResponse.next({ request: { headers } }), never public
+response metadata, authentication, workspace context or a Gateway lookup. Keep
+its matcher literal and exclude public/assets. The workspace unauthenticated
+layout now carries next; the authenticated login layout follows the existing
+safe local next policy and refuses auth-entry loops. Other auth branches retain
+their native behavior. No caller-supplied header may override the actual URI.
+
+The full production Next 16.3.6 build and native HTTP main pass against an explicit
+synthetic Gateway. Restoring the same compiled archive is allowed only after
+matching production inputs, Node/Next versions, fixture ports, archive SHA and
+BUILD_ID; malformed archive entries fail rather than rebuilding silently. HTTP
+checks include forged header, external next, a generateStaticParams chat route
+and no request-metadata response leak. This does not prove real JWT, membership,
+browser hydration or task business. The exported artifact has a synthetic
+Gateway destination and is never a release artifact. See
+docs/tenant-workspaces-next-testing.md for the cloud-only driver and limits.
+Earlier notes identifying the server redirect gap are historical; actual account
+registration/OIDC/step-up flows and full tenant runtime remain separate gates.

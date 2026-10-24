@@ -5,6 +5,9 @@ description = "Native MCP local execution bridge with durable Docker jobs"
 requires-python = ">=3.12"
 dependencies = ["deerflow-harness>=0.2.5", "sqlalchemy>=2.0", "mcp>=1.20", "uvicorn>=0.30"]
 
+[project.entry-points."deerflow.extensions"]
+ecs-execution-control = "ecs_executor.control:install"
+
 [project.optional-dependencies]
 postgres = ["psycopg[binary]>=3.2"]
 

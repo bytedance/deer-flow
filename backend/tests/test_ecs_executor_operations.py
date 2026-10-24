@@ -75,13 +75,16 @@ async def test_controller_remote_all_requires_literal_operator_true():
 
     from ecs_executor.agent_dispatch import NativeDispatchHost
 
+    from deerflow.runtime.runs.manager import RunRecord
+    from deerflow.runtime.runs.schemas import DisconnectMode, RunStatus
+
     class Threads:
         async def get(self, *args, **kwargs):
             return None
 
     app = SimpleNamespace(state=SimpleNamespace(thread_store=Threads()))
     host = NativeDispatchHost(app, None, {"native_node": "one", "remote_origins": ["schedule"]}, {"one": "synthetic"})
-    record = SimpleNamespace(user_id="owner", thread_id="thread", metadata={})
+    record = RunRecord(run_id="run", thread_id="thread", assistant_id=None, status=RunStatus.pending, on_disconnect=DisconnectMode.continue_, user_id="owner")
 
     async def snapshot_factory(**kwargs):
         assert kwargs == {"transport_node": "one", "transport_secret": "synthetic"}

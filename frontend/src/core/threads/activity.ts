@@ -7,9 +7,10 @@ import {
 import { useCallback, useEffect, useRef } from "react";
 
 import { GatewayApiError, throwGatewayApiError } from "@/core/api/errors";
-import { fetch } from "@/core/api/fetcher";
+import { fetch, type WorkspaceRESTClient } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
 import { useThreadActivityFeature } from "@/core/features/hooks";
+import { useWorkspaceLifetime } from "@/core/workspaces/context";
 
 import {
   INFINITE_THREADS_QUERY_KEY_PREFIX,
@@ -128,9 +129,14 @@ function parseActivityResponse(body: unknown): ThreadActivityResponse {
   };
 }
 
+type ActivityRequestOptions = {
+  rest?: WorkspaceRESTClient;
+  signal?: AbortSignal;
+};
+
 export async function fetchThreadActivity(
   cursor: string | null,
-  { signal }: { signal?: AbortSignal } = {},
+  { rest, signal }: ActivityRequestOptions = {},
 ): Promise<ThreadActivityResponse> {
   const params = new URLSearchParams({
     limit: String(THREAD_ACTIVITY_PAGE_LIMIT),
@@ -138,34 +144,41 @@ export async function fetchThreadActivity(
   if (cursor !== null) {
     params.set("cursor", cursor);
   }
-  const response = await fetch(
+  const response = await (rest?.fetch ?? fetch)(
     `${getBackendBaseURL()}/api/thread-activity?${params}`,
     { signal, cache: "no-store" },
   );
-  if (!response.ok) {
-    await throwGatewayApiError(
-      response,
-      `Failed to load thread activity: ${response.statusText}`,
-    );
-  }
-  return parseActivityResponse(await response.json());
+  const decode = async (response: Response) => {
+    if (!response.ok) {
+      await throwGatewayApiError(
+        response,
+        `Failed to load thread activity: ${response.statusText}`,
+      );
+    }
+    return parseActivityResponse(await response.json());
+  };
+  return rest ? rest.consume(response, decode) : decode(response);
 }
 
 export async function postThreadRead(
   threadId: string,
+  { rest, signal }: ActivityRequestOptions = {},
 ): Promise<ThreadReadResponse> {
-  const response = await fetch(
+  const response = await (rest?.fetch ?? fetch)(
     `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}/read`,
-    { method: "POST" },
+    { method: "POST", ...(signal ? { signal } : {}) },
   );
-  if (!response.ok) {
-    await throwGatewayApiError(
-      response,
-      `Failed to mark the conversation read: ${response.statusText}`,
-    );
-  }
-  const body = (await response.json()) as Record<string, unknown>;
-  return { unread: false, read_version: readNumber(body.read_version) };
+  const decode = async (response: Response): Promise<ThreadReadResponse> => {
+    if (!response.ok) {
+      await throwGatewayApiError(
+        response,
+        `Failed to mark the conversation read: ${response.statusText}`,
+      );
+    }
+    const body = (await response.json()) as Record<string, unknown>;
+    return { unread: false, read_version: readNumber(body.read_version) };
+  };
+  return rest ? rest.consume(response, decode) : decode(response);
 }
 
 function invalidateThreadLists(queryClient: QueryClient) {
@@ -234,21 +247,25 @@ function isInvalidCursor(error: unknown): boolean {
 /** One poll: fetch from the stored cursor and apply the result. */
 export async function pollThreadActivity(
   queryClient: QueryClient,
-  { signal }: { signal?: AbortSignal } = {},
+  options: ActivityRequestOptions = {},
 ): Promise<ThreadActivityResponse> {
+  options.signal?.throwIfAborted();
   const state = threadActivityState(queryClient);
   try {
-    const response = await fetchThreadActivity(state.cursor, { signal });
+    const response = await fetchThreadActivity(state.cursor, options);
+    options.signal?.throwIfAborted();
     applyThreadActivity(queryClient, state, response);
     return response;
   } catch (error) {
+    options.signal?.throwIfAborted();
     if (state.cursor === null || !isInvalidCursor(error)) {
       throw error;
     }
     // The server no longer accepts the cursor: seed again. Seeding refetches
     // the lists once, which covers the changes the old cursor cannot list.
     state.cursor = null;
-    const response = await fetchThreadActivity(null, { signal });
+    const response = await fetchThreadActivity(null, options);
+    options.signal?.throwIfAborted();
     applyThreadActivity(queryClient, state, response);
     return response;
   }
@@ -256,12 +273,18 @@ export async function pollThreadActivity(
 
 export function threadActivityQueryOptions(
   queryClient: QueryClient,
-  { enabled }: { enabled: boolean },
+  { enabled, request }: { enabled: boolean; request?: ActivityRequestOptions },
 ) {
   return {
     queryKey: THREAD_ACTIVITY_QUERY_KEY,
     queryFn: ({ signal }: { signal?: AbortSignal }) =>
-      pollThreadActivity(queryClient, { signal }),
+      pollThreadActivity(queryClient, {
+        ...request,
+        signal:
+          request?.signal && signal
+            ? AbortSignal.any([request.signal, signal])
+            : (request?.signal ?? signal),
+      }),
     enabled,
     staleTime: 0,
     refetchInterval: THREAD_ACTIVITY_POLL_MS,
@@ -282,9 +305,15 @@ export function threadActivityQueryOptions(
 export function useThreadActivity() {
   const queryClient = useQueryClient();
   const feature = useThreadActivityFeature();
+  const lifetime = useWorkspaceLifetime();
   useEffect(() => () => resetThreadActivityState(queryClient), [queryClient]);
   return useQuery(
-    threadActivityQueryOptions(queryClient, { enabled: feature.available }),
+    threadActivityQueryOptions(queryClient, {
+      enabled: feature.available,
+      request: lifetime
+        ? { rest: lifetime.rest, signal: lifetime.scope.signal }
+        : undefined,
+    }),
   );
 }
 
@@ -349,10 +378,13 @@ export function setThreadUnreadInCaches(
 export async function markThreadRead(
   queryClient: QueryClient,
   threadId: string,
+  options?: ActivityRequestOptions,
 ): Promise<void> {
+  if (options?.signal?.aborted) return;
   setThreadUnreadInCaches(queryClient, threadId, false);
   try {
-    const { read_version } = await postThreadRead(threadId);
+    const { read_version } = await postThreadRead(threadId, options);
+    options?.signal?.throwIfAborted();
     const state = threadActivityState(queryClient);
     const previous = state.readVersion;
     // The returned clock is the user's, not this read's: a jump past this one
@@ -363,7 +395,7 @@ export async function markThreadRead(
     }
     state.readVersion = Math.max(previous ?? 0, read_version);
   } catch {
-    invalidateThreadLists(queryClient);
+    if (!options?.signal?.aborted) invalidateThreadLists(queryClient);
   }
 }
 
@@ -377,6 +409,7 @@ export async function markThreadRead(
 export function useMarkThreadRead(threadId: string | null | undefined) {
   const queryClient = useQueryClient();
   const { available } = useThreadActivityFeature();
+  const lifetime = useWorkspaceLifetime();
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(
@@ -386,11 +419,11 @@ export function useMarkThreadRead(threadId: string | null | undefined) {
         timer.current = null;
       }
     },
-    [threadId],
+    [threadId, lifetime],
   );
 
   return useCallback(() => {
-    if (!available || !threadId) {
+    if (lifetime?.scope.signal.aborted || !available || !threadId) {
       return;
     }
     if (cachedThreadUnread(queryClient, threadId) === false) {
@@ -401,11 +434,18 @@ export function useMarkThreadRead(threadId: string | null | undefined) {
     }
     timer.current = setTimeout(() => {
       timer.current = null;
+      if (lifetime?.scope.signal.aborted) return;
       // Re-check: a list refetch during the debounce may already say read.
       if (cachedThreadUnread(queryClient, threadId) === false) {
         return;
       }
-      void markThreadRead(queryClient, threadId);
+      void markThreadRead(
+        queryClient,
+        threadId,
+        lifetime
+          ? { rest: lifetime.rest, signal: lifetime.scope.signal }
+          : undefined,
+      );
     }, MARK_THREAD_READ_DEBOUNCE_MS);
-  }, [available, queryClient, threadId]);
+  }, [available, queryClient, threadId, lifetime]);
 }

@@ -1,6 +1,6 @@
 import { MessagesSquareIcon, XIcon } from "lucide-react";
-import Link from "next/link";
 
+import Link from "@/components/workspace/workspace-link";
 import { cn } from "@/lib/utils";
 
 /**

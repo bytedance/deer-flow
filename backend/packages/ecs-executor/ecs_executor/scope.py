@@ -12,12 +12,17 @@ import hmac
 import json
 import re
 import time
+from collections.abc import Callable
+from dataclasses import asdict, dataclass
 from typing import Any
+
+from deerflow.authz.workspace import WorkspaceContext
 
 SCOPE_HEADER = "X-DeerFlow-Execution-Scope"
 MAX_TTL_SECONDS = 300
 MAX_TOKEN_BYTES = 8192
 MAX_ARGUMENT_BYTES = 262144
+WORKSPACE_SCOPE_VERSION = 2
 _FIELDS = {"aud", "user_id", "thread_id", "incarnation", "run_id", "operation", "iat", "exp", "args_sha256"}
 
 
@@ -69,9 +74,30 @@ def arguments_sha256(arguments: dict[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _workspace_claims(context: WorkspaceContext, user_id: str) -> dict[str, Any]:
+    if type(context) is not WorkspaceContext or context.actor_user_id != user_id:
+        raise ValueError("Execution scope workspace actor mismatch")
+    return asdict(context)
+
+
 def _validate(claims: Any) -> None:
-    if not isinstance(claims, dict) or set(claims) != _FIELDS:
+    if not isinstance(claims, dict):
         raise ValueError("Invalid execution scope claims")
+    scoped = set(claims) == _FIELDS | {"version", "workspace_context"}
+    if not scoped and set(claims) != _FIELDS:
+        raise ValueError("Invalid execution scope claims")
+    if scoped:
+        if type(claims["version"]) is not int or claims["version"] != WORKSPACE_SCOPE_VERSION:
+            raise ValueError("Unsupported execution scope version")
+        value = claims["workspace_context"]
+        if not isinstance(value, dict):
+            raise ValueError("Invalid execution scope workspace")
+        try:
+            context = WorkspaceContext(**value)
+        except (TypeError, ValueError):
+            raise ValueError("Invalid execution scope workspace") from None
+        _workspace_claims(context, claims["user_id"])
+        _identifier(claims["incarnation"])
     for name in ("aud", "user_id", "thread_id", "run_id", "operation"):
         _identifier(claims[name])
     if claims["incarnation"] is not None:
@@ -100,7 +126,20 @@ def _decode(value: str) -> bytes:
     return decoded
 
 
-def mint_execution_scope(*, secret: bytes, audience: str, user_id: str, thread_id: str, incarnation: str | None, run_id: str, operation: str, arguments: dict[str, Any], now: int | None = None, ttl_seconds: int = 60) -> str:
+def mint_execution_scope(
+    *,
+    secret: bytes,
+    audience: str,
+    user_id: str,
+    thread_id: str,
+    incarnation: str | None,
+    run_id: str,
+    operation: str,
+    arguments: dict[str, Any],
+    workspace_context: WorkspaceContext | None = None,
+    now: int | None = None,
+    ttl_seconds: int = 60,
+) -> str:
     """Sign a short-lived, argument-bound submission from trusted runtime values."""
     _secret(secret)
     issued = int(time.time()) if now is None else now
@@ -108,6 +147,8 @@ def mint_execution_scope(*, secret: bytes, audience: str, user_id: str, thread_i
     if type(ttl_seconds) is not int or not 1 <= ttl_seconds <= MAX_TTL_SECONDS:
         raise ValueError("Invalid execution scope lifetime")
     claims = {"aud": audience, "user_id": user_id, "thread_id": thread_id, "incarnation": incarnation, "run_id": run_id, "operation": operation, "iat": issued, "exp": issued + ttl_seconds, "args_sha256": arguments_sha256(arguments)}
+    if workspace_context is not None:
+        claims.update(version=WORKSPACE_SCOPE_VERSION, workspace_context=_workspace_claims(workspace_context, user_id))
     _validate(claims)
     payload = _encode(_json(claims))
     signature = _encode(hmac.digest(secret, payload.encode("ascii"), "sha256"))
@@ -117,8 +158,36 @@ def mint_execution_scope(*, secret: bytes, audience: str, user_id: str, thread_i
     return token
 
 
-def verify_execution_scope(token: str, *, secret: bytes, authenticated_user_id: str, arguments: dict[str, Any], expected_audience: str, expected_operation: str, now: int | None = None) -> dict[str, Any]:
+@dataclass(frozen=True, slots=True)
+class ExecutionIdentity:
+    """Authenticated locators only; contains no token-asserted workspace grant."""
+
+    user_id: str
+    thread_id: str
+    incarnation: str | None
+    run_id: str
+
+
+def verify_execution_scope(
+    token: str,
+    *,
+    secret: bytes,
+    authenticated_user_id: str,
+    arguments: dict[str, Any],
+    expected_audience: str,
+    expected_operation: str,
+    expected_workspace_context: WorkspaceContext | None = None,
+    workspace_resolver: Callable[[ExecutionIdentity], WorkspaceContext] | None = None,
+    now: int | None = None,
+) -> dict[str, Any]:
     """Verify before execution, binding separate authenticated owner and arguments.
+
+    expected_workspace_context must be independently authorized by the receiver,
+    never reconstructed from this token or the browser's current selection.
+    A resolver receives only authenticated locators after all cryptographic and
+    argument checks, and must return independently authorized native identity.
+    Version 2 is refused by callers without that expectation or resolver; callers
+    with one refuse legacy signatures. Matching versions do not prove live membership.
 
     Never return or log the token on failure. Remote task creation must persist
     the verified owner/scope and use that record to authorize later operations.
@@ -147,10 +216,37 @@ def verify_execution_scope(token: str, *, secret: bytes, authenticated_user_id: 
         raise ValueError("Execution scope authority mismatch")
     if not hmac.compare_digest(claims["args_sha256"], arguments_sha256(arguments)):
         raise ValueError("Execution scope arguments mismatch")
+    if workspace_resolver is not None:
+        if expected_workspace_context is not None or "workspace_context" not in claims:
+            raise ValueError("Execution scope requires one workspace authorization source")
+        expected_workspace_context = workspace_resolver(ExecutionIdentity(claims["user_id"], claims["thread_id"], claims["incarnation"], claims["run_id"]))
+        if type(expected_workspace_context) is not WorkspaceContext:
+            raise ValueError("Execution scope resolver requires workspace authorization")
+    if expected_workspace_context is None:
+        if "workspace_context" in claims:
+            raise ValueError("Execution scope workspace authorization is required")
+    elif claims.get("workspace_context") != _workspace_claims(expected_workspace_context, authenticated_user_id):
+        raise ValueError("Execution scope workspace mismatch")
     return claims
 
 
-def mint_management_scope(*, secret: bytes, audience: str, user_id: str, task_id: str, operation: str, now: int | None = None, ttl_seconds: int = 60) -> str:
+def verify_native_execution_scope(token: str, *, engine, secret: bytes, authenticated_user_id: str, arguments: dict[str, Any], expected_audience: str, expected_operation: str) -> dict[str, Any]:
+    """Native SQL submission preflight; not a worker start/publication grant.
+
+    Accepts only v2 submit intent. Callers must fence native task commitment,
+    ledger identity, physical launch and publication separately. No HTTP endpoint
+    is enabled by this function and no database row or ambient scope is mutated.
+    """
+    from ecs_executor.native_authority import NativeSubmissionAuthority
+
+    if expected_operation != "submit":
+        raise ValueError("Native execution preflight only accepts submit")
+    return verify_execution_scope(
+        token, secret=secret, authenticated_user_id=authenticated_user_id, arguments=arguments, expected_audience=expected_audience, expected_operation=expected_operation, workspace_resolver=NativeSubmissionAuthority(engine).resolve
+    )
+
+
+def mint_management_scope(*, secret: bytes, audience: str, user_id: str, task_id: str, operation: str, workspace_context: WorkspaceContext | None = None, now: int | None = None, ttl_seconds: int = 60) -> str:
     """Owner/task capability for the native poller, which has no active run."""
     _secret(secret)
     issued = int(time.time()) if now is None else now
@@ -160,11 +256,30 @@ def mint_management_scope(*, secret: bytes, audience: str, user_id: str, task_id
     if operation not in {"status", "cancel"} or type(ttl_seconds) is not int or not 1 <= ttl_seconds <= MAX_TTL_SECONDS:
         raise ValueError("Invalid management scope")
     claims = {"aud": audience, "user_id": user_id, "task_id": task_id, "operation": operation, "iat": issued, "exp": issued + ttl_seconds, "args_sha256": arguments_sha256({"task_id": task_id})}
+    if workspace_context is not None:
+        claims.update(version=WORKSPACE_SCOPE_VERSION, workspace_context=_workspace_claims(workspace_context, user_id))
     payload = _encode(_json(claims))
     return payload + "." + _encode(hmac.digest(secret, payload.encode("ascii"), "sha256"))
 
 
-def verify_management_scope(token: str, *, secret: bytes, authenticated_user_id: str, arguments: dict[str, Any], expected_audience: str, expected_operation: str, now: int | None = None) -> dict[str, Any]:
+@dataclass(frozen=True, slots=True)
+class ManagementIdentity:
+    user_id: str
+    task_id: str
+
+
+def verify_management_scope(
+    token: str,
+    *,
+    secret: bytes,
+    authenticated_user_id: str,
+    arguments: dict[str, Any],
+    expected_audience: str,
+    expected_operation: str,
+    expected_workspace_context: WorkspaceContext | None = None,
+    workspace_resolver: Callable[[ManagementIdentity], WorkspaceContext] | None = None,
+    now: int | None = None,
+) -> dict[str, Any]:
     _secret(secret)
     if not isinstance(token, str) or not 1 <= len(token) <= MAX_TOKEN_BYTES or token.count(".") != 1:
         raise ValueError("Invalid management scope")
@@ -176,8 +291,16 @@ def verify_management_scope(token: str, *, secret: bytes, authenticated_user_id:
         claims = json.loads(encoded)
     except (ValueError, UnicodeError, RecursionError):
         raise ValueError("Invalid management claims") from None
-    if not isinstance(claims, dict) or set(claims) != {"aud", "user_id", "task_id", "operation", "iat", "exp", "args_sha256"} or _json(claims) != encoded:
+    fields = {"aud", "user_id", "task_id", "operation", "iat", "exp", "args_sha256"}
+    if not isinstance(claims, dict) or set(claims) not in (fields, fields | {"version", "workspace_context"}) or _json(claims) != encoded:
         raise ValueError("Invalid management claims")
+    if "workspace_context" in claims:
+        try:
+            if type(claims["version"]) is not int or claims["version"] != WORKSPACE_SCOPE_VERSION:
+                raise ValueError("Unsupported management version")
+            _workspace_claims(WorkspaceContext(**claims["workspace_context"]), claims["user_id"])
+        except (TypeError, ValueError):
+            raise ValueError("Invalid management workspace claims") from None
     for name in ("aud", "user_id", "task_id"):
         _identifier(claims[name])
     _integer(claims["iat"])
@@ -190,4 +313,15 @@ def verify_management_scope(token: str, *, secret: bytes, authenticated_user_id:
         raise ValueError("Management authority mismatch")
     if arguments != {"task_id": claims["task_id"]} or claims["args_sha256"] != arguments_sha256(arguments):
         raise ValueError("Management arguments mismatch")
+    if workspace_resolver is not None:
+        if expected_workspace_context is not None or "workspace_context" not in claims:
+            raise ValueError("Management requires one workspace authorization source")
+        expected_workspace_context = workspace_resolver(ManagementIdentity(claims["user_id"], claims["task_id"]))
+        if type(expected_workspace_context) is not WorkspaceContext:
+            raise ValueError("Management resolver requires workspace authorization")
+    if expected_workspace_context is None:
+        if "workspace_context" in claims:
+            raise ValueError("Management workspace authorization is required")
+    elif claims.get("workspace_context") != _workspace_claims(expected_workspace_context, authenticated_user_id):
+        raise ValueError("Management workspace mismatch")
     return claims

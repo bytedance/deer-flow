@@ -85,6 +85,8 @@ async def test_route_permissions_disabled_preserves_all_permissions(monkeypatch)
     permissions = await resolve_route_permissions(_user(), is_internal=False)
 
     assert permissions == [
+        Permissions.WORKSPACES_READ,
+        Permissions.WORKSPACES_WRITE,
         Permissions.THREADS_READ,
         Permissions.THREADS_WRITE,
         Permissions.THREADS_DELETE,

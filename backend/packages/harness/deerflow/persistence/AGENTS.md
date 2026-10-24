@@ -26,3 +26,376 @@ Scheduled-task lifecycle rules live in one place each. `ScheduledTaskRepository.
 The per-owner run cap `scheduler.max_concurrent_runs_per_user` is effective `min(per_user, max_concurrent_runs)` (0 = off) and is checked in `claim_queued_run` right after the global count, under the same budget lock. `list_queued_runs` ranks same-thread FIFO heads per owner (`ROW_NUMBER() OVER (PARTITION BY owner)`) and orders the batch by that rank, so the drain is owner-fair even with the cap off; owners at their cap drop out before the batch limit, and orphan rows (task deleted while queued) are never held back by the cap. Scheduled-task repository boundaries coerce serialized timestamps before SQL `DateTime` binding.
 
 Recovery locks task/run pairs in task-id/run-id order and restores `run_id`, `started_at` and live errors before releasing launch claims. Launch/failure/timeout updates use one parent-first transaction to prevent interleaved claims. Queue timeout fails the occurrence and advances scheduled work to prevent immediate requeue.
+
+## Tenant schema foundation
+
+`0036_tenant_workspaces` appends to the audited `0035` join. Native tenant
+control-plane tables live in `workspaces/model.py` and register with shared
+Base.metadata. Resource workspace_id columns remain nullable during explicit
+legacy backfill. DDL never guesses owners or marks email verified. An existing
+channel_connections.workspace_id is a provider workspace identifier, not the
+DeerFlow tenant; do not reuse it as tenant authority. This schema alone does not
+enable tenant access. Controlled backfill, both database receipts and admission
+coverage remain required before multi-tenant activation.
+
+`workspaces/backfill.py` is an explicit offline native metadata operation, never
+startup recovery. `plan_personal_backfill` is read-only; apply requires a caller
+transaction, stopped writers and coherent operator backups. It serializes its
+maintenance path, refuses after team provisioning, and never repairs unknown or
+contradictory owners. Parent resources precede children; source data remains.
+Plans/quarantine identifiers belong in private receipts, public logs only counts.
+Native backfill alone does not satisfy executor or NAS rollout prerequisites.
+
+`export_native_workspace_bindings` reads only thread/run ownership metadata
+after completed personal backfill and exact personal owner membership checks.
+It excludes quarantine, binds each run to its matching thread and produces a
+private versioned DTO for executor attribution. Keep writers fenced across both
+database phases; this export is not live membership authorization.
+
+`workspaces/sql.py` uses the native async session factory for personal/team
+provisioning and live membership reads. Tenant mode requires persistent SQL;
+the disabled factory returns None and does not create an ephemeral authority.
+Provisioning and membership access require active, verified native accounts.
+Personal IDs share the offline backfill namespace. Team create idempotency is
+bound to actor, request key and name; replays recheck live membership.
+Membership mutations lock the workspace first (SQLite BEGIN IMMEDIATE; Postgres
+FOR UPDATE). Role changes increment membership version; owner transfer flushes
+the prior owner's downgrade before promotion in one transaction, preserving the
+active-owner index. Direct last-owner removal/demotion is refused. Reads filter
+workspace/member/account state in SQL and do not confer platform-admin bypass.
+This repository is not yet Gateway wiring: callers must authenticate actors,
+apply native credential scopes and enforce recent reauthentication for transfer.
+Internal add_member is for managed/invitation services, not a public invite bypass.
+HTTP control callers supply an expected immutable context; writes compare its
+actor, workspace and live versions under the workspace lock. Password-proved
+transfer additionally locks the native account row while checking persisted
+token version/password hash, serializing with native password/token updates. Member
+disclosure applies actor access in the same SELECT. Gateway lifecycle wiring,
+invitations and revocation effects remain acceptance gates.
+
+`workspaces/scope.py` reuses the native live membership query for resource SQL
+predicates and fences writes with workspace -> native actor -> resource locking
+(SQLite BEGIN IMMEDIATE first). ProjectRepository accepts a trusted explicit or
+task-local WorkspaceContext; workspace_required instances refuse missing scope.
+Private project reads retain native owner filtering and selected workspace,
+and write checks happen within their mutation transaction. Delete refuses any
+incompatible document/thread child before trash or unlink statements. Default
+legacy mode retains existing ownership behavior. Shared project/document progress is recorded below; scoped threads and background
+coverage still need implementation. No activation is implied.
+
+
+ProjectDocumentRepository scopes insert/dedup/list/count/snapshot/get/trash by
+project ACL, workspace, live versions and matching project. Mutations use the
+same workspace -> actor -> project -> document order. Required scope is captured
+at native bootstrap. Scoped conversion and trash maintenance are refused
+until integrated, including absent scope on required repositories. Commit-error
+reconciliation must not treat a scoped invisible row as proof of rollback or
+remove bytes that a committed row may still own. Thread, conversion and retention integration remain M3/M8 work.
+
+
+Project sharing revision `0037_project_visibility` appends after unchanged 0036.
+Project.visibility is non-null, private by default, with a two-value CHECK in
+both ORM and migration. Shared SQL scopes use a live team predicate; write
+predicates additionally require owner/admin. Documents inherit parent-project
+ACLs instead of treating uploader identity as a separate shared-data grant.
+Scoped project delete trashes all compatible authors' document rows atomically;
+foreign/null-scope children still refuse. Native backfill and independent
+executor export consumption both require the current native head. Keep past
+receipts immutable; e0002 executor schema is unchanged.
+
+ThreadMetaRepository accepts workspace_required and consumes trusted task-local scope. Reads and pagination combine original owner, selected workspace, live membership and parent-workspace consistency. Private thread history remains owner-private when its project visibility changes; project source access must separately use current ProjectRepository ACL. Association locks workspace -> actor -> project; row mutations lock workspace -> actor -> thread. Workspace mode refuses orphan claiming, owner reassignment and user_id=None bypass. make_thread_store cannot fall back to memory when scope is required. Gateway admission must bind scope before native owner checks; remaining runtime/background coverage is not implied by this repository foundation.
+
+Scoped stage_live_copy adds workspace/actor/project locks before the document lock
+and read ACL; archived source projects remain readable. Its file-copy callback is
+drained before releasing the transaction. Thread-origin insert_active additionally
+locks/checks the owner-private source in the same workspace before publication.
+ThreadMetaRepository.publish_under_live_lock fences only short file operations
+under workspace/actor/thread locks. Callers must not put model or network work in
+that callback. Controlled withdrawal/cancellation and physical mount checks remain
+required; isolated byte-level mains do not close those gates.
+
+Read-clock revision 0038_workspace_read_clocks (now followed by 0039); workspace_thread_read_versions
+uses (workspace_id,user_id) PK and a non-null BIGINT zero-default version. Legacy
+per-user clocks/marker PKs stay unchanged. ThreadReadRepository captures the
+operator workspace_required flag, consumes trusted scope and filters run rows
+by matching owner-private thread/workspace before unread/max-position queries.
+Marker mutation locks workspace -> actor -> thread and updates its workspace
+clock only when the native monotonic marker moves. Version reads use one live
+membership SELECT; missing required scope is refused. Scoped delete_by_thread
+is refused pending thread lifecycle integration, never blind all-viewer cleanup.
+Current offline native/executor ownership receipts require 0040/e0002; physical
+paired rollout, activity/run feeds and lifecycle acceptance remain required.
+
+RunRepository read scope consumes trusted task-local context and the operator
+workspace_required setting captured at bootstrap. Its SQL combines Run owner/space
+with the compatible private ThreadMeta predicate before pagination, cursor lookup
+or token reduction. Scope validation precedes empty batch returns. Default unbound
+legacy mode is preserved. Run admission, operation cleanup, global worker recovery
+and HTTP feeds are not yet integrated; do not infer activation from read tests.
+
+Scoped non-run reject reservations lock workspace -> actor -> private thread,
+then preserve clock -> Run row order and persist workspace_id. Invisible global
+idempotency conflicts never return a foreign payload. Operation release uses
+captured workspace/user/worker and excludes normal runs; it deliberately does
+not require live membership/parent so withdrawal/deletion cannot strand cleanup.
+This release is not authority for reads/publication. Normal scoped Run lifecycle
+and HTTP goal/state writers remain unintegrated; activation stays refused.
+
+ThreadMetaRepository.commit_checkpoint_under_live_lock is a dedicated final
+checkpoint commit fence, separate from file publication. Callers hold durable
+non-run admission, capture incarnation before preparing state and construct
+graphs outside SQL locks. The fence rechecks workspace/actor/thread/incarnation
+and drains prepared native checkpoint IO while authorization/lifecycle locks
+remain held. It cannot make separate checkpoint/metadata databases atomic; never
+put model/tool/graph setup in the callback. Crash/cancellation acceptance remains
+required beyond the current actual HTTP withdrawal/incarnation evidence.
+
+publish_branch_from_private_source is a tenant-only native branch publication
+transaction. It rechecks live source ownership/incarnation and current project
+assignability, adds and flushes child metadata in the same transaction, drains
+only prepared native checkpoint IO and commits metadata afterwards. Graph setup
+and file staging must occur before it, under durable source branch admission.
+Private files remain unpublished until metadata exists. It is not a cross-store
+atomic transaction; uncertain commits cannot authorize file cleanup. Orphan
+staging/retention and fault acceptance remain separate required work.
+
+ThreadDeletionRepository is a tenant-only lifecycle helper sharing ThreadMeta's
+session factory, not a new execution authority. Native delete reservations may
+see tombstones; other scoped reads/mutations may not. begin validates incarnation
+and child attribution before persisting deleting plus a private receipt token.
+finish locks workspace -> actor -> exact parent and verifies receipt before
+precise child/marker deletion; native reservation release remains independent.
+No unknown cleanup replay is authorized. publish_under_live_lock requires the
+captured incarnation whenever scope is bound, including rejected-upload cleanup.
+Do not silently look up and adopt a replacement incarnation. #62 proves the
+local HTTP mains; remote STOP, Run cache/background writers and crash recovery
+remain integration requirements, so compiled tenant activation stays closed.
+
+RunRepository advertises supports_workspace_reads and freezes the public
+workspace_scope_required capability from its constructor flag, so native
+RunManager can validate cached reads without binding to a concrete SQL class.
+Its existing scoped get/get_many predicates remain the authorization authority;
+a capability flag alone does not authorize any record. #67 confirms resident
+filtering/withdrawal/deletion/fault refusal with both SQL dialects.
+
+RunRepository.can_observe_private_run is a read-only delivery predicate, not
+admission or execution authority. It checks a normal Run, original private
+thread incarnation and live workspace/actor, plus captured token version,
+setup/role/OAuth principal attributes in one statement. _read_scope keeps its
+legacy default and accepts optional thread_incarnation for this check.
+The Gateway owns JWT expiry and native route permission evaluation; no SQL
+writer lock spans delivery. Producer lease/generation scope remains M4.
+
+FeedbackRepository scopes reads using original actor/thread/Run relations;
+compatible workspace, private parent and live versions precede limit/count/
+grouping. Scoped user writes require captured entry incarnation and the standard
+workspace -> actor -> thread -> Run -> feedback lock order. ID deletion discovers
+only a locator in a separate read session and rechecks after locking. Bulk
+workspace cleanup must use the canonical ThreadDeletion receipt, not generic
+feedback.delete_by_thread. Unbound stats defaults remain all-owner; scoped
+callers pass the explicit actor. Constructor workspace_required is not yet full
+runtime-factory activation. #82 evidence/limits live in workspace progress JSON.
+
+
+0039_run_workspace_identity follows unchanged 0038 (current head is 0040). It adds
+nullable runs.workspace_context_json and runs.thread_incarnation without
+backfilling live authority. Scoped atomic short-operation admission captures
+immutable WorkspaceContext and parent incarnation under the existing private
+thread lock. RunRepository advertises supports_workspace_admission; scoped normal Run
+reject admission and pending transitions are now integrated as documented below.
+Interrupt/rollback admission remains refused. Legacy put
+refuses bound workspace callers and any existing workspace row, including
+unbound callers, rather than retargeting a captured identity. Dedicated scoped
+worker write/recovery methods remain M4 work. Backfill/export and executor import
+agree on current 0040/e0002 but do not fabricate permission snapshots for history.
+
+
+M4 pending execution: scoped create_thread_operation_atomic admits normal Runs
+only with reject strategy, retaining the lock-captured identity snapshot.
+find_by_idempotency_key and durable conflict recovery additionally join the
+current private parent's incarnation to the original Run; do not reuse a row
+across parent replacement. start_run and transfer_pending receive the captured
+context/nonce, lock workspace -> actor -> parent -> clock -> Run, validate live
+membership and exact stored identity, then execute the native pending/owner/
+cancel CAS. Legacy unbound calls require workspace_id IS NULL and cannot touch
+a scoped row. A denied CAS must preserve the pending row and its owner/lease.
+These start/transfer fences do not authorize terminal publication, lease renewal,
+recovery, cancellation, remote dispatch or external writes; all remain M4 work.
+
+
+0040_mcp_workspace_identity is the native head after unchanged 0039. It adds
+nullable mcp_tasks.workspace_context_json with no historical authority backfill.
+McpTaskRepository fixes workspace_scope_required at construction. Scoped submit
+validation locks workspace -> native actor -> private parent -> source Run,
+checks immutable identity and current executing owner/lease/cancel intent, then
+releases before IO. Create repeats the checks in its insert transaction. Poll
+validation/result commit lock that source and exact task, validate original
+scope and native claim token; the source may have ended while the durable task
+continues. Resource reads filter private scope before limits. Legacy unbound
+snapshot writes require workspace_id NULL. Mandatory workers skip unattributed
+legacy rows; unsupported scoped cancellation/notification cannot use legacy
+claims. Releasing retry diagnostics is not permission to publish a result.
+Native backfill/export and executor import require 0040/e0002; release/schema
+startup alignment and full M4 control/publication/physical evidence stay pending.
+
+
+Captured MCP cleanup uses `workspaces/execution_control.py`, the existing native
+outbox and a generic typed stop target/receipt; harness never imports executor.
+Membership version changes enqueue revocation parents and active task stop
+children under the existing workspace lock, before version mutation, in one
+transaction. Scoped user cancellation uses fresh private-parent authorization
+but preserves the task's original stored identity. Poll leases are fenced at
+intent commit. Missing/future snapshots quarantine; no current-scope backfill.
+Only verified operator control receipts plus unexpired outbox owner/token and
+exact original native target settle cancellation. This cleanup transaction does
+not need live membership or parent; it cannot publish results, recreate a missing
+task or retarget a replacement. Parent revocations remain pending for other
+domains. Keep the member helper import inside business mutation methods: eager
+import through mcp_tasks/run/thread_meta package roots creates a Gateway cycle.
+Native head stays 0040; no outbox migration or tenant activation is implied.
+
+Membership invalidation now also captures active normal Runs in `run_control.py`.
+Under the existing workspace transaction it retains native clock -> Run order,
+sets the first cancel_action/timestamp and records `run_stop`. Identity includes
+native Run ID, original user/workspace/thread/incarnation/context, creation time
+and native owner. Missing/future snapshots quarantine; they still block admission.
+The native heartbeat returns an interrupt cleanup directive for these rows even
+if an earlier persisted action was rollback. It can renew the same owner through
+terminal cleanup, without granting another execution.
+
+Pending/quarantined run_stop blocks same-private-thread scoped admission and is
+excluded from ordinary startup/expired-lease orphan terminalization. Only the
+owning native runtime can acknowledge a matching local execution: it rechecks
+registration after start_lock, actual task completion plus successful native
+cleanup (or local pending/unattached NoStart), and the repository checks the
+original tuple and unexpired native Run lease. It does not consult the selected
+space, revive membership, mutate a replacement parent or infer STOP from expiry.
+This is a native execution-close receipt, not remote C physical STOP. Root
+revocation retains a separate pending execution domain plus browser, Scheduler
+and credentials. Native 0040/e0003 stay unchanged; no new DDL or activation.
+Full scoped Run lease/terminal/progress publication fences and revocation that
+arrives after a prior terminal commit remain required integration work.
+
+New scoped normal Run admission now creates one `run_execution` row in the
+existing generic outbox, in the SAME transaction. Its binding excludes owner
+but retains original Run/user/workspace/thread/incarnation/creation/context;
+pending handoff/adopt updates only its owner alongside the native owner CAS.
+Start/transfer refuse a missing/mismatched lifetime instead of filling history.
+No new ORM/schema migration is needed; native Run metadata remains authority.
+
+The durable barrier now covers logical terminal status through actual native
+closure, not only a requested stop. Member invalidation selects active Runs OR
+unclosed lifetimes, so a completion hook still running after `success` is covered.
+Scoped user cancellation locks the fresh private parent, then rechecks original
+Run identity under clock/Run locks before enqueuing captured stop intent. Unbound
+legacy cancellation cannot touch scoped rows. Wrong space/withdrawn membership
+cannot reuse a local cache or become an infrastructure-error abort fallback.
+Pending scoped rollback is NoStart/interrupt only and retains old checkpoint;
+running/terminal scoped rollback remains refused until its write fence exists.
+
+Only the successful native closing boundary can close an execution lifetime;
+dedicated task completion also settles its stop child. Awaited native workers can
+acknowledge their own last close boundary without a synthetic completed task.
+Exact committed receipts can be recognized after lease expiry, but an OPEN row
+requires a currently valid owner lease rechecked after locks. Failed cleanup keeps
+the barrier. Ordinary startup/expiry takeover skips ALL scoped rows, including
+missing historical lifetimes: authenticated scoped recovery/physical proof is
+still required, never assume expiry means STOP. M8 concurrency must count these
+unclosed lifetimes as reserved even when Run.status looks terminal.
+
+Cleanup locks the original workspace row (existence only, no live-member grant)
+BEFORE clock/Run or outbox/task locks. Audit's workspace FK would otherwise take
+an inverse workspace key-share lock during flush. MCP claims recheck actual time
+after lock acquisition. Neither workspace locking nor lifecycle receipts grant
+execution, result reads or remote C physical STOP. Root revocations remain pending
+for remaining domains. Checkpoint/journal/tool/goal write authorization and full
+public Gateway/credential integrations remain M4/M5/M10/M11 requirements.
+
+Scoped worker saver IO uses RunRepository.commit_worker_checkpoint with an
+explicit immutable NativeRunStopTarget, independent of ambient UI selection.
+Lock workspace -> actor -> original private thread incarnation -> Run -> open
+execution lifetime; revalidate captured Run creation/owner/context, native lease,
+no cancellation and no pending stop before draining prepared saver IO. No model,
+graph construction or tool/network execution belongs in the callback. This is
+not a distributed transaction across checkpoint and metadata storage, nor a
+cleanup/rollback grant after withdrawal. Generic status/progress/journal and
+external effects remain separately required; tenant activation stays closed.
+
+RunRepository.lock_worker_effect is shared by native saver IO and ordinary
+worker Run/journal mutations. It locks workspace -> actor -> private parent ->
+optional native clock -> Run -> open lifetime, then checks original creation/
+owner/context/incarnation, live membership, pending STOP/cancel and native lease.
+Run metadata and journal rows commit inside that SAME metadata transaction;
+never wrap them in a separate session callback, especially with SQLite.
+Worker target is explicit; ambient UI selection cannot fill missing authority.
+Legacy status/progress/completion/model/finalization and update_lease exclude
+scoped rows. Scoped dispatch failure/recovery remain separate future boundaries.
+
+DbRunEventStore.bind_worker makes a per-Run view sharing lock registries; each
+single/batch/singleton producer validates the complete original Run/actor/thread
+binding before persistence and stamps workspace/user from it. An unbound store
+cannot append private rows even with no ambient scope. No Jsonl/Memory fallback
+is granted to a scoped worker. Special branch/seed/deletion protocols remain
+separate from worker authority.
+
+Control-only mark_owner_interrupted consumes the exact original pending STOP
+and live owner/lease, writes only interrupted/time/change_seq, and leaves every
+cleanup barrier open. It uses workspace -> clock -> Run/lifetime/STOP ordering
+without reusing revoked membership. Actual execution-close acknowledgement can
+terminalize that cancelled row after true cleanup, never a lost owner/expired
+lease. This does not authorize response/token/error/goal data or remote C STOP.
+
+RunRepository.commit_worker_io drains only prepared native checkpoint/queue IO
+under lock_worker_effect; commit_worker_checkpoint remains its adapter entry.
+This is not a distributed SQL/Redis transaction or permission to hold SQL locks
+across model/tool work or subscriber socket delivery. signal_owned_stream_end
+uses original owner/lease and lifetime control without a member grant or result
+payload; lost/replaced/expired owners cannot signal end. Exact completed NoStart
+can still be recognized by the original owner.
+
+ThreadMetaRepository.bind_worker is a private worker view for status/display-name
+mutations. Those writes use the captured Run's live SQL fence in the SAME session;
+regular manual API mutations retain their existing private-scope behavior.
+Actual native execution-close acknowledgement locks only the original private
+parent incarnation before clock/Run and may update its status/time. It must not
+resurrect deleting or replaced parents, overwrite a replacement owner's state,
+set a title/result, or treat this as remote C physical STOP. Producer lease/owner
+refusal leaves durable lifetime cleanup pending for trusted recovery.
+
+RunRepository.check_worker_invocation reuses lock_worker_effect only as a short
+admission transaction, then commits/releases BEFORE invoking models or tools.
+The captured native target is not an authorization grant by itself. Existing
+current member/parent/owner/lease/lifetime/cancel fences remain authority.
+
+cleanup_worker_stream invokes the same original-owner control helper with
+closed_only=True. It may remove only this exact Run lane after a completed
+native lifetime; no member grant is reused and an open lifetime never qualifies.
+The bridge delay occurs outside SQL; Run identity/creation/owner and durable
+receipt are rechecked after the delay. This does not acknowledge physical C STOP
+or permit deletion of a foreign lane.
+
+
+inspect_dispatch_control compares all original C bindings against canonical native SQL and returns control facts only, without payload/result reads or a member grant. renew_lease dispatch_target fences the exact pending target. finish_dispatch_pending is unscoped compatibility only; scoped NoStart uses confirm_workspace_run_stop.
+
+
+transfer_pending from dispatch ownership rechecks nonexpired lease and absence of pending native STOP for scoped rows at the locked CAS, based on canonical workspace_id. A preflight read never replaces this fence; legacy rows preserve their existing behavior.
+
+
+inspect_native_execution_control is a separate exact-identity, control-only view of the canonical current owner after adoption. It returns no business payload and is never launch authority. inspect_dispatch_control still requires a nonempty explicit owner, and receiver authorization uses that stricter path.
+
+Scheduler public history/thread relations use alias-aware resource predicates from `scheduled_task_runs/scope.py`; current live resource authority does not renew stored task execution snapshots. Public run-number subqueries filter visible original occurrences before counting, independently of background launch numbering. Summary/token LEFT JOINs require the exact normal native Run scope/user/thread/incarnation/snapshot and Scheduler task+occurrence metadata; mismatched pointers expose no Run payload.
+
+Scoped normal Run idempotent retries may read-only reuse an exact admitted user/workspace/private-thread incarnation/context before the native cleanup barrier. Never use ambient read scope, refresh original kwargs/credential receipts, mutate execution lifetime/capacity, or bypass the barrier for new work. Scheduled admission retains its separate exact occurrence receipt checks.
+
+Scheduler conversation create with a worker target holds workspace/actor, sorted parents and owner quota before native Run/lifetime locks and insert. Require exact typed original target/context/user/origin nonce and original token version; parameters are server-only and paired. Reuse RunRepository._lock_worker_effect_after_parent only after the caller locks and verifies the original live parents; do not repeat BEGIN IMMEDIATE or lock Run before quota. The existing public lock_worker_effect retains finalizer semantics; new task insertion additionally requires status running. Ordinary HTTP resource create has no worker target.
+
+Scoped Scheduler management has a separate current-resource writer; background original-authority methods retain their default path. Additional parent receipts are server-only. Freeze active occurrence identity before canonical parent locks, then recheck after task/occurrence locks. Unknown/inconsistent active work must not disappear behind read filtering. Only queued/no Run/explicit False accounting/no start/no lease can be cancelled; capacity and native STOP are untouched. Protected snapshot/owner/nonce/lease/accounting fields cannot enter update payloads. Resume/rearm validates original authority without changing its snapshot; stale authority requires a new task/copy. Native tool writes additionally fence original token and running Run in the same transaction.
+
+
+Scoped Scheduler note/manual/own-stop integration (#149 main): notes reuse management-resource locks and original source token/Run fences. Manual queue insertion locks original workspace/actor, sorted task/execution/source parents, task/occurrence and source Run; final insertion retains caller status/updated-at CAS, validates original snapshot and actual source authority. Only the canonical stored trigger permits native manual statuses through queue claim, normal Run admission and launch bookkeeping. Paused recurring manual trials keep pause; fast-completion protection stays intact. Previous-occurrence reads filter original child and exact normal Run metadata before ordering/LIMIT. Own-stop SQL checks exact task/occurrence/native target with live running execution and writes only stop_requested_run_id; completion owns task pause/event projection. Preparation is read-only and accepts pending/running before run_agent barrier, never a business-write grant. No installed scheduled dependency/recovery or physical proof is implied.
+
+
+Installed Scheduler dependency continuation main #151: scoped dependency_wait_sources returns only exact normal Run/task/occurrence/trigger identities with original live context and private incarnations. These IDs are control locators, not grants. Scoped transfer locks original scope/parents/task/occurrence then sorted source/continuation Runs; verifies exact original context/metadata, canonical mcp-dependencies source key, successful waiting source with completed lifetime and pending live/open continuation without STOP. Only occurrence.run_id and eligible task.last_run_id transfer; no new admission/count/lease. Unknown/invalid waits remain held pending separate control settlement. This deterministic main does not prove actual B wire/physical/recovery or tenant activation.
+
+
+Scoped Scheduler revoked control (#154 closed-initial main): retire_revoked_control_occurrences uses finite task/occurrence/native identity/control columns, never task prompts, Run kwargs/full metadata, goals/results/checkpoints or business finalizers. It validates a canonical pending workspace_revoke intent and original snapshot plus current locked version bounds. Control lock order is workspace existence → actor existence → membership → task → occurrence → native Run/lifetime → revoke intent. Explicit queued NoStart or known terminal/completed-lifetime initial scheduled Runs may retire derived logical records/audit; original Run/count/snapshot/lease/STOP/physical pool remain unchanged. Transferred, active, unknown native executions remain held. Historical audit replay is a separate full keyset drain for ledger control retry, never a live valid-source grant. Parent/scheduler domain stays pending. Native execution closure is not physical STOP; only existing host stop_owned/report releases physical capacity. Queued/unknown/physical/replay-fault branches still need separate acceptance.

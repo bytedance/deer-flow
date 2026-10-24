@@ -39,6 +39,7 @@ from deerflow.mcp.tasks.runtime import (
 )
 from deerflow.mcp_scope import mcp_session_scope_key, runtime_thread_incarnation
 from deerflow.reflection import resolve_variable
+from deerflow.runtime.context_keys import RUN_OWNER_WORKER_CONTEXT_KEY
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.tools.mcp_metadata import tag_mcp_routing, tag_mcp_tool
 from deerflow.tools.sync import make_sync_tool_wrapper
@@ -793,6 +794,8 @@ def _make_background_submit_tool(
                 user_id=user_id,
                 thread_id=thread_id,
                 thread_incarnation=thread_incarnation,
+                workspace_context=context.get("workspace_context"),
+                source_worker_id=context.get(RUN_OWNER_WORKER_CONTEXT_KEY),
                 run_id=str(run_id) if run_id is not None else None,
                 tool_call_id=str(tool_call_id) if tool_call_id is not None else None,
                 server_name=server_name,

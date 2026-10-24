@@ -1,10 +1,10 @@
 "use client";
 
 import { CalendarClock } from "lucide-react";
-import Link from "next/link";
 
 import { Button } from "@/components/ui/button";
 import { fill } from "@/components/workspace/scheduled-tasks/shared";
+import Link from "@/components/workspace/workspace-link";
 import { useScheduledTasksFeature } from "@/core/features";
 import { useI18n } from "@/core/i18n/hooks";
 import { useThreadScheduledTasks } from "@/core/scheduled-tasks/hooks";

@@ -1,0 +1,123 @@
+{
+  "job": "deerflow-tenant-execution-m4-sql",
+  "fixture_failure": {
+    "build": 128,
+    "result": "FAILURE",
+    "tests": "1 failed in 16.65s",
+    "reason": "Missing three required ScheduledTaskService constructor arguments; not a business RED. Only test fixture corrected."
+  },
+  "red": {
+    "build": 129,
+    "result": "FAILURE",
+    "duration_ms": 40226,
+    "tests": "1 failed in 17.58s",
+    "reason": "Real authenticated POST persisted task, then _task_response -> automatic_runs_used_for raised WorkspaceAccessDenied."
+  },
+  "green": {
+    "build": 130,
+    "result": "SUCCESS",
+    "duration_ms": 39762,
+    "tests": "1 passed in 17.57s",
+    "static": "Ruff check passed; 65 files already formatted"
+  },
+  "source_sha256": "da97a7c4f34e566d52f178e42aa32c5db6d9b4bead8fa1fea9945d4753f5bca3",
+  "pipeline_sha256": "897c51911142555bd425f045a288c644b5a1be71ca6224cf858466e32162e51d",
+  "reviewed_patch_sha256": "f2f8976d97ac424e0ab5093ae520a4ebf954fe981d082bf8f029a546b787e7c7",
+  "root_verification": "Root independently read Jenkins terminal/log and byte-matched all five changed source files to successful archive.",
+  "source_files": {
+    "backend/app/gateway/routers/scheduled_tasks.py": "da2f1354f037e6aafddb1772f0f63fe6d8854f9ca3eb20470f2742325e772f20",
+    "backend/packages/harness/deerflow/persistence/scheduled_tasks/sql.py": "a6435f78d98069b8f8e28a995500d9c9ba91f854ce3c3d384e4cb6c2066c4329",
+    "backend/tests/test_workspace_native_scheduler.py": "1f44fd165c2f68f8d732251c7656781e13e0c8b32653d4217e60e86b323a3fd6",
+    "examples/ecs-native/deploy/Jenkinsfile.tenant-run-control.in": "5d4688f2fd47d2b5dbc154451bea7ba453db4aaf7e30d8276579afe34966e9ce",
+    "scripts/render_tenant_run_control_pipeline.py": "2b38bdd2c7f72aacd3df6e9ea4f584e9a532b40920cdc7c2ad18724ea816cad3"
+  },
+  "cleanup": {
+    "build": 130,
+    "read_only": true,
+    "cleanup": [
+      {
+        "kind": "container",
+        "name": "deerflow-tenant-execution-m4-sql-130",
+        "exit": 1,
+        "stderr": "Error response from daemon: No such container: deerflow-tenant-execution-m4-sql-130"
+      },
+      {
+        "kind": "container",
+        "name": "deerflow-tenant-execution-m4-sql-130-db",
+        "exit": 1,
+        "stderr": "Error response from daemon: No such container: deerflow-tenant-execution-m4-sql-130-db"
+      },
+      {
+        "kind": "network",
+        "name": "deerflow-tenant-execution-m4-sql-130",
+        "exit": 1,
+        "stderr": "Error response from daemon: network deerflow-tenant-execution-m4-sql-130 not found"
+      }
+    ]
+  },
+  "red_cleanup": [
+    {
+      "build": 128,
+      "read_only": true,
+      "cleanup": [
+        {
+          "kind": "container",
+          "name": "deerflow-tenant-execution-m4-sql-128",
+          "exit": 1,
+          "stderr": "Error response from daemon: No such container: deerflow-tenant-execution-m4-sql-128"
+        },
+        {
+          "kind": "container",
+          "name": "deerflow-tenant-execution-m4-sql-128-db",
+          "exit": 1,
+          "stderr": "Error response from daemon: No such container: deerflow-tenant-execution-m4-sql-128-db"
+        },
+        {
+          "kind": "network",
+          "name": "deerflow-tenant-execution-m4-sql-128",
+          "exit": 1,
+          "stderr": "Error response from daemon: network deerflow-tenant-execution-m4-sql-128 not found"
+        }
+      ]
+    },
+    {
+      "build": 129,
+      "read_only": true,
+      "cleanup": [
+        {
+          "kind": "container",
+          "name": "deerflow-tenant-execution-m4-sql-129",
+          "exit": 1,
+          "stderr": "Error response from daemon: No such container: deerflow-tenant-execution-m4-sql-129"
+        },
+        {
+          "kind": "container",
+          "name": "deerflow-tenant-execution-m4-sql-129-db",
+          "exit": 1,
+          "stderr": "Error response from daemon: No such container: deerflow-tenant-execution-m4-sql-129-db"
+        },
+        {
+          "kind": "network",
+          "name": "deerflow-tenant-execution-m4-sql-129",
+          "exit": 1,
+          "stderr": "Error response from daemon: network deerflow-tenant-execution-m4-sql-129 not found"
+        }
+      ]
+    }
+  ],
+  "verified": [
+    "Real JWT/session AuthMiddleware + CSRF + WorkspaceService + scoped SQL repositories on PostgreSQL.",
+    "POST task with private reuse-thread parent returns full enriched response; actual due claim and foreground dispatch persist queued occurrence without native launch.",
+    "List/detail show queued status and automatic_runs_used=0. Fresh request membership versions preserve resource access without modifying original task execution snapshot.",
+    "Other workspace list empty/detail404; selecting original again remains readable; run_count0 and last_run_id None."
+  ],
+  "limits": [
+    "Only HTTP create/list/detail. No full browser or installed host acceptance.",
+    "No history/thread relation/tool listing, management/manual, IM, timeout/recovery, installed scheduled dependency acceptance.",
+    "No physical worker, model API, release, migration receipts or full M4/M0–M11 acceptance."
+  ],
+  "files": {
+    "/private/tmp/m4-native-scheduler-resource-green-20261018-18.log": "7aa8b14d50180107834e587037fc632d14b98b43439c0eedd272ae577916163f",
+    "/private/tmp/m4-native-scheduler-resource-green-20261018-18-source.tar.gz": "da97a7c4f34e566d52f178e42aa32c5db6d9b4bead8fa1fea9945d4753f5bca3"
+  }
+}

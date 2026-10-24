@@ -2,6 +2,8 @@
 
 English | [中文](./README_zh.md) | [日本語](./README_ja.md) | [Français](./README_fr.md) | [Русский](./README_ru.md) | [Português](./README_pt.md)
 
+Tenant workspace development: [current progress and next steps (2026-10-24)](docs/tenant-workspaces-status-2026-10-24.md). The shared B/C pool main has development verification; tenant activation and self-service release remain incomplete and disabled.
+
 [![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](./backend/pyproject.toml)
 [![Node.js](https://img.shields.io/badge/Node.js-22%2B-339933?logo=node.js&logoColor=white)](./Makefile)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
@@ -1989,6 +1991,8 @@ For example, independent read-only research can run concurrently when the wall-c
 
 ### Sandbox & File System
 
+Standalone artifact previews retain their file link through sign-in. They show a loading state while confirming access, and an unavailable message with a refresh hint when access cannot be confirmed. Workspace-aware report links, source references and images are being integrated. The native sidebar space switcher is wired through a server capability gate; private shell regions wait for confirmed scope and share a fresh workspace cache. Native workspace links and new-chat history retain the selected space; changing spaces opens a fresh chat after confirmation. Native SSR login returns have passed full Next production-build and HTTP checks with synthetic authentication. Browser hydration and real-backend/business acceptance are still pending. Tenant activation remains gated by the [workspace acceptance plan](docs/superpowers/plans/2026-10-13-tenant-workspaces.md).
+
 Host-externalized tool outputs use the Gateway's normal file-creation umask.
 Host and sandbox outputs use deterministic filenames hashed from the raw tool
 call ID and output content. Missing, colliding, or oversized IDs cannot overwrite
@@ -2918,3 +2922,186 @@ and stopped-writer image selection are documented in [docs/ecs-native-deployment
 Native ECS pool operators: see the [repeatable Jenkins delivery procedure](docs/ecs-native-release-ci.md) for same-schema backend rollouts. Restricted-network builds can explicitly forward the Dockerfile APT_MIRROR parameter; build inputs are hashed into image metadata. This new delivery path is pending cloud verification; accepted application behavior remains recorded in the Shanghai acceptance report.
 
 Native ECS release builds can opt into the Dockerfile's existing fixed, SHA-checked wheel transport mirror with `--locked-artifact-mirror` (Jenkins `LOCKED_ARTIFACT_MIRROR`). The selected flag is included in private build-input metadata and its verified image digest label; dependency metadata and runtime configuration stay unchanged.
+
+Tenant development: the [offline metadata attribution procedure](docs/tenant-workspaces-migration.md) documents plan/apply/verify and private paired receipts. It does not enable tenant access or replace the schema-aware rollout and isolation acceptance gates.
+
+The [workspace HTTP adapter contracts](docs/tenant-workspaces-api.md) describe the current tenant control-plane foundation, member management and local-password ownership transfer. The Gateway registers these routes, but tenant activation is still blocked until SSO reauthentication, resource/background isolation and release gates are complete. The startup-only `workspaces.enabled` defaults to false; a database containing team data cannot restart in legacy authorization mode.
+
+Workspace implementation progress: [explicit shared project files and remaining integration](docs/tenant-workspaces-api.md#explicit-shared-projects-and-documents-partial-m3). Tenant activation remains blocked; this is not a deployed multi-tenant release.
+
+Private conversation isolation is implemented at the native SQL repository layer; shared project sources do not grant access to other members’ chats. See the [partial thread integration](docs/tenant-workspaces-api.md#private-thread-repository-partial-m3) for validation and remaining requirements. Tenant activation is still blocked.
+
+Native thread metadata APIs and project thread lists now carry trusted workspace scope; shared projects list only the caller’s own conversations. See [HTTP integration limits](docs/tenant-workspaces-api.md#native-thread-metadata-http-partial-m3). Files, full runtime and frontend acceptance remain pending; this does not activate multi-tenant deployment.
+
+Workspace-scoped thread uploads and project file transfers now preserve original files and private conversation ownership. The [file transfer checkpoint](docs/tenant-workspaces-api.md#thread-uploads-and-project-transfer-partial-m3) records real byte checks and remaining artifact, runtime, physical mount and frontend requirements. Tenant deployment remains blocked.
+
+Workspace thread download links now retain their space locator and recheck access before sending file or archive bytes. See [download validation and limits](docs/tenant-workspaces-api.md#thread-artifact-downloads-partial-m3). This remains partial tenant integration; deployment activation stays blocked.
+
+Workspace upload deletion now rechecks live access before removing bytes. The [deletion checkpoint](docs/tenant-workspaces-api.md#thread-upload-deletion-partial-m3) records withdrawal and native file safety verification; full tenant activation remains blocked.
+
+Workspace conversation detail, state, history and goal reads now recheck private ownership and lifecycle identity around checkpoint reads. The [persistent checkpoint read checkpoint](docs/tenant-workspaces-api.md#persistent-thread-checkpoint-reads-partial-m3) records SQLite reopen through the native compiled graph and remaining runtime/client requirements. Tenant activation stays blocked.
+
+Workspace read markers now use independent per-space viewer clocks and matching private Run/thread scope. The [read-clock checkpoint](docs/tenant-workspaces-api.md#workspace-read-markers-and-clocks-partial-m3) records real database/HTTP and old-data upgrade validation. Current native schema is 0038; tenant deployment remains blocked.
+
+Native Run history and usage repository reads now filter the selected workspace before pagination and aggregation. See [validation and remaining integration](docs/tenant-workspaces-api.md#native-run-read-isolation-partial-m3); tenant deployment remains blocked.
+
+Native non-run reservations now preserve workspace ownership through admission and cleanup after withdrawal. See [reservation validation and remaining HTTP/runtime work](docs/tenant-workspaces-api.md#scoped-native-operation-reservations-partial-m3); tenant activation remains closed.
+
+Workspace goal and state writes now preserve new-chat creation, native reservations and private lifecycle checks. New thread creation also refuses unattributed checkpoint IDs and preserves an already-committed goal. See [write validation and remaining integration](docs/tenant-workspaces-api.md#native-goal-and-state-writes-partial-m3); full tenant activation remains blocked.
+
+Native conversation branches now preserve private workspace ownership, history and file copying. See [branch validation and remaining lifecycle work](docs/tenant-workspaces-api.md#private-native-branches-partial-m3); tenant activation remains blocked.
+
+Manual context compaction now rechecks private workspace access before summarizing and before checkpoint commit. See [compaction validation and remaining requirements](docs/tenant-workspaces-api.md#private-manual-compaction-partial-m3); full tenant activation remains blocked.
+
+Private conversation deletion and upload cleanup now preserve workspace and
+conversation-instance ownership in isolated local-sandbox acceptance. See
+[deletion limits and evidence](docs/tenant-workspaces-api.md#private-conversation-deletion-partial-m3).
+Remote lifecycle recovery, runtime/client isolation and tenant activation remain pending.
+
+The native activity feed now has isolated workspace heads and read clocks in
+[partial HTTP acceptance](docs/tenant-workspaces-api.md#workspace-activity-feed-partial-m3).
+Run/SSE and frontend workspace integration remain pending.
+
+[Scoped resident Run reads](docs/tenant-workspaces-api.md#resident-run-authorization-partial-m3)
+now validate durable ownership before serving cached data. Full Run/event/SSE,
+worker and frontend integration remain pending; tenant activation stays closed.
+
+[Event SQL read isolation](docs/tenant-workspaces-api.md#event-sql-reads-partial-m3)
+preserves private workspace paging and branch history in isolated acceptance;
+HTTP/SSE, event writers and full tenant rollout remain pending.
+
+[Private Run/message/event HTTP reads](docs/tenant-workspaces-api.md#private-run-message-and-event-http-reads-partial-m3)
+now preserve selected-space history and private conversation identity. Stream
+observation, remaining APIs, producers and frontend integration are still pending.
+
+[Private SSE observation](docs/tenant-workspaces-api.md#private-sse-observers-partial-m3)
+now rechecks delivery authority and closes revoked observers without cancelling
+background work. Full producer, Redis/physical and frontend acceptance remain pending.
+
+[Global Run message and feedback reads](docs/tenant-workspaces-api.md#global-run-locator-reads-partial-m3)
+now preserve the selected private workspace and reject conversation replacement
+before returning. Remaining feedback operations, client flows and full tenant
+activation are still pending. New workspace/team controls will reuse native
+DeerFlow styling, as confirmed for the tenant UI plan.
+
+[Native usage and file-change reads](docs/tenant-workspaces-api.md#native-usage-and-file-change-reads-partial-m3)
+now apply selected private-workspace authorization while retaining native
+statistics and diff options. Feedback operations, frontend and full tenant
+activation remain pending.
+
+[Feedback space isolation](docs/tenant-workspaces-api.md#feedback-sql-and-http-partial-m3)
+now covers native SQL reads and HTTP feedback mutations, including withdrawn
+space permissions and replaced conversations before commit. Remaining file,
+frontend and runtime integration still gate full tenant activation.
+
+[Terminal Run artifact archives](docs/tenant-workspaces-api.md#terminal-run-artifact-archives-partial-m3)
+now preserve selected private-space delivery and close temporary archives when
+publication is refused or cancelled. Remaining file editing, frontend and full
+runtime integration still gate tenant activation.
+
+[Single-artifact download identity](docs/tenant-workspaces-api.md#single-artifact-entry-identity-partial-m3)
+now refuses requests whose conversation is replaced during owner admission,
+while preserving native Range and ETag behavior. File editing, frontend and full
+runtime integration remain pending before tenant activation.
+
+[Mounted artifact editing](docs/tenant-workspaces-api.md#mounted-artifact-editing-partial-m3)
+now checks private workspace and conversation identity at publication while
+preserving native digest checks. Scoped remote editing, frontend and production
+filesystem/fault acceptance remain unfinished gates before tenant activation.
+
+[Frontend Request preservation](docs/tenant-workspaces-api.md#frontend-request-preservation-partial-m3)
+now keeps explicit workspace selectors, request bodies and cancellation while
+retaining CSRF behavior. Automatic space selection, SDK streams, cache isolation
+and compiled Next / real-backend UI acceptance remain pending. [Frontend CI notes](docs/tenant-workspaces-frontend-testing.md)
+record the isolated Shanghai validation setup and replay commands.
+
+
+Captured MCP cancellation now has a separate operator STOP service: native
+transactions persist cancellation intents, and only a verified STOP receipt can
+settle the original task. The bounded Shanghai SQL/Docker checks and repeatable
+CI instructions are in [workspace testing](docs/tenant-workspaces-testing.md).
+Other revocation domains, remote C and complete tenant activation remain pending.
+
+Active native Runs now consume member-revocation intent through the existing
+ownership heartbeat. A durable cleanup barrier prevents replacement admission
+until local native execution is confirmed closed; failed cleanup stays pending.
+See [Run control validation and its limits](docs/tenant-workspaces-testing.md).
+Remote C physical STOP and complete tenant lifecycle activation remain pending.
+
+New scoped Runs now retain a durable execution-lifetime barrier through cleanup,
+even after their logical status becomes terminal. Fresh-scope user cancellation
+and late member revocation preserve that barrier; an unstarted rollback leaves
+the prior conversation intact. [Validation and remaining gates](docs/tenant-workspaces-testing.md)
+record the native graph/SQL/checkpoint checks. Complete tenant activation and
+remote C physical recovery remain pending.
+
+Scoped native worker checkpoint IO now revalidates its captured private thread,
+Run owner, live membership and lease before saving state. Late results after
+revocation, cancellation or ownership loss cannot update that checkpoint.
+[Validation and limitations](docs/tenant-workspaces-testing.md) describe this
+partial integration; complete tenant activation remains closed.
+
+Scoped native worker SQL journals now retain their original workspace, and
+ordinary Run progress/completion writes recheck live execution ownership.
+Revoked or cancelled workers discard denied buffered responses; their original
+STOP control path can still record interruption without releasing cleanup early.
+[Verification and remaining work](docs/tenant-workspaces-testing.md) keep the
+full tenant integration and activation requirements explicit.
+
+Scoped native workers now fence stream enqueue and thread-status updates with
+the same captured execution identity. Late output is refused, and an expired
+or replaced worker cannot end a successor's stream. [Validation limits](docs/tenant-workspaces-testing.md)
+separate this producer integration from pending model/tool, Redis and full tenant
+activation work.
+
+Ordinary scoped async Agents now recheck execution authority before native model
+and tool calls, including model queue waits and independent worker-built models.
+The shared middleware and model factory remain native; an expired capability
+cannot start a new report handler. [Validation and remaining boundaries](docs/tenant-workspaces-testing.md)
+keep service lifetimes, external effects and full tenant activation separate.
+
+Native scoped Runs now retain actual host model-service work through cancellation
+and wait before releasing their execution lifetime. Shared services retain per-Run
+cleanup boundaries, and title/summary/service fallbacks preserve native stop signals.
+[Evidence and remaining scope](docs/tenant-workspaces-testing.md) distinguish this
+from direct-model/remote transport cleanup and full tenant deployment.
+
+Scoped native lead-agent, title, summary and goal model calls also retain their
+actual work until native cleanup; goal evaluation preserves permission refusal
+and stop signals. [Validation scope](docs/tenant-workspaces-testing.md) covers
+deterministic provider threads, with tool effects and arbitrary external model
+transports still pending. Multi-tenant deployment remains disabled.
+
+
+Scoped native sandbox tools recheck execution authority after readiness and before
+synchronous dispatch. Read-before-write checks preserve native stop signals, so
+a revoked waiting report write is refused. [Verification scope](docs/tenant-workspaces-testing.md)
+records actual file/lease and shared Agent-chain checks. Cache identity, external
+effects and full tenant activation remain pending.
+
+
+The native Local conversation-deletion flow also clears generated report files
+before a same-ID conversation is recreated; normal continuation keeps them.
+[Validation scope](docs/tenant-workspaces-testing.md) records both database checks.
+Remote providers and complete tenant deployment still have separate pending gates.
+
+
+Native remote-Agent dispatch now preserves the admitted workspace while staging
+the existing Run for handoff. Its C snapshot, fixed budget and affinity are
+immutable, and scope stripping cannot downgrade it to legacy execution.
+[Validation scope](docs/tenant-workspaces-testing.md) covers SQL staging and
+ownership transfer; remote claiming, recovery and complete tenant deployment
+remain pending.
+
+
+Tenant workspace development: queued remote-agent admissions now retain their original ownership after dispatcher restart. Revoked, never-assigned admissions can settle through native cancellation; assigned work still requires confirmed stopping. Worker reception now rechecks the original tenant authority before native task adoption. The scoped C development path now runs through pool dispatch and native execution with report/usage writeback. Worker cancellation captures the acquired sandbox object instead of recalculating its identity from the current workspace or skills view; unknown stopping retains capacity. Physical lifecycle acceptance remains pending. Remote tenant execution and self-service rollout remain under development and disabled.
+Scoped Scheduler development now supports original-conversation notes and explicit manual trials, authenticated manual triggers, and a scheduled run stopping its own future schedule. The native queue and completion lifecycle remain authoritative; a manual trial of a paused recurring task keeps it paused. This is development validation; tenant rollout remains disabled. The installed Scheduler dependency continuation main also preserves the same occurrence and single execution count across an asynchronous MCP result; live goal-replacement settlement and revoked closed-run control have passed development verification. Complete revoke-domain recovery and physical acceptance remain in progress.
+
+
+Scheduler tenant development now preserves original workspace identity through native execution and authenticated task create/list/detail/history. Local and remote agents can list, create, update, pause, resume and delete conversation tasks through a native Run-bound capability, even after the UI switches spaces. Remote runs preserve original session permissions and credential version; the remaining task-management lifecycle is still in progress; tenant activation remains disabled. See [verification and remaining scope](docs/tenant-workspaces-testing.md).
+
+
+Scoped B native snapshots/publication now derive paths from the captured job workspace, restoring caller context before existing SQL authorization and no-follow IO. Shanghai physical #16 verifies real single-host B output returns to the original scheduled C2 after the UI changes spaces; #15 records the prior failure. Separate B ledger and ASGI MCP transport are explicit; shared pool/two-host/C physical/full recovery remain open and tenant activation stays disabled. See [verification](docs/tenant-workspaces-testing.md).
+
+
+Scoped B pool development now shares the existing B/C execution ledger and node budget through an explicit native-authorized path. Shanghai #18 verifies normal C1 → real B Docker → C2 with C2 waiting until B STOP; ordinary NULL-only pool admission stays isolated. Worker scope mode requires fixed `workspace_required: true`, `native_server_name`, workspace root and metadata configuration. Withdrawal/control/restart/CLI boot and actual two-host/C physical acceptance remain pending; tenant activation stays disabled. See [verification](docs/tenant-workspaces-testing.md).

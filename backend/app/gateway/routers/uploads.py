@@ -13,10 +13,14 @@ from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from pydantic import BaseModel, Field
 
 from app.gateway.authz import require_permission, try_acquire_sandbox_for_request
-from app.gateway.deps import get_config
+from app.gateway.deps import get_config, get_thread_store
 from app.gateway.upload_ingestion import ThreadUploadIngestionService, UnsafeFilenameError, UnsafeUploadDestinationError
+from app.gateway.workspaces.dependencies import workspace_resource_scope
+from deerflow.authz.workspace import get_current_workspace
 from deerflow.config.app_config import AppConfig
 from deerflow.config.paths import get_paths
+from deerflow.persistence.thread_meta import ThreadMetaRepository
+from deerflow.persistence.workspaces.sql import WorkspaceAccessDenied
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.sandbox_provider import SandboxProvider, get_sandbox_provider
 from deerflow.uploads.manager import (
@@ -386,6 +390,7 @@ def _auto_convert_documents_enabled(app_config: AppConfig) -> bool:
 
 
 @router.post("", response_model=UploadResponse)
+@workspace_resource_scope(private_thread_read=True)
 @require_permission("threads", "write", owner_check=True, require_existing=False)
 async def upload_files(
     thread_id: ThreadId,
@@ -448,6 +453,9 @@ async def upload_files(
             except HTTPException as e:
                 await service.cleanup_written()
                 raise e
+            except WorkspaceAccessDenied:
+                await service.cleanup_written()
+                raise
             except Exception as e:
                 logger.error(f"Failed to upload {file.filename}: {e}")
                 await service.cleanup_written()
@@ -471,6 +479,7 @@ async def upload_files(
 
 
 @router.get("/limits", response_model=UploadLimits)
+@workspace_resource_scope()
 @require_permission("threads", "read", owner_check=True)
 async def get_upload_limits(
     thread_id: ThreadId,
@@ -482,6 +491,7 @@ async def get_upload_limits(
 
 
 @router.get("/list", response_model=UploadListResponse)
+@workspace_resource_scope()
 @require_permission("threads", "read", owner_check=True)
 async def list_uploaded_files(thread_id: ThreadId, request: Request) -> UploadListResponse:
     """List all files in a thread's uploads directory."""
@@ -494,11 +504,29 @@ async def list_uploaded_files(thread_id: ThreadId, request: Request) -> UploadLi
 
 
 @router.delete("/{filename}")
+@workspace_resource_scope(private_thread_read=True)
 @require_permission("threads", "delete", owner_check=True, require_existing=True)
 async def delete_uploaded_file(thread_id: ThreadId, filename: str, request: Request) -> dict:
     """Delete a file from a thread's uploads directory."""
     try:
-        return await run_file_io(_delete_uploaded_file_for_thread, thread_id, filename, get_effective_user_id())
+        owner = get_effective_user_id()
+
+        async def delete():
+            return await run_file_io(_delete_uploaded_file_for_thread, thread_id, filename, owner)
+
+        if get_current_workspace() is None:
+            return await delete()
+        repo = get_thread_store(request)
+        if not isinstance(repo, ThreadMetaRepository):
+            raise HTTPException(status_code=503, detail="Workspace deletion requires persistent thread scope")
+        # Recheck live membership/private ownership while serializing with
+        # revocation; drain the short unlink worker before releasing SQL locks.
+        from app.gateway.workspaces.checkpoints import capture_checkpoint_thread_identity
+
+        incarnation = await capture_checkpoint_thread_identity(request, thread_id)
+        return await repo.publish_under_live_lock(thread_id, user_id=owner, incarnation=incarnation, publish=delete)
+    except (HTTPException, WorkspaceAccessDenied):
+        raise
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"File not found: {filename}")
     except PathTraversalError:

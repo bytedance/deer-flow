@@ -48,6 +48,9 @@ async function captureThreadStreamOptions(assistantId?: string) {
       };
     },
   }));
+  rs.doMock("@/core/workspaces/context", () => ({
+    useWorkspaceLifetime: () => null,
+  }));
   rs.doMock("@/core/api", () => ({
     getAPIClient: () => ({}),
   }));
@@ -88,6 +91,7 @@ afterEach(() => {
   rs.doUnmock("@tanstack/react-query");
   rs.doUnmock("@langchain/langgraph-sdk/react");
   rs.doUnmock("@/core/api");
+  rs.doUnmock("@/core/workspaces/context");
   rs.doUnmock("@/core/i18n/hooks");
   rs.doUnmock("@/core/tasks/context");
   rs.resetModules();

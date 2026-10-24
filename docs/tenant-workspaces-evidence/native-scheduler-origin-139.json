@@ -1,0 +1,81 @@
+{
+  "build": 139,
+  "queue": 1084,
+  "phase": "m4-native-scheduler-remote-green-20261018-27",
+  "result": "SUCCESS",
+  "duration_ms": 47845,
+  "pytest": "2 passed in 24.47s",
+  "ruff": "All checks passed; 67 files already formatted",
+  "source_sha256": "ddf0a661f75166366d021c63ad59529d870dc99453d303ed019e558f6f372e00",
+  "pipeline_sha256": "9b87527f6a75d9197f5d0e32970f142f1d9d6ed9f49ae0373121b93e5d43ecec",
+  "source_archive_exact_match": {
+    "backend/app/gateway/scheduled_task_access.py": "58b9413fdc34dbde39802c7d6d72d1c3ed8b801dad65e16fd08c8bdf5858a22c",
+    "backend/app/gateway/services.py": "e713957f8486a282520d1fa92cfc2ca01629f0c6cce15a8c7867dde7fff1f9c5",
+    "backend/packages/harness/deerflow/persistence/run/sql.py": "204255586a281f22b932a59bd21b759cc9ae5398621a2369dc91de549775f6fb",
+    "backend/tests/test_workspace_native_scheduler.py": "a4ba327e92187e953d5bfdd7419f86c86e8e0c0ca15ab3dca65aa2051dd47839",
+    "scripts/render_tenant_run_control_pipeline.py": "fa39b8ca26c2846bd08baa06299ee9541a52ae7d46808474a4ddf55155060ed4",
+    "examples/ecs-native/deploy/Jenkinsfile.tenant-run-control.in": "055296bb8e012c5a3808f463974db349d0eda9a26e2125c11b8943c8b3e7f2a3"
+  },
+  "log_path": "/private/tmp/m4-native-scheduler-remote-green-20261018-27.log",
+  "log_sha256": "ebbc7d916b6f57ea305bacdac1dcbc751ded629539ce5dc8d377abd4f459ba7c",
+  "cleanup_path": "/private/tmp/native-scheduler-origin-build139-cleanup.json",
+  "scope": "One PostgreSQL remote pool/adopt/ToolNode list main plus existing local main. Durable same-key pending retry reused original Run without refreshing origin; different-key work denied with pool reservation retained. No token/ceiling negatives or PAT workspace support claimed.",
+  "job": "deerflow-tenant-execution-m4-sql",
+  "cleanup": {
+    "build": 139,
+    "read_only": true,
+    "cleanup": [
+      {
+        "kind": "container",
+        "name": "deerflow-tenant-execution-m4-sql-139",
+        "exit": 1,
+        "stderr": "Error response from daemon: No such container: deerflow-tenant-execution-m4-sql-139"
+      },
+      {
+        "kind": "container",
+        "name": "deerflow-tenant-execution-m4-sql-139-db",
+        "exit": 1,
+        "stderr": "Error response from daemon: No such container: deerflow-tenant-execution-m4-sql-139-db"
+      },
+      {
+        "kind": "network",
+        "name": "deerflow-tenant-execution-m4-sql-139",
+        "exit": 1,
+        "stderr": "Error response from daemon: network deerflow-tenant-execution-m4-sql-139 not found"
+      }
+    ]
+  },
+  "root_review": "Root independently read live Jenkins terminal, reviewed production/test diffs, verified source archive SHA and byte-compared all six listed files.",
+  "history": [
+    {
+      "build": 138,
+      "queue": 1082,
+      "phase": "m4-native-scheduler-remote-green-20261018-26",
+      "result": "FAILURE",
+      "duration_ms": 39939,
+      "pytest": "1 failed, 1 passed in 22.31s",
+      "first_error": "Remote durable original Session receipt assertions passed; same-key retry while native Run pending returned409 cleanup barrier instead of existing Run. No remote poll/adopt yet. Existing local ToolNode case passed.",
+      "source_sha256": "d3fc7078134e0ce85e7319d80a0255ad623419bc78494de37f93ec6a4d7b81c5",
+      "pipeline_sha256": "b0f0827d557b60d2e049bc2d7488729f06c691d13dd9be71af1938996778d8a0",
+      "log_path": "/private/tmp/m4-native-scheduler-remote-green-20261018-26.log",
+      "log_sha256": "d828a7f787c47347628c1305c0057303b694c1e0e38ac8e6e8bfb358f0642421",
+      "cleanup_path": "/private/tmp/native-scheduler-origin-build138-cleanup.json"
+    }
+  ],
+  "red_137": {
+    "result": "FAILURE",
+    "tests": "1 failed in 18.60s",
+    "source_sha256": "6905009ff9cfa516d8ad431d58c2acf37df4117543d1ad97d2d9976f37bb68ff",
+    "failure": "Actual admitted pending Run had no server-owned original credential receipt; pool adoption not reached."
+  },
+  "reviewed_patches": [
+    "563973a8b5879c28ee6ff60fbe087d493f3cfcff7b4979b0f257c8e626010e52",
+    "0a4c6c719c99abaf5e2c2f016479a9115f515b52524d092a6ed2c693ac5e984e"
+  ],
+  "limits": [
+    "Original token-version revocation and permission-ceiling widening boundaries remain next, only two necessary PG cases.",
+    "No physical sandbox/two-host proof or external provider call. No PAT workspace admission acceptance.",
+    "Only scoped Scheduler list via background Run POST; management/manual/own-stop, other Run entry variants and full M4/M0-M11 remain open.",
+    "Tenant activation false; no deployment or push."
+  ]
+}

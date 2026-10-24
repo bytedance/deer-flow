@@ -212,3 +212,24 @@ repeat provider selection or persist the probe override.
 Tests: `test_managed_models.py`, `test_managed_deepseek.py` (real SDK serialization
 with an HTTP double), opt-in `test_managed_deepseek_live.py`, and
 `tests/blocking_io/test_managed_models.py`.
+
+### Scoped native worker invocation admission
+
+create_chat_model preserves its provider class. When a host-bound worker guard
+is active, compose its existing BaseRateLimiter with WorkerInvocationRateLimiter
+and revalidate after waiting, before provider dispatch. Models exposing
+max_retries receive zero so hidden SDK retries do not bypass native admission;
+outer LLM middleware retries re-enter callbacks/limiter. Worker models also
+receive a stateless model-local WorkerInvocationCallback ahead of tracing, so
+explicit graph callbacks=[] does not disable admission. It resolves the CURRENT
+host worker rather than retaining a construction-time Run/loop on a cached model.
+A worker-built model used without a current live native worker fails closed.
+
+Only ordinary owning-loop async Run binding is verified. Legacy factory use
+without a bound guard retains its original type/constructor/tracing/pacing.
+Do not make callback failure observational/fail-open: this admission callback
+has raise_error=True/run_inline=True and raises a native GraphBubbleUp stop.
+Do not treat model admission as proof that every provider SDK/transport/cache,
+non-run/embedded API, foreign-loop sync use, system fallback or shielded service
+lifetime is integrated. Actual external-model retry/fault acceptance is pending;
+CI uses a deterministic provider and verifies the exposed constructor setting.

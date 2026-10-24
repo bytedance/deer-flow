@@ -1,0 +1,69 @@
+{
+  "build": 132,
+  "queue": 1070,
+  "phase": "m4-native-scheduler-history-green-20261018-20",
+  "result": "SUCCESS",
+  "duration_ms": 47903,
+  "pytest": "2 passed in 24.55s",
+  "ruff": "check passed; 65 files already formatted",
+  "source_sha256": "4f4b27e91fb8a6883380c5e33d760bf0ef81021a8c1f7c67bea07f1db8e4ec58",
+  "pipeline_sha256": "0aa5c56e687bde0d57527a4e8030c2411591a9a390f83160c432b8abd9f6f3c5",
+  "log_path": "/private/tmp/m4-native-scheduler-history-green-20261018-20.log",
+  "log_sha256": "c5fd4b6bb441683c6524be29d0ce2f3a75794f7c0901126a4ab20cd8ae609614",
+  "cleanup_path": "/private/tmp/native-scheduler-history-build132-cleanup.json",
+  "archive_matches_current_files": {
+    "backend/packages/harness/deerflow/persistence/scheduled_task_runs/scope.py": "230dce2d43176f6e8bdff3790166d1e88267bb61fdeeef8c24dc33984ae8627a",
+    "backend/packages/harness/deerflow/persistence/scheduled_tasks/sql.py": "c44fd35ce3878eee56a37394b9ee3a3ab3d7894739109ee023d65408867b0e45",
+    "backend/packages/harness/deerflow/persistence/scheduled_task_runs/sql.py": "94bdfef4d8e1ca49f4bfb52d88f6bd3d0a05b97802a4a8a04c21014b5f4f7e15",
+    "backend/app/gateway/routers/scheduled_tasks.py": "b24c54c041a9209fcaf8b574e528c8f8c38008ccd11ccb03b35c527a759decf9",
+    "backend/tests/test_workspace_native_scheduler.py": "7fce7147aac6b9b1ea5dbc192b54d229455b10c3baab92191300627eb3c39fe8",
+    "scripts/render_tenant_run_control_pipeline.py": "40fb8b93d4771050fbb4a52e84248213ea367cb3da64839f57bc3c5a22e6ae7c"
+  },
+  "scope": "Only new PG history/thread-relations actual native completion/real model callback main plus existing HTTP create/list/detail PG regression. Canonical summary12, hidden child before page/sequence, foreign Run sentinel denied/restored, fresh member/other workspace tested. Tool list and management remain withheld.",
+  "job": "deerflow-tenant-execution-m4-sql",
+  "red": {
+    "build": 131,
+    "queue": 1068,
+    "phase": "m4-native-scheduler-history-red-20261018-19",
+    "result": "FAILURE",
+    "duration_ms": 39945,
+    "pytest": "1 failed in 20.21s",
+    "business_red": "Actual native completion, real journal 12-token/summary preconditions passed; first history GET returned404 task_not_found because route lacks workspace_resource_scope and caller ambient workspace is other. Did not yet reach repository history rejection.",
+    "source_sha256": "cc82562f014f0ab300a27d36eb3b96a71c22de92f25895b63b0f30c62282c91d",
+    "pipeline_sha256": "28d306fef1daf80f5069482de6f6d999150d799a46c43b9da619a7a075b5ed45",
+    "log_path": "/private/tmp/m4-native-scheduler-history-red-20261018-19.log",
+    "log_sha256": "c1963af2a561c7ee58c77dcf6b7dbeca7f7b262ee8f088e623e138961434d139",
+    "cleanup_path": "/private/tmp/native-scheduler-history-build131-cleanup.json"
+  },
+  "cleanup": {
+    "build": 132,
+    "read_only": true,
+    "cleanup": [
+      {
+        "kind": "container",
+        "name": "deerflow-tenant-execution-m4-sql-132",
+        "exit": 1,
+        "stderr": "Error response from daemon: No such container: deerflow-tenant-execution-m4-sql-132"
+      },
+      {
+        "kind": "container",
+        "name": "deerflow-tenant-execution-m4-sql-132-db",
+        "exit": 1,
+        "stderr": "Error response from daemon: No such container: deerflow-tenant-execution-m4-sql-132-db"
+      },
+      {
+        "kind": "network",
+        "name": "deerflow-tenant-execution-m4-sql-132",
+        "exit": 1,
+        "stderr": "Error response from daemon: network deerflow-tenant-execution-m4-sql-132 not found"
+      }
+    ]
+  },
+  "root_archive_comparison": "All six changed source files independently byte-matched successful archive; root independently read Jenkins terminal and test output.",
+  "model": "Deterministic in-process BaseChatModel; real native worker/journal persisted summary and usage 7+5=12, no provider API call.",
+  "limits": [
+    "Only HTTP history/thread relations plus existing create/list/detail regression.",
+    "Tool capability/listing, management/manual/own-stop, installed dependency, IM, timeout/unknown recovery remain required.",
+    "No physical B/two-host/reboot proof, migration/release acceptance, activation or full M4/M0–M11 completion."
+  ]
+}

@@ -17,7 +17,7 @@ export const dynamic = "force-dynamic";
  * The auth guard lives in the page rather than here. A layout cannot read
  * `searchParams`, and this route carries its whole target in the query string
  * — guarding here would redirect to /login with nothing to come back to.
- * No AuthProvider either: nothing under this route reads `useAuth`.
+ * The page supplies AuthProvider only for a server-confirmed workspace target.
  */
 export default async function ArtifactViewerLayout({
   children,

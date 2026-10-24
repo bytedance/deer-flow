@@ -13,6 +13,8 @@ from deerflow.persistence.base import Base
 class ThreadMetaRow(Base):
     __tablename__ = "threads_meta"
 
+    workspace_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+
     thread_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     incarnation: Mapped[str | None] = mapped_column(String(32), nullable=True)
     assistant_id: Mapped[str | None] = mapped_column(String(128), index=True)

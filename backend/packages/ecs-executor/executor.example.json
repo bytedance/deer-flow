@@ -13,14 +13,24 @@
       "max_execution_seconds": 60
     }
   },
-  "allowed_networks": ["none"],
-  "user_profiles": {"alice": ["small"]},
-  "user_credential_env": {"alice": "ECS_EXECUTOR_ALICE_CREDENTIAL"},
+  "allowed_networks": [
+    "none"
+  ],
+  "user_profiles": {
+    "alice": [
+      "small"
+    ]
+  },
+  "user_credential_env": {
+    "alice": "ECS_EXECUTOR_ALICE_CREDENTIAL"
+  },
   "discovery_credential_env": "ECS_EXECUTOR_DISCOVERY_CREDENTIAL",
   "artifact_root": "/private/operator/execution-artifacts",
   "workspace_root": "/shared/deer-flow",
   "metadata_database_url": "postgresql+psycopg://gateway:REPLACE@127.0.0.1:5432/deerflow",
   "max_input_bytes": 8388608,
   "artifact_base_url": "http://127.0.0.1:8003",
-  "port": 8003
+  "port": 8003,
+  "workspace_required": false,
+  "native_server_name": "ecs"
 }

@@ -49,6 +49,7 @@ from deerflow.integrations.lark_cli import INTEGRATION_ID as LARK_CLI_INTEGRATIO
 from deerflow.integrations.lark_cli import LARK_CLI_SANDBOX_CONFIG_DIR, LARK_CLI_SANDBOX_DATA_DIR, LARK_CLI_SANDBOX_LOCKS_DIR, LARK_CLI_SANDBOX_RUNTIME_DIR, ensure_lark_cli_credential_tree, lark_skills_installed
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.acquire_serialization import AcquireSerializer
+from deerflow.sandbox.execution_capture import capture_acquisition, current_execution_capture
 from deerflow.sandbox.identity import derive_sandbox_scope_token
 from deerflow.sandbox.lease import run_sync_lifecycle_operation
 from deerflow.sandbox.sandbox import Sandbox
@@ -2112,6 +2113,13 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
     # ── Core: acquire / get / release / shutdown ─────────────────────────
 
     def acquire(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
+        owner = self._effective_acquire_user_id(user_id)
+        with capture_acquisition(self, thread_id, owner) as captured:
+            sandbox_id = self._acquire_without_capture(thread_id, user_id=owner)
+            captured(sandbox_id)
+            return sandbox_id
+
+    def _acquire_without_capture(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
         """Acquire a sandbox environment and return its ID.
 
         For the same thread_id, this method will return the same sandbox_id
@@ -2136,6 +2144,13 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         return self._acquire_internal(thread_id, user_id=effective_user_id)
 
     async def acquire_async(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
+        owner = self._effective_acquire_user_id(user_id)
+        with capture_acquisition(self, thread_id, owner) as captured:
+            sandbox_id = await self._acquire_async_without_capture(thread_id, user_id=owner)
+            captured(sandbox_id)
+            return sandbox_id
+
+    async def _acquire_async_without_capture(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
         """Acquire a sandbox environment without blocking the event loop.
 
         Mirrors ``acquire()`` while keeping blocking backend operations off the
@@ -2526,7 +2541,58 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             sandbox = self._sandboxes.get(sandbox_id)
             if sandbox is not None:
                 self._last_activity[sandbox_id] = time.time()
-            return sandbox
+            observer = current_execution_capture()
+        if sandbox is not None and observer is not None:
+            observer.observe(self, sandbox_id)
+        return sandbox
+
+    def capture_physical(self, sandbox_id: str, *, user_id: str, thread_id: str):
+        """Capture an already-tracked object; never derive it from current policy."""
+        from .sandbox_info import CapturedSandbox
+
+        key = self._thread_key(thread_id, user_id)
+        with self._lock:
+            info = self._sandbox_infos.get(sandbox_id)
+            identity = self._active_sandbox_identity.get(sandbox_id)
+            if info is None and sandbox_id in self._warm_pool:
+                info = self._warm_pool[sandbox_id][0]
+                identity = self._warm_pool_identity.get(sandbox_id)
+            if info is None or identity != key or not isinstance(info.container_id, str) or not info.container_id or not info.container_name:
+                raise RuntimeError("Native physical capture is unavailable")
+            return CapturedSandbox(sandbox_id, user_id, thread_id, info.container_id, info.container_name, info.sandbox_url, info.created_at, info.requires_replacement)
+
+    def destroy_captured(self, captured) -> None:
+        """STOP exactly an acquired object, retaining tracking on unknown outcomes."""
+        from .sandbox_info import CapturedSandbox
+
+        if type(captured) is not CapturedSandbox or not callable(getattr(self._backend, "_is_container_running", None)):
+            raise RuntimeError("Native captured physical STOP is unavailable")
+        sandbox_id = captured.sandbox_id
+        if not self._reserve_local_teardown(sandbox_id, lambda: True):
+            raise RuntimeError("Native captured teardown is already in progress")
+        try:
+            with self._lock:
+                current = self._sandbox_infos.get(sandbox_id)
+                identity = self._active_sandbox_identity.get(sandbox_id)
+                if current is None and sandbox_id in self._warm_pool:
+                    current = self._warm_pool[sandbox_id][0]
+                    identity = self._warm_pool_identity.get(sandbox_id)
+                if current is not None and (current.container_id != captured.container_id or identity != self._thread_key(captured.thread_id, captured.user_id)):
+                    raise RuntimeError("Native captured object or private identity was replaced")
+            if not self._claim_ownership(sandbox_id, for_destroy=True):
+                raise RuntimeError("Native captured object is owned by a peer")
+            info = SandboxInfo(
+                sandbox_id=sandbox_id, sandbox_url=captured.sandbox_url, container_id=captured.container_id, container_name=captured.container_name, created_at=captured.created_at, requires_replacement=captured.requires_replacement
+            )
+            with self._held_teardown_lease(sandbox_id):
+                self._backend.destroy(info)
+                if self._backend._is_container_running(captured.container_id):
+                    raise RuntimeError("Native captured physical STOP remains unconfirmed")
+                sandbox, _, _ = self._remove_tracked_sandbox(sandbox_id, expected_info=current) if current is not None else (None, None, None)
+            if sandbox is not None:
+                sandbox.close()
+        finally:
+            self._finish_local_teardown(sandbox_id)
 
     def release(self, sandbox_id: str) -> None:
         """Release a sandbox from active use.

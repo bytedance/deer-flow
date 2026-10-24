@@ -206,3 +206,159 @@ Writable-directory cases remain portable.
 of an existing entry on failure. A cleanup failure must preserve the original
 publish exception, including interruption. Import the scanner during fixture
 setup, after the autouse fixtures initialize runtime, to avoid the package cycle.
+
+Workspace deletion coverage in test_workspace_http uses actual scoped SQL and
+authenticated multipart/delete/create calls: an old request must neither publish
+into nor clean files from a reused thread generation. Tombstone probes execute
+after real native checkpoint deletion, and uncertain cleanup checks no replay.
+The native cancellation unit targets _delete_thread_data_authorized.__wrapped__
+to retain its original authorization-bypassed lifecycle focus after the route
+adapter split; HTTP authorization remains exercised separately.
+
+The workspace HTTP main temporarily uses actual DbRunEventStore and
+FeedbackRepository on its isolated session factory for Run/message/event reads,
+then restores its native memory event fixture for the existing lifecycle main.
+Do not replace scoped event results with canned payloads or remove feedback
+enrichment. #71 verifies both dialects and entry-incarnation response fencing.
+
+The workspace HTTP SSE main uses real JWT, both SQL dialects, native resident
+Run records and native MemoryStreamBridge. The fixture publishes deterministic
+frames (no Agent execution), commits withdrawal between frames, and checks
+actual subscriber drain and unchanged running status/abort state. Token-version
+withdrawal also requires native reconnect 401 before the fixture mints its next
+valid token. A blocked-close native test pins cancellation intent before drain;
+do not replace these edges with sleeps or pre-authorized canned responses.
+
+Global Run reads in test_workspace_http use actual SQL messages and feedback
+with real JWTs; after materialization they rotate the persisted parent nonce
+and assert the prepared JSON is refused. Restore method patches before later
+SSE/lifecycle checks. Native global API tests preserve unbound paging and
+optional-storage behavior; these do not prove feedback write authorization.
+
+The workspace HTTP usage/change stage seeds distinct persisted token totals and
+one workspace_changes event per space, tests native include flags and SQL nonce
+replacement after reads. Later deletion must retain exactly two personal SQL
+events (message plus file change), one row in each other seeded child table, and
+zero rows for the deleted space. Do not loosen retention to a nonzero count.
+
+Workspace feedback tests use both actual metadata dialects. Invalid-parent and
+peer rows precede valid feedback so a limit-one read proves SQL filtering.
+HTTP tests commit policy/nonce changes immediately before the actual repository
+method and inspect persisted rating/row count after refusal; do not mock a
+successful mutation or test only the 404 status. Native feedback tests retain
+unbound owner/statistics/deletion compatibility. Full fault matrices remain M11.
+
+Workspace archive main uses actual SQL delivery events and current file bytes,
+including an unpresented file that must never enter the ZIP. Observe native
+builder file handles and assert close after normal send, post-materialization
+policy refusal, and delayed ASGI refusal. Cancellation test separately checks
+owned close/context restore. Personal SQL retention now has three events
+(message/change/delivery), exactly one in other seeded child tables, zero for
+the deleted space. Never relax this to an arbitrary positive count.
+
+Artifact entry replacement in the workspace HTTP main commits an actual new
+nonce inside native check_access. The old request must return 404, then a new
+request must still read correct bytes. #85 failed with 200; #86 passes. This is
+separate from existing prepared-response policy withdrawal and archive close
+checks; do not replace it with a pre-denied canned owner response.
+
+Workspace editor main configures artifacts and uploads with actual local provider
+instances (no production config/credentials). After real private PUT, inspect
+bytes/digest/size; inject actual policy/nonce/revision changes just before the
+repository publication and assert old/new external bytes remain. Replace an
+actual parent directory with a symlink and inspect both original/outside files
+and outside temp inventory. Restore the directory in finally. No sandbox/model
+execution or production physical isolation is implied. Native remote tests remain
+unbound compatibility; scoped remote integration is still M4/M5.
+
+
+Workspace Run identity checks use real SQLite/PostgreSQL admission and native
+RunManager, then change the ambient selection and persisted policy independently.
+Keep assertions on actual stored identity/nonce and refusal without mutation,
+including unbound legacy upsert and resident idempotency reuse. The migration
+case reconstructs parent 0038 only inside its disposable fixture database,
+checks exact historical rows and NULL authority through repeat upgrades, then
+checks refused downgrade preserves head and leaves no migration-owned Postgres
+session. Never force DROP DATABASE or terminate connections to hide a leak.
+These are short-operation/recovery foundations, not normal Agent Run execution.
+
+
+Workspace worker context checks use actual native RunManager/StreamBridge and
+compiled LangGraph, without a model. The scoped main provisions real verified
+SQL membership, creates the ordinary Run, hands off and adopts that same row,
+then executes the graph with the persisted native principal. Observe actual
+tool runtime and ambient identity inside the graph, private thread busy state,
+persisted terminal row and unchanged caller selection. Pending refusal checks
+change actual parent nonce/member version before handoff/adopt/start; retain an
+exact row snapshot to prove no owner/lease mutation. Unbound legacy CAS must not
+operate on a scoped row. These do not prove public JWT/cookie admission, remote
+physical execution, recurring jobs, or in-flight tool/publication revocation.
+
+
+Workspace MCP checks use actual scoped SQL Run/task/member/parent records and
+native McpTaskService; only remote protocol IO is deterministic. The main ends
+the source Run and changes the caller's selection before polling, then inspects
+actual task scope/result and context reset. Source-policy/nonce/owner/cancel
+withdrawal checks happen around real IO and insert; observe compensation calls
+and absent durable rows without claiming physical remote Stop. Poll withdrawal
+checks assert no terminal/result commit. Use two poll slots for the independent
+before/during cases so a deliberately denied old row cannot consume the one
+slot and prevent the second edge from executing. Mandatory-mode checks use an
+actual contextless worker call and inspect an untouched unattributed task.
+Migration coverage reconstructs parent 0039 only in its disposable DB, preserves
+old content/remote handles/leases through repeat upgrade to 0040 and refuses
+downgrade without leaking a Postgres session. Crypto producer checks separately
+prove original-runtime v2 identity and legacy-receiver refusal, not B server auth.
+
+
+`test_workspace_execution_control.py` opts in only under the owned Shanghai
+physical CI flag, before fixture creation. First prove real native ToolNode/MCP,
+SQLite/PostgreSQL and actual running Docker -> member version change -> pending
+SQL outbox -> independent control request -> physical removal -> signed receipt
+-> native cancellation. The finite companion scenario covers queued user cancel,
+missing provider, duplicate intent, wrong-purpose/expired/unauthenticated control,
+false STOP payload, abandoned lease and service restart. ASGI is explicit, as are
+trusted internal admission and the lack of public JWT/TCP/NAS acceptance. False
+transport proof is a rejection injection, never a successful STOP stub. Only
+manifest-owned job/spec Docker objects are cleaned. Other revocation-domain
+parents remain pending. Default SQL runs skip all physical/control cases.
+
+A historical/ordinary terminal B state without `physical_stopped` remains pending.
+The control request now persists `cleanup_pending` for the existing worker to
+verify exact owned-container absence/removal. Terminal metadata alone cannot
+produce a STOP receipt or settle native cancellation; a running or unobservable
+object still retains uncertainty. The companion test uses actual Docker
+observation after the old ordinary queued-cancel path.
+
+`test_workspace_revocation.py` first proves the native graph/SQL/real heartbeat
+main on both databases. The held on_run_completed hook creates a real window
+where metadata is interrupted while native finalizers are still alive; peer
+admission must remain blocked. The finite companions cover callback failure
+(no fake success), pending/unattached NoStart, first rollback intent preservation
+with interrupt-only revocation consumption, wrong owner/context/incarnation/time,
+expired owner lease, refusal of ordinary orphan takeover and replacement-parent
+preservation. Trusted internal user/admission fixtures are explicit; no model,
+public JWT, actual C container or new checkpoint rollback is claimed. Lease fault
+restore is only disposable fixture restoration, never runtime takeover authority.
+The startup negative test derives which closed production guard rejects current
+metadata (unreleased schema fence or compiled integration gate), while separately
+asserting _WORKSPACE_RUNTIME_INTEGRATED is False. It patches neither production
+fence and proves no tenant startup; M10 must still align the release candidate.
+
+`test_workspace_run_lifetime.py` first proves three native graph mains (normal,
+member revoke during terminal cleanup, peer user interrupt), each on SQLite and
+PostgreSQL. A held real completion hook plus a separate native manager proves
+terminal status does not release private-thread admission; wrong-space and
+withdrawn cached-user requests cannot signal local abort. Successful native close
+then permits a fresh Run. The only added corrective scenario seeds a real durable
+SQLite checkpoint, cancels an unstarted owner rollback and executes a late native
+consumer; checkpoint ID/content must remain intact. It does not mock permission,
+SQL, native closure or graph execution into success. Scoped running rollback and
+actual C/OS recovery still need separate integration.
+
+The versioned Run CI renderer accepts only revocation/lifetime suite names. The
+lifetime suite combines these eight cases with the prior six Run-stop cases;
+CI retains fixed images, RO source, internal PG, no runtime Docker socket and
+recorded exact fixture-volume removal. Keep previous red/main/regression archives
+and do not overwrite their phase names. Source receipts identify exact code
+rather than treating a later formatter/test change as already verified.

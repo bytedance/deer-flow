@@ -47,7 +47,7 @@ from app.gateway.conversation_reader import (
 from app.gateway.conversation_reader import (
     scan_visible_thread_messages as _scan_visible_thread_messages,
 )
-from app.gateway.deps import get_current_user, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
+from app.gateway.deps import get_current_user, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge, get_thread_store
 from app.gateway.internal_auth import INTERNAL_SYSTEM_ROLE, get_trusted_internal_owner_user_id
 from app.gateway.pagination import trim_run_message_page
 from app.gateway.run_models import RunCreateRequest
@@ -61,14 +61,20 @@ from app.gateway.services import (
 )
 from app.gateway.sse_headers import sse_response_headers
 from app.gateway.utils import sanitize_log_param
+from app.gateway.workspaces.checkpoints import capture_checkpoint_thread_identity
+from app.gateway.workspaces.dependencies import workspace_resource_scope
+from app.gateway.workspaces.file_response import WorkspaceThreadResponse
+from app.gateway.workspaces.observer import wrap_private_observer
 from deerflow.agents.human_input import read_human_input_response
 from deerflow.agents.middlewares.dynamic_context_middleware import strip_injected_user_message_id_suffix
 from deerflow.authz.sandbox_authz import safe_app_config_async
+from deerflow.authz.workspace import get_current_workspace
 from deerflow.config.paths import get_paths, make_safe_user_id
 from deerflow.runtime import CancelOutcome, ConflictError, RunRecord, RunStatus, ThreadOperationKind, serialize_channel_values_for_api
 from deerflow.runtime.runs.store.base import format_run_cursor_created_at, normalize_run_created_at_iso
 from deerflow.runtime.secret_context import redact_config_secrets, redact_metadata_secrets
 from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.utils.file_io import await_drained
 from deerflow.utils.llm_text import strip_leading_think_blocks
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, get_original_user_content_text, message_to_text
 from deerflow.utils.thread_id import ThreadId
@@ -953,6 +959,7 @@ async def prepare_edit_regenerate_run(
 
 
 @router.post("/{thread_id}/runs", response_model=RunResponse)
+@workspace_resource_scope()
 @require_permission("runs", "create", owner_check=True, require_existing=True)
 async def create_run(
     thread_id: ThreadId,
@@ -1167,6 +1174,12 @@ async def _require_run_visible_to_scope(run_id: str, thread_id: str, request: Re
     the legacy ``"default"`` stamp); every other caller and every
     established-ownership thread keeps its existing semantics.
     """
+    context = get_current_workspace()
+    if context is not None:
+        record = await get_run_manager(request).get(run_id, user_id=context.actor_user_id)
+        if record is None or record.thread_id != thread_id:
+            raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+        return
     state = getattr(request, "state", None)
     user = getattr(state, "user", None)
     if getattr(user, "system_role", None) != INTERNAL_SYSTEM_ROLE:
@@ -1183,6 +1196,7 @@ async def _require_run_visible_to_scope(run_id: str, thread_id: str, request: Re
 
 
 @router.get("/{thread_id}/runs", response_model=list[RunResponse])
+@workspace_resource_scope(private_thread_read=True)
 @require_permission("runs", "read", owner_check=True)
 async def list_runs(thread_id: ThreadId, request: Request) -> list[RunResponse]:
     """List the newest runs for a thread (default 100, as a bare array)."""
@@ -1193,6 +1207,7 @@ async def list_runs(thread_id: ThreadId, request: Request) -> list[RunResponse]:
 
 
 @router.get("/{thread_id}/runs/page", response_model=ThreadRunsPageResponse)
+@workspace_resource_scope(private_thread_read=True)
 @require_permission("runs", "read", owner_check=True)
 async def list_runs_page(
     thread_id: ThreadId,
@@ -1235,6 +1250,7 @@ async def list_runs_page(
 
 
 @router.get("/{thread_id}/runs/{run_id}", response_model=RunResponse)
+@workspace_resource_scope(private_thread_read=True)
 @require_permission("runs", "read", owner_check=True)
 async def get_run(thread_id: ThreadId, run_id: str, request: Request) -> RunResponse:
     """Get details of a specific run."""
@@ -1308,25 +1324,27 @@ async def cancel_run(
 
 
 @router.get("/{thread_id}/runs/{run_id}/join")
+@workspace_resource_scope(private_thread_read=True)
 @require_permission("runs", "read", owner_check=True)
-async def join_run(thread_id: ThreadId, run_id: str, request: Request) -> StreamingResponse:
+async def join_run(thread_id: ThreadId, run_id: str, request: Request) -> Response:
     """Join an existing run's SSE stream."""
     await _require_run_visible_to_scope(run_id, thread_id, request)
     run_mgr = get_run_manager(request)
-    record = await run_mgr.get(run_id)
+    record = await run_mgr.get(run_id, user_id=get_current_workspace().actor_user_id) if get_current_workspace() is not None else await run_mgr.get(run_id)
     if record is None or record.thread_id != thread_id:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
     bridge = get_stream_bridge(request)
     if record.store_only and not bridge.supports_cross_process:
         raise HTTPException(status_code=409, detail=f"Run {run_id} is not active on this worker and cannot be streamed")
 
-    return StreamingResponse(
+    response = StreamingResponse(
         # Joins are read-only observation: the creator's cancel-on-disconnect
         # policy must not fire because an observer closed their connection.
         sse_consumer(bridge, record, request, run_mgr, apply_on_disconnect=False),
         media_type="text/event-stream",
         headers=sse_response_headers(),
     )
+    return await wrap_private_observer(response, request, thread_id=thread_id, run_id=run_id)
 
 
 def _reject_get_stream_action(
@@ -1362,7 +1380,7 @@ async def _stream_existing_run(
 
     await _require_run_visible_to_scope(run_id, thread_id, request)
     run_mgr = get_run_manager(request)
-    record = await run_mgr.get(run_id)
+    record = await run_mgr.get(run_id, user_id=get_current_workspace().actor_user_id) if get_current_workspace() is not None else await run_mgr.get(run_id)
     if record is None or record.thread_id != thread_id:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
     bridge = get_stream_bridge(request)
@@ -1402,7 +1420,7 @@ async def _stream_existing_run(
             )
             return Response(status_code=204 if completed else 202)
 
-    return StreamingResponse(
+    response = StreamingResponse(
         # Both methods of this handler are join surfaces: a POST carrying an
         # action cancels explicitly above (already gated by
         # require_cancel_permission_when_action), and an action-less join is
@@ -1413,10 +1431,14 @@ async def _stream_existing_run(
         headers=sse_response_headers(),
     )
 
+    return await wrap_private_observer(response, request, thread_id=thread_id, run_id=run_id)
+
 
 # Register POST before GET to preserve the historical route precedence and
 # Allow header, while separate signatures keep cancel-only parameters off the
 # GET schema. The shared route name keeps generated operationIds stable.
+
+
 @router.post("/{thread_id}/runs/{run_id}/stream", response_model=None, name="stream_existing_run")
 @require_permission("runs", "read", owner_check=True)
 async def stream_existing_run(
@@ -1436,6 +1458,7 @@ async def stream_existing_run(
     dependencies=[Depends(_reject_get_stream_action)],
     name="stream_existing_run",
 )
+@workspace_resource_scope(private_thread_read=True)
 @require_permission("runs", "read", owner_check=True)
 async def join_existing_run_stream(thread_id: ThreadId, run_id: str, request: Request) -> Response:
     """Join an existing run's observation-only SSE stream."""
@@ -1448,6 +1471,7 @@ async def join_existing_run_stream(thread_id: ThreadId, run_id: str, request: Re
 
 
 @router.get("/{thread_id}/messages")
+@workspace_resource_scope(private_thread_read=True)
 @require_permission("runs", "read", owner_check=True)
 async def list_thread_messages(
     thread_id: ThreadId,
@@ -1588,6 +1612,7 @@ async def _enrich_thread_message_page(
 
 
 @router.get("/{thread_id}/messages/page", response_model=ThreadMessagesPageResponse)
+@workspace_resource_scope(private_thread_read=True)
 @require_permission("runs", "read", owner_check=True)
 async def list_thread_messages_page(
     thread_id: ThreadId,
@@ -1616,6 +1641,7 @@ async def list_thread_messages_page(
 
 
 @router.get("/{thread_id}/runs/{run_id}/messages")
+@workspace_resource_scope(private_thread_read=True)
 @require_permission("runs", "read", owner_check=True)
 async def list_run_messages(
     thread_id: ThreadId,
@@ -1644,7 +1670,7 @@ async def list_run_messages(
 
     if data:
         run_mgr = get_run_manager(request)
-        record = await run_mgr.get(run_id)
+        record = await run_mgr.get(run_id, user_id=user_id) if get_current_workspace() is not None else await run_mgr.get(run_id)
         if record:
             durations = compute_run_durations([record])
             if durations:
@@ -1733,6 +1759,7 @@ async def _archive_presented_paths(thread_id: ThreadId, run_id: str, request: Re
     "/{thread_id}/runs/{run_id}/artifacts/archive",
     response_model=ArtifactArchiveManifestResponse,
 )
+@workspace_resource_scope(private_thread_read=True)
 @require_permission("runs", "read", owner_check=True, require_existing=True)
 async def get_run_artifact_archive_manifest(
     thread_id: ThreadId,
@@ -1746,13 +1773,16 @@ async def get_run_artifact_archive_manifest(
 
 
 @router.post("/{thread_id}/runs/{run_id}/artifacts/archive")
+@workspace_resource_scope(private_thread_read=True)
 @require_permission("runs", "read", owner_check=True, require_existing=True)
 async def create_run_artifact_archive(
     thread_id: ThreadId,
     run_id: str,
     request: Request,
-) -> StreamingResponse:
+) -> Response:
     """Download the current contents of the files presented by one terminal run."""
+    context = get_current_workspace()
+    incarnation = await capture_checkpoint_thread_identity(request, thread_id)
     await _require_run_visible_to_scope(run_id, thread_id, request)
     presented_paths = await _archive_presented_paths(thread_id, run_id, request)
 
@@ -1765,6 +1795,8 @@ async def create_run_artifact_archive(
     user_data_dir = paths.sandbox_user_data_dir(thread_id, user_id=effective_user_id)
     outputs_dir = paths.sandbox_outputs_dir(thread_id, user_id=effective_user_id)
 
+    result = None
+    handed_off = False
     try:
         async with get_run_manager(request).reserve_thread_operation(
             thread_id,
@@ -1777,34 +1809,53 @@ async def create_run_artifact_archive(
                 presented_paths,
                 extra_reserved_dir_names=extra_reserved_dir_names,
             )
+
+        safe_run_id = re.sub(r"[^A-Za-z0-9_-]", "", run_id)[:32] or "run"
+        logger.info(
+            "Created artifact archive thread_id=%s run_id=%s members=%d input_bytes=%d output_bytes=%d",
+            sanitize_log_param(thread_id),
+            sanitize_log_param(run_id),
+            result.member_count,
+            result.input_bytes,
+            result.size,
+        )
+        response = StreamingResponse(
+            _archive_response_chunks(result),
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": f'attachment; filename="artifacts-{safe_run_id}.zip"',
+                "Content-Length": str(result.size),
+                "Cache-Control": "private, no-store",
+                "X-Content-Type-Options": "nosniff",
+            },
+            background=BackgroundTask(result.file.close),
+        )
+
+        if context is not None:
+            response = WorkspaceThreadResponse(
+                response,
+                workspace_service=request.app.state.workspace_service,
+                repository=get_thread_store(request),
+                context=context,
+                thread_id=thread_id,
+                incarnation=incarnation,
+                close_unpublished=result.file.close,
+            )
+        handed_off = True
+        return response
     except ConflictError as exc:
         raise HTTPException(status_code=409, detail="Artifacts are currently being modified; try again shortly") from exc
     except ArtifactArchiveError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
-
-    safe_run_id = re.sub(r"[^A-Za-z0-9_-]", "", run_id)[:32] or "run"
-    logger.info(
-        "Created artifact archive thread_id=%s run_id=%s members=%d input_bytes=%d output_bytes=%d",
-        sanitize_log_param(thread_id),
-        sanitize_log_param(run_id),
-        result.member_count,
-        result.input_bytes,
-        result.size,
-    )
-    return StreamingResponse(
-        _archive_response_chunks(result),
-        media_type="application/zip",
-        headers={
-            "Content-Disposition": f'attachment; filename="artifacts-{safe_run_id}.zip"',
-            "Content-Length": str(result.size),
-            "Cache-Control": "private, no-store",
-            "X-Content-Type-Options": "nosniff",
-        },
-        background=BackgroundTask(result.file.close),
-    )
+    finally:
+        # A builder result can exist even if reservation release or response
+        # construction fails. After hand-off the wrapper owns early/ASGI cleanup.
+        if result is not None and not handed_off:
+            await await_drained(asyncio.to_thread(result.file.close))
 
 
 @router.get("/{thread_id}/runs/{run_id}/events")
+@workspace_resource_scope(private_thread_read=True)
 @require_permission("runs", "read", owner_check=True)
 async def list_run_events(
     thread_id: ThreadId,
@@ -1845,6 +1896,7 @@ async def list_run_events(
 
 
 @router.get("/{thread_id}/runs/{run_id}/workspace-changes")
+@workspace_resource_scope(private_thread_read=True)
 @require_permission("runs", "read", owner_check=True)
 async def get_run_workspace_changes(
     thread_id: ThreadId,
@@ -1868,6 +1920,7 @@ async def get_run_workspace_changes(
 
 
 @router.get("/{thread_id}/token-usage", response_model=ThreadTokenUsageResponse)
+@workspace_resource_scope(private_thread_read=True)
 @require_permission("threads", "read", owner_check=True)
 async def thread_token_usage(
     thread_id: ThreadId,

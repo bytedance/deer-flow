@@ -621,3 +621,38 @@ async def test_repeated_cancellation_keeps_the_archive_slot_until_worker_exit(mo
         release.set()
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+@pytest.mark.asyncio
+async def test_private_archive_response_closes_owned_file_on_cancellation():
+    import tempfile
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from fastapi.responses import Response
+
+    from app.gateway.workspaces.file_response import WorkspaceThreadResponse
+    from deerflow.authz.workspace import WorkspaceContext, get_current_workspace
+
+    class CancelledResponse(Response):
+        async def __call__(self, scope, receive, send):
+            raise asyncio.CancelledError
+
+    original_context = get_current_workspace()
+    handle = tempfile.TemporaryFile("w+b")
+    try:
+        response = WorkspaceThreadResponse(
+            CancelledResponse(),
+            workspace_service=SimpleNamespace(revalidate=AsyncMock()),
+            repository=SimpleNamespace(get=AsyncMock(return_value={"incarnation": "epoch"})),
+            context=WorkspaceContext(workspace_id="00000000-0000-0000-0000-000000000124", actor_user_id="owner", membership_version=1, policy_version=1),
+            thread_id="thread",
+            incarnation="epoch",
+            close_unpublished=handle.close,
+        )
+        with pytest.raises(asyncio.CancelledError):
+            await response({}, None, None)
+        assert handle.closed
+        assert get_current_workspace() is original_context
+    finally:
+        handle.close()

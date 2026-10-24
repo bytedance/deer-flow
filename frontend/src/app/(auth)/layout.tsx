@@ -3,6 +3,7 @@ import { type ReactNode } from "react";
 
 import { GatewayOfflineFallback } from "@/components/workspace/gateway-offline-fallback";
 import { AuthProvider } from "@/core/auth/AuthProvider";
+import { getAuthenticatedEntryReturnPath } from "@/core/auth/return-path-server";
 import { getServerSideUser } from "@/core/auth/server";
 import { assertNever } from "@/core/auth/types";
 import { I18nProvider } from "@/core/i18n/context";
@@ -22,7 +23,7 @@ export default async function AuthLayout({
 
   switch (result.tag) {
     case "authenticated":
-      redirect("/workspace");
+      redirect(await getAuthenticatedEntryReturnPath());
     case "needs_setup":
       // Allow access to setup page
       content = (

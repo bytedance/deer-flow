@@ -3,8 +3,9 @@
 This optional package uses DeerFlow's existing HTTP MCP interceptor and
 `McpTaskService` ordinary-tools driver. The Agent submits once; native SQL
 `mcp_tasks` owns background polling, cancellation and delivery. A separate
-`ecs_execution_jobs` ledger owns physical Docker execution. The executor never
-reads or writes `mcp_tasks`, creates threads, or starts another Agent loop.
+`ecs_execution_jobs` ledger owns physical Docker execution. The physical JobStore never reads or writes `mcp_tasks`. The optional scoped
+HTTP receiver reads original native Run/task/member records for authorization;
+it does not own or mutate their lifecycle, create threads or start an Agent loop.
 
 Install alongside the matching local harness in the Gateway environment and on
 the execution host:
@@ -60,14 +61,61 @@ so mandatory server verification remains the final fail-closed boundary.
 Submission scopes bind current trusted user, thread, incarnation, run,
 operation, audience, expiry and canonical argument digest. Runtime identity never
 comes from model arguments or a default user. Management scopes bind only the
-persisted authenticated owner, task ID, operation, audience and expiry; they do
-not invent a thread/run context after the Agent run ends. Scope lifetime defaults
+persisted authenticated owner, task ID, operation, audience and expiry. Version 2
+also signs the original task-local workspace snapshot; it does not invent an
+active thread/run context after the Agent run ends. Scope lifetime defaults
 to 60 seconds, with a 300-second maximum; keep host clocks synchronized. JSON
 arguments are bounded to 256 KiB and nesting 32; tokens are bounded to 8 KiB.
 
+Native SQL submission preflight is available as `verify_native_execution_scope`.
+After HMAC, owner, audience, expiry and argument checks, it resolves only the
+signed Run/thread/incarnation locators against native SQL. One SQL statement
+checks the admitted Run snapshot, active verified account, live membership and
+policy versions, private parent/project, running state, cancellation and lease.
+It does not read the caller's selected workspace or use token workspace JSON to
+construct an authorization grant. This is a read-only preflight; it does not
+hold a lock or authorize a later physical start/publication. Scoped HTTP
+`ExecutionJobs` now consumes this preflight and captures immutable ledger intent.
+V2 status/cancel verify a separately resolved native MCP receipt with exact server,
+remote ID, source Run, private thread/incarnation and independent live snapshots.
+Status can queue staged work only with an uncancelled pollable native task;
+source Run completion does not erase task ownership. Single-host scoped B now
+claims through native authority, fences durable start intent/result writes and
+rechecks publication. Scope revocation observed by the worker requests durable
+control-only STOP; only actual removal confirms physical_stopped. Pool scoped
+claims remain incomplete. Captured native MCP cancellation and membership-version
+revocation now have the independent STOP receipt path described below.
+
+Workspace transport preparation (not tenant activation): `mint_execution_scope`
+accepts a trusted immutable `workspace_context` and signs protocol `version: 2`
+alongside the existing Run identity and argument digest. `verify_execution_scope`
+requires an independently authorized `expected_workspace_context` with exactly
+matching workspace, actor, membership and policy versions. A scoped verifier
+refuses a legacy token; an unintegrated verifier refuses version 2. Tokens do not
+resolve membership or authorize parent/child resources. The submit interceptor
+now signs version 2 from the original typed runtime snapshot and refuses missing
+or forged workspace identity instead of degrading to legacy. A different ambient
+selection never supplies submission authority. Unscoped legacy submits retain
+the prior protocol. `mint_management_scope`/`verify_management_scope` support the
+same v2 snapshot. Only the native service's captured task binding supplies it;
+receiver lookup is independent of the token's asserted workspace. Unintegrated
+remote C launch/browser receivers still refuse v2. Do not enable tenant execution
+from these component proofs; the global startup gate remains closed.
+
+The private executor config accepts `workspace_required` (default false) and
+`native_server_name` (exact native MCP server binding). Scoped mode requires fixed
+metadata/shared-root settings and executor e0003. Receiver/control startup accepts
+exactly one known native revision: `0040_mcp_workspace_identity` or
+`0041_scheduler_workspace`; unknown and multiple heads are rejected. This runtime
+compatibility does not update offline migration/backfill receipt contracts.
+Existing team data refuses legacy B startup. The example keeps scoped mode off;
+single-host B uses the original committed task authority. Gateway tenant
+activation stays closed until the complete runtime/release plan is verified.
+
 A submit response durably stages the job without execution. Only the first
-signed native background status poll activates it, after native submission SQL
-has committed. Staging expires after 300 seconds by default. The run/request key
+signed native background status poll queues it. In scoped mode the receiver
+independently confirms native submission SQL commitment first; an orphan staged
+job cannot activate from a valid signature alone. Staging expires after 300 seconds by default. The run/request key
 namespace returns the same immutable job on retry. A changed spec for an existing
 request key fails. Jobs with a persisted start intent and unknown physical outcome
 are inspected and never automatically started again. Cancellation reports a
@@ -111,7 +159,10 @@ Paths are bounded to 512 UTF-8 bytes total and 255 bytes per component; empty
 or dot components, backslashes and control characters are rejected. Absolute
 host paths, traversal, symlinks, special files and hard links are rejected. Under a native `threads_meta` owner/incarnation row lock, the executor
 checks the supplied digest and persists an immutable snapshot before admission.
-Later source changes do not alter retries or execution. The operator's combined
+Scoped file operations also lock workspace and actor before the private parent,
+then recheck live membership/policy and the original captured scope. Unscoped
+file operations cannot access attributed parents. Later source changes do not
+alter retries or execution. The operator's combined
 input budget defaults to 8 MiB (`max_input_bytes`, 128 KiB–64 MiB). At most 64
 input names are accepted; use distinct inline/reference target names.
 
@@ -533,3 +584,183 @@ Ops/cgroup/cloud/restart acceptance belongs to Task6B.
 Task6B native role Compose, private reference-only generation, durable operator drain
 and stopped-writer image selection are documented in `docs/ecs-native-deployment.md`. Installed/cloud acceptance remains separately recorded;
 cloud/Jenkins work is paused.
+
+## Tenant schema foundation (implementation in progress)
+
+This development branch requires `e0003_execution_identity` for production ledger
+admission. The explicit offline upgrade accepts only reviewed legacy/current
+shapes, adds nullable indexed workspace fields to jobs and native affinities,
+and leaves existing physical reservations, JSON payloads and versions intact.
+It never assigns legacy tenant ownership or replays work. New job creation
+persists scope; mutation and conflicting create retries cannot change it.
+
+The appended e0003 migration adds a separate nullable JSON execution identity.
+Explicit B snapshots bind actor, workspace, source Run/thread/incarnation and the
+effective input/profile budget digest. Scoped create retries, reads and ordinary
+mutations validate this independent identity; output/state updates retain it.
+Historical rows keep NULL identity, including offline workspace attribution.
+Default JobStore and pool claims refuse workspace-attributed jobs. The scoped
+single-host ExecutionJobs claimer uses original native task authority and short
+workspace/actor/private-parent/Run/task SQL locks around claim/start/result writes.
+It never holds those locks across Docker or HTTP; pool filtering still precedes
+limit and pool scoped execution remains pending.
+Unknown physical reservations remain reserved. Stop every old worker/dispatcher
+before upgrading: an old binary starting afterward rejects the new revision/shape,
+but changing a schema cannot stop an already-running old process. No live schema
+upgrade, scoped launch or tenant deployment is enabled by this work.
+
+These columns are not user authorization. Tenant protocol, live membership
+checks, native/executor backfill and the controlled migration receipt remain
+required. The historical Shanghai release manifests and same-schema operations
+contract still describe `0035/e0001`; do not edit their receipts or use that
+release flow to claim a `0036/e0002` rollout. No deployment has been performed.
+
+`tenant_backfill.py` provides offline plan/apply attribution from a pinned native
+ownership export. Only exact user/thread/incarnation/run bindings acquire scope;
+unknown or conflicting records remain quarantined. Apply changes only indexed
+scope and top-level JSON scope, preserving job versions, physical state, native
+snapshots and affinity node selection. It never authorizes runtime access or
+releases physical capacity. The caller must stop writers and retain coherent
+backups plus both database receipts. Native `export_native_workspace_bindings` now supplies the metadata-only DTO.
+A guarded operator CLI and paired migration receipts are still required;
+hand-authored bindings are not a deployment procedure.
+
+
+## Scoped single-host physical evidence
+
+The Shanghai-only physical test follows the real native durable ToolNode wrapper,
+ordinary MCP HTTP driver and native SQL receipt into real Docker. Input snapshot
+bytes become a native report, publication is checked under the original task
+scope and the original MCP row receives completion after source Run ends and UI
+selection changes. Actual container removal is checked before STOP flags. Creation
+and running withdrawal boundaries, one failed physical observation and cancelled
+task publication refusal are tested. There is no permission-success or Docker
+execution stub in that main.
+
+Native authority locks serialize the short durable start intent with native
+revocation writers. The start intent is the admission linearization point;
+withdrawal afterward requires physical STOP, not another start or result grant.
+The worker rechecks before start, on reconciliation and at publication/result
+commit. Its captured stop request survives in the private ledger and does not
+need withdrawn member permission to remove the exact owned object. Failed
+observation never establishes STOP. This polling path is not the still-pending
+native revocation outbox or task control settlement; revoked native task results
+are withheld while that dedicated control receipt remains unimplemented.
+
+Reproduce with the versioned Jenkins template and standard-library renderer in
+[the tenant testing guide](../../../docs/tenant-workspaces-testing.md). The default
+suite skips physical tests before fixture setup. CI uses only owned shared temp
+paths and preloaded image IDs; it performs no deployment or model calls. Actual
+NAS/TCP, pool/remote C/continuation/notifications, durable outbox, least-privilege
+DB role and full M0-M11 tenant/restore acceptance remain pending.
+
+
+## Captured native MCP STOP control (partial M4)
+
+`ecs_executor.control:install` contributes a Gateway extension service through the
+existing operator-only `plugins:` mechanism. It consumes native
+`workspace_operation_outbox.kind=mcp_stop`; it does not own Agent runs, introduce
+another task authority, execute Docker centrally or use a withdrawn member grant.
+The native member transaction records pending `workspace_revoke` parents plus
+captured MCP stop children, sets cancellation intent and invalidates poll leases.
+Native user cancellation also enqueues the same idempotent child after fresh
+private-parent authorization. No SQL writer transaction spans remote IO.
+
+The executor has an optional `POST /_internal/execution-control/stop` endpoint.
+It requires a dedicated bearer credential and separate HMAC secret, exact purpose
+(`stop_intent` versus `stop_receipt`), audience, bounded lifetime and original
+task/actor/workspace/thread/incarnation/Run/server/remote handle. The endpoint is
+not an Agent tool and cannot submit work, read artifacts or return business output.
+The private executor ledger independently checks its immutable captured identity.
+Starting/running/uncertain work remains pending until its worker observes actual
+owned-container removal. A still-unassigned staged/queued job with no start intent
+can instead record `not_started`; no worker may subsequently claim it.
+
+Only a verified signed STOP receipt and current native outbox owner/token/lease
+can settle the original native task as cancelled. A bare Boolean, expired or wrong
+purpose token, stale claimant or changed native target cannot settle it. Missing
+historical identity is quarantined, not filled from current membership. Errors
+retain durable retry/uncertainty. Restarted services reclaim expired leases.
+Unsupported/missing providers make scoped service cancellation unavailable.
+
+Example operator configuration (environment variable names, never actual secrets):
+
+```yaml
+plugins:
+  - name: ecs-execution-control
+    package: deerflow-ecs-executor
+    use: ecs_executor.control:install
+    enabled: true
+    required: true
+    config:
+      routes:
+        ecs:
+          url: http://executor.internal:8003
+          audience: B/control
+          credential_env: ECS_EXECUTOR_CONTROL_CREDENTIAL
+          secret_env: ECS_EXECUTOR_CONTROL_SECRET
+```
+
+The executor's private JSON config must set `control_credential_env` and
+`control_secret_env` to the same environment variable names, alongside
+`workspace_required: true` and its existing `native_server_name: ecs` and
+`audience: B`. Use at least 32 secret bytes, distinct from the ordinary scope
+secret, and a credential distinct from user/discovery/worker roles. This is an
+operator development configuration, not permission to activate tenant mode.
+The native schema stays 0040, executor schema e0003; the generic outbox needs no
+new migration. The app-scoped readiness marker is shared with McpTaskService.
+
+The Shanghai main uses real SQL and Docker, with MCP/control HTTP via ASGI and a
+trusted native admission fixture. It proves member-version invalidation after a
+source Run ends, physical STOP and original task settlement, plus queued user
+cancellation, false-proof refusal, lease fencing and service restart. It does not
+prove public Gateway/JWT integration, TCP/NAS, multi-node delivery, OS reboot,
+remote C, notifications, policy/account revocation or all resource-domain cleanup.
+Parent `workspace_revoke` rows deliberately stay pending for those remaining
+handlers; MCP child completion must never mark the whole revocation completed.
+Compiled tenant activation remains closed. See the workspace test instructions.
+
+A historical/ordinary terminal B state without `physical_stopped` remains pending.
+The control request now persists `cleanup_pending` for the existing worker to
+verify exact owned-container absence/removal. Terminal metadata alone cannot
+produce a STOP receipt or settle native cancellation; a running or unobservable
+object still retains uncertainty. The companion test uses actual Docker
+observation after the old ordinary queued-cancel path.
+
+
+### Scoped native C staging (partial M4)
+
+NativeDispatchHost now binds the admitted Run's private workspace while capturing
+its snapshot and handing off the existing pending Run. C jobs persist original
+workspace/actor/thread/incarnation/Run and fixed affinity. Existing e0003 immutable
+execution_identity also hashes the complete native payload, profile and node
+budget. Removing outer scope while retaining a scoped native payload is refused;
+legacy B identity hashing remains unchanged. Native reads/ownership CAS still
+reauthorize; snapshot JSON alone never grants execution.
+
+Shanghai SQL #95 verifies thirteen focused checks and thirty-five-file Ruff.
+Queued restart/lease and pre-assignment NoStart control now pass Shanghai #99
+(20 focused cases). Refusal recovery,
+scoped pool claim/owned integration, recovery and physical C->B->C remain pending.
+Independent v2 receiver authorization and RunContext adoption are verified below. Default pool claims still refuse
+scoped C, and tenant activation remains closed. See the current
+[validation evidence](../../../docs/tenant-workspaces-testing.md).
+
+
+Scoped receiver acceptance now uses v2 capabilities plus independent native SQL authorization and the existing RunManager adoption path. Ordinary Scheduling.owned excludes scoped payloads while their capacity remains reserved. Shanghai #102 validates eight focused checks using a context-observation execution entry; scoped dispatch and physical execution remain pending.
+
+
+Scoped C pool main now passes Shanghai #104 (seven cases): exact candidate/version reservation, pending native SQL preflight/recheck and v2 launch, real ASGI/native graph result and usage writeback. Ordinary claim/owned stay isolated. Running/withdrawn polls plus scoped get/report expose control scalars only; worker reuses only its already-held snapshot. Unknown work retains capacity; scoped dependency wait/refuse remain closed. This deterministic in-process evidence does not establish two-host TCP, AIO namespace/physical STOP or restart recovery.
+
+
+Scoped Scheduler development checkpoint (#151): the actual installed dependency reconciler now protects original waiting occurrences and the native notification continuation transfers C1→C2 on that same occurrence without another automatic launch/count. The PostgreSQL story uses real native/MCP services with deterministic graph/remote IO. Actual B wire/physical execution, invalid-wait control settlement and full installed recovery remain separate required acceptance; tenant activation stays disabled.
+
+Live-original-scope goal replacement is verified in #152 without product changes: the existing installed wait reconciler ends the obsolete occurrence, retains the new goal and original result, and rejects late notification continuation. This does not cover revoked/private-parent/unknown control settlement or physical execution.
+
+Scoped closed-initial Scheduler revocation control passed #154: after native ownership transfer/member removal, the control sweep retires the obsolete logical occurrence and the existing host retires only its ledger wait. Native source/closing receipts and physical pool records stay unchanged. Logical native execution closure is not physical STOP; pool release remains stop_owned/report. Full revoke/unknown/physical domain acceptance remains open.
+
+
+Scoped B native snapshots/publication now derive paths from the captured job workspace, restoring caller context before existing SQL authorization and no-follow IO. Shanghai physical #16 verifies real single-host B output returns to the original scheduled C2 after the UI changes spaces; #15 records the prior failure. Separate B ledger and ASGI MCP transport are explicit; shared pool/two-host/C physical/full recovery remain open and tenant activation stays disabled. See `../../../docs/tenant-workspaces-testing.md`.
+
+
+Scoped B pool development now shares the existing B/C execution ledger and node budget through an explicit native-authorized path. Shanghai #18 verifies normal C1 → real B Docker → C2 with C2 waiting until B STOP; ordinary NULL-only pool admission stays isolated. Worker scope mode requires fixed `workspace_required: true`, `native_server_name`, workspace root and metadata configuration. Withdrawal/control/restart/CLI boot and actual two-host/C physical acceptance remain pending; tenant activation stays disabled. See `../../../docs/tenant-workspaces-testing.md`.

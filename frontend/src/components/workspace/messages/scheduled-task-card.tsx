@@ -12,7 +12,6 @@ import {
   RotateCcw,
   Target,
 } from "lucide-react";
-import Link from "next/link";
 import { useMemo, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
@@ -27,6 +26,7 @@ import {
   nextRunLine,
   stopLines,
 } from "@/components/workspace/scheduled-tasks/task-detail";
+import Link from "@/components/workspace/workspace-link";
 import { GatewayApiError } from "@/core/api/errors";
 import { useScheduledTasksFeature } from "@/core/features";
 import { useI18n } from "@/core/i18n/hooks";

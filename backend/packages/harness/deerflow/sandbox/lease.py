@@ -261,6 +261,11 @@ class SandboxLeaseManager:
         if existing.thread_key != key:
             raise RuntimeError(f"Sandbox lease owner {owner_id!r} cannot move between thread identities")
         if self._provider.get(existing.sandbox_id) is not None:
+            from deerflow.sandbox.execution_capture import current_execution_capture
+
+            observer = current_execution_capture()
+            if observer is not None:
+                observer.observe(self._provider, existing.sandbox_id)
             if release_on_last and not existing.release_on_last:
                 with self._metadata_lock:
                     if self._bindings_by_owner.get(owner_id) == existing:
@@ -466,6 +471,12 @@ class SandboxLeaseManager:
                 )
             )
             if sandbox is not None:
+                if allow_unscoped_borrow:
+                    from deerflow.sandbox.execution_capture import current_execution_capture
+
+                    observer = current_execution_capture()
+                    if observer is not None:
+                        observer.observe(self._provider, sandbox_id)
                 with self._metadata_lock:
                     previous, release_previous = self._bind_locked(
                         owner_id,
@@ -543,6 +554,12 @@ class SandboxLeaseManager:
                 )
             )
             if sandbox is not None:
+                if allow_unscoped_borrow:
+                    from deerflow.sandbox.execution_capture import current_execution_capture
+
+                    observer = current_execution_capture()
+                    if observer is not None:
+                        observer.observe(self._provider, sandbox_id)
                 with self._metadata_lock:
                     previous, release_previous = self._bind_locked(
                         owner_id,

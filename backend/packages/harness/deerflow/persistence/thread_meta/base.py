@@ -29,6 +29,8 @@ THREAD_ARCHIVED_METADATA_KEY = "deerflow_archived"
 # ``frontend/src/core/threads/utils.ts`` and
 # ``frontend/tests/e2e/utils/mock-api.ts``.
 THREAD_PROJECT_METADATA_KEY = "deerflow_project_id"
+THREAD_DELETING_STATUS = "deleting"
+THREAD_DELETION_METADATA_KEY = "deerflow_deletion_receipt"
 
 
 class _ProjectFilterUnset:

@@ -287,6 +287,8 @@ export const enUS: Translations = {
   },
 
   artifactPreview: {
+    loading: "Loading file...",
+    unavailable: "This file is unavailable. Reload the page to try again.",
     limited: (previewSize, totalSize) =>
       totalSize
         ? `Showing the first ${previewSize} of ${totalSize}.`
@@ -1344,6 +1346,17 @@ export const enUS: Translations = {
 
   // Workspace
   workspace: {
+    spaceSwitcher: {
+      label: "Switch workspace",
+      personal: "Personal workspace",
+      team: "Team workspace",
+      loading: "Switching workspace…",
+      unavailable: "Workspace unavailable",
+      error: "Workspace access could not be confirmed.",
+      retry: "Retry workspace",
+      personalAction: "Use personal workspace",
+      authRequired: "Sign in again to confirm workspace access.",
+    },
     officialWebsite: "DeerFlow's official website",
     githubTooltip: "DeerFlow on GitHub",
     settingsAndMore: "Settings and more",

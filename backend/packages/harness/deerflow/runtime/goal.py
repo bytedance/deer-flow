@@ -27,6 +27,7 @@ from deerflow.agents.goal_state import GoalBlocker, GoalEvaluation, GoalState
 from deerflow.agents.human_input import read_human_input_response
 from deerflow.agents.interaction_policy import RunInteractionPolicy
 from deerflow.models import create_chat_model
+from deerflow.runtime.invocation import invoke_worker_model
 from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
 from deerflow.tracing import inject_langfuse_metadata
 from deerflow.utils.file_io import await_drained
@@ -487,7 +488,7 @@ async def evaluate_goal_completion(
         return response
 
     if extensions is None:
-        response = await invoke_with_usage()
+        response = await invoke_worker_model(invoke_with_usage)
     else:
         from deerflow_extension_api import SystemOperationKind
 
@@ -499,7 +500,7 @@ async def evaluate_goal_completion(
             messages=prompt_messages,
             model_name=model_name,
             invoke_config=invoke_config,
-            invoke=invoke_with_usage,
+            invoke=lambda: invoke_worker_model(invoke_with_usage),
             task_store=task_store,
         )
     return parse_goal_evaluation_response(_extract_response_text(response.content), require_assumption_attribution=interaction_policy is not None and not interaction_policy.allows_clarification)

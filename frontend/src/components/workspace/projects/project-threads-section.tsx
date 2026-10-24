@@ -1,9 +1,8 @@
 "use client";
 
-import Link from "next/link";
-
 import { Button } from "@/components/ui/button";
 import { VirtualThreadList } from "@/components/workspace/thread-list-virtualizer";
+import Link from "@/components/workspace/workspace-link";
 import { useI18n } from "@/core/i18n/hooks";
 import { type ProjectThreadsQueryResult } from "@/core/projects";
 import { pathOfThread } from "@/core/threads/utils";

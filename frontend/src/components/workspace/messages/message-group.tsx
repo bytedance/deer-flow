@@ -44,6 +44,7 @@ import {
 } from "@/core/messages/utils";
 import type { ArtifactEntry } from "@/core/threads/types";
 import { extractTitleFromMarkdown } from "@/core/utils/markdown";
+import { useWorkspaceLifetime } from "@/core/workspaces/context";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
@@ -737,6 +738,7 @@ function ToolCall({
   artifacts?: ArtifactEntry[];
   threadId?: string;
 }) {
+  const lifetime = useWorkspaceLifetime();
   const { t } = useI18n();
   const kind = getToolCallKind(name);
   const { setOpen, autoOpen, autoSelect, selectedArtifact, select } =
@@ -789,7 +791,9 @@ function ToolCall({
   if (kind === "browser") {
     const shot = browserView?.screenshot;
     const previewUrl =
-      shot && threadId ? resolveArtifactURL(shot, threadId) : undefined;
+      shot && threadId
+        ? resolveArtifactURL(shot, threadId, lifetime?.scope.workspaceId)
+        : undefined;
     return (
       <ChainOfThoughtStep
         key={id}

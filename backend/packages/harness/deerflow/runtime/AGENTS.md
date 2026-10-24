@@ -283,3 +283,248 @@ normalization and durable admission, before local native task attachment. Its
 `admit(record)` returns False for the usual local path, or stages durable work
 and calls handoff before returning True. HTTP input cannot install/select this
 hook. The hook alone does not provide remote execution or durable queue recovery.
+
+Native short thread-operation reservations capture the trusted immutable
+WorkspaceContext before admission and pass it, original record user and admitting
+worker to scoped SQL cleanup. Ambient selection changes do not redirect release.
+Legacy calls omit the new cleanup keywords for custom-store compatibility.
+Scope-aware cleanup is mandatory for tenant stores; worker lifecycle,
+leases and complete caller admission integration remain M4 work. Short-operation
+admission snapshots and hydration are documented below.
+
+compact_thread_context accepts optional validate_scope and commit_update
+adapters. It revalidates after reading a checkpoint and immediately before
+generation; commit_update wraps only the prepared accessor.aupdate, not model
+configuration, generation or middleware execution. Gateway tenant callers bind
+these to private entry identity and the final live SQL checkpoint fence. Native
+unbound callers retain their existing behavior. These adapters do not establish
+workspace memory/archive authorization, which needs M5 provider integration.
+
+Scoped RunManager reads require the store's explicit supports_workspace_reads
+capability; workspace_scope_required is captured from operator construction.
+A cache hit never authenticates a Run. get checks durable private scope first
+and retains live controls only for matching Run/thread/user/operation/created_at.
+List, batch and replay overlays authorize only resident IDs through scoped SQL.
+Scope/store errors cannot use legacy memory fallback; empty batches still check
+required scope. Unbound legacy behavior is unchanged. #67 verifies both dialects
+and native live-object/status precedence. Worker/admission/lease/result scope
+remains M4 work, not implied by these read checks.
+
+DbRunEventStore read predicates combine event workspace/owner with the live
+private ThreadMeta parent before pagination, reduction or message identity
+matching. Synthetic/inherited branch seed Run IDs remain readable without a
+new execution record. workspace_required currently gates reads only; journal
+write attribution and runtime factory/alternative-backend policy remain M4
+integration work. #69 verifies both dialects, withdrawal and native read parity.
+
+Native sse_consumer now owns/drains its bridge subscription with
+close_agent_stream. In finally, preserve the original creator cancellation
+intent first, then drain teardown even if cancellation fails; a blocked close
+must not delay cancel. Observer callers keep apply_on_disconnect=False.
+#74 exposed the ordering window and #75 verifies it plus native cancellation
+and scoped observer mains. No new inference/stream engine is introduced.
+
+
+Native Run identity preparation: RunRecord retains workspace_id, immutable
+WorkspaceContext and thread_incarnation from lock-fenced durable admission or
+hydration. _record_from_store validates identity shape/owner/space/incarnation;
+historical NULL snapshots stay NULL, regardless of ambient selection. Scoped
+resident overlays compare the same durable identity before retaining live
+controls. Store capability supports_workspace_admission is explicit; legacy or
+memory stores cannot silently admit a bound workspace. Local idempotency reuse
+checks exact space/operation and re-reads current scoped SQL before returning.
+Legacy create/put cannot create or retarget scoped authority. The later pending
+Run/worker main below adds ordinary reject admission and
+RunContext propagation. Ownership leases, worker recovery, remote dispatch,
+terminal publication and journal write attribution remain M4 work; keep the
+overall tenant activation gate closed until the complete plan is verified.
+
+
+M4 ordinary Run/worker main: handoff/try_start pass the original Run's immutable
+scope/nonce explicitly; adopt_pending accepts a trusted receiver context and
+restores its caller's ambient selection after its scoped CAS/read. The caller
+must still authenticate the launch capability; the ownership CAS is not an
+authentication mechanism. Workspace access denial must not be converted to
+ConflictError merely because its suppressed context contains IntegrityError.
+
+RunContext.workspace_context is host-bound from the persisted Run. Before any
+private worker preflight, run_agent checks it against the record, original
+incarnation and native authenticated principal, then binds that workspace for
+the complete worker/finalization lifetime and restores the caller even through
+cleanup exceptions. An unscoped Run cannot inherit ambient workspace authority.
+_build_runtime_context refuses all five workspace identity fields from callers;
+only the typed host snapshot populates tool runtime identity. _install also
+removes those fields from configurable; user_id follows the authenticated actor
+for a scoped run. Actual deterministic graphs and both SQL dialects verify
+original identity across native create/handoff/adopt/start and caller switching.
+This is not JWT HTTP, physical C/B execution, lease/finalization fencing or live
+tool/notification authorization proof. MCP/Scheduler and signed transport wiring
+must consume the original identity before full tenant execution can activate.
+
+
+The scoped worker also stamps RUN_OWNER_WORKER_CONTEXT_KEY from the admitted
+record into tool runtime. Callers cannot supply it through context/configurable;
+configurable entries are cleared at install and cleanup. The MCP wrapper copies it into the scoped
+submission request so pre-IO and post-IO SQL reject a replaced/expired/cancelled
+source execution; a current membership snapshot alone cannot authorize a stale
+worker to create child work. This key is an execution fence, not authentication
+or a substitute for native launch credentials. Legacy unscoped Runs do not
+receive it. The same immutable WorkspaceContext feeds the ECS submit signer;
+recipient authorization and the management/control protocol remain required.
+
+Scoped native execution now requires configured ownership heartbeats.
+`workspace_stop_requested` on LeaseRenewal carries a captured revocation cleanup
+directive, not fresh execution permission. RunManager signals the existing abort
+path, retains its own lease during interrupted finalization, then confirms only
+an actually closed worker task or its locally unattached pending admission.
+A persisted run_stop blocks peer admission even after the native status says
+interrupted. The manager rechecks local registration/owner under start_lock
+before acknowledging. No selected workspace or withdrawn member capability is
+used for cleanup. Native Run ownership and immutable admission remain authority.
+
+run_agent sets workspace_execution_closed only after stream/journal/lifecycle and
+sandbox lease cleanup. Close failures, interrupted cleanup or failed completion/
+extension stop hooks preserve uncertainty and do not close the durable barrier.
+Normal caller cancellation is drained by the existing close_agent_stream logic;
+this adds no second Agent loop. Local closure is not remote C container absence.
+The Shanghai deterministic native graph main proves active member-version
+invalidation, held graph/native finalizers, continued cleanup renewal, peer
+admission exclusion and native close acknowledgement; queued NoStart, original
+binding/lease denial and cleanup failure are companion checks. Public HTTP/JWT,
+checkpoint/journal/external-tool fencing, direct user Run cancellation, the
+already-terminalizing-before-revocation window and remote C recovery remain M4
+requirements. Failed/unknown cleanup remains blocked for later reconciliation;
+do not turn ordinary orphan expiry into STOP or enable the compiled tenant gate.
+
+Run lifetime refinement: every new scoped normal admission has a persistent
+run_execution barrier through its native finalizers, independent of staged
+Run.status. Heartbeat renews only matching open lifetime ownership, including
+terminal-looking cleanup. No old lease is revived. The final native worker
+boundary acknowledges successful stream/journal/hooks/sandbox cleanup; direct
+await callers use that actual boundary, while dedicated task settlement remains
+available through heartbeat. This is not a remote C physical-stop assertion.
+
+RunManager.cancel rechecks current private scope before any local cached abort
+state, including optional stores holding scoped records. Scope denial is never
+the legacy persistence-error fallback. A peer can durably request cleanup even
+when metadata already says success; scoped expiry does not go through legacy
+orphan takeover. Only an exact prior committed receipt can be recognized after
+expiry; new closure still requires valid ownership.
+
+A pending/unattached owner cancel may stage local interrupted before its SQL
+NoStart acknowledgement. Recognize that combination only with the native DB
+still pending, captured identity and valid lease. Stored first rollback intent
+is preserved, but scoped NoStart consumes interrupt and never restores/deletes
+checkpoint state. run_agent also guards its own pre-start cancellation boundary,
+so a late queued consumer cannot reinterpret a missing pre-run snapshot as an
+empty original thread. Legacy unscoped rollback behavior remains unchanged.
+The Shanghai test uses a real SQLite checkpoint with both metadata dialects and
+checks exact checkpoint ID/content before and after that late consumer.
+
+Normal success, late member withdrawal, peer interrupt, wrong-space/revoked
+cached denial, actual cleanup failure and NoStart are verified in focused CI.
+Running scoped rollback is intentionally pending its real checkpoint permission
+fence, not silently accepted. Complete scoped worker checkpoint/journal/goal/
+external-tool effects, signed recovery, public APIs and other resource domains
+remain open; compiled tenant activation remains false.
+
+For captured scoped Runs, run_agent installs ScopedRunSaver before any worker
+checkpoint use. It wraps the native saver and preserves serializer/versioning;
+supported async tuple/history/delta reads and put/pending-write IO go through
+fresh native SQL execution fencing. Each listed tuple is read under its own
+short fence. No unsafe saver-specific __getattr__ forwarding, sync access,
+thread copy/prune or destructive rollback is granted. The owner/space/thread/
+Run binding is captured once; UI selection cannot retarget it. Missing durable
+fence fails closed. Raw legacy unscoped behavior is unchanged.
+
+Actual full-mode SQLite checkpoints with both native metadata dialects verify
+normal generation and stale member/cancel/lease/owner refusal; head ID, content
+and pending writes survive refusal. This is not delta/cache/Postgres checkpoint,
+same-file SQLite, crash recovery, complete journal/SSE/status/progress/tool or
+goal permission proof. Other worker effects and active scoped rollback remain
+required. Keep the compiled tenant gate false.
+
+Scoped run_agent binds DbRunEventStore to its captured immutable NativeRunStopTarget
+before constructing RunJournal; unsupported event stores fail closed. Journal
+single/batch/terminal receipt writes share native SQL live execution fencing,
+and RunManager passes captured targets for ordinary Run metadata writes. Local
+ownership_lost alone never authorizes a persistent write. Known workspace
+refusal interrupts normal finalization and does not become an infrastructure
+retry or snapshot recreation grant. Legacy unscoped call signatures remain.
+
+RunJournal treats WorkspaceAccessDenied as a final refusal: do not requeue stale
+batches, accept new buffered events, or retry a delivery receipt. Drain/detach
+its runtime dependencies through existing close(flush=False); genuine IO errors
+still retain the old retry/buffer/uncertain-close behavior. Control-only logical
+interruption uses the exact pending native STOP and never declares actual close.
+The worker still releases its durable barrier only after real final cleanup.
+
+Both SQL engines with actual native model callbacks verify normal journal/
+completion and stale member/cancel/lease/owner refusal. Existing early interrupted
+status and held/failed finalizers remain verified. This is not stream/cache/
+publication, ThreadMeta title/status, model/tool invocation, dispatcher/recovery,
+active rollback, public JWT/browser or remote C proof. Keep full M0-M11 gates
+open and compiled tenant activation false.
+
+After validating scoped admission, run_agent captures NativeRunStopTarget once
+and binds native stream/checkpoint/journal/thread-writer views to it. Private
+ScopedWorkerBridge wraps every worker publish helper with the short prepared-IO
+execution fence; it does not grant subscribe or cleanup authority. A known
+WorkspaceAccessDenied terminates through native interrupt rather than leaking an
+unfenced error payload, including a provider exception that races withdrawal.
+End is payload-free original-owner control, not result delivery or STOP proof.
+
+Native MemoryStreamBridge subscribe/replay now proves refusal of late member/
+cancel/lease/owner output. Normal output and own-lane end remain functional;
+expired/replaced owners cannot end a successor lane or overwrite replacement
+thread status/title. Existing actual-close/held-finalizer and checkpoint tests
+still pass in the fixed 46-case combination. No new scenario matrix was added.
+Full held-title publication/UI, Redis/generation/fault/backpressure, real
+HTTP/JWT/browser sockets, model/tool invocation guards and effect-specific
+publication/IO protocols remain pending. Never infer external-effect safety
+from output refusal; keep the compiled tenant gate false.
+
+Native invocation admission lives in runtime/invocation.py. Only validated
+run_agent binds WorkerInvocationGuard from its captured Run and native async
+loop. It is a private ContextVar, never a client context/config key. Every check
+uses RunRepository.check_worker_invocation and releases SQL locks before model/
+handler IO. Close/reset this guard through worker teardown, detach its root
+callback, and never cache a guard/Run/loop reference on model callbacks/limiters.
+WorkerInvocationDenied is GraphBubbleUp; ordinary LLM/tool error normalizers must
+not convert it into retry/fallback execution. Shared lead/subagent middleware
+and model-local callbacks are complementary, not new Agent loops.
+
+Scoped worker-built models preserve provider type, compose existing rate policy,
+recheck after its queue and disable exposed SDK max_retries. Stateless callbacks
+also cover independent model calls with callbacks=[]; a cached worker model
+fails closed without a current worker. Scoped model callbacks require their
+owning async loop; legacy unscoped calls retain prior behavior. Direct/non-run/
+embedded/sync entrypoints and arbitrary external provider transports are not
+silently granted worker authority.
+
+Producer cleanup correction: native teardown schedules delayed cleanup on the
+private bridge, so rejecting EVERY cleanup caused a real background exception.
+The view now delays outside SQL then removes only the same lane with an exact
+completed-lifetime control receipt. Open/unknown/lost ownership and foreign
+lanes remain intact; subscribe/global deletion authority is still absent.
+
+Actual native create_agent + full shared runtime middleware/model factory +
+real report-file main proves tool/second-model/independent-model/queue admission
+on both SQL engines. Native provider is deterministic. This does not settle
+already-admitted tool IO, arbitrary provider transports/cache, all actor/token
+revocation domains, physical C or full tenant activation. Keep these explicit follow-ups and the compiled gate false.
+
+Native HostModelInvoker tasks register with their original task-local invocation
+guard, not a global service drain. Construction and invocation shield/drain actual
+work even if the provider task is cancelled. Worker finalization first drains body
+work without sealing (completion hooks can invoke models), then seals/drains hook
+leftovers before journal/sandbox/lifetime close. Cancellation during drain defers
+interrupt and retains uncertain cleanup; it never proves remote physical STOP.
+invoke_worker_model now binds the ordinary native lead model wrapper and async
+title/summary/goal calls to the same per-Run task drain. The retained callable
+executes in original Run context; unscoped callers retain legacy cancellation.
+Retrieve completed failures privately even if they leave the drain set before
+finalization. Goal usage sinks execute inside retained work; goal read/prepare/
+evaluate/persist/re-read paths rethrow native workspace refusal/STOP before
+ordinary fallback. Direct transports, streaming internals and other unintegrated
+call sites remain separate audits; native tool IO is the next effect domain.

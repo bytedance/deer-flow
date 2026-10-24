@@ -1,10 +1,9 @@
 import type { BaseStream } from "@langchain/langgraph-sdk/react";
 
-import { fetch } from "@/core/api/fetcher";
-
 import type { AgentThreadState } from "../threads";
 
 import { buildWriteFileDraftContent } from "./preview";
+import { requestArtifact, type ArtifactRequestOptions } from "./request";
 import { urlOfArtifact } from "./utils";
 
 function fnv1aHash(value: string): string {
@@ -47,72 +46,83 @@ export function parseContentRange(value: string | null) {
   };
 }
 
-export async function loadArtifactContent({
-  filepath,
-  threadId,
-  isMock,
-  full = false,
-}: {
-  filepath: string;
-  threadId: string;
-  isMock?: boolean;
-  full?: boolean;
-}) {
+export async function loadArtifactContent(
+  {
+    filepath,
+    threadId,
+    isMock,
+    full = false,
+  }: {
+    filepath: string;
+    threadId: string;
+    isMock?: boolean;
+    full?: boolean;
+  },
+  options?: ArtifactRequestOptions,
+) {
   let enhancedFilepath = filepath;
   if (filepath.endsWith(".skill")) {
     enhancedFilepath = filepath + "/SKILL.md";
   }
   const url = urlOfArtifact({ filepath: enhancedFilepath, threadId, isMock });
-  const response = await fetch(url, {
-    cache: "no-store",
-    headers: full
-      ? undefined
-      : { Range: `bytes=0-${ARTIFACT_PREVIEW_MAX_BYTES - 1}` },
-  });
-  const contentRange = parseContentRange(response.headers.get("Content-Range"));
-  if (response.status === 416 && contentRange?.total === 0) {
-    return {
-      content: "",
-      url,
-      truncated: false,
-      previewBytes: 0,
-      totalBytes: 0,
-      sha256:
-        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", // SHA-256 of empty content (keeps empty artifacts editable on non-secure origins)
-    };
-  }
-  if (!response.ok) {
-    throw new Error(`Failed to load artifact: ${response.status}`);
-  }
-
-  const bytes = await response.arrayBuffer();
-  const truncated =
-    !full &&
-    response.status === 206 &&
-    (contentRange?.end === undefined ||
-      contentRange.total > contentRange.end + 1);
-  // Streaming decode intentionally holds an incomplete trailing UTF-8 code
-  // point instead of fabricating U+FFFD at the range boundary.
-  const content = new TextDecoder().decode(bytes, { stream: truncated });
-  const etag = response.headers.get("etag");
-  const sha256 =
-    etag?.match(/^(?:W\/)?"([0-9a-fA-F]{64})"$/)?.[1]?.toLowerCase() ??
-    (!truncated ? await sha256OfText(content) : undefined);
-  const contentLengthHeader = response.headers.get("Content-Length");
-  const contentLength =
-    contentLengthHeader === null ? undefined : Number(contentLengthHeader);
-  return {
-    content,
+  return requestArtifact(
     url,
-    sha256,
-    truncated,
-    previewBytes: bytes.byteLength,
-    totalBytes:
-      contentRange?.total ??
-      (contentLength !== undefined && Number.isFinite(contentLength)
-        ? contentLength
-        : undefined),
-  };
+    {
+      cache: "no-store",
+      headers: full
+        ? undefined
+        : { Range: `bytes=0-${ARTIFACT_PREVIEW_MAX_BYTES - 1}` },
+    },
+    async (response) => {
+      const contentRange = parseContentRange(
+        response.headers.get("Content-Range"),
+      );
+      if (response.status === 416 && contentRange?.total === 0) {
+        return {
+          content: "",
+          url,
+          truncated: false,
+          previewBytes: 0,
+          totalBytes: 0,
+          sha256:
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", // SHA-256 of empty content (keeps empty artifacts editable on non-secure origins)
+        };
+      }
+      if (!response.ok) {
+        throw new Error(`Failed to load artifact: ${response.status}`);
+      }
+
+      const bytes = await response.arrayBuffer();
+      const truncated =
+        !full &&
+        response.status === 206 &&
+        (contentRange?.end === undefined ||
+          contentRange.total > contentRange.end + 1);
+      // Streaming decode intentionally holds an incomplete trailing UTF-8 code
+      // point instead of fabricating U+FFFD at the range boundary.
+      const content = new TextDecoder().decode(bytes, { stream: truncated });
+      const etag = response.headers.get("etag");
+      const sha256 =
+        etag?.match(/^(?:W\/)?"([0-9a-fA-F]{64})"$/)?.[1]?.toLowerCase() ??
+        (!truncated ? await sha256OfText(content) : undefined);
+      const contentLengthHeader = response.headers.get("Content-Length");
+      const contentLength =
+        contentLengthHeader === null ? undefined : Number(contentLengthHeader);
+      return {
+        content,
+        url,
+        sha256,
+        truncated,
+        previewBytes: bytes.byteLength,
+        totalBytes:
+          contentRange?.total ??
+          (contentLength !== undefined && Number.isFinite(contentLength)
+            ? contentLength
+            : undefined),
+      };
+    },
+    options,
+  );
 }
 
 export function loadArtifactContentFromToolCall({

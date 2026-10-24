@@ -14,6 +14,13 @@ import { isStaticWebsiteOnly } from "../static-mode";
 
 import { type User, buildLoginUrl } from "./types";
 
+/** Read the current browser locator at redirect time, including workspace and anchor. */
+function loginReturnPath(fallback: string) {
+  return typeof window === "undefined"
+    ? fallback
+    : window.location.pathname + window.location.search + window.location.hash;
+}
+
 // Re-export for consumers
 export type { User };
 
@@ -82,8 +89,13 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
         // Session expired or invalid
         setUser(null);
         // Redirect to login if on a protected route
-        if (pathname?.startsWith("/workspace")) {
-          router.push(buildLoginUrl(pathname));
+        const returnPath = loginReturnPath(pathname || "/workspace");
+        if (
+          returnPath === "/workspace" ||
+          returnPath.startsWith("/workspace/") ||
+          returnPath.startsWith("/workspace?")
+        ) {
+          router.push(buildLoginUrl(returnPath));
         }
       }
     } catch (err) {
@@ -172,6 +184,11 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
 
+/** Display identity for cache partitioning, also usable in public page trees. */
+export function useOptionalAuthUserId(): string | null {
+  return useContext(AuthContext)?.user?.id ?? null;
+}
+
 /**
  * Hook to access authentication context
  * Throws if used outside AuthProvider - this is intentional for proper usage
@@ -198,7 +215,7 @@ export function useRequireAuth(): AuthContextType {
 
     // Only redirect if we're sure user is not authenticated (not just loading)
     if (!auth.isLoading && !auth.isAuthenticated) {
-      router.push(buildLoginUrl(pathname || "/workspace"));
+      router.push(buildLoginUrl(loginReturnPath(pathname || "/workspace")));
     }
   }, [auth.isAuthenticated, auth.isLoading, router, pathname]);
 

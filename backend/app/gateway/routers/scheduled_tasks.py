@@ -22,7 +22,9 @@ from app.gateway.deps import (
 )
 from app.gateway.scheduled_task_errors import active_occurrence_error, active_occurrence_message, repository_error, scheduler_error
 from app.gateway.scheduled_task_validation import prepare_resume_updates, validate_scheduled_task_create, validate_scheduled_task_update
+from app.gateway.workspaces.dependencies import workspace_resource_scope
 from app.scheduler.service import TASK_CHANGED_ERROR
+from deerflow.authz.workspace import get_current_workspace
 from deerflow.config.agents_config import AGENT_NAME_PATTERN, load_agent_config
 from deerflow.persistence.scheduled_tasks import ActiveScheduledTaskMutationConflict, ScheduledTaskQuotaExceeded
 from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRunStatus
@@ -198,6 +200,7 @@ async def preview_cron_schedule(request: Request, body: CronPreviewRequest):
 
 
 @router.get("/scheduled-tasks")
+@workspace_resource_scope()
 @require_permission("threads", "read")
 async def list_scheduled_tasks(request: Request):
     repo = get_scheduled_task_repo(request)
@@ -208,6 +211,7 @@ async def list_scheduled_tasks(request: Request):
 
 
 @router.post("/scheduled-tasks")
+@workspace_resource_scope()
 @require_permission("threads", "write")
 @require_permission("runs", "create")
 async def create_scheduled_task(request: Request, body: ScheduledTaskCreateRequest):
@@ -247,6 +251,7 @@ async def create_scheduled_task(request: Request, body: ScheduledTaskCreateReque
 
 
 @router.get("/scheduled-tasks/{task_id}")
+@workspace_resource_scope()
 @require_permission("threads", "read")
 async def get_scheduled_task(task_id: str, request: Request):
     repo = get_scheduled_task_repo(request)
@@ -260,6 +265,7 @@ async def get_scheduled_task(task_id: str, request: Request):
 
 
 @router.patch("/scheduled-tasks/{task_id}")
+@workspace_resource_scope()
 @require_permission("threads", "write")
 @require_permission("runs", "create")
 async def update_scheduled_task(task_id: str, request: Request, body: ScheduledTaskUpdateRequest):
@@ -307,6 +313,7 @@ async def update_scheduled_task(task_id: str, request: Request, body: ScheduledT
 
 
 @router.post("/scheduled-tasks/{task_id}/pause")
+@workspace_resource_scope()
 @require_permission("threads", "write")
 async def pause_scheduled_task(task_id: str, request: Request):
     repo = get_scheduled_task_repo(request)
@@ -325,7 +332,7 @@ async def pause_scheduled_task(task_id: str, request: Request):
             error=RUN_ERROR_PAUSED_WHILE_QUEUED,
             now=datetime.now(UTC),
         )
-    except ScheduledTaskQuotaExceeded as exc:
+    except (ScheduledTaskQuotaExceeded, ValueError) as exc:
         raise repository_error(exc) from exc
     if result == "not_found":
         raise _task_not_found()
@@ -340,6 +347,7 @@ async def pause_scheduled_task(task_id: str, request: Request):
 
 
 @router.post("/scheduled-tasks/{task_id}/resume")
+@workspace_resource_scope()
 @require_permission("threads", "write")
 @require_permission("runs", "create")
 async def resume_scheduled_task(task_id: str, request: Request, body: ScheduledTaskResumeRequest | None = None):
@@ -357,11 +365,13 @@ async def resume_scheduled_task(task_id: str, request: Request, body: ScheduledT
     if existing is None:
         raise _task_not_found()
     await _ensure_task_mutable(existing, repo)
-    if existing.get("status") == "enabled":
+    if existing.get("status") == "enabled" and get_current_workspace() is None:
         return await _task_response(repo, existing)
     used = (await repo.automatic_runs_used_for([task_id])).get(task_id, 0)
     renewal = body.model_dump(exclude_unset=True) if body is not None else {}
     updates = await asyncio.to_thread(prepare_resume_updates, existing, renewal, used=used, now=datetime.now(UTC))
+    if get_current_workspace() is not None:
+        updates.setdefault("status", "enabled")
     try:
         updated = await repo.update(
             task_id,
@@ -377,6 +387,7 @@ async def resume_scheduled_task(task_id: str, request: Request, body: ScheduledT
 
 
 @router.post("/scheduled-tasks/{task_id}/trigger")
+@workspace_resource_scope()
 @require_permission("threads", "write")
 @require_permission("runs", "create")
 async def trigger_scheduled_task(task_id: str, request: Request):
@@ -389,7 +400,10 @@ async def trigger_scheduled_task(task_id: str, request: Request):
     task = await repo.get(task_id, user_id=str(user.id))
     if task is None:
         raise _task_not_found()
-    result = await service.dispatch_task(task, now=datetime.now(UTC), trigger="manual")
+    try:
+        result = await service.dispatch_task(task, now=datetime.now(UTC), trigger="manual")
+    except ValueError as exc:
+        raise repository_error(exc) from exc
     outcome = result.get("outcome")
     if outcome == "not_found":
         raise scheduler_error(404, "task_not_found", result.get("error") or "Scheduled task not found")
@@ -402,18 +416,22 @@ async def trigger_scheduled_task(task_id: str, request: Request):
 
 
 @router.delete("/scheduled-tasks/{task_id}")
+@workspace_resource_scope()
 @require_permission("threads", "write")
 async def delete_scheduled_task(task_id: str, request: Request):
     repo = get_scheduled_task_repo(request)
     user = await get_optional_user_from_request(request)
     if user is None:
         raise _authentication_required()
-    result = await repo.delete_with_queue_cancellation(
-        task_id,
-        user_id=str(user.id),
-        error=RUN_ERROR_DELETED_WHILE_QUEUED,
-        now=datetime.now(UTC),
-    )
+    try:
+        result = await repo.delete_with_queue_cancellation(
+            task_id,
+            user_id=str(user.id),
+            error=RUN_ERROR_DELETED_WHILE_QUEUED,
+            now=datetime.now(UTC),
+        )
+    except ValueError as exc:
+        raise repository_error(exc) from exc
     if result == "not_found":
         raise _task_not_found()
     if result == "executing":
@@ -422,6 +440,7 @@ async def delete_scheduled_task(task_id: str, request: Request):
 
 
 @router.get("/scheduled-tasks/{task_id}/runs")
+@workspace_resource_scope()
 @require_permission("threads", "read")
 async def list_scheduled_task_runs(
     task_id: str,
@@ -443,6 +462,7 @@ async def list_scheduled_task_runs(
 
 
 @router.get("/threads/{thread_id}/scheduled-tasks")
+@workspace_resource_scope()
 @require_permission("threads", "read", owner_check=True)
 async def list_thread_scheduled_tasks(thread_id: ThreadId, request: Request):
     """Tasks created in, running in, or run by this conversation (``thread_relation``)."""

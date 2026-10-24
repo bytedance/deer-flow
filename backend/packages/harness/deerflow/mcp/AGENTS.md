@@ -79,3 +79,63 @@ recognized by injected-argument recovery and can silently remove server runtime
 identity. Preserve hidden runtime and native incarnation validation; never expose
 runtime as a public model argument. `test_mcp_session_pool` covers the real local
 ToolNode path without old Fleet workspace hooks.
+
+
+M4 scoped MCP foundation: TaskSubmitRequest/TaskReference carry immutable
+WorkspaceContext; submissions also carry source_worker_id from the worker's
+server-owned RUN_OWNER_WORKER_CONTEXT_KEY, never model arguments. The service
+requires a scoped durable repository, validates the actual running source Run
+before remote IO, and rechecks current workspace/member/parent/Run/owner/lease/
+cancel state under SQL locks when persisting the returned handle. No writer
+transaction spans remote IO. Compensation carries the same original scope.
+
+McpTaskRow.workspace_context_json (0040) stores that identity separately from
+remote-controlled driver_data. Historical NULL snapshots cannot become execution
+authority from current selection. Internal claim records expose the snapshot
+only for typed TaskReference recovery. User get/list-by-run/list-by-thread SQL
+filters workspace/private parent before pagination. Native background polling
+validates the persisted reference and lease before IO, binds original scope for
+the driver, and rechecks authorization plus claim fencing at snapshot commit.
+Original Run completion does not redirect or erase the durable task's scope.
+
+Mandatory workspace mode skips unattributed legacy poll rows and refuses their
+references. Scoped cancel/notification queues are not integrated yet: they are
+not claimed through legacy code, and mandatory mode disables those legacy queue
+paths entirely. Do not present this as working tenant cancellation or delivery.
+B now has an opt-in scoped HTTP receiver/management component: native task-local
+scope signs v2, while B independently verifies original native task commitment
+and live scope. This does not integrate the native cancel/notification queues.
+Next implement native control/launch authority, physical start/adopt/publication
+and Stop proof. The global tenant startup gate
+remains closed. Deterministic remote IO fixtures prove metadata/driver boundaries,
+not actual external service authorization or physical B execution.
+
+The real ToolNode/durable-wrapper/ordinary-driver/MCP HTTP B component is verified
+against native SQLite/PostgreSQL, including source Run completion and selected
+space changes. Native metadata owns the task lifecycle; the physical ledger is
+not a replacement. Direct remote cancellation of a staged/queued B job can flow
+back through ordinary polling, but scoped native cancel queue/outbox/delivery
+and physical execution/Stop are still incomplete. Global tenant activation stays
+closed; no model or public Gateway tenant startup is proved by component tests.
+
+Scoped B single-host physical completion is now proven through the native wrapper,
+MCP HTTP, real SQL/Docker and original task result persistence. Source Run end and
+UI selection do not redirect its authority. Native scope/cancel fences also guard
+publication. On observed member withdrawal the executor stops its exact owned
+object and withholds business results; native task cancellation/notification and
+revocation outbox/control receipts are still separate pending work. Do not mark a
+revoked task completed/cancelled by reusing its withdrawn member context.
+
+
+M4 STOP refinement: scoped native cancellation now writes an idempotent captured
+`mcp_stop` child in the generic native outbox, fencing in-flight polling in the
+same transaction. Member version mutations enqueue children plus still-pending
+`workspace_revoke` parents. A separately configured operator extension handles
+STOP and returns a verified typed receipt; only current outbox leases can settle
+the original task without any withdrawn member grant or business result write.
+The app-scoped TaskControlRuntime reports supported servers and live service
+readiness; absent support refuses user cancellation. Legacy cancel/notification
+claims still exclude scoped rows. Earlier notes about missing scoped cancellation
+are historical checkpoints: captured MCP control is now implemented, while
+notification delivery, full HTTP tenant binding, other revocation domains,
+pool/remote C and full tenant activation remain incomplete.

@@ -8,6 +8,7 @@ import os
 import time
 import uuid
 from contextlib import suppress
+from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -53,22 +54,48 @@ def _arguments(job):
     return {**{key: job[key] for key in ("id", "node_id", "generation", "worker_owner", "native")}, "node_budget": job.get("node_budget")}
 
 
-def sign_native_launch(job, secret):
+def _native_workspace(job, context):
     native = job["native"]
+    scoped = any(value.get(key) is not None for value in (job, native) for key in ("workspace_id", "workspace_context"))
+    if scoped or context is not None:
+        if context is None or any(value.get("workspace_id") != context.workspace_id or value.get("workspace_context") != asdict(context) for value in (job, native)):
+            raise ValueError("Native launch capability requires matching workspace authority")
+
+
+def sign_native_launch(job, secret, *, workspace_context=None):
+    native = job["native"]
+    _native_workspace(job, workspace_context)
     return mint_execution_scope(
-        secret=secret.encode(), audience=job["node_id"], user_id=native["user_id"], thread_id=native["thread_id"], incarnation=native["incarnation"], run_id=native["run_id"], operation="native_launch", arguments=_arguments(job)
+        secret=secret.encode(),
+        audience=job["node_id"],
+        user_id=native["user_id"],
+        thread_id=native["thread_id"],
+        incarnation=native["incarnation"],
+        run_id=native["run_id"],
+        operation="native_launch",
+        arguments=_arguments(job),
+        workspace_context=workspace_context,
     )
 
 
-def verify_native_launch(job, token, secret):
+def verify_native_launch(job, token, secret, *, expected_workspace_context=None):
     try:
         native = job["native"]
-        claims = verify_execution_scope(token, secret=secret.encode(), authenticated_user_id=native["user_id"], arguments=_arguments(job), expected_audience=job["node_id"], expected_operation="native_launch")
+        _native_workspace(job, expected_workspace_context)
+        claims = verify_execution_scope(
+            token, secret=secret.encode(), authenticated_user_id=native["user_id"], arguments=_arguments(job), expected_audience=job["node_id"], expected_operation="native_launch", expected_workspace_context=expected_workspace_context
+        )
         if any(claims[key] != native[key] for key in ("user_id", "thread_id", "incarnation", "run_id")):
             raise ValueError("Native identity mismatch")
         return native
     except (ValueError, KeyError, TypeError):
         raise ValueError("Native launch capability denied") from None
+
+
+def _native_control_projection(job):
+    """Assignment/control scalars only; never inputs, secrets or result data."""
+    fields = ("id", "node_id", "worker_owner", "generation", "state", "attempt", "start_intent", "started_at", "cancel_requested", "physical_stopped", "physical_stopped_at", "lease_until")
+    return {key: job[key] for key in fields if key in job}
 
 
 logger = logging.getLogger(__name__)
@@ -82,15 +109,19 @@ _AFFINITIES = Table(
     Column("thread_id", String(255), primary_key=True),
     Column("incarnation", String(255), primary_key=True),
     Column("node_id", String(64), nullable=False),
+    Column("workspace_id", String(36), nullable=True, index=True),
 )
 
 
-def _affinity(store, user_id, thread_id, incarnation, *, node_id=None):
+def _affinity(store, user_id, thread_id, incarnation, *, node_id=None, workspace_id=None):
     with store.engine.begin() as connection:
         conditions = (_AFFINITIES.c.user_id == user_id, _AFFINITIES.c.thread_id == thread_id, _AFFINITIES.c.incarnation == incarnation)
         if node_id is not None:
-            connection.execute(insert(_AFFINITIES).values(user_id=user_id, thread_id=thread_id, incarnation=incarnation, node_id=node_id).on_conflict_do_nothing())
-        value = connection.execute(select(_AFFINITIES.c.node_id).where(*conditions)).scalar_one_or_none()
+            connection.execute(insert(_AFFINITIES).values(user_id=user_id, thread_id=thread_id, incarnation=incarnation, node_id=node_id, workspace_id=workspace_id).on_conflict_do_nothing())
+        row = connection.execute(select(_AFFINITIES.c.node_id, _AFFINITIES.c.workspace_id).where(*conditions)).first()
+        if row is not None and row.workspace_id != workspace_id:
+            raise ValueError("Native affinity workspace identity changed")
+        value = row.node_id if row is not None else None
         if node_id is not None and value != node_id:
             raise ValueError("Native thread incarnation affinity changed")
         return value
@@ -106,6 +137,77 @@ class NativeDispatchHost:
 
     async def quiesce(self):
         self.quiescing = True
+
+    async def _scoped_control(self, job, *, pending=False):
+        native = job["native"]
+        identity = {key: native.get(key) for key in ("run_id", "user_id", "workspace_id", "thread_id", "incarnation", "workspace_context", "created_at")}
+        store = self.app.state.run_store
+        if pending:
+            return await store.inspect_dispatch_control(identity=identity, owner_worker_id="dispatch:" + job["id"])
+        return await store.inspect_native_execution_control(identity=identity)
+
+    @staticmethod
+    def _can_launch_scoped(job, control):
+        return (
+            control is not None
+            and control["target"].owner_worker_id == "dispatch:" + job["id"]
+            and control["status"] == "pending"
+            and control["cancel_action"] is None
+            and control["live"]
+            and control["lease_active"]
+            and not control["stop_recorded"]
+            and not control["lifetime_completed"]
+            and job["state"] in ("queued", "starting")
+            and (job.get("start_intent") is None or job.get("start_intent") is False)
+            and not job.get("cancel_requested")
+            and job.get("physical_stopped") is False
+        )
+
+    async def _scoped_envelope(self, job):
+        # Re-read after the ledger CAS. A native revocation cannot be turned
+        # into a grant by the captured job or an expired reservation lease.
+        if job["state"] == "starting" and (job.get("start_intent") is None or job.get("start_intent") is False) and job.get("physical_stopped") is False:
+            pending = await self._scoped_control(job, pending=True)
+            if self._can_launch_scoped(job, pending):
+                return {"job": job, "capability": sign_native_launch(job, self.credentials[job["node_id"]], workspace_context=pending["target"].workspace_context)}
+        control = await self._scoped_control(job)
+        denied = control is None or not control["live"] or control["stop_recorded"] or control["cancel_action"] is not None or (control["status"] in ("pending", "running") and not control["lease_active"])
+        if denied and not job.get("cancel_requested"):
+
+            def cancel(value):
+                if any(value.get(key) != job.get(key) for key in ("node_id", "worker_owner", "generation")):
+                    raise RuntimeError("Native control assignment changed")
+                value["cancel_requested"] = True
+
+            job = await asyncio.to_thread(self.pool.store.mutate, job["id"], cancel)
+        return {"job": _native_control_projection(job), "capability": None}
+
+    async def poll_envelopes(self, node, owner):
+        """Single poll entry for legacy and explicitly authorized native C work."""
+        await self.maintain()
+        owned = await asyncio.to_thread(self.pool.owned, node, owner, kind="C")
+        claim = None if self.quiescing else await asyncio.to_thread(self.pool.claim, node, owner, kind="C")
+        result = {
+            "schema_revision": SCHEMA_REVISION,
+            "owned": [{"job": job, "capability": sign_native_launch(job, self.credentials[node])} for job in owned],
+            "claim": {"job": claim, "capability": sign_native_launch(claim, self.credentials[node])} if claim else None,
+        }
+        for version, candidate in await asyncio.to_thread(self.pool.scoped_native_candidates, node):
+            if candidate["state"] == "queued":
+                if self.quiescing or result["claim"] is not None or not self._can_launch_scoped(candidate, await self._scoped_control(candidate, pending=True)):
+                    continue
+                job = await asyncio.to_thread(self.pool.claim_scoped_native, node, owner, expected=candidate, version=version)
+                if job is not None:
+                    envelope = await self._scoped_envelope(job)
+                    if envelope["capability"] is not None:
+                        result["claim"] = envelope
+                    else:
+                        result["owned"].append(envelope)
+            else:
+                job = await asyncio.to_thread(self.pool.renew_scoped_native, node, owner, expected=candidate, version=version)
+                if job is not None:
+                    result["owned"].append(await self._scoped_envelope(job))
+        return result
 
     async def prepare_notification(self, notification):
         from ecs_executor.dependencies import prepare_notification
@@ -126,50 +228,67 @@ class NativeDispatchHost:
         await asyncio.to_thread(self.pool.store.mutate, job["id"], lambda row: row["dependency_wait"].update(continuation_run_id=run_id))
 
     async def admit_native(self, record, snapshot_factory):
-        if self.quiescing:
-            raise RuntimeError("Native dispatcher is quiescing")
-        # Origin is server-stamped before admission, never external metadata.
-        origin = (record.metadata or {}).get("deerflow_origin") or {}
-        node = None
-        if record.user_id:
-            thread = await self.app.state.thread_store.get(record.thread_id, user_id=record.user_id)
-            if thread is not None:
-                node = await asyncio.to_thread(_affinity, self.pool.store, record.user_id, record.thread_id, thread["incarnation"])
-        if node is None and self.config.get("remote_all") is not True and getattr(self, "browser_control", None) is None and origin.get("kind") not in self.config.get("remote_origins", ["schedule"]):
-            return False
-        node = node or self.config["native_node"]
-        snapshot = await snapshot_factory(transport_node=node, transport_secret=self.credentials[node])
-        wait = snapshot["execution"].get("dependency_continuation")
-        scheduled = snapshot["execution"].get("scheduled_task_runtime")
-        if wait is not None and not wait.get("notification_only") and scheduled is not None:
-            await self.app.state.scheduled_task_run_repo.transfer_dependency_run(
-                task_id=scheduled["task_id"], occurrence_id=scheduled["occurrence_id"], user_id=record.user_id, source_run_id=wait["source_run_id"], continuation_run_id=record.run_id
+        from app.gateway.native_admission import native_admission_workspace
+
+        with native_admission_workspace(record):
+            if self.quiescing:
+                raise RuntimeError("Native dispatcher is quiescing")
+            # Origin is server-stamped before admission, never external metadata.
+            origin = (record.metadata or {}).get("deerflow_origin") or {}
+            node = None
+            if record.user_id:
+                thread = await self.app.state.thread_store.get(record.thread_id, user_id=record.user_id)
+                if thread is not None:
+                    node = await asyncio.to_thread(_affinity, self.pool.store, record.user_id, record.thread_id, thread["incarnation"], workspace_id=record.workspace_id)
+            if node is None and self.config.get("remote_all") is not True and getattr(self, "browser_control", None) is None and origin.get("kind") not in self.config.get("remote_origins", ["schedule"]):
+                return False
+            node = node or self.config["native_node"]
+            snapshot = await snapshot_factory(transport_node=node, transport_secret=self.credentials[node])
+            identity_fields = {}
+            if record.workspace_context is not None:
+                context = asdict(record.workspace_context)
+                if (
+                    snapshot.get("workspace_context") != context
+                    or snapshot.get("workspace_id") != record.workspace_id
+                    or any(snapshot.get(key) != getattr(record, key) for key in ("run_id", "user_id", "thread_id"))
+                    or snapshot.get("incarnation") != record.thread_incarnation
+                ):
+                    raise ValueError("Native dispatch snapshot differs from its captured admission")
+                identity_fields = {"workspace_id": record.workspace_id, "workspace_context": context, "user_id": record.user_id, "thread_id": record.thread_id, "incarnation": record.thread_incarnation, "run_id": record.run_id}
+            elif snapshot.get("workspace_id") is not None or snapshot.get("workspace_context") is not None:
+                raise ValueError("Native dispatch cannot infer workspace authority")
+            wait = snapshot["execution"].get("dependency_continuation")
+            scheduled = snapshot["execution"].get("scheduled_task_runtime")
+            if wait is not None and not wait.get("notification_only") and scheduled is not None:
+                await self.app.state.scheduled_task_run_repo.transfer_dependency_run(
+                    task_id=scheduled["task_id"], occurrence_id=scheduled["occurrence_id"], user_id=record.user_id, source_run_id=wait["source_run_id"], continuation_run_id=record.run_id
+                )
+            if not record.user_id:
+                raise ValueError("Remote native admission requires an authenticated owner")
+            node = node or self.config["native_node"]
+            profile = self.config["profile"]
+            job = await asyncio.to_thread(
+                self.pool.store.create,
+                namespace="native-C",
+                request_key=record.run_id,
+                spec_digest=arguments_sha256(snapshot),
+                record={
+                    **identity_fields,
+                    "kind": "C",
+                    "node_budget": self.pool.nodes[node].model_dump(mode="json"),
+                    "native": snapshot,
+                    "affinity_node": node,
+                    "spec": {"profile": profile},
+                    "profile": self.config["profiles"][profile],
+                    "staged_deadline": time.time() + 120,
+                    "cancel_requested": False,
+                    "physical_stopped": False,
+                },
             )
-        if not record.user_id:
-            raise ValueError("Remote native admission requires an authenticated owner")
-        node = node or self.config["native_node"]
-        profile = self.config["profile"]
-        job = await asyncio.to_thread(
-            self.pool.store.create,
-            namespace="native-C",
-            request_key=record.run_id,
-            spec_digest=arguments_sha256(snapshot),
-            record={
-                "kind": "C",
-                "node_budget": self.pool.nodes[node].model_dump(mode="json"),
-                "native": snapshot,
-                "affinity_node": node,
-                "spec": {"profile": profile},
-                "profile": self.config["profiles"][profile],
-                "staged_deadline": time.time() + 120,
-                "cancel_requested": False,
-                "physical_stopped": False,
-            },
-        )
-        await asyncio.to_thread(_affinity, self.pool.store, record.user_id, record.thread_id, snapshot["incarnation"], node_id=node)
-        await self.app.state.run_manager.handoff_pending(record.run_id, owner_worker_id="dispatch:" + job["id"])
-        await asyncio.to_thread(self.pool.store.mutate, job["id"], lambda row: row.update(state="queued"))
-        return True
+            await asyncio.to_thread(_affinity, self.pool.store, record.user_id, record.thread_id, snapshot["incarnation"], node_id=node, workspace_id=record.workspace_id)
+            await self.app.state.run_manager.handoff_pending(record.run_id, owner_worker_id="dispatch:" + job["id"])
+            await asyncio.to_thread(self.pool.store.mutate, job["id"], lambda row: row.update(state="queued"))
+            return True
 
     async def refuse(self, job):
         if job.get("settlement_kind") == "refusal":
@@ -218,6 +337,8 @@ class NativeDispatchHost:
         raise RuntimeError("Native refusal commit unconfirmed")
 
     async def settle_queued_cancel(self, job):
+        if job.get("workspace_id") is not None:
+            return await self.maintain_scoped(job)
         if job.get("settlement_kind") == "refusal":
             return await self.settle_refusal(job)
         if job.get("start_intent") or job["state"] != "cancelled":
@@ -239,6 +360,80 @@ class NativeDispatchHost:
                 raise RuntimeError("Queued native cancellation commit unconfirmed")
         await asyncio.to_thread(self.pool.store.mutate, job["id"], lambda value: value.update(settlement_pending=False))
 
+    @staticmethod
+    def _no_native_assignment(job):
+        start = job.get("start_intent")
+        attempt = job.get("attempt")
+        return (start is None or start is False) and (attempt is None or (type(attempt) is int and attempt == 0)) and all(job.get(key) is None for key in ("node_id", "worker_owner", "generation"))
+
+    async def settle_scoped_no_start(self, job, control):
+        """Consume a durable pre-assignment CAS; never infer physical STOP."""
+        target = control["target"]
+        if (
+            not control["stop_recorded"]
+            or not self._no_native_assignment(job)
+            or job.get("settlement_kind") != "scoped_no_start"
+            or job.get("scoped_no_start_target") != target.as_payload()
+            or job["state"] != "cancelled"
+            or job.get("physical_stopped") is not True
+        ):
+            return
+        store = self.app.state.run_store
+        if not await store.confirm_workspace_run_stop(target, evidence="native_not_started"):
+            return
+        from deerflow.persistence.workspaces.run_control import signal_owned_stream_end
+
+        if not await signal_owned_stream_end(store._sf, target, signal=lambda: self.app.state.stream_bridge.publish_end(target.run_id), closed_only=True):
+            return
+
+        def acknowledge(value):
+            if (
+                not self._no_native_assignment(value)
+                or value.get("settlement_kind") != "scoped_no_start"
+                or value.get("scoped_no_start_target") != target.as_payload()
+                or value["state"] != "cancelled"
+                or value.get("physical_stopped") is not True
+            ):
+                raise RuntimeError("Native NoStart settlement identity changed")
+            value["settlement_pending"] = False
+
+        await asyncio.to_thread(self.pool.store.mutate, job["id"], acknowledge)
+
+    async def maintain_scoped(self, job):
+        """Renew only original queued native ownership; never grant execution."""
+        store = self.app.state.run_store
+        inspect = getattr(store, "inspect_dispatch_control", None)
+        if inspect is None:
+            raise RuntimeError("Scoped native dispatch requires native control storage")
+        native = job["native"]
+        identity = {key: native.get(key) for key in ("run_id", "user_id", "workspace_id", "thread_id", "incarnation", "workspace_context", "created_at")}
+        owner = "dispatch:" + job["id"]
+        control = await inspect(identity=identity, owner_worker_id=owner)
+        if control is None:
+            return
+        if job.get("settlement_kind") == "scoped_no_start":
+            return await self.settle_scoped_no_start(job, control)
+        if control["lifetime_completed"] or control["status"] != "pending" or not control["lease_active"]:
+            return
+        renewal = await store.renew_lease(native["run_id"], owner_worker_id=owner, lease_expires_at=(datetime.now(UTC) + timedelta(seconds=120)).isoformat(), dispatch_target=control["target"])
+        if not renewal.renewed:
+            return
+        if not control["live"] or control["stop_recorded"] or renewal.cancel_action or renewal.workspace_stop_requested:
+            # Serialize this NoStart proof against the same ledger CAS used by
+            # assignment. Once an assignment/generation exists, retain unknown
+            # physical work and never close native lifetime from start_intent.
+            def stop(value):
+                value["cancel_requested"] = True
+                if control["stop_recorded"] and value["state"] in ("staged", "queued") and value.get("physical_stopped") is False and self._no_native_assignment(value):
+                    value.update(state="cancelled", physical_stopped=True, settlement_pending=True, settlement_kind="scoped_no_start", scoped_no_start_target=control["target"].as_payload())
+
+            stopped = await asyncio.to_thread(self.pool.store.mutate, job["id"], stop)
+            if stopped.get("settlement_kind") == "scoped_no_start":
+                await self.settle_scoped_no_start(stopped, control)
+            return
+        if job["state"] == "staged":
+            await asyncio.to_thread(self.pool.store.mutate, job["id"], lambda value: value.update(state="queued") if value["state"] == "staged" and not value.get("start_intent") and not value.get("cancel_requested") else None)
+
     async def maintain(self):
         from ecs_executor.dependencies import maintain_waits
 
@@ -255,6 +450,12 @@ class NativeDispatchHost:
         jobs = await asyncio.to_thread(self.pool.store.list_active, kind="C")
         for job in jobs:
             if job.get("kind") != "C":
+                continue
+            if job.get("workspace_id") is not None:
+                try:
+                    await self.maintain_scoped(job)
+                except Exception:
+                    logger.warning("Scoped native queue maintenance remains unconfirmed")
                 continue
             native = job["native"]
             row = await store.get(native["run_id"], user_id=native["user_id"])
@@ -349,16 +550,7 @@ def install_native_dispatch(app, host):
                 await host.maintain()
                 return JSONResponse({"schema_revision": SCHEMA_REVISION, "renewed": True})
             if operation == "poll":
-                await host.maintain()
-                owned = await asyncio.to_thread(host.pool.owned, node, args["owner"], kind="C")
-                claim = None if host.quiescing else await asyncio.to_thread(host.pool.claim, node, args["owner"], kind="C")
-                return JSONResponse(
-                    {
-                        "schema_revision": SCHEMA_REVISION,
-                        "owned": [{"job": job, "capability": sign_native_launch(job, credential)} for job in owned],
-                        "claim": {"job": claim, "capability": sign_native_launch(claim, credential)} if claim else None,
-                    }
-                )
+                return JSONResponse(await host.poll_envelopes(node, args["owner"]))
             if operation == "notification":
                 from app.gateway.services import launch_mcp_task_notification_run
                 from app.mcp_tasks.errors import PermanentNotificationError
@@ -366,16 +558,28 @@ def install_native_dispatch(app, host):
 
                 notification = args["notification"]
                 owner, thread_id = notification["owner_user_id"], notification["thread_id"]
-                claims = verify_execution_scope(args["capability"], secret=credential.encode(), authenticated_user_id=owner, arguments=notification, expected_audience=node, expected_operation="native_notification")
-                thread = await host.app.state.thread_store.get(thread_id, user_id=owner)
-                if thread is None or claims["thread_id"] != thread_id or claims["incarnation"] != thread["incarnation"]:
-                    raise ValueError("Native notification identity mismatch")
-                # Global native notification claims may be owned by any peer.
-                # Authenticate the sender, then resolve placement centrally;
-                # the sender node is never evidence of the source Run's node.
-                task = await host.app.state.mcp_task_repo.get(notification["task_id"], user_id=owner, thread_id=thread_id, thread_incarnation=thread["incarnation"])
+                from deerflow.mcp.tasks import TaskReference
+                from ecs_executor.dependencies import dependency_workspace
+
+                context = None
+                if getattr(host.app.state.mcp_task_repo, "workspace_scope_required", False):
+                    task = await host.app.state.mcp_task_repo.resolve_notification_authority(notification["task_id"], user_id=owner, thread_id=thread_id, notification=notification)
+                    reference = TaskReference.from_record(task)
+                    context = reference.workspace_context
+                    incarnation = reference.thread_incarnation
+                else:
+                    thread = await host.app.state.thread_store.get(thread_id, user_id=owner)
+                    if thread is None:
+                        raise ValueError("Native notification parent is unavailable")
+                    incarnation = thread["incarnation"]
+                    task = await host.app.state.mcp_task_repo.get(notification["task_id"], user_id=owner, thread_id=thread_id, thread_incarnation=incarnation)
+                claims = verify_execution_scope(
+                    args["capability"], secret=credential.encode(), authenticated_user_id=owner, arguments=notification, expected_audience=node, expected_operation="native_notification", expected_workspace_context=context
+                )
                 if (
                     task is None
+                    or claims["thread_id"] != thread_id
+                    or claims["incarnation"] != incarnation
                     or task.get("run_id") != args["source_run_id"]
                     or claims["run_id"] != (task.get("run_id") or "mcp-task:" + notification["task_id"])
                     or task.get("dispatch_version") != notification["dispatch_version"]
@@ -385,7 +589,8 @@ def install_native_dispatch(app, host):
                 ):
                     raise ValueError("Native notification reservation mismatch")
                 try:
-                    return JSONResponse(await launch_mcp_task_notification_run(app=host.app, **notification))
+                    with dependency_workspace(context):
+                        return JSONResponse(await launch_mcp_task_notification_run(app=host.app, **notification))
                 except PermanentNotificationError:
                     return JSONResponse({"error": "Notification permanently rejected"}, status_code=410)
                 except ConflictError:
@@ -393,6 +598,21 @@ def install_native_dispatch(app, host):
             job = await asyncio.to_thread(host.pool.store.get, args["job_id"])
             if job.get("kind") != "C" or job.get("node_id") != node or job.get("worker_owner") != args["owner"] or job.get("generation") != args.get("generation"):
                 raise ValueError("Native assignment mismatch")
+            if job.get("workspace_id") is not None:
+                if operation == "get":
+                    return JSONResponse(_native_control_projection(job))
+                if operation == "report":
+                    if args["expected"] != _native_control_projection(job):
+                        raise RuntimeError("Native control snapshot changed")
+                    updated = await asyncio.to_thread(host.pool.report, node, args["owner"], job["id"], job["generation"], args["changes"], job)
+                    return JSONResponse(_native_control_projection(updated))
+                if operation == "wait":
+                    from ecs_executor.dependencies import persist_wait
+
+                    return JSONResponse({"waiting": await persist_wait(host, job, source_worker_id=args.get("native_owner_worker_id"))})
+                # Scoped dependencies and NoStart settlement need their native
+                # lifecycle fences; never route them into legacy handlers.
+                raise ValueError("Scoped native operation is not integrated")
             if operation == "wait":
                 from ecs_executor.dependencies import persist_wait
 
@@ -430,6 +650,7 @@ class NativeWorkerHost:
         self.owner, self.task = uuid.uuid4().hex, None
         self.active = {}
         self.stop_tasks = {}
+        self.sandbox_captures = {}
         self.closing = False
         self.quiescing = False
         self.adoption_lock = asyncio.Lock()
@@ -442,16 +663,28 @@ class NativeWorkerHost:
 
     async def persist_dependency_wait(self, record):
         for job, owned in self.executions.values():
-            if owned.run_id == record.run_id:
-                return (await self.request("wait", job_id=job["id"], generation=job["generation"]))["waiting"]
+            if owned is record and owned.run_id == job["native"]["run_id"]:
+                if record.ownership_lost or record.abort_event.is_set() or not record.owner_worker_id:
+                    raise RuntimeError("Native dependency source ownership was lost")
+                return (await self.request("wait", job_id=job["id"], generation=job["generation"], native_owner_worker_id=record.owner_worker_id))["waiting"]
         raise RuntimeError("Native dependency source assignment unavailable")
 
     async def forward_notification(self, notification):
         from app.mcp_tasks.errors import PermanentNotificationError
         from deerflow.runtime.runs.manager import ConflictError
 
-        thread = await self.app.state.thread_store.get(notification["thread_id"], user_id=notification["owner_user_id"])
-        task = await self.app.state.mcp_task_repo.get(notification["task_id"], user_id=notification["owner_user_id"], thread_id=notification["thread_id"], thread_incarnation=thread.get("incarnation") if thread else None)
+        context = None
+        if getattr(self.app.state.mcp_task_repo, "workspace_scope_required", False):
+            from deerflow.mcp.tasks import TaskReference
+
+            task = await self.app.state.mcp_task_repo.resolve_notification_authority(notification["task_id"], user_id=notification["owner_user_id"], thread_id=notification["thread_id"], notification=notification)
+            reference = TaskReference.from_record(task)
+            context = reference.workspace_context
+            incarnation = reference.thread_incarnation
+        else:
+            thread = await self.app.state.thread_store.get(notification["thread_id"], user_id=notification["owner_user_id"])
+            incarnation = thread.get("incarnation") if thread else None
+            task = await self.app.state.mcp_task_repo.get(notification["task_id"], user_id=notification["owner_user_id"], thread_id=notification["thread_id"], thread_incarnation=incarnation)
         if task is None:
             raise PermanentNotificationError("Native notification source unavailable")
         capability = mint_execution_scope(
@@ -459,8 +692,9 @@ class NativeWorkerHost:
             audience=self.config["node_id"],
             user_id=notification["owner_user_id"],
             thread_id=notification["thread_id"],
-            incarnation=thread["incarnation"],
+            incarnation=incarnation,
             run_id=task.get("run_id") or "mcp-task:" + notification["task_id"],
+            workspace_context=context,
             operation="native_notification",
             arguments=notification,
         )
@@ -489,9 +723,18 @@ class NativeWorkerHost:
 
     async def report(self, job, changes):
         current = await self.request("get", job_id=job["id"], generation=job["generation"])
+        scoped = job.get("workspace_id") is not None
+        if scoped and any(current.get(key) != job.get(key) for key in ("id", "node_id", "worker_owner", "generation")):
+            raise ValueError("Native control response assignment mismatch")
         if all(current.get(key) == value for key, value in changes.items()):
-            return current
-        return await self.request("report", job_id=job["id"], generation=job["generation"], expected=current, changes=changes)
+            return {**job, **current} if scoped else current
+        updated = await self.request("report", job_id=job["id"], generation=job["generation"], expected=current, changes=changes)
+        if scoped:
+            if any(updated.get(key) != job.get(key) for key in ("id", "node_id", "worker_owner", "generation")):
+                raise ValueError("Native report response assignment mismatch")
+            # Restore only this caller's already-held immutable snapshot.
+            return {**job, **changes, **updated}
+        return updated
 
     async def report_until_acknowledged(self, job, changes):
         while not getattr(self, "closing", False):
@@ -504,9 +747,13 @@ class NativeWorkerHost:
     async def stop_native(self, job):
         # Cancellation polling and the native task finalizer share one owned
         # physical stop. Failed/unknown proofs are retryable, never successes.
+        capture = getattr(self, "sandbox_captures", {}).get(job["id"])
+        if capture is not None:
+            capture.validate_assignment(job)
         task = self.stop_tasks.get(job["id"])
         if task is None:
-            task = asyncio.create_task(asyncio.to_thread(stop_native_sandbox, job["native"]))
+            work = asyncio.to_thread(stop_native_sandbox, job["native"], capture=capture) if capture is not None else asyncio.to_thread(stop_native_sandbox, job["native"])
+            task = asyncio.create_task(work)
             self.stop_tasks[job["id"]] = task
         try:
             await asyncio.shield(task)
@@ -544,24 +791,46 @@ class NativeWorkerHost:
             raise RuntimeError("Native worker is quiescing")
 
     async def adopt_owned(self, job, token):
-        from app.gateway.native_admission import adopt_native_run
-
         async with self.adoption_lock:
             self.check_admission()
             self.adopting = asyncio.current_task()
+            from contextlib import nullcontext
+
+            from deerflow.sandbox.execution_capture import sandbox_execution_capture
+
+            capture_scope = nullcontext()
+            if job.get("workspace_id") is not None:
+                from ecs_executor.native_sandbox import NativeSandboxCapture
+
+                captures = getattr(self, "sandbox_captures", None)
+                if captures is None:
+                    captures = self.sandbox_captures = {}
+                capture = captures.get(job["id"])
+                if capture is None:
+                    capture = captures[job["id"]] = NativeSandboxCapture(job)
+                capture.validate_assignment(job)
+                capture_scope = sandbox_execution_capture(capture)
             try:
-                browser = getattr(self, "browser_control", None)
-                if browser is not None:
-                    # Verify the launch before its identity may bind browser
-                    # state; adoption itself verifies it again at the native fence.
-                    native = verify_native_launch(job, token, self.secret)
-                    with await browser.execution_scope(native) as attach_browser_task:
-                        record = await adopt_native_run(self.app, job, token, self.secret, admission_check=self.check_admission)
-                        attach_browser_task(record.task)
-                        return record
-                return await adopt_native_run(self.app, job, token, self.secret, admission_check=self.check_admission)
+                with capture_scope:
+                    return await self._adopt_with_capture(job, token)
             finally:
                 self.adopting = None
+
+    async def _adopt_with_capture(self, job, token):
+        from app.gateway.native_admission import adopt_native_run
+
+        browser = getattr(self, "browser_control", None)
+        if browser is not None:
+            # Verify the launch before its identity may bind browser
+            # state; adoption itself verifies it again at the native fence.
+            from app.gateway.native_admission import verify_native_launch_for_receiver
+
+            native, _ = await verify_native_launch_for_receiver(self.app, job, token, self.secret)
+            with await browser.execution_scope(native) as attach_browser_task:
+                record = await adopt_native_run(self.app, job, token, self.secret, admission_check=self.check_admission)
+                attach_browser_task(record.task)
+                return record
+        return await adopt_native_run(self.app, job, token, self.secret, admission_check=self.check_admission)
 
     async def quiesce(self):
         self.quiescing = True
@@ -585,7 +854,9 @@ class NativeWorkerHost:
     async def execute(self, job, token):
 
         try:
-            verify_native_launch(job, token, self.secret)
+            from app.gateway.native_admission import verify_native_launch_for_receiver
+
+            await verify_native_launch_for_receiver(self.app, job, token, self.secret)
             budget = job["node_budget"]
             if budget["max_concurrency"] != 1 or budget["resident_cpu_millis"] < 1500 or budget["resident_memory_mib"] < 2048 or job["node_id"] != self.config["node_id"]:
                 raise ValueError("Native worker resident budget mismatch")
@@ -596,6 +867,10 @@ class NativeWorkerHost:
             await asyncio.shield(record.task)
             if record.ownership_lost:
                 raise RuntimeError("Native task ownership was lost; physical outcome requires reconciliation")
+            capture = getattr(self, "sandbox_captures", {}).get(job["id"])
+            if capture is not None:
+                capture.validate_assignment(job)
+                capture.execution_drained(record)
             # AIO container remains within the continuously charged resident
             # budget. The native task has fully drained its finalizers here.
             while not getattr(self, "closing", False):
@@ -605,6 +880,9 @@ class NativeWorkerHost:
                     if state == "cancelled":
                         await self.stop_owned(job)
                     await self.report(job, {"state": state, "error": record.error, "physical_stopped": True, "physical_stopped_at": time.time()})
+                    captures = getattr(self, "sandbox_captures", {})
+                    if captures.get(job["id"]) is capture:
+                        captures.pop(job["id"], None)
                     break
                 except (httpx.HTTPError, RuntimeError):
                     # Retry this settled native outcome/owned STOP, never the
@@ -612,7 +890,10 @@ class NativeWorkerHost:
                     await asyncio.sleep(1)
         except Exception:
             native = job["native"]
-            row = await self.app.state.run_store.get(native["run_id"], user_id=native["user_id"])
+            # Scoped rejection retains the reservation. The legacy refusal
+            # path cannot prove scoped NoStart or close its native lifetime.
+            scoped = getattr(self.app.state.run_store, "workspace_scope_required", False) or any(value.get(key) is not None for value in (job, native) for key in ("workspace_id", "workspace_context"))
+            row = None if scoped else await self.app.state.run_store.get(native["run_id"], user_id=native["user_id"])
             if row is not None and row.get("owner_worker_id") == "dispatch:" + job["id"] and row["status"] == "pending":
                 while not getattr(self, "closing", False):
                     try:
@@ -642,6 +923,19 @@ class NativeWorkerHost:
                     if job["id"] in seen:
                         continue
                     seen.add(job["id"])
+                    if envelope.get("capability") is None:
+                        # No native payload or launch grant is present. Only
+                        # an already-owned local task may consume this control.
+                        execution = self.executions.get(job["id"])
+                        if execution is None:
+                            continue
+                        local_job, record = execution
+                        if any(job.get(key) != local_job.get(key) for key in ("id", "node_id", "worker_owner", "generation")) or record.ownership_lost:
+                            continue
+                        if job.get("cancel_requested"):
+                            await self.app.state.run_manager._signal_local_cancel(record.run_id, action="interrupt")
+                            await self.stop_owned(local_job)
+                        continue
                     if job.get("cancel_requested"):
                         native = job["native"]
                         from app.gateway.internal_auth import get_internal_user
@@ -716,8 +1010,13 @@ class NativeWorkerHost:
                     task.add_done_callback(release_after_drain)
 
 
-def stop_native_sandbox(native):
-    """Destroy the exact native sandbox, and prove physical STOP before release."""
+def stop_native_sandbox(native, *, capture=None):
+    """STOP a captured scoped object; legacy derives only its historical ID."""
+    if capture is not None:
+        capture.stop()
+        return
+    if native.get("workspace_id") is not None or native.get("workspace_context") is not None:
+        raise RuntimeError("Scoped native physical STOP requires its acquired object")
     from deerflow.sandbox.sandbox_provider import get_initialized_sandbox_provider
 
     provider = get_initialized_sandbox_provider()

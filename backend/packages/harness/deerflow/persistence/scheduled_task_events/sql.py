@@ -28,8 +28,9 @@ _PAYLOAD_FIELDS = ("task_title", "stop_condition", "run_thread_id", "run_agent_n
 class ScheduledTaskEventRepository:
     """Persistence facade for ``scheduled_task_events``."""
 
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession], *, workspace_required=False) -> None:
         self._sf = session_factory
+        self.workspace_scope_required = workspace_required
 
     @staticmethod
     def to_api_dict(row: ScheduledTaskEventRow) -> dict[str, Any]:
@@ -61,6 +62,8 @@ class ScheduledTaskEventRepository:
         after_run_id: str | None,
         payload: dict[str, Any],
         created_at: datetime | None = None,
+        workspace_context=None,
+        thread_incarnation=None,
     ) -> dict[str, Any]:
         """Stage one event row in the caller's transaction; a duplicate is ignored.
 
@@ -68,12 +71,25 @@ class ScheduledTaskEventRepository:
         caller's state change or open a second writer while it holds the parent
         lock. Returns the stored row (the existing one on a duplicate).
         """
+        if workspace_context is not None:
+            from deerflow.persistence.thread_meta.model import ThreadMetaRow
+            from deerflow.persistence.thread_meta.sql import ThreadMetaRepository
+            from deerflow.persistence.workspaces.sql import WorkspaceAccessDenied
+
+            if (
+                workspace_context.actor_user_id != user_id
+                or not thread_incarnation
+                or await session.scalar(ThreadMetaRepository._owned_scope(select(ThreadMetaRow.thread_id).where(ThreadMetaRow.thread_id == thread_id, ThreadMetaRow.incarnation == thread_incarnation), user_id, workspace_context)) is None
+            ):
+                raise WorkspaceAccessDenied("Scheduled event private origin changed")
         dialect = session.get_bind().dialect.name
         if dialect not in {"sqlite", "postgresql"}:
             raise ValueError(f"Unsupported scheduled task event database dialect: {dialect}")
         insert = sqlite_insert if dialect == "sqlite" else pg_insert
         values = {
             "id": f"evt-{uuid.uuid4().hex}",
+            "workspace_id": workspace_context.workspace_id if workspace_context else None,
+            "thread_incarnation": thread_incarnation,
             "user_id": user_id,
             "task_id": task_id,
             "thread_id": thread_id,
@@ -100,7 +116,22 @@ class ScheduledTaskEventRepository:
 
     async def list_for_thread(self, *, user_id: str, thread_id: str, limit: int = 50) -> list[dict[str, Any]]:
         """The caller's newest ``limit`` events of one chat, returned oldest first."""
-        stmt = select(ScheduledTaskEventRow).where(ScheduledTaskEventRow.thread_id == thread_id, ScheduledTaskEventRow.user_id == user_id).order_by(ScheduledTaskEventRow.created_at.desc(), ScheduledTaskEventRow.id.desc()).limit(limit)
+        from deerflow.persistence.thread_meta.model import ThreadMetaRow
+        from deerflow.persistence.thread_meta.sql import ThreadMetaRepository
+        from deerflow.persistence.workspaces.scope import resolve_resource_scope
+
+        context = resolve_resource_scope(None, user_id, required=self.workspace_scope_required)
+        scope = ScheduledTaskEventRow.workspace_id.is_(None)
+        if context is not None:
+            parent = (
+                ThreadMetaRepository._owned_scope(select(ThreadMetaRow.thread_id).where(ThreadMetaRow.thread_id == ScheduledTaskEventRow.thread_id, ThreadMetaRow.incarnation == ScheduledTaskEventRow.thread_incarnation), user_id, context)
+                .correlate(ScheduledTaskEventRow)
+                .exists()
+            )
+            scope = (ScheduledTaskEventRow.workspace_id == context.workspace_id) & parent
+        stmt = (
+            select(ScheduledTaskEventRow).where(scope, ScheduledTaskEventRow.thread_id == thread_id, ScheduledTaskEventRow.user_id == user_id).order_by(ScheduledTaskEventRow.created_at.desc(), ScheduledTaskEventRow.id.desc()).limit(limit)
+        )
         async with self._sf() as session:
             rows = list((await session.execute(stmt)).scalars())
         return [self.to_api_dict(row) for row in reversed(rows)]
@@ -110,7 +141,12 @@ class ScheduledTaskEventRepository:
 
         ``None`` removes every owner's rows (migration and CLI callers).
         """
-        conditions = [ScheduledTaskEventRow.thread_id == thread_id]
+        from deerflow.authz.workspace import get_current_workspace
+        from deerflow.persistence.workspaces.sql import WorkspaceAccessDenied
+
+        if self.workspace_scope_required or get_current_workspace() is not None:
+            raise WorkspaceAccessDenied("Scoped Scheduler event deletion requires lifecycle integration")
+        conditions = [ScheduledTaskEventRow.thread_id == thread_id, ScheduledTaskEventRow.workspace_id.is_(None)]
         if user_id is not None:
             conditions.append(ScheduledTaskEventRow.user_id == user_id)
         async with self._sf() as session:

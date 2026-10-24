@@ -630,6 +630,11 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
 
         await require_activation(get_engine())
 
+        from app.gateway.workspaces.startup import validate_workspace_bootstrap
+
+        app.state.workspace_service = await validate_workspace_bootstrap(config, get_session_factory())
+        app.state.workspace_mode_enabled = config.workspaces.enabled
+
         app.state.checkpointer = await stack.enter_async_context(make_checkpointer(config))
         app.state.store = await stack.enter_async_context(make_store(config))
 
@@ -652,7 +657,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             from deerflow.persistence.personal_access_tokens import PersonalAccessTokenRepository
             from deerflow.persistence.run import RunRepository
 
-            app.state.run_store = RunRepository(sf)
+            app.state.run_store = RunRepository(sf, workspace_required=config.workspaces.enabled)
             app.state.feedback_repo = FeedbackRepository(sf)
             from app.gateway.auth.pat import PAT_LAST_USED_WRITE_INTERVAL_SECONDS
 
@@ -721,7 +726,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
 
         from deerflow.persistence.thread_meta import make_thread_store
 
-        app.state.thread_store = make_thread_store(sf, app.state.store)
+        app.state.thread_store = make_thread_store(sf, app.state.store, workspace_required=config.workspaces.enabled)
         if sf is not None:
             from deerflow.persistence.mcp_tasks import McpTaskRepository
             from deerflow.persistence.projects import ProjectDocumentRepository, ProjectRepository
@@ -733,20 +738,22 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             from deerflow.persistence.subagent_batches import SubagentBatchRepository
             from deerflow.persistence.thread_reads import ThreadReadRepository
 
-            app.state.project_repo = ProjectRepository(sf)
-            app.state.project_document_repo = ProjectDocumentRepository(sf)
+            app.state.project_repo = ProjectRepository(sf, workspace_required=config.workspaces.enabled)
+            app.state.project_document_repo = ProjectDocumentRepository(sf, workspace_required=config.workspaces.enabled)
             app.state.scheduled_task_repo = ScheduledTaskRepository(
                 sf,
                 run_repository=app.state.run_store,
+                workspace_required=config.workspaces.enabled,
             )
             app.state.scheduled_task_run_repo = ScheduledTaskRunRepository(
                 sf,
                 run_repository=app.state.run_store,
+                workspace_required=config.workspaces.enabled,
             )
-            app.state.scheduled_task_event_repo = ScheduledTaskEventRepository(sf)
+            app.state.scheduled_task_event_repo = ScheduledTaskEventRepository(sf, workspace_required=config.workspaces.enabled)
             # Per-user unread state and the activity feed's read clock.
-            app.state.thread_read_repo = ThreadReadRepository(sf)
-            app.state.mcp_task_repo = McpTaskRepository(sf)
+            app.state.thread_read_repo = ThreadReadRepository(sf, workspace_required=config.workspaces.enabled)
+            app.state.mcp_task_repo = McpTaskRepository(sf, workspace_required=config.workspaces.enabled)
             app.state.subagent_batch_repo = SubagentBatchRepository(sf)
         else:
             app.state.mcp_task_repo = None

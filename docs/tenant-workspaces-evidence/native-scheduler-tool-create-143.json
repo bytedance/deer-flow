@@ -1,0 +1,88 @@
+{
+  "build": 143,
+  "queue": 1092,
+  "phase": "m4-native-scheduler-tool-create-green-20261018-31",
+  "result": "SUCCESS",
+  "duration_ms": 39927,
+  "pytest": "1 passed in 20.65s",
+  "ruff": "All checks passed; 67 files already formatted",
+  "source_sha256": "8d5c6a8df16381c72899200bbed24a1ad40f369cbae223e5718c6eaba76ca625",
+  "pipeline_sha256": "e2297f35945d28b1d5632dc2d78fddf146e830935fb8f325af346f556e3e71b3",
+  "source_archive_exact_match": {
+    "backend/app/gateway/scheduled_task_access.py": "8d3f5fe707d5a50fb2b796d41ff36c64e73518d423d5efa41b67b33ea7631fba",
+    "backend/packages/harness/deerflow/persistence/scheduled_tasks/sql.py": "12cdc8516e420c788e7e1953891968a503591b560bbd07bc71491ef7494808a0",
+    "backend/packages/harness/deerflow/persistence/run/sql.py": "282aefa830b9fd8300365a06eac6ca5134c8fa04e9fb211eefa09a083b46ac7f",
+    "backend/tests/test_workspace_native_scheduler.py": "e683be734fefe6649a5d3c70398d2fd85999f7cf9a096cd33eae2ac62f9736c7",
+    "scripts/render_tenant_run_control_pipeline.py": "3c8a036b729ea25e12ec5f51637d3db8e15d833ad18effa4dfcf8e45b3237099",
+    "examples/ecs-native/deploy/Jenkinsfile.tenant-run-control.in": "055296bb8e012c5a3808f463974db349d0eda9a26e2125c11b8943c8b3e7f2a3"
+  },
+  "log_path": "/private/tmp/m4-native-scheduler-tool-create-green-20261018-31.log",
+  "log_sha256": "0ac63ccce9bf2497d2167c552e283ecb2c829ace63192688552ae0d9b0418db9",
+  "cleanup_path": "/private/tmp/native-scheduler-tool-create-build143-cleanup.json",
+  "scope": "One PostgreSQL remote ToolNode create -> durable original task -> real due claim/queued occurrence; no second native Run launched. Original native no-sandbox STOP/report released pool. Terminal write-race/nonce/token transaction boundaries not yet exercised.",
+  "job": "deerflow-tenant-execution-m4-sql",
+  "cleanup": {
+    "build": 143,
+    "read_only": true,
+    "cleanup": [
+      {
+        "kind": "container",
+        "name": "deerflow-tenant-execution-m4-sql-143",
+        "exit": 1,
+        "stderr": "Error response from daemon: No such container: deerflow-tenant-execution-m4-sql-143"
+      },
+      {
+        "kind": "container",
+        "name": "deerflow-tenant-execution-m4-sql-143-db",
+        "exit": 1,
+        "stderr": "Error response from daemon: No such container: deerflow-tenant-execution-m4-sql-143-db"
+      },
+      {
+        "kind": "network",
+        "name": "deerflow-tenant-execution-m4-sql-143",
+        "exit": 1,
+        "stderr": "Error response from daemon: network deerflow-tenant-execution-m4-sql-143 not found"
+      }
+    ]
+  },
+  "root_review": "Root independently checked live Jenkins terminal, reviewed exact production/test diffs, verified source SHA and byte-matched all six listed files.",
+  "reviewed_patches": [
+    "586af4d66802185598c02304a5f0dca3c7cb1d324ca8d4e32c6e990fe71a05ff",
+    "1bd9f2f8dc579855cd1e9506bcf433a8aae090410321df08061ffdf4685295eb"
+  ],
+  "history": [
+    {
+      "build": 141,
+      "queue": 1088,
+      "phase": "m4-native-scheduler-tool-create-red-20261018-29",
+      "result": "FAILURE",
+      "duration_ms": 39940,
+      "pytest": "1 failed in 20.19s",
+      "first_error": "Actual remote native Run / admitted Session capability / ToolNode returned scheduler_scoped_management_unavailable for create; no tool-created task or later due-queue assertions reached.",
+      "source_sha256": "c270d15987a9badfacf2e6751655a337320aa0da213404ac55cb64c7738f5b9a",
+      "pipeline_sha256": "3df0635759ba445fed927b0b446846607841c406e043bd52266a920e9fd7d752",
+      "log_path": "/private/tmp/m4-native-scheduler-tool-create-red-20261018-29.log",
+      "log_sha256": "5212b0c9151fd35cd0d88fb87b4c151033793e0d6c576d3c22d99ed1cb9d2ef8",
+      "cleanup_path": "/private/tmp/native-scheduler-tool-create-build141-cleanup.json"
+    },
+    {
+      "build": 142,
+      "queue": 1090,
+      "phase": "m4-native-scheduler-tool-create-green-20261018-30",
+      "result": "FAILURE",
+      "duration_ms": 39854,
+      "pytest": "1 failed in 20.34s",
+      "first_error": "ToolNode create, durable task scope assertions, real due claim and queued occurrence succeeded before fixture accessed nonexistent ScheduledTaskRunRow.user_id. Main not accepted as passing.",
+      "source_sha256": "6271d377677ac7e6632258afb64bf85c0243ab6540006aa8a0b1b430554c0962",
+      "pipeline_sha256": "322f667b8dc9d2f4ac31b6154a62bd4c37bcf5b126d2e1b7145863eb8fe8808c",
+      "log_path": "/private/tmp/m4-native-scheduler-tool-create-green-20261018-30.log",
+      "log_sha256": "efd16a6442a8346a37070ce04928580a02499060c9a5a1e7b3501cf3627b3e2e",
+      "cleanup_path": "/private/tmp/native-scheduler-tool-create-build142-cleanup.json"
+    }
+  ],
+  "limits": [
+    "Terminal-between-validation-and-write boundary is next. Origin-incarnation/token-version transaction refusals are code-reviewed but not separately exercised here.",
+    "Only conversation tool-create (fresh) and due queue are newly proved; no second native Run, physical sandbox or provider call.",
+    "Other management/manual/own-stop, Run entries, installed dependencies and full M4/M0-M11 remain open; activation false."
+  ]
+}

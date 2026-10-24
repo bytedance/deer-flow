@@ -16,6 +16,7 @@ import { ConversationEmptyState } from "@/components/ai-elements/conversation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { resolveArtifactURL } from "@/core/artifacts/utils";
+import { useWorkspaceLifetime } from "@/core/workspaces/context";
 import { isIMEComposing } from "@/lib/ime";
 import { cn } from "@/lib/utils";
 
@@ -31,10 +32,15 @@ export function BrowserViewPanel({
   threadId: string;
   className?: string;
 }) {
+  const lifetime = useWorkspaceLifetime();
   const browserView = useMaybeBrowserView();
   const frame = browserView?.latestFrame ?? null;
   const imageUrl = frame
-    ? resolveArtifactURL(frame.screenshot, threadId)
+    ? resolveArtifactURL(
+        frame.screenshot,
+        threadId,
+        lifetime?.scope.workspaceId,
+      )
     : null;
 
   const [urlInput, setUrlInput] = useState("");

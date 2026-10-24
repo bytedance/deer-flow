@@ -1,9 +1,8 @@
 "use client";
 
-import Link from "next/link";
-
 import { Button } from "@/components/ui/button";
 import { SidebarTrigger } from "@/components/ui/sidebar";
+import Link from "@/components/workspace/workspace-link";
 import { useFrontendExtensions } from "@/core/extensions/hooks";
 import { pluginPages, pluginPageTitle } from "@/core/extensions/pages";
 import { useI18n } from "@/core/i18n/hooks";

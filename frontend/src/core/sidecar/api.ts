@@ -1,7 +1,11 @@
 import { getAPIClient } from "@/core/api";
-import { fetch as fetchWithAuth } from "@/core/api/fetcher";
+import {
+  fetch as fetchWithAuth,
+  type WorkspaceRESTClient,
+} from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
 import type { AgentThread } from "@/core/threads";
+import type { ThreadRequestOptions } from "@/core/threads/api";
 
 import type { SidecarContext } from "./context";
 import {
@@ -10,9 +14,17 @@ import {
   isSidecarThread,
 } from "./thread";
 
-type SidecarThreadSearchClient = {
+type SidecarThreadSearchQuery = {
+  metadata: Record<string, unknown>;
+  limit: number;
+  offset: number;
+  sortBy: "updated_at";
+  sortOrder: "desc";
+};
+
+export type SidecarThreadSearchClient = {
   threads: {
-    search: (query: Record<string, unknown>) => Promise<AgentThread[]>;
+    search: (query: SidecarThreadSearchQuery) => Promise<AgentThread[]>;
   };
 };
 
@@ -22,63 +34,86 @@ type SidecarThreadSearchClient = {
 // concurrent creates for the same parent behind a single in-flight promise so
 // only one thread is created; the entry is cleared once it settles.
 const inFlightCreates = new Map<string, Promise<AgentThread>>();
+// A fixed client is unique to one actor/workspace/reset lifetime. An old
+// pending create must never block or supply a result to another lifetime.
+const workspaceCreates = new WeakMap<
+  WorkspaceRESTClient,
+  Map<string, Promise<AgentThread>>
+>();
 
-export async function createSidecarThread({
-  parentThreadId,
-  context,
-}: {
-  parentThreadId: string;
-  context: SidecarContext | SidecarContext[];
-}): Promise<AgentThread> {
-  const inFlight = inFlightCreates.get(parentThreadId);
+export async function createSidecarThread(
+  {
+    parentThreadId,
+    context,
+  }: { parentThreadId: string; context: SidecarContext | SidecarContext[] },
+  options?: ThreadRequestOptions,
+): Promise<AgentThread> {
+  options?.signal?.throwIfAborted();
+  let pendingCreates = inFlightCreates;
+  if (options) {
+    const existing = workspaceCreates.get(options.rest);
+    pendingCreates = existing ?? new Map<string, Promise<AgentThread>>();
+    if (!existing) workspaceCreates.set(options.rest, pendingCreates);
+  }
+  const inFlight = pendingCreates.get(parentThreadId);
   if (inFlight) {
     return inFlight;
   }
 
-  const request = createSidecarThreadRequest({ parentThreadId, context });
-  inFlightCreates.set(parentThreadId, request);
+  const request = createSidecarThreadRequest(
+    { parentThreadId, context },
+    options,
+  );
+  pendingCreates.set(parentThreadId, request);
   try {
     return await request;
   } finally {
-    if (inFlightCreates.get(parentThreadId) === request) {
-      inFlightCreates.delete(parentThreadId);
+    if (pendingCreates.get(parentThreadId) === request) {
+      pendingCreates.delete(parentThreadId);
     }
   }
 }
 
-async function createSidecarThreadRequest({
-  parentThreadId,
-  context,
-}: {
-  parentThreadId: string;
-  context: SidecarContext | SidecarContext[];
-}): Promise<AgentThread> {
-  const response = await fetchWithAuth(`${getBackendBaseURL()}/api/threads`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
+async function createSidecarThreadRequest(
+  {
+    parentThreadId,
+    context,
+  }: { parentThreadId: string; context: SidecarContext | SidecarContext[] },
+  options?: ThreadRequestOptions,
+): Promise<AgentThread> {
+  const response = await (options?.rest.fetch ?? fetchWithAuth)(
+    `${getBackendBaseURL()}/api/threads`,
+    {
+      method: "POST",
+      ...(options?.signal ? { signal: options.signal } : {}),
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        metadata: buildSidecarThreadMetadata(parentThreadId, context),
+      }),
     },
-    body: JSON.stringify({
-      metadata: buildSidecarThreadMetadata(parentThreadId, context),
-    }),
-  });
+  );
 
-  if (!response.ok) {
-    throw new Error("Failed to create side conversation.");
-  }
-
-  return (await response.json()) as AgentThread;
+  const decode = async (response: Response) => {
+    if (!response.ok) throw new Error("Failed to create side conversation.");
+    return (await response.json()) as AgentThread;
+  };
+  return options ? options.rest.consume(response, decode) : decode(response);
 }
 
 export async function findLatestSidecarThread({
   parentThreadId,
   isMock,
+  signal,
   apiClient = getAPIClient(isMock) as SidecarThreadSearchClient,
 }: {
   parentThreadId: string;
   isMock?: boolean;
   apiClient?: SidecarThreadSearchClient;
+  signal?: AbortSignal;
 }): Promise<AgentThread | null> {
+  signal?.throwIfAborted();
   const response = await apiClient.threads.search({
     metadata: {
       [SIDECAR_METADATA_KEY]: true,
@@ -90,6 +125,7 @@ export async function findLatestSidecarThread({
     sortOrder: "desc",
   });
 
+  signal?.throwIfAborted();
   return (
     response.find(
       (thread) =>

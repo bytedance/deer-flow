@@ -604,6 +604,15 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
     # 先合并再展开，避免同名字段通过两个 **dict 传入时触发 TypeError。
     effective_model_settings = dict(model_settings_from_config)
     effective_model_settings.update({key: value for key, value in kwargs.items() if value is not None})
+    from deerflow.runtime.invocation import WorkerInvocationCallback, WorkerInvocationRateLimiter, get_invocation_guard
+
+    scoped_invocation = get_invocation_guard() is not None
+    if scoped_invocation:
+        effective_model_settings["rate_limiter"] = WorkerInvocationRateLimiter(effective_model_settings.get("rate_limiter"))
+        # Internal SDK retries cannot re-enter native admission. Existing LLM
+        # middleware retries remain available and re-enter callbacks/limiter.
+        if "max_retries" in model_class.model_fields:
+            effective_model_settings["max_retries"] = 0
     model_instance = model_class(**effective_model_settings)
 
     if translate_context_window:
@@ -622,4 +631,6 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
             existing_callbacks = model_instance.callbacks or []
             model_instance.callbacks = [*existing_callbacks, *callbacks]
             logger.debug(f"Tracing attached to model '{name}' with providers={len(callbacks)}")
+    if scoped_invocation:
+        model_instance.callbacks = [WorkerInvocationCallback(), *(model_instance.callbacks or [])]
     return model_instance

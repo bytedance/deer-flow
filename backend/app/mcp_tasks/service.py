@@ -12,6 +12,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from app.mcp_tasks.errors import PermanentNotificationError
+from deerflow.authz.workspace import get_current_workspace, reset_current_workspace, set_current_workspace
 from deerflow.constants import (
     MCP_TASK_POLL_AFTER_MAX_SECONDS,
     MCP_TASK_REMOTE_ID_MAX_LENGTH,
@@ -26,6 +27,7 @@ from deerflow.mcp.tasks import (
     TaskSubmitRequest,
 )
 from deerflow.persistence.mcp_tasks import DuplicateMcpRemoteTaskError
+from deerflow.persistence.workspaces.sql import WorkspaceAccessDenied
 from deerflow.runtime.cancellation import wait_for_task_until
 from deerflow.runtime.runs.manager import ConflictError
 from deerflow.runtime.runs.schemas import RunStatus
@@ -108,7 +110,9 @@ class McpTaskService:
         result_preview_max_chars: int = 2_000,
         launch_notification: Callable[..., Awaitable[dict[str, Any]]] | None = None,
         get_run: Callable[..., Awaitable[Any | None]] | None = None,
+        control_runtime=None,
     ) -> None:
+        self._control_runtime = control_runtime
         self._repository = repository
         self._drivers = drivers
         self._poll_interval_seconds = poll_interval_seconds
@@ -292,6 +296,17 @@ class McpTaskService:
         else:
             self._observe_batch_release_task(state, task, ordinary=True, action=action)
 
+    async def _with_workspace(self, context, operation):
+        if context is None:
+            if get_current_workspace() is not None:
+                raise WorkspaceAccessDenied("unscoped MCP work cannot inherit an ambient workspace")
+            return await operation()
+        token = set_current_workspace(context)
+        try:
+            return await operation()
+        finally:
+            reset_current_workspace(token)
+
     async def submit(
         self,
         *,
@@ -304,10 +319,18 @@ class McpTaskService:
         if driver is None:
             raise LookupError(f"No MCP task driver registered as {driver_name!r}")
 
+        context = request.workspace_context
+        if context is None:
+            if getattr(self._repository, "workspace_scope_required", False) or get_current_workspace() is not None:
+                raise WorkspaceAccessDenied("MCP submission requires its admitted workspace")
+        else:
+            if getattr(self._repository, "supports_workspace_submissions", False) is not True:
+                raise WorkspaceAccessDenied("MCP workspace submission requires a scoped durable repository")
+            await self._repository.validate_submission(request)
         submitted_at = now or datetime.now(UTC)
         local_task_id = request.local_task_id or f"mcp-task-{uuid.uuid4().hex}"
         driver_request = replace(request, local_task_id=local_task_id)
-        submission = await driver.submit(driver_request)
+        submission = await self._with_workspace(context, lambda: driver.submit(driver_request))
         driver_data = {**request.driver_data, **submission.driver_data}
         task_reference = TaskReference(
             local_task_id=local_task_id,
@@ -317,6 +340,8 @@ class McpTaskService:
             remote_task_id=submission.remote_task_id,
             thread_incarnation=request.thread_incarnation,
             driver_data=driver_data,
+            workspace_context=context,
+            run_id=request.run_id if context is not None else None,
         )
         try:
             if len(submission.remote_task_id) > MCP_TASK_REMOTE_ID_MAX_LENGTH:
@@ -343,6 +368,7 @@ class McpTaskService:
                 input_required=snapshot.input_required,
                 next_poll_at=next_poll_at,
                 driver_data=driver_data,
+                **({"workspace_context": context, "source_worker_id": request.source_worker_id} if context is not None else {}),
             )
         except DuplicateMcpRemoteTaskError:
             # This handle already has a durable owner. Cancelling it as
@@ -377,7 +403,7 @@ class McpTaskService:
         reason: str,
     ) -> None:
         compensation = asyncio.create_task(
-            driver.cancel(task_reference),
+            self._with_workspace(task_reference.workspace_context, lambda: driver.cancel(task_reference)),
             name=f"mcp-submit-compensation-{task_reference.local_task_id}",
         )
         self._compensation_tasks.add(compensation)
@@ -720,6 +746,15 @@ class McpTaskService:
         thread_incarnation: str | None,
         now: datetime | None = None,
     ) -> dict[str, Any] | None:
+        from deerflow.authz.workspace import get_current_workspace
+        from deerflow.mcp.tasks.control import McpTaskControlUnavailable
+
+        if getattr(self._repository, "workspace_scope_required", False) or get_current_workspace() is not None:
+            record = await self._repository.get(task_id, user_id=user_id, thread_id=thread_id, thread_incarnation=thread_incarnation)
+            if record is None:
+                return None
+            if self._control_runtime is None or not self._control_runtime.supports(record["server_name"]):
+                raise McpTaskControlUnavailable("MCP task control worker is not running")
         return await self._repository.request_cancel(
             task_id,
             user_id=user_id,
@@ -833,6 +868,11 @@ class McpTaskService:
             )
 
     async def _run_notifications(self, *, now: datetime) -> None:
+        # Settlement is a repository-only control operation. It must not bind
+        # a revoked actor or enter Run/checkpoint/result/launch business paths.
+        retire = getattr(self._repository, "retire_revoked_dispatched_notifications", None)
+        if getattr(self._repository, "workspace_scope_required", False) and retire is not None:
+            await retire(now=now, limit=self._max_concurrent_polls)
         if self._launch_notification is None or self._get_run is None:
             return
         records = await self._claim_with_cancellation_release(
@@ -868,6 +908,16 @@ class McpTaskService:
             await self._release_notification_failure(record, now=now, error=error)
 
     async def _notify_one_claimed(self, record: dict[str, Any], *, now: datetime) -> None:
+        if record.get("workspace_id") is None:
+            return await self._notify_one_in_workspace(record, now=now)
+        reference = TaskReference.from_record(record)
+        await self._with_workspace(reference.workspace_context, lambda: self._notify_one_in_workspace(record, now=now))
+
+    @staticmethod
+    def _notification_reference(record):
+        return {"task_reference": TaskReference.from_record(record)} if record.get("workspace_id") is not None else {}
+
+    async def _notify_one_in_workspace(self, record: dict[str, Any], *, now: datetime) -> None:
         task_id = record["id"]
         dispatch_version = int(record.get("dispatch_version") or 0)
         notification_attempts = max(0, int(record.get("notification_attempt_count") or 0))
@@ -880,6 +930,7 @@ class McpTaskService:
                 run_id = record.get("notification_run_id")
                 await self._repository.finish_notification_run(
                     task_id,
+                    **self._notification_reference(record),
                     lease_owner=self._lease_owner,
                     notification_lease_token=record["notification_lease_token"],
                     dispatch_version=dispatch_version,
@@ -891,6 +942,7 @@ class McpTaskService:
             elif status == RunStatus.success:
                 await self._repository.finish_notification_run(
                     task_id,
+                    **self._notification_reference(record),
                     lease_owner=self._lease_owner,
                     notification_lease_token=record["notification_lease_token"],
                     dispatch_version=dispatch_version,
@@ -902,6 +954,7 @@ class McpTaskService:
             elif status in {RunStatus.error, RunStatus.timeout, RunStatus.interrupted}:
                 await self._repository.finish_notification_run(
                     task_id,
+                    **self._notification_reference(record),
                     lease_owner=self._lease_owner,
                     notification_lease_token=record["notification_lease_token"],
                     dispatch_version=dispatch_version,
@@ -913,6 +966,7 @@ class McpTaskService:
             else:
                 await self._repository.defer_dispatched_notification(
                     task_id,
+                    **self._notification_reference(record),
                     lease_owner=self._lease_owner,
                     notification_lease_token=record["notification_lease_token"],
                     dispatch_version=dispatch_version,
@@ -926,6 +980,7 @@ class McpTaskService:
             completed_at = _notification_completion_time(not_before=now)
             await self._repository.dead_letter_notification(
                 task_id,
+                **self._notification_reference(record),
                 lease_owner=self._lease_owner,
                 notification_lease_token=record["notification_lease_token"],
                 dispatch_version=dispatch_version,
@@ -943,6 +998,7 @@ class McpTaskService:
         record["notification_status"] = "launching"
         launch_reserved = await self._repository.begin_notification_launch(
             task_id,
+            **self._notification_reference(record),
             lease_owner=self._lease_owner,
             notification_lease_token=record["notification_lease_token"],
             dispatch_version=dispatch_version,
@@ -955,6 +1011,7 @@ class McpTaskService:
                     record,
                     release=lambda: self._repository.release_notification_lease(
                         task_id,
+                        **self._notification_reference(record),
                         lease_owner=self._lease_owner,
                         notification_lease_token=record["notification_lease_token"],
                         next_notification_at=launch_started_at,
@@ -968,6 +1025,7 @@ class McpTaskService:
                 record,
                 release=lambda: self._repository.release_notification_claim(
                     task_id,
+                    **self._notification_reference(record),
                     lease_owner=self._lease_owner,
                     notification_lease_token=record["notification_lease_token"],
                     next_notification_at=launch_started_at,
@@ -991,6 +1049,7 @@ class McpTaskService:
             completed_at = _notification_completion_time(not_before=now)
             await self._repository.dead_letter_notification(
                 task_id,
+                **self._notification_reference(record),
                 lease_owner=self._lease_owner,
                 notification_lease_token=record["notification_lease_token"],
                 dispatch_version=dispatch_version,
@@ -1007,6 +1066,7 @@ class McpTaskService:
                     record,
                     release=lambda: self._repository.release_notification_lease(
                         task_id,
+                        **self._notification_reference(record),
                         lease_owner=self._lease_owner,
                         notification_lease_token=record["notification_lease_token"],
                         next_notification_at=completed_at + timedelta(seconds=self._poll_interval_seconds),
@@ -1020,6 +1080,7 @@ class McpTaskService:
                     record,
                     release=lambda: self._repository.release_notification_claim(
                         task_id,
+                        **self._notification_reference(record),
                         lease_owner=self._lease_owner,
                         notification_lease_token=record["notification_lease_token"],
                         next_notification_at=completed_at + timedelta(seconds=self._poll_interval_seconds),
@@ -1037,6 +1098,7 @@ class McpTaskService:
                     record,
                     release=lambda: self._repository.release_notification_lease(
                         task_id,
+                        **self._notification_reference(record),
                         lease_owner=self._lease_owner,
                         notification_lease_token=record["notification_lease_token"],
                         next_notification_at=completed_at + timedelta(seconds=self._notification_retry_seconds(record)),
@@ -1050,6 +1112,7 @@ class McpTaskService:
                     record,
                     release=lambda: self._repository.release_notification_claim(
                         task_id,
+                        **self._notification_reference(record),
                         lease_owner=self._lease_owner,
                         notification_lease_token=record["notification_lease_token"],
                         next_notification_at=completed_at + timedelta(seconds=self._notification_retry_seconds(record)),
@@ -1063,6 +1126,7 @@ class McpTaskService:
         completed_at = _notification_completion_time(not_before=now)
         await self._repository.mark_notification_dispatched(
             task_id,
+            **self._notification_reference(record),
             lease_owner=self._lease_owner,
             notification_lease_token=record["notification_lease_token"],
             dispatch_version=dispatch_version,
@@ -1264,6 +1328,7 @@ class McpTaskService:
                 record,
                 release=lambda: self._repository.release_notification_lease(
                     record["id"],
+                    **self._notification_reference(record),
                     lease_owner=self._lease_owner,
                     notification_lease_token=record["notification_lease_token"],
                     next_notification_at=completed_at + timedelta(seconds=self._notification_retry_seconds(record)),
@@ -1301,6 +1366,7 @@ class McpTaskService:
         if record.get("notification_status") in {"launching", "dispatched"}:
             compensation = self._repository.release_notification_lease(
                 task_id,
+                **self._notification_reference(record),
                 lease_owner=self._lease_owner,
                 notification_lease_token=record["notification_lease_token"],
                 next_notification_at=datetime.now(UTC),
@@ -1311,6 +1377,7 @@ class McpTaskService:
         else:
             compensation = self._repository.release_notification_claim(
                 task_id,
+                **self._notification_reference(record),
                 lease_owner=self._lease_owner,
                 notification_lease_token=record["notification_lease_token"],
                 next_notification_at=datetime.now(UTC),
@@ -1351,7 +1418,12 @@ class McpTaskService:
             return
 
         try:
-            snapshot = self._normalize_snapshot(await driver.get_status(TaskReference.from_record(record)))
+            reference = TaskReference.from_record(record)
+            if reference.workspace_context is None and getattr(self._repository, "workspace_scope_required", False):
+                raise WorkspaceAccessDenied("MCP polling requires a captured workspace reference")
+            if reference.workspace_context is not None:
+                await self._repository.validate_reference(reference, lease_owner=self._lease_owner, lease_token=record["lease_token"], now=datetime.now(UTC))
+            snapshot = self._normalize_snapshot(await self._with_workspace(reference.workspace_context, lambda: driver.get_status(reference)))
         except McpTaskProtocolError as exc:
             logger.error(
                 "MCP task status contract failed permanently (task_id=%s, driver=%s): %s",
@@ -1408,6 +1480,7 @@ class McpTaskService:
             input_required=snapshot.input_required,
             next_poll_at=self._next_poll_at(snapshot, now=polled_at),
             polled_at=polled_at,
+            **({"task_reference": TaskReference.from_record(record)} if record.get("workspace_id") is not None or record.get("_workspace_context") is not None else {}),
         )
         if not applied:
             logger.info(

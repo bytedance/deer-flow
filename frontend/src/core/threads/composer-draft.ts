@@ -2,6 +2,16 @@ import {
   readConversationReferences,
   type ConversationReference,
 } from "@/core/conversation-references";
+import {
+  captureWorkspaceRequestScope,
+  type WorkspaceRequestScope,
+} from "@/core/workspaces/request-scope";
+
+const WORKSPACE_COMPOSER_DRAFT_PREFIX = "deerflow:workspace-composer-draft:v1";
+
+function workspaceDraftPrefix(actorUserId: string, workspaceId: string) {
+  return `${WORKSPACE_COMPOSER_DRAFT_PREFIX}:${encodeURIComponent(actorUserId)}:${encodeURIComponent(workspaceId)}:`;
+}
 
 const COMPOSER_DRAFT_VERSION = 1;
 const COMPOSER_DRAFT_PREFIX = "deerflow:composer-draft:v1";
@@ -28,15 +38,47 @@ export function getSessionComposerDraftStorage(): ComposerDraftStorage | null {
   }
 }
 
+/** One captured namespace; closed handles never access even their old keys. */
+export function createWorkspaceComposerDraftStorage(
+  scope: WorkspaceRequestScope,
+): ComposerDraftStorage {
+  const captured = captureWorkspaceRequestScope(scope);
+  const prefix = workspaceDraftPrefix(
+    captured.actorUserId,
+    captured.workspaceId,
+  );
+  const accepts = (key: string) =>
+    !captured.signal.aborted &&
+    key.startsWith(prefix) &&
+    key.length > prefix.length;
+  return Object.freeze({
+    getItem(key: string) {
+      return accepts(key)
+        ? (getSessionComposerDraftStorage()?.getItem(key) ?? null)
+        : null;
+    },
+    setItem(key: string, value: string) {
+      if (accepts(key)) getSessionComposerDraftStorage()?.setItem(key, value);
+    },
+    removeItem(key: string) {
+      if (accepts(key)) getSessionComposerDraftStorage()?.removeItem(key);
+    },
+  });
+}
+
 export function buildComposerDraftKey({
   userId,
   agentName,
   threadId,
+  workspaceId,
 }: {
   userId: string;
   agentName?: string | null;
   threadId: string;
+  workspaceId?: string;
 }) {
+  if (workspaceId)
+    return `${workspaceDraftPrefix(userId || "anonymous", workspaceId)}${encodeURIComponent(agentName ?? "lead-agent")}:${encodeURIComponent(threadId)}`;
   return [
     COMPOSER_DRAFT_PREFIX,
     encodeURIComponent(userId ? userId : "anonymous"),

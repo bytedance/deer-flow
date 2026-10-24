@@ -8,12 +8,17 @@ import re
 import stat
 import uuid
 from contextlib import contextmanager
+from contextvars import Context
 from pathlib import Path
 
 from sqlalchemy import create_engine, select
 
+from deerflow.authz.workspace import WorkspaceContext, reset_current_workspace, set_current_workspace
 from deerflow.config.paths import Paths, make_safe_user_id
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
+from deerflow.persistence.thread_meta.sql import ThreadMetaRepository
+from deerflow.persistence.user.model import UserRow
+from deerflow.persistence.workspaces.model import WorkspaceRow
 from ecs_executor.files import relative_file
 
 
@@ -103,25 +108,47 @@ def remove_tree_at(parent_fd, name):
 
 
 class WorkspacePublication:
-    def __init__(self, *, workspace_root: Path, metadata_database_url: str):
+    def __init__(self, *, workspace_root: Path, metadata_database_url: str, native_server_name: str | None = None):
         self.root = Path(workspace_root).resolve()
         self.paths = Paths(self.root)
         self.engine = create_engine(metadata_database_url)
+        self.native_server_name = native_server_name
 
     @contextmanager
-    def authorized_root(self, job, path, *, create=False):
+    def authorized_root(self, job, path, *, create=False, require_task=False):
         with self.engine.connect() as connection:
             if self.engine.dialect.name == "sqlite":
                 connection.exec_driver_sql("BEGIN IMMEDIATE")
             else:
                 connection.begin()
             try:
-                query = select(ThreadMetaRow.user_id, ThreadMetaRow.incarnation).where(ThreadMetaRow.thread_id == job["thread_id"])
+                query = select(ThreadMetaRow.user_id, ThreadMetaRow.incarnation, ThreadMetaRow.workspace_id).where(ThreadMetaRow.thread_id == job["thread_id"])
+                captured = job.get("workspace_context")
+                if captured is not None:
+                    try:
+                        context = WorkspaceContext(**captured)
+                    except (TypeError, ValueError):
+                        raise ValueError("Native file scope is invalid") from None
+                    if context.actor_user_id != job["user_id"] or context.workspace_id != job.get("workspace_id"):
+                        raise ValueError("Native file scope owner mismatch")
+                    connection.execute(select(WorkspaceRow.id).where(WorkspaceRow.id == context.workspace_id).with_for_update()).first()
+                    connection.execute(select(UserRow.id).where(UserRow.id == context.actor_user_id).with_for_update()).first()
+                    query = ThreadMetaRepository._owned_scope(query, job["user_id"], context)
+                else:
+                    query = query.where(ThreadMetaRow.workspace_id.is_(None))
+                    if job.get("workspace_id") is not None:
+                        raise ValueError("Native file access requires original workspace snapshot")
                 if self.engine.dialect.name == "postgresql":
                     query = query.with_for_update()
                 owner = connection.execute(query).first()
                 if owner is None or owner.user_id != job["user_id"] or owner.incarnation != job["incarnation"]:
                     raise ValueError("Native file access denied: owner/incarnation no longer matches")
+                if require_task:
+                    from ecs_executor.native_authority import NativeSubmissionAuthority
+
+                    if not self.native_server_name:
+                        raise PermissionError("Scoped publication requires native MCP binding")
+                    NativeSubmissionAuthority(connection).resolve_task(job, self.native_server_name, require_active=True)
                 self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
                 root_fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
                 try:
@@ -134,10 +161,38 @@ class WorkspacePublication:
                 connection.rollback()
                 raise
 
+    def _thread_data_path(self, identity, *, outputs=False):
+        """Select the captured namespace only for pure path derivation.
+
+        This is not authorization. Restore the caller before SQL/no-follow IO;
+        authorized_root must independently recheck the original durable scope.
+        """
+        derive = self.paths.sandbox_outputs_dir if outputs else self.paths.sandbox_user_data_dir
+        user_id = make_safe_user_id(identity["user_id"])
+        captured = identity.get("workspace_context")
+        if captured is None:
+            if identity.get("workspace_id") is not None:
+                raise ValueError("Native file access requires original workspace snapshot")
+            # None is an explicit legacy namespace, never the ambient UI space.
+            # A fresh Context clears only this pure calculation and restores
+            # every caller ContextVar automatically, including on failure.
+            return Context().run(derive, identity["thread_id"], user_id=user_id)
+        try:
+            context = WorkspaceContext(**captured)
+        except (TypeError, ValueError):
+            raise ValueError("Native file scope is invalid") from None
+        if context.actor_user_id != identity["user_id"] or context.workspace_id != identity.get("workspace_id"):
+            raise ValueError("Native file scope owner mismatch")
+        selected = set_current_workspace(context)
+        try:
+            return derive(identity["thread_id"], user_id=user_id)
+        finally:
+            reset_current_workspace(selected)
+
     def snapshot(self, identity, references, *, limit):
         if len(references) > 64:
             raise ValueError("Too many declared input references")
-        root = self.paths.sandbox_user_data_dir(identity["thread_id"], user_id=make_safe_user_id(identity["user_id"]))
+        root = self._thread_data_path(identity)
         result = {}
         with self.authorized_root(identity, root) as fd:
             for name, reference in references.items():
@@ -159,10 +214,10 @@ class WorkspacePublication:
         return result
 
     def publish(self, job, payload: bytes, files: dict[str, bytes]) -> str:
-        outputs = self.paths.sandbox_outputs_dir(job["thread_id"], user_id=make_safe_user_id(job["user_id"]))
+        outputs = self._thread_data_path(job, outputs=True)
         for name in files:
             relative_file(name)
-        with self.authorized_root(job, outputs, create=True) as outputs_fd:
+        with self.authorized_root(job, outputs, create=True, require_task=job.get("workspace_id") is not None) as outputs_fd:
             try:
                 os.stat(job["id"], dir_fd=outputs_fd, follow_symlinks=False)
             except FileNotFoundError:

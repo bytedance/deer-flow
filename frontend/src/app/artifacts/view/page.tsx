@@ -1,7 +1,10 @@
 import type { Metadata } from "next";
 import { redirect } from "next/navigation";
 
-import { ArtifactViewer } from "@/components/workspace/artifacts/artifact-viewer";
+import {
+  ArtifactViewer,
+  WorkspaceArtifactViewer,
+} from "@/components/workspace/artifacts/artifact-viewer";
 import {
   artifactViewerTitle,
   buildArtifactViewerURL,
@@ -12,6 +15,7 @@ import {
 import { getServerSideUser } from "@/core/auth/server";
 import { assertNever, buildLoginUrl } from "@/core/auth/types";
 import { getI18n } from "@/core/i18n/server";
+import { getServerSideWorkspaceCapability } from "@/core/workspaces/server";
 
 const POST_LOGIN_FALLBACK = "/workspace";
 
@@ -36,12 +40,12 @@ export async function generateMetadata({
  */
 async function requireViewerAccess(target: ArtifactViewerTarget | null) {
   if (target && !requiresAuthenticatedViewer(target)) {
-    return;
+    return null;
   }
   const result = await getServerSideUser();
   switch (result.tag) {
     case "authenticated":
-      return;
+      return result.user;
     case "unauthenticated":
       redirect(
         buildLoginUrl(
@@ -54,10 +58,8 @@ async function requireViewerAccess(target: ArtifactViewerTarget | null) {
     case "config_error":
       throw new Error(result.message);
     case "gateway_unavailable":
-      // Render anyway: the viewer surfaces its own load failure with a
-      // download link, which beats bouncing a detached window to a page the
-      // user did not ask for.
-      return;
+      // Retain this route; capability bootstrap below refuses unknown scope.
+      return null;
     default:
       assertNever(result);
   }
@@ -67,7 +69,7 @@ export default async function ArtifactViewerPage({
   searchParams,
 }: ArtifactViewerPageProps) {
   const target = parseArtifactViewerQuery(await searchParams);
-  await requireViewerAccess(target);
+  const user = await requireViewerAccess(target);
 
   if (!target) {
     const { t } = await getI18n();
@@ -78,6 +80,40 @@ export default async function ArtifactViewerPage({
         </p>
       </main>
     );
+  }
+
+  if (requiresAuthenticatedViewer(target)) {
+    const capability = await getServerSideWorkspaceCapability().catch(
+      () => null,
+    );
+    if (
+      !capability ||
+      (target.workspaceId !== undefined && !capability.enabled) ||
+      (capability.enabled && (!capability.available || !user))
+    ) {
+      const { t } = await getI18n();
+      return (
+        <main
+          role="alert"
+          className="flex h-screen items-center justify-center p-6"
+        >
+          <p className="text-muted-foreground text-sm">
+            {t.artifactPreview.unavailable}
+          </p>
+        </main>
+      );
+    }
+    if (capability.enabled && user) {
+      return (
+        <WorkspaceArtifactViewer
+          initialUser={user}
+          workspaceId={target.workspaceId}
+          filepath={target.filepath}
+          threadId={target.threadId}
+          isMock={target.isMock}
+        />
+      );
+    }
   }
 
   return (

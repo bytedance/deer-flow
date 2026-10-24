@@ -1,7 +1,9 @@
 "use client";
 
-import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { usePathname, useSearchParams } from "next/navigation";
 import { useEffect, useRef } from "react";
+
+import { useWorkspaceRouter as useRouter } from "@/core/workspaces/navigation";
 
 import {
   openSettingsDialog,

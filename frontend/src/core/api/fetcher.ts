@@ -1,7 +1,14 @@
 import { buildLoginUrl } from "@/core/auth/types";
+import { getBackendBaseURL } from "@/core/config";
 import { isStaticWebsiteOnly } from "@/core/static-mode";
+import {
+  captureWorkspaceRequestScope,
+  createWorkspaceFetch,
+  prepareWorkspaceRequest,
+  type WorkspaceRequestScope,
+} from "@/core/workspaces/request-scope";
 
-import { UnauthorizedError } from "./errors";
+import { parseGatewayApiError, UnauthorizedError } from "./errors";
 import { staticApiResponse } from "./static-response";
 
 /** HTTP methods that the gateway's CSRFMiddleware checks. */
@@ -57,27 +64,34 @@ export function readCsrfCookie(): string | null {
  * preserved; the helper only ADDS the CSRF header when it isn't already
  * present, so explicit overrides win.
  */
-export async function fetch(
-  input: RequestInfo | string,
+async function fetchAuthenticated(
+  input: RequestInfo | URL,
   init?: RequestInit,
+  transport?: typeof globalThis.fetch,
 ): Promise<Response> {
-  const url = typeof input === "string" ? input : input.url;
+  const request = input instanceof Request ? input : undefined;
+  const url =
+    typeof input === "string"
+      ? input
+      : input instanceof URL
+        ? input.toString()
+        : input.url;
+  const method = init?.method ?? request?.method ?? "GET";
 
   // Static demos have no Gateway. Resolve REST calls before credentials,
   // CSRF, or redirects; demo assets and explicit mock routes still use HTTP.
   if (isStaticWebsiteOnly()) {
     const response = await staticApiResponse(url, {
       ...init,
-      method:
-        init?.method ?? (typeof input === "string" ? "GET" : input.method),
+      method,
     });
     if (response) return response;
   }
 
   // Inject CSRF for state-changing methods. GET/HEAD/OPTIONS/TRACE skip
   // it to mirror the gateway's ``should_check_csrf`` logic exactly.
-  let headers = init?.headers;
-  if (isStateChangingMethod(init?.method ?? "GET")) {
+  let headers = init?.headers ?? request?.headers;
+  if (isStateChangingMethod(method)) {
     const token = readCsrfCookie();
     if (token) {
       // Fresh Headers instance so we don't mutate caller-supplied objects.
@@ -89,7 +103,9 @@ export async function fetch(
     }
   }
 
-  const res = await globalThis.fetch(url, {
+  // Forward the original Request so its body, method and cancellation signal
+  // survive. Reducing it to a URL loses explicit workspace selectors as well.
+  const res = await (transport ?? globalThis.fetch)(input, {
     ...init,
     headers,
     credentials: "include",
@@ -122,3 +138,76 @@ export function getCsrfHeaders(): HeadersInit {
   const token = readCsrfCookie();
   return token ? { "X-CSRF-Token": token } : {};
 }
+
+/** Native REST callers retain their existing unscoped behavior. */
+export async function fetch(
+  input: RequestInfo | URL,
+  init?: RequestInit,
+): Promise<Response> {
+  return fetchAuthenticated(input, init);
+}
+
+/** Bind browser REST calls to one immutable actor/workspace lifetime. */
+export function createWorkspaceRESTClient(scope: WorkspaceRequestScope) {
+  if (isStaticWebsiteOnly())
+    throw new Error("Workspace clients are unavailable in demo mode");
+  const snapshot = captureWorkspaceRequestScope(scope);
+  const origin =
+    typeof window === "undefined"
+      ? "http://localhost:2026"
+      : window.location.origin;
+  const apiRoot = new URL(`${getBackendBaseURL()}/api`, origin).toString();
+  const transport = createWorkspaceFetch(snapshot, apiRoot);
+  const responses = new WeakMap<Response, AbortSignal>();
+  const scopedFetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+    const prepared = prepareWorkspaceRequest(snapshot, apiRoot, input, init);
+    const response = await fetchAuthenticated(input, prepared, transport);
+    responses.set(response, prepared.signal!);
+    return response;
+  };
+  // Native domain decoders retain their status/error/Blob behavior. Ownership
+  // and the exact combined request signal survive all their decoding awaits.
+  const consume = async <T>(
+    response: Response,
+    reader: (response: Response) => Promise<T>,
+  ): Promise<T> => {
+    const signal = responses.get(response);
+    if (!signal) throw new Error("Response belongs to another REST client");
+    signal.throwIfAborted();
+    try {
+      const value = await reader(response);
+      signal.throwIfAborted();
+      return value;
+    } catch (error) {
+      signal.throwIfAborted();
+      throw error;
+    }
+  };
+  return Object.freeze({
+    fetch: scopedFetch,
+    consume,
+    async json<T = unknown>(
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ): Promise<T> {
+      return consume(await scopedFetch(input, init), async (response) => {
+        let body: unknown;
+        try {
+          body = await response.json();
+        } catch (error) {
+          if (response.ok) throw error;
+          body = {};
+        }
+        if (!response.ok)
+          throw parseGatewayApiError(
+            body,
+            response.status,
+            "Workspace request failed",
+          );
+        return body as T;
+      });
+    },
+  });
+}
+
+export type WorkspaceRESTClient = ReturnType<typeof createWorkspaceRESTClient>;

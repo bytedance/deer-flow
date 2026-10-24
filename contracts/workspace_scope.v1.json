@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:deerflow:workspace-scope:v1",
+  "title": "Workspace scope identity",
+  "description": "Server-resolved identity shape; this schema is not proof of membership or authenticity. HTTP selectors are locators only. Clients and model contexts cannot establish this identity. Native permission, active membership and resource ACL are intersected by server authorization.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "workspace_id",
+    "actor_user_id",
+    "membership_version",
+    "policy_version"
+  ],
+  "properties": {
+    "workspace_id": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "actor_user_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^(?!\\s)(?!.*[\\u0000-\\u001f\\u007f]).*\\S$"
+    },
+    "membership_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "policy_version": {
+      "type": "integer",
+      "minimum": 1
+    }
+  }
+}

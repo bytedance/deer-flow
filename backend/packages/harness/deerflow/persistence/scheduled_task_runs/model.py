@@ -11,6 +11,10 @@ from deerflow.persistence.base import Base
 class ScheduledTaskRunRow(Base):
     __tablename__ = "scheduled_task_runs"
 
+    workspace_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    workspace_context_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    thread_incarnation: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     task_id: Mapped[str] = mapped_column(String(64), index=True)
     # NULL identifies legacy history or direct inserts without a parent task.

@@ -44,10 +44,16 @@ from app.gateway.services import (
     strip_server_owned_state_metadata,
 )
 from app.gateway.utils import sanitize_log_param
+from app.gateway.workspaces.checkpoints import capture_checkpoint_thread_identity, commit_checkpoint_write, require_unallocated_checkpoint_id
+from app.gateway.workspaces.deletion import delete_private_thread
+from app.gateway.workspaces.dependencies import workspace_resource_scope
 from deerflow.agents.thread_state import THREAD_STATE_REDUCER_FIELDS
+from deerflow.authz.workspace import get_current_workspace
 from deerflow.config.paths import Paths, get_paths
 from deerflow.config.summarization_config import ContextSize
 from deerflow.persistence.thread_meta import PROJECT_FILTER_UNSET, THREAD_ARCHIVED_METADATA_KEY, THREAD_PINNED_METADATA_KEY, THREAD_PROJECT_METADATA_KEY, ThreadOwnershipConflictError
+from deerflow.persistence.thread_meta.base import THREAD_DELETION_METADATA_KEY
+from deerflow.persistence.workspaces.sql import WorkspaceAccessDenied
 from deerflow.runtime import ThreadOperationKind, serialize_channel_values_for_api
 from deerflow.runtime.checkpoint_mode import CheckpointModeMismatchError, CheckpointModeReconfigurationError
 from deerflow.runtime.checkpoint_state import graph_reducer_channels, graph_state_schema, graph_writable_channels
@@ -117,7 +123,9 @@ def _checkpoint_mode_http_error(exc: Exception, thread_id: str) -> HTTPException
 # the auth contextvar; this list closes the metadata-blob echo gap.
 # ``deerflow_origin`` marks a thread the server created for a schedule or an
 # extension; only the server sets it (``create_thread`` below, run admission).
-_SERVER_RESERVED_METADATA_KEYS: frozenset[str] = frozenset({"owner_id", "user_id", THREAD_PROJECT_METADATA_KEY, DEERFLOW_ORIGIN_KEY})
+_SERVER_RESERVED_METADATA_KEYS: frozenset[str] = frozenset(
+    {"owner_id", "user_id", "workspace_id", "actor_user_id", "workspace_context", "membership_version", "policy_version", THREAD_PROJECT_METADATA_KEY, DEERFLOW_ORIGIN_KEY, THREAD_DELETION_METADATA_KEY}
+)
 _SIDECAR_METADATA_KEY = "deerflow_sidecar"
 _BRANCH_METADATA_KEY = "deerflow_branch"
 _BRANCH_TITLE_SEQUENCE_METADATA_KEY = "branch_title_sequence"
@@ -691,7 +699,7 @@ def _derive_thread_status(snapshot: Any, pending_writes: list[Any], *, fallback_
     return "idle"
 
 
-async def _ensure_thread_for_goal(thread_id: str, request: Request) -> None:
+async def _ensure_thread_for_goal(thread_id: str, request: Request, *, metadata_only: bool = False) -> None:
     """Ensure a thread_meta row and root checkpoint exist for goal commands."""
     from app.gateway.deps import get_thread_store
 
@@ -708,12 +716,24 @@ async def _ensure_thread_for_goal(thread_id: str, request: Request) -> None:
                 await thread_store.update_owner(thread_id, thread_owner_user_id, user_id=None)
             record = await thread_store.get(thread_id, **thread_owner_kwargs)
     if record is None:
+        await require_unallocated_checkpoint_id(request, thread_id)
         try:
             await thread_store.create(thread_id, metadata={}, **thread_owner_kwargs)
+        except IntegrityError:
+            if get_current_workspace() is None:
+                raise
+            # Concurrent same-scope creation is reusable; a global ID owned by
+            # another space is never claimed or exposed to this request.
+            if await thread_store.get(thread_id, **thread_owner_kwargs) is None:
+                raise HTTPException(status_code=404, detail="Thread not found") from None
+        except WorkspaceAccessDenied:
+            raise
         except Exception:
             logger.exception("Failed to create thread_meta for goal thread %s", sanitize_log_param(thread_id))
             raise HTTPException(status_code=500, detail="Failed to create thread") from None
 
+    if metadata_only:
+        return
     try:
         await ensure_thread_checkpoint(checkpointer, thread_id)
     except Exception:
@@ -727,8 +747,19 @@ async def _ensure_thread_for_goal(thread_id: str, request: Request) -> None:
 
 
 @router.delete("/{thread_id}", response_model=ThreadDeleteResponse)
-@require_permission("threads", "delete", owner_check=True, require_existing=True)
+@workspace_resource_scope()
+@require_permission("threads", "delete")
 async def delete_thread_data(thread_id: str, request: Request) -> ThreadDeleteResponse:
+    if get_current_workspace() is not None:
+        try:
+            return ThreadDeleteResponse.model_validate(await delete_private_thread(request, thread_id))
+        except ConflictError:
+            raise HTTPException(status_code=409, detail="Thread has work in flight. Delete it after the work finishes.") from None
+    return await _delete_thread_data_authorized(thread_id=thread_id, request=request)
+
+
+@require_permission("threads", "delete", owner_check=True, require_existing=True)
+async def _delete_thread_data_authorized(thread_id: str, request: Request) -> ThreadDeleteResponse:
     """Delete local persisted filesystem data for a thread.
 
     Cleans DeerFlow-managed thread directories, removes checkpoint data,
@@ -930,6 +961,7 @@ def _existing_thread_response(thread_id: str, record: dict) -> ThreadResponse:
 
 
 @router.post("", response_model=ThreadResponse)
+@workspace_resource_scope()
 @require_permission("threads", "write")
 async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadResponse:
     """Create a new thread.
@@ -958,6 +990,8 @@ async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadRe
     existing_record = await _resolve_existing_thread(thread_store, thread_id, thread_owner_user_id, thread_owner_kwargs)
     if existing_record is not None:
         return _existing_thread_response(thread_id, existing_record)
+
+    await require_unallocated_checkpoint_id(request, thread_id)
 
     # Write thread_meta so the thread appears in /threads/search immediately
     from deerflow.persistence.projects import ProjectNotAssignableError
@@ -989,9 +1023,15 @@ async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadRe
         existing_record = await _resolve_existing_thread(thread_store, thread_id, thread_owner_user_id, thread_owner_kwargs)
         if existing_record is not None:
             return _existing_thread_response(thread_id, existing_record)
+        if get_current_workspace() is not None:
+            # IDs are globally unique. A collision outside this trusted scope
+            # must neither claim the row nor reveal it as a server error.
+            raise HTTPException(status_code=404, detail="Thread not found") from None
         # A duplicate-key error with no row we can read back is a real failure.
         logger.exception("Failed to write thread_meta for %s", sanitize_log_param(thread_id))
         raise HTTPException(status_code=500, detail="Failed to create thread")
+    except WorkspaceAccessDenied:
+        raise
     except Exception:
         # Any non-race failure must surface, not be silently swallowed as a 200.
         logger.exception("Failed to write thread_meta for %s", sanitize_log_param(thread_id))
@@ -1008,7 +1048,23 @@ async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadRe
             **metadata,
             "created_at": now,
         }
-        await checkpointer.aput(config, empty_checkpoint(), ckpt_metadata, {})
+
+        async def initialize_checkpoint():
+            if get_current_workspace() is not None and await checkpointer.aget_tuple(config) is not None:
+                # An admitted same-owner goal can have initialized this new
+                # thread while allocation was completing. Preserve its state.
+                return
+            await checkpointer.aput(config, empty_checkpoint(), ckpt_metadata, {})
+
+        if get_current_workspace() is not None:
+            async with reserve_checkpoint_write(request, thread_id, user_id=get_effective_user_id()):
+                await commit_checkpoint_write(request, thread_id, incarnation=created_record.get("incarnation"), commit=initialize_checkpoint)
+        else:
+            await initialize_checkpoint()
+    except ConflictError:
+        raise HTTPException(status_code=409, detail="Thread has work in flight. Retry creation after it finishes.") from None
+    except (HTTPException, WorkspaceAccessDenied):
+        raise
     except Exception:
         logger.exception("Failed to create checkpoint for thread %s", sanitize_log_param(thread_id))
         raise HTTPException(status_code=500, detail="Failed to create thread")
@@ -1022,6 +1078,7 @@ async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadRe
 
 
 @router.post("/{thread_id}/branches", response_model=ThreadBranchResponse)
+@workspace_resource_scope(private_thread_read=True)
 @require_permission("threads", "write", owner_check=True, require_existing=True)
 async def branch_thread(thread_id: ThreadId, body: ThreadBranchRequest, request: Request) -> ThreadBranchResponse:
     """Create a new main-thread branch from a completed assistant turn."""
@@ -1049,6 +1106,8 @@ async def _branch_thread_with_reservation(
     from app.gateway.deps import get_thread_store
 
     thread_store = get_thread_store(request)
+    scoped = get_current_workspace() is not None
+    source_incarnation = await capture_checkpoint_thread_identity(request, thread_id)
 
     source_record = await thread_store.get(thread_id)
     if source_record is None:
@@ -1159,28 +1218,42 @@ async def _branch_thread_with_reservation(
         "created_at": now,
     }
     new_config.setdefault("metadata", {}).update(checkpoint_metadata_updates)
-    try:
-        head_config = new_config
-        if replay_base_tuple is not None:
-            head_config = await branch_accessor.aupdate(
-                new_config,
-                branch_values(replay_base_tuple),
+
+    async def _write_branch_checkpoints() -> None:
+        try:
+            head_config = new_config
+            if replay_base_tuple is not None:
+                head_config = await branch_accessor.aupdate(
+                    new_config,
+                    branch_values(replay_base_tuple),
+                    as_node="branch",
+                )
+                head_config.setdefault("metadata", {}).update(checkpoint_metadata_updates)
+            await branch_accessor.aupdate(
+                head_config,
+                branch_values(snapshot),
                 as_node="branch",
             )
-            head_config.setdefault("metadata", {}).update(checkpoint_metadata_updates)
-        await branch_accessor.aupdate(
-            head_config,
-            branch_values(snapshot),
-            as_node="branch",
-        )
-    except _CHECKPOINT_MODE_ERRORS as exc:
-        raise _checkpoint_mode_http_error(exc, new_thread_id) from exc
-    except Exception:
-        logger.exception("Failed to write branch checkpoint for thread %s", sanitize_log_param(new_thread_id))
-        raise HTTPException(status_code=500, detail="Failed to create branch") from None
+        except _CHECKPOINT_MODE_ERRORS as exc:
+            raise _checkpoint_mode_http_error(exc, new_thread_id) from exc
+        except Exception:
+            logger.exception("Failed to write branch checkpoint for thread %s", sanitize_log_param(new_thread_id))
+            raise HTTPException(status_code=500, detail="Failed to create branch") from None
 
     async def _write_branch_row(project_id: str | None) -> None:
         try:
+            if scoped:
+                await thread_store.publish_branch_from_private_source(
+                    thread_id,
+                    source_incarnation,
+                    new_thread_id,
+                    publish=_write_branch_checkpoints,
+                    assistant_id=source_record.get("assistant_id"),
+                    display_name=display_name,
+                    metadata=branch_metadata,
+                    project_id=project_id,
+                )
+                return
             await thread_store.create(
                 new_thread_id,
                 assistant_id=source_record.get("assistant_id"),
@@ -1189,11 +1262,19 @@ async def _branch_thread_with_reservation(
                 project_id=project_id,
                 **thread_owner_kwargs,
             )
-        except ProjectNotAssignableError:
+        except (ProjectNotAssignableError, WorkspaceAccessDenied, HTTPException):
             raise
         except Exception:
             logger.exception("Failed to write branch thread_meta for %s", sanitize_log_param(new_thread_id))
             raise HTTPException(status_code=500, detail="Failed to create branch") from None
+
+    if scoped:
+        await require_unallocated_checkpoint_id(request, new_thread_id)
+        # This generated private directory has no published metadata yet.
+        # Copy outside SQL writer locks and drain before deciding publication.
+        workspace_clone_mode = await await_drained(_copy_branch_user_data(thread_id, new_thread_id)) if branch_from_latest_turn else "skipped_historical_turn"
+    else:
+        await _write_branch_checkpoints()
 
     try:
         await _write_branch_row(source_project_id)
@@ -1227,10 +1308,11 @@ async def _branch_thread_with_reservation(
         logger.exception("Failed to seed branch history run-events for thread %s", sanitize_log_param(new_thread_id))
         history_seed_mode = "failed"
 
-    if branch_from_latest_turn:
-        workspace_clone_mode = await _copy_branch_user_data(thread_id, new_thread_id)
-    else:
-        workspace_clone_mode = "skipped_historical_turn"
+    if not scoped:
+        if branch_from_latest_turn:
+            workspace_clone_mode = await _copy_branch_user_data(thread_id, new_thread_id)
+        else:
+            workspace_clone_mode = "skipped_historical_turn"
     return ThreadBranchResponse(
         thread_id=new_thread_id,
         parent_thread_id=thread_id,
@@ -1242,6 +1324,7 @@ async def _branch_thread_with_reservation(
 
 
 @router.post("/search", response_model=list[ThreadResponse])
+@workspace_resource_scope()
 @require_permission("threads", "read")
 async def search_threads(body: ThreadSearchRequest, request: Request) -> list[ThreadResponse]:
     """Search and list threads.
@@ -1305,6 +1388,7 @@ async def _unread_thread_ids(request: Request, thread_ids: list[str]) -> set[str
 
 
 @router.post("/{thread_id}/read", response_model=ThreadReadResponse)
+@workspace_resource_scope()
 @require_permission("threads", "read", owner_check=True, require_existing=True)
 async def mark_thread_read(thread_id: ThreadId, request: Request) -> ThreadReadResponse:
     """Mark the thread read for the caller (per user, monotonic across devices).
@@ -1316,11 +1400,12 @@ async def mark_thread_read(thread_id: ThreadId, request: Request) -> ThreadReadR
     if repo is None:
         raise HTTPException(status_code=503, detail="Thread read state is not available")
     user_id = str(get_effective_user_id())
-    await repo.mark_read(user_id=user_id, thread_id=thread_id)
+    await await_drained(repo.mark_read(user_id=user_id, thread_id=thread_id))
     return ThreadReadResponse(unread=False, read_version=await repo.read_version(user_id=user_id))
 
 
 @router.patch("/{thread_id}", response_model=ThreadResponse)
+@workspace_resource_scope()
 @require_permission("threads", "write", owner_check=True, require_existing=True)
 async def patch_thread(thread_id: ThreadId, body: ThreadPatchRequest, request: Request) -> ThreadResponse:
     """Merge metadata into a thread record."""
@@ -1338,6 +1423,8 @@ async def patch_thread(thread_id: ThreadId, body: ThreadPatchRequest, request: R
     touch = not _is_organization_metadata_patch(body.metadata)
     try:
         await thread_store.update_metadata(thread_id, body.metadata, touch=touch)
+    except WorkspaceAccessDenied:
+        raise
     except Exception:
         logger.exception("Failed to patch thread %s", sanitize_log_param(thread_id))
         raise HTTPException(status_code=500, detail="Failed to update thread")
@@ -1360,6 +1447,7 @@ class ThreadMoveRequest(BaseModel):
 
 
 @router.post("/{thread_id}/move", response_model=ThreadResponse)
+@workspace_resource_scope()
 @require_permission("threads", "write", owner_check=True, require_existing=True)
 async def move_thread(thread_id: ThreadId, body: ThreadMoveRequest, request: Request) -> ThreadResponse:
     """Move a thread between projects (or out). Organizational only: history,
@@ -1381,6 +1469,7 @@ async def move_thread(thread_id: ThreadId, body: ThreadMoveRequest, request: Req
 
 
 @router.get("/{thread_id}", response_model=ThreadResponse)
+@workspace_resource_scope(private_thread_read=True)
 @require_permission("threads", "read", owner_check=True)
 async def get_thread(thread_id: ThreadId, request: Request) -> ThreadResponse:
     """Get thread info from metadata plus the graph's materialized state."""
@@ -1389,6 +1478,8 @@ async def get_thread(thread_id: ThreadId, request: Request) -> ThreadResponse:
     thread_store = get_thread_store(request)
     checkpointer = get_checkpointer(request)
     record: dict | None = await thread_store.get(thread_id)
+    if record is None and get_current_workspace() is not None:
+        raise HTTPException(status_code=404, detail="Thread not found")
     try:
         accessor, config = await abuild_checkpoint_state_accessor(
             request,
@@ -1434,6 +1525,7 @@ async def get_thread(thread_id: ThreadId, request: Request) -> ThreadResponse:
 
 
 @router.get("/{thread_id}/goal", response_model=ThreadGoalResponse)
+@workspace_resource_scope(private_thread_read=True)
 @require_permission("threads", "read", owner_check=True)
 async def get_thread_goal(thread_id: ThreadId, request: Request) -> ThreadGoalResponse:
     """Return the active Claude-style goal for a thread, if any."""
@@ -1446,44 +1538,70 @@ async def get_thread_goal(thread_id: ThreadId, request: Request) -> ThreadGoalRe
     return ThreadGoalResponse(goal=goal)
 
 
-@router.put("/{thread_id}/goal", response_model=ThreadGoalResponse)
 @require_permission("threads", "write", owner_check=True)
-async def set_thread_goal(thread_id: ThreadId, body: ThreadGoalRequest, request: Request) -> ThreadGoalResponse:
-    """Set or replace the active goal for a thread.
-
-    ``/chats/new`` pages already hold a generated UUID before the first run, so
-    this endpoint creates the missing thread checkpoint on demand.
-    """
+async def _set_thread_goal_authorized(thread_id: ThreadId, goal: dict[str, Any], request: Request, incarnation: str | None) -> ThreadGoalResponse:
+    """Check native ownership after scoped metadata-only new-chat allocation."""
     checkpointer = get_checkpointer(request)
+    async with reserve_checkpoint_write(request, thread_id, user_id=get_effective_user_id()):
+        if get_current_workspace() is None:
+            await _ensure_thread_for_goal(thread_id, request)
+        await commit_checkpoint_write(
+            request,
+            thread_id,
+            incarnation=incarnation,
+            commit=lambda: write_thread_goal(checkpointer, thread_id, goal, as_node="goal", create_if_missing=True),
+        )
+    return ThreadGoalResponse(goal=goal)
+
+
+@router.put("/{thread_id}/goal", response_model=ThreadGoalResponse)
+@workspace_resource_scope()
+@require_permission("threads", "write")
+async def set_thread_goal(thread_id: ThreadId, body: ThreadGoalRequest, request: Request) -> ThreadGoalResponse:
+    """Set a goal, preserving new-chat UUID creation before the first run."""
     try:
         goal = build_goal_state(body.objective, max_continuations=body.max_continuations)
-        async with reserve_checkpoint_write(request, thread_id, user_id=get_effective_user_id()):
-            await _ensure_thread_for_goal(thread_id, request)
-            await write_thread_goal(checkpointer, thread_id, goal, as_node="goal", create_if_missing=True)
+        if get_current_workspace() is not None:
+            # Native scoped owner checks intentionally refuse missing rows.
+            # First allocate metadata under active space/write permission, then
+            # apply that unchanged owner check. No checkpoint bytes exist yet.
+            await _ensure_thread_for_goal(thread_id, request, metadata_only=True)
+        # Capture before the delegated owner check. That check may await SQL;
+        # a later read must not adopt a replacement conversation incarnation.
+        incarnation = await capture_checkpoint_thread_identity(request, thread_id)
+        return await _set_thread_goal_authorized(thread_id=thread_id, goal=goal, request=request, incarnation=incarnation)
+    except (HTTPException, WorkspaceAccessDenied):
+        raise
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except ConflictError:
         raise HTTPException(status_code=409, detail="Thread has a run in flight. Set the goal after the run finishes.") from None
-    except HTTPException:
-        raise
     except Exception:
         logger.exception("Failed to set goal for thread %s", sanitize_log_param(thread_id))
         raise HTTPException(status_code=500, detail="Failed to set thread goal") from None
-    return ThreadGoalResponse(goal=goal)
 
 
 @router.delete("/{thread_id}/goal", response_model=ThreadGoalResponse)
+@workspace_resource_scope(private_thread_read=True)
 @require_permission("threads", "write", owner_check=True)
 async def clear_thread_goal(thread_id: ThreadId, request: Request) -> ThreadGoalResponse:
     """Clear the active goal for a thread."""
     checkpointer = get_checkpointer(request)
+    incarnation = await capture_checkpoint_thread_identity(request, thread_id)
     try:
         async with reserve_checkpoint_write(request, thread_id, user_id=get_effective_user_id()):
-            await write_thread_goal(checkpointer, thread_id, None, as_node="goal")
+            await commit_checkpoint_write(
+                request,
+                thread_id,
+                incarnation=incarnation,
+                commit=lambda: write_thread_goal(checkpointer, thread_id, None, as_node="goal"),
+            )
     except ConflictError:
         raise HTTPException(status_code=409, detail="Thread has a run in flight. Clear the goal after the run finishes.") from None
     except LookupError:
         return ThreadGoalResponse(goal=None)
+    except (HTTPException, WorkspaceAccessDenied):
+        raise
     except Exception:
         logger.exception("Failed to clear goal for thread %s", sanitize_log_param(thread_id))
         raise HTTPException(status_code=500, detail="Failed to clear thread goal") from None
@@ -1504,9 +1622,17 @@ def _thread_compact_response(result: ThreadCompactionResult) -> ThreadCompactRes
 
 
 @router.post("/{thread_id}/compact", response_model=ThreadCompactResponse)
+@workspace_resource_scope(private_thread_read=True)
 @require_permission("threads", "write", owner_check=True, require_existing=True)
 async def compact_thread(thread_id: ThreadId, body: ThreadCompactRequest, request: Request) -> ThreadCompactResponse:
     """Manually summarize old thread context while preserving the visible history."""
+    incarnation = await capture_checkpoint_thread_identity(request, thread_id)
+    scoped_kwargs = {}
+    if get_current_workspace() is not None:
+        scoped_kwargs = {
+            "validate_scope": lambda: capture_checkpoint_thread_identity(request, thread_id),
+            "commit_update": lambda update: commit_checkpoint_write(request, thread_id, incarnation=incarnation, commit=update),
+        }
     # Compaction writes only base-schema channels (messages + summary_text);
     # every other channel — including middleware-contributed ones — is carried
     # forward by checkpoint fork inheritance, so the base-schema mutation
@@ -1530,6 +1656,7 @@ async def compact_thread(thread_id: ThreadId, body: ThreadCompactRequest, reques
                 user_id=get_effective_user_id(),
                 agent_name=body.agent_name,
                 model_name=body.model_name,
+                **scoped_kwargs,
             )
     except ConflictError:
         raise HTTPException(status_code=409, detail="Thread has a run in flight. Compact after the run finishes.") from None
@@ -1541,7 +1668,7 @@ async def compact_thread(thread_id: ThreadId, body: ThreadCompactRequest, reques
         raise HTTPException(status_code=500, detail="Failed to compact thread context.") from None
     except LookupError:
         raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found") from None
-    except HTTPException:
+    except (HTTPException, WorkspaceAccessDenied):
         raise
     except Exception:
         logger.exception("Failed to compact thread %s", sanitize_log_param(thread_id))
@@ -1551,6 +1678,7 @@ async def compact_thread(thread_id: ThreadId, body: ThreadCompactRequest, reques
 
 # ---------------------------------------------------------------------------
 @router.get("/{thread_id}/state", response_model=ThreadStateResponse)
+@workspace_resource_scope(private_thread_read=True)
 @require_permission("threads", "read", owner_check=True)
 async def get_thread_state(thread_id: ThreadId, request: Request) -> ThreadStateResponse:
     """Get the latest materialized graph state for a thread."""
@@ -1600,12 +1728,14 @@ async def get_thread_state(thread_id: ThreadId, request: Request) -> ThreadState
 
 
 @router.post("/{thread_id}/state", response_model=ThreadStateResponse)
+@workspace_resource_scope(private_thread_read=True)
 @require_permission("threads", "write", owner_check=True, require_existing=True)
 async def update_thread_state(thread_id: ThreadId, body: ThreadStateUpdateRequest, request: Request) -> ThreadStateResponse:
     """Replace selected thread-state fields through the materialized graph."""
     from app.gateway.deps import get_thread_store
 
     thread_store = get_thread_store(request)
+    incarnation = await capture_checkpoint_thread_identity(request, thread_id)
     # Validate external roles before materializing a graph or reserving a write.
     values = strip_server_owned_state_metadata(dict(body.values or {}))
     if body.checkpoint_id is not None:
@@ -1655,16 +1785,19 @@ async def update_thread_state(thread_id: ThreadId, body: ThreadStateUpdateReques
                 "configurable": dict(read_config.get("configurable", {})),
                 "metadata": checkpoint_agent_binding_metadata(source_metadata),
             }
-            updated_config = await accessor.aupdate(
-                update_config,
-                updates,
-                as_node=mutation_node,
+            updated_config = await commit_checkpoint_write(
+                request,
+                thread_id,
+                incarnation=incarnation,
+                commit=lambda: accessor.aupdate(update_config, updates, as_node=mutation_node),
             )
             snapshot = await accessor.aget(updated_config)
     except ConflictError:
         raise HTTPException(status_code=409, detail="Thread has a run in flight. Update state after the run finishes.") from None
     except _CHECKPOINT_MODE_ERRORS as exc:
         raise _checkpoint_mode_http_error(exc, thread_id) from exc
+    except (HTTPException, WorkspaceAccessDenied):
+        raise
     except Exception:
         logger.exception("Failed to update state for thread %s", sanitize_log_param(thread_id))
         raise HTTPException(status_code=500, detail="Failed to update thread state")
@@ -1800,6 +1933,7 @@ async def _persist_run_history_metadata_background(
 
 
 @router.post("/{thread_id}/history", response_model=list[HistoryEntry])
+@workspace_resource_scope(private_thread_read=True)
 @require_permission("threads", "read", owner_check=True)
 async def get_thread_history(
     thread_id: ThreadId,

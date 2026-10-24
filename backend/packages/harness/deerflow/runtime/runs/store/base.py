@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
+from deerflow.authz.workspace import WorkspaceContext
 from deerflow.utils.time import coerce_iso
 
 
@@ -34,6 +35,9 @@ class LeaseRenewal:
 
     renewed: bool
     cancel_action: str | None = None
+    # True only for a captured native workspace stop; cleanup is not a new
+    # execution grant and retains the owning lease through finalizers.
+    workspace_stop_requested: bool = False
 
 
 @dataclass(frozen=True)
@@ -118,6 +122,12 @@ def run_is_before_cursor(
 
 
 class RunStore(abc.ABC):
+    # Trusted provider capabilities, fixed by operator construction. A bound
+    # workspace must never authorize resident data through an unscoped store.
+    supports_workspace_reads: bool = False
+    supports_workspace_admission: bool = False
+    workspace_scope_required: bool = False
+
     async def list_changed(
         self,
         *,
@@ -232,14 +242,16 @@ class RunStore(abc.ABC):
         pass
 
     @abc.abstractmethod
-    async def start_run(self, run_id: str, *, owner_worker_id: str | None = None) -> bool:
+    async def start_run(self, run_id: str, *, owner_worker_id: str | None = None, user_id: str | None = None, thread_id: str | None = None, thread_incarnation: str | None = None, workspace_context: WorkspaceContext | None = None) -> bool:
         """Atomically transition a pending run to running.
 
         Returns ``False`` when the row is missing or no longer pending.
         """
         pass
 
-    async def transfer_pending(self, run_id: str, *, thread_id: str, user_id: str | None, expected_owner_worker_id: str, owner_worker_id: str, lease_expires_at: str | None) -> bool:
+    async def transfer_pending(
+        self, run_id: str, *, thread_id: str, user_id: str | None, expected_owner_worker_id: str, owner_worker_id: str, lease_expires_at: str | None, workspace_context: WorkspaceContext | None = None, thread_incarnation: str | None = None
+    ) -> bool:
         """CAS a pending admission to a trusted dispatcher or execution worker."""
         raise NotImplementedError
 
@@ -247,13 +259,15 @@ class RunStore(abc.ABC):
     async def delete(self, run_id: str) -> None:
         pass
 
-    async def delete_thread_operation(self, run_id: str, *, user_id: str | None) -> None:
+    async def delete_thread_operation(self, run_id: str, *, user_id: str | None, workspace_context=None, owner_worker_id: str | None = None) -> None:
         """Release an admitted thread operation for its recorded owner.
 
         The default keeps legacy stores compatible: older implementations only
         accepted ``run_id``. User-aware stores should override this method so
         cleanup never depends on ambient request context.
         """
+        if workspace_context is not None:
+            raise NotImplementedError("Workspace reservation cleanup requires a scope-aware persistent store")
         await self.delete(run_id)
 
     @abc.abstractmethod
@@ -446,6 +460,7 @@ class RunStore(abc.ABC):
         created_at: str | None = None,
         grace_seconds: int = 10,
         idempotency_key: str | None = None,
+        workspace_context: WorkspaceContext | None = None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """Atomically create an active thread operation with cross-process uniqueness.
 
@@ -457,6 +472,8 @@ class RunStore(abc.ABC):
         Returns ``(new_run_dict, claimed_run_dicts)``.
         Raises ``IntegrityError`` on conflict for ``reject`` strategy.
         """
+        if workspace_context is not None:
+            raise NotImplementedError("Legacy RunStore cannot persist workspace authority")
         legacy_impl = type(self).create_run_atomic
         if legacy_impl is RunStore.create_run_atomic:
             raise NotImplementedError("RunStore must implement create_thread_operation_atomic() or create_run_atomic()")

@@ -1,5 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 
+import { useWorkspaceLifetime } from "@/core/workspaces/context";
+
 import { fetchWorkspaceChanges } from "./api";
 import type { WorkspaceChangesResponse } from "./types";
 
@@ -31,6 +33,7 @@ export function useWorkspaceChanges({
   includeDiff?: boolean;
   enabled?: boolean;
 }) {
+  const lifetime = useWorkspaceLifetime();
   return useQuery<WorkspaceChangesResponse>({
     queryKey: workspaceChangesQueryKey(
       threadId,
@@ -38,16 +41,19 @@ export function useWorkspaceChanges({
       includeFiles,
       includeDiff,
     ),
-    queryFn: () => {
+    queryFn: ({ signal }) => {
       if (!threadId || !runId) {
         throw new Error("threadId and runId are required");
       }
-      return fetchWorkspaceChanges({
+      const input = {
         threadId,
         runId,
         includeFiles,
         includeDiff,
-      });
+      };
+      return lifetime
+        ? fetchWorkspaceChanges(input, { rest: lifetime.rest, signal })
+        : fetchWorkspaceChanges(input);
     },
     enabled: enabled && Boolean(threadId) && Boolean(runId),
     retry: false,

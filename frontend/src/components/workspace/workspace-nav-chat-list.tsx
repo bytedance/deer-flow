@@ -6,7 +6,6 @@ import {
   MessagesSquare,
   BlocksIcon,
 } from "lucide-react";
-import Link from "next/link";
 import { usePathname } from "next/navigation";
 
 import {
@@ -20,6 +19,7 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import Link from "@/components/workspace/workspace-link";
 import { useAgentsApiEnabled } from "@/core/agents";
 import { useI18n } from "@/core/i18n/hooks";
 

@@ -2,6 +2,8 @@ import { useQuery } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useThread } from "@/components/workspace/messages/context";
+import { useWorkspaceLifetime } from "@/core/workspaces/context";
+import { useCurrentWorkspaceView } from "@/core/workspaces/view-lifetime";
 
 import { loadArtifactContent, loadArtifactContentFromToolCall } from "./loader";
 
@@ -18,6 +20,10 @@ export function useArtifactContent({
     return filepath.startsWith("write-file:");
   }, [filepath]);
   const { thread, isMock } = useThread();
+  const lifetime = useWorkspaceLifetime();
+  const isCurrent = useCurrentWorkspaceView(
+    JSON.stringify([threadId, filepath]),
+  );
   const [fullContentSelection, setFullContentSelection] = useState<{
     filepath: string;
     threadId: string;
@@ -34,13 +40,16 @@ export function useArtifactContent({
 
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: ["artifact", filepath, threadId, isMock, fullContentRequested],
-    queryFn: () => {
-      return loadArtifactContent({
+    queryFn: ({ signal }) => {
+      const input = {
         filepath,
         threadId,
         isMock,
         full: fullContentRequested,
-      });
+      };
+      return lifetime
+        ? loadArtifactContent(input, { rest: lifetime.rest, signal })
+        : loadArtifactContent(input);
     },
     enabled,
     staleTime: 0,
@@ -59,8 +68,8 @@ export function useArtifactContent({
   }, [enabled, isWriteFile, refetch, thread.isLoading]);
 
   const loadFullContent = useCallback(() => {
-    setFullContentSelection({ filepath, threadId });
-  }, [filepath, threadId]);
+    if (isCurrent()) setFullContentSelection({ filepath, threadId });
+  }, [filepath, threadId, isCurrent]);
 
   return {
     content: isWriteFile ? content : data?.content,
@@ -93,6 +102,10 @@ export function useStandaloneArtifactContent({
   threadId: string;
   isMock?: boolean;
 }) {
+  const lifetime = useWorkspaceLifetime();
+  const isCurrent = useCurrentWorkspaceView(
+    JSON.stringify([threadId, filepath]),
+  );
   const [fullContentSelection, setFullContentSelection] = useState<{
     filepath: string;
     threadId: string;
@@ -103,20 +116,24 @@ export function useStandaloneArtifactContent({
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["artifact", filepath, threadId, isMock, fullContentRequested],
-    queryFn: () =>
-      loadArtifactContent({
+    queryFn: ({ signal }) => {
+      const input = {
         filepath,
         threadId,
         isMock,
         full: fullContentRequested,
-      }),
+      };
+      return lifetime
+        ? loadArtifactContent(input, { rest: lifetime.rest, signal })
+        : loadArtifactContent(input);
+    },
     staleTime: 0,
     refetchOnWindowFocus: true,
   });
 
   const loadFullContent = useCallback(() => {
-    setFullContentSelection({ filepath, threadId });
-  }, [filepath, threadId]);
+    if (isCurrent()) setFullContentSelection({ filepath, threadId });
+  }, [filepath, threadId, isCurrent]);
 
   return {
     content: data?.content,

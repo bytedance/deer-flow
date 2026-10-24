@@ -9,6 +9,8 @@ recovery; this hook does not create a second graph or execution runtime.
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from contextlib import contextmanager
+from dataclasses import asdict, replace
 
 from deerflow.runtime.runs.manager import RunManager, RunRecord, RunStartupError
 
@@ -39,65 +41,132 @@ async def attach_native_admission(request, manager: RunManager, record: RunRecor
         raise
 
 
+@contextmanager
+def native_admission_workspace(record):
+    """Bind a private admitted Run snapshot, never the current UI selection.
+
+    This shape check grants no new authority: scoped repository reads and the
+    pending-owner CAS still reauthorize membership and the original generation.
+    """
+    from deerflow.authz.workspace import reset_current_workspace, set_current_workspace
+
+    RunManager._workspace_transition_kwargs(record)
+    token = set_current_workspace(record.workspace_context) if record.workspace_context is not None else None
+    try:
+        yield record.workspace_context
+    finally:
+        if token is not None:
+            reset_current_workspace(token)
+
+
 async def make_native_snapshot(request, record, *, run_ctx, body, config, graph_input, admitted_knowledge_scope, scope_assistant_id, scheduled_task_runtime, require_existing_thread, transport_node=None, transport_secret=None):
     """Capture admission output, never live request secrets or closure objects."""
-    from langchain_core.messages import messages_to_dict
-    from langgraph.types import Command
+    with native_admission_workspace(record):
+        from langchain_core.messages import messages_to_dict
+        from langgraph.types import Command
 
-    from app.gateway.services import _ensure_thread_metadata
-    from deerflow.runtime.goal import read_thread_goal
-    from deerflow.runtime.secret_context import redact_config_secrets
+        from app.gateway.services import _ensure_thread_metadata
+        from deerflow.runtime.goal import read_thread_goal
+        from deerflow.runtime.secret_context import redact_config_secrets
 
-    metadata = await _ensure_thread_metadata(run_ctx, record, owner_user_id=record.user_id, require_existing_thread=require_existing_thread)
-    if metadata is None or not metadata.get("incarnation"):
-        raise RunStartupError("Remote native execution requires thread incarnation")
-    if isinstance(graph_input, Command):
-        encoded_input = {"command": {"resume": graph_input.resume}}
-    else:
-        encoded_input = {"input": {**graph_input, "messages": messages_to_dict(graph_input.get("messages", []))}} if graph_input is not None else {"input": None}
-    from app.gateway.conversation_access import _source_id
+        metadata = await _ensure_thread_metadata(run_ctx, record, owner_user_id=record.user_id, require_existing_thread=require_existing_thread)
+        if metadata is None or not metadata.get("incarnation"):
+            raise RunStartupError("Remote native execution requires thread incarnation")
+        if isinstance(graph_input, Command):
+            encoded_input = {"command": {"resume": graph_input.resume}}
+        else:
+            encoded_input = {"input": {**graph_input, "messages": messages_to_dict(graph_input.get("messages", []))}} if graph_input is not None else {"input": None}
+        from app.gateway.conversation_access import _source_id
 
-    body_snapshot = body.model_dump(mode="json", exclude={"input", "config", "metadata", "context"})
-    body_snapshot["conversation_references"] = [_source_id(value, str(request.url)) for value in body.conversation_references or []]
-    conversation_sources = body_snapshot["conversation_references"] if run_ctx.conversation_reader is not None else []
-    if not conversation_sources and run_ctx.conversation_reader is not None and scheduled_task_runtime is not None:
-        previous = record.metadata.get("scheduled_previous_thread_id")
-        if isinstance(previous, str):
-            conversation_sources = [previous]
-    snapshot = {
-        "run_id": record.run_id,
-        "user_id": record.user_id,
-        "thread_id": record.thread_id,
-        "incarnation": metadata["incarnation"],
-        "assistant_id": record.assistant_id,
-        "kwargs": record.kwargs,
-        "metadata": record.metadata,
-        "goal": await read_thread_goal(run_ctx.checkpointer, record.thread_id),
-        "execution": {
-            **encoded_input,
-            "config": redact_config_secrets(config),
-            "body": body_snapshot,
-            "conversation_sources": conversation_sources,
-            "knowledge_scope": admitted_knowledge_scope,
-            "scope_assistant_id": scope_assistant_id,
-            "scheduled_task_runtime": scheduled_task_runtime,
-            "dependency_continuation": run_ctx.dependency_continuation,
-            "require_existing_thread": require_existing_thread,
-        },
-    }
+        body_snapshot = body.model_dump(mode="json", exclude={"input", "config", "metadata", "context"})
+        body_snapshot["conversation_references"] = [_source_id(value, str(request.url)) for value in body.conversation_references or []]
+        conversation_sources = body_snapshot["conversation_references"] if run_ctx.conversation_reader is not None else []
+        if not conversation_sources and run_ctx.conversation_reader is not None and scheduled_task_runtime is not None:
+            previous = record.metadata.get("scheduled_previous_thread_id")
+            if isinstance(previous, str):
+                conversation_sources = [previous]
+        snapshot = {
+            "run_id": record.run_id,
+            "user_id": record.user_id,
+            "thread_id": record.thread_id,
+            "incarnation": metadata["incarnation"],
+            "assistant_id": record.assistant_id,
+            "kwargs": record.kwargs,
+            "metadata": record.metadata,
+            "goal": await read_thread_goal(run_ctx.checkpointer, record.thread_id),
+            "execution": {
+                **encoded_input,
+                "config": redact_config_secrets(config),
+                "body": body_snapshot,
+                "conversation_sources": conversation_sources,
+                "knowledge_scope": admitted_knowledge_scope,
+                "scope_assistant_id": scope_assistant_id,
+                "scheduled_task_runtime": scheduled_task_runtime,
+                "dependency_continuation": run_ctx.dependency_continuation,
+                "require_existing_thread": require_existing_thread,
+            },
+        }
 
-    if transport_secret is not None:
-        from ecs_executor.agent_dispatch import seal_native_secrets
+        if record.workspace_context is not None:
+            context = record.workspace_context
+            if run_ctx.workspace_context != context or metadata.get("workspace_id") != context.workspace_id or metadata.get("user_id") != record.user_id or metadata["incarnation"] != record.thread_incarnation:
+                raise RunStartupError("Remote native snapshot differs from its captured admission")
+            from deerflow.persistence.workspaces.run_control import NativeRunStopTarget
 
-        snapshot["secret_carrier"] = seal_native_secrets(snapshot, transport_node, transport_secret, config.get("context"))
-    return snapshot
+            snapshot.update(workspace_id=context.workspace_id, workspace_context=asdict(context), created_at=NativeRunStopTarget.from_record(record).created_at)
+
+        if transport_secret is not None:
+            from ecs_executor.agent_dispatch import seal_native_secrets
+
+            snapshot["secret_carrier"] = seal_native_secrets(snapshot, transport_node, transport_secret, config.get("context"))
+        return snapshot
+
+
+async def verify_native_launch_for_receiver(app, job, token, secret):
+    """Resolve pending launch authority from native SQL, never transport scope.
+
+    The signed values are locators/expectations only. Native control storage
+    independently resolves the immutable target and live authorization facts.
+    The later pending-owner CAS rechecks those facts under native locks.
+    """
+    from ecs_executor.agent_dispatch import verify_native_launch
+
+    native = job["native"]
+    store = getattr(app.state, "run_store", None)
+    scoped = getattr(store, "workspace_scope_required", False) or any(value.get(key) is not None for value in (job, native) for key in ("workspace_id", "workspace_context"))
+    if not scoped:
+        return verify_native_launch(job, token, secret), None
+    inspect = getattr(store, "inspect_dispatch_control", None)
+    if inspect is None:
+        raise ValueError("Native launch capability requires native control storage")
+    identity = {key: native.get(key) for key in ("run_id", "user_id", "workspace_id", "thread_id", "incarnation", "workspace_context", "created_at")}
+    control = await inspect(identity=identity, owner_worker_id="dispatch:" + job["id"])
+    if control is None or control["status"] != "pending" or control["cancel_action"] is not None or not control["live"] or not control["lease_active"] or control["stop_recorded"] or control["lifetime_completed"]:
+        raise ValueError("Native launch capability no longer has pending authority")
+    context = control["target"].workspace_context
+    return verify_native_launch(job, token, secret, expected_workspace_context=context), context
 
 
 async def adopt_native_run(app, job, token, secret, *, admission_check=None):
+    """Bind independently resolved scope through reads, owner CAS and task capture."""
+    from deerflow.authz.workspace import get_current_workspace, reset_current_workspace, set_current_workspace
+
+    native, context = await verify_native_launch_for_receiver(app, job, token, secret)
+    if context is None:
+        if get_current_workspace() is not None:
+            raise ValueError("Native launch capability cannot inherit an ambient workspace")
+        return await _adopt_native_run(app, job, native, secret, None, admission_check=admission_check)
+    scope_token = set_current_workspace(context)
+    try:
+        return await _adopt_native_run(app, job, native, secret, context, admission_check=admission_check)
+    finally:
+        reset_current_workspace(scope_token)
+
+
+async def _adopt_native_run(app, job, native, secret, workspace_context, *, admission_check=None):
     """Trusted worker entry: signed authority + canonical durable row + owner CAS."""
     from types import SimpleNamespace
 
-    from ecs_executor.agent_dispatch import verify_native_launch
     from langchain_core.messages import messages_from_dict
     from langgraph.types import Command
 
@@ -107,13 +176,12 @@ async def adopt_native_run(app, job, token, secret, *, admission_check=None):
     from deerflow.runtime.goal import read_thread_goal
     from deerflow.utils.assembly_io import run_assembly
 
-    native = verify_native_launch(job, token, secret)
     manager = app.state.run_manager
     original = await manager.get(native["run_id"], user_id=native["user_id"])
     if original is None or any(getattr(original, key) != native[key] for key in ("thread_id", "user_id", "assistant_id", "kwargs", "metadata")):
         raise ValueError("Native admission snapshot mismatch")
     request = SimpleNamespace(app=app, headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: native["user_id"]}, state=SimpleNamespace(user=get_internal_user(), auth_source=AUTH_SOURCE_INTERNAL), cookies={})
-    ctx = services.get_run_context(request)
+    ctx = replace(services.get_run_context(request), workspace_context=workspace_context)
     thread = await ctx.thread_store.get(native["thread_id"], user_id=native["user_id"])
     if thread is None or thread.get("incarnation") != native["incarnation"] or not await ctx.thread_store.check_access(native["thread_id"], native["user_id"], require_existing=True):
         raise ValueError("Native admission thread incarnation mismatch")
@@ -125,8 +193,6 @@ async def adopt_native_run(app, job, token, secret, *, admission_check=None):
 
     execution = deepcopy(native["execution"])
     if execution.get("dependency_continuation") is not None:
-        from dataclasses import replace
-
         ctx = replace(ctx, dependency_continuation=execution["dependency_continuation"])
     request_secrets = open_native_secrets(native, job["node_id"], secret, native.get("secret_carrier"))
     if request_secrets:
@@ -139,8 +205,6 @@ async def adopt_native_run(app, job, token, secret, *, admission_check=None):
     if owner is None and native["user_id"] == services.AUTH_DISABLED_USER_ID and services.is_auth_disabled():
         owner = services.get_auth_disabled_user()
     if execution.get("conversation_sources"):
-        from dataclasses import replace
-
         from app.gateway.conversation_access import _prepare_owner_bound_conversation_reader
 
         if owner is None or "runs:read" not in await services.resolve_route_permissions(owner, is_internal=False):
@@ -155,13 +219,17 @@ async def adopt_native_run(app, job, token, secret, *, admission_check=None):
 
         ctx = replace(ctx, conversation_reader=conversation_reader)
     if execution["scheduled_task_runtime"] is not None:
-        from dataclasses import replace
-
         ctx = replace(ctx, scheduled_task_runtime=execution["scheduled_task_runtime"])
     factory = await run_assembly(services.resolve_agent_factory, native["assistant_id"])
     if admission_check is not None:
         admission_check()
-    record = await manager.adopt_pending(native["run_id"], thread_id=native["thread_id"], user_id=native["user_id"], expected_owner_worker_id="dispatch:" + job["id"])
+    record = await manager.adopt_pending(native["run_id"], thread_id=native["thread_id"], user_id=native["user_id"], expected_owner_worker_id="dispatch:" + job["id"], workspace_context=workspace_context)
+
+    from deerflow.sandbox.execution_capture import current_execution_capture
+
+    capture = current_execution_capture()
+    if capture is not None:
+        capture.bind_execution(record)
 
     async def execute():
         from deerflow.runtime.user_context import reset_current_user, set_current_user

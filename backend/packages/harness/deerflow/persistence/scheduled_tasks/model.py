@@ -12,6 +12,11 @@ from deerflow.persistence.base import Base
 class ScheduledTaskRow(Base):
     __tablename__ = "scheduled_tasks"
 
+    workspace_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    workspace_context_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    thread_incarnation: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    origin_thread_incarnation: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     user_id: Mapped[str] = mapped_column(String(64), index=True)
     thread_id: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)

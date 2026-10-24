@@ -266,3 +266,309 @@ with a disposition link; no disabled-feature bypass or local fallback exists.
 Native central dispatch requires the dedicated executor database's current revision
 and shape; startup never calls `create_all`. Workers require the same schema
 capability over their existing authenticated outbound channel.
+
+Workspace identity (`workspace_id`, `actor_user_id`, `workspace_context`, `membership_version`,
+`policy_version`) is server-owned. Native run admission clears client values
+from both context and configurable, including unauthenticated early returns.
+This reservation does not yet enable multi-tenant membership authorization.
+See `docs/tenant-entrypoint-inventory.md` at the repository root.
+
+`deerflow.authz.workspace` defines the immutable four-field identity contract
+and task-local binding. Shape/actor validation is not membership authorization;
+only trusted admission may bind it after live database checks. Transport requires
+separate authentication, version checks and reauthorization.
+
+`workspaces/service.py` resolves immutable workspace identity from live native
+SQL and intersects membership/version, native credential permissions and the
+resource ACL. Platform-admin status cannot bypass it. Browser management
+`workspaces/dependencies.py` requires the native session source and matching
+AuthContext; selector headers never identify the actor. PAT/internal bindings
+remain separate work. Workspace routers are registered by create_app(); native
+bootstrap resolves workspace_service before recovery. Disabled mode leaves it None (503).
+Persistent async writes drain with await_drained; no synchronous write worker is
+created for the native async repository. See docs/tenant-workspaces-api.md and
+actual JWT/RBAC/CSRF tests. Resource filtering, request/task binding, publication
+locks, startup gates and complete entrypoint coverage remain mandatory.
+
+Member-control adapters enforce owner/admin/member transitions through locked
+SQL writes with expected server scope versions. Ownership transfer uses native
+local-password verification and compares persisted credential/token versions
+before commit. SSO proof, invitations and revoke effects are still required.
+Router registration does not activate workspace admission.
+
+`workspaces/startup.py` refuses enabled memory/auth-disabled/wrong-schema startup
+and refuses legacy startup against any team-bearing native database. Workspace
+configuration is startup-only; the current compiled coverage gate still refuses
+tenant activation until resource/background and release integration is complete.
+This runs before checkpointer/Store construction and RunManager recovery. It is
+not a fence against already-running old peers; paired release admission remains
+M10 work. The actual PostgreSQL bootstrap rejection is exercised by the startup
+main, in addition to helper checks and create_app route registration.
+
+Project CRUD forwards only a server-resolved context to persistent SQL and keeps
+the native permission decorators. Create/patch bodies reject unknown ownership
+fields. Persistent writes use await_drained; denied scope becomes 404. The project thread-list route binds trusted scope and applies private thread
+ownership after current project ACL authorization. Native startup sets workspace_mode_enabled once and creates
+the SQL project repository with its matching workspace_required setting. Full thread/file,
+cache and background coverage remain required before activation. The project
+file and shared ACL checkpoints are documented below.
+
+
+Project document routes bind live native-session workspace context after native
+permissions and reset it on exit. Only the content route accepts a UUID query
+locator, and conflicting header/query selectors are refused. WorkspaceFileResponse
+rebinds the captured context and checks live document/parent access before ASGI
+headers; scoped file responses are private/no-store. Upload publication and trash
+drain owned async writes. Thread promotion/attach now use scoped source and target checks and
+workspace thread paths. No request can activate workspace mode.
+
+
+Projects accept explicit private/workspace visibility. Private content uses the
+native creator; shared reads require selected active team membership and native
+project permission, while shared writes require owner/admin. HTTP preflight uses
+WorkspaceService's same permission intersection; SQL repeats live role checks
+inside the mutation lock. Shelf ACLs inherit their actual parent, preserving real
+uploader IDs. Personal/unscoped shared publication is refused. Project visibility
+does not grant thread content access; listing is own-only and attachments recheck source access at publication.
+
+Thread metadata HTTP (create/search/PATCH/move/GET) binds workspace_resource_scope
+before native owner-check decorators. Resolve annotated signatures from the
+unwrapped handler, so wrapping modules do not misresolve future annotations.
+Scope resets in finally and current membership revalidates before return.
+Creation strips four-field identity metadata and workspace_context; foreign
+unique-ID collision returns 404 in scoped mode, never an orphan claim. Scoped
+SQL denial must reach the outer adapter instead of becoming a generic 500.
+GET refuses checkpoint-only fallback when the scoped metadata row is missing.
+This is not state/Run/files/branch/delete/history or PAT/internal integration;
+those entrypoints remain required before compiled tenant activation.
+
+Thread uploads bind trusted scope before owner-check decorators. Ingestion captures
+that scope; short filesystem publication/chmod uses ThreadMetaRepository's drained
+publish_under_live_lock, never a DB transaction around sandbox network work.
+Shelf attachment binds before thread owner checks and rechecks its source under
+publication scope. Shelf promotion preflights destination write ACL; insert_active
+checks source thread ownership/workspace while holding the workspace and project
+locks. Legacy native permission requirements remain. Artifact ASGI/query integration,
+delete/withdrawal races, non-mounted synchronization and physical NAS evidence are
+still required before tenant activation.
+
+Artifact GET binds workspace scope before native owner checks; only explicit file
+navigation accepts query workspace_id. Upload/output URLs carry that locator.
+WorkspaceThreadResponse revalidates membership and scoped private SQL thread
+incarnation before ASGI headers, then delegates native file/ZIP/Range behavior
+and FastAPI background tasks. Scoped responses are private/no-store. This is a
+before-send fence, not continuous-stream or credential-reset revocation. Artifact
+PUT, deletion races and full runtime/client coverage remain activation gates.
+
+Workspace upload DELETE uses ThreadMetaRepository.publish_under_live_lock for
+final private ownership/live scope and the short drained unlink worker. Keep
+WorkspaceAccessDenied/HTTPException outside generic 500 handling; stale admitted
+scope must not mutate files before returning a scope denial. No sandbox network
+or model work belongs inside this SQL transaction. Full lifecycle/client,
+cancellation/physical mounts and remaining M3-M11 gates still block activation.
+
+Thread detail/state/history/goal reads use workspace_resource_scope with
+private_thread_read=True: require scoped owner-private SQL metadata and nonempty
+incarnation before reading, then revalidate membership and the same incarnation
+after materialization. Never hold workspace writer locks over graph/checkpointer
+IO. Native full/delta accessor behavior remains unchanged. Durable SQLite reopen
+and actual compiled-graph reads are verified; Postgres checkpointer/recovery,
+read markers, writes/branch/delete/compact and history background backfill still
+need scoped integration and evidence before tenant activation.
+
+POST /threads/{id}/read binds workspace_resource_scope before native owner
+checks. Native bootstrap constructs ThreadReadRepository with the frozen
+workspaces.enabled flag. Scoped marker writes recheck live private thread
+access in the SQL mutation transaction; counters are per workspace/viewer and
+repeat reads write nothing. Thread activity and Run change feeds still need
+scoped integration; this does not activate multi-tenancy.
+
+Workspace goal/state writes use workspaces/checkpoints.py to capture private
+incarnation before preparation and fence the final prepared native checkpoint
+commit. PUT goal first checks native write permission, allocates only scoped SQL
+metadata for a new-chat UUID, then applies native owner-check and durable
+reservation; checkpoint creation remains inside final commit. Foreign global
+IDs are never claimed. WorkspaceAccessDenied inherits ValueError, so route
+handlers must preserve it before generic 422/500 handlers. DELETE goal and POST
+state require an existing private scoped thread. Tenant activation remains gated
+on the remaining M3–M11 coverage.
+
+Private-thread entry admission saves its workspace/actor/thread/incarnation on
+request.state for checkpoint writers, restoring any prior binding in finally.
+A subsequent live lookup compares this captured identity; it cannot replace it
+with a new incarnation. PUT goal captures identity before its delegated native
+owner-check, after metadata-only allocation. This prevents authorization awaits
+from silently moving an in-flight write onto a replacement conversation.
+
+Before scoped thread metadata allocation, require_unallocated_checkpoint_id
+probes the native saver across all namespaces using bounded alist and closes
+the iterator. An unattributed checkpoint ID cannot be claimed via POST thread
+or new-chat goal; read failures refuse allocation. This is occupancy, never
+content authorization. Scoped POST root initialization uses native reservation
+and final live fence, and leaves an already-initialized same-owner root intact.
+Legacy unbound behavior is unchanged. Mixed-version writer exclusion and actual
+checkpoint inventory remain rollout prerequisites, not proven by this probe.
+
+Branch admission uses private scope and captured source identity before native
+checkpoint preparation. Scoped mode drains native file staging outside writer
+locks, then publishes through ThreadMetaRepository.publish_branch_from_private_source.
+Native full/delta replay, event history and historical-file rules are retained.
+No source-project share grants access to another member's chat or branch.
+Cross-store uncertainty and unpublished staging require explicit reconciliation;
+do not infer completion of delete/compact/feed/client or tenant activation.
+
+Manual compaction binds private workspace identity before native owner-check
+and keeps native checkpoint-write admission. Runtime validation adapters refuse
+a replaced snapshot before model invocation; the final commit adapter refuses
+revoked/replaced writes after generation. SQL writer locks never span model
+generation. Tenant memory/task archive effects and model credentials remain M5
+coverage; deterministic compaction acceptance alone cannot enable tenant mode.
+
+Scoped conversation deletion delegates to workspaces/deletion.py after native
+permission and workspace admission. Capture source incarnation before the native
+reservation; persist the tombstone before physical cleanup, retain it on unknown
+outcomes, and never auto-replay. Current acceptance is local-only with no retained
+MCP tasks/active scheduled occurrence. Upload/shelf-attach/file-unlink entry uses
+private_thread_read and passes the captured incarnation into the short file fence;
+failure cleanup must not unlink a recreated thread's reusable paths. Revoked
+cleanup defers for provenance-aware reconciliation. #62 verifies both metadata
+dialects and native cancellation drain; remote/background/client gates remain.
+
+GET /thread-activity binds workspace_resource_scope before native read permission
+and repository calls. Native Run SQL filters before keyset/limit, and the existing
+read repository selects the per-workspace viewer clock. The wrapper revalidates
+live policy before returning. #64 verifies both metadata dialects plus five
+legacy activity cases; RunManager cache, Run/SSE and frontend switching remain.
+
+Thread-scoped Run list/page/detail, messages/page, Run messages and events bind
+private workspace scope before native owner checks. A scoped specific Run read
+requires its durable row to match the path thread and original actor; errors
+do not bypass SQL through resident cache. list_run_messages passes explicit
+user_id in scoped mode while preserving the legacy custom-manager signature.
+#71 verifies two real SQL HTTP mains and four native permissions/history/page
+cases. SSE/global Run/token/artifact/feedback and producer scope remain pending.
+
+Private GET Run join/stream wraps the existing native SSE response with
+workspaces/observer.py. Capture entry incarnation and a browser principal
+snapshot (password cleared, no JWT persisted); bind its WorkspaceContext again
+when ASGI consumes the generator. Before headers and each produced chunk,
+check native runs:read policy, expiry and the SQL private Run/thread/account
+snapshot. Changes close observation without END or worker cancellation.
+Drain the native generator and its bridge subscription; preserve creator
+cancellation intent before waiting on teardown. #75 proves both metadata
+dialects/native memory bridge, Last-Event-ID, controlled withdrawal and six
+legacy/slow-close checks. Redis/load/physical, complete credential workflows,
+creating/POST producer paths and remaining APIs still gate activation.
+
+Global Run message/feedback GETs bind workspace scope before durable lookup,
+pass the real actor explicitly in scoped mode, and delegate to private helpers
+with a concrete thread_id. Helpers capture the entry incarnation, recheck the
+Run/thread association and fence the materialized response. Unbound calls keep
+native keyword/return/pagination contracts. #77 verifies both metadata dialects
+and native global API regressions; FeedbackRepository mutation fencing and
+normal Run producers remain separate requirements.
+
+Native token-usage and Run workspace-changes GETs bind private workspace scope
+before owner checks, then keep native aggregate/context/event implementations.
+The wrapper fences the materialized result against the entry incarnation and
+live versions. #80 verifies actual two-dialect payloads/options and eleven native
+regressions. Usage quota admission, event production and remaining feedback/
+file/client paths are not implied by these read checks.
+
+All six feedback routes bind private workspace scope before native owner checks.
+Scoped lists/stats require matching durable Run and explicit actor. Mutations
+pass the original HTTP entry nonce into FeedbackRepository; response revalidation
+alone cannot authorize a write that already committed. Legacy calls omit new
+keywords. #82 verifies policy/nonce changes before real SQL writes preserve data;
+full credential and distributed lifecycle gates remain M6/M11.
+
+Terminal Run archive GET/POST binds private entry identity; POST wraps the native
+StreamingResponse with WorkspaceThreadResponse. Its optional explicit owned-file
+callback closes on ASGI exit and on workspace decorator post-return refusal.
+Do not run arbitrary response background tasks on denial. Archive construction
+retains ownership through reservation release and response construction; native
+builder/reservation semantics stay intact. #84 covers SQL/JWT/ZIP and resource
+close edges; continuous credential/transport acceptance remains M6/M11.
+
+Single artifact GET binds private_thread_read with query locators before native
+owner admission. capture_checkpoint_thread_identity checks the original request
+nonce again before file preparation; do not reacquire a fresh nonce after owner
+checks and treat it as original authority. #86 proves old-admission replacement
+refusal and fresh valid download while native Range/ETag remains passing. PUT
+and continuous credential/transport gates remain separate unfinished work.
+
+Scoped artifact PUT uses the original private entry nonce and the existing
+artifact_write reservation. Final mounted-file mutation is a bounded callback
+under ThreadMetaRepository.publish_under_live_lock; workspaces/artifact_edit.py
+pins directory descriptors, refuses links, rechecks digest/identity and replaces
+relative to the pinned parent. Never hold this lock over remote sandbox APIs.
+Unbound native synchronization remains unchanged. Scoped remote/non-mounted
+providers currently fail 503 and require M4/M5 protocol before full acceptance.
+Unknown filesystem outcomes require later persistent reconciliation/admission
+proof; a 503 is not evidence of rollback. #89 verifies controlled two-dialect
+HTTP/SQL/byte cases, not production OS/NAS or full fault isolation.
+
+
+/api/features reports startup-scoped workspaces.enabled (isolation required)
+and workspaces.available (the resource authorization service exists). A present
+service also requires mode, even if a partial state omitted the flag; missing
+service never becomes available from config/query input. This capability is
+read-only and does not bypass _WORKSPACE_RUNTIME_INTEGRATED. Clients must not
+interpret enabled=true/available=false as legacy single-user mode.
+
+
+The native background Agent launcher clones RunContext.workspace_context from
+the admitted RunRecord, not request config, a selector or a shared singleton.
+The worker validates that snapshot and native principal, binds its original
+workspace and restores the invoking task's context. The normal SQL Run reject
+admission and pending transition main is verified independently of startup.
+This does not provide the full HTTP/internal/Scheduler/MCP caller bindings,
+credential version fences or remote launch authentication; the compiled tenant
+activation gate remains closed until all runtime/release integration is proven.
+
+
+Native persistence constructs McpTaskRepository with workspace_required from
+the startup-only operator configuration, like other scoped repositories.
+McpTaskService uses original request/persisted task identity for remote calls
+and result commit, not request selectors. This does not integrate the MCP HTTP
+router, scoped cancellation/notifications or remote B receiver; full native
+permissions/credential revocation and entrypoint bindings remain acceptance
+requirements. Tenant startup is still compiled closed.
+
+
+McpTaskService receives the app-scoped generic TaskControlRuntime from extension
+storage. A scoped cancellation requires a running provider for its persisted
+server before committing intent; the route maps ControlUnavailable to 503.
+Existing mcp_tasks_available checks remain. The operator ecs-execution-control
+extension owns HTTP STOP delivery and receipt verification; core Gateway imports
+no executor module. This readiness wiring is not complete tenant binding for the
+MCP HTTP router and does not open compiled workspace activation. Full
+Run/browser/Scheduler/credential revocation and notifications remain pending.
+
+
+Native C staging: native_admission_workspace binds only a captured admitted
+RunRecord, validates its shape with existing native transition rules, and restores
+the prior context in finally. This is not a membership grant: actual thread reads
+and pending handoff CAS reauthorize. make_native_snapshot preserves scoped
+workspace/context and checks the RunContext and actual parent incarnation. C
+ledger/affinity capture is verified (#95), while scoped queued maintenance,
+independent v2 launch verification, remote adoption/context and recovery remain
+unintegrated. Do not enable the tenant startup or default pool claim fences.
+
+
+Scoped native C snapshots include canonical created_at for exact control binding. Queued recovery uses native control-only inspection and pre-assignment ledger CAS; it does not authorize worker launch. Tenant activation remains closed.
+
+
+verify_native_launch_for_receiver resolves the exact pending target from native SQL before accepting v2 workspace claims. The canonical context binds repository reads, RunContext and adopt_pending/task creation. Legacy calls reject inherited workspace context. Scoped refusal retains reservation; it cannot use legacy terminal settlement.
+
+
+Native dispatch poll delegates to poll_envelopes. Scoped launch requires the strict pending-owner SQL read before and after exact pool reservation; general post-adoption control inspection must never sign a launch. Scoped get/report return assignment/control scalars only, with report projections compared before the existing full-snapshot pool CAS. Scoped wait/refuse remain closed until lifecycle integration.
+
+Scoped Scheduler HTTP create/list/detail use `workspace_resource_scope` with native permissions. Resource status/count reads authorize current live workspace/private parents and original occurrence identity before aggregation; they never renew the stored task execution snapshot. History/thread-list endpoints additionally bind resource scope before native owner checks. Their scoped history number counts and latest-thread occurrence filter private parents and original child snapshots before pagination/LIMIT. Summary/token joins require exact normal Run identity and task/occurrence metadata. Local-session tool listing uses a server RunRecord descriptor plus the actual WorkerInvocationGuard before/after access; it never uses UI scope as execution authority. Missing scoped descriptors cannot use legacy fallback. Remote interactive list requires a strict original-session descriptor in server-owned Run kwargs, carried by the signed native snapshot and compared with original SQL. Preserve the admitted token version and intersect its permission ceiling with current owner permissions; internal transport itself grants no eligibility. Missing descriptors fail closed. Core update/pause/resume/delete management is integrated through shared resource writers; note/manual/own-stop are integrated through original native authority; installed scheduled dependency normal main passed #151; invalid waits/IM/recovery and full lifecycle remain open. The background Run POST binds workspace before owner checking; this does not cover every creation/stream/wait variant.
+
+Scoped Scheduler conversation create passes the actual matched worker target and original token version as server-only repository arguments. List/create/update/pause/resume/delete are integrated; note/manual/own-stop are integrated (main #149). Validation runs outside SQL; insertion atomically rechecks captured parent, locked actor token and live running Run authority. See persistence guide and #143 evidence; terminal writer refusal is verified in #144; nonce/token atomic-window refusals are not separately proved.
+
+Scheduler HTTP PATCH/pause/resume/delete bind current resource scope; native tools pass their matched original target/token to the same scoped writers. Lock parents (including proposed reuse and active occurrence/source parents) before quota/task/occurrence/Run. Recheck active identity after locks, retain unknown queued work, and never renew original task snapshots. Business mains #146 and representative unknown-accounting/stale-snapshot boundaries #147 are verified. Other races and installed scheduled lifecycle require subsequent acceptance.
+
+
+Scoped notes and explicit trials retain original Session ceiling/target/token checks. Manual HTTP triggers bind current resource scope and cannot renew invalid original task snapshots. Manual queue preflight preserves the caller confirmation; the final SQL writer rechecks it and any actual running tool source. Scheduled own-stop uses a separate canonical SQL-bound control-only capability, never a Session descriptor or general manage grant. Assembly precedes the pending→running barrier; only its running guarded call may write its own occurrence stop marker. Canonical completion applies pause/event behavior. Main evidence #149; separate refusal/race probes are not inferred.

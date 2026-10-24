@@ -12,7 +12,6 @@ import {
   Share2,
   Trash2,
 } from "lucide-react";
-import Link from "next/link";
 import { useParams, usePathname } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -46,6 +45,7 @@ import {
   SidebarMenuItem,
 } from "@/components/ui/sidebar";
 import { ConversationExtensionActions } from "@/components/workspace/conversation-extension-actions";
+import Link from "@/components/workspace/workspace-link";
 import { getAPIClient } from "@/core/api";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { hasPermission, PERMISSIONS } from "@/core/auth/permissions";

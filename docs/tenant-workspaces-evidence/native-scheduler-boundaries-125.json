@@ -1,0 +1,61 @@
+{
+  "build": 125,
+  "queue": 1056,
+  "phase": "m4-native-scheduler-boundaries-20261018-13",
+  "result": "SUCCESS",
+  "duration_ms": 39837,
+  "pytest": "2 passed in 21.04s",
+  "ruff": "check passed; 61 files already formatted",
+  "source_sha256": "28ae7875bf515413265e015b237cc9185024ede2fefed621d4eb18a90cbdb1e0",
+  "pipeline_sha256": "011e3d600f16e29330ebc6796813046598f07a776058bf7c3e734d4773230c50",
+  "log_path": "/private/tmp/m4-native-scheduler-boundaries-20261018-13.log",
+  "log_sha256": "5c88f1d95c8e95352315f6893b28553e101ca1ebf3b7a8f0fecf93c27c8f2b07",
+  "cleanup_path": "/private/tmp/native-scheduler-build125-cleanup.json",
+  "archive_matches_current_files": {
+    "backend/tests/test_workspace_native_scheduler.py": "911c79776dd8a2e3c8c58f1cb357a6f1973f219ea24709724e2b367f7239db12",
+    "backend/app/scheduler/service.py": "c7c855c065271ae98d6b67fe023394fda9f2e30f5303e0be64804c3c1039085c",
+    "scripts/render_tenant_run_control_pipeline.py": "b46026ec4b7ccc3cd4986ef45571fa1e8d921c0d29e6c3a1e448a019778a5a7d"
+  },
+  "scope": "Only queued_member-postgres and launch_lease-postgres. Normal main build123 was not rerun. No B/control schema compatibility acceptance.",
+  "job": "deerflow-tenant-execution-m4-sql",
+  "root_archive_comparison": "All three changed source files independently matched successful #125 archive by root.",
+  "cleanup": {
+    "build": 125,
+    "read_only": true,
+    "cleanup": [
+      {
+        "kind": "container",
+        "name": "deerflow-tenant-execution-m4-sql-125",
+        "exit": 1,
+        "stderr": "Error response from daemon: No such container: deerflow-tenant-execution-m4-sql-125"
+      },
+      {
+        "kind": "container",
+        "name": "deerflow-tenant-execution-m4-sql-125-db",
+        "exit": 1,
+        "stderr": "Error response from daemon: No such container: deerflow-tenant-execution-m4-sql-125-db"
+      },
+      {
+        "kind": "network",
+        "name": "deerflow-tenant-execution-m4-sql-125",
+        "exit": 1,
+        "stderr": "Error response from daemon: network deerflow-tenant-execution-m4-sql-125 not found"
+      }
+    ]
+  },
+  "previous_failure": {
+    "build": 124,
+    "result": "FAILURE",
+    "tests": "2 failed in 21.10s",
+    "reason": "Invalid empty-table fixture assertion; existing historical Runs and unknown executor job are intentional. Test-only retry compares all seeded rows unchanged."
+  },
+  "verified": [
+    "Queued membership version withdrawal: repeated drain creates no Run/job/event, original occurrence remains queued attempt0 and original snapshot unchanged.",
+    "Pre-insert lease takeover: actual atomic insert raises WorkspaceAccessDenied: Scheduler launch lease changed. Successor owner/attempt/expiry and launching status retained; no Run/job/event or capacity release."
+  ],
+  "limits": [
+    "No normal main rerun; #123 remains its evidence.",
+    "No physical sandbox, two-host, full Scheduler or migration receipt acceptance.",
+    "0041 B/control runtime gate compatibility remains separate work."
+  ]
+}
