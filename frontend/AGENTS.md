@@ -27,18 +27,21 @@ Run from `frontend/`; host pnpm calls use `../scripts/pnpm.py`.
 - `pnpm format` / `pnpm format:write`: Prettier check/write.
 - `pnpm test`: Rstest unit tests; `pnpm test:e2e`: Playwright Chromium E2E tests.
 
-Rstest unit tests under `tests/unit/` mirror `src/` (e.g., `tests/unit/core/api/stream-mode.test.ts` tests `src/core/api/stream-mode.ts`). Import source modules via `@/`.
+Unit tests under `tests/unit/` mirror `src/`; import source via `@/`.
 
 Webpack is the default development bundler. Use `DEER_FLOW_DEV_BUNDLER=turbo` with `pnpm dev` to opt in to Turbopack when diagnosing a local Next.js bundler issue.
 
 On Windows `pnpm dev` binds `127.0.0.1` by default because Hyper-V/winnat excluded port ranges can reject Next's default `0.0.0.0` bind with `EACCES` (#2870). Pass `pnpm dev -- --hostname 0.0.0.0` to listen on a LAN interface instead.
 
-`rstest.config.ts` separates **node** (`*.test.ts` / `*.test.tsx`) for pure logic
-from **happy-dom** (`*.dom.test.ts` / `*.dom.test.tsx`) for components and hooks
-rendered with `@testing-library/react`'s `renderHook`. Keep the split: DOM tests
-cost roughly 3x more runtime. Hooks that depend on React effect ordering, unmount
-cleanup, or re-renders on store changes belong in `.dom.test.*`; do not mock React
-in node tests to cover those behaviors.
+`rstest.config.ts`: **node** runs `*.test.*` pure logic; **happy-dom** runs
+`*.dom.test.*` components/hooks via `@testing-library/react` render/renderHook.
+DOM costs ~3x: keep the split. Effect ordering, unmount cleanup and store
+re-renders need DOM tests with real React.
+
+Content/state suites may mock decorative `FlipDisplay` with
+`tests/unit/helpers/flip-display.tsx`, preserving children, classes and keyed
+remounts. Happy DOM 21's animation cancellation rejects `finished`; keep rejection
+reporting enabled. Real Motion behavior belongs in Playwright.
 
 E2E tests live under `tests/e2e/` and use Playwright with Chromium. They mock all backend APIs via `page.route()` network interception and test real page interactions (navigation, chat input, streaming responses). Config: `playwright.config.ts`. The real-backend auth contract in `tests/e2e-real-backend/auth-disabled-contract.spec.ts` and `backend/tests/test_auth_me_permissions.py` pin the complete route-permission list; update both when adding registered permissions (including `projects:read/write/delete`).
 
