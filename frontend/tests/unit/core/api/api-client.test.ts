@@ -1495,3 +1495,72 @@ test.each(["initial", "join"] as const)(
     expect(sessionStorage.setItem).not.toHaveBeenCalled();
   },
 );
+
+for (const source of ["initial", "join"] as const) {
+  const validGap = {
+    code: "stream_replay_gap",
+    run_id: "run-malformed",
+    requested_event_id: "1-0",
+    earliest_available_event_id: "2-0",
+    latest_available_event_id: "3-0",
+    recovery: "reload_durable_state",
+  };
+  test.each([
+    ["null payload", null],
+    ["unknown code", { ...validGap, code: "unknown_gap" }],
+    ["invalid run ID", { ...validGap, run_id: 42 }],
+    ["numeric cursor", { ...validGap, requested_event_id: 1 }],
+    [
+      "missing retained bound",
+      { ...validGap, latest_available_event_id: undefined },
+    ],
+    ["unsupported recovery", { ...validGap, recovery: "unknown_recovery" }],
+  ])(
+    `rejects %s on the ${source} stream before recovery side effects`,
+    async (_label, gap) => {
+      const sessionStorage = makeSessionStorage();
+      sessionStorage.setItem("lg:stream:thread-malformed", "run-malformed");
+      sessionStorage.setItem.mockClear();
+      const fetchFn = rs.fn(async (url: string | URL) => {
+        const path = new URL(url.toString()).pathname;
+        if (path.endsWith("/runs/run-malformed")) {
+          return new Response(JSON.stringify({ status: "running" }));
+        }
+        if (
+          path.endsWith("/runs/stream") ||
+          path.endsWith("/runs/run-malformed/stream")
+        ) {
+          return makeSSEResponse(
+            `event: gap\ndata: ${JSON.stringify(gap)}\n\n`,
+            {
+              "Content-Location":
+                "/threads/thread-malformed/runs/run-malformed",
+            },
+          );
+        }
+        return new Response(JSON.stringify({ values: { messages: [] } }));
+      });
+      rs.stubGlobal("window", {
+        location: { origin: "http://localhost:2026" },
+        sessionStorage,
+      });
+      rs.stubGlobal("fetch", fetchFn);
+
+      const client = getAPIClient(true);
+      const stream =
+        source === "initial"
+          ? client.runs.stream("thread-malformed", "lead_agent", {})
+          : client.runs.joinStream("thread-malformed", "run-malformed");
+
+      await expect(stream.next()).rejects.toThrow(
+        "Invalid stream replay gap payload.",
+      );
+      expect(fetchFn).toHaveBeenCalledTimes(source === "initial" ? 1 : 2);
+      expect(sessionStorage.getItem("lg:stream:thread-malformed")).toBe(
+        "run-malformed",
+      );
+      expect(sessionStorage.removeItem).not.toHaveBeenCalled();
+      expect(sessionStorage.setItem).not.toHaveBeenCalled();
+    },
+  );
+}
