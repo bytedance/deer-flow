@@ -42,6 +42,26 @@ def test_fetch_bounds_redirect_destination(monkeypatch, structured):
 
 
 @pytest.mark.parametrize("structured", [False, True], ids=["text", "structured"])
+@pytest.mark.parametrize("markdown", ["Body", ""], ids=["warning", "error"])
+@pytest.mark.parametrize(
+    ("final_url", "safe_url", "secrets"),
+    [
+        ("https://alice:password@example.invalid/private", "https://example.invalid/private", ("alice", "password")),
+        (
+            "https://bob:p%40ss@[2001:db8::1]:8443/private",
+            "https://[2001:db8::1]:8443/private",
+            ("bob", "p%40ss"),
+        ),
+    ],
+)
+def test_fetch_strips_userinfo_from_failure_redirect_destination(monkeypatch, structured, markdown, final_url, safe_url, secrets):
+    result = _fetch(monkeypatch, structured, {"statusCode": 404}, markdown=markdown, finalUrl=final_url)
+
+    assert f"final URL: {safe_url}" in result
+    assert all(secret not in result for secret in secrets)
+
+
+@pytest.mark.parametrize("structured", [False, True], ids=["text", "structured"])
 @pytest.mark.parametrize("final_url", [None, "", "   ", 42, {}, []])
 def test_fetch_ignores_empty_or_non_string_final_url(monkeypatch, structured, final_url):
     result = _fetch(monkeypatch, structured, {"statusCode": 404}, finalUrl=final_url)

@@ -12,7 +12,7 @@ https://unbrowse.ai/app.
 import json
 import logging
 import os
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 from langchain.tools import tool
@@ -143,21 +143,18 @@ def _clip(value: object, limit: int) -> str:
     return text if limit <= 0 else text[:limit]
 
 
-def _final_url_for_diagnostic(value: object) -> str:
-    """Strip URL credentials before bounding a target-controlled diagnostic."""
-    if not isinstance(value, str):
-        return ""
-    text = value.strip()
+def _strip_url_userinfo(url: str) -> str:
+    """Remove URL credentials; omit unparseable HTTP(S) destinations."""
     try:
-        parsed = urlsplit(text)
+        parsed = urlsplit(url)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
             return ""
     except ValueError:
-        # A malformed authority must never fall back to echoing raw credentials.
+        # Never echo raw credentials when parsing the authority fails.
         return ""
-    if "@" in parsed.netloc:
-        text = parsed._replace(netloc=parsed.netloc.rsplit("@", 1)[-1]).geturl()
-    return _clip(text, _UNBROWSE_FINAL_URL_MAX_CHARS)
+    if "@" not in parsed.netloc:
+        return url
+    return urlunsplit(parsed._replace(netloc=parsed.netloc.rsplit("@", 1)[-1]))
 
 
 @tool("web_fetch", parse_docstring=True)
@@ -189,8 +186,9 @@ def web_fetch_tool(url: str) -> str:
     failure = ""
     if isinstance(status, int) and not isinstance(status, bool) and 400 <= status <= 599:
         failure = f"target page responded with HTTP {status}"
-        if final_url := _final_url_for_diagnostic(data.get("finalUrl")):
-            failure += f" (final URL: {final_url})"
+        final_url = data.get("finalUrl")
+        if isinstance(final_url, str) and (safe_final_url := _strip_url_userinfo(final_url.strip())):
+            failure += f" (final URL: {_clip(safe_final_url, _UNBROWSE_FINAL_URL_MAX_CHARS)})"
 
     content = _clip(data.get("markdown") or "", _UNBROWSE_FETCH_MAX_CHARS)
     if not content:
