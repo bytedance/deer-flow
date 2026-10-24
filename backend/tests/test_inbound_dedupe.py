@@ -210,6 +210,14 @@ async def test_memory_store_respects_max_entries_bound():
     assert set(store._store) == {keys[2], keys[3], keys[4]}
 
 
+def test_memory_store_rejects_non_positive_max_entries():
+    # A non-positive bound would make the make-room eviction pop from an empty
+    # store on every call, so it must be rejected at construction time (matching
+    # the sibling bounded store in feishu_card_interaction.py).
+    with pytest.raises(ValueError, match="max_entries must be positive"):
+        MemoryInboundDedupeStore(max_entries=0)
+
+
 # ---------------------------------------------------------------------------
 # PostgresInboundDedupeStore (unit, mocked session factory)
 # ---------------------------------------------------------------------------
