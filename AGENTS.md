@@ -226,11 +226,8 @@ Repo-wide conventions:
   Public skill script regressions live in `tests/skills/` and run in Skill Review CI
   independently of package review. Exercise dependency fallbacks with the optional
   import unavailable and mock HTTP transport to keep tests offline.
-  Video- and podcast-generation CLI failures must exit non-zero and write diagnostics to stderr;
-  keep success output on stdout and test the CLI boundary with offline transport.
-  Chart-visualization CLI failures (unknown tool, missing `tool`, or HTTP errors)
-  must exit non-zero after the batch and write diagnostics to stderr; successful
-  chart URLs, including `generate_spreadsheet`, stay on stdout.
+  Video, podcast, and chart-visualization CLI failures exit non-zero;
+  diagnostics on stderr, success URLs on stdout; test offline.
 - **Before pushing** — backend `make format`, frontend `pnpm check`.
   Backend CI enforces `ruff format --check`.
 - **Skill text encoding** — use explicit UTF-8 for textual skill resources.
