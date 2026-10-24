@@ -1244,6 +1244,17 @@ def test_validate_local_bash_command_paths_blocks_brace_expansion_host_paths(com
         # scan, so a multi-segment path stays rejected even after ``)``.
         ("awk '{print ($1)/etc/passwd}' /mnt/user-data/workspace/data.txt", "/etc/passwd"),
         ("awk 'BEGIN{x = 1 /etc/shadow}'", "/etc/shadow"),
+        # The expression-division exemption (#7444) is narrower than awk's:
+        # an identifier segment after ``)`` must close a ``name(...)`` call and
+        # ``}`` admits digits only, so unknown-value path builds stay rejected.
+        ("echo $(pwd)/x", "/x"),
+        ("cp f $(mktemp -d)/etc", "/etc"),
+        ("(pwd)/x", "/x"),
+        ("x=(1 2)/y", "/y"),
+        ("echo ${HOME}/etc", "/etc"),
+        ("$(dirname /mnt/user-data/workspace/a.txt)/etc/passwd", "/etc/passwd"),
+        ("echo /2", "/2"),
+        ("ls /2", "/2"),
         # An ``awk`` word that is an argument of another command is not a command.
         ("echo $(true) awk '{print $NF/2}'", "$NF/2"),
         ("echo >| awk '{print $NF/2}'", "$NF/2"),
@@ -1305,6 +1316,18 @@ def test_validate_local_bash_command_paths_blocks_variable_prefixed_host_paths(c
         "awk '{print ($NF+1)/2, $NF/2}' /mnt/user-data/workspace/data.txt",
         "awk '{print length($0)/2}' /mnt/user-data/workspace/data.txt",
         "awk '{a[$1]/=2; print a[$1]/2}' /mnt/user-data/workspace/data.txt",
+        # ``/`` after a closing paren/bracket/brace is division in other inline
+        # languages and in shell arithmetic too (#7444); the per-closer rules
+        # live in ``_is_expression_division_after_closer``.
+        "python3 -c 'xs=[1,2,3]; print(sum(xs)/len(xs))'",
+        "python3 -c 'print((3+4)/2)'",
+        "python3 -c 'import os; print(os.path.getsize(\"/mnt/user-data/workspace/a.bin\")/1024)'",
+        "node -e 'console.log((3+4)/2)'",
+        "perl -lane 'print $F[1]/2' /mnt/user-data/workspace/a.txt",
+        "perl -lane 'print $F[1]/$F[2]' /mnt/user-data/workspace/a.txt",
+        "python3 -c 'x=[1,2]; print(x[0]/n)'",
+        "echo $(( ${SIZE}/2 ))",
+        "bash -c 'echo $(( ${#arr}/2 ))'",
         # The command word is found like the shell does: basename, after an
         # assignment prefix, inside ``$(...)``, before a comment.
         "/usr/bin/awk '{print $NF/2}' /mnt/user-data/workspace/data.txt",
