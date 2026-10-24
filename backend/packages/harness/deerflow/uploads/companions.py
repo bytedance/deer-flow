@@ -90,7 +90,12 @@ def invalidate_overwritten_upload(path: Path) -> None:
             if record.is_symlink():
                 continue
             if json.loads(record.read_text(encoding="utf-8")).get("markdown") == path.name:
-                record.unlink(missing_ok=True)
+                try:
+                    record.unlink(missing_ok=True)
+                except OSError:
+                    # The upload already succeeded; report the orphan instead of
+                    # replacing that outcome, as ``unregister_companion`` does.
+                    logger.warning("Failed to remove upload companion record %s", record, exc_info=True)
         except (OSError, ValueError, AttributeError):
             continue
 

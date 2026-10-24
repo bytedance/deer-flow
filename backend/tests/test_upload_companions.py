@@ -129,6 +129,7 @@ def test_new_conversion_restores_outline_after_source_edit(converted_upload):
     assert resolve_companion(original) == markdown
     assert extract_outline_for_file(original)[0] == [{"title": "Replaced B", "line": 1}]
 
+
 def _fail_record_unlink(monkeypatch):
     """Make deleting an ownership record fail the way a held handle does."""
     real_unlink = Path.unlink
