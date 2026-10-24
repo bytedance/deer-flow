@@ -4,6 +4,7 @@ import hashlib
 import inspect
 import io
 import json
+import logging
 import multiprocessing
 import os
 import re
@@ -4021,3 +4022,73 @@ def test_lark_config_credentials_route_rejects_invalid_brand(tmp_path):
         )
 
     assert response.status_code == 422
+
+
+@pytest.mark.parametrize("winerror", [5, 32, 33])
+@pytest.mark.parametrize("logging_fails", [False, True])
+def test_runtime_rollback_failure_preserves_publication_error(monkeypatch, tmp_path, winerror, logging_fails):
+    _patch_paths(monkeypatch, tmp_path / "home")
+    source = tmp_path / "pre-staged"
+    for arch in ("amd64", "arm64"):
+        binary = source / f"linux-{arch}" / "lark-cli"
+        binary.parent.mkdir(parents=True)
+        binary.write_bytes(b"\x7fELF" + arch.encode())
+        binary.chmod(0o755)
+    launcher = source / "bin" / "lark-cli"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text("#!/bin/sh\n", encoding="utf-8")
+    launcher.chmod(0o755)
+    monkeypatch.setenv(lark_cli.LARK_CLI_SANDBOX_RUNTIME_SOURCE_ENV, str(source))
+    target = lark_cli._ensure_managed_sandbox_lark_cli("v1.0.64")
+    real_rename = Path.rename
+    publish_error = PermissionError("runtime publication denied")
+    publish_error.winerror = winerror
+    rollback_error = PermissionError("old runtime still held open")
+    rollback_error.winerror = winerror
+    attempts = {"publish": [], "rollback": []}
+    delays = []
+    records = []
+
+    class CaptureHandler(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+            if logging_fails:
+                raise OSError("diagnostic sink unavailable")
+
+    def rename(path, destination):
+        assert lark_cli._LARK_RUNTIME_INSTALL_THREAD_LOCK.locked()
+        if path.name.startswith(".installing-sandbox-cli-"):
+            attempts["publish"].append(path)
+            raise publish_error
+        if path.name.startswith(".replacing-sandbox-cli-"):
+            attempts["rollback"].append(path)
+            raise rollback_error
+        return real_rename(path, destination)
+
+    def sleep(delay):
+        assert lark_cli._LARK_RUNTIME_INSTALL_THREAD_LOCK.locked()
+        delays.append(delay)
+
+    monkeypatch.setattr(lark_cli, "os", SimpleNamespace(**{**vars(os), "name": "nt"}))
+    monkeypatch.setattr(Path, "rename", rename)
+    monkeypatch.setattr(lark_cli, "time", SimpleNamespace(**{**vars(time), "sleep": sleep}))
+    monkeypatch.setattr(lark_cli.logger, "handlers", [CaptureHandler()])
+    monkeypatch.setattr(lark_cli.logger, "propagate", False)
+    monkeypatch.setattr(lark_cli.logger, "level", logging.ERROR)
+
+    with pytest.raises(PermissionError) as caught:
+        lark_cli._ensure_managed_sandbox_lark_cli("v1.0.65")
+
+    assert caught.value is publish_error
+    assert len(attempts["publish"]) == len(attempts["rollback"]) == 8
+    assert delays == [0.005 * index for index in range(1, 8)] * 2
+    assert not target.exists()
+    assert not list(target.parent.glob(".installing-sandbox-cli-*"))
+    backups = list(target.parent.glob(".replacing-sandbox-cli-*"))
+    assert len(backups) == 1
+    lark_cli._validate_lark_cli_sandbox_runtime(backups[0])
+    manifest = json.loads((backups[0] / lark_cli.LARK_CLI_RUNTIME_MANIFEST_FILE).read_text(encoding="utf-8"))
+    assert manifest["version"] == "v1.0.64"
+    assert len(records) == 1
+    assert str(backups[0]) in records[0].getMessage()
+    assert records[0].exc_info[1] is rollback_error

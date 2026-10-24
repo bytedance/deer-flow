@@ -5,11 +5,38 @@ from __future__ import annotations
 import logging
 import os
 import stat
+from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
 from uuid import uuid4
 
 logger = logging.getLogger(__name__)
+
+
+_ATOMIC_RETRY_ATTEMPTS = 8
+_ATOMIC_RETRY_BACKOFF_SECONDS = 0.005
+_ATOMIC_RETRY_WINERRORS = (5, 32, 33)
+
+
+def retry_windows_atomic_operation(
+    operation: Callable[[], object],
+    *,
+    windows: bool,
+    sleep: Callable[[float], None],
+) -> None:
+    """Retry one staged rename/replace under short Windows handle contention.
+
+    Callers retain their lock, staged paths and cleanup policy. Each attempt
+    repeats the complete atomic operation; never copy in place or change ACLs.
+    """
+    for attempt in range(_ATOMIC_RETRY_ATTEMPTS):
+        try:
+            operation()
+            return
+        except OSError as exc:
+            if not windows or getattr(exc, "winerror", None) not in _ATOMIC_RETRY_WINERRORS or attempt == _ATOMIC_RETRY_ATTEMPTS - 1:
+                raise
+            sleep(_ATOMIC_RETRY_BACKOFF_SECONDS * (attempt + 1))
 
 
 def cleanup_failed_atomic_write(temporary: Path, fd: int | None = None) -> None:

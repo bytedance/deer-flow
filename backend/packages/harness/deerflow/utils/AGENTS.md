@@ -23,6 +23,17 @@ publication exception (including interruptions) nor skip remaining cleanup.
 Both tools take collision names from `output_names.output_name_candidates`
 (name, `-1`..`-1000`, five timestamps); claim each atomically, never pre-check.
 
+### Windows Atomic Retry Policy
+
+`atomic_write.retry_windows_atomic_operation` owns the shared retry loop for
+File Agent config/SOUL publication and managed Lark runtime rename/rollback.
+Only Windows winerror 5/32/33 retry: eight attempts, 5 ms linear steps, 140 ms
+total backoff. Callers supply the platform gate and sleep function while keeping
+the same staged paths, lock and cleanup ownership. All terminal errors preserve
+exception identity. Never add in-place copying or permission/ACL changes.
+`tests/test_windows_atomic_retry_policy.py` changes the shared budget/delay and
+checks both callers, including generic OSError mapping.
+
 ### Model Retry Hints
 
 `retry_after.py::bounded_retry_after_ms` shares the 24-hour provider-hint ceiling

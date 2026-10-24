@@ -1654,6 +1654,11 @@ secret directories are restricted to `0700`, regular credential files to
 `0600`, and symlinks are rejected.
 On Windows, waiting for another process's integration file lock retries for up
 to 15 minutes; other file-lock errors are reported immediately.
+Publishing the managed Lark runtime and saving Agent config/SOUL files also
+retry brief Windows access/sharing violations, with up to eight atomic attempts
+and 140 ms total backoff. If runtime publication and restoration both fail,
+DeerFlow reports the original publication error and retains the previous runtime
+in its backup directory; Gateway logs identify that path for recovery.
 
 After installation, users can click **Connect Lark** to open a browser
 authorization link; no terminal authorization is required. The same UI can

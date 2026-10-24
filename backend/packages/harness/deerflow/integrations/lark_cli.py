@@ -91,7 +91,7 @@ from deerflow.skills.package_files import EXEC_SNIFF_BYTES, is_executable_binary
 from deerflow.skills.parser import parse_skill_file
 from deerflow.skills.permissions import make_skill_tree_sandbox_readable
 from deerflow.skills.types import SKILL_MD_FILE, SkillCategory
-from deerflow.utils.atomic_write import cleanup_failed_atomic_write
+from deerflow.utils.atomic_write import cleanup_failed_atomic_write, retry_windows_atomic_operation
 
 logger = logging.getLogger(__name__)
 
@@ -1510,14 +1510,7 @@ def _rename_sandbox_runtime(source: Path, target: Path) -> None:
     staged directory). A permanent denial still raises after 140 ms total wait;
     never fall back to a non-atomic copy or change permission/ACL policy.
     """
-    for attempt in range(8):
-        try:
-            source.rename(target)
-            return
-        except PermissionError as exc:
-            if os.name != "nt" or getattr(exc, "winerror", None) not in (5, 32, 33) or attempt == 7:
-                raise
-            time.sleep(0.005 * (attempt + 1))
+    retry_windows_atomic_operation(lambda: source.rename(target), windows=os.name == "nt", sleep=time.sleep)
 
 
 def _ensure_managed_sandbox_lark_cli_locked(tag: str, target: Path, parent: Path) -> Path:
@@ -1561,8 +1554,15 @@ def _ensure_managed_sandbox_lark_cli_locked(tag: str, target: Path, parent: Path
             shutil.rmtree(backup, ignore_errors=True)
         return target
     except Exception:
-        if backup is not None and backup.exists() and not target.exists():
-            _rename_sandbox_runtime(backup, target)
+        try:
+            if backup is not None and backup.exists() and not target.exists():
+                _rename_sandbox_runtime(backup, target)
+        except Exception:
+            # A failed restore must not replace the original publish error.
+            # Keep the previous runtime in backup for recovery, and make even
+            # a broken diagnostic handler independent of the caller's outcome.
+            with suppress(Exception):
+                logger.exception("Sandbox runtime rollback failed; previous runtime may remain in %s", backup)
         raise
     finally:
         shutil.rmtree(staging, ignore_errors=True)
