@@ -228,6 +228,9 @@ Repo-wide conventions:
   import unavailable and mock HTTP transport to keep tests offline.
   Video- and podcast-generation CLI failures must exit non-zero and write diagnostics to stderr;
   keep success output on stdout and test the CLI boundary with offline transport.
+  Chart-visualization CLI failures (unknown tool, missing `tool`, or HTTP errors)
+  must exit non-zero after the batch and write diagnostics to stderr; successful
+  chart URLs, including `generate_spreadsheet`, stay on stdout.
 - **Before pushing** — backend `make format`, frontend `pnpm check`.
   Backend CI enforces `ruff format --check`.
 - **Skill text encoding** — use explicit UTF-8 for textual skill resources.
