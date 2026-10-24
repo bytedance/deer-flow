@@ -2,8 +2,8 @@
 
 Sandbox restore requires a thread ID, even forks.
 
-Before drain threads start, failure closes read ends; `finally` alone closes
-write ends, even after `Popen` returns.
+On startup failure, close reads and kill/reap the child, preserving the error.
+Only `finally` closes write ends.
 
 On Linux/macOS, local non-append text saves use `_publish_file_revision` and the shared atomic byte publisher. Check write access without truncation and keep the source descriptor open through metadata transfer. Resolve symlinks under existing mapping rules; publish only regular files. Failure before replace retains the old file and cleans staging. Append and other platforms keep their in-place behavior. Replacement requires parent-directory write and metadata-preservation permissions; inode identity changes, so hard-link aliases retain the old version. It is not concurrent-writer arbitration or power-loss recovery. Regressions: `tests/test_local_sandbox_atomic_writes.py`.
 

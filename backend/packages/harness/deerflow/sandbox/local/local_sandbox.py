@@ -887,6 +887,7 @@ class LocalSandbox(Sandbox):
         timed_out = False
         stdout_read_fd, stdout_write_fd = os.pipe()
         stderr_read_fd, stderr_write_fd = os.pipe()
+        process = None
         try:
             process = subprocess.Popen(
                 args,
@@ -906,6 +907,13 @@ class LocalSandbox(Sandbox):
                 except OSError:
                     # Preserve the original startup failure; fd cleanup is best-effort.
                     pass
+            if process is not None:
+                # Cleanup must not replace the startup error, even on another
+                # interruption. Reap independently if killing the child fails.
+                with suppress(BaseException):
+                    process.kill()
+                with suppress(BaseException):
+                    process.wait(timeout=10)
             raise
         finally:
             # A single owner prevents a second close from hitting a recycled fd.
@@ -913,6 +921,7 @@ class LocalSandbox(Sandbox):
                 try:
                     os.close(fd)
                 except OSError:
+                    # Closing is best-effort; preserve the command's result or startup error.
                     pass
 
         if encoding is None:
@@ -1013,6 +1022,7 @@ class LocalSandbox(Sandbox):
         timed_out = False
         stdout_read_fd, stdout_write_fd = os.pipe()
         stderr_read_fd, stderr_write_fd = os.pipe()
+        process = None
         try:
             process = subprocess.Popen(
                 args,
@@ -1035,6 +1045,13 @@ class LocalSandbox(Sandbox):
                 except OSError:
                     # Preserve the original startup failure; fd cleanup is best-effort.
                     pass
+            if process is not None:
+                # Cleanup must not replace the startup error, even on another
+                # interruption. Reap independently if killing the child fails.
+                with suppress(BaseException):
+                    process.kill()
+                with suppress(BaseException):
+                    process.wait(timeout=10)
             raise
         finally:
             # A single owner prevents a second close from hitting a recycled fd.
@@ -1042,6 +1059,7 @@ class LocalSandbox(Sandbox):
                 try:
                     os.close(fd)
                 except OSError:
+                    # Closing is best-effort; preserve the command's result or startup error.
                     pass
 
         stdout_capture, stdout_thread = LocalSandbox._start_pipe_drain(stdout_read_fd, "deerflow-bash-stdout-drain")
