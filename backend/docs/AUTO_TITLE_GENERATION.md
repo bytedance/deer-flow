@@ -257,4 +257,4 @@ async def _agenerate_title_result(self, state: TitleMiddlewareState) -> dict | N
 
 - [LangGraph Checkpointer 文档](https://langchain-ai.github.io/langgraph/concepts/persistence/)
 - [LangGraph State 管理](https://langchain-ai.github.io/langgraph/concepts/low_level/#state)
-- [LangGraph Middleware](https://langchain-ai.github.io/langgraph/concepts/middleware/)
+- [LangGraph Middleware](https://docs.langchain.com/oss/python/langchain/middleware/overview)
