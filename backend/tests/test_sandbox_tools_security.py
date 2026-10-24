@@ -484,15 +484,49 @@ def test_volume_mount_config_normalizes_trailing_slashes() -> None:
     assert VolumeMountConfig(host_path="/tmp/host", container_path="/mnt/reports").container_path == "/mnt/reports"
 
 
-@pytest.mark.parametrize("raw", ["/", "//", "///"])
+@pytest.mark.parametrize("raw", ["/", "//", "///", ""])
 def test_volume_mount_config_rejects_the_container_root(raw: str) -> None:
-    """Mounting the container root cannot be expressed in the path gates, so reject it at load."""
+    """The container root and a blank value cannot be expressed in the path gates, so reject them at load.
+
+    On ``main`` an empty ``container_path`` made the gates match every absolute
+    path (``path == "" or path.startswith("/")``), letting one mount's
+    ``read_only`` flag silently apply to all paths.
+    """
     from pydantic import ValidationError
 
     from deerflow.config.sandbox_config import VolumeMountConfig
 
     with pytest.raises(ValidationError, match="container_path"):
         VolumeMountConfig(host_path="/tmp/host", container_path=raw)
+
+
+def test_skills_config_normalizes_trailing_slashes() -> None:
+    """skills.container_path feeds the same as-is prefix comparison in _is_skills_path."""
+    from deerflow.config.skills_config import SkillsConfig
+
+    assert SkillsConfig(container_path="/mnt/skills/").container_path == "/mnt/skills"
+    assert SkillsConfig(container_path="/mnt/skills//").container_path == "/mnt/skills"
+    assert SkillsConfig().container_path == "/mnt/skills"
+
+
+@pytest.mark.parametrize("raw", ["/", "//", ""])
+def test_skills_config_rejects_the_container_root(raw: str) -> None:
+    from pydantic import ValidationError
+
+    from deerflow.config.skills_config import SkillsConfig
+
+    with pytest.raises(ValidationError, match="container_path"):
+        SkillsConfig(container_path=raw)
+
+
+def test_is_skills_path_accepts_prefix_declared_with_trailing_slash() -> None:
+    """A skills prefix configured as ``/mnt/skills/`` must keep gating skills paths."""
+    from deerflow.config.skills_config import SkillsConfig
+
+    prefix = SkillsConfig(container_path="/mnt/skills/").container_path
+    with patch("deerflow.sandbox.tools._get_skills_container_path", return_value=prefix):
+        assert _is_skills_path("/mnt/skills/reporter/SKILL.md")
+        assert not _is_skills_path("/mnt/skillsmalformed/SKILL.md")
 
 
 def test_validate_local_tool_path_accepts_mount_declared_with_trailing_slash() -> None:

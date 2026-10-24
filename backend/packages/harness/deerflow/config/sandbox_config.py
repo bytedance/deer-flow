@@ -17,6 +17,20 @@ SandboxNetworkApproval = Literal["deny", "prompt"]
 _REDIS_MAX_SAFE_TTL_MILLISECONDS = (2**63 - 1) // 2
 
 
+def normalize_container_path(value: str) -> str:
+    """Strip trailing slashes from a container mount/virtual path.
+
+    LocalSandboxProvider normalizes when building path mappings, but the tool
+    path gates compare the configured value as-is; one spelling at config load
+    keeps both layers in agreement. An empty result (the container root or a
+    blank value) cannot be expressed in the gates and is rejected instead.
+    """
+    normalized = value.rstrip("/")
+    if not normalized:
+        raise ValueError("container_path must be a non-empty mount point below the container root")
+    return normalized
+
+
 class SandboxNetworkConfig(BaseModel):
     """Outbound network policy for locally managed AIO sandboxes."""
 
@@ -168,14 +182,9 @@ class VolumeMountConfig(BaseModel):
     @field_validator("container_path")
     @classmethod
     def _normalize_container_path(cls, value: str) -> str:
-        # LocalSandboxProvider strips trailing slashes when building path
-        # mappings, but the tool path gates compare the configured value as-is;
-        # normalizing here keeps a natural "/mnt/reports/" spelling from
-        # producing a mount the gates reject with a confusing PermissionError.
-        normalized = value.rstrip("/")
-        if not normalized:
-            raise ValueError("container_path must be a mount point below the container root, not '/'")
-        return normalized
+        # Keep a natural "/mnt/reports/" spelling from producing a mount the
+        # tool gates reject with a confusing PermissionError.
+        return normalize_container_path(value)
 
 
 class SandboxConfig(BaseModel):
