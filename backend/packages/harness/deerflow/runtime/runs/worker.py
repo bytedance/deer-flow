@@ -2081,14 +2081,35 @@ async def run_agent(
                 if not record.ownership_lost and journal is not None:
                     evidence_failure = None
                     try:
-                        evidence_receipt = await journal.finish_evidence()
+
+                        async def confirm_terminal() -> None:
+                            nonlocal evidence_failure
+                            from deerflow.runtime.events.terminal import confirm_terminal_event
+
+                            status = run_manager.terminal_event_status(record)
+                            if status is None:
+                                evidence_failure = "Terminal event lacks an attributable final commit ACK"
+                                raise RuntimeError(evidence_failure)
+                            confirmation = await confirm_terminal_event(
+                                event_store,
+                                thread_id=thread_id,
+                                run_id=run_id,
+                                status=status,
+                                user_id=record.user_id,
+                                authorized=lambda: run_manager.terminal_event_status(record) == status,
+                            )
+                            if not confirmation.confirmed:
+                                evidence_failure = f"Terminal event confirmation: {confirmation.value}."
+                                raise RuntimeError(evidence_failure)
+
+                        evidence_receipt = await journal.finish_evidence(before_receipt=confirm_terminal)
                         if evidence_receipt is not None:
                             if not evidence_execution_started:
                                 evidence_failure = "Lead graph execution did not begin; producer coverage is partial."
                             elif not await run_manager.seal_completed_evidence(run_id, evidence_receipt):
                                 evidence_failure = "The owning worker could not persist the journal seal."
                     except BaseException as exc:
-                        evidence_failure = f"Journal seal failed ({type(exc).__name__})."
+                        evidence_failure = evidence_failure or f"Journal seal failed ({type(exc).__name__})."
                         if not isinstance(exc, Exception):
                             deferred_finalization_interrupt = _defer_finalization_interrupt(deferred_finalization_interrupt, exc)
                         logger.warning("Failed to seal completed-run evidence for %s (non-fatal)", run_id, exc_info=True)
