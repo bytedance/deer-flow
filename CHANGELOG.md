@@ -1397,6 +1397,14 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
 
 ### Fixed
 
+- **persistence:** A PostgreSQL bootstrap failure inside an existing database
+  now reports its own error. The Gateway treated any error mentioning "does not
+  exist", such as a missing column or relation during a migration, as a missing
+  database and ran `CREATE DATABASE`. Startup then failed with `database ...
+  already exists` or `permission denied to create database`, and the original
+  error was missing from the traceback. Only a missing database (SQLSTATE
+  `3D000`) is auto-created now. ([#7410])
+
 - **mcp:** Ordinary users can now install DingTalk, WeCom and HubSpot from
   **Capability Center → Plugins**. Saving one of these bundled
   connections as a non-administrator, including editing or enabling it later,
@@ -13060,3 +13068,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7362]: https://github.com/bytedance/deer-flow/pull/7362
 [#7364]: https://github.com/bytedance/deer-flow/pull/7364
 [#7400]: https://github.com/bytedance/deer-flow/pull/7400
+[#7410]: https://github.com/bytedance/deer-flow/pull/7410

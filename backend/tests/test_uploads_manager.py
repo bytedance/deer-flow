@@ -6,7 +6,9 @@ import os
 import shutil
 import stat
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
+from threading import Barrier, local
 from unittest.mock import patch
 
 import pytest
@@ -245,13 +247,15 @@ class TestWriteUploadFileNoSymlink:
 
         with pytest.raises(FileExistsError):
             write_upload_file_no_symlink(tmp_path, "notes.txt", b"new attachment", exclusive=True)
-        # The default replacement path still rejects hardlinks outright, where the
-        # platform maintains a trustworthy link count. Windows keeps a published
-        # upload at ``st_nlink == 2`` forever, so the replacement overwrites the
-        # destination (and, being a hard link, ``source`` with it).
+        # Default collision retries keep both aliases intact. POSIX still
+        # rejects a pre-existing multi-link destination; Windows cannot use its
+        # stale link count to reject files published through a staging link.
         if os.name == "nt":
-            assert write_upload_file_no_symlink(tmp_path, "notes.txt", b"replacement").read_bytes() == b"replacement"
-            assert source.read_bytes() == b"replacement"
+            renamed = write_upload_file_no_symlink(tmp_path, "notes.txt", b"new attachment")
+            assert renamed.name == "notes_1.txt"
+            assert renamed.read_bytes() == b"new attachment"
+            assert source.read_bytes() == b"existing upload"
+            assert (tmp_path / "notes.txt").read_bytes() == b"existing upload"
         else:
             with pytest.raises(UnsafeUploadPathError, match="multiple links"):
                 write_upload_file_no_symlink(tmp_path, "notes.txt", b"replacement")
@@ -286,16 +290,69 @@ class TestWriteUploadFileNoSymlink:
         assert dest == tmp_path / "notes.txt"
         assert dest.read_bytes() == b"hello"
 
-    def test_overwrites_existing_regular_file_with_single_link(self, tmp_path):
-        dest = tmp_path / "notes.txt"
-        dest.write_bytes(b"old contents")
-        assert os.stat(dest).st_nlink == 1
+    def test_collision_appends_suffix_and_preserves_existing_file(self, tmp_path):
+        """A same-name upload must never truncate the file already on disk (issue #3750)."""
+        existing = tmp_path / "notes.txt"
+        existing.write_bytes(b"old contents")
+        assert os.stat(existing).st_nlink == 1
 
         result = write_upload_file_no_symlink(tmp_path, "notes.txt", b"new contents")
 
-        assert result == dest
-        assert dest.read_bytes() == b"new contents"
-        assert os.stat(dest).st_nlink == 1
+        assert result == tmp_path / "notes_1.txt"
+        assert existing.read_bytes() == b"old contents"
+        assert result.read_bytes() == b"new contents"
+
+    def test_repeated_same_name_uploads_keep_every_version(self, tmp_path):
+        write_upload_file_no_symlink(tmp_path, "notes.txt", b"v1")
+        write_upload_file_no_symlink(tmp_path, "notes.txt", b"v2")
+
+        result = write_upload_file_no_symlink(tmp_path, "notes.txt", b"v3")
+
+        assert result == tmp_path / "notes_2.txt"
+        assert {p.read_bytes() for p in tmp_path.glob("notes*.txt")} == {b"v1", b"v2", b"v3"}
+
+    @pytest.mark.parametrize("without_nofollow", [False, True], ids=["native", "without-nofollow"])
+    def test_concurrent_same_name_uploads_keep_every_payload(self, tmp_path, monkeypatch, without_nofollow):
+        if without_nofollow:
+            monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
+        filename = "notes.txt"
+        payloads = [f"upload-{index}:".encode() + bytes([index]) * 4096 for index in range(12)]
+        first_claim = Barrier(len(payloads), timeout=15)
+        real_open = os.open
+
+        def synchronized_open(path, flags, *args, **kwargs):
+            if os.path.basename(path) == filename and flags & os.O_CREAT:
+                # All writers complete their pre-open checks before any can
+                # create the shared name. Keep the actual filesystem open.
+                first_claim.wait()
+            return real_open(path, flags, *args, **kwargs)
+
+        monkeypatch.setattr(os, "open", synchronized_open)
+        with ThreadPoolExecutor(max_workers=len(payloads)) as executor:
+            futures = [executor.submit(write_upload_file_no_symlink, tmp_path, filename, payload) for payload in payloads]
+            try:
+                paths = [future.result(timeout=20) for future in futures]
+            finally:
+                first_claim.abort()
+
+        assert len(set(paths)) == len(payloads)
+        assert {path.name for path in paths} == {filename, *(f"notes_{index}.txt" for index in range(1, len(payloads)))}
+        assert set(tmp_path.iterdir()) == set(paths)
+        for path, payload in zip(paths, payloads, strict=True):
+            assert path.read_bytes() == payload
+
+    def test_collision_fallback_without_no_follow_support_preserves_existing_file(self, tmp_path, monkeypatch):
+        # When O_NOFOLLOW is absent (Windows), the function falls back to a
+        # dual-lstat + fstat approach — which must also refuse to truncate.
+        monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
+        existing = tmp_path / "notes.txt"
+        existing.write_bytes(b"old contents")
+
+        result = write_upload_file_no_symlink(tmp_path, "notes.txt", b"new contents")
+
+        assert result == tmp_path / "notes_1.txt"
+        assert existing.read_bytes() == b"old contents"
+        assert result.read_bytes() == b"new contents"
 
     def test_fallback_without_no_follow_support_succeeds(self, tmp_path, monkeypatch):
         monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
@@ -306,11 +363,9 @@ class TestWriteUploadFileNoSymlink:
         assert result == tmp_path / "notes.txt"
         assert (tmp_path / "notes.txt").read_bytes() == b"hello"
 
-    def test_exclusive_write_keeps_post_open_link_guard_without_no_follow(self, tmp_path, monkeypatch):
-        """Without ``O_NOFOLLOW`` (the Windows fallback branch), the exclusive
-        path keeps its strict post-open single-link check: a file that opens
-        with more than one link is rejected on every platform. Only the
-        non-exclusive replacement path defers to the Windows-aware guard."""
+    @pytest.mark.parametrize("exclusive", [False, True])
+    def test_write_keeps_post_open_link_guard_without_no_follow(self, tmp_path, monkeypatch, exclusive):
+        """Both O_EXCL creation modes require a new file with one link."""
         monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
         real_fstat = os.fstat
 
@@ -321,7 +376,7 @@ class TestWriteUploadFileNoSymlink:
         monkeypatch.setattr(os, "fstat", twin_linked_fstat)
 
         with pytest.raises(UnsafeUploadPathError, match="not an exclusive regular file"):
-            write_upload_file_no_symlink(tmp_path, "notes.txt", b"new attachment", exclusive=True)
+            write_upload_file_no_symlink(tmp_path, "notes.txt", b"new attachment", exclusive=exclusive)
 
     def test_open_uses_nonblocking_flag_when_available(self, tmp_path):
         if not hasattr(os, "O_NONBLOCK"):
@@ -367,7 +422,8 @@ class TestCopyUploadFileNoSymlink:
         if os.utime in os.supports_fd:
             assert os.stat(dest).st_mtime_ns == 1_700_000_000_000_000_000
 
-    def test_overwrites_existing_regular_file(self, tmp_path):
+    def test_collision_copies_to_unique_name_and_preserves_existing(self, tmp_path):
+        """Re-uploading an existing name must not destroy the earlier copy (issue #3750)."""
         uploads = tmp_path / "uploads"
         uploads.mkdir()
         (uploads / "notes.txt").write_bytes(b"old contents")
@@ -376,7 +432,90 @@ class TestCopyUploadFileNoSymlink:
 
         dest = copy_upload_file_no_symlink(uploads, "notes.txt", src)
 
+        assert dest == uploads / "notes_1.txt"
+        assert (uploads / "notes.txt").read_bytes() == b"old contents"
         assert dest.read_bytes() == b"new contents"
+
+    @pytest.mark.parametrize("capture", [False, True], ids=["direct", "snapshot"])
+    def test_known_collision_stages_payload_once(self, tmp_path, capture):
+        uploads = tmp_path / "uploads"
+        uploads.mkdir()
+        existing = {"notes.txt": b"first upload", "NOTES_1.TXT": b"second upload"}
+        for name, data in existing.items():
+            (uploads / name).write_bytes(data)
+        src = tmp_path / "source.txt"
+        src.write_bytes(b"new contents" * 4096)
+        snapshot = tmp_path / "snapshot" if capture else None
+
+        with patch("deerflow.uploads.manager.shutil.copyfileobj", wraps=shutil.copyfileobj) as copy:
+            dest = copy_upload_file_no_symlink(uploads, "notes.txt", src, snapshot_path=snapshot)
+
+        assert copy.call_count == 1 + int(capture)
+        assert dest.name == "notes_2.txt"
+        assert dest.read_bytes() == src.read_bytes()
+        for name, data in existing.items():
+            assert (uploads / name).read_bytes() == data
+        assert {path.name for path in uploads.iterdir()} == {*existing, dest.name}
+        if snapshot is not None:
+            assert snapshot.read_bytes() == src.read_bytes()
+
+    @pytest.mark.parametrize("existing", [False, True], ids=["fresh", "occupied"])
+    @pytest.mark.parametrize("nofollow", [False, True], ids=["link-fallback", "link-nofollow"])
+    def test_concurrent_same_name_copies_keep_every_payload(self, tmp_path, monkeypatch, existing, nofollow):
+        uploads = tmp_path / "uploads"
+        uploads.mkdir()
+        if existing:
+            (uploads / "notes.txt").write_bytes(b"original upload")
+        payloads = [f"copy-{index}:".encode() + bytes([index]) * 4096 for index in range(8)]
+        sources = [tmp_path / f"source-{index}.txt" for index in range(len(payloads))]
+        for source, payload in zip(sources, payloads, strict=True):
+            source.write_bytes(payload)
+        first_publication = Barrier(len(payloads), timeout=15)
+        worker_state = local()
+        real_link = os.link
+        if nofollow and real_link not in os.supports_follow_symlinks:
+            pytest.skip("host does not support no-follow hard links")
+
+        def synchronized_link(staging, dest, **kwargs):
+            if not getattr(worker_state, "published", False):
+                worker_state.published = True
+                first_publication.wait()
+            return real_link(staging, dest, **kwargs)
+
+        monkeypatch.setattr(os, "link", synchronized_link)
+        monkeypatch.setattr(os, "supports_follow_symlinks", {synchronized_link} if nofollow else set())
+        with ThreadPoolExecutor(max_workers=len(payloads)) as executor:
+            futures = [executor.submit(copy_upload_file_no_symlink, uploads, "notes.txt", source) for source in sources]
+            try:
+                paths = [future.result(timeout=20) for future in futures]
+            finally:
+                first_publication.abort()
+
+        assert len(set(paths)) == len(payloads)
+        start = int(existing)
+        expected = {"notes.txt" if index == 0 else f"notes_{index}.txt" for index in range(start, start + len(payloads))}
+        assert {path.name for path in paths} == expected
+        assert {path.name for path in uploads.iterdir()} == expected | ({"notes.txt"} if existing else set())
+        for path, payload in zip(paths, payloads, strict=True):
+            assert path.read_bytes() == payload
+        if existing:
+            assert (uploads / "notes.txt").read_bytes() == b"original upload"
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX destination hardlink guard")
+    def test_existing_hardlinked_destination_is_not_silently_renamed(self, tmp_path):
+        uploads = tmp_path / "uploads"
+        uploads.mkdir()
+        original = tmp_path / "original.txt"
+        original.write_bytes(b"original upload")
+        os.link(original, uploads / "notes.txt")
+        src = tmp_path / "source.txt"
+        src.write_bytes(b"new contents")
+
+        with pytest.raises(UnsafeUploadPathError, match="multiple links"):
+            copy_upload_file_no_symlink(uploads, "notes.txt", src)
+
+        assert (uploads / "notes.txt").read_bytes() == b"original upload"
+        assert [path.name for path in uploads.iterdir()] == ["notes.txt"]
 
     def test_no_replace_copy_preserves_existing_file_and_cleans_stage(self, tmp_path):
         uploads = tmp_path / "uploads"
@@ -857,8 +996,10 @@ class TestCleanupStaleUploadStagingFiles:
         assert validate_upload_destination(uploads_dir, "notes.txt") == published
         replacement = tmp_path / "replacement.txt"
         replacement.write_bytes(b"replacement bytes")
-        assert copy_upload_file_no_symlink(uploads_dir, "notes.txt", replacement) == published
-        assert published.read_bytes() == b"replacement bytes"
+        copied = copy_upload_file_no_symlink(uploads_dir, "notes.txt", replacement)
+        assert copied == uploads_dir / "notes_1.txt"
+        assert copied.read_bytes() == b"replacement bytes"
+        assert published.read_bytes() == b"published bytes"
 
     def test_skips_staging_file_that_vanished_before_its_age_was_read(self, tmp_path, caplog):
         uploads_dir = tmp_path / "threads" / "thread-1" / "user-data" / "uploads"

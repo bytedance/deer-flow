@@ -1,5 +1,9 @@
 # Backend Tests
 
+When adding a scoped `AGENTS.md`, update `EXPECTED_GUIDANCE_PATHS` in
+`test_agent_guidance_check.py` in the same change. The explicit inventory pins
+guidance ownership and extends hard-budget checks to each approved guide.
+
 `test_image_result_url_safety.py` drives GroundRoute through `ainvoke` and an
 offline HTTPX transport. Patch only the provider's `httpx` reference; preserve
 the shared client and exercise real configuration resolution and URL screening.
@@ -88,6 +92,11 @@ retry reuse, so the rejection tests cannot pass by rejecting every custom store.
 Upload case-collision coverage uses separate HTTP requests and preserves both
 reported payloads. Observe real filename-claim inputs to pin the disk seed;
 case-insensitive hosts can otherwise mask a missing seed through link retries.
+
+Same-name upload concurrency tests synchronize the first real claim: `os.open`
+for direct writes and `os.link` for staged copies. Cover native/fallback options,
+fresh/occupied copy names, every caller's exact bytes and no staging leftovers.
+Drain workers and abort barriers on failure; do not rely on scheduling or sleeps.
 
 Channel reload cancellation regressions must assert the worker returned the
 stale snapshot before checking that newer runtime config survived. Completion

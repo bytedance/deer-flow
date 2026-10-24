@@ -48,6 +48,9 @@ class DummyTaskRepo:
     async def update_after_launch(self, *args, **kwargs):
         self.updated = (args, kwargs)
 
+    async def reconcile_terminal_runs(self, **_kwargs):
+        return 0
+
     async def complete_run(self, task_id, **kwargs):
         self.completions.append((task_id, kwargs))
         return True

@@ -1530,9 +1530,10 @@ async def _ingest_inbound_files_impl(thread_id: str, msg: InboundMessage, *, use
 
             created.append(
                 {
-                    "filename": safe_name,
+                    # Report the returned path rather than the pre-scan claim.
+                    "filename": dest.name,
                     "size": len(data),
-                    "path": f"/mnt/user-data/uploads/{safe_name}",
+                    "path": f"/mnt/user-data/uploads/{dest.name}",
                     "is_image": ftype == "image",
                 }
             )
