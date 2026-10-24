@@ -91,18 +91,174 @@ def test_python_extraction_fallback_preserves_article_text(monkeypatch):
 
     from deerflow.utils import readability
 
-    original = readability.simple_json_from_html_string
+    calls = []
 
     def extract(html, *, use_readability):
-        if use_readability:
-            raise subprocess.CalledProcessError(1, "node")
-        return original(html, use_readability=False)
+        calls.append(use_readability)
+        raise subprocess.CalledProcessError(1, "node")
 
     monkeypatch.setattr(readability, "simple_json_from_html_string", extract)
+    monkeypatch.setattr(readability, "_readability_js_available", lambda: True)
     article = ReadabilityExtractor().extract_article(_article('<a href="../next">Next</a>'), url=PAGE_URL)
-    # The existing Python fallback strips link markup; preserve its text contract.
-    assert "Next" in article.to_markdown()
+    # The Python fallback keeps link destinations instead of stripping markup.
+    assert calls == [True]
+    assert "[Next](https://example.com/next)" in article.to_markdown()
     assert "This article explains the documentation" in article.to_markdown()
+
+
+def test_unavailable_readability_preserves_resolved_link_and_image_destinations(monkeypatch, caplog):
+    from deerflow.utils import readability
+
+    calls = []
+
+    def extract(html, *, use_readability):
+        calls.append(use_readability)
+        return {
+            "title": "Guide",
+            "content": '<article><p>Article body</p><a>Next</a><img alt="Chart"></article>',
+        }
+
+    readability._reset_readability_probe()
+    monkeypatch.setattr(readability, "have_node", lambda: False)
+    monkeypatch.setattr(readability, "simple_json_from_html_string", extract)
+
+    try:
+        article = ReadabilityExtractor().extract_article(
+            _article('<a href="../next">Next</a> <img src="images/chart.png" alt="Chart">'),
+            url=PAGE_URL,
+        )
+    finally:
+        readability._reset_readability_probe()
+
+    # When Readability.js cannot run at all, extraction must not silently go
+    # through readabilipy's pure-Python mode; the explicit fallback keeps the
+    # resolved destinations.
+    assert calls == []
+    assert "# Guide" in article.to_markdown()
+    assert "[Next](https://example.com/next)" in article.to_markdown()
+    assert "![Chart](https://example.com/docs/images/chart.png)" in article.to_markdown()
+    assert "This article explains the documentation" in article.to_markdown()
+    assert "Readability.js is unavailable" in caplog.text
+
+
+def test_python_fallback_keeps_content_outside_empty_main_and_uses_article_title(monkeypatch):
+    from deerflow.utils import readability
+
+    monkeypatch.setattr(readability, "_readability_js_available", lambda: False)
+    html = """<html><head><title>Example Site</title></head><body>
+    <nav><a href="/home">Home</a></nav><main></main>
+    <article><h1>Real Story</h1><p>Article details.</p><a href="/next">Next</a></article>
+    <footer>Site footer</footer></body></html>"""
+
+    article = ReadabilityExtractor().extract_article(html, url=PAGE_URL)
+    markdown = article.to_markdown()
+
+    assert markdown.startswith("# Real Story")
+    assert "Article details." in markdown
+    assert "[Next](https://example.com/next)" in markdown
+    assert "Home" not in markdown
+    assert "Site footer" not in markdown
+
+
+def test_python_fallback_strips_shell_inside_main(monkeypatch):
+    from deerflow.utils import readability
+
+    monkeypatch.setattr(readability, "_readability_js_available", lambda: False)
+    html = """<html><head><title>Site</title></head><body>
+    <main><nav><a href="/home">Home</a><a href="/a">A</a></nav>
+    <h1>Real</h1><p>Article body</p></main></body></html>"""
+
+    markdown = ReadabilityExtractor().extract_article(html, url=PAGE_URL).to_markdown()
+
+    # The nav sweep must not be keyed to the body branch only: a <main> that
+    # wins the container selection must not leak its navigation into the
+    # result either.
+    assert "Article body" in markdown
+    assert "Home" not in markdown
+    assert "(/home)" not in markdown
+
+
+def test_python_fallback_finds_article_outside_container(monkeypatch):
+    from deerflow.utils import readability
+
+    monkeypatch.setattr(readability, "_readability_js_available", lambda: False)
+    html = """<html><head><title>T</title></head><body>
+    <main><p>shell text</p></main>
+    <article><h1>Real</h1><p>Article body</p></article></body></html>"""
+
+    markdown = ReadabilityExtractor().extract_article(html, url=PAGE_URL).to_markdown()
+
+    # An <article> beside the selected container must degrade into the
+    # content instead of being discarded in favour of the shell text.
+    assert markdown.startswith("# Real")
+    assert "Article body" in markdown
+    assert "shell text" not in markdown
+
+
+def test_python_fallback_skips_textless_article(monkeypatch):
+    from deerflow.utils import readability
+
+    monkeypatch.setattr(readability, "_readability_js_available", lambda: False)
+    html = "<html><head><title>T</title></head><body><article></article><p>Real prose lives here.</p></body></html>"
+
+    markdown = ReadabilityExtractor().extract_article(html, url=PAGE_URL).to_markdown()
+
+    # A textless <article> placeholder must fall back to the container, the
+    # same way an empty <main> does, instead of serializing as empty content.
+    assert "Real prose lives here." in markdown
+    assert "No content could be extracted" not in markdown
+
+
+def test_python_fallback_keeps_in_article_aside_callout(monkeypatch):
+    from deerflow.utils import readability
+
+    monkeypatch.setattr(readability, "_readability_js_available", lambda: False)
+    html = """<html><head><title>Guide</title></head><body>
+    <article><h1>Guide</h1><p>Main prose.</p>
+    <aside class="note"><p>Important caveat readers need.</p></aside></article>
+    </body></html>"""
+
+    markdown = ReadabilityExtractor().extract_article(html, url=PAGE_URL).to_markdown()
+
+    # Docs sites (MDN, Docusaurus, many blogs) use <aside> for in-article
+    # callouts; the shell sweep must not drop real article text with them.
+    assert "Main prose." in markdown
+    assert "Important caveat readers need." in markdown
+
+
+def test_python_fallback_still_strips_aside_outside_article(monkeypatch):
+    from deerflow.utils import readability
+
+    monkeypatch.setattr(readability, "_readability_js_available", lambda: False)
+    html = """<html><head><title>Site</title></head><body>
+    <main><article><p>Main prose.</p></article>
+    <aside><p>Shell sidebar</p></aside></main>
+    <footer>Site footer</footer></body></html>"""
+
+    markdown = ReadabilityExtractor().extract_article(html, url=PAGE_URL).to_markdown()
+
+    # The in-article protection is scoped to the article itself: shell
+    # regions beside it still leak nothing into the serialized content.
+    assert "Main prose." in markdown
+    assert "Shell sidebar" not in markdown
+    assert "Site footer" not in markdown
+
+
+def test_python_fallback_skips_empty_article_before_real_one(monkeypatch):
+    from deerflow.utils import readability
+
+    monkeypatch.setattr(readability, "_readability_js_available", lambda: False)
+    html = """<html><head><title>T</title></head><body>
+    <main><article></article><p>shell</p></main>
+    <article><h1>Real story</h1><p>Substantive prose.</p></article></body></html>"""
+
+    markdown = ReadabilityExtractor().extract_article(html, url=PAGE_URL).to_markdown()
+
+    # The first <article> in document order can be a textless placeholder;
+    # discarding it must not shadow a real <article> later in the document.
+    assert markdown.startswith("# Real story")
+    assert "Substantive prose." in markdown
+    assert "shell" not in markdown
 
 
 @pytest.mark.parametrize("base", ["http://[broken", "data:text/plain,invalid", "javascript:void(0)", "about:blank", "mailto:help@example.com", "blob:https://example.com/id"])
