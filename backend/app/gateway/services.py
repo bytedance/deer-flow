@@ -2586,8 +2586,20 @@ async def start_run(
                 )
                 if start_producer_lease is not None:
                     producer_lease_started = await start_producer_lease(admission_run_id)
-                if getattr(bridge, "supports_cross_process", False) is True and not producer_lease_started:
-                    raise RuntimeError("Cross-process stream producer tracking is unavailable")
+                    if not producer_lease_started and getattr(bridge, "supports_cross_process", False) is True:
+                        # Best-effort: a cross-process bridge returns False only
+                        # after a transient backend error whose partial lease
+                        # registration was safely rolled back (nothing is left
+                        # tracked). An untracked producer falls back to the
+                        # historical conservative recovery path -- wait for the
+                        # real END or the retained-stream TTL rather than
+                        # synthesizing one -- so this run is no less safe than it
+                        # was before producer leases existed. Rejecting admission
+                        # here would instead turn a transient blip into a 500.
+                        logger.warning(
+                            "Stream producer tracking unavailable for run %s; admitting it with untracked (conservative) stream recovery",
+                            sanitize_log_param(admission_run_id),
+                        )
                 try:
                     record = await run_mgr.create_or_reject(
                         thread_id,
