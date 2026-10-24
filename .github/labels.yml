@@ -2,7 +2,7 @@
 #
 # This file is the single source of truth for repository labels used by the
 # auto-labeling workflow (.github/workflows/triage.yml). Auto-labelers can only
-# apply labels that already exist, so every label referenced by a workflow MUST
+# apply labels that already exist, so every label applied by that workflow MUST
 # be declared here; scripts/check_label_declarations.py enforces that pair.
 #
 # Apply with:  uv run --with pyyaml python scripts/sync_labels.py [--repo OWNER/NAME]
