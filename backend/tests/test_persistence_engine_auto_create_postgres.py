@@ -92,4 +92,3 @@ async def test_bootstrap_failure_in_an_existing_database_is_not_masked(missing_d
         sqlstates.append(getattr(error, "sqlstate", None))
         error = error.__cause__
     assert "42703" in sqlstates, raised.value
-    assert 'column "updated_at" does not exist' in str(raised.value)

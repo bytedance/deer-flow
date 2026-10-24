@@ -249,16 +249,31 @@ async def test_init_engine_postgres_retry_uses_hardened_kwargs(monkeypatch) -> N
             await engine_mod.close_engine()
 
 
-@pytest.mark.asyncio
-async def test_init_engine_postgres_retries_a_wrapped_missing_database_error(monkeypatch) -> None:
+def _wrapped_by_orig(missing: BaseException) -> BaseException:
     from sqlalchemy.exc import OperationalError
 
+    return OperationalError("connect", {}, missing)
+
+
+def _wrapped_by_cause(missing: BaseException) -> BaseException:
+    wrapped = RuntimeError("bootstrap failed")
+    wrapped.__cause__ = missing
+    return wrapped
+
+
+def _wrapped_by_context(missing: BaseException) -> BaseException:
+    wrapped = RuntimeError("bootstrap failed")
+    wrapped.__context__ = missing
+    return wrapped
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wrap", [_wrapped_by_orig, _wrapped_by_cause, _wrapped_by_context], ids=["orig", "cause", "context"])
+async def test_init_engine_postgres_retries_a_wrapped_missing_database_error(monkeypatch, wrap) -> None:
     url = "postgresql+asyncpg://user:password@localhost/deerflow"
     engine = MagicMock()
     engine.dispose = AsyncMock()
-    missing = _PostgresError("3D000", 'database "deerflow" does not exist')
-    wrapped = OperationalError("connect", {}, missing)
-    wrapped.__cause__ = missing
+    wrapped = wrap(_PostgresError("3D000", 'database "deerflow" does not exist'))
     bootstrap_schema = AsyncMock(side_effect=[wrapped, None])
     auto_create = AsyncMock()
 
@@ -278,6 +293,15 @@ async def test_init_engine_postgres_retries_a_wrapped_missing_database_error(mon
             await engine_mod.close_engine()
 
 
+def _cyclic_chain() -> BaseException:
+    # The classifier must terminate on a chain that loops back on itself.
+    error = _PostgresError("42703", 'column "updated_at" does not exist')
+    wrapper = RuntimeError("bootstrap failed")
+    wrapper.__cause__ = error
+    error.__context__ = wrapper
+    return error
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "error",
@@ -287,6 +311,7 @@ async def test_init_engine_postgres_retries_a_wrapped_missing_database_error(mon
         pytest.param(_PostgresError("42883", "function gen_random_uuid() does not exist"), id="undefined-function"),
         pytest.param(_PostgresError("28000", 'role "deerflow" does not exist'), id="undefined-role"),
         pytest.param(Exception('database "deerflow" does not exist'), id="no-sqlstate"),
+        pytest.param(_cyclic_chain(), id="cyclic-chain"),
     ],
 )
 async def test_init_engine_postgres_reraises_other_does_not_exist_errors(monkeypatch, error) -> None:

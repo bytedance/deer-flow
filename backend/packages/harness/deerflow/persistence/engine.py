@@ -65,14 +65,23 @@ def _is_missing_database_error(exc: BaseException) -> bool:
 
     Postgres words missing relations, columns and roles as "does not exist"
     too, so the message cannot tell them apart; only the SQLSTATE can.
-    asyncpg raises this one unwrapped from connect(); follow ``__cause__``
-    so a SQLAlchemy-wrapped copy is recognized as well.
+    asyncpg raises this one unwrapped from connect(); follow ``orig``,
+    ``__cause__`` and ``__context__`` (as ``_is_unique_violation`` in
+    ``runtime/runs/manager.py`` does) so a wrapped copy is recognized as well.
     """
-    error: BaseException | None = exc
-    while error is not None:
-        if getattr(error, "sqlstate", None) == _MISSING_DATABASE_SQLSTATE:
+    pending: list[BaseException] = [exc]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if getattr(current, "sqlstate", None) == _MISSING_DATABASE_SQLSTATE:
             return True
-        error = error.__cause__
+        for attr in ("orig", "__cause__", "__context__"):
+            inner = getattr(current, attr, None)
+            if isinstance(inner, BaseException):
+                pending.append(inner)
     return False
 
 
