@@ -1397,6 +1397,12 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
 
 ### Fixed
 
+- **threads:** `POST /api/threads` now rejects an `assistant_id` that cannot
+  name an agent with `422`. It used to store the value, and every later read
+  of the thread (`GET` thread, state, history) answered
+  `500 Internal Server Error` until the thread was deleted. Threads saved that
+  way before this fix are read with the lead agent's schema. ([#7445])
+
 - **mcp:** Ordinary users can now install DingTalk, WeCom and HubSpot from
   **Capability Center → Plugins**. Saving one of these bundled
   connections as a non-administrator, including editing or enabling it later,
@@ -13060,3 +13066,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7362]: https://github.com/bytedance/deer-flow/pull/7362
 [#7364]: https://github.com/bytedance/deer-flow/pull/7364
 [#7400]: https://github.com/bytedance/deer-flow/pull/7400
+[#7445]: https://github.com/bytedance/deer-flow/pull/7445

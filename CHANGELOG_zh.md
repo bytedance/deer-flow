@@ -1112,6 +1112,11 @@
 
 ### 修复
 
+- **线程：** `POST /api/threads` 现在会以 `422` 拒绝无法对应任何智能体的
+  `assistant_id`。此前该值会被直接保存，之后读取该线程（`GET` 线程、状态、历史）
+  都会返回 `500 Internal Server Error`，直到删除线程。修复前已这样保存的线程
+  改为按主智能体的状态结构读取。([#7445])
+
 - **MCP：** 普通用户现在可以在“能力中心 → 插件”中安装钉钉、企业微信和 HubSpot。
   此前非管理员保存这些内置连接（包括之后编辑或启用）会返回
   `500 Internal Server Error`，因为个人连接检查读取了请求模型未声明的 `cwd` 字段。
@@ -10425,3 +10430,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7362]: https://github.com/bytedance/deer-flow/pull/7362
 [#7364]: https://github.com/bytedance/deer-flow/pull/7364
 [#7400]: https://github.com/bytedance/deer-flow/pull/7400
+[#7445]: https://github.com/bytedance/deer-flow/pull/7445
