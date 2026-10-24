@@ -26,7 +26,7 @@ import secrets
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, TypedDict
+from typing import Any, TypedDict, cast
 
 from app.channels.message_bus import HUMAN_INPUT_REQUEST_METADATA_KEY
 
@@ -264,10 +264,18 @@ class PendingCardRegistry:
             return len(expired)
 
     def get_pending_entry(self, callback_token: str) -> PendingCardEntry | None:
-        """Read-only lookup of a pending entry without consuming it."""
+        """Read-only lookup of a pending entry without consuming it.
+
+        .. note::
+
+            The lookup does **not** check the entry's TTL.  An expired-but-not-
+            yet-pruned entry is still reported as pending.  Callers that need
+            strict freshness should call :meth:`prune_expired` first or compare
+            ``created_at`` themselves.
+        """
         with self._lock:
             entry = self._entries.get(callback_token)
-            return dict(entry) if entry is not None else None  # type: ignore[return-value]
+            return cast(PendingCardEntry, dict(entry)) if entry is not None else None
 
     def __len__(self) -> int:
         """Return the number of tracked pending cards."""
