@@ -20,6 +20,8 @@ _SKILL_BODY_AT_EOF = """---
 name: data-analysis
 description: Analyze data with pandas and charts.
 ---"""
+# The same EOF-terminated document saved with CRLF line endings.
+_SKILL_BODY_AT_EOF_CRLF = "---\r\nname: data-analysis\r\ndescription: Analyze data with pandas and charts.\r\n---"
 
 
 def _ai_read(tool_call_id: str, path: str, name: str = "read_file") -> AIMessage:
@@ -77,6 +79,17 @@ class TestExtractSkills:
         entry = build_skill_entry_metadata_from_read(
             "/mnt/skills/public/data-analysis/SKILL.md",
             _SKILL_BODY_AT_EOF,
+            skills_root=_ROOT,
+        )
+        assert entry == {
+            "path": "/mnt/skills/public/data-analysis/SKILL.md",
+            "description": "Analyze data with pandas and charts.",
+        }
+
+    def test_build_skill_entry_metadata_from_read_accepts_crlf_frontmatter_at_eof(self):
+        entry = build_skill_entry_metadata_from_read(
+            "/mnt/skills/public/data-analysis/SKILL.md",
+            _SKILL_BODY_AT_EOF_CRLF,
             skills_root=_ROOT,
         )
         assert entry == {
