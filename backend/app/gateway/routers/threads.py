@@ -44,6 +44,7 @@ from app.gateway.services import (
     build_checkpoint_state_mutation_accessor,
     build_thread_checkpoint_state_accessor,
     build_thread_checkpoint_state_mutation_accessor,
+    custom_agent_name,
     reserve_checkpoint_write,
     strip_server_owned_state_metadata,
 )
@@ -496,6 +497,14 @@ class ThreadCreateRequest(BaseModel):
     project_id: str | None = Field(default=None, description="Assign the new thread to this project (validated server-side)")
 
     _strip_reserved = field_validator("metadata")(classmethod(lambda cls, v: _strip_reserved_metadata(v)))
+
+    @field_validator("assistant_id")
+    @classmethod
+    def _assistant_id_names_an_agent(cls, value: str | None) -> str | None:
+        # State reads build a run config from the stored value, so reject it
+        # here as run creation does. The caller's spelling is kept.
+        custom_agent_name(value)
+        return value
 
 
 class ThreadSearchRequest(BaseModel):
