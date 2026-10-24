@@ -36,6 +36,8 @@ in `extension-package-check.yml`. Tests: `backend/tests/test_extension_check_scr
 with `errors="replace"` for legacy terminals/pipes. Guard `reconfigure` on
 embedded/captured streams. Offline tests: `backend/tests/test_setup_script_encoding.py`.
 
+`sync_labels.py`: apply the same guard to stdout and stderr at `main` start.
+
 `check_label_declarations.py`: stdlib-only guard; reject unsupported
 expressions. Tests: `backend/tests/test_label_declarations.py`.
 

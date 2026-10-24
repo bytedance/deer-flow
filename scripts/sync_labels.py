@@ -65,6 +65,11 @@ def sync_label(label: dict[str, str], repo: str | None, dry_run: bool) -> bool:
 
 
 def main() -> int:
+    # Status symbols must not abort a redirected sync on legacy-encoding hosts.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", help="Target repository as OWNER/NAME")
     parser.add_argument(
