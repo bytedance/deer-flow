@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from typing import Any
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
 
 ORIGINAL_USER_CONTENT_KEY = "original_user_content"
 SUMMARY_MESSAGE_NAME = "summary"
@@ -61,6 +61,29 @@ def message_content_to_text(content: Any) -> str:
                     parts.append(text)
         return "\n".join(part for part in parts if part)
     return str(content)
+
+
+def is_deerflow_error_fallback(message: object) -> bool:
+    """Return whether *message* is a framework-generated model error fallback."""
+    return isinstance(message, AIMessage) and bool((message.additional_kwargs or {}).get("deerflow_error_fallback"))
+
+
+def strip_trailing_error_fallbacks(messages: Sequence[object]) -> list[object]:
+    """Drop only terminal fallback assistants from a model-bound history.
+
+    Error fallbacks remain in checkpoints and in the visible conversation. A
+    provider request may omit a trailing fallback when a continuation has no
+    newer user turn, because some providers reject an assistant-prefill-shaped
+    final message. Fallbacks in the middle of a conversation are retained, and
+    an all-fallback history is left intact so this helper never creates an
+    empty request by itself.
+    """
+    end = len(messages)
+    while end > 0 and is_deerflow_error_fallback(messages[end - 1]):
+        end -= 1
+    if end == 0:
+        return list(messages)
+    return list(messages[:end])
 
 
 def message_to_text(message: Any, *, text_attribute_fallback: bool = False) -> str:

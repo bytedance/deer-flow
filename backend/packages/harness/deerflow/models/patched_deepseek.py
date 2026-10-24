@@ -14,6 +14,7 @@ from langchain_core.messages import AIMessage
 from langchain_deepseek import ChatDeepSeek
 
 from deerflow.models.assistant_payload_replay import restore_assistant_payloads, restore_reasoning_content
+from deerflow.utils.messages import strip_trailing_error_fallbacks
 
 
 def _thinking_enabled(*sources: Any) -> bool:
@@ -79,7 +80,7 @@ class PatchedChatDeepSeek(ChatDeepSeek):
         additional_kwargs into assistant messages in the payload.
         """
         original_messages = self._convert_input(input_).to_messages()
-        request_messages = [message for message in original_messages if not (isinstance(message, AIMessage) and (message.additional_kwargs or {}).get("deerflow_error_fallback"))]
+        request_messages = strip_trailing_error_fallbacks(original_messages)
 
         # Call parent to get the base payload
         payload = super()._get_request_payload(request_messages, stop=stop, **kwargs)
