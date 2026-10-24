@@ -1021,6 +1021,9 @@ class LocalSandbox(Sandbox):
                 start_new_session=True,
                 env=env,
             )
+            # With start_new_session=True, the new process is also the
+            # process-group leader, so its PID is the stable group identifier.
+            process_group_id = process.pid
         except Exception:
             for fd in (stdout_read_fd, stdout_write_fd, stderr_read_fd, stderr_write_fd):
                 try:
@@ -1040,16 +1043,11 @@ class LocalSandbox(Sandbox):
         stdout_capture, stdout_thread = LocalSandbox._start_pipe_drain(stdout_read_fd, "deerflow-bash-stdout-drain")
         stderr_capture, stderr_thread = LocalSandbox._start_pipe_drain(stderr_read_fd, "deerflow-bash-stderr-drain")
         try:
-            process_group_id = os.getpgid(process.pid)
-        except OSError:
-            process_group_id = None
-
-        try:
             try:
                 process.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
                 timed_out = True
-                LocalSandbox._terminate_process_group(process)
+                LocalSandbox._terminate_process_group(process, process_group_id)
             returncode = process.returncode if process.returncode is not None else 0
         finally:
             join_timeout = 10 if timed_out or not LocalSandbox._process_group_exists(process_group_id) else _PIPE_DRAIN_JOIN_TIMEOUT_SECONDS
@@ -1063,14 +1061,14 @@ class LocalSandbox(Sandbox):
         return stdout, stderr, returncode, timed_out
 
     @staticmethod
-    def _terminate_process_group(process: subprocess.Popen) -> None:
+    def _terminate_process_group(process: subprocess.Popen, process_group_id: int) -> None:
         """Kill the command's whole process group, then reap it.
 
         Falls back to killing just the direct child if the group is already
         gone (e.g. the command exited between the timeout and this call).
         """
         try:
-            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+            os.killpg(process_group_id, signal.SIGKILL)
         except (ProcessLookupError, PermissionError, OSError):
             # The process group is already gone (the command exited in the race
             # between the timeout and this call); fall back to killing just the

@@ -36,6 +36,7 @@ export interface Translations {
       | "screening"
       | "retrieval"
       | "knowledge"
+      | "knowledgeManagement"
       | "weknora"
       | "lightrag"
       | "example",

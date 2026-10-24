@@ -417,6 +417,7 @@ streams simulate chunks from a non-streaming response, while no-tool streams sta
    - ACP agent entries are separate from model providers — if you configure `acp_agents.codex`, point it at a Codex ACP adapter such as `npx -y @zed-industries/codex-acp`
    - A bare or absolute ACP agent `command` is resolved before the agent starts, so npm-installed launchers work on Windows too: `npx` or `mcode` is spawned as its `npx.cmd`/`mcode.cmd` shim instead of failing with a command-not-found error, and an absolute path such as `C:\Users\me\AppData\Roaming\npm\mcode` resolves to the `mcode.cmd` shim beside npm's extensionless shell script instead of failing with `WinError 193`. The lookup uses the `PATH` the agent subprocess will actually see (`acp_agents.<name>.env.PATH` when set, otherwise the Gateway's) and hands the spawn an absolute path, so a relative `PATH` entry cannot be re-interpreted inside the agent's own workspace. A relative `command` (for example `bin/mcode`) is used as configured, and a command that cannot be resolved is still reported with the install guidance below.
    - Each ACP agent's `timeout_seconds` (default: 1800) is one shared budget for initialization, session creation, and the prompt, starting after the subprocess launches. On timeout, DeerFlow aborts the invocation and closes the subprocess before returning an error. Workspace/MCP preparation and subprocess cleanup are outside this budget. A `TimeoutError` raised by the SDK before this deadline expires retains its own error message.
+   - If an ACP agent exits before answering (for example because it is not authenticated or a configured argument is wrong), DeerFlow reports its exit code within a few seconds instead of waiting for `timeout_seconds`, and records the end of the agent's stderr in the Gateway log. Agent stderr is read continuously, so an agent that logs heavily cannot stall on a full pipe.
    - MiniMax Code speaks ACP directly. Install and authenticate it, then add it as an ACP agent:
 
    ```bash
@@ -548,7 +549,7 @@ Gateway checkpoint cleanup runs when the next run wins durable same-thread
 admission, before its first checkpoint read. It checks only the root head and
 its parent, removes at most one metadata-only duration leaf without pending
 writes, and preserves explicit checkpoint selections and delta replay state.
-See [checkpoint operations](https://deerflow.tech/docs/harness/checkpoints/operations)
+See [checkpoint operations](frontend/src/content/en/harness/checkpoints/operations.mdx)
 for the retention constraints.
 
 > [!TIP]
@@ -952,6 +953,12 @@ failed run. Live runs require a disposable OpenSandbox service and runtime home.
 BoxLite shutdown rejects late VM registration and keeps its SDK loop open while
 in-flight acquisitions finish. If they cannot drain within five seconds,
 shutdown fails with resources still owned and can be retried.
+
+Successful `read_file` calls treat a JSON document's `error` field as file data,
+not a failure of the read tool. This keeps receipts accurate when inspecting
+saved API error responses and avoids blocking later reads when the optional
+`tool_progress` guard is enabled. Actual read failures and output truncation
+still retain their error or partial-result status.
 
 #### MCP Server
 
@@ -1506,6 +1513,16 @@ actions remain visible beside the compact sidebar on narrow screens.
 
 ### Skills & Tools
 
+Agents can call the read-only `inspect_run_status` tool to inspect visible run
+token usage, message and tool-call counts, an approximate context-window fill,
+and whether a summary or unfinished to-dos exist. It returns counts only, not
+conversation or to-do text. Token counts depend on provider usage metadata;
+compaction can remove earlier messages, and context fill is unavailable when
+the model has no configured `context_window` or its latest response reports no
+input usage. It is also unavailable after a subagent dispatch because subagent
+usage may be attributed to that response. The result identifies whether a
+current-run boundary is known.
+
 Open **Capability Center** from the workspace sidebar to manage **Plugins**
 (MCP servers and Lark/Feishu integration) and **Skills**. Both catalogs support
 search; skill cards show concise descriptions with full descriptions in a detail
@@ -1581,6 +1598,15 @@ retrieval citations. Configure explicit user-to-workspace credential bindings;
 resource authorization remains with WeKnora. The extension directory includes
 its installation guide.
 
+The optional [knowledge management extension](examples/deerflow-extension-knowledge-management/README.md)
+adds administrator-authorized file, URL and manual ingestion, processing status,
+reprocessing and cancellation through WeKnora. Parsing, indexing and optional
+Wiki/graph generation remain upstream. It is disabled by default, requires
+explicit resource/operation grants, and installs no management page. Its
+provider-independent API is covered by offline contract tests. Real ingestion,
+GLM-5.3/BGE integration, browser citation replay and observed limitations are
+recorded in the [acceptance report](examples/deerflow-extension-knowledge-management/VALIDATION.md).
+
 Skills are what make DeerFlow do *almost anything*.
 
 A standard Agent Skill is a structured capability module — a Markdown file that defines a workflow, best practices, and references to supporting resources. DeerFlow ships with built-in skills for research, report generation, slide creation, web pages, image and video generation, and more. But the real power is extensibility: add your own skills, replace the built-in ones, or combine them into compound workflows.
@@ -1588,6 +1614,10 @@ A standard Agent Skill is a structured capability module — a Markdown file tha
 The [music-generation skill](skills/public/music-generation/SKILL.md#output-handling) preserves existing output when the provider returns malformed, empty or unrecognized audio.
 
 Skills are loaded progressively — only when the task needs them, not all at once. This keeps the context window lean and makes DeerFlow work well even with token-sensitive models.
+
+The bundled video-generation command reports failures on stderr and exits with
+status 1, including when the selected provider has no API key. Callers can check
+the exit status before presenting an output file.
 
 When deferred skill discovery is enabled, `describe_skill` ranks installed skills by bounded, Unicode-normalized intent-term coverage across names and descriptions. Natural multi-term requests can therefore find a relevant skill without requiring one exact phrase, while exact `select:` and required-name `+prefix` lookups remain available. Ranked searches use up to 256 characters and return up to five results; exact `select:` lists are not truncated and return all requested catalog matches.
 
@@ -1621,6 +1651,13 @@ uses neither `main` nor `master` reports its current tree instead of a stale bra
 Users can explicitly activate an enabled skill for a single turn by starting the request with `/skill-name`, for example `/data-analysis analyze uploads/foo.csv`. DeerFlow loads that skill's `SKILL.md` as hidden current-turn context while leaving the base prompt limited to skill metadata. Slash activation respects disabled skills, custom-agent skill whitelists, and existing channel commands such as `/new` and `/help`.
 
 Data-analysis Markdown exports escape pipes and backslashes in column names and values, and render cell line breaks as `<br>` so multiline data stays within its table cell.
+
+Data-analysis JSON exports require unique result column names. For joins that
+return repeated names such as `id`, use SQL aliases (`AS left_id`, `AS right_id`)
+before exporting. Duplicate names cause an error before the output file is opened,
+preserving any existing file.
+The CLI names the repeated columns in a short stderr error and exits nonzero,
+so callers can correct their aliases without reading a traceback.
 
 The **data-analysis** skill preserves each CSV file or Excel sheet when names collide across inputs. [Prepare its Python environment](skills/public/data-analysis/SKILL.md#environment-setup) explicitly with DuckDB and openpyxl; missing packages report setup instructions instead of installing themselves during analysis. Use the SQL names printed by `inspect` (such as `report`, `report_1`) for queries and summaries. Its cache follows ordered input basenames and contents, so renaming or reordering inputs rebuilds their table map instead of silently selecting a different source. Quoted original names also resolve without rewriting query text; apostrophes in upload paths and double quotes in column names are preserved through loading, inspection, queries, and summaries.
 
@@ -2049,6 +2086,22 @@ Git URLs are rejected because the stock Docker builder does not forward host SSH
 credentials. Installing from a loopback URL is allowed for local tooling but warns, because
 `127.0.0.1` recorded in the lock is a different machine inside the Docker builder.
 
+For scripts, `deerflow extensions list --json` returns a JSON array in configuration
+order, with `name`, `package`, `entry_point`, `enabled`, and `required` fields. An
+unspecified package is `"-"`; an empty inventory is `[]`. Private plugin configuration
+and source metadata are excluded. The default `list` output remains a table.
+For example, from `backend/`, check that `demo` is configured as enabled and required:
+
+```bash
+inventory=$(uv run --frozen --no-group extensions deerflow extensions list --json) || exit 1
+printf '%s\n' "$inventory" |
+  jq -e 'any(.[]; .name == "demo" and .enabled == true and .required == true)'
+```
+
+This reports configured state without executing plugins or changing files; it does
+not verify package installation or successful Gateway loading. Configuration errors
+exit non-zero with diagnostics on stderr and no inventory on stdout.
+
 A managed package declares exactly one standard PEP 621 entry point:
 
 ```toml
@@ -2239,6 +2292,8 @@ The Web UI displays a localized AI-generated-content disclaimer below the compos
 information.
 
 Interrupted first-turn runs still persist a fallback conversation title, so stopping a streaming response does not leave the thread as "Untitled" after refresh.
+
+Updating a subgraph checkpoint's title through the state API keeps the root conversation's title unchanged.
 
 Streaming Markdown responses animate only newly arrived words; text that is already visible is not faded out and replayed when the next chunk extends the same block.
 
@@ -3760,7 +3815,7 @@ binds the exact retained output or captured file version (SHA-256); preview and
 downstream reads use the same immutable bytes. Each child retains host-generated
 assembly evidence for its resolved instructions, model, tools and Skills.
 Cancelling a recoverable workflow continues child cleanup even if the requesting browser disconnects.
-After a Gateway restart, sign in and select **Recover workflow** to recover a compatible run using retained results and exact-version approvals. Uncertain child admissions require reconciliation; they are never automatically retried. Recovery requires unchanged runtime/configuration and durable Gateway storage. Multi-Gateway failover remains Phase 4; there is no hard monetary budget. Workflow deadlines and child-observation timeouts are
+After a Gateway restart, sign in and select **Recover workflow** to recover a compatible run using retained results and exact-version approvals. Uncertain child admissions require reconciliation; they are never automatically retried. Recovery requires unchanged runtime/configuration and durable Gateway storage. The optional PostgreSQL mode supports cross-Gateway controls and session-authorized takeover after lease expiry, with fenced child admission and shared limits; see the extension deployment contract. Expired cancellations can be taken over for cleanup even at workflow admission limits. Definitive pre-admission permission/configuration rejection releases child capacity; uncertain admissions retain their reservations. SQLite remains single-Gateway. The [deployed acceptance and delivery boundary](examples/deerflow-extension-workflows/README.md#deployed-acceptance-and-delivery-boundary) documents real two-Gateway fault tests, session-authorized takeover, and the still-open reconciliation API/UI. There is no hard monetary budget. Workflow deadlines and child-observation timeouts are
 reported separately from uncertain admission. Accepted launches retain their request
 identity across inspection refresh failures, with a separate inspection retry action. A runnable example, installation steps
 and QuickJS source-build prerequisites for other Python/CPU combinations are included.

@@ -181,7 +181,13 @@ _ENV_STANDALONE_OPTIONS = {"0", "i", "v"}
 _ENV_EXIT_OPTIONS = {"--help", "--version", "--null"}
 _ENV_MAX_SPLIT_STEPS = 256
 _ENV_MAX_SPLIT_CHARS = 65_536
-_SHELL_NAMES = {"bash", "dash", "fish", "sh", "zsh"}
+_SHELL_NAMES = {"ash", "bash", "csh", "dash", "fish", "ksh", "mksh", "sh", "tcsh", "zsh"}
+# The download-pipe matcher below and the structural `env` fallback share this one
+# vocabulary: a name listed here is matched after a pipe, after an interpreter path
+# and behind `env`/`sudo`. Every entry starts with a distinct character, which is
+# what keeps the alternation free of the overlapping repeats the pattern above
+# documents, so a new name has to keep that property.
+_SHELL_NAME_ALTERNATION = "|".join(sorted(_SHELL_NAMES))
 _SHELL_SEPARATORS = {";", "&", "&&", "|", "||", "(", ")", "`", "\n"}
 # The head of a heredoc redirection: `<<` or `<<-`, an optional quoted delimiter,
 # then the delimiter word. Requiring a leading letter/underscore keeps arithmetic
@@ -1197,7 +1203,7 @@ def _scan_shell(rel_path: str, text: str) -> list[SecurityFinding]:
         # the two branches mutually exclusive, so each token is consumed in
         # exactly one way and a failing chain stays linear.
         r"|-(?![acCDghprRtTuU]\b)\S+(?:\s|\\\r?\n)+)*?)?(?:/usr/(?:local/)?bin/|/bin/)?"
-        r"(?:bash|zsh|dash|fish|sh)\b",
+        rf"(?:{_SHELL_NAME_ALTERNATION})\b",
         text,
     ):
         findings.append(_finding_from_match("shell-curl-pipe-shell", rel_path, text, match))
