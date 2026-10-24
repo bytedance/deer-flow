@@ -86,6 +86,7 @@ async def test_reader_results_are_detached_snapshots(reader, cursor):
     assert [event["seq"] for event in await store.list_messages("thread")] == [1, 2, 3]
     assert [event["seq"] for event in await store.list_messages_by_run("thread", "run")] == [1, 2, 3]
 
+
 @pytest.mark.asyncio
 async def test_put_if_absent_existing_receipt_is_not_the_stored_event():
     store = MemoryRunEventStore()
