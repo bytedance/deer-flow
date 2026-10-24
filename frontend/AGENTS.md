@@ -20,6 +20,8 @@ docs builds after changes.
 
 ## Commands
 
+[Upload context](../docs/upload-context.md).
+
 Run from `frontend/`; host pnpm calls use `../scripts/pnpm.py`.
 
 - `pnpm dev`: Webpack development server; `pnpm build` / `pnpm start`: production build/server.

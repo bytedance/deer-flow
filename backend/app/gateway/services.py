@@ -115,6 +115,7 @@ from deerflow.utils.file_io import await_drained
 from deerflow.utils.goal_objective import normalize_goal_objective
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, UNTRUSTED_INPUT_KEY
 from deerflow.utils.thread_id import validate_thread_id
+from deerflow.utils.upload_context import UPLOAD_CONTEXT_KEY
 
 logger = logging.getLogger(__name__)
 
@@ -199,6 +200,7 @@ _SERVER_OWNED_MESSAGE_METADATA_KEYS = (
             SUBAGENT_RECEIPT_VERDICT_KEY,
             SUBAGENT_ACCEPTANCE_VERDICT_KEY,
             UNTRUSTED_INPUT_KEY,
+            UPLOAD_CONTEXT_KEY,
         }
     )
     | PROVENANCE_KEYS

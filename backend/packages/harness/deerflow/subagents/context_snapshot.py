@@ -13,6 +13,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage, conver
 
 from deerflow.agents.middlewares.input_sanitization_middleware import neutralize_untrusted_tags
 from deerflow.agents.middlewares.message_utils import is_genuine_user_message
+from deerflow.utils.upload_context import project_upload_context
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +135,7 @@ class ParentContextSnapshot:
         for index, message in enumerate(messages):
             if index not in retained_positions:
                 continue
+            message = project_upload_context(message)
             history: list[dict[str, Any]] = []
             content = [message.content] if isinstance(message.content, str) else message.content
             for block in content:

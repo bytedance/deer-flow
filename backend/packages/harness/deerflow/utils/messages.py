@@ -6,6 +6,8 @@ from typing import Any
 
 from langchain_core.messages import HumanMessage
 
+from deerflow.utils.upload_context import UPLOAD_CONTEXT_KEY, upload_context_text
+
 ORIGINAL_USER_CONTENT_KEY = "original_user_content"
 SUMMARY_MESSAGE_NAME = "summary"
 
@@ -128,15 +130,31 @@ def restore_original_human_message(message: HumanMessage) -> HumanMessage:
     retains its value and relative order.
     """
     original_content = message.additional_kwargs.get(ORIGINAL_USER_CONTENT_KEY)
-    if not isinstance(original_content, str):
+    context = message.additional_kwargs.get(UPLOAD_CONTEXT_KEY)
+    is_projected = isinstance(context, dict) and context.get("projected") is True
+    if not isinstance(original_content, str) and not is_projected:
         return message
 
     additional_kwargs = dict(message.additional_kwargs)
     additional_kwargs.pop(ORIGINAL_USER_CONTENT_KEY, None)
+    if is_projected:
+        additional_kwargs[UPLOAD_CONTEXT_KEY] = {key: value for key, value in context.items() if key not in ("projected", "sanitized")}
 
     content = message.content
-    if isinstance(content, str):
-        restored_content: str | list = original_content
+    if not isinstance(original_content, str):
+        # Defensive recovery when original-user provenance was lost: remove
+        # only the exact prefix our validated envelope says we projected.
+        # Do not guess user text or transport boundaries from matching tags.
+        restored_content = content
+        text = upload_context_text(message)
+        if text is not None:
+            prefix = f"{text}\n\n"
+            if isinstance(content, str) and content.startswith(prefix):
+                restored_content = content[len(prefix) :]
+            elif isinstance(content, list) and content and content[0] == {"type": "text", "text": prefix}:
+                restored_content = content[1:]
+    elif isinstance(content, str):
+        restored_content = original_content
     elif isinstance(content, list):
         restored_content = []
         restored_text = False

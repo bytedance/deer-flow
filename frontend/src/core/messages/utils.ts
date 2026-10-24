@@ -676,7 +676,9 @@ export function getAssistantTurnCopyData(
 export function getMessageCopyData(message: Message) {
   const content = extractContentFromMessage(message);
   if (message.type === "human") {
-    return stripUploadedFilesTag(content);
+    return hasStructuredUploadContext(message)
+      ? content
+      : stripUploadedFilesTag(content);
   }
   if (content.length > 0) {
     return content;
@@ -944,6 +946,16 @@ function splitInlineReasoningFromAIMessage(message: Message) {
   return split;
 }
 
+/** New captures keep upload context in server metadata, outside user content. */
+export function hasStructuredUploadContext(message: Message): boolean {
+  if (message.type !== "human") return false;
+  const raw: unknown = message.additional_kwargs?.deerflow_upload_context;
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw))
+    return false;
+  const value = raw as Record<string, unknown>;
+  return value.version === 1 && typeof value.text === "string";
+}
+
 export function extractContentFromMessage(message: Message) {
   const selectedModelText = modelControlDisplayText(message);
   if (selectedModelText !== null) return selectedModelText;
@@ -1142,6 +1154,7 @@ export function isHiddenFromUIMessage(message: Message) {
   if (message.type !== "human") {
     return false;
   }
+  if (hasStructuredUploadContext(message)) return false;
   const content = extractTextFromMessage(message);
   return (
     content.includes("<slash_skill_activation>") &&

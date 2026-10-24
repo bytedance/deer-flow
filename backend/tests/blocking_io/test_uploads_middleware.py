@@ -49,6 +49,7 @@ async def test_before_agent_uploads_scan_does_not_block_event_loop(tmp_path: Pat
 
     from deerflow.agents.middlewares.uploads_middleware import UploadsMiddleware
     from deerflow.runtime.user_context import get_effective_user_id
+    from deerflow.utils.upload_context import upload_context_text
 
     mw = await asyncio.to_thread(UploadsMiddleware, str(tmp_path))
     uploads_dir = await asyncio.to_thread(mw._paths.sandbox_uploads_dir, "t1", user_id=get_effective_user_id())
@@ -66,4 +67,5 @@ async def test_before_agent_uploads_scan_does_not_block_event_loop(tmp_path: Pat
     if files:
         assert [file["filename"] for file in result["uploaded_files"]] == ["existing.txt"]
         assert result["uploaded_files"][0]["size"] == size
-        assert f"existing.txt ({size_label})" in result["messages"][0].content
+        assert result["messages"][0].content == "hi"
+        assert f"existing.txt ({size_label})" in upload_context_text(result["messages"][0])

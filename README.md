@@ -2322,6 +2322,8 @@ When the agent asks for clarification, the Web UI shows the structured response 
 
 Unsent Web UI composer drafts survive page reloads and switching between conversations within the same browser tab. Drafts are isolated by user, agent, and conversation, include the selected skill and explicit conversation references, and are cleared once a send is accepted. Project documents already attached to the thread also survive reloads; browser-local uploads and quoted message excerpts are not persisted.
 
+Attachment descriptions stay out of chat text, copied messages and exports. Literal tag examples remain user text, while older inline upload history retains its existing display cleanup when the original text cannot be recovered. See [upload context compatibility](docs/upload-context.md).
+
 If an attachment upload reports `success: false`, the Web UI stops the send even when the HTTP response is 200. The upload error is shown and the composer keeps its draft and attachments for correction or retry. Files already accepted by a partially successful upload remain on the server; this does not roll them back.
 
 The Web UI composer supports `@` references at the cursor or through the `@` button. Search enabled skills, documents in the current project, and other conversations in a grouped picker; selected references appear inline alongside the draft text and can be removed with normal editing. Multiple skills can be selected in one message (up to 16 unique skills); selecting a checked skill again removes it, with each selection checked against the current user registry and agent allowlist. Project files are attached only after ingestion succeeds; conversation references require the `read_conversation` capability and retain its per-run limit. If capability discovery fails, saved conversation references remain intact and sending waits for a successful retry. Polishing preserves complete reference labels when instructions are reordered. The file group also offers local uploads. `/goal`, `/compact`, and legacy `/skill-name` input remain supported.
@@ -3828,6 +3830,14 @@ immediately after starting any deployment that is not loopback-only.
 ## Contributing
 
 We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, workflow, and guidelines.
+
+New upload turns keep the user's message separate from server-generated file
+context. Models, conversation summaries and delegated agents still receive the
+validated file descriptions, included in context budgets and usage estimates,
+while chat, copy and export preserve the original
+user text, including literal tag examples. Existing inline-upload history remains
+readable. See the [upload context contract](docs/upload-context.md) for storage,
+compatibility and integration details.
 
 Backend `make test` runs four duration-balanced shards concurrently and reports
 failure if any shard fails. Use `make test TEST_JOBS=1` to run the shards sequentially.

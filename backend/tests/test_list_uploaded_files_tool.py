@@ -604,9 +604,13 @@ def test_channel_message_single_upload_block_via_middleware(tmp_path):
     assert len(mw_result["uploaded_files"]) == 1
     assert mw_result["uploaded_files"][0]["filename"] == "report.pdf"
 
-    # The content must contain exactly one upload block and one filename occurrence.
+    # State stays pristine; the model view contains exactly one upload block.
     updated = mw_result["messages"][-1]
-    content = updated.content if isinstance(updated.content, str) else str(updated.content)
+    assert updated.content == msg.content
+    from deerflow.utils.upload_context import project_upload_context
+
+    projected = project_upload_context(updated)
+    content = projected.content if isinstance(projected.content, str) else str(projected.content)
 
     assert "<current_uploads>" in content, "Middleware must inject <current_uploads>"
     assert "<uploaded_files>" not in content, "Legacy <uploaded_files> block must NOT appear — UploadsMiddleware is the sole upload-context producer"

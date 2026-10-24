@@ -1,0 +1,153 @@
+{
+  "metadata_key": "deerflow_upload_context",
+  "supported_version": 1,
+  "description": "Shared Python/TypeScript envelope validity: human messages only, JSON numeric version 1 (excluding booleans), and string text. Transient request flags do not alter envelope validity.",
+  "cases": [
+    {
+      "name": "absent",
+      "message_type": "human",
+      "valid": false
+    },
+    {
+      "name": "null",
+      "message_type": "human",
+      "metadata": null,
+      "valid": false
+    },
+    {
+      "name": "array",
+      "message_type": "human",
+      "metadata": [],
+      "valid": false
+    },
+    {
+      "name": "string",
+      "message_type": "human",
+      "metadata": "context",
+      "valid": false
+    },
+    {
+      "name": "number",
+      "message_type": "human",
+      "metadata": 1,
+      "valid": false
+    },
+    {
+      "name": "missing-version",
+      "message_type": "human",
+      "metadata": {
+        "text": "x"
+      },
+      "valid": false
+    },
+    {
+      "name": "missing-text",
+      "message_type": "human",
+      "metadata": {
+        "version": 1
+      },
+      "valid": false
+    },
+    {
+      "name": "boolean-version",
+      "message_type": "human",
+      "metadata": {
+        "version": true,
+        "text": "x"
+      },
+      "valid": false
+    },
+    {
+      "name": "string-version",
+      "message_type": "human",
+      "metadata": {
+        "version": "1",
+        "text": "x"
+      },
+      "valid": false
+    },
+    {
+      "name": "future-version",
+      "message_type": "human",
+      "metadata": {
+        "version": 2,
+        "text": "x"
+      },
+      "valid": false
+    },
+    {
+      "name": "fractional-version",
+      "message_type": "human",
+      "metadata": {
+        "version": 1.5,
+        "text": "x"
+      },
+      "valid": false
+    },
+    {
+      "name": "null-text",
+      "message_type": "human",
+      "metadata": {
+        "version": 1,
+        "text": null
+      },
+      "valid": false
+    },
+    {
+      "name": "array-text",
+      "message_type": "human",
+      "metadata": {
+        "version": 1,
+        "text": []
+      },
+      "valid": false
+    },
+    {
+      "name": "v1",
+      "message_type": "human",
+      "metadata": {
+        "version": 1,
+        "text": "<current_uploads>context</current_uploads>"
+      },
+      "valid": true
+    },
+    {
+      "name": "empty-text",
+      "message_type": "human",
+      "metadata": {
+        "version": 1,
+        "text": ""
+      },
+      "valid": true
+    },
+    {
+      "name": "json-integer-number",
+      "message_type": "human",
+      "metadata": {
+        "version": 1.0,
+        "text": "context"
+      },
+      "valid": true
+    },
+    {
+      "name": "request-flags",
+      "message_type": "human",
+      "metadata": {
+        "version": 1,
+        "text": "context",
+        "projected": true,
+        "sanitized": true
+      },
+      "valid": true
+    },
+    {
+      "name": "assistant",
+      "message_type": "ai",
+      "metadata": {
+        "version": 1,
+        "text": "context"
+      },
+      "valid": false
+    }
+  ]
+}

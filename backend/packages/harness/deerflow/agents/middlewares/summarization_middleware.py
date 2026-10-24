@@ -32,6 +32,7 @@ from deerflow.extensions.notify import notify_context_compacted
 from deerflow.models import create_chat_model
 from deerflow.models.reasoning import resolve_reasoning_contract
 from deerflow.runtime.events.catalog import MIDDLEWARE_SUMMARIZE_TAG
+from deerflow.utils.upload_context import project_upload_contexts
 
 logger = logging.getLogger(__name__)
 _SUMMARY_TRIGGER_MESSAGE_NAME = "summary"
@@ -297,7 +298,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         # Redact the complete source before splitting: an identifier spanning a
         # chunk boundary must not bypass PII screening. Input remains plain text,
         # so the chat-message human-anchor filter is neither needed nor safe.
-        return redact_text(get_buffer_string(messages), getattr(self._app_config, "pii_redaction", None))
+        return redact_text(get_buffer_string(project_upload_contexts(messages)), getattr(self._app_config, "pii_redaction", None))
 
     def _summarize_with(self, messages_to_summarize: list[AnyMessage], previous_summary: str | None = None, *, runtime: Runtime | None = None) -> str | None:
         """Fold every selected source fragment before committing any removal.
@@ -531,6 +532,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         return HumanMessage(content=summary_text, name=_SUMMARY_TRIGGER_MESSAGE_NAME)
 
     def _messages_for_trigger_count(self, messages: list[AnyMessage], summary_text: str | None) -> list[AnyMessage]:
+        messages = project_upload_contexts(messages)
         if not summary_text:
             return messages
         return [*messages, self._summary_count_message(summary_text)]
@@ -741,7 +743,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         # is skipped or summary generation fails.
         messages = [message for message in messages if not (isinstance(message, HumanMessage) and message.name == TODO_REMINDER_MESSAGE_NAME)]
 
-        cutoff_index = self._determine_cutoff_index(messages)
+        cutoff_index = self._determine_cutoff_index(project_upload_contexts(messages))
         if cutoff_index <= 0:
             return None
 

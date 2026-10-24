@@ -10,6 +10,7 @@ from fastapi import HTTPException, Request
 
 from app.gateway.deps import get_config
 from app.gateway.services import build_thread_checkpoint_state_accessor
+from deerflow.utils.upload_context import project_upload_contexts
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +21,7 @@ def _count_messages_approximately(messages: list[Any]) -> int:
         return 0
     from langchain_core.messages.utils import count_tokens_approximately
 
-    return int(count_tokens_approximately(messages))
+    return int(count_tokens_approximately(project_upload_contexts(messages)))
 
 
 async def _load_checkpoint_messages(accessor: Any, config: dict[str, Any]) -> list[Any]:
