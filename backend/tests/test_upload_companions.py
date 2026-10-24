@@ -164,3 +164,18 @@ def test_overwrite_invalidation_tolerates_a_record_that_cannot_be_removed(conver
         invalidate_overwritten_upload(original)
 
     assert "Failed to remove upload companion record" in caplog.text
+
+
+def test_record_removal_survives_a_broken_log_handler(converted_upload, monkeypatch):
+    """Diagnostics are best-effort too: a raising handler cannot fail the caller."""
+    from deerflow.uploads import companions as companions_module
+
+    original, _ = converted_upload
+    _fail_record_unlink(monkeypatch)
+
+    def broken_warning(*_args, **_kwargs):
+        raise RuntimeError("synthetic logging handler failure")
+
+    monkeypatch.setattr(companions_module.logger, "warning", broken_warning)
+
+    unregister_companion(original)

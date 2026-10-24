@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import tempfile
+from contextlib import suppress
 from pathlib import Path
 
 from deerflow.utils.atomic_write import cleanup_failed_atomic_write
@@ -60,6 +61,16 @@ def register_companion(original: Path, markdown: Path) -> None:
         raise
 
 
+def _warn_record_removal_failed(target: Path, *, exc_info: bool) -> None:
+    """Report a record we could not remove without adding a new failure.
+
+    Diagnostics are best-effort, exactly like ``cleanup_failed_atomic_write``:
+    a logging handler that raises must not become the caller's error.
+    """
+    with suppress(Exception):
+        logger.warning("Failed to remove upload companion record for %s", target, exc_info=exc_info)
+
+
 def unregister_companion(original: Path) -> None:
     """Forget the ownership record for ``original``, best-effort.
 
@@ -74,7 +85,7 @@ def unregister_companion(original: Path) -> None:
     try:
         _record_path(original.parent, original.name).unlink(missing_ok=True)
     except OSError:
-        logger.warning("Failed to remove upload companion record for %s", original, exc_info=True)
+        _warn_record_removal_failed(original, exc_info=True)
 
 
 def invalidate_overwritten_upload(path: Path) -> None:
@@ -95,7 +106,7 @@ def invalidate_overwritten_upload(path: Path) -> None:
                 except OSError:
                     # The upload already succeeded; report the orphan instead of
                     # replacing that outcome, as ``unregister_companion`` does.
-                    logger.warning("Failed to remove upload companion record %s", record, exc_info=True)
+                    _warn_record_removal_failed(record, exc_info=True)
         except (OSError, ValueError, AttributeError):
             continue
 
