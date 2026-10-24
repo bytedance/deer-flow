@@ -473,7 +473,7 @@ def _harvest_tool_receipts(
 #: Bash-family tool names whose calls count as recorded command executions.
 _BASH_EVIDENCE_TOOL_NAMES = BASH_TOOL_NAMES
 #: Bounds for the harvested evidence: only the newest few executions travel,
-#: with command/output text capped (test summaries print at the tail).
+#: with command/output text capped and full-output summary semantics preserved.
 _BASH_EVIDENCE_MAX_ENTRIES = 20
 _BASH_EVIDENCE_COMMAND_CHARS = 500
 _BASH_EVIDENCE_OUTPUT_TAIL_CHARS = 1000
@@ -534,9 +534,9 @@ def _harvest_bash_executions(
 
     RFC #4651 PR4: a ``tests_passed:<command>`` acceptance leaf must anchor to
     a specific recorded execution — the command text lets the parent match the
-    criterion against the call that actually ran, and the bounded output tail
-    carries the test-summary shape. The recorded status is the **actual shell
-    exit status**: a nonzero bash exit comes back as ordinary output text
+    criterion against the call that actually ran. A bounded summary stamp is
+    computed from the full tool output before retaining the diagnostic tail.
+    The recorded status is the **actual shell exit status**: a nonzero bash exit comes back as ordinary output text
     (local: a trailing ``Exit Code: N``; e2b/opensandbox with empty output:
     ``Command exited with code N``), which ``deerflow_tool_meta`` still reports
     as success — so an explicit exit marker wins, and the meta status is only
@@ -555,6 +555,7 @@ def _harvest_bash_executions(
         return None
     try:
         from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY
+        from deerflow.subagents.acceptance_checks import summarize_test_output
 
         commands: dict[str, tuple[str, str, bool]] = {}
         for message in messages:
@@ -599,6 +600,7 @@ def _harvest_bash_executions(
                     "command": command,
                     "command_truncated": command_truncated,
                     "output_tail": output_tail,
+                    "test_summary": summarize_test_output(content),
                     "status": status,
                     "status_marker": status_marker,
                 }

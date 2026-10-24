@@ -41,7 +41,8 @@ Leaf families:
   anchor to a *specific recorded execution* — a matching bash execution
   (harvested by the executor from the same stamped ``ToolMessage``s the
   receipt layer reads) with ``status=success`` and a test-summary shape in
-  its output tail — not merely to some successful call. Matching accounts
+  its recorded output (classified before tail truncation) — not merely to
+  some successful call. Matching accounts
   for shell command structure (operator-separated segments, executables,
   arguments), so an unrelated command that merely mentions the criterion
   string (e.g. inside an ``echo`` argument or a comment) cannot anchor the
@@ -75,7 +76,7 @@ import stat
 import time
 import unicodedata
 from collections.abc import Callable, Mapping
-from typing import Any, TypedDict
+from typing import Any, Literal, TypedDict
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.subagents.report_contract import MAX_ACCEPTANCE_CRITERIA, normalize_acceptance_criteria
@@ -2026,6 +2027,29 @@ def _output_attribution(executed_command: str, thread_data: Mapping[str, Any] | 
     return None
 
 
+def summarize_test_output(output: str) -> Literal["passed", "failed", "unverified"]:
+    """Classify the complete recorded tool output before evidence is truncated.
+
+    This bounded stamp carries summary semantics without retaining full logs.
+    It is execution evidence, not an acceptance verdict: consumers must still
+    enforce command matching, exit status, output attribution and shell provenance.
+    """
+    # Test names are arbitrary data, not runner summaries. Exclude TAP/spec
+    # point labels from negative/zero evidence too (`test('1 failed', ...)`).
+    text = _NODE_TEST_POINT_RE.sub("", _ANSI_SGR_RE.sub("", output))
+    build_summary = _build_test_summary_holds(text)
+    node_summary = _node_test_summary_holds(text)
+    if _TEST_FAIL_SHAPE_RE.search(text) or build_summary is False or node_summary is False:
+        return "failed"
+    # Empty packages/targets cannot veto complete positive sibling evidence.
+    summary_text = _without_empty_cargo_targets(_GO_ZERO_TEST_LINE_RE.sub("", text))
+    go_ok = _GO_TEST_PASS_SHAPE_RE.search(summary_text) and _go_package_summary_is_evidence(summary_text)
+    passing = _TEST_PASS_SHAPE_RE.search(summary_text) or go_ok or _unittest_test_summary_holds(summary_text) or build_summary is True or node_summary is True
+    if passing and not _TEST_ZERO_SHAPE_RE.search(summary_text):
+        return "passed"
+    return "unverified"
+
+
 def _check_tests_passed_leaf(command: str, bash_executions: list[dict[str, Any]] | None, thread_data: Mapping[str, Any] | None = None) -> AcceptanceLeaf:
     base: AcceptanceLeaf = {"criterion": "", "family": "tests_passed", "checked": False, "holds": False, "detail": ""}
     matches: list[tuple[str, dict[str, Any]]] = []
@@ -2083,26 +2107,21 @@ def _check_tests_passed_leaf(command: str, bash_executions: list[dict[str, Any]]
         else:
             base["detail"] = f"latest matching run recorded status={status or 'unknown'}"
         return base
-    output_tail = _ANSI_SGR_RE.sub("", str(latest.get("output_tail") or ""))
     unattributable = _output_attribution(str(latest.get("command") or ""), thread_data)
     if unattributable is not None:
         # Neither a pass nor a fail shape here can be trusted either way.
         base["detail"] = unattributable
         return base
-    # Test names are arbitrary data, not runner summaries. Exclude TAP/spec
-    # point labels from negative/zero evidence too (`test('1 failed', ...)`).
-    output_tail = _NODE_TEST_POINT_RE.sub("", output_tail)
-    build_summary = _build_test_summary_holds(output_tail)
-    node_summary = _node_test_summary_holds(output_tail)
-    if _TEST_FAIL_SHAPE_RE.search(output_tail) or build_summary is False or node_summary is False:
+    # New harvests classify the full ToolMessage before truncating its tail.
+    # Legacy entries have only the tail; retain their existing conservative check.
+    summary = latest.get("test_summary")
+    if summary not in ("passed", "failed", "unverified"):
+        summary = summarize_test_output(str(latest.get("output_tail") or ""))
+    if summary == "failed":
         base["checked"] = True
         base["detail"] = "recorded output carries a failing test summary"
         return base
-    # Empty packages/targets cannot veto complete positive sibling evidence.
-    summary_tail = _without_empty_cargo_targets(_GO_ZERO_TEST_LINE_RE.sub("", output_tail))
-    go_ok = _GO_TEST_PASS_SHAPE_RE.search(summary_tail) and _go_package_summary_is_evidence(summary_tail)
-    passing = _TEST_PASS_SHAPE_RE.search(summary_tail) or go_ok or _unittest_test_summary_holds(summary_tail) or build_summary is True or node_summary is True
-    if passing and not _TEST_ZERO_SHAPE_RE.search(summary_tail):
+    if summary == "passed":
         base["checked"] = True
         base["holds"] = True
         base["detail"] = "recorded output carries a passing test summary"
