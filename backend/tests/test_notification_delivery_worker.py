@@ -1190,19 +1190,16 @@ async def test_wecom_group_notification_for_owner_and_multi_group_binding_isolat
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("event_preferences", "case"),
+    "event_preferences",
     [
-        (None, "none"),
-        ([], "list"),
-        ("malformed", "string"),
-        ({"run_completed": "false"}, "string-value"),
-        ({"run_completed": 1}, "integer-value"),
+        pytest.param(None, id="none"),
+        pytest.param([], id="list"),
+        pytest.param("malformed", id="string"),
+        pytest.param({"run_completed": "false"}, id="string-value"),
+        pytest.param({"run_completed": 1}, id="integer-value"),
     ],
-    ids=lambda value: value if isinstance(value, str) and value in {
-        "none", "list", "string", "string-value", "integer-value"
-    } else None,
 )
-async def test_runtime_event_preference_lookup_fails_closed_on_malformed_shape(event_preferences, case):
+async def test_runtime_event_preference_lookup_fails_closed_on_malformed_shape(event_preferences):
     row = _delivery_row(event="run_completed")
     row["source_kind"] = "run"
     repo = FakeDeliveryRepo([row])
