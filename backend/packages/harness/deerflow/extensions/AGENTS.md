@@ -284,7 +284,11 @@ snapshot immutable in fact rather than only by declaration. Gateway registers on
 hooks and async system observations are dispatched to that loop even when the caller is a
 subagent's isolated loop, while synchronous system callbacks submit fire-and-forget work
 there. Shutdown stops accepting detached observations before the memory shutdown flush and
-resets the loop only after in-flight run/subagent drain ordering is complete.
+resets the loop only after in-flight run/subagent drain ordering is complete. The
+synchronous dispatch admission check, submission, and pending-future registration share
+a process-local lock with suspension; draining snapshots the set only after suspension
+acquires that lock, so an accepted observation cannot be registered after the shutdown
+snapshot. Completion callbacks take the same lock before removing futures.
 
 `ContextCompactionObserver` reports the one moment a lossy context transform can still be
 described: `DeerFlowSummarizationMiddleware.compact_state()` / `acompact_state()` hash each
