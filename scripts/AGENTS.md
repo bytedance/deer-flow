@@ -23,21 +23,21 @@ For those launches, export the effective `DEER_FLOW_HOME` when collecting a bund
 and ensure the checkout `.env` does not override it. Tests clear all three runtime
 path variables and compare storage defaults with the launcher's actual shell blocks.
 
-## Dependency Check Diagnostics
+## Dependency and Label Checks
 
-`check_extension.py` checks wheels with Gateway's asset validator.
-CI builds and checks all bundled examples in `extension-package-check.yml`.
-Tests: `backend/tests/test_extension_check_script.py`.
+`check_extension.py` uses Gateway's wheel asset validator; CI checks examples
+in `extension-package-check.yml`. Tests: `backend/tests/test_extension_check_script.py`.
 
-`check.py` decodes captured output as UTF-8 with replacement and runs pnpm with
-`PYTHONIOENCODING=utf-8:backslashreplace`. Preserve Unicode diagnostics and exit
-status in `make check`, independently of the host locale.
-Tests: `backend/tests/test_check_script.py`.
+`check.py`: decode UTF-8 with replacement; pnpm uses
+`PYTHONIOENCODING=utf-8:backslashreplace`. Keep Unicode/exit status in
+`make check` in any locale. Tests: `backend/tests/test_check_script.py`.
 
-`doctor.py` and `setup_wizard.py` configure stdout with `errors="replace"` at
-the start of `main`, preserving its encoding so legacy terminals and pipes can
-finish reports and setup. Guard `reconfigure` for embedded/captured streams.
-Offline subprocess coverage: `backend/tests/test_setup_script_encoding.py`.
+`doctor.py`/`setup_wizard.py`: at `main` start, keep stdout's encoding
+with `errors="replace"` for legacy terminals/pipes. Guard `reconfigure` on
+embedded/captured streams. Offline tests: `backend/tests/test_setup_script_encoding.py`.
+
+`check_label_declarations.py`: stdlib-only guard; reject unsupported
+expressions. Tests: `backend/tests/test_label_declarations.py`.
 
 ## Manual Claude OAuth Export
 
@@ -473,7 +473,7 @@ Memory backend async boundary:
   `failure_policy.read: fail_closed`; other recall errors preserve the existing
   log-and-empty-context behavior.
 
-CI runs these regression tests for every pull request via [.github/workflows/backend-unit-tests.yml](../.github/workflows/backend-unit-tests.yml).
+CI: `.github/workflows/backend-unit-tests.yml` runs these tests on every PR.
 
 Agentic browser sessions are process-local. Browser use is refused when the Gateway runs
 more than one worker process, because ordinary uvicorn worker dispatch does not provide

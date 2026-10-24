@@ -27,3 +27,12 @@ import-failure regressions offline in the root skill tests.
 Markdown exports use the same cell escaping for headers and values. Escape
 backslashes before pipes and normalize CRLF, CR, and LF to inline `<br>` breaks;
 raw newlines must not split one query-result row across Markdown table rows.
+
+JSON exports require unique result column names under case-sensitive JSON key
+semantics. Reject duplicate names before opening the output file and direct the
+caller to explicit SQL aliases; never silently overwrite one column with another.
+CSV and Markdown exports continue to preserve duplicate column headers.
+List each duplicate name once in result-column order, using `repr` so embedded
+line breaks remain escaped. At the CLI action-dispatch boundary, report
+`ValueError` as a short stderr error with a nonzero exit; close the connection
+in `finally` for both successful and failed actions. Other exceptions propagate.

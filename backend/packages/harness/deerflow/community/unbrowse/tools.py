@@ -165,10 +165,19 @@ def web_fetch_tool(url: str) -> str:
     if error is not None:
         return f"Error: {error}"
 
+    metadata = data.get("metadata")
+    status = metadata.get("statusCode") if isinstance(metadata, dict) else None
+    failure = ""
+    if isinstance(status, int) and not isinstance(status, bool) and 400 <= status <= 599:
+        failure = f"target page responded with HTTP {status}"
+        final_url = data.get("finalUrl")
+        if isinstance(final_url, str) and final_url.strip():
+            failure += f" (final URL: {final_url.strip()})"
+
     content = _clip(data.get("markdown") or "", _UNBROWSE_FETCH_MAX_CHARS)
     if not content:
-        return "Error: No content found"
+        return f"Error: No content found ({failure})" if failure else "Error: No content found"
 
-    metadata = data.get("metadata")
     title = (metadata.get("title") if isinstance(metadata, dict) else None) or "Untitled"
-    return f"# {title}\n\n{content}"
+    warning = f"Warning: {failure}.\n\n" if failure else ""
+    return f"{warning}# {title}\n\n{content}"

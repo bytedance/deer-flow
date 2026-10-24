@@ -1,5 +1,6 @@
 import base64
 import os
+import sys
 import time
 
 import requests
@@ -105,7 +106,7 @@ def _download(url: str, output_file: str) -> None:
 def _generate_video_minimax(prompt: str, reference_images: list[str], output_file: str) -> str:
     minimax_api_key = os.getenv("MINIMAX_API_KEY")
     if not minimax_api_key:
-        return "MINIMAX_API_KEY is not set"
+        raise ValueError("MINIMAX_API_KEY is not set")
     host = _minimax_host()
     auth = f"Bearer {minimax_api_key}"
     body = {"model": os.getenv("MINIMAX_VIDEO_MODEL", "MiniMax-Hailuo-2.3"), "prompt": prompt}
@@ -152,7 +153,7 @@ def _generate_video_gemini(prompt: str, reference_images: list[str], output_file
         request_json["instances"][0]["referenceImages"] = reference_payload
     gemini_api_key = os.getenv("GEMINI_API_KEY")
     if not gemini_api_key:
-        return "GEMINI_API_KEY is not set"
+        raise ValueError("GEMINI_API_KEY is not set")
     response = requests.post(
         "https://generativelanguage.googleapis.com/v1beta/models/veo-3.1-generate-preview:predictLongRunning",
         headers={"x-goog-api-key": gemini_api_key, "Content-Type": "application/json"},
@@ -208,4 +209,5 @@ if __name__ == "__main__":
     try:
         print(generate_video(args.prompt_file, args.reference_images, args.output_file, args.aspect_ratio))
     except Exception as e:
-        print(f"Error while generating video: {e}")
+        print(f"Error while generating video: {e}", file=sys.stderr)
+        sys.exit(1)
