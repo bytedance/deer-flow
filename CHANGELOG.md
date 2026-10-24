@@ -1402,7 +1402,9 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
   `config.context` that is not an object, an invalid `assistant_id`, a
   non-string `agent_name`, or an AI message whose `tool_calls` is not a list of
   objects used to fail run admission unhandled. They now return `422` (`400`
-  for the message) before a run is created. ([#7362])
+  for the message) before a run is created. On thread routes, a
+  `config.configurable` of `[]`, `""`, `0`, `false` or a list of key/value
+  pairs used to be accepted and is now rejected with `422` too. ([#7362])
 
 - **tui:** Quitting after `Ctrl+C` interrupted a run no longer hangs on the
   step that run is still finishing. The run thread was joined on exit, so the
