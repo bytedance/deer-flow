@@ -612,10 +612,11 @@ async def test_delta_resume_of_paused_checkpoint_with_pending_execution_fails_ex
     assert after.config["configurable"]["checkpoint_id"] == head.config["configurable"]["checkpoint_id"]
 
 
-async def test_delta_resume_of_completed_checkpoint_still_linearizes():
-    """Non-head checkpoints without pending execution keep today's behavior."""
+async def test_delta_resume_command_from_an_input_checkpoint_still_linearizes():
+    """Historical input checkpoints retain their synthetic entry node."""
     checkpointer = InMemorySaver()
     accessor, head, pre_turn = await _seed_two_turns(checkpointer, _DeltaChannelState, "thread-completed")
+    assert pre_turn.next == ("__start__",)
     config = _run_config("thread-completed", pre_turn.config["configurable"]["checkpoint_id"])
 
     resumed = await _linearize_delta_checkpoint_resume(
@@ -624,6 +625,7 @@ async def test_delta_resume_of_completed_checkpoint_still_linearizes():
         config=config,
         thread_id="thread-completed",
         run_id="run-3",
+        resume_command=True,
     )
 
     assert [message.id for message in resumed] == ["h1", "a1"]
