@@ -67,11 +67,14 @@ class MemoryInboundDedupeStore:
                 self._store.popitem(last=False)
             else:
                 break
-        while len(self._store) > self._max:
-            self._store.popitem(last=False)
-
         if key in self._store:
             return True
+
+        # Make room before inserting so the store never exceeds ``max_entries``.
+        # Evicting only while ``len > max`` (checked before the insert) let the
+        # store reach ``max + 1`` entries: the bound ran first, then the insert.
+        while len(self._store) >= self._max:
+            self._store.popitem(last=False)
 
         self._store[key] = now
         return False
