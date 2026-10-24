@@ -7,10 +7,12 @@ components, then prints an actionable report.
 Exit codes:
   0 — all required checks passed (warnings allowed)
   1 — one or more required checks failed
+  2 — invalid command-line usage
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import shutil
@@ -868,7 +870,13 @@ def check_env_file(project_root: Path) -> CheckResult:
 # ---------------------------------------------------------------------------
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="doctor.py",
+        description="DeerFlow Health Check (make doctor): checks system requirements, configuration, LLM provider, and optional components, then prints an actionable report.",
+    )
+    parser.parse_args(argv)
+
     # Keep reporting usable on terminals and pipes with legacy encodings.
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(errors="replace")
