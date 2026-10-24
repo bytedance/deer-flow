@@ -1676,6 +1676,9 @@ and other runs.
 
 Custom skill history preserves Unicode line separators inside saved content and metadata, keeping those revisions readable for history inspection and rollback. Malformed JSON history records are still rejected.
 
+The skill-creator packager excludes its own output archive when packaging into
+the skill folder or one of its subdirectories.
+
 The bundled `github-deep-research` API client also works without `requests`, using
 Python's standard-library HTTP client. Its fallback preserves spaces, Unicode, and
 reserved characters in search queries and label filters.
