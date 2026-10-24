@@ -20,7 +20,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 61
+config_version: 62
 
 # Optional operator-owned literal prompt extensions (see CONFIGURATION.md):
 # lead_prompt_overlay:
@@ -1647,6 +1647,12 @@ projects:
   # Caller-side wait limit in seconds for one summary model call (range:
   # 5-300); abandons the wait, not the remote work.
   summary_timeout_seconds: 60
+  # Shelf search budgets (search_project_documents), in decoded CHARACTERS
+  # not bytes (CJK differs 3x). Per-document cap and whole-shelf total; the
+  # total must be >= the per-document cap, otherwise both reset to defaults.
+  # Read per call — edits apply without a restart.
+  search_max_chars_per_document: 1000000
+  search_max_total_chars: 8000000
 
 # ============================================================================
 # Provider Safety Termination Configuration
