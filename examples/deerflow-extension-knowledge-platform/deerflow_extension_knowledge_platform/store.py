@@ -4,11 +4,12 @@ import json
 import re
 import sqlite3
 from contextlib import closing
+from dataclasses import dataclass
 from pathlib import Path
 
 from deerflow_extension_knowledge_management.contracts import ProcessingOptions
 
-from .models import OPERATIONS, RANK, TOOLS, ConnectionPolicy, PlatformPolicy, Settings, resource_key
+from .models import OPERATIONS, RANK, TOOLS, ConnectionPolicy, PlatformPolicy, Settings, Space, resource_key
 
 
 class RevisionConflict(Exception):
@@ -20,36 +21,6 @@ def administrator(principal):
         raise PermissionError("Platform policy requires a human administrator")
 
 
-def chain(policy, space_id):
-    result, visited = [], set()
-    while space_id is not None:
-        if space_id in visited or space_id not in policy.spaces:
-            raise ValueError("Cyclic or missing space parent")
-        visited.add(space_id)
-        space = policy.spaces[space_id]
-        result.append((space_id, space))
-        space_id = space.parent_id
-    return list(reversed(result))
-
-
-def bounds(path):
-    resources, operations, tools = None, OPERATIONS, TOOLS
-    for _, space in path:
-        if space.resources is not None:
-            if resources is not None and not space.resources <= resources:
-                raise ValueError("Child resources exceed parent envelope")
-            resources = space.resources
-        if space.operations is not None:
-            if not space.operations <= operations:
-                raise ValueError("Child operations exceed parent envelope")
-            operations = space.operations
-        if space.tools is not None:
-            if not space.tools <= tools:
-                raise ValueError("Child tools exceed parent envelope")
-            tools = space.tools
-    return resources or frozenset(), operations, tools
-
-
 def inherited_defaults(policies):
     values, default = {}, None
     for policy in policies:
@@ -57,6 +28,111 @@ def inherited_defaults(policies):
         if "default_tool" in policy.model_fields_set:
             default = policy.default_tool
     return values, default
+
+
+@dataclass(frozen=True)
+class _SpaceState:
+    space_id: str
+    space: Space
+    parent: "_SpaceState | None"
+    resources: frozenset[str]
+    operations: frozenset[str]
+    tools: frozenset[str]
+    members: dict[str, str]
+    enabled: bool
+    default_tool: str | None
+    default_overridden: bool
+
+
+class _PolicyTree:
+    """One snapshot only: reuse ancestor state, never cache grants across requests."""
+
+    def __init__(self, policy, resources):
+        self.policy, self.resources = policy, resources
+        self.states, self.processing, self.groups, self.connection_defaults = {}, {}, {}, {}
+        self.connections = {}
+        for connection, _ in resources.values():
+            if connection.id not in self.connections:
+                self.connections[connection.id] = policy.connections.get(connection.id, ConnectionPolicy())
+
+    def resolve(self, space_id):
+        pending, visited = [], set()
+        cursor = space_id
+        while cursor is not None and cursor not in self.states:
+            if cursor in visited or cursor not in self.policy.spaces:
+                raise ValueError("Cyclic or missing space parent")
+            if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", cursor):
+                raise ValueError("Invalid space identity")
+            visited.add(cursor)
+            pending.append(cursor)
+            cursor = self.policy.spaces[cursor].parent_id
+        for key in reversed(pending):
+            space = self.policy.spaces[key]
+            parent = self.states.get(space.parent_id)
+            if parent is None and space.resources is None:
+                raise ValueError("Root requires an explicit resource envelope")
+            values = {}
+            for field, initial in (("resources", frozenset()), ("operations", OPERATIONS), ("tools", TOOLS)):
+                ceiling = getattr(parent, field) if parent else initial
+                value = getattr(space, field)
+                if parent is not None and value is not None and not value <= ceiling:
+                    raise ValueError(f"Child {field} exceed parent envelope")
+                values[field] = ceiling if value is None else value
+            members = dict(parent.members) if parent else {}
+            if parent and any(RANK[role] > RANK[members.get(user, "blocked")] for user, role in space.members.items()):
+                raise ValueError("Child membership exceeds ancestor grant")
+            for user, role in space.members.items():
+                if role == "blocked":
+                    members.pop(user, None)
+                else:
+                    members[user] = role
+            overridden = "default_tool" in space.model_fields_set
+            self.states[key] = _SpaceState(
+                space_id=key,
+                space=space,
+                parent=parent,
+                **values,
+                members=members,
+                enabled=space.enabled and (parent.enabled if parent else True),
+                default_tool=space.default_tool if overridden else (parent.default_tool if parent else None),
+                default_overridden=overridden or (parent.default_overridden if parent else False),
+            )
+        return self.states[space_id]
+
+    def resource_groups(self, selected):
+        if selected not in self.groups:
+            groups = {}
+            for key in selected:
+                if key not in self.resources:
+                    raise ValueError("Unknown operator resource")
+                connection, base = self.resources[key]
+                previous = groups.get(connection.id, (connection, TOOLS))[1]
+                groups[connection.id] = (connection, previous & base.tools)
+            self.groups[selected] = groups
+        return self.groups[selected]
+
+    def default_tool(self, state, connection):
+        if state.default_overridden:
+            return state.default_tool
+        cp = self.connections[connection]
+        return cp.default_tool if "default_tool" in cp.model_fields_set else self.policy.defaults.default_tool
+
+    def tools(self, state, connection):
+        cp = self.connections[connection]
+        return state.tools & (self.policy.defaults.tools if self.policy.defaults.tools is not None else TOOLS) & (cp.tools if cp.tools is not None else TOOLS)
+
+    def defaults(self, state, connection):
+        if connection not in self.connection_defaults:
+            self.connection_defaults[connection] = inherited_defaults([self.policy.defaults, self.connections[connection]])[0]
+        pending, cursor = [], state
+        while cursor is not None and cursor.space_id not in self.processing:
+            pending.append(cursor)
+            cursor = cursor.parent
+        values = self.processing[cursor.space_id] if cursor else {}
+        for item in reversed(pending):
+            values = {**values, **item.space.processing.model_dump(exclude_none=True)}
+            self.processing[item.space_id] = values
+        return {**self.connection_defaults[connection], **self.processing[state.space_id]}
 
 
 class Store:
@@ -82,29 +158,13 @@ class Store:
     def validate(self, policy):
         if not policy.connections.keys() <= {c.id for c in self.settings.connections}:
             raise ValueError("Unknown operator connection")
-        for space_id, space in policy.spaces.items():
-            if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", space_id):
-                raise ValueError("Invalid space identity")
-            path = chain(policy, space_id)
-            if path[0][1].resources is None:
-                raise ValueError("Root requires an explicit resource envelope")
-            resources, _, space_tools = bounds(path)
-            if not resources <= self.resources.keys():
-                raise ValueError("Unknown operator resource")
-            # An explicit child grant can narrow an inherited grant, never add one.
-            roles = {}
-            for index, (_, ancestor) in enumerate(path):
-                for user, role in ancestor.members.items():
-                    if index and RANK[role] > RANK[roles.get(user, "blocked")]:
-                        raise ValueError("Child membership exceeds ancestor grant")
-                    roles[user] = role
-            for resource in resources:
-                conn, base = self.resources[resource]
-                connection_policy = policy.connections.get(conn.id, ConnectionPolicy())
-                values, default = inherited_defaults([policy.defaults, connection_policy, *(ancestor for _, ancestor in path)])
-                tools = space_tools & base.tools & (connection_policy.tools if connection_policy.tools is not None else TOOLS) & (policy.defaults.tools if policy.defaults.tools is not None else TOOLS)
-                ProcessingOptions.model_validate(values)
-                if default is not None and default not in tools:
+        tree = _PolicyTree(policy, self.resources)
+        for space_id in policy.spaces:
+            state = tree.resolve(space_id)
+            for connection, base_tools in tree.resource_groups(state.resources).values():
+                ProcessingOptions.model_validate(tree.defaults(state, connection.id))
+                default = tree.default_tool(state, connection.id)
+                if default is not None and default not in tree.tools(state, connection.id) & base_tools:
                     raise ValueError("Default tool is outside the effective tool envelope")
 
     def read(self, principal):
@@ -135,36 +195,42 @@ class Store:
             db.execute("UPDATE platform_policy SET revision=?, data=? WHERE id=1", (revision + 1, serialized))
         return {"revision": revision + 1, "policy": json.loads(serialized)}
 
+    def _access(self, principal, space_id, tree):
+        if not principal.user_id or principal.is_internal or not tree.policy.defaults.enabled:
+            raise PermissionError("Space access denied")
+        if space_id not in tree.policy.spaces:
+            raise PermissionError("Space access denied")
+        state = tree.resolve(space_id)
+        role = state.members.get(principal.user_id, "blocked")
+        if not state.enabled or not RANK[role]:
+            raise PermissionError("Space access denied")
+        try:
+            groups = tree.resource_groups(state.resources)
+        except ValueError:
+            raise PermissionError("Space contains an unavailable operator resource") from None
+        # Keep listing and detail admission identical after operator tool revocation.
+        # Intersect base tools per connection without constructing resource responses.
+        for connection, base_tools in groups.values():
+            default = tree.default_tool(state, connection.id)
+            if tree.connections[connection.id].enabled and default is not None and default not in tree.tools(state, connection.id) & base_tools:
+                raise PermissionError("Space default tool is no longer available")
+        return state, role
+
     def _effective(self, principal, space_id, revision, policy):
-        if not principal.user_id or principal.is_internal or not policy.defaults.enabled:
-            raise PermissionError("Space access denied")
-        if space_id not in policy.spaces:
-            raise PermissionError("Space access denied")
-        path = chain(policy, space_id)
-        role = "blocked"
-        for _, space in path:
-            role = space.members.get(principal.user_id, role)
-            if not space.enabled:
-                raise PermissionError("Space access denied")
-        if not RANK[role]:
-            raise PermissionError("Space access denied")
-        selected, operations, tools = bounds(path)
-        if not selected <= self.resources.keys():
-            raise PermissionError("Space contains an unavailable operator resource")
-        operations &= policy.defaults.operations if policy.defaults.operations is not None else OPERATIONS
-        tools &= policy.defaults.tools if policy.defaults.tools is not None else TOOLS
+        tree = _PolicyTree(policy, self.resources)
+        state, role = self._access(principal, space_id, tree)
+        operations = state.operations & (policy.defaults.operations if policy.defaults.operations is not None else OPERATIONS)
         if role == "viewer":
             operations &= {"capabilities", "status"}
-        items = []
-        for key in sorted(selected):
+        items, defaults = [], {}
+        for key in sorted(state.resources):
             conn, base = self.resources[key]
-            cp = policy.connections.get(conn.id, ConnectionPolicy())
+            cp = tree.connections[conn.id]
             if not cp.enabled:
                 continue
-            values, default = inherited_defaults([policy.defaults, cp, *(space for _, space in path)])
-            resource_tools = tools & base.tools & (cp.tools if cp.tools is not None else TOOLS)
-            if default is not None and default not in resource_tools:
-                raise PermissionError("Space default tool is no longer available")
+            if conn.id not in defaults:
+                defaults[conn.id] = tree.defaults(state, conn.id)
+            resource_tools = tree.tools(state, conn.id) & base.tools
             items.append(
                 {
                     "resource_id": key,
@@ -174,11 +240,11 @@ class Store:
                     "dataset_id": base.dataset_id,
                     "operations": sorted(operations & base.operations & (cp.operations if cp.operations is not None else OPERATIONS)),
                     "tools": sorted(resource_tools),
-                    "default_tool": default,
-                    "processing": values,
+                    "default_tool": tree.default_tool(state, conn.id),
+                    "processing": defaults[conn.id],
                 }
             )
-        return {"version": 1, "revision": revision, "space_id": space_id, "title": path[-1][1].title, "role": role, "resources": items}
+        return {"version": 1, "revision": revision, "space_id": space_id, "title": state.space.title, "role": role, "resources": items}
 
     def effective(self, principal, space_id):
         with closing(self.connect()) as db:
@@ -188,11 +254,12 @@ class Store:
     def spaces(self, principal):
         with closing(self.connect()) as db:
             revision, policy = self._snapshot(db)
+        tree = _PolicyTree(policy, self.resources)
         items = []
         for space_id in policy.spaces:
             try:
-                effective = self._effective(principal, space_id, revision, policy)
+                state, role = self._access(principal, space_id, tree)
             except PermissionError:
                 continue
-            items.append({key: effective[key] for key in ("space_id", "title", "role")})
+            items.append({"space_id": space_id, "title": state.space.title, "role": role})
         return {"revision": revision, "items": items}

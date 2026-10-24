@@ -115,6 +115,8 @@ Management responses preserve #7293's contract: capability is not observed execu
 
 SQLite failures, including an exhausted busy timeout when workers share the policy file, return a sanitized `503` without database paths or exception details. Reload the policy and its revision before deciding whether to retry a policy update; ingestion and processing writes are never automatically retried.
 
+Policy evaluation resolves each ancestor once within the current snapshot, combines processing defaults per connection and reuses resource-envelope checks. Space listing performs the same admission checks as space details without constructing their resource/processing responses. These temporary calculations are discarded after each call; grants are never cached across requests or revisions.
+
 ## Verification
 
 ```sh

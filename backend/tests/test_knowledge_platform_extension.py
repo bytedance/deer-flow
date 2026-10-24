@@ -52,6 +52,126 @@ def test_four_level_inheritance_and_restart(platform):
     assert effective["role"] == "manager"
 
 
+def deep_policy(settings, directory, resources_per_connection=40, connections=5):
+    from deerflow_extension_knowledge_platform.models import Settings, resource_key
+    from deerflow_extension_knowledge_platform.store import Store
+
+    config = settings.model_dump()
+    config["storage_path"] = str(directory / "deep.db")
+    config["connections"] = [{"id": f"c{i}", "provider": "weknora", "resources": [{"base_id": f"b{j}", "dataset_id": f"wk1_{i}_{j}"} for j in range(resources_per_connection)]} for i in range(connections)]
+    store = Store(Settings.model_validate(config))
+    spaces = {f"s{i}": {"title": f"Space {i}", "parent_id": f"s{i - 1}"} for i in range(1, 500)}
+    spaces["s0"] = {"title": "Root", "resources": list(store.resources), "members": {"alice": "manager", "bob": "viewer"}}
+    spaces["s250"]["processing"] = {"chunk_size": 256, "chunk_overlap": 32}
+    spaces["s499"].update(processing={"summary_enabled": False}, default_tool=None, tools=[])
+    # Resolve leaves before parents to exercise arbitrary policy JSON order.
+    policy = {
+        "defaults": {"default_tool": "knowledge_search", "processing": {"summary_enabled": True}},
+        "connections": {f"c{i}": {"processing": {"graph_enabled": bool(i % 2)}, "default_tool": "knowledge_entries_search" if i == 4 else "knowledge_search"} for i in range(connections)},
+        "spaces": dict(reversed(list(spaces.items()))),
+    }
+    return store, policy, resource_key("weknora", "c4", "b0")
+
+
+@pytest.mark.parametrize(("connections", "resources_per_connection"), [(5, 1), (5, 40), (20, 200)])
+def test_deep_policy_does_not_reserialize_processing_per_resource_ancestor(platform, tmp_path, monkeypatch, connections, resources_per_connection):
+    from deerflow_extension_knowledge_management.contracts import ProcessingOptions
+
+    _, settings, _ = platform
+    store, policy, resource = deep_policy(settings, tmp_path, resources_per_connection, connections)
+    original = ProcessingOptions.model_dump
+    dumps = 0
+
+    def counted_dump(self, *args, **kwargs):
+        nonlocal dumps
+        dumps += 1
+        # A depth/resource product used to perform 25M dumps for this valid tree.
+        assert dumps <= 2000, "Processing serialization multiplied by resource count and ancestor depth"
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(ProcessingOptions, "model_dump", counted_dump)
+    store.replace(ADMIN, policy, 0)
+    effective = store.effective(MEMBER, "s499")
+    assert effective["role"] == "viewer"
+    assert len(effective["resources"]) == resources_per_connection * connections
+    item = next(item for item in effective["resources"] if item["resource_id"] == resource)
+    assert item["processing"] == {"summary_enabled": False, "graph_enabled": False, "chunk_size": 256, "chunk_overlap": 32}
+    assert item["default_tool"] is None and item["tools"] == []
+    assert item["operations"] == ["capabilities", "status"]
+    inherited = next(item for item in store.effective(MEMBER, "s498")["resources"] if item["resource_id"] == resource)
+    assert inherited["default_tool"] == "knowledge_entries_search"
+
+
+def test_listing_deep_spaces_does_not_build_processing_or_resource_projections(platform, tmp_path, monkeypatch):
+    from deerflow_extension_knowledge_management.contracts import ProcessingOptions
+
+    _, settings, _ = platform
+    store, policy, _ = deep_policy(settings, tmp_path, resources_per_connection=1)
+    store.replace(ADMIN, policy, 0)
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("Space listing materialized management processing/resource projections")
+
+    monkeypatch.setattr(store, "_effective", unexpected)
+    monkeypatch.setattr(ProcessingOptions, "model_dump", unexpected)
+    result = store.spaces(MEMBER)
+    assert result["revision"] == 1
+    assert len(result["items"]) == 500
+    assert all(set(item) == {"space_id", "title", "role"} and item["role"] == "viewer" for item in result["items"])
+
+
+@pytest.mark.parametrize("change", ["resource_removed", "tool_revoked", "connection_disabled", "ancestor_disabled", "member_blocked", "ancestor_revoked"])
+def test_listing_keeps_detail_admission_after_policy_or_operator_changes(platform, change):
+    from deerflow_extension_knowledge_platform.models import Settings
+    from deerflow_extension_knowledge_platform.store import Store
+
+    store, settings, resource = platform
+    data = document(resource)
+    data["defaults"] = {"default_tool": "knowledge_search"}
+    data["spaces"]["unrelated"] = {"title": "Unrelated", "resources": [], "members": {"bob": "viewer"}}
+    expected = {"org", "division", "team", "project", "unrelated"}
+    if change == "connection_disabled":
+        data["connections"]["local"]["enabled"] = False
+    elif change == "ancestor_disabled":
+        data["spaces"]["division"]["enabled"] = False
+        expected -= {"division", "team", "project"}
+    elif change == "member_blocked":
+        data["spaces"]["team"]["members"] = {"bob": "blocked"}
+        expected -= {"team", "project"}
+    elif change == "ancestor_revoked":
+        del data["spaces"]["org"]["members"]["bob"]
+        expected = {"unrelated"}
+    store.replace(ADMIN, data, 0)
+    changed = settings.model_dump()
+    if change == "resource_removed":
+        changed["connections"][0]["resources"] = [{"base_id": "replacement", "dataset_id": "wk1_replacement"}]
+        expected = {"unrelated"}
+    elif change == "tool_revoked":
+        changed["connections"][0]["resources"][0]["tools"] = []
+        expected = {"unrelated"}
+    store = Store(Settings.model_validate(changed))
+    assert {item["space_id"] for item in store.spaces(MEMBER)["items"]} == expected
+    for space_id in data["spaces"]:
+        if space_id in expected:
+            assert store.effective(MEMBER, space_id)["role"] == "viewer"
+        else:
+            with pytest.raises(PermissionError):
+                store.effective(MEMBER, space_id)
+
+
+def test_blocked_members_cannot_be_unblocked_below_or_leak_into_siblings(platform):
+    store, _, resource = platform
+    data = document(resource)
+    data["spaces"]["team"]["members"] = {"bob": "blocked"}
+    data["spaces"]["sibling"] = {"title": "Sibling", "parent_id": "division"}
+    store.replace(ADMIN, data, 0)
+    assert {item["space_id"] for item in store.spaces(MEMBER)["items"]} == {"org", "division", "sibling"}
+    data["spaces"]["project"]["members"] = {"bob": "viewer"}
+    with pytest.raises(ValueError):
+        store.replace(ADMIN, data, 1)
+    assert store.read(ADMIN)["revision"] == 1
+
+
 def test_members_cannot_edit_or_escalate(platform):
     store, _, resource = platform
     store.replace(ADMIN, document(resource), 0)

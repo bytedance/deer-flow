@@ -104,6 +104,41 @@ management selection passes **99 tests**. Ruff and the platform wheel check pass
 The original commit `d64411f2` also passed all validation workflows after
 maintainer approval; CI on subsequent commits must be assessed independently.
 
+## Review follow-up: deep-tree policy evaluation
+
+The second non-blocking review identified repeated ancestor/default evaluation
+for every selected resource, and full resource projection during member space
+listing. Three regression cases first failed on `a96d2e7b`. Evaluation now uses
+an iterative tree scoped to one snapshot, incremental ancestor processing,
+connection-level default composition and shared resource-envelope checks. Listing
+uses the same admission checks as details without building processing/resource
+responses. No cache survives the call or a policy revision.
+
+The regression selection above now passes **286 tests**, including **46 platform
+tests and one strict blocking-I/O test**. New cases exercise a 500-level tree
+with 5, 200 and 4,000 resources, bound serialization work instead of asserting
+wall-clock timing, and reject processing/resource materialization during listing.
+They also cover ancestor revocation/disablement, blocked members, sibling
+isolation, operator resource/tool removal and list/detail admission parity.
+Independent architecture/security review found no regression; an additional
+comparison against the old implementation matched 3,840 effective projections
+across 80 generated trees and three user identities.
+
+Same-host single-run measurements used real SQLite, `Store.replace`, member
+`Store.spaces` and member `Store.effective` on a 500-space chain. Each connection
+has distinct defaults, with overrides midway and at the leaf. Times include
+parsing/validation or serialization performed by those methods, but not HTTP
+transport. They are local measurements, not production latency guarantees.
+
+| Version / resources | Policy replacement | Space listing | Leaf detail |
+| --- | --- | --- | --- |
+| `a96d2e7b`, 5 connections / 200 resources | 40.907 s | 39.492 s | 0.146 s |
+| Optimized, same 5 / 200 | 0.0146 s | 0.0039 s | 0.0035 s |
+| Optimized, maximum 20 / 4,000 | 0.0309 s | 0.0082 s | 0.0092 s |
+
+CI on `a96d2e7b` passed all validation workflows. The subsequent performance
+commit has independent CI results; the earlier pass does not cover this change.
+
 ## Acceptance boundary
 
 This is an opt-in backend policy layer, with discovery text in the existing

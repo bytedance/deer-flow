@@ -20,6 +20,9 @@ Run all filesystem/SQLite work off async request loops; add strict blocking-I/O
 regressions. Do not hold a database transaction across Provider HTTP calls.
 Map SQLite failures to a sanitized 503; require policy reload before retrying
 an update and never automatically retry Provider mutations.
+Resolve ancestors incrementally within one policy snapshot. Never cache grants
+across requests. Space listing must share detail admission checks without
+materializing per-resource processing responses or repeating ancestor merges.
 
 Keep resource identity provider/connection/native-base-qualified and bounded;
 preserve retrieval dataset IDs and validate management result identities. Space
