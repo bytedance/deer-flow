@@ -6,7 +6,19 @@ import asyncio
 from dataclasses import replace
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
+
+
+def _reject_boolean(value: object, info: ValidationInfo, *, kind: str) -> object:
+    """Delegate to the shared boolean guard, imported lazily to avoid an import cycle.
+
+    ``deerflow.config`` imports ``deerflow.extensions.loader`` (and therefore this module)
+    while its own package ``__init__`` is still running, so importing
+    ``deerflow.config._boolean_guards`` at module scope here would be circular.
+    """
+    from deerflow.config._boolean_guards import reject_boolean
+
+    return reject_boolean(value, info, kind=kind)
 
 
 class ModelInvocationGrant(BaseModel):
@@ -24,6 +36,18 @@ class ModelInvocationGrant(BaseModel):
         if any(not value or value != value.strip() for pair in roles.items() for value in pair):
             raise ValueError("Role and model names must be nonempty without surrounding whitespace")
         return roles
+
+    @field_validator("max_concurrency", "max_input_chars", "max_output_chars", mode="before")
+    @classmethod
+    def _reject_boolean_integers(cls, value: object, info: ValidationInfo) -> object:
+        """Reject booleans before Pydantic coerces them to integers."""
+        return _reject_boolean(value, info, kind="an integer")
+
+    @field_validator("timeout_seconds", mode="before")
+    @classmethod
+    def _reject_boolean_timeout(cls, value: object, info: ValidationInfo) -> object:
+        """Reject booleans before Pydantic coerces them to a number."""
+        return _reject_boolean(value, info, kind="a number")
 
 
 class ExtensionHostAccess(BaseModel):
