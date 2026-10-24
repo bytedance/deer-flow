@@ -89,6 +89,11 @@ Upload case-collision coverage uses separate HTTP requests and preserves both
 reported payloads. Observe real filename-claim inputs to pin the disk seed;
 case-insensitive hosts can otherwise mask a missing seed through link retries.
 
+Same-name upload concurrency tests synchronize the first real claim: `os.open`
+for direct writes and `os.link` for staged copies. Cover native/fallback options,
+fresh/occupied copy names, every caller's exact bytes and no staging leftovers.
+Drain workers and abort barriers on failure; do not rely on scheduling or sleeps.
+
 Channel reload cancellation regressions must assert the worker returned the
 stale snapshot before checking that newer runtime config survived. Completion
 alone cannot prove the race: loader exceptions are caught and return `None`.
