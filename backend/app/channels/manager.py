@@ -1660,6 +1660,17 @@ class ChannelManager:
         self._followup_watcher_tasks: set[asyncio.Task] = set()
 
     @staticmethod
+    def _notify_channel_thread_replaced(channel_name: str, old_thread_id: str) -> None:
+        """Tell the channel adapter that a thread was replaced (``/new``)."""
+        from .service import get_channel_service
+
+        service = get_channel_service()
+        if service:
+            channel = service.get_channel(channel_name)
+            if channel is not None:
+                channel.on_thread_replaced(old_thread_id)
+
+    @staticmethod
     def _channel_supports_streaming(channel_name: str) -> bool:
         from .service import get_channel_service
 
@@ -3680,7 +3691,12 @@ class ChannelManager:
         if reply is None and command == "new":
             # Create a new thread through Gateway
             client = self._get_client()
+            old_thread_id = await self._lookup_thread_id(msg)
             await self._create_thread(client, msg)
+            # Retire pending interactive cards for the replaced thread so stale
+            # button clicks are correctly rejected instead of lingering.
+            if old_thread_id:
+                self._notify_channel_thread_replaced(msg.channel_name, old_thread_id)
             reply = "New conversation started."
         elif reply is None and command == "status":
             thread_id = await self._lookup_thread_id(msg)
