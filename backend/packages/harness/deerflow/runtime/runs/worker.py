@@ -2976,6 +2976,14 @@ async def _linearize_delta_checkpoint_resume(
     messages = values.get("messages") if isinstance(values, dict) else None
     if not isinstance(messages, list):
         raise RuntimeError(f"Run {run_id} could not materialize resume checkpoint {checkpoint_id}")
+    # The state-only graph cannot preserve pending Sends to original agent nodes.
+    # Inspect the selected checkpoint, not the current head; ordinary replay's
+    # branch-channel triggers do not need this restriction.
+    selected_tuple = await accessor.aget_tuple(source_config)
+    if selected_tuple is None:
+        raise RuntimeError(f"Run {run_id} could not inspect pending execution for resume checkpoint {checkpoint_id}")
+    if (selected_tuple.checkpoint.get("channel_values") or {}).get("__pregel_tasks"):
+        raise RuntimeError("Cannot resume an older delta checkpoint with pending execution. Resume from the latest checkpoint instead.")
     head_config["metadata"] = checkpoint_agent_binding_metadata(getattr(snapshot, "metadata", None))
 
     # Write through the thread's effective schema so every application and
