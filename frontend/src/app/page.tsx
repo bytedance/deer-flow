@@ -1,26 +1,29 @@
-import { Footer } from "@/components/landing/footer";
-import { Header } from "@/components/landing/header";
-import { Hero } from "@/components/landing/hero";
-import { CaseStudySection } from "@/components/landing/sections/case-study-section";
-import { CommunitySection } from "@/components/landing/sections/community-section";
-import { SandboxSection } from "@/components/landing/sections/sandbox-section";
-import { SkillsSection } from "@/components/landing/sections/skills-section";
-import { WhatsNewSection } from "@/components/landing/sections/whats-new-section";
-import { DEFAULT_LOCALE } from "@/core/i18n/locale";
+import { redirect } from "next/navigation";
 
-export default function LandingPage() {
-  return (
-    <div className="min-h-screen w-full overflow-x-clip bg-[#0a0a0a]">
-      <Header locale={DEFAULT_LOCALE} />
-      <main className="flex w-full flex-col">
-        <Hero />
-        <CaseStudySection />
-        <SkillsSection />
-        <SandboxSection />
-        <WhatsNewSection />
-        <CommunitySection />
-      </main>
-      <Footer />
-    </div>
-  );
+import LandingPage from "@/components/landing/landing-page";
+import { getServerSideUser } from "@/core/auth/server";
+import { isStaticWebsiteOnly } from "@/core/static-mode";
+
+export const dynamic = "force-dynamic";
+
+// Static-website deployments have no gateway session to inspect, so they
+// keep the marketing landing page as the homepage. A full deployment instead
+// routes `/` by auth state: first boot goes straight to admin setup, signed-in
+// users to the workspace, and everyone else to login.
+export default async function HomePage() {
+  if (isStaticWebsiteOnly()) {
+    return <LandingPage />;
+  }
+
+  const result = await getServerSideUser();
+
+  switch (result.tag) {
+    case "authenticated":
+      redirect("/workspace");
+    case "needs_setup":
+    case "system_setup_required":
+      redirect("/setup");
+    default:
+      redirect("/login");
+  }
 }
