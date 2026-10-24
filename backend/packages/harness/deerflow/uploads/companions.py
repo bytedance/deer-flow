@@ -61,7 +61,20 @@ def register_companion(original: Path, markdown: Path) -> None:
 
 
 def unregister_companion(original: Path) -> None:
-    _record_path(original.parent, original.name).unlink(missing_ok=True)
+    """Forget the ownership record for ``original``, best-effort.
+
+    Callers run this on paths whose real outcome is already decided: an upload
+    that has just been published, or a rejected request being cleaned up. A
+    record that cannot be removed (a Windows handle still open, a read-only
+    mount) must not turn that outcome into an error. Dropping the removal is
+    safe rather than merely convenient: ``resolve_companion`` validates the
+    recorded source identity, so a leftover record fails validation instead of
+    resolving to the wrong companion.
+    """
+    try:
+        _record_path(original.parent, original.name).unlink(missing_ok=True)
+    except OSError:
+        logger.warning("Failed to remove upload companion record for %s", original, exc_info=True)
 
 
 def invalidate_overwritten_upload(path: Path) -> None:

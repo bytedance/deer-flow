@@ -9,7 +9,13 @@ from types import SimpleNamespace
 import pytest
 
 from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
-from deerflow.uploads.companions import companion_names, register_companion, resolve_companion
+from deerflow.uploads.companions import (
+    companion_names,
+    invalidate_overwritten_upload,
+    register_companion,
+    resolve_companion,
+    unregister_companion,
+)
 from deerflow.utils.file_outline import extract_outline_for_file
 
 
@@ -122,3 +128,38 @@ def test_new_conversion_restores_outline_after_source_edit(converted_upload):
 
     assert resolve_companion(original) == markdown
     assert extract_outline_for_file(original)[0] == [{"title": "Replaced B", "line": 1}]
+
+def _fail_record_unlink(monkeypatch):
+    """Make deleting an ownership record fail the way a held handle does."""
+    real_unlink = Path.unlink
+
+    def unlink(self, missing_ok=False):
+        if self.suffix == ".json" and self.parent.name == "upload-companions":
+            raise PermissionError(13, "The process cannot access the file", str(self))
+        return real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+
+
+def test_unregister_tolerates_a_record_that_cannot_be_removed(converted_upload, monkeypatch, caplog):
+    """Removal runs after the caller's outcome is decided, so it cannot raise."""
+    original, _ = converted_upload
+    record = next((original.parent.parent.parent / "upload-companions").glob("*.json"))
+    _fail_record_unlink(monkeypatch)
+
+    with caplog.at_level("WARNING", logger="deerflow.uploads.companions"):
+        unregister_companion(original)
+
+    assert "Failed to remove upload companion record" in caplog.text
+    assert record.exists()
+
+
+def test_overwrite_invalidation_tolerates_a_record_that_cannot_be_removed(converted_upload, monkeypatch, caplog):
+    """The embedded upload path publishes first, so this must not raise either."""
+    original, _ = converted_upload
+    _fail_record_unlink(monkeypatch)
+
+    with caplog.at_level("WARNING", logger="deerflow.uploads.companions"):
+        invalidate_overwritten_upload(original)
+
+    assert "Failed to remove upload companion record" in caplog.text
