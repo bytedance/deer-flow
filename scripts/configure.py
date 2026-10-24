@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import shutil
 import sys
 from pathlib import Path
@@ -17,7 +18,13 @@ def copy_if_missing(src: Path, dst: Path) -> None:
     shutil.copyfile(src, dst)
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="configure.py",
+        description="Cross-platform config bootstrap script for DeerFlow.",
+    )
+    parser.parse_args(argv)
+
     project_root = Path(__file__).resolve().parent.parent
 
     existing_config = [

@@ -887,6 +887,7 @@ class LocalSandbox(Sandbox):
         timed_out = False
         stdout_read_fd, stdout_write_fd = os.pipe()
         stderr_read_fd, stderr_write_fd = os.pipe()
+        process: subprocess.Popen | None = None
         try:
             process = subprocess.Popen(
                 args,
@@ -897,7 +898,10 @@ class LocalSandbox(Sandbox):
                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
                 env=env,
             )
-        except Exception:
+        except BaseException:
+            # BaseException, not Exception: a KeyboardInterrupt mid-spawn must
+            # still release the fds; each fd is closed exactly once here, and
+            # the guarded finally below never closes them a second time.
             for fd in (stdout_read_fd, stdout_write_fd, stderr_read_fd, stderr_write_fd):
                 try:
                     os.close(fd)
@@ -906,12 +910,16 @@ class LocalSandbox(Sandbox):
                     pass
             raise
         finally:
-            for fd in (stdout_write_fd, stderr_write_fd):
-                try:
-                    os.close(fd)
-                except OSError:
-                    # The write fd may already be closed by the exception cleanup above.
-                    pass
+            # Only the successful-spawn path owes the parent's write-end close;
+            # on failure the except block already released all four fds, and a
+            # second close could hit a descriptor number another thread claimed
+            # in between.
+            if process is not None:
+                for fd in (stdout_write_fd, stderr_write_fd):
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
 
         if encoding is None:
             encoding = locale.getpreferredencoding(False)
@@ -1011,6 +1019,7 @@ class LocalSandbox(Sandbox):
         timed_out = False
         stdout_read_fd, stdout_write_fd = os.pipe()
         stderr_read_fd, stderr_write_fd = os.pipe()
+        process: subprocess.Popen | None = None
         try:
             process = subprocess.Popen(
                 args,
@@ -1024,7 +1033,10 @@ class LocalSandbox(Sandbox):
             # With start_new_session=True, the new process is also the
             # process-group leader, so its PID is the stable group identifier.
             process_group_id = process.pid
-        except Exception:
+        except BaseException:
+            # BaseException, not Exception: a KeyboardInterrupt mid-spawn must
+            # still release the fds; each fd is closed exactly once here, and
+            # the guarded finally below never closes them a second time.
             for fd in (stdout_read_fd, stdout_write_fd, stderr_read_fd, stderr_write_fd):
                 try:
                     os.close(fd)
@@ -1033,12 +1045,16 @@ class LocalSandbox(Sandbox):
                     pass
             raise
         finally:
-            for fd in (stdout_write_fd, stderr_write_fd):
-                try:
-                    os.close(fd)
-                except OSError:
-                    # The write fd may already be closed by the exception cleanup above.
-                    pass
+            # Only the successful-spawn path owes the parent's write-end close;
+            # on failure the except block already released all four fds, and a
+            # second close could hit a descriptor number another thread claimed
+            # in between.
+            if process is not None:
+                for fd in (stdout_write_fd, stderr_write_fd):
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
 
         stdout_capture, stdout_thread = LocalSandbox._start_pipe_drain(stdout_read_fd, "deerflow-bash-stdout-drain")
         stderr_capture, stderr_thread = LocalSandbox._start_pipe_drain(stderr_read_fd, "deerflow-bash-stderr-drain")
