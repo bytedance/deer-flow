@@ -80,6 +80,11 @@ export const zhCN: Translations = {
         title: "LightRAG",
         description: "从 LightRAG 检索文档与实体关系，并使用统一的来源引用。",
       },
+      knowledgeManagement: {
+        title: "知识入库与处理",
+        description:
+          "通过 WeKnora 导入文件、网址和文本，并在管理员明确授权后管理处理任务。需要安装和配置，不包含管理页面。",
+      },
       weknora: {
         title: "WeKnora 知识检索",
         description:

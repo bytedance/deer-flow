@@ -954,6 +954,12 @@ BoxLite shutdown rejects late VM registration and keeps its SDK loop open while
 in-flight acquisitions finish. If they cannot drain within five seconds,
 shutdown fails with resources still owned and can be retried.
 
+Successful `read_file` calls treat a JSON document's `error` field as file data,
+not a failure of the read tool. This keeps receipts accurate when inspecting
+saved API error responses and avoids blocking later reads when the optional
+`tool_progress` guard is enabled. Actual read failures and output truncation
+still retain their error or partial-result status.
+
 #### MCP Server
 
 In the chat UI, enable **Token Usage → Debug** to inspect generic/MCP tool calls.
@@ -1592,6 +1598,15 @@ retrieval citations. Configure explicit user-to-workspace credential bindings;
 resource authorization remains with WeKnora. The extension directory includes
 its installation guide.
 
+The optional [knowledge management extension](examples/deerflow-extension-knowledge-management/README.md)
+adds administrator-authorized file, URL and manual ingestion, processing status,
+reprocessing and cancellation through WeKnora. Parsing, indexing and optional
+Wiki/graph generation remain upstream. It is disabled by default, requires
+explicit resource/operation grants, and installs no management page. Its
+provider-independent API is covered by offline contract tests. Real ingestion,
+GLM-5.3/BGE integration, browser citation replay and observed limitations are
+recorded in the [acceptance report](examples/deerflow-extension-knowledge-management/VALIDATION.md).
+
 Skills are what make DeerFlow do *almost anything*.
 
 A standard Agent Skill is a structured capability module — a Markdown file that defines a workflow, best practices, and references to supporting resources. DeerFlow ships with built-in skills for research, report generation, slide creation, web pages, image and video generation, and more. But the real power is extensibility: add your own skills, replace the built-in ones, or combine them into compound workflows.
@@ -1636,6 +1651,13 @@ uses neither `main` nor `master` reports its current tree instead of a stale bra
 Users can explicitly activate an enabled skill for a single turn by starting the request with `/skill-name`, for example `/data-analysis analyze uploads/foo.csv`. DeerFlow loads that skill's `SKILL.md` as hidden current-turn context while leaving the base prompt limited to skill metadata. Slash activation respects disabled skills, custom-agent skill whitelists, and existing channel commands such as `/new` and `/help`.
 
 Data-analysis Markdown exports escape pipes and backslashes in column names and values, and render cell line breaks as `<br>` so multiline data stays within its table cell.
+
+Data-analysis JSON exports require unique result column names. For joins that
+return repeated names such as `id`, use SQL aliases (`AS left_id`, `AS right_id`)
+before exporting. Duplicate names cause an error before the output file is opened,
+preserving any existing file.
+The CLI names the repeated columns in a short stderr error and exits nonzero,
+so callers can correct their aliases without reading a traceback.
 
 The **data-analysis** skill preserves each CSV file or Excel sheet when names collide across inputs. [Prepare its Python environment](skills/public/data-analysis/SKILL.md#environment-setup) explicitly with DuckDB and openpyxl; missing packages report setup instructions instead of installing themselves during analysis. Use the SQL names printed by `inspect` (such as `report`, `report_1`) for queries and summaries. Its cache follows ordered input basenames and contents, so renaming or reordering inputs rebuilds their table map instead of silently selecting a different source. Quoted original names also resolve without rewriting query text; apostrophes in upload paths and double quotes in column names are preserved through loading, inspection, queries, and summaries.
 
