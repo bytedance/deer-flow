@@ -230,6 +230,20 @@ async def test_router_upload_is_bounded_and_errors_are_sanitized(api, monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_router_upload_accepts_case_insensitive_media_type(api):
+    app, _, calls, _ = api
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            API_BASE + "/files?filename=guide.txt",
+            content=b"knowledge",
+            headers={"content-type": "Application/Octet-Stream; charset=binary"},
+        )
+
+    assert response.status_code == 202
+    assert calls[-1].url.path.endswith("/file")
+
+
+@pytest.mark.asyncio
 async def test_router_fails_closed_without_host_resolver(api):
     from deerflow_extension_api.auth import EXTENSION_PRINCIPAL_RESOLVER_KEY
 
