@@ -19,7 +19,7 @@ else
     RUN_SHELL_SCRIPT = $(BASH)
 endif
 
-FRONTEND_PNPM = $(PYTHON) ../scripts/pnpm.py
+FRONTEND_PNPM = "$(PYTHON)" ../scripts/pnpm.py
 # What `make clean` deletes; shared by its help line and deletion notice.
 RUNTIME_DATA_CONTENTS = database, users, threads, uploads, memory, secrets
 
@@ -85,7 +85,7 @@ detect-blocking-io:
 	@$(MAKE) -C backend detect-blocking-io
 
 config:
-	@$(PYTHON) ./scripts/configure.py
+	@"$(PYTHON)" ./scripts/configure.py
 
 config-upgrade:
 	@$(RUN_SHELL_SCRIPT) ./scripts/config-upgrade.sh
@@ -95,10 +95,10 @@ test-config-version:
 
 # Check required tools
 check:
-	@$(PYTHON) ./scripts/check.py
+	@"$(PYTHON)" ./scripts/check.py
 
 check-agent-guidance:
-	@$(PYTHON) ./scripts/check_agent_guidance.py
+	@"$(PYTHON)" ./scripts/check_agent_guidance.py
 
 # Install all dependencies
 install:
@@ -153,24 +153,24 @@ setup-sandbox:
 
 # Start all services in development mode (with hot-reloading)
 dev:
-	@$(PYTHON) ./scripts/check.py
+	@"$(PYTHON)" ./scripts/check.py
 	@$(RUN_SHELL_SCRIPT) ./scripts/serve.sh --dev
 
 # Start all services in production mode (with optimizations).
 # SKIP_FRONTEND_BUILD=1 reuses the existing frontend build instead of running
 # `next build`; see scripts/serve.sh --skip-frontend-build.
 start:
-	@$(PYTHON) ./scripts/check.py
+	@"$(PYTHON)" ./scripts/check.py
 	@$(RUN_SHELL_SCRIPT) ./scripts/serve.sh --prod $(if $(filter 1,$(SKIP_FRONTEND_BUILD)),--skip-frontend-build)
 
 # Start all services in daemon mode (background)
 dev-daemon:
-	@$(PYTHON) ./scripts/check.py
+	@"$(PYTHON)" ./scripts/check.py
 	@$(RUN_SHELL_SCRIPT) ./scripts/serve.sh --dev --daemon
 
 # Start prod services in daemon mode (background)
 start-daemon:
-	@$(PYTHON) ./scripts/check.py
+	@"$(PYTHON)" ./scripts/check.py
 	@$(RUN_SHELL_SCRIPT) ./scripts/serve.sh --prod --daemon $(if $(filter 1,$(SKIP_FRONTEND_BUILD)),--skip-frontend-build)
 
 # Start nginx alone in the foreground with the local dev config
