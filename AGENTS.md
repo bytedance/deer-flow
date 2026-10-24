@@ -193,9 +193,6 @@ cd backend && python -m pytest tests/path/to/test.py::test_func -q
 cd frontend && pnpm rstest run <pattern>     # e.g. pnpm rstest run my-component
 ```
 
-`.github/workflows/public-skill-tests.yml` runs the public skill suite when
-public skills, their tests/dependencies, or the workflow itself change.
-
 ### Logs
 
 - Docker stack: `make docker-logs` (or `docker compose -f docker/... logs -f <svc>`).
