@@ -2033,9 +2033,10 @@ def _output_attribution(executed_command: str, thread_data: Mapping[str, Any] | 
 # summaries may contribute evidence. Bare "N passed/errors" in program logs
 # cannot override those counters. Keep the legacy loose fallback without Node.
 _SIBLING_TEST_SUMMARY_RE = re.compile(
-    r"^[ \t=]*(?:[0-9]+ (?:passed|failed|errors?|skipped|deselected|xfailed|xpassed)(?:, )?)+ in [0-9]+(?:\.[0-9]+)?s[ \t=]*\r?$"
+    r"^[ \t=]*(?:[0-9]+ (?:passed|failed|errors?|warnings?|skipped|deselected|xfailed|xpassed)(?:, )?)+ in [0-9]+(?:\.[0-9]+)?s[ \t=]*\r?$"
     r"|^test result: (?:ok|FAILED)\.[^\r\n]*$"
     r"|^(?:ok|FAIL)[ \t]+[^\r\n]+$"
+    r"|^[ \t]*--- (?:PASS|FAIL|SKIP):[^\r\n]*$"
     r"|^Ran [0-9]+ tests? in [0-9]+(?:\.[0-9]+)?s\r?\n\r?\n(?:OK|FAILED)[^\r\n]*$",
     re.MULTILINE,
 )
@@ -2056,6 +2057,8 @@ def summarize_test_output(output: str) -> Literal["passed", "failed", "unverifie
     if node_summary is not None:
         # A complete Node report owns its family. Recognizable sibling reports
         # still participate (for make/test scripts running several frameworks).
+        # Retain pytest warning counters and Go per-case markers too: these
+        # are part of the sibling evidence, not disposable diagnostic text.
         text = "\n".join(match[0] for pattern in (_SIBLING_TEST_SUMMARY_RE, _MAVEN_TEST_SUMMARY_RE, _GRADLE_TEST_SUMMARY_RE) for match in pattern.finditer(text))
     if _TEST_FAIL_SHAPE_RE.search(text) or build_summary is False or node_summary == "failed":
         return "failed"

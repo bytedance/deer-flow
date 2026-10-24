@@ -99,7 +99,9 @@ The executor calls `summarize_test_output` on the complete ToolMessage before
 tail slicing and retains `test_summary` (`passed`/`failed`/`unverified`). The checker
 uses this stamp only after its normal admission guards; legacy entries fall back
 to their tail. Complete Node counters outrank loose pass/fail log text; independently shaped
-sibling runner summaries still count. Full-output stamps are cached per execution
+sibling runner summaries still count. Preserve pytest warning counters and Go
+per-case PASS/FAIL/SKIP records when filtering sibling evidence; an all-skipped
+Go package must not gain proof merely from its `ok` banner. Full-output stamps are cached per execution
 by tool-call ID and unchanged content; changed content is reclassified. The cache
 is invocation-local and pruned to the newest 20 retained executions, so values
 chunks do not repeatedly run full-output regexes or retain compacted logs.

@@ -358,3 +358,26 @@ def test_summary_cache_is_bounded_and_tracks_compaction(executor_module, monkeyp
     assert classify.call_count == 20
     executor_module._harvest_bash_executions({"messages": [AIMessage(content="compacted")]}, summary_cache=cache)
     assert cache == {}
+
+
+@pytest.mark.parametrize("node_passed", [0, 1])
+@pytest.mark.parametrize(
+    "sibling,expected",
+    [
+        ("1 failed, 1 passed, 1 warning in 0.05s", (True, False)),
+        ("2 passed, 3 warnings in 0.05s", (True, True)),
+        ("=== 1 failed, 1 passed, 2 warnings in 0.05s ===", (True, False)),
+    ],
+)
+def test_node_sibling_pytest_warning_summaries(node_passed, sibling, expected):
+    verdict = _verdict(_summary(passed=node_passed, skipped=1) + "\n" + sibling)
+    assert (verdict["leaves"][0]["checked"], verdict["all_hold"]) == expected
+
+
+@pytest.mark.parametrize("node_passed", [0, 1])
+@pytest.mark.parametrize("cases", ["--- SKIP: TestA (0.00s)", "--- PASS: TestA (0.00s)", "--- SKIP: TestA (0.00s)\n--- PASS: TestB (0.00s)"])
+def test_node_sibling_go_preserves_case_evidence(node_passed, cases):
+    output = _summary(passed=node_passed, skipped=1) + "\n=== RUN   TestA\n" + cases + "\nok  \texample/pkg\t0.002s"
+    verdict = _verdict(output)
+    holds = node_passed > 0 or "--- PASS:" in cases
+    assert (verdict["leaves"][0]["checked"], verdict["all_hold"]) == (holds, holds)
