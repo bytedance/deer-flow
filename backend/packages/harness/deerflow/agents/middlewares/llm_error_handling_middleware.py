@@ -27,6 +27,7 @@ from deerflow.agents.middlewares.model_response import append_visible_text, fini
 from deerflow.config.app_config import AppConfig
 from deerflow.models.request_admission import AdmissionError
 from deerflow.utils.custom_events import aemit_custom_event, emit_custom_event
+from deerflow.utils.messages import strip_trailing_error_fallbacks
 from deerflow.utils.retry_after import bounded_retry_after_ms, parse_retry_after_date_ms
 
 logger = logging.getLogger(__name__)
@@ -79,6 +80,19 @@ def _consume_empty_response_retry(request: ModelRequest) -> bool:
         return False
     context[_EMPTY_RESPONSE_RETRY_CONTEXT_KEY] = _EMPTY_RESPONSE_RETRY_CONSUMED
     return True
+
+
+def _model_request_without_trailing_fallbacks(request: ModelRequest) -> ModelRequest:
+    """Use a request-only view without terminal framework error messages."""
+    original_messages = getattr(request, "messages", None)
+    if original_messages is None:
+        # Direct middleware callers and a few host adapters use a lightweight
+        # request object without assembled messages; preserve that contract.
+        return request
+    messages = strip_trailing_error_fallbacks(original_messages)
+    if len(messages) == len(original_messages):
+        return request
+    return request.override(messages=messages)
 
 
 _RETRIABLE_STATUS_CODES = {408, 409, 425, 429, 500, 502, 503, 504, 529}
@@ -958,9 +972,10 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
 
         attempt = 1
         prev_delay_ms: int | None = None
+        model_request = _model_request_without_trailing_fallbacks(request)
         while True:
             try:
-                response = self._bounded_model_call_sync(request, handler)
+                response = self._bounded_model_call_sync(model_request, handler)
                 _raise_for_empty_response(response)
                 self._record_success(admission=admission)
                 return response
@@ -1022,10 +1037,11 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
 
         attempt = 1
         prev_delay_ms: int | None = None
+        model_request = _model_request_without_trailing_fallbacks(request)
         try:
             while True:
                 try:
-                    response = await self._bounded_model_call(request, handler)
+                    response = await self._bounded_model_call(model_request, handler)
                     _raise_for_empty_response(response)
                     self._record_success(admission=admission)
                     return response

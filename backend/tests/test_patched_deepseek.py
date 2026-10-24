@@ -320,7 +320,7 @@ def test_thinking_does_not_replay_reasoning_for_assistant_without_tool_calls():
     assert "reasoning_content" not in assistant_msg
 
 
-def test_legacy_fallback_assistant_is_removed_before_deepseek_replay():
+def test_legacy_trailing_fallback_assistant_is_removed_before_deepseek_replay():
     model = _make_model(extra_body={"thinking": {"type": "enabled"}})
     fallback = AIMessage(
         content="temporary provider error",
@@ -334,8 +334,32 @@ def test_legacy_fallback_assistant_is_removed_before_deepseek_replay():
 
     with patch.object(type(model).__bases__[0], "_get_request_payload", return_value=base_payload):
         with patch.object(model, "_convert_input") as mock_convert:
-            mock_convert.return_value = MagicMock(to_messages=lambda: [fallback, human])
-            payload = model._get_request_payload([fallback, human])
+            mock_convert.return_value = MagicMock(to_messages=lambda: [human, fallback])
+            payload = model._get_request_payload([human, fallback])
 
     assert payload["messages"] == base_payload["messages"]
     assert not any(message.get("role") == "assistant" for message in payload["messages"])
+
+
+def test_legacy_middle_fallback_assistant_is_preserved_for_deepseek_replay():
+    model = _make_model(extra_body={"thinking": {"type": "enabled"}})
+    fallback = AIMessage(
+        content="temporary provider error",
+        additional_kwargs={"deerflow_error_fallback": True},
+    )
+    human = HumanMessage(content="retry")
+    base_payload = {
+        "tools": _TOOL_SPEC,
+        "messages": [
+            _make_payload_message("assistant", "temporary provider error"),
+            _make_payload_message("user", "retry"),
+        ],
+    }
+
+    with patch.object(type(model).__bases__[0], "_get_request_payload", return_value=base_payload):
+        with patch.object(model, "_convert_input") as mock_convert:
+            mock_convert.return_value = MagicMock(to_messages=lambda: [fallback, human])
+            payload = model._get_request_payload([fallback, human])
+
+    assert [message["role"] for message in payload["messages"]] == ["assistant", "user"]
+    assert payload["messages"][0]["content"] == "temporary provider error"
