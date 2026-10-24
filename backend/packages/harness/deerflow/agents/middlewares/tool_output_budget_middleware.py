@@ -53,7 +53,7 @@ from deerflow.agents.middlewares.tool_transform_meta import append_tool_transfor
 from deerflow.community.ragflow.sources import budget_source_artifact
 from deerflow.config.summarization_config import DEFAULT_SKILL_FILE_READ_TOOL_NAMES
 from deerflow.config.tool_output_config import ToolOutputConfig
-from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
+from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH, WRITE_ELISION_PLACEHOLDER_TEMPLATE
 from deerflow.sandbox.lease import run_sync_lifecycle_operation
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 from deerflow.storage import BlobRef, BlobStoreError, get_blob_store_if_enabled
@@ -1054,8 +1054,9 @@ _SUPERSEDING_READ_STATUSES = frozenset({"success", "partial_success"})
 # Deterministic for a given payload so repeated model calls keep the same
 # request prefix (prompt caching) instead of drifting. Framework-owned static
 # text plus a character count; no model-supplied value is interpolated (the
-# path stays visible in the call's own ``path`` argument).
-_ELIDED_WRITE_CONTENT_TEMPLATE = "[content elided: {chars} chars; this write_file call succeeded and the file was read or modified again afterwards, so the on-disk file is the current version; call read_file on its path to see it]"
+# path stays visible in the call's own ``path`` argument). The template is
+# shared with ``write_file``, which refuses to write it back out (#7319).
+_ELIDED_WRITE_CONTENT_TEMPLATE = WRITE_ELISION_PLACEHOLDER_TEMPLATE
 
 
 def elide_superseded_write_payloads(messages: list[Any], *, min_chars: int, keep_recent: int) -> list[Any] | None:
