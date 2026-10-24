@@ -270,14 +270,22 @@ export function displayTimeZone(
  * A run summary short enough to quote mid-sentence: its first sentence, no
  * trailing sentence punctuation (the template adds its own), at most `max`
  * characters with an ellipsis. The full text stays in the linked run.
+ *
+ * The budget counts code points, so an emoji at the cut is never split into a
+ * lone surrogate (`conversation-outline.ts` and `tool-detail-preview.ts`
+ * follow the same rule for their own limits).
  */
 export function briefReason(summary: string, max = 120): string {
   const text = summary.replace(/\s+/g, " ").trim();
   const sentenceEnd = /[。！？]|[.!?](?=\s|$)/.exec(text);
   const first = sentenceEnd ? text.slice(0, sentenceEnd.index + 1) : text;
   const bare = first.replace(/[\s。．.！!？?；;，,、:：]+$/u, "");
-  if (bare.length <= max) {
+  const characters = Array.from(bare);
+  if (characters.length <= max) {
     return bare;
   }
-  return `${bare.slice(0, max - 1).trimEnd()}…`;
+  return `${characters
+    .slice(0, Math.max(0, max - 1))
+    .join("")
+    .trimEnd()}…`;
 }
