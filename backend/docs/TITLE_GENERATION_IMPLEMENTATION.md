@@ -221,7 +221,7 @@ pytest
 ## 📚 相关资源
 
 - [完整文档](AUTO_TITLE_GENERATION.md)
-- [LangGraph Middleware](https://langchain-ai.github.io/langgraph/concepts/middleware/)
+- [LangGraph Middleware](https://docs.langchain.com/oss/python/langchain/middleware)
 - [LangGraph State 管理](https://langchain-ai.github.io/langgraph/concepts/low_level/#state)
 - [LangGraph Checkpointer](https://langchain-ai.github.io/langgraph/concepts/persistence/)
 
