@@ -1,0 +1,126 @@
+{
+  "scenario": "subagent_file_task",
+  "mode": "ultra",
+  "model": "scenario-model",
+  "prompt": "Use the task tool to delegate this bounded job to the general-purpose subagent: create /mnt/user-data/workspace/subagent-note.txt with exactly this content: hi from subagent replay. The subagent must use the write_file tool and return that exact text. After the task completes, reply with exactly the subagent result. Do not use file tools yourself and do not ask any clarifying questions.",
+  "context": {
+    "is_bootstrap": false,
+    "mode": "ultra",
+    "thinking_enabled": true,
+    "is_plan_mode": true,
+    "subagent_enabled": true
+  },
+  "stream_mode": [
+    "values",
+    "custom"
+  ],
+  "requires_real_subagent": true,
+  "turns": [
+    {
+      "caller": "lead_agent",
+      "conversation_hash": "d5c7e4528930738579ce1301de4b0c07952bbf3ad2ce025042f10e730511ecbf",
+      "input_hash": "ac3cbd0d9008574398c55a8ea566e50a69482f4142a2cfa28d258d34aec189c2",
+      "output": {
+        "type": "ai",
+        "data": {
+          "content": "",
+          "additional_kwargs": {},
+          "response_metadata": {
+            "finish_reason": "tool_calls"
+          },
+          "type": "ai",
+          "name": null,
+          "id": "replay-lead-delegate",
+          "tool_calls": [
+            {
+              "name": "task",
+              "args": {
+                "description": "Create replay proof file",
+                "prompt": "Create /mnt/user-data/workspace/subagent-note.txt with exactly this content: hi from subagent replay. Use the write_file tool, then return exactly: hi from subagent replay.",
+                "subagent_type": "general-purpose"
+              },
+              "id": "call_subagent_replay_task",
+              "type": "tool_call"
+            }
+          ],
+          "invalid_tool_calls": [],
+          "usage_metadata": null
+        }
+      }
+    },
+    {
+      "caller": "subagent:general-purpose",
+      "conversation_hash": "ba657f7b66fec240fcf4f3b0fba485edb65526c4ee1879adfbdba8825cd07b56",
+      "input_hash": "2299469152379bac70c6685ccc743a2cba10da2d8372a6ead22f5f3ec32709b0",
+      "output": {
+        "type": "ai",
+        "data": {
+          "content": "",
+          "additional_kwargs": {},
+          "response_metadata": {
+            "finish_reason": "tool_calls"
+          },
+          "type": "ai",
+          "name": null,
+          "id": "replay-subagent-write",
+          "tool_calls": [
+            {
+              "name": "write_file",
+              "args": {
+                "description": "Create the delegated replay proof file",
+                "path": "/mnt/user-data/workspace/subagent-note.txt",
+                "content": "hi from subagent replay."
+              },
+              "id": "call_subagent_write_file",
+              "type": "tool_call"
+            }
+          ],
+          "invalid_tool_calls": [],
+          "usage_metadata": null
+        }
+      }
+    },
+    {
+      "caller": "subagent:general-purpose",
+      "conversation_hash": "8a1c2893e58f7118b1df7535c7081474ec24c457f3ed7b8c43ed124b3cdf63a1",
+      "input_hash": "f3cf9a86b49b6b610b9380172098de876dba643f0c408c41cad38780e7c8ca90",
+      "output": {
+        "type": "ai",
+        "data": {
+          "content": "hi from subagent replay.",
+          "additional_kwargs": {},
+          "response_metadata": {
+            "finish_reason": "stop"
+          },
+          "type": "ai",
+          "name": null,
+          "id": "replay-subagent-final",
+          "tool_calls": [],
+          "invalid_tool_calls": [],
+          "usage_metadata": null
+        }
+      }
+    },
+    {
+      "caller": "lead_agent",
+      "conversation_hash": "16f57d6e94768efb6f3a1b428a80c4094b191586ea2b63d5ce3ffc0986717799",
+      "input_hash": "551fdc67abfdacd64f65301839b7bb4db8dc7a3a4591c5f2f30b03ac3daa2ca1",
+      "output": {
+        "type": "ai",
+        "data": {
+          "content": "hi from subagent replay.",
+          "additional_kwargs": {},
+          "response_metadata": {
+            "finish_reason": "stop"
+          },
+          "type": "ai",
+          "name": null,
+          "id": "replay-lead-final",
+          "tool_calls": [],
+          "invalid_tool_calls": [],
+          "usage_metadata": null
+        }
+      }
+    }
+  ]
+}
