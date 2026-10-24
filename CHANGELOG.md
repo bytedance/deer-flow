@@ -1389,6 +1389,13 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
 
 ### Changed
 
+- **gateway:** The top-level `recursion_limit` default is now `1000`, preserving
+  the existing web UI budget and matching scheduled runs. UI submissions omit
+  their former hard-coded value, so operators' configured defaults and valid
+  per-request overrides apply consistently. Existing `config.yaml` values are
+  preserved on upgrade; installations still configured to `100` can raise the
+  value explicitly if they want the former UI budget. ([#7323])
+
 - **skills:** Treat `allowed-tools` as non-enforced compatibility metadata.
   Activating a skill no longer hides or blocks tools that Agent configuration
   and host authorization already permit, including when the declaration is
