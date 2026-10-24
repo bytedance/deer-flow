@@ -202,6 +202,11 @@ the shared simulated chunker. Preserve terminal usage exactly once, XML/native
 tool calls, invalid calls, and the original messages. Offline SDK boundary tests:
 `tests/test_mindie_provider.py::test_public_stream_compatibility_through_sdk`.
 
+Whole-response and streaming newline decoding protect both triple-backtick and
+triple-tilde fences. The earliest opener wins, only the same delimiter closes it,
+and an unclosed fence keeps the remainder verbatim. Boundary and mixed-delimiter
+regressions live in `tests/test_mindie_newline_fences.py`.
+
 `_fix_messages` converts tool results to the XML text format expected by MindIE.
 Only tool-message `type=json` payloads join the text channel; other non-text
 blocks remain omitted. Keep the `<tool_response>` escaping boundary and the
