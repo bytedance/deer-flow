@@ -9,16 +9,19 @@ The model-call hooks also budget the other bulky side of a tool call: the
 ``content`` argument of a successful ``write_file`` call (issue #5328, step
 2). After a successful write the file on disk is the source of truth, and the
 read-before-write gate forces a ``read_file`` before the next modification of
-that path, so once a *later* successful read or write of the same path exists
-the historical copy is redundant with it. Such superseded content is replaced
-by a short deterministic placeholder in the *model-bound request only*
-(``request.override``): ``state["messages"]``, checkpoints, tool receipts,
+that path, so a later successful same-path read or write can make the
+historical copy redundant. At its first model-bound appearance, a superseded
+write may be replaced by a short deterministic placeholder in the request
+copy only (``request.override``); that keep/elide decision is cached for the
+message so later requests do not rewrite an already-seen prefix. The bounded
+process-local cache is shared by middleware instances and keyed by thread,
+message, and tool-call IDs. ``state["messages"]``, checkpoints, tool receipts,
 loop detection, and the run journal keep the original arguments, and nothing
-is externalized to disk (the file itself is the reference). The newest
-``keep_recent_writes`` successful writes always stay visible so the model can
-still say what it just wrote without a read. Gate-blocked calls are the
-read-before-write middleware's own policy; both rewrite through the shared
-``tool_call_args`` helper so every provider surface changes together.
+is externalized to disk (the file itself is the reference).
+``keep_recent_writes`` applies when the message first appears. Gate-blocked
+calls are the read-before-write middleware's own policy; both rewrite through
+the shared ``tool_call_args`` helper so every provider surface changes
+together.
 """
 
 from __future__ import annotations
@@ -32,7 +35,10 @@ import posixpath
 import re
 import shlex
 import tempfile
+import threading
 import uuid
+import weakref
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace as dc_replace
 from typing import TYPE_CHECKING, Any, NamedTuple, override
@@ -919,6 +925,20 @@ def _model_outputs_path(request: ModelRequest) -> str | None:
     return outputs_path if isinstance(outputs_path, str) and outputs_path else None
 
 
+def _resolve_model_thread_id(request: ModelRequest) -> str | None:
+    """Resolve the model request's thread scope for process-local write decisions."""
+    runtime = getattr(request, "runtime", None)
+    context = getattr(runtime, "context", None)
+    if isinstance(context, Mapping):
+        thread_id = context.get("thread_id")
+        if isinstance(thread_id, str) and thread_id:
+            return thread_id
+    runtime_config = getattr(runtime, "config", None)
+    configurable = runtime_config.get("configurable") if isinstance(runtime_config, Mapping) else None
+    thread_id = configurable.get("thread_id") if isinstance(configurable, Mapping) else None
+    return thread_id if isinstance(thread_id, str) and thread_id else None
+
+
 def _has_tool_output_blob_refs(messages: list[Any]) -> bool:
     """Cheap pre-scan used to keep normal async model calls on the event loop."""
     return any(isinstance(message, ToolMessage) and isinstance(getattr(message, "additional_kwargs", None), dict) and TOOL_OUTPUT_BLOB_KEY in message.additional_kwargs for message in messages)
@@ -1056,9 +1076,21 @@ _SUPERSEDING_READ_STATUSES = frozenset({"success", "partial_success"})
 # text plus a character count; no model-supplied value is interpolated (the
 # path stays visible in the call's own ``path`` argument).
 _ELIDED_WRITE_CONTENT_TEMPLATE = "[content elided: {chars} chars; this write_file call succeeded and the file was read or modified again afterwards, so the on-disk file is the current version; call read_file on its path to see it]"
+_MAX_WRITE_ELISION_DECISIONS = 20_000
+_WriteElisionDecisionScope = tuple[str | None, int, int]
+_WriteElisionDecisionKey = tuple[_WriteElisionDecisionScope, str, str | int, str]
+_WRITE_ELISION_DECISIONS: OrderedDict[_WriteElisionDecisionKey, tuple[bool, weakref.ReferenceType[Any] | None]] = OrderedDict()
+_WRITE_ELISION_DECISIONS_LOCK = threading.Lock()
 
 
-def elide_superseded_write_payloads(messages: list[Any], *, min_chars: int, keep_recent: int) -> list[Any] | None:
+def elide_superseded_write_payloads(
+    messages: list[Any],
+    *,
+    min_chars: int,
+    keep_recent: int,
+    decision_cache: OrderedDict[_WriteElisionDecisionKey, tuple[bool, weakref.ReferenceType[Any] | None]] | None = None,
+    decision_scope: _WriteElisionDecisionScope | None = None,
+) -> list[Any] | None:
     """Return ``messages`` with superseded ``write_file`` content replaced by placeholders, or ``None`` if unchanged.
 
     Only the policy lives here. A call qualifies when its paired result is
@@ -1073,8 +1105,10 @@ def elide_superseded_write_payloads(messages: list[Any], *, min_chars: int, keep
     rewrite is ``rewrite_messages_tool_call_args``, which never mutates the
     input and passes untouched messages through by identity, so the stored
     history keeps the original arguments and the output is identical across
-    model calls. The policy is monotonic: once a write is elided, more history
-    never brings its content back.
+    model calls. When ``decision_cache`` is supplied, each write's first
+    keep/elide decision is remembered by thread/message/tool-call identity;
+    later requests reuse it even if newer history changes the current policy
+    answer.
     """
     if not _has_elidable_write(messages, min_chars):
         return None
@@ -1098,13 +1132,35 @@ def elide_superseded_write_payloads(messages: list[Any], *, min_chars: int, keep
             continue
         latest_touch[path] = max(latest_touch.get(path, -1), occurrence.index)
 
-    replacements: dict[tuple[int, str], dict[str, Any]] = {}
     cutoff = max(0, len(successful_writes) - keep_recent)
-    for occurrence, path in successful_writes[:cutoff]:
+    replacements: dict[tuple[int, str], dict[str, Any]] = {}
+    for write_index, (occurrence, path) in enumerate(successful_writes):
         content = occurrence.args.get("content")
         if not isinstance(content, str) or not content or len(content) < min_chars:
             continue
-        if latest_touch.get(path, -1) <= occurrence.index:
+        should_elide = write_index < cutoff and latest_touch.get(path, -1) > occurrence.index
+        if decision_cache is not None:
+            message_id = getattr(occurrence.message, "id", None)
+            if isinstance(message_id, str) and message_id:
+                decision_key: _WriteElisionDecisionKey = (decision_scope or (None, min_chars, keep_recent), "message", message_id, occurrence.call_id)
+                message_ref = None
+            else:
+                decision_key = (decision_scope or (None, min_chars, keep_recent), "object", id(occurrence.message), occurrence.call_id)
+                try:
+                    message_ref = weakref.ref(occurrence.message)
+                except TypeError:
+                    message_ref = None
+            with _WRITE_ELISION_DECISIONS_LOCK:
+                cached = decision_cache.get(decision_key)
+                if cached is not None and message_ref is not None and cached[1] is not None and cached[1]() is not occurrence.message:
+                    decision_cache.pop(decision_key, None)
+                    cached = None
+                if cached is None:
+                    decision_cache[decision_key] = (should_elide, message_ref)
+                else:
+                    decision_cache.move_to_end(decision_key)
+                    should_elide = cached[0]
+        if not should_elide:
             continue
         replacements[(id(occurrence.message), occurrence.call_id)] = {**occurrence.args, "content": _ELIDED_WRITE_CONTENT_TEMPLATE.format(chars=len(content))}
     if not replacements:
@@ -1251,7 +1307,7 @@ class ToolOutputBudgetMiddleware(AgentMiddleware[AgentState]):
         return await handler(prepared)
 
     def _budget_model_request(self, request: ModelRequest) -> ModelRequest:
-        """Truncate oversized historical tool output and elide superseded write payloads in the request copy only."""
+        """Truncate tool output and freeze write-elision choices in the request copy only."""
         original = getattr(request, "messages", None)
         if not isinstance(original, list):
             return request
@@ -1269,7 +1325,16 @@ class ToolOutputBudgetMiddleware(AgentMiddleware[AgentState]):
                 messages,
                 min_chars=self._config.superseded_write_min_chars,
                 keep_recent=self._config.keep_recent_writes,
+                decision_cache=_WRITE_ELISION_DECISIONS,
+                decision_scope=(
+                    _resolve_model_thread_id(request),
+                    self._config.superseded_write_min_chars,
+                    self._config.keep_recent_writes,
+                ),
             )
+            with _WRITE_ELISION_DECISIONS_LOCK:
+                while len(_WRITE_ELISION_DECISIONS) > _MAX_WRITE_ELISION_DECISIONS:
+                    _WRITE_ELISION_DECISIONS.popitem(last=False)
             if elided is not None:
                 messages = elided
         if messages is original:

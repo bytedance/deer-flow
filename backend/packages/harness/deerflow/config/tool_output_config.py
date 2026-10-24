@@ -29,8 +29,9 @@ class ToolOutputConfig(BaseModel):
 
     The same middleware also budgets the other bulky side of a tool call in
     model-bound requests: the ``content`` argument of a successful
-    ``write_file`` call, once a later read or write of the same path has
-    made the historical copy redundant with the file on disk
+    ``write_file`` call. Its first model-bound appearance freezes whether that
+    content is elided, based on whether a later successful same-path operation
+    is already present in the history
     (``elide_superseded_writes``; issue #5328).
     """
 
@@ -100,10 +101,13 @@ class ToolOutputConfig(BaseModel):
         default=True,
         description=(
             "Replace the content argument of a successful write_file call with a short placeholder in model-bound "
-            "requests once the same path was read or modified again later in the conversation. After a successful "
-            "write the file on disk is the source of truth, and the read-before-write gate forces a read_file before "
-            "the next modification, so the historical copy is redundant with that read. Only the request copy "
-            "changes: stored message history, receipts, and the run journal keep the original arguments."
+            "requests on its first model-bound appearance when the history already contains a later successful "
+            "read or modification of the same path. The keep/elide decision is cached per Gateway worker, so a "
+            "later operation does not change the full or placeholder representation already sent while cached. "
+            "After a successful write "
+            "the file on disk is the source of truth, and the read-before-write gate forces a read_file before the "
+            "next modification. Only the request copy changes: stored message history, receipts, and the run "
+            "journal keep the original arguments."
         ),
     )
     superseded_write_min_chars: _OutputLimit = Field(
@@ -117,5 +121,11 @@ class ToolOutputConfig(BaseModel):
     )
     keep_recent_writes: _OutputLimit = Field(
         default=1,
-        description="Never elide the content of the newest N successful write_file calls (counted across all paths), even when superseded, so the model can still say what it just wrote without a read. 0 keeps none.",
+        description=(
+            "Keep the content of the newest N successful write_file calls (across all paths) in full when first "
+            "shown to the model. While that per-worker decision remains cached, writes first seen in this window "
+            "stay full in later requests even after leaving the window or being superseded, so this does not bound "
+            "older content already shown. A worker restart, cache eviction, or different worker may recompute it. "
+            "0 keeps none."
+        ),
     )
