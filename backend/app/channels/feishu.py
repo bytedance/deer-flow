@@ -259,6 +259,18 @@ class FeishuChannel(Channel):
     def supports_streaming(self) -> bool:
         return True
 
+    def on_thread_replaced(self, old_thread_id: str) -> None:
+        """Retire pending interactive cards for a thread replaced by ``/new``."""
+        if not self._card_interaction_enabled:
+            return
+        discarded = self._card_registry.discard_thread(old_thread_id)
+        if discarded:
+            logger.info(
+                "[Feishu] retired %d pending card(s) for replaced thread: thread_id=%s",
+                discarded,
+                old_thread_id,
+            )
+
     @property
     def is_running(self) -> bool:
         if not self._running:

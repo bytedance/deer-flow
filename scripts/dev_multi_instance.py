@@ -740,17 +740,17 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     render = sub.add_parser("render-config", help="write the multi-instance config.yaml")
     render.add_argument("--base", required=True, type=Path)
-    render.add_argument("--out", required=True, type=Path)
+    render.add_argument("--out", required=True, type=Path, help="output file path (not a directory)")
     render.add_argument("--database-url", required=True)
     render.add_argument("--redis-url", required=True)
     render.add_argument("--state-dir", required=True, type=Path)
     render.add_argument("--keep-channels", action="store_true")
 
     secrets_cmd = sub.add_parser("secrets", help="create the shared secrets file if missing")
-    secrets_cmd.add_argument("--out", required=True, type=Path)
+    secrets_cmd.add_argument("--out", required=True, type=Path, help="output file path (not a directory)")
 
     nginx = sub.add_parser("nginx-conf", help="write the round-robin nginx config")
-    nginx.add_argument("--out", required=True, type=Path)
+    nginx.add_argument("--out", required=True, type=Path, help="output file path (not a directory)")
     nginx.add_argument("--state-dir", required=True, type=Path)
     nginx.add_argument("--listen-port", required=True, type=int)
     nginx.add_argument("--gateway-port", required=True, type=int, action="append")
@@ -764,6 +764,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     check.add_argument("--timeout", type=float, default=15.0)
 
     args = parser.parse_args(argv)
+
+    out = getattr(args, "out", None)
+    if out is not None:
+        # Both shapes reach the writers as a raw OSError (EISDIR/ENOTDIR) after doing work.
+        if out.is_dir():
+            parser.error(f"--out must be a file path, not a directory: {out}")
+        for ancestor in out.parents:
+            if ancestor.exists():
+                if not ancestor.is_dir():
+                    parser.error(f"--out parent must be a directory: {ancestor}")
+                break
 
     if args.command == "render-config":
         for note in render_config(args.base, args.out, database_url=args.database_url, redis_url=args.redis_url, state_dir=args.state_dir, keep_channels=args.keep_channels):

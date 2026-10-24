@@ -154,6 +154,8 @@ For MindIE XML tool calls, see the
 [argument parsing and newline compatibility guide](backend/docs/CONFIGURATION.md#mindie-xml-tool-arguments).
 Both synchronous and asynchronous streams retain this compatibility: tool-enabled
 streams simulate chunks from a non-streaming response, while no-tool streams stay native.
+Newline compatibility preserves literal escapes inside backtick and tilde code
+fences, including unclosed fences, in complete and streamed replies.
 
 1. **Clone the DeerFlow repository**
 
@@ -185,6 +187,8 @@ streams simulate chunks from a non-streaming response, while no-tool streams sta
    Sofya web search and fetch contain malformed HTTP-success payloads the same way: a non-object payload, a `results` container that is not a list, or a non-empty list with no object entries returns the provider's format error, while non-object entries in an otherwise valid list are skipped in order. Missing, null, or empty results keep the existing "No results found" response.
 
    Serper web and image search preserve valid entries in mixed result lists. A malformed `organic`/`images` container, or a non-empty list holding no object entries, returns Serper's format error; missing, null, or empty containers keep the existing "No results found" / "No images found" response. Format errors log the container field name only, without queries, credentials, or payload values.
+
+   Unbrowse web fetch preserves the extracted text but prefixes a warning when the target page's HTTP status is 400–599, even when the scraping service itself returns a successful response. Empty-page errors retain that status too, and both messages include the reported final URL when available.
 
    Tencent Cloud WSA web search contains malformed HTTP-success payloads the same way: a `Pages` container that is not a list, or a non-empty container holding no usable page, returns the provider's format error, while malformed page entries in an otherwise valid container are skipped so the valid rows survive. Missing, null, or empty `Pages` keep the existing "No results found" response.
 
@@ -699,6 +703,13 @@ Keyed input and resume requests return HTTP 503 before run admission when the
 store cannot guarantee that support. The built-in Memory and SQL stores support
 both fields; older custom stores with an explicit `idempotency_key` parameter
 continue to accept keyed input requests.
+
+Gateway runs also assign IDs to input messages that omit one before storing the
+run record and invoking the graph. This keeps the message visible as one turn
+when the Web UI reconnects to an active run started by an API client. During a
+rolling upgrade, route keyed runs with ID-less input and their retries to
+upgraded workers until all Gateway workers are upgraded; older workers may
+reject those retries with 409. See the [run API contract](backend/docs/API.md#create-run).
 
 #### Option 2: Local Development
 
@@ -1629,6 +1640,10 @@ The bundled video-generation command reports failures on stderr and exits with
 status 1, including when the selected provider has no API key. Callers can check
 the exit status before presenting an output file.
 
+The bundled podcast-generation command returns a nonzero exit status and writes
+diagnostics to stderr when generation fails. Callers can check the status before
+presenting audio; an existing MP3 or generated transcript is not proof of success.
+
 When deferred skill discovery is enabled, `describe_skill` ranks installed skills by bounded, Unicode-normalized intent-term coverage across names and descriptions. Natural multi-term requests can therefore find a relevant skill without requiring one exact phrase, while exact `select:` and required-name `+prefix` lookups remain available. Ranked searches use up to 256 characters and return up to five results; exact `select:` lists are not truncated and return all requested catalog matches.
 
 A skill directory is a package boundary: once DeerFlow finds its `SKILL.md`, nested `SKILL.md` files under that package (for example evaluation fixtures) remain supporting data and are not registered as runtime skills. This applies to managed integration packs as well as public and custom skills. Namespace directories without their own `SKILL.md` can still group nested skills.
@@ -1678,6 +1693,12 @@ A skill's `allowed-tools` frontmatter is compatibility metadata carried for inte
 When you install `.skill` archives through the Gateway, DeerFlow accepts standard space-separated `allowed-tools`, optional frontmatter metadata, and the Claude-compatible `argument-hint` field instead of rejecting otherwise valid external skills. YAML lists remain supported for `allowed-tools` and preserve exact runtime names. Exact portable spellings such as `WebFetch`, `WebSearch`, `Glob`, `Grep`, and `Read` map to DeerFlow's `web_fetch`, `web_search`, `glob`, `grep`, and `read_file` tools; lowercase or otherwise unknown scalar names remain unchanged so custom and MCP tools keep their exact runtime spelling. Parenthesized entries such as `Bash(tvly *)` are tokenized as one literal entry, including spaces, quoted text, and escaped parentheses; such scoped declarations remain literal compatibility metadata and do not authorize or restrict commands — DeerFlow's Agent configuration and authorization, not tool arguments, decide what may run.
 
 Disabling a skill also removes it from the sandbox filesystem view, so shell commands and structured file tools follow the same enabled state. Local, Docker/AIO, hostPath provisioner, and newly created E2B sandboxes source `/mnt/skills` from enabled-only projections that update when public, custom, legacy, or managed integration skills are toggled, edited, created, deleted, or installed. Structured `read_file` calls (including line ranges and read-before-write checks) use the sandbox provider's mount mapping, so the user identity captured when the sandbox was acquired remains authoritative. Managed integration packages remain shared, while their projected filesystem visibility follows each user's enabled state. Multi-worker Gateways re-read on-disk enable state while rebuilding user projections, so a toggle handled by one worker is honored by another worker's next sandbox acquire. Existing E2B sandboxes retain their creation-time snapshot until they are recreated. PVC-backed provisioner skills keep their configured PVC snapshot/layout for now; dynamic PVC materialization is tracked separately.
+
+Chat-specific skill views used by an Agent's skill allowlist verify copied file
+contents before sandbox reuse. Edited instructions, missing or injected files,
+and changed links are repaired from the canonical skills on the next acquire;
+inode and timestamp drift on shared storage does not force a rebuild. Integrity
+checks read the projected files, so larger packages increase acquire-time read I/O.
 
 Skill projection manifest saves preserve the original error or interruption even if temporary-file cleanup or its logging also fails. Manifest files retain their private filesystem permissions.
 
@@ -3378,6 +3399,8 @@ from the project page's Documents section:
   Oversized uploads return `413`; deduplicated uploads return `200`. Staging
   cleanup failures are logged without replacing these outcomes or a missing,
   foreign, or archived project's `404` response.
+  Cancelling a shelf upload discards its partial file after any active disk
+  operation finishes; waiting for further upload data remains cancellable.
 - **List** entries with name, size, modified time, and provenance (uploaded vs.
   saved from a conversation), and preview or download any entry.
 - **Save to project** from a thread file: the read-only conversation-files
