@@ -137,7 +137,8 @@ Read the nearest scoped `AGENTS.md` for subsystem ownership.
 
 ## Architecture
 
-Read-only knowledge: [contract](docs/KNOWLEDGE.md).
+Read-only knowledge: [contract](docs/KNOWLEDGE.md) covers independent retrieval
+tools, scope intersection and extension-owned providers.
 
 ### Harness / App Split
 
@@ -189,6 +190,11 @@ while `strip_internal_context_keys` scrubs both destinations. Treat
 `disable_clarification` like `non_interactive`. Before run/state writes,
 `_normalize_input_messages` rejects canonical external system/developer roles;
 only `AUTH_SOURCE_INTERNAL` run input may retain them.
+
+`start_run` assigns IDs to ID-less messages before recording input or invoking
+the graph; keyed retries keep those IDs stable, while the pre-stamp input
+remains the idempotency identity. The record and checkpoint share IDs so
+frontend reconnect can deduplicate the user's message.
 
 ## Development Workflow
 

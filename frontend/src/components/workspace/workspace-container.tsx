@@ -12,12 +12,12 @@ import {
   BreadcrumbPage,
   BreadcrumbSeparator,
 } from "@/components/ui/breadcrumb";
-import { SidebarTrigger } from "@/components/ui/sidebar";
 import { useI18n } from "@/core/i18n/hooks";
 import { cn } from "@/lib/utils";
 
 import { GithubIcon } from "./github-icon";
 import { Tooltip } from "./tooltip";
+import { WorkspaceSidebarTrigger } from "./workspace-sidebar-trigger";
 // Workspace sections that have an index route (/workspace/<section>/page.tsx)
 // and can therefore be linked to from the breadcrumb.
 const LINKABLE_SECTIONS: Record<string, true> = {
@@ -60,7 +60,7 @@ export function WorkspaceHeader({
       {...props}
     >
       <div className="flex min-w-0 items-center gap-2 px-2 sm:px-4">
-        <SidebarTrigger className="md:hidden" />
+        <WorkspaceSidebarTrigger className="md:hidden" />
         <Breadcrumb>
           <BreadcrumbList>
             {segments?.[0] && (

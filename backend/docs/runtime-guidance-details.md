@@ -2,6 +2,28 @@
 
 The runtime AGENTS.md indexes these detailed contracts. Preserve their behavior when changing the corresponding code.
 
+**Goal no-progress counting** (`runtime/goal_progress.py`): pair actual tool calls
+with their results in the current human/hidden-continuation interval. Normalize
+success/error metadata without mutating checkpoint messages. Retain only exact
+successful-operation hashes in the active Goal's `last_evaluation`; no global
+cache, arbitrary operation-count cutoff, file inspection or extra model call.
+Repeated results, UI-only sandbox descriptions, failed commands, receipt IDs and
+timestamps alone do not reset the counter. Validate receipts against the original
+arguments before excluding narration from operation identity. Shared shell-result
+classification recognizes nonzero exit markers, correcting older generic success
+metadata while preserving explicit producer stamps. A successful new operation is
+activity, not proof of usefulness or completion. Pure-text turns retain the
+existing reply comparison.
+
+Already evaluated hashes survive checkpoint restart and compaction. Results
+removed before observation cannot be reconstructed; do not claim complete tool
+history capture. Goal replacement/clearing drops the active set, while historical
+checkpoints retain their existing lifecycle. Storage grows with observed work;
+measure it rather than reintroducing a silent fallback to text after a fixed
+number of operations. Preserve old counters on first migration, merge against
+freshly read Goal state when persisting, and leave all existing stop, durability,
+cancellation and racing-user checks unchanged.
+
 **JSONL tail recovery** (`runtime/events/store/jsonl.py`, #6520): every append
 path goes through `_append_records`. A nonempty file whose last byte is not LF
 gets a separator written first, so a crash that left either valid JSON without
@@ -107,6 +129,30 @@ then guards the write with the latest checkpoint ID. If another run has already
 been admitted, the old completion leaves the goal alone. This allows duration
 bookkeeping while preserving newer goal or conversation changes. Delivery
 failure does not itself queue a hidden continuation.
+
+**Workspace change detection** (`workspace_changes/diff.py`, `scanner.py`):
+`get_changed_paths()` owns change filtering for summaries, text capture, and
+output delivery detection. Absence from a truncated snapshot is unknown:
+require a complete before snapshot to infer creation and a complete after
+snapshot to infer deletion. Keep comparing files observed in both snapshots and
+preserve the summary's truncation flag. The scanner walks directories and files
+in sorted order so the truncation boundary is reproducible across the before
+and after scans. Its budget is shared and consumed root by root (workspace
+before outputs), so a workspace at the limit starves outputs.
+`get_changed_output_paths()` inherits this uncertainty: newly observed outputs
+are suppressed when the before snapshot was truncated, while modifications
+observed in both snapshots remain eligible. The worker passes this list through
+`_produced_output_paths()` to its delivery check; an empty list leaves
+`produced_paths` and `verification` absent from the delivery receipt, and
+`_delivery_error()` returns no error. When that empty list accompanies a truncated
+pre-run snapshot, the receipt includes
+`verification_skipped: "truncated_pre_run_snapshot"` on both normal completion and
+failure/cancellation cleanup. This marker explains the skipped check without
+asserting that no outputs were produced. Observed modifications still receive the
+ordinary verification verdict, without a skip marker. A missing snapshot or
+capture error alone does not imply this skip reason. These cases are pinned
+through real snapshot capture and `run_agent()` in
+`tests/test_run_worker_delivery.py`.
 
 **Extension changed-run discovery** (`runtime/runs/store/` and
 `extensions/run_evidence.py`) orders public run-record changes by the

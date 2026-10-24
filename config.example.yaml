@@ -20,7 +20,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 61
+config_version: 62
 
 # Optional operator-owned literal prompt extensions (see CONFIGURATION.md):
 # lead_prompt_overlay:
@@ -157,6 +157,8 @@ models:
   # Example: Volcengine (Doubao) model
   # - name: doubao-seed-1.8
   #   display_name: Doubao-Seed-1.8
+  #   aliases: [doubao, seed 1.8]  # Optional names for selecting this model in chat
+  #   # Model-name aliases differ from reasoning.effort.aliases (effort values).
   #   use: deerflow.models.patched_deepseek:PatchedChatDeepSeek
   #   model: doubao-seed-1-8-251228
   #   api_base: https://ark.cn-beijing.volces.com/api/v3
@@ -886,6 +888,19 @@ tools:
   #   group: knowledge
   #   use: deerflow.community.ragflow.tools:list_knowledge_bases_tool
 
+  # Jsonify dataset rows (read-only). Jsonify pipelines run on a schedule,
+  # repair themselves when a source changes, and publish the result as a
+  # dataset. Each dataset has a serve URL (Integrations > REST API in Jsonify)
+  # that returns its latest rows as JSON. The URL is the credential: keep it in
+  # an env var, never in the prompt. Name each dataset; the model picks by name.
+  # - name: jsonify_dataset_rows
+  #   group: data
+  #   use: deerflow.community.jsonify.tools:dataset_rows_tool
+  #   datasets:
+  #     llm_api_pricing: $JSONIFY_LLM_PRICING_URL  # https://factory.jsonify.com/api/serve/<id>
+  #   max_rows: 100   # Cap per call; the model's limit is clamped to this
+  #   timeout: 30
+
   # LightRAG knowledge retrieval (read-only). Alternative provider for the same
   # knowledge_search tool; uncomment this entry instead of the RAGFlow one —
   # duplicate names keep the first entry, so configure exactly one. Requires
@@ -1011,6 +1026,7 @@ tools:
   #   search_type: auto  # Options: auto, neural, keyword
   #   contents_max_characters: 1000
   #   # api_key: $EXA_API_KEY
+  #   # base_url: https://api.exa.ai  # Exa-compatible endpoint; overrides EXA_BASE_URL
 
   # Web search tool (uses Firecrawl. Cloud requires FIRECRAWL_API_KEY; self-host may need no key.)
   # - name: web_search
@@ -1216,6 +1232,7 @@ tools:
   #   group: web
   #   use: deerflow.community.exa.tools:web_fetch_tool
   #   # api_key: $EXA_API_KEY
+  #   # base_url: https://api.exa.ai  # Exa-compatible endpoint; overrides EXA_BASE_URL
 
   # Web fetch tool (uses Jina AI reader)
   - name: web_fetch
@@ -1630,6 +1647,12 @@ projects:
   # Caller-side wait limit in seconds for one summary model call (range:
   # 5-300); abandons the wait, not the remote work.
   summary_timeout_seconds: 60
+  # Shelf search budgets (search_project_documents), in decoded CHARACTERS
+  # not bytes (CJK differs 3x). Per-document cap and whole-shelf total; the
+  # total must be >= the per-document cap, otherwise both reset to defaults.
+  # Read per call — edits apply without a restart.
+  search_max_chars_per_document: 1000000
+  search_max_total_chars: 8000000
 
 # ============================================================================
 # Provider Safety Termination Configuration
@@ -1711,11 +1734,14 @@ sandbox:
   # This is not a total container or deployment-wide capacity limit.
   prewarm_max_concurrent: 1
   # Optional: Mount additional host directories into the sandbox.
-  # Each mount maps a host path to a virtual container path accessible by the agent.
+  # host_path: existing absolute source path; container_path: agent-facing /mnt/... path.
+  # Native Windows source example: 'D:/data'; WSL source example: /mnt/d/data.
+  # Keep container_path POSIX-style on every OS (for example, /mnt/my-project).
   # Note: with LocalSandboxProvider under `make up` (docker-compose), host_path is
   # checked from inside the deer-flow-gateway container — you must also bind-mount
   # the same directory into services.gateway.volumes in docker/docker-compose.yaml
-  # for this mount to take effect (see issue #3244).
+  # for this mount to take effect. AIO Docker mounts instead use Docker-host paths.
+  # Platform examples: backend/docs/CONFIGURATION.md#skills-and-sandbox-paths
   # mounts:
   #   - host_path: /home/user/my-project    # Absolute path; see note above for Docker mode
   #     container_path: /mnt/my-project     # Virtual path inside the sandbox
@@ -2130,13 +2156,17 @@ verification:
 # Configure skills directory for specialized agent workflows
 
 skills:
-  # Path to skills directory on the host (relative to project root or absolute)
-  # Default: skills under the project root
+  # Skills source root read by the Gateway (contains public/ and legacy custom/).
+  # Absolute, or relative to DEER_FLOW_PROJECT_ROOT (process cwd when unset).
+  # Default: skills under that root, with a source-checkout fallback to repo skills/.
   # Override with DEER_FLOW_SKILLS_PATH when this field is omitted.
+  # In Docker, use a Gateway-visible path, such as the bundled /app/skills mount.
+  # Native Windows: 'D:/deer-flow/skills'; WSL: /mnt/d/deer-flow/skills.
+  # See backend/docs/CONFIGURATION.md#skills-and-sandbox-paths for mappings.
   # Uncomment to customize:
   # path: /absolute/path/to/custom/skills
 
-  # Path where skills are mounted in the sandbox container
+  # Agent-facing POSIX path; keep /mnt/skills even when the Gateway runs on Windows.
   # This is used by the agent to access skills in both local and Docker sandbox
   # AIO/provisioner and E2B modes require a canonical absolute non-root path
   # that does not overlap reserved platform mounts. Providers snapshot this
@@ -3065,8 +3095,9 @@ run_ownership:
 #   # heartbeat; only the holder connects (GitHub webhooks stay on every
 #   # instance). A crashed holder is replaced within lease_seconds +
 #   # grace_seconds plus one renewal interval, a cleanly stopped one on the
-#   # next heartbeat. Runtime credential changes from the web UI reach the
-#   # holder only when it next starts the channel. Restart-required.
+#   # next heartbeat. Credentials saved or a disconnect made from the web UI
+#   # on any instance reach the holder within one renewal interval. The
+#   # leader_lease block itself is restart-required.
 #   leader_lease:
 #     # auto (default): on whenever the Gateway sees a multi-process signal
 #     # (GATEWAY_WORKERS / WEB_CONCURRENCY > 1, deployment.multi_instance: true

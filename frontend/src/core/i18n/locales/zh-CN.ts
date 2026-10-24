@@ -45,6 +45,10 @@ export const zhCN: Translations = {
         description:
           "保存版本化 Agent 工作流，在同一 Gateway 进程内恢复，并确认确切的保留输出版本。不支持重启回放或硬金额预算。",
       },
+      reportSections: {
+        title: "分段长文写作",
+        description: "逐段撰写长报告，并将各章节汇总为可下载的 Markdown 文档。",
+      },
       agentTeams: {
         title: "Agent 团队",
         description: "让完整 Custom Agent 通过 @成员、共享记录与任务交接协作。",
@@ -75,6 +79,15 @@ export const zhCN: Translations = {
         title: "本地检索示例",
         description:
           "使用固定示例文档演示只读检索与结构化工具结果，不连接外部知识库。",
+      },
+      lightrag: {
+        title: "LightRAG",
+        description: "从 LightRAG 检索文档与实体关系，并使用统一的来源引用。",
+      },
+      knowledgeManagement: {
+        title: "知识入库与处理",
+        description:
+          "通过 WeKnora 导入文件、网址和文本，并在管理员明确授权后管理处理任务。需要安装和配置，不包含管理页面。",
       },
       weknora: {
         title: "WeKnora 知识检索",
@@ -227,6 +240,15 @@ export const zhCN: Translations = {
     showArtifacts: "查看此对话的文件",
     browser: "浏览器",
     showBrowser: "打开浏览器面板",
+  },
+
+  browserStream: {
+    connecting: "正在连接…",
+    disconnected: "连接已断开",
+    handshakeTimeout:
+      "实时浏览器连接超时。请检查网络或代理设置，然后关闭并重新开启 Live 以重试。",
+    connectionFailed:
+      "实时浏览器连接失败或已关闭。请检查网络连接和访问权限，然后关闭并重新开启 Live 以重试。",
   },
 
   skillUsage: {
