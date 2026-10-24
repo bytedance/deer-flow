@@ -101,6 +101,12 @@ Duplicate names cause an error and leave any existing output file untouched.
 The error lists the repeated names so you can alias them directly. The CLI prints
 a short `Error: ...` message to stderr and exits nonzero for this rejection.
 
+SQL execution errors, missing summary tables, and unsupported export formats also
+exit nonzero and report diagnostics on stderr without overwriting existing output
+files. Correct the SQL, table name, or output extension before retrying. Successful
+operations, including valid queries returning zero rows, exit zero and keep their
+normal stdout output.
+
 ### Parameters
 
 | Parameter | Required | Description |
