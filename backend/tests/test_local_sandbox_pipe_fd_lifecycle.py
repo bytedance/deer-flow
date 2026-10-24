@@ -76,8 +76,36 @@ def test_spawn_interrupt_closes_each_pipe_fd_exactly_once(monkeypatch: pytest.Mo
     assert len(closed) == 4, f"expected exactly one close per pipe end, got {closed}"
 
 
+@pytest.mark.parametrize("exception_type", [RuntimeError, KeyboardInterrupt])
+def test_post_spawn_failure_closes_each_pipe_fd_exactly_once(monkeypatch: pytest.MonkeyPatch, exception_type: type[BaseException]) -> None:
+    """An error after Popen returns must not give two handlers ownership of the write ends."""
+    closed = _record_os_close(monkeypatch)
+    pipe_fds: list[int] = []
+    real_pipe = os.pipe
+    error = exception_type("post-spawn failure")
+
+    def recording_pipe() -> tuple[int, int]:
+        fds = real_pipe()
+        pipe_fds.extend(fds)
+        return fds
+
+    class StartedProcess:
+        @property
+        def pid(self) -> int:
+            raise error
+
+    monkeypatch.setattr(os, "pipe", recording_pipe)
+    with patch.object(subprocess, "Popen", return_value=StartedProcess()):
+        with pytest.raises(exception_type) as exc_info:
+            LocalSandbox._run_posix_command(["whatever"], 1.0, None)
+
+    assert exc_info.value is error
+    assert len(pipe_fds) == 4
+    assert sorted(closed) == sorted(pipe_fds), f"expected each pipe fd to close once, got {closed} for {pipe_fds}"
+
+
 def test_successful_spawn_closes_write_fds_exactly_once(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The guard must not skip the parent's write-end close after a real spawn."""
+    """Successful startup must still close the parent's write ends."""
     if sys.platform == "win32":
         runner = LocalSandbox._run_windows_command
         command = ["cmd", "/c", "echo hi"]
