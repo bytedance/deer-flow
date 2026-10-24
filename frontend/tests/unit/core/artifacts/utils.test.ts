@@ -57,6 +57,105 @@ describe("artifact URL helpers", () => {
     restoreEnv(saved);
   });
 
+  describe("Markdown artifact image destinations", () => {
+    const context = {
+      filepath: "/mnt/user-data/outputs/reports/report.md",
+      threadId: "thread/1",
+    };
+
+    test.each([
+      ["chart.png", "/mnt/user-data/outputs/reports/chart.png"],
+      ["./charts/a.png", "/mnt/user-data/outputs/reports/charts/a.png"],
+      ["../chart.png", "/mnt/user-data/outputs/chart.png"],
+      ["%2e%2e/chart.png", "/mnt/user-data/outputs/chart.png"],
+      ["/mnt/user-data/uploads/chart.png", "/mnt/user-data/uploads/chart.png"],
+      ["chart%20one.png", "/mnt/user-data/outputs/reports/chart%20one.png"],
+      ["chart%2520one.png", "/mnt/user-data/outputs/reports/chart%2520one.png"],
+      [
+        "chart%23%3F.png?v=2#crop",
+        "/mnt/user-data/outputs/reports/chart%23%3F.png?v=2#crop",
+      ],
+      ["chart%.png", "/mnt/user-data/outputs/reports/chart%25.png"],
+      ["%E5%9B%BE.png", "/mnt/user-data/outputs/reports/%E5%9B%BE.png"],
+    ])("resolves %s against the report directory", async (src, path) => {
+      const { resolveArtifactImageURL } = await loadFreshArtifactUtils();
+      expect(resolveArtifactImageURL(src, context)).toBe(
+        `/api/threads/thread%2F1/artifacts${path}`,
+      );
+    });
+
+    test.each([
+      "https://example.com/chart.png",
+      "//example.com/chart.png",
+      "data:image/png;base64,abc",
+      "blob:https://example.com/123",
+      "javascript:alert(1)",
+      "/api/other.png",
+      "",
+      "#chart",
+      "?v=2",
+      "../../../../api/secret.png",
+      "%2F%2Fexample.com/chart.png",
+      "..%5Cchart.png",
+      "\ud800.png",
+    ])("does not remap %s into the artifact route", async (src) => {
+      const { resolveArtifactImageURL } = await loadFreshArtifactUtils();
+      expect(resolveArtifactImageURL(src, context)).toBe(src);
+    });
+
+    test("preserves raw percent sequences in the report directory", async () => {
+      const { resolveArtifactImageURL } = await loadFreshArtifactUtils();
+      expect(
+        resolveArtifactImageURL("chart.png", {
+          ...context,
+          filepath: "/mnt/user-data/outputs/report%20folder/report.md",
+        }),
+      ).toBe(
+        "/api/threads/thread%2F1/artifacts/mnt/user-data/outputs/report%2520folder/chart.png",
+      );
+    });
+
+    test("uses the configured backend and mock route", async () => {
+      setEnv("NEXT_PUBLIC_BACKEND_BASE_URL", "https://backend.example/root");
+      const { resolveArtifactImageURL } = await loadFreshArtifactUtils();
+      expect(
+        resolveArtifactImageURL("chart.png", { ...context, isMock: true }),
+      ).toBe(
+        "https://backend.example/root/mock/api/threads/thread%2F1/artifacts/mnt/user-data/outputs/reports/chart.png",
+      );
+    });
+
+    test("uses bundled demo paths in static mode", async () => {
+      setEnv("NEXT_PUBLIC_STATIC_WEBSITE_ONLY", "true");
+      const { resolveArtifactImageURL } = await loadFreshArtifactUtils();
+      expect(resolveArtifactImageURL("../chart.png", context)).toBe(
+        "/demo/threads/thread%2F1/user-data/outputs/chart.png",
+      );
+    });
+
+    test("bases skill previews on their embedded SKILL.md", async () => {
+      const { resolveArtifactImageURL } = await loadFreshArtifactUtils();
+      expect(
+        resolveArtifactImageURL("images/chart.png", {
+          ...context,
+          filepath: "/mnt/user-data/outputs/example.skill",
+        }),
+      ).toBe(
+        "/api/threads/thread%2F1/artifacts/mnt/user-data/outputs/example.skill/images/chart.png",
+      );
+    });
+
+    test("does not invent a virtual path for a non-artifact document", async () => {
+      const { resolveArtifactImageURL } = await loadFreshArtifactUtils();
+      expect(
+        resolveArtifactImageURL("chart.png", {
+          ...context,
+          filepath: "report.md",
+        }),
+      ).toBe("chart.png");
+    });
+  });
+
   test("maps static demo artifact paths to bundled public files", async () => {
     setEnv("NEXT_PUBLIC_STATIC_WEBSITE_ONLY", "true");
 
@@ -273,6 +372,84 @@ describe("artifact URL helpers", () => {
         "/mnt/user-data/outputs/image.png",
       ]),
     ).toBe("https://example.com/image.png");
+  });
+
+  test("resolveRelativeArtifactURL returns null when it cannot resolve", async () => {
+    const { isRelativeArtifactReference, resolveRelativeArtifactURL } =
+      await loadFreshArtifactUtils();
+    const artifacts = [
+      "/mnt/user-data/outputs/report.md",
+      "/mnt/user-data/outputs/a/dup.md",
+      "/mnt/user-data/outputs/b/dup.md",
+    ];
+
+    expect(
+      resolveRelativeArtifactURL("./report.md#s1", "thread-1", artifacts),
+    ).toBe(
+      "/api/threads/thread-1/artifacts/mnt/user-data/outputs/report.md#s1",
+    );
+    expect(resolveRelativeArtifactURL("dup.md", "thread-1", artifacts)).toBe(
+      null,
+    );
+    expect(resolveRelativeArtifactURL("none.md", "thread-1", artifacts)).toBe(
+      null,
+    );
+    expect(
+      resolveRelativeArtifactURL("../report.md", "thread-1", artifacts),
+    ).toBe(null);
+
+    expect(isRelativeArtifactReference("report.md")).toBe(true);
+    expect(isRelativeArtifactReference("./a/b.md?x=1")).toBe(true);
+    for (const href of [
+      "../report.md",
+      "/workspace/chats/x",
+      "/mnt/user-data/outputs/report.md",
+      "https://example.com/report.md",
+      "mailto:a@example.com",
+      "#section",
+      "?q=1",
+      "",
+    ]) {
+      expect(isRelativeArtifactReference(href)).toBe(false);
+    }
+  });
+
+  test("collectThreadArtifactPaths adds present_files paths missing from state", async () => {
+    const { collectThreadArtifactPaths } = await loadFreshArtifactUtils();
+    const state = ["/mnt/user-data/outputs/a.md"];
+    const messages = [
+      { type: "human", id: "h", content: "go" },
+      {
+        type: "ai",
+        id: "a1",
+        content: "",
+        tool_calls: [
+          {
+            id: "p1",
+            name: "present_files",
+            args: {
+              filepaths: [
+                "/mnt/user-data/outputs/a.md",
+                "/mnt/user-data/outputs/b.zip",
+                "outputs/relative-is-ignored.md",
+              ],
+            },
+          },
+        ],
+      },
+    ] as Parameters<typeof collectThreadArtifactPaths>[1];
+
+    // Reopened thread: the /history head carries no artifacts.
+    expect(collectThreadArtifactPaths([], messages)).toEqual([
+      "/mnt/user-data/outputs/a.md",
+      "/mnt/user-data/outputs/b.zip",
+    ]);
+    expect(collectThreadArtifactPaths(state, messages)).toEqual([
+      "/mnt/user-data/outputs/a.md",
+      "/mnt/user-data/outputs/b.zip",
+    ]);
+    // Without present_files the state array is returned as-is.
+    expect(collectThreadArtifactPaths(state, [messages[0]!])).toBe(state);
   });
 
   test("builds encoded write-file URLs without undefined query parameters", async () => {

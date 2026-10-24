@@ -64,6 +64,9 @@ class FileAgentStore(AgentStore):
         return paths.user_agent_dir(effective_user, name).exists() or paths.agent_dir(name).exists()
 
     def get_soul(self, name: str, *, user_id: str | None = None) -> str | None:
+        # Every other read/write method validates the name; without this, a
+        # ".." segment reaches resolve_agent_dir and escapes the user's tree.
+        name = validate_agent_name(name)
         agent_dir = resolve_agent_dir(name, user_id=user_id)
         soul_path = agent_dir / SOUL_FILENAME
         # resolve_agent_dir requires config.yaml; SOUL.md loading does not, so
@@ -83,7 +86,11 @@ class FileAgentStore(AgentStore):
                     break
         if not soul_path.exists():
             return None
-        content = soul_path.read_text(encoding="utf-8").strip()
+        # Match the default-agent read in :func:`deerflow.config.agents_config.
+        # load_agent_soul`: ``utf-8-sig`` drops the BOM a Windows editor writes,
+        # which ``str.strip()`` would otherwise leave as the leading character of
+        # the ``<soul>`` block.
+        content = soul_path.read_text(encoding="utf-8-sig").strip()
         return content or None
 
     def list(self, *, user_id: str | None = None) -> list[AgentConfig]:

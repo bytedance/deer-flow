@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from uuid import uuid4
 
-from sqlalchemy import JSON, BigInteger, DateTime, Index, Integer, String, Text, text
+from sqlalchemy import JSON, BigInteger, DateTime, Index, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from deerflow.persistence.base import Base
@@ -21,6 +22,7 @@ class RunRow(Base):
     # "pending" | "running" | "success" | "error" | "timeout" | "interrupted"
     operation_kind: Mapped[str] = mapped_column(String(32), nullable=False, default="run", server_default=text("'run'"))
     idempotency_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    idempotency_request_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     model_name: Mapped[str | None] = mapped_column(String(128))
     multitask_strategy: Mapped[str] = mapped_column(String(20), default="reject")
@@ -60,6 +62,18 @@ class RunRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC))
     change_seq: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default=text("0"))
+    evidence_origin: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    evidence_agent_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    evidence_seal_state: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    evidence_seal_error: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    evidence_revision: Mapped[str | None] = mapped_column(String(64), nullable=True, default=lambda: uuid4().hex)
+    evidence_upper_seq: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    evidence_event_count: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    evidence_retention_revision: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default=text("0"))
+    # Server-owned origin kind of the run (``deerflow_origin``: schedule,
+    # im_channel, github, extension, mcp_notification). NULL means an
+    # interactive or legacy run; legacy rows are never backfilled.
+    origin_kind: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     __table_args__ = (
         Index("ix_runs_thread_status", "thread_id", "status"),
@@ -67,6 +81,8 @@ class RunRow(Base):
         Index("uq_runs_idempotency_key", "idempotency_key", unique=True),
         Index("ix_runs_change_seq", "change_seq", "run_id"),
         Index("ix_runs_user_change_seq", "user_id", "change_seq", "run_id"),
+        # Per-thread change clock: unread checks seek a thread's newest change.
+        Index("ix_runs_thread_change_seq", "thread_id", "change_seq"),
         # Cross-process atomicity guarantee: at most one pending/running run per
         # thread. Must live in ORM ``__table_args__`` (not just the migration)
         # because the empty-DB bootstrap path runs ``create_all`` + ``stamp head``
@@ -88,3 +104,18 @@ class RunChangeClockRow(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     value: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default=text("0"))
+
+
+class CompletedRunSnapshotRow(Base):
+    """Small durable boundaries only; never a copy of event contents."""
+
+    __tablename__ = "completed_run_snapshots"
+
+    snapshot_ref: Mapped[str] = mapped_column(String(64), primary_key=True)
+    run_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    scope_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    evidence_revision: Mapped[str] = mapped_column(String(64), nullable=False)
+    retention_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    snapshot_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+
+    __table_args__ = (UniqueConstraint("run_id", "scope_digest", "evidence_revision", "retention_revision", name="uq_completed_run_snapshot_revision"),)

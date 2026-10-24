@@ -181,6 +181,30 @@ def test_extensions_config_falls_back_to_legacy_when_project_root_lacks_file(tmp
     assert ExtensionsConfig.resolve_config_path() == legacy_extensions
 
 
+def test_extensions_config_default_path_is_the_first_search_location(tmp_path: Path, monkeypatch):
+    """A writer that finds no extensions config must create it where the
+    search looks first, so the next resolution reads the file it wrote."""
+    _clear_path_env(monkeypatch)
+    project = tmp_path / "project"
+    project.mkdir()
+    cwd = tmp_path / "runtime" / "backend"
+    cwd.mkdir(parents=True)
+    monkeypatch.setenv("DEER_FLOW_PROJECT_ROOT", str(project))
+    monkeypatch.chdir(cwd)
+
+    fake_paths_module_file = tmp_path / "fake-backend-empty" / "packages" / "harness" / "deerflow" / "config" / "extensions_config.py"
+    fake_paths_module_file.parent.mkdir(parents=True)
+    fake_paths_module_file.write_text("", encoding="utf-8")
+    monkeypatch.setattr(extensions_config_module, "__file__", str(fake_paths_module_file))
+
+    assert ExtensionsConfig.resolve_config_path() is None
+    created = ExtensionsConfig.default_config_path()
+    assert created == project / "extensions_config.json"
+
+    created.write_text('{"mcpServers": {}, "skills": {}}', encoding="utf-8")
+    assert ExtensionsConfig.resolve_config_path() == created
+
+
 def test_extensions_config_explicit_path_missing_file_raises(tmp_path: Path, monkeypatch):
     """An explicit ``config_path`` argument pointing at a file that does not
     exist (e.g. it existed earlier and was deleted) must raise

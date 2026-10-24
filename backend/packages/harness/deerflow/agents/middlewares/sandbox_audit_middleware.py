@@ -45,6 +45,19 @@ _RISKY_SUBSTITUTION = rf"(?:[$<]\(\s*|`\s*){_RISKY_SUBSTITUTION_EXECUTABLES}"
 # alternation cannot backtrack on long input.
 _CODE_STRING_INTERPRETERS = r"(?:(?:ba|da|k|z)?sh|python[\d.]*|perl|ruby|node|php)"
 _LEADING_FLAGS = r"(?:-\w+\s+){0,4}"
+# Flags before a stdin redirect or program operand also include the bare `-`
+# ("read the program from stdin") and long forms. A flag taking its value as the
+# next word (`-o pipefail`, `--rcfile f`) can hide either form; its value is
+# indistinguishable from a script argument in this heuristic (a documented gap).
+_STDIN_SCRIPT_FLAGS = r"(?:--?[-\w]*\s+){0,4}"
+
+# A command position is not always the first character: POSIX shell allows leading
+# variable assignments, and exec wrappers keep what follows in command position
+# (``FOO=1 $(curl url)``, ``env FOO=1 $(curl url)``, ``nohup $(curl url)``). The
+# assignment branch cannot match ``x=$(curl url)`` because it requires whitespace
+# between the assignment and the substitution, so value position stays allowed.
+# The repetition is bounded to keep the alternation from backtracking on long input.
+_COMMAND_POSITION_PREFIX = r"(?:(?:env|command|builtin|exec|nohup|time|sudo|doas)\s+|\w+=\S*\s+){0,8}"
 
 # Each pattern is compiled once at import time.
 _HIGH_RISK_PATTERNS: list[re.Pattern[str]] = [
@@ -56,8 +69,14 @@ _HIGH_RISK_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r">+\s*/etc/"),
     # --- pipe to sh/bash (generalised, replaces old curl|sh rule) ---
     re.compile(r"\|\s*(ba)?sh\b"),
-    # --- eval/source execute a substitution regardless of its position ---
-    re.compile(rf"\b(eval|source)\s+[\"']?{_RISKY_SUBSTITUTION}"),
+    # --- eval/source execute a substitution regardless of its position. The `.`
+    # spelling is deliberately *not* here: as a path argument (`du -sh . $(curl u)`)
+    # a dot is value position, so it is matched in command position only, below. ---
+    re.compile(rf"\b(?:eval|source)\s+[\"']?{_RISKY_SUBSTITUTION}"),
+    # `eval . $(curl u)` executes the same fetched content one step removed:
+    # eval re-parses the dot builtin, which sources the substitution's output.
+    # `_COMMAND_POSITION_PREFIX` still admits wrappers (`eval env . $(curl u)`).
+    re.compile(rf"\b(?:eval|source)\s+{_COMMAND_POSITION_PREFIX}\.\s+[\"']?{_RISKY_SUBSTITUTION}"),
     # --- an interpreter's code-string flag is an execution context too ---
     re.compile(rf"\b{_CODE_STRING_INTERPRETERS}\s+{_LEADING_FLAGS}-[cepr]\s+[\"']?{_RISKY_SUBSTITUTION}"),
     re.compile(rf"\b{_CODE_STRING_INTERPRETERS}\s+{_LEADING_FLAGS}<<<\s*[\"']?{_RISKY_SUBSTITUTION}"),
@@ -73,8 +92,9 @@ _HIGH_RISK_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"\b(LD_PRELOAD|LD_LIBRARY_PATH)\s*="),
     # --- bash built-in networking (bypasses tool allowlists) ---
     re.compile(r"/dev/tcp/"),
-    # --- fork bomb ---
-    re.compile(r"\S+\(\)\s*\{[^}]*\|\s*\S+\s*&"),  # :(){ :|:& };:
+    # --- fork bomb: fn(){ ... | fn & } (the function name must recur after the
+    # pipe; kept byte-identical to _FORK_BOMB_PATTERN in skills/skillscan/orchestrator.py) ---
+    re.compile(r"(?P<fn>[^\s(){};|&]{1,64})\(\)\s*\{[^{}]{0,2048}\|\s*[^{}\s&]{0,64}(?P=fn)\s*&"),  # :(){ :|:& };:
     re.compile(r"while\s+true.*&\s*done"),  # while true; do bash & done
 ]
 
@@ -90,19 +110,69 @@ _HIGH_RISK_PATTERNS: list[re.Pattern[str]] = [
 #
 # The previous unanchored rule could not tell them apart and refused everyday
 # output capture (issue #4611).
-#
-# A command position is not always the first character: POSIX shell allows leading
-# variable assignments, and exec wrappers keep what follows in command position
-# (``FOO=1 $(curl url)``, ``env FOO=1 $(curl url)``, ``nohup $(curl url)``). The
-# assignment branch cannot match ``x=$(curl url)`` because it requires whitespace
-# between the assignment and the substitution, so value position stays allowed.
-# The repetition is bounded to keep the alternation from backtracking on long input.
-_COMMAND_POSITION_PREFIX = r"(?:(?:env|command|builtin|exec|nohup|time|sudo|doas)\s+|\w+=\S*\s+){0,8}"
-
 _HIGH_RISK_COMMAND_POSITION_PATTERNS: list[re.Pattern[str]] = [
     re.compile(rf"^{_COMMAND_POSITION_PREFIX}[\"']?\$\(\s*{_RISKY_SUBSTITUTION_EXECUTABLES}"),
     re.compile(rf"^{_COMMAND_POSITION_PREFIX}[\"']?`\s*{_RISKY_SUBSTITUTION_EXECUTABLES}"),
+    # `.` is the POSIX spelling of `source` and executes the substitution it is
+    # handed. Anchoring keeps it in command position: a dot that is an ordinary
+    # path argument (`du -sh . $(curl u)`) stays value position.
+    re.compile(rf"^{_COMMAND_POSITION_PREFIX}\.\s+[\"']?{_RISKY_SUBSTITUTION}"),
 ]
+
+# `cmd < <(curl u)` is only an execution when *nothing* else supplies the
+# program: a script operand (`bash < <(curl u) consumer.sh`) or a noexec flag
+# (`bash -n < <(curl u)`) keeps the fetched bytes as data, and `.`/`source`
+# require a filename, so they never read a program from stdin at all. That is
+# more than one anchored pattern can express, so it is decided from the token
+# list instead.
+_STDIN_SUBSTITUTION_RE = re.compile(rf"<\s*<\s*\(\s*{_RISKY_SUBSTITUTION_EXECUTABLES}[^)]*\)")
+_STDIN_TRAILING_OPERATOR_RE = re.compile(r"^\s*(?:$|[|;&<>)(])")
+_SHELL_NOEXEC_RE = re.compile(r"(?:^|\s)(?:-n|--noexec)(?=\s|$)")
+_SHELL_INTERPRETER_RE = re.compile(r"^(?:ba|da|k|z)?sh$")
+_STDIN_INTERPRETER_HEAD_RE = re.compile(rf"^{_COMMAND_POSITION_PREFIX}({_CODE_STRING_INTERPRETERS})\s+({_STDIN_SCRIPT_FLAGS})(?=<\s*<\s*\()")
+
+# An interpreter handed a process substitution as its *operand* (`bash <(curl u)`)
+# runs the fetched bytes as the program; the substitution is a filename, not a
+# redirect. A script operand in front (`bash script.sh <(curl u)`) keeps it an
+# ordinary argument, and a noexec shell (`bash -n <(curl u)`) only parses it.
+_PROCESS_SUBSTITUTION_RE = re.compile(rf"<\s*\(\s*{_RISKY_SUBSTITUTION_EXECUTABLES}[^)]*\)")
+_PROCESS_SUBSTITUTION_PROGRAM_RE = re.compile(rf"^{_COMMAND_POSITION_PREFIX}({_CODE_STRING_INTERPRETERS})\s+({_STDIN_SCRIPT_FLAGS})(?=<\s*\()")
+
+
+def _stdin_program_substitution(command: str) -> bool:
+    """Return True when *command* feeds a fetched program to an interpreter on stdin.
+
+    The interpreter must be in command position, the process substitution must be
+    its stdin redirect, there must be no script operand after the redirect, and a
+    shell must not be in noexec mode.
+    """
+    head = _STDIN_INTERPRETER_HEAD_RE.match(command)
+    if head is None:
+        return False
+    interpreter, flags = head.group(1), head.group(2)
+    if _SHELL_INTERPRETER_RE.match(interpreter) and _SHELL_NOEXEC_RE.search(flags):
+        return False
+    rest = command[head.end() :]
+    substitution = _STDIN_SUBSTITUTION_RE.match(rest)
+    if substitution is None:
+        return False
+    return bool(_STDIN_TRAILING_OPERATOR_RE.match(rest[substitution.end() :]))
+
+
+def _process_substitution_program(command: str) -> bool:
+    """Return True when *command* hands a fetched process substitution to an interpreter as its program.
+
+    The interpreter must be in command position and the substitution its first
+    operand: a script operand in front keeps it an argument, and a shell in
+    noexec mode only parses it.
+    """
+    head = _PROCESS_SUBSTITUTION_PROGRAM_RE.match(command)
+    if head is None:
+        return False
+    if _SHELL_INTERPRETER_RE.match(head.group(1)) and _SHELL_NOEXEC_RE.search(head.group(2)):
+        return False
+    return bool(_PROCESS_SUBSTITUTION_RE.match(command[head.end() :]))
+
 
 _MEDIUM_RISK_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"chmod\s+777"),
@@ -113,6 +183,14 @@ _MEDIUM_RISK_PATTERNS: list[re.Pattern[str]] = [
     # PATH modification: long attack chain, warn rather than block
     re.compile(r"\bPATH\s*="),
 ]
+
+# Shell exit markers at the end of the output (mirrors
+# ``sandbox.tools._BASH_EXIT_MARKER_TAIL_RE``, plus a bare ``Exit Code: N``):
+# local ``Exit Code: N`` and remote ``Command exited with code N``. Remote
+# providers emit the latter as the whole output; it is matched after other
+# output too, so the warning never lands after either form.
+_EXIT_MARKER_TAIL_RE = re.compile(r"(?:(?:^|\n)Exit Code: -?\d+|\n?Command exited with code -?\d+)\s*$")
+_SILENT_EXIT_MARKER_RE = re.compile(r"Command exited with code -?\d+")
 
 
 # A heredoc header and its delimiter: ``<<EOF``, ``<< EOF``, ``<<-EOF``,
@@ -309,6 +387,12 @@ def _classify_single_command(command: str) -> str:
     if _matches_high_risk(normalized):
         return "block"
 
+    if _stdin_program_substitution(normalized):
+        return "block"
+
+    if _process_substitution_program(normalized):
+        return "block"
+
     # Also try shlex-parsed tokens for high-risk detection
     try:
         tokens = shlex.split(command)
@@ -427,13 +511,18 @@ class SandboxAuditMiddleware(AgentMiddleware[ThreadState]):
         if isinstance(result.content, list):
             new_content = list(result.content) + [{"type": "text", "text": warning}]
         else:
-            new_content = str(result.content) + warning
-        return ToolMessage(
-            content=new_content,
-            tool_call_id=result.tool_call_id,
-            name=result.name,
-            status=result.status,
-        )
+            content = str(result.content)
+            if _SILENT_EXIT_MARKER_RE.fullmatch(content.strip()):
+                # The whole output IS the exit marker; evidence consumers
+                # fullmatch it, so any added text would erase the failure.
+                return result
+            # Keep a trailing exit marker last: evidence consumers anchor on
+            # it to recover the real shell status (see sandbox/tools.py).
+            marker = _EXIT_MARKER_TAIL_RE.search(content)
+            cut = marker.start() if marker else len(content)
+            new_content = content[:cut] + warning + content[cut:]
+        # model_copy keeps additional_kwargs (deerflow_tool_meta), artifact and id.
+        return result.model_copy(update={"content": new_content})
 
     # ------------------------------------------------------------------
     # Input sanitisation

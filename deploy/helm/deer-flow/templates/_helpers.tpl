@@ -70,14 +70,81 @@ imagePullSecrets:
 {{- else -}}{{- printf "%s-provider" (include "deer-flow.fullname" .) -}}{{- end -}}
 {{- end -}}
 
-{{/* Name of the Secret holding generated app secrets (auth token, better-auth). */}}
+{{/* Name of the Secret holding the app secrets (BETTER_AUTH_SECRET,
+     DEER_FLOW_INTERNAL_AUTH_TOKEN, AUTH_JWT_SECRET, PROVISIONER_API_KEY,
+     DEER_FLOW_CREDENTIALS_KEY).
+     `existingAppSecret` points every consumer (gateway, frontend,
+     provisioner) at a user-managed Secret instead and skips generating one;
+     it must carry PROVISIONER_API_KEY while the provisioner is enabled and
+     AUTH_JWT_SECRET for more than one gateway instance. */}}
 {{- define "deer-flow.appSecret" -}}
-{{- printf "%s-app" (include "deer-flow.fullname" .) -}}
+{{- if .Values.existingAppSecret -}}{{- .Values.existingAppSecret -}}
+{{- else -}}{{- printf "%s-app" (include "deer-flow.fullname" .) -}}{{- end -}}
+{{- end -}}
+
+{{/* "true" when more than one gateway instance shares the database. An explicit
+     boolean `gateway.multiInstance` wins -- set it before scaling with
+     `kubectl scale` or an HPA, which change the replica count without a Helm
+     upgrade -- otherwise it is derived from `gateway.replicas`. */}}
+{{- define "deer-flow.gatewayMultiInstance" -}}
+{{- if kindIs "invalid" .Values.gateway.multiInstance -}}
+{{- gt (int .Values.gateway.replicas) 1 -}}
+{{- else -}}
+{{- eq (toString .Values.gateway.multiInstance | lower) "true" -}}
+{{- end -}}
+{{- end -}}
+
+{{/* PodDisruptionBudget minAvailable as Kubernetes accepts it: a positive
+     integer or a percentage string such as "50%". Takes a dict with `value`
+     (the raw values entry; unset falls back to 1) and `key` (the values path,
+     named in the error). `int` on "50%" is 0 -- a budget that protects
+     nothing -- so a YAML number renders as an integer, a digit string from
+     --set-string becomes that integer, a percentage is preserved quoted, and
+     0, "0%", more than 100% or anything else fails the render. Anything that
+     is not a plain Go number is normalized with toString before the string
+     branches: Helm 3.18.0 loads YAML numbers as json.Number, whose kind is
+     "string" but which regexMatch and friends reject at argument validation,
+     so the unoverridden default would otherwise fail every multi-replica
+     render on that release. */}}
+{{- define "deer-flow.pdbMinAvailable" -}}
+{{- $raw := .value -}}
+{{- if kindIs "invalid" $raw -}}{{- $raw = 1 -}}{{- end -}}
+{{- $hint := printf "%s must be a positive integer or a percentage such as \"50%%\" (got %v); a budget of 0 protects nothing, so set %s to false instead" .key $raw (replace ".minAvailable" ".enabled" .key) -}}
+{{- if or (kindIs "float64" $raw) (kindIs "int64" $raw) (kindIs "int" $raw) -}}
+{{- if or (lt (int $raw) 1) (ne (float64 (int $raw)) (float64 $raw)) -}}{{- fail $hint -}}{{- end -}}
+{{- int $raw -}}
+{{- else -}}
+{{- $text := toString $raw -}}
+{{- if regexMatch "^[0-9]+$" $text -}}
+{{- if lt (atoi $text) 1 -}}{{- fail $hint -}}{{- end -}}
+{{- atoi $text -}}
+{{- else if regexMatch "^[0-9]+%$" $text -}}
+{{- $percent := atoi (trimSuffix "%" $text) -}}
+{{- if or (lt $percent 1) (gt $percent 100) -}}{{- fail $hint -}}{{- end -}}
+{{- $text | quote -}}
+{{- else -}}
+{{- fail $hint -}}
+{{- end -}}
+{{- end -}}
 {{- end -}}
 
 {{/* Name of the postgres StatefulSet/Service. */}}
 {{- define "deer-flow.postgresFullname" -}}
 {{- printf "%s-postgres" (include "deer-flow.fullname" .) -}}
+{{- end -}}
+
+{{/* Name of the operator-managed postgres Secret, or empty when the chart owns
+     the credentials. This is the only place the precedence chain is encoded:
+     databaseUrlSecret, the gateway's DATABASE_URL, the StatefulSet's
+     POSTGRES_PASSWORD and postgres-secret.yaml's render gate all read it, so a
+     source added here cannot make them disagree.
+
+     `default` rather than `or`: `or` returns its last operand even when falsy,
+     so `existingSecret: false` (or `0`) would render the literal name
+     "false". Chaining `default` keeps the old if/else-if truthiness and yields
+     an empty string for any falsy value. */}}
+{{- define "deer-flow.databaseUserSecret" -}}
+{{- .Values.postgresql.external.existingSecret | default .Values.postgresql.existingSecret | default "" -}}
 {{- end -}}
 
 {{/* Name of the Secret holding DATABASE_URL (and, in bundled mode, the
@@ -87,9 +154,7 @@ imagePullSecrets:
        3. chart-managed secret `<release>-postgres`
      Only #3 is created by this chart; #1/#2 must exist already. */}}
 {{- define "deer-flow.databaseUrlSecret" -}}
-{{- if .Values.postgresql.external.existingSecret -}}{{- .Values.postgresql.external.existingSecret -}}
-{{- else if .Values.postgresql.existingSecret -}}{{- .Values.postgresql.existingSecret -}}
-{{- else -}}{{- include "deer-flow.postgresFullname" . -}}{{- end -}}
+{{- include "deer-flow.databaseUserSecret" . | default (include "deer-flow.postgresFullname" .) -}}
 {{- end -}}
 
 {{/* Name of the redis StatefulSet/Service. */}}
@@ -104,16 +169,55 @@ imagePullSecrets:
        3. chart-managed secret `<release>-redis`
      Only #3 is created by this chart; #1/#2 must exist already. */}}
 {{- define "deer-flow.redisUrlSecret" -}}
-{{- if .Values.redis.external.existingSecret -}}{{- .Values.redis.external.existingSecret -}}
-{{- else if .Values.redis.existingSecret -}}{{- .Values.redis.existingSecret -}}
-{{- else -}}{{- include "deer-flow.redisFullname" . -}}{{- end -}}
+{{- include "deer-flow.redisUserSecret" . | default (include "deer-flow.redisFullname" .) -}}
+{{- end -}}
+
+{{/* Name of the operator-managed redis Secret, or empty when the chart owns the
+     credentials. Only the chart-managed Secret is created by this chart, and
+     only there is the AUTH password known at render time — a user-managed
+     Secret may or may not carry `redis-password`.
+
+     Same truthiness rule as databaseUserSecret: `default` (not `or`) so a
+     falsy `existingSecret` yields an empty string instead of the literal name
+     "false". */}}
+{{- define "deer-flow.redisUserSecret" -}}
+{{- .Values.redis.external.existingSecret | default .Values.redis.existingSecret | default "" -}}
+{{- end -}}
+
+{{/* Args for the bundled redis container. With a user-managed Secret the
+     password is only knowable at runtime, so the container reads
+     `redis-password` from that Secret and enables AUTH only when the value is
+     nonempty. This keeps a `redis-url`-only Secret in no-auth mode instead of
+     failing to start, and keeps a stale `redis.auth.password` from winning over
+     the user-managed Secret (values.yaml documents it as ignored there). */}}
+{{- define "deer-flow.redisServerArgs" -}}
+{{- if include "deer-flow.redisUserSecret" . -}}
+if [ -n "$REDIS_PASSWORD" ]; then exec redis-server --appendonly yes --requirepass "$REDIS_PASSWORD"; fi; exec redis-server --appendonly yes
+{{- else if .Values.redis.auth.password -}}
+exec redis-server --appendonly yes --requirepass "$REDIS_PASSWORD"
+{{- else -}}
+exec redis-server --appendonly yes
+{{- end -}}
+{{- end -}}
+
+{{/* Readiness/liveness command for the bundled redis container. Mirrors
+     redisServerArgs so the probes authenticate exactly when the server has a
+     password — otherwise a password-protected server reports itself unhealthy. */}}
+{{- define "deer-flow.redisPingCommand" -}}
+{{- if include "deer-flow.redisUserSecret" . -}}
+if [ -n "$REDIS_PASSWORD" ]; then redis-cli --no-auth-warning -a "$REDIS_PASSWORD" ping; else redis-cli ping; fi
+{{- else if .Values.redis.auth.password -}}
+redis-cli --no-auth-warning -a "$REDIS_PASSWORD" ping
+{{- else -}}
+redis-cli ping
+{{- end -}}
 {{- end -}}
 
 {{/* Whether any redis stream-bridge backend is configured (bundled StatefulSet,
      external URL, or a user-managed Secret). Drives the env injection in the
      gateway deployment. */}}
 {{- define "deer-flow.redisConfigured" -}}
-{{- or .Values.redis.enabled .Values.redis.external.redisUrl .Values.redis.external.existingSecret .Values.redis.existingSecret -}}
+{{- or .Values.redis.enabled .Values.redis.external.redisUrl (include "deer-flow.redisUserSecret" .) -}}
 {{- end -}}
 
 {{/* SHA256 checksums of the ConfigMaps. Mount these as pod-template

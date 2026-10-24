@@ -2,6 +2,7 @@
 
 import copy
 from collections import OrderedDict
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
@@ -2319,3 +2320,131 @@ class TestFromConfig:
         result = mw._apply(_make_state(tool_calls=[_bash_call(f"cmd_{hard}")]), runtime)
         assert result is not None
         assert mw.consume_stop_reason("test-run") == "loop_capped"
+
+
+class TestWarningLetsAgentSaveResultsFirst:
+    """F67: a warn-level loop message must not make a subagent drop the
+    file it was asked to write. The warning asks for one last save through a
+    file-writing tool before the final answer; the hard stop is unchanged."""
+
+    @staticmethod
+    def _write_call(path="/mnt/user-data/workspace/out.md"):
+        return {"name": "write_file", "id": "call_write", "args": {"path": path, "content": "partial results"}}
+
+    @staticmethod
+    def _read_call(path):
+        return {"name": "read_file", "id": f"call_read_{path}", "args": {"path": path}}
+
+    def test_hash_warning_asks_to_save_before_final_answer(self):
+        mw = LoopDetectionMiddleware(warn_threshold=3, hard_limit=10)
+        runtime = _make_runtime()
+        for _ in range(3):
+            mw._apply(_make_state(tool_calls=[_bash_call("ls")]), runtime)
+        warning = mw._pending_warnings[_pending_key()][0]
+        assert "LOOP DETECTED" in warning
+        assert "Stop calling tools and produce your final answer now" not in warning
+        assert "write_file" in warning
+        assert warning.index("write what you have collected") < warning.index("produce your final answer")
+
+    def test_freq_warning_names_the_looping_tool_and_allows_saving(self):
+        mw = LoopDetectionMiddleware(tool_freq_warn=3, tool_freq_hard_limit=10)
+        runtime = _make_runtime()
+        for i in range(3):
+            mw._apply(_make_state(tool_calls=[self._read_call(f"/f_{i}")]), runtime)
+        warning = mw._pending_warnings[_pending_key()][0]
+        assert "Stop calling read_file" in warning
+        assert "Stop calling tools and produce your final answer now" not in warning
+        assert "write_file" in warning
+
+    def test_save_call_after_warning_is_not_stripped(self):
+        mw = LoopDetectionMiddleware(tool_freq_warn=3, tool_freq_hard_limit=10)
+        runtime = _make_runtime()
+        for i in range(3):
+            mw._apply(_make_state(tool_calls=[self._read_call(f"/f_{i}")]), runtime)
+        assert mw._pending_warnings[_pending_key()]
+        # The follow-up write is a different tool and a different call set:
+        # neither detection layer acts on it, so the write reaches the tools node.
+        assert mw._apply(_make_state(tool_calls=[self._write_call()]), runtime) is None
+
+    @pytest.mark.parametrize("layer", ["hash", "frequency"])
+    def test_warning_allows_a_bounded_read_before_write_recovery(self, layer):
+        mw = LoopDetectionMiddleware(warn_threshold=3 if layer == "hash" else 10, hard_limit=20, tool_freq_warn=3 if layer == "frequency" else 10, tool_freq_hard_limit=20)
+        runtime = _make_runtime()
+        for i in range(3):
+            mw._apply(_make_state(tool_calls=[_bash_call("ls" if layer == "hash" else f"cmd_{i}")]), runtime)
+        warning = mw._pending_warnings[_pending_key()][0]
+        assert "read-before-write" in warning
+        assert "read the target file" in warning
+        assert "retry the save once" in warning
+        assert warning.index("retry the save once") < warning.index("produce your final answer")
+
+    @pytest.mark.parametrize("layer", ["hash", "frequency"])
+    def test_looping_writer_requires_an_alternative_or_an_unsaved_result(self, layer):
+        mw = LoopDetectionMiddleware(warn_threshold=3 if layer == "hash" else 10, hard_limit=20, tool_freq_warn=3 if layer == "frequency" else 10, tool_freq_hard_limit=20)
+        runtime = _make_runtime()
+        for i in range(3):
+            mw._apply(_make_state(tool_calls=[self._write_call("/out.md" if layer == "hash" else f"/out_{i}.md")]), runtime)
+        warning = mw._pending_warnings[_pending_key()][0]
+        assert "unless it is the looping tool" in warning
+        assert "different available file-writing tool" in warning
+        assert "Do not use a tool that this warning tells you to stop" in warning
+        assert "include the collected results in your final answer" in warning
+        assert "file was not saved" in warning
+
+    @pytest.mark.asyncio
+    async def test_warned_agent_can_recover_an_existing_file_save_through_the_real_gate(self, tmp_path):
+        from deerflow.agents.middlewares.read_before_write_middleware import ReadBeforeWriteMiddleware
+
+        output = tmp_path / "out.md"
+        output.write_text("previous attempt", encoding="utf-8")
+        executed = []
+
+        @as_tool
+        def bash(command: str) -> str:
+            """Return a deterministic research result without running a shell."""
+            return "partial results"
+
+        @as_tool
+        def read_file(path: str) -> str:
+            """Read the output from the previous attempt."""
+            content = Path(path).read_text(encoding="utf-8")
+            executed.append(("read", content))
+            return content
+
+        @as_tool
+        def write_file(path: str, content: str) -> str:
+            """Save the collected results."""
+            Path(path).write_text(content, encoding="utf-8")
+            executed.append(("write", content))
+            return "saved"
+
+        loop = LoopDetectionMiddleware(warn_threshold=3, hard_limit=10, tool_freq_warn=10, tool_freq_hard_limit=20)
+        gate = ReadBeforeWriteMiddleware(content_reader=lambda _runtime, path: Path(path).read_text(encoding="utf-8"))
+        calls = [dict(_bash_call("ls"), id=f"research_{i}") for i in range(3)]
+        calls.extend([dict(self._write_call(str(output)), id="blocked_save"), self._read_call(str(output)), dict(self._write_call(str(output)), id="final_save")])
+        model = _CapturingFakeMessagesListChatModel(responses=[*[AIMessage(content="", tool_calls=[call]) for call in calls], AIMessage(content="Saved partial results.")])
+        graph = create_agent(model=model, tools=[bash, read_file, write_file], middleware=[gate, loop])
+        result = await graph.ainvoke({"messages": [("user", f"Save your research to {output}.")]}, context={"thread_id": "save-thread", "run_id": "save-run"}, config={"recursion_limit": 30})
+
+        warnings = [message for message in model.seen_messages[3] if isinstance(message, HumanMessage) and message.name == "loop_warning"]
+        assert len(warnings) == 1 and "retry the save once" in warnings[0].content
+        blocked = next(message for message in result["messages"] if isinstance(message, ToolMessage) and message.tool_call_id == "blocked_save")
+        assert blocked.status == "error" and "deerflow_write_block" in blocked.additional_kwargs
+        read = next(message for message in result["messages"] if isinstance(message, ToolMessage) and message.name == "read_file")
+        assert read.additional_kwargs["deerflow_read_mark"]["path"] == str(output)
+        assert executed == [("read", "previous attempt"), ("write", "partial results")]
+        assert output.read_text(encoding="utf-8") == "partial results"
+        assert result["messages"][-1].content == "Saved partial results."
+        assert loop.consume_stop_reason("save-run") is None
+
+    @pytest.mark.parametrize(
+        "name,expected",
+        [
+            ("_HARD_STOP_MSG", "[FORCED STOP] Repeated tool calls exceeded the safety limit. Producing final answer with results collected so far."),
+            ("_TOOL_FREQ_HARD_STOP_MSG", "[FORCED STOP] Tool {tool_name} called {count} times — exceeded the per-tool safety limit. Producing final answer with results collected so far."),
+        ],
+    )
+    def test_hard_stop_message_unchanged(self, name, expected):
+        message = getattr(loop_detection_module, name)
+        assert message == expected
+        assert loop_detection_module._WRAP_UP_INSTRUCTIONS not in message

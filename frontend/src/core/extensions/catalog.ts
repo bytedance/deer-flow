@@ -30,6 +30,33 @@ export const extensionCatalog = [
     package: "deerflow-extension-jev-screening",
     namespace: null,
   },
+  {
+    key: "workflows",
+    package: "deerflow-extension-workflows",
+    namespace: "community.workflows",
+  },
+  {
+    key: "reportSections",
+    package: "deerflow-extension-report-sections",
+    namespace: "community.report-sections",
+  },
+  {
+    key: "retrieval",
+    package: "deerflow-extension-retrieval",
+    namespace: "example.retrieval",
+  },
+  {
+    key: "knowledge",
+    package: "deerflow-extension-knowledge",
+    namespace: null,
+  },
+  {
+    key: "knowledgeManagement",
+    package: "deerflow-extension-knowledge-management",
+    namespace: "knowledge-management",
+  },
+  { key: "lightrag", package: "deerflow-extension-lightrag", namespace: null },
+  { key: "weknora", package: "deerflow-extension-weknora", namespace: null },
   { key: "example", package: "deerflow-extension-example", namespace: null },
 ] as const;
 

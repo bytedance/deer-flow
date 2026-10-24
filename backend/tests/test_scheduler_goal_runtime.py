@@ -167,8 +167,57 @@ async def test_scheduled_goal_is_installed_before_first_turn_and_removed_at_term
     persisted = await store.get(record.run_id)
     if outcome in {"satisfied", "unmet"}:
         assert persisted["goal_verdict"]["satisfied"] is (outcome == "satisfied")
+        assert persisted["goal_verdict"]["continuations"] == 0
     else:
         assert persisted["status"] in {"error", "interrupted"}
+
+
+@pytest.mark.asyncio
+async def test_captured_verdict_counts_goal_continuations(monkeypatch):
+    monkeypatch.setenv("LANGCHAIN_TRACING_V2", "false")
+    checkpointer = InMemorySaver()
+    store = MemoryRunStore()
+    manager = RunManager(store=store)
+    metadata = {"scheduled_task_id": "task", "scheduled_task_run_id": "occurrence", "scheduled_goal_objective": "Make a verified report"}
+    record = await manager.create("fresh", user_id="alice", metadata=metadata)
+    turns = []
+
+    async def node(state, config):
+        turns.append(state.get("goal"))
+        return {"messages": [AIMessage(content=f"Report draft {len(turns)}.")], "title": "Report"}
+
+    graph = StateGraph(get_thread_state_schema("full"))
+    graph.add_node("report", node)
+    graph.add_edge(START, "report")
+    graph.add_edge("report", END)
+    compiled = graph.compile(checkpointer=checkpointer)
+    verdicts = iter(
+        [
+            {"satisfied": False, "blocker": "goal_not_met_yet", "reason": "Needs one more section", "relied_on_assumption": False},
+            {"satisfied": True, "blocker": "none", "reason": "Verified", "relied_on_assumption": False},
+        ]
+    )
+
+    async def evaluate(*args, **kwargs):
+        return next(verdicts)
+
+    monkeypatch.setattr(worker, "evaluate_goal_completion", evaluate)
+    monkeypatch.setattr(worker, "create_goal_evaluator_model", lambda **kwargs: object())
+    bridge = SimpleNamespace(publish=AsyncMock(), publish_end=AsyncMock(), cleanup=AsyncMock())
+    await worker.run_agent(
+        bridge,
+        manager,
+        record,
+        ctx=worker.RunContext(checkpointer=checkpointer, scheduled_task_runtime={"task_id": "task", "occurrence_id": "occurrence", "user_id": "alice", "goal_objective": metadata["scheduled_goal_objective"]}),
+        agent_factory=lambda config: compiled,
+        graph_input={"messages": [HumanMessage(content="Make the report")]},
+        config={"configurable": {"thread_id": "fresh"}, "context": {"non_interactive": True}},
+    )
+
+    persisted = await store.get(record.run_id)
+    assert len(turns) == 2
+    assert persisted["goal_verdict"]["satisfied"] is True
+    assert persisted["goal_verdict"]["continuations"] == turns[-1]["continuation_count"] == 1
 
 
 def test_metadata_cannot_install_scheduled_goal_authority():

@@ -130,6 +130,16 @@ class RbacAuthorizationProvider:
                 compiled = self._compile_resource_policy(role_name, resource_key, resource_policy)
                 self._policies[(role_name, resource_key)] = compiled
 
+    @property
+    def known_roles(self) -> frozenset[str]:
+        """Role names declared in the ``roles`` configuration.
+
+        Management surfaces (e.g. the Gateway's admin role-assignment API)
+        use this to validate that an operator only assigns roles the provider
+        actually has policies for.
+        """
+        return self._known_roles
+
     def validate_role(self, role: str, *, field: str = "role") -> None:
         """Fail fast when an operator-configured role is not defined."""
         role = _require_non_empty_string(role, field=field)

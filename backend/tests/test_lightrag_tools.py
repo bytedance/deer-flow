@@ -2,8 +2,10 @@ import logging
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
+from pydantic import ValidationError
 
 import deerflow.community.lightrag.tools as lightrag_tools
 from deerflow.community.lightrag.client import LightRAGAPIError, LightRAGConnectionError
@@ -418,3 +420,62 @@ def test_lightrag_package_has_explicit_init_file() -> None:
     package_dir = Path(lightrag_tools.__file__).resolve().parent
 
     assert (package_dir / "__init__.py").is_file()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["selected", "disabled"])
+async def test_runtime_scope_never_falls_back_to_unconstrained_lightrag(monkeypatch, mode):
+    search = AsyncMock()
+    monkeypatch.setattr(lightrag_tools, "_search", search)
+    scope = {"version": 1, "mode": mode}
+    if mode == "selected":
+        scope["dataset_ids"] = ["private"]
+    runtime = SimpleNamespace(context={"__knowledge_scope_execution": scope})
+    content, artifact = await lightrag_tools._knowledge_search_entrypoint("q", runtime=runtime)
+    assert content.startswith("Error:")
+    assert artifact is None
+    search.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scope", [None, {"version": 1, "mode": "all"}])
+async def test_runtime_unfiltered_scope_preserves_lightrag_search(monkeypatch, scope):
+    search = AsyncMock(return_value=("evidence", {"knowledge_sources": []}))
+    monkeypatch.setattr(lightrag_tools, "_search", search)
+    runtime = SimpleNamespace(context={"__knowledge_scope_execution": scope})
+    content, artifact = await lightrag_tools._knowledge_search_entrypoint("q", runtime=runtime)
+    assert content == "evidence"
+    assert artifact is not None
+    search.assert_awaited_once_with("q", with_sources=True)
+
+
+LIGHTRAG_BOOLEAN_FIELDS = (
+    ("timeout", "a number"),
+    ("top_k", "an integer"),
+    ("chunk_top_k", "an integer or null"),
+    ("max_chars_per_chunk", "an integer"),
+    ("max_total_chars", "an integer"),
+)
+
+
+@pytest.mark.parametrize("value", [True, False])
+@pytest.mark.parametrize(("field", "kind"), LIGHTRAG_BOOLEAN_FIELDS)
+def test_lightrag_settings_reject_booleans(field: str, kind: str, value: bool) -> None:
+    with pytest.raises(ValidationError, match=f"{field} must be {kind}, not a boolean"):
+        lightrag_tools._LightRAGRetrievalSettings.model_validate({field: value})
+
+
+def test_lightrag_settings_keep_numeric_values() -> None:
+    settings = lightrag_tools._LightRAGRetrievalSettings.model_validate({"timeout": 45, "top_k": 10, "chunk_top_k": 5, "max_chars_per_chunk": 400, "max_total_chars": 2000})
+    assert (settings.timeout, settings.top_k, settings.chunk_top_k) == (45.0, 10, 5)
+    assert (settings.max_chars_per_chunk, settings.max_total_chars) == (400, 2000)
+
+
+def test_lightrag_boolean_setting_reports_invalid_configuration(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A boolean in config.yaml must not silently become one second of timeout."""
+    monkeypatch.setattr(lightrag_tools, "get_app_config", lambda: _config(extra={"timeout": True}))
+
+    settings, error = lightrag_tools._settings_or_error()
+
+    assert settings is None
+    assert error == "Error: Invalid LightRAG settings for knowledge_search; check config.yaml."

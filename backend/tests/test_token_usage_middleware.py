@@ -3,13 +3,18 @@
 import logging
 from unittest.mock import MagicMock
 
-from langchain_core.messages import AIMessage, ToolMessage
+import pytest
+from langchain.agents import create_agent
+from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.graph.message import add_messages
 
+from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
 from deerflow.agents.middlewares.token_usage_middleware import (
     TOKEN_USAGE_ATTRIBUTION_KEY,
     TokenUsageMiddleware,
     _build_todo_actions,
+    _normalize_todos,
 )
 from deerflow.subagents.status_contract import SUBAGENT_TOKEN_USAGE_KEY
 
@@ -367,3 +372,54 @@ class TestBuildTodoActions:
         ]
         actions = _build_todo_actions(previous, next_todos)
         assert any(a.get("kind") == "todo_remove" and a.get("content") == "B" for a in actions), f"Expected todo_remove for B but got: {actions}"
+
+
+@pytest.mark.parametrize(
+    "status, expected_status",
+    [("pending", "pending"), ("in_progress", "in_progress"), ("completed", "completed"), ("unknown", None), (None, None), (True, None), (1, None), ([], None), ({}, None)],
+)
+def test_normalize_todos_only_keeps_valid_string_statuses(status, expected_status):
+    todo = {"content": "Example task", "status": status}
+    expected = {"content": "Example task"}
+    if expected_status is not None:
+        expected["status"] = expected_status
+
+    assert _normalize_todos([todo]) == [expected]
+
+
+class _ToolCallingModel(FakeMessagesListChatModel):
+    def bind_tools(self, tools, *, tool_choice=None, **kwargs):
+        return self
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("status", [[], {}, "unknown", "completed"], ids=["list", "dict", "unknown-string", "valid"])
+async def test_todo_validation_remains_recoverable_with_token_attribution(status, use_async):
+    """Attribution runs before ToolNode validates model-generated TODO arguments."""
+    todo = {"content": "Example task", "status": status}
+    model = _ToolCallingModel(
+        responses=[
+            AIMessage(content="", tool_calls=[{"name": "write_todos", "id": "todo-call", "args": {"todos": [todo]}}]),
+            AIMessage(content="Final answer"),
+        ]
+    )
+    graph = create_agent(model=model, tools=[], middleware=[TodoMiddleware(), TokenUsageMiddleware()])
+    state = {"messages": [HumanMessage(content="Plan the example task")]}
+
+    result = await graph.ainvoke(state) if use_async else graph.invoke(state)
+
+    assert result["messages"][-1].content == "Final answer"
+    tool_messages = [message for message in result["messages"] if isinstance(message, ToolMessage)]
+    assert len(tool_messages) == 1
+    assert tool_messages[0].tool_call_id == "todo-call"
+    if status == "completed":
+        assert tool_messages[0].status == "success"
+        assert result["todos"] == [todo]
+    else:
+        assert tool_messages[0].status == "error"
+        assert "todos.0.status" in tool_messages[0].content
+        assert not result.get("todos")
+    dispatch = next(message for message in result["messages"] if isinstance(message, AIMessage) and message.tool_calls)
+    assert dispatch.tool_calls[0]["args"] == {"todos": [todo]}
+    assert dispatch.additional_kwargs[TOKEN_USAGE_ATTRIBUTION_KEY]["tool_call_ids"] == ["todo-call"]

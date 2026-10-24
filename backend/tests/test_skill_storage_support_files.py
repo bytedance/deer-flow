@@ -80,6 +80,18 @@ def test_ensure_safe_support_path_rejects_windows_incompatible_names(storage, sk
         storage.ensure_safe_support_path("demo-skill", path)
 
 
+@pytest.mark.parametrize("path", ["assets/CONIN$", "scripts/conout$", "assets/CONIN$.txt", "assets/CONOUT$/icon.png"])
+def test_ensure_safe_support_path_rejects_console_device_names(storage, skill_dir, path):
+    with pytest.raises(ValueError, match="reserved Windows device name"):
+        storage.ensure_safe_support_path("demo-skill", path)
+
+
+@pytest.mark.parametrize("path", ["assets/NUL .txt", "scripts/con  .log", "assets/COM1 .txt", "assets/lpt²  .md", "assets/CONIN$ .txt", "assets/conout$  .log", "assets/COM1 .txt/icon.png"])
+def test_ensure_safe_support_path_rejects_padded_device_names(storage, skill_dir, path):
+    with pytest.raises(ValueError, match="reserved Windows device name"):
+        storage.ensure_safe_support_path("demo-skill", path)
+
+
 def test_read_text_or_none_decodes_text_and_returns_none_for_binary(tmp_path: Path):
     text = tmp_path / "t.md"
     text.write_text("héllo", encoding="utf-8")
@@ -112,6 +124,7 @@ def _write_literal(path: Path, data: bytes) -> None:
         path.write_bytes(data)
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows cannot create reserved AUX device names")
 def test_remove_preexisting_nonportable_support_file(storage, skill_dir):
     """Deletion of a stored non-portable name succeeds; creating one still fails."""
     target = skill_dir / "scripts" / "AUX.py"

@@ -25,6 +25,7 @@ import {
   buildKnowledgeScopeSnapshot,
   cloneKnowledgeScopeSelection,
   countKnowledgeScopeSelection,
+  fetchKnowledgeProviderCapabilities,
   listRetrievalCatalogDatasets,
   listRetrievalCatalogDocuments,
   type KnowledgeScopeDatasetSelection,
@@ -263,8 +264,32 @@ export function KnowledgeScopeSelector({
   );
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState("");
+  const capabilities = useQuery({
+    queryKey: ["knowledge", "capabilities", agentName],
+    queryFn: () => fetchKnowledgeProviderCapabilities(agentName),
+    enabled: open && !unavailableReason,
+    retry: false,
+    staleTime: 0,
+  });
+  const operations = capabilities.data?.operations ?? [];
+  const canSelectDatasets =
+    capabilities.isSuccess &&
+    capabilities.data.scope_selection_enabled &&
+    operations.includes("catalog") &&
+    operations.includes("dataset_filter");
+  const canSelectDocuments =
+    canSelectDatasets &&
+    operations.includes("documents") &&
+    operations.includes("document_filter");
   const query = useQuery({
-    queryKey: ["knowledge", "retrieval-catalog", agentName, page, search],
+    queryKey: [
+      "knowledge",
+      "retrieval-catalog",
+      agentName,
+      operations,
+      page,
+      search,
+    ],
     queryFn: () =>
       listRetrievalCatalogDatasets({
         agentName,
@@ -272,7 +297,11 @@ export function KnowledgeScopeSelector({
         pageSize: PAGE_SIZE,
         search,
       }),
-    enabled: open && draft.mode === "selected" && !unavailableReason,
+    enabled:
+      open &&
+      draft.mode === "selected" &&
+      canSelectDatasets &&
+      !unavailableReason,
     retry: false,
   });
 
@@ -301,6 +330,13 @@ export function KnowledgeScopeSelector({
           dataset.documents.mode === "selected" &&
           dataset.documents.items.length === 0,
       ));
+  const unsupportedSelection =
+    draft.mode === "selected" &&
+    (!canSelectDatasets ||
+      (!canSelectDocuments &&
+        draft.datasets.some(
+          (dataset) => dataset.documents.mode === "selected",
+        )));
   const draftExceedsLimits = useMemo(() => {
     if (draftInvalid) return false;
     try {
@@ -369,7 +405,9 @@ export function KnowledgeScopeSelector({
             <label className="flex items-center gap-2" key={mode}>
               <input
                 checked={draft.mode === mode}
-                disabled={disabled}
+                disabled={
+                  disabled || (mode === "selected" && !canSelectDatasets)
+                }
                 name="knowledge-scope-mode"
                 type="radio"
                 onChange={() =>
@@ -404,7 +442,12 @@ export function KnowledgeScopeSelector({
               {t.knowledge.scope.selectedCount(draft.datasets.length)}
             </div>
             <ScrollArea className="min-h-48 flex-1 pr-3">
-              {query.isPending ? (
+              {capabilities.isError ||
+              (capabilities.isSuccess && !canSelectDatasets) ? (
+                <p className="text-destructive p-3 text-sm">
+                  {t.knowledge.scope.loadFailed}
+                </p>
+              ) : capabilities.isPending || query.isPending ? (
                 <Loader2Icon className="text-muted-foreground mx-auto mt-8 size-5 animate-spin" />
               ) : query.isError ? (
                 <p className="text-destructive p-3 text-sm">
@@ -443,7 +486,7 @@ export function KnowledgeScopeSelector({
                               {t.knowledge.scope.notSearchable}
                             </span>
                           )}
-                          {selected && (
+                          {selected && canSelectDocuments && (
                             <Button
                               aria-expanded={expanded}
                               size="sm"
@@ -465,7 +508,7 @@ export function KnowledgeScopeSelector({
                             </Button>
                           )}
                         </div>
-                        {selected && expanded && (
+                        {selected && expanded && canSelectDocuments && (
                           <DocumentSelector
                             agentName={agentName}
                             dataset={selected}
@@ -491,7 +534,8 @@ export function KnowledgeScopeSelector({
             </ScrollArea>
           </div>
         )}
-        {draftExceedsLimits && (
+        {(draftExceedsLimits ||
+          (capabilities.isSuccess && unsupportedSelection)) && (
           <p className="text-destructive text-xs">
             {t.knowledge.scope.selectionInvalid}
           </p>
@@ -505,7 +549,12 @@ export function KnowledgeScopeSelector({
             {t.common.cancel}
           </Button>
           <Button
-            disabled={disabled || draftInvalid || draftExceedsLimits}
+            disabled={
+              disabled ||
+              draftInvalid ||
+              draftExceedsLimits ||
+              unsupportedSelection
+            }
             type="button"
             onClick={() => {
               onChange(cloneKnowledgeScopeSelection(draft));

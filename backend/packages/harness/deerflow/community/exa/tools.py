@@ -1,9 +1,12 @@
 import json
 import logging
+import os
+from urllib.parse import urlparse
 
 from exa_py import Exa
 from langchain.tools import tool
 
+from deerflow.community.url_safety import safe_public_result_url, validate_delegated_backend_url
 from deerflow.config import get_app_config
 
 logger = logging.getLogger(__name__)
@@ -34,12 +37,55 @@ def _coerce_positive_int(value: object, default: int, option: str) -> int:
     return count
 
 
+def _coerce_bool(value: object, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    return default
+
+
+def _resolve_base_url(extra: dict) -> str | None:
+    """Return the configured Exa-compatible base URL, or ``None`` for the SDK default.
+
+    A non-blank string ``base_url`` in the tool entry takes precedence over
+    ``EXA_BASE_URL``. Overrides must be absolute HTTP(S) URLs with a host, a
+    valid port, and no query or fragment; an invalid one raises without echoing
+    the configured value and never falls back to another host.
+    """
+    base_url = extra.get("base_url")
+    if not isinstance(base_url, str) or not base_url.strip():
+        base_url = os.getenv("EXA_BASE_URL") or ""
+    base_url = base_url.strip()
+    if not base_url:
+        return None
+    try:
+        parsed = urlparse(base_url)
+        valid = parsed.scheme in {"http", "https"} and bool(parsed.netloc and parsed.hostname) and "?" not in base_url and "#" not in base_url
+        # Accessing port also rejects invalid and out-of-range ports.
+        parsed.port
+    except ValueError:
+        valid = False
+    if not valid:
+        raise ValueError("Invalid Exa base_url/EXA_BASE_URL: use an absolute HTTP(S) URL with a host, a valid port, and no query or fragment")
+    return base_url.rstrip("/")
+
+
 def _get_exa_client(tool_name: str = "web_search") -> Exa:
     config = get_app_config().get_tool_config(tool_name)
-    api_key = None
-    if config is not None and "api_key" in config.model_extra:
-        api_key = config.model_extra.get("api_key")
-    return Exa(api_key=api_key)
+    extra = config.model_extra if config is not None else {}
+    return _build_exa_client(extra, _resolve_base_url(extra))
+
+
+def _build_exa_client(extra: dict, base_url: str | None) -> Exa:
+    kwargs = {"api_key": extra.get("api_key")}
+    if base_url:
+        kwargs["base_url"] = base_url
+    return Exa(**kwargs)
 
 
 @tool("web_search", parse_docstring=True)
@@ -74,7 +120,7 @@ def web_search_tool(query: str) -> str:
         normalized_results = [
             {
                 "title": result.title or "",
-                "url": result.url or "",
+                "url": safe_public_result_url(result.url),
                 "snippet": "\n".join(result.highlights) if result.highlights else "",
             }
             for result in res.results
@@ -97,7 +143,18 @@ def web_fetch_tool(url: str) -> str:
         url: The URL to fetch the contents of.
     """
     try:
-        client = _get_exa_client("web_fetch")
+        config = get_app_config().get_tool_config("web_fetch")
+        extra = config.model_extra if config is not None else {}
+        base_url = _resolve_base_url(extra)
+        if base_url:
+            # A custom backend fetches the URL in its own network, like other delegated fetch services.
+            backend_error = validate_delegated_backend_url(
+                base_url,
+                network_isolation_confirmed=_coerce_bool(extra.get("network_isolation_confirmed"), False),
+            )
+            if backend_error:
+                return backend_error
+        client = _build_exa_client(extra, base_url)
         res = client.get_contents([url], text={"max_characters": 4096})
 
         if res.results:

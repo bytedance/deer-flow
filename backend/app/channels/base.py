@@ -43,6 +43,50 @@ class ChannelStopTimeout(RuntimeError):
     """A channel still owns a live provider worker after bounded teardown."""
 
 
+PRIVATE_LOOP_DRAIN_TIMEOUT_SECONDS = 1.0
+
+
+def shutdown_private_loop(loop: asyncio.AbstractEventLoop, *, drain_timeout: float = PRIVATE_LOOP_DRAIN_TIMEOUT_SECONDS) -> None:
+    """Cancel what is still scheduled on a thread-private SDK loop, then close it.
+
+    Runs on the thread that owns ``loop`` once its ``run_until_complete`` or
+    ``run_forever`` has returned. Provider SDKs leave their own tasks behind
+    (lark-oapi's ping and receive loops, dingtalk-stream's keepalive); cancelling
+    them with a bounded drain keeps the thread exit inside the channel's stop
+    budget, and a task that refuses to finish is abandoned with the loop rather
+    than joined.
+    """
+    try:
+        pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
+        for task in pending:
+            task.cancel()
+        if pending:
+            loop.run_until_complete(asyncio.wait(pending, timeout=drain_timeout))
+        loop.run_until_complete(loop.shutdown_asyncgens())
+    except Exception:
+        logger.debug("Error draining a private channel loop before close", exc_info=True)
+    finally:
+        asyncio.set_event_loop(None)
+        loop.close()
+
+
+def abort_connection_transport(connection: Any) -> bool:
+    """Tear down a ``websockets`` connection's transport if its close handshake did not finish.
+
+    ``connection.close()`` waits for the peer's close frame and only aborts the
+    transport after its own ``close_timeout``; a caller that bounds that wait more
+    tightly (channel stop budgets do) cancels before the abort, and the socket
+    then lives until garbage collection. Returns True when a transport was
+    aborted; the caller should yield to its loop once so ``connection_lost``
+    runs before the loop is stopped.
+    """
+    transport = getattr(connection, "transport", None)
+    if transport is None or transport.is_closing():
+        return False
+    transport.abort()
+    return True
+
+
 @dataclass(eq=False, slots=True)
 class _ThreadsafeSubmission:
     coroutine: Coroutine[Any, Any, Any]
@@ -96,6 +140,13 @@ class Channel(ABC):
     async def stop(self) -> None:
         """Gracefully stop the channel."""
 
+    def on_thread_replaced(self, old_thread_id: str) -> None:
+        """Notify the adapter that a conversation's thread was replaced (e.g. ``/new``).
+
+        Subclasses override this to clean up per-thread state such as pending
+        interactive card registrations.  The default is a no-op.
+        """
+
     # -- outbound ----------------------------------------------------------
 
     @abstractmethod
@@ -121,17 +172,49 @@ class Channel(ABC):
         platform identity (e.g. the ``external_account_id`` recorded by the
         bind flow). Used by the notification delivery worker to deliver
         scheduled-task outcomes. Channels without proactive push support keep
-        the default, which raises so the delivery outbox records a failure
-        instead of silently dropping the notification.
+        the default, which raises so a stray delivery is recorded as a failure
+        instead of being silently dropped.
 
         Connectivity preconditions should raise :class:`ChannelUnavailable`
         (not a generic ``RuntimeError``) so the outbox can park the row without
         consuming its retry budget. Platform rejections of a well-formed send
         remain ordinary exceptions that count as attempts.
+
+        The scheduler never imports channel classes: it reads the static
+        ``proactive_notifications`` flag in ``app/channels/capabilities.py``,
+        and providers without it get no outbox rows at all. To add proactive
+        push to a provider:
+
+        1. override this method and return only after the platform ACKs the send;
+        2. raise :class:`ChannelUnavailable` for transient transport failures
+           (not connected, socket closed, timeout); any other exception counts
+           against the retry budget;
+        3. set ``proactive_notifications`` to ``True`` for that provider in
+           ``CHANNEL_CAPABILITIES`` (a test fails while the flag and this
+           override disagree).
+
+        The outbox, deduplication, retries, localized text and the Settings
+        label are shared and need no provider code.
         """
         if not self.is_running:
             raise ChannelUnavailable(f"channel '{self.name}' is not running")
         raise NotImplementedError(f"channel '{self.name}' does not support proactive notifications")
+
+    async def send_notification_for_owner(self, *, owner_user_id: str | None, target: str, text_markdown: str) -> None:
+        """Deliver to an already-verified identity, with owner context for routing.
+
+        Providers may resolve a private conversation from that owner's current
+        bindings. The outbox target remains the external account identity.
+        """
+        await self.send_notification(target=target, text_markdown=text_markdown)
+
+    async def send_group_notification_for_owner(self, *, owner_user_id: str | None, target: str, text_markdown: str) -> None:
+        """Push to an explicitly selected group binding, never a personal fallback.
+
+        ``target`` is the owner's connection ID, not a provider chat ID.
+        Providers must revalidate that binding before sending to its group.
+        """
+        raise NotImplementedError(f"channel '{self.name}' does not support group notifications")
 
     # -- helpers -----------------------------------------------------------
 

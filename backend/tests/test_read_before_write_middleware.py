@@ -357,7 +357,7 @@ class TestErrorStringSandboxes:
 
     def test_existing_file_read_still_marked_and_write_allowed(self):
         mw = self._error_string_middleware({self.PATH: "v1"})
-        read_request = _make_request("read_file", {"description": "d", "path": self.PATH})
+        read_request = _make_request("read_file", {"description": "d", "path": self.PATH}, tool_call_id="r1")
         read_handler = MagicMock(return_value=ToolMessage(content="v1", tool_call_id="r1", name="read_file"))
         read_result = mw.wrap_tool_call(read_request, read_handler)
         assert read_result.additional_kwargs["deerflow_read_mark"]["hash"] == _sha("v1")
@@ -423,7 +423,7 @@ class TestSamePathSerialization:
             return ToolMessage(content="OK", tool_call_id="w-call", name="write_file")
 
         async def run():
-            read_task = asyncio.create_task(mw.awrap_tool_call(_make_request("read_file", {"description": "d", "path": self.PATH}), read_handler))
+            read_task = asyncio.create_task(mw.awrap_tool_call(_make_request("read_file", {"description": "d", "path": self.PATH}, tool_call_id="r-call"), read_handler))
             await asyncio.sleep(0.01)
             write_task = asyncio.create_task(
                 mw.awrap_tool_call(
@@ -868,7 +868,7 @@ def test_lock_scope_resolves_overwrite_wrapped_sandbox():
         ("write_file", "", "0 lines"),
         ("str_replace", "line1\nline2\n", "2 lines"),
         # Exotic separators: \f and \u2028 are NOT line boundaries in LocalSandbox
-        # (Python text-mode iterates only \n/\r\n/\r), so count must match LocalSandbox.
+        # (it ends lines only at \n), so count must match LocalSandbox.
         ("write_file", "x\fx\n", "1 line"),
         ("write_file", "x\u2028x\n", "1 line"),
     ],
@@ -957,6 +957,9 @@ class TestStampingGateBugFix:
             pytest.param("a\n\nb\n", {"start_line": 2, "end_line": 2}, id="both_bounds"),
             pytest.param("a\n\n", {"start_line": 2}, id="start_only"),
             pytest.param("\nb\n", {"end_line": 1}, id="end_only"),
+            pytest.param("a\r\n\r\nb\r\n", {"start_line": 2, "end_line": 2}, id="crlf_both_bounds"),
+            pytest.param("a\r\n\r\n", {"start_line": 2}, id="crlf_start_only"),
+            pytest.param("\r\nb\r\n", {"end_line": 1}, id="crlf_end_only"),
         ],
     )
     def test_blank_line_range_stamps_full_hash_and_allows_write(self, tmp_path, monkeypatch, content, line_range):
@@ -970,7 +973,7 @@ class TestStampingGateBugFix:
 
         outputs = tmp_path / "outputs"
         outputs.mkdir()
-        (outputs / "report.md").write_text(content, encoding="utf-8")
+        (outputs / "report.md").write_text(content, encoding="utf-8", newline="")
         runtime = SimpleNamespace(
             state={"sandbox": {"sandbox_id": "local:t-test"}, "thread_data": {"outputs_path": str(outputs)}},
             context={"thread_id": "t-test"},

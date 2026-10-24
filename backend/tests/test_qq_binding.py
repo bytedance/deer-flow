@@ -9,7 +9,7 @@ import pytest_asyncio
 from app.channels.manager import ChannelManager
 from app.channels.message_bus import MessageBus
 from app.channels.qq import QQChannel
-from app.channels.store import ChannelStore
+from app.channels.store import JsonChannelStore
 from deerflow.persistence.channel_connections import ChannelConnectionRepository
 from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
 
@@ -59,7 +59,7 @@ async def test_binding_transfer_rejects_queued_old_owner(repo, tmp_path, monkeyp
     channel.send = AsyncMock()
     manager = ChannelManager(
         bus,
-        ChannelStore(tmp_path / "threads.json"),
+        JsonChannelStore(tmp_path / "threads.json"),
         connection_repo=repo,
         require_bound_identity=True,
     )
@@ -114,3 +114,23 @@ async def test_private_group_and_app_bindings_do_not_fall_back(repo):
     finally:
         await channel.stop()
         await other_app.stop()
+
+
+@pytest.mark.asyncio
+async def test_named_group_connections_keep_friendly_names_and_stable_ids(repo):
+    channel = QQChannel(MessageBus(), {"app_id": "app1", "client_secret": "fixture", "connection_repo": repo})
+    channel.send = AsyncMock()
+    try:
+        for code, group, label in (("code-1", "group1", "Release team"), ("code-2", "group2", "Support team"), ("code-3", "group1", "Release team renamed")):
+            await repo.create_oauth_state(owner_user_id="owner", provider="qq", state=code, expires_at=datetime.now(UTC) + timedelta(minutes=5), metadata={"notification_group_name": label})
+            await channel._handle_inbound(incoming(f"msg-{code}", f"/connect {code}", group))
+            rows = await repo.list_connections("owner")
+            if code == "code-1":
+                group1_id = rows[0]["id"]
+        by_workspace = {row["workspace_id"]: row for row in rows}
+        assert len(rows) == 2
+        assert by_workspace["app1:group:group1"]["id"] == group1_id
+        assert by_workspace["app1:group:group1"]["workspace_name"] == "Release team renamed"
+        assert by_workspace["app1:group:group2"]["workspace_name"] == "Support team"
+    finally:
+        await channel.stop()

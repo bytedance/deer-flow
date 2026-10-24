@@ -23,6 +23,7 @@ from app.gateway.services import (
     start_run,
     wait_for_run_completion,
 )
+from app.gateway.sse_headers import sse_response_headers
 from deerflow.runtime import RunStatus, serialize_channel_values_for_api
 from deerflow.utils.thread_id import resolve_thread_id
 
@@ -53,12 +54,7 @@ async def stateless_stream(body: RunCreateRequest, request: Request) -> Streamin
     return StreamingResponse(
         sse_consumer(bridge, record, request, run_mgr),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-            "Content-Location": f"/api/threads/{thread_id}/runs/{record.run_id}",
-        },
+        headers=sse_response_headers(content_location=f"/api/threads/{thread_id}/runs/{record.run_id}"),
     )
 
 

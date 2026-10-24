@@ -72,3 +72,57 @@ async def test_one_occurrence_can_commit_unmet_and_pause_notices_together(delive
         await session.commit()
     claimed = await delivery_repo.claim_due_deliveries(now=datetime.now(UTC), limit=5)
     assert {row["event"] for row in claimed} == {"run_unmet", "task_paused"}
+
+
+@pytest.mark.anyio
+async def test_observer_notice_commits_and_rolls_back_with_complete_run(delivery_repo):
+    """The finalization observer stages the v2 notice inside complete_run's transaction."""
+    from app.scheduler.service import ScheduledTaskService
+    from deerflow.persistence.channel_connections import ChannelConnectionRepository
+    from deerflow.persistence.channel_connections.model import ChannelConnectionRow
+    from deerflow.persistence.scheduled_task_runs import ScheduledTaskRunRepository
+    from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
+
+    sf = delivery_repo.session_factory
+    tasks, runs = ScheduledTaskRepository(sf), ScheduledTaskRunRepository(sf)
+    service = ScheduledTaskService(task_repo=tasks, task_run_repo=runs, launch_run=None, poll_interval_seconds=60, lease_seconds=30, max_concurrent_runs=3, connection_repo=ChannelConnectionRepository(sf), notification_repo=delivery_repo)
+    now = datetime(2026, 10, 6, 8, tzinfo=UTC)
+    await tasks.create(
+        task_id="task-a",
+        user_id="alice",
+        thread_id=None,
+        context_mode="fresh_thread_per_run",
+        assistant_id=None,
+        title="Digest",
+        prompt="Summarize.",
+        schedule_type="interval",
+        schedule_spec={"every_seconds": 3600},
+        timezone="UTC",
+        next_run_at=now,
+    )
+    await runs.create(run_record_id="occurrence-a", task_id="task-a", thread_id="thread-a", scheduled_for=now, trigger="scheduled", status="running")
+    await runs.update_status("occurrence-a", status="running", run_id="run-a", started_at=now)
+    async with sf() as session:
+        session.add(ChannelConnectionRow(id="binding", owner_user_id="alice", provider="wecom", status="connected", external_account_id="alice-external"))
+        await session.commit()
+
+    async def fails_after_enqueue(session, task, occurrence, *, events):
+        await service._on_finalization(session, task, occurrence, events=events)
+        assert await session.scalar(select(func.count()).select_from(NotificationDeliveryRow)) == 1
+        raise RuntimeError("commit interrupted")
+
+    def complete():
+        return tasks.complete_run("task-a", user_id="alice", task_run_id="occurrence-a", run_id="run-a", status="success", error=None, finished_at=now)
+
+    tasks.set_finalization_observer(fails_after_enqueue)
+    with pytest.raises(RuntimeError, match="commit interrupted"):
+        await complete()
+    # The notice rolled back with the outcome; the occurrence is still active.
+    assert await delivery_repo.claim_due_deliveries(now=datetime.now(UTC), limit=5) == []
+    assert (await runs.list_by_task("task-a"))[0]["status"] == "running"
+
+    tasks.set_finalization_observer(service._on_finalization)
+    assert await complete() is True
+    (claimed,) = await delivery_repo.claim_due_deliveries(now=datetime.now(UTC), limit=5)
+    assert (claimed["event"], claimed["task_run_id"], claimed["run_id"]) == ("run_completed", "occurrence-a", "run-a")
+    assert claimed["payload"] == {"payload_version": 2, "task_id": "task-a", "task_title": "Digest", "locale": None, "reason_code": None, "latest_reason_code": None, "run_status": "success"}

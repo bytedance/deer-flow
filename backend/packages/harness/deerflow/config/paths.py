@@ -6,6 +6,7 @@ import shutil
 from pathlib import Path, PureWindowsPath
 
 from deerflow.config.runtime_paths import runtime_home
+from deerflow.utils.host_paths import extended_length_path
 from deerflow.utils.thread_id import validate_thread_id
 
 # Virtual path prefix seen by agents inside the sandbox
@@ -366,7 +367,7 @@ class Paths:
 
     def user_projects_dir(self, user_id: str) -> Path:
         """Host path root for one user's project shelves: ``users/{user_id}/projects/``."""
-        return self.user_dir(user_id) / "projects"
+        return extended_length_path(self.user_dir(user_id) / "projects")
 
     def user_project_dir(self, user_id: str, project_id: str) -> Path:
         """Host path for one project: ``users/{user_id}/projects/{project_id}/``."""

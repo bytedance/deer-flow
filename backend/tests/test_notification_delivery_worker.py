@@ -15,7 +15,8 @@ import pytest
 from app.channels.base import ChannelUnavailable
 from app.channels.message_bus import MessageBus
 from app.channels.wecom import WeComChannel
-from app.scheduler.notification_delivery import NotificationDeliveryWorker, redact_egress_text, render_notification_text
+from app.scheduler.notification_delivery import NotificationDeliveryWorker, render_notification_text
+from app.scheduler.notification_text import redact_egress_text
 
 
 class FakeDeliveryRepo:
@@ -27,14 +28,18 @@ class FakeDeliveryRepo:
         self.terminal_failures = []
         self.resets = []
         self.events = []
+        self.exclusions = []
 
     async def reset_stale_sending_rows(self, *, now, timeout):
         self.resets.append((now, timeout))
         self.events.append("reset")
         return 0
 
-    async def claim_due_deliveries(self, *, now, limit):
-        claimed, self.rows = self.rows[:limit], self.rows[limit:]
+    async def claim_due_deliveries(self, *, now, limit, **kwargs):
+        excluded = kwargs.get("exclude_providers") or frozenset()
+        self.exclusions.append(kwargs.get("exclude_providers"))
+        claimed = [row for row in self.rows if row["provider"] not in excluded][:limit]
+        self.rows = [row for row in self.rows if row not in claimed]
         self.claims.append((now, limit))
         self.events.append("claim")
         return claimed
@@ -54,6 +59,15 @@ class FakeChannel:
         self.fail = fail
         self.unavailable = unavailable
         self.is_running = running
+        self.owners = []
+        self.group_sent = []
+
+    async def send_group_notification_for_owner(self, *, owner_user_id, target, text_markdown):
+        self.group_sent.append((owner_user_id, target, text_markdown))
+
+    async def send_notification_for_owner(self, *, owner_user_id, target, text_markdown):
+        self.owners.append(owner_user_id)
+        await self.send_notification(target=target, text_markdown=text_markdown)
 
     async def send_notification(self, *, target, text_markdown):
         if self.unavailable:
@@ -108,20 +122,117 @@ def _connection(*, provider="wecom", external_account_id="GaoZhiChao", status="c
     }
 
 
-def test_render_run_completed_text_includes_task_and_run():
-    text = render_notification_text(_delivery_row())
+def _group_connection(**updates):
+    return {**_connection(provider="feishu", external_account_id="ou_owner"), "id": "group-binding", "workspace_id": "oc_group", "metadata": {"chat_id": "oc_group", "chat_type": "group"}, **updates}
 
-    assert "completed" in text.lower()
-    assert "task-1" in text
-    assert "run-1" in text
+
+@pytest.mark.asyncio
+async def test_group_notice_uses_selected_binding_and_only_group_hook():
+    repo = FakeDeliveryRepo([_delivery_row(provider="feishu", target="group-binding", payload={"target_type": "group", "run_status": "success"})])
+    channel = FakeChannel()
+    worker = NotificationDeliveryWorker(delivery_repo=repo, resolve_channel=lambda provider: channel, resolve_connections=lambda owner: [_group_connection()])
+    await worker.run_once(now=datetime.now(UTC))
+    assert repo.sent == ["delivery-1"]
+    assert channel.group_sent[0][:2] == ("user-1", "group-binding")
+    assert channel.sent == []
+    assert channel.owners == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "updates",
+    [
+        None,
+        {"id": "another-binding"},
+        {"owner_user_id": "another-owner"},
+        {"status": "revoked"},
+        {"provider": "wecom"},
+        {"workspace_id": "oc_other"},
+        {"metadata": {"chat_id": "oc_group", "chat_type": "p2p"}},
+        {"metadata": {"chat_id": "oc_group"}},
+    ],
+)
+async def test_group_notice_requires_current_exact_group_binding(updates):
+    repo = FakeDeliveryRepo([_delivery_row(provider="feishu", target="group-binding", payload={"target_type": "group"})])
+    channel = FakeChannel()
+    rows = [] if updates is None else [_group_connection(**updates)]
+    worker = NotificationDeliveryWorker(delivery_repo=repo, resolve_channel=lambda provider: channel, resolve_connections=lambda owner: rows)
+    await worker.run_once(now=datetime.now(UTC))
+    assert repo.sent == []
+    assert len(repo.terminal_failures) == 1
+    assert channel.sent == []
+    assert channel.group_sent == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider,target_type", [("wecom", "group"), ("wechat", "group"), ("feishu", "unknown"), ("feishu", "private")])
+async def test_invalid_group_target_type_never_falls_back_to_personal_notice(provider, target_type):
+    repo = FakeDeliveryRepo([_delivery_row(provider=provider, target="ou_owner", payload={"target_type": target_type})])
+    channel = FakeChannel()
+    worker = NotificationDeliveryWorker(delivery_repo=repo, resolve_channel=lambda provider: channel, resolve_connections=lambda owner: [_connection(provider=provider, external_account_id="ou_owner")])
+    await worker.run_once(now=datetime.now(UTC))
+    assert repo.sent == []
+    assert len(repo.terminal_failures) == 1
+    assert channel.sent == []
+    assert channel.group_sent == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider", "workspace_id", "metadata"),
+    [
+        ("qq", "app1:group:group-openid", {"chat_type": "group", "group_openid": "group-openid"}),
+        ("wecom", "bot1:group:wr_chat_1", {"aibotid": "bot1", "chattype": "group", "chatid": "wr_chat_1"}),
+    ],
+)
+async def test_qq_and_wecom_group_notices_use_group_hook_only(provider, workspace_id, metadata):
+    repo = FakeDeliveryRepo([_delivery_row(provider=provider, target="group-binding", payload={"target_type": "group", "run_status": "success"})])
+    channel = FakeChannel()
+    group_conn = _group_connection(provider=provider, workspace_id=workspace_id, metadata=metadata)
+    worker = NotificationDeliveryWorker(delivery_repo=repo, resolve_channel=lambda p: channel if p == provider else None, resolve_connections=lambda owner: [group_conn])
+    await worker.run_once(now=datetime.now(UTC))
+    assert repo.sent == ["delivery-1"]
+    assert channel.group_sent[0][:2] == ("user-1", "group-binding")
+    assert channel.sent == []
+    assert channel.owners == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("resolver_missing", [False, True])
+async def test_group_notice_parks_when_binding_cannot_be_checked(resolver_missing):
+    repo = FakeDeliveryRepo([_delivery_row(provider="feishu", target="group-binding", payload={"target_type": "group"})])
+    channel = FakeChannel()
+
+    def unavailable(owner):
+        raise OSError("lookup unavailable")
+
+    worker = NotificationDeliveryWorker(delivery_repo=repo, resolve_channel=lambda provider: channel, resolve_connections=None if resolver_missing else unavailable)
+    await worker.run_once(now=datetime.now(UTC))
+    assert repo.sent == []
+    assert repo.failed[0][2] is False
+    assert channel.sent == []
+    assert channel.group_sent == []
+
+
+def test_render_run_completed_text_has_no_raw_ids():
+    text = render_notification_text(_delivery_row(payload={"run_status": "success", "error": None, "task_id": "task-1", "task_title": "Daily digest"}))
+
+    assert "Finished a run." in text
+    assert "“Daily digest”" in text
+    assert "task-1" not in text
+    assert "run-1" not in text
 
 
 def test_render_prefers_task_title_over_id():
     text = render_notification_text(_delivery_row(payload={"run_status": "success", "error": None, "task_id": "task-1", "task_title": "Daily digest"}))
 
-    assert "Daily digest" in text
-    task_line = next(line for line in text.splitlines() if line.startswith("Task:"))
-    assert "task-1" not in task_line
+    assert "“Daily digest”" in text
+    assert "task-1" not in text
+    assert not any(line.startswith("Task:") for line in text.splitlines())
+    # Without a title the notice says so instead of printing the id.
+    untitled = render_notification_text(_delivery_row())
+    assert "Untitled task" in untitled
+    assert "task-1" not in untitled
 
 
 def test_render_run_failed_text_does_not_forward_raw_error():
@@ -133,9 +244,9 @@ def test_render_run_failed_text_does_not_forward_raw_error():
         )
     )
 
-    assert "failed" in text.lower()
+    assert "A run failed." in text
     assert secret not in text
-    assert "workspace" in text.lower()
+    assert "Open DeerFlow → Scheduled tasks for details." in text
     assert "Error:" not in text
 
 
@@ -151,41 +262,25 @@ def test_render_truncates_unbounded_error_text():
     assert "Error:" not in text
 
 
-def test_redact_egress_text_scrubs_seeded_secret():
-    secret = "sk-" + ("S" * 40)
-    redacted = redact_egress_text(f"answer used {secret} here")
+@pytest.mark.parametrize("prefix", ["sk-", "sk-proj-", "sk-svcacct-", "sk-admin-", "sk-ant-api03-"])
+@pytest.mark.asyncio
+async def test_delivery_scrubs_sk_bearer_tokens(prefix):
+    # Synthetic credentials, with no secret assignment to provide a fallback.
+    secret = prefix + "A1b2_C3d4-E5f6_G7h8-I9j0" * 3
+    summary = f"Authorization: Bearer {secret}; Repeated: {secret}"
+    safe_summary = "Authorization: Bearer [redacted]; Repeated: [redacted]"
+    assert redact_egress_text(summary) == safe_summary
 
-    assert secret not in redacted
-    assert "[redacted]" in redacted
+    repo = FakeDeliveryRepo([_delivery_row()])
+    channel = FakeChannel()
+    worker = _make_worker(repo, channel, resolve_run_summary=lambda *_: summary)
 
+    await worker.run_once(now=datetime.now(UTC))
 
-def test_redact_egress_text_scrubs_entire_pem_block():
-    pem_body = "ABCDEFSECRETKEYBODY"
-    pem = "-----BEGIN PRIVATE KEY-----\n" + pem_body + "\n-----END PRIVATE KEY-----"
-    redacted = redact_egress_text(f"key follows\n{pem}\nend")
-
-    assert pem_body not in redacted
-    assert "BEGIN PRIVATE KEY" not in redacted
-    assert "END PRIVATE KEY" not in redacted
-    assert "[redacted]" in redacted
-
-
-def test_render_redacts_entire_pem_block_in_result_summary():
-    pem_body = "ABCDEFSECRETKEYBODY"
-    pem = "-----BEGIN PRIVATE KEY-----\n" + pem_body + "\n-----END PRIVATE KEY-----"
-    text = render_notification_text(_delivery_row(payload={"run_status": "success", "error": None, "task_id": "task-1", "result_summary": pem}))
-
-    assert pem_body not in text
-    assert "END PRIVATE KEY" not in text
-    assert "[redacted]" in text
-
-
-def test_render_redacts_secret_in_result_summary():
-    secret = "ghp_" + ("a" * 36)
-    text = render_notification_text(_delivery_row(payload={"run_status": "success", "error": None, "task_id": "task-1", "result_summary": f"token={secret}"}))
-
-    assert secret not in text
-    assert "[redacted]" in text
+    assert repo.sent == ["delivery-1"]
+    assert len(channel.sent) == 1
+    assert safe_summary in channel.sent[0][1]
+    assert secret not in channel.sent[0][1]
 
 
 @pytest.mark.asyncio
@@ -201,7 +296,8 @@ async def test_run_once_delivers_claimed_row_and_marks_sent():
     assert len(channel.sent) == 1
     target, text = channel.sent[0]
     assert target == "GaoZhiChao"
-    assert "task-1" in text
+    assert text.splitlines()[0] == "Scheduled task “Untitled task”"
+    assert "task-1" not in text
 
 
 @pytest.mark.asyncio
@@ -500,17 +596,19 @@ async def test_start_stop_lifecycle():
 
 
 def test_render_includes_result_summary_for_completed_runs():
-    text = render_notification_text(_delivery_row(payload={"run_status": "success", "error": None, "task_id": "task-1", "result_summary": "The answer is 42"}))
+    text = render_notification_text(_delivery_row(payload={"run_status": "success", "error": None, "task_id": "task-1", "result_summary": "The answer is 42\nand a second line"}))
 
-    assert "The answer is 42" in text
+    # The tasks page's run summary: the reply's first line only.
+    assert "Result: The answer is 42" in text.splitlines()
+    assert "second line" not in text
 
 
 def test_render_truncates_long_result_summary():
     text = render_notification_text(_delivery_row(payload={"run_status": "success", "error": None, "task_id": "task-1", "result_summary": "x" * 5000}))
 
-    # Bounded on the wire: 999 chars of summary + the ellipsis marker.
+    # Bounded like the tasks page: at most 160 chars, ending in an ellipsis.
     result_line = next(line for line in text.splitlines() if line.startswith("Result: "))
-    assert len(result_line) == len("Result: ") + 1000
+    assert len(result_line) == len("Result: ") + 160
     assert result_line.endswith("\u2026")
 
 
@@ -596,7 +694,8 @@ async def test_delivery_falls_back_to_skeleton_when_resolver_raises():
     # A summary lookup failure must never block the notification itself.
     assert repo.sent == ["delivery-1"]
     assert repo.failed == []
-    assert "task-1" in channel.sent[0][1]
+    assert "Finished a run." in channel.sent[0][1]
+    assert "Result:" not in channel.sent[0][1]
 
 
 @pytest.mark.asyncio
@@ -609,8 +708,127 @@ async def test_delivery_sends_skeleton_when_summary_is_missing():
 
     assert repo.sent == ["delivery-1"]
     text = channel.sent[0][1]
-    assert "task-1" in text
+    assert "Finished a run." in text
     assert "Result:" not in text
+
+
+@pytest.mark.asyncio
+async def test_legacy_row_for_unsupported_provider_fails_terminally_without_send():
+    # Rows queued before only push-capable providers got rows: they can never
+    # be sent, so they end at once instead of using up five retries.
+    repo = FakeDeliveryRepo([_delivery_row(provider="slack", target="U123")])
+    channel = FakeChannel()
+    resolved_channels, checked_connections = [], []
+
+    def resolve_channel(provider):
+        resolved_channels.append(provider)
+        return channel
+
+    def resolve_connections(owner):
+        checked_connections.append(owner)
+        return [_connection(provider="slack", external_account_id="U123")]
+
+    worker = NotificationDeliveryWorker(delivery_repo=repo, resolve_channel=resolve_channel, resolve_connections=resolve_connections)
+
+    await worker.run_once(now=datetime.now(UTC))
+
+    assert channel.sent == []
+    assert resolved_channels == [] and checked_connections == []
+    assert repo.sent == []
+    assert repo.terminal_failures == [("delivery-1", "provider does not support proactive notifications")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("binding_owner", ["user-1", "another-user"])
+async def test_feishu_notice_requires_its_owners_current_binding(binding_owner):
+    repo = FakeDeliveryRepo([_delivery_row(provider="feishu", target="ou_bound_user")])
+    channel = FakeChannel()
+    worker = NotificationDeliveryWorker(
+        delivery_repo=repo,
+        resolve_channel=lambda provider: channel if provider == "feishu" else None,
+        resolve_connections=lambda owner: [_connection(provider="feishu", external_account_id="ou_bound_user", owner_user_id=binding_owner)],
+    )
+
+    await worker.run_once(now=datetime.now(UTC))
+
+    if binding_owner == "user-1":
+        assert repo.sent == ["delivery-1"]
+        assert channel.sent[0][0] == "ou_bound_user"
+        assert "Scheduled task" in channel.sent[0][1]
+        assert repo.failed == []
+        assert channel.owners == ["user-1"]
+    else:
+        assert repo.sent == []
+        assert channel.sent == []
+        assert channel.owners == []
+        assert repo.terminal_failures == [("delivery-1", "target is no longer a connected feishu identity of its owner")]
+
+
+@pytest.mark.asyncio
+async def test_task_stopped_is_enriched_with_summary():
+    row = _delivery_row(event="task_stopped", payload={"payload_version": 2, "task_title": "Release check", "reason_code": "agent_stop", "run_status": "success", "stop_condition": "all items are ticked"})
+    repo = FakeDeliveryRepo([row])
+    channel = FakeChannel()
+    seen = []
+
+    def resolver(run_id, user_id):
+        seen.append((run_id, user_id))
+        return "## All 12 items are ticked\nmore"
+
+    await _make_worker(repo, channel, resolve_run_summary=resolver).run_once(now=datetime.now(UTC))
+
+    assert seen == [("run-1", "user-1")]
+    assert channel.sent[0][1].splitlines() == [
+        "Scheduled task “Release check”",
+        "Paused by agent: its stop condition was met (all items are ticked).",
+        "Result: All 12 items are ticked",
+        "Open DeerFlow → Scheduled tasks for details.",
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("event", "payload"),
+    [
+        ("run_failed", {"payload_version": 2, "run_status": "failed"}),
+        ("task_finished", {"payload_version": 2, "reason_code": "max_runs", "run_status": "failed", "max_runs": 3}),
+        ("task_stopped", {"payload_version": 2, "reason_code": "agent_stop", "run_status": "interrupted"}),
+    ],
+)
+async def test_failed_run_is_not_enriched(event, payload):
+    repo = FakeDeliveryRepo([_delivery_row(event=event, payload=payload)])
+    channel = FakeChannel()
+    called = []
+
+    def resolver(run_id, user_id):
+        called.append(run_id)
+        return "partial answer"
+
+    await _make_worker(repo, channel, resolve_run_summary=resolver).run_once(now=datetime.now(UTC))
+
+    assert called == []
+    assert repo.sent == ["delivery-1"]
+    assert "partial answer" not in channel.sent[0][1]
+    assert "Result:" not in channel.sent[0][1]
+
+
+@pytest.mark.asyncio
+async def test_worker_uses_default_locale_for_rows_without_locale():
+    legacy = _delivery_row(delivery_id="legacy", event="run_failed", payload={"run_status": "failed", "error": "boom", "task_id": "task-1"})
+    no_preference = _delivery_row(delivery_id="no-preference", event="run_failed", payload={"payload_version": 2, "locale": None, "run_status": "failed"})
+    english_owner = _delivery_row(delivery_id="english-owner", event="run_failed", payload={"payload_version": 2, "locale": "en-US", "run_status": "failed"})
+    repo = FakeDeliveryRepo([legacy, no_preference, english_owner])
+    channel = FakeChannel()
+    worker = NotificationDeliveryWorker(delivery_repo=repo, resolve_channel=lambda provider: channel, default_locale="zh-CN")
+
+    await worker.run_once(now=datetime.now(UTC))
+
+    assert repo.sent == ["legacy", "no-preference", "english-owner"]
+    texts = [text for _target, text in channel.sent]
+    assert texts[0].splitlines()[1:] == ["一次运行出错了。", "在 DeerFlow 的定时任务页查看详情。"]
+    assert texts[1] == texts[0].replace("Untitled task", "未命名任务")
+    # The owner's own UI language wins over the configured default.
+    assert texts[2].splitlines()[1] == "A run failed."
 
 
 class FakeWsClient:
@@ -826,5 +1044,146 @@ async def test_binding_check_reads_the_real_connection_repository_shape(tmp_path
 
         assert await conn_repo.disconnect_connection(connection_id=bound["id"], owner_user_id="user-1") is True
         assert await worker._target_still_connected(_delivery_row()) is False
+    finally:
+        await close_engine()
+
+
+@pytest.mark.asyncio
+async def test_worker_leaves_rows_of_providers_another_instance_leads():
+    """``excluded_providers`` is read on every poll; ``None`` or an empty set claims everything."""
+    repo = FakeDeliveryRepo([_delivery_row(delivery_id="d-wecom"), _delivery_row(delivery_id="d-feishu", provider="feishu")])
+    channel = FakeChannel()
+    led_elsewhere = {"value": frozenset({"feishu"})}
+    worker = NotificationDeliveryWorker(delivery_repo=repo, resolve_channel=lambda provider: channel if provider == "wecom" else None, excluded_providers=lambda: led_elsewhere["value"])
+
+    await worker.run_once(now=datetime.now(UTC))
+    assert repo.exclusions == [frozenset({"feishu"})]
+    assert repo.sent == ["d-wecom"]
+    assert [row["id"] for row in repo.rows] == ["d-feishu"]  # left pending, not parked
+
+    led_elsewhere["value"] = frozenset()
+    await worker.run_once(now=datetime.now(UTC))
+    assert repo.exclusions[-1] is None  # no restriction: the plain claim
+    assert repo.rows == []
+
+
+@pytest.mark.asyncio
+async def test_worker_ignores_a_non_collection_exclusion_result():
+    """A test double or a misbehaving resolver must not narrow the claim to nothing."""
+    from unittest.mock import MagicMock
+
+    repo = FakeDeliveryRepo([_delivery_row()])
+    worker = NotificationDeliveryWorker(delivery_repo=repo, resolve_channel=lambda provider: FakeChannel(), excluded_providers=MagicMock())
+    await worker.run_once(now=datetime.now(UTC))
+    assert repo.exclusions == [None]
+    assert repo.sent == ["delivery-1"]
+
+
+@pytest.mark.asyncio
+async def test_wecom_group_notification_for_owner_and_multi_group_binding_isolation(tmp_path):
+    from datetime import timedelta
+    from unittest.mock import AsyncMock
+
+    from deerflow.persistence.channel_connections import ChannelConnectionRepository
+    from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+
+    await init_engine("sqlite", url=f"sqlite+aiosqlite:///{tmp_path / 'wecom_group.db'}", sqlite_dir=str(tmp_path))
+    try:
+        conn_repo = ChannelConnectionRepository(get_session_factory())
+        ws_client = FakeWsClient()
+        ws_client.reply = AsyncMock()
+        ws_client.reply_stream = AsyncMock()
+        channel = WeComChannel(bus=MessageBus(), config={"bot_id": "bot-1", "connection_repo": conn_repo})
+        channel._bot_id = "bot-1"
+        channel._ws_client = ws_client
+        channel._running = True
+        channel._ws_transport_up = True
+
+        for code in ("code-priv", "code-g1", "code-g2"):
+            await conn_repo.create_oauth_state(
+                owner_user_id="user-1",
+                provider="wecom",
+                state=code,
+                expires_at=datetime.now(UTC) + timedelta(minutes=5),
+            )
+
+        await channel._bind_connection_from_connect_code(
+            frame={"body": {"aibotid": "bot-1", "chattype": "single"}},
+            user_id="GaoZhiChao",
+            code="code-priv",
+        )
+        await channel._bind_connection_from_connect_code(
+            frame={"body": {"aibotid": "bot-1", "chattype": "group", "chatid": "wr_group_1"}},
+            user_id="GaoZhiChao",
+            code="code-g1",
+        )
+        await channel._bind_connection_from_connect_code(
+            frame={"body": {"aibotid": "bot-1", "chattype": "group", "chatid": "wr_group_2"}},
+            user_id="GaoZhiChao",
+            code="code-g2",
+        )
+
+        connections = await conn_repo.list_connections("user-1")
+        assert len(connections) == 3
+        by_workspace = {row["workspace_id"]: row for row in connections}
+        assert set(by_workspace) == {"bot-1", "bot-1:group:wr_group_1", "bot-1:group:wr_group_2"}
+        assert by_workspace["bot-1:group:wr_group_1"]["workspace_name"] is None
+        assert by_workspace["bot-1:group:wr_group_2"]["workspace_name"] is None
+        g1_id = by_workspace["bot-1:group:wr_group_1"]["id"]
+        g2_id = by_workspace["bot-1:group:wr_group_2"]["id"]
+        priv_id = by_workspace["bot-1"]["id"]
+        assert len({g1_id, g2_id, priv_id}) == 3
+
+        # A group-specific binding resolves only that group; a private binding
+        # must not authorize an unrelated, unbound group.
+        bound_group_inbound = channel._make_inbound(
+            chat_id="wr_group_1",
+            user_id="GaoZhiChao",
+            text="hello",
+            metadata={"aibotid": "bot-1", "chattype": "group", "chatid": "wr_group_1"},
+        )
+        bound_group_inbound = await channel._attach_connection_identity(bound_group_inbound)
+        assert bound_group_inbound.connection_id == g1_id
+        assert bound_group_inbound.owner_user_id == "user-1"
+
+        legacy_group_inbound = channel._make_inbound(
+            chat_id="wr_legacy_group",
+            user_id="GaoZhiChao",
+            text="hello from legacy group",
+            metadata={"aibotid": "bot-1", "chattype": "group", "chatid": "wr_legacy_group"},
+        )
+        legacy_group_inbound = await channel._attach_connection_identity(legacy_group_inbound)
+        assert legacy_group_inbound.connection_id is None
+        assert legacy_group_inbound.owner_user_id is None
+
+        await channel.send_group_notification_for_owner(
+            owner_user_id="user-1",
+            target=g1_id,
+            text_markdown="**group 1 notice**",
+        )
+        await channel.send_group_notification_for_owner(
+            owner_user_id="user-1",
+            target=g2_id,
+            text_markdown="**group 2 notice**",
+        )
+        assert ws_client.calls == [
+            ("wr_group_1", {"msgtype": "markdown", "markdown": {"content": "**group 1 notice**"}}),
+            ("wr_group_2", {"msgtype": "markdown", "markdown": {"content": "**group 2 notice**"}}),
+        ]
+
+        # Private binding ID or foreign owner must not be accepted as a group target.
+        with pytest.raises(RuntimeError, match="group notification destination"):
+            await channel.send_group_notification_for_owner(
+                owner_user_id="user-1",
+                target=priv_id,
+                text_markdown="nope",
+            )
+        with pytest.raises(RuntimeError, match="group notification destination"):
+            await channel.send_group_notification_for_owner(
+                owner_user_id="other-user",
+                target=g1_id,
+                text_markdown="nope",
+            )
+        assert len(ws_client.calls) == 2
     finally:
         await close_engine()

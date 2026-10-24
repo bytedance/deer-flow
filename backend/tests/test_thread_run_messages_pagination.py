@@ -164,6 +164,7 @@ def test_after_seq_forwarded_to_event_store():
         limit=51,  # default limit(50) + 1
         before_seq=None,
         after_seq=5,
+        user_id=None,
     )
 
 
@@ -181,6 +182,7 @@ def test_before_seq_forwarded_to_event_store():
         limit=51,
         before_seq=10,
         after_seq=None,
+        user_id=None,
     )
 
 
@@ -198,6 +200,7 @@ def test_custom_limit_forwarded_to_event_store():
         limit=11,  # 10 + 1
         before_seq=None,
         after_seq=None,
+        user_id=None,
     )
 
 

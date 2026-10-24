@@ -4,6 +4,11 @@ import { describe, expect, test } from "@rstest/core";
 import { getMessageGroups } from "@/core/messages/utils";
 import { getSkillUsageByGroupIndex, readSkillUsage } from "@/core/skills/usage";
 
+import {
+  loadScheduledThread,
+  withOrdinaryHumanTurn,
+} from "../../helpers/scheduled-fixtures";
+
 const snapshot = {
   name: "report",
   description: "Create reports",
@@ -182,5 +187,61 @@ describe("skill usage display evidence", () => {
       snapshot,
       second,
     ]);
+  });
+});
+
+describe("skill usage around scheduled-task groups", () => {
+  test("a schedule card does not end the turn: live skills anchor on the final answer", () => {
+    const grouped = getMessageGroups([
+      message("user", "human"),
+      {
+        ...message("read", "ai"),
+        tool_calls: [{ id: "read", name: "read_file", args: {} }],
+      } as Message,
+      message("result", "tool", undefined, snapshot),
+      {
+        ...message("schedule", "ai"),
+        tool_calls: [
+          { id: "sched", name: "schedule_task", args: { action: "create" } },
+        ],
+      } as Message,
+      {
+        ...message("scheduled", "tool"),
+        name: "schedule_task",
+        tool_call_id: "sched",
+        content: JSON.stringify({
+          action: "create",
+          display: "card",
+          task: { id: "task-1", title: "Report" },
+        }),
+      } as Message,
+      message("final", "ai", undefined, snapshot),
+    ]);
+    expect(grouped.map((group) => group.type)).toContain(
+      "assistant:scheduled-task",
+    );
+    const usage = getSkillUsageByGroupIndex(grouped);
+    expect([...usage.keys()]).toEqual([grouped.length - 1]);
+    expect(usage.get(grouped.length - 1)).toEqual([snapshot]);
+  });
+
+  test("a run thread attributes skills like an ordinary human turn", () => {
+    const { messages } = loadScheduledThread("minute-run");
+    const finalId = messages.at(-1)?.id;
+    expect(messages.at(-1)?.type).toBe("ai");
+    const withSkill = messages.map((item) =>
+      item.id === finalId
+        ? ({
+            ...item,
+            additional_kwargs: { skill_usages: [snapshot] },
+          } as Message)
+        : item,
+    );
+    const scheduled = getSkillUsageByGroupIndex(getMessageGroups(withSkill));
+    const ordinary = getSkillUsageByGroupIndex(
+      getMessageGroups(withOrdinaryHumanTurn(withSkill)),
+    );
+    expect([...scheduled.entries()]).toEqual([...ordinary.entries()]);
+    expect(scheduled.size).toBe(1);
   });
 });

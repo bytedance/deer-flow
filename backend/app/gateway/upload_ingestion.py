@@ -35,6 +35,7 @@ import shutil
 import tempfile
 import uuid
 from collections.abc import AsyncIterator
+from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -42,6 +43,7 @@ from fastapi import HTTPException
 
 from deerflow.config.app_config import AppConfig
 from deerflow.uploads.companions import register_companion, unregister_companion
+from deerflow.utils.atomic_write import cleanup_failed_atomic_write
 from deerflow.utils.file_io import await_drained, run_file_io
 
 if TYPE_CHECKING:
@@ -60,7 +62,8 @@ def _close_fd(fd: int | None) -> None:
     try:
         os.close(fd)
     except OSError:
-        logger.warning("Failed to close upload conversion descriptor", exc_info=True)
+        with suppress(Exception):
+            logger.warning("Failed to close upload conversion descriptor", exc_info=True)
 
 
 def _close_abandoned_fd(duplication: asyncio.Future) -> None:
@@ -160,7 +163,11 @@ class ThreadUploadIngestionService:
         self._total_size = 0
 
     async def __aenter__(self) -> ThreadUploadIngestionService:
-        await self.open()
+        try:
+            await self.open()
+        except BaseException:
+            await self.aclose()
+            raise
         return self
 
     async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
@@ -193,18 +200,23 @@ class ThreadUploadIngestionService:
         sandbox_provider = uploads.get_sandbox_provider()
         self._sync_to_sandbox = not uploads._uses_thread_data_mounts(sandbox_provider)
         if self._sync_to_sandbox:
-            self._sandbox_lease = await uploads.try_acquire_sandbox_for_request(
-                self._request,
-                sandbox_provider,
-                self._thread_id,
-                user_id=self._user_id,
-                app_config=self._config,
-                owner_prefix="gateway:upload",
-                release_on_last=True,
-            )
-            self._sandbox = self._sandbox_lease.sandbox
-            if not self._sandbox_lease.denied and self._sandbox is None:
-                raise HTTPException(status_code=500, detail="Failed to acquire sandbox")
+
+            async def acquire_lease() -> None:
+                self._sandbox_lease = await uploads.try_acquire_sandbox_for_request(
+                    self._request,
+                    sandbox_provider,
+                    self._thread_id,
+                    user_id=self._user_id,
+                    app_config=self._config,
+                    owner_prefix="gateway:upload",
+                    release_on_last=True,
+                )
+                self._sandbox = self._sandbox_lease.sandbox
+                if not self._sandbox_lease.denied and self._sandbox is None:
+                    raise HTTPException(status_code=500, detail="Failed to acquire sandbox")
+
+            # Retain the returned holder even if acquisition's awaiter is gone.
+            await await_drained(acquire_lease())
         self._auto_convert = uploads._auto_convert_documents_enabled(self._config)
 
     async def _link_commit_with_retry(self, uploads: Any, staged_path: Path, claimed_name: str) -> tuple[str, Path]:
@@ -220,14 +232,37 @@ class ThreadUploadIngestionService:
         the link makes the final name visible, fully formed.
         """
         assert self._uploads_dir is not None, "open() must run before committing destinations"
-        name = claimed_name
-        while True:
-            try:
-                return name, await run_file_io(uploads._link_staged_no_overwrite, staged_path, self._uploads_dir, name)
-            except FileExistsError:
-                name = uploads.claim_unique_filename(name, self._seen_filenames)
+
+        async def publish() -> tuple[str, Path]:
+            name = claimed_name
+            while True:
+                try:
+                    path = await run_file_io(uploads._link_staged_no_overwrite, staged_path, self._uploads_dir, name)
+                    self._written_paths.append(path)
+                    return name, path
+                except FileExistsError:
+                    name = uploads.claim_unique_filename(name, self._seen_filenames)
+
+        # Publication and recording its cleanup owner are one admitted step.
+        return await await_drained(publish())
 
     async def ingest_chunks(self, chunks: AsyncIterator[bytes], *, display_name: str) -> dict[str, Any]:
+        """Ingest a cancellable stream, reclaiming session files on cancellation.
+
+        Only admitted filesystem steps and their ownership handoffs are drained;
+        waiting for the next incoming chunk remains immediately cancellable.
+        """
+        try:
+            return await self._ingest_chunks(chunks, display_name=display_name)
+        except asyncio.CancelledError:
+            try:
+                await self.cleanup_written()
+            except Exception:
+                with suppress(Exception):
+                    logger.warning("Failed to reclaim cancelled upload session files", exc_info=True)
+            raise
+
+    async def _ingest_chunks(self, chunks: AsyncIterator[bytes], *, display_name: str) -> dict[str, Any]:
         """Ingest one file from a chunk stream; return its wire metadata dict.
 
         Owns the per-file pipeline exactly as the ordinary endpoint defines
@@ -252,8 +287,42 @@ class ThreadUploadIngestionService:
         upload_temp = None
         convert_source_fd: int | None = None
         deferred_staged_path: Path | None = None
-        try:
+
+        async def prepare() -> None:
+            nonlocal upload_temp
             upload_temp = await run_file_io(uploads._prepare_upload_destination, self._uploads_dir, safe_filename)
+
+        async def publish() -> Path:
+            nonlocal safe_filename, upload_temp, deferred_staged_path
+            while True:
+                try:
+                    path = await run_file_io(
+                        uploads._commit_upload_temp_no_overwrite,
+                        upload_temp,
+                        self._uploads_dir,
+                        safe_filename,
+                        unlink_staged=convert_source_fd is None,
+                    )
+                    break
+                except FileExistsError:
+                    safe_filename = uploads.claim_unique_filename(safe_filename, self._seen_filenames)
+            self._written_paths.append(path)
+            if convert_source_fd is not None:
+                deferred_staged_path = upload_temp.temp_path
+            upload_temp = None
+            return path
+
+        async def abort() -> None:
+            nonlocal convert_source_fd
+            _close_fd(convert_source_fd)
+            convert_source_fd = None
+            if upload_temp is not None:
+                await run_file_io(uploads._abort_upload_temp, upload_temp)
+            if deferred_staged_path is not None:
+                await run_file_io(uploads._remove_staged_file, deferred_staged_path)
+
+        try:
+            await await_drained(prepare())
             async for chunk in chunks:
                 file_size += len(chunk)
                 self._total_size += len(chunk)
@@ -261,7 +330,7 @@ class ThreadUploadIngestionService:
                     raise HTTPException(status_code=413, detail=f"File too large: {safe_filename}")
                 if self._total_size > self._limits.max_total_size:
                     raise HTTPException(status_code=413, detail="Total upload size too large")
-                await run_file_io(uploads._write_upload_chunk, upload_temp, chunk)
+                await await_drained(run_file_io(uploads._write_upload_chunk, upload_temp, chunk))
             if self._auto_convert and Path(safe_filename).suffix.lower() in uploads.CONVERTIBLE_EXTENSIONS:
                 # Conversion must read the bytes this request staged. Once the
                 # name is committed a sandbox process can replace it with a
@@ -278,37 +347,17 @@ class ThreadUploadIngestionService:
             # Publishing is therefore split from removing the staged name:
             # this request keeps ownership of the staged path and removes it
             # once the descriptor is released below.
-            while True:
-                try:
-                    file_path = await run_file_io(
-                        uploads._commit_upload_temp_no_overwrite,
-                        upload_temp,
-                        self._uploads_dir,
-                        safe_filename,
-                        unlink_staged=convert_source_fd is None,
-                    )
-                    break
-                except FileExistsError:
-                    safe_filename = uploads.claim_unique_filename(safe_filename, self._seen_filenames)
-            if convert_source_fd is not None:
-                deferred_staged_path = upload_temp.temp_path
-            upload_temp = None
+            file_path = await await_drained(publish())
         except uploads.UnsafeUploadPathError as exc:
-            _close_fd(convert_source_fd)
-            if upload_temp is not None:
-                await run_file_io(uploads._abort_upload_temp, upload_temp)
+            await await_drained(abort())
             raise UnsafeUploadDestinationError(safe_filename) from exc
         except BaseException:
             # BaseException, not Exception: a cancellation between the
             # duplication and the commit would otherwise leave the descriptor
             # open, and nothing downstream owns it yet.
-            _close_fd(convert_source_fd)
-            convert_source_fd = None
-            if upload_temp is not None:
-                await run_file_io(uploads._abort_upload_temp, upload_temp)
+            await await_drained(abort())
             raise
 
-        self._written_paths.append(file_path)
         virtual_path = uploads.upload_virtual_path(safe_filename)
         if self._sync_to_sandbox:
             self._sync_targets.append((file_path, virtual_path))
@@ -340,8 +389,22 @@ class ThreadUploadIngestionService:
             # the descriptor is already owned here — leaking it would also hold
             # the unlinked staged bytes until the process exits.
             private_dir: Path | None = None
-            try:
+
+            async def prepare_conversion() -> None:
+                nonlocal private_dir
                 private_dir = Path(await run_file_io(tempfile.mkdtemp, "-deerflow-convert"))
+
+            def cleanup_conversion() -> None:
+                # Release the pinned descriptor before removing either name
+                # on Windows, and cover allocation/publication cancellations.
+                cleanup_failed_atomic_write(md_staging, convert_source_fd)
+                if deferred_staged_path is not None:
+                    uploads._remove_staged_file(deferred_staged_path)
+                if private_dir is not None:
+                    shutil.rmtree(private_dir, ignore_errors=True)
+
+            try:
+                await await_drained(prepare_conversion())
                 conversion_source = private_dir / safe_filename
                 # Hand the descriptor over before the call: the copy closes it
                 # even when it fails, so this scope must not close it again and
@@ -354,36 +417,23 @@ class ThreadUploadIngestionService:
                 staged_fd, convert_source_fd = convert_source_fd, None
                 await await_drained(run_file_io(_copy_fd_to_path, staged_fd, conversion_source))
                 md_staged = await uploads.convert_file_to_markdown(conversion_source, output_path=md_staging)
-            except Exception:
+                if not md_staged:
+                    self._seen_filenames.discard(unique_md_name)
+                else:
+                    unique_md_name, md_path = await self._link_commit_with_retry(uploads, Path(md_staged), unique_md_name)
+                    md_virtual_path = uploads.upload_virtual_path(md_path.name)
+                    if self._sync_to_sandbox:
+                        self._sync_targets.append((md_path, md_virtual_path))
+                    file_info["markdown_file"] = md_path.name
+                    self._companion_pairs.append((file_path, md_path))
+                    file_info["markdown_path"] = str(self._uploads_dir / md_path.name)
+                    file_info["markdown_virtual_path"] = md_virtual_path
+                    file_info["markdown_artifact_url"] = uploads.upload_artifact_url(self._thread_id, md_path.name)
+            except BaseException:
                 self._seen_filenames.discard(unique_md_name)
-                await run_file_io(md_staging.unlink, True)
                 raise
             finally:
-                _close_fd(convert_source_fd)
-                if deferred_staged_path is not None:
-                    # The descriptor that pinned the staged inode is released
-                    # by now, so the deferred staged-name removal can land.
-                    await run_file_io(uploads._remove_staged_file, deferred_staged_path)
-                if private_dir is not None:
-                    await run_file_io(shutil.rmtree, private_dir, True)
-            if not md_staged:
-                # Conversion failed and wrote nothing (or a partial staged
-                # file, removed here): release the claim; holding it would
-                # rename a later same-stem upload against a name nothing
-                # occupies.
-                self._seen_filenames.discard(unique_md_name)
-                await run_file_io(md_staging.unlink, True)
-            else:
-                unique_md_name, md_path = await self._link_commit_with_retry(uploads, Path(md_staged), unique_md_name)
-                self._written_paths.append(md_path)
-                md_virtual_path = uploads.upload_virtual_path(md_path.name)
-                if self._sync_to_sandbox:
-                    self._sync_targets.append((md_path, md_virtual_path))
-                file_info["markdown_file"] = md_path.name
-                self._companion_pairs.append((file_path, md_path))
-                file_info["markdown_path"] = str(self._uploads_dir / md_path.name)
-                file_info["markdown_virtual_path"] = md_virtual_path
-                file_info["markdown_artifact_url"] = uploads.upload_artifact_url(self._thread_id, md_path.name)
+                await await_drained(run_file_io(cleanup_conversion))
         return file_info
 
     async def finalize(self) -> None:
@@ -394,6 +444,9 @@ class ThreadUploadIngestionService:
         stay in place; the caller does not clean them up, matching ordinary
         upload behavior for sync-phase errors).
         """
+        await await_drained(self._finalize())
+
+    async def _finalize(self) -> None:
         uploads = _uploads()
         # Uploaded files are created with 0o600 permissions (owner read/write
         # only). In Docker sandbox deployments the gateway writes as root but
@@ -413,12 +466,19 @@ class ThreadUploadIngestionService:
 
     async def cleanup_written(self) -> None:
         """Remove every file this session wrote (ordinary rejected-request cleanup)."""
+        await await_drained(self._cleanup_written())
+
+    async def _cleanup_written(self) -> None:
         if not self._written_paths:
             return
         uploads = _uploads()
         await run_file_io(uploads._cleanup_uploaded_paths, self._written_paths)
         for original, _ in self._companion_pairs:
-            await run_file_io(unregister_companion, original)
+            try:
+                await run_file_io(unregister_companion, original)
+            except Exception:
+                with suppress(Exception):
+                    logger.warning("Failed to remove upload companion record for %s", original, exc_info=True)
         self._companion_pairs = []
         self._written_paths = []
 
@@ -427,10 +487,11 @@ class ThreadUploadIngestionService:
         if self._sandbox_lease is None:
             return
         try:
-            await self._sandbox_lease.release()
+            await await_drained(self._sandbox_lease.release())
         except Exception:
-            logger.warning(
-                "Failed to release sandbox request lease after upload sync: %s",
-                self._sandbox_lease.sandbox_id,
-                exc_info=True,
-            )
+            with suppress(Exception):
+                logger.warning(
+                    "Failed to release sandbox request lease after upload sync: %s",
+                    self._sandbox_lease.sandbox_id,
+                    exc_info=True,
+                )

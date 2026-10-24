@@ -174,13 +174,18 @@ class SandboxConfig(BaseModel):
         allow_host_bash: Enable host-side bash execution for LocalSandboxProvider.
             Dangerous and intended only for fully trusted local workflows.
 
-    AioSandboxProvider, BoxliteProvider, E2BSandboxProvider, and OpenSandboxProvider shared options:
+    AioSandboxProvider, BoxliteProvider, E2BSandboxProvider, OpenSandboxProvider, and
+    LocalSandboxProvider shared options:
         image: Sandbox image to use (Docker/AIO, BoxLite OCI, or OpenSandbox image)
         replicas: Positive provider capacity. E2B shares it across Gateway
             workers when ownership uses Redis; other modes/providers keep
             process-local accounting.
         idle_timeout: Idle timeout in seconds before released warm sandboxes/VMs are stopped (default: 600 = 10 minutes). Set to 0 to disable.
-        environment: Environment variables to inject into the sandbox (values starting with $ are resolved from host env)
+        environment: Environment variables to inject into the sandbox (values starting with $ are
+            resolved from host env when config is loaded; providers use them verbatim). Injected
+            entries bypass the env-policy scrubber as operator-authorized values;
+            LocalSandboxProvider masks injected credentials from bash tool output and command
+            errors while preserving benign configuration values.
 
     BoxliteProvider specific options:
         health_check_skip_seconds: Optional reclaim-time skip window in seconds for recently released warm VMs. Default behavior is 0.0 = always validate before reuse.
@@ -211,6 +216,15 @@ class SandboxConfig(BaseModel):
     allow_host_bash: bool = Field(
         default=False,
         description="Allow the bash tool to execute directly on the host when using LocalSandboxProvider. Dangerous; intended only for fully trusted local environments.",
+    )
+    prewarm: bool = Field(
+        default=False,
+        description=("Start an AioSandboxProvider acquire in parallel with the first model call when the user input contains a strong sandbox-use signal. Disabled by default; ignored by other sandbox providers."),
+    )
+    prewarm_max_concurrent: int = Field(
+        default=1,
+        ge=1,
+        description=("Maximum pending or ready-but-unused AIO prewarms per provider instance in this process. When full, skip speculation without delaying foreground tools. This is not a total container or deployment-wide limit."),
     )
     image: str | None = Field(
         default=None,
@@ -252,6 +266,7 @@ class SandboxConfig(BaseModel):
     )
 
     @field_validator(
+        "prewarm_max_concurrent",
         "port",
         "replicas",
         "acquire_timeout",
@@ -291,7 +306,7 @@ class SandboxConfig(BaseModel):
     )
     environment: dict[str, str] = Field(
         default_factory=dict,
-        description="Environment variables to inject into the sandbox container. Values starting with $ will be resolved from host environment variables.",
+        description="Environment variables to inject into sandbox commands (including the local provider). Values starting with $ will be resolved from host environment variables when config is loaded.",
     )
     network: SandboxNetworkConfig = Field(
         default_factory=SandboxNetworkConfig,
@@ -322,10 +337,10 @@ class SandboxConfig(BaseModel):
             "(1.9.3+, recommended 1.11.0) enforce it server-side through "
             "`hard_timeout`; the frozen legacy `all-in-one-sandbox:latest` image "
             "only gets the bounded host-side request. `bash_command_timeout` is "
-            "used by providers that explicitly wire this setting (currently "
-            "LocalSandbox, AioSandbox, and OpenSandbox). Other providers retain "
-            "their provider-specific command defaults unless a caller supplies an "
-            "explicit timeout."
+            "forwarded to each provider's command API. LocalSandbox, AioSandbox, "
+            "OpenSandbox, E2B, BoxLite, and Tenki apply it to bash commands; "
+            "providers without per-command timeout support retain their own "
+            "defaults."
         ),
     )
 

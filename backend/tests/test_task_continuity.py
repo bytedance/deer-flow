@@ -91,6 +91,61 @@ def test_old_checkpoint_cannot_see_future_batch(scoped):
     assert archive.lookup(old, scoped, query="Citrine")["results"]
 
 
+def test_active_search_results_participate_in_archive_result_limit(scoped):
+    archived = [HumanMessage(content=f"needle archived {i}", id=f"archived-{i}") for i in range(8)]
+    history = archive.capture({}, scoped, archived, TaskContinuityConfig(enabled=True))
+    active = HumanMessage(content="needle current", id="current")
+
+    result = archive.lookup({"task_history": history, "messages": [active]}, scoped, query="needle")
+
+    assert len(result["results"]) == 8
+    assert any(row["message_id"] == "current" for row in result["results"])
+    assert sum(row["role"] == "human" for row in result["results"]) == 8
+
+
+def test_active_search_results_deduplicate_against_archived_matches(scoped):
+    archived = [HumanMessage(content=f"needle archived {i}", id=f"archived-{i}") for i in range(8)]
+    history = archive.capture({}, scoped, archived, TaskContinuityConfig(enabled=True))
+    active = [archived[0], HumanMessage(content="needle current", id="current")]
+
+    result = archive.lookup({"task_history": history, "messages": active}, scoped, query="needle")
+
+    assert len(result["results"]) == 8
+    message_ids = [row["message_id"] for row in result["results"]]
+    assert message_ids.count("archived-0") == 1
+    assert "current" in message_ids
+
+
+def test_read_by_id_deduplicates_active_and_archived_source(scoped):
+    message = HumanMessage(content="needle archived and active", id="shared")
+    history = archive.capture({}, scoped, [message], TaskContinuityConfig(enabled=True))
+    source_id = archive.records([message])[0]["id"]
+
+    result = archive.lookup(
+        {"task_history": history, "messages": [message]},
+        scoped,
+        source_id=source_id,
+    )
+
+    assert [row["id"] for row in result["results"]] == [source_id]
+
+
+def test_active_only_matches_deduplicate_before_result_limit(scoped):
+    archived = [HumanMessage(content="needle archived", id="archived")]
+    history = archive.capture({}, scoped, archived, TaskContinuityConfig(enabled=True))
+    duplicate_a = HumanMessage(content="needle duplicate")
+    duplicate_b = HumanMessage(content="needle duplicate")
+
+    result = archive.lookup(
+        {"task_history": history, "messages": [duplicate_a, duplicate_b]},
+        scoped,
+        query="needle",
+    )
+
+    assert len(result["results"]) == 2
+    assert {row["message_id"] for row in result["results"]} == {None, "archived"}
+
+
 def test_retention_is_explicit_and_duplicate_capture_is_idempotent(scoped):
     config = TaskContinuityConfig(enabled=True, max_batches=1)
     old = {"task_history": archive.capture({}, scoped, conversation(), config)}
@@ -754,3 +809,196 @@ async def test_graph_executes_role_search_and_reads_original_source(scoped, asyn
     initial = {"messages": [HumanMessage(content="Resume")], "task_history": history}
     result = await graph.ainvoke(initial, context=scoped.context) if async_mode else graph.invoke(initial, context=scoped.context)
     assert result["messages"][-1].content == "source verified"
+
+
+@pytest.mark.parametrize("archived", [False, True])
+def test_search_excerpt_centers_late_hit_and_reads_same_characters(role_runtime, archived):
+    import json
+
+    text = "padding " * 625 + "Needle" + " tail" * 200
+    message = HumanMessage(content=text, id="late")
+    role_runtime.state = {"messages": [message]}
+    if archived:
+        role_runtime.state = {"task_history": archive.capture({}, role_runtime, [message], TaskContinuityConfig(enabled=True))}
+    row = json.loads(history_search.invoke({"runtime": role_runtime, "query": "needle", "role": "user"}))["results"][0]
+    assert "Needle" in row["excerpt"]
+    assert row["excerpt_start"] == 4703
+    assert row["excerpt_end"] == 5303
+    assert row["excerpt_match"] is True
+    assert row["excerpt"] == text[row["excerpt_start"] : row["excerpt_end"]]
+    page = json.loads(history_read.invoke({"runtime": role_runtime, "source_id": row["id"], "offset": row["excerpt_start"]}))
+    assert page["text"].startswith(row["excerpt"])
+
+
+@pytest.mark.parametrize("archived", [False, True])
+def test_search_excerpt_respects_active_substrings_and_archive_tokens(role_runtime, archived):
+    import json
+
+    text = "concatenate " + "padding " * 625 + "cat " + "tail " * 200
+    message = HumanMessage(content=text, id="tokens")
+    role_runtime.state = {"messages": [message]}
+    if archived:
+        role_runtime.state = {"task_history": archive.capture({}, role_runtime, [message], TaskContinuityConfig(enabled=True))}
+    row = json.loads(history_search.invoke({"runtime": role_runtime, "query": "cat"}))["results"][0]
+    assert row["excerpt_start"] == (4714 if archived else 0)
+    assert row["excerpt_match"] is True
+
+
+def test_search_excerpt_uses_readable_version_when_archive_caps_differ(role_runtime):
+    import json
+
+    message = HumanMessage(content="padding " * 625 + "needle", id="caps")
+    history = archive.capture({}, role_runtime, [message], TaskContinuityConfig(enabled=True, max_record_chars=1000))
+    history = archive.capture({"task_history": history}, role_runtime, [message], TaskContinuityConfig(enabled=True, max_record_chars=6000))
+    role_runtime.state = {"task_history": history}
+    row = json.loads(history_search.invoke({"runtime": role_runtime, "query": "needle"}))["results"][0]
+    source = json.loads(history_read.invoke({"runtime": role_runtime, "source_id": row["id"]}))
+    assert row["excerpt_start"] == 0
+    assert row["excerpt_end"] == 600
+    assert row["excerpt_match"] is False
+    assert row["truncated"] is source["truncated"] is True
+    assert row["excerpt"] == source["text"][:600]
+
+
+@pytest.mark.parametrize("archived", [False, True])
+@pytest.mark.parametrize(
+    "text,query,expected_start,expected_end,expected_hit",
+    [
+        ("needle" + " tail" * 200, "needle", 0, 600, "needle"),
+        ("pad " * 250 + "needle", "needle", 406, 1006, "needle"),
+        ("hello NEEDLE", "needle", 0, 12, "NEEDLE"),
+        ("pad " * 250 + "beta" + " filler " * 100 + "alpha", "alpha beta", 702, 1302, "beta"),
+        ("pad " * 250 + "needle" + " filler " * 100 + "needle", "needle needle", 703, 1303, "needle"),
+        ("ß " * 500 + "Straße" + " tail" * 200, "STRASSE", 703, 1303, "Straße"),
+        ("😀 " * 500 + "保留备份" + " tail" * 200, "保留备份", 701, 1301, "保留"),
+        ("pad " * 250 + "İstanbul" + " tail" * 200, "İSTANBUL", 701, 1301, "İstanbul"),
+    ],
+    ids=["start", "end", "short", "multi-term", "repeated", "sharp-s", "chinese-emoji", "dotted-i"],
+)
+def test_search_excerpt_boundaries_and_original_unicode_offsets(role_runtime, archived, text, query, expected_start, expected_end, expected_hit):
+    import json
+
+    message = HumanMessage(content=text, id="boundary")
+    role_runtime.state = {"messages": [message]}
+    if archived:
+        role_runtime.state = {"task_history": archive.capture({}, role_runtime, [message], TaskContinuityConfig(enabled=True))}
+    row = json.loads(history_search.invoke({"runtime": role_runtime, "query": query}))["results"][0]
+    assert (row["excerpt_start"], row["excerpt_end"]) == (expected_start, expected_end)
+    assert row["excerpt_match"] is True
+    assert expected_hit in row["excerpt"]
+    assert row["excerpt"] == text[expected_start:expected_end]
+    page = json.loads(history_read.invoke({"runtime": role_runtime, "source_id": row["id"], "offset": expected_start}))
+    assert page["text"].startswith(row["excerpt"])
+
+
+@pytest.mark.parametrize("active_copy", [False, True])
+def test_search_excerpt_fts_accent_fallback_does_not_invent_a_hit(role_runtime, active_copy):
+    import json
+
+    text = "pad " * 225 + "café" + " tail" * 200
+    message = HumanMessage(content=text, id="accent")
+    role_runtime.state = {"task_history": archive.capture({}, role_runtime, [message], TaskContinuityConfig(enabled=True, max_record_chars=1000))}
+    if active_copy:
+        role_runtime.state["messages"] = [message]
+    row = json.loads(history_search.invoke({"runtime": role_runtime, "query": "cafe"}))["results"][0]
+    assert row["excerpt_match"] is False
+    assert (row["excerpt_start"], row["excerpt_end"]) == (0, 600)
+    assert row["excerpt"] == text[:600]
+    assert row["truncated"] is (not active_copy)
+    source = json.loads(history_read.invoke({"runtime": role_runtime, "source_id": row["id"]}))
+    assert row["excerpt"] == source["text"][:600]
+    assert row["truncated"] == source["truncated"]
+
+
+@pytest.mark.parametrize("archived,cap", [(False, 64000), (True, 1000)])
+def test_search_excerpt_obeys_stored_cap_and_pagination(role_runtime, archived, cap):
+    import json
+
+    text = "x " * ((cap - 10) // 2) + "needle    " + "outside"
+    message = HumanMessage(content=text, id="capped")
+    role_runtime.state = {"messages": [message]}
+    if archived:
+        role_runtime.state = {"task_history": archive.capture({}, role_runtime, [message], TaskContinuityConfig(enabled=True, max_record_chars=cap))}
+    row = json.loads(history_search.invoke({"runtime": role_runtime, "query": "needle"}))["results"][0]
+    assert row["truncated"] is True
+    assert (row["excerpt_start"], row["excerpt_end"]) == (cap - 600, cap)
+    assert row["excerpt_match"] is True
+    page = json.loads(history_read.invoke({"runtime": role_runtime, "source_id": row["id"], "offset": row["excerpt_start"]}))
+    assert page["text"] == row["excerpt"] == text[cap - 600 : cap]
+    assert page["next_offset"] is None
+    assert not json.loads(history_search.invoke({"runtime": role_runtime, "query": "outside"}))["results"]
+
+
+@pytest.mark.asyncio
+async def test_async_search_excerpt_reads_active_version_of_archived_source(role_runtime):
+    import json
+
+    text = "pad " * 225 + "needle" + " tail" * 1000
+    message = HumanMessage(content=text, id="both")
+    role_runtime.state = {"task_history": archive.capture({}, role_runtime, [message], TaskContinuityConfig(enabled=True, max_record_chars=1000)), "messages": [message]}
+    rows = json.loads(await history_search.ainvoke({"runtime": role_runtime, "query": "needle", "role": "user"}))["results"]
+    assert len(rows) == 1
+    row = rows[0]
+    assert (row["excerpt_start"], row["excerpt_end"]) == (603, 1203)
+    assert row["truncated"] is False
+    page = json.loads(await history_read.ainvoke({"runtime": role_runtime, "source_id": row["id"], "offset": row["excerpt_start"]}))
+    assert page["text"].startswith(row["excerpt"])
+    assert page["next_offset"] == 4603
+
+
+@pytest.mark.parametrize("archived", [False, True])
+def test_search_excerpt_falls_back_when_folded_term_cannot_fit(role_runtime, archived):
+    import json
+
+    message = HumanMessage(content="pad " * 250 + "s" * 800, id="long-term")
+    role_runtime.state = {"messages": [message]}
+    if archived:
+        role_runtime.state = {"task_history": archive.capture({}, role_runtime, [message], TaskContinuityConfig(enabled=True))}
+    row = json.loads(history_search.invoke({"runtime": role_runtime, "query": "ß" * 400}))["results"][0]
+    assert row["excerpt_match"] is False
+    assert (row["excerpt_start"], row["excerpt_end"]) == (0, 600)
+    assert row["excerpt"] == message.content[:600]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_mode", [False, True])
+@pytest.mark.parametrize("archived", [False, True])
+@pytest.mark.parametrize("oversized_occurrences", [1, 2])
+async def test_search_excerpt_skips_oversized_occurrences_for_later_fitting_hit(role_runtime, async_mode, archived, oversized_occurrences):
+    import json
+
+    text = "padding " * 125 + ("s" * 800 + " gap " * 200) * oversized_occurrences + "ß" * 400 + " tail" * 200
+    message = HumanMessage(content=text, id="later-fitting-hit")
+    role_runtime.state = {"messages": [message]}
+    if archived:
+        role_runtime.state = {"task_history": archive.capture({}, role_runtime, [message], TaskContinuityConfig(enabled=True))}
+
+    arguments = {"runtime": role_runtime, "query": "ß" * 400, "role": "user"}
+    rows = json.loads(await history_search.ainvoke(arguments) if async_mode else history_search.invoke(arguments))["results"]
+    assert len(rows) == 1
+    row = rows[0]
+    expected_start = 900 + 1800 * oversized_occurrences
+    assert (row["excerpt_start"], row["excerpt_end"]) == (expected_start, expected_start + 600)
+    assert row["excerpt_match"] is True
+    assert "ß" * 400 in row["excerpt"]
+    assert row["excerpt"] == text[expected_start : expected_start + 600]
+    read_arguments = {"runtime": role_runtime, "source_id": row["id"], "offset": row["excerpt_start"]}
+    page = json.loads(await history_read.ainvoke(read_arguments) if async_mode else history_read.invoke(read_arguments))
+    assert page["text"].startswith(row["excerpt"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_mode", [False, True])
+async def test_active_search_excerpt_keeps_overlapping_fitting_occurrence(role_runtime, async_mode):
+    import json
+
+    text = "padding " * 125 + "s" * 800 + "ß" * 400 + " tail" * 200
+    role_runtime.state = {"messages": [HumanMessage(content=text, id="overlapping-fitting-hit")]}
+    arguments = {"runtime": role_runtime, "query": "ß" * 400}
+    row = json.loads(await history_search.ainvoke(arguments) if async_mode else history_search.invoke(arguments))["results"][0]
+    assert (row["excerpt_start"], row["excerpt_end"]) == (1400, 2000)
+    assert row["excerpt_match"] is True
+    assert row["excerpt"] == text[1400:2000] == "s" * 400 + "ß" * 200
+    read_arguments = {"runtime": role_runtime, "source_id": row["id"], "offset": row["excerpt_start"]}
+    page = json.loads(await history_read.ainvoke(read_arguments) if async_mode else history_read.invoke(read_arguments))
+    assert page["text"].startswith(row["excerpt"])

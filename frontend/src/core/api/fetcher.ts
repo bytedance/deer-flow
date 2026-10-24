@@ -1,4 +1,9 @@
-import { buildLoginUrl } from "@/core/auth/types";
+import {
+  ACCOUNT_DISABLED_LOGIN_URL,
+  buildLoginUrl,
+  currentReturnPath,
+  parseAuthError,
+} from "@/core/auth/types";
 import { isStaticWebsiteOnly } from "@/core/static-mode";
 
 import { UnauthorizedError } from "./errors";
@@ -61,23 +66,26 @@ export async function fetch(
   input: RequestInfo | string,
   init?: RequestInit,
 ): Promise<Response> {
+  const request = typeof input === "string" ? undefined : input;
   const url = typeof input === "string" ? input : input.url;
+  const method = init?.method ?? request?.method ?? "GET";
+  let headers = init?.headers ?? request?.headers;
 
   // Static demos have no Gateway. Resolve REST calls before credentials,
   // CSRF, or redirects; demo assets and explicit mock routes still use HTTP.
   if (isStaticWebsiteOnly()) {
     const response = await staticApiResponse(url, {
       ...init,
-      method:
-        init?.method ?? (typeof input === "string" ? "GET" : input.method),
+      method,
+      headers,
+      signal: init?.signal === undefined ? request?.signal : init.signal,
     });
     if (response) return response;
   }
 
   // Inject CSRF for state-changing methods. GET/HEAD/OPTIONS/TRACE skip
   // it to mirror the gateway's ``should_check_csrf`` logic exactly.
-  let headers = init?.headers;
-  if (isStateChangingMethod(init?.method ?? "GET")) {
+  if (isStateChangingMethod(method)) {
     const token = readCsrfCookie();
     if (token) {
       // Fresh Headers instance so we don't mutate caller-supplied objects.
@@ -89,19 +97,29 @@ export async function fetch(
     }
   }
 
-  const res = await globalThis.fetch(url, {
+  const res = await globalThis.fetch(input, {
     ...init,
     headers,
     credentials: "include",
   });
 
   if (res.status === 401) {
-    // Include the search string: routes that carry their target in the query
-    // (e.g. the standalone artifact viewer) are otherwise unrecoverable after
-    // login, which lands on the default workspace instead.
-    window.location.href = buildLoginUrl(
-      `${window.location.pathname}${window.location.search}`,
-    );
+    // An operator-disabled account (#4063 gap 3) gets a distinct code on the
+    // session surface; it cannot sign back in, so skip the `next` round-trip
+    // and land on a login page that states the reason.
+    // Body-consumption contract: the JSON body is consumed for the code and
+    // must never be read again below this line — every branch exits by
+    // throwing UnauthorizedError, so a future fall-through (e.g. telemetry)
+    // must not re-read `res`.
+    const code = await res
+      .json()
+      .then((data) => parseAuthError(data).code)
+      .catch(() => null);
+    if (code === "account_disabled") {
+      window.location.href = ACCOUNT_DISABLED_LOGIN_URL;
+      throw new UnauthorizedError();
+    }
+    window.location.href = buildLoginUrl(currentReturnPath());
     throw new UnauthorizedError();
   }
 

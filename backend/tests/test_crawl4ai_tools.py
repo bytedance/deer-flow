@@ -168,10 +168,81 @@ class TestCrawl4AiClient:
             assert result.startswith("Error: Crawl4AI returned a non-JSON 200 response")
             assert "text/html" in result
 
+    @pytest.mark.parametrize(
+        "payload",
+        [[{"markdown": "# ok"}], "maintenance window", 42, None, True],
+        ids=["payload-is-a-list", "payload-is-a-string", "payload-is-an-int", "payload-is-null", "payload-is-a-bool"],
+    )
+    async def test_fetch_markdown_non_object_200_reports_a_format_error(self, payload):
+        """A JSON 200 that is not an object is a format error, not a Python traceback.
+
+        Crawl4AI answers with a JSON object on success. A reverse proxy, a
+        version-skewed server or an error document delivered with HTTP 200 can
+        return a list or a bare scalar instead; indexing it directly raised
+        ``'list' object has no attribute 'get'`` and the generic handler echoed
+        that Python text to the agent. Sibling providers (tavily's
+        ``_response_objects``) report a format error instead.
+        """
+        with patch("deerflow.community.crawl4ai.crawl4ai_client.httpx.AsyncClient") as mock_cls:
+            mock_ctx = MagicMock()
+            mock_cls.return_value.__aenter__.return_value = mock_ctx
+
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.json.return_value = payload
+            mock_resp.headers = {"content-type": "application/json"}
+            mock_resp.text = json.dumps(payload)[:200]
+            mock_ctx.post = AsyncMock(return_value=mock_resp)
+
+            client = Crawl4AiClient(base_url="http://crawl4ai:11235")
+            result = await client.fetch_markdown("https://example.com")
+
+        assert result.startswith("Error: Crawl4AI returned an unexpected response format"), result
+        assert "object has no attribute" not in result
+
+    @pytest.mark.parametrize(
+        "markdown",
+        [["# heading"], 123, {"text": "# heading"}],
+        ids=["markdown-is-a-list", "markdown-is-an-int", "markdown-is-an-object"],
+    )
+    async def test_fetch_markdown_non_string_payload_reports_a_format_error(self, markdown):
+        """A non-string ``markdown`` field is the same format error, one level in.
+
+        ``data.get("markdown") or ""`` passes a list/dict/int straight through to
+        ``.strip()``, which raised ``'list' object has no attribute 'strip'`` --
+        the container guard above does not cover this field.
+        """
+        with patch("deerflow.community.crawl4ai.crawl4ai_client.httpx.AsyncClient") as mock_cls:
+            mock_ctx = MagicMock()
+            mock_cls.return_value.__aenter__.return_value = mock_ctx
+
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.json.return_value = {"success": True, "markdown": markdown}
+            mock_resp.headers = {"content-type": "application/json"}
+            mock_resp.text = "{}"
+            mock_ctx.post = AsyncMock(return_value=mock_resp)
+
+            client = Crawl4AiClient(base_url="http://crawl4ai:11235")
+            result = await client.fetch_markdown("https://example.com")
+
+        assert result.startswith("Error: Crawl4AI returned an unexpected response format"), result
+        assert "object has no attribute" not in result
+
 
 @pytest.mark.asyncio
 class TestCrawl4AiTools:
     """Tests for the Crawl4AI tool functions."""
+
+    @pytest.fixture(autouse=True)
+    def _backend_isolation_confirmed(self):
+        """Assume the delegated backend's egress is isolated for these tests.
+
+        These tests exercise fetch behavior, not backend isolation; the
+        fail-closed backend guard is covered in TestCrawl4AiBackendIsolation.
+        """
+        with patch("deerflow.community.crawl4ai.tools._validate_backend_base_url", return_value=None):
+            yield
 
     @patch("deerflow.community.crawl4ai.tools._build_client")
     @pytest.mark.usefixtures("public_dns")
@@ -356,3 +427,69 @@ class TestCrawl4AiTools:
         assert tools._coerce_filter("  FIt ") == "fit"
         assert tools._coerce_filter("bogus") == "fit"
         assert tools._coerce_filter(None) == "fit"
+
+
+@pytest.mark.asyncio
+class TestCrawl4AiBackendIsolation:
+    """Fail-closed delegated-backend SSRF guard (issue #5970)."""
+
+    @patch("deerflow.community.crawl4ai.tools._build_client")
+    @pytest.mark.usefixtures("public_dns")
+    async def test_web_fetch_tool_fails_closed_on_default_backend(self, mock_build):
+        from deerflow.community.crawl4ai import tools
+
+        with patch("deerflow.community.crawl4ai.tools._get_tool_config", return_value=None):
+            result = await tools.web_fetch_tool.ainvoke("https://example.com")
+
+        assert "network_isolation_confirmed" in result
+        mock_build.assert_not_called()
+
+    @patch("deerflow.community.crawl4ai.tools._build_client")
+    @pytest.mark.usefixtures("public_dns")
+    async def test_web_fetch_tool_fails_closed_even_with_allow_private(self, mock_build):
+        from deerflow.community.crawl4ai import tools
+
+        with patch(
+            "deerflow.community.crawl4ai.tools._get_tool_config",
+            return_value={"allow_private_addresses": True},
+        ):
+            result = await tools.web_fetch_tool.ainvoke("https://example.com")
+
+        assert "network_isolation_confirmed" in result
+        mock_build.assert_not_called()
+
+    @patch("deerflow.community.crawl4ai.tools._build_client")
+    @pytest.mark.usefixtures("public_dns")
+    async def test_web_fetch_tool_allows_self_hosted_backend_when_confirmed(self, mock_build):
+        from deerflow.community.crawl4ai import tools
+
+        mock_client = MagicMock()
+        mock_client.fetch_markdown = AsyncMock(return_value="# ok")
+        mock_build.return_value = mock_client
+
+        with patch(
+            "deerflow.community.crawl4ai.tools._get_tool_config",
+            return_value={"network_isolation_confirmed": True},
+        ):
+            result = await tools.web_fetch_tool.ainvoke("https://example.com")
+
+        assert result == "# ok"
+        mock_client.fetch_markdown.assert_called_once()
+
+    @patch("deerflow.community.crawl4ai.tools._build_client")
+    @pytest.mark.usefixtures("public_dns")
+    async def test_web_fetch_tool_allows_public_backend(self, mock_build):
+        from deerflow.community.crawl4ai import tools
+
+        mock_client = MagicMock()
+        mock_client.fetch_markdown = AsyncMock(return_value="# ok")
+        mock_build.return_value = mock_client
+
+        with patch(
+            "deerflow.community.crawl4ai.tools._get_tool_config",
+            return_value={"base_url": "https://crawl4ai.example.com"},
+        ):
+            result = await tools.web_fetch_tool.ainvoke("https://example.com")
+
+        assert result == "# ok"
+        mock_client.fetch_markdown.assert_called_once()

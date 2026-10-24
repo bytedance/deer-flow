@@ -1,12 +1,16 @@
 import errno
 import json
 import stat
+import threading
+import time
 import zipfile
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
+import uvicorn
 from _router_auth_helpers import make_authed_test_app
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -25,6 +29,12 @@ def _make_admin_user() -> User:
     from uuid import uuid4
 
     return User(email="admin-test@example.com", password_hash="x", system_role="admin", id=uuid4())
+
+
+def _make_member_user() -> User:
+    from uuid import uuid4
+
+    return User(email="member-test@example.com", password_hash="x", system_role="user", id=uuid4())
 
 
 def _skill_content(name: str, description: str = "Demo skill") -> str:
@@ -51,7 +61,7 @@ def _make_skill(name: str, *, enabled: bool) -> Skill:
     )
 
 
-def _make_test_app(config) -> FastAPI:
+def _make_test_app(config, *, user_factory=None, bind_current_user: bool = False) -> FastAPI:
     # The listing/detail routes read config.authorization.fail_closed even
     # when authorization is disabled (mirroring list_models). Many tests here
     # build minimal SimpleNamespace configs; backfill the real disabled
@@ -59,7 +69,10 @@ def _make_test_app(config) -> FastAPI:
     # crashing on a missing attribute.
     if not hasattr(config, "authorization"):
         config.authorization = AuthorizationConfig(enabled=False)
-    app = make_authed_test_app(user_factory=_make_admin_user)
+    # bind_current_user=True is what makes the route's real
+    # get_effective_user_id() resolve the stub user, so a test can drive two
+    # requests as two different users.
+    app = make_authed_test_app(user_factory=user_factory or _make_admin_user, bind_current_user=bind_current_user)
     app.state.config = config  # kept for any startup-style reads
     app.dependency_overrides[get_config] = lambda: config
     app.include_router(skills_router.router)
@@ -771,6 +784,154 @@ def test_custom_skill_delete_preserves_history_and_allows_restore(monkeypatch, t
         assert refresh_calls == [("refresh", "default"), ("refresh", "default")]
 
 
+def _patch_demo_custom_skill_config(monkeypatch, tmp_path: Path) -> SimpleNamespace:
+    from deerflow.config.paths import Paths
+
+    custom_dir = _user_custom_dir(tmp_path, "default") / "demo-skill"
+    custom_dir.mkdir(parents=True, exist_ok=True)
+    (custom_dir / "SKILL.md").write_text(_skill_content("demo-skill"), encoding="utf-8")
+
+    config = SimpleNamespace(
+        skills=SimpleNamespace(get_skills_path=lambda: tmp_path / "skills", container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage"),
+        skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
+    )
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: Paths(base_dir=tmp_path))
+    monkeypatch.setattr("deerflow.config.paths._paths", None)
+    monkeypatch.setattr("app.gateway.routers.skills.get_effective_user_id", lambda: "default")
+    return config
+
+
+def _make_demo_custom_skill_app(monkeypatch, tmp_path: Path, *, user_factory=None) -> FastAPI:
+    return _make_test_app(_patch_demo_custom_skill_config(monkeypatch, tmp_path), user_factory=user_factory)
+
+
+@pytest.mark.parametrize(
+    ("skill_name", "detail"),
+    [
+        ("Bad_Name", "hyphen-case"),
+        ("a" * 65, "64 characters or fewer"),
+    ],
+)
+def test_custom_skill_history_rejects_invalid_name(monkeypatch, tmp_path, caplog, skill_name, detail):
+    """An invalid name is a 400 like delete and rollback, not a logged 500."""
+    import logging
+
+    app = _make_demo_custom_skill_app(monkeypatch, tmp_path)
+
+    with TestClient(app) as client, caplog.at_level(logging.ERROR, logger=skills_router.__name__):
+        response = client.get(f"/api/skills/custom/{skill_name}/history")
+
+    assert response.status_code == 400
+    assert detail in response.json()["detail"]
+    assert "Failed to read history" not in caplog.text
+
+
+def test_custom_skill_delete_rejects_invalid_name_before_mutation_tail(monkeypatch, tmp_path, caplog):
+    """A malformed name is a 400 the drained delete tail never sees, so nothing is logged."""
+    import logging
+
+    app = _make_demo_custom_skill_app(monkeypatch, tmp_path)
+
+    with TestClient(app) as client, caplog.at_level(logging.ERROR, logger=skills_router.__name__):
+        response = client.delete("/api/skills/custom/Bad_Name")
+
+    assert response.status_code == 400
+    assert "hyphen-case" in response.json()["detail"]
+    assert caplog.records == []
+
+
+@pytest.mark.parametrize(
+    "history_bytes",
+    [
+        pytest.param(b"{not json\n", id="malformed-json"),
+        pytest.param(b'{"action": "human_edit", "prev_content": "\xff"}\n', id="non-utf8"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("method", "path", "body", "detail"),
+    [
+        ("GET", "/api/skills/custom/demo-skill/history", None, "Failed to read history:"),
+        ("POST", "/api/skills/custom/demo-skill/rollback", {"history_index": -1}, "Failed to roll back custom skill:"),
+    ],
+)
+def test_custom_skill_corrupt_history_record_stays_server_error(monkeypatch, tmp_path, method, path, body, detail, history_bytes):
+    """Only the name maps to 400: a corrupt history file (JSONDecodeError and UnicodeDecodeError are ValueErrors too) is a server fault."""
+    app = _make_demo_custom_skill_app(monkeypatch, tmp_path)
+    history_file = _user_custom_dir(tmp_path, "default") / ".history" / "demo-skill.jsonl"
+    history_file.parent.mkdir(parents=True, exist_ok=True)
+    history_file.write_bytes(history_bytes)
+
+    with TestClient(app) as client:
+        response = client.request(method, path, json=body)
+
+    assert response.status_code == 500
+    assert response.json()["detail"].startswith(detail)
+
+
+@pytest.mark.parametrize(
+    ("path", "detail"),
+    [
+        ("/api/skills", "Failed to load skills."),
+        ("/api/skills/custom", "Failed to list custom skills."),
+        ("/api/skills/demo-skill", "Failed to get skill."),
+    ],
+)
+def test_member_skill_reads_keep_load_error_text_out_of_500(monkeypatch, tmp_path, caplog, path, detail):
+    """Any signed-in user reaches these reads, so a load failure's host path stays in the server log."""
+    import logging
+
+    extensions_config = tmp_path / "extensions_config.json"
+    extensions_config.write_text("{not json", encoding="utf-8")
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_config))
+    app = _make_demo_custom_skill_app(monkeypatch, tmp_path, user_factory=_make_member_user)
+
+    with TestClient(app) as client, caplog.at_level(logging.ERROR, logger=skills_router.__name__):
+        response = client.get(path)
+
+    assert response.status_code == 500
+    assert response.json() == {"detail": detail}
+    assert str(extensions_config) in caplog.text
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/skills",
+        "/api/skills/custom",
+        "/api/skills/demo-skill",
+        "/api/capabilities/installations/skills",
+    ],
+)
+def test_gateway_skill_reads_keep_load_error_text_out_of_500(monkeypatch, tmp_path, path):
+    """Drive the real Gateway app: capability discovery has no handler of its own, so its 500 body is TraceMiddleware's fixed fallback until a handler for the raised class or a changed fallback echoes the exception."""
+    import app.gateway.app as app_module
+    from deerflow.extensions import reset_loaded_extensions, reset_runtime_diagnostics
+
+    extensions_config = tmp_path / "extensions_config.json"
+    extensions_config.write_text("{not json", encoding="utf-8")
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_config))
+    monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "1")
+    config = _patch_demo_custom_skill_config(monkeypatch, tmp_path)
+    config.authorization = AuthorizationConfig(enabled=False)
+
+    def _no_config_yaml():
+        raise FileNotFoundError("config.yaml")
+
+    # create_app() reads only the plugin list from config.yaml; keep a local one out of the test.
+    monkeypatch.setattr(app_module, "get_app_config", _no_config_yaml)
+    try:
+        gateway = app_module.create_app()
+        gateway.dependency_overrides[get_config] = lambda: config
+        response = TestClient(gateway, raise_server_exceptions=False).get(path)
+    finally:
+        reset_loaded_extensions()
+        reset_runtime_diagnostics()
+
+    assert response.status_code == 500
+    assert str(tmp_path) not in response.text
+
+
 def test_custom_skill_delete_continues_when_history_write_is_readonly(monkeypatch, tmp_path):
     skills_root = tmp_path / "skills"
     from deerflow.config.paths import Paths
@@ -999,12 +1160,15 @@ def test_public_skill_toggle_clears_all_users_cache(monkeypatch, tmp_path):
     assert persisted["skills"]["public-skill"]["enabled"] is False
 
 
-def test_public_skill_toggle_creates_missing_extensions_config(monkeypatch, tmp_path):
+def test_public_skill_toggle_creates_missing_extensions_config_at_project_root(monkeypatch, tmp_path):
     from deerflow.config.extensions_config import ExtensionsConfig
 
-    backend_dir = tmp_path / "backend"
-    backend_dir.mkdir()
+    # The working directory's parent is not the project root: the new file
+    # must land where resolution looks first, not next to the cwd.
+    backend_dir = tmp_path / "runtime" / "backend"
+    backend_dir.mkdir(parents=True)
     monkeypatch.chdir(backend_dir)
+    monkeypatch.setenv("DEER_FLOW_PROJECT_ROOT", str(tmp_path))
     config_path = tmp_path / "extensions_config.json"
 
     def _load_skills(*, enabled_only: bool):
@@ -1040,6 +1204,7 @@ def test_public_skill_toggle_creates_missing_extensions_config(monkeypatch, tmp_
     assert json.loads(config_path.read_text(encoding="utf-8")) == {
         "skills": {"public-skill": {"enabled": False}},
     }
+    assert not (backend_dir.parent / "extensions_config.json").exists()
 
 
 def test_public_skill_toggle_rebuilds_projection_before_response(monkeypatch, tmp_path):
@@ -1764,3 +1929,341 @@ async def test_install_skill_archive_drains_install_and_cache_refresh_across_can
 
     assert _user_custom_dir(tmp_path, "default").joinpath("install-skill").exists()
     assert refresh_calls == [("refresh", "default")]
+
+
+def _run_live_server(app) -> tuple[uvicorn.Server, threading.Thread, str]:
+    """Serve the app on a real socket so two requests can run concurrently."""
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=0, log_level="error"))
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    deadline = time.time() + 10
+    while not server.started and time.time() < deadline:
+        time.sleep(0.05)
+    assert server.started, "uvicorn test server did not start"
+    port = server.servers[0].sockets[0].getsockname()[1]
+    return server, thread, f"http://127.0.0.1:{port}"
+
+
+def _gate_first_write(monkeypatch) -> tuple[threading.Event, threading.Event]:
+    """Pause the first mutation inside its storage write, after its
+    predecessor read and before the write lands, so the test can complete a
+    second mutation inside the read -> write window."""
+    first_write_entered = threading.Event()
+    second_put_done = threading.Event()
+    original_write = UserScopedSkillStorage.write_custom_skill
+
+    def _gated_write(self, name, relative_path, content):
+        if not first_write_entered.is_set():
+            first_write_entered.set()
+            # When the mutation paths are serialized this wait times out —
+            # the second mutation cannot land inside the first one's critical
+            # section — and the write proceeds with a still-true predecessor.
+            # Without serialization the gate releases as soon as the test
+            # signals that the second PUT has fully completed, leaving the
+            # first entry's prev_content stale.
+            second_put_done.wait(timeout=2)
+        return original_write(self, name, relative_path, content)
+
+    monkeypatch.setattr(UserScopedSkillStorage, "write_custom_skill", _gated_write)
+    return first_write_entered, second_put_done
+
+
+def test_custom_skill_update_history_survives_concurrent_put(monkeypatch, tmp_path):
+    """A PUT completing between request A's predecessor read and A's write
+    must still be recorded in history: A's entry may not claim it overwrote
+    a revision that was already gone, and B's entry must record what it
+    actually overwrote, so every overwritten revision stays reachable by
+    rollback."""
+    skills_root = tmp_path / "skills"
+    from deerflow.config.paths import Paths
+
+    user_custom = _user_custom_dir(tmp_path, "default")
+    custom_dir = user_custom / "demo-skill"
+    custom_dir.mkdir(parents=True, exist_ok=True)
+    initial_content = _skill_content("demo-skill")
+    edited_content = _skill_content("demo-skill", "Edited skill")
+    concurrent_content = _skill_content("demo-skill", "Concurrent edit")
+    (custom_dir / "SKILL.md").write_text(initial_content, encoding="utf-8")
+
+    config = SimpleNamespace(
+        skills=SimpleNamespace(get_skills_path=lambda: skills_root, container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage"),
+        skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
+    )
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: Paths(base_dir=tmp_path))
+    monkeypatch.setattr("deerflow.config.paths._paths", None)
+
+    async def _refresh(user_id: str):
+        return None
+
+    monkeypatch.setattr("app.gateway.routers.skills.refresh_user_skills_system_prompt_cache_async", _refresh)
+    monkeypatch.setattr("app.gateway.routers.skills.get_effective_user_id", lambda: "default")
+    monkeypatch.setattr("app.gateway.routers.skills.scan_skill_content", lambda *args, **kwargs: _async_scan("allow", "ok"))
+
+    first_write_entered, second_put_done = _gate_first_write(monkeypatch)
+
+    app = _make_test_app(config)
+    server, server_thread, base_url = _run_live_server(app)
+    try:
+        with httpx.Client(base_url=base_url, timeout=30) as client_a, httpx.Client(base_url=base_url, timeout=30) as client_b:
+            a_result: dict = {}
+
+            def _request_a():
+                a_result["response"] = client_a.put("/api/skills/custom/demo-skill", json={"content": edited_content})
+
+            thread_a = threading.Thread(target=_request_a)
+            thread_a.start()
+            assert first_write_entered.wait(timeout=10), "request A never reached its write"
+            b_response = client_b.put("/api/skills/custom/demo-skill", json={"content": concurrent_content})
+            second_put_done.set()
+            thread_a.join(timeout=30)
+            assert a_result["response"].status_code == 200
+            assert b_response.status_code == 200
+
+            history_response = client_a.get("/api/skills/custom/demo-skill/history")
+    finally:
+        server.should_exit = True
+        server_thread.join(timeout=10)
+
+    assert history_response.status_code == 200
+    entries = history_response.json()["history"]
+    assert [entry["action"] for entry in entries] == ["human_edit", "human_edit"]
+    # First entry: A edited from the initial revision it actually overwrote.
+    assert entries[0]["prev_content"] == initial_content
+    assert entries[0]["new_content"] == edited_content
+    # Second entry: B landed after A and recorded A's revision as its
+    # predecessor — the chain stays replayable, so B remains reachable by
+    # a rollback from the latest entry.
+    assert entries[1]["prev_content"] == edited_content
+    assert entries[1]["new_content"] == concurrent_content
+    assert (custom_dir / "SKILL.md").read_text(encoding="utf-8") == concurrent_content
+
+
+def test_custom_skill_rollback_history_survives_concurrent_put(monkeypatch, tmp_path):
+    """Same contract as the edit path, for rollback: a concurrent PUT
+    completing between the rollback's predecessor read and its restore write
+    must end up recorded as the rollback's actually-overwritten content (or
+    serialized after it), never silently dropped from the history chain."""
+    skills_root = tmp_path / "skills"
+    from deerflow.config.paths import Paths
+
+    user_custom = _user_custom_dir(tmp_path, "default")
+    custom_dir = user_custom / "demo-skill"
+    custom_dir.mkdir(parents=True, exist_ok=True)
+    original_content = _skill_content("demo-skill")
+    current_content = _skill_content("demo-skill", "Current skill")
+    concurrent_content = _skill_content("demo-skill", "Concurrent edit")
+    (custom_dir / "SKILL.md").write_text(current_content, encoding="utf-8")
+
+    config = SimpleNamespace(
+        skills=SimpleNamespace(get_skills_path=lambda: skills_root, container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage"),
+        skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
+    )
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: Paths(base_dir=tmp_path))
+    monkeypatch.setattr("deerflow.config.paths._paths", None)
+
+    async def _refresh(user_id: str):
+        return None
+
+    monkeypatch.setattr("app.gateway.routers.skills.refresh_user_skills_system_prompt_cache_async", _refresh)
+    monkeypatch.setattr("app.gateway.routers.skills.get_effective_user_id", lambda: "default")
+    monkeypatch.setattr("app.gateway.routers.skills.scan_skill_content", lambda *args, **kwargs: _async_scan("allow", "ok"))
+
+    # One prior human_edit entry so the rollback has something to restore.
+    storage = UserScopedSkillStorage("default", host_path=str(skills_root))
+    history_file = storage.get_skill_history_file("demo-skill")
+    history_file.parent.mkdir(parents=True, exist_ok=True)
+    history_file.write_text(
+        '{"action":"human_edit","prev_content":' + json.dumps(original_content) + ',"new_content":' + json.dumps(current_content) + "}\n",
+        encoding="utf-8",
+    )
+
+    first_write_entered, second_put_done = _gate_first_write(monkeypatch)
+
+    app = _make_test_app(config)
+    server, server_thread, base_url = _run_live_server(app)
+    try:
+        with httpx.Client(base_url=base_url, timeout=30) as client_a, httpx.Client(base_url=base_url, timeout=30) as client_b:
+            a_result: dict = {}
+
+            def _request_a():
+                a_result["response"] = client_a.post("/api/skills/custom/demo-skill/rollback", json={"history_index": -1})
+
+            thread_a = threading.Thread(target=_request_a)
+            thread_a.start()
+            assert first_write_entered.wait(timeout=10), "rollback never reached its write"
+            b_response = client_b.put("/api/skills/custom/demo-skill", json={"content": concurrent_content})
+            second_put_done.set()
+            thread_a.join(timeout=30)
+            assert a_result["response"].status_code == 200
+            assert b_response.status_code == 200
+
+            history_response = client_a.get("/api/skills/custom/demo-skill/history")
+    finally:
+        server.should_exit = True
+        server_thread.join(timeout=10)
+
+    assert history_response.status_code == 200
+    entries = history_response.json()["history"]
+    assert [entry["action"] for entry in entries] == ["human_edit", "rollback", "human_edit"]
+    # The rollback restored the prior revision it actually overwrote.
+    assert entries[1]["prev_content"] == current_content
+    assert entries[1]["new_content"] == original_content
+    # The concurrent edit serialized after the rollback and recorded the
+    # restored revision as its predecessor — the chain stays replayable.
+    assert entries[2]["prev_content"] == original_content
+    assert entries[2]["new_content"] == concurrent_content
+    assert (custom_dir / "SKILL.md").read_text(encoding="utf-8") == concurrent_content
+
+
+def _user_with_id(user_id: str) -> User:
+    """An admin user with a fixed id, so its per-user skill root is predictable."""
+    from uuid import UUID
+
+    return User(email=f"{user_id}@example.com", password_hash="x", system_role="admin", id=UUID(user_id))
+
+
+def _users_in_request_order(*users: User):
+    """Hand one stub user to each request, in arrival order, then repeat the last."""
+    remaining = list(users)
+
+    def _factory() -> User:
+        return remaining.pop(0) if remaining else users[-1]
+
+    return _factory
+
+
+def _gate_write_by_content(monkeypatch, gated_content: str, concurrent_content: str) -> tuple[threading.Event, threading.Event, threading.Event]:
+    """Pause one mutation inside its storage write, after its predecessor read.
+
+    The gated request stays there until the test releases it, so a second
+    mutation either lands inside that window (its own user's lock) or cannot
+    start at all (one lock shared by both users).
+    """
+    gated_write_entered = threading.Event()
+    concurrent_write_entered = threading.Event()
+    release_gated_write = threading.Event()
+    original_write = UserScopedSkillStorage.write_custom_skill
+
+    def _gated_write(self, name, relative_path, content):
+        if content == gated_content:
+            gated_write_entered.set()
+            release_gated_write.wait(timeout=30)
+        elif content == concurrent_content:
+            concurrent_write_entered.set()
+        return original_write(self, name, relative_path, content)
+
+    monkeypatch.setattr(UserScopedSkillStorage, "write_custom_skill", _gated_write)
+    return gated_write_entered, concurrent_write_entered, release_gated_write
+
+
+def test_custom_skill_mutation_lock_is_scoped_to_the_owning_user(tmp_path, monkeypatch):
+    """One mutation lock per owning-user storage root, not one per process.
+
+    Every request (and every hot-reloaded config) builds its own storage object,
+    so identity across instances is what keeps one user's mutations serialized;
+    two users that own disjoint custom-skill trees must not share the lock that
+    also spans write_custom_skill's whole projection rebuild.
+    """
+    from app.gateway.routers.skills import _custom_skill_mutation_lock
+    from deerflow.config.paths import Paths
+
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: Paths(base_dir=tmp_path))
+    monkeypatch.setattr("deerflow.config.paths._paths", None)
+
+    alice = UserScopedSkillStorage("alice", host_path=str(tmp_path / "skills"))
+    alice_second_instance = UserScopedSkillStorage("alice", host_path=str(tmp_path / "skills"))
+    bob = UserScopedSkillStorage("bob", host_path=str(tmp_path / "skills"))
+
+    assert _custom_skill_mutation_lock(alice) is _custom_skill_mutation_lock(alice_second_instance)
+    assert _custom_skill_mutation_lock(alice) is not _custom_skill_mutation_lock(bob)
+
+
+def test_custom_skill_update_does_not_serialize_an_unrelated_user(monkeypatch, tmp_path):
+    """One user's in-flight mutation must not block a different user's.
+
+    The locked sequence wraps write_custom_skill, which rebuilds the user's
+    skill projection and can therefore be slow (a large or linked package, a
+    projection lock held elsewhere). With one process-wide lock, Alice's
+    rebuild stalls Bob's edit of an unrelated skill; scoped to the owning
+    user's storage, Bob's write reaches storage while Alice is still inside
+    hers, and each user's own history chain stays intact.
+    """
+    skills_root = tmp_path / "skills"
+    alice = _user_with_id("00000000-0000-4000-8000-0000000000a1")
+    bob = _user_with_id("00000000-0000-4000-8000-0000000000b2")
+    alice_custom = _user_custom_dir(tmp_path, str(alice.id)) / "demo-skill"
+    bob_custom = _user_custom_dir(tmp_path, str(bob.id)) / "demo-skill"
+    alice_custom.mkdir(parents=True, exist_ok=True)
+    bob_custom.mkdir(parents=True, exist_ok=True)
+    alice_initial = _skill_content("demo-skill")
+    bob_initial = _skill_content("demo-skill", "Bob's own skill")
+    alice_edited = _skill_content("demo-skill", "Edited by Alice")
+    bob_edited = _skill_content("demo-skill", "Edited by Bob")
+    (alice_custom / "SKILL.md").write_text(alice_initial, encoding="utf-8")
+    (bob_custom / "SKILL.md").write_text(bob_initial, encoding="utf-8")
+
+    from deerflow.config.paths import Paths
+
+    config = SimpleNamespace(
+        skills=SimpleNamespace(get_skills_path=lambda: skills_root, container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage"),
+        skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
+    )
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: Paths(base_dir=tmp_path))
+    monkeypatch.setattr("deerflow.config.paths._paths", None)
+
+    async def _refresh(user_id: str):
+        return None
+
+    monkeypatch.setattr("app.gateway.routers.skills.refresh_user_skills_system_prompt_cache_async", _refresh)
+    monkeypatch.setattr("app.gateway.routers.skills.scan_skill_content", lambda *args, **kwargs: _async_scan("allow", "ok"))
+
+    gated_write_entered, concurrent_write_entered, release_gated_write = _gate_write_by_content(monkeypatch, alice_edited, bob_edited)
+
+    app = _make_test_app(config, user_factory=_users_in_request_order(alice, bob), bind_current_user=True)
+    server, server_thread, base_url = _run_live_server(app)
+    bob_progressed = False
+    try:
+        with httpx.Client(base_url=base_url, timeout=30) as client_a, httpx.Client(base_url=base_url, timeout=30) as client_b:
+            a_result: dict = {}
+            b_result: dict = {}
+
+            def _request_a():
+                a_result["response"] = client_a.put("/api/skills/custom/demo-skill", json={"content": alice_edited})
+
+            def _request_b():
+                b_result["response"] = client_b.put("/api/skills/custom/demo-skill", json={"content": bob_edited})
+
+            thread_a = threading.Thread(target=_request_a)
+            thread_a.start()
+            assert gated_write_entered.wait(timeout=10), "Alice's edit never reached its write"
+
+            thread_b = threading.Thread(target=_request_b)
+            thread_b.start()
+            # Alice is parked inside her mutation; Bob must not wait for her.
+            bob_progressed = concurrent_write_entered.wait(timeout=5)
+
+            release_gated_write.set()
+            thread_a.join(timeout=30)
+            thread_b.join(timeout=30)
+    finally:
+        release_gated_write.set()
+        server.should_exit = True
+        server_thread.join(timeout=10)
+
+    assert bob_progressed, "Bob's edit waited on Alice's in-flight mutation instead of its own user's lock"
+    assert a_result["response"].status_code == 200
+    assert b_result["response"].status_code == 200
+    assert (alice_custom / "SKILL.md").read_text(encoding="utf-8") == alice_edited
+    assert (bob_custom / "SKILL.md").read_text(encoding="utf-8") == bob_edited
+
+    # Each user kept its own chain: the concurrent peer never entered the
+    # other user's history.
+    alice_history = UserScopedSkillStorage(str(alice.id), host_path=str(skills_root)).read_history("demo-skill")
+    bob_history = UserScopedSkillStorage(str(bob.id), host_path=str(skills_root)).read_history("demo-skill")
+    assert [entry["prev_content"] for entry in alice_history] == [alice_initial]
+    assert [entry["new_content"] for entry in alice_history] == [alice_edited]
+    assert [entry["prev_content"] for entry in bob_history] == [bob_initial]
+    assert [entry["new_content"] for entry in bob_history] == [bob_edited]
