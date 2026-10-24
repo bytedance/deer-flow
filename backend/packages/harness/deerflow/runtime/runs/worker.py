@@ -1033,6 +1033,7 @@ async def run_agent(
     # checkpoint lineage (see below).
     accessor: CheckpointStateAccessor | None = None
     rollback_point: RollbackPoint | None = None
+    checkpoint_resume_rejected = False
     journal = None
     partial_assistant_response: _PartialAssistantResponseAccumulator | None = None
     seq_stamper: _MessageSeqStamper | None = None
@@ -1750,6 +1751,7 @@ async def run_agent(
         await _finish_cancellation(record.abort_action)
 
     except Exception as exc:
+        checkpoint_resume_rejected = isinstance(exc, CheckpointResumeRejected)
         error_msg = f"{exc}"
         logger.exception("Run %s failed: %s", run_id, error_msg)
         await _ensure_stream_producer_lease()
@@ -1761,7 +1763,7 @@ async def run_agent(
             **terminal_status_kwargs,
         )
         if cancel_action is not None:
-            await _finish_cancellation(cancel_action)
+            await _finish_cancellation(cancel_action, restore_checkpoint=not checkpoint_resume_rejected)
         elif not record.ownership_lost:
             error_frame = {
                 "message": error_msg,
@@ -1801,7 +1803,9 @@ async def run_agent(
                         run_id,
                     )
 
-                if not record.ownership_lost and _is_edit_replay_run(record) and record.status != RunStatus.success:
+                # A rejected resume has not written state; compensating it through
+                # the state-only graph would itself discard the pending Sends.
+                if not record.ownership_lost and _is_edit_replay_run(record) and record.status != RunStatus.success and not checkpoint_resume_rejected:
                     if not record.finalizing:
                         await run_manager.set_finalizing(run_id, True)
                     try:
@@ -2907,6 +2911,10 @@ def _complete_state_replacement_values(
     return replacement_values
 
 
+class CheckpointResumeRejected(RuntimeError):
+    """Checkpoint preparation was rejected before any state write."""
+
+
 async def _linearize_delta_checkpoint_resume(
     *,
     accessor: CheckpointStateAccessor,
@@ -2977,13 +2985,18 @@ async def _linearize_delta_checkpoint_resume(
     if not isinstance(messages, list):
         raise RuntimeError(f"Run {run_id} could not materialize resume checkpoint {checkpoint_id}")
     # The state-only graph cannot preserve pending Sends to original agent nodes.
-    # Inspect the selected checkpoint, not the current head; ordinary replay's
-    # branch-channel triggers do not need this restriction.
-    selected_tuple = await accessor.aget_tuple(source_config)
-    if selected_tuple is None:
-        raise RuntimeError(f"Run {run_id} could not inspect pending execution for resume checkpoint {checkpoint_id}")
-    if (selected_tuple.checkpoint.get("channel_values") or {}).get("__pregel_tasks"):
-        raise RuntimeError("Cannot resume an older delta checkpoint with pending execution. Resume from the latest checkpoint instead.")
+    # Neither the selected checkpoint's tasks nor the head's may be discarded;
+    # ordinary replay's branch-channel triggers do not need this restriction.
+    for location, checkpoint_config in (("selected", source_config), ("head", head.config)):
+        inspected_id = checkpoint_config["configurable"]["checkpoint_id"]
+        checkpoint_tuple = await accessor.aget_tuple(checkpoint_config)
+        if checkpoint_tuple is None:
+            raise CheckpointResumeRejected(f"Run {run_id} could not inspect pending execution for {location} checkpoint {inspected_id} while resuming checkpoint {checkpoint_id}")
+        if (checkpoint_tuple.checkpoint.get("channel_values") or {}).get("__pregel_tasks"):
+            raise CheckpointResumeRejected(
+                f"Run {run_id} cannot resume an older delta checkpoint {checkpoint_id}: the {location} checkpoint {inspected_id} has pending execution. "
+                "Resume pending work from the latest checkpoint; to regenerate completed work, submit new input from the latest checkpoint."
+            )
     head_config["metadata"] = checkpoint_agent_binding_metadata(getattr(snapshot, "metadata", None))
 
     # Write through the thread's effective schema so every application and

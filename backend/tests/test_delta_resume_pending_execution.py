@@ -75,8 +75,8 @@ def _config(mode, checkpoint_id=None):
     return config
 
 
-async def _worker(graph, saver, manager, mode, config, graph_input, **kwargs):
-    record = await manager.create(THREAD_ID)
+async def _worker(graph, saver, manager, mode, config, graph_input, *, metadata=None, **kwargs):
+    record = await manager.create(THREAD_ID, metadata=metadata)
     bridge = SimpleNamespace(publish=AsyncMock(), publish_end=AsyncMock(), cleanup=AsyncMock())
     await run_agent(
         bridge,
@@ -120,6 +120,94 @@ async def _paused_worker(saver, mode):
     return graph, manager, calls, selected, head
 
 
+async def _earlier_checkpoint_without_sends(graph, saver, selector):
+    history = [snapshot async for snapshot in graph.aget_state_history(_config("delta"))]
+    selected = next(snapshot for snapshot in history if any(message.id == "first-answer" for message in snapshot.values.get("messages", [])) and (snapshot.metadata.get("source") == "input" if selector == "input" else snapshot.next == ()))
+    selected_tuple = await saver.aget_tuple(selected.config)
+    assert not (selected_tuple.checkpoint.get("channel_values") or {}).get("__pregel_tasks")
+    return await graph.aget_state(selected.config)
+
+
+@pytest.mark.parametrize("selector", ["input", "completed"])
+async def test_pending_head_rejects_earlier_selector_without_rewriting(checkpointer, selector):
+    graph, _, calls, _, head = await _paused_worker(checkpointer, "delta")
+    selected = await _earlier_checkpoint_without_sends(graph, checkpointer, selector)
+    head_tuple = await checkpointer.aget_tuple(head.config)
+    assert head_tuple.checkpoint["channel_values"]["__pregel_tasks"]
+    config = _config("delta", selected.config["configurable"]["checkpoint_id"])
+    before_config = copy.deepcopy(config)
+    before_checkpoints = [item.config async for item in checkpointer.alist(_config("delta"))]
+    accessor = CheckpointStateAccessor.bind(graph, checkpointer, mode="delta")
+
+    with pytest.raises(RuntimeError, match="pending execution.*latest checkpoint"):
+        await _linearize_delta_checkpoint_resume(accessor=accessor, checkpointer=checkpointer, config=config, thread_id=THREAD_ID, run_id="pending-head")
+
+    assert config == before_config
+    assert await graph.aget_state(_config("delta")) == head
+    assert await graph.aget_state(selected.config) == selected
+    assert [item.config async for item in checkpointer.alist(_config("delta"))] == before_checkpoints
+    result = await graph.ainvoke(Command(resume="continue"), _config("delta"))
+    assert calls == ["probe"]
+    assert result["messages"][-1].content == FINAL_ANSWER
+
+
+@pytest.mark.parametrize("selector", ["input", "completed"])
+@pytest.mark.parametrize("input_kind", ["resume", "fresh"])
+@pytest.mark.parametrize("edit_replay", [False, True])
+async def test_worker_preserves_pending_head_with_earlier_selector(checkpointer, selector, input_kind, edit_replay):
+    graph, manager, calls, _, head = await _paused_worker(checkpointer, "delta")
+    selected = await _earlier_checkpoint_without_sends(graph, checkpointer, selector)
+    checkpoint_id = selected.config["configurable"]["checkpoint_id"]
+    graph_input = Command(resume="continue") if input_kind == "resume" else {"messages": [HumanMessage(content="new request", id="h3")]}
+
+    record = await _worker(graph, checkpointer, manager, "delta", _config("delta", checkpoint_id), graph_input, metadata={"replay_kind": "edit"} if edit_replay else None)
+
+    assert record.status == RunStatus.error
+    assert "pending execution" in record.error
+    assert record.run_id in record.error
+    assert checkpoint_id in record.error
+    assert head.config["configurable"]["checkpoint_id"] in record.error
+    assert calls == []
+    after = await graph.aget_state(_config("delta"))
+    assert after.values == head.values
+    assert after.next == head.next == ("tools",)
+    record = await _worker(graph, checkpointer, manager, "delta", _config("delta"), Command(resume="continue"))
+    assert record.status == RunStatus.success
+    assert calls == ["probe"]
+    messages = (await graph.aget_state(_config("delta"))).values["messages"]
+    assert any(isinstance(message, ToolMessage) and message.tool_call_id == "probe-call" for message in messages)
+    assert messages[-1].content == FINAL_ANSWER
+
+
+@pytest.mark.parametrize("edit_replay", [False, True])
+async def test_rejected_resume_skips_rollback_when_cancellation_wins(checkpointer, monkeypatch, edit_replay):
+    graph, manager, calls, _, head = await _paused_worker(checkpointer, "delta")
+    selected = await _earlier_checkpoint_without_sends(graph, checkpointer, "completed")
+    original_set_status = manager.set_status_if_not_cancelled
+
+    async def cancellation_wins(run_id, status, **kwargs):
+        # Model the terminal manager decision after a durable rollback request
+        # wins admission; retain the real Worker, graph and checkpoint writes.
+        if status == RunStatus.error and "pending execution" in (kwargs.get("error") or ""):
+            return "rollback"
+        return await original_set_status(run_id, status, **kwargs)
+
+    monkeypatch.setattr(manager, "set_status_if_not_cancelled", cancellation_wins)
+    config = _config("delta", selected.config["configurable"]["checkpoint_id"])
+    record = await _worker(graph, checkpointer, manager, "delta", config, Command(resume="continue"), metadata={"replay_kind": "edit"} if edit_replay else None)
+
+    assert record.status == RunStatus.error
+    assert record.error == "Rolled back by user"
+    assert calls == []
+    after = await graph.aget_state(_config("delta"))
+    assert after.values == head.values
+    assert after.next == ("tools",)
+    record = await _worker(graph, checkpointer, manager, "delta", _config("delta"), Command(resume="continue"))
+    assert record.status == RunStatus.success
+    assert calls == ["probe"]
+    assert (await graph.aget_state(_config("delta"))).values["messages"][-1].content == FINAL_ANSWER
+
+
 @pytest.mark.parametrize("head_completed", [False, True])
 async def test_historical_delta_resume_rejects_before_mutating_pending_work(checkpointer, head_completed):
     graph, _, calls, selected, head = await _paused_worker(checkpointer, "delta")
@@ -133,9 +221,12 @@ async def test_historical_delta_resume_rejects_before_mutating_pending_work(chec
     before_checkpoints = [item.config async for item in checkpointer.alist(_config("delta"))]
     accessor = CheckpointStateAccessor.bind(graph, checkpointer, mode="delta")
 
-    with pytest.raises(RuntimeError, match="pending execution.*latest checkpoint"):
+    with pytest.raises(RuntimeError, match="pending execution.*latest checkpoint") as error:
         await _linearize_delta_checkpoint_resume(accessor=accessor, checkpointer=checkpointer, config=config, thread_id=THREAD_ID, run_id="rejected-resume")
 
+    assert "rejected-resume" in str(error.value)
+    assert selected.config["configurable"]["checkpoint_id"] in str(error.value)
+    assert "new input from the latest checkpoint" in str(error.value)
     assert config == before_config
     assert await graph.aget_state(_config("delta")) == head
     assert await graph.aget_state(selected.config) == selected
@@ -146,19 +237,29 @@ async def test_historical_delta_resume_rejects_before_mutating_pending_work(chec
     assert calls == ["probe"]
 
 
-async def test_unavailable_selected_checkpoint_rejects_without_rewriting(checkpointer, monkeypatch):
-    graph, _, calls, selected, head = await _paused_worker(checkpointer, "delta")
+@pytest.mark.parametrize("missing_checkpoint", ["selected", "head"])
+async def test_unavailable_checkpoint_rejects_without_rewriting(checkpointer, monkeypatch, missing_checkpoint):
+    graph, _, calls, _, head = await _paused_worker(checkpointer, "delta")
+    selected = await _earlier_checkpoint_without_sends(graph, checkpointer, "completed")
     accessor = CheckpointStateAccessor.bind(graph, checkpointer, mode="delta")
     config = _config("delta", selected.config["configurable"]["checkpoint_id"])
     before_config = copy.deepcopy(config)
     before_checkpoints = [item.config async for item in checkpointer.alist(_config("delta"))]
-    missing = AsyncMock(return_value=None)
+    missing_id = (selected if missing_checkpoint == "selected" else head).config["configurable"]["checkpoint_id"]
+    original_get_tuple = accessor.aget_tuple
+
+    async def get_tuple(config):
+        if config["configurable"].get("checkpoint_id") == missing_id:
+            return None
+        return await original_get_tuple(config)
+
+    missing = AsyncMock(side_effect=get_tuple)
     monkeypatch.setattr(accessor, "aget_tuple", missing)
 
     with pytest.raises(RuntimeError, match="could not inspect pending execution"):
         await _linearize_delta_checkpoint_resume(accessor=accessor, checkpointer=checkpointer, config=config, thread_id=THREAD_ID, run_id="missing-checkpoint")
 
-    assert missing.await_args.args[0]["configurable"]["checkpoint_id"] == selected.config["configurable"]["checkpoint_id"]
+    assert missing.await_args.args[0]["configurable"]["checkpoint_id"] == missing_id
     assert config == before_config
     assert await graph.aget_state(_config("delta")) == head
     assert [item.config async for item in checkpointer.alist(_config("delta"))] == before_checkpoints
@@ -169,10 +270,11 @@ async def test_unavailable_selected_checkpoint_rejects_without_rewriting(checkpo
 
 @pytest.mark.parametrize("mode", ["full", "delta"])
 @pytest.mark.parametrize("selector", ["head", "latest-id", "paused-id"])
-async def test_worker_does_not_report_success_after_discarding_pending_tools(checkpointer, mode, selector):
+@pytest.mark.parametrize("edit_replay", [False, True])
+async def test_worker_does_not_report_success_after_discarding_pending_tools(checkpointer, mode, selector, edit_replay):
     graph, manager, calls, selected, head = await _paused_worker(checkpointer, mode)
     checkpoint_id = None if selector == "head" else (head if selector == "latest-id" else selected).config["configurable"]["checkpoint_id"]
-    record = await _worker(graph, checkpointer, manager, mode, _config(mode, checkpoint_id), Command(resume="continue"))
+    record = await _worker(graph, checkpointer, manager, mode, _config(mode, checkpoint_id), Command(resume="continue"), metadata={"replay_kind": "edit"} if edit_replay else None)
 
     if mode == "delta" and selector == "paused-id":
         assert record.status == RunStatus.error
