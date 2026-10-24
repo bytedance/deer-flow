@@ -56,6 +56,25 @@ logger = logging.getLogger(__name__)
 _engine: AsyncEngine | None = None
 _session_factory: async_sessionmaker[AsyncSession] | None = None
 
+# SQLSTATE invalid_catalog_name: the database named in the URL does not exist.
+_MISSING_DATABASE_SQLSTATE = "3D000"
+
+
+def _is_missing_database_error(exc: BaseException) -> bool:
+    """Return whether *exc* means the target PostgreSQL database is absent.
+
+    Postgres words missing relations, columns and roles as "does not exist"
+    too, so the message cannot tell them apart; only the SQLSTATE can.
+    asyncpg raises this one unwrapped from connect(); follow ``__cause__``
+    so a SQLAlchemy-wrapped copy is recognized as well.
+    """
+    error: BaseException | None = exc
+    while error is not None:
+        if getattr(error, "sqlstate", None) == _MISSING_DATABASE_SQLSTATE:
+            return True
+        error = error.__cause__
+    return False
+
 
 async def _auto_create_postgres_db(url: str) -> None:
     """Connect to the ``postgres`` maintenance DB and CREATE DATABASE.
@@ -218,8 +237,11 @@ async def init_engine(
         await _ensure_postgres_schema()
         await bootstrap_schema(_engine, backend=backend, postgres_schema=postgres_schema)
     except Exception as exc:
-        if backend == "postgres" and "does not exist" in str(exc):
+        if backend == "postgres" and _is_missing_database_error(exc):
             # Database not yet created -- attempt to auto-create it, then retry.
+            # Any other bootstrap failure is re-raised untouched: a
+            # CREATE DATABASE attempt would replace it with "already exists"
+            # or "permission denied to create database".
             await _auto_create_postgres_db(url)
             # Rebuild engine against the now-existing database. The rebuilt
             # engine MUST keep the same connect_args so the retried bootstrap
