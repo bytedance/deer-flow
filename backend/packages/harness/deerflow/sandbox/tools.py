@@ -153,6 +153,129 @@ _LOCAL_BASH_ROOT_PATH_COMMANDS = {
     "tail",
     "tar",
 }
+# Windows host paths. ``_ABSOLUTE_PATH_PATTERN`` knows POSIX spellings only:
+# its ``/`` never matches right after a drive colon and a backslash path holds
+# no ``/`` at all, yet PowerShell, cmd.exe and Git Bash resolve both against the
+# host filesystem. Every scan below is Windows-only: on POSIX ``C:/x`` and
+# ``\x`` are ordinary relative names under the workspace.
+_WINDOWS_DRIVE_PATH_PATTERN = re.compile(r"(?<![A-Za-z0-9_])[A-Za-z]:[\\/][^\s\"'`;&|<>()]*")
+# Win32 namespace prefixes: ``\\?\C:\x`` is the extended-length spelling of a
+# host path and ``\\.\PhysicalDrive0`` opens a device, so both are host paths in
+# every argument position and never regex text.
+_WINDOWS_DEVICE_PREFIX_PATTERN = re.compile(r"\\\\[?.]\\")
+# No Windows file name may contain a colon, so a word starting ``X:`` is never a
+# relative workspace path there: it names drive X or its current directory. The
+# same reference keeps its meaning after a quote or ``=`` (``node -e "…('a:b')"``),
+# so the boundary rather than the word start decides; ``%h:%s`` and ``fix:`` stay
+# text because they follow a name character.
+_WINDOWS_DRIVE_SPEC_PATTERN = re.compile(r"(?:^|(?<=[\s;&|()<>`\"',=]))[A-Za-z]:")
+# A backslash root at an argument boundary. It needs one or two leading
+# backslashes: ``\Windows`` roots on the current drive and ``\\server\share`` is
+# a UNC path. The boundary includes a quote, so a root inside an interpreted
+# script (``sh -c "cat \Windows\win.ini"``) is found too.
+_WINDOWS_ROOTED_WORD_PATTERN = re.compile(r"(?:^|(?<=[\s,=\"']))\\{1,2}[^\s\"'`;&|<>()]+")
+# Unquoted ``..\..\secret`` loses its backslashes in the shlex token stream
+# (``....secret``), so the token-level dotdot check never sees the traversal.
+_WINDOWS_RAW_DOTDOT_PATTERN = re.compile(r"(?:^|(?<=[\s;&|()<>`\"'\\/,=]))\.\.[\\/]")
+# One C/regex escape atom: ``\d``, ``\n``, ``\x41``, ``\033``, ``\N{DASH}``,
+# ``\.``, optionally quantified. A word built from these (``\d``, ``\d\n``,
+# ``\\d``) is regex or format text; a letter after an atom starts a file name
+# instead (``\Windows``, ``\temp``, ``\Boot\BCD``, ``\\server\share``).
+_WINDOWS_ESCAPE_ATOM = r"\\(?:[A-Za-z]|0[0-7]{0,2}|[1-7][0-7]{0,2}|x[0-9A-Fa-f]{1,2}|u[0-9A-Fa-f]{1,4}|U[0-9A-Fa-f]{1,8}|N\{[^}]*\}|[.^$*+?()\[\]{}|/\-<>])[+*?]?"
+_WINDOWS_ESCAPE_WORD_PATTERN = re.compile(rf"\\?(?:{_WINDOWS_ESCAPE_ATOM})*(?:[^A-Za-z0-9\\/]|$)")
+# A colon followed by a separator is never escape text: ``\.:\Windows`` and
+# ``\C:\Windows`` are rooted paths whose first segment merely looks like an atom.
+_WINDOWS_ROOTED_COLON_PATTERN = re.compile(r":[\\/]")
+# cmd.exe ``%NAME%`` and PowerShell ``$env:NAME`` expand at execution time, so a
+# separator after the variable names a host path (``%WINDIR%\win.ini``).
+# Requiring the separator keeps printf formats (``%s\n``) and URL escapes out.
+# A ``:~`` substring expansion is already a fragment of the drive, so it needs no
+# separator; the two-character name keeps templates such as ``%s:~%s`` out.
+_WINDOWS_ENV_VAR_PATH_PATTERN = re.compile(r"%[A-Za-z_][A-Za-z0-9_]*(?::[^%]*)?%[\\/]|%[A-Za-z_][A-Za-z0-9_]+:~[^%]*%|\$\{?env:[A-Za-z_][A-Za-z0-9_]*\}?[\\/]", re.IGNORECASE)
+# A standalone variable is a host directory on its own, which the working
+# directory check needs (``cd %WINDIR%``).
+_WINDOWS_ENV_VAR_TARGET_PATTERN = re.compile(r"%[A-Za-z_][A-Za-z0-9_]*(?::[^%]*)?%|\$\{?env:[A-Za-z_][A-Za-z0-9_]*\}?", re.IGNORECASE)
+# ``$HOME\.ssh\id_rsa`` is the bash spelling of the same host path; a trailing
+# backslash with nothing after it stays literal text.
+_WINDOWS_SHELL_VARIABLE_PATH_PATTERN = re.compile(r"\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})\\(?=[^\s\"'`;&|<>()])")
+# A path-valued option, assignment or PowerShell provider keeps the root marker
+# right after ``-Name:``/``--name=``/``Name=``/``FileSystem::``, where the shell
+# sees no word boundary. The same attached to a short option (``curl -o\x``).
+_WINDOWS_VALUE_PREFIX_PATTERN = re.compile(r"(?P<option>-{1,2}[A-Za-z0-9][A-Za-z0-9_-]*[=:]|[A-Za-z_][A-Za-z0-9_]*=|[A-Za-z][A-Za-z0-9_.\-\\]*::)['\"]?(?P<path>[\\/][^\s\"'`;&|<>()]*)")
+_WINDOWS_ATTACHED_OPTION_PATTERN = re.compile(r"-(?P<option>[A-Za-z]+)(?P<path>[\\/][^\s\"'`;&|<>()]*)")
+_WINDOWS_OPERATOR_CHARS = frozenset(";&|()<>`")
+# Commands whose positional arguments are regex/glob patterns, and the options
+# whose value is one: text at those positions is a pattern, never a host path.
+# A *source* option supplies the pattern itself, so later positionals are files;
+# a *value* option only carries glob/type text and the pattern stays positional.
+# ``-e``/``--regexp``/``--expression`` mean "the pattern follows" only for those
+# tools (``node -e`` carries a program and ``curl -e`` a referrer); a PowerShell
+# ``-Pattern``/``-Filter`` parameter holds one for any command. Short options
+# stay case-sensitive (``-e`` is the pattern, ``-E`` the encoding); long and
+# PowerShell names are matched lowercased.
+_WINDOWS_PATTERN_COMMANDS = frozenset({"grep", "egrep", "fgrep", "rg", "ag", "ack", "findstr", "sed", "awk", "gawk", "mawk", "nawk", "perl", "select-string", "sls"})
+_WINDOWS_PATTERN_SOURCE_OPTIONS = frozenset("-e --regexp --expression".split())
+# ``-f``/``--file`` supplies the pattern from a file, so the first positional is
+# an input file again; the file itself is a path, not pattern text.
+_WINDOWS_PATTERN_FILE_OPTIONS = frozenset("-f --file".split())
+# awk spells that role ``-E``/``--exec`` (``gawk -E prog.awk data``), while grep
+# and sed read ``-E`` as extended-regex mode and rg as ``--encoding``.
+_WINDOWS_AWK_SCRIPT_OPTIONS = frozenset("-E --exec".split())
+_WINDOWS_PATTERN_PARAMETERS = frozenset("-pattern --pattern -filter --filter".split())
+# Glob filters that take such a value for every tool that has them (``grep
+# --include=GLOB``, ``rsync --exclude``); gawk's ``--include`` names a file.
+_WINDOWS_GLOB_FILTER_OPTIONS = frozenset("--include --exclude".split())
+# rg's glob and type filters are rg's alone: grep has no ``-g``/``-t`` and its
+# ``-T`` is ``--initial-tab``, while gawk reads ``-g``/``-t`` as flags too.
+_WINDOWS_RG_GLOB_OPTIONS = frozenset("-g --glob --iglob -t --type -T --type-not".split())
+# awk's field separator and ``-v`` assignment are program data, never a path
+# (``awk -F/``, ``awk -v re=\\bfoo``); ``-F`` is ``--fixed-strings`` elsewhere.
+_WINDOWS_AWK_TEXT_OPTIONS = frozenset("-F --field-separator -v --assign".split())
+# The value roles ``_windows_option_role`` returns: which of them hold text, and
+# which of them supply the pattern so the first positional is a file again.
+_WINDOWS_TEXT_OPTION_ROLES = frozenset({"regex", "glob"})
+_WINDOWS_PATTERN_FILLING_ROLES = frozenset({"regex", "script"})
+# A subcommand launcher's first positional names the command that runs the rest
+# (``git grep -E …``), so it opens the argument context like a wrapper does.
+_WINDOWS_SUBCOMMAND_LAUNCHERS = frozenset({"git", "gh", "npm", "npx", "pnpm", "yarn", "cargo", "go", "uv", "poetry", "docker", "kubectl"})
+# Commands that run another command, so their own flags and values are not
+# argument positions of it (``env -u VAR grep``, ``xargs -n 1 grep``).
+_WINDOWS_COMMAND_WRAPPERS = _LOCAL_BASH_COMMAND_WRAPPERS | frozenset({"env", "nice", "nohup", "stdbuf", "time", "xargs"})
+# ``find`` predicates after which the next word is a command, not an operand.
+_WINDOWS_FIND_EXEC_OPTIONS = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
+# Options that consume a value without supplying the pattern (``rg -m 5
+# '\Aclass' .``). Arity is per tool because the same letter differs: ``-l`` is a
+# flag for grep/rg but a line length for sed and a library for gawk, ``-o``
+# matches only for grep/rg but names an output file for curl. Reading a flag as
+# value-taking is the only mistake here that hides a host path -- it moves the
+# pattern one word right, so ``grep -l foo \Windows\win.ini`` checked every word
+# but the file. A command outside the table consumes no value (``--help`` rows).
+_WINDOWS_GREP_VALUE_OPTIONS = frozenset("-m --max-count -A --after-context -B --before-context -C --context -d --directories".split())
+_WINDOWS_RG_VALUE_OPTIONS = frozenset("-m --max-count -A --after-context -B --before-context -C --context -d --max-depth -j --threads -M --max-columns -r --replace -E --encoding --engine --pre --sort".split())
+_WINDOWS_AWK_VALUE_OPTIONS = frozenset("-l --load -i --include".split())
+_WINDOWS_POWERSHELL_VALUE_OPTIONS = frozenset("-path --path -literalpath --literalpath".split())
+_WINDOWS_VALUE_OPTIONS_BY_COMMAND = {
+    **dict.fromkeys(("grep", "egrep", "fgrep"), _WINDOWS_GREP_VALUE_OPTIONS),
+    **dict.fromkeys(("awk", "gawk", "mawk", "nawk"), _WINDOWS_AWK_VALUE_OPTIONS),
+    **dict.fromkeys(("select-string", "sls"), _WINDOWS_POWERSHELL_VALUE_OPTIONS),
+    "rg": _WINDOWS_RG_VALUE_OPTIONS,
+    "sed": frozenset("-l --line-length".split()),
+    "perl": frozenset({"-I"}),
+}
+# Text-valued spellings for the prefix scan, which has no command name; ``-f``/
+# ``--file`` stay out because their value is a path.
+_WINDOWS_TEXT_VALUE_OPTION_NAMES = _WINDOWS_PATTERN_SOURCE_OPTIONS | _WINDOWS_GLOB_FILTER_OPTIONS | _WINDOWS_RG_GLOB_OPTIONS | _WINDOWS_PATTERN_PARAMETERS
+# Commands that only print their arguments, so a colon or escape word in them is
+# text (``echo a:b``).
+_WINDOWS_TEXT_ONLY_COMMANDS = frozenset({"echo", "printf", "write-output", "write-host"})
+# The commands this pass can read arguments for; a wrapper's preamble ends here.
+_WINDOWS_WRAPPED_COMMANDS = _WINDOWS_PATTERN_COMMANDS | _WINDOWS_TEXT_ONLY_COMMANDS
+# Working-directory commands beyond ``_LOCAL_BASH_CWD_COMMANDS``: cmd.exe is
+# case-insensitive and knows ``chdir``; PowerShell spells the same operation
+# ``Set-Location``/``Push-Location`` (alias ``sl``).
+_WINDOWS_CWD_COMMANDS = frozenset({"cd", "pushd", "chdir", "set-location", "push-location", "sl"})
+_WINDOWS_CWD_PATH_PARAMETERS = frozenset({"-path", "-literalpath", "-lp"})
+
 _SHELL_COMMAND_SEPARATORS = {";", "&&", "||", "|", "|&", "&", "(", ")"}
 _SHELL_REDIRECTION_OPERATORS = {
     "<",
@@ -1164,6 +1287,339 @@ def _is_in_spans(position: int, spans: list[tuple[int, int]]) -> bool:
     return any(start <= position < end for start, end in spans)
 
 
+def _is_embedded_in_spans(position: int, spans: list[tuple[int, int]]) -> bool:
+    """Return True when *position* is inside a span but not at its start.
+
+    ``C://Windows/win.ini`` makes the URL scan see a one-letter scheme, but
+    Windows still resolves it as the drive path ``C:/Windows/win.ini``. Only a
+    drive match embedded in a larger URL is URL text; one that starts the
+    URL-like span stays subject to the drive scan.
+    """
+    return any(start < position < end for start, end in spans)
+
+
+def _windows_raw_words(command: str) -> list[tuple[str, int]]:
+    """Split *command* into raw shell words and operators, keeping the quotes.
+
+    ``_split_shell_tokens`` cannot be reused: it resolves quotes and drops
+    unquoted backslashes, and the raw spelling is exactly the evidence this scan
+    needs (``\\\\server\\share``, ``\\Windows``, ``,\\Boot``, ``C^:/Windows``).
+    Quotes still group a word, so ``grep 'a|..\\d'`` stays one word.
+    """
+    words: list[tuple[str, int]] = []
+    index = 0
+    while index < len(command):
+        char = command[index]
+        if char in " \t\r\n":
+            index += 1
+            continue
+        if char in _WINDOWS_OPERATOR_CHARS:
+            end = index + 1
+            while end < len(command) and command[end] in _WINDOWS_OPERATOR_CHARS:
+                end += 1
+            words.append((command[index:end], index))
+            index = end
+            continue
+        start = index
+        quote = ""
+        while index < len(command):
+            char = command[index]
+            if quote:
+                index += 1
+                if char == quote:
+                    quote = ""
+            elif char in "'\"":
+                quote = char
+                index += 1
+            elif char in " \t\r\n" or char in _WINDOWS_OPERATOR_CHARS:
+                break
+            else:
+                index += 1
+        words.append((command[start:index], start))
+    return words
+
+
+def _windows_text_roles(words: list[str]) -> list[bool]:
+    """Mark the words whose argument position holds regex, glob or printed text.
+
+    Those are the only positions where a backslash root (``\\Afoo``) or a colon
+    word (``a:b``) is text rather than a host path. A value-taking option is
+    consumed so the pattern stays the first positional argument, which is what
+    makes ``rg -m 5 '\\Aclass' .`` a search and not a host read. An option that
+    supplies the pattern itself closes that slot, whether the value is attached
+    (``-efoo``, ``-fprog.awk``, ``-ieX``) or the next word
+    (``grep -f patterns.txt``), so the file after it is a file again.
+    """
+    roles = [False] * len(words)
+    index = 0
+    while index < len(words):
+        if words[index][0] in _WINDOWS_OPERATOR_CHARS:
+            index += 1
+            continue
+        name = _windows_word_name(words[index])
+        if name in _LOCAL_BASH_COMMAND_PREFIX_KEYWORDS or name in _WINDOWS_SUBCOMMAND_LAUNCHERS or words[index].startswith("-"):
+            index += 1
+            continue
+        if name in _WINDOWS_COMMAND_WRAPPERS:
+            # A wrapper runs the command after its own flags and values
+            # (``env -u VAR grep``, ``nice -n 5 grep``, ``xargs -n 1 grep``),
+            # and only the wrapped command's arguments decide text.
+            index = _windows_wrapped_command_start(words, index + 1)
+            continue
+        text_only = name in _WINDOWS_TEXT_ONLY_COMMANDS
+        pattern_command = name in _WINDOWS_PATTERN_COMMANDS
+        index += 1
+        pattern_open = True
+        while index < len(words) and words[index][0] not in _WINDOWS_OPERATOR_CHARS:
+            word = words[index]
+            if word in _WINDOWS_FIND_EXEC_OPTIONS:
+                # ``find . -exec grep '\\Afoo' {} +`` runs the command after the
+                # predicate, so its arguments open a new context.
+                index = _windows_wrapped_command_start(words, index + 1)
+                break
+            if word.startswith("-") and word != "-":
+                kind, value = _windows_option_role(word, name, pattern_command)
+                if kind is not None:
+                    text = kind in _WINDOWS_TEXT_OPTION_ROLES
+                    if value is not None:
+                        # The value sits inside this token (``--glob=*.py``,
+                        # ``-e's/x/y/'``, ``-fprog.awk``).
+                        roles[index] = text
+                    elif index + 1 < len(words) and words[index + 1][0] not in _WINDOWS_OPERATOR_CHARS:
+                        # The next word is the value: pattern text is text, but
+                        # a script or output file stays a host path
+                        # (``grep -f \\Windows\\patterns.txt``).
+                        roles[index + 1] = text
+                        index += 1
+                    pattern_open = pattern_open and kind not in _WINDOWS_PATTERN_FILLING_ROLES
+                index += 1
+                continue
+            roles[index] = text_only or (pattern_command and pattern_open)
+            pattern_open = False
+            index += 1
+    return roles
+
+
+def _windows_word_name(word: str) -> str:
+    """Return *word*'s command name without quotes and a directory prefix."""
+    return word.strip("'\"").rsplit("/", 1)[-1].rsplit("\\", 1)[-1].lower()
+
+
+def _windows_wrapped_command_start(words: list[str], start: int) -> int:
+    """Return the index of the command a wrapper or a ``find -exec`` runs.
+
+    The wrapper's flags and their values sit before it (``nice -n 5 grep``), so
+    the first word this pass knows as a command ends that preamble; when none
+    follows, the index lands on the operator and the rest stays path-checked.
+    """
+    while start < len(words) and words[start][0] not in _WINDOWS_OPERATOR_CHARS:
+        if _windows_word_name(words[start]) in _WINDOWS_WRAPPED_COMMANDS:
+            break
+        start += 1
+    return start
+
+
+def _windows_option_role(word: str, command_name: str, pattern_command: bool) -> tuple[str | None, str | None]:
+    """Classify the value an option token carries, for the text-role pass.
+
+    Returns ``(kind, attached)``. ``kind`` is ``"regex"`` for the pattern itself,
+    ``"glob"`` for glob/type/field-separator text that leaves the pattern
+    positional, ``"script"`` for the file the pattern is read from, ``"value"``
+    for every other value and None for a flag; ``attached`` is that value when it
+    sits inside *word*, else None (the value is the next word). A short cluster
+    is walked letter by letter because the letter that takes a value owns the
+    rest of the token (``-ieX`` is ``-i`` plus ``-e X``).
+    """
+    option = word.split("=", 1)[0].split(":", 1)[0]
+    kind = _windows_value_role(option, command_name, pattern_command)
+    if kind is not None:
+        return kind, ("" if option != word else None)
+    if not word.startswith("--"):
+        for position, letter in enumerate(word[1:]):
+            if not letter.isalpha():
+                break
+            kind = _windows_value_role("-" + letter, command_name, pattern_command)
+            if kind is not None:
+                return kind, word[position + 2 :]
+    return None, None
+
+
+def _windows_value_role(option: str, command_name: str, pattern_command: bool) -> str | None:
+    """Return how one option spelling's value is read, or None when it is a flag."""
+    if _windows_is_option(option, _WINDOWS_PATTERN_PARAMETERS):
+        return "regex"
+    if command_name not in _AWK_COMMAND_NAMES and _windows_is_option(option, _WINDOWS_GLOB_FILTER_OPTIONS):
+        # gawk's ``--include`` names a file to read, so it is a path, not a glob.
+        return "glob"
+    if pattern_command:
+        if _windows_is_option(option, _WINDOWS_PATTERN_SOURCE_OPTIONS):
+            return "regex"
+        if _windows_is_option(option, _WINDOWS_PATTERN_FILE_OPTIONS):
+            return "script"
+        if command_name in _AWK_COMMAND_NAMES and _windows_is_option(option, _WINDOWS_AWK_SCRIPT_OPTIONS):
+            return "script"
+        if command_name in _AWK_COMMAND_NAMES and _windows_is_option(option, _WINDOWS_AWK_TEXT_OPTIONS):
+            return "glob"
+        if command_name == "rg" and _windows_is_option(option, _WINDOWS_RG_GLOB_OPTIONS):
+            return "glob"
+    if _windows_takes_value(command_name, option):
+        return "value"
+    return None
+
+
+def _windows_is_option(option: str, names: frozenset[str]) -> bool:
+    """Match a short option case-sensitively and a long/PowerShell one lowercased."""
+    return option in names or (len(option) > 2 and option.lower() in names)
+
+
+def _windows_takes_value(command_name: str, option: str) -> bool:
+    """Return True when *option* consumes the next word as its value.
+
+    Arity comes from ``_WINDOWS_VALUE_OPTIONS_BY_COMMAND``, never one shared set.
+    A command outside the table consumes no value, which keeps the word after an
+    unknown option a checked positional.
+    """
+    return _windows_is_option(option, _WINDOWS_VALUE_OPTIONS_BY_COMMAND.get(command_name, frozenset()))
+
+
+def _windows_host_path_word(word: str, start: int, *, text_role: bool, url_spans: list[tuple[int, int]], allowed_paths: list[str], thread_data: ThreadDataState | None) -> str | None:
+    """Return the Windows host path *word* names, or None when it names none.
+
+    A drive path is a host path wherever it sits inside the word, so one scan
+    covers an interpreted script (``open('C:/Windows/win.ini')``), a first
+    segment that is a drive spec (``\\C:\\Windows\\win.ini``) and the drive part
+    of a Win32 device spelling; only a match embedded in a URL is URL text,
+    while one that starts the URL-like span (``C://Windows``) is still a drive
+    path. A ``/``-rooted option or provider value is a host path too, and both
+    go through the allowlist so ``/mnt/user-data/...`` stays legal. A backslash
+    root and a drive-relative ``X:`` word are host paths unless the argument
+    position holds regex/format text (see ``_windows_text_roles``).
+    """
+    device = _WINDOWS_DEVICE_PREFIX_PATTERN.search(word)
+    if device is not None and not _is_in_spans(start + device.start(), url_spans):
+        return word.strip("'\"")
+    for match in _WINDOWS_DRIVE_PATH_PATTERN.finditer(word):
+        if _is_embedded_in_spans(start + match.start(), url_spans):
+            continue
+        if _is_allowed_local_bash_absolute_path(match.group(), allowed_paths, allow_system_paths=True, thread_data=thread_data):
+            continue
+        return match.group()
+    if _is_in_spans(start, url_spans):
+        return None
+    bare = word.strip("'\"")
+    if not bare:
+        return None
+    if text_role:
+        # Regex, glob or printed text: ``-e/foo/d``, ``awk -F/``, a pattern
+        # holding ``x=\\Afoo``. The drive and device scans above still apply.
+        return None
+    # cmd.exe treats ``,`` and ``=`` as argument delimiters (``curl ,-o\\Users``).
+    bare = bare.lstrip(",=")
+    # A root marker behind an option, assignment or provider prefix
+    # (``-Path:\\Windows``, ``--output=\\\\server\\share``, ``curl -o\\Users``).
+    # A bare ``/``-rooted word is left to ``_ABSOLUTE_PATH_PATTERN``.
+    prefix = _WINDOWS_VALUE_PREFIX_PATTERN.match(bare) or _WINDOWS_ATTACHED_OPTION_PATTERN.match(bare)
+    if prefix is not None:
+        option = prefix.group("option")
+        if _windows_is_option(option, _WINDOWS_TEXT_VALUE_OPTION_NAMES):
+            return None
+        bare = prefix.group("path")
+        if bare.startswith("/"):
+            if _is_non_path_literal_fragment(bare):
+                return None
+            if _is_allowed_local_bash_absolute_path(bare, allowed_paths, allow_system_paths=True, thread_data=thread_data):
+                return None
+            return bare
+    if not bare:
+        return None
+    # A drive reference keeps its meaning inside an interpreted string
+    # (``node -e "…('a:b')"``), at a shell-word boundary after a quote or ``=``.
+    for match in _WINDOWS_DRIVE_SPEC_PATTERN.finditer(word):
+        if not _is_embedded_in_spans(start + match.start(), url_spans):
+            return bare
+    # A backslash root can also sit inside such a string
+    # (``sh -c "cat \\Windows\\win.ini"``), so every argument boundary inside
+    # the word is judged, not only its start.
+    for match in _WINDOWS_ROOTED_WORD_PATTERN.finditer(bare):
+        rooted = match.group()
+        if _WINDOWS_ESCAPE_WORD_PATTERN.fullmatch(rooted) is None or _WINDOWS_ROOTED_COLON_PATTERN.search(rooted):
+            return rooted
+    return None
+
+
+def _windows_raw_host_paths(command: str, allowed_paths: list[str], thread_data: ThreadDataState | None, *, escaped_from: str | None = None) -> list[str]:
+    """Return the Windows host paths *command* reaches that no POSIX scan sees.
+
+    Judged on the raw text because the shlex token stream drops unquoted
+    backslashes, which is how ``\\\\server\\share`` and ``\\Windows`` reach the
+    host unnoticed. A drive match inside a larger URL is URL text, but one that
+    starts the URL-like span (``C://Windows``) is still a drive path.
+
+    *escaped_from* names the command this text was decoded from. A word that is
+    a different spelling there and holds regex text in this reading was escaped
+    text (``grep 'C^:/foo'``), so the argument the tool receives is a pattern and
+    no part of it is a host path.
+    """
+    words = _windows_raw_words(command)
+    roles = _windows_text_roles([word for word, _ in words])
+    escaped = [word for word, _ in _windows_raw_words(escaped_from)] if escaped_from is not None else []
+    aligned = len(escaped) == len(words)
+    url_spans = _non_file_url_spans(command)
+    paths: list[str] = []
+    for position, ((word, start), text_role) in enumerate(zip(words, roles)):
+        if word[0] in _WINDOWS_OPERATOR_CHARS:
+            continue
+        if aligned and text_role and escaped[position] != word:
+            continue
+        # A drive match inside a larger URL is URL text, but one that starts the
+        # URL-like span (``C://Windows``) is still a drive path; the word scan
+        # makes that call per match, so only the traversal test is word-wide.
+        if not text_role and not _is_in_spans(start, url_spans) and _WINDOWS_RAW_DOTDOT_PATTERN.search(word):
+            raise PermissionError("Access denied: path traversal detected")
+        path = _windows_host_path_word(word, start, text_role=text_role, url_spans=url_spans, allowed_paths=allowed_paths, thread_data=thread_data)
+        if path is not None:
+            paths.append(path)
+    for pattern in (_WINDOWS_ENV_VAR_PATH_PATTERN, _WINDOWS_SHELL_VARIABLE_PATH_PATTERN):
+        paths.extend(match.group() for match in pattern.finditer(command) if not _is_in_spans(match.start(), url_spans))
+    return paths
+
+
+def _windows_escaped_command(command: str) -> str | None:
+    r"""Return *command* with cmd.exe and shell escapes removed, or None.
+
+    cmd.exe strips ``^`` before parsing, so ``C^:/Windows`` and ``^\Windows``
+    reach the same host paths as the unescaped spellings; a POSIX shell drops a
+    backslash in front of a character that carries no escape meaning, so
+    ``C\:Windows\win.ini`` reaches ``C:Windows\win.ini``. Only a caret between a
+    path character and a separator, or right before a rooted backslash, is
+    decoded; a regex anchor (``grep '^C:'``) is left alone.
+    """
+    decoded = re.sub(r"(?<=[A-Za-z0-9:%])\^(?=[:\\/])|\^(?=\\)", "", command).replace("\\:", ":")
+    return decoded if decoded != command else None
+
+
+def _windows_cwd_parameter(token: str) -> tuple[str, str | None] | None:
+    """Return the lowercase PowerShell parameter name and its attached value."""
+    if not token.startswith("-") or token == "-":
+        return None
+    name, separator, value = token.partition(":")
+    if not separator:
+        name, separator, value = token.partition("=")
+    return name.lower(), value if separator else None
+
+
+def _is_local_bash_cwd_command(command_name: str) -> bool:
+    """Return True for a working-directory command on the active host.
+
+    POSIX bash is case-sensitive and knows ``cd``/``pushd`` only; Windows shells
+    match names case-insensitively and add cmd.exe ``chdir`` plus the PowerShell
+    ``Set-Location``/``Push-Location``/``sl`` forms.
+    """
+    if command_name in _LOCAL_BASH_CWD_COMMANDS:
+        return True
+    return _is_windows() and command_name.lower() in _WINDOWS_CWD_COMMANDS
+
+
 def _has_dotdot_path_segment(token: str) -> bool:
     if _is_non_file_url_token(token):
         return False
@@ -1636,6 +2092,22 @@ def _next_cd_target(tokens: list[str], start_index: int) -> tuple[str | None, in
         if token == "--":
             index += 1
             continue
+        named = _windows_cwd_parameter(token) if _is_windows() else None
+        if named is not None:
+            # PowerShell binds ``-Name value`` before the directory argument, so
+            # in ``Set-Location -ErrorAction Stop $env:WINDIR`` the value of the
+            # parameter is not the target; ``-Path``/``-LiteralPath`` names it.
+            name, attached = named
+            if attached is not None:
+                if name in _WINDOWS_CWD_PATH_PARAMETERS:
+                    return attached, index + 1
+                index += 1
+                continue
+            if name not in _WINDOWS_CWD_PATH_PARAMETERS and index + 1 < len(tokens) and not tokens[index + 1].startswith(("/", "-")):
+                index += 2
+                continue
+            index += 1
+            continue
         if token in {"-L", "-P", "-e", "-@"}:
             index += 1
             continue
@@ -1657,6 +2129,12 @@ def _validate_local_bash_cwd_target(command_name: str, target: str | None, allow
         _reject_path_traversal(target)
         if not _is_allowed_local_bash_absolute_path(target, allowed_paths, allow_system_paths=False, thread_data=thread_data):
             raise PermissionError(f"Unsafe working directory change in command: {command_name} {target}. Use paths under {VIRTUAL_PATH_PREFIX}")
+    # A drive target (``C:/Windows``, a bare ``C:``), a backslash root
+    # (``\Windows``, ``\\server\share``) and a cmd/PowerShell variable expansion
+    # (``%WINDIR%``, ``$env:WINDIR``) are host directories on a Windows host and
+    # relative names on POSIX, where the checks above already apply.
+    if _is_windows() and (_WINDOWS_DRIVE_SPEC_PATTERN.match(target) or target.startswith("\\") or _WINDOWS_ENV_VAR_TARGET_PATTERN.search(target)):
+        raise PermissionError(f"Unsafe working directory change in command: {command_name} {target}. Use paths under {VIRTUAL_PATH_PREFIX}")
 
 
 def _validate_local_bash_root_path_args(command_name: str, tokens: list[str], start_index: int) -> None:
@@ -1719,14 +2197,14 @@ def _validate_local_bash_shell_tokens(command: str, allowed_paths: list[str], to
         at_command_start = False
         if command_name in _LOCAL_BASH_COMMAND_WRAPPERS and index + 1 < len(tokens):
             wrapped_name = tokens[index + 1].rsplit("/", 1)[-1]
-            if wrapped_name in _LOCAL_BASH_CWD_COMMANDS:
+            if _is_local_bash_cwd_command(wrapped_name):
                 target, next_index = _next_cd_target(tokens, index + 2)
                 _validate_local_bash_cwd_target(wrapped_name, target, allowed_paths, thread_data)
                 index = next_index
                 continue
             _validate_local_bash_root_path_args(wrapped_name, tokens, index + 2)
 
-        if command_name not in _LOCAL_BASH_CWD_COMMANDS:
+        if not _is_local_bash_cwd_command(command_name):
             _validate_local_bash_root_path_args(command_name, tokens, index + 1)
             index += 1
             continue
@@ -1790,7 +2268,7 @@ def _is_non_path_literal_fragment(fragment: str) -> bool:
 
 
 def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState | None) -> None:
-    """Validate absolute paths in local-sandbox bash commands.
+    r"""Validate absolute paths in local-sandbox bash commands.
 
     This validation is only a best-effort guard for the explicit
     ``sandbox.allow_host_bash: true`` opt-in. It is not a secure sandbox
@@ -1812,6 +2290,20 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
     exemption is withheld from any command that could redefine ``awk`` or
     re-read quoted text (see ``_awk_program_field_spans``);
     ``$PWD/...`` is checked like the relative path it is equivalent to.
+    On a Windows host the same rule covers the spellings that have no POSIX
+    ``/`` root: drive paths (``C:/...``, ``C:\...``, a bare ``C:/`` or ``C:``,
+    and the drive-relative ``C:Windows/win.ini``), backslash roots
+    (``\Windows\win.ini``, ``\\server\share``), Win32 device and extended-length
+    paths (``\\?\C:\...``, ``\\.\PhysicalDrive0``) and cmd/PowerShell variable
+    expansions (``%WINDIR%\win.ini``, ``$env:SystemRoot\win.ini``, and a
+    standalone target such as ``cd %WINDIR%``, rejected as a working-directory
+    change). A drive path is judged wherever it appears in the command, so an
+    interpreted script (``python -c "open('C:/Windows/win.ini')"``) and a rooted
+    first segment (``\C:\Windows\win.ini``) are rejected too, and shell escape
+    characters are decoded first (``C^:/Windows``, ``C\:Windows``). Regex, glob
+    and format text (``grep '\d'``, ``printf '\t%s\n'``,
+    ``rg -g '*.py' '\Aclass' .``) is not a path and stays allowed. On POSIX all
+    of these are ordinary relative file names.
     A windows-incompatible segment still rejects a path that is not already
     stored on the host; an existing host file may be read or renamed.
     """
@@ -1883,6 +2375,24 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
         if _is_in_spans(match.start(), url_spans):
             continue
         unsafe_paths.append(match.group())
+
+    # On a Windows host the scans above miss every spelling without a POSIX
+    # ``/`` root: a drive path (``C:/...``, ``C:\...``, a bare ``C:/`` or ``C:``,
+    # and the drive-relative ``C:Windows/...`` that Windows resolves against the
+    # drive's current directory), a backslash root (``\Windows\win.ini`` on the
+    # current drive, ``\\server\share`` for UNC), a Win32 device or
+    # extended-length path (``\\?\C:\...``, ``\\.\PhysicalDrive0``), and a
+    # cmd/PowerShell variable expansion (``%WINDIR%\win.ini``,
+    # ``$env:SystemRoot\win.ini``). All are absolute host paths there and
+    # relative names on POSIX, so this runs only on Windows. The shell strips
+    # its escape characters before running the command, so the same judgement is
+    # repeated on a ``^``/``\:``-decoded copy; delayed expansion (``!NAME!``) is
+    # out of scope because it needs the non-default delayed-expansion mode.
+    if _is_windows():
+        unsafe_paths.extend(_windows_raw_host_paths(command, allowed_paths, thread_data))
+        escaped = _windows_escaped_command(command)
+        if escaped:
+            unsafe_paths.extend(_windows_raw_host_paths(escaped, allowed_paths, thread_data, escaped_from=command))
 
     if unsafe_paths:
         unsafe = ", ".join(sorted(dict.fromkeys(unsafe_paths)))
