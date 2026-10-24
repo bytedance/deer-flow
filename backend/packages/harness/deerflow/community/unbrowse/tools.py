@@ -12,6 +12,7 @@ https://unbrowse.ai/app.
 import json
 import logging
 import os
+from urllib.parse import urlsplit
 
 import httpx
 from langchain.tools import tool
@@ -142,6 +143,23 @@ def _clip(value: object, limit: int) -> str:
     return text if limit <= 0 else text[:limit]
 
 
+def _final_url_for_diagnostic(value: object) -> str:
+    """Strip URL credentials before bounding a target-controlled diagnostic."""
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    try:
+        parsed = urlsplit(text)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            return ""
+    except ValueError:
+        # A malformed authority must never fall back to echoing raw credentials.
+        return ""
+    if "@" in parsed.netloc:
+        text = parsed._replace(netloc=parsed.netloc.rsplit("@", 1)[-1]).geturl()
+    return _clip(text, _UNBROWSE_FINAL_URL_MAX_CHARS)
+
+
 @tool("web_fetch", parse_docstring=True)
 def web_fetch_tool(url: str) -> str:
     """Fetch the contents of a web page at a given URL.
@@ -171,9 +189,8 @@ def web_fetch_tool(url: str) -> str:
     failure = ""
     if isinstance(status, int) and not isinstance(status, bool) and 400 <= status <= 599:
         failure = f"target page responded with HTTP {status}"
-        final_url = data.get("finalUrl")
-        if isinstance(final_url, str) and final_url.strip():
-            failure += f" (final URL: {_clip(final_url.strip(), _UNBROWSE_FINAL_URL_MAX_CHARS)})"
+        if final_url := _final_url_for_diagnostic(data.get("finalUrl")):
+            failure += f" (final URL: {final_url})"
 
     content = _clip(data.get("markdown") or "", _UNBROWSE_FETCH_MAX_CHARS)
     if not content:
