@@ -205,6 +205,58 @@ def test_catalog_listing_and_installation_respect_owner(personal_client, monkeyp
         assert "Bearer alice" not in response.text
 
 
+def test_capybrowser_catalog_configures_personal_http_mcp_without_exposing_key(personal_client, monkeypatch, tmp_path):
+    from app.gateway.deps import get_config
+    from app.gateway.routers import capabilities
+
+    app = personal_client.app
+    app.include_router(capabilities.router)
+    app.dependency_overrides[get_config] = lambda: SimpleNamespace()
+    platform = tmp_path / "deployment.json"
+    platform.write_text(json.dumps({"mcpServers": {}}))
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(platform))
+    monkeypatch.setattr("deerflow.community.url_safety.validate_public_http_url", lambda *a, **k: None)
+
+    catalog = personal_client.get("/api/capabilities/catalog", headers={"test-user": "alice"})
+    assert catalog.status_code == 200
+    capy = next(item for item in catalog.json() if item["id"] == "capybrowser")
+    assert capy["adapter"] == "mcp"
+    assert capy["name"]["en-US"] == "Baizhi Cloud Browser"
+    assert capy["name"]["zh-CN"] == "百智云云浏览器"
+    assert "Baizhi Cloud Browser" in capy["description"]["en-US"]
+    assert "百智云云浏览器" in capy["description"]["zh-CN"]
+    assert "Baizhi Cloud Browser" in capy["setup"]["en-US"]
+    assert "百智云云浏览器" in capy["setup"]["zh-CN"]
+    assert capy["source"] == "https://capybrowser.app.baizhi.cloud/docs/installation.md"
+    assert "https://capybrowser.app.baizhi.cloud/mcp" in capy["setup"]["en-US"]
+    assert "enter only Bearer <your API Key>" in capy["setup"]["en-US"]
+    assert "只填写 Bearer <自己的 API Key>" in capy["setup"]["zh-CN"]
+    assert "Authorization: Bearer" not in capy["setup"]["en-US"]
+    assert "Authorization: Bearer" not in capy["setup"]["zh-CN"]
+    assert "CDP" in capy["description"]["en-US"]
+    assert capy["config_schema"]["properties"]["authorization"]["format"] == "password"
+    assert "authorization" in capy["config_schema"]["required"]
+
+    secret = "Bearer fixture-only-capy-key"
+    response = personal_client.post(
+        "/api/capabilities/installations",
+        headers={"test-user": "alice", "test-role": "user"},
+        json={"plugin_id": "capybrowser", "name": "my-capybrowser", "scope": "user", "configuration": {"enabled": True, "type": "http", "url": "https://mcp.fixture.test/mcp", "headers": {"Authorization": secret}}},
+    )
+    assert response.status_code == 200, response.text
+    saved = read_user_mcp_config("alice")["mcpServers"]["my-capybrowser"]
+    assert saved["headers"]["Authorization"] == secret
+    assert saved["capability"]["plugin_id"] == "capybrowser"
+    assert secret not in response.text
+    own = personal_client.get("/api/mcp/personal/config", headers={"test-user": "alice"})
+    assert own.json()["mcp_servers"]["my-capybrowser"]["headers"]["Authorization"] == "***"
+    assert "my-capybrowser" not in personal_client.get("/api/mcp/personal/config", headers={"test-user": "bob"}).text
+    masked = own.json()["mcp_servers"]["my-capybrowser"]
+    masked["enabled"] = False
+    assert personal_client.put("/api/mcp/personal/config/server", headers={"test-user": "alice"}, json={"server_name": "my-capybrowser", "server": masked}).status_code == 200
+    assert read_user_mcp_config("alice")["mcpServers"]["my-capybrowser"]["headers"]["Authorization"] == secret
+
+
 def test_tool_assembly_combines_platform_and_only_current_owner(personal_client, monkeypatch, tmp_path):
     from langchain_core.tools import StructuredTool
 
