@@ -206,6 +206,11 @@ class DingTalkChannel(Channel):
         # Serialize inbound-file writes into the uploads directory to avoid
         # racing writers clobbering one another (mirrors FeishuChannel).
         self._file_write_lock = threading.Lock()
+        # Strong references to the per-message stream handler tasks. asyncio only
+        # keeps a weak reference to a task once it awaits, so a dropped
+        # ``create_task`` result can be garbage-collected mid-execution and its
+        # exception never observed; the done callback keeps the set bounded.
+        self._background_tasks: set[asyncio.Task[Any]] = set()
 
     @property
     def supports_streaming(self) -> bool:
@@ -508,7 +513,9 @@ class DingTalkChannel(Channel):
                     keepalive = asyncio.create_task(client.keepalive(websocket))
                     try:
                         async for raw_message in websocket:
-                            asyncio.create_task(client.background_task(json.loads(raw_message)))
+                            task = asyncio.create_task(client.background_task(json.loads(raw_message)))
+                            self._background_tasks.add(task)
+                            task.add_done_callback(self._background_tasks.discard)
                     finally:
                         keepalive.cancel()
             except websockets.exceptions.ConnectionClosedError as exc:
