@@ -1188,6 +1188,7 @@ async def test_wecom_group_notification_for_owner_and_multi_group_binding_isolat
     finally:
         await close_engine()
 
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "event_preferences",
