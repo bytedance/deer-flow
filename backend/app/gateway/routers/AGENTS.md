@@ -1,5 +1,10 @@
 # Router contracts
 
+Console usage attributes legacy rows without a per-model usage map to
+`model_name`, including their recorded `total_input_tokens`. Accumulate those
+inputs with newer usage buckets for the same model; do not infer cache hits.
+Regression coverage lives in `tests/test_console_router.py`.
+
 Shared scheduled-task update validation preserves an unchanged future `once`
 instant on a live task inside `scheduler.min_once_delay_seconds`; new/changed
 instants and terminal reactivation still enforce the minimum delay.
