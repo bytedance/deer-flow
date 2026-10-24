@@ -14,12 +14,14 @@ rejection path never touches a filesystem.
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from deerflow.sandbox import tools as tools_module
 from deerflow.sandbox.tools import write_file_tool
+from deerflow.tools.types import Runtime
 
 # Spelled out rather than imported so the rejection tests fail on base for the
 # right reason (no guard) instead of erroring on a missing import. The last test
@@ -140,6 +142,36 @@ def test_append_mode_is_guarded_too():
     result = _call_write_file(content=PLACEHOLDER.format(chars=9000), append=True)
 
     assert result.startswith("Error:")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("append", [False, True])
+@pytest.mark.parametrize(
+    "content",
+    [PLACEHOLDER.format(chars=194), "\n  " + PLACEHOLDER.format(chars=5000) + "\n", PLACEHOLDER.format(chars=0)],
+    ids=["exact", "whitespace", "zero-count"],
+)
+async def test_async_placeholder_rejection_needs_no_initialized_sandbox(tmp_path: Path, content: str, append: bool) -> None:
+    target = tmp_path / "report.md"
+    target.write_text("Existing report\n", encoding="utf-8")
+    runtime = Runtime(
+        state={"messages": []},
+        context={},
+        config={"configurable": {"thread_id": tmp_path.name}},
+        stream_writer=print,
+        tools=[write_file_tool],
+        tool_call_id="write-placeholder",
+        store=None,
+    )
+
+    result = await write_file_tool.coroutine(runtime=runtime, path=target.as_posix(), content=content, append=append)
+
+    assert result.startswith("Error:")
+    assert "placeholder" in result
+    assert "read_file" in result
+    assert target.read_text(encoding="utf-8") == "Existing report\n"
+    assert runtime.state == {"messages": []}
+    assert runtime.context == {}
 
 
 @pytest.mark.parametrize(

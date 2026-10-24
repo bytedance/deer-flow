@@ -89,5 +89,8 @@ The character count must be an ASCII non-negative integer. A document beginning
 with the same prefix, including a quoted placeholder followed by more content,
 is allowed.
 
+Both sync and async `write_file` calls reject the placeholder before sandbox
+initialization, including when the sandbox provider is unavailable.
+
 This rejection applies only to `write_file`; `str_replace` does not validate
 `new_str` against the placeholder template.

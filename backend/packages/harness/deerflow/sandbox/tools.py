@@ -3467,6 +3467,9 @@ async def _write_file_tool_async(
     description: str = "",
     append: bool = False,
 ) -> str:
+    placeholder_error = _reject_elision_placeholder_content(content)
+    if placeholder_error is not None:
+        return placeholder_error
     return await _run_sync_tool_after_async_sandbox_init(write_file_tool.func, runtime, path, content, description, append)
 
 
