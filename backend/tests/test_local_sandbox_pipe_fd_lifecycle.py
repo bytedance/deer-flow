@@ -33,7 +33,16 @@ def _record_os_close(monkeypatch: pytest.MonkeyPatch) -> list[int]:
     return closed
 
 
-@pytest.mark.parametrize("runner_name", ["_run_windows_command", "_run_posix_command"])
+@pytest.mark.parametrize(
+    "runner_name",
+    [
+        pytest.param(
+            "_run_windows_command",
+            marks=pytest.mark.skipif(sys.platform != "win32", reason="the runner reads subprocess.CREATE_NEW_PROCESS_GROUP, which only exists on Windows builds"),
+        ),
+        "_run_posix_command",
+    ],
+)
 def test_spawn_failure_closes_each_pipe_fd_exactly_once(monkeypatch: pytest.MonkeyPatch, runner_name: str) -> None:
     runner = getattr(LocalSandbox, runner_name)
     closed = _record_os_close(monkeypatch)
@@ -47,6 +56,23 @@ def test_spawn_failure_closes_each_pipe_fd_exactly_once(monkeypatch: pytest.Monk
 
     duplicated = sorted({fd for fd in closed if closed.count(fd) > 1})
     assert not duplicated, f"fds {duplicated} were closed more than once; a concurrent thread may have claimed them in between: {closed}"
+    assert len(closed) == 4, f"expected exactly one close per pipe end, got {closed}"
+
+
+def test_spawn_interrupt_closes_each_pipe_fd_exactly_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A BaseException (KeyboardInterrupt mid-spawn) must still release all four fds once."""
+    runner = LocalSandbox._run_posix_command
+    closed = _record_os_close(monkeypatch)
+
+    def interrupted_popen(*args: object, **kwargs: object) -> subprocess.Popen:
+        raise KeyboardInterrupt
+
+    with patch.object(subprocess, "Popen", side_effect=interrupted_popen):
+        with pytest.raises(KeyboardInterrupt):
+            runner(["whatever"], 1.0, None)
+
+    duplicated = sorted({fd for fd in closed if closed.count(fd) > 1})
+    assert not duplicated, f"fds {duplicated} were closed more than once: {closed}"
     assert len(closed) == 4, f"expected exactly one close per pipe end, got {closed}"
 
 

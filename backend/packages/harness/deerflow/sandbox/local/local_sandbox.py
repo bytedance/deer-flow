@@ -898,7 +898,10 @@ class LocalSandbox(Sandbox):
                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
                 env=env,
             )
-        except Exception:
+        except BaseException:
+            # BaseException, not Exception: a KeyboardInterrupt mid-spawn must
+            # still release the fds; each fd is closed exactly once here, and
+            # the guarded finally below never closes them a second time.
             for fd in (stdout_read_fd, stdout_write_fd, stderr_read_fd, stderr_write_fd):
                 try:
                     os.close(fd)
@@ -1030,7 +1033,10 @@ class LocalSandbox(Sandbox):
             # With start_new_session=True, the new process is also the
             # process-group leader, so its PID is the stable group identifier.
             process_group_id = process.pid
-        except Exception:
+        except BaseException:
+            # BaseException, not Exception: a KeyboardInterrupt mid-spawn must
+            # still release the fds; each fd is closed exactly once here, and
+            # the guarded finally below never closes them a second time.
             for fd in (stdout_read_fd, stdout_write_fd, stderr_read_fd, stderr_write_fd):
                 try:
                     os.close(fd)
