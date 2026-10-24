@@ -70,9 +70,12 @@ writers' files based on a TTL.
 
 ## Model-bound write elision
 
-`wrap_model_call` elides successful `write_file` content only in model requests
-after a later successful same-path `read_file`, `write_file`, or `str_replace`
-(#5328); disk remains the reference. `keep_recent_writes` preserves the newest
-writes. Use the shared `tool_call_args` helpers (`pair_tool_call_results` and
-argument rewriting). Controls: `elide_superseded_writes` and
-`superseded_write_min_chars`.
+`wrap_model_call` can elide successful `write_file` content only in model
+requests after a later successful same-path `read_file`, `write_file`, or
+`str_replace` (#5328); disk remains the reference. The optimization is disabled
+by default because applying it after a later action rewrites an earlier request
+prefix and reduces provider prompt-cache reuse (#7319). Explicitly enable
+`elide_superseded_writes` to accept that trade-off. `keep_recent_writes`
+preserves the newest writes. Use the shared `tool_call_args` helpers
+(`pair_tool_call_results` and argument rewriting). Controls:
+`elide_superseded_writes` and `superseded_write_min_chars`.
