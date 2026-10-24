@@ -195,7 +195,10 @@ the real installer: the previous installed tree must stay byte-identical while
 the write is still in staging and after it fails, with no staging or backup
 tree left behind. Do not replace these behavioral checks with assertions about
 source formatting or duplicate the runtime publication control in
-`test_lark_cli_atomic_publish.py`.
+`test_lark_cli_atomic_publish.py`. That runtime publisher must also keep the
+original publish error when temporary cleanup or its warning log fails,
+including interruptions. A successful publish still replaces the bytes, leaves
+no temporary file, and keeps the temporary file's mode; callers chmod afterward.
 
 ## Channel staging cleanup
 
