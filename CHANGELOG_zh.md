@@ -1112,6 +1112,11 @@
 
 ### 修复
 
+- **MCP：** 普通用户可以再次在“能力中心 → 插件”中安装钉钉、企业微信和 HubSpot。
+  此前非管理员保存这些内置连接（包括之后编辑或启用）会返回
+  `500 Internal Server Error`，因为个人连接检查读取了请求模型未声明的 `cwd` 字段。
+  设置了工作目录的内置连接仍需管理员权限。([#7400])
+
 - **网关：** 请求体格式错误的运行请求现在返回客户端错误，而不是
   `500 Internal Server Error`。此前 `config.configurable` 或 `config.context`
   不是对象、`assistant_id` 无效、`agent_name` 不是字符串，或 AI 消息的 `tool_calls`
@@ -10413,3 +10418,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7325]: https://github.com/bytedance/deer-flow/pull/7325
 [#7326]: https://github.com/bytedance/deer-flow/pull/7326
 [#7362]: https://github.com/bytedance/deer-flow/pull/7362
+[#7400]: https://github.com/bytedance/deer-flow/pull/7400
