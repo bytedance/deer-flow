@@ -98,7 +98,11 @@ Failures/cancellations win, and the normal command/output admission guards still
 The executor calls `summarize_test_output` on the complete ToolMessage before
 tail slicing and retains `test_summary` (`passed`/`failed`/`unverified`). The checker
 uses this stamp only after its normal admission guards; legacy entries fall back
-to their tail. Failure and zero-test evidence outside the tail must still count.
+to their tail. Complete Node counters outrank loose pass/fail log text; independently shaped
+sibling runner summaries still count. Full-output stamps are cached per execution
+by tool-call ID and unchanged content; changed content is reclassified. The cache
+is invocation-local and pruned to the newest 20 retained executions, so values
+chunks do not repeatedly run full-output regexes or retain compacted logs.
 Bounded diagnostic tails drop their first partial physical line when slicing
 cuts a line; otherwise a long test label can lose its reporter prefix.
 

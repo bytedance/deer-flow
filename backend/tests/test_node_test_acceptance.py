@@ -219,6 +219,8 @@ def test_full_summary_does_not_bypass_admission(overrides):
         ("describe('1 failed', () => { test('sample', () => {}); });", (True, True)),
         ("test('sample', () => { throw Error('fixture'); });", (True, False)),
         ("test('pending', { timeout: 20 }, () => new Promise(() => {}));", (True, False)),
+        ("console.log('12 passed'); for (let i=0; i<250; i++) test.skip('t'+i,()=>{});", (False, False)),
+        ("console.log('validation found 2 errors'); for (let i=0; i<250; i++) test('t'+i,()=>{});", (True, True)),
     ],
     ids=[
         "pass",
@@ -237,6 +239,8 @@ def test_full_summary_does_not_bypass_admission(overrides):
         "summary-like-suite",
         "failure",
         "cancelled",
+        "stray-pass-all-skipped",
+        "stray-error-all-passing",
     ],
 )
 async def test_real_node_results_reach_parent_acceptance(tmp_path, monkeypatch, executor_module, reporter, body, expected):
@@ -290,3 +294,67 @@ def test_real_node_todo_stack_after_summary_survives_harvest(tmp_path, monkeypat
     assert executions[0]["test_summary"] == "passed"
     verdict = check_acceptance_criteria([f"tests_passed:{command}"], bash_executions=executions)
     assert verdict["all_hold"] is True, (output, executions, verdict)
+
+
+@pytest.mark.parametrize("prefix", ["#", "ℹ"])
+@pytest.mark.parametrize("log", ["12 passed", "all tests passed", "validation found 2 errors", "1 failed"])
+@pytest.mark.parametrize("passed,skipped,expected", [(0, 250, (False, False)), (250, 0, (True, True))])
+def test_node_counts_outrank_incidental_logs(executor_module, monkeypatch, prefix, log, passed, skipped, expected):
+    output = (f"# {log}" if prefix == "#" else log) + "\n" + "diagnostic\n" * 250 + _summary(prefix, passed=passed, skipped=skipped)
+    messages = [AIMessage(content="", tool_calls=[{"name": "bash", "id": "node-call", "args": {"command": "node --test"}}]), ToolMessage(content=output, tool_call_id="node-call")]
+    monkeypatch.setattr(executor_module, "_harvest_shell_persistence", lambda state: False)
+    executions = executor_module._harvest_bash_executions({"messages": messages})
+    verdict = check_acceptance_criteria(["tests_passed:node --test"], bash_executions=executions)
+    assert (verdict["leaves"][0]["checked"], verdict["all_hold"]) == expected
+
+
+@pytest.mark.parametrize(
+    "sibling,expected", [("2 passed in 0.01s", (True, True)), ("1 failed in 0.01s", (True, False)), ("Tests run: 2, Failures: 0, Errors: 0, Skipped: 0", (True, True)), ("Tests run: 2, Failures: 1, Errors: 0, Skipped: 0", (True, False))]
+)
+def test_node_counts_preserve_other_runner_summaries(sibling, expected):
+    verdict = _verdict(_summary(passed=0, skipped=250) + "\n" + sibling)
+    assert (verdict["leaves"][0]["checked"], verdict["all_hold"]) == expected
+
+
+def test_harvest_reuses_unchanged_summaries_and_invalidates_changes(executor_module, monkeypatch):
+    from unittest.mock import Mock
+
+    from deerflow.subagents import acceptance_checks
+
+    classify = Mock(wraps=acceptance_checks.summarize_test_output)
+    monkeypatch.setattr(acceptance_checks, "summarize_test_output", classify)
+    monkeypatch.setattr(executor_module, "_harvest_shell_persistence", lambda state: False)
+    call = AIMessage(content="", tool_calls=[{"name": "bash", "id": "node-call", "args": {"command": "node --test"}}])
+    tool = ToolMessage(content=_summary(), tool_call_id="node-call")
+    cache = {}
+    for _ in range(5):
+        entries = executor_module._harvest_bash_executions({"messages": [call, tool]}, summary_cache=cache)
+        assert entries[0]["test_summary"] == "passed"
+    assert classify.call_count == 1
+    tool.content = _summary(failed=1)
+    entries = executor_module._harvest_bash_executions({"messages": [call, tool]}, summary_cache=cache)
+    assert entries[0]["test_summary"] == "failed"
+    assert classify.call_count == 2
+
+
+def test_summary_cache_is_bounded_and_tracks_compaction(executor_module, monkeypatch):
+    from unittest.mock import Mock
+
+    from deerflow.subagents import acceptance_checks
+
+    classify = Mock(wraps=acceptance_checks.summarize_test_output)
+    monkeypatch.setattr(acceptance_checks, "summarize_test_output", classify)
+    monkeypatch.setattr(executor_module, "_harvest_shell_persistence", lambda state: False)
+    calls = [{"name": "bash", "id": f"call-{i}", "args": {"command": "node --test"}} for i in range(25)]
+    ai = AIMessage(content="", tool_calls=calls)
+    tools = [ToolMessage(content=_summary(), tool_call_id=call["id"]) for call in calls]
+    cache = {}
+    for _ in range(3):
+        entries = executor_module._harvest_bash_executions({"messages": [ai, *tools]}, summary_cache=cache)
+        assert len(entries) == len(cache) == 20
+    assert classify.call_count == 20
+    executor_module._harvest_bash_executions({"messages": [ai, tools[-1]]}, summary_cache=cache)
+    assert list(cache) == ["call-24"]
+    assert classify.call_count == 20
+    executor_module._harvest_bash_executions({"messages": [AIMessage(content="compacted")]}, summary_cache=cache)
+    assert cache == {}

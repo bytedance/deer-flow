@@ -529,6 +529,8 @@ def _harvest_shell_persistence(final_state: Any) -> bool | None:
 
 def _harvest_bash_executions(
     final_state: Any,
+    *,
+    summary_cache: dict[str, tuple[str, str]] | None = None,
 ) -> list[dict[str, Any]] | None:
     """Harvest bounded bash command/output evidence from one streamed state.
 
@@ -549,9 +551,13 @@ def _harvest_bash_executions(
     UNVERIFIED.
     """
     if not final_state:
+        if summary_cache is not None:
+            summary_cache.clear()
         return None
     messages = final_state.get("messages") if isinstance(final_state, dict) else None
     if not messages:
+        if summary_cache is not None:
+            summary_cache.clear()
         return None
     try:
         from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY
@@ -574,20 +580,28 @@ def _harvest_bash_executions(
                 # selection-changing suffix like ``-k smoke`` could be cut).
                 commands[tool_call_id] = (name, command[:_BASH_EVIDENCE_COMMAND_CHARS], len(command) > _BASH_EVIDENCE_COMMAND_CHARS)
         if not commands:
+            if summary_cache is not None:
+                summary_cache.clear()
             return []
         executions: list[dict[str, Any]] = []
-        for message in messages:
-            if not isinstance(message, ToolMessage):
-                continue
+        # Only retained executions need full-output parsing. The per-run cache
+        # survives values chunks, but keeps at most the same newest 20 outputs.
+        tool_messages = [message for message in messages if isinstance(message, ToolMessage) and str(message.tool_call_id or "") in commands][-_BASH_EVIDENCE_MAX_ENTRIES:]
+        next_cache: dict[str, tuple[str, str]] = {}
+        for message in tool_messages:
             tool_call_id = str(message.tool_call_id or "")
-            entry = commands.get(tool_call_id)
-            if entry is None:
-                continue
+            entry = commands[tool_call_id]
             name, command, command_truncated = entry
             meta = (message.additional_kwargs or {}).get(TOOL_META_KEY) or {}
             meta_status = str(meta.get("status") or getattr(message, "status", "success") or "success")
             content = message.content if isinstance(message.content, str) else json.dumps(message.content, sort_keys=True, default=str)
             status, status_marker = _bash_evidence_status(content, meta_status)
+            cached = summary_cache.get(tool_call_id) if summary_cache is not None else None
+            if cached is not None and (cached[0] is content or cached[0] == content):
+                test_summary = cached[1]
+            else:
+                test_summary = summarize_test_output(content)
+            next_cache[tool_call_id] = (content, test_summary)
             output_tail = content[-_BASH_EVIDENCE_OUTPUT_TAIL_CHARS:]
             if len(content) > _BASH_EVIDENCE_OUTPUT_TAIL_CHARS and content[-_BASH_EVIDENCE_OUTPUT_TAIL_CHARS - 1] != "\n":
                 # A clipped test name/log line can look like a summary after
@@ -600,11 +614,14 @@ def _harvest_bash_executions(
                     "command": command,
                     "command_truncated": command_truncated,
                     "output_tail": output_tail,
-                    "test_summary": summarize_test_output(content),
+                    "test_summary": test_summary,
                     "status": status,
                     "status_marker": status_marker,
                 }
             )
+        if summary_cache is not None:
+            summary_cache.clear()
+            summary_cache.update(next_cache)
         # Provenance stamp: whether the producing sandbox reuses one
         # persistent shell session. Captured here — while the state that
         # carried the evidence is at hand — because the parent-side checker
@@ -1718,6 +1735,8 @@ class SubagentExecutor:
                 return None
             return _harvest_tool_receipts(final_state, prefer_citing_turn=prefer_citing_turn)
 
+        bash_summary_cache: dict[str, tuple[str, str]] = {}
+
         def current_bash_executions() -> list[dict[str, Any]] | None:
             # RFC #4651 PR4: evidence for tests_passed acceptance leaves.
             # Accumulated from every chunk (not harvested once at terminal) so
@@ -1725,7 +1744,7 @@ class SubagentExecutor:
             # execution. Criteria-free runs pay nothing.
             if not self.acceptance_criteria:
                 return None
-            return _harvest_bash_executions(final_state)
+            return _harvest_bash_executions(final_state, summary_cache=bash_summary_cache)
 
         try:
             if task_info is not None and task_store is not None:
