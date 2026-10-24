@@ -513,6 +513,10 @@ single-label cluster hosts, and Docker/Podman internal hostnames do not inherit
 `HTTP_PROXY` or `HTTPS_PROXY`. External sandbox FQDNs and public IPs still
 honor environment proxy settings.
 
+After native runtime shutdown and MCP teardown, Gateway closes an initialized
+sandbox provider, including AIO sandboxes first created by a worker-thread tool call.
+It does not start an unused sandbox provider solely for cleanup.
+
 Backend processes automatically pick up `config.yaml` changes on the next config access, so model metadata updates do not require a manual restart during development.
 
 Gateway runs use the top-level `recursion_limit` in `config.yaml` when an API
