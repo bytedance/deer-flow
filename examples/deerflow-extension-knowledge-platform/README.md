@@ -113,6 +113,8 @@ The same principal is passed to the Provider. No member is promoted to an admini
 
 Management responses preserve #7293's contract: capability is not observed execution, `202` is not completion, searchable is not success of every Wiki/graph step, and unknown stays unknown. Writes are never retried. On timeouts, lost/malformed responses or identity mismatches, reconcile with the selected upstream base before submitting again. There is no exactly-once ledger. Errors omit provider messages/credentials; database or Provider exceptions are not exposed to clients. See [CONTRACT.md](CONTRACT.md) for the fourth/fifth-stage handoff.
 
+SQLite failures, including an exhausted busy timeout when workers share the policy file, return a sanitized `503` without database paths or exception details. Reload the policy and its revision before deciding whether to retry a policy update; ingestion and processing writes are never automatically retried.
+
 ## Verification
 
 ```sh

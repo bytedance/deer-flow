@@ -233,6 +233,65 @@ async def test_http_trusted_auth_and_bounded_input(platform):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["GET", "PUT"])
+async def test_policy_storage_lock_returns_503_without_mutating(platform, monkeypatch, method):
+    import sqlite3
+    from contextlib import closing
+
+    import httpx
+    from deerflow_extension_knowledge_platform.router import build_router
+    from deerflow_extension_knowledge_platform.service import Platform
+    from fastapi import FastAPI
+
+    store, settings, resource = platform
+    app = FastAPI()
+    app.include_router(build_router(Platform(settings, store, {})))
+    app.state.deerflow_extension_principal_resolver = lambda request: ADMIN
+
+    async def authorize(*args):
+        return True
+
+    app.state.deerflow_extension_plugin_authz_resolver_async = authorize
+    # Exercise the real busy-timeout error without waiting the production ten seconds.
+    monkeypatch.setattr(store, "connect", lambda: sqlite3.connect(store.path, timeout=0.01))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app, raise_app_exceptions=False), base_url="http://test") as client:
+        with closing(sqlite3.connect(store.path)) as owner:
+            owner.execute("BEGIN EXCLUSIVE")
+            response = await client.request(method, "/api/extensions/knowledge-platform/policy", **({"json": {"revision": 0, "policy": document(resource)}} if method == "PUT" else {}))
+            assert response.status_code == 503
+            assert response.json() == {"detail": "Policy storage is busy or unavailable; reload policy before retrying"}
+            assert str(store.path) not in response.text
+        snapshot = await client.get("/api/extensions/knowledge-platform/policy")
+        assert snapshot.status_code == 200 and snapshot.json()["revision"] == 0
+        saved = await client.put("/api/extensions/knowledge-platform/policy", json={"revision": 0, "policy": document(resource)})
+        assert saved.status_code == 200 and saved.json()["revision"] == 1
+
+
+@pytest.mark.asyncio
+async def test_unavailable_policy_database_returns_sanitized_503(platform):
+    import httpx
+    from deerflow_extension_knowledge_platform.router import build_router
+    from deerflow_extension_knowledge_platform.service import Platform
+    from fastapi import FastAPI
+
+    store, settings, _ = platform
+    store.path.write_bytes(b"invalid SQLite database with private diagnostic content")
+    app = FastAPI()
+    app.include_router(build_router(Platform(settings, store, {})))
+    app.state.deerflow_extension_principal_resolver = lambda request: ADMIN
+
+    async def authorize(*args):
+        return True
+
+    app.state.deerflow_extension_plugin_authz_resolver_async = authorize
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app, raise_app_exceptions=False), base_url="http://test") as client:
+        response = await client.get("/api/extensions/knowledge-platform/policy")
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Policy storage is busy or unavailable; reload policy before retrying"}
+    assert "private diagnostic" not in response.text and str(store.path) not in response.text
+
+
+@pytest.mark.asyncio
 async def test_platform_database_work_runs_off_loop(platform, monkeypatch):
     from deerflow_extension_knowledge_platform.service import Platform
 

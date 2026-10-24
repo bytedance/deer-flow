@@ -88,6 +88,22 @@ The full suites were run, but are **not reported as green** on this Windows host
 
 CI on the PR is a separate result; these local checks do not substitute for it.
 
+## Review follow-up: policy storage failures
+
+The low-severity review on PR #7417 identified uncaught SQLite busy/unavailable
+errors. Three new HTTP regressions first reproduced `500` on the previous code:
+real exclusive locks exhaust the busy timeout on policy GET/PUT, and a damaged
+database raises a non-operational SQLite error. With the fix all return a
+sanitized `503` directing the caller to reload policy before retrying. Lock
+failures leave revision 0 intact; after releasing the lock, reads and an explicit
+policy update succeed. No automatic retry was introduced.
+
+The combined regression command above now passes **275 tests**, including **35
+platform tests and one strict blocking-I/O test**. The narrower platform and
+management selection passes **99 tests**. Ruff and the platform wheel check pass.
+The original commit `d64411f2` also passed all validation workflows after
+maintainer approval; CI on subsequent commits must be assessed independently.
+
 ## Acceptance boundary
 
 This is an opt-in backend policy layer, with discovery text in the existing

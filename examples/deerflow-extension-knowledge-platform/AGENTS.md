@@ -18,6 +18,8 @@ never persist credentials, endpoints or factory paths. Use absolute private
 SQLite storage, transactional revision checks and bounded validated snapshots.
 Run all filesystem/SQLite work off async request loops; add strict blocking-I/O
 regressions. Do not hold a database transaction across Provider HTTP calls.
+Map SQLite failures to a sanitized 503; require policy reload before retrying
+an update and never automatically retry Provider mutations.
 
 Keep resource identity provider/connection/native-base-qualified and bounded;
 preserve retrieval dataset IDs and validate management result identities. Space

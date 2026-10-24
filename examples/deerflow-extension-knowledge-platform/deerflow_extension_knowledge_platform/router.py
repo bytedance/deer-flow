@@ -1,6 +1,7 @@
 """Host-authenticated platform routes; no caller-provided identities or credentials."""
 
 import logging
+import sqlite3
 from typing import Literal
 
 from deerflow_extension_api.auth import arequire_plugin_management
@@ -51,6 +52,9 @@ async def invoke(awaitable):
         raise HTTPException(422, "Invalid platform policy or request") from None
     except ManagementCredentialUnavailable:
         raise HTTPException(503, "Management credential is not configured") from None
+    except sqlite3.Error as exc:
+        logger.warning("Knowledge platform storage failed: %s", type(exc).__name__)
+        raise HTTPException(503, "Policy storage is busy or unavailable; reload policy before retrying") from None
     except RuntimeError as exc:
         logger.warning("Knowledge platform provider failed: %s", type(exc).__name__)
         raise HTTPException(502, "Provider request failed; reconcile before retrying a write") from None
