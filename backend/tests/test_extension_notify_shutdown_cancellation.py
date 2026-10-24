@@ -126,9 +126,7 @@ def test_shutdown_snapshot_includes_dispatch_already_admitted(monkeypatch) -> No
         assert submit_entered.wait(timeout=1)
         shutdown.start()
         assert suspend_entered.wait(timeout=1)
-        assert not drain_done.wait(timeout=0.05), (
-            "shutdown returned while an admitted dispatch had not been registered"
-        )
+        assert not drain_done.wait(timeout=0.05), "shutdown returned while an admitted dispatch had not been registered"
 
         release_submit.set()
         assert dispatch_done.wait(timeout=1)
@@ -146,4 +144,3 @@ def test_shutdown_snapshot_includes_dispatch_already_admitted(monkeypatch) -> No
 
     assert not dispatcher.is_alive()
     assert not shutdown.is_alive()
-
