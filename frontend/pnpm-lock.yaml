@@ -6,6 +6,8 @@ settings:
 
 overrides:
   '@xmldom/xmldom@>=0.9.0 <0.9.12': 0.9.12
+  nextra@4.6.1>zod: 4.3.6
+  nextra-theme-docs@4.6.1>zod: 4.3.6
 
 importers:
 
@@ -5985,6 +5987,9 @@ packages:
   yoga-wasm-web@0.3.3:
     resolution: {integrity: sha512-N+d4UJSJbt/R3wqY7Coqs5pcV0aUj2j9IaQ3rNj9bVCLld8tTGKRa2USARjnvZJWVx1NDmQev8EknoczaOQDOA==}
 
+  zod@4.3.6:
+    resolution: {integrity: sha512-rftlrkhHZOcjDwkGlnUtZZkvaPHCsDATp4pGpuOOMDaTdDDXF91wuVDJoWoPsKX/3YPQ5fHuF3STjcYyKr+Qhg==}
+
   zod@4.6.6:
     resolution: {integrity: sha512-4UmzQUF5fxvfcYHlbjBmejU+w+hbDnWFx4aS8kBx7nPBHcO2SqPbpAG8snbdg+Xse4pRefR98hgjFgIMCI/UhA==}
 
@@ -11039,7 +11044,7 @@ snapshots:
       react-compiler-runtime: 19.1.0-rc.3(react@19.2.4)
       react-dom: 19.2.4(react@19.2.4)
       scroll-into-view-if-needed: 3.1.0
-      zod: 4.6.6
+      zod: 4.3.6
       zustand: 5.0.12(@types/react@19.2.13)(react@19.2.4)(use-sync-external-store@1.6.0(react@19.2.4))
     transitivePeerDependencies:
       - '@types/react'
@@ -11089,7 +11094,7 @@ snapshots:
       unist-util-visit: 5.1.0
       unist-util-visit-children: 3.0.0
       yaml: 2.8.3
-      zod: 4.6.6
+      zod: 4.3.6
     transitivePeerDependencies:
       - supports-color
       - typescript
@@ -12574,6 +12579,8 @@ snapshots:
   yoga-layout@3.2.1: {}
 
   yoga-wasm-web@0.3.3: {}
+
+  zod@4.3.6: {}
 
   zod@4.6.6: {}
 
