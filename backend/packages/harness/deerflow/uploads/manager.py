@@ -512,8 +512,10 @@ def copy_upload_file_no_symlink(base_dir: Path, filename: str, src: Path, *, sna
     safe_name = normalize_filename(filename)
     with _open_upload_copy_source(base_dir, safe_name, src, snapshot_path=snapshot_path) as (captured, src_stat):
         validate_upload_destination(base_dir, safe_name)
-        seen = {safe_name}
-        candidate = safe_name
+        # Skip known collisions before staging; the atomic link still decides
+        # whether this candidate is free when concurrent writers publish.
+        seen = _existing_dir_names(base_dir)
+        candidate = claim_unique_filename(safe_name, seen)
         while True:
             try:
                 captured.seek(0)

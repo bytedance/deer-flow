@@ -1530,9 +1530,7 @@ async def _ingest_inbound_files_impl(thread_id: str, msg: InboundMessage, *, use
 
             created.append(
                 {
-                    # Same-name collisions land under the next free ``_N``
-                    # suffix; report the name the bytes actually landed under
-                    # (issue #3750).
+                    # Report the returned path rather than the pre-scan claim.
                     "filename": dest.name,
                     "size": len(data),
                     "path": f"/mnt/user-data/uploads/{dest.name}",

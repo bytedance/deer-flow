@@ -17,6 +17,9 @@ normalized original name, for originals and companions. With `snapshot_path`,
 capture the opened source once before retries and retain its original `fstat`
 metadata; every attempt reads the held private capture. Collision copies share
 this capture helper and publish complete staged copies under the next free name.
+Validate the requested destination before seeding copy suffixes from a directory
+snapshot, so unsafe links still fail and known collisions do not stage twice.
+Atomic no-replace links remain the concurrency boundary; retry after a lost claim.
 Never copy snapshot permission bits onto the saved upload.
 Close the caller's descriptor after capture and finish conversion workers before
 removing captures. Never reopen the caller/sandbox upload path for conversion.

@@ -8,7 +8,7 @@ import stat
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
-from threading import Barrier
+from threading import Barrier, local
 from unittest.mock import patch
 
 import pytest
@@ -435,6 +435,87 @@ class TestCopyUploadFileNoSymlink:
         assert dest == uploads / "notes_1.txt"
         assert (uploads / "notes.txt").read_bytes() == b"old contents"
         assert dest.read_bytes() == b"new contents"
+
+    @pytest.mark.parametrize("capture", [False, True], ids=["direct", "snapshot"])
+    def test_known_collision_stages_payload_once(self, tmp_path, capture):
+        uploads = tmp_path / "uploads"
+        uploads.mkdir()
+        existing = {"notes.txt": b"first upload", "NOTES_1.TXT": b"second upload"}
+        for name, data in existing.items():
+            (uploads / name).write_bytes(data)
+        src = tmp_path / "source.txt"
+        src.write_bytes(b"new contents" * 4096)
+        snapshot = tmp_path / "snapshot" if capture else None
+
+        with patch("deerflow.uploads.manager.shutil.copyfileobj", wraps=shutil.copyfileobj) as copy:
+            dest = copy_upload_file_no_symlink(uploads, "notes.txt", src, snapshot_path=snapshot)
+
+        assert copy.call_count == 1 + int(capture)
+        assert dest.name == "notes_2.txt"
+        assert dest.read_bytes() == src.read_bytes()
+        for name, data in existing.items():
+            assert (uploads / name).read_bytes() == data
+        assert {path.name for path in uploads.iterdir()} == {*existing, dest.name}
+        if snapshot is not None:
+            assert snapshot.read_bytes() == src.read_bytes()
+
+    @pytest.mark.parametrize("existing", [False, True], ids=["fresh", "occupied"])
+    @pytest.mark.parametrize("nofollow", [False, True], ids=["link-fallback", "link-nofollow"])
+    def test_concurrent_same_name_copies_keep_every_payload(self, tmp_path, monkeypatch, existing, nofollow):
+        uploads = tmp_path / "uploads"
+        uploads.mkdir()
+        if existing:
+            (uploads / "notes.txt").write_bytes(b"original upload")
+        payloads = [f"copy-{index}:".encode() + bytes([index]) * 4096 for index in range(8)]
+        sources = [tmp_path / f"source-{index}.txt" for index in range(len(payloads))]
+        for source, payload in zip(sources, payloads, strict=True):
+            source.write_bytes(payload)
+        first_publication = Barrier(len(payloads), timeout=15)
+        worker_state = local()
+        real_link = os.link
+        if nofollow and real_link not in os.supports_follow_symlinks:
+            pytest.skip("host does not support no-follow hard links")
+
+        def synchronized_link(staging, dest, **kwargs):
+            if not getattr(worker_state, "published", False):
+                worker_state.published = True
+                first_publication.wait()
+            return real_link(staging, dest, **kwargs)
+
+        monkeypatch.setattr(os, "link", synchronized_link)
+        monkeypatch.setattr(os, "supports_follow_symlinks", {synchronized_link} if nofollow else set())
+        with ThreadPoolExecutor(max_workers=len(payloads)) as executor:
+            futures = [executor.submit(copy_upload_file_no_symlink, uploads, "notes.txt", source) for source in sources]
+            try:
+                paths = [future.result(timeout=20) for future in futures]
+            finally:
+                first_publication.abort()
+
+        assert len(set(paths)) == len(payloads)
+        start = int(existing)
+        expected = {"notes.txt" if index == 0 else f"notes_{index}.txt" for index in range(start, start + len(payloads))}
+        assert {path.name for path in paths} == expected
+        assert {path.name for path in uploads.iterdir()} == expected | ({"notes.txt"} if existing else set())
+        for path, payload in zip(paths, payloads, strict=True):
+            assert path.read_bytes() == payload
+        if existing:
+            assert (uploads / "notes.txt").read_bytes() == b"original upload"
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX destination hardlink guard")
+    def test_existing_hardlinked_destination_is_not_silently_renamed(self, tmp_path):
+        uploads = tmp_path / "uploads"
+        uploads.mkdir()
+        original = tmp_path / "original.txt"
+        original.write_bytes(b"original upload")
+        os.link(original, uploads / "notes.txt")
+        src = tmp_path / "source.txt"
+        src.write_bytes(b"new contents")
+
+        with pytest.raises(UnsafeUploadPathError, match="multiple links"):
+            copy_upload_file_no_symlink(uploads, "notes.txt", src)
+
+        assert (uploads / "notes.txt").read_bytes() == b"original upload"
+        assert [path.name for path in uploads.iterdir()] == ["notes.txt"]
 
     def test_no_replace_copy_preserves_existing_file_and_cleans_stage(self, tmp_path):
         uploads = tmp_path / "uploads"
