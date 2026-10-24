@@ -31,6 +31,8 @@ The per-owner run cap `scheduler.max_concurrent_runs_per_user` is effective `min
 
 Recovery locks task/run pairs in task-id/run-id order and restores `run_id`, `started_at` and live errors before releasing launch claims. Launch/failure/timeout updates use one parent-first transaction to prevent interleaved claims. Queue timeout fails the occurrence and advances scheduled work to prevent immediate requeue.
 
+Single-instance polling also performs a non-destructive terminal-run reconciliation: a `running` occurrence whose durable `runs` row is already terminal is finalized from that row's status, error and goal verdict. Live runs are never taken over or interrupted; multi-instance reconciliation already covers terminal runs through lease ownership. This repairs a completion hook that failed after the run committed its terminal status.
+
 Expired-launch scans select candidates, not ownership. After taking the parent
 and occurrence locks, recheck launch status and lease expiry before recovery.
 A busy launch may have requeued and a manual trigger reclaimed the same row
