@@ -38,6 +38,32 @@ _COMMAND_CAPTURE_LIMIT_BYTES = 10 * 1024 * 1024
 _PIPE_DRAIN_JOIN_TIMEOUT_SECONDS = 0.2
 
 
+def _content_path_translation_applies(path: str, content: str, *, append: bool, resolved_path: str) -> bool:
+    """Whether container paths inside ``content`` are translated to host paths.
+
+    The translation exists so a script the agent wrote can run under a host
+    interpreter (PR #1935). Documents, data files, and configs are not
+    executed, so their bytes are stored verbatim: rewriting them put host
+    paths into deliverables while ``read_file`` masked the rewrite back to
+    virtual paths (#7461). ``is_code_file`` is the shared rule the skill
+    installer, SkillScan, and ``skill_manage_tool`` already use to separate
+    code from static support files, so the sandbox does not grow a second
+    copy of it.
+    """
+    from deerflow.skills.package_files import is_code_file
+
+    head = content[:2].encode("utf-8", "surrogatepass")
+    if append and not head.startswith(b"#!"):
+        # An extensionless script's interpreter line sits at the top of the
+        # existing file, not in the text being appended.
+        try:
+            with open(resolved_path, "rb") as existing:
+                head = existing.read(2) or head
+        except OSError:
+            pass
+    return is_code_file(path, head)
+
+
 def _publish_file_revision(path: str, content: str) -> None:
     target = Path(os.path.realpath(path))
     # Rename checks the parent, not the target's write permission. Check the
@@ -1231,9 +1257,10 @@ class LocalSandbox(Sandbox):
             dir_path = os.path.dirname(resolved_path)
             if dir_path:
                 os.makedirs(dir_path, exist_ok=True)
-            # Resolve container paths in content to local paths
-            # using the content-specific resolver (forward-slash safe)
-            resolved_content = self._resolve_paths_in_content(content)
+            # Resolve container paths in content to local paths, but only for
+            # executable content: a script needs host-resolvable paths when
+            # bash runs it, while a document's bytes must survive the write.
+            resolved_content = self._resolve_paths_in_content(content) if _content_path_translation_applies(path, content, append=append, resolved_path=resolved_path) else content
             if append or sys.platform not in {"darwin", "linux"}:
                 # Other hosts retain their existing write/ACL semantics.
                 with open(resolved_path, "a" if append else "w", encoding="utf-8", newline="") as f:
