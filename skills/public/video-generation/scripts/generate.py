@@ -38,13 +38,18 @@ def _check_base_resp(payload: dict) -> None:
 
 def _guess_mime(image_path: str) -> str:
     ext = os.path.splitext(image_path)[1].lower()
-    return {
+    mime_types = {
         ".png": "image/png",
         ".webp": "image/webp",
         ".gif": "image/gif",
         ".jpg": "image/jpeg",
         ".jpeg": "image/jpeg",
-    }.get(ext, "image/jpeg")
+    }
+    try:
+        return mime_types[ext]
+    except KeyError:
+        supported = ", ".join(mime_types)
+        raise ValueError(f"Unsupported reference image extension for {image_path!r}. Supported extensions: {supported}") from None
 
 
 def _to_data_url(image_path: str) -> str:
