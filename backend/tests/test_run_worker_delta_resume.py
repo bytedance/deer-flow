@@ -17,7 +17,7 @@ from typing import Annotated, Any, TypedDict
 from unittest.mock import AsyncMock
 
 import pytest
-from langchain_core.messages import AIMessage, AnyMessage, HumanMessage
+from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, ToolMessage
 from langgraph.channels.delta import DeltaChannel
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
@@ -546,3 +546,116 @@ async def test_unmaterializable_resume_state_fails_closed():
             thread_id="thread-1",
             run_id="run-1",
         )
+
+
+def _build_tool_graph(state_schema: type, checkpointer: Any, *, pause_before_tools: bool):
+    """answer -> tools -> END. With ``pause_before_tools`` the graph interrupts
+    right before the tools node, leaving a checkpoint with pending execution."""
+
+    async def _answer(state: dict[str, Any]) -> dict[str, Any]:
+        return {"messages": [AIMessage(content="need the probe tool", id="a-tool", tool_calls=[{"name": "probe", "args": {"x": 1}, "id": "call-1"}])]}
+
+    async def _tools(state: dict[str, Any]) -> dict[str, Any]:
+        return {"messages": [ToolMessage(content="probe ok", id="t-1", tool_call_id="call-1")]}
+
+    builder = StateGraph(state_schema)
+    builder.add_node("answer", _answer)
+    builder.add_node("tools", _tools)
+    builder.set_entry_point("answer")
+    builder.add_edge("answer", "tools")
+    builder.set_finish_point("tools")
+    return builder.compile(checkpointer=checkpointer, interrupt_before=["tools"] if pause_before_tools else None)
+
+
+async def test_delta_resume_of_paused_checkpoint_with_pending_execution_fails_explicitly():
+    """A non-head delta resume must not silently drop pending tool execution (#7438).
+
+    The paused checkpoint holds a pending task for the tools node. Linearizing it
+    through the state-only checkpoint_resume graph cannot carry that pending send
+    (the graph has no tools node — LangGraph logs ``Ignoring unknown node name
+    tools in pending sends`` and discards it), so the resumed run would finish as
+    success with zero tool calls and no final answer. The linearization must fail
+    explicitly before rewriting the head instead."""
+
+    checkpointer = InMemorySaver()
+    thread_id = "thread-pending"
+
+    await _build_tool_graph(_DeltaChannelState, checkpointer, pause_before_tools=False).ainvoke({"messages": [HumanMessage(content="q1", id="h1")]}, _run_config(thread_id))
+    graph = _build_tool_graph(_DeltaChannelState, checkpointer, pause_before_tools=True)
+    await graph.ainvoke({"messages": [HumanMessage(content="q2", id="h2")]}, _run_config(thread_id))
+
+    paused = await CheckpointStateAccessor.bind(graph, checkpointer, mode="delta").aget(_run_config(thread_id))
+    assert paused.next == ("tools",)
+
+    from deerflow.runtime.runs.worker import persist_run_durations
+
+    await persist_run_durations(checkpointer=checkpointer, thread_id=thread_id, durations={"run-1": 7})
+
+    accessor = CheckpointStateAccessor.bind(graph, checkpointer, mode="delta")
+    head = await accessor.aget(_run_config(thread_id))
+    paused_id = paused.config["configurable"]["checkpoint_id"]
+    assert head.config["configurable"]["checkpoint_id"] != paused_id
+
+    config = _run_config(thread_id, paused_id)
+    with pytest.raises(RuntimeError, match="pending execution"):
+        await _linearize_delta_checkpoint_resume(
+            accessor=accessor,
+            checkpointer=checkpointer,
+            config=config,
+            thread_id=thread_id,
+            run_id="run-2",
+            resume_command=True,
+        )
+    # Nothing was rewritten: the selector is intact and the head is unchanged.
+    assert config["configurable"].get("checkpoint_id") == paused_id
+    after = await accessor.aget(_run_config(thread_id))
+    assert after.config["configurable"]["checkpoint_id"] == head.config["configurable"]["checkpoint_id"]
+
+
+async def test_delta_resume_command_from_an_input_checkpoint_still_linearizes():
+    """Historical input checkpoints retain their synthetic entry node."""
+    checkpointer = InMemorySaver()
+    accessor, head, pre_turn = await _seed_two_turns(checkpointer, _DeltaChannelState, "thread-completed")
+    assert pre_turn.next == ("__start__",)
+    config = _run_config("thread-completed", pre_turn.config["configurable"]["checkpoint_id"])
+
+    resumed = await _linearize_delta_checkpoint_resume(
+        accessor=accessor,
+        checkpointer=checkpointer,
+        config=config,
+        thread_id="thread-completed",
+        run_id="run-3",
+        resume_command=True,
+    )
+
+    assert [message.id for message in resumed] == ["h1", "a1"]
+
+
+async def test_delta_resume_command_from_a_materialized_checkpoint_still_linearizes():
+    """A genuinely completed checkpoint (``next == ()``, not the ``__start__``
+    input pseudo-node) linearizes even under ``Command(resume)`` — the gate
+    only refuses checkpoints with real pending agent work (review of #7439)."""
+    checkpointer = InMemorySaver()
+    thread_id = "thread-materialized"
+    config = _run_config(thread_id)
+
+    await _build_answer_graph(_DeltaChannelState, checkpointer, "a1").ainvoke({"messages": [HumanMessage(content="q1", id="h1")]}, config)
+    graph = _build_answer_graph(_DeltaChannelState, checkpointer, "a2")
+    await graph.ainvoke({"messages": [HumanMessage(content="q2", id="h2")]}, config)
+
+    accessor = CheckpointStateAccessor.bind(graph, checkpointer, mode="delta")
+    history = await accessor.ahistory(config, limit=20)
+    completed = next(snapshot for snapshot in history if not snapshot.next and "h2" not in _ids(snapshot))
+    assert completed.next == ()
+
+    resume_config = _run_config(thread_id, completed.config["configurable"]["checkpoint_id"])
+    resumed = await _linearize_delta_checkpoint_resume(
+        accessor=accessor,
+        checkpointer=checkpointer,
+        config=resume_config,
+        thread_id=thread_id,
+        run_id="run-mat",
+        resume_command=True,
+    )
+
+    assert [message.id for message in resumed] == ["h1", "a1"]

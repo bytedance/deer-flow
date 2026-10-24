@@ -36,7 +36,7 @@ from typing import Any, Final, Literal, cast
 from deerflow_extension_api.agent_runs import AGENT_RUNS_CONTEXT_KEY
 from langchain_core.messages import AIMessage, AIMessageChunk
 from langgraph.checkpoint.base import empty_checkpoint
-from langgraph.types import Overwrite
+from langgraph.types import Command, Overwrite
 
 from deerflow.agents.goal_state import GoalEvaluation, GoalState
 from deerflow.agents.interaction_policy import RunInteractionPolicy, resolve_run_interaction_policy
@@ -1430,6 +1430,7 @@ async def run_agent(
                     config=config,
                     thread_id=thread_id,
                     run_id=run_id,
+                    resume_command=_is_resume_command_input(graph_input),
                 )
             if resumed_messages is not None:
                 # The graph now starts from the selected state, so the
@@ -2907,6 +2908,14 @@ def _complete_state_replacement_values(
     return replacement_values
 
 
+def _is_resume_command_input(graph_input: Any) -> bool:
+    """True when the run was admitted as ``Command(resume=...)``.
+
+    Such a run can only resume an interrupted node at the current head, which
+    the delta linearization rewrite removes — see #7438."""
+    return isinstance(graph_input, Command) and graph_input.resume is not None
+
+
 async def _linearize_delta_checkpoint_resume(
     *,
     accessor: CheckpointStateAccessor,
@@ -2914,6 +2923,7 @@ async def _linearize_delta_checkpoint_resume(
     config: dict[str, Any],
     thread_id: str,
     run_id: str,
+    resume_command: bool = False,
 ) -> list[Any] | None:
     """Replace a delta-mode checkpoint fork with an equivalent linear write.
 
@@ -2976,6 +2986,37 @@ async def _linearize_delta_checkpoint_resume(
     messages = values.get("messages") if isinstance(values, dict) else None
     if not isinstance(messages, list):
         raise RuntimeError(f"Run {run_id} could not materialize resume checkpoint {checkpoint_id}")
+    # ``__start__`` is the synthetic entry pseudo-node every turn's *input*
+    # checkpoint carries, not paused work — only real agent nodes count as
+    # pending execution (review of #7439).
+    pending_nodes = tuple(sorted(node for node in (getattr(snapshot, "next", None) or ()) if node != "__start__"))
+    if pending_nodes:
+        if resume_command:
+            # ``Command(resume=...)`` can only resume an interrupted node at the
+            # current head. The state-only rewrite below restores channel values,
+            # not execution position — its graph has no agent nodes, so a pending
+            # task for e.g. ``tools`` is dropped (LangGraph logs ``Ignoring
+            # unknown node name tools in pending sends``) and the resumed run
+            # finishes as success without ever executing the pending work
+            # (#7438). Pending tasks carry per-task arguments the mutation path
+            # cannot reconstruct, so refuse before touching the head rather than
+            # silently discarding the work.
+            raise RuntimeError(
+                f"Run {run_id} cannot linearize a delta-mode resume of checkpoint {checkpoint_id}: "
+                f"that checkpoint holds pending execution for {pending_nodes}, which Command(resume) "
+                "cannot reach after the head rewrite — the run would finish as success without "
+                "executing it. Resume the head checkpoint instead, or let the paused turn finish "
+                "before resuming from history."
+            )
+        # A fresh-input resume regenerates the turn from the selected state, so
+        # dropping the paused task is the established linearization semantics
+        # (#4458) — but log it, because the drop is otherwise invisible.
+        logger.info(
+            "Run %s linearizes a delta-mode resume of checkpoint %s that held pending execution for %s; the fresh-input run regenerates that work",
+            run_id,
+            checkpoint_id,
+            pending_nodes,
+        )
     head_config["metadata"] = checkpoint_agent_binding_metadata(getattr(snapshot, "metadata", None))
 
     # Write through the thread's effective schema so every application and
