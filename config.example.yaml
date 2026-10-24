@@ -1444,17 +1444,22 @@ tool_output:
   # tool_overrides:
   #   web_search: 8000
   #   bash: 20000
-  # Replace a successful write_file call's `content` with a short placeholder
-  # pointing at read_file once a later successful read_file / write_file /
-  # str_replace of the same path exists. Only the model-bound request changes.
+  # On a write's first model-bound appearance, replace `content` with a short
+  # placeholder if the history already contains a later successful read_file /
+  # write_file / str_replace of the same path. This keep/elide decision is
+  # cached per Gateway worker; later operations do not change the full or
+  # placeholder representation already sent while cached. Only the model-bound
+  # request changes.
   elide_superseded_writes: true
   # Only elide content at least this many characters long (a character count,
   # not tokens: CJK text costs ~3-4x more per character than ASCII). 0 elides
   # every non-empty content.
   superseded_write_min_chars: 2000
-  # The newest N successful write_file calls (across all paths) always stay
-  # visible, even when superseded, so the model can still say what it just
-  # wrote without a read. 0 keeps none.
+  # Keep the newest N successful writes (across all paths) in full when first
+  # shown to the model. Their cached decision can keep them full after leaving
+  # this window or being superseded, so this does not bound older content
+  # already shown. A worker restart, cache eviction, or other worker may
+  # recompute the decision. 0 keeps none.
   keep_recent_writes: 1
 
 # ============================================================================
