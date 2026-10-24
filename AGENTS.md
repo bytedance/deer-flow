@@ -223,6 +223,7 @@ Repo-wide conventions:
 - **Test-driven development** — features and bug fixes ship with tests. Backend tests live
   in `backend/tests/` (TDD is mandatory there; see [backend/AGENTS.md](backend/AGENTS.md));
   frontend tests live in `frontend/tests/`.
+  Evaluator tests use offline pipes, including EOF without a newline.
   Public skill script regressions live in `tests/skills/` and run in Skill Review CI
   independently of package review. Exercise dependency fallbacks with the optional
   import unavailable and mock HTTP transport to keep tests offline.

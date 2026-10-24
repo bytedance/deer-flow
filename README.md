@@ -1645,6 +1645,8 @@ validated or converted, and provider-specific format restrictions still apply.
 
 The [music-generation skill](skills/public/music-generation/SKILL.md#output-handling) preserves existing output when the provider returns malformed, empty or unrecognized audio.
 
+The bundled skill-creator trigger evaluator drains CLI output through EOF, so a completed subprocess does not turn a recorded skill trigger into a false negative.
+
 Skills are loaded progressively — only when the task needs them, not all at once. This keeps the context window lean and makes DeerFlow work well even with token-sensitive models.
 
 The bundled video-generation command reports failures on stderr and exits with
