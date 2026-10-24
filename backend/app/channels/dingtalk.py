@@ -1101,14 +1101,19 @@ class DingTalkChannel(Channel):
                     raise ValueError("DingTalk access token response did not contain a usable accessToken")
 
                 raw_expires_in = data.get("expireIn", 7200)
+                now = time.monotonic()
                 try:
                     expires_in = int(raw_expires_in)
-                except (TypeError, ValueError):
+                    if expires_in <= 0:
+                        raise ValueError
+                    expires_at = now + expires_in - _TOKEN_REFRESH_MARGIN_SECONDS
+                except (TypeError, ValueError, OverflowError):
                     logger.warning("[DingTalk] invalid expireIn value %r, using default 7200s", raw_expires_in)
                     expires_in = 7200
+                    expires_at = now + expires_in - _TOKEN_REFRESH_MARGIN_SECONDS
 
                 self._cached_token = access_token.strip()
-                self._token_expires_at = time.monotonic() + expires_in - _TOKEN_REFRESH_MARGIN_SECONDS
+                self._token_expires_at = expires_at
                 return self._cached_token
 
     @staticmethod

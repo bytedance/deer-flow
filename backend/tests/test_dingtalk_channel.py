@@ -1023,9 +1023,9 @@ class TestAccessTokenValidation:
 
         _run(go())
 
-    def test_invalid_expire_in_uses_default(self):
+    @pytest.mark.parametrize("expire_in", ["invalid", float("inf"), 10**400, 0, -1])
+    def test_invalid_expire_in_uses_default(self, expire_in):
         async def go():
-            import time
             from unittest.mock import patch
 
             bus = MessageBus()
@@ -1038,7 +1038,7 @@ class TestAccessTokenValidation:
                     pass
 
                 def json(self):
-                    return {"accessToken": "tok_ok", "expireIn": "invalid"}
+                    return {"accessToken": "tok_ok", "expireIn": expire_in}
 
             class FakeClient:
                 async def __aenter__(self):
@@ -1050,12 +1050,14 @@ class TestAccessTokenValidation:
                 async def post(self, url, **kwargs):
                     return FakeResponse()
 
-            before = time.monotonic()
-            with patch("app.channels.dingtalk.httpx.AsyncClient", return_value=FakeClient()):
+            with (
+                patch("app.channels.dingtalk.httpx.AsyncClient", return_value=FakeClient()),
+                patch("app.channels.dingtalk.time.monotonic", return_value=1000.0),
+            ):
                 token = await channel._get_access_token()
 
             assert token == "tok_ok"
-            assert channel._token_expires_at > before
+            assert channel._token_expires_at == 7900.0
 
         _run(go())
 
