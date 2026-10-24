@@ -196,6 +196,9 @@ cd backend && python -m pytest tests/path/to/test.py::test_func -q
 cd frontend && pnpm rstest run <pattern>     # e.g. pnpm rstest run my-component
 ```
 
+Music-generation CLI tests run real subprocesses and replace only HTTP transport
+for provider responses, keeping the production entry point and output handling under test.
+
 ### Logs
 
 - Docker stack: `make docker-logs` (or `docker compose -f docker/... logs -f <svc>`).
