@@ -1,5 +1,9 @@
 # Backend Tests
 
+When adding a scoped `AGENTS.md`, update `EXPECTED_GUIDANCE_PATHS` in
+`test_agent_guidance_check.py` in the same change. The explicit inventory pins
+guidance ownership and extends hard-budget checks to each approved guide.
+
 `test_image_result_url_safety.py` drives GroundRoute through `ainvoke` and an
 offline HTTPX transport. Patch only the provider's `httpx` reference; preserve
 the shared client and exercise real configuration resolution and URL screening.

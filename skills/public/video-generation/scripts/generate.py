@@ -39,13 +39,18 @@ def _check_base_resp(payload: dict) -> None:
 
 def _guess_mime(image_path: str) -> str:
     ext = os.path.splitext(image_path)[1].lower()
-    return {
+    mime_types = {
         ".png": "image/png",
         ".webp": "image/webp",
         ".gif": "image/gif",
         ".jpg": "image/jpeg",
         ".jpeg": "image/jpeg",
-    }.get(ext, "image/jpeg")
+    }
+    try:
+        return mime_types[ext]
+    except KeyError:
+        supported = ", ".join(mime_types)
+        raise ValueError(f"Unsupported reference image extension for {image_path!r}. Supported extensions: {supported}") from None
 
 
 def _to_data_url(image_path: str) -> str:
@@ -143,7 +148,7 @@ def _generate_video_gemini(prompt: str, reference_images: list[str], output_file
     for reference_image in reference_images:
         with open(reference_image, "rb") as f:
             image_b64 = base64.b64encode(f.read()).decode("utf-8")
-        reference_payload.append({"image": {"mimeType": "image/jpeg", "bytesBase64Encoded": image_b64}, "referenceType": "asset"})
+        reference_payload.append({"image": {"mimeType": _guess_mime(reference_image), "bytesBase64Encoded": image_b64}, "referenceType": "asset"})
     if reference_payload:
         request_json["instances"][0]["referenceImages"] = reference_payload
     gemini_api_key = os.getenv("GEMINI_API_KEY")
