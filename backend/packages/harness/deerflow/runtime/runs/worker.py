@@ -2969,7 +2969,10 @@ async def _linearize_delta_checkpoint_resume(
     messages = values.get("messages") if isinstance(values, dict) else None
     if not isinstance(messages, list):
         raise RuntimeError(f"Run {run_id} could not materialize resume checkpoint {checkpoint_id}")
-    pending_nodes = tuple(sorted(getattr(snapshot, "next", None) or ()))
+    # ``__start__`` is the synthetic entry pseudo-node every turn's *input*
+    # checkpoint carries, not paused work — only real agent nodes count as
+    # pending execution (review of #7439).
+    pending_nodes = tuple(sorted(node for node in (getattr(snapshot, "next", None) or ()) if node != "__start__"))
     if pending_nodes:
         if resume_command:
             # ``Command(resume=...)`` can only resume an interrupted node at the

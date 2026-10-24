@@ -627,3 +627,33 @@ async def test_delta_resume_of_completed_checkpoint_still_linearizes():
     )
 
     assert [message.id for message in resumed] == ["h1", "a1"]
+
+
+async def test_delta_resume_command_from_a_materialized_checkpoint_still_linearizes():
+    """A genuinely completed checkpoint (``next == ()``, not the ``__start__``
+    input pseudo-node) linearizes even under ``Command(resume)`` — the gate
+    only refuses checkpoints with real pending agent work (review of #7439)."""
+    checkpointer = InMemorySaver()
+    thread_id = "thread-materialized"
+    config = _run_config(thread_id)
+
+    await _build_answer_graph(_DeltaChannelState, checkpointer, "a1").ainvoke({"messages": [HumanMessage(content="q1", id="h1")]}, config)
+    graph = _build_answer_graph(_DeltaChannelState, checkpointer, "a2")
+    await graph.ainvoke({"messages": [HumanMessage(content="q2", id="h2")]}, config)
+
+    accessor = CheckpointStateAccessor.bind(graph, checkpointer, mode="delta")
+    history = await accessor.ahistory(config, limit=20)
+    completed = next(snapshot for snapshot in history if not snapshot.next and "h2" not in _ids(snapshot))
+    assert completed.next == ()
+
+    resume_config = _run_config(thread_id, completed.config["configurable"]["checkpoint_id"])
+    resumed = await _linearize_delta_checkpoint_resume(
+        accessor=accessor,
+        checkpointer=checkpointer,
+        config=resume_config,
+        thread_id=thread_id,
+        run_id="run-mat",
+        resume_command=True,
+    )
+
+    assert [message.id for message in resumed] == ["h1", "a1"]
