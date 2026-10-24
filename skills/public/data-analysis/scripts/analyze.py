@@ -383,8 +383,13 @@ def _export_results(columns: list[str], rows: list[tuple], output_file: str) -> 
                     val = val.hex()
                 record[col] = val
             records.append(record)
+        # Reject non-JSON numbers, including nested values, before touching the
+        # destination so a failed export cannot overwrite an existing result.
+        serialized = json.dumps(
+            records, indent=2, ensure_ascii=False, default=str, allow_nan=False
+        )
         with open(output_file, "w", encoding="utf-8") as f:
-            json.dump(records, f, indent=2, ensure_ascii=False, default=str)
+            f.write(serialized)
 
     elif ext == ".md":
         with open(output_file, "w", encoding="utf-8") as f:
