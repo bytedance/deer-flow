@@ -543,6 +543,11 @@ The checkpoint storage settings `database.checkpoint_channel_mode` and
 both are frozen when the process first builds an agent (including through
 `DeerFlowClient`) and require a process restart to change safely.
 
+In delta mode, a run selecting an older checkpoint with pending tool execution
+reports an error before rewriting its state. Resume from the latest checkpoint to
+continue the pending work. Full-mode resumes and ordinary replay keep their
+existing behavior.
+
 The optional `database.checkpoint_cache` section (delta channel mode only)
 caches materialized checkpoint histories: `type` is `memory` (default) or
 `redis`, and `max_entries: 0` disables the cache. The `redis` backend is
