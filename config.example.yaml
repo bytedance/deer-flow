@@ -3089,8 +3089,9 @@ run_ownership:
 #   # heartbeat; only the holder connects (GitHub webhooks stay on every
 #   # instance). A crashed holder is replaced within lease_seconds +
 #   # grace_seconds plus one renewal interval, a cleanly stopped one on the
-#   # next heartbeat. Runtime credential changes from the web UI reach the
-#   # holder only when it next starts the channel. Restart-required.
+#   # next heartbeat. Credentials saved or a disconnect made from the web UI
+#   # on any instance reach the holder within one renewal interval. The
+#   # leader_lease block itself is restart-required.
 #   leader_lease:
 #     # auto (default): on whenever the Gateway sees a multi-process signal
 #     # (GATEWAY_WORKERS / WEB_CONCURRENCY > 1, deployment.multi_instance: true
