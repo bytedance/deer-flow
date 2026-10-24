@@ -681,16 +681,18 @@ class TestRedactTextSharedSeam:
 
 
 class _StateRequest:
-    """Duck-typed ModelRequest carrying .state, .messages and .override()."""
+    """Duck-typed ModelRequest carrying .state, .messages, .runtime and .override()."""
 
     def __init__(self, state, messages):
         self.state = state
         self.messages = list(messages)
+        self.runtime = None
 
     def override(self, **kwargs):
         copy = object.__new__(type(self))
         copy.state = kwargs.get("state", self.state)
         copy.messages = kwargs.get("messages", self.messages)
+        copy.runtime = kwargs.get("runtime", self.runtime)
         return copy
 
 
@@ -700,25 +702,28 @@ class TestDurableContextReinjection:
 
         return DurableContextMiddleware(pii_redaction_config=config)
 
+    @staticmethod
+    def _data_block(prepared):
+        return next(message.content for message in prepared.messages if (getattr(message, "additional_kwargs", None) or {}).get("durable_context_data"))
+
     def test_reinjected_summary_redacted(self):
         mw = self._make_dc(PiiRedactionConfig(enabled=True, token_secret=_TOKEN_SECRET))
         request = _StateRequest({"summary_text": "summary of alice@example.com"}, [HumanMessage("hi")])
-        final = mw._inject(request)
-        # insert_after_leading_system_messages puts the injected pair up front:
-        # [authority SystemMessage, durable-context data block, original…].
-        block = final.messages[1].content
+        prepared, _pending = mw._prepare_request(request)[:2]
+        block = self._data_block(prepared)
         assert EMAIL_ALICE in block and "alice@example.com" not in block
 
     def test_reinjected_summary_untouched_without_config(self):
         mw = self._make_dc(None)
         request = _StateRequest({"summary_text": "summary of alice@example.com"}, [HumanMessage("hi")])
-        final = mw._inject(request)
-        assert "alice@example.com" in final.messages[1].content
+        prepared, _pending = mw._prepare_request(request)[:2]
+        assert "alice@example.com" in self._data_block(prepared)
 
     def test_reinjected_goal_redacted(self):
         mw = self._make_dc(PiiRedactionConfig(enabled=True, token_secret=_TOKEN_SECRET))
         request = _StateRequest({"goal": {"status": "active", "objective": "email the report to alice@example.com"}}, [HumanMessage("hi")])
-        block = mw._inject(request).messages[1].content
+        prepared, _pending = mw._prepare_request(request)[:2]
+        block = self._data_block(prepared)
         assert EMAIL_ALICE in block and "alice@example.com" not in block
 
     def test_policy_declares_pii_gate(self):
@@ -854,7 +859,7 @@ def test_raw_legacy_summary_and_retained_messages_share_request_allocation():
     state = {"summary_text": "Alice alice@example.com"}
     request = _StateRequest(state, [HumanMessage(content="Alice alice@example.com; Bob bob@example.com")])
     redacted = PiiRedactionMiddleware(pii)._process_request(request)
-    final = DurableContextMiddleware(pii_redaction_config=pii)._inject(redacted)
+    final, _pending = DurableContextMiddleware(pii_redaction_config=pii)._prepare_request(redacted)[:2]
     text = get_buffer_string(final.messages)
     assert f"Alice {EMAIL_ALICE}" in text and f"Bob {EMAIL_BOB_COM}" in text
     assert "alice@example.com" not in text and "bob@example.com" not in text

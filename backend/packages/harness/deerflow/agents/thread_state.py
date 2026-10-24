@@ -394,6 +394,10 @@ class ThreadState(AgentState):
     task_notes: Annotated[dict | None, TaskNotesChannel(dict | None, merge_task_notes)]
     task_history: NotRequired[dict | None]
     summary_text: NotRequired[str | None]
+    # Frozen view of the durable-context block, rendered once and re-sent as-is
+    # so consecutive model requests share a prefix (#7320). Later changes ride
+    # as appended hidden messages; see durable_context_middleware.
+    durable_context_snapshot: NotRequired[dict | None]
     background_tasks: NotRequired[list[BackgroundTaskState]]
 
 

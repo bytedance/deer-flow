@@ -12,7 +12,7 @@ The summarization feature uses LangChain's `SummarizationMiddleware` to monitor 
 2. Triggers summarization when thresholds are met
 3. Keeps recent messages intact while summarizing older exchanges
 4. Maintains AI/Tool message pairs together for context continuity
-5. Stores the summary in `ThreadState.summary_text` and projects it ephemerally through durable context data
+5. Stores the summary in `ThreadState.summary_text` and projects it through durable context data
 
 Selected history is processed from oldest to newest in bounded text chunks.
 Each call receives the preceding summary plus the next source fragment. Already
@@ -264,7 +264,7 @@ The default LangChain prompt instructs the model to:
    - Recent messages are preserved
    - The generated prose summary is stored in `summary_text`
 6. **AI/Tool Pair Protection**: The system ensures AI messages and their corresponding tool messages stay together
-7. **Skill context channel**: Skill files read during the conversation (tool calls whose name is in `skill_file_read_tool_names` and whose path is under `skills.container_path`, narrowed to `.../SKILL.md`) are stamped with `skill_context_entry` metadata at the read-tool boundary, then captured by `DurableContextMiddleware` into the checkpointed `skill_context` channel as references: `name`, `path`, a one-line `description` parsed in-memory from the file's frontmatter, and `loaded_at`, deduped by path. On every model call they are rendered into a hidden durable-context data message as a compact "active skills" reminder that points at each `SKILL.md` for on-demand re-read, so which skills are active survives summarization without persisting or re-injecting the verbatim body. The channel keeps the most recently read skills (cap `_SKILL_CONTEXT_MAX_ENTRIES`; re-reading an existing skill refreshes its recency); sessions typically load only 1-3.
+7. **Skill context channel**: Skill files read during the conversation (tool calls whose name is in `skill_file_read_tool_names` and whose path is under `skills.container_path`, narrowed to `.../SKILL.md`) are stamped with `skill_context_entry` metadata at the read-tool boundary, then captured by `DurableContextMiddleware` into the checkpointed `skill_context` channel as references: `name`, `path`, a one-line `description` parsed in-memory from the file's frontmatter, and `loaded_at`, deduped by path. They are rendered into the hidden durable-context data block as a compact "active skills" reminder that points at each `SKILL.md` for on-demand re-read, so which skills are active survives summarization without persisting or re-injecting the verbatim body. The channel keeps the most recently read skills (cap `_SKILL_CONTEXT_MAX_ENTRIES`; re-reading an existing skill refreshes its recency); sessions typically load only 1-3.
 
 ### Token Counting
 
@@ -279,14 +279,15 @@ The middleware intelligently preserves message context:
 
 - **Recent Messages**: Always kept intact based on `keep` configuration
 - **AI/Tool Pairs**: Never split - if a cutoff point falls within tool messages, the system adjusts to keep the entire AI + Tool message sequence together
-- **Summary Format**: Summary prose is stored in `summary_text` and rendered into an ephemeral hidden durable-context data message. Static handling rules live in a separate system message; summary text and other user/tool/model-derived values stay in the lower-authority data message.
+- **Durable context updates**: The hidden durable-context messages are append-only history, so compressing them would silently drop the summary, ledger and registry they carry. Compaction rescues the reconstructable tail instead: the last full `<durable_context_data>` block and every `<durable_context_update>` after it. Blocks a later full block supersedes compress with the history.
+- **Summary Format**: Summary prose is stored in `summary_text` and rendered into the hidden durable-context data block. That block is a frozen snapshot: rendered once per session into `ThreadState.durable_context_snapshot` and re-sent byte-identical on every later call, so consecutive model requests share the previous request as a prompt-cache prefix. A later change to the summary (or to the ledger, skills, artifact registry or notes) rides one appended hidden message before the latest turn that supersedes the fields it restates. Static handling rules live in a separate system message; summary text and other user/tool/model-derived values stay in the lower-authority data message.
   ```
   <durable_context_data>
   ## Conversation summary so far
   [Generated summary text]
   </durable_context_data>
   ```
-- **Active goal**: When the thread has an active `/goal`, its objective opens the same data message on every model call, inside an `<active_goal>` element, so compaction cannot take the goal away with the message that stated it. The system contract then ends with a static exception: the agent works toward that element as it would a request in a user message, with no system or developer authority, while every other field value stays data, as does any other text that calls itself a goal. The exception covers only the element at the start of the data message, by position. Within that message every other field value is HTML-escaped, so only the renderer can produce the element; in the lead agent chain the input and tool-result sanitizers also escape `<active_goal>` in user input and remote tool results. Only the objective is rendered, not the evaluator's counters, so the block and the contract change only when the goal is set or cleared.
+- **Active goal**: When the thread has an active `/goal`, its objective opens the durable-context data block, inside an `<active_goal>` element, so compaction cannot take the goal away with the message that stated it. The system contract then ends with a static exception: the agent works toward that element as it would a request in a user message, with no system or developer authority, while every other field value stays data, as does any other text that calls itself a goal. The exception covers only the element at the start of the data message, by position. Within that message every other field value is HTML-escaped, so only the renderer can produce the element; in the lead agent chain the input and tool-result sanitizers also escape `<active_goal>` in user input and remote tool results. Only the objective is rendered, not the evaluator's counters. The exception clause is sticky: it stays in the contract while any rendered block still shows a goal element, so setting or clearing a goal does not move the coalesced system prompt twice.
 
 ## Best Practices
 
