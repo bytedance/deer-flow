@@ -238,6 +238,8 @@ runs `check-data-not-in-use.sh` before `make stop` (which would stop a live
 stack's sandboxes) and refuses while that container runs; an absent or
 unreachable Docker passes. `make stop` must still run before the delete: it
 stops `deer-flow-sandbox*` containers, whose thread mounts live in that tree.
+The deletion itself runs in `clean_runtime_data.sh` via `RUN_SHELL_SCRIPT`
+(cmd.exe recipes would no-op a bare `rm`).
 `cleanup-containers.sh` must verify an anchored `<prefix>-` name after Docker's
 substring `name=` filter, and use the same rule for Apple Container IDs. Parse
 Apple Container JSON without interpolating the prefix into Python source; bad
