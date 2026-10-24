@@ -697,7 +697,7 @@ MANUAL_CHECKS = (
     "cancel a run on B from A: takes effect within about one heartbeat (~10s)",
     "change an MCP filesystem server's args on A: B's local-bash allowlist follows",
     "edit a skill on A: B's system-prompt skills section changes within 30s",
-    "IM channel gates (one leader per platform, failover, runtime-config): once channel leader election lands",
+    "IM channel gates (one leader per platform, failover, runtime-config): `up` with `DEERFLOW_MI_KEEP_CHANNELS=1` and test bots, then follow the channel item in that section",
 )
 
 
