@@ -549,7 +549,8 @@ caches materialized checkpoint histories: `type` is `memory` (default) or
 Gateway/async-only; the sync TUI/embedded path supports `memory` only. The
 cache is performance-only — results are identical with it disabled — so it is
 never frozen and workers sharing one checkpoint database may safely run
-different cache settings. Redis thread cleanup treats a configured `key_prefix`
+different cache settings. Returned state snapshots have independent nested values,
+so editing one cannot change later checkpoint reads. Redis thread cleanup treats a configured `key_prefix`
 as literal text, including glob metacharacters, so deletion stays within that
 namespace and thread.
 

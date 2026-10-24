@@ -4,6 +4,10 @@ The memory history cache is shared by sync saver wrappers. Its threading lock
 serializes lookup/LRU promotion, population/eviction, thread purge, close, and
 statistics snapshots. Keep cache critical sections free of awaits and saver I/O;
 immutable histories do not make the mutable LRU registry thread-safe.
+Memory entries own deep copies of write payloads and snapshot seeds on ingest
+and read. Clone payloads outside the registry lock: user-defined copy callbacks
+can re-enter the cache. Preserve sync/async state isolation through
+`CheckpointStateAccessor`; tests live in `tests/test_checkpoint_cache_payload_isolation.py`.
 
 ### Redis Checkpoint Cache Purge
 
