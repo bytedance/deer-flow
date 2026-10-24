@@ -762,6 +762,28 @@ def test_normalize_input_rejects_malformed_message_with_400():
     assert "input.messages[1]" in excinfo.value.detail
 
 
+@pytest.mark.parametrize(
+    "message",
+    [
+        {"role": "ai", "content": "", "tool_calls": "x"},
+        {"role": "ai", "content": "", "tool_calls": {"name": "t"}},
+        {"role": "ai", "content": "", "tool_calls": ["x"]},
+        {"lc": 1, "type": "constructor", "id": ["langchain", "schema", "messages", "AIMessage"], "kwargs": {"content": "", "tool_calls": "x"}},
+    ],
+    ids=["string", "object", "string-items", "constructor"],
+)
+def test_normalize_input_rejects_wrong_typed_tool_calls_with_400(message):
+    """LangChain's AI-message validator raises ``AttributeError`` for these."""
+    from fastapi import HTTPException
+
+    from app.gateway.services import normalize_input
+
+    with pytest.raises(HTTPException) as excinfo:
+        normalize_input({"messages": [{"role": "human", "content": "ok"}, message]})
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.detail == "Invalid message at input.messages[1]"
+
+
 def test_normalize_input_handles_trusted_internal_non_human_roles():
     """The previous implementation collapsed every role to HumanMessage with a
     `# TODO: handle other message types` comment.  Resuming a thread with prior
@@ -4484,6 +4506,23 @@ def test_build_run_config_rejects_non_mapping_context():
 
     with pytest.raises(ValueError, match="context"):
         build_run_config("thread-1", {"context": "bad-context"}, None)
+
+
+@pytest.mark.parametrize("configurable", [[1], "ab", [["k", "v"]], []], ids=["list", "string", "pairs", "empty-list"])
+@pytest.mark.parametrize("with_context", [False, True], ids=["configurable-only", "with-context"])
+def test_build_run_config_rejects_non_mapping_configurable(configurable, with_context):
+    """A non-object configurable is a clear ValueError, not a dict.update() error.
+
+    With ``context`` present the configurable section is otherwise ignored, but
+    reading its keys for the warning used to raise AttributeError.
+    """
+    from app.gateway.services import build_run_config
+
+    request_config = {"configurable": configurable}
+    if with_context:
+        request_config["context"] = {}
+    with pytest.raises(ValueError, match="configurable"):
+        build_run_config("thread-1", request_config, None)
 
 
 def test_build_run_config_null_context_custom_agent_injects_agent_name():

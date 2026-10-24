@@ -1397,6 +1397,33 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
 
 ### Fixed
 
+- **gateway:** Run requests with a malformed body now get a client error
+  instead of `500 Internal Server Error`. A `config.configurable` or
+  `config.context` that is not an object, an invalid `assistant_id`, a
+  non-string `agent_name`, or an AI message whose `tool_calls` is not a list of
+  objects used to fail run admission unhandled. They now return `422` (`400`
+  for the message) before a run is created. On thread routes, a
+  `config.configurable` of `[]`, `""`, `0`, `false` or a list of key/value
+  pairs used to be accepted and is now rejected with `422` too. ([#7362])
+
+- **tui:** Quitting after `Ctrl+C` interrupted a run no longer hangs on the
+  step that run is still finishing. The run thread was joined on exit, so the
+  TUI closed but the shell prompt stayed blocked until a long tool call or model
+  request returned, and further `Ctrl+C` only printed a traceback. Quitting now
+  says it is waiting for that step and closes when it finishes; press `Ctrl+C`
+  again to quit at once. ([#7326])
+  
+- **tui:** The streamed transcript no longer drops tokens that repeat or extend
+  the text already shown. Deltas were merged by prefix, so `ha` + `ha` rendered
+  as `ha`, `1` + `10` as `10`, and an answer that opened with a Markdown marker
+  lost every later standalone copy of it (closing `**`, list bullets, table
+  pipes, closing code fences). Each delta is now appended as sent. ([#7325])
+
+- **sandbox:** Release an E2B VM's ownership lease when acquire finds it gone
+  (a dead cached client or a warm-pool VM reaped while parked). The lease was
+  kept and renewed until Gateway shutdown, so every reaped VM left a tracked
+  ID and a renewed ownership key behind. ([#7277])
+  
 - **auth:** SSO login and callback no longer fail with a `500` when the OIDC
   provider answers `200` with a body that is not the expected JSON object, such
   as a maintenance HTML page. Discovery, token, JWKS and UserInfo bodies, a
@@ -13014,3 +13041,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7217]: https://github.com/bytedance/deer-flow/pull/7217
 [#7255]: https://github.com/bytedance/deer-flow/pull/7255
 [#7258]: https://github.com/bytedance/deer-flow/pull/7258
+[#7277]: https://github.com/bytedance/deer-flow/pull/7277
+[#7325]: https://github.com/bytedance/deer-flow/pull/7325
+[#7326]: https://github.com/bytedance/deer-flow/pull/7326
+[#7362]: https://github.com/bytedance/deer-flow/pull/7362

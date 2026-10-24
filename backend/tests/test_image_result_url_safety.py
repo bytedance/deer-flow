@@ -80,7 +80,7 @@ def _stub_exa(module, url):
 
 def _stub_youcom(module, url):
     data = {"results": {"web": [{"title": "t", "url": url, "description": "c"}]}}
-    return [patch.object(module, "_get_api_key", return_value="k"), patch.object(module, "_search", return_value=data)], _sync(module.web_search_tool)
+    return [patch.object(module, "_search", new=AsyncMock(return_value=data))], _async(module.web_search_tool)
 
 
 def _stub_tencent_wsa(module, url):
