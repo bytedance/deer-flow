@@ -56,6 +56,10 @@ python /path/to/skill/scripts/github_api.py <owner> <repo> tree
 - prs
 - releases
 
+When calling `GitHubAPI.get_tree()` from Python, pass the raw branch, tag, or
+commit reference. The client URL-encodes it, including literal `#` and `%`
+characters; do not pre-encode the reference.
+
 **Round 2 - Discovery (3-5 web_search)**
 - Get overview and identify key terms
 - Find official website/repo
