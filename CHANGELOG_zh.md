@@ -1112,6 +1112,12 @@
 
 ### 修复
 
+- **持久化：** 在已存在的数据库中 PostgreSQL 启动初始化失败时，现在会报告原始错误。
+  此前 Gateway 会把任何包含 "does not exist" 的错误（例如迁移时缺少列或表）当作数据库
+  不存在并执行 `CREATE DATABASE`，启动随之以 `database ... already exists` 或
+  `permission denied to create database` 失败，原始错误也不会出现在 traceback 中。
+  现在只有数据库确实不存在（SQLSTATE `3D000`）时才会自动创建。([#7410])
+
 - **示例：** 扩展示例的包测试重新通过。其测试用 registry 缺少
   `knowledge_provider()`，不再满足 `ExtensionRegistry` 协议，按 README 运行
   `pytest` 会失败。Extension Package Check 现在也会运行自带测试的内置示例的测试，
@@ -10419,3 +10425,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7326]: https://github.com/bytedance/deer-flow/pull/7326
 [#7362]: https://github.com/bytedance/deer-flow/pull/7362
 [#7364]: https://github.com/bytedance/deer-flow/pull/7364
+[#7410]: https://github.com/bytedance/deer-flow/pull/7410

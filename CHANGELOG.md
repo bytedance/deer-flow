@@ -1397,6 +1397,14 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
 
 ### Fixed
 
+- **persistence:** A PostgreSQL bootstrap failure inside an existing database
+  now reports its own error. The Gateway treated any error mentioning "does not
+  exist", such as a missing column or relation during a migration, as a missing
+  database and ran `CREATE DATABASE`. Startup then failed with `database ...
+  already exists` or `permission denied to create database`, and the original
+  error was missing from the traceback. Only a missing database (SQLSTATE
+  `3D000`) is auto-created now. ([#7410])
+
 - **examples:** The extension example's package tests pass again. Its test
   registry lacked `knowledge_provider()`, so it no longer matched the
   `ExtensionRegistry` protocol and the README's `pytest` run failed. Extension
@@ -13052,3 +13060,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7326]: https://github.com/bytedance/deer-flow/pull/7326
 [#7362]: https://github.com/bytedance/deer-flow/pull/7362
 [#7364]: https://github.com/bytedance/deer-flow/pull/7364
+[#7410]: https://github.com/bytedance/deer-flow/pull/7410
