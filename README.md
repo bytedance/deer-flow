@@ -188,7 +188,7 @@ fences, including unclosed fences, in complete and streamed replies.
 
    Serper web and image search preserve valid entries in mixed result lists. A malformed `organic`/`images` container, or a non-empty list holding no object entries, returns Serper's format error; missing, null, or empty containers keep the existing "No results found" / "No images found" response. Format errors log the container field name only, without queries, credentials, or payload values.
 
-   Unbrowse web fetch preserves the extracted text but prefixes a warning when the target page's HTTP status is 400–599, even when the scraping service itself returns a successful response. Empty-page errors retain that status too, and both messages include the reported final URL when available.
+   Unbrowse web fetch preserves the extracted text but prefixes a warning when the target page's HTTP status is 400–599, even when the scraping service itself returns a successful response. Empty-page errors retain that status too. Both messages include up to 500 characters of the reported final URL after removing any username and password; final URLs that cannot be parsed as HTTP(S) URLs with a host are omitted.
 
    Tencent Cloud WSA web search contains malformed HTTP-success payloads the same way: a `Pages` container that is not a list, or a non-empty container holding no usable page, returns the provider's format error, while malformed page entries in an otherwise valid container are skipped so the valid rows survive. Missing, null, or empty `Pages` keep the existing "No results found" response.
 
@@ -1550,6 +1550,8 @@ search; skill cards show concise descriptions with full descriptions in a detail
 view. Built-in and user-created/imported skills are listed separately. The
 Community tab supports importing `.skill` archives into My skills.
 General preferences remain in Settings.
+
+The **ppt-generation** skill preserves transparent slide images when composing a presentation, including grayscale and palette PNG transparency.
 
 Administrators can see **Could not load** warnings in Capability Center > Skills
 when their own custom skill's `SKILL.md` contains invalid YAML. Warnings show the

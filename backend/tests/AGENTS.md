@@ -21,6 +21,12 @@ capture handler with fixture-scoped cleanup. Expect scheme/host context with
 redacted paths, so isolated runs and full-suite logging configuration agree;
 keep payload omission and tool-result assertions intact.
 
+Unbrowse final-URL regressions invoke the real fetch tool through mocked HTTP,
+covering text/structured MCP payloads and warning/empty-page diagnostics. Strip
+userinfo before the 500-character bound; keep ordinary URL spelling and `@` in
+paths/queries. Invalid authorities must not echo raw credentials. Include long
+userinfo and IPv6 cases in `test_unbrowse_target_status.py`.
+
 `.github/workflows/backend-windows-live-policy.yml` runs the child-env contract and all
 four live-test collection policy cases on Windows/Python 3.12, weekly, manually,
 and for relevant PR changes. These children only collect live tests. Keep the
