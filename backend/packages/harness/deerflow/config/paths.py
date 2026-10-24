@@ -3,7 +3,10 @@ import logging
 import os
 import re
 import shutil
+import stat
+from collections.abc import Callable
 from pathlib import Path, PureWindowsPath
+from typing import Any
 
 from deerflow.config.runtime_paths import runtime_home
 from deerflow.utils.host_paths import extended_length_path
@@ -28,6 +31,20 @@ def _default_local_base_dir() -> Path:
 def _validate_thread_id(thread_id: str) -> str:
     """Validate a thread ID before using it in filesystem paths."""
     return validate_thread_id(thread_id)
+
+
+def _retry_after_clearing_read_only(function: Callable[..., Any], path: str, exc: BaseException) -> None:
+    """Retry one ``shutil.rmtree`` step after clearing the read-only attribute.
+
+    Windows refuses ``unlink``/``rmdir`` on a read-only file or directory, where
+    POSIX needs only a writable parent, so a restored archive or a mode-preserving
+    sync leaves a thread undeletable (``WinError 5``). Exactly one retry: a file
+    still held open keeps raising, and every other failure is re-raised untouched.
+    """
+    if not isinstance(exc, PermissionError):
+        raise exc
+    os.chmod(path, os.stat(path).st_mode | stat.S_IWRITE)
+    function(path)
 
 
 def _validate_user_id(user_id: str) -> str:
@@ -488,11 +505,14 @@ class Paths:
     def delete_thread_dir(self, thread_id: str, *, user_id: str | None = None) -> None:
         """Delete all persisted data for a thread.
 
-        The operation is idempotent: missing thread directories are ignored.
+        Idempotent: missing thread directories are ignored. A file the host marks
+        read-only is retried once after clearing that bit, because Windows refuses
+        to unlink it where POSIX only needs a writable parent; a file that stays
+        undeletable still raises.
         """
         thread_dir = self.thread_dir(thread_id, user_id=user_id)
         if thread_dir.exists():
-            shutil.rmtree(thread_dir)
+            shutil.rmtree(thread_dir, onexc=_retry_after_clearing_read_only)
 
     def resolve_virtual_path(self, thread_id: str, virtual_path: str, *, user_id: str | None = None) -> Path:
         """Resolve a sandbox virtual path to the actual host filesystem path.
