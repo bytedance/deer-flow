@@ -186,6 +186,8 @@ streams simulate chunks from a non-streaming response, while no-tool streams sta
 
    Serper web and image search preserve valid entries in mixed result lists. A malformed `organic`/`images` container, or a non-empty list holding no object entries, returns Serper's format error; missing, null, or empty containers keep the existing "No results found" / "No images found" response. Format errors log the container field name only, without queries, credentials, or payload values.
 
+   Unbrowse web fetch preserves the extracted text but prefixes a warning when the target page's HTTP status is 400–599, even when the scraping service itself returns a successful response. Empty-page errors retain that status too, and both messages include the reported final URL when available.
+
    Tencent Cloud WSA web search contains malformed HTTP-success payloads the same way: a `Pages` container that is not a list, or a non-empty container holding no usable page, returns the provider's format error, while malformed page entries in an otherwise valid container are skipped so the valid rows survive. Missing, null, or empty `Pages` keep the existing "No results found" response.
 
    Serply web search contains malformed HTTP-success payloads the same way in every vertical: a `results`/`entries`/`articles` container that is not a list, or a non-empty list with no object entries, returns the provider's format error, while non-object entries in an otherwise valid list are skipped in order. Missing, null, or empty containers keep the existing "No results found" response.
@@ -1628,6 +1630,10 @@ Skills are loaded progressively — only when the task needs them, not all at on
 The bundled video-generation command reports failures on stderr and exits with
 status 1, including when the selected provider has no API key. Callers can check
 the exit status before presenting an output file.
+
+The bundled podcast-generation command returns a nonzero exit status and writes
+diagnostics to stderr when generation fails. Callers can check the status before
+presenting audio; an existing MP3 or generated transcript is not proof of success.
 
 When deferred skill discovery is enabled, `describe_skill` ranks installed skills by bounded, Unicode-normalized intent-term coverage across names and descriptions. Natural multi-term requests can therefore find a relevant skill without requiring one exact phrase, while exact `select:` and required-name `+prefix` lookups remain available. Ranked searches use up to 256 characters and return up to five results; exact `select:` lists are not truncated and return all requested catalog matches.
 
@@ -3378,6 +3384,8 @@ from the project page's Documents section:
   Oversized uploads return `413`; deduplicated uploads return `200`. Staging
   cleanup failures are logged without replacing these outcomes or a missing,
   foreign, or archived project's `404` response.
+  Cancelling a shelf upload discards its partial file after any active disk
+  operation finishes; waiting for further upload data remains cancellable.
 - **List** entries with name, size, modified time, and provenance (uploaded vs.
   saved from a conversation), and preview or download any entry.
 - **Save to project** from a thread file: the read-only conversation-files
