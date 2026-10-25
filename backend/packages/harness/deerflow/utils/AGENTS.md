@@ -173,12 +173,16 @@ retain their existing portability exemptions.
 ### Advisory File Lock Retries
 
 `file_lock.retry_until_locked` owns contention-only acquisition retries for the
-Windows Lark and extension-manager locks and bounded skill-projection reads.
+Windows Lark, extension-manager and channel runtime-config locks and bounded
+skill-projection reads.
 Retry only EACCES/EAGAIN/EDEADLK; other errors propagate without sleeping.
 Keep per-caller policies: Lark has a 15-minute Windows file-lock deadline,
-extension management waits indefinitely, and skill export retains its existing
-deadline, 0.02-second cadence and cancellation check. Clocks and sleeps are
-injectable; tests must not patch the shared stdlib time module.
+extension management and channel runtime config wait indefinitely, and skill
+export retains its existing deadline, 0.02-second cadence and cancellation
+check. Clocks and sleeps are injectable; tests must not patch the shared stdlib
+time module.
+The channel caller wraps its injected sleep to warn once after 50 contention
+retries; the helper remains responsible for error classification and cadence.
 
 `parse_retry_after_date_ms(raw, now=...)` owns HTTP-date parsing for Claude, Codex
 and LLM error middleware. Interpret timezone-less asctime as UTC and apply the
