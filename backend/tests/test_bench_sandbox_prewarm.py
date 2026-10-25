@@ -153,15 +153,17 @@ async def test_prewarm_reused_survives_a_coarse_clock_tie(observed, monkeypatch)
     coarse_s = 0.015
     real_monotonic = time.monotonic
 
+    # Freeze the quantized clock instead of racing a real bucket: the scenario
+    # between the acquire and the tool request takes several awaits, so waiting
+    # for a fresh tick and hoping both land inside it made this test fail
+    # whenever the machine was busy. A constant reading still reproduces #7044
+    # exactly (acquire and tool request share one timestamp) and cannot flake.
+    frozen_tick = math.floor(real_monotonic() / coarse_s) * coarse_s
+
     def coarse_monotonic():
-        return math.floor(real_monotonic() / coarse_s) * coarse_s
+        return frozen_tick
 
     monkeypatch.setattr(bench.time, "monotonic", coarse_monotonic)
-    # Spin until a fresh quantized bucket starts, so the whole overlap scenario
-    # lands inside the same tick deterministically.
-    current_bucket = coarse_monotonic()
-    while coarse_monotonic() == current_bucket:
-        await asyncio.sleep(0.001)
 
     model_gate = asyncio.Event()
     trace = bench.Trace()
