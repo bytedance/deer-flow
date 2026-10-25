@@ -920,6 +920,24 @@ class LocalSandbox(Sandbox):
             args = [shell, "-c", resolved_command]
             stdout, stderr, returncode, timed_out = self._run_posix_command(args, timeout, sandbox_env)
 
+        output = self._assemble_command_output(stdout, stderr, returncode, timed_out, timeout)
+        # Reverse resolve local paths back to container paths in output
+        return self._reverse_resolve_paths_in_output(output)
+
+    def _assemble_command_output(
+        self,
+        stdout: str,
+        stderr: str,
+        returncode: int,
+        timed_out: bool,
+        timeout: float | None,
+    ) -> str:
+        """Assemble one command execution's final output.
+
+        Shared by the sync and async execution paths so both produce identical
+        output: stderr attachment, the timeout notice with the coreutils
+        ``Exit Code: 124`` convention, and the ``(no output)`` placeholder.
+        """
         output = stdout
         if stderr:
             output += f"\nStd Error:\n{stderr}" if output else stderr
@@ -932,10 +950,7 @@ class LocalSandbox(Sandbox):
             output += "\nExit Code: 124"
         elif returncode != 0:
             output += f"\nExit Code: {returncode}"
-
-        final_output = output if output else "(no output)"
-        # Reverse resolve local paths back to container paths in output
-        return self._reverse_resolve_paths_in_output(final_output)
+        return output if output else "(no output)"
 
     @staticmethod
     def _run_windows_command(
