@@ -1,7 +1,7 @@
 "use client";
 
 import type { Message } from "@langchain/langgraph-sdk";
-import { useEffect, useId, useMemo, useState } from "react";
+import { memo, useEffect, useId, useMemo, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { writeTextToClipboard } from "@/core/clipboard";
@@ -9,7 +9,7 @@ import { useI18n } from "@/core/i18n/hooks";
 import { formatToolDetail } from "@/core/messages/tool-detail-preview";
 import { isErrorToolMessage } from "@/core/messages/tool-error";
 
-export function ToolCallDetails({
+function ToolCallDetailsImpl({
   name,
   callId,
   args,
@@ -58,6 +58,10 @@ export function ToolCallDetails({
     </div>
   );
 }
+
+/** Memoized so unchanged steps bail out while the active turn streams. */
+export const ToolCallDetails = memo(ToolCallDetailsImpl);
+ToolCallDetails.displayName = "ToolCallDetails";
 
 function Payload({ label, value }: { label: string; value: unknown }) {
   const { t } = useI18n();

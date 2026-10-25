@@ -2,6 +2,7 @@
 
 import {
   createContext,
+  memo,
   type ComponentProps,
   isValidElement,
   type ReactNode,
@@ -205,7 +206,7 @@ function StreamingCode({
 }
 
 /** Renders markdown content. */
-export function MarkdownContent({
+function MarkdownContentImpl({
   content,
   isLoading,
   rehypePlugins,
@@ -265,3 +266,7 @@ export function MarkdownContent({
     </SafeMessageResponse>
   );
 }
+
+/** Renders markdown content; memoized so unchanged steps bail out during streaming. */
+export const MarkdownContent = memo(MarkdownContentImpl);
+MarkdownContent.displayName = "MarkdownContent";

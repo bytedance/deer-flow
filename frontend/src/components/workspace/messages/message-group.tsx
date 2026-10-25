@@ -1231,6 +1231,9 @@ interface BrowserViewMeta {
   title?: string;
 }
 
+/** Stable empty args so a memoized step is not invalidated by a fresh {} each render. */
+const EMPTY_TOOL_ARGS: Record<string, unknown> = {};
+
 function indexToolCallData(messages: Message[]) {
   const toolCallResults = new Map<string, string>();
   const browserViews = new Map<string, BrowserViewMeta>();
@@ -1321,7 +1324,7 @@ function convertToSteps(
           name: tool_call.name,
           // Persisted or mid-stream tool calls can omit args (or send null);
           // every ToolCall branch reads them, so normalize once here.
-          args: tool_call.args ?? {},
+          args: tool_call.args ?? EMPTY_TOOL_ARGS,
         };
         const toolCallId = tool_call.id;
         if (toolCallId) {
