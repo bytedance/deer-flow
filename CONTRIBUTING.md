@@ -338,6 +338,10 @@ before review.
 ## Testing
 
 ```bash
+# Public skill scripts (from the repository root)
+python -m pip install -r tests/skills/requirements.txt
+python -m pytest tests/skills -q
+
 # Default backend tests (four parallel shards; excludes live and blocking-I/O tests)
 cd backend
 make test

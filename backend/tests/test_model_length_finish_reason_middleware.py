@@ -341,3 +341,36 @@ def test_non_ai_last_message_passes_through():
 
     assert mw._apply({"messages": [HumanMessage(content="hello")]}, runtime) is None
     assert "stop_reason" not in runtime.context
+
+
+def test_consume_stop_reason_returns_model_length_capped_once_per_run():
+    mw = ModelLengthFinishReasonMiddleware()
+    msg = AIMessage(content="partial", response_metadata={"finish_reason": "length"})
+
+    mw._apply({"messages": [msg]}, _runtime("run-a"))
+
+    assert mw.consume_stop_reason("run-b") is None
+    assert mw.consume_stop_reason("run-a") == MODEL_LENGTH_CAPPED_STOP_REASON
+    assert mw.consume_stop_reason("run-a") is None
+
+
+def test_consume_stop_reason_keys_by_context_run_id_including_none():
+    # The subagent executor consumes with its raw run_id, which is None when
+    # the parent run has none; the middleware must key the cap the same way.
+    mw = ModelLengthFinishReasonMiddleware()
+    runtime = MagicMock()
+    runtime.context = {"thread_id": "thread-1", "run_id": None}
+    msg = AIMessage(content="", tool_calls=[{"name": "write_file", "args": {}, "id": "call-1"}], response_metadata={"finish_reason": "length"})
+
+    assert mw._apply({"messages": [msg]}, runtime) is not None
+
+    assert mw.consume_stop_reason(None) == MODEL_LENGTH_CAPPED_STOP_REASON
+
+
+def test_consume_stop_reason_is_empty_for_clean_response():
+    mw = ModelLengthFinishReasonMiddleware()
+    msg = AIMessage(content="done", response_metadata={"finish_reason": "stop"})
+
+    mw._apply({"messages": [msg]}, _runtime("run-a"))
+
+    assert mw.consume_stop_reason("run-a") is None

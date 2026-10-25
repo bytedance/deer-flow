@@ -40,10 +40,15 @@ def _posix(path: str | PurePath) -> PurePosixPath:
     return PurePosixPath(str(path).replace("\\", "/"))
 
 
+def is_scripts_member(path: str | PurePath) -> bool:
+    """Return whether a package-relative path is a member of the top-level ``scripts/`` directory."""
+    posix = _posix(path)
+    return bool(posix.parts) and posix.parts[0] == "scripts"
+
+
 def is_code_path(path: str | PurePath) -> bool:
     """Return whether a package-relative path is code by name: a ``scripts/`` member or a code suffix."""
-    posix = _posix(path)
-    return (bool(posix.parts) and posix.parts[0] == "scripts") or posix.suffix.lower() in CODE_SUFFIXES
+    return is_scripts_member(path) or _posix(path).suffix.lower() in CODE_SUFFIXES
 
 
 def is_code_file(path: str | PurePath, head: bytes) -> bool:
