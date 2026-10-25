@@ -8,8 +8,6 @@ from typing import Any
 
 from langchain.tools import BaseTool, tool
 from langchain_core.messages import AIMessage
-from langgraph._internal._constants import CONFIG_KEY_SCRATCHPAD
-from langgraph._internal._scratchpad import PregelScratchpad
 
 from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
 from deerflow.tools.types import Runtime
@@ -44,16 +42,26 @@ def _recursion_status(config: Mapping[str, Any]) -> dict[str, int] | None:
     LangGraph's RemainingSteps managed value uses ``scratchpad.stop - step``.
     ToolNode's Send path does not hydrate managed values into ToolRuntime.state,
     so read the same execution scratchpad instead (verified with LangGraph
-    1.2.9). Keep this private dependency isolated and covered by real-graph tests.
-    Checkpoint steps accumulate across turns; stop is reset on each invocation,
-    including resumes, so ``recursion_limit - step`` is not a valid substitute.
+    1.2.9). Keep this private dependency local and fail closed when its import or
+    shape changes so the ordinary tools package remains usable. Checkpoint steps
+    accumulate across turns; stop is reset on each invocation, including resumes,
+    so ``recursion_limit - step`` is not a valid substitute.
     """
-    configurable = config.get("configurable")
-    scratchpad = configurable.get(CONFIG_KEY_SCRATCHPAD) if isinstance(configurable, Mapping) else None
-    if not isinstance(scratchpad, PregelScratchpad):
+    try:
+        from langgraph._internal._constants import CONFIG_KEY_SCRATCHPAD
+        from langgraph._internal._scratchpad import PregelScratchpad
+    except (AttributeError, ImportError):
+        return None
+
+    try:
+        configurable = config.get("configurable")
+        scratchpad = configurable.get(CONFIG_KEY_SCRATCHPAD) if isinstance(configurable, Mapping) else None
+        if not isinstance(scratchpad, PregelScratchpad):
+            return None
+        step, stop = scratchpad.step, scratchpad.stop
+    except (AttributeError, TypeError):
         return None
     limit = config.get("recursion_limit")
-    step, stop = scratchpad.step, scratchpad.stop
     if any(not isinstance(value, int) or isinstance(value, bool) for value in (limit, step, stop)):
         return None
     if limit <= 0 or step < 0 or stop < step:

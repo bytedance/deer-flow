@@ -1,6 +1,8 @@
 """Phase 2 introspection against real LangGraph execution, without providers."""
 
 import asyncio
+import builtins
+import importlib
 import json
 
 import pytest
@@ -13,6 +15,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.errors import GraphRecursionError
 
 from deerflow.agents.thread_state import get_thread_state_schema
+from deerflow.tools.builtins import inspect_run_status_tool as run_status_module
 from deerflow.tools.builtins.inspect_run_status_tool import build_inspect_run_status_tool
 from deerflow.tools.types import Runtime
 
@@ -158,3 +161,37 @@ def test_outside_graph_recursion_is_unknown_instead_of_guessed(config):
     snapshot = json.loads(tool.func(runtime=runtime))
 
     assert snapshot["recursion"] is None
+
+
+def test_private_langgraph_import_failure_is_local(monkeypatch):
+    real_import = builtins.__import__
+    private_modules = {"langgraph._internal._constants", "langgraph._internal._scratchpad"}
+
+    def reject_private_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name in private_modules:
+            raise ImportError(f"blocked private import: {name}")
+        return real_import(name, globals, locals, fromlist, level)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(builtins, "__import__", reject_private_import)
+        reloaded = importlib.reload(run_status_module)
+        assert reloaded._recursion_status({"recursion_limit": 10}) is None
+    importlib.reload(run_status_module)
+
+
+def test_incompatible_private_scratchpad_shape_returns_unknown(monkeypatch):
+    from langgraph._internal import _constants, _scratchpad
+
+    class IncompatibleScratchpad:
+        @property
+        def step(self):
+            raise AttributeError("step is unavailable")
+
+    monkeypatch.setattr(_scratchpad, "PregelScratchpad", IncompatibleScratchpad)
+    monkeypatch.setattr(run_status_module, "PregelScratchpad", IncompatibleScratchpad, raising=False)
+    config = {
+        "configurable": {_constants.CONFIG_KEY_SCRATCHPAD: IncompatibleScratchpad()},
+        "recursion_limit": 10,
+    }
+
+    assert run_status_module._recursion_status(config) is None
