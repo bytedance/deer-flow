@@ -105,7 +105,7 @@ importers:
         version: 1.0.2(react@19.2.4)
       '@t3-oss/env-nextjs':
         specifier: ^0.12.0
-        version: 0.12.0(typescript@5.9.3)(zod@4.6.6)
+        version: 0.12.0(typescript@5.9.3)(zod@4.6.7)
       '@tanstack/react-query':
         specifier: ^5.90.17
         version: 5.90.20(react@19.2.4)
@@ -129,7 +129,7 @@ importers:
         version: 12.10.0(@types/react@19.2.13)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
       ai:
         specifier: ^6.0.33
-        version: 6.0.78(zod@4.6.6)
+        version: 6.0.78(zod@4.6.7)
       best-effort-json-parser:
         specifier: ^1.2.1
         version: 1.2.1
@@ -258,7 +258,7 @@ importers:
         version: 14.0.0
       zod:
         specifier: ^4.6.6
-        version: 4.6.6
+        version: 4.6.7
     devDependencies:
       '@eslint/eslintrc':
         specifier: ^3.3.1
@@ -6035,8 +6035,8 @@ packages:
   zod@4.3.6:
     resolution: {integrity: sha512-rftlrkhHZOcjDwkGlnUtZZkvaPHCsDATp4pGpuOOMDaTdDDXF91wuVDJoWoPsKX/3YPQ5fHuF3STjcYyKr+Qhg==}
 
-  zod@4.6.6:
-    resolution: {integrity: sha512-4UmzQUF5fxvfcYHlbjBmejU+w+hbDnWFx4aS8kBx7nPBHcO2SqPbpAG8snbdg+Xse4pRefR98hgjFgIMCI/UhA==}
+  zod@4.6.7:
+    resolution: {integrity: sha512-g8W2D2kU6a8untc053fX1uVBKzM7yqAxW/3zwk83+6RyF2+SKOuV+c0wBDhUwzV1PaGapmZH+rmcUzPf+3CGwg==}
 
   zustand@4.5.7:
     resolution: {integrity: sha512-CHOUy7mu3lbD6o6LJLfllpjkzhHXSBlX8B9+qPddUsIfeF5S/UZ5q0kmCsnRqT1UHFQZchNFDDzMbQsuesHWlw==}
@@ -6076,19 +6076,19 @@ packages:
 
 snapshots:
 
-  '@ai-sdk/gateway@3.0.39(zod@4.6.6)':
+  '@ai-sdk/gateway@3.0.39(zod@4.6.7)':
     dependencies:
       '@ai-sdk/provider': 3.0.8
-      '@ai-sdk/provider-utils': 4.0.14(zod@4.6.6)
+      '@ai-sdk/provider-utils': 4.0.14(zod@4.6.7)
       '@vercel/oidc': 3.1.0
-      zod: 4.6.6
+      zod: 4.6.7
 
-  '@ai-sdk/provider-utils@4.0.14(zod@4.6.6)':
+  '@ai-sdk/provider-utils@4.0.14(zod@4.6.7)':
     dependencies:
       '@ai-sdk/provider': 3.0.8
       '@standard-schema/spec': 1.1.0
       eventsource-parser: 3.0.6
-      zod: 4.6.6
+      zod: 4.6.7
 
   '@ai-sdk/provider@3.0.8':
     dependencies:
@@ -6749,7 +6749,7 @@ snapshots:
       mustache: 4.2.0
       p-queue: 6.6.2
       uuid: 10.0.0
-      zod: 4.6.6
+      zod: 4.6.7
     transitivePeerDependencies:
       - '@opentelemetry/api'
       - '@opentelemetry/exporter-trace-otlp-proto'
@@ -7975,17 +7975,17 @@ snapshots:
     dependencies:
       tslib: 2.8.1
 
-  '@t3-oss/env-core@0.12.0(typescript@5.9.3)(zod@4.6.6)':
+  '@t3-oss/env-core@0.12.0(typescript@5.9.3)(zod@4.6.7)':
     optionalDependencies:
       typescript: 5.9.3
-      zod: 4.6.6
+      zod: 4.6.7
 
-  '@t3-oss/env-nextjs@0.12.0(typescript@5.9.3)(zod@4.6.6)':
+  '@t3-oss/env-nextjs@0.12.0(typescript@5.9.3)(zod@4.6.7)':
     dependencies:
-      '@t3-oss/env-core': 0.12.0(typescript@5.9.3)(zod@4.6.6)
+      '@t3-oss/env-core': 0.12.0(typescript@5.9.3)(zod@4.6.7)
     optionalDependencies:
       typescript: 5.9.3
-      zod: 4.6.6
+      zod: 4.6.7
 
   '@tailwindcss/node@4.1.18':
     dependencies:
@@ -8646,13 +8646,13 @@ snapshots:
 
   acorn@8.15.0: {}
 
-  ai@6.0.78(zod@4.6.6):
+  ai@6.0.78(zod@4.6.7):
     dependencies:
-      '@ai-sdk/gateway': 3.0.39(zod@4.6.6)
+      '@ai-sdk/gateway': 3.0.39(zod@4.6.7)
       '@ai-sdk/provider': 3.0.8
-      '@ai-sdk/provider-utils': 4.0.14(zod@4.6.6)
+      '@ai-sdk/provider-utils': 4.0.14(zod@4.6.7)
       '@opentelemetry/api': 1.9.0
-      zod: 4.6.6
+      zod: 4.6.7
 
   ajv@6.12.6:
     dependencies:
@@ -12658,7 +12658,7 @@ snapshots:
 
   zod@4.3.6: {}
 
-  zod@4.6.6: {}
+  zod@4.6.7: {}
 
   zustand@4.5.7(@types/react@19.2.13)(react@19.2.4):
     dependencies:
