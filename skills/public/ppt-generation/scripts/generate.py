@@ -53,7 +53,7 @@ def generate_ppt(
 
     for i, image_path in enumerate(slide_images):
         if not os.path.exists(image_path):
-            return f"Error: Slide image not found: {image_path}"
+            raise FileNotFoundError(f"Slide image not found: {image_path}")
 
         # Add a blank slide
         slide = prs.slides.add_slide(blank_layout)
@@ -133,6 +133,7 @@ def generate_ppt(
 
 if __name__ == "__main__":
     import argparse
+    import sys
 
     parser = argparse.ArgumentParser(
         description="Generate PowerPoint presentation from slide images"
@@ -164,5 +165,6 @@ if __name__ == "__main__":
                 args.output_file,
             )
         )
-    except Exception as e:
-        print(f"Error while generating presentation: {e}")
+    except Exception as e:  # noqa: BLE001 - any composition failure must exit 1
+        print(f"Error while generating presentation: {e}", file=sys.stderr)
+        sys.exit(1)

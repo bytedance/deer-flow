@@ -416,6 +416,7 @@ python /mnt/skills/public/ppt-generation/scripts/generate.py \
 After generation:
 
 - The PPTX file is saved in `/mnt/user-data/outputs/`
+- Composition failures exit with status 1 and write diagnostics to stderr. This includes a missing or unreadable plan, invalid plan JSON, and a missing slide image. Successful composition exits 0 and prints its result to stdout. Do not present the PPTX when the command exits nonzero.
 - Share the generated presentation with user using `present_files` tool
 - Also share the individual slide images if requested
 - Provide brief description of the presentation

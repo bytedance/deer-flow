@@ -1684,6 +1684,10 @@ a spec missing `tool`, or a chart-service HTTP failure. Successful chart URLs,
 including spreadsheets (`generate_spreadsheet`), stay on stdout. A mixed batch
 still prints URLs for the charts that succeeded, then exits with status 1.
 
+The bundled ppt-generation command reports composition failures on stderr and
+exits with status 1, including a missing or invalid plan and a missing slide
+image. Successful composition exits 0 and prints its result to stdout.
+
 When deferred skill discovery is enabled, `describe_skill` ranks installed skills by bounded, Unicode-normalized intent-term coverage across names and descriptions. Natural multi-term requests can therefore find a relevant skill without requiring one exact phrase, while exact `select:` and required-name `+prefix` lookups remain available. Ranked searches use up to 256 characters and return up to five results; exact `select:` lists are not truncated and return all requested catalog matches.
 
 A skill directory is a package boundary: once DeerFlow finds its `SKILL.md`, nested `SKILL.md` files under that package (for example evaluation fixtures) remain supporting data and are not registered as runtime skills. This applies to managed integration packs as well as public and custom skills. Namespace directories without their own `SKILL.md` can still group nested skills.
