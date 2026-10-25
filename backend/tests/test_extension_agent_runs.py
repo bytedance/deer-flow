@@ -343,6 +343,15 @@ async def test_foreign_thread_and_forged_privileged_input_are_rejected(runtime):
 
 
 @pytest.mark.asyncio
+async def test_create_thread_rejects_an_assistant_id_that_names_no_agent(runtime):
+    runs, state, _, _, _ = runtime
+    with pytest.raises(AgentRunError) as rejected:
+        await runs.create_thread(assistant_id="bad name!", thread_id="invalid-agent")
+    assert rejected.value.status_code == 422
+    assert await state.thread_store.get("invalid-agent", user_id=None) is None
+
+
+@pytest.mark.asyncio
 async def test_custom_agent_binding_and_permission_rechecks_use_current_user(runtime, monkeypatch):
     from app.gateway.routers.thread_runs import RunResponse
     from deerflow.runtime.user_context import get_effective_user_id
@@ -466,3 +475,77 @@ async def test_durable_configuration_revision_survives_host_replacement_and_rota
     load_user.return_value = None
     with pytest.raises(AgentRunError):
         await second.configuration_revision(assistant_ids=["lead_agent"], durable=True)
+
+
+@pytest.mark.asyncio
+async def test_execution_fence_namespace_and_host_prerequisites(runtime):
+    from deerflow_extension_api import ExecutionFence
+
+    runs, state, request, _, _ = runtime
+    runs = runs.for_plugin("test.fenced")
+    thread_id = await runs.create_thread(thread_id="fenced-thread")
+    with pytest.raises(AgentRunError, match="belong to this plugin"):
+        await runs.start(thread_id=thread_id, input={}, execution_fence=ExecutionFence("other", "workflow", "owner", 1))
+    with pytest.raises(AgentRunError, match="heartbeats"):
+        await runs.start(thread_id=thread_id, input={}, execution_fence=ExecutionFence("test.fenced", "workflow", "owner", 1))
+
+
+@pytest.mark.asyncio
+async def test_host_forwards_fence_to_atomic_admission(runtime, monkeypatch, tmp_path):
+    from deerflow_extension_api import ExecutionFence
+    from sqlalchemy import insert
+    from test_run_repository import _cleanup, _make_repo
+
+    from deerflow.config.run_ownership_config import RunOwnershipConfig
+    from deerflow.persistence.extension_leases.model import ExtensionExecutionLeaseRow
+    from deerflow.runtime import RunManager
+
+    runs, state, request, _, _ = runtime
+    repository = await _make_repo(tmp_path)
+    state.run_store = repository
+    await state.run_manager.shutdown()
+    state.run_manager = RunManager(store=repository, run_ownership_config=RunOwnershipConfig(heartbeat_enabled=True))
+    # Transport is irrelevant to this admission test; advertise its prerequisite
+    # without starting Redis. The actual host/manager/store admission path is real.
+    monkeypatch.setattr(type(state.stream_bridge), "supports_cross_process", True, raising=False)
+    monkeypatch.setattr(type(state.stream_bridge), "start_producer_lease", AsyncMock(return_value=True), raising=False)
+    runs = runs.for_plugin("test.fenced")
+    thread_id = await runs.create_thread(thread_id="fenced-host-thread")
+    async with repository._sf() as session:
+        await session.execute(insert(ExtensionExecutionLeaseRow).values(namespace="test.fenced", resource_id="workflow", user_id=str(request.state.user.id), holder_id="new", epoch=2, expires_at=9999999999))
+        await session.commit()
+    try:
+        with pytest.raises(AgentRunError) as failure:
+            await runs.start(thread_id=thread_id, input={"messages": [{"role": "user", "content": "must not execute"}]}, execution_fence=ExecutionFence("test.fenced", "workflow", "old", 1))
+        assert failure.value.status_code == 409
+        assert "execution fence" in str(failure.value)
+    finally:
+        await state.run_manager.shutdown()
+        await _cleanup()
+
+
+@pytest.mark.asyncio
+async def test_configuration_revision_canonicalizes_sets_but_preserves_list_order(host, monkeypatch):
+    class OrderedSet(set):
+        def __init__(self, values):
+            super().__init__(values)
+            self.values = values
+
+        def __iter__(self):
+            return iter(self.values)
+
+    control, request, _ = host
+    data = {"tools": ["first", "second"], "exempt_tools": OrderedSet(["task", "present_files"])}
+
+    # Pydantic JSON mode loses the distinction between sets and ordered lists.
+    def dump(**kwargs):
+        return {**data, "exempt_tools": list(data["exempt_tools"])} if kwargs.get("mode") == "json" else data
+
+    monkeypatch.setattr("deerflow.config.app_config.get_app_config", lambda: SimpleNamespace(model_dump=dump))
+    monkeypatch.setattr("deerflow.config.extensions_config.get_extensions_config", lambda: SimpleNamespace(model_dump=lambda **kw: {}))
+    runs = control.bind(request)
+    before = await runs.configuration_revision(assistant_ids=["lead_agent"], durable=True)
+    data["exempt_tools"] = OrderedSet(["present_files", "task"])
+    assert before == await runs.configuration_revision(assistant_ids=["lead_agent"], durable=True)
+    data["tools"].reverse()
+    assert before != await runs.configuration_revision(assistant_ids=["lead_agent"], durable=True)

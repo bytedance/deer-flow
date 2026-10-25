@@ -76,6 +76,10 @@ class GoalWriteConflict(RuntimeError):
     """Raised when a goal write is based on a stale checkpoint."""
 
 
+class GoalEvaluationFormatError(ValueError):
+    """A normally completed evaluator response did not contain a valid verdict."""
+
+
 def goal_thread_lock(thread_id: str) -> AbstractAsyncContextManager[None]:
     """Serialize goal read-modify-write sequences within the current event loop."""
     return _goal_locks.hold(thread_id)
@@ -306,7 +310,8 @@ def _cap_evidence(lines: list[str]) -> str:
     that work answers, and so is the latest Human Input Card answer left out. Each is shortened
     only when it and the lines after it do not fit whole. If the next assistant message back
     does not fit whole, its end fills the room left. A marker says how many lines were left
-    out. No line starts midway without a label.
+    out. Spare room then restores shortened user input without displacing the selected
+    recent work. No line starts midway without a label.
     """
     conversation = "\n\n".join(lines)
     if len(conversation) <= MAX_GOAL_CONVERSATION_CHARS:
@@ -345,6 +350,13 @@ def _cap_evidence(lines: list[str]) -> str:
         start = boundary
     omitted = start - len(head)
     marker = [f"[{omitted} earlier evidence lines omitted]"] if omitted else []
+    spare = MAX_GOAL_CONVERSATION_CHARS - len("\n\n".join([*head, *marker, *kept]))
+    for offset, index in enumerate(picks if head else []):
+        if spare <= 0:
+            break
+        expanded = _truncate(lines[index], MAX_GOAL_REQUEST_CHARS + spare)
+        spare += len(head[offset]) - len(expanded)
+        head[offset] = expanded
     return "\n\n".join([*head, *marker, *kept])
 
 
@@ -547,7 +559,20 @@ async def evaluate_goal_completion(
             invoke=invoke_with_usage,
             task_store=task_store,
         )
-    return parse_goal_evaluation_response(_extract_response_text(response.content), require_assumption_attribution=interaction_policy is not None and not interaction_policy.allows_clarification)
+    try:
+        return parse_goal_evaluation_response(_extract_response_text(response.content), require_assumption_attribution=interaction_policy is not None and not interaction_policy.allows_clarification)
+    except ValueError as exc:
+        metadata = getattr(response, "response_metadata", None)
+        reasons = [metadata[key] for key in ("finish_reason", "stop_reason") if key in metadata] if isinstance(metadata, Mapping) else []
+        blocks = response.content if isinstance(response.content, list) else []
+        refusal = _additional_kwargs(response).get("refusal") or any(
+            isinstance(block, Mapping) and (block.get("type") == "refusal" or (block.get("type") == "non_standard" and isinstance(block.get("value"), Mapping) and block["value"].get("refusal"))) for block in blocks
+        )
+        # Explicit refusal wins even when an adapter also reports normal stop.
+        # Length/safety stops and unknown outcomes retain their failure behavior.
+        if not refusal and reasons and all(isinstance(reason, str) and reason.casefold() in {"stop", "end_turn"} for reason in reasons):
+            raise GoalEvaluationFormatError("The completed goal evaluator response was malformed.") from exc
+        raise
 
 
 def _goal_evaluator_usage_record(response: Any, *, source_id: str, model_name: str | None, model: Any) -> dict[str, int | str | None]:

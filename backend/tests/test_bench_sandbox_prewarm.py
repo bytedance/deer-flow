@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -136,6 +138,49 @@ async def test_real_graph_prewarm_starts_during_model_and_is_claimed_once(observ
     assert row["tool_output_valid"] is True
     assert provider.executed and provider.released == ["alice:overlap"]
     assert not provider.active
+
+
+@pytest.mark.anyio
+async def test_prewarm_reused_survives_a_coarse_clock_tie(observed, monkeypatch):
+    """Pin #7044: a same-tick acquire/tool timestamp must not unclassify a reused lease.
+
+    Coarse monotonic clocks (Windows, ~15.6 ms granularity) can quantize the
+    prewarm acquire and the tool request into the same tick; the former strict
+    `<` classification then dropped the genuine prewarm from the speculative
+    set. Event-state capture must keep it classified as speculative.
+    """
+    provider, config = observed
+    coarse_s = 0.015
+    real_monotonic = time.monotonic
+
+    def coarse_monotonic():
+        return math.floor(real_monotonic() / coarse_s) * coarse_s
+
+    monkeypatch.setattr(bench.time, "monotonic", coarse_monotonic)
+    # Spin until a fresh quantized bucket starts, so the whole overlap scenario
+    # lands inside the same tick deterministically.
+    current_bucket = coarse_monotonic()
+    while coarse_monotonic() == current_bucket:
+        await asyncio.sleep(0.001)
+
+    model_gate = asyncio.Event()
+    trace = bench.Trace()
+    task = asyncio.create_task(bench.run_case(provider, config, case="tool", prewarm=True, model_delay=0, thread_id="coarse-tick", user_id="alice", trace=trace, model_gate=model_gate))
+    try:
+        await asyncio.wait_for(trace.model_started.wait(), 2)
+        await asyncio.wait_for(provider.started.wait(), 2)
+        provider.finish.set()
+        await asyncio.wait_for(trace.acquire_ready.wait(), 2)
+        model_gate.set()
+        row = await asyncio.wait_for(task, 3)
+    finally:
+        provider.finish.set()
+        model_gate.set()
+        await asyncio.gather(task, return_exceptions=True)
+    assert trace.acquisitions[0]["started"] == trace.timestamps["tool_requested"], "precondition: the acquire and the tool request must share one quantized tick"
+    assert row["success"], json.dumps(row)
+    assert row["acquire_calls"] == 1
+    assert row["prewarm_reused"] is True
 
 
 @pytest.mark.anyio

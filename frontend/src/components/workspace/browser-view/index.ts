@@ -10,6 +10,7 @@ export {
   type BrowserTab,
   type BrowserInputEvent,
   type BrowserStreamStatus,
+  type BrowserStreamClosedReason,
 } from "./use-browser-stream";
 export {
   BrowserViewProvider,
