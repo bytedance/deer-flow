@@ -203,18 +203,19 @@ NEXT_PUBLIC_LANGGRAPH_BASE_URL=http://localhost:8001/api
 
 Leave these unset for the standard `make dev` / Docker flow, where nginx serves the public `/api/langgraph/*` prefix and rewrites it to Gateway's native `/api/*` routes.
 
-`make build-static` creates a standalone read-only demo and copies `.next/static`
-and `public` into the output. In static mode, `core/api/static-response.ts`
-resolves Gateway REST reads with the bundled capability catalog and safe
-installation projections from existing same-origin `/mock/api` fixtures; writes
-and unknown API routes fail locally.
-The homepage client counter calls `/github-stars`, outside the Gateway proxy.
-That dynamic route reads the server-only `GITHUB_OAUTH_TOKEN` at runtime, caches
-GitHub data for one hour, and returns 204 when the count is unavailable. Start
-the standalone server from `frontend/` with `node --env-file=.env
-.next/standalone/server.js` to load the current credentials.
+`make build-static` emits a standalone read-only demo, copying `.next/static`
+and `public`. In static mode, `core/api/static-response.ts` serves Gateway reads
+from bundled capabilities and safe installation projections in same-origin
+`/mock/api` fixtures; writes and unknown routes fail locally.
+The homepage counter uses `/github-stars`, outside Gateway. It reads server-only
+`GITHUB_OAUTH_TOKEN` at runtime, caches GitHub data for one hour, and returns 204
+when unavailable. From `frontend/`, run `node --env-file=.env
+.next/standalone/server.js` to load credentials.
 
-To reach a dev server on anything other than localhost — a LAN address, or a proxied hostname — list the host in `DEER_FLOW_DEV_ALLOWED_ORIGINS` (comma-separated; a full URL is reduced to its host). It feeds Next's `allowedDevOrigins`, which gates `/_next/*`, fonts, and HMR. Without it those requests get a 403 and the page renders server-side but never hydrates, so nothing on it — including the login form — responds. Development only; production builds ignore it.
+For non-localhost dev access, set `DEER_FLOW_DEV_ALLOWED_ORIGINS` to comma-separated
+hosts (URLs reduce to hosts). Next's `allowedDevOrigins` gates `/_next/*`, fonts
+and HMR; otherwise 403s prevent hydration and interactions, including login.
+Production ignores this setting.
 
 One-time schedule input uses `validZonedLocalToUtcIso` to reject wall times that
 do not round-trip in the selected timezone. Invalid input emits an empty spec and
@@ -241,20 +242,18 @@ round-trip validation must still reject newly entered skipped times.
 Follow `src/` ownership, add types/error handling and unit/E2E coverage, run
 `pnpm check`, and update this guide for architecture, command, or convention changes.
 
-Docs search: `pnpm build` runs `scripts/build-search-index.mjs`, which sets each
-page's `<html lang>` from its route so Pagefind writes one index per language
-(`public/_pagefind/`, gitignored); it works only on a build. `DocsHtmlLang` syncs
-`<html lang>` at runtime. Search renders only via `Header`'s `search` slot
-(`Layout search={null}`). See `tests/unit/app/docs-search.test.ts`.
+Docs search: `pnpm build` runs `scripts/build-search-index.mjs`, setting each
+page's `<html lang>` from its route for Pagefind's per-language indexes
+(`public/_pagefind/`, gitignored; build only). `DocsHtmlLang` syncs runtime
+`<html lang>`. Render search only via `Header`'s `search` slot with
+`Layout search={null}`. Tests: `tests/unit/app/docs-search.test.ts`.
 
-Route asset budgets are enforced with `pnpm perf:check`. The command measures
-`/login` from a normal production build, then builds in static-demo mode for the
-fixture-backed workspace routes. It starts the production server on temporary local
-ports, measures the unique JavaScript and CSS files referenced by representative
-routes, writes the detailed result to `.next/performance-results.json`, and compares
-totals with `performance-budgets.json`. Fix route ownership or split points when a
-budget fails; do not raise a ceiling without documenting and reviewing the measured
-regression.
+`pnpm perf:check` measures `/login` in a production build and fixture-backed
+workspace routes in a static-demo build. It starts servers on temporary local
+ports, measures unique JavaScript/CSS for representative routes, writes
+`.next/performance-results.json`, and checks `performance-budgets.json`.
+Fix route ownership or split points when over budget; document and review
+measured regressions before raising ceilings.
 
 Chat archive is a thread metadata flag (`deerflow_archived === true`), independent
 of run status. Sidebar and Chats explicitly request the Gateway's optional
