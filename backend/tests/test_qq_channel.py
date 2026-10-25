@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock
 
@@ -95,6 +96,94 @@ async def test_allowed_users_gate_precedes_identity_query(channel):
     await channel._handle_inbound(event())
     assert channel.bus.inbound_queue.empty()
     channel._connection_repo.find_connection_by_external_identity.assert_not_awaited()
+
+
+OPEN_ID = "E4F4AEA33253A2797FB897C50B81D7ED"
+GROUP_OPEN_ID = "0A1B2C3D4E5F60718293A4B5C6D7E8F9"
+
+
+async def admits(allowed_users, sender=OPEN_ID, kind="c2c"):
+    """Whether an ordinary message from *sender* passes ``allowed_users``."""
+    frame = event(kind, sender=sender, target=GROUP_OPEN_ID)
+    if kind == "group":
+        # Group frames identify the sender by member_openid only.
+        frame["d"]["author"] = {"member_openid": sender}
+    instance = qq.QQChannel(
+        bus=MessageBus(),
+        config={"app_id": "app1", "client_secret": "fixture-secret", "allowed_users": allowed_users},
+    )
+    try:
+        await instance._handle_inbound(frame)
+        return not instance.bus.inbound_queue.empty()
+    finally:
+        await instance.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "allowed_users",
+    [None, [], (), set(), frozenset(), " "],
+    ids=["null", "list", "tuple", "set", "frozenset", "blank-string"],
+)
+async def test_unset_or_empty_allowlist_admits_everyone_quietly(allowed_users, caplog):
+    with caplog.at_level(logging.WARNING, logger="app.channels.qq"):
+        assert await admits(allowed_users)
+        assert await admits(allowed_users, sender="another-open-id")
+    assert caplog.records == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["c2c", "group"])
+@pytest.mark.parametrize("collection", [list, tuple, set, frozenset])
+async def test_listed_open_ids_are_admitted_and_others_denied(collection, kind):
+    allowed = collection([OPEN_ID, "another-open-id"])
+    assert await admits(allowed, kind=kind)
+    assert await admits(allowed, sender="another-open-id", kind=kind)
+    assert not await admits(allowed, sender="stranger", kind=kind)
+
+
+@pytest.mark.asyncio
+async def test_group_messages_are_gated_by_member_not_group_open_id():
+    assert not await admits([GROUP_OPEN_ID], kind="group")
+    assert await admits([OPEN_ID], kind="group")
+
+
+@pytest.mark.asyncio
+async def test_scalar_open_id_is_one_entry_not_its_characters():
+    # ``allowed_users: $QQ_ALLOWED_USERS`` resolves to one string, not a list.
+    assert await admits(OPEN_ID)
+    assert await admits(f"  {OPEN_ID}  ")
+    assert not await admits(OPEN_ID, sender=OPEN_ID[0])
+
+
+@pytest.mark.asyncio
+async def test_scalar_with_separators_stays_one_literal_id_and_warns(caplog):
+    with caplog.at_level(logging.WARNING, logger="app.channels.qq"):
+        assert not await admits(f"{OPEN_ID},another-open-id")
+    assert "YAML list" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_unparseable_entry_is_dropped_with_a_warning(caplog):
+    with caplog.at_level(logging.WARNING, logger="app.channels.qq"):
+        assert await admits([OPEN_ID, 123456789, "  "])
+    assert "123456789" in caplog.text
+    assert not await admits([OPEN_ID, 123456789], sender="123456789")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "allowed_users",
+    [{OPEN_ID: True}, {OPEN_ID: False}, {}, 123456789, [123456789], [""], [None], [True], 1.5],
+    ids=["mapping-true", "mapping-false", "empty-mapping", "int-scalar", "int-entry", "blank-entry", "null-entry", "bool-entry", "float-scalar"],
+)
+async def test_allowlist_without_an_open_id_denies_everyone(allowed_users, caplog):
+    # Mappings must not authorize their keys, and a numeric QQ account number
+    # never matches an OpenID: either way the configured restriction stands.
+    with caplog.at_level(logging.ERROR, logger="app.channels.qq"):
+        assert not await admits(allowed_users)
+        assert not await admits(allowed_users, sender="123456789")
+    assert any(record.levelno == logging.ERROR for record in caplog.records)
 
 
 @pytest.mark.asyncio

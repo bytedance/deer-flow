@@ -24,6 +24,19 @@ class IncompleteMessageRunLookupError(RuntimeError):
     """Raised when a store cannot prove that a targeted lookup is complete."""
 
 
+class RunEventStoreNotCommittedError(RuntimeError):
+    """A batch write definitely did not commit any of its events.
+
+    ``RunEventStore.put_batch()`` implementations may raise this only when they
+    can prove that none of the batch was persisted (for example, the write was
+    rejected before reaching storage). ``RunJournal`` may then deliberately
+    retry the batch. Any other exception from ``put_batch`` is treated as an
+    ambiguous/UNKNOWN outcome: the batch is quarantined and is never replayed,
+    because a store that committed and then lost its acknowledgement would
+    otherwise produce duplicate events.
+    """
+
+
 def normalize_message_ids(message_ids: set[str]) -> set[str]:
     """Return the non-empty string IDs that can participate in a lookup."""
     return {message_id for message_id in message_ids if isinstance(message_id, str) and message_id}
@@ -90,6 +103,7 @@ class RunEventStore(abc.ABC):
         content: str | dict = "",
         metadata: dict | None = None,
         created_at: str | None = None,
+        user_id: str | None | _AutoSentinel = AUTO,
     ) -> tuple[dict, bool]:
         """Write one event unless this run already has the same event type.
 
@@ -97,6 +111,10 @@ class RunEventStore(abc.ABC):
         thread. Returns ``(record, created)``. This is the durability primitive
         used by terminal run receipts, whose recovery path may safely retry
         after a worker crash.
+
+        Explicit ``user_id`` stamps the owner for contextless worker writes.
+        Stores without user isolation accept it for interface parity. Existing
+        events retain their original owner and must be validated by the caller.
         """
 
     @abc.abstractmethod

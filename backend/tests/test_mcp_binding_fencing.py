@@ -317,8 +317,11 @@ async def test_durable_stdio_call_binds_base_connection_before_workspace_augment
     )
     result = SimpleNamespace(structuredContent={"status": "running"}, isError=False)
     session = SimpleNamespace(call_tool=AsyncMock(return_value=result))
+    cm = _GatedSessionCm()
+    cm.session = session
+    session.initialize = cm.initialize
     pool = MCPSessionPool()
-    pool.get_session = AsyncMock(return_value=session)
+    pool.get_session = AsyncMock(wraps=pool.get_session)
 
     prepared = {
         "transport": "stdio",
@@ -329,27 +332,31 @@ async def test_durable_stdio_call_binds_base_connection_before_workspace_augment
     }
 
     caller = McpTaskToolCaller(config)
-    with (
-        patch("deerflow.mcp.task_tool_caller.get_session_pool", return_value=pool),
-        patch("deerflow.mcp.task_tool_caller._prepare_stdio_connection", return_value=prepared),
-    ):
-        actual = await caller.call_tool(
-            server_name="reports",
-            tool_name="status_report",
-            arguments={"task_id": "1"},
-            user_id="u1",
-            thread_id="t1",
-        )
+    try:
+        with (
+            patch("deerflow.mcp.task_tool_caller.get_session_pool", return_value=pool),
+            patch("deerflow.mcp.task_tool_caller._prepare_stdio_connection", return_value=prepared),
+            patch("langchain_mcp_adapters.sessions.create_session", return_value=cm),
+        ):
+            actual = await caller.call_tool(
+                server_name="reports",
+                tool_name="status_report",
+                arguments={"task_id": "1"},
+                user_id="u1",
+                thread_id="t1",
+            )
 
-    assert actual is result
-    binding = pool._bindings[("deployment", "reports")]
-    assert binding.fingerprint == normalized_connection_fingerprint({"transport": "stdio", "command": "report-mcp", "args": []})
-    pool.get_session.assert_awaited_once_with(
-        "reports",
-        "u1:t1",
-        prepared,
-        binding=binding,
-    )
+        assert actual is result
+        binding = pool._bindings[("deployment", "reports")]
+        assert binding.fingerprint == normalized_connection_fingerprint({"transport": "stdio", "command": "report-mcp", "args": []})
+        pool.get_session.assert_awaited_once_with(
+            "reports",
+            "u1:t1",
+            prepared,
+            binding=binding,
+        )
+    finally:
+        await pool.close_all()
 
 
 def test_ensure_binding_rejects_changed_fingerprint():

@@ -38,6 +38,21 @@ The Gateway worker carries the capability only in its reserved runtime context;
 untrusted request input cannot replace it. Direct embedded or subagent execution
 does not acquire it automatically.
 
+## Configuration invalidation (API 0.2.7)
+
+`configuration_revision(assistant_ids=[...])` returns an opaque process-local revision
+for up to 32 Agent references, after rechecking the caller's `runs:create` grant.
+It covers declarative app/extensions config and owner-scoped Custom Agent config/SOUL;
+Agent order does not affect the revision. Missing definitions are represented as
+missing and their later creation changes the revision. The host uses a per-process
+HMAC key, so secret configuration is never returned or exposed as an unsalted digest.
+
+This is a conservative invalidation guard for retained results. It does not pin the
+subsequent admission atomically or attest effective run assembly, mutable memory,
+referenced Skill/tool files or remote provider state. Unrelated declarative changes
+can invalidate it too. Compare only within one Gateway lifetime; do not serialize
+capabilities or interpret the revision as cross-process recovery authority.
+
 ## Operations
 
 - `create_thread(assistant_id="lead_agent", thread_id=None, metadata=None)` creates
@@ -106,3 +121,20 @@ IDs and workflow progress, then reacquire a capability from a newly authenticate
 request to continue. Existing run/checkpoint durability and orphan recovery remain
 the host's responsibility. The original route-permission ceiling cannot widen; Agent/model/tool policy
 still evaluates the current user. Do not expose a retained handle to other users.
+
+### Immutable file review and run configuration evidence
+
+`AgentRuns.configuration_evidence(thread_id, run_id)` returns host-owned proof
+recorded from actual Agent assembly before graph execution and bound to the run.
+It includes actual model, safe numeric parameters and keyed versions of instructions,
+model configuration, tools, Skills and policies. No raw secrets are exposed.
+Missing evidence fails closed; the declarative revision remains a separate preflight
+guard. Evidence describes assembly-time configuration, not external service state.
+
+`AgentRuns.read_artifact(thread_id, path)` authorizes a bounded (2 MiB) regular
+output-file snapshot, rejects symlink traversal, and reserves the thread against
+concurrent runs/edits while reading off-loop. The workflow extension stores those
+bytes append-only with SHA-256, approves exact versions, and serves preview and
+approved consumer reads from the same snapshot (16 KiB chunks). File versions are
+owner/workflow scoped; consumers cannot use an unapproved version. See the workflow
+extension README for limits and `captureArtifact` / `readArtifact` examples.

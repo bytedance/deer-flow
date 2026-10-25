@@ -283,7 +283,6 @@ async def test_yaml_name_reserved_and_pat_denied(store, monkeypatch):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode,expected", [("tool", "success"), ("text", "tool_call_missing"), ("error", "connection_failed")])
 async def test_connection_probe_is_bounded_redacted_and_does_not_save(store, monkeypatch, mode, expected):
-    import langchain_openai
     from langchain_core.messages import AIMessageChunk
 
     from app.gateway.routers import managed_models as router
@@ -303,7 +302,12 @@ async def test_connection_probe_is_bounded_redacted_and_does_not_save(store, mon
                 raise RuntimeError("test-secret should never be returned")
             yield AIMessageChunk(content="", tool_call_chunks=[{"name": "connection_check", "args": "{}", "id": "call-1", "index": 0}] if mode == "tool" else [])
 
-    monkeypatch.setattr(langchain_openai, "ChatOpenAI", FakeModel)
+    def fake_factory(**kwargs):
+        assert kwargs["attach_tracing"] is False
+        assert kwargs["app_config"].models[0].use == "langchain_openai:ChatOpenAI"
+        return FakeModel(**kwargs["model_overrides"])
+
+    monkeypatch.setattr(router, "create_chat_model", fake_factory)
     request = SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(system_role="admin")))
     result = await router.test_model(request, router.SaveModelRequest(config=profile()))
     assert result["message"] == expected

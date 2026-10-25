@@ -27,11 +27,19 @@ export interface Translations {
     catalogHint: string;
     installationGuide: string;
     catalog: Record<
+      | "workflows"
+      | "reportSections"
       | "agentTeams"
       | "bookmarks"
       | "context"
       | "classify"
       | "screening"
+      | "retrieval"
+      | "knowledge"
+      | "knowledgeManagement"
+      | "knowledgePlatform"
+      | "weknora"
+      | "lightrag"
       | "example",
       { title: string; description: string }
     >;
@@ -172,6 +180,13 @@ export interface Translations {
     showBrowser: string;
   };
 
+  browserStream: {
+    connecting: string;
+    disconnected: string;
+    handshakeTimeout: string;
+    connectionFailed: string;
+  };
+
   skillUsage: {
     used: string;
     title: string;
@@ -237,6 +252,8 @@ export interface Translations {
   };
 
   artifactPreview: {
+    loadingPreview: string;
+    resourcesUnavailable: string;
     limited: (previewSize: string, totalSize?: string) => string;
     loadFullFile: string;
     loadingFullFile: string;
@@ -431,6 +448,7 @@ export interface Translations {
         autoOff: string;
         noProgress: string;
         tokenCapped: string;
+        loopCapped: string;
         missingEvidence: string;
         runFailed: string;
         needsInputCard: string;
@@ -840,6 +858,37 @@ export interface Translations {
       removeCapBlocked: string;
       submit: string;
     };
+    notificationGroup: {
+      savedUnavailable: string;
+      clearSaved: string;
+      bind: string;
+      bindWecom: string;
+      bindQq: string;
+      name: string;
+      nameHint: string;
+      refresh: string;
+      bindInstructions: string;
+      generating: string;
+      bindFailed: string;
+      command: string;
+      expiresAt: string;
+      copy: string;
+      copied: string;
+      copyFailed: string;
+      newCode: string;
+      close: string;
+      label: string;
+      detailLabel: string;
+      none: string;
+      personalHint: string;
+      emptyHint: string;
+      loading: string;
+      unavailable: string;
+      unavailableHint: string;
+      unnamed: string;
+      unnamedHint: string;
+      loadFailed: string;
+    };
     form: {
       createTitle: string;
       editTitle: string;
@@ -964,6 +1013,7 @@ export interface Translations {
         maxContinuations: string;
         noProgress: string;
         tokenCapped: string;
+        loopCapped: string;
         evaluatorFailed: string;
         noDurableEndOfTurn: string;
         threadChanged: string;
@@ -1000,6 +1050,7 @@ export interface Translations {
       invalidGoal: string;
       goalRequiresFreshThread: string;
       invalidStopCondition: string;
+      invalidNotificationGroup: string;
       invalidMaxRuns: string;
       endAtInPast: string;
       endAtBeforeFirstRun: string;
@@ -1114,6 +1165,7 @@ export interface Translations {
     saveRequested: string;
     saveHint: string;
     saveCommandMessage: string;
+    agentSaveFailed: string;
     agentCreatedPendingRefresh: string;
     more: string;
     agentCreated: string;
@@ -1124,12 +1176,22 @@ export interface Translations {
     settingsDisplayName: string;
     settingsDisplayNameTooLong: string;
     settingsDisplayNameHint: string;
+    settingsToolGroups: string;
+    settingsToolGroupsHint: string;
+    settingsToolGroupsAll: string;
+    settingsToolGroupsLoadFailed: string;
+    settingsToolGroupUnavailable: string;
     settingsDescription: string;
     settingsKnowledge: string;
     settingsKnowledgeHint: string;
     settingsKnowledgeReset: string;
+    settingsKnowledgeSaveToolAccess: string;
     settingsModel: string;
     settingsModelDefault: string;
+    settingsModelSwitchNeedsCatalog: string;
+    settingsReasoningUnsupported: string;
+    settingsThinkingRequiredHint: string;
+    settingsReasoningUnsupportedHint: string;
     settingsTemperature: string;
     settingsTemperatureHint: string;
     settingsMaxTokens: string;
@@ -1359,6 +1421,9 @@ export interface Translations {
   // Tool calls
   toolCalls: {
     details: string;
+    failed: string;
+    scheduleTaskPending: string;
+    stopScheduledTaskPending: string;
     toolName: string;
     callId: string;
     input: string;
@@ -1535,6 +1600,18 @@ export interface Translations {
       success: string;
       tool_call_missing: string;
       connection_failed: string;
+      customProvider: string;
+      apiKey: string;
+      advanced: string;
+      providerDefault: string;
+      requiredKey: string;
+      providerChanged: string;
+      missing_api_key: string;
+      authentication_failed: string;
+      response_limit: string;
+      revisionConflict: string;
+      keyOrCapabilities: string;
+      invalidModel: string;
     };
     users: {
       title: string;
@@ -1892,6 +1969,32 @@ export interface Translations {
       testBody: string;
       notSupported: string;
       disableNotification: string;
+      channels: {
+        title: string;
+        description: string;
+        providers: {
+          feishu: string;
+          wecom: string;
+          wechat: string;
+          qq: string;
+        };
+        toggleLabel: (provider: string) => string;
+        eventsTitle: string;
+        eventsDescription: string;
+        events: {
+          run_completed: string;
+          run_failed: string;
+          human_input_requested: string;
+        };
+        eventToggleLabel: (event: string) => string;
+        loading: string;
+        saving: string;
+        loadFailed: string;
+        saveFailed: string;
+        unavailable: string;
+        empty: string;
+        retry: string;
+      };
     };
     account: {
       profileTitle: string;

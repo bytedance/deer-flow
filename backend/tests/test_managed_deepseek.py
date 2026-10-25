@@ -117,7 +117,7 @@ async def test_probe_requires_the_expected_tool_and_empty_arguments(store, provi
 async def test_probe_does_not_retry_or_expose_provider_errors(store, provider, status):
     provider.status = status
     result = await router.test_model(_ADMIN, router.SaveModelRequest(config=_profile()))
-    assert result == {"ok": False, "message": "connection_failed"}
+    assert result == {"ok": False, "message": "authentication_failed" if status in (401, 403) else "connection_failed"}
     assert _KEY not in json.dumps(result)
     assert len(provider.requests) == 1
     assert not store.path.exists()
@@ -140,7 +140,7 @@ async def test_probe_uses_draft_or_saved_key_without_persisting(store, provider,
     original_catalog = store.path.read_bytes()
     draft = _profile(api_key={"retained": None, "replacement": _KEY, "cleared": ""}[key_mode])
     result = await router.test_model(_ADMIN, router.SaveModelRequest(config=draft, expected_revision=saved.revision))
-    assert result == ({"ok": False, "message": "connection_failed"} if key_mode == "cleared" else {"ok": True, "message": "success"})
+    assert result == ({"ok": False, "message": "authentication_failed"} if key_mode == "cleared" else {"ok": True, "message": "success"})
     assert len(provider.requests) == 1
     expected_key = "not-required" if key_mode == "cleared" else _KEY
     assert provider.requests[0][0].headers["authorization"] == f"Bearer {expected_key}"
@@ -212,6 +212,36 @@ async def test_saved_model_streaming_replays_reasoning_and_honors_token_limit(st
     assert model_config.supports_reasoning_effort is True
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "effort,expected",
+    [("minimal", "low"), ("low", "low"), ("medium", "medium"), ("high", "high"), ("max", "max"), ("xhigh", "xhigh")],
+)
+async def test_deepseek_effort_contract_maps_generic_effort_values(store, provider, effort, expected):
+    saved = store.save(ManagedModel(provider="deepseek", model="deepseek-flash", api_key=_KEY), expected_revision=None)
+    config = merge_managed_models(_base_config())
+    model_config = config.get_model_config(saved.name)
+
+    # The official endpoint rejects the generic "minimal" token (issue #4514),
+    # so the declared contract advertises the provider's real vocabulary and
+    # aliases "minimal" onto "low". Parametrized over every accepted value so
+    # a future rename/drop fails here, not at request time.
+    assert model_config.reasoning is not None
+    assert model_config.reasoning.effort is not None
+    assert model_config.reasoning.effort.values == ["low", "medium", "high", "max", "xhigh"]
+    assert model_config.reasoning.effort.default == "low"
+    assert model_config.reasoning.effort.aliases == {"minimal": "low"}
+    assert model_config.supports_reasoning_effort is True
+
+    model = create_chat_model(saved.name, thinking_enabled=False, reasoning_effort=effort, app_config=config, attach_tracing=False)
+    await _collect(model, [HumanMessage(content="Hello")])
+
+    assert len(provider.requests) == 1
+    body = provider.requests[0][1]
+    assert body["reasoning_effort"] == expected
+    assert body["thinking"] == {"type": "disabled"}
+
+
 @pytest.mark.parametrize(
     "base_url",
     [
@@ -250,7 +280,7 @@ async def test_new_draft_without_key_does_not_use_environment_credentials(store,
     monkeypatch.setenv("DEEPSEEK_API_KEY", _KEY)
     monkeypatch.setenv("OPENAI_API_KEY", _KEY)
     result = await router.test_model(_ADMIN, router.SaveModelRequest(config=_profile(api_key=None)))
-    assert result == {"ok": False, "message": "connection_failed"}
+    assert result == {"ok": False, "message": "authentication_failed"}
     assert provider.requests[0][0].headers["authorization"] == "Bearer not-required"
     assert not store.path.exists()
 

@@ -31,7 +31,6 @@ import os
 import posixpath
 import re
 import shlex
-import tempfile
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace as dc_replace
@@ -719,7 +718,7 @@ def _patch_tool_message(
     trigger = _effective_trigger(tool_name, config)
     citation_result = None
     if tool_name in {"knowledge_search", "task"} and trigger > 0 and len(text) > trigger:
-        citation_result = budget_source_artifact(text, msg.artifact, trigger, summary=(budgeted[0] if budgeted else text) if tool_name == "task" else "")
+        citation_result = budget_source_artifact(text, msg.artifact, trigger, summary=(budgeted.replacement if budgeted else text) if tool_name == "task" else "")
     if citation_result is not None:
         replacement, update["artifact"] = citation_result
         transform_kind = "truncated"
@@ -728,6 +727,11 @@ def _patch_tool_message(
         transform_kind = budgeted.transform_kind
     else:
         return msg
+    from deerflow.knowledge.sources import prune_sources
+
+    replacement, artifact = prune_sources(replacement, update.get("artifact", msg.artifact))
+    if artifact is not msg.artifact or "artifact" in update:
+        update["artifact"] = artifact
     update["content"] = [{"type": "text", "text": replacement}, *retained_blocks] if retained_blocks else replacement
     if getattr(msg, "response_metadata", None):
         update["response_metadata"] = dict(msg.response_metadata)
@@ -925,12 +929,16 @@ def _write_restored_output(filepath: str, data: bytes) -> bool:
     tmp_path: str | None = None
     try:
         os.makedirs(directory, exist_ok=True)
-        fd, tmp_path = tempfile.mkstemp(prefix=f".{os.path.basename(filepath)}.", suffix=".tmp", dir=directory)
-        with os.fdopen(fd, "wb") as handle:
+        candidate_path = os.path.join(directory, f".tool-output-{uuid.uuid4().hex}.tmp")
+        # Match initial publication's creation permissions for mounted sandbox
+        # readers, while retaining the recovering Gateway's restrictive umask.
+        with open(candidate_path, "xb") as handle:
+            tmp_path = candidate_path
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(tmp_path, filepath)
+        tmp_path = None
         return True
     except OSError:
         logger.warning("Failed to restore externalized tool output on this Gateway", exc_info=True)

@@ -210,12 +210,21 @@ def load_claude_code_credential() -> ClaudeCodeCredential | None:
       }
     }
     """
-    direct_token = os.getenv("CLAUDE_CODE_OAUTH_TOKEN") or os.getenv("ANTHROPIC_AUTH_TOKEN")
-    if direct_token:
-        cred = _credential_from_direct_token(direct_token, "claude-cli-env")
+    # A present-but-blank token (an unset CI secret rendered as " ", or a stray
+    # newline) is not a credential. Returning ``None`` from here would end the
+    # lookup before the descriptor and file sources, while an empty string already
+    # falls through because it is falsy. Only a usable token ends the search, and a
+    # blank first variable must not hide a usable second one: test each source
+    # instead of letting ``or`` pick the first truthy value.
+    for env_var in ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN"):
+        env_token = os.getenv(env_var)
+        if env_token is None:
+            continue
+        cred = _credential_from_direct_token(env_token, "claude-cli-env")
         if cred:
             logger.info("Loaded Claude Code OAuth credential from environment")
-        return cred
+            return cred
+        logger.debug(f"Ignoring blank {env_var}; trying the next credential source")
 
     fd_token = _read_secret_from_file_descriptor("CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR")
     if fd_token:
@@ -250,14 +259,20 @@ def load_codex_cli_credential() -> CodexCliCredential | None:
     if not isinstance(tokens, dict):
         tokens = {}
 
-    access_token = data.get("access_token") or data.get("token") or tokens.get("access_token", "")
+    # doctor.py validates this file across all three supported token layouts with
+    # any(_has_non_empty_token(...)); a blank or non-string value in an earlier
+    # layout must not hide a usable token in a later one, so take the first layout
+    # that actually holds a non-empty string instead of the first truthy key.
+    access_token = ""
+    for candidate in (data.get("access_token"), data.get("token"), tokens.get("access_token")):
+        if isinstance(candidate, str) and candidate.strip():
+            access_token = candidate.strip()
+            break
     account_id = data.get("account_id") or tokens.get("account_id", "")
-    if isinstance(access_token, str):
-        access_token = access_token.strip()
     if not isinstance(account_id, str):
         logger.debug("Codex CLI credentials file has a non-string account_id; using no account")
         account_id = ""
-    if not isinstance(access_token, str) or not access_token:
+    if not access_token:
         logger.debug("Codex CLI credentials file exists but no string token found")
         return None
 

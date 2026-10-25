@@ -4,6 +4,7 @@ import json
 
 import pytest
 from langchain_core.messages import ToolMessage
+from langchain_core.messages.content import create_file_block, create_image_block
 
 from deerflow.agents.thread_state import merge_tool_artifacts
 from deerflow.tools.artifact_registry import (
@@ -192,7 +193,55 @@ def test_extract_from_image_block():
     assert entries[0]["real_ref"] == "/mnt/user-data/outputs/chart.png"
 
 
-def test_file_block_rejects_data_and_blob_urls():
+@pytest.mark.parametrize("make_block,artifact_type,mime", [(create_file_block, "file", "application/pdf"), (create_image_block, "image", "image/png")])
+def test_extract_from_standard_url_block(make_block, artifact_type, mime):
+    url = "https://example.com/report?download=1#page=2"
+    result = ToolMessage(content=[make_block(url=url, mime_type=mime)], tool_call_id="call_1")
+
+    (entry,) = extract_artifacts_from_result(result, thread_id="thread-1")
+
+    assert (entry["real_ref"], entry["artifact_type"], entry["mime_type"]) == (url, artifact_type, mime)
+
+
+@pytest.mark.parametrize("source", [{"url": "https://example.com/legacy.png", "mime_type": "image/jpeg"}, "malformed"])
+@pytest.mark.parametrize("mime", ["image/png", None])
+def test_standard_url_and_mime_take_precedence_over_legacy_source(source, mime):
+    block = create_image_block(url="https://example.com/chart.png", mime_type=mime)
+    block["source"] = source
+    result = ToolMessage(content=[block], tool_call_id="call_1")
+
+    (entry,) = extract_artifacts_from_result(result, thread_id="thread-1")
+
+    assert entry["real_ref"] == "https://example.com/chart.png"
+    assert entry.get("mime_type") == mime
+
+
+@pytest.mark.parametrize("url", [None, "", "relative.png", "data:image/png;base64,AAAA", "blob:https://example.com/id"])
+def test_invalid_standard_url_does_not_fall_back_to_conflicting_legacy_source(url):
+    block = {"type": "image", "url": url, "source": {"url": "https://example.com/legacy.png"}}
+    result = ToolMessage(content=[block], tool_call_id="call_1")
+
+    assert extract_artifacts_from_result(result, thread_id="thread-1") == []
+
+
+def test_standard_and_legacy_blocks_deduplicate_the_same_reference():
+    url = "https://example.com/chart.png"
+    result = ToolMessage(
+        content=[
+            create_image_block(url=url, mime_type="image/png"),
+            {"type": "file", "source": {"url": url, "mime_type": "application/octet-stream"}},
+            {"type": "text", "text": f"Chart: {url}"},
+        ],
+        tool_call_id="call_1",
+    )
+
+    (entry,) = extract_artifacts_from_result(result, thread_id="thread-1")
+
+    assert (entry["real_ref"], entry["artifact_type"], entry["mime_type"]) == (url, "image", "image/png")
+
+
+@pytest.mark.parametrize("standard", [False, True])
+def test_file_block_rejects_data_and_blob_urls(standard):
     """Embedded-resource URIs must never enter the registry or tool args."""
     result = ToolMessage(
         content=[
@@ -204,6 +253,8 @@ def test_file_block_rejects_data_and_blob_urls():
         tool_call_id="call-2b",
         name="mcp_embedded",
     )
+    if standard:
+        result.content = [{"type": block["type"], "url": block["source"]["url"]} for block in result.content]
     entries = extract_artifacts_from_result(result, thread_id="thread-1")
     refs = {entry["real_ref"] for entry in entries}
     assert refs == {"/mnt/user-data/outputs/real.txt"}
@@ -622,3 +673,233 @@ def test_merge_tool_artifacts_consumption_update_does_not_grow_count():
     consumed = {**entries[0], "consumed_by": ["call-x"]}
     merged = merge_tool_artifacts(entries, [consumed])
     assert len(merged) == 1000
+
+
+# --- delimited sandbox paths (issue #7303) ---------------------------------
+
+
+@pytest.mark.parametrize("delimiter", ['"', "'", "`"])
+def test_a_delimited_sandbox_path_keeps_its_spaces(delimiter):
+    """A tool that quotes the filename means the whole quoted string is the path."""
+    path = "/mnt/user-data/outputs/quarterly report (final).pdf"
+
+    refs = _detect_refs_in_text(f"Created {delimiter}{path}{delimiter} successfully.")
+
+    assert [ref["ref"] for ref in refs] == [path]
+    assert refs[0]["display"] == "quarterly report (final).pdf"
+
+
+def test_a_bare_sandbox_path_keeps_the_whitespace_boundary():
+    """Nothing tells the free-text scan where an undelimited name with spaces ends, so it
+    keeps the conservative boundary it always had."""
+    refs = _detect_refs_in_text("Created /mnt/user-data/outputs/quarterly report.pdf successfully.")
+
+    assert [ref["ref"] for ref in refs] == ["/mnt/user-data/outputs/quarterly"]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # Never closed on this line.
+        'Created "/mnt/user-data/outputs/quarterly report.pdf successfully.',
+        "Created '/mnt/user-data/outputs/quarterly report.pdf",
+        "Created `/mnt/user-data/outputs/quarterly report.pdf",
+        # Closed, but only after the line break: a multi-line value is not one path.
+        'Created "/mnt/user-data/outputs/quarterly report.pdf\nsuccessfully."',
+    ],
+)
+def test_an_unterminated_delimited_span_produces_no_reference(text):
+    """A prefix of a quoted filename names a file that does not exist, so it is not
+    reported at all rather than reported truncated."""
+    assert _detect_refs_in_text(text) == []
+
+
+def test_delimited_paths_keep_their_order_and_deduplicate():
+    first = "/mnt/user-data/outputs/a report.pdf"
+    second = "/mnt/user-data/outputs/b report.csv"
+
+    refs = _detect_refs_in_text(f'Published `{first}` and "{second}", then again "{first}".')
+
+    assert [ref["ref"] for ref in refs] == [first, second]
+
+
+def test_a_delimited_and_a_bare_path_in_one_result_are_both_captured():
+    quoted = "/mnt/user-data/outputs/a report.pdf"
+
+    refs = _detect_refs_in_text(f'Copied to "{quoted}"; log at /mnt/user-data/workspace/run.log.')
+
+    assert [ref["ref"] for ref in refs] == [quoted, "/mnt/user-data/workspace/run.log"]
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ('Output: "/mnt/user-data/outputs/report.pdf".', "/mnt/user-data/outputs/report.pdf"),
+        ("Output: `/mnt/user-data/outputs/report.pdf`,", "/mnt/user-data/outputs/report.pdf"),
+    ],
+)
+def test_punctuation_outside_the_delimiter_is_not_part_of_the_reference(text, expected):
+    assert [ref["ref"] for ref in _detect_refs_in_text(text)] == [expected]
+
+
+def test_extraction_registers_the_full_delimited_path_once():
+    path = "/mnt/user-data/outputs/quarterly report.pdf"
+    message = ToolMessage(
+        content=f'Created "{path}" successfully.',
+        tool_call_id="export-1",
+        name="export_report",
+    )
+
+    entries = extract_artifacts_from_result(message, thread_id="demo")
+
+    assert [entry["real_ref"] for entry in entries] == [path]
+    assert entries[0]["display_name"] == "quarterly report.pdf"
+    assert entries[0]["artifact_type"] == "file"
+
+
+@pytest.mark.parametrize("separator", ["\n", "\r", "\r\n", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029", "\t"])
+@pytest.mark.parametrize("delimiter", ['"', "'", "`"])
+def test_delimited_sandbox_path_rejects_line_breaks_and_tabs(separator, delimiter):
+    message = ToolMessage(
+        content=f"Created {delimiter}/mnt/user-data/outputs/quarterly{separator}report.pdf{delimiter}.",
+        tool_call_id="export-multiline",
+        name="export_report",
+    )
+
+    assert extract_artifacts_from_result(message, thread_id="demo") == []
+
+
+@pytest.mark.parametrize("delimiter", ['"', "'", "`"])
+@pytest.mark.parametrize("content_block", [False, True])
+def test_backslash_escaped_delimiters_keep_the_full_sandbox_path(delimiter, content_block):
+    path = "/mnt/user-data/outputs/quarterly report (final).pdf"
+    text = f"log: \\{delimiter}{path}\\{delimiter} done"
+    message = ToolMessage(
+        content=[{"type": "text", "text": text}] if content_block else text,
+        tool_call_id="export-escaped",
+        name="export_report",
+    )
+
+    entries = extract_artifacts_from_result(message, thread_id="demo")
+
+    assert [entry["real_ref"] for entry in entries] == [path]
+    assert entries[0]["display_name"] == "quarterly report (final).pdf"
+
+
+@pytest.mark.parametrize("escaped", [False, True])
+def test_delimited_sandbox_path_keeps_a_literal_trailing_backslash(escaped):
+    path = "/mnt/user-data/outputs/report \\"
+    delimiter = '\\"' if escaped else '"'
+
+    assert [ref["ref"] for ref in _detect_refs_in_text(f"Created {delimiter}{path}{delimiter}.")] == [path]
+
+
+def test_json_escaped_path_deduplicates_against_a_structured_reference():
+    path = "/mnt/user-data/outputs/quarterly report.pdf"
+    message = ToolMessage(
+        content=json.dumps(f'Created "{path}" successfully.'),
+        tool_call_id="export-json",
+        name="export_report",
+        artifact={"structured_content": {"path": path}},
+    )
+
+    entries = extract_artifacts_from_result(message, thread_id="demo")
+
+    assert [entry["real_ref"] for entry in entries] == [path]
+
+
+def test_escaped_sandbox_path_requires_a_matching_escaped_closer():
+    assert _detect_refs_in_text(r'Created \"/mnt/user-data/outputs/quarterly report.pdf" successfully.') == []
+
+
+_LINE_BREAKS = ["\n", "\r", "\r\n", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"]
+_CJK_QUOTE_PAIRS = [("“", "”"), ("‘", "’"), ("「", "」"), ("『", "』")]
+
+
+@pytest.mark.parametrize("separator", [*_LINE_BREAKS, "\t"])
+@pytest.mark.parametrize(("opener", "closer"), _CJK_QUOTE_PAIRS)
+def test_delimited_sandbox_paths_reject_line_breaks_and_tabs(separator, opener, closer):
+    path = f"/mnt/user-data/outputs/quarterly{separator}report.pdf"
+
+    assert _detect_refs_in_text(f"Created {opener}{path}{closer}.") == []
+
+
+@pytest.mark.parametrize("separator", _LINE_BREAKS)
+def test_unterminated_path_does_not_swallow_a_reference_on_the_next_line(separator):
+    valid = "/mnt/user-data/outputs/next.pdf"
+    text = f'Created "/mnt/user-data/outputs/unfinished report.pdf{separator}Saved {valid}"'
+
+    assert [ref["ref"] for ref in _detect_refs_in_text(text)] == [valid]
+
+
+@pytest.mark.parametrize("delimiter", ['"', "'", "`"])
+@pytest.mark.parametrize("escape_count", [3])
+@pytest.mark.parametrize(("path", "display"), [("/mnt/user-data/outputs/a b.pdf", "a b.pdf"), (r"/mnt/user-data/outputs/folder\name report.pdf", "name report.pdf")])
+def test_escaped_quote_wrappers_do_not_append_backslashes(delimiter, escape_count, path, display):
+    marker = "\\" * escape_count + delimiter
+
+    refs = _detect_refs_in_text(f"log: {marker}{path}{marker} done")
+
+    assert [ref["ref"] for ref in refs] == [path]
+    assert refs[0]["display"] == display
+
+
+@pytest.mark.parametrize(("opener", "closer"), _CJK_QUOTE_PAIRS)
+def test_cjk_quote_pairs_keep_the_entire_sandbox_path(opener, closer):
+    path = "/mnt/user-data/outputs/输出 报告（最终）.pdf"
+
+    refs = _detect_refs_in_text(f"已创建 {opener}{path}{closer}，完成。")
+
+    assert [ref["ref"] for ref in refs] == [path]
+    assert refs[0]["display"] == "输出 报告（最终）.pdf"
+
+
+@pytest.mark.parametrize("opener", [opener for opener, _ in _CJK_QUOTE_PAIRS])
+def test_unterminated_cjk_quotes_do_not_register_prefixes(opener):
+    assert _detect_refs_in_text(f"已创建 {opener}/mnt/user-data/outputs/输出 报告.pdf") == []
+
+
+@pytest.mark.parametrize("closer", [closer for _, closer in _CJK_QUOTE_PAIRS[-2:]])
+def test_a_bare_path_drops_an_unpaired_corner_closer(closer):
+    path = "/mnt/user-data/outputs/报告.pdf"
+
+    assert [ref["ref"] for ref in _detect_refs_in_text(f"已生成 {path}{closer}，")] == [path]
+
+
+def test_even_backslashes_before_a_quote_preserve_literal_path_backslashes():
+    prefix = "\\" * 2
+    path = "/mnt/user-data/outputs/a b\\"
+
+    assert [ref["ref"] for ref in _detect_refs_in_text(f'{prefix}"{path}"')] == [path]
+
+
+@pytest.mark.parametrize(("opener", "closer"), [('\\"', '\\"'), *_CJK_QUOTE_PAIRS])
+@pytest.mark.parametrize("text_block", [False, True])
+def test_review_quote_wrappers_deduplicate_structured_refs_and_keep_order(opener, closer, text_block):
+    first = "/mnt/user-data/outputs/输出 报告.pdf"
+    second = "/mnt/user-data/outputs/second report.csv"
+    text = f"Created {opener}{first}{closer}, then {opener}{second}{closer}, then {opener}{first}{closer}."
+    message = ToolMessage(
+        content=[{"type": "text", "text": text}] if text_block else text,
+        artifact={"structured_content": {"path": first}},
+        tool_call_id="export-review",
+        name="export_report",
+    )
+
+    entries = extract_artifacts_from_result(message, thread_id="demo")
+
+    assert [entry["real_ref"] for entry in entries] == [first, second]
+    assert [entry["display_name"] for entry in entries] == ["输出 报告.pdf", "second report.csv"]
+    assert len({entry["handle"] for entry in entries}) == 2
+
+
+@pytest.mark.parametrize("text_block", [False, True])
+def test_raw_json_text_preserves_a_quoted_sandbox_path(text_block):
+    path = "/mnt/user-data/outputs/quarterly report.pdf"
+    text = json.dumps({"message": f'Created "{path}" successfully.'})
+    message = ToolMessage(content=[{"type": "text", "text": text}] if text_block else text, tool_call_id="export-json", name="export_report")
+
+    entries = extract_artifacts_from_result(message, thread_id="demo")
+
+    assert [entry["real_ref"] for entry in entries] == [path]
+    assert entries[0]["display_name"] == "quarterly report.pdf"

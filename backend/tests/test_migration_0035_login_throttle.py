@@ -25,7 +25,6 @@ IDEMPOTENCY = "0036_run_idempotency_request"
 DOCUMENT_SUMMARIES = "0037_project_document_summaries"
 CHANNEL_BINDINGS = "0038_channel_thread_bindings"
 USER_DISABLED = "0039_user_disabled"
-CURRENT_HEAD = "0039_user_disabled"
 PREVIOUS = "0034_run_event_seq_watermark"
 TABLE = "login_throttle"
 COLUMNS = {"ip", "fail_count", "locked_at", "lock_duration_seconds", "updated_at"}
@@ -33,9 +32,10 @@ INDEX = "ix_login_throttle_updated_at"
 pytestmark = pytest.mark.asyncio
 
 
-async def test_0035_remains_in_the_single_head_chain_after_0034():
+async def test_0035_remains_in_the_single_migration_chain():
     script = ScriptDirectory(str(bootstrap._MIGRATIONS_DIR))
-    assert script.get_heads() == [CURRENT_HEAD]
+    assert len(script.get_heads()) == 1
+    assert REVISION in {revision.revision for revision in script.walk_revisions()}
     assert script.get_revision(REVISION).down_revision == PREVIOUS
     assert script.get_revision(IDEMPOTENCY).down_revision == REVISION
     assert script.get_revision(DOCUMENT_SUMMARIES).down_revision == IDEMPOTENCY
@@ -186,6 +186,6 @@ async def test_bootstrap_provisions_the_table_on_an_empty_database_and_is_idempo
         assert set(shape["columns"]) == COLUMNS
         assert INDEX in shape["indexes"]
         async with engine.connect() as conn:
-            assert (await conn.execute(sa.text("SELECT version_num FROM alembic_version"))).scalar_one() == CURRENT_HEAD
+            assert (await conn.execute(sa.text("SELECT version_num FROM alembic_version"))).scalar_one() == bootstrap._get_head_revision()
     finally:
         await engine.dispose()

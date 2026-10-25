@@ -45,3 +45,8 @@ Budget aborts before and after backoff log a warning identifying the stage,
 without query/key values, and preserve the last structured error. Date tests
 pin asctime UTC anchoring (under a non-UTC host timezone where supported) and
 the RFC 850 50-year cutoff down to the second.
+
+Image result URLs use `community.url_safety.safe_public_result_url` (imported
+as `_safe_public_url`); do not add a provider-local copy. It checks strings
+without DNS and shares the non-public address predicate with fetch validation.
+Tests: `tests/test_image_result_url_safety.py` plus the existing provider suite.

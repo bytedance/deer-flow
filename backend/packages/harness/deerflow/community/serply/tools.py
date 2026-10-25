@@ -17,6 +17,7 @@ import re
 import httpx
 from langchain.tools import tool
 
+from deerflow.community.url_safety import safe_public_result_url
 from deerflow.config import get_app_config
 
 logger = logging.getLogger(__name__)
@@ -104,6 +105,30 @@ def _unexpected_format_error(query: str) -> str:
     return json.dumps({"error": "Serply returned an unexpected response format", "query": query}, ensure_ascii=False)
 
 
+def _response_rows(data: dict, rows_key: str, query: str) -> tuple[list[dict], str | None]:
+    """Return the object rows of a Serply vertical container, or a format error.
+
+    A missing or null container is an empty search. A container that is not a
+    list, or a non-empty list holding no objects, is malformed: the caller
+    reports the provider's format error rather than "No results found", which
+    would tell the agent the query legitimately matched nothing — the
+    containment rule the sibling providers already apply (brave, groundroute,
+    tavily, sofya). Non-object entries in an otherwise valid list are skipped
+    in order so the valid rows survive.
+    """
+    rows = data.get(rows_key)
+    if rows is None:
+        return [], None
+    if not isinstance(rows, list):
+        logger.error("Serply returned unexpected '%s' payload type: %s", rows_key, type(rows).__name__)
+        return [], _unexpected_format_error(query)
+    usable = [row for row in rows if isinstance(row, dict)]
+    if rows and not usable:
+        logger.error("Serply returned '%s' with no usable result objects", rows_key)
+        return [], _unexpected_format_error(query)
+    return usable, None
+
+
 def _serply_get(path: str, api_key: str, query: str, params: dict[str, object]) -> tuple[dict | None, str | None]:
     """Send a GET request to a Serply endpoint.
 
@@ -139,7 +164,7 @@ def _normalize_row(vertical: str, row: dict) -> dict:
 
     News and Scholar rows carry a few extra fields worth surfacing to the model.
     """
-    result = {"title": row.get("title", ""), "url": row.get("link", "")}
+    result = {"title": row.get("title", ""), "url": safe_public_result_url(row.get("link"))}
     if vertical == "news":
         result["content"] = _clean_text(row.get("summary"))
         result["published"] = row.get("published", "")
@@ -154,7 +179,7 @@ def _normalize_row(vertical: str, row: dict) -> dict:
         citations = extras.get("citations") if isinstance(extras.get("citations"), dict) else {}
         result["cited_by"] = citations.get("count", 0)
         doc = row.get("doc") if isinstance(row.get("doc"), dict) else {}
-        result["pdf_url"] = doc.get("link", "")
+        result["pdf_url"] = safe_public_result_url(doc.get("link"))
     else:
         result["content"] = row.get("description", "")
     return result
@@ -190,13 +215,9 @@ def web_search_tool(query: str, max_results: int = 5) -> str:
     if error_json is not None:
         return error_json
 
-    rows = data.get(rows_key)
-    if rows is None:
-        rows = []
-    if not isinstance(rows, list):
-        logger.error("Serply returned unexpected '%s' payload type: %s", rows_key, type(rows).__name__)
-        return _unexpected_format_error(query)
-    rows = [row for row in rows if isinstance(row, dict)]
+    rows, error_json = _response_rows(data, rows_key, query)
+    if error_json is not None:
+        return error_json
     if not rows:
         return json.dumps({"error": "No results found", "query": query}, ensure_ascii=False)
 

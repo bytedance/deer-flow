@@ -114,6 +114,7 @@ class CheckpointStateAccessor:
     graph: Any
     checkpointer: Any
     mode: CheckpointChannelMode
+    direct_namespace: bool = False
 
     @classmethod
     def bind(
@@ -123,11 +124,12 @@ class CheckpointStateAccessor:
         *,
         store: Any | None = None,
         mode: CheckpointChannelMode = "full",
+        direct_namespace: bool = False,
     ) -> CheckpointStateAccessor:
         graph.checkpointer = checkpointer
         if store is not None:
             graph.store = store
-        return cls(graph=graph, checkpointer=checkpointer, mode=mode)
+        return cls(graph=graph, checkpointer=checkpointer, mode=mode, direct_namespace=direct_namespace)
 
     def _prepare_config(self, config: dict[str, Any]) -> dict[str, Any]:
         prepared = {
@@ -135,6 +137,15 @@ class CheckpointStateAccessor:
             "configurable": dict(config.get("configurable", {})),
             "metadata": dict(config.get("metadata", {})),
         }
+        if self.direct_namespace and prepared["configurable"].get("checkpoint_ns"):
+            # A state-only mutation graph has no subgraphs to delegate to. Bind
+            # the saver explicitly so LangGraph reads/writes this namespace on
+            # the graph itself, including when reading back an updated config.
+            # This private key is verified against LangGraph 1.2.9; recheck it
+            # when upgrading LangGraph because its internal location may move.
+            from langgraph._internal._constants import CONFIG_KEY_CHECKPOINTER
+
+            prepared["configurable"][CONFIG_KEY_CHECKPOINTER] = self.checkpointer
         inject_checkpoint_mode(prepared, self.mode)
         return prepared
 
@@ -148,6 +159,20 @@ class CheckpointStateAccessor:
         prepared = self._prepare_config(config)
         snapshot = await self.graph.aget_state(prepared)
         raise_if_snapshot_incompatible(snapshot, self.mode)
+        # Delta materialization may perform a second saver read after LangGraph
+        # has resolved the latest checkpoint. Retention can remove a trailing
+        # metadata-only leaf in that interval. CachedHistorySaver then cannot
+        # walk the vanished target's parent chain and the first materialization
+        # can contain an empty messages channel. For an unpinned latest-state
+        # read, verify that the resolved target still exists and retry once from
+        # the new head when it does not. Explicit historical selections remain
+        # fail-closed instead of silently moving to another checkpoint.
+        if self.mode == "delta" and not prepared["configurable"].get("checkpoint_id"):
+            snapshot_config = getattr(snapshot, "config", None)
+            checkpoint_id = (snapshot_config or {}).get("configurable", {}).get("checkpoint_id")
+            if checkpoint_id and await self.checkpointer.aget_tuple(snapshot_config) is None:
+                snapshot = await self.graph.aget_state(prepared)
+                raise_if_snapshot_incompatible(snapshot, self.mode)
         return snapshot
 
     def get_tuple(self, config: dict[str, Any]) -> Any | None:

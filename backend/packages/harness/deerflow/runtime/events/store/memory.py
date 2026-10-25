@@ -104,6 +104,7 @@ class MemoryRunEventStore(RunEventStore):
         content="",
         metadata=None,
         created_at=None,
+        user_id: str | None | _AutoSentinel = AUTO,
     ):
         # No await occurs between the lookup and append, so this is atomic for
         # the backend's documented single-event-loop concurrency model.

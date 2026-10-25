@@ -13,6 +13,7 @@ injected onto the updater so no network is needed.
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -20,11 +21,12 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from deerflow.agents.memory.backends.deermem.deer_mem import DeerMem
+from deerflow.agents.memory.backends.deermem.deermem.core import storage as deermem_storage
 from deerflow.agents.memory.backends.deermem.deermem.core.message_processing import (
     filter_messages_for_memory,
 )
 from deerflow.agents.memory.backends.deermem.deermem.core.storage import FileMemoryStorage
-from deerflow.agents.memory.manager import MemoryCallbacks
+from deerflow.agents.memory.manager import MemoryCallbacks, MemoryCorruptionError
 
 
 @pytest.fixture
@@ -52,6 +54,25 @@ def _deermem_with_fake_llm(backend_config=None, payload=None, callbacks=None) ->
     dm._llm = fake
     dm._updater._llm = fake
     return dm
+
+
+def _legacy_alias_normalize_category(fact: dict) -> None:
+    """The pre-native-category ``storage._normalize_category``.
+
+    Historical builds parked any label outside CORE_CATEGORIES in
+    ``categoryExtension`` and stored ``category="other"``; migration-retry and
+    update-path regressions below replay data an interrupted such build left
+    behind, so the tests need the exact historical writer.
+    """
+    raw_category = fact.get("category", "context")
+    if not isinstance(raw_category, str):
+        raise ValueError("fact.category must be a string")
+    category = raw_category or "context"
+    if category not in deermem_storage.CORE_CATEGORIES:
+        fact.setdefault("categoryExtension", category)
+        fact["category"] = "other"
+    else:
+        fact["category"] = category
 
 
 def test_add_swallows_queue_full_so_backpressure_does_not_break_caller(deermem_data_dir, caplog) -> None:
@@ -535,6 +556,132 @@ def test_search_survives_non_float_confidence(deermem_data_dir):
     # No TypeError; all three match "query"; ranked by coerced confidence desc:
     # b("0.9"->0.9) > a(None->0.5)=c("high"->0.5), stable so a before c.
     assert [r["id"] for r in results] == ["b", "a", "c"]
+
+
+def test_create_fact_category_round_trips_into_search_and_documents(deermem_data_dir):
+    """A non-core category label must survive the write and stay searchable.
+
+    Regression: ``storage._normalize_category`` rewrote every label outside
+    CORE_CATEGORIES to "other" (parking the original in a write-only
+    ``categoryExtension`` field), so a fact added via
+    ``memory_add(category="personal")`` -- an example label in the memory_add
+    docstring -- was persisted as "other", never matched
+    ``memory_search(category="personal")`` ("Only facts with this exact category
+    are returned"), and kept reporting "other" in get_memory documents.
+    """
+    dm = DeerMem(backend_config={"storage_path": str(deermem_data_dir)})
+    memory_data, fact_id = dm.create_fact(
+        "The user lives in Paris",
+        category="personal",
+        confidence=0.9,
+        user_id="u1",
+    )
+    assert fact_id is not None
+
+    assert next(f for f in memory_data["facts"] if f["id"] == fact_id)["category"] == "personal"
+    document = dm.get_memory(user_id="u1")
+    assert next(f for f in document["facts"] if f["id"] == fact_id)["category"] == "personal"
+
+    results = dm.search("Paris", top_k=10, user_id="u1", category="personal")
+    assert [f["id"] for f in results] == [fact_id]
+
+
+def test_interrupted_legacy_migration_retry_recovers_aliased_category(deermem_data_dir, monkeypatch):
+    """Regression: a migration interrupted after its Markdown commit recovers.
+
+    An older build (pre-native-category ``_normalize_category``) committed a
+    per-agent legacy JSON migration and stopped before deleting the JSON.  Its
+    Markdown fact holds ``category="other"`` + ``categoryExtension="personal"``
+    while the retained JSON holds ``category="personal"``.  The next build's
+    migration candidate keeps "personal" natively, so the retry must recognize
+    the alias as the same fact and finish recovery (delete the JSON) instead of
+    raising a migration conflict that fails every read and retry for the agent
+    (HTTP 500 at the Gateway).  A genuinely different label must still conflict.
+    """
+    dm = DeerMem(backend_config={"storage_path": str(deermem_data_dir)})
+    memory_path = dm._storage._get_memory_file_path("researcher", user_id="u1")
+    legacy_path = FileMemoryStorage._legacy_agent_memory_path(dm._storage, memory_path, "researcher")
+    legacy_path.parent.mkdir(parents=True)
+    legacy_path.write_text(
+        json.dumps(
+            {
+                "version": "1.0",
+                "lastUpdated": "2026-09-01T00:00:00Z",
+                "user": {},
+                "history": {},
+                "facts": [
+                    {
+                        "id": "fact_interrupted_personal",
+                        "content": "The user's sister is called Lea",
+                        "category": "personal",
+                        "confidence": 0.9,
+                        "source": "manual",
+                        "createdAt": "2026-09-01T00:00:00Z",
+                        "revision": 1,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    retained = legacy_path.read_bytes()
+
+    native_normalize = deermem_storage._normalize_category
+    monkeypatch.setattr(deermem_storage, "_normalize_category", _legacy_alias_normalize_category)
+    dm.get_memory(agent_name="researcher", user_id="u1")  # the old Gateway commits the migration
+    legacy_path.write_bytes(retained)  # ... and stops before the unlink
+    monkeypatch.setattr(deermem_storage, "_normalize_category", native_normalize)
+
+    # The retry must complete recovery instead of raising a conflict.
+    document = dm.get_memory(agent_name="researcher", user_id="u1")
+    assert not legacy_path.exists()
+    fact = next(f for f in document["facts"] if f["id"] == "fact_interrupted_personal")
+    # The already-committed Markdown fact is adopted as-is, not rewritten.
+    assert (fact["category"], fact.get("categoryExtension")) == ("other", "personal")
+
+    # Recovery must not relax genuine conflicts: a retained JSON label that
+    # disagrees with the committed alias still stops the migration and keeps
+    # the legacy file for a human decision.
+    payload = json.loads(retained)
+    payload["facts"][0]["category"] = "work"
+    legacy_path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(MemoryCorruptionError):
+        dm.get_memory(agent_name="researcher", user_id="u1")
+    assert legacy_path.exists()
+
+
+def test_update_legacy_aliased_fact_to_native_category_clears_extension(deermem_data_dir, monkeypatch):
+    """Regression: rewriting a legacy "other"+extension fact drops the stale extension.
+
+    ``_normalize_fact`` deep-copies every key, so a legacy fact persisted as
+    ``category="other"`` + ``categoryExtension="personal"`` that is updated to
+    the now-native ``category="personal"`` used to keep the stale extension --
+    contradicting the Gateway contract that the field is only set "when
+    category is 'other'".  The update must clear it, and the rewritten fact
+    must be findable by its native label.
+    """
+    dm = DeerMem(backend_config={"storage_path": str(deermem_data_dir)})
+    native_normalize = deermem_storage._normalize_category
+    monkeypatch.setattr(deermem_storage, "_normalize_category", _legacy_alias_normalize_category)
+    _, fact_id = dm.create_fact(
+        "The user's sister is called Lea",
+        category="personal",
+        agent_name="researcher",
+        user_id="u1",
+    )
+    monkeypatch.setattr(deermem_storage, "_normalize_category", native_normalize)
+
+    stored = next(f for f in dm.get_memory(agent_name="researcher", user_id="u1")["facts"] if f["id"] == fact_id)
+    assert (stored["category"], stored.get("categoryExtension")) == ("other", "personal")
+
+    updated = dm.update_fact(fact_id, category="personal", agent_name="researcher", user_id="u1")
+
+    fact = next(f for f in updated["facts"] if f["id"] == fact_id)
+    assert fact["category"] == "personal"
+    assert "categoryExtension" not in fact
+    assert fact["revision"] == 2
+    results = dm.search("sister", top_k=10, user_id="u1", agent_name="researcher", category="personal")
+    assert [f["id"] for f in results] == [fact_id]
 
 
 def test_query_search_records_access_but_default_injection_does_not(deermem_data_dir):

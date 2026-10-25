@@ -2,20 +2,16 @@
 
 ## Project Overview
 
-The backend runs a LangGraph-based super agent with sandbox execution, persistent memory, subagent delegation, and extensible tools in isolated per-thread environments.
+The LangGraph backend provides sandbox execution, persistent memory, subagent delegation, and extensible tools, isolated per thread.
 
-**Architecture**:
-- **Gateway API** (port 8001): REST API plus embedded LangGraph-compatible agent runtime
-- **Frontend** (port 3000): Next.js web interface
-- **Nginx** (port 2026): Unified reverse proxy entry point
-- **Provisioner** (port 8002, optional in Docker dev): Started only when sandbox is configured for provisioner/Kubernetes mode
+Service roles and ports: [root service topology](../AGENTS.md#service-topology).
 
 **Runtime**:
 - `make dev`, Docker dev, and production all run the agent runtime in Gateway via `RunManager` + `run_agent()` + `StreamBridge` (`packages/harness/deerflow/runtime/`). Nginx exposes that runtime at `/api/langgraph/*` and rewrites it to Gateway's native `/api/*` routers.
 - Gateway streams `write_file` and `str_replace` argument deltas in bounded batches for multi-mode `messages-tuple` consumers; single-mode message consumers retain the original per-chunk contract. Non-message frames flush pending batches, and `values` remains an optional complete-state snapshot rather than a prerequisite for batching.
-- With `stream_subgraphs`, subgraph frames keep their namespace in the SSE event name (`values|<ns>`, LangGraph Platform style) instead of impersonating root frames — a delegated subagent inherits the parent checkpoint namespace, so publishing its `values` snapshot as bare `values` replaces the whole thread view in SDK clients (#4399). Root-only consumers (file-tool chunk batcher, subagent event persistence, LLM error-fallback detection) ignore namespaced frames. The web frontend does not request subgraph streaming; subtask progress rides root-namespace `task_*` custom events.
+- `stream_subgraphs` preserves subgraph SSE namespaces (`values|<ns>`, LangGraph Platform style); bare `values` would overwrite the SDK thread view (#4399). Delegated subagents inherit the parent's checkpoint namespace. Root-only consumers (file-tool chunk batcher, subagent event persistence, LLM error-fallback detection) ignore namespaced frames. The web frontend uses root `task_*` events without subgraph streaming.
 - Background subagent identity is deliberately split: the provider `tool_call_id` remains the correlation key for `ToolMessage`, `task_*` SSE events, persisted lifecycle events, frontend cards, and the public `ExtensionData.scope_id` contract (stored as `SubagentResult.external_task_id`), while `SubagentExecutor.execute_async()` generates a full server-side `execution_id` for `SubagentResult.task_id`, the process-wide registry, polling, cancellation, timeout handling, and cleanup. Provider IDs are not globally unique across parent runs, so they must never become registry ownership keys; scheduler closures retain their own `SubagentResult` rather than resolving ownership again through the mutable registry. Terminal subagent token usage travels in the current run's `ToolMessage.additional_kwargs` and is attributed from message state, never through a process-global provider-ID cache.
-- Scheduled tasks dispatch through the normal Gateway run path. `launch_scheduled_thread_run` reads `get_app_config()` at dispatch and passes `scheduler.recursion_limit` (default 1000, matching the web UI; clamped by `max_recursion_limit`), so YAML changes apply on the next run without restarting Gateway.
+- Scheduled runs use Gateway's normal run path. `launch_scheduled_thread_run` reads `get_app_config()` at dispatch: `scheduler.recursion_limit` defaults to 1000 (web UI), capped by `max_recursion_limit`; YAML changes apply next run without restart. IM enqueue checks recipients before locking preferences in the outcome transaction.
 - Run-history `status` filters are occurrence states, not task states. `ScheduledTaskRunStatus` in `persistence/scheduled_tasks/model.py` is the shared API/repository vocabulary and must match the active and terminal occurrence-status sets. Keep owner lookup before reading history, and apply SQL task/status predicates before pagination; omitted status preserves the existing response.
 - The background scheduler is single-instance by default. `scheduler.multi_instance=true` opts into lease-aware recovery across Gateway instances and requires shared Postgres, `run_ownership.heartbeat_enabled=true`, and `run_events.backend=db`; otherwise startup rejects the configuration. Live scheduled runs are preserved when a peer starts; expired launch claims return to the durable queue, expired run leases are atomically taken over, stale launch writes are fenced by lease ownership, and the Postgres advisory-locked budget makes `max_concurrent_runs` a shared global cap for `launching`/`running` rows.
 - The multi-process startup gate also fires on `deployment.multi_instance: true`; contract in `docs/CONFIGURATION.md`.
@@ -26,36 +22,12 @@ The backend runs a LangGraph-based super agent with sandbox execution, persisten
 - Gateway MCP/skill updates write `extensions_config.json` at runtime. Production Compose mounts it read-write (`config.yaml` stays `:ro`); Helm seeds a writable home-volume copy. Hold both `extensions_config_write_lock` and the sidecar advisory `extensions_config_file_lock` during read-modify-write to prevent lost updates across workers. `atomic_write_extensions_config` uses temp-file replacement; only mount-point `EBUSY` permits a non-atomic in-place overwrite (crashes can truncate). Warn about this fallback once per target; propagate other errors. `get_extensions_config()` revalidates reads by file signature; see [config caching](packages/harness/deerflow/config/AGENTS.md). Tests: `tests/test_compose_extensions_config_writable.py`, `tests/test_extensions_config_atomic_write.py`, `tests/test_helm_extensions_config_writable.py`.
 - MCP cache reset scope and discovery fencing: [MCP guide](packages/harness/deerflow/mcp/AGENTS.md).
 
-**Project Structure** (backend/ subtree; the root guide maps the full repo):
-```
-backend/
-├── Makefile                    # Backend-only commands (dev, gateway, lint)
-├── langgraph.json              # LangGraph Studio graph configuration
-├── packages/
-│   ├── extension-api/          # public, host-independent extension contracts (import: deerflow_extension_api.*)
-│   └── harness/                # deerflow-harness package (import: deerflow.*)
-│       └── deerflow/
-│           ├── agents/         # LangGraph agent system (lead_agent/, middlewares/ — see Middleware Chain, memory/, thread_state.py)
-│           ├── sandbox/        # Sandbox execution system
-│           ├── subagents/      # Subagent delegation (builtins/, executor.py, registry.py)
-│           ├── tools/builtins/ # Built-in tools (present_files, ask_clarification, view_image, review_skill_package)
-│           ├── mcp/            # MCP integration (tools, cache, client)
-│           ├── integrations/   # Managed first-party integration installers (e.g. Lark CLI skill pack)
-│           ├── extensions/     # Python plugin loader, registry, placement, and isolation
-│           ├── models/         # Model factory with thinking/vision support
-│           ├── skills/         # Skills discovery, loading, parsing
-│           ├── config/         # Configuration system
-│           ├── community/      # Community tools (search/fetch/scrape, image search, AIO sandbox)
-│           ├── reflection/     # Dynamic module loading (resolve_variable, resolve_class)
-│           ├── utils/          # Utilities (network, readability)
-│           └── client.py       # Embedded Python client (DeerFlowClient)
-├── app/                        # Application layer (import: app.*)
-│   ├── gateway/                # FastAPI Gateway API (app.py, routers/)
-│   └── channels/               # IM platform integrations
-├── scripts/benchmark/          # Standalone reproducible backend benchmarks
-├── tests/                      # Test suite
-└── docs/                       # Documentation
-```
+**Project structure:** The [root repository map](../AGENTS.md#repository-map)
+indexes the stack. Backend code lives in `app/` (Gateway and channels),
+`packages/harness/deerflow/` (agent runtime), and `packages/extension-api/`
+(public extension contracts). Tests, detailed docs, and standalone benchmarks
+live in `tests/`, `docs/`, and `scripts/benchmark/` respectively. Module-local
+`AGENTS.md` files describe their implementation boundaries.
 
 ## Important Development Guidelines
 
@@ -64,6 +36,8 @@ Every code change must keep docs accurate and current: update `README.md` for
 user-facing behavior and the relevant `AGENTS.md` for development changes.
 `CLAUDE.md` imports `AGENTS.md`; do not edit the shim.
 
+Image result URL policy: [image search guide](packages/harness/deerflow/community/image_search/AGENTS.md).
+
 ### Backend Benchmarks
 
 `scripts/benchmark/context_snapshot/`: explicit `run-live` needs provider env
@@ -71,6 +45,10 @@ vars; `summarize` and pytest are offline. See its README for the protocol.
 
 Benchmarks in `scripts/benchmark/` must be standalone and reproducible. Import
 production functions; never duplicate them or introduce an alternative runtime.
+
+OpenSandbox benchmarks reuse the production lifecycle with scoped config overrides.
+Export only non-secret dimensions; final cleanup failures must fail both the runner
+and JSONL summary. See the sandbox benchmark README for supported options and tests.
 
 - Pin every external dataset by immutable revision and SHA-256. Callers provide
   the local dataset path; evaluation commands must not silently download data.
@@ -124,21 +102,10 @@ uv run pytest tests/test_bench_concurrency.py tests/test_bench_worker.py -q
 
 ## Commands
 
-**Root directory** (for full application):
-```bash
-make check      # Check system requirements
-make install    # Install all dependencies (frontend + backend)
-make extension-install SOURCE=...  # Install and enable a trusted Python extension
-make extension-upgrade SOURCE=...  # Replace an installed extension and keep its config
-make extension-list                # List configured Python extensions
-make extension-enable NAME=...     # Enable an installed extension
-make extension-disable NAME=...    # Disable an extension without uninstalling it
-make extension-remove NAME=...     # Remove a managed extension
-make detect-thread-boundaries  # Inventory backend executor/thread/event-loop boundaries
-make dev        # Start all services (Gateway + Frontend + Nginx), with config.yaml preflight
-make start      # Start production services locally
-make stop       # Stop all services
-```
+Root orchestration and extension commands live in the
+[root guide](../AGENTS.md#commands-root-vs-module); run them from the repo root.
+`make detect-thread-boundaries` inventories backend executor, thread and event-loop
+boundaries.
 
 **Backend directory** (for backend development only):
 ```bash
@@ -166,16 +133,21 @@ environment with `uv run --no-sync --project backend` from the repository root.
 `--project` preserves the caller's working directory and relative runtime/config
 selectors; `--no-sync` retains installed extras such as PostgreSQL drivers.
 
-More specific `AGENTS.md` files in backend code directories contain the subsystem sections split from this file. Follow the nearest file in the directory tree.
+Read the nearest scoped `AGENTS.md` for subsystem ownership.
 
 ## Architecture
+
+Read-only knowledge: [contract](docs/KNOWLEDGE.md) covers independent retrieval
+tools, scope intersection and extension-owned providers.
 
 ### Harness / App Split
 
 The backend is split into two layers with a strict dependency direction:
 
 - **Harness** (`packages/harness/deerflow/`): Publishable agent framework package (`deerflow-harness`). Import prefix: `deerflow.*`. Contains agent orchestration, tools, sandbox, models, MCP, skills, config — everything needed to build and run agents.
-- **App** (`app/`): Unpublished application code. Import prefix: `app.*`. Contains the FastAPI Gateway API and IM channel integrations (Feishu, Slack, Telegram, DingTalk).
+- **App** (`app/`): Unpublished application code. Import prefix: `app.*`. Contains the FastAPI Gateway API and IM channel integrations (Feishu, Slack, Telegram, DingTalk). Feishu option clarifications can render as interactive button cards behind `channels.feishu.card_interaction_enabled` (default off); see `app/channels/AGENTS.md`.
+
+Channel credential staging (`app/channels/credential_staging.py`) is swept on worker-thread state loads, including SQL legacy import. Only owned regular files older than 24h are removed; leave anonymous temporary files alone and keep WeChat constructors IO-free.
 
 **Dependency rule**: App imports deerflow, but deerflow never imports app. This boundary is enforced by `tests/test_harness_boundary.py` which runs in CI.
 
@@ -219,6 +191,11 @@ while `strip_internal_context_keys` scrubs both destinations. Treat
 `_normalize_input_messages` rejects canonical external system/developer roles;
 only `AUTH_SOURCE_INTERNAL` run input may retain them.
 
+`start_run` assigns IDs to ID-less messages before recording input or invoking
+the graph; keyed retries keep those IDs stable, while the pre-stamp input
+remains the idempotency identity. The record and checkpoint share IDs so
+frontend reconnect can deduplicate the user's message.
+
 ## Development Workflow
 
 ### Test-Driven Development (TDD) — MANDATORY
@@ -230,20 +207,6 @@ only `AUTH_SOURCE_INTERNAL` run input may retain them.
 - Tests must pass before a feature is considered complete
 - For lightweight config/utility modules, prefer pure unit tests with no external dependencies
 - If a module causes circular import issues in tests, add a `sys.modules` mock in `tests/conftest.py` (see existing example for `deerflow.subagents.executor`)
-
-```bash
-# Four duration-balanced offline shards
-make test
-
-# Run strict blocking-I/O tests
-make test-blocking-io
-
-# Live API tests: require config.yaml, credentials, and explicit opt-in
-make test-live
-
-# Run a specific test file
-PYTHONPATH=. uv run pytest tests/test_<feature>.py -v
-```
 
 Keep live tests opt-in via `DEER_FLOW_RUN_LIVE_TESTS=1`; guard POSIX-only
 markers with `os.name` for Windows collection.
