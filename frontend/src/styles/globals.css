@@ -485,9 +485,8 @@ html.dark .shiki span {
 }
 
 /*
- * In the mobile menu the results portal sits outside the modal sheet (z-50),
- * which also sets pointer-events: none on <body>. Lift it above the sheet and
- * keep it tappable.
+ * Mobile search results live inside the modal sheet's scroll-lock boundary.
+ * Lift the panel above the sheet and its other controls.
  */
 .nextra-search-results {
   z-index: 60;

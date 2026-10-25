@@ -242,11 +242,12 @@ round-trip validation must still reject newly entered skipped times.
 Follow `src/` ownership, add types/error handling and unit/E2E coverage, run
 `pnpm check`, and update this guide for architecture, command, or convention changes.
 
-Docs search: `pnpm build` runs `scripts/build-search-index.mjs`, setting each
-page's `<html lang>` from its route for Pagefind's per-language indexes
-(`public/_pagefind/`, gitignored; build only). `DocsHtmlLang` syncs runtime
-`<html lang>`. Render search only via `Header`'s `search` slot with
-`Layout search={null}`. Tests: `tests/unit/app/docs-search.test.ts`.
+Docs search: `pnpm build` runs `scripts/build-search-index.mjs`: route-based
+language, then replace `public/_pagefind/` (generated). `DocsHtmlLang` syncs
+runtime language. Only `Header.search` renders search (`Layout search={null}`).
+`MobileNav` uses Headless UI `Portal.Group` inside Radix's scroll boundary;
+selections close at the same hash too. Pin behavior with DOM and
+`tests/e2e/docs-search-mobile.spec.ts` tests; index tests use temporary files.
 
 `pnpm perf:check` measures `/login` in a production build and fixture-backed
 workspace routes in a static-demo build. It starts servers on temporary local
@@ -344,7 +345,7 @@ shared-MCP administrator checks remain authoritative; this adds no personal scop
 
 <!-- BEGIN:nextjs-agent-rules -->
 
-# This is NOT the Next.js you know
+## This is NOT the Next.js you know
 
 This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` (resolved from this file's directory; in monorepos the `next` package may not be visible from the repo root) before writing any code. Heed deprecation notices.
 

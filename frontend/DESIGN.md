@@ -91,10 +91,11 @@ Build from `src/components/ui/` (shadcn on Radix) before writing new primitives:
   only "No items."
 - **Loading**: `Skeleton` for layout-shaped loading, a spinner only for short
   inline waits.
-- **Overlays**: Radix `Sheet`/`Dialog` are modal (z-50, body pointer-events
-  locked). Anything portalled from inside one, such as Nextra's search results,
-  must sit above z-50 and opt back into pointer events. See
-  `components/landing/mobile-nav.tsx`.
+- **Overlays**: Radix `Sheet`/`Dialog` lock body scrolling and pointer events.
+  Nested portals must stay inside the modal's allowed content region, above
+  z-50, with pointer events enabled. Mobile docs search uses Headless UI's
+  `Portal.Group` targeting the sheet content; z-index alone cannot permit scroll.
+  See `components/landing/mobile-nav.tsx`.
 
 ## Docs (Nextra)
 

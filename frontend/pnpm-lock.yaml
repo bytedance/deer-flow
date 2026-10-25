@@ -34,6 +34,9 @@ importers:
       '@codemirror/language-data':
         specifier: ^6.5.2
         version: 6.5.2
+      '@headlessui/react':
+        specifier: ^2.2.9
+        version: 2.2.9(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
       '@langchain/core':
         specifier: ^1.1.15
         version: 1.1.20(@opentelemetry/api@1.9.0)
