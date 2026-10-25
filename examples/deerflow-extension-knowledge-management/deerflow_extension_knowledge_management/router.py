@@ -74,7 +74,8 @@ def build_router(provider: ManagementProvider) -> APIRouter:
 
     @router.post(prefix + "/files", status_code=202)
     async def upload(request: Request, connection: str, base: str, filename: str, context: ManagementContext = Depends(_context)):
-        if request.headers.get("content-type", "").split(";", 1)[0] != "application/octet-stream":
+        media_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        if media_type != "application/octet-stream":
             raise HTTPException(415, "Use application/octet-stream")
         try:
             options = ProcessingOptions.model_validate_json(request.headers.get("x-processing-options", "{}"))
