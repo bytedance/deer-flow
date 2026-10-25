@@ -4,14 +4,16 @@ Store JSON decode errors follow corrupt-file recovery; SQL import keeps the orig
 
 IM channels use `langgraph-sdk` HTTP; Gateway owns thread lifecycle.
 WeChat outbound: off-loop cap+1; overflow `None` before encryption/upload; <=0 unlimited.
-Cancel drains cursor writes; expiry drains cursor/auth reset under `_auth_lock`.
+Cancel drains cursors; expiry drains cursor/auth reset under `_auth_lock`.
 Inbound: ingest/drop drains off-loop cleanup of owned dirs, never metadata paths.
 
 Telegram retries share bootstrap/Bot cleanup. Dead loops warn once; clear
 matching futures under `_shutdown_resources_lock` (closure unconfirmed).
 Finalize asyncgens; keep primary errors; propagate lone Bot errors.
 
-**Auth**: SDK and raw-httpx `/goal` calls send process-local auth plus `_csrf_headers()`; internal auth requires CSRF.
+**Auth**: SDK/raw-httpx `/goal` use process-local auth + `_csrf_headers()`; internal auth needs CSRF.
+
+DingTalk retains tasks and logs failures.
 
 **Components**:
 - `message_bus.py` - Inbound queue → dispatcher; outbound uses a dispatch-start listener snapshot. Unsubscribe neither cancels nor drains captured callbacks.
@@ -76,6 +78,7 @@ The cached value is reused for both the blocking (`runs.wait`) and streaming (`_
 - Frontend APIs: `GET /api/channels/providers`, `GET /api/channels/connections`, `POST /api/channels/{provider}/connect`, and `DELETE /api/channels/connections/{connection_id}`.
 - Browser APIs remain protected by normal Gateway auth/CSRF. Provider messages arrive through the already-configured channel workers.
 - Runtime credentials (`runtime_config_store.py`): encrypted `channel_runtime_configs` rows (JSON only for `memory`), re-read per request, never cached on `app.state`; a save is one cancellation-owned commit.
+- The JSON runtime-config sidecar uses `utils.file_lock.retry_until_locked` on Windows: retry only EACCES/EAGAIN/EDEADLK every 0.2s without a deadline; propagate other errors before entering the mutation or unlocking. Warn once per acquisition after 50 contention retries with the sidecar path; logging failures must not interrupt the wait. POSIX keeps blocking `flock`. Coverage: `tests/test_channel_runtime_config_store_lock.py`.
 - Provider-level `connection_status` reflects the user's newest connection row. With no binding it is `not_connected`, except in auth-disabled local mode where a configured running channel reports `connected` because all channel messages already route to the default user.
 - Slack replies use the configured operator bot token from `channels.slack` unless per-connection credentials are present; unreadable or corrupt stored credentials are treated as unavailable.
 - Telegram, Slack, Discord, Feishu/Lark, DingTalk, WeChat, and WeCom workers resolve incoming platform identities to connection records before reaching `ChannelManager`.
@@ -87,7 +90,16 @@ The cached value is reused for both the blocking (`runs.wait`) and streaming (`_
 - Custom agents declare a `github:` block in their `config.yaml` to bind to repos and event triggers; the webhook route is fail-closed by default (mounted only when `GITHUB_WEBHOOK_SECRET` is set) and exempt from auth/CSRF because authenticity is enforced by HMAC.
 - Registry caching is keyed by the configured agent store's opaque signature: file storage uses agent config mtimes, while database storage hashes the ordered owner/name/config/soul contents so same-timestamp writes still invalidate webhook routing.
 - Outbound is **log-only** by design: each agent posts its own reply mid-run via the `gh` CLI from its sandbox, so the manager uses `fire_and_forget=True` and `runs.create()` returns once pending.
-- **Follow-up buffering while busy** (issue #4121): outbound is log-only, so the `THREAD_BUSY_MESSAGE` reply on a `ConflictError` was invisible to the commenter — a comment posted during an active run looked silently ignored. When `ChannelRunPolicy.buffer_followups_on_busy=True` (GitHub's default), a `ConflictError` on `runs.create()` also appends the triggering message to a per-thread in-memory buffer (`ChannelManager._followup_buffers`) — deduped by GitHub delivery id, capped at `FOLLOWUP_BUFFER_MAX_PER_THREAD` (20, oldest dropped with a WARNING). The first successful `runs.create()` on a thread captures its `run_id` and spawns a watcher on that run's `StreamBridge` stream; on `END_SENTINEL` it drains up to `FOLLOWUP_DRAIN_BATCH_SIZE` (10) entries into one `<followups-while-busy>`-wrapped input and fires a follow-up `runs.create()` — itself watched, so a deeper backlog chains into further drain cycles instead of one unbounded input. If that follow-up hits `ConflictError` (a concurrent turn raced onto the thread), the batch is requeued and retried when this manager next creates and watches a run on that thread. Reactions on buffered comments are out of scope; comments coalesce silently. **Plumbing**: the watcher reaches the Gateway's `StreamBridge` through a zero-arg closure threaded from the lifespan via `start_channel_service(get_stream_bridge=...)` → `ChannelService` → `ChannelManager` (like `ScheduledTaskService.launch_run`); without it (tests) buffering works without auto-drain. **Scope limitation**: buffer and watcher are per-process and webhooks reach any instance (the leader lease does not arbitrate GitHub), so a follow-up routed to another worker misses the buffer until a shared buffer store exists (#4120 shape).
+- **Busy follow-ups** (#4121): `ChannelRunPolicy.buffer_followups_on_busy=True`
+  (GitHub default) buffers `runs.create()` conflicts per thread, deduplicated by
+  delivery ID. Cap at 20 entries, dropping the oldest with WARNING. Watch each
+  successful run's `StreamBridge`; `END_SENTINEL` drains up to 10 entries into
+  `<followups-while-busy>` and watches the successor. Requeue drain conflicts
+  until this manager next creates and watches a run. Buffers/watchers are
+  process-local; GitHub has no leader-lease arbitration. Without the zero-arg
+  lifespan → service → manager bridge closure, buffering has no auto-drain.
+  Coalesce silently without reactions. Before changing buffering or watcher
+  plumbing, read [the full contract](../../docs/GITHUB_AGENTS.md#follow-up-buffering-while-busy-4121).
 - See [backend/docs/GITHUB_AGENTS.md](../../docs/GITHUB_AGENTS.md) for the architecture diagrams: webhook → fan-out → `InboundMessage` dispatch, `preferred_thread_id = UUID5(repo, number, agent_name)` thread determinism, mention-handle precedence chain, GH token lifecycle via `GH_TOKEN`/`GITHUB_TOKEN` per-call `extra_env`, and the narrow `ConflictError` (HTTP 409) thread-create race recovery.
 
 

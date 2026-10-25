@@ -21,6 +21,7 @@ import { getBackendBaseURL } from "../config";
 import { useI18n } from "../i18n/hooks";
 import type { Locale } from "../i18n/locale";
 import { getMessageRunId } from "../messages/run-duration";
+import { isErrorToolMessage } from "../messages/tool-error";
 import {
   extractContentFromMessage,
   hasToolCalls,
@@ -156,22 +157,6 @@ export type PendingPreparedReplayMask = {
 };
 
 export type ToolResultStatus = "pending" | "success" | "error";
-
-function isErrorToolMessage(message: Message): boolean {
-  if (message.type !== "tool") {
-    return false;
-  }
-  if (message.status === "error") {
-    return true;
-  }
-  const metadata = message.additional_kwargs?.deerflow_tool_meta;
-  return (
-    typeof metadata === "object" &&
-    metadata !== null &&
-    "status" in metadata &&
-    metadata.status === "error"
-  );
-}
 
 export function getToolResultStatus(
   messages: Message[],

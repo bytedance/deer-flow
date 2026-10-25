@@ -1308,6 +1308,23 @@ def _clamp_recursion_limit(value: Any, max_limit: int, default_limit: int) -> in
     return min(value, max_limit)
 
 
+def custom_agent_name(assistant_id: str | None) -> str | None:
+    """Return the custom agent *assistant_id* selects, or ``None`` for the lead agent.
+
+    Custom names are normalized (trimmed, lowercased, ``_`` to ``-``) and must
+    then contain only letters, digits and hyphens.
+
+    Raises:
+        ValueError: *assistant_id* cannot name an agent.
+    """
+    if not assistant_id or assistant_id == _DEFAULT_ASSISTANT_ID:
+        return None
+    normalized = assistant_id.strip().lower().replace("_", "-")
+    if not normalized or not re.fullmatch(r"[a-z0-9-]+", normalized):
+        raise ValueError(f"Invalid assistant_id {assistant_id!r}: must contain only letters, digits, and hyphens after normalization.")
+    return normalized
+
+
 def build_run_config(
     thread_id: str,
     request_config: dict[str, Any] | None,
@@ -1405,10 +1422,8 @@ def build_run_config(
 
     # Inject custom agent name when the caller specified a non-default assistant.
     # Honour an explicit agent_name in either runtime options container.
-    if assistant_id and assistant_id != _DEFAULT_ASSISTANT_ID:
-        normalized = assistant_id.strip().lower().replace("_", "-")
-        if not normalized or not re.fullmatch(r"[a-z0-9-]+", normalized):
-            raise ValueError(f"Invalid assistant_id {assistant_id!r}: must contain only letters, digits, and hyphens after normalization.")
+    normalized = custom_agent_name(assistant_id)
+    if normalized is not None:
         configurable = config.setdefault("configurable", {})
         runtime_context = config.setdefault("context", {})
         explicit_agent_name: str | None = None
@@ -1642,6 +1657,14 @@ def build_checkpoint_state_accessor(
 ) -> tuple[CheckpointStateAccessor, dict[str, Any]]:
     """Build the mode-selected lead graph used for materialized checkpoint state."""
     ctx = get_run_context(request)
+    try:
+        custom_agent_name(assistant_id)
+    except ValueError:
+        # Thread creation did not always validate assistant_id, so a stored
+        # one may name no agent. Run creation rejects such a name, so no run
+        # ran as it: read with the lead agent's schema instead of failing.
+        logger.warning("Thread %s records an invalid assistant_id; reading its state with the lead agent schema", sanitize_log_param(thread_id))
+        assistant_id = None
     config = build_run_config(thread_id, None, None, assistant_id=assistant_id)
     configurable = config.setdefault("configurable", {})
     configurable["checkpoint_ns"] = checkpoint_ns
