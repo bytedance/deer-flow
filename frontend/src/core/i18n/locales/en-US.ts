@@ -2565,6 +2565,10 @@ export const enUS: Translations = {
         "SSO login is not allowed for your account. Contact your administrator.",
       account_disabled:
         "This account has been disabled. Contact your administrator.",
+      invalid_email: "Please enter a valid email address.",
+      password_too_short: "Password must be at least 6 characters.",
+      registration_password_too_short:
+        "Password must be at least 8 characters.",
     },
   },
 };
