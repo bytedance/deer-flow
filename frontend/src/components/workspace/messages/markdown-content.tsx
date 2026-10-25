@@ -25,6 +25,7 @@ import {
   type StreamdownComponentOverrides,
   toStreamdownComponents,
 } from "@/core/streamdown/components";
+import { snapForwardToCodePoint } from "@/core/utils/text";
 import { cn } from "@/lib/utils";
 
 import { createMarkdownLinkComponent } from "./markdown-link";
@@ -104,13 +105,16 @@ function useSmoothStreamingContent(content: string, isLoading: boolean) {
         1,
         Math.ceil(remainingDuration / SMOOTH_REVEAL_CADENCE_MS),
       );
-      const nextLength = Math.min(
-        target.length,
-        latest.length +
-          Math.max(
-            SMOOTH_REVEAL_MIN_CHARS_PER_COMMIT,
-            Math.ceil((target.length - latest.length) / remainingCommits),
-          ),
+      const nextLength = snapForwardToCodePoint(
+        target,
+        Math.min(
+          target.length,
+          latest.length +
+            Math.max(
+              SMOOTH_REVEAL_MIN_CHARS_PER_COMMIT,
+              Math.ceil((target.length - latest.length) / remainingCommits),
+            ),
+        ),
       );
       const next = target.slice(0, nextLength);
       displayContentRef.current = next;
