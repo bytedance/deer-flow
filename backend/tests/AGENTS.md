@@ -1,5 +1,10 @@
 # Backend Tests
 
+`test_lark_broker_image.py` stages Python files from the broker Dockerfile's
+final-stage COPY instructions. Run shim installation and the health endpoint
+under `-I -S`, adding only the staged script directory to the import path;
+repository paths or installed Harness packages would hide missing image files.
+
 When adding a scoped `AGENTS.md`, update `EXPECTED_GUIDANCE_PATHS` in
 `test_agent_guidance_check.py` in the same change. The explicit inventory pins
 guidance ownership and extends hard-budget checks to each approved guide.
