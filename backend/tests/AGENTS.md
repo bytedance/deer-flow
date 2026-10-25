@@ -346,6 +346,11 @@ Windows. The link-free article companion must retain the extractor's exact HTML
 and exclude resolved navigation links from Markdown; checking for raw `href=`
 attributes after Markdown conversion cannot detect an unwanted fallback.
 
+The authority-tag census also scans parser regexes as raw source. Classify
+Readability's ordinary HTML body tag as a reviewed test exemption, with markup
+preservation and nested framework-tag neutralization covered in
+`test_input_sanitization_middleware.py`.
+
 ## Classification request packing
 
 Pin the Jev example's outbound byte budget against captured HTTP request bodies.
