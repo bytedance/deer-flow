@@ -1454,8 +1454,8 @@ async def test_scheduler_recovery_claim_backfills_error_terminal(tmp_path, recov
         sf = get_session_factory()
         assert sf is not None
         event_store = DbRunEventStore(sf)
-        publisher = RecoveryTerminalPublisher(event_store)
         run_repo = RunRepository(sf)
+        publisher = RecoveryTerminalPublisher(event_store, run_repo)
         task_repo = ScheduledTaskRepository(sf, run_repository=run_repo, recovery_terminal_publisher=publisher)
         task_run_repo = ScheduledTaskRunRepository(sf, run_repository=run_repo, recovery_terminal_publisher=publisher)
         now = datetime.now(UTC)
@@ -1541,8 +1541,8 @@ async def test_scheduler_outer_transaction_failure_still_publishes_committed_cla
         sf = get_session_factory()
         assert sf is not None
         event_store = DbRunEventStore(sf)
-        publisher = RecoveryTerminalPublisher(event_store)
         run_repo = RunRepository(sf)
+        publisher = RecoveryTerminalPublisher(event_store, run_repo)
         task_repo = ScheduledTaskRepository(sf, run_repository=run_repo, recovery_terminal_publisher=publisher)
         now = datetime.now(UTC)
         run_id, thread_id = "run-outer-rollback", "thread-outer-rollback"
@@ -1606,8 +1606,8 @@ async def test_scheduler_recovery_event_failure_preserves_committed_state(tmp_pa
         sf = get_session_factory()
         assert sf is not None
         event_store = DbRunEventStore(sf)
-        publisher = RecoveryTerminalPublisher(event_store)
         run_repo = RunRepository(sf)
+        publisher = RecoveryTerminalPublisher(event_store, run_repo)
         task_repo = ScheduledTaskRepository(sf, run_repository=run_repo, recovery_terminal_publisher=publisher)
         now = datetime.now(UTC)
         run_id, thread_id = "run-event-failure", "thread-event-failure"

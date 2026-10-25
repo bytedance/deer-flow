@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import logging
 import threading
-from collections.abc import Callable
-from dataclasses import dataclass, field
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from enum import StrEnum
 
 from deerflow.runtime.events.catalog import RUN_TERMINAL_EVENT
-from deerflow.runtime.events.store.base import RunEventStore
+from deerflow.runtime.events.store.base import RunEventLifecycleRejected, RunEventStore
+from deerflow.runtime.runs.store.base import RunStore
 
 TERMINAL_PROTOCOL_VERSION = 1
 TERMINAL_STATUSES = frozenset({"success", "error", "interrupted", "timeout"})
@@ -23,41 +24,91 @@ class RecoveryTerminalTargetConsumed(RuntimeError):
     """A one-shot recovery terminal target was published more than once."""
 
 
-@dataclass
 class _RecoveryTargetClaimState:
-    consumed: bool = False
-    lock: threading.Lock = field(default_factory=threading.Lock)
+    __slots__ = ("_consumed", "_lock")
+
+    def __init__(self) -> None:
+        object.__setattr__(self, "_consumed", False)
+        object.__setattr__(self, "_lock", threading.Lock())
+
+    def __setattr__(self, name: str, value: object) -> None:
+        raise AttributeError("Recovery target claim state is immutable")
+
+    def consume(self) -> None:
+        with self._lock:
+            if self._consumed:
+                raise RecoveryTerminalTargetConsumed("Recovery terminal target was already consumed")
+            object.__setattr__(self, "_consumed", True)
 
 
 @dataclass(frozen=True)
-class RecoveryTerminalTarget:
-    """One-shot authority to publish an error terminal after a takeover claim."""
-
+class _RecoveryTargetIdentity:
     thread_id: str
     run_id: str
     user_id: str | None
     operation_kind: str
     committed_status: str
-    _claim_state: _RecoveryTargetClaimState = field(repr=False, compare=False)
-    _issuer: object = field(repr=False, compare=False)
 
-    def __post_init__(self) -> None:
-        if self._issuer is not _RECOVERY_TARGET_ISSUER:
+
+class RecoveryTerminalTarget:
+    """One-shot authority to publish an error terminal after a takeover claim."""
+
+    __slots__ = ("_claim_state", "_identity")
+
+    def __init__(
+        self,
+        *,
+        thread_id: str,
+        run_id: str,
+        user_id: str | None,
+        operation_kind: str,
+        committed_status: str,
+        _issuer: object,
+    ) -> None:
+        if _issuer is not _RECOVERY_TARGET_ISSUER:
             raise TypeError("RecoveryTerminalTarget must be issued by RecoveryTerminalPublisher")
-        if self.operation_kind != "run":
+        if operation_kind != "run":
             raise ValueError("Recovery terminal evidence is limited to ordinary runs")
-        if self.committed_status != "error":
+        if committed_status != "error":
             raise ValueError("Takeover recovery terminal evidence must be error")
-        if not self.thread_id or not self.run_id:
+        if not thread_id or not run_id:
             raise ValueError("Recovery terminal target requires thread_id and run_id")
-        if self.user_id is not None and not isinstance(self.user_id, str):
+        if user_id is not None and not isinstance(user_id, str):
             raise TypeError("Recovery terminal target user_id must be a string or None")
+        self._identity = _RecoveryTargetIdentity(thread_id, run_id, user_id, operation_kind, committed_status)
+        self._claim_state = _RecoveryTargetClaimState()
 
-    def _consume(self) -> None:
-        with self._claim_state.lock:
-            if self._claim_state.consumed:
-                raise RecoveryTerminalTargetConsumed(f"Recovery terminal target for run {self.run_id} was already consumed")
-            self._claim_state.consumed = True
+    def __setattr__(self, name: str, value: object) -> None:
+        if name in self.__slots__ and hasattr(self, name):
+            raise AttributeError("RecoveryTerminalTarget is immutable")
+        object.__setattr__(self, name, value)
+
+    @property
+    def thread_id(self) -> str:
+        return self._identity.thread_id
+
+    @property
+    def run_id(self) -> str:
+        return self._identity.run_id
+
+    @property
+    def user_id(self) -> str | None:
+        return self._identity.user_id
+
+    @property
+    def operation_kind(self) -> str:
+        return self._identity.operation_kind
+
+    @property
+    def committed_status(self) -> str:
+        return self._identity.committed_status
+
+    def _consume(self) -> _RecoveryTargetIdentity:
+        try:
+            self._claim_state.consume()
+        except RecoveryTerminalTargetConsumed:
+            raise RecoveryTerminalTargetConsumed(f"Recovery terminal target for run {self.run_id} was already consumed") from None
+        return self._identity
 
 
 class RecoveryTerminalPublisher:
@@ -68,8 +119,18 @@ class RecoveryTerminalPublisher:
     from a later RunRow read.
     """
 
-    def __init__(self, store: RunEventStore) -> None:
+    def __init__(self, store: RunEventStore, run_store: RunStore) -> None:
         self._store = store
+        self._run_store = run_store
+
+    def lifecycle_guard(self, *, thread_id: str, run_id: str, user_id: str | None) -> Callable[[], Awaitable[bool]]:
+        """Return a guard that rejects publication after Run deletion or identity drift."""
+
+        async def guard() -> bool:
+            row = await self._run_store.get(run_id, user_id=user_id)
+            return row is not None and row.get("run_id") == run_id and row.get("thread_id") == thread_id and row.get("operation_kind", "run") == "run" and row.get("status") == "error"
+
+        return guard
 
     def authorize_takeover(
         self,
@@ -89,36 +150,38 @@ class RecoveryTerminalPublisher:
             user_id=user_id,
             operation_kind=operation_kind,
             committed_status="error",
-            _claim_state=_RecoveryTargetClaimState(),
             _issuer=_RECOVERY_TARGET_ISSUER,
         )
 
     async def publish(self, target: RecoveryTerminalTarget) -> TerminalEventConfirmation:
         """Consume *target* once and resolve its event confirmation."""
-        target._consume()
+        if not isinstance(target, RecoveryTerminalTarget):
+            raise TypeError("RecoveryTerminalPublisher.publish requires a RecoveryTerminalTarget")
+        identity = target._consume()
         try:
             confirmation = await confirm_terminal_event(
                 self._store,
-                thread_id=target.thread_id,
-                run_id=target.run_id,
-                status=target.committed_status,
-                user_id=target.user_id,
+                thread_id=identity.thread_id,
+                run_id=identity.run_id,
+                status=identity.committed_status,
+                user_id=identity.user_id,
                 recovered=True,
                 authorized=lambda: True,
+                lifecycle_guard=self.lifecycle_guard(thread_id=identity.thread_id, run_id=identity.run_id, user_id=identity.user_id),
             )
         except Exception:
             # Cancellation is BaseException and must retain its independent
             # propagation semantics after the one-shot target was consumed.
             logger.warning(
                 "Unexpected recovery terminal confirmation failure for run %s; preserving the committed RunRow",
-                target.run_id,
+                identity.run_id,
                 exc_info=True,
             )
             return TerminalEventConfirmation.UNKNOWN
         if not confirmation.confirmed:
             logger.warning(
                 "Recovery terminal publication for run %s returned %s; preserving the committed RunRow",
-                target.run_id,
+                identity.run_id,
                 confirmation.value,
             )
         return confirmation
@@ -165,6 +228,7 @@ async def confirm_terminal_event(
     user_id: str | None,
     authorized: Callable[[], bool],
     recovered: bool = False,
+    lifecycle_guard: Callable[[], Awaitable[bool]] | None = None,
 ) -> TerminalEventConfirmation:
     """Confirm a singleton without replaying any Journal batch.
 
@@ -192,7 +256,10 @@ async def confirm_terminal_event(
                 content={"status": status},
                 metadata={"protocol_version": TERMINAL_PROTOCOL_VERSION, "recovered": recovered},
                 user_id=user_id,
+                lifecycle_guard=lifecycle_guard,
             )
+        except RunEventLifecycleRejected:
+            return TerminalEventConfirmation.CONFLICT
         except Exception:
             if attempt == 0:
                 continue

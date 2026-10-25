@@ -193,7 +193,7 @@ async def test_postgres_recovery_takeover_has_one_publisher():
         async def recover_once(factory):
             nonlocal ready_count
             repo = RunRepository(factory)
-            publisher = RecoveryTerminalPublisher(DbRunEventStore(factory))
+            publisher = RecoveryTerminalPublisher(DbRunEventStore(factory), repo)
             async with ready_lock:
                 ready_count += 1
                 if ready_count == 2:

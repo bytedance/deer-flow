@@ -900,7 +900,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         app.state.run_event_store = make_run_event_store(run_events_config)
         from deerflow.runtime.events.terminal import RecoveryTerminalPublisher
 
-        app.state.recovery_terminal_publisher = RecoveryTerminalPublisher(app.state.run_event_store)
+        app.state.recovery_terminal_publisher = RecoveryTerminalPublisher(app.state.run_event_store, app.state.run_store)
 
         from deerflow.extensions.run_evidence import StoreRunEvidenceReader, StoreRunEvidenceReaderFactory
 

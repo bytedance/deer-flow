@@ -845,6 +845,84 @@ async def test_orphan_recovery_unexpected_publisher_error_preserves_recovery_flo
 
 
 @pytest.mark.asyncio
+async def test_recovery_publication_cannot_resurrect_deleted_thread(runtime, monkeypatch):
+    record = await put_expired_run(runtime)
+    manager = recovery_manager(runtime)
+    publishing, release = asyncio.Event(), asyncio.Event()
+    original_confirm = terminal_module.confirm_terminal_event
+
+    async def pause_before_event_write(*args, **kwargs):
+        publishing.set()
+        await release.wait()
+        return await original_confirm(*args, **kwargs)
+
+    monkeypatch.setattr(terminal_module, "confirm_terminal_event", pause_before_event_write)
+    recovery = asyncio.create_task(
+        manager.reconcile_orphaned_inflight_runs(
+            error="orphan recovered",
+            before=datetime.now(UTC).isoformat(),
+            stop_reason="orphan_recovered",
+        )
+    )
+    try:
+        await asyncio.wait_for(publishing.wait(), timeout=5)
+        await runtime.runs.delete_by_thread(record.thread_id, user_id=record.user_id)
+        await runtime.events.delete_by_thread(record.thread_id, user_id=record.user_id)
+    finally:
+        release.set()
+    recovered = await asyncio.wait_for(recovery, timeout=5)
+
+    assert [run.run_id for run in recovered] == [record.run_id]
+    assert await runtime.runs.get(record.run_id, user_id=record.user_id) is None
+    assert await runtime.events.list_events(record.thread_id, record.run_id, user_id=None) == []
+    assert await runtime.events.list_messages(record.thread_id, user_id=None) == []
+
+
+@pytest.mark.asyncio
+async def test_recovery_delivery_receipt_precedes_terminal(runtime):
+    record = await put_expired_run(runtime)
+    manager = recovery_manager(runtime)
+
+    recovered = await manager.reconcile_orphaned_inflight_runs(
+        error="orphan recovered",
+        before=datetime.now(UTC).isoformat(),
+        stop_reason="orphan_recovered",
+    )
+
+    assert [run.run_id for run in recovered] == [record.run_id]
+    delivery = await runtime.events.list_events(record.thread_id, record.run_id, event_types=["run.delivery"], user_id=None)
+    terminal = await terminal_events(runtime, record)
+    assert len(delivery) == 1
+    assert delivery[0]["user_id"] == record.user_id
+    confirmed_terminal(terminal, record, "error", recovered=True)
+    assert delivery[0]["seq"] < terminal[0]["seq"]
+
+
+@pytest.mark.asyncio
+async def test_recovery_delivery_receipt_failure_does_not_block_terminal(runtime, monkeypatch):
+    record = await put_expired_run(runtime)
+    manager = recovery_manager(runtime)
+    original = runtime.events.put_if_absent
+
+    async def fail_delivery(**kwargs):
+        if kwargs["event_type"] == "run.delivery":
+            raise OSError("delivery receipt unavailable")
+        return await original(**kwargs)
+
+    monkeypatch.setattr(runtime.events, "put_if_absent", fail_delivery)
+
+    recovered = await manager.reconcile_orphaned_inflight_runs(
+        error="orphan recovered",
+        before=datetime.now(UTC).isoformat(),
+        stop_reason="orphan_recovered",
+    )
+
+    assert [run.run_id for run in recovered] == [record.run_id]
+    assert await runtime.events.list_events(record.thread_id, record.run_id, event_types=["run.delivery"], user_id=None) == []
+    confirmed_terminal(await terminal_events(runtime, record), record, "error", recovered=True)
+
+
+@pytest.mark.asyncio
 async def test_recovery_accepts_existing_owner_terminal_without_rewriting_source(runtime):
     record = await put_expired_run(runtime)
     owner_event, created = await runtime.events.put_if_absent(

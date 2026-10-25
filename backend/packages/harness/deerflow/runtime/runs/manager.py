@@ -358,7 +358,9 @@ class RunManager:
         self._worker_id = worker_id or _generate_worker_id()
         self._run_ownership_config = run_ownership_config
         self._event_store = event_store
-        self._recovery_terminal_publisher = recovery_terminal_publisher or (RecoveryTerminalPublisher(event_store) if event_store is not None else None)
+        self._recovery_terminal_publisher = recovery_terminal_publisher
+        if self._recovery_terminal_publisher is None and event_store is not None and store is not None:
+            self._recovery_terminal_publisher = RecoveryTerminalPublisher(event_store, store)
         self._on_orphans_recovered = on_orphans_recovered
         self._heartbeat_task: asyncio.Task | None = None
         self._heartbeat_stop: asyncio.Event | None = None
@@ -1503,7 +1505,7 @@ class RunManager:
         await self._fence_unconfirmed_terminal(record)
         return None
 
-    async def _ensure_delivery_receipt(self, record: RunRecord) -> bool:
+    async def _ensure_delivery_receipt(self, record: RunRecord, *, lifecycle_guard: Callable[[], Awaitable[bool]] | None = None) -> bool:
         """Idempotently persist a zero-delivery receipt during recovery."""
         if self._event_store is None:
             return True
@@ -1514,6 +1516,8 @@ class RunManager:
                 event_type="run.delivery",
                 category="outputs",
                 content={"presented": 0, "paths": [], "by_tool": {}},
+                user_id=record.user_id,
+                lifecycle_guard=lifecycle_guard,
             )
             return True
         except Exception:
@@ -2472,8 +2476,11 @@ class RunManager:
             record.stop_reason = stop_reason
             record.updated_at = now
             if record.operation_kind == ThreadOperationKind.run:
-                if self._recovery_terminal_publisher is not None:
-                    target = self._recovery_terminal_publisher.authorize_takeover(
+                publisher = self._recovery_terminal_publisher
+                lifecycle_guard = publisher.lifecycle_guard(thread_id=record.thread_id, run_id=record.run_id, user_id=record.user_id) if publisher is not None else None
+                await self._ensure_delivery_receipt(record, lifecycle_guard=lifecycle_guard)
+                if publisher is not None:
+                    target = publisher.authorize_takeover(
                         claimed=claimed,
                         thread_id=record.thread_id,
                         run_id=record.run_id,
@@ -2481,13 +2488,7 @@ class RunManager:
                         operation_kind=record.operation_kind.value,
                     )
                     if target is not None:
-                        await self._recovery_terminal_publisher.publish(target)
-                # The atomic takeover above must win before writing a zero-delivery
-                # receipt; otherwise a stale scan could race a heartbeat renewal and
-                # permanently overwrite a live run's later detailed receipt. The
-                # receipt remains best-effort, matching normal terminal delivery
-                # when its event store is unavailable.
-                await self._ensure_delivery_receipt(record)
+                        await publisher.publish(target)
                 recovered.append(record)
 
         if recovered:

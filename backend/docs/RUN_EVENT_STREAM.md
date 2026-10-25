@@ -101,7 +101,11 @@ rejected or unconfirmed commits, and unknown predecessor writes fail closed.
 Reading a historical terminal row does not create local publication authority.
 Recovery publication requires the boolean result of a successful atomic takeover
 claim, with the target bound to the claimed Run identity and its committed
-`error` outcome. A later same-status RunRow read cannot create that authority.
+`error` outcome. The target is one-shot and cannot be reconstructed with another
+Run identity. A later same-status RunRow read cannot create that authority.
+Recovery receipts and terminal confirmation re-check the Run lifecycle inside
+the Event Store's per-thread mutation fence; a completed thread deletion wins,
+so a stale target cannot recreate an orphan event.
 
 ### Evidence Ordering
 
@@ -128,6 +132,11 @@ appended later cannot be claimed as covered by an earlier Seal; an event alone
 does not prove complete evidence. Barrier release before END preserves immediate
 next-message admission, including when later cleanup is slow.
 
+Recovery publishes its zero-delivery receipt before `run.terminal`, matching the
+normal delivery-before-terminal order. Receipt failure remains non-fatal and does
+not prevent the terminal confirmation attempt. Both recovery writes are fenced
+by the current Run lifecycle.
+
 ### Idempotence and Failure Semantics
 
 Confirmation validates the returned event's identity, category, status, version,
@@ -137,7 +146,7 @@ required field types, positive sequence, and database user ownership:
 | --- | --- |
 | `CONFIRMED_NEW` | Insertion is confirmed and the returned event matches; Receipt capture may proceed. |
 | `CONFIRMED_EXISTING` | The existing event itself matches; accept idempotently and preserve its sequence and original source marker. |
-| `CONFLICT` | Identity or protocol fields contradict expectations or are malformed; record the conflict, do not overwrite, and do not seal as complete. |
+| `CONFLICT` | Identity or protocol fields contradict expectations or are malformed, or the guarded Run lifecycle no longer admits publication; record the conflict, do not overwrite, and do not seal as complete. |
 | `UNKNOWN` | The operation outcome cannot be established; preserve uncertainty and do not seal as complete. |
 
 `created=False` alone proves neither success nor conflict. Additional optional

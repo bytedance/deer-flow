@@ -418,3 +418,7 @@ freeze/drain → singleton confirmation → Receipt → Seal → barrier release
 Force close invalidates Receipt bounds. Preserve ownership checks, four-state
 confirmation, and partial evidence on failure without changing business status
 or SSE liveness. See [Run outcome protocol](../../../../docs/RUN_EVENT_STREAM.md#authoritative-run-outcome).
+Recovery uses a non-replaceable one-shot target, writes the zero-delivery receipt
+before `run.terminal`, and passes a Run-lifecycle guard into both singleton
+writes. Stores evaluate that guard under the same per-thread mutation fence as
+event deletion; completed thread deletion wins over a stale recovery target.

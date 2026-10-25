@@ -19,11 +19,16 @@ ownership and capture cleanup. Retain the real XLSX conversion coverage.
 Backend tests must preserve the runtime invariants they exercise without changing production execution topology.
 
 `test_run_terminal_protocol.py` exercises authoritative `run.terminal`
-evidence through real Worker finalization. Keep final commit authority,
-producer drain, singleton confirmation, and Seal boundaries observable. Release all storage/producer gates before bounded cleanup,
-preserve healthy controls in refusal cases, and retain Journal/Seal compatibility
-coverage. `test_terminal_event_confirmation.py` covers supported stores; use
-`TEST_POSTGRES_URI` for independent PostgreSQL pools and real advisory contention. Protocol: [Run outcome](../docs/RUN_EVENT_STREAM.md#authoritative-run-outcome).
+evidence through real Worker finalization and recovery takeover. Keep final
+commit authority, producer drain, singleton confirmation, and Seal boundaries
+observable. Recovery coverage must block after the committed claim, delete the
+Run/events, then prove the lifecycle guard cannot recreate terminal history;
+also pin delivery-before-terminal order. `test_terminal_event_confirmation.py`
+covers supported stores, non-replaceable one-shot recovery targets, and guarded
+singleton rejection; use `TEST_POSTGRES_URI` for independent PostgreSQL pools
+and real advisory contention. Release all storage/producer gates before bounded
+cleanup, preserve healthy controls in refusal cases, and retain Journal/Seal
+compatibility coverage. Protocol: [Run outcome](../docs/RUN_EVENT_STREAM.md#authoritative-run-outcome).
 `test_goal_loop_stop_probe.py` runs the standalone Goal-loop reproduction through the native graph, loop middleware, worker and checkpoints. Only model responses are scripted; do not replace the Goal decision or simulate the stop-reason write.
 
 InfoQuest fetch log assertions install the real `UrlRedactionFilter` on the

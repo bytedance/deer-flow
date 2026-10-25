@@ -13,7 +13,7 @@ Implementations:
 from __future__ import annotations
 
 import abc
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 
 from deerflow.runtime.user_context import AUTO, _AutoSentinel
 
@@ -35,6 +35,10 @@ class RunEventStoreNotCommittedError(RuntimeError):
     because a store that committed and then lost its acknowledgement would
     otherwise produce duplicate events.
     """
+
+
+class RunEventLifecycleRejected(RuntimeError):
+    """A guarded singleton write was rejected because its Run is no longer live."""
 
 
 def normalize_message_ids(message_ids: set[str]) -> set[str]:
@@ -104,6 +108,7 @@ class RunEventStore(abc.ABC):
         metadata: dict | None = None,
         created_at: str | None = None,
         user_id: str | None | _AutoSentinel = AUTO,
+        lifecycle_guard: Callable[[], Awaitable[bool]] | None = None,
     ) -> tuple[dict, bool]:
         """Write one event unless this run already has the same event type.
 
@@ -115,6 +120,10 @@ class RunEventStore(abc.ABC):
         Explicit ``user_id`` stamps the owner for contextless worker writes.
         Stores without user isolation accept it for interface parity. Existing
         events retain their original owner and must be validated by the caller.
+
+        When ``lifecycle_guard`` is provided, stores evaluate it while holding
+        the same per-thread mutation fence used by event deletion. A false
+        result raises :class:`RunEventLifecycleRejected` without writing.
         """
 
     @abc.abstractmethod
