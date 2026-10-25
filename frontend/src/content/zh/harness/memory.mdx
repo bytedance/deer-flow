@@ -33,7 +33,7 @@ import { Callout } from "nextra/components";
 1. **两种模式都会注入**：每次对话开始时，Agent 当前记忆以受控的 token 预算（`max_injection_tokens`）注入到系统提示中。
 2. **中间件模式（默认）**：`MemoryMiddleware` 在每次 Lead Agent 轮次结束后运行，过滤对话、排队后台更新并自动提取新事实。更新通过 `debounce_seconds` 防抖以批量处理快速变化。
 3. **工具模式（实验性）**：DeerFlow 注册 `memory_search`、`memory_get`、`memory_add`、`memory_update`、`memory_delete` 五个工具，并跳过 `MemoryMiddleware`。模型自行决定何时搜索、读取或写入记忆，因此效果取决于模型的工具调用行为。这些显式 CRUD 工具不是被动的陈旧性复核路径；启用工具模式意味着运营方选择由模型主动更新/删除记忆，而不是依赖中间件的陈旧性保护栏。
-4. **按 Agent 记忆**：当自定义 Agent 激活时，其记忆独立于全局记忆存储。这保持不同 Agent 的知识隔离。
+4. **按 Agent 划分事实**：默认的 DeerMem 后端将各自定义 Agent 学到的事实保存在各自的事实目录中。同一用户的各 Agent 共用一个记忆文件。
 
 在工具模式中，五个 `memory_*` 工具名是保留名。如果 MCP 服务或自定义工具已经使用 `memory_search`、`memory_get`、`memory_add`、`memory_update` 或 `memory_delete`，已有工具会保留该名称，冲突的记忆工具会被跳过并记录告警。
 
