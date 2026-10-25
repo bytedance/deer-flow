@@ -887,7 +887,7 @@ class LocalSandbox(Sandbox):
         timed_out = False
         stdout_read_fd, stdout_write_fd = os.pipe()
         stderr_read_fd, stderr_write_fd = os.pipe()
-        process: subprocess.Popen | None = None
+        process = None
         try:
             process = subprocess.Popen(
                 args,
@@ -899,27 +899,30 @@ class LocalSandbox(Sandbox):
                 env=env,
             )
         except BaseException:
-            # BaseException, not Exception: a KeyboardInterrupt mid-spawn must
-            # still release the fds; each fd is closed exactly once here, and
-            # the guarded finally below never closes them a second time.
-            for fd in (stdout_read_fd, stdout_write_fd, stderr_read_fd, stderr_write_fd):
+            # Include interruptions during and after Popen; the read ends have
+            # no drain-thread owner yet. The finally block owns the write ends.
+            for fd in (stdout_read_fd, stderr_read_fd):
                 try:
                     os.close(fd)
                 except OSError:
-                    # Preserve the original Popen failure; fd cleanup is best-effort.
+                    # Preserve the original startup failure; fd cleanup is best-effort.
                     pass
+            if process is not None:
+                # Cleanup must not replace the startup error, even on another
+                # interruption. Reap independently if killing the child fails.
+                with suppress(BaseException):
+                    process.kill()
+                with suppress(BaseException):
+                    process.wait(timeout=10)
             raise
         finally:
-            # Only the successful-spawn path owes the parent's write-end close;
-            # on failure the except block already released all four fds, and a
-            # second close could hit a descriptor number another thread claimed
-            # in between.
-            if process is not None:
-                for fd in (stdout_write_fd, stderr_write_fd):
-                    try:
-                        os.close(fd)
-                    except OSError:
-                        pass
+            # A single owner prevents a second close from hitting a recycled fd.
+            for fd in (stdout_write_fd, stderr_write_fd):
+                try:
+                    os.close(fd)
+                except OSError:
+                    # Closing is best-effort; preserve the command's result or startup error.
+                    pass
 
         if encoding is None:
             encoding = locale.getpreferredencoding(False)
@@ -1019,7 +1022,7 @@ class LocalSandbox(Sandbox):
         timed_out = False
         stdout_read_fd, stdout_write_fd = os.pipe()
         stderr_read_fd, stderr_write_fd = os.pipe()
-        process: subprocess.Popen | None = None
+        process = None
         try:
             process = subprocess.Popen(
                 args,
@@ -1034,27 +1037,30 @@ class LocalSandbox(Sandbox):
             # process-group leader, so its PID is the stable group identifier.
             process_group_id = process.pid
         except BaseException:
-            # BaseException, not Exception: a KeyboardInterrupt mid-spawn must
-            # still release the fds; each fd is closed exactly once here, and
-            # the guarded finally below never closes them a second time.
-            for fd in (stdout_read_fd, stdout_write_fd, stderr_read_fd, stderr_write_fd):
+            # Include interruptions during and after Popen; the read ends have
+            # no drain-thread owner yet. The finally block owns the write ends.
+            for fd in (stdout_read_fd, stderr_read_fd):
                 try:
                     os.close(fd)
                 except OSError:
-                    # Preserve the original Popen failure; fd cleanup is best-effort.
+                    # Preserve the original startup failure; fd cleanup is best-effort.
                     pass
+            if process is not None:
+                # Cleanup must not replace the startup error, even on another
+                # interruption. Reap independently if killing the child fails.
+                with suppress(BaseException):
+                    process.kill()
+                with suppress(BaseException):
+                    process.wait(timeout=10)
             raise
         finally:
-            # Only the successful-spawn path owes the parent's write-end close;
-            # on failure the except block already released all four fds, and a
-            # second close could hit a descriptor number another thread claimed
-            # in between.
-            if process is not None:
-                for fd in (stdout_write_fd, stderr_write_fd):
-                    try:
-                        os.close(fd)
-                    except OSError:
-                        pass
+            # A single owner prevents a second close from hitting a recycled fd.
+            for fd in (stdout_write_fd, stderr_write_fd):
+                try:
+                    os.close(fd)
+                except OSError:
+                    # Closing is best-effort; preserve the command's result or startup error.
+                    pass
 
         stdout_capture, stdout_thread = LocalSandbox._start_pipe_drain(stdout_read_fd, "deerflow-bash-stdout-drain")
         stderr_capture, stderr_thread = LocalSandbox._start_pipe_drain(stderr_read_fd, "deerflow-bash-stderr-drain")
