@@ -1104,7 +1104,8 @@ class DingTalkChannel(Channel):
                 now = time.monotonic()
                 try:
                     expires_in = int(raw_expires_in)
-                    if expires_in <= 0:
+                    # A lifetime within the refresh margin is already stale.
+                    if expires_in <= _TOKEN_REFRESH_MARGIN_SECONDS:
                         raise ValueError
                     expires_at = now + expires_in - _TOKEN_REFRESH_MARGIN_SECONDS
                 except (TypeError, ValueError, OverflowError):

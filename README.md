@@ -1341,6 +1341,8 @@ Scheduled-task result and lifecycle notices can also be pushed to a bound Feishu
 DingTalk's Markdown fallback displays tables as labeled blockquotes, preserving escaped pipes (`\|`) within cells and empty leading or trailing cells so values stay under the correct column labels.
 
 
+DingTalk token caching uses a two-hour fallback when the provider's token lifetime is invalid or no longer than the five-minute refresh margin, avoiding a refresh on every request.
+
 When DeerFlow runs in Docker Compose, IM channels execute inside the `gateway` container. In that case, do not point `channels.langgraph_url` or `channels.gateway_url` at `localhost`; use container service names such as `http://gateway:8001/api` and `http://gateway:8001`, or set `DEER_FLOW_CHANNELS_LANGGRAPH_URL` and `DEER_FLOW_CHANNELS_GATEWAY_URL`.
 
 **Commands**
