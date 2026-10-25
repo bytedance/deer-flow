@@ -88,7 +88,7 @@ class FileManagedSubagentStore(ManagedSubagentStore):
         payload = definition.model_dump_json(indent=2) + "\n"
         tmp_path: Path | None = None
         try:
-            with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, suffix=".tmp", delete=False) as handle:
+            with tempfile.NamedTemporaryFile("w", encoding="utf-8", newline="", dir=path.parent, suffix=".tmp", delete=False) as handle:
                 handle.write(payload)
                 handle.flush()
                 os.fsync(handle.fileno())
