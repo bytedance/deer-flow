@@ -24,6 +24,7 @@ from langgraph.graph.message import add_messages
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+import deerflow.runtime.events.terminal as terminal_module
 import deerflow.runtime.runs.worker as worker_module
 from deerflow.config.paths import Paths
 from deerflow.config.run_ownership_config import RunOwnershipConfig
@@ -690,24 +691,32 @@ async def test_non_local_cancel_takeover_backfills_error_terminal(runtime):
 
 
 @pytest.mark.asyncio
-async def test_non_local_cancel_returns_taken_over_when_terminal_publish_fails(runtime, monkeypatch):
+@pytest.mark.parametrize("failure", ["event_store", "unexpected"])
+async def test_non_local_cancel_returns_taken_over_when_terminal_publish_fails(runtime, monkeypatch, failure):
     record = await put_expired_run(runtime, user_id=get_effective_user_id())
     manager = recovery_manager(runtime)
     attempts = []
-    original = runtime.events.put_if_absent
+    if failure == "event_store":
+        original = runtime.events.put_if_absent
 
-    async def fail_terminal(**kwargs):
-        if kwargs["event_type"] == "run.terminal":
-            attempts.append(kwargs)
-            raise OSError("terminal event unavailable")
-        return await original(**kwargs)
+        async def fail_terminal(**kwargs):
+            if kwargs["event_type"] == "run.terminal":
+                attempts.append(kwargs)
+                raise OSError("terminal event unavailable")
+            return await original(**kwargs)
 
-    monkeypatch.setattr(runtime.events, "put_if_absent", fail_terminal)
+        monkeypatch.setattr(runtime.events, "put_if_absent", fail_terminal)
+    else:
+
+        async def fail_confirmation(*args, **kwargs):
+            raise RuntimeError("unexpected confirmation failure")
+
+        monkeypatch.setattr(terminal_module, "confirm_terminal_event", fail_confirmation)
 
     outcome = await manager.cancel(record.run_id)
 
     assert outcome == CancelOutcome.taken_over
-    assert len(attempts) == 2
+    assert len(attempts) == (2 if failure == "event_store" else 0)
     row = await runtime.runs.get(record.run_id, user_id=record.user_id)
     assert row is not None and row["status"] == "error"
     assert row["evidence_seal_state"] == "partial"
@@ -808,6 +817,31 @@ async def test_recovery_terminal_failure_never_changes_committed_takeover(runtim
     else:
         assert len(attempts) == 2
         confirmed_terminal(terminal, record, "error", recovered=True)
+
+
+@pytest.mark.asyncio
+async def test_orphan_recovery_unexpected_publisher_error_preserves_recovery_flow(runtime, monkeypatch):
+    record = await put_expired_run(runtime)
+    manager = recovery_manager(runtime)
+
+    async def fail_confirmation(*args, **kwargs):
+        raise RuntimeError("unexpected confirmation failure")
+
+    monkeypatch.setattr(terminal_module, "confirm_terminal_event", fail_confirmation)
+
+    recovered = await manager.reconcile_orphaned_inflight_runs(
+        error="orphan recovered",
+        before=datetime.now(UTC).isoformat(),
+        stop_reason="orphan_recovered",
+    )
+
+    assert [run.run_id for run in recovered] == [record.run_id]
+    row = await runtime.runs.get(record.run_id, user_id=record.user_id)
+    assert row is not None and row["status"] == "error"
+    assert row["evidence_seal_state"] == "partial"
+    assert await terminal_events(runtime, record) == []
+    delivery = await runtime.events.list_events(record.thread_id, record.run_id, event_types=["run.delivery"], user_id=None)
+    assert len(delivery) == 1
 
 
 @pytest.mark.asyncio

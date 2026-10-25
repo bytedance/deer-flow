@@ -3,6 +3,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+import deerflow.runtime.events.terminal as terminal_module
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
 from deerflow.persistence.run import RunRepository
@@ -1533,7 +1534,8 @@ async def test_scheduler_recovery_claim_backfills_error_terminal(tmp_path, recov
 
 
 @pytest.mark.asyncio
-async def test_scheduler_outer_transaction_failure_still_publishes_committed_claim(tmp_path, monkeypatch):
+@pytest.mark.parametrize("publisher_failure", [False, True])
+async def test_scheduler_outer_transaction_failure_still_publishes_committed_claim(tmp_path, monkeypatch, publisher_failure):
     await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
     try:
         sf = get_session_factory()
@@ -1572,6 +1574,12 @@ async def test_scheduler_outer_transaction_failure_still_publishes_committed_cla
         def fail_after_claim(*args, **kwargs):
             raise RuntimeError("scheduler outer transaction failed")
 
+        if publisher_failure:
+
+            async def fail_confirmation(*args, **kwargs):
+                raise RuntimeError("unexpected confirmation failure")
+
+            monkeypatch.setattr(terminal_module, "confirm_terminal_event", fail_confirmation)
         monkeypatch.setattr(ScheduledTaskRepository, "_finalise_once_task_from_run", fail_after_claim)
         with pytest.raises(RuntimeError, match="scheduler outer transaction failed"):
             await asyncio.wait_for(task_repo.reconcile_stuck_once_tasks(error="restart", now=now), timeout=5)
@@ -1582,8 +1590,11 @@ async def test_scheduler_outer_transaction_failure_still_publishes_committed_cla
         task = await task_repo.get("task-outer-rollback", user_id="user-1")
         assert task is not None and task["status"] == "running"
         terminal = await event_store.list_events(thread_id, run_id, event_types=["run.terminal"], user_id=None)
-        assert len(terminal) == 1
-        assert terminal[0]["metadata"]["recovered"] is True
+        if publisher_failure:
+            assert terminal == []
+        else:
+            assert len(terminal) == 1
+            assert terminal[0]["metadata"]["recovered"] is True
     finally:
         await close_engine()
 

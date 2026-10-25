@@ -96,15 +96,25 @@ class RecoveryTerminalPublisher:
     async def publish(self, target: RecoveryTerminalTarget) -> TerminalEventConfirmation:
         """Consume *target* once and resolve its event confirmation."""
         target._consume()
-        confirmation = await confirm_terminal_event(
-            self._store,
-            thread_id=target.thread_id,
-            run_id=target.run_id,
-            status=target.committed_status,
-            user_id=target.user_id,
-            recovered=True,
-            authorized=lambda: True,
-        )
+        try:
+            confirmation = await confirm_terminal_event(
+                self._store,
+                thread_id=target.thread_id,
+                run_id=target.run_id,
+                status=target.committed_status,
+                user_id=target.user_id,
+                recovered=True,
+                authorized=lambda: True,
+            )
+        except Exception:
+            # Cancellation is BaseException and must retain its independent
+            # propagation semantics after the one-shot target was consumed.
+            logger.warning(
+                "Unexpected recovery terminal confirmation failure for run %s; preserving the committed RunRow",
+                target.run_id,
+                exc_info=True,
+            )
+            return TerminalEventConfirmation.UNKNOWN
         if not confirmation.confirmed:
             logger.warning(
                 "Recovery terminal publication for run %s returned %s; preserving the committed RunRow",

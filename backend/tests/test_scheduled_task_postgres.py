@@ -16,9 +16,10 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.persistence.base import Base
 from deerflow.persistence.engine import close_engine, get_engine, get_session_factory, init_engine_from_config
+from deerflow.persistence.models.run_event import RunEventRow, RunEventThreadSeqRow
 from deerflow.persistence.postgres_schema import build_asyncpg_connect_args
 from deerflow.persistence.run import RunRepository
-from deerflow.persistence.run.model import RunRow
+from deerflow.persistence.run.model import RunChangeClockRow, RunRow
 from deerflow.persistence.scheduled_task_runs import ScheduledTaskRunRepository
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
 from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
@@ -169,48 +170,67 @@ async def test_postgres_reconciliation_uses_metadata_and_atomically_claims_expir
 
 
 @pytest.mark.asyncio
-async def test_postgres_recovery_takeover_has_one_publisher(postgres_repositories):
-    _task_repo, _task_run_repo, run_repo = postgres_repositories
-    sf = get_session_factory()
-    assert sf is not None
-    event_store = DbRunEventStore(sf)
-    publisher = RecoveryTerminalPublisher(event_store)
-    now = datetime.now(UTC)
-    run_id, thread_id = "run-recovery-postgres", "thread-recovery-postgres"
-    await run_repo.put(
-        run_id,
-        thread_id=thread_id,
-        user_id="user-1",
-        status="running",
-        owner_worker_id="dead-owner",
-        lease_expires_at=(now - timedelta(seconds=60)).isoformat(),
-    )
-
-    async def recover_once():
-        claimed = await run_repo.claim_for_takeover(
+async def test_postgres_recovery_takeover_has_one_publisher():
+    async with _contender_engines(2) as factories:
+        seed_repo = RunRepository(factories[0])
+        event_store = DbRunEventStore(factories[0])
+        now = datetime.now(UTC)
+        run_id, thread_id = "run-recovery-postgres", "thread-recovery-postgres"
+        await seed_repo.put(
             run_id,
-            grace_seconds=10,
-            error="orphan recovered",
-            stop_reason="orphan_recovered",
-        )
-        target = publisher.authorize_takeover(
-            claimed=claimed,
             thread_id=thread_id,
-            run_id=run_id,
             user_id="user-1",
-            operation_kind="run",
+            status="running",
+            owner_worker_id="dead-owner",
+            lease_expires_at=(now - timedelta(seconds=60)).isoformat(),
         )
-        if target is not None:
-            await publisher.publish(target)
-        return target is not None
 
-    outcomes = await asyncio.gather(recover_once(), recover_once())
+        both_ready = asyncio.Event()
+        start_claiming = asyncio.Event()
+        ready_count = 0
+        ready_lock = asyncio.Lock()
 
-    assert outcomes == [True, False]
-    terminal = await event_store.list_events(thread_id, run_id, event_types=["run.terminal"], user_id=None)
-    assert len(terminal) == 1
-    assert terminal[0]["content"] == {"status": "error"}
-    assert terminal[0]["metadata"]["recovered"] is True
+        async def recover_once(factory):
+            nonlocal ready_count
+            repo = RunRepository(factory)
+            publisher = RecoveryTerminalPublisher(DbRunEventStore(factory))
+            async with ready_lock:
+                ready_count += 1
+                if ready_count == 2:
+                    both_ready.set()
+            await both_ready.wait()
+            await start_claiming.wait()
+            claimed = await repo.claim_for_takeover(
+                run_id,
+                grace_seconds=10,
+                error="orphan recovered",
+                stop_reason="orphan_recovered",
+            )
+            target = publisher.authorize_takeover(
+                claimed=claimed,
+                thread_id=thread_id,
+                run_id=run_id,
+                user_id="user-1",
+                operation_kind="run",
+            )
+            if target is not None:
+                await publisher.publish(target)
+            return target is not None
+
+        tasks = [asyncio.create_task(recover_once(factory)) for factory in factories]
+        try:
+            await asyncio.wait_for(both_ready.wait(), timeout=5)
+            start_claiming.set()
+            outcomes = await asyncio.wait_for(asyncio.gather(*tasks), timeout=10)
+        finally:
+            start_claiming.set()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        assert sum(outcomes) == 1
+        terminal = await event_store.list_events(thread_id, run_id, event_types=["run.terminal"], user_id=None)
+        assert len(terminal) == 1
+        assert terminal[0]["content"] == {"status": "error"}
+        assert terminal[0]["metadata"]["recovered"] is True
 
 
 @pytest.mark.asyncio
@@ -293,7 +313,19 @@ async def _contender_engines(count: int):
     try:
         async with engines[0].begin() as conn:
             await conn.execute(text(f'CREATE SCHEMA "{schema}"'))
-            await conn.run_sync(lambda sync: Base.metadata.create_all(sync, tables=[ScheduledTaskRow.__table__, ScheduledTaskRunRow.__table__, RunRow.__table__]))
+            await conn.run_sync(
+                lambda sync: Base.metadata.create_all(
+                    sync,
+                    tables=[
+                        ScheduledTaskRow.__table__,
+                        ScheduledTaskRunRow.__table__,
+                        RunRow.__table__,
+                        RunChangeClockRow.__table__,
+                        RunEventRow.__table__,
+                        RunEventThreadSeqRow.__table__,
+                    ],
+                )
+            )
         yield [async_sessionmaker(engine, expire_on_commit=False) for engine in engines]
     finally:
         async with engines[0].begin() as conn:

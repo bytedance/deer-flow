@@ -75,8 +75,10 @@ outcome. It is a singleton identified by `(thread_id, run_id, event_type)` and
 confirmed through `put_if_absent()`. Content contains only `status`:
 `success`, `error`, `interrupted`, or `timeout`; graph outputs and error details
 are excluded. Metadata requires `protocol_version: 1` and a boolean `recovered`.
-Current Workers emit `recovered: false`; the marker describes evidence origin
-and grants no publication authority. Field definitions remain in the
+Owner Workers emit `recovered: false`; a confirmed recovery takeover emits
+`recovered: true` only when it creates a missing terminal. An existing matching
+event retains its original marker. The marker describes evidence origin and
+grants no publication authority. Field definitions remain in the
 [JSON contract](../../contracts/run_event_stream_contract.json).
 
 `run.start` and `run.end` retain their root-invocation producers, counts,
@@ -97,6 +99,9 @@ Rollback's `interrupted` ACK is intermediate while restoration remains pending;
 publication waits for restoration and the final `error` ACK. Ownership loss,
 rejected or unconfirmed commits, and unknown predecessor writes fail closed.
 Reading a historical terminal row does not create local publication authority.
+Recovery publication requires the boolean result of a successful atomic takeover
+claim, with the target bound to the claimed Run identity and its committed
+`error` outcome. A later same-status RunRow read cannot create that authority.
 
 ### Evidence Ordering
 
@@ -162,11 +167,16 @@ Confirmation is limited to the Store's declared failure and concurrency model:
 | SQLite | Database-backed confirmation with per-thread in-process serialization; this does not establish PostgreSQL or multi-Gateway concurrency semantics. |
 | PostgreSQL | Database-backed confirmation with per-thread transaction advisory locking across independent connections/processes; concurrency validation requires real sessions. |
 
-Singleton insertion and RunRow terminal commit are separate transactions. A crash
-between them can leave a terminal Run without an event. Recovery publication,
-takeover backfill, historical migration, and durable outbox/reconciliation are
-outside the current owner-side implementation; eventual evidence after every
-terminal commit is not guaranteed. Missing events must not gate SSE recovery.
+Singleton insertion and RunRow terminal commit are separate transactions.
+`RecoveryTerminalPublisher` backfills an error terminal only after a successful
+takeover claim. A crash between a normal terminal commit and event confirmation
+can still leave a terminal Run without an event when no later takeover claim
+exists; closing that remaining gap requires durable outbox/reconciliation and
+is outside this implementation. Historical migration is also out of scope.
+Later recovery appends do not upgrade an earlier Evidence Seal's coverage, and
+terminal singleton confirmation does not deduplicate Redis END. Eventual
+evidence after every terminal commit is not yet guaranteed. Missing events must
+not gate SSE recovery.
 
 ## Producers
 

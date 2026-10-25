@@ -14,6 +14,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from support.postgres import asyncpg_test_url
 
+import deerflow.runtime.events.terminal as terminal_module
 from deerflow.persistence.models.run_event import RunEventRow, RunEventThreadSeqRow
 from deerflow.runtime.events.store.db import DbRunEventStore
 from deerflow.runtime.events.store.jsonl import JsonlRunEventStore
@@ -261,3 +262,39 @@ async def test_recovery_target_is_one_shot_across_lost_ack_retry():
     terminal = await store.list_events("thread", "run", user_id="alice")
     assert len(terminal) == 1
     assert terminal[0]["metadata"]["recovered"] is True
+
+
+@pytest.mark.asyncio
+async def test_recovery_target_isolates_unexpected_confirmation_error(monkeypatch):
+    store = MemoryRunEventStore()
+    publisher = RecoveryTerminalPublisher(store)
+    target = publisher.authorize_takeover(claimed=True, thread_id="thread", run_id="run", user_id="alice", operation_kind="run")
+    assert target is not None
+
+    async def unexpected_failure(*args, **kwargs):
+        raise RuntimeError("unexpected confirmation failure")
+
+    monkeypatch.setattr(terminal_module, "confirm_terminal_event", unexpected_failure)
+
+    assert await publisher.publish(target) == TerminalEventConfirmation.UNKNOWN
+    with pytest.raises(RecoveryTerminalTargetConsumed):
+        await publisher.publish(target)
+    assert await store.list_events("thread", "run", user_id="alice") == []
+
+
+@pytest.mark.asyncio
+async def test_recovery_target_propagates_cancellation_after_consumption(monkeypatch):
+    store = MemoryRunEventStore()
+    publisher = RecoveryTerminalPublisher(store)
+    target = publisher.authorize_takeover(claimed=True, thread_id="thread", run_id="run", user_id="alice", operation_kind="run")
+    assert target is not None
+
+    async def cancelled(*args, **kwargs):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(terminal_module, "confirm_terminal_event", cancelled)
+
+    with pytest.raises(asyncio.CancelledError):
+        await publisher.publish(target)
+    with pytest.raises(RecoveryTerminalTargetConsumed):
+        await publisher.publish(target)
