@@ -143,11 +143,16 @@ def _replace_artifact_atomically(actual_path: Path, content: bytes, file_stat: o
         _sha256_of_file_cached.cache_clear()
     finally:
         if temp_fd >= 0:
-            os.close(temp_fd)
+            try:
+                os.close(temp_fd)
+            except OSError:
+                logger.debug("Could not close the artifact temp descriptor for %s", actual_path, exc_info=True)
         try:
             temp_path.unlink()
-        except FileNotFoundError:
-            pass
+        except OSError:
+            # The edit outcome is already decided; a leftover temp file must not
+            # replace it with the cleanup error.
+            logger.warning("Failed to remove the artifact edit temp file %s", temp_path, exc_info=True)
 
 
 def _sync_artifact_to_sandbox(sandbox, virtual_path: str, content: bytes) -> None:
