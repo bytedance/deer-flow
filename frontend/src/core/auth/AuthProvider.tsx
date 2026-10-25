@@ -77,6 +77,7 @@ export function AuthProvider({
   // Logout and externally confirmed users supersede pending auth refreshes.
   const authRequestRef = React.useRef(0);
   const authRefreshInFlightRef = React.useRef(false);
+  const reconnectPendingRef = React.useRef(false);
   const router = useRouter();
   const pathname = usePathname();
   const staticMode = isStaticWebsiteOnly();
@@ -91,6 +92,7 @@ export function AuthProvider({
   const applyUser = useCallback((next: User | null) => {
     authRequestRef.current++;
     authRefreshInFlightRef.current = false;
+    reconnectPendingRef.current = false;
     setUser(next);
     setAuthKnown(true);
     setIsLoading(false);
@@ -164,6 +166,7 @@ export function AuthProvider({
     // Immediately clear local state to prevent UI flicker
     authRequestRef.current++;
     authRefreshInFlightRef.current = false;
+    reconnectPendingRef.current = false;
     setUser(null);
     setAuthKnown(true);
     setIsLoading(false);
@@ -202,16 +205,26 @@ export function AuthProvider({
    */
   const lastCheckRef = React.useRef(0);
 
+  useEffect(
+    () => () => {
+      reconnectPendingRef.current = false;
+    },
+    [],
+  );
+
   useEffect(() => {
     if (staticMode) return;
 
     const checkUser = (reconnecting = false) => {
       if (
         document.visibilityState !== "visible" ||
-        (user === null && authKnown) ||
-        authRefreshInFlightRef.current
+        (user === null && authKnown)
       )
         return;
+      if (authRefreshInFlightRef.current) {
+        if (reconnecting) reconnectPendingRef.current = true;
+        return;
+      }
       const now = Date.now();
       if (!reconnecting && now - lastCheckRef.current < 60_000) return;
       lastCheckRef.current = now;
@@ -219,8 +232,14 @@ export function AuthProvider({
     };
     const handleVisibilityChange = () => checkUser();
     const handleOnline = () => {
-      if (!authKnown) checkUser(true);
+      if (!authKnown || authRefreshInFlightRef.current) checkUser(true);
     };
+
+    // Keep one wakeup if connectivity returned before a failed request settled.
+    if (reconnectPendingRef.current && !authRefreshInFlightRef.current) {
+      reconnectPendingRef.current = false;
+      if (!authKnown) checkUser(true);
+    }
 
     document.addEventListener("visibilitychange", handleVisibilityChange);
     window.addEventListener("online", handleOnline);
@@ -228,7 +247,7 @@ export function AuthProvider({
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       window.removeEventListener("online", handleOnline);
     };
-  }, [staticMode, user, authKnown, refreshUser]);
+  }, [staticMode, user, authKnown, isLoading, refreshUser]);
 
   const value: AuthContextType = {
     user,

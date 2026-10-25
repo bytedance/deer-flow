@@ -117,7 +117,34 @@ test("reconnect events do not overlap an in-flight unknown-auth check", async ()
   await act(async () => resolve(userResponse()));
   expect(screen.getByText("a@example.com")).toBeTruthy();
   expect(owner).toBe("account-a");
+  expect(fetch).toHaveBeenCalledTimes(1);
 });
+
+test.each([false, true])(
+  "coalesces a reconnect received before a failed refresh settles (initially unknown: %s)",
+  async (initiallyUnknown) => {
+    let reject!: (reason: Error) => void;
+    const fetch = rs
+      .spyOn(globalThis, "fetch")
+      .mockImplementationOnce(
+        () => new Promise<Response>((_resolve, fail) => (reject = fail)),
+      )
+      .mockResolvedValueOnce(userResponse());
+    mount(initiallyUnknown ? null : user, initiallyUnknown);
+    await act(async () => {
+      document.dispatchEvent(new Event("visibilitychange"));
+      window.dispatchEvent(new Event("online"));
+      window.dispatchEvent(new Event("online"));
+    });
+    expect(fetch).toHaveBeenCalledTimes(1);
+
+    await act(async () => reject(new TypeError("Failed to fetch")));
+
+    expect(screen.getByText("a@example.com")).toBeTruthy();
+    expect(owner).toBe("account-a");
+    expect(fetch).toHaveBeenCalledTimes(2);
+  },
+);
 
 test("unknown-auth recovery retains the visible-tab throttle", async () => {
   const fetch = rs
@@ -129,6 +156,40 @@ test("unknown-auth recovery retains the visible-tab throttle", async () => {
   await wake("visibilitychange");
   expect(fetch).toHaveBeenCalledTimes(1);
 });
+
+test.each(["401", "logout", "account", "unmount"] as const)(
+  "%s cancels a queued reconnect wakeup",
+  async (action) => {
+    let resolve!: (response: Response) => void;
+    const pending = new Promise<Response>((done) => (resolve = done));
+    const fetch = rs
+      .spyOn(globalThis, "fetch")
+      .mockImplementation((input) =>
+        input === "/api/v1/auth/me"
+          ? pending
+          : Promise.resolve(new Response(null, { status: 204 })),
+      );
+    const view = mount(null, true);
+    await wake("visibilitychange");
+    await wake("online");
+
+    await act(async () => {
+      if (action === "logout") await auth.logout();
+      if (action === "account") auth.applyUser({ ...user, id: "account-b" });
+      if (action === "unmount") view.unmount();
+      resolve(
+        new Response(JSON.stringify({ detail: "expired" }), { status: 401 }),
+      );
+    });
+
+    expect(
+      fetch.mock.calls.filter(([url]) => url === "/api/v1/auth/me"),
+    ).toHaveLength(1);
+    if (action !== "unmount") {
+      expect(owner).toBe(action === "account" ? "account-b" : null);
+    }
+  },
+);
 
 test.each([false, true])(
   "confirmed anonymous sessions do not restart checks (explicit logout: %s)",

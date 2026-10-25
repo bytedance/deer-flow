@@ -119,6 +119,8 @@ without waiting for that throttle; it does not authenticate on connectivity alon
 Confirmed anonymous/logout and static demos do not probe. Keep wakeups single-flight,
 remove both listeners on unmount, and retain request-generation ownership when
 clearing the in-flight guard. DOM and browser regressions cover outage recovery.
+Coalesce a reconnect received during a pending refresh into one follow-up only
+if auth remains unknown; confirmed identity/logout and unmount discard that wake.
 
 Auth: trim emails; validate raw passwords.
 
