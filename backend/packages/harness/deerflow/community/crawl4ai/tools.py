@@ -30,10 +30,11 @@ def _coerce_timeout(value: object, default: int) -> float:
     """Coerce a config timeout into seconds, falling back to ``default`` on bad input.
 
     Booleans and non-numeric strings fall back to the default, and so does any number
-    ``httpx`` will not accept as a timeout: the result is handed straight to
-    ``httpx.AsyncClient(timeout=...)``, where ``0`` raises a connect error against a
-    healthy backend, a negative value raises ``ValueError``, and ``inf``/``nan`` fail on
-    conversion. Silently dropping every fetch is worse than using the documented default.
+    that gives ``httpx`` no usable deadline: the result is handed straight to
+    ``httpx.AsyncClient(timeout=...)``, where ``0`` or a negative value fails every fetch
+    with ``ConnectTimeout`` against a healthy backend, and ``inf``/``nan`` leave the
+    request with no deadline at all, so it never completes. Silently disabling the
+    provider is worse than using the documented default.
 
     ``jina_ai._coerce_timeout`` still forwards non-positive values, so this provider is
     deliberately stricter than the sibling it used to mirror.

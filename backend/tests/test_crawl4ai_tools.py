@@ -439,12 +439,13 @@ class TestCrawl4AiTools:
         ],
     )
     async def test_coerce_timeout_rejects_values_httpx_cannot_use(self, value):
-        """``httpx`` refuses these at request time, so they must not reach the client.
+        """These values give ``httpx`` no usable deadline, so they must not reach it.
 
-        Measured against a backend that accepts the connection and never answers:
-        ``timeout=0`` raises a connect error, a negative value raises ``ValueError``,
-        ``inf`` raises ``OverflowError`` and ``nan`` raises ``ValueError`` — every fetch
-        fails, none of them falls back to the configured default.
+        Measured on the pinned httpx 0.28.1 through ``AsyncClient`` against a backend
+        that accepts the connection and never answers: ``0`` and the negatives fail every
+        fetch with ``ConnectTimeout`` in ~0.05 s, and ``inf``/``nan`` never complete at
+        all, while the default still raises ``ReadTimeout`` at 30 s. None of them falls
+        back to the configured default on its own.
         """
         from deerflow.community.crawl4ai import tools
 

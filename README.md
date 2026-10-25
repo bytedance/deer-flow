@@ -3080,9 +3080,9 @@ moves to the next free one, such as `report-1.png`.
 
 Crawl4AI `web_fetch` accepts a positive, finite request timeout in seconds through
 `timeout`. An invalid configured value falls back to 30 seconds and emits a warning;
-omitting the key uses the default silently. A `timeout: 0` no longer fails every fetch
-with a connect error against a healthy backend, and negative or non-finite values no
-longer raise out of the tool.
+omitting the key uses the default silently. A `timeout: 0` or a negative value no longer
+fails every fetch with a connect timeout against a healthy backend, and `inf` or `nan` no
+longer leaves the request with no deadline so that it never completes.
 
 Browser dependency auto-detection accepts `name`, `group`, and `use` in any
 order within a tool entry, with either indented or indentless YAML lists.
