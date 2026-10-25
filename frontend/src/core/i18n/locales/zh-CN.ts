@@ -285,6 +285,11 @@ export const zhCN: Translations = {
   home: {
     docs: "文档",
     blog: "博客",
+    searchDocs: "搜索文档…",
+    searchDocsLabel: "搜索文档",
+    searchNoResults: "未找到结果，请尝试更少或不同的关键词。",
+    searchLoadFailed: "搜索暂时不可用。",
+    searchLoading: "加载中…",
   },
 
   // Welcome
@@ -2401,6 +2406,9 @@ export const zhCN: Translations = {
         "该邮箱对应的账号已存在。请使用密码登录或联系管理员。",
       sso_not_allowed: "你的账号不允许使用 SSO 登录。请联系管理员。",
       account_disabled: "账号已停用，请联系管理员。",
+      invalid_email: "请输入有效的邮箱地址。",
+      password_too_short: "密码至少需要 6 个字符。",
+      registration_password_too_short: "密码至少需要 8 个字符。",
     },
   },
 };

@@ -18,6 +18,10 @@ ownership and capture cleanup. Retain the real XLSX conversion coverage.
 
 Backend tests must preserve the runtime invariants they exercise without changing production execution topology.
 
+`test_bench_sandbox_prewarm.py` controls observation timestamps through the
+benchmark module's clock binding. Keep asyncio's clock real, initialize
+`Trace.started` from the controlled clock, and advance ticks at event gates.
+
 `test_doctor_script.py` runs a copied doctor from a temporary checkout with an
 empty-model config. Drop inherited `DEER_FLOW_*`, `PYTHONPATH` and `PYTHONHOME`
 from child processes; cover help, invalid flags, normal reporting and an
