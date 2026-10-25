@@ -12,7 +12,7 @@ from typing import Any
 import openai
 from langchain_core.language_models import LanguageModelInput
 from langchain_core.messages import AIMessage
-from langchain_core.outputs import ChatResult
+from langchain_core.outputs import ChatGenerationChunk, ChatResult
 from langchain_deepseek import ChatDeepSeek
 
 from deerflow.models.assistant_payload_replay import restore_assistant_payloads, restore_reasoning_content
@@ -132,3 +132,34 @@ class PatchedChatDeepSeek(ChatDeepSeek):
             input_details = usage.setdefault("input_token_details", {})
             input_details["cache_creation"] = cache_write_tokens
         return result
+
+    def _convert_chunk_to_generation_chunk(
+        self,
+        chunk: dict,
+        default_chunk_class: type,
+        base_generation_info: dict | None,
+    ) -> ChatGenerationChunk | None:
+        """Streaming mirror of ``_create_chat_result``'s cache_write restore.
+
+        Streamed runs (the web UI's ``messages-tuple`` mode) build usage
+        metadata in ``_convert_chunk_to_generation_chunk`` ->
+        ``_create_usage_metadata``, which ignores ``cache_write_tokens``
+        (#7426). Restore it the same way for the final usage chunk.
+        """
+        generation_chunk = super()._convert_chunk_to_generation_chunk(
+            chunk,
+            default_chunk_class,
+            base_generation_info,
+        )
+        if generation_chunk is None:
+            return None
+        prompt_details = ((chunk or {}).get("usage") or {}).get("prompt_tokens_details") or {}
+        cache_write_tokens = prompt_details.get("cache_write_tokens")
+        if cache_write_tokens is None:
+            return generation_chunk
+        usage = getattr(generation_chunk.message, "usage_metadata", None)
+        if not usage:
+            return generation_chunk
+        input_details = usage.setdefault("input_token_details", {})
+        input_details["cache_creation"] = cache_write_tokens
+        return generation_chunk
