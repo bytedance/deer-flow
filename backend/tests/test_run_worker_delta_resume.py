@@ -23,7 +23,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import StateGraph
 from langgraph.graph.message import add_messages
-from langgraph.types import Overwrite
+from langgraph.types import Command, Overwrite
 
 from deerflow.agents.thread_state import merge_message_writes
 from deerflow.runtime.checkpoint_state import CheckpointStateAccessor, build_state_mutation_graph
@@ -659,3 +659,97 @@ async def test_delta_resume_command_from_a_materialized_checkpoint_still_lineari
     )
 
     assert [message.id for message in resumed] == ["h1", "a1"]
+
+
+@pytest.mark.parametrize("saver_kind", ["memory", "sqlite"])
+@pytest.mark.parametrize("selected_kind", ["input", "completed"])
+@pytest.mark.parametrize("resume_command", [False, True])
+async def test_historical_resume_preserves_pending_head_work(tmp_path, saver_kind: str, selected_kind: str, resume_command: bool):
+    executions = tmp_path / "tool-executions.txt"
+
+    async def answer(state: dict[str, Any]) -> dict[str, Any]:
+        human = next(message for message in reversed(state["messages"]) if isinstance(message, HumanMessage))
+        return {"messages": [AIMessage(content="call probe", id=f"answer-{human.id}", tool_calls=[{"name": "probe", "args": {}, "id": f"call-{human.id}"}])]}
+
+    async def tools(state: dict[str, Any]) -> dict[str, Any]:
+        call = state["messages"][-1].tool_calls[0]
+        with executions.open("a", encoding="utf-8") as output:
+            output.write(call["id"] + "\n")
+        return {"messages": [ToolMessage(content="probe executed", id=f"result-{call['id']}", tool_call_id=call["id"])]}
+
+    async def exercise(checkpointer):
+        builder = StateGraph(_DeltaChannelState)
+        builder.add_node("answer", answer)
+        builder.add_node("tools", tools)
+        builder.set_entry_point("answer")
+        builder.add_edge("answer", "tools")
+        builder.set_finish_point("tools")
+        thread_id = "pending-head"
+        first_graph = builder.compile(checkpointer=checkpointer)
+        await first_graph.ainvoke({"messages": [HumanMessage(content="first", id="h1")]}, _run_config(thread_id))
+        accessor = CheckpointStateAccessor.bind(first_graph, checkpointer, mode="delta")
+        history = await accessor.ahistory(_run_config(thread_id), limit=20)
+        selected = next(snapshot for snapshot in history if snapshot.next == (("__start__",) if selected_kind == "input" else ()))
+        assert executions.read_text(encoding="utf-8").splitlines() == ["call-h1"]
+
+        graph = builder.compile(checkpointer=checkpointer, interrupt_before=["tools"])
+        await graph.ainvoke({"messages": [HumanMessage(content="second", id="h2")]}, _run_config(thread_id))
+        accessor = CheckpointStateAccessor.bind(graph, checkpointer, mode="delta")
+        head = await accessor.aget(_run_config(thread_id))
+        assert head.next == ("tools",)
+        selected_id = selected.config["configurable"]["checkpoint_id"]
+        head_id = head.config["configurable"]["checkpoint_id"]
+        assert selected_id != head_id
+        config = _run_config(thread_id, selected_id)
+        config["configurable"]["checkpoint_map"] = {"": selected_id}
+
+        if not resume_command:
+            resumed = await _linearize_delta_checkpoint_resume(
+                accessor=accessor,
+                checkpointer=checkpointer,
+                config=config,
+                thread_id=thread_id,
+                run_id="fresh-input",
+                resume_command=False,
+            )
+            assert isinstance(resumed, list)
+            assert "checkpoint_id" not in config["configurable"]
+            return
+
+        original_config = dict(config["configurable"])
+        with pytest.raises(RuntimeError, match="current head.*pending execution"):
+            await _linearize_delta_checkpoint_resume(
+                accessor=accessor,
+                checkpointer=checkpointer,
+                config=config,
+                thread_id=thread_id,
+                run_id="historical-command",
+                resume_command=True,
+            )
+        assert config["configurable"] == original_config
+        after = await accessor.aget(_run_config(thread_id))
+        assert after.config["configurable"]["checkpoint_id"] == head_id
+        assert after.next == ("tools",)
+        assert executions.read_text(encoding="utf-8").splitlines() == ["call-h1"]
+
+        head_config = _run_config(thread_id, head_id)
+        assert (
+            await _linearize_delta_checkpoint_resume(
+                accessor=accessor,
+                checkpointer=checkpointer,
+                config=head_config,
+                thread_id=thread_id,
+                run_id="head-command",
+                resume_command=True,
+            )
+            is None
+        )
+        await graph.ainvoke(Command(resume="continue"), head_config)
+        assert executions.read_text(encoding="utf-8").splitlines() == ["call-h1", "call-h2"]
+        assert (await accessor.aget(_run_config(thread_id))).next == ()
+
+    if saver_kind == "sqlite":
+        async with AsyncSqliteSaver.from_conn_string(str(tmp_path / "checkpoints.sqlite")) as checkpointer:
+            await exercise(checkpointer)
+    else:
+        await exercise(InMemorySaver())

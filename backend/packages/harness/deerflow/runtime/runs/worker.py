@@ -2973,24 +2973,19 @@ async def _linearize_delta_checkpoint_resume(
     # checkpoint carries, not paused work — only real agent nodes count as
     # pending execution (review of #7439).
     pending_nodes = tuple(sorted(node for node in (getattr(snapshot, "next", None) or ()) if node != "__start__"))
+    head_pending_nodes = tuple(sorted(node for node in (getattr(head, "next", None) or ()) if node != "__start__"))
+    if resume_command and (pending_nodes or head_pending_nodes):
+        # 状态重写无法恢复待执行节点的位置 也不能丢弃当前 head 的工具任务。
+        pending_source = "selected checkpoint" if pending_nodes else "current head"
+        blocked_nodes = pending_nodes or head_pending_nodes
+        raise RuntimeError(
+            f"Run {run_id} cannot linearize a delta-mode resume of checkpoint {checkpoint_id}: "
+            f"the {pending_source} holds pending execution for {blocked_nodes}, which Command(resume) "
+            "cannot reach after the head rewrite — the run would finish as success without "
+            "executing it. Resume the head checkpoint instead, or let the paused turn finish "
+            "before resuming from history."
+        )
     if pending_nodes:
-        if resume_command:
-            # ``Command(resume=...)`` can only resume an interrupted node at the
-            # current head. The state-only rewrite below restores channel values,
-            # not execution position — its graph has no agent nodes, so a pending
-            # task for e.g. ``tools`` is dropped (LangGraph logs ``Ignoring
-            # unknown node name tools in pending sends``) and the resumed run
-            # finishes as success without ever executing the pending work
-            # (#7438). Pending tasks carry per-task arguments the mutation path
-            # cannot reconstruct, so refuse before touching the head rather than
-            # silently discarding the work.
-            raise RuntimeError(
-                f"Run {run_id} cannot linearize a delta-mode resume of checkpoint {checkpoint_id}: "
-                f"that checkpoint holds pending execution for {pending_nodes}, which Command(resume) "
-                "cannot reach after the head rewrite — the run would finish as success without "
-                "executing it. Resume the head checkpoint instead, or let the paused turn finish "
-                "before resuming from history."
-            )
         # A fresh-input resume regenerates the turn from the selected state, so
         # dropping the paused task is the established linearization semantics
         # (#4458) — but log it, because the drop is otherwise invisible.

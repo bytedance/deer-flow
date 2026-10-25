@@ -1,3 +1,11 @@
+### Delta Resume Admission
+
+Before rewriting history for `Command(resume)`, reject real pending nodes on
+either the selected checkpoint or current head. Exclude synthetic `__start__`.
+Selecting the head bypasses rewriting; fresh-input replay keeps its existing contract.
+Cover both historical selector shapes on memory and SQLite, preserving the head
+and selector on refusal and executing its pending tool on direct head resume.
+
 ### Checkpoint Cache Concurrency
 
 The memory history cache is shared by sync saver wrappers. Its threading lock
