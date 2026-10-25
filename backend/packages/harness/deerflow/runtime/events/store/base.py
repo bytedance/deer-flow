@@ -14,6 +14,10 @@ from __future__ import annotations
 
 import abc
 from collections.abc import Awaitable, Callable, Sequence
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
 
 from deerflow.runtime.user_context import AUTO, _AutoSentinel
 
@@ -39,6 +43,22 @@ class RunEventStoreNotCommittedError(RuntimeError):
 
 class RunEventLifecycleRejected(RuntimeError):
     """A guarded singleton write was rejected because its Run is no longer live."""
+
+
+class SessionAwareRunEventLifecycleGuard(abc.ABC):
+    """A lifecycle guard that can reuse a DB event writer's active session.
+
+    Other stores call it normally. DB stores call ``check_in_session`` under
+    their mutation fence; implementations must fall back to their ordinary
+    read when that session does not belong to the guarded store's database.
+    Neither entry point may re-enter the event store or commit the session.
+    """
+
+    @abc.abstractmethod
+    async def __call__(self) -> bool: ...
+
+    @abc.abstractmethod
+    async def check_in_session(self, session: AsyncSession) -> bool: ...
 
 
 def normalize_message_ids(message_ids: set[str]) -> set[str]:
@@ -127,7 +147,9 @@ class RunEventStore(abc.ABC):
         That fence is non-reentrant: the guard must not call back into this
         event store or acquire locks in an order that can invert the fence's
         lock ordering, as doing so may deadlock. The built-in recovery guard
-        only reads the RunStore.
+        only reads the RunStore. DB stores evaluate
+        :class:`SessionAwareRunEventLifecycleGuard` with their active session
+        to avoid a nested connection checkout from the same pool.
         """
 
     @abc.abstractmethod

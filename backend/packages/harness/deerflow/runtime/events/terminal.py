@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from deerflow.runtime.events.catalog import RUN_TERMINAL_EVENT
-from deerflow.runtime.events.store.base import RunEventLifecycleRejected, RunEventStore
+from deerflow.runtime.events.store.base import RunEventLifecycleRejected, RunEventStore, SessionAwareRunEventLifecycleGuard
 from deerflow.runtime.runs.store.base import RunStore
 
 TERMINAL_PROTOCOL_VERSION = 1
@@ -111,6 +111,28 @@ class RecoveryTerminalTarget:
         return self._identity
 
 
+@dataclass(frozen=True)
+class _RecoveryRunLifecycleGuard(SessionAwareRunEventLifecycleGuard):
+    run_store: RunStore
+    thread_id: str
+    run_id: str
+    user_id: str | None
+
+    def _matches(self, row: dict | None) -> bool:
+        return row is not None and row.get("run_id") == self.run_id and row.get("thread_id") == self.thread_id and row.get("operation_kind", "run") == "run" and row.get("status") == "error"
+
+    async def __call__(self) -> bool:
+        return self._matches(await self.run_store.get(self.run_id, user_id=self.user_id))
+
+    async def check_in_session(self, session) -> bool:
+        # Import lazily so memory/JSONL recovery does not load SQL persistence.
+        from deerflow.persistence.run.sql import RunRepository
+
+        if isinstance(self.run_store, RunRepository):
+            return self._matches(await self.run_store.get_in_session(session, self.run_id, user_id=self.user_id))
+        return await self()
+
+
 class RecoveryTerminalPublisher:
     """Publish one confirmed error terminal for each successful takeover claim.
 
@@ -126,11 +148,7 @@ class RecoveryTerminalPublisher:
     def lifecycle_guard(self, *, thread_id: str, run_id: str, user_id: str | None) -> Callable[[], Awaitable[bool]]:
         """Return a guard that rejects publication after Run deletion or identity drift."""
 
-        async def guard() -> bool:
-            row = await self._run_store.get(run_id, user_id=user_id)
-            return row is not None and row.get("run_id") == run_id and row.get("thread_id") == thread_id and row.get("operation_kind", "run") == "run" and row.get("status") == "error"
-
-        return guard
+        return _RecoveryRunLifecycleGuard(self._run_store, thread_id, run_id, user_id)
 
     def authorize_takeover(
         self,

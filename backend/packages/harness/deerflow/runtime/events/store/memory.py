@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import bisect
+import weakref
 from datetime import UTC, datetime
 
 from deerflow.runtime.events.message_identity import message_identity
@@ -33,7 +34,14 @@ class MemoryRunEventStore(RunEventStore):
         self._seq_counters: dict[str, int] = {}  # thread_id -> last assigned seq
         # Guarded singleton writes may await a lifecycle callback, so deletion
         # needs an explicit fence rather than relying on no-await atomicity.
-        self._mutation_lock = asyncio.Lock()
+        self._mutation_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
+
+    def _get_mutation_lock(self, thread_id: str) -> asyncio.Lock:
+        lock = self._mutation_locks.get(thread_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._mutation_locks[thread_id] = lock
+        return lock
 
     def _next_seq(self, thread_id: str) -> int:
         current = self._seq_counters.get(thread_id, 0)
@@ -111,7 +119,7 @@ class MemoryRunEventStore(RunEventStore):
         user_id: str | None | _AutoSentinel = AUTO,
         lifecycle_guard=None,
     ):
-        async with self._mutation_lock:
+        async with self._get_mutation_lock(thread_id):
             if lifecycle_guard is not None and not await lifecycle_guard():
                 raise RunEventLifecycleRejected(f"Run lifecycle no longer admits terminal evidence for {thread_id}/{run_id}")
             for event in self._events_by_run.get(thread_id, {}).get(run_id, []):
@@ -227,7 +235,7 @@ class MemoryRunEventStore(RunEventStore):
         accepted for interface parity with the user-scoped backends and ignored
         — the same convention as this store's read methods.
         """
-        async with self._mutation_lock:
+        async with self._get_mutation_lock(thread_id):
             events = self._events.pop(thread_id, [])
             self._messages.pop(thread_id, None)
             self._events_by_run.pop(thread_id, None)
@@ -237,7 +245,7 @@ class MemoryRunEventStore(RunEventStore):
 
     async def delete_by_run(self, thread_id, run_id, *, user_id: str | None | _AutoSentinel = AUTO):
         """Delete one run's events; ``user_id`` is accepted for parity only."""
-        async with self._mutation_lock:
+        async with self._get_mutation_lock(thread_id):
             all_events = self._events.get(thread_id, [])
             if not all_events:
                 return 0

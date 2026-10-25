@@ -106,6 +106,11 @@ Run identity. A later same-status RunRow read cannot create that authority.
 Recovery receipts and terminal confirmation re-check the Run lifecycle inside
 the Event Store's mutation fence; a completed thread deletion wins,
 so a stale target cannot recreate an orphan event.
+When SQL Run and Event stores share an engine, the built-in guard reads the Run
+through the active event transaction, so recovery needs only one available pooled
+connection. It retains the mutation fence through the check and event commit.
+Different engines and custom Run lookups keep their normal read path. Memory
+guard/deletion fences are per-thread; a slow guard does not block unrelated threads.
 
 ### Evidence Ordering
 
