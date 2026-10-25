@@ -81,13 +81,18 @@ export default function SetupPage() {
 
     // `noValidate` + JS check: the browser's `type="email"` rule would reject
     // addresses the backend accepts, e.g. a non-ASCII local part (#7488).
-    if (!isValidEmail(email)) {
+    const address = email.trim();
+    if (!isValidEmail(address)) {
       setError("Please enter a valid email address");
       return;
     }
 
     if (newPassword !== confirmPassword) {
       setError("Passwords do not match");
+      return;
+    }
+    if (newPassword.length < 8) {
+      setError("Password must be at least 8 characters");
       return;
     }
 
@@ -98,7 +103,7 @@ export default function SetupPage() {
         headers: { "Content-Type": "application/json" },
         credentials: "include",
         body: JSON.stringify({
-          email,
+          email: address,
           password: newPassword,
           remember_me: rememberMe,
         }),
@@ -130,7 +135,8 @@ export default function SetupPage() {
 
     // The address field also carries the account's existing email here, so
     // the same permissive check applies (#7488).
-    if (!isValidEmail(email)) {
+    const address = email.trim();
+    if (!isValidEmail(address)) {
       setError("Please enter a valid email address");
       return;
     }
@@ -140,6 +146,11 @@ export default function SetupPage() {
     }
     if (newPassword.length < 8) {
       setError("Password must be at least 8 characters");
+      return;
+    }
+
+    if (!currentPassword) {
+      setError("Please enter your current password");
       return;
     }
 
@@ -155,7 +166,7 @@ export default function SetupPage() {
         body: JSON.stringify({
           current_password: currentPassword,
           new_password: newPassword,
-          new_email: email || undefined,
+          new_email: address,
           remember_me: rememberMe,
         }),
       });

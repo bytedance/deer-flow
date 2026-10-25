@@ -1,5 +1,6 @@
 /**
  * Permissive email syntax check used by the auth password forms.
+ * Surrounding whitespace is accepted; callers must submit the trimmed address.
  *
  * The backend identity schema deliberately accepts addresses that stricter
  * validators reject — see `emailSchema` in `@/core/auth/types`, which is a

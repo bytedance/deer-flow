@@ -113,6 +113,8 @@ Confirmed logout unmounts query consumers immediately; public and unknown-auth
 routes still render with an independent client. Keep auth outside the query
 provider. Superseded auth refreshes cannot restore an earlier owner.
 
+Auth: trim emails; validate raw passwords.
+
 See [project structure](README.md#project-structure) for the directory map and
 [src/AGENTS.md](src/AGENTS.md) for component and domain ownership.
 
