@@ -148,6 +148,8 @@ After all slide images are generated, call the composition script:
 
 Photos with EXIF orientation metadata are rotated or mirrored before sizing and embedding, preserving their displayed orientation in the presentation.
 
+Transparent slide images retain their alpha channel in the presentation. Opaque images are embedded as JPEG as before.
+
 ```bash
 python /mnt/skills/public/ppt-generation/scripts/generate.py \
   --plan-file /mnt/user-data/workspace/presentation-plan.json \

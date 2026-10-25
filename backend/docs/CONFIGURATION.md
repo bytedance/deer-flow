@@ -453,7 +453,8 @@ backslash. The existing Python-literal fallback also parses the original value.
 
 Non-JSON raw-string parameters retain the gateway's multiline compatibility:
 literal `\n` outside fenced code becomes a real newline, and surrounding
-whitespace is trimmed. Escapes inside fenced code remain unchanged. This keeps
+whitespace is trimmed. Escapes inside matching triple-backtick or triple-tilde
+fences remain unchanged; an unclosed fence preserves the rest of the reply. This keeps
 multi-line file content and commands working. Raw strings cannot distinguish an
 intended literal `\n` from a gateway-escaped newline; structured JSON parameters
 avoid that ambiguity. Numeric conversion failures and unsafe Python-literal
@@ -764,8 +765,8 @@ Notes:
 - The declaration also drives the `agent_storage.backend: file` divergence warning, the inbound webhook dedupe warning, the `auth.local.throttle_storage: memory` warning, and the WeChat QR-login guard, which otherwise only look at the worker count.
 - Login lockouts are shared through the database: `auth.local.throttle_storage` (startup-only) defaults to `auto`, which keeps the per-IP failed-login counters for `POST /api/v1/auth/login/local` in the `login_throttle` table whenever `database.backend` is `sqlite` or `postgres`, so every instance enforces one `max_login_attempts` limit per client IP and a lockout on one instance holds on all of them. `memory` keeps the historical per-process counter (N instances give an attacker N × `max_login_attempts` guesses; a declared multi-instance deployment logs a warning), and `db` forces the table (it falls back to memory with a warning when the database backend is `memory`, and refuses to start when the configured database's engine is unavailable; `auto` falls back with a warning in that case). `max_login_attempts` and `lockout_seconds` stay live-read.
 - IM chat-to-thread bindings are shared through the database too: with `database.backend: sqlite` or `postgres` the `ChannelManager` keeps the `channel_name:chat_id[:topic_id]` → thread mapping of unbound IM conversations in the `channel_thread_bindings` table (migration `0038_channel_thread_bindings`), so a conversation created on one instance continues on the same thread when its next message lands on another. On the first start after upgrading, an existing `{base_dir}/channels/store.json` is imported once — only into an empty table, with `INSERT … ON CONFLICT DO NOTHING` so concurrently starting instances cannot duplicate a binding — and renamed `store.json.migrated`; a populated table leaves the file untouched. `memory` keeps the per-process JSON file.
-- With the default DeerMem backend, the declaration also warns when the derived SQLite retrieval index sits inside the shared `storage_path` (the default `{storage_path}/.retrieval`). Set `memory.backend_config.retrieval_index_path` to an instance-local directory (relative values resolve against `storage_path`): SQLite WAL is unsupported on network filesystems, and the index is rebuilt from the Markdown facts at startup and re-synced per user scope after a peer writes.
-- A declared multi-instance deployment that enables a feature storing credentials (today `channel_connections.enabled: true`) also needs one shared `DEER_FLOW_CREDENTIALS_KEY`; see [Credentials encryption key](#credentials-encryption-key-deer_flow_credentials_key).
+- With the default DeerMem backend, the declaration also warns when the derived SQLite retrieval index sits inside the shared `storage_path` (the default `{storage_path}/.retrieval`). Set `memory.backend_config.retrieval_index_path` to an instance-local directory (relative values resolve against `storage_path`): SQLite WAL is unsupported on network filesystems, and the index is rebuilt from the Markdown facts at startup and re-synced per user scope after a peer writes. DeerMem's extraction watermark lives in the shared `storage_path` too (`users/{user}/agents/{agent}/.metadata/watermarks.json`), so a thread whose next turn lands on another instance, or on a restarted one, does not send already-extracted turns to the memory LLM again.
+- A declared multi-instance deployment that enables a feature storing credentials (`channel_connections.enabled: true`, or an enabled MCP server whose `oauth.grant_type` is `refresh_token`) also needs one shared `DEER_FLOW_CREDENTIALS_KEY`; see [Credentials encryption key](#credentials-encryption-key-deer_flow_credentials_key).
 - IM channels: the gate refuses `channels.leader_lease.enabled: false` while a provider other than GitHub is enabled (under `channels.*`, or connectable from the web UI through `channel_connections.<provider>.enabled`), because every instance would otherwise open the platform connection with the same bot credentials. With `auto` (the default) or `true` the instances share each provider's connection through the `channel_leases` table; see [IM channel leader lease](#im-channel-leader-lease-channelsleader_lease).
 - Restart-required: the gate runs once at startup. Restart all Gateway instances together after changing it.
 
@@ -803,7 +804,7 @@ These still need a manual pass:
 - cancel a run on B from A: it takes effect within about one heartbeat (~10 s; a lower `run_ownership.lease_seconds` makes the boundary easier to observe);
 - change an MCP filesystem server's args on A: B's local-bash allowlist follows;
 - edit a skill on A: B's system-prompt skills section changes within 30 s;
-- with `DEERFLOW_MI_KEEP_CHANNELS=1` and test bots configured: only one Gateway connects each platform (`GET /api/channels/` reports the same `leader` on both, Telegram logs no `409`, Discord answers once), `stop <leader> --kill` hands each provider to the other Gateway within `lease_seconds + grace_seconds`, and a plain `stop <leader>` hands them over on the other Gateway's next tick.
+- with `DEERFLOW_MI_KEEP_CHANNELS=1` and test bots configured: only one Gateway connects each platform (`GET /api/channels/` reports the same `leader` on both, Telegram logs no `409`, Discord answers once), `stop <leader> --kill` hands each provider to the other Gateway within `lease_seconds + grace_seconds` plus one renewal interval (50 s with the defaults), a plain `stop <leader>` hands them over on the other Gateway's next tick, and credentials saved or a disconnect made with `POST` / `DELETE /api/channels/{provider}/runtime-config` on the non-holder reach the holder within one renewal interval.
 
 ### IM channel leader lease (`channels.leader_lease`)
 
@@ -830,7 +831,7 @@ Every IM channel except GitHub connects outbound to its platform (Telegram long 
 
 ### Credentials encryption key (`DEER_FLOW_CREDENTIALS_KEY`)
 
-DeerFlow encrypts credentials it stores at rest (today: per-connection IM channel credentials in the `channel_credentials` table, and the IM bot credentials an admin enters in the web UI, in `channel_runtime_configs`) with a deployment key read **only** from the environment — there is no `config.yaml` key, and it is never derived from `AUTH_JWT_SECRET`.
+DeerFlow encrypts credentials it stores at rest (today: per-connection IM channel credentials in the `channel_credentials` table, the IM bot credentials an admin enters in the web UI, in `channel_runtime_configs`, and the rotating tokens of MCP servers using the OAuth `refresh_token` grant, in `mcp_oauth_tokens` — see [MCP_SERVER.md](MCP_SERVER.md#refresh-token-rotation-across-restarts-and-replicas)) with a deployment key read **only** from the environment — there is no `config.yaml` key, and it is never derived from `AUTH_JWT_SECRET`.
 
 ```bash
 # Generate a key (urlsafe base64 of 32 random bytes, a Fernet key):
@@ -840,7 +841,7 @@ export DEER_FLOW_CREDENTIALS_KEY=<key>
 
 - **Rotation:** the value may be a comma-separated list. The first key encrypts new values; every listed key decrypts. Prepend the new key (`new,old`), restart, and keep the old key listed until the values it encrypted have been rewritten. Stored values carry a `fernet:v2:` prefix; `fernet:v1:` values written by earlier builds stay readable under the same key.
 - **Single instance:** when the variable is unset or blank, the Gateway generates `{DEER_FLOW_HOME}/.credentials_key` (mode `0600`) on first use and reuses it. The file is created exclusively, so uvicorn workers sharing the runtime home converge on one key. It is only created when a feature that stores credentials is enabled.
-- **Multi-instance:** instances that do not share a runtime home would each generate their own file and could not decrypt what their peers stored. Startup therefore refuses a declared multi-instance deployment (`deployment.multi_instance: true` / `DEER_FLOW_MULTI_INSTANCE=1`) that enables `channel_connections` without the variable. Multiple workers of one process tree (`GATEWAY_WORKERS > 1` without the declaration) share the file and are not refused. Deployments that store no credentials keep booting without a key.
+- **Multi-instance:** instances that do not share a runtime home would each generate their own file and could not decrypt what their peers stored. Startup therefore refuses a declared multi-instance deployment (`deployment.multi_instance: true` / `DEER_FLOW_MULTI_INSTANCE=1`) that enables `channel_connections`, or an MCP server with a `refresh_token` OAuth block, without the variable. Personal MCP OAuth connections are saved at runtime, after that check, so set the variable whenever multi-instance users may get one. Multiple workers of one process tree (`GATEWAY_WORKERS > 1` without the declaration) share the file and are not refused. Deployments that store no credentials keep booting without a key.
 - **Malformed keys** (wrong length, standard rather than urlsafe base64, any bad entry in the list) stop startup with an error that never repeats the key material.
 - **Backup:** losing the key makes every stored credential unreadable. Unreadable values are treated as missing (logged), never as a crash — Slack, for example, falls back to the deployment bot token, and a bot configured from the web UI reads as not configured until its credentials are saved again. If no key can be loaded at all (an unreadable key file), saving bot credentials from the web UI answers `503` instead of storing them in plaintext.
 - **Deployment tooling:** the Helm chart generates the key into its app Secret and preserves it across upgrades; `make up` (`scripts/deploy.sh`) honors a shell or `.env` value and otherwise generates and persists `$DEER_FLOW_HOME/.credentials_key` — the same file the Gateway would generate, so whichever side created it first wins.
@@ -1125,6 +1126,34 @@ existing validation of returned image URLs or web source filters. The endpoint
 is resolved once before transport so it can remain constant across retry attempts.
 Override debug diagnostics show the effective endpoint without URL credentials,
 query or fragment; result-URL guards do not restrict the operator's API host.
+
+#### Exa endpoints
+
+To use an Exa-compatible provider for the Exa `web_search` and `web_fetch`
+tools, set `EXA_BASE_URL` to its base URL (without `/search` or `/contents`)
+and `EXA_API_KEY` to that provider's key. Each tool entry can instead set its
+own `base_url`; a non-blank string there takes precedence over `EXA_BASE_URL`.
+When neither is set, the SDK default `https://api.exa.ai` is used.
+
+```yaml
+tools:
+  - name: web_search
+    group: web
+    use: deerflow.community.exa.tools:web_search_tool
+    base_url: https://exa-compatible.example
+    api_key: $EXA_COMPATIBLE_API_KEY
+```
+
+Overrides must be absolute `http://` or `https://` URLs with a host and valid
+port, without a query string or fragment. Surrounding whitespace and trailing
+slashes are removed. An invalid override returns a configuration error that
+does not echo the configured value and does not fall back to another host. The
+key is sent to the configured host in the `x-api-key` header.
+
+The endpoint fetches pages for `web_fetch` in its own network, so `web_fetch`
+screens a configured base URL like the other delegated fetch backends: a host
+that resolves to a loopback, private or unverifiable address is refused unless
+the tool entry sets `network_isolation_confirmed: true`.
 
 #### Serper source filters
 
@@ -1589,7 +1618,9 @@ sandbox:
       read_only: false
 ```
 
-When you configure `sandbox.mounts`, DeerFlow exposes those `container_path` values in the agent prompt so the agent can discover and operate on mounted directories directly instead of assuming everything must live under `/mnt/user-data`.
+When you configure `sandbox.mounts`, DeerFlow exposes those `container_path` values in the agent prompt so the agent can discover and operate on mounted directories directly instead of assuming everything must live under `/mnt/user-data`. See [Skills and sandbox paths](#skills-and-sandbox-paths) for Windows, WSL, and Docker path examples.
+
+Trailing slashes in `container_path` values are normalized when the config is loaded (`/mnt/reports/` behaves like `/mnt/reports`) — this applies to both `sandbox.mounts[].container_path` and `skills.container_path` — and the container root `/` or an empty value is rejected; mount a specific directory instead.
 
 #### Sandbox network policy
 
@@ -1792,12 +1823,79 @@ Configure the skills directory for specialized workflows:
 
 ```yaml
 skills:
-  # Host path (optional, default: ../skills)
+  # Gateway-visible source root (optional; see resolution order below)
   path: /custom/path/to/skills
 
-  # Container mount path (default: /mnt/skills)
+  # Agent-facing POSIX path (default: /mnt/skills, including on Windows)
   container_path: /mnt/skills
 ```
+
+#### Skills and sandbox paths
+
+Choose paths from the filesystem of the process that reads them:
+
+| Setting | Meaning |
+| --- | --- |
+| `skills.path` | Source directory read by the Gateway, containing `public/` and any legacy `custom/` skills. It is not the path the agent uses. |
+| `skills.container_path` | Agent-facing skills root, normally `/mnt/skills`. DeerFlow prepares the enabled skill views beneath this root; do not add a second `sandbox.mounts` entry for skills. |
+| `sandbox.mounts[].host_path` | Existing absolute source directory. With `LocalSandboxProvider`, it must be visible to the Gateway process. With local AIO Docker, it must be available to the Docker daemon creating the sandbox. |
+| `sandbox.mounts[].container_path` | Absolute POSIX path used by agent tools, such as `/mnt/shared`, on every host OS. Local mode maps it to the source; AIO Docker bind-mounts the source there. |
+
+Skills source resolution is: explicit `skills.path`, then `DEER_FLOW_SKILLS_PATH`,
+then `<project-root>/skills`. The project root is `DEER_FLOW_PROJECT_ROOT` when
+set, otherwise the Gateway process's working directory. Relative skill source
+paths use that root, **not the directory containing `config.yaml`**. If the default
+directory is absent, a source checkout also tries its repository `skills/`
+directory. Use an absolute path to remove ambiguity; `~` is not expanded in
+these path fields. Changing `skills.path` does not relocate per-user custom
+skills, which live under `DEER_FLOW_HOME/users/<user-id>/skills/custom/`.
+
+For a Gateway running directly on the machine with `LocalSandboxProvider`,
+adapt the two source paths in this example to your platform:
+
+```yaml
+skills:
+  path: /home/alice/deer-flow/skills
+  container_path: /mnt/skills
+sandbox:
+  use: deerflow.sandbox.local:LocalSandboxProvider
+  mounts:
+    - host_path: /home/alice/data
+      container_path: /mnt/shared
+      read_only: true
+```
+
+| Gateway environment | Example `skills.path` | Example `sandbox.mounts[].host_path` |
+| --- | --- | --- |
+| Linux | `/home/alice/deer-flow/skills` | `/home/alice/data` |
+| macOS | `/Users/alice/deer-flow/skills` | `/Users/alice/data` |
+| Native Windows Python (including when launched from Git Bash) | `'D:/deer-flow/skills'` | `'D:/data'` |
+| Linux Python inside WSL, using files on Windows drive D | `/mnt/d/deer-flow/skills` | `/mnt/d/data` |
+
+Keep both `container_path` values unchanged. For example, an agent reads
+`/mnt/shared/report.csv`; native Windows resolves that to `D:/data/report.csv`,
+while WSL resolves it to `/mnt/d/data/report.csv`. WSL-native files can instead
+use `/home/alice/...`. Native Windows paths can use forward slashes as above,
+or single-quoted backslashes (`'D:\data'`). Plain, unquoted YAML scalars also keep
+backslashes literal; only double-quoted scalars interpret backslash escapes.
+These are path examples; the [local development prerequisites](../../README.md#option-2-local-development)
+still apply, including the documented WSL limitations of the startup scripts.
+
+**Gateway in Docker:** both bundled Compose files mount the repository's
+`skills/` at `/app/skills` and set `DEER_FLOW_PROJECT_ROOT=/app`. Leave
+`skills.path` unset, or use `/app/skills`. To use another host skills directory,
+replace that Gateway volume's source and keep its container destination consistent
+with `skills.path`; a host path such as `D:/deer-flow/skills` is not a path inside
+the Linux Gateway container.
+
+For local-sandbox custom directories, use the two-step [Gateway bind mount
+example](#sandbox) above: Docker host directory → Gateway-visible `host_path` →
+agent-facing `container_path`. In AIO Docker-outside-of-Docker mode, custom mounts
+go directly from the Docker host to the sandbox: on a Linux Docker host,
+`host_path: /srv/data` and `container_path: /mnt/shared` expose `/srv/data` there,
+even if the Gateway sees the same directory at `/app/data`. Do not substitute
+`/app/data` unless it is also the intended source on the Docker host. These local
+mount examples do not configure Kubernetes PVCs or remote sandbox storage.
 
 For the AIO provider (including the Kubernetes provisioner) and E2B,
 `skills.container_path` is captured when the provider starts and must be one
@@ -1809,7 +1907,7 @@ same root. E2B also records the root in remote metadata and refuses to adopt a
 VM created for another root.
 
 **How Skills Work**:
-- Skills are stored in `deer-flow/skills/{public,custom}/`
+- Public and legacy skills use the configured source root; user-installed custom skills use the per-user runtime directory above
 - Each skill has a `SKILL.md` file with metadata
 - Skills are automatically discovered and loaded
 - Available in both local and Docker sandbox via path mapping
@@ -1829,9 +1927,9 @@ Custom agents can restrict which skills they discover and activate by defining a
 - **`[]` (empty list)**: Disables all skills for this specific agent.
 - **`["skill-name"]`**: Makes only the explicitly specified skills available.
 
-This field is a discovery and activation allowlist; it does not activate every listed skill's `allowed-tools` policy when the agent is constructed. Use `tool_groups` to define the agent's baseline tools. A listed skill's policy applies only after slash activation or an actual `SKILL.md` load.
+This field is a discovery and activation allowlist; a listed skill's `allowed-tools` frontmatter is compatibility metadata only and never filters the agent's tools. Use `tool_groups` to define the agent's baseline tools.
 
-The same semantics apply to `subagents.agents.<name>.skills` and `subagents.custom_agents.<name>.skills`: omitted or `null` exposes all enabled skills, `[]` exposes none, and a list limits discovery and activation. A passive subagent skill never removes baseline tools; its `allowed-tools` declaration becomes active only after slash activation or a completed `SKILL.md` read.
+The same semantics apply to `subagents.agents.<name>.skills` and `subagents.custom_agents.<name>.skills`: omitted or `null` exposes all enabled skills, `[]` exposes none, and a list limits discovery and activation. A skill's `allowed-tools` declaration never removes baseline tools; it is compatibility metadata for other agent frameworks.
 
 `LocalSandboxProvider` enforces this filesystem view through its managed virtual
 path mappings only. Explicit per-Agent skill policies therefore fail closed when
@@ -1879,6 +1977,8 @@ models:
 - `BRAVE_SEARCH_API_KEY` - Brave Search API key for `web_search` and `image_search`
 - `SERPER_API_KEY` - Serper (Google Search/Images API) key for `web_search` and `image_search`
 - `SERPER_BASE_URL` - Optional operator-controlled Serper-compatible base URL for both tools; each tool's `base_url` takes precedence. The provider key is sent to the configured host in `X-API-KEY`, never a query parameter. See [Serper endpoints](#serper-endpoints).
+- `EXA_API_KEY` - [Exa](https://exa.ai) key for `web_search` and `web_fetch`
+- `EXA_BASE_URL` - Optional operator-controlled Exa-compatible base URL for both Exa tools; each tool's `base_url` takes precedence. See [Exa endpoints](#exa-endpoints).
 - `SERPLY_API_KEY` - [Serply](https://serply.io) key for `web_search` (Google Search, plus Google News and Google Scholar via `vertical`)
 - `GROUNDROUTE_API_KEY` - GroundRoute meta-search API key for `web_search` and `web_fetch` (routes across Serper, Brave, Exa, Tavily, Firecrawl, Perplexity with gain-share pricing)
 - `SOFYA_API_KEY` - [Sofya](https://sofya.co) key for `web_search` and `web_fetch`
@@ -1924,6 +2024,47 @@ values already injected by those layers remain process variables and win.
 For containers, explicitly pass the selector and mount the selected file at a
 container-visible path. Database, runtime-home, storage and tenant isolation
 must be configured separately; selecting a dotenv file does not provide them.
+
+
+## Production Compose env files
+
+Set `DEER_FLOW_COMPOSE_ENV_FILE` in the launcher environment to select a
+production dotenv file for `make up`, `make down`, and direct
+`./scripts/deploy.sh build|start|down` calls:
+
+```bash
+DEER_FLOW_COMPOSE_ENV_FILE=/srv/deer-flow/stage.env make up
+```
+
+Relative paths are resolved from the checkout root. The production launcher
+passes the same file to Compose's `--env-file`, the Gateway and provisioner
+`env_file` entries, the secret-resolution probe, and optional build-extra
+discovery. It never sources the file as shell code. An explicit missing,
+directory, or unreadable selector fails before Docker is invoked for startup
+or build. `make down` can still stop the stack if the selected file was removed.
+An unset or empty selector preserves the optional repo-root `.env` default.
+
+For direct Compose calls, use an absolute path and provide both selectors:
+`--env-file` controls interpolation; service `env_file` controls container
+variables.
+
+```bash
+DEER_FLOW_COMPOSE_ENV_FILE=/srv/deer-flow/stage.env \
+  docker compose --env-file /srv/deer-flow/stage.env \
+  -f docker/docker-compose.yaml config
+```
+
+Existing shell variables retain Compose's precedence. Export
+`DEER_FLOW_CONFIG_PATH`, `DEER_FLOW_EXTENSIONS_CONFIG_PATH`, and
+`DEER_FLOW_HOME` independently when choosing different configuration and state
+locations. This is a production Docker file-selection option. `make start` uses
+the local
+`serve.sh --prod` launcher, and `make docker-*` uses Docker development; those
+commands keep their repo-root `.env` handling.
+`frontend/.env`, project/container names, database separation, and tenant
+isolation are not changed. Stop an existing stack before switching its profile.
+Keep credential-bearing profiles outside the checkout or in local Git exclusions.
+`DEER_FLOW_ENV_FILE` remains the separate backend Python dotenv selector.
 
 ## Configuration Location
 

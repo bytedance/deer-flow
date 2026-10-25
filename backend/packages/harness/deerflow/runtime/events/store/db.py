@@ -293,6 +293,7 @@ class DbRunEventStore(RunEventStore):
         content="",
         metadata=None,
         created_at=None,
+        user_id: str | None | _AutoSentinel = AUTO,
     ):
         """Idempotently insert a run-scoped singleton event.
 
@@ -304,7 +305,7 @@ class DbRunEventStore(RunEventStore):
         """
         content, metadata = self._truncate_trace(category, content, metadata)
         db_content, metadata = self._content_to_db(content, metadata)
-        user_id = self._user_id_from_context()
+        user_id = self._user_id_from_context() if user_id is AUTO else user_id
         async with self._get_write_lock(thread_id):
             async with self._sf() as session:
                 async with session.begin():
@@ -424,7 +425,7 @@ class DbRunEventStore(RunEventStore):
         stmt = select(RunEventRow).where(RunEventRow.thread_id == thread_id, RunEventRow.run_id == run_id)
         if resolved_user_id is not None:
             stmt = stmt.where(RunEventRow.user_id == resolved_user_id)
-        if event_types:
+        if event_types is not None:
             stmt = stmt.where(RunEventRow.event_type.in_(event_types))
         if task_id is not None:
             # Filter on metadata["task_id"] in SQL (before LIMIT) so cursor
