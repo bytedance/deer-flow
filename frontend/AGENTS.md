@@ -113,6 +113,13 @@ Confirmed logout unmounts query consumers immediately; public and unknown-auth
 routes still render with an independent client. Keep auth outside the query
 provider. Superseded auth refreshes cannot restore an earlier owner.
 
+Unknown auth after a transport failure remains eligible for the 60-second
+visible-tab refresh. A visible browser `online` event revalidates unknown auth
+without waiting for that throttle; it does not authenticate on connectivity alone.
+Confirmed anonymous/logout and static demos do not probe. Keep wakeups single-flight,
+remove both listeners on unmount, and retain request-generation ownership when
+clearing the in-flight guard. DOM and browser regressions cover outage recovery.
+
 Auth: trim emails; validate raw passwords.
 
 See [project structure](README.md#project-structure) for the directory map and
