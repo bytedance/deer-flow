@@ -881,6 +881,7 @@ class DingTalkChannel(Channel):
                 virtual_path=virtual_path,
                 content=content,
                 owner_prefix="dingtalk-upload",
+                release_on_last=True,
             )
             if not synced:
                 # Mirror Feishu: the agent's non-local sandbox cannot see this
@@ -1100,14 +1101,20 @@ class DingTalkChannel(Channel):
                     raise ValueError("DingTalk access token response did not contain a usable accessToken")
 
                 raw_expires_in = data.get("expireIn", 7200)
+                now = time.monotonic()
                 try:
                     expires_in = int(raw_expires_in)
-                except (TypeError, ValueError):
+                    # A lifetime within the refresh margin is already stale.
+                    if expires_in <= _TOKEN_REFRESH_MARGIN_SECONDS:
+                        raise ValueError
+                    expires_at = now + expires_in - _TOKEN_REFRESH_MARGIN_SECONDS
+                except (TypeError, ValueError, OverflowError):
                     logger.warning("[DingTalk] invalid expireIn value %r, using default 7200s", raw_expires_in)
                     expires_in = 7200
+                    expires_at = now + expires_in - _TOKEN_REFRESH_MARGIN_SECONDS
 
                 self._cached_token = access_token.strip()
-                self._token_expires_at = time.monotonic() + expires_in - _TOKEN_REFRESH_MARGIN_SECONDS
+                self._token_expires_at = expires_at
                 return self._cached_token
 
     @staticmethod

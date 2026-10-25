@@ -103,6 +103,7 @@ class RunEventStore(abc.ABC):
         content: str | dict = "",
         metadata: dict | None = None,
         created_at: str | None = None,
+        user_id: str | None | _AutoSentinel = AUTO,
     ) -> tuple[dict, bool]:
         """Write one event unless this run already has the same event type.
 
@@ -110,6 +111,10 @@ class RunEventStore(abc.ABC):
         thread. Returns ``(record, created)``. This is the durability primitive
         used by terminal run receipts, whose recovery path may safely retry
         after a worker crash.
+
+        Explicit ``user_id`` stamps the owner for contextless worker writes.
+        Stores without user isolation accept it for interface parity. Existing
+        events retain their original owner and must be validated by the caller.
         """
 
     @abc.abstractmethod

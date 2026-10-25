@@ -11,6 +11,8 @@ semantics, while the shared tests pin the user-facing timeout notice.
 
 import os
 import shlex
+import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -221,3 +223,79 @@ def test_bash_tool_description_guides_safe_cross_platform_local_environment_prob
     assert "only when the active sandbox policy permits it" in description
     assert "do not repeat the rejected command" in description
     assert "command-only probes" in description
+
+
+@posix_only
+def test_timeout_uses_saved_process_group_id_if_leader_exits(monkeypatch):
+    """Timeout cleanup must target the saved group even if the leader has exited."""
+    calls = []
+
+    class ExitedLeaderProcess:
+        pid = 4242
+
+        def __init__(self):
+            self.returncode = None
+            self.wait_calls = 0
+
+        def wait(self, timeout=None):
+            self.wait_calls += 1
+            if self.wait_calls == 1:
+                # The command crossed the deadline as its leader exited; its
+                # descendants may still hold the captured pipes open.
+                self.returncode = 0
+                raise subprocess.TimeoutExpired("fake-command", timeout)
+            return self.returncode
+
+        def kill(self):
+            pytest.fail("fallback child kill should not replace process-group cleanup")
+
+    process = ExitedLeaderProcess()
+    monkeypatch.setattr(local_sandbox.subprocess, "Popen", lambda *args, **kwargs: process)
+    monkeypatch.setattr(
+        local_sandbox.os,
+        "getpgid",
+        lambda pid: pytest.fail("cleanup must not re-query an exited process leader"),
+    )
+    monkeypatch.setattr(
+        local_sandbox.os,
+        "killpg",
+        lambda process_group_id, sig: calls.append((process_group_id, sig)),
+    )
+
+    _, _, returncode, timed_out = LocalSandbox._run_posix_command(["fake-command"], timeout=0.01)
+
+    assert timed_out is True
+    assert returncode == 0
+    assert calls == [(process.pid, signal.SIGKILL)]
+
+
+@posix_only
+def test_process_group_lookup_failure_falls_back_to_direct_child_kill(monkeypatch):
+    """A vanished process group is tolerated by killing/reaping the direct child."""
+    calls = []
+
+    class FakeProcess:
+        pid = 12345
+
+        def kill(self):
+            calls.append(("kill-child",))
+
+        def wait(self, timeout=None):
+            calls.append(("wait", timeout))
+
+    process = FakeProcess()
+
+    def missing_process_group(process_group_id, sig):
+        calls.append(("killpg", process_group_id, sig))
+        raise ProcessLookupError
+
+    monkeypatch.setattr(local_sandbox.os, "killpg", missing_process_group)
+
+    # ESRCH from killpg must not escape; the direct-child fallback still runs.
+    LocalSandbox._terminate_process_group(process, process.pid)
+
+    assert calls == [
+        ("killpg", process.pid, signal.SIGKILL),
+        ("kill-child",),
+        ("wait", 10),
+    ]

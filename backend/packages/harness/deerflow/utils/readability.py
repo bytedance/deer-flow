@@ -60,6 +60,10 @@ class Article:
 
 
 _BASE_TAG_RE = re.compile(r"<base", re.IGNORECASE)
+# A successful Readability.js extraction always strips <body> and <title>;
+# their presence in the content signals the subprocess returned the raw document.
+_UNEXTRACTED_DOC_RE = re.compile(r"<body\b[^>]*>|<title\b[^>]*>", re.IGNORECASE)
+_BODY_INNER_RE = re.compile(r"<body[^>]*>(.*)</body>", re.DOTALL | re.IGNORECASE)
 
 
 def _resolve_html_urls(html: str, url: str) -> str:
@@ -172,6 +176,16 @@ class ReadabilityExtractor:
         html_content = article.get("content")
         if not html_content or not str(html_content).strip():
             html_content = "No content could be extracted from this page"
+
+        # Detect silent Readability.js degradation: a successful extraction always
+        # strips <body> and <title> from the content. Their presence means the
+        # subprocess returned the raw document (e.g. on Windows where the node
+        # bridge may not produce real output). When detected, use the resolved
+        # HTML's <body> content so that <a> destinations survive.
+        if url and html and _UNEXTRACTED_DOC_RE.search(html_content):
+            logger.info("Readability.js returned the unextracted document; using resolved HTML body")
+            body_match = _BODY_INNER_RE.search(html)
+            html_content = body_match.group(1) if body_match else html
 
         title = article.get("title")
         if not title or not str(title).strip():

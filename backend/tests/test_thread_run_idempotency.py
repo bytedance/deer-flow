@@ -418,6 +418,23 @@ def test_scope_http_run_idempotency_key_ignores_header_default():
     assert thread_runs._scope_http_run_idempotency_key(request, "thread-1", None) is None
 
 
+def test_internal_caller_key_is_scoped_by_owner_not_thread():
+    """The IM channel manager may route a redelivered message to a different
+    thread after ``/new`` rebound the conversation; its key must still meet the
+    run admitted for the first delivery."""
+    from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME, INTERNAL_SYSTEM_ROLE
+
+    internal = SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE)), headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: "alice"})
+    other_owner = SimpleNamespace(state=internal.state, headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: "bob"})
+    browser = SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(id="alice", system_role="user")), headers={})
+
+    scope = thread_runs._scope_http_run_idempotency_key
+    assert scope(internal, "thread-1", "message-1") == scope(internal, "thread-2", "message-1")
+    assert scope(internal, "thread-1", "message-1") != scope(other_owner, "thread-1", "message-1")
+    assert scope(browser, "thread-1", "message-1") != scope(browser, "thread-2", "message-1")
+    assert scope(internal, "thread-1", "message-1") != scope(browser, "thread-1", "message-1")
+
+
 def test_stream_reused_store_only_running_run_returns_409(monkeypatch):
     """A reused running record on a process-local bridge must not hang on an empty stream."""
 
@@ -723,6 +740,74 @@ async def test_start_run_rejects_reused_key_with_different_input(_stub_app_confi
 
     assert excinfo.value.status_code == 409
     assert "different request" in str(excinfo.value.detail)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(("stable_message_id", "reused"), [(True, True), (False, False)], ids=["keyed-message-id", "random-message-id"])
+async def test_channel_redelivery_on_another_instance_reuses_the_admitted_run(_stub_app_config, stable_message_id, reused):
+    """The IM manager's keyed request, as a second Gateway instance sees it.
+
+    The human message id is part of the compared input, so only a message id
+    derived from the same key lets a redelivery reuse the admitted run; a
+    fresh uuid per delivery is a different request (409).
+    """
+    from app.channels.manager import ChannelManager, _human_input_message
+    from app.channels.message_bus import InboundMessage
+    from app.gateway.services import start_run
+
+    msg = InboundMessage(channel_name="slack", chat_id="C1", user_id="U1", text="hi", metadata={"event_id": "evt-1", "team_id": "T1"})
+    key = f"http-run:{ChannelManager._run_idempotency_key(msg)}"
+
+    def body() -> RunCreateRequest:
+        message_id = ChannelManager._human_message_id(msg) if stable_message_id else None
+        return RunCreateRequest(input={"messages": [_human_input_message("hi", message_id=message_id)]}, on_disconnect="continue")
+
+    async def fake_run_agent(*args, **kwargs):
+        del args, kwargs
+        await asyncio.Event().wait()
+
+    store = MemoryRunStore()
+    first_instance, second_instance = RunManager(store=store, worker_id="worker-a"), RunManager(store=store, worker_id="worker-b")
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
+    ):
+        first = await start_run(body(), "thread-1", _make_start_run_request(first_instance), idempotency_key=key)
+        try:
+            if reused:
+                second = await start_run(body(), "thread-1", _make_start_run_request(second_instance), idempotency_key=key)
+                assert (second.run_id, second.idempotency_reused) == (first.run_id, True)
+            else:
+                with pytest.raises(HTTPException) as excinfo:
+                    await start_run(body(), "thread-1", _make_start_run_request(second_instance), idempotency_key=key)
+                assert excinfo.value.status_code == 409
+                assert "different request" in str(excinfo.value.detail)
+        finally:
+            first.task.cancel()
+            await asyncio.gather(first.task, return_exceptions=True)
+
+
+@pytest.mark.anyio
+async def test_key_already_admitted_on_another_thread_is_a_409_not_a_second_run(_stub_app_config):
+    """A redelivery routed to the conversation's new thread after ``/new``."""
+    from app.gateway.services import start_run
+
+    input_payload = {"messages": [{"role": "user", "content": "hello"}]}
+    store = MemoryRunStore()
+    first_instance, second_instance = RunManager(store=store, worker_id="worker-a"), RunManager(store=store, worker_id="worker-b")
+    await first_instance.create_or_reject("thread-old", user_id=None, idempotency_key="internal-run:same", kwargs={"input": input_payload, "config": None})
+
+    for run_manager in (first_instance, second_instance):  # the local record, then the durable row
+        with (
+            patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+            patch("app.gateway.services.run_agent", side_effect=AssertionError("worker must not attach")),
+            pytest.raises(HTTPException) as excinfo,
+        ):
+            await start_run(RunCreateRequest(input=input_payload), "thread-new", _make_start_run_request(run_manager), idempotency_key="internal-run:same")
+
+        assert excinfo.value.status_code == 409
+        assert "Idempotency-Key already used" in str(excinfo.value.detail)
+    assert await store.list_by_thread("thread-new") == []
 
 
 def test_resume_idempotency_fingerprint_is_typed_and_order_independent():

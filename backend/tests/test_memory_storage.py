@@ -1,7 +1,9 @@
 """Tests for memory storage providers (DI: FileMemoryStorage(config) / create_storage)."""
 
+import errno
 import json
 import threading
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -13,6 +15,7 @@ from deerflow.agents.memory.backends.deermem.deermem.core.paths import validate_
 from deerflow.agents.memory.backends.deermem.deermem.core.storage import (
     FileMemoryStorage,
     MemoryStorage,
+    MemoryStorageCorruption,
     create_empty_memory,
     create_storage,
     normalize_memory_data,
@@ -392,6 +395,23 @@ class TestMarkdownMemoryStorage:
         assert len(quarantined) == 1
         assert quarantined[0].read_text(encoding="utf-8") == truncated
 
+    @pytest.mark.parametrize("encoding", ["utf-16", "invalid-utf8"])
+    def test_non_utf8_summary_is_quarantined_before_rebuild(self, tmp_path, encoding):
+        """Invalid UTF-8 bytes stay recoverable across repeated reads and a save."""
+        memory_file = tmp_path / "memory.json"
+        payload = json.dumps(create_empty_memory(), ensure_ascii=False)
+        original = payload.encode("utf-16") if encoding == "utf-16" else payload.encode("utf-8") + b"\xff"
+        memory_file.write_bytes(original)
+        storage = self._markdown_storage_at(memory_file)
+        loaded = storage.load()
+        assert isinstance(loaded, dict)
+        assert isinstance(storage.reload(), dict)
+        assert storage.save(create_empty_memory()) is True
+        assert isinstance(storage.load(), dict)
+        quarantined = list(tmp_path.glob("memory.json.corrupt-*"))
+        assert len(quarantined) == 1, "a non-UTF-8 summary must be quarantined, not silently rebuilt over"
+        assert quarantined[0].read_bytes() == original
+
     def test_fenced_block_containing_backticks_parses_losslessly(self):
         """Remembered code snippets must not terminate the JSON block."""
         manifest = create_empty_memory()
@@ -430,3 +450,90 @@ class TestMarkdownMemoryStorage:
     )
     def test_invalid_or_non_object_fenced_summary_rejected(self, body):
         assert mf._parse_markdown_memory(body) is None
+
+
+class TestMarkdownMemoryReadFailures:
+    @pytest.mark.parametrize("error_number", [errno.EACCES, errno.EIO, getattr(errno, "ESTALE", errno.EIO), errno.EBUSY])
+    @pytest.mark.parametrize("operation", ["load", "reload", "save", "apply_changes"])
+    @pytest.mark.parametrize("cached", [False, True])
+    def test_read_error_preserves_summary_and_retries_after_recovery(self, tmp_path, monkeypatch, error_number, operation, cached):
+        memory_file = tmp_path / "memory.json"
+        manifest = create_empty_memory()
+        manifest["version"] = "2.0"
+        manifest.pop("facts")
+        manifest["revision"] = 41
+        manifest["user"]["workContext"]["summary"] = "private saved summary"
+        original = json.dumps(manifest, ensure_ascii=False).encode("utf-8")
+        memory_file.write_bytes(original)
+        storage = MarkdownMemoryStorage(DeerMemConfig(storage_path=str(tmp_path), retrieval_adapter=""))
+        try:
+            if cached:
+                assert storage.load()["revision"] == 41
+            replacement = create_empty_memory()
+            replacement["user"]["workContext"]["summary"] = "replacement summary"
+            read_text = Path.read_text
+
+            def fail_summary_read(path, *args, **kwargs):
+                if path == memory_file:
+                    raise OSError(error_number, "synthetic summary read failure")
+                return read_text(path, *args, **kwargs)
+
+            with monkeypatch.context() as patcher:
+                patcher.setattr(Path, "read_text", fail_summary_read)
+                if operation == "save":
+                    assert storage.save(replacement) is False
+                else:
+                    with pytest.raises(MemoryStorageCorruption, match="Failed to read memory summary") as raised:
+                        if operation == "apply_changes":
+                            storage.apply_changes({"summaries": {"user": replacement["user"]}})
+                        else:
+                            getattr(storage, operation)()
+                    assert isinstance(raised.value.__cause__, OSError)
+                    assert raised.value.__cause__.errno == error_number
+
+            assert memory_file.read_bytes() == original
+            assert list(tmp_path.glob("memory.json.corrupt-*")) == []
+            assert not (tmp_path / ".memory.journal.json").exists()
+            recovered = storage.load()
+            assert recovered["revision"] == 41
+            assert recovered["user"]["workContext"]["summary"] == "private saved summary"
+            assert storage.save(replacement, expected_revision=41) is True
+            saved = storage.reload()
+            assert saved["revision"] == 42
+            assert saved["user"]["workContext"]["summary"] == "replacement summary"
+        finally:
+            storage.close()
+
+
+class TestFactMarkdownBom:
+    """Hand-edited canonical facts must survive the complete storage read path."""
+
+    def test_fact_saved_with_utf8_bom_round_trips_through_storage(self, tmp_path):
+        storage = _storage_at(tmp_path / "memory.json")
+        memory = create_empty_memory()
+        memory["facts"] = [
+            {
+                "id": "fact_bom",
+                "title": "Shared decision",
+                "content": "Use Postgres. Preserve an interior \ufeff character.",
+                "category": "context",
+                "confidence": 0.9,
+                "createdAt": "2026-10-19T00:00:00Z",
+                "source": "manual",
+            }
+        ]
+        assert storage.save(memory, "agent-a", user_id="alice")
+        before = storage.load("agent-a", user_id="alice")
+        (fact_path,) = tmp_path.rglob("fact_bom.md")
+        original = fact_path.read_bytes()
+        assert not original.startswith(b"\xef\xbb\xbf")
+        fact_path.write_bytes(b"\xef\xbb\xbf" + original)
+
+        reloaded = storage.reload("agent-a", user_id="alice")
+
+        assert reloaded["facts"] == before["facts"]
+        (fact,) = reloaded["facts"]
+        assert fact["id"] == "fact_bom"
+        assert fact["title"] == "Shared decision"
+        assert fact["content"] == memory["facts"][0]["content"]
+        assert fact["scope"] == {"userId": "alice", "agentName": "agent-a"}

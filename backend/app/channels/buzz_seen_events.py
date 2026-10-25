@@ -56,6 +56,7 @@ import logging
 import tempfile
 import threading
 from collections import OrderedDict, deque
+from contextlib import suppress
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -136,7 +137,7 @@ class BuzzSeenEventStore:
     def _write_snapshot(self, payload: dict[str, list[str]]) -> bool:
         if self._path is None:
             return True
-        tmp_name: str | None = None
+        fh = None
         try:
             path = self._path
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -144,17 +145,29 @@ class BuzzSeenEventStore:
             # crash mid-write must never truncate the store (a truncated store
             # would fail open into replay on the next start, which is
             # recoverable — but there is no reason to accept even that).
-            with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, suffix=".tmp", delete=False, encoding="utf-8") as fh:
-                tmp_name = fh.name
-                json.dump(payload, fh)
-            Path(tmp_name).replace(path)
+            fh = tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", newline="", dir=path.parent, suffix=".tmp", delete=False)
+            json.dump(payload, fh)
+            fh.close()
+            Path(fh.name).replace(path)
             return True
-        except Exception:
-            # Mirror ChannelStore._save: never leave the temp file behind, or a
-            # persistently failing write accumulates one *.tmp per attempt.
-            if tmp_name is not None:
-                Path(tmp_name).unlink(missing_ok=True)
-            logger.warning("[buzz] failed to persist seen-event store (will retry on next flush)", exc_info=True)
+        except BaseException as exc:
+            # Each cleanup step and its diagnostic is independent. Keep the
+            # persistence failure attributable and the dirty snapshot retryable.
+            if fh is not None:
+                try:
+                    fh.close()
+                except OSError:
+                    with suppress(Exception):
+                        logger.warning("Failed to close temporary Buzz seen-event store file %s", fh.name, exc_info=True)
+                try:
+                    Path(fh.name).unlink(missing_ok=True)
+                except OSError:
+                    with suppress(Exception):
+                        logger.warning("Failed to remove temporary Buzz seen-event store file %s", fh.name, exc_info=True)
+            if not isinstance(exc, Exception):
+                raise
+            with suppress(Exception):
+                logger.warning("[buzz] failed to persist seen-event store (will retry on next flush)", exc_info=True)
             return False
 
     def _save(self) -> None:
