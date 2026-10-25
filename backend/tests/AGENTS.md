@@ -178,6 +178,13 @@ contract probes execute the actual migration test setup through SQLAlchemy's
 dialect argument conversion, stopping before database acquisition; the real
 SQLite/PostgreSQL cases still exercise upgrade, downgrade and re-upgrade.
 
+## DingTalk stream tasks
+
+DingTalk stream lifecycle tests drive `_serve_stream` with a fake websocket and
+real handler tasks. Use events to pin pending-task retention, completion cleanup,
+logged failures and quiet cancellation; drain handlers and keepalive tasks even
+when an assertion fails.
+
 ## Real Compose tests
 
 `support/compose.py` probes `docker compose version --short` and requires Compose

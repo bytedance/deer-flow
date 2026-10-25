@@ -4,14 +4,16 @@ Store JSON decode errors follow corrupt-file recovery; SQL import keeps the orig
 
 IM channels use `langgraph-sdk` HTTP; Gateway owns thread lifecycle.
 WeChat outbound: off-loop cap+1; overflow `None` before encryption/upload; <=0 unlimited.
-Cancel drains cursor writes; expiry drains cursor/auth reset under `_auth_lock`.
+Cancel drains cursors; expiry drains cursor/auth reset under `_auth_lock`.
 Inbound: ingest/drop drains off-loop cleanup of owned dirs, never metadata paths.
 
 Telegram retries share bootstrap/Bot cleanup. Dead loops warn once; clear
 matching futures under `_shutdown_resources_lock` (closure unconfirmed).
 Finalize asyncgens; keep primary errors; propagate lone Bot errors.
 
-**Auth**: SDK and raw-httpx `/goal` calls send process-local auth plus `_csrf_headers()`; internal auth requires CSRF.
+**Auth**: SDK/raw-httpx `/goal` use process-local auth + `_csrf_headers()`; internal auth needs CSRF.
+
+DingTalk retains tasks and logs failures.
 
 **Components**:
 - `message_bus.py` - Inbound queue → dispatcher; outbound uses a dispatch-start listener snapshot. Unsubscribe neither cancels nor drains captured callbacks.
