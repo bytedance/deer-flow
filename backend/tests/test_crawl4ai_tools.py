@@ -420,6 +420,74 @@ class TestCrawl4AiTools:
         assert tools._coerce_timeout(20, 30) == 20.0
         assert tools._coerce_timeout(12.5, 30) == 12.5
 
+    @pytest.mark.parametrize(
+        "value",
+        [
+            0,
+            0.0,
+            -1,
+            -0.5,
+            float("inf"),
+            float("-inf"),
+            float("nan"),
+            "0",
+            "inf",
+            "-inf",
+            "nan",
+            "1e400",
+            10**400,
+        ],
+    )
+    async def test_coerce_timeout_rejects_values_httpx_cannot_use(self, value):
+        """``httpx`` refuses these at request time, so they must not reach the client.
+
+        Measured against a backend that accepts the connection and never answers:
+        ``timeout=0`` raises a connect error, a negative value raises ``ValueError``,
+        ``inf`` raises ``OverflowError`` and ``nan`` raises ``ValueError`` — every fetch
+        fails, none of them falls back to the configured default.
+        """
+        from deerflow.community.crawl4ai import tools
+
+        assert tools._coerce_timeout(value, 30) == 30.0
+
+    @pytest.mark.parametrize("value", [1, 0.001, 45, 12.5, "1", "45", "12.5"])
+    async def test_coerce_timeout_keeps_usable_values(self, value):
+        from deerflow.community.crawl4ai import tools
+
+        assert tools._coerce_timeout(value, 30) == float(value)
+
+    async def test_coerce_timeout_warns_for_a_rejected_value(self, caplog):
+        from deerflow.community.crawl4ai import tools
+
+        with caplog.at_level("WARNING"):
+            assert tools._coerce_timeout(0, 30) == 30.0
+        assert "invalid timeout 0 in config" in caplog.text
+
+    async def test_build_client_rejects_a_zero_timeout(self):
+        from deerflow.community.crawl4ai import tools
+
+        assert tools._build_client({"timeout": 0}).timeout_s == 30.0
+
+    async def test_build_client_without_a_timeout_key_does_not_warn(self, caplog):
+        """An omitted timeout is the documented default, not a bad value.
+
+        ``_build_client`` runs for every fetch, so warning here would flood the log for
+        the common configuration that only sets ``base_url`` or ``token``.
+        """
+        from deerflow.community.crawl4ai import tools
+
+        with caplog.at_level("WARNING"):
+            assert tools._build_client({"token": "secret-token"}).timeout_s == 30.0
+        assert caplog.records == []
+
+    async def test_build_client_warns_for_an_empty_timeout_value(self, caplog):
+        """``timeout:`` with nothing after it is a YAML null the operator did write."""
+        from deerflow.community.crawl4ai import tools
+
+        with caplog.at_level("WARNING"):
+            assert tools._build_client({"timeout": None}).timeout_s == 30.0
+        assert "invalid timeout None in config" in caplog.text
+
     async def test_coerce_filter_validates_and_normalizes(self):
         from deerflow.community.crawl4ai import tools
 
