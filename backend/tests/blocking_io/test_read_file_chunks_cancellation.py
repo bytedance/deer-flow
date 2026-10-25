@@ -12,6 +12,8 @@ handle always reaches the cleanup path, and the close never races a read.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable, Coroutine
+from typing import Any
 
 import pytest
 
@@ -36,7 +38,11 @@ class _Gate:
         self.hold.set()
 
 
-def _gated_offload(gates: dict[str, _Gate], on_call, on_done) -> list[str]:
+def _gated_offload(
+    gates: dict[str, _Gate],
+    on_call,
+    on_done,
+) -> tuple[list[str], Callable[..., Coroutine[Any, Any, Any]]]:
     """Wrap ``documents.run_file_io`` call-through with worker-boundary gates.
 
     ``on_call`` fires when a dispatch enters the wrapper (admission),
