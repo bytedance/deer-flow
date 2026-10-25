@@ -516,6 +516,7 @@ class DingTalkChannel(Channel):
                             task = asyncio.create_task(client.background_task(json.loads(raw_message)))
                             self._background_tasks.add(task)
                             task.add_done_callback(self._background_tasks.discard)
+                            task.add_done_callback(self._log_task_error)
                     finally:
                         keepalive.cancel()
             except websockets.exceptions.ConnectionClosedError as exc:
@@ -528,6 +529,15 @@ class DingTalkChannel(Channel):
                     break
                 logger.exception("[DingTalk] stream error")
                 await asyncio.sleep(_DINGTALK_STREAM_ERROR_RETRY_SECONDS)
+
+    @staticmethod
+    def _log_task_error(task: asyncio.Task[Any]) -> None:
+        """Retrieve and log failures from per-message stream tasks."""
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error("[DingTalk] stream message task failed: %s", exc, exc_info=exc)
 
     async def _open_stream_connection(self, client: Any) -> dict[str, Any] | None:
         """Fetch a Stream ticket: ``DingTalkStreamClient.open_connection()`` with a deadline.
