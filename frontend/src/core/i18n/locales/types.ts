@@ -28,6 +28,7 @@ export interface Translations {
     installationGuide: string;
     catalog: Record<
       | "workflows"
+      | "reportSections"
       | "agentTeams"
       | "bookmarks"
       | "context"
@@ -35,7 +36,9 @@ export interface Translations {
       | "screening"
       | "retrieval"
       | "knowledge"
+      | "knowledgeManagement"
       | "weknora"
+      | "lightrag"
       | "example",
       { title: string; description: string }
     >;
@@ -174,6 +177,13 @@ export interface Translations {
     showArtifacts: string;
     browser: string;
     showBrowser: string;
+  };
+
+  browserStream: {
+    connecting: string;
+    disconnected: string;
+    handshakeTimeout: string;
+    connectionFailed: string;
   };
 
   skillUsage: {

@@ -1397,6 +1397,76 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
 
 ### Fixed
 
+- **threads:** `POST /api/threads` now rejects an `assistant_id` that cannot
+  name an agent with `422`. It used to store the value, and every later read
+  of the thread (`GET` thread, state, history) answered
+  `500 Internal Server Error` until the thread was deleted. Threads saved that
+  way before this fix are read with the lead agent's schema, and a branch of
+  such a thread stores no `assistant_id`, so it uses the lead agent. ([#7445])
+
+- **frontend:** Accounts whose email the backend accepted but the frontend's
+  stricter pattern did not (for example `a&b@example.com`, `a@b.c` or a
+  Unicode address) now get the normal workspace. Their sessions used to show
+  the gateway-offline fallback, and one such account made the admin
+  **Settings → Users** list fail for every administrator. ([#7449])
+
+- **persistence:** A PostgreSQL bootstrap failure inside an existing database
+  now reports its own error. The Gateway treated any error mentioning "does not
+  exist", such as a missing column or relation during a migration, as a missing
+  database and ran `CREATE DATABASE`. Startup then failed with `database ...
+  already exists` or `permission denied to create database`, and the original
+  error was missing from the traceback. Only a missing database (SQLSTATE
+  `3D000`) is auto-created now. ([#7410])
+
+- **mcp:** Ordinary users can now install DingTalk, WeCom and HubSpot from
+  **Capability Center → Plugins**. Saving one of these bundled
+  connections as a non-administrator, including editing or enabling it later,
+  failed with `500 Internal Server Error` because the personal-connection check
+  read a `cwd` field the request model does not declare. A bundled connection
+  with a working directory still requires an administrator. ([#7400])
+
+- **examples:** The extension example's package tests pass again. Its test
+  registry lacked `knowledge_provider()`, so it no longer matched the
+  `ExtensionRegistry` protocol and the README's `pytest` run failed. Extension
+  Package Check now also runs the tests of bundled examples that ship them,
+  so a contract change that breaks them fails its pull request. ([#7364])
+
+- **gateway:** Run requests with a malformed body now get a client error
+  instead of `500 Internal Server Error`. A `config.configurable` or
+  `config.context` that is not an object, an invalid `assistant_id`, a
+  non-string `agent_name`, or an AI message whose `tool_calls` is not a list of
+  objects used to fail run admission unhandled. They now return `422` (`400`
+  for the message) before a run is created. On thread routes, a
+  `config.configurable` of `[]`, `""`, `0`, `false` or a list of key/value
+  pairs used to be accepted and is now rejected with `422` too. ([#7362])
+
+- **tui:** Quitting after `Ctrl+C` interrupted a run no longer hangs on the
+  step that run is still finishing. The run thread was joined on exit, so the
+  TUI closed but the shell prompt stayed blocked until a long tool call or model
+  request returned, and further `Ctrl+C` only printed a traceback. Quitting now
+  says it is waiting for that step and closes when it finishes; press `Ctrl+C`
+  again to quit at once. ([#7326])
+  
+- **tui:** The streamed transcript no longer drops tokens that repeat or extend
+  the text already shown. Deltas were merged by prefix, so `ha` + `ha` rendered
+  as `ha`, `1` + `10` as `10`, and an answer that opened with a Markdown marker
+  lost every later standalone copy of it (closing `**`, list bullets, table
+  pipes, closing code fences). Each delta is now appended as sent. ([#7325])
+
+- **sandbox:** Release an E2B VM's ownership lease when acquire finds it gone
+  (a dead cached client or a warm-pool VM reaped while parked). The lease was
+  kept and renewed until Gateway shutdown, so every reaped VM left a tracked
+  ID and a renewed ownership key behind. ([#7277])
+  
+- **auth:** SSO login and callback no longer fail with a `500` when the OIDC
+  provider answers `200` with a body that is not the expected JSON object, such
+  as a maintenance HTML page. Discovery, token, JWKS and UserInfo bodies, a
+  malformed ID token header and a discovery document without a usable endpoint
+  now take the existing `502` / `/login?error=sso_failed` path, and a rejected
+  discovery document is no longer cached. A malformed UserInfo body is skipped
+  like a failed UserInfo request instead of aborting a login whose ID token is
+  valid. ([#7258])
+
 - **mcp:** MCP servers using the OAuth `refresh_token` grant keep working
   across Gateway restarts, tool-cache resets, repeated personal-connection runs
   and multiple Gateway instances when the provider rotates refresh tokens
@@ -6915,6 +6985,23 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
   reject the root, because a search would read every file below it. ([#6991])
 
 ### Security
+
+- **uploads:** Thread uploads (`POST /api/threads/{thread_id}/uploads`), upload
+  deletes (`DELETE /api/threads/{thread_id}/uploads/{filename}`) and shelf
+  attach-to-thread no longer put the raw `OSError` text in their `500` detail. A
+  permission error, or a disk too full to create the staging file, answered with
+  the absolute host path of the thread's uploads directory, including the user
+  and thread IDs. They now return `Failed to upload <name>.` /
+  `Failed to delete <name>.`, and the full error stays in the Gateway log. ([#7217])
+  
+- **agents:** The custom-agent and user-profile routes no longer put the raw
+  exception text in their `500` detail. An unparsable agent `config.yaml` or a
+  filesystem error (`[Errno 13]` and the like) made them answer with the
+  absolute host path under `users/<user_id>/`. They now return a fixed
+  `Failed to <action>` detail, matching agent import and export, and the full
+  error stays in the Gateway log. Scheduled-task create and update keep the
+  `invalid_assistant` 422 for an unloadable agent config but no longer echo
+  the parse error, which also reached the scheduler tool result. ([#7255])
 
 - **infoquest:** Screen organic, news and image result URLs through the shared
   public-URL policy, dropping non-public and unsafe references before they
@@ -12985,3 +13072,15 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7170]: https://github.com/bytedance/deer-flow/pull/7170
 [#7205]: https://github.com/bytedance/deer-flow/pull/7205
 [#7207]: https://github.com/bytedance/deer-flow/pull/7207
+[#7217]: https://github.com/bytedance/deer-flow/pull/7217
+[#7255]: https://github.com/bytedance/deer-flow/pull/7255
+[#7258]: https://github.com/bytedance/deer-flow/pull/7258
+[#7277]: https://github.com/bytedance/deer-flow/pull/7277
+[#7325]: https://github.com/bytedance/deer-flow/pull/7325
+[#7326]: https://github.com/bytedance/deer-flow/pull/7326
+[#7362]: https://github.com/bytedance/deer-flow/pull/7362
+[#7364]: https://github.com/bytedance/deer-flow/pull/7364
+[#7400]: https://github.com/bytedance/deer-flow/pull/7400
+[#7410]: https://github.com/bytedance/deer-flow/pull/7410
+[#7445]: https://github.com/bytedance/deer-flow/pull/7445
+[#7449]: https://github.com/bytedance/deer-flow/pull/7449

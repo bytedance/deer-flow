@@ -95,6 +95,17 @@ Supported output formats (auto-detected from extension):
 - `.json` — JSON array of records
 - `.md` — Markdown table
 
+JSON result column names must be unique. Use explicit SQL aliases for repeated
+names, for example `SELECT a.id AS left_id, b.id AS right_id FROM ...`.
+Duplicate names cause an error and leave any existing output file untouched.
+The error lists the repeated names so you can alias them directly. The CLI prints
+a short `Error: ...` message to stderr and exits nonzero for this rejection.
+
+JSON exports also reject non-finite numbers (`NaN`, `Infinity`, and `-Infinity`),
+including values inside lists or structs, before opening the output file. Filter
+or replace them in SQL, for example `CASE WHEN isfinite(ratio) THEN ratio ELSE
+NULL END AS ratio`. Finite numbers, nulls, and text such as `'NaN'` remain valid.
+
 ### Parameters
 
 | Parameter | Required | Description |

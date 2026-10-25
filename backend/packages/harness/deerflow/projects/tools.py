@@ -1,7 +1,7 @@
 """Project shelf tools: bounded live reads through the pinned project identity.
 
-Two read-only tools (Phase-2 spec §7.3; the shelf is user-curated — there is
-no agent-initiated shelf write). Both take ``project_id`` from the run's
+Read-only tools (Phase-2 spec §7.3; the shelf is user-curated — there is
+no agent-initiated shelf write). All take ``project_id`` from the run's
 admission-pinned context (``PROJECT_CONTEXT_KEY``) and ``user_id`` from
 :func:`resolve_runtime_user_id`, then query **live** shelf rows: the pinned
 snapshot fixes *which* project, never *what* the shelf currently holds. A
@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Annotated, Any
 
 from langchain.tools import tool
@@ -37,6 +38,14 @@ _LIST_DEFAULT_LIMIT = 50
 _LIST_MAX_LIMIT = 200
 _READ_DEFAULT_LIMIT = 8000
 _READ_MAX_LIMIT = 20000
+_SEARCH_DEFAULT_LIMIT = 10
+_SEARCH_MAX_LIMIT = 50
+_SEARCH_QUERY_MAX_CHARS = 200
+#: Excerpt window: this many characters on each side of the match (spec §7;
+#: a constant, deliberately not a config knob).
+_SEARCH_EXCERPT_CONTEXT = 80
+#: Cap on each id list in the search result payload.
+_SEARCH_ID_LIST_CAP = 20
 
 _BINARY_DECLINE_MESSAGE = "This document is binary and cannot be read as text. To let the agent process it, attach it to a thread (attach-to-thread) instead."
 _CONVERSION_DISABLED_MESSAGE = "This document is a convertible office/PDF file, but automatic document conversion is disabled (uploads.auto_convert_documents). Enable conversion, or attach the file to a thread (attach-to-thread) instead."
@@ -204,6 +213,214 @@ async def read_project_document(
     return await _read_project_document_impl(runtime, document_id=document_id, offset=offset, limit=limit)
 
 
+_QUERY_BLANK_MESSAGE = "Query must be 1-200 non-whitespace characters."
+
+
+def _resolve_search_budgets() -> tuple[int, int]:
+    """Worker-thread config read: per-call so edits apply without a restart."""
+    try:
+        from deerflow.config.app_config import get_app_config
+        from deerflow.config.projects_config import ProjectsConfig
+
+        cfg = getattr(get_app_config(), "projects", None)
+        if not isinstance(cfg, ProjectsConfig):
+            cfg = ProjectsConfig()
+        return cfg.search_max_chars_per_document, cfg.search_max_total_chars
+    except Exception:
+        from deerflow.config.projects_config import ProjectsConfig
+
+        fallback = ProjectsConfig()
+        return fallback.search_max_chars_per_document, fallback.search_max_total_chars
+
+
+def _search_excerpt(text: str, match: re.Match) -> str:
+    """Slice ±``_SEARCH_EXCERPT_CONTEXT`` around *match* on the ORIGINAL text, then neutralize.
+
+    Order matters: slicing on neutralized text would misalign every offset.
+    """
+    start = max(0, match.start() - _SEARCH_EXCERPT_CONTEXT)
+    end = min(len(text), match.end() + _SEARCH_EXCERPT_CONTEXT)
+    snippet = text[start:end]
+    if start > 0:
+        snippet = "…" + snippet
+    if end < len(text):
+        snippet += "…"
+    return neutralize_untrusted_tags(snippet)
+
+
+def _capped_id_list(ids: list[str]) -> tuple[list[str], int]:
+    """The first ``_SEARCH_ID_LIST_CAP`` ids plus the full count (spec §6)."""
+    return ids[:_SEARCH_ID_LIST_CAP], len(ids)
+
+
+async def _search_project_documents_impl(runtime: Runtime, *, query: str, limit: int) -> str:
+    resolved = _resolve_pin_and_repo(runtime)
+    if isinstance(resolved, str):
+        return resolved
+    project_id, user_id, repo = resolved
+
+    query = query.strip()
+    if not query or len(query) > _SEARCH_QUERY_MAX_CHARS:
+        return _error(_QUERY_BLANK_MESSAGE)
+    limit = _clamp(limit, default=_SEARCH_DEFAULT_LIMIT, lower=1, upper=_SEARCH_MAX_LIMIT)
+    per_doc_cap, total_budget = await run_file_io(_resolve_search_budgets)
+    # re.IGNORECASE, NOT casefold: indices must stay original-text character
+    # positions — casefold changes length (ß→ss, İ→i̇) and would corrupt both
+    # the returned offset and the excerpt slice (spec §5.3).
+    pattern = re.compile(re.escape(query), re.IGNORECASE)
+
+    # Tier 1: name/summary over the whole shelf, materialized in ONE query.
+    # The rows are kept and reused for tier 2 — a stable candidate set.
+    # Offset paging would re-read the live shelf per page, so a concurrent
+    # upload/trash between pages could duplicate a row (an unrelated newest
+    # upload shifts every offset) or silently skip one (a trash shrinks
+    # earlier pages); a single SELECT reads one snapshot. A row trashed
+    # between the snapshot and its content read follows the normal serving
+    # rules ("missing" etc.) — shelf membership is fixed as of this call.
+    shelf_rows = await repo.list_active(project_id, limit=1 << 62, offset=0, user_id=user_id)  # effectively unbounded: one read snapshot
+    name_hits: list[dict] = []
+    summary_hits: list[dict] = []
+    tier1_ids: set[str] = set()
+    for row in shelf_rows:
+        name = str(row.get("name") or "")
+        summary = row.get("summary") or None
+        name_match = pattern.search(name)
+        if name_match is not None:
+            name_hits.append({"id": row["id"], "name": neutralize_untrusted_tags(name), "matched": "name", "excerpt": _search_excerpt(name, name_match), "offset": None})
+            tier1_ids.add(row["id"])
+        elif summary:
+            summary_match = pattern.search(str(summary))
+            if summary_match is not None:
+                summary_hits.append({"id": row["id"], "name": neutralize_untrusted_tags(name), "matched": "summary", "excerpt": _search_excerpt(str(summary), summary_match), "offset": None})
+                tier1_ids.add(row["id"])
+
+    results = (name_hits + summary_hits)[:limit]
+    if len(results) >= limit:
+        # Tier 1 alone filled the page: content was never read, and the
+        # ranking is exact — the answer must NOT claim coverage (spec §6).
+        return json.dumps(
+            {
+                "results": results,
+                "stop_reason": "limit",
+                "content_scanned": False,
+                "skipped": {"non_text": 0, "unconverted": 0, "missing": 0, "error": 0},
+                "truncated_document_ids": [],
+                "truncated_count": 0,
+                "unscanned_document_ids": [],
+                "unscanned_count": 0,
+            },
+            ensure_ascii=False,
+        )
+
+    # Tier 2: content scan over the SAME snapshot, in shelf order, skipping
+    # tier-1 hits, bounded by the whole-shelf budget. auto_convert=False:
+    # search NEVER converts (a first search must not synchronously convert
+    # every PDF on the shelf).
+    remaining = limit - len(results)
+    budget_left = total_budget
+    stop_reason = "complete"
+    skipped = {"non_text": 0, "unconverted": 0, "missing": 0, "error": 0}
+    truncated_ids: list[str] = []
+    unscanned_ids: list[str] = []
+    processed = 0  # non-tier-1 rows examined before any budget trip
+    paths = get_paths()
+    for row in shelf_rows:
+        if remaining == 0:
+            stop_reason = "limit"
+            break
+        if row["id"] in tier1_ids:
+            # Tier 1 was fully scanned over this snapshot: these are already
+            # in results and were searched — never "unscanned".
+            continue
+        if budget_left <= 0:
+            # Budget tripped. Unscanned ids are enumerated in memory, up to
+            # the payload cap; the honest total is derived after the loop
+            # from the snapshot — no further DB reads for rows already ruled
+            # out.
+            stop_reason = "budget"
+            if len(unscanned_ids) < _SEARCH_ID_LIST_CAP:
+                unscanned_ids.append(row["id"])
+            continue
+        processed += 1
+        try:
+            serving_path, reason = await read_text_serving_path(repo, paths, user_id=user_id, row=row, auto_convert=False)
+        except Exception:
+            skipped["error"] += 1
+            logger.warning("Shelf search: failed to resolve serving path for %s", row["id"], exc_info=True)
+            continue
+        if serving_path is None:
+            skipped[{"content_missing": "missing", "conversion_disabled": "unconverted"}.get(reason, "non_text")] += 1
+            continue
+        cap = min(per_doc_cap, budget_left)
+        try:
+            text = await read_document_text_window(serving_path, offset=0, limit=cap + 1)
+        except Exception:
+            skipped["error"] += 1
+            logger.warning("Shelf search: failed to read %s", row["id"], exc_info=True)
+            continue
+        budget_left -= len(text)
+        if len(text) > cap:
+            text = text[:cap]
+            truncated_ids.append(row["id"])
+        match = pattern.search(text)
+        if match is not None:
+            results.append({"id": row["id"], "name": neutralize_untrusted_tags(str(row.get("name") or "")), "matched": "content", "excerpt": _search_excerpt(text, match), "offset": match.start()})
+            remaining -= 1
+
+    truncated_capped, truncated_total = _capped_id_list(truncated_ids)
+    if stop_reason == "complete" and remaining == 0:
+        # The limit filled exactly on the snapshot's final row — a limit stop,
+        # not a complete scan.
+        stop_reason = "limit"
+    unscanned_total = 0
+    if stop_reason == "budget":
+        # Exact — the snapshot IS the candidate set: unscanned = non-tier-1
+        # rows minus those processed before the trip.
+        unscanned_total = len(shelf_rows) - len(tier1_ids) - processed
+    return json.dumps(
+        {
+            "results": results,
+            "stop_reason": stop_reason,
+            "content_scanned": True,
+            "skipped": skipped,
+            "truncated_document_ids": truncated_capped,
+            "truncated_count": truncated_total,
+            "unscanned_document_ids": unscanned_ids,
+            "unscanned_count": unscanned_total,
+        },
+        ensure_ascii=False,
+    )
+
+
+@tool
+async def search_project_documents(
+    runtime: Runtime,
+    query: Annotated[str, "Case-insensitive keyword to find on the shelf (plain substring, not regex; 1-200 chars)."],
+    limit: Annotated[int, "Maximum results to return (default 10, max 50)."] = _SEARCH_DEFAULT_LIMIT,
+) -> str:
+    """Search the current project's shelf by keyword across names, summaries, and content.
+
+    Two tiers: every document's name and summary are matched first (cheap),
+    and content is scanned only if that produced too few hits — so ranking is
+    always name > summary > content, with the shelf's own order inside a
+    tier. Each document appears at most once, credited to its best field.
+
+    Returns JSON: {"results": [{"id", "name", "matched", "excerpt",
+    "offset"}], "stop_reason", "content_scanned", "skipped",
+    "truncated_document_ids", "truncated_count", "unscanned_document_ids",
+    "unscanned_count"}. "offset" is set ONLY for content hits: a character
+    position to pass straight to read_project_document(offset=...).
+    stop_reason is "complete" (everything searched), "limit" (enough hits;
+    unsearched remainder is irrelevant), or "budget" (the whole-shelf scan
+    budget ran out — unscanned_document_ids lists what was not searched).
+    content_scanned=false means content was never read (tier 1 was enough);
+    never treat that as full coverage. skipped counts non_text binaries,
+    unconverted office/PDF (never converted on the fly), and missing
+    content. Live data: reflects the shelf as of this call.
+    """
+    return await _search_project_documents_impl(runtime, query=query, limit=limit)
+
+
 def get_project_document_tools() -> list:
-    """The two shelf tools the lead agent gains in project runs (§7.3)."""
-    return [list_project_documents, read_project_document]
+    """The shelf tools the lead agent gains in project runs (§7.3)."""
+    return [list_project_documents, read_project_document, search_project_documents]

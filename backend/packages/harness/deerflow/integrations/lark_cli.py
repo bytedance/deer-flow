@@ -87,10 +87,11 @@ from deerflow.config.app_config import AppConfig
 from deerflow.config.paths import Paths, get_paths
 from deerflow.integrations.lark_broker import LARK_BROKER_URL_ENV
 from deerflow.skills.installer import is_symlink_member, is_unsafe_zip_member
-from deerflow.skills.package_files import is_executable_binary_prefix
+from deerflow.skills.package_files import EXEC_SNIFF_BYTES, is_executable_binary_prefix
 from deerflow.skills.parser import parse_skill_file
 from deerflow.skills.permissions import make_skill_tree_sandbox_readable
 from deerflow.skills.types import SKILL_MD_FILE, SkillCategory
+from deerflow.utils.atomic_write import cleanup_failed_atomic_write
 
 logger = logging.getLogger(__name__)
 
@@ -1271,16 +1272,21 @@ def _publish_bytes_atomically(path: Path, content: bytes) -> None:
     staged skill files and manifests become read-only through
     ``make_skill_tree_sandbox_readable``. The parent directory is not fsynced,
     so this helper alone does not guarantee publication survives power loss.
+    A failed write, fsync, or replace leaves the previous file intact.
+    Removing the temporary is best-effort and must not replace that error.
     """
-    fd, temporary = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+    fd, temporary_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+    temporary = Path(temporary_name)
     try:
-        with os.fdopen(fd, "wb") as handle:
+        handle = os.fdopen(fd, "wb")
+        fd = None  # The file object now owns the descriptor.
+        with handle:
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
     except BaseException:
-        Path(temporary).unlink(missing_ok=True)
+        cleanup_failed_atomic_write(temporary, fd)
         raise
 
 
@@ -1302,7 +1308,7 @@ def _runtime_artifact_is_executable(relative: Path, candidate: Path) -> bool:
     if os.name != "nt":
         return candidate.stat().st_mode & 0o111 != 0
     with candidate.open("rb") as handle:
-        prefix = handle.read(4)
+        prefix = handle.read(EXEC_SNIFF_BYTES)
     if relative == Path("bin/lark-cli"):
         return prefix.startswith(b"#!")
     return is_executable_binary_prefix(prefix)
@@ -3468,10 +3474,10 @@ def _download_lark_archive(version: str) -> Path:
                         raise ValueError("Lark CLI source archive is too large.")
                     out.write(chunk)
     except ValueError:
-        archive_path.unlink(missing_ok=True)
+        cleanup_failed_atomic_write(archive_path)
         raise
     except Exception as exc:  # noqa: BLE001 - network boundary
-        archive_path.unlink(missing_ok=True)
+        cleanup_failed_atomic_write(archive_path)
         raise ValueError(f"Could not download the Lark skill pack ({version}) from GitHub. Check the Gateway's internet access, or pre-stage the archive via {LARK_CLI_SOURCE_ARCHIVE_ENV}.") from exc
     return archive_path
 

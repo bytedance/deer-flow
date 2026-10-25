@@ -196,6 +196,42 @@ class TestPendingCardRegistry:
             entry, _ = registry.consume_if_originator(f"callback-{index}", "ou_originator", option_id="option-1", option_value="Alpha")
             assert entry is not None
 
+    def test_discard_thread_retires_all_matching_cards(self):
+        registry = PendingCardRegistry()
+        registry.register(**self._entry(callback_token="cb-1", thread_id="thread-target"))
+        registry.register(**self._entry(callback_token="cb-2", thread_id="thread-target"))
+        registry.register(**self._entry(callback_token="cb-3", thread_id="thread-other"))
+        assert len(registry) == 3
+
+        pruned = registry.discard_thread("thread-target")
+        assert pruned == 2
+        assert len(registry) == 1
+        entry, _ = registry.consume_if_originator("cb-3", "ou_originator", option_id="option-1", option_value="Alpha")
+        assert entry is not None
+
+    def test_prune_expired_removes_stale_cards_and_returns_count(self):
+        registry = PendingCardRegistry(ttl_seconds=10)
+        registry.register(**self._entry(callback_token="cb-fresh"))
+        registry.register(**self._entry(callback_token="cb-stale"))
+        registry._entries["cb-stale"]["created_at"] -= 15
+
+        cleaned = registry.prune_expired()
+        assert cleaned == 1
+        assert len(registry) == 1
+        assert "cb-fresh" in registry._entries
+        assert "cb-stale" not in registry._entries
+
+    def test_get_pending_entry_provides_read_only_view(self):
+        registry = PendingCardRegistry()
+        registry.register(**self._entry(callback_token="cb-inspect", thread_id="th-100"))
+        view = registry.get_pending_entry("cb-inspect")
+        assert view is not None
+        assert view["thread_id"] == "th-100"
+        assert len(registry) == 1
+        consumed, _ = registry.consume_if_originator("cb-inspect", "ou_originator", option_id="option-1", option_value="Alpha")
+        assert consumed is not None
+        assert registry.get_pending_entry("cb-inspect") is None
+
 
 class TestFeishuChannelButtonCardWiring:
     """Channel-level wiring: when the flag and payload line up, final
@@ -724,3 +760,144 @@ class TestCardClickEndToEndRouting:
             asyncio.run(go())
         finally:
             asyncio.run(close_engine())
+
+
+class TestThreadReplacementRetiresCards:
+    """Integration: ``/new`` retires pending cards for the old thread so stale
+    button clicks are correctly rejected instead of lingering."""
+
+    def _channel_with_cards(self, *, thread_id: str = "thread-old"):
+        from app.channels.feishu import FeishuChannel
+        from app.channels.message_bus import MessageBus
+
+        channel = FeishuChannel(
+            MessageBus(),
+            {"app_id": "t", "app_secret": "t", "card_interaction_enabled": True},
+        )
+        # Register two pending cards on the target thread and one on another.
+        for token_suffix in ("a", "b"):
+            channel._card_registry.register(
+                callback_token=f"cb-{token_suffix}",
+                request_id=f"req-{token_suffix}",
+                source="ask_clarification",
+                thread_id=thread_id,
+                chat_id="chat-1",
+                originator_open_id="ou_originator",
+                options=("Alpha", "Beta"),
+                option_ids=("option-1", "option-2"),
+                card_message_id=f"om_card_{token_suffix}",
+            )
+        channel._card_registry.register(
+            callback_token="cb-other",
+            request_id="req-other",
+            source="ask_clarification",
+            thread_id="thread-unrelated",
+            chat_id="chat-1",
+            originator_open_id="ou_originator",
+            options=("Alpha",),
+            option_ids=("option-1",),
+            card_message_id="om_card_other",
+        )
+        return channel
+
+    def test_on_thread_replaced_retires_old_thread_cards(self):
+        channel = self._channel_with_cards()
+        assert len(channel._card_registry) == 3
+
+        channel.on_thread_replaced("thread-old")
+
+        # The two cards for the replaced thread are gone.
+        assert len(channel._card_registry) == 1
+        entry_a, _ = channel._card_registry.consume_if_originator("cb-a", "ou_originator", option_id="option-1", option_value="Alpha")
+        assert entry_a is None
+        entry_b, _ = channel._card_registry.consume_if_originator("cb-b", "ou_originator", option_id="option-1", option_value="Alpha")
+        assert entry_b is None
+
+        # The unrelated thread's card is unaffected.
+        entry_other, reason = channel._card_registry.consume_if_originator("cb-other", "ou_originator", option_id="option-1", option_value="Alpha")
+        assert reason is None and entry_other is not None
+
+    def test_on_thread_replaced_is_noop_when_card_interaction_disabled(self):
+        from app.channels.feishu import FeishuChannel
+        from app.channels.message_bus import MessageBus
+
+        channel = FeishuChannel(
+            MessageBus(),
+            {"app_id": "t", "app_secret": "t", "card_interaction_enabled": False},
+        )
+        channel._card_registry.register(
+            callback_token="cb-1",
+            request_id="req-1",
+            source="ask_clarification",
+            thread_id="thread-old",
+            chat_id="chat-1",
+            originator_open_id="ou_originator",
+            options=("Alpha",),
+            option_ids=("option-1",),
+            card_message_id="om_card_1",
+        )
+        channel.on_thread_replaced("thread-old")
+        # Card interaction is off, so nothing is retired.
+        assert len(channel._card_registry) == 1
+
+    def test_manager_new_command_notifies_channel(self, tmp_path):
+        """The ``/new`` command path in ChannelManager looks up the old thread
+        and calls ``channel.on_thread_replaced`` before replying."""
+        from unittest.mock import patch
+
+        from app.channels.feishu import FeishuChannel
+        from app.channels.manager import ChannelManager
+        from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus
+        from app.channels.store import JsonChannelStore
+
+        async def go():
+            bus = MessageBus()
+            store = JsonChannelStore(path=tmp_path / "routes.json")
+            manager = ChannelManager(bus=bus, store=store)
+
+            # Pre-seed the thread mapping so /new finds an old thread to replace.
+            channel = FeishuChannel(
+                MessageBus(),
+                {"app_id": "t", "app_secret": "t", "card_interaction_enabled": True},
+            )
+            channel._card_registry.register(
+                callback_token="cb-old",
+                request_id="req-old",
+                source="ask_clarification",
+                thread_id="thread-old",
+                chat_id="chat-1",
+                originator_open_id="ou_originator",
+                options=("Alpha",),
+                option_ids=("option-1",),
+                card_message_id="om_card_old",
+            )
+
+            mock_client = MagicMock()
+            mock_client.threads.create = AsyncMock(return_value={"thread_id": "thread-new"})
+            manager._client = mock_client
+
+            # Simulate: _lookup_thread_id returns the old thread
+            manager._lookup_thread_id = AsyncMock(return_value="thread-old")
+            manager._store_thread_id = AsyncMock()
+
+            inbound = InboundMessage(
+                channel_name="feishu",
+                chat_id="chat-1",
+                user_id="ou_originator",
+                text="/new",
+                msg_type=InboundMessageType.COMMAND,
+            )
+
+            # Patch get_channel_service to return our channel instance
+            mock_service = MagicMock()
+            mock_service.get_channel.return_value = channel
+
+            with patch("app.channels.service.get_channel_service", return_value=mock_service):
+                await manager._handle_command(inbound)
+
+            # The old thread's card should be retired.
+            assert len(channel._card_registry) == 0
+            entry, _ = channel._card_registry.consume_if_originator("cb-old", "ou_originator", option_id="option-1", option_value="Alpha")
+            assert entry is None
+
+        asyncio.run(go())

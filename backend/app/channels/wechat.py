@@ -1695,7 +1695,7 @@ class WechatChannel(Channel):
             return
         try:
             data = json.loads(self._cursor_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
             logger.warning("[WeChat] failed to read cursor state from %s", self._cursor_path)
             return
         cursor = data.get("get_updates_buf")
@@ -1719,7 +1719,7 @@ class WechatChannel(Channel):
             return
         try:
             data = json.loads(self._auth_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
             logger.warning("[WeChat] failed to read auth state from %s", self._auth_path)
             return
         if not isinstance(data, dict):
