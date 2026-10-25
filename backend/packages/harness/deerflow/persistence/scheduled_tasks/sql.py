@@ -15,6 +15,7 @@ from deerflow.persistence.scheduled_task_runs.finalization import FinalizationOb
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
 from deerflow.persistence.scheduled_task_runs.projection import account_launch, can_project
 from deerflow.persistence.scheduled_tasks.model import ACTIVE_RUN_STATUSES, LIVE_TASK_STATUSES, ONCE_TASK_STATUS_BY_RUN_STATUS, TERMINAL_RUN_STATUSES, TERMINAL_TASK_STATUSES, ScheduledTaskRow
+from deerflow.runtime.events.terminal import RecoveryTerminalPublisher, RecoveryTerminalTarget
 from deerflow.scheduler.host_notes import RUN_ERROR_END_REACHED, RUN_ERROR_INTERRUPTED
 from deerflow.utils.goal_objective import normalize_goal_objective
 from deerflow.utils.time import coerce_iso
@@ -91,9 +92,11 @@ class ScheduledTaskRepository:
         session_factory: async_sessionmaker[AsyncSession],
         *,
         run_repository: RunRepository | None = None,
+        recovery_terminal_publisher: RecoveryTerminalPublisher | None = None,
     ) -> None:
         self._sf = session_factory
         self._run_repository = run_repository or RunRepository(session_factory)
+        self._recovery_terminal_publisher = recovery_terminal_publisher
         self._finalization_observer: FinalizationObserver | None = None
 
     def set_finalization_observer(self, callback: FinalizationObserver | None) -> None:
@@ -1017,6 +1020,27 @@ class ScheduledTaskRepository:
         lease_grace_seconds: int = 10,
     ) -> int:
         """Cancel once tasks only after their underlying run is no longer live."""
+        recovery_targets: list[RecoveryTerminalTarget] = []
+        try:
+            return await self._reconcile_stuck_once_tasks(
+                error=error,
+                now=now,
+                lease_grace_seconds=lease_grace_seconds,
+                recovery_targets=recovery_targets,
+            )
+        finally:
+            if self._recovery_terminal_publisher is not None:
+                for target in recovery_targets:
+                    await self._recovery_terminal_publisher.publish(target)
+
+    async def _reconcile_stuck_once_tasks(
+        self,
+        *,
+        error: str,
+        now: datetime,
+        lease_grace_seconds: int,
+        recovery_targets: list[RecoveryTerminalTarget],
+    ) -> int:
         async with self._sf() as session:
             result = await session.execute(
                 select(ScheduledTaskRow.id).where(
@@ -1056,6 +1080,16 @@ class ScheduledTaskRepository:
                         error=error,
                         stop_reason="scheduled_task_orphan_recovered",
                     )
+                    if claimed and self._recovery_terminal_publisher is not None:
+                        target = self._recovery_terminal_publisher.authorize_takeover(
+                            claimed=claimed,
+                            thread_id=candidate.thread_id,
+                            run_id=candidate.run_id,
+                            user_id=candidate.user_id,
+                            operation_kind=candidate.operation_kind,
+                        )
+                        if target is not None:
+                            recovery_targets.append(target)
                     if not claimed:
                         refreshed = await self._run_repository.get(candidate.run_id, user_id=None)
                         if refreshed is not None and refreshed.get("status") in {"pending", "running"}:

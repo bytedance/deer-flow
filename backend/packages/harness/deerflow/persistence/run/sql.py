@@ -255,6 +255,26 @@ class RunRepository(RunStore):
                 return None
             return self._row_to_dict(row)
 
+    async def get_in_session(
+        self,
+        session: AsyncSession,
+        run_id: str,
+        *,
+        user_id: str | None | _AutoSentinel = AUTO,
+    ):
+        """Read through a compatible caller transaction without another checkout.
+
+        Keep custom ``get`` implementations and differently bound databases
+        on their normal read path. The caller owns this session's lifetime.
+        """
+        if type(self).get is not RunRepository.get or session.bind is not self._sf.kw.get("bind"):
+            return await self.get(run_id, user_id=user_id)
+        resolved_user_id = resolve_user_id(user_id, method_name="RunRepository.get")
+        row = await session.get(RunRow, run_id)
+        if row is None or (resolved_user_id is not None and row.user_id != resolved_user_id):
+            return None
+        return self._row_to_dict(row)
+
     async def list_changed(
         self,
         *,
