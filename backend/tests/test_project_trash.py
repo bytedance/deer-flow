@@ -111,6 +111,36 @@ class TestPurgeFiles:
         assert purged is True
         assert await env.docs.get(row["id"], include_trashed=True, user_id=_USER) is None
 
+    async def test_purge_removes_read_only_document_files(self, env):
+        """A read-only document still purges.
+
+        Windows refuses ``unlink`` on a read-only file (``WinError 5``) where
+        POSIX needs only a writable parent, so a restored archive or a
+        mode-preserving sync must not leave a trashed row unpurgeable. Windows
+        fails here before the fix; POSIX passes either way.
+        """
+        project = await env.projects.create(name="P", user_id=_USER)
+        row = await _add(env, project["id"], name="notes.txt", data=b"hello")
+        derived = converted_markdown_path(env.paths, user_id=_USER, row=row)
+        derived.parent.mkdir(parents=True, exist_ok=True)
+        derived.write_text("# converted")
+        original = original_file_path(env.paths, user_id=_USER, row=row)
+        await _trash(env, row)
+        protected = (original, derived)
+        for path in protected:
+            path.chmod(0o444)
+        try:
+            purged = await env.docs.purge(row["id"], remove_files=make_purge_file_remover(env.paths, user_id=_USER), user_id=_USER)
+
+            assert purged is True
+            assert not original.exists()
+            assert not derived.exists()
+            assert await env.docs.get(row["id"], include_trashed=True, user_id=_USER) is None
+        finally:
+            for path in protected:
+                if path.exists():
+                    path.chmod(0o644)
+
     async def test_partial_unlink_failure_retains_row_and_retry_completes(self, env, monkeypatch):
         """§13 purge ordering: original unlinked, derived unlink raises —
         the row stays trashed (retryable); the retry tolerates the missing
