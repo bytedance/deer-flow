@@ -905,6 +905,7 @@ class _StatefulRunRepo:
             "task_id": kwargs["task_id"],
             "thread_id": kwargs["thread_id"],
             "trigger": kwargs["trigger"],
+            "scheduled_for": kwargs["scheduled_for"],
             "status": kwargs["status"],
             "run_id": None,
         }
@@ -1883,6 +1884,47 @@ async def test_manual_launch_origin_is_stable_across_retries():
 
     assert first["scheduled_for"] == admitted.isoformat()
     assert first == second
+
+
+@pytest.mark.asyncio
+async def test_manual_trial_retry_reuses_the_admitted_origin():
+    launches: list[dict] = []
+
+    async def fake_launch(**kwargs):
+        launches.append(kwargs)
+        if len(launches) == 1:
+            raise ConflictError("Thread busy")
+        return {"run_id": "run-retried", "thread_id": kwargs["thread_id"]}
+
+    class DrainableRunRepo(_StatefulRunRepo):
+        async def list_queued_runs(self, *, limit: int, **_kwargs) -> list[dict]:
+            return [dict(row) for row in self.rows.values() if row["status"] == "queued"][:limit]
+
+    task_repo = DummyTaskRepo([_provenance_task()])
+    run_repo = DrainableRunRepo()
+    service = ScheduledTaskService(
+        task_repo=task_repo,
+        task_run_repo=run_repo,
+        launch_run=fake_launch,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_runs=3,
+        own_stop_available=True,
+    )
+    admitted = datetime(2026, 10, 7, 1, 0, tzinfo=UTC)
+
+    first = await service.dispatch_task(task_repo.rows[0], now=admitted, trigger="manual")
+    assert first["outcome"] == "queued"
+
+    # The immediate launch was busy, so the occurrence was requeued with the
+    # admitted scheduled_for. Draining it at a later clock must reproduce the
+    # first request's origin rather than embedding the retry time.
+    await service._drain_queue(now=admitted + timedelta(hours=2))
+
+    assert len(launches) == 2, launches
+    assert launches[0]["origin"]["scheduled_for"] == admitted.isoformat()
+    assert launches[1]["origin"]["scheduled_for"] == admitted.isoformat()
+    assert launches[0]["origin"] == launches[1]["origin"]
 
 
 @pytest.mark.asyncio
