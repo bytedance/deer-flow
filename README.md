@@ -1668,6 +1668,8 @@ the exit status before presenting an output file.
 The bundled podcast-generation command returns a nonzero exit status and writes
 diagnostics to stderr when generation fails. Callers can check the status before
 presenting audio; an existing MP3 or generated transcript is not proof of success.
+The input JSON, MP3 and optional transcript must refer to different files;
+matching resolved paths and existing file aliases are rejected before writes or TTS calls.
 
 The bundled chart-visualization command does the same for an unknown chart tool,
 a spec missing `tool`, or a chart-service HTTP failure. Successful chart URLs,

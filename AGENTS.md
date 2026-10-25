@@ -232,6 +232,8 @@ Repo-wide conventions:
   import unavailable and mock HTTP transport to keep tests offline.
   Video, podcast, and chart-visualization CLI failures exit non-zero;
   diagnostics on stderr, success URLs on stdout; test offline.
+  Podcast input/audio/transcript identity checks run before writes or TTS;
+  cover resolved paths and existing file aliases offline.
 - **Before pushing** — backend `make format`, frontend `pnpm check`.
   Backend CI enforces `ruff format --check`.
 - **Skill text encoding** — use explicit UTF-8 for textual skill resources.

@@ -329,8 +329,25 @@ def generate_markdown(script: Script, title: str = "Podcast Script") -> str:
     return "\n".join(lines)
 
 
+def _validate_output_paths(script_file: str, output_file: str, transcript_file: str | None) -> None:
+    paths = [("script_file", script_file), ("output_file", output_file)]
+    if transcript_file:
+        paths.append(("transcript_file", transcript_file))
+    for index, (name, path) in enumerate(paths):
+        for previous_name, previous_path in paths[:index]:
+            try:
+                same_file = os.path.samefile(previous_path, path)
+            except FileNotFoundError:
+                same_file = os.path.normcase(os.path.realpath(previous_path)) == os.path.normcase(
+                    os.path.realpath(path)
+                )
+            if same_file:
+                raise ValueError(f"{previous_name} and {name} must refer to different files")
+
+
 def generate_podcast(script_file: str, output_file: str,
                      transcript_file: str | None = None) -> str:
+    _validate_output_paths(script_file, output_file, transcript_file)
     with open(script_file, encoding="utf-8") as f:
         script_json = json.load(f)
     if "lines" not in script_json:

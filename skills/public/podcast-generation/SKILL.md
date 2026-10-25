@@ -59,6 +59,10 @@ Parameters:
 - `--output-file`: Absolute path to output MP3 file (required)
 - `--transcript-file`: Absolute path to output transcript markdown file (optional, but recommended)
 
+Use different files for the input JSON, output MP3, and optional transcript.
+Paths that resolve to the same file, including existing hard links, are rejected
+before transcript writes or TTS calls so they cannot overwrite one another.
+
 > [!IMPORTANT]
 > - Execute the script in one complete call. Do NOT split the workflow into separate steps.
 > - The script handles all TTS API calls and audio generation internally.
