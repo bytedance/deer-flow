@@ -36,8 +36,9 @@ def user_storage(tmp_path):
 
 def _failing_replace(real_replace, destination_name: str, primary: BaseException, staged: list[Path]):
     def replace(path, destination):
-        if Path(destination).name == destination_name and path.name != destination_name:
-            staged.append(path)
+        source = Path(path)
+        if Path(destination).name == destination_name and source.name != destination_name:
+            staged.append(source)
             raise primary
         return real_replace(path, destination)
 
@@ -55,9 +56,11 @@ def test_write_custom_skill_preserves_replace_error_when_cleanup_fails(tmp_path,
 
     primary = OSError("replace failed")
     staged: list[Path] = []
-    real_replace = Path.replace
+    from deerflow.utils import file_lock
+
+    real_replace = file_lock.os.replace
     real_unlink = Path.unlink
-    monkeypatch.setattr(Path, "replace", _failing_replace(real_replace, "SKILL.md", primary, staged))
+    monkeypatch.setattr(file_lock.os, "replace", _failing_replace(real_replace, "SKILL.md", primary, staged))
     if failure in {"unlink", "logging"}:
 
         def unlink(path, *args, **kwargs):
