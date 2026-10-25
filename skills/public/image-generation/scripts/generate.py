@@ -2,6 +2,7 @@ import base64
 from contextlib import ExitStack
 import json
 import os
+import sys
 
 import requests
 
@@ -158,10 +159,10 @@ def _generate_image_minimax(
 ) -> str:
     bearer_value = os.getenv("MINIMAX_API_KEY")
     if not bearer_value:
-        return "MINIMAX_API_KEY is not set"
+        raise ValueError("MINIMAX_API_KEY is not set")
     prompt = _minimax_prompt(prompt)
     if len(prompt) > MINIMAX_PROMPT_MAX_CHARS:
-        return (
+        raise ValueError(
             f"Prompt is {len(prompt)} characters but MiniMax image-01 accepts at most "
             f"{MINIMAX_PROMPT_MAX_CHARS}. Shorten the prompt to stay within the limit; "
             f"reference images plus a tighter description usually recover the detail."
@@ -225,7 +226,7 @@ def _generate_image_gemini(
 
     bearer_value = os.getenv("GEMINI_API_KEY")
     if not bearer_value:
-        return "GEMINI_API_KEY is not set"
+        raise ValueError("GEMINI_API_KEY is not set")
     response = requests.post(
         "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-pro-image-preview:generateContent",
         headers={"x-goog-api-key": bearer_value, "Content-Type": "application/json"},
@@ -281,7 +282,7 @@ def _generate_image_openai(
 ) -> str:
     bearer_value = os.getenv("IMAGE_GENERATION_API_KEY")
     if not bearer_value:
-        return "IMAGE_GENERATION_API_KEY is not set"
+        raise ValueError("IMAGE_GENERATION_API_KEY is not set")
 
     url = f"{_openai_base_url()}/images/generations"
     headers = {"Authorization": f"Bearer {bearer_value}"}
@@ -397,4 +398,5 @@ if __name__ == "__main__":
             )
         )
     except Exception as e:
-        print(f"Error while generating image: {e}")
+        print(f"Error while generating image: {e}", file=sys.stderr)
+        sys.exit(1)
