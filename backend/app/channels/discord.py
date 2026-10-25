@@ -34,6 +34,27 @@ logger = logging.getLogger(__name__)
 
 _DISCORD_MAX_MESSAGE_LEN = 2000
 
+
+def _utf16_width(char: str) -> int:
+    """UTF-16 code units taken by *char* — the unit Discord counts limits in."""
+    return 2 if ord(char) > 0xFFFF else 1
+
+
+def _utf16_len(text: str) -> int:
+    """*text*'s length as Discord measures it: UTF-16 code units, not code points."""
+    return sum(_utf16_width(char) for char in text)
+
+
+def _utf16_prefix(text: str, limit: int) -> str:
+    """The longest prefix of *text* within *limit* UTF-16 code units."""
+    units = 0
+    for index, char in enumerate(text):
+        units += _utf16_width(char)
+        if units > limit:
+            return text[:index]
+    return text
+
+
 # Bound for outbound work scheduled onto the Discord client's event loop.
 # Discord API calls normally return in well under a second; anything still
 # pending after this is a dead or wedged client, not a slow response.
@@ -1247,7 +1268,11 @@ class DiscordChannel(Channel):
                 )
                 return None
 
-            thread_name = f"deerflow-{message.author.display_name}-{message.id}"[:100]
+            # Thread names are capped at 100 characters, counted in UTF-16 code
+            # units like every other Discord text limit; slicing by code points
+            # lets an emoji-heavy display name exceed the cap and the creation
+            # fails with 400 (falling back to channel replies).
+            thread_name = _utf16_prefix(f"deerflow-{message.author.display_name}-{message.id}", 100)
             return await message.create_thread(name=thread_name)
         except self._discord_module.errors.HTTPException as exc:
             if exc.code == 50024:
@@ -1313,19 +1338,38 @@ class DiscordChannel(Channel):
 
     @staticmethod
     def _split_text(text: str) -> list[str]:
+        """Split *text* into chunks that fit Discord's 2000 UTF-16 code unit limit.
+
+        Slicing by code points hands sendMessage up to twice the limit when the
+        reply is emoji-heavy (an astral character costs 2 units), Discord answers
+        400 "Content longer than 2000 characters" and the rest of the reply is
+        dropped — the same UTF-16 accounting the Telegram adapter already applies
+        to its 4096-unit cap. A split can still fall inside one user-perceived
+        character (a ZWJ emoji sequence, the second half of a flag emoji); every
+        chunk stays within budget, so a seam is a rendering artifact, not a
+        failed send.
+        """
         if not text:
             return [""]
 
         chunks: list[str] = []
         remaining = text
-        while len(remaining) > _DISCORD_MAX_MESSAGE_LEN:
-            split_at = remaining.rfind("\n", 0, _DISCORD_MAX_MESSAGE_LEN)
-            if split_at <= 0:
-                split_at = _DISCORD_MAX_MESSAGE_LEN
-            else:
+        while _utf16_len(remaining) > _DISCORD_MAX_MESSAGE_LEN:
+            split_at = 0
+            last_newline = -1
+            units = 0
+            for index, char in enumerate(remaining):
+                width = _utf16_width(char)
+                if units + width > _DISCORD_MAX_MESSAGE_LEN:
+                    break
+                units += width
+                split_at = index + 1
+                if char == "\n":
+                    last_newline = index
+            if last_newline > 0:
                 # Keep the delimiter on this chunk's tail so consecutive
                 # Discord messages reconstruct the original text exactly.
-                split_at += 1
+                split_at = last_newline + 1
             chunks.append(remaining[:split_at])
             remaining = remaining[split_at:]
 

@@ -7801,6 +7801,41 @@ class TestDiscordChannel:
         assert all(0 < len(chunk) <= _DISCORD_MAX_MESSAGE_LEN for chunk in chunks)
         assert "".join(chunks) == text
 
+    @pytest.mark.parametrize(
+        "text",
+        [
+            pytest.param("💸" * 1500, id="astral-run-over-utf16-limit"),
+            pytest.param("x" * 1000 + "\n" + "💸" * 700, id="newline-before-astral-run"),
+            pytest.param("x" * 1990 + "\n\n" + "💸" * 20, id="ascii-paragraph-then-astral-tail"),
+        ],
+    )
+    def test_split_text_respects_utf16_code_unit_limit(self, text: str):
+        """Astral characters cost two of Discord's 2000 counted characters each.
+
+        Discord counts message length in UTF-16 code units (an astral emoji is a
+        surrogate pair), while Python's len() counts code points, so an
+        emoji-heavy reply that fits by code points is still rejected with
+        400 "Content longer than 2000 characters" and the reply is dropped.
+        """
+        from app.channels.discord import _DISCORD_MAX_MESSAGE_LEN, DiscordChannel
+
+        def units(chunk: str) -> int:
+            return len(chunk.encode("utf-16-le")) // 2
+
+        chunks = DiscordChannel._split_text(text)
+
+        assert all(units(chunk) <= _DISCORD_MAX_MESSAGE_LEN for chunk in chunks)
+        assert "".join(chunks) == text
+
+    def test_utf16_prefix_keeps_thread_names_within_budget(self):
+        from app.channels.discord import _utf16_prefix
+
+        assert _utf16_prefix("a" * 150, 100) == "a" * 100
+        assert _utf16_prefix("💸" * 100, 100) == "💸" * 50
+        assert _utf16_prefix("💸" * 50, 100) == "💸" * 50
+        assert _utf16_prefix("x" * 99 + "💸", 100) == "x" * 99
+        assert _utf16_prefix("", 100) == ""
+
     def test_split_text_preserves_empty_and_short_messages(self):
         from app.channels.discord import DiscordChannel
 
