@@ -133,24 +133,25 @@ class TenkiSandbox(Sandbox):
     def close(self) -> None:
         """Terminate the underlying Tenki session (idempotent).
 
-        The microVM is terminated *first*; the adapter is only marked closed once
-        the session is actually gone, so a failed termination stays retryable
-        instead of silently leaking a running (billed) sandbox. A terminal
-        session error means it is already gone, which counts as closed; anything
-        else is raised so the caller can retry or alert.
+        Mark closed only after the termination RPC is accepted or the service
+        confirms the session is already gone. This does not wait for physical
+        VM termination. Ambiguous transport failures stay retryable instead of
+        silently abandoning a possibly running (billed) sandbox.
+        Holding the adapter lock across the RPC serializes close attempts;
+        other operations checking this lock wait for that network call too.
         """
         with self._lock:
             if self._closed:
                 return
-            sandbox = self._sandbox
-        try:
-            sandbox.close()
-        except Exception as e:
-            if not self._is_terminal_failure(e):
-                logger.error("Error terminating Tenki sandbox %s: %s", self.id, e)
-                raise
-            logger.info("Tenki sandbox %s was already gone at close: %s", self.id, e)
-        with self._lock:
+            try:
+                self._sandbox.close()
+            except Exception as e:
+                # A broken transport can make an operational handle unusable
+                # without confirming that the termination RPC was accepted.
+                if type(e).__name__ not in {"SessionTerminatedError", "SessionNotFoundError"}:
+                    logger.error("Error terminating Tenki sandbox %s: %s", self.id, e)
+                    raise
+                logger.info("Tenki sandbox %s was already gone at close: %s", self.id, e)
             self._closed = True
 
     # ── bridge helpers ──────────────────────────────────────────────────

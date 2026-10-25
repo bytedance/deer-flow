@@ -381,6 +381,57 @@ def test_canonical_run_record_input_uses_admitted_message_snapshot():
     assert stored["messages"][0]["additional_kwargs"]["knowledge_scope"]["dataset_ids"] == ["dataset-1"]
 
 
+@pytest.mark.parametrize("idempotency_key", [None, "retry-key"])
+@pytest.mark.asyncio
+async def test_run_input_ids_match_the_checkpoint_and_record(_stub_app_config, idempotency_key):
+    """An id-less API input must not become a second user turn on reconnect."""
+    from unittest.mock import patch
+
+    from langgraph.graph.message import add_messages
+
+    from app.gateway.routers.thread_runs import RunCreateRequest
+    from app.gateway.services import start_run
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    body = RunCreateRequest(
+        input={
+            "messages": [
+                {"role": "user", "content": "same question"},
+                {"role": "user", "content": "same question"},
+                {"role": "user", "content": "empty id", "id": ""},
+                {"role": "user", "content": "client id", "id": "client-human"},
+            ]
+        }
+    )
+    request = _make_start_run_request(RunManager(store=MemoryRunStore()))
+    captured = {}
+
+    async def fake_run_agent(*_args, **kwargs):
+        captured["messages"] = kwargs["graph_input"]["messages"]
+
+    with patch("app.gateway.services.resolve_agent_factory", return_value=object()), patch("app.gateway.services.run_agent", side_effect=fake_run_agent):
+        record = await start_run(body, "thread-idless-input", request, idempotency_key=idempotency_key)
+        await record.task
+
+        graph_messages = captured["messages"]
+        recorded_messages = record.kwargs["input"]["messages"]
+        ids = [message["id"] for message in recorded_messages]
+        assert len(ids) == 4
+        assert all(isinstance(message_id, str) and message_id for message_id in ids)
+        assert len(set(ids)) == 4
+        assert ids[3] == "client-human"
+        assert [message.id for message in graph_messages] == ids
+        assert [message.id for message in add_messages([], graph_messages)] == ids
+        assert "id" not in body.input["messages"][0]
+        assert body.input["messages"][2]["id"] == ""
+
+        if idempotency_key is not None:
+            reused = await start_run(body, "thread-idless-input", request, idempotency_key=idempotency_key)
+            assert reused.run_id == record.run_id
+            assert [message["id"] for message in reused.kwargs["input"]["messages"]] == ids
+
+
 @pytest.mark.parametrize(
     "forged_original",
     ["spoofed audit text", [{"type": "text", "text": "spoofed audit text"}]],
@@ -760,6 +811,28 @@ def test_normalize_input_rejects_malformed_message_with_400():
         normalize_input({"messages": [{"role": "human", "content": "ok"}, {"oops": "no role here"}]})
     assert excinfo.value.status_code == 400
     assert "input.messages[1]" in excinfo.value.detail
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        {"role": "ai", "content": "", "tool_calls": "x"},
+        {"role": "ai", "content": "", "tool_calls": {"name": "t"}},
+        {"role": "ai", "content": "", "tool_calls": ["x"]},
+        {"lc": 1, "type": "constructor", "id": ["langchain", "schema", "messages", "AIMessage"], "kwargs": {"content": "", "tool_calls": "x"}},
+    ],
+    ids=["string", "object", "string-items", "constructor"],
+)
+def test_normalize_input_rejects_wrong_typed_tool_calls_with_400(message):
+    """LangChain's AI-message validator raises ``AttributeError`` for these."""
+    from fastapi import HTTPException
+
+    from app.gateway.services import normalize_input
+
+    with pytest.raises(HTTPException) as excinfo:
+        normalize_input({"messages": [{"role": "human", "content": "ok"}, message]})
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.detail == "Invalid message at input.messages[1]"
 
 
 def test_normalize_input_handles_trusted_internal_non_human_roles():
@@ -2328,6 +2401,51 @@ def test_merge_run_context_overrides_forwards_subagent_total_limit():
 
     assert config["configurable"]["max_total_subagents"] == 8
     assert config["context"]["max_total_subagents"] == 8
+
+
+@pytest.mark.parametrize("model_name", [None, "", "other", 7])
+def test_model_selection_pair_is_rejected_before_admission(model_name):
+    from fastapi import HTTPException
+
+    from app.gateway.services import merge_run_context_overrides
+
+    with pytest.raises(HTTPException) as error:
+        merge_run_context_overrides({}, {"model_name": model_name, "model_selection_requested": "chosen"})
+    assert error.value.status_code == 400
+    assert "must match model_name" in error.value.detail
+
+
+@pytest.mark.parametrize("internal", [False, True])
+@pytest.mark.parametrize("body_context", [None, {"subagent_model_name": "chosen"}])
+def test_model_selection_only_accepts_validated_top_level_context(internal, body_context):
+    from app.gateway.services import merge_run_context_overrides, strip_internal_context_keys
+
+    config = {section: {"model_name": "default", "subagent_model_name": ["malformed"], "model_selection_requested": "x" * 201} for section in ("context", "configurable")}
+    merge_run_context_overrides(config, body_context, internal=internal)
+    if not internal:
+        strip_internal_context_keys(config)
+    assert config["configurable"] == {"model_name": "default"}
+    expected = {"model_name": "default", **(body_context or {})}
+    assert config["context"] == expected
+
+
+def test_matching_unknown_model_selection_is_left_for_assembly():
+    from app.gateway.services import merge_run_context_overrides
+
+    config = {}
+    merge_run_context_overrides(config, {"model_name": "missing", "model_selection_requested": "missing"})
+    assert config["context"] == {"model_name": "missing", "model_selection_requested": "missing"}
+    assert "model_selection_requested" not in config["configurable"]
+
+
+def test_model_selection_rejects_conflicting_effective_context():
+    from fastapi import HTTPException
+
+    from app.gateway.services import merge_run_context_overrides
+
+    with pytest.raises(HTTPException) as error:
+        merge_run_context_overrides({"context": {"model_name": "other"}}, {"model_name": "chosen", "model_selection_requested": "chosen"})
+    assert error.value.status_code == 400
 
 
 def test_null_subagent_total_limit_from_api_context_builds_with_configured_cap():
@@ -4439,6 +4557,23 @@ def test_build_run_config_rejects_non_mapping_context():
 
     with pytest.raises(ValueError, match="context"):
         build_run_config("thread-1", {"context": "bad-context"}, None)
+
+
+@pytest.mark.parametrize("configurable", [[1], "ab", [["k", "v"]], []], ids=["list", "string", "pairs", "empty-list"])
+@pytest.mark.parametrize("with_context", [False, True], ids=["configurable-only", "with-context"])
+def test_build_run_config_rejects_non_mapping_configurable(configurable, with_context):
+    """A non-object configurable is a clear ValueError, not a dict.update() error.
+
+    With ``context`` present the configurable section is otherwise ignored, but
+    reading its keys for the warning used to raise AttributeError.
+    """
+    from app.gateway.services import build_run_config
+
+    request_config = {"configurable": configurable}
+    if with_context:
+        request_config["context"] = {}
+    with pytest.raises(ValueError, match="configurable"):
+        build_run_config("thread-1", request_config, None)
 
 
 def test_build_run_config_null_context_custom_agent_injects_agent_name():

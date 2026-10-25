@@ -286,6 +286,7 @@ class JsonlRunEventStore(RunEventStore):
         content="",
         metadata=None,
         created_at=None,
+        user_id: str | None | _AutoSentinel = AUTO,
     ):
         async def mutate():
             existing = await asyncio.to_thread(self._read_run_events, thread_id, run_id)

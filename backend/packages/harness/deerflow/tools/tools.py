@@ -16,6 +16,7 @@ from deerflow.scheduler.runtime import SchedulerRunCapability, is_scheduler_capa
 from deerflow.subagents.batch_runtime import is_subagent_batch_runtime_available
 from deerflow.tools.builtins import (
     ask_clarification_tool,
+    build_inspect_run_status_tool,
     cancel_background_task,
     list_background_tasks,
     list_uploaded_files,
@@ -208,6 +209,7 @@ def get_available_tools(
 
     # Add view_image_tool only if the model supports vision
     model_config = config.get_model_config(model_name) if model_name else None
+    builtin_tools.append(build_inspect_run_status_tool(context_window=model_config.context_window if model_config else None))
     if model_config is not None and model_config.supports_vision:
         builtin_tools.append(view_image_tool)
         logger.info(f"Including view_image_tool for model '{model_name}' (supports_vision=True)")
@@ -267,9 +269,9 @@ def get_available_tools(
 
                         # Tag MCP-sourced tools so deferred-tool assembly at each
                         # agent construction site can identify them. Lead agents
-                        # assemble their full configured MCP catalog and apply active
-                        # skill policy at runtime; subagents may pass an already
-                        # policy-filtered list because their skills load at startup.
+                        # assemble their full configured MCP catalog; subagents
+                        # may pass an already filtered list reflecting their own
+                        # tool configuration and authorization.
                         for t in mcp_tools:
                             tag_mcp_tool(t)
                 else:
