@@ -215,6 +215,11 @@ export interface Translations {
   home: {
     docs: string;
     blog: string;
+    searchDocs: string;
+    searchDocsLabel: string;
+    searchNoResults: string;
+    searchLoadFailed: string;
+    searchLoading: string;
   };
 
   // Welcome
@@ -2050,6 +2055,9 @@ export interface Translations {
       sso_account_exists: string;
       sso_not_allowed: string;
       account_disabled: string;
+      invalid_email: string;
+      password_too_short: string;
+      registration_password_too_short: string;
     };
   };
 }
