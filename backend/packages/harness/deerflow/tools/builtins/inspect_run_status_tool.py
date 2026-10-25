@@ -66,7 +66,7 @@ def _recursion_status(config: Mapping[str, Any]) -> dict[str, int] | None:
         return None
     if limit <= 0 or step < 0 or stop < step:
         return None
-    return {"step": step, "limit": limit, "remaining": stop - step}
+    return {"limit": limit, "remaining": stop - step}
 
 
 def snapshot_run_status(state: Mapping[str, Any], context: Mapping[str, Any], *, context_window: int | None, config: Mapping[str, Any] | None = None) -> dict[str, Any]:
@@ -142,9 +142,8 @@ def build_inspect_run_status_tool(*, context_window: int | None) -> BaseTool:
         messages or provider-omitted usage. Context fill needs a configured
         window and an unaggregated model input report.
         Recursion counts graph super-steps, including middleware, not model
-        turns. Its step is cumulative checkpoint position; limit and remaining
-        belong to this graph invocation. Resumes refresh the native budget, so
-        remaining can exceed limit and is not limit minus step. Unknown is null.
+        turns. Limit and remaining belong to this graph invocation. Resumes
+        refresh the native budget, so remaining can exceed limit. Unknown is null.
         """
         context = runtime.context if isinstance(runtime.context, Mapping) else {}
         state = runtime.state if isinstance(runtime.state, Mapping) else {}

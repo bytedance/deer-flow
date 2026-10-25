@@ -57,9 +57,9 @@ def test_recursion_tracks_tool_supersteps_instead_of_message_counts(mode, execut
     result = _invoke(graph, {"messages": [("user", "check twice")]}, {"recursion_limit": 10}, execution)
 
     assert _snapshots(result) == [
-        {"step": 2, "limit": 10, "remaining": 8},
-        {"step": 2, "limit": 10, "remaining": 8},
-        {"step": 4, "limit": 10, "remaining": 6},
+        {"limit": 10, "remaining": 8},
+        {"limit": 10, "remaining": 8},
+        {"limit": 10, "remaining": 6},
     ]
 
 
@@ -75,19 +75,19 @@ def test_recursion_counts_middleware_nodes():
 
     result = graph.invoke({"messages": [("user", "check")]}, {"recursion_limit": 10})
 
-    assert _snapshots(result) == [{"step": 4, "limit": 10, "remaining": 6}]
+    assert _snapshots(result) == [{"limit": 10, "remaining": 6}]
 
 
 @pytest.mark.parametrize("mode", ["full", "delta"])
 @pytest.mark.parametrize("execution", ["sync", "async"])
-def test_new_turn_uses_fresh_budget_despite_cumulative_checkpoint_step(mode, execution):
+def test_new_turn_reports_fresh_budget_without_cumulative_checkpoint_step(mode, execution):
     graph = _graph([_status_call("first"), AIMessage(content="done"), _status_call("second"), AIMessage(content="done")], mode=mode, checkpointer=InMemorySaver())
     config = {"configurable": {"thread_id": "recursion-turns"}, "recursion_limit": 10}
     first = _invoke(graph, {"messages": [("user", "first")]}, config, execution)
     second = _invoke(graph, {"messages": [("user", "second")]}, dict(config, recursion_limit=5), execution)
 
-    assert _snapshots(first) == [{"step": 2, "limit": 10, "remaining": 8}]
-    assert _snapshots(second)[-1] == {"step": 7, "limit": 5, "remaining": 3}
+    assert _snapshots(first) == [{"limit": 10, "remaining": 8}]
+    assert _snapshots(second)[-1] == {"limit": 5, "remaining": 3}
 
 
 @pytest.mark.parametrize("mode", ["full", "delta"])
@@ -102,7 +102,7 @@ def test_resume_uses_live_budget_not_limit_minus_checkpoint_step(mode, execution
 
     # LangGraph grants a fresh invocation budget when resuming. Its native
     # RemainingSteps value can exceed the configured limit at the pending node.
-    assert _snapshots(resumed) == [{"step": 2, "limit": 5, "remaining": 6}]
+    assert _snapshots(resumed) == [{"limit": 5, "remaining": 6}]
 
 
 def test_read_only_status_does_not_bypass_recursion_exhaustion():
@@ -113,7 +113,7 @@ def test_read_only_status_does_not_bypass_recursion_exhaustion():
             for state in update.values():
                 snapshots.extend(_snapshots(state))
 
-    assert snapshots == [{"step": 2, "limit": 4, "remaining": 2}, {"step": 4, "limit": 4, "remaining": 0}]
+    assert snapshots == [{"limit": 4, "remaining": 2}, {"limit": 4, "remaining": 0}]
 
 
 def test_default_budget_comes_from_langgraph_instead_of_a_hardcoded_limit():
@@ -122,7 +122,7 @@ def test_default_budget_comes_from_langgraph_instead_of_a_hardcoded_limit():
 
     result = graph.invoke({"messages": [("user", "check")]})
 
-    assert _snapshots(result) == [{"step": 2, "limit": effective_limit, "remaining": effective_limit - 2}]
+    assert _snapshots(result) == [{"limit": effective_limit, "remaining": effective_limit - 2}]
 
 
 @pytest.mark.parametrize("execution", ["sync", "async"])
@@ -149,8 +149,8 @@ def test_nested_agent_reports_its_own_budget_without_changing_parent(execution):
     result = _invoke(parent, {"messages": [("user", "delegate then check")]}, {"recursion_limit": 12}, execution)
 
     child_result = next(message for message in result["messages"] if isinstance(message, ToolMessage) and message.name == "delegate_status")
-    assert json.loads(child_result.content) == [{"step": 2, "limit": 8, "remaining": 6}]
-    assert _snapshots(result) == [{"step": 4, "limit": 12, "remaining": 8}]
+    assert json.loads(child_result.content) == [{"limit": 8, "remaining": 6}]
+    assert _snapshots(result) == [{"limit": 12, "remaining": 8}]
 
 
 @pytest.mark.parametrize("config", [{}, {"recursion_limit": 10}, {"recursion_limit": 10, "metadata": {"langgraph_step": 2}, "configurable": {"recursion": {"remaining": 999}}}])
