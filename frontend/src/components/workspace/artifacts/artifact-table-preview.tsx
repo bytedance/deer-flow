@@ -185,9 +185,14 @@ function TablePreview({
                     </th>
                     {columns.map((column) => {
                       const value = row[column];
+                      // Count code points so a 120-code-point cell that ends in
+                      // an astral character stays inline instead of getting a
+                      // pointless expand control.
+                      const characters =
+                        value === undefined ? [] : Array.from(value);
                       const expandable =
                         value !== undefined &&
-                        (value.length > 120 || /[\r\n]/.test(value));
+                        (characters.length > 120 || /[\r\n]/.test(value));
                       return (
                         <td
                           key={column}

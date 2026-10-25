@@ -96,10 +96,11 @@ describe("ArtifactTablePreview", () => {
       ["00456", overflows],
     ];
     mount();
+    // 120 code points is inside the budget: no expand control at all.
+    expect(screen.getByRole("cell", { name: fits })).toBeTruthy();
     expect(
-      screen.getByRole("button", { name: "View cell: row 1, column 2" })
-        .textContent,
-    ).toBe(fits);
+      screen.queryByRole("button", { name: "View cell: row 1, column 2" }),
+    ).toBeNull();
     expect(
       screen.getByRole("button", { name: "View cell: row 2, column 2" })
         .textContent,
