@@ -14,7 +14,7 @@ import threading
 from contextlib import suppress
 from dataclasses import dataclass
 from functools import cached_property
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import NamedTuple
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
@@ -36,6 +36,69 @@ logger = logging.getLogger(__name__)
 DEFAULT_COMMAND_TIMEOUT_SECONDS = 600
 _COMMAND_CAPTURE_LIMIT_BYTES = 10 * 1024 * 1024
 _PIPE_DRAIN_JOIN_TIMEOUT_SECONDS = 0.2
+
+
+#: Script suffixes a host interpreter opens by path but the shared skill-package
+#: classifier does not list. ``awk -f``, ``sed -f``, ``lua``, ``Rscript``, and
+#: ``tclsh`` all read the file named on the command line, so container paths
+#: inside it need the same translation as ``.py``/``.sh``. The shared set is
+#: left alone: it also decides what SkillScan and the installer treat as
+#: package code, which is a separate contract from what the host shell runs.
+_INTERPRETER_SCRIPT_SUFFIXES = frozenset({".awk", ".lua", ".r", ".sed", ".tcl"})
+
+
+def _existing_regular_file_head(path: str) -> bytes:
+    """Return the first two bytes of an existing regular file, else ``b""``.
+
+    ``write_file(append=True)`` asks this for the interpreter line of an
+    extensionless destination. Only a regular file may be opened: opening a
+    FIFO for reading blocks until the other end connects, which would turn an
+    append that used to complete into a hang. ``O_NONBLOCK`` keeps the open
+    itself from waiting, and the ``fstat`` check rejects the handle before any
+    read.
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+    except OSError:
+        return b""
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return b""
+        return os.read(fd, 2)
+    except OSError:
+        return b""
+    finally:
+        with suppress(OSError):
+            os.close(fd)
+
+
+def _content_path_translation_applies(path: str, content: str, *, append: bool, resolved_path: str) -> bool:
+    """Whether container paths inside ``content`` are translated to host paths.
+
+    The translation exists so a script the agent wrote can run under a host
+    interpreter (PR #1935). Documents, data files, and configs are not
+    executed, so their bytes are stored verbatim: rewriting them put host
+    paths into deliverables while ``read_file`` masked the rewrite back to
+    virtual paths (#7461).
+
+    A suffix settles the classification by itself, so only an extensionless
+    destination is inspected for a shebang. That keeps named files free of
+    I/O and leaves an append to a pipe or device untouched.
+    """
+    from deerflow.skills.package_files import is_code_file, is_code_path
+
+    posix = PurePosixPath(path.replace("\\", "/"))
+    if is_code_path(path) or posix.suffix.lower() in _INTERPRETER_SCRIPT_SUFFIXES:
+        return True
+    if posix.suffix:
+        # A non-script suffix settles it: a shebang cannot make ``.md`` a program.
+        return False
+    head = content[:2].encode("utf-8", "surrogatepass")
+    if append and not head.startswith(b"#!"):
+        # An extensionless script's interpreter line sits at the top of the
+        # existing file, not in the text being appended.
+        head = _existing_regular_file_head(resolved_path) or head
+    return is_code_file(path, head)
 
 
 def _publish_file_revision(path: str, content: str) -> None:
@@ -1237,9 +1300,11 @@ class LocalSandbox(Sandbox):
             dir_path = os.path.dirname(resolved_path)
             if dir_path:
                 os.makedirs(dir_path, exist_ok=True)
-            # Resolve container paths in content to local paths
-            # using the content-specific resolver (forward-slash safe)
-            resolved_content = self._resolve_paths_in_content(content)
+            # Resolve container paths in content to local paths, but only for
+            # executable content: a script needs host-resolvable paths when
+            # bash runs it, while a document's bytes must survive the write.
+            translate_paths = _content_path_translation_applies(path, content, append=append, resolved_path=resolved_path)
+            resolved_content = self._resolve_paths_in_content(content) if translate_paths else content
             if append or sys.platform not in {"darwin", "linux"}:
                 # Other hosts retain their existing write/ACL semantics.
                 with open(resolved_path, "a" if append else "w", encoding="utf-8", newline="") as f:
