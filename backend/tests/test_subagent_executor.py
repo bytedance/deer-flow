@@ -7014,3 +7014,140 @@ async def test_deferred_cleanup_expiry_registers_removal_after_fence_opens(class
         assert executor_module.get_background_task_result(execution_id) is None
     finally:
         executor_module.force_cleanup_background_task(execution_id)
+
+
+class TestSubagentCancellationLifecycle:
+    @pytest.fixture
+    def lifecycle(self):
+        from deerflow.extensions.registry import ExtensionRegistry
+
+        starts, stops = [], []
+
+        async def on_start(app_store, task_store, info):
+            starts.append(info)
+
+        async def on_stop(app_store, task_store, info, outcome):
+            stops.append((info, outcome))
+
+        registry = ExtensionRegistry()
+        with registry.attributed_to("test:lifecycle"):
+            registry.task_lifecycle(SimpleNamespace(on_task_start=on_start, on_task_stop=on_stop))
+        return SimpleNamespace(extensions=registry.build(), starts=starts, stops=stops)
+
+    @pytest.mark.parametrize("mode", ["setup_cancel", "stream_cancel", "cooperative", "success", "failure", "timeout"])
+    def test_background_outcome_matches_terminal_status(self, classes, base_config, lifecycle, monkeypatch, mode):
+        from dataclasses import replace
+
+        from deerflow_extension_api import TaskOutcome
+
+        from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
+        from deerflow.subagents.capacity import SubagentExecutionCapacity
+
+        module = importlib.import_module("deerflow.subagents.executor")
+        entered = threading.Event()
+        cooperative_cancel = threading.Event()
+        closed = threading.Event()
+        capacity = SubagentExecutionCapacity(SubagentRuntimeConfig(max_running=1))
+
+        async def initial_state(task):
+            if mode == "setup_cancel":
+                entered.set()
+                await asyncio.Event().wait()
+            return {}, [], None
+
+        async def stream(*args, **kwargs):
+            try:
+                entered.set()
+                if mode in {"stream_cancel", "timeout"}:
+                    await asyncio.Event().wait()
+                elif mode == "cooperative":
+                    while not cooperative_cancel.is_set():
+                        await asyncio.sleep(0.001)
+                elif mode == "failure":
+                    raise RuntimeError("synthetic execution failure")
+                yield {"messages": [classes["AIMessage"](content="done")]}
+            finally:
+                closed.set()
+
+        config = replace(base_config, timeout_seconds=0.2 if mode == "timeout" else 10)
+        executor = classes["SubagentExecutor"](config=config, tools=[], thread_id="thread", run_id="run", extensions=lifecycle.extensions, execution_capacity=capacity)
+        monkeypatch.setattr(executor, "_build_initial_state", initial_state)
+        monkeypatch.setattr(executor, "_create_agent", AsyncMock(return_value=SimpleNamespace(astream=stream)))
+        monkeypatch.setattr(module, "build_tracing_callbacks", lambda: [])
+        monkeypatch.setattr(module, "inject_langfuse_metadata", lambda *args, **kwargs: None)
+        execution_id = executor.execute_async("synthetic lifecycle task")
+        result = module.get_background_task_result(execution_id)
+        try:
+            assert entered.wait(timeout=5)
+            if mode in {"setup_cancel", "stream_cancel"}:
+                module.request_cancel_background_task(execution_id)
+            elif mode == "cooperative":
+                result.cancel_event.set()
+                cooperative_cancel.set()
+            deadline = time.monotonic() + 5
+            while not (result.status.is_terminal and result.execution_done_event.is_set()) and time.monotonic() < deadline:
+                time.sleep(0.001)
+            expected_status, expected_outcome = {
+                "success": (classes["SubagentStatus"].COMPLETED, TaskOutcome.COMPLETED),
+                "failure": (classes["SubagentStatus"].FAILED, TaskOutcome.FAILED),
+                "timeout": (classes["SubagentStatus"].TIMED_OUT, TaskOutcome.FAILED),
+            }.get(mode, (classes["SubagentStatus"].CANCELLED, TaskOutcome.ABORTED))
+            assert result.status is expected_status
+            assert result.execution_done_event.is_set()
+            assert capacity.snapshot().running == 0
+            assert mode == "setup_cancel" or closed.is_set()
+            assert len(lifecycle.starts) == 1
+            assert lifecycle.stops == [(lifecycle.starts[0], expected_outcome)]
+        finally:
+            cooperative_cancel.set()
+            module.request_cancel_background_task(execution_id)
+            module._shutdown_isolated_subagent_loop()
+            module.cleanup_background_task(execution_id)
+        assert module.get_background_task_result(execution_id) is None
+
+    @pytest.mark.anyio
+    async def test_direct_cancellation_drains_stream_before_notification(self, classes, base_config, lifecycle, monkeypatch):
+        from deerflow_extension_api import TaskOutcome
+
+        from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
+        from deerflow.subagents.capacity import SubagentExecutionCapacity
+
+        entered, closing, release_close = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        capacity = SubagentExecutionCapacity(SubagentRuntimeConfig(max_running=1))
+
+        class Stream:
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                entered.set()
+                await asyncio.Event().wait()
+
+            async def aclose(self):
+                closing.set()
+                await release_close.wait()
+
+        executor = classes["SubagentExecutor"](config=base_config, tools=[], run_id="run", extensions=lifecycle.extensions, execution_capacity=capacity)
+        monkeypatch.setattr(executor, "_build_initial_state", AsyncMock(return_value=({}, [], None)))
+        monkeypatch.setattr(executor, "_create_agent", AsyncMock(return_value=SimpleNamespace(astream=lambda *args, **kwargs: Stream())))
+        holder = classes["SubagentResult"](task_id="cancel", trace_id="trace", status=classes["SubagentStatus"].PENDING)
+        task = asyncio.create_task(executor._aexecute("synthetic task", holder))
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=5)
+            task.cancel()
+            await asyncio.wait_for(closing.wait(), timeout=5)
+            task.cancel()
+            await asyncio.sleep(0)
+            assert not task.done()
+            assert not holder.status.is_terminal
+            assert not holder.execution_done_event.is_set()
+            assert capacity.snapshot().running == 1
+            assert lifecycle.stops == []
+        finally:
+            release_close.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        assert holder.status is classes["SubagentStatus"].CANCELLED
+        assert holder.execution_done_event.is_set()
+        assert capacity.snapshot().running == 0
+        assert lifecycle.stops == [(lifecycle.starts[0], TaskOutcome.ABORTED)]

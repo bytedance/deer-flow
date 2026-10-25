@@ -46,7 +46,9 @@ citation references, and opaque base64/URL/image sources.
 
 **Interrupted usage**: After stream cleanup, publish the collector's final
 snapshot on cancellation/timeout; callbacks can precede values chunks.
-`execute_async()` owns terminalization; `SubagentResult` guards first write.
+Cancellation terminalizes before task-stop notification and still propagates;
+`execute_async()` owns hard timeouts. `SubagentResult` guards first write, so
+late cancellation cannot replace a timeout. Stream cleanup precedes notification.
 Parent journals deduplicate by `source_run_id`; batch writes need a live lease.
 
 **Durable batch acceptance**: Normalize optional `batch_task` criteria before

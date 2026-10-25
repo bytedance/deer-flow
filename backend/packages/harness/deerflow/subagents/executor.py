@@ -2068,6 +2068,18 @@ class SubagentExecutor:
                         tool_receipts=terminal_receipts(),
                     )
 
+        except asyncio.CancelledError:
+            # The outer background wrapper observes cancellation only after this
+            # function's task-stop hook. Publish it here so observers see ABORTED;
+            # a previously published hard timeout still wins the terminal race.
+            result.try_set_terminal(
+                SubagentStatus.CANCELLED,
+                error="Cancelled by user",
+                token_usage_records=collector.snapshot_records() if collector is not None else None,
+                tool_receipts=terminal_receipts(),
+            )
+            raise
+
         except Exception as e:
             logger.exception(f"[trace={self.trace_id}] Subagent {self.config.name} async execution failed")
             result.try_set_terminal(
@@ -2078,11 +2090,9 @@ class SubagentExecutor:
             )
 
         finally:
-            # Cancellation (including wait_for's execution timeout) bypasses
-            # the terminal branches above. A completed model response can be
-            # in the collector before its graph node publishes a values chunk.
-            # Stream teardown has drained at this point; publish its final
-            # usage before the outer wrapper chooses CANCELLED or TIMED_OUT.
+            # A completed model response can be in the collector before its
+            # graph node publishes a values chunk. Publish final usage after
+            # stream teardown, including cancellation and hard-timeout cleanup.
             if collector is not None:
                 result.update_token_usage_records(collector.snapshot_records())
             if execution_context is not None:
