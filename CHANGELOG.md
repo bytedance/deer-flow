@@ -1397,6 +1397,12 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
 
 ### Fixed
 
+- **frontend:** SSO sign-ins now return to the page that asked for them, such
+  as a shared chat link, instead of always opening the default workspace. The
+  sign-in pages used to send every signed-in request to `/workspace`, which
+  dropped the `next` path of `/auth/callback?next=...`. A signed-in visit to
+  `/login?next=...` lost its target the same way. ([#7467])
+
 - **frontend:** Accounts whose email the backend accepted but the frontend's
   stricter pattern did not (for example `a&b@example.com`, `a@b.c` or a
   Unicode address) now get the normal workspace. Their sessions used to show
@@ -13076,3 +13082,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7400]: https://github.com/bytedance/deer-flow/pull/7400
 [#7410]: https://github.com/bytedance/deer-flow/pull/7410
 [#7449]: https://github.com/bytedance/deer-flow/pull/7449
+[#7467]: https://github.com/bytedance/deer-flow/pull/7467

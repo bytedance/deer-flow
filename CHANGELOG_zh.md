@@ -1112,6 +1112,11 @@
 
 ### 修复
 
+- **前端：** SSO 登录后现在会回到发起登录的页面（例如分享的对话链接），不再总是打开
+  默认工作区。此前登录相关页面会把所有已登录的请求都跳转到 `/workspace`，导致
+  `/auth/callback?next=...` 中的 `next` 路径丢失；已登录时访问 `/login?next=...`
+  也会同样丢失目标页面。([#7467])
+
 - **前端：** 后端接受、但前端更严格的格式检查不接受的邮箱账号（如
   `a&b@example.com`、`a@b.c` 或含 Unicode 的地址）现在可以正常进入工作区。此前这些
   账号的会话会显示网关离线界面，且只要存在一个这样的账号，所有管理员的
@@ -10438,3 +10443,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7400]: https://github.com/bytedance/deer-flow/pull/7400
 [#7410]: https://github.com/bytedance/deer-flow/pull/7410
 [#7449]: https://github.com/bytedance/deer-flow/pull/7449
+[#7467]: https://github.com/bytedance/deer-flow/pull/7467
