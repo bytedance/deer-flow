@@ -59,8 +59,9 @@ def _unlink_document_file(path: Path) -> None:
     Windows refuses ``unlink`` on a read-only file (``WinError 5``) where POSIX
     needs only a writable parent, so a restored archive or a mode-preserving
     sync leaves the trashed document unpurgeable. ``FileNotFoundError`` counts
-    as already removed (§8.3); any other error propagates so the purge
-    transaction rolls back and keeps the row retryable.
+    as already removed (§8.3), including during the retry. Attribute changes
+    skip symlinks so their targets keep their permissions. Any other error
+    propagates so the purge transaction rolls back and keeps the row retryable.
     """
     try:
         path.unlink()
@@ -68,10 +69,12 @@ def _unlink_document_file(path: Path) -> None:
         return
     except PermissionError:
         try:
-            path.chmod(path.stat().st_mode | stat.S_IWRITE)
+            mode = path.lstat().st_mode
+            if not stat.S_ISLNK(mode):
+                path.chmod(mode | stat.S_IWRITE)
+            path.unlink()
         except FileNotFoundError:
             return
-        path.unlink()
 
 
 def _unlink_document_files(paths: Paths, *, user_id: str, row: dict) -> None:
