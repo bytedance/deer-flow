@@ -234,6 +234,30 @@ class TestConsoleUsage:
         assert data["by_model"]["qwen"]["tokens"] == 70
         # Legacy row (empty token_usage_by_model) falls back to model_name
         assert data["by_model"]["gpt-x"]["tokens"] == 50
+        assert data["by_model"]["gpt-x"]["input_tokens"] == 50
+
+    @pytest.mark.parametrize("legacy_usage", [{}, None], ids=["empty-map", "null-map"])
+    @pytest.mark.parametrize("legacy_input_tokens", [0, 50])
+    def test_legacy_input_tokens_accumulate_with_model_usage(self, client, session_factory, legacy_usage, legacy_input_tokens):
+        async def _update_legacy_run() -> None:
+            async with session_factory() as session:
+                row = await session.get(RunRow, "r3")
+                row.model_name = "minimax-m2"
+                row.token_usage_by_model = legacy_usage
+                row.total_input_tokens = legacy_input_tokens
+                row.total_output_tokens = 50 - legacy_input_tokens
+                await session.commit()
+
+        asyncio.run(_update_legacy_run())
+        response = client.get("/api/console/usage", params={"days": 14})
+        assert response.status_code == 200
+        data = response.json()
+        model = data["by_model"]["minimax-m2"]
+        assert model["input_tokens"] == 1000 + legacy_input_tokens
+        assert model["tokens"] == 1550
+        assert model["runs"] == 3
+        assert model["cache_read_tokens"] == 500
+        assert sum(day["input_tokens"] for day in data["days"]) == sum(entry["input_tokens"] for entry in data["by_model"].values())
 
     def test_window_excludes_old_rows_but_stats_include_them(self, client):
         usage = client.get("/api/console/usage", params={"days": 7}).json()
