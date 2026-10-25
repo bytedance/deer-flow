@@ -1578,6 +1578,10 @@ view. Built-in and user-created/imported skills are listed separately. The
 Community tab supports importing `.skill` archives into My skills.
 General preferences remain in Settings.
 
+The **ppt-generation** skill applies photo EXIF orientation before fitting and
+embedding slide images, so rotated or mirrored photos retain their displayed
+orientation.
+
 The **ppt-generation** skill preserves transparent slide images when composing a presentation, including grayscale and palette PNG transparency.
 
 Administrators can see **Could not load** warnings in Capability Center > Skills
