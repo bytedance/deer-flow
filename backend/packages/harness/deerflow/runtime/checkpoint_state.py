@@ -114,6 +114,7 @@ class CheckpointStateAccessor:
     graph: Any
     checkpointer: Any
     mode: CheckpointChannelMode
+    direct_namespace: bool = False
 
     @classmethod
     def bind(
@@ -123,11 +124,12 @@ class CheckpointStateAccessor:
         *,
         store: Any | None = None,
         mode: CheckpointChannelMode = "full",
+        direct_namespace: bool = False,
     ) -> CheckpointStateAccessor:
         graph.checkpointer = checkpointer
         if store is not None:
             graph.store = store
-        return cls(graph=graph, checkpointer=checkpointer, mode=mode)
+        return cls(graph=graph, checkpointer=checkpointer, mode=mode, direct_namespace=direct_namespace)
 
     def _prepare_config(self, config: dict[str, Any]) -> dict[str, Any]:
         prepared = {
@@ -135,6 +137,15 @@ class CheckpointStateAccessor:
             "configurable": dict(config.get("configurable", {})),
             "metadata": dict(config.get("metadata", {})),
         }
+        if self.direct_namespace and prepared["configurable"].get("checkpoint_ns"):
+            # A state-only mutation graph has no subgraphs to delegate to. Bind
+            # the saver explicitly so LangGraph reads/writes this namespace on
+            # the graph itself, including when reading back an updated config.
+            # This private key is verified against LangGraph 1.2.9; recheck it
+            # when upgrading LangGraph because its internal location may move.
+            from langgraph._internal._constants import CONFIG_KEY_CHECKPOINTER
+
+            prepared["configurable"][CONFIG_KEY_CHECKPOINTER] = self.checkpointer
         inject_checkpoint_mode(prepared, self.mode)
         return prepared
 

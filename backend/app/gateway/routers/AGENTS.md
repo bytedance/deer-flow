@@ -1,5 +1,14 @@
 # Router contracts
 
+Branch metadata inherits valid `assistant_id` values verbatim. Validate with
+`custom_agent_name` and clear invalid legacy values to null in the new row;
+leave the source record unchanged.
+
+Console usage attributes legacy rows without a per-model usage map to
+`model_name`, including their recorded `total_input_tokens`. Accumulate those
+inputs with newer usage buckets for the same model; do not infer cache hits.
+Regression coverage lives in `tests/test_console_router.py`.
+
 Shared scheduled-task update validation preserves an unchanged future `once`
 instant on a live task inside `scheduler.min_once_delay_seconds`; new/changed
 instants and terminal reactivation still enforce the minimum delay.
@@ -66,3 +75,16 @@ external filesystem writers do not participate in this history guarantee.
 Plugin actions stamp `ActionContext.interaction=session` only from authenticated
 session provenance. Never accept it from payloads or propagate it to model tools;
 extensions use it to distinguish owner review from model/tool output.
+
+Skill archive upload copies (`_copy_uploaded_skill_archive`) report the original
+size-limit or read error when temporary cleanup or its warning log fails.
+Successful copies still return the uploaded bytes unchanged. The upload route's
+`finally` discards that archive through the same helper before closing the
+multipart form. Form close is suppressed, so a close, cleanup, or warning
+failure cannot turn a successful install into a 500, replace an install
+error, or skip the discard. Coverage: `tests/test_skill_archive_upload_cleanup.py`.
+
+State updates synchronize titles into thread metadata only for the root checkpoint
+namespace. Nonroot writes preserve the conversation title, branch-title sequence
+and activity timestamp. `tests/test_threads_router.py` checks metadata/search
+isolation and root title synchronization in full and delta modes.

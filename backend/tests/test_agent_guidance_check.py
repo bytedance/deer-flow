@@ -10,6 +10,7 @@ CHECKER_PATH = REPO_ROOT / "scripts" / "check_agent_guidance.py"
 EXPECTED_GUIDANCE_PATHS = {
     "AGENTS.md",
     "skills/public/data-analysis/AGENTS.md",
+    "skills/public/video-generation/AGENTS.md",
     "backend/AGENTS.md",
     "backend/tests/AGENTS.md",
     "frontend/AGENTS.md",
@@ -53,12 +54,15 @@ EXPECTED_GUIDANCE_PATHS = {
     "backend/packages/harness/deerflow/uploads/AGENTS.md",
     "backend/packages/harness/deerflow/utils/AGENTS.md",
     "frontend/src/AGENTS.md",
+    "frontend/src/components/workspace/browser-view/AGENTS.md",
     "frontend/src/core/memory/AGENTS.md",
     "frontend/tests/e2e/AGENTS.md",
     "scripts/AGENTS.md",
     "examples/deerflow-extension-agent-teams/AGENTS.md",
     "examples/deerflow-extension-workflows/AGENTS.md",
     "examples/deerflow-extension-weknora/AGENTS.md",
+    "examples/deerflow-extension-knowledge-management/AGENTS.md",
+    "examples/deerflow-extension-knowledge-platform/AGENTS.md",
     "examples/deerflow-extension-lightrag/AGENTS.md",
 }
 

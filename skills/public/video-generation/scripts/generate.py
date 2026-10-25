@@ -1,5 +1,6 @@
 import base64
 import os
+import sys
 import time
 
 import requests
@@ -16,10 +17,7 @@ def _resolve_provider(override_env: str, existing_provider: str, has_existing_cr
         return existing_provider
     if os.getenv("MINIMAX_API_KEY"):
         return "minimax"
-    raise ValueError(
-        f"No credentials found. Set GEMINI_API_KEY for {existing_provider}, "
-        f"or MINIMAX_API_KEY for minimax (optionally force with {override_env})."
-    )
+    raise ValueError(f"No credentials found. Set GEMINI_API_KEY for {existing_provider}, or MINIMAX_API_KEY for minimax (optionally force with {override_env}).")
 
 
 def _minimax_host() -> str:
@@ -41,13 +39,18 @@ def _check_base_resp(payload: dict) -> None:
 
 def _guess_mime(image_path: str) -> str:
     ext = os.path.splitext(image_path)[1].lower()
-    return {
+    mime_types = {
         ".png": "image/png",
         ".webp": "image/webp",
         ".gif": "image/gif",
         ".jpg": "image/jpeg",
         ".jpeg": "image/jpeg",
-    }.get(ext, "image/jpeg")
+    }
+    try:
+        return mime_types[ext]
+    except KeyError:
+        supported = ", ".join(mime_types)
+        raise ValueError(f"Unsupported reference image extension for {image_path!r}. Supported extensions: {supported}") from None
 
 
 def _to_data_url(image_path: str) -> str:
@@ -56,8 +59,7 @@ def _to_data_url(image_path: str) -> str:
     return f"data:{_guess_mime(image_path)};base64,{b64}"
 
 
-def _poll_video_task(host: str, auth: str, task_id: str,
-                     max_attempts: int = 120, interval: int = 3) -> str:
+def _poll_video_task(host: str, auth: str, task_id: str, max_attempts: int = 120, interval: int = 3) -> str:
     for _ in range(max_attempts):
         response = requests.get(
             f"{host}/v1/query/video_generation",
@@ -72,10 +74,7 @@ def _poll_video_task(host: str, auth: str, task_id: str,
             return payload["file_id"]
         if status == "Fail":
             base = payload.get("base_resp") or {}
-            raise Exception(
-                f"MiniMax video task {task_id} failed: "
-                f"{base.get('status_code')} {base.get('status_msg')}"
-            )
+            raise Exception(f"MiniMax video task {task_id} failed: {base.get('status_code')} {base.get('status_msg')}")
         # Surface query-level errors (bad task_id, auth) that arrive as a non-zero
         # base_resp without a terminal status, then keep polling.
         _check_base_resp(payload)
@@ -104,12 +103,10 @@ def _download(url: str, output_file: str) -> None:
         f.write(response.content)
 
 
-def _generate_video_minimax(
-    prompt: str, reference_images: list[str], output_file: str
-) -> str:
+def _generate_video_minimax(prompt: str, reference_images: list[str], output_file: str) -> str:
     minimax_api_key = os.getenv("MINIMAX_API_KEY")
     if not minimax_api_key:
-        return "MINIMAX_API_KEY is not set"
+        raise ValueError("MINIMAX_API_KEY is not set")
     host = _minimax_host()
     auth = f"Bearer {minimax_api_key}"
     body = {"model": os.getenv("MINIMAX_VIDEO_MODEL", "MiniMax-Hailuo-2.3"), "prompt": prompt}
@@ -142,9 +139,7 @@ def download(url: str, output_file: str) -> None:
         f.write(response.content)
 
 
-def _generate_video_gemini(
-    prompt: str, reference_images: list[str], output_file: str, aspect_ratio: str = "16:9"
-) -> str:
+def _generate_video_gemini(prompt: str, reference_images: list[str], output_file: str, aspect_ratio: str = "16:9") -> str:
     reference_payload = []
     request_json = {
         "instances": [{"prompt": prompt}],
@@ -153,15 +148,12 @@ def _generate_video_gemini(
     for reference_image in reference_images:
         with open(reference_image, "rb") as f:
             image_b64 = base64.b64encode(f.read()).decode("utf-8")
-        reference_payload.append(
-            {"image": {"mimeType": "image/jpeg", "bytesBase64Encoded": image_b64},
-             "referenceType": "asset"}
-        )
+        reference_payload.append({"image": {"mimeType": _guess_mime(reference_image), "bytesBase64Encoded": image_b64}, "referenceType": "asset"})
     if reference_payload:
         request_json["instances"][0]["referenceImages"] = reference_payload
     gemini_api_key = os.getenv("GEMINI_API_KEY")
     if not gemini_api_key:
-        return "GEMINI_API_KEY is not set"
+        raise ValueError("GEMINI_API_KEY is not set")
     response = requests.post(
         "https://generativelanguage.googleapis.com/v1beta/models/veo-3.1-generate-preview:predictLongRunning",
         headers={"x-goog-api-key": gemini_api_key, "Content-Type": "application/json"},
@@ -193,18 +185,14 @@ def generate_video(
     output_file: str,
     aspect_ratio: str = "16:9",
 ) -> str:
-    with open(prompt_file, "r", encoding="utf-8") as f:
+    with open(prompt_file, encoding="utf-8") as f:
         prompt = f.read()
-    provider = _resolve_provider(
-        "VIDEO_GENERATION_PROVIDER", "gemini", bool(os.getenv("GEMINI_API_KEY"))
-    )
+    provider = _resolve_provider("VIDEO_GENERATION_PROVIDER", "gemini", bool(os.getenv("GEMINI_API_KEY")))
     if provider == "minimax":
         # MiniMax video uses resolution/duration, not aspect_ratio; aspect_ratio ignored.
         return _generate_video_minimax(prompt, reference_images, output_file)
     if provider in ("gemini", "google"):
-        return _generate_video_gemini(
-            prompt, reference_images, output_file, aspect_ratio
-        )
+        return _generate_video_gemini(prompt, reference_images, output_file, aspect_ratio)
     raise ValueError(f"Unknown video provider: {provider!r} (use 'gemini' or 'minimax')")
 
 
@@ -213,15 +201,13 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Generate videos using Gemini or MiniMax API")
     parser.add_argument("--prompt-file", required=True, help="Absolute path to JSON prompt file")
-    parser.add_argument("--reference-images", nargs="*", default=[],
-                        help="Absolute paths to reference images (space-separated)")
+    parser.add_argument("--reference-images", nargs="*", default=[], help="Absolute paths to reference images (space-separated)")
     parser.add_argument("--output-file", required=True, help="Output path for generated video")
-    parser.add_argument("--aspect-ratio", required=False, default="16:9",
-                        help="Aspect ratio of the generated video (Gemini only)")
+    parser.add_argument("--aspect-ratio", required=False, default="16:9", help="Aspect ratio of the generated video (Gemini only)")
     args = parser.parse_args()
 
     try:
-        print(generate_video(args.prompt_file, args.reference_images,
-                             args.output_file, args.aspect_ratio))
+        print(generate_video(args.prompt_file, args.reference_images, args.output_file, args.aspect_ratio))
     except Exception as e:
-        print(f"Error while generating video: {e}")
+        print(f"Error while generating video: {e}", file=sys.stderr)
+        sys.exit(1)

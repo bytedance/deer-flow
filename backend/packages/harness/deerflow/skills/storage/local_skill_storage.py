@@ -17,6 +17,7 @@ from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.skills.permissions import make_skill_written_path_sandbox_readable
 from deerflow.skills.storage.skill_storage import SKILL_MD_FILE, SkillStorage, walk_skill_directories
 from deerflow.skills.types import SkillCategory
+from deerflow.utils.atomic_write import cleanup_failed_atomic_write
 from deerflow.utils.file_lock import replace_with_retry
 
 logger = logging.getLogger(__name__)
@@ -116,7 +117,7 @@ class LocalSkillStorage(SkillStorage):
                 make_skill_written_path_sandbox_readable(self.get_custom_skill_dir(name), target)
             finally:
                 if tmp_path is not None:
-                    tmp_path.unlink(missing_ok=True)
+                    cleanup_failed_atomic_write(tmp_path)
 
     def remove_custom_skill_file(self, name: str, relative_path: str) -> str | None:
         removal = ((SkillCategory.CUSTOM, Path(name)),)

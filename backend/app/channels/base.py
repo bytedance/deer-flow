@@ -140,6 +140,13 @@ class Channel(ABC):
     async def stop(self) -> None:
         """Gracefully stop the channel."""
 
+    def on_thread_replaced(self, old_thread_id: str) -> None:
+        """Notify the adapter that a conversation's thread was replaced (e.g. ``/new``).
+
+        Subclasses override this to clean up per-thread state such as pending
+        interactive card registrations.  The default is a no-op.
+        """
+
     # -- outbound ----------------------------------------------------------
 
     @abstractmethod

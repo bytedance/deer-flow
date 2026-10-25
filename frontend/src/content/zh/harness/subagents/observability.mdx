@@ -63,7 +63,7 @@ GET /api/threads/{thread_id}/runs/{run_id}/events?event_types=subagent.step&task
 | 键                            | 说明                                                    |
 | ----------------------------- | ------------------------------------------------------- |
 | `subagent_status`             | 五个终态之一                                            |
-| `subagent_stop_reason`        | `token_capped` / `turn_capped` / `loop_capped`，可缺省  |
+| `subagent_stop_reason`        | `token_capped` / `turn_capped` / `loop_capped` / `model_length_capped`，可缺省 |
 | `subagent_error`              | 非 `completed` 时的错误文本，最多 2,000 字符            |
 | `subagent_result_brief`       | `completed` 时的结果摘要，最多 2,000 字符               |
 | `subagent_result_sha256`      | 完整结果的 SHA-256                                      |

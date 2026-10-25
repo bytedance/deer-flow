@@ -45,6 +45,11 @@ export const enUS: Translations = {
         description:
           "Save versioned Agent workflows, resume within the same Gateway process and review exact retained output versions. No restart replay or hard monetary budget.",
       },
+      reportSections: {
+        title: "Sectioned long-form writing",
+        description:
+          "Write long reports section by section and assemble them into a downloadable Markdown document.",
+      },
       agentTeams: {
         title: "Agent teams",
         description:
@@ -84,6 +89,16 @@ export const enUS: Translations = {
         title: "LightRAG",
         description:
           "Retrieve documents and entity relations from LightRAG with shared source citations.",
+      },
+      knowledgePlatform: {
+        title: "Knowledge spaces and connections",
+        description:
+          "Manage hierarchical spaces, resource sharing and inherited policies with explicit administrator grants. Requires installation and configuration; no management page or global retrieval ACL is included.",
+      },
+      knowledgeManagement: {
+        title: "Knowledge ingestion and processing",
+        description:
+          "Ingest files, URLs and text through WeKnora and manage processing with explicit administrator grants. Requires installation and configuration; no management page is included.",
       },
       weknora: {
         title: "WeKnora knowledge retrieval",
@@ -245,6 +260,15 @@ export const enUS: Translations = {
     showBrowser: "Open browser panel",
   },
 
+  browserStream: {
+    connecting: "Connecting…",
+    disconnected: "Disconnected",
+    handshakeTimeout:
+      "Live browser connection timed out. Check your network or proxy, then turn Live off and on to retry.",
+    connectionFailed:
+      "Live browser connection failed or closed. Check your connection and access permissions, then turn Live off and on to retry.",
+  },
+
   skillUsage: {
     used: "Skills used",
     title: "Skills",
@@ -276,6 +300,11 @@ export const enUS: Translations = {
   home: {
     docs: "Docs",
     blog: "Blog",
+    searchDocs: "Search docs…",
+    searchDocsLabel: "Search documentation",
+    searchNoResults: "No results. Try fewer or different words.",
+    searchLoadFailed: "Search is unavailable right now.",
+    searchLoading: "Loading…",
   },
 
   // Welcome
@@ -1708,6 +1737,9 @@ export const enUS: Translations = {
   // Tool calls
   toolCalls: {
     details: "Tool details",
+    failed: "Failed",
+    scheduleTaskPending: "Scheduled task operation",
+    stopScheduledTaskPending: "Pause this scheduled task",
     toolName: "Tool name",
     callId: "Call ID",
     input: "Input",
@@ -2533,6 +2565,10 @@ export const enUS: Translations = {
         "SSO login is not allowed for your account. Contact your administrator.",
       account_disabled:
         "This account has been disabled. Contact your administrator.",
+      invalid_email: "Please enter a valid email address.",
+      password_too_short: "Password must be at least 6 characters.",
+      registration_password_too_short:
+        "Password must be at least 8 characters.",
     },
   },
 };

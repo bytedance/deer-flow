@@ -63,7 +63,7 @@ The terminal `ToolMessage` of a `task` carries these keys in `additional_kwargs`
 | Key                           | Meaning                                                    |
 | ----------------------------- | ---------------------------------------------------------- |
 | `subagent_status`             | One of the five terminal statuses                          |
-| `subagent_stop_reason`        | `token_capped` / `turn_capped` / `loop_capped`, optional   |
+| `subagent_stop_reason`        | `token_capped` / `turn_capped` / `loop_capped` / `model_length_capped`, optional |
 | `subagent_error`              | Error text for non-`completed` results, up to 2,000 characters |
 | `subagent_result_brief`       | Result brief for `completed`, up to 2,000 characters       |
 | `subagent_result_sha256`      | SHA-256 of the full result                                 |

@@ -1841,22 +1841,26 @@ class DeerFlowClient:
                     skipped_files.append(dest_name)
                     continue
                 invalidate_overwritten_upload(dest)
+                # Same-name collisions land under the next free ``_N`` suffix;
+                # report the name the bytes actually landed under, never the
+                # requested one (issue #3750).
+                resolved_name = dest.name
 
                 info: dict[str, Any] = {
-                    "filename": dest_name,
+                    "filename": resolved_name,
                     "size": dest.stat().st_size,
                     "path": str(dest),
-                    "virtual_path": upload_virtual_path(dest_name),
-                    "artifact_url": upload_artifact_url(thread_id, dest_name),
+                    "virtual_path": upload_virtual_path(resolved_name),
+                    "artifact_url": upload_artifact_url(thread_id, resolved_name),
                 }
-                if dest_name != src_path.name:
+                if resolved_name != src_path.name:
                     info["original_filename"] = src_path.name
 
                 if src_path.suffix.lower() in CONVERTIBLE_EXTENSIONS:
                     # Reserve companion .md name before convert so two stems
                     # that collapse to the same .md (or a prior .md upload)
                     # cannot silently overwrite each other.
-                    provisional_md_name = Path(dest_name).with_suffix(".md").name
+                    provisional_md_name = Path(resolved_name).with_suffix(".md").name
                     unique_md_name = claim_unique_filename(provisional_md_name, seen_names)
                     try:
                         # Convert the same private capture used to publish the

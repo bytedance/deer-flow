@@ -16,6 +16,7 @@ from deerflow.persistence.managed_subagents.base import (
     ManagedSubagentStore,
     normalize_managed_subagent_name,
 )
+from deerflow.utils.atomic_write import cleanup_failed_atomic_write
 
 logger = logging.getLogger(__name__)
 _write_lock = threading.RLock()
@@ -97,4 +98,4 @@ class FileManagedSubagentStore(ManagedSubagentStore):
             tmp_path = None
         finally:
             if tmp_path is not None:
-                tmp_path.unlink(missing_ok=True)
+                cleanup_failed_atomic_write(tmp_path)
