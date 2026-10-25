@@ -277,6 +277,7 @@ export function buildThreadSubmitMessages({
  * attached them, and never from local settings. A stray key in settings is
  * dropped rather than forwarded, so a stale value can never grant access.
  * `client_timezone` carries the browser's zone (scheduled-task default only).
+ * `locale` carries the live UI language and overrides any saved value.
  */
 export function buildRunContext({
   settings,

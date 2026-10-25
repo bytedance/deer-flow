@@ -375,6 +375,9 @@ language requests take precedence. Unsupported values are ignored. The value
 is runtime-only and is not a checkpoint `configurable` default; legacy
 `config.context.locale` is also validated, with an explicit null/invalid
 top-level value clearing it. Omitting a locale retains language inference.
+Scheduled runs and MCP task notification runs currently omit this preference;
+the owner's saved locale localizes scheduled IM notices only, not those runs'
+replies or memory writes.
 
 A custom client can describe what it can display under top-level
 `context.client`, so the agent and its skills can choose an output shape that

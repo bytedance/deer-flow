@@ -206,6 +206,10 @@ and an explicit invalid/null top-level value clears a legacy preference. Treat
 `_normalize_input_messages` rejects canonical external system/developer roles;
 only `AUTH_SOURCE_INTERNAL` run input may retain them.
 
+`contracts/ui_locales.v1.json` pins the UI/Gateway locale allowlists in tests;
+DeerMem's portable map stays separate. Scheduled/MCP notification runs omit
+locale; persisted owner locale is used for scheduled IM notices only.
+
 ## Development Workflow
 
 ### Test-Driven Development (TDD) — MANDATORY

@@ -2991,6 +2991,8 @@ and new automatic DeerMem facts and summary updates on subsequent chat turns and
 replays. Explicit user language requests take precedence. Existing memories are
 not bulk translated, and other memory backends retain their own language policy.
 Model-native reasoning text may still use another language.
+Scheduled runs and MCP task notification runs do not inherit this preference;
+their replies and memory updates continue to infer language from run messages.
 
 Settings > Memory keeps successful clear, import, and fact edits visible even
 when an older background read finishes afterward. Later reads still refresh

@@ -1,6 +1,8 @@
 """The current UI language is request data, including at memory capture."""
 
 import asyncio
+import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -33,6 +35,12 @@ class _Request:
 
 def test_deermem_language_map_matches_the_ui_allowlist():
     assert memory_updater._MEMORY_UI_LANGUAGES == UI_LANGUAGES
+
+
+def test_ui_languages_match_shared_contract():
+    contract_path = Path(__file__).resolve().parents[2] / "contracts" / "ui_locales.v1.json"
+    contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    assert UI_LANGUAGES == contract["languages"]
 
 
 @pytest.mark.parametrize("locale", ["zh-CN", "en-US", None, "fr-FR", [], {}])
