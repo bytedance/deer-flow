@@ -89,18 +89,17 @@ Tests: `html-assets.dom.test.ts`, `artifact-file-preview.dom.test.tsx`,
    bounded error and attempt count; retryable failures use backend backoff,
    while a permanent rejection or exhausted five-attempt budget is shown as
    stopped rather than implying that retries will continue.
-   Explicit durable native-subagent batches use `core/subagent-batches` and
-   `ThreadSubagentBatches`. `/api/features` separates SQL-repository availability
-   from startup worker state. Show the trigger on default and Custom Agent chats
-   when the worker runs, or read-only when durable history exists; hide it otherwise.
-   Normalize persisted progress to bounded percentages before rendering. Use fixed
-   item-preview page sizes with load-more; full results require JSONL export.
-   Gate pause/resume/cancel and failed-item retries on the worker.
-   Never infer batch mode from prompts or inject full results into chat state.
+   `core/subagent-batches` / `ThreadSubagentBatches` own durable native batches.
+   `/api/features` separates SQL availability from startup worker state.
+   Show the trigger on default/Custom Agent chats with a running worker, or
+   read-only with durable history; hide otherwise. Bound persisted progress
+   percentages. Use fixed item-preview pages and load-more; full results need
+   JSONL export. Gate pause/resume/cancel and failed-item retries on the worker.
+   Never infer batches from prompts or put full results in chat state.
    Review citations use only the selected persisted snapshot. Poll open details
-   until their own response is terminal, independently of compact-list status;
-   stop on close. Compact attempt/status/update revisions invalidate the cached
-   detail so external retries refresh open dialogs without fetching closed ones.
+   until their own response is terminal, regardless of compact-list status;
+   stop on close. Compact attempt/status/update changes invalidate cached details
+   so external retries refresh open dialogs; never fetch closed details.
    Show omitted counts even without sources; localize page labels.
    Real-hook/HTTP tests: `thread-subagent-batch-review.dom.test.tsx`.
    Capability Center > Plugins > Lark uses a local generation only to suppress stale React
