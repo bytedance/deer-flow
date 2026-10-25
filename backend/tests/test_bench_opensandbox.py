@@ -301,3 +301,14 @@ def test_invalid_idle_timeout_fails_before_provider_creation(monkeypatch, provid
     monkeypatch.setitem(bench.PROVIDER_FACTORIES, provider, unexpected_provider)
     with pytest.raises(SystemExit, match="idle timeout must be nonnegative"):
         bench.main(["--provider", provider, "--scenario", "warm_same_thread", "--idle-timeout", idle_timeout])
+
+
+@pytest.mark.parametrize("provider", ["opensandbox", "boxlite", "aio-docker"])
+@pytest.mark.parametrize("skip_seconds", ["-5", "nan", "NaN", "-inf"])
+def test_invalid_health_check_skip_seconds_fails_before_provider_creation(monkeypatch, provider, skip_seconds):
+    def unexpected_provider(*args, **kwargs):
+        pytest.fail("invalid health-check skip seconds must be rejected before provisioning")
+
+    monkeypatch.setitem(bench.PROVIDER_FACTORIES, provider, unexpected_provider)
+    with pytest.raises(SystemExit, match="health-check skip seconds must be nonnegative"):
+        bench.main(["--provider", provider, f"--health-check-skip-seconds={skip_seconds}"])

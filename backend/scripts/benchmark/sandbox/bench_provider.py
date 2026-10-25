@@ -751,6 +751,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
+    if not args.health_check_skip_seconds >= 0:
+        raise SystemExit("health-check skip seconds must be nonnegative")
     if args.provider == "opensandbox" and (args.fault_inject is not None or args.health_check_skip_seconds != 0):
         raise SystemExit("opensandbox benchmarks do not support --fault-inject or nonzero --health-check-skip-seconds")
     if min(args.concurrency, args.users, args.replicas) < 1 or min(args.iterations, args.warmup_iterations) < 0:
