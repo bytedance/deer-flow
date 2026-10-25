@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 
 from sqlalchemy.exc import IntegrityError as SAIntegrityError
 
+from deerflow.runtime.events.terminal import RecoveryTerminalPublisher
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, get_current_user, resolve_user_id
 from deerflow.utils.time import is_lease_expired
 from deerflow.utils.time import now_iso as _now_iso
@@ -342,6 +343,7 @@ class RunManager:
         worker_id: str | None = None,
         run_ownership_config: RunOwnershipConfig | None = None,
         event_store: RunEventStore | None = None,
+        recovery_terminal_publisher: RecoveryTerminalPublisher | None = None,
         on_orphans_recovered: OrphanRecoveryCallback | None = None,
     ) -> None:
         self._runs: dict[str, RunRecord] = {}
@@ -356,6 +358,7 @@ class RunManager:
         self._worker_id = worker_id or _generate_worker_id()
         self._run_ownership_config = run_ownership_config
         self._event_store = event_store
+        self._recovery_terminal_publisher = recovery_terminal_publisher or (RecoveryTerminalPublisher(event_store) if event_store is not None else None)
         self._on_orphans_recovered = on_orphans_recovered
         self._heartbeat_task: asyncio.Task | None = None
         self._heartbeat_stop: asyncio.Event | None = None
@@ -1894,6 +1897,16 @@ class RunManager:
             return CancelOutcome.unknown
 
         if taken:
+            if self._recovery_terminal_publisher is not None:
+                target = self._recovery_terminal_publisher.authorize_takeover(
+                    claimed=taken,
+                    thread_id=row["thread_id"],
+                    run_id=run_id,
+                    user_id=row.get("user_id"),
+                    operation_kind=row.get("operation_kind", "run"),
+                )
+                if target is not None:
+                    await self._recovery_terminal_publisher.publish(target)
             logger.warning("Run %s taken over by worker %s (action=%s)", run_id, self._worker_id, action)
             return CancelOutcome.taken_over
 
@@ -2459,6 +2472,16 @@ class RunManager:
             record.stop_reason = stop_reason
             record.updated_at = now
             if record.operation_kind == ThreadOperationKind.run:
+                if self._recovery_terminal_publisher is not None:
+                    target = self._recovery_terminal_publisher.authorize_takeover(
+                        claimed=claimed,
+                        thread_id=record.thread_id,
+                        run_id=record.run_id,
+                        user_id=record.user_id,
+                        operation_kind=record.operation_kind.value,
+                    )
+                    if target is not None:
+                        await self._recovery_terminal_publisher.publish(target)
                 # The atomic takeover above must win before writing a zero-delivery
                 # receipt; otherwise a stale scan could race a heartbeat renewal and
                 # permanently overwrite a live run's later detailed receipt. The

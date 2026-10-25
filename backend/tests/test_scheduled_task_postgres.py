@@ -23,6 +23,8 @@ from deerflow.persistence.scheduled_task_runs import ScheduledTaskRunRepository
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
 from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
 from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
+from deerflow.runtime.events.store.db import DbRunEventStore
+from deerflow.runtime.events.terminal import RecoveryTerminalPublisher
 
 POSTGRES_URL = os.environ.get("TEST_POSTGRES_URI")
 
@@ -164,6 +166,51 @@ async def test_postgres_reconciliation_uses_metadata_and_atomically_claims_expir
     assert recovered is not None
     assert recovered["status"] == "error"
     assert recovered["stop_reason"] == "scheduled_task_orphan_recovered"
+
+
+@pytest.mark.asyncio
+async def test_postgres_recovery_takeover_has_one_publisher(postgres_repositories):
+    _task_repo, _task_run_repo, run_repo = postgres_repositories
+    sf = get_session_factory()
+    assert sf is not None
+    event_store = DbRunEventStore(sf)
+    publisher = RecoveryTerminalPublisher(event_store)
+    now = datetime.now(UTC)
+    run_id, thread_id = "run-recovery-postgres", "thread-recovery-postgres"
+    await run_repo.put(
+        run_id,
+        thread_id=thread_id,
+        user_id="user-1",
+        status="running",
+        owner_worker_id="dead-owner",
+        lease_expires_at=(now - timedelta(seconds=60)).isoformat(),
+    )
+
+    async def recover_once():
+        claimed = await run_repo.claim_for_takeover(
+            run_id,
+            grace_seconds=10,
+            error="orphan recovered",
+            stop_reason="orphan_recovered",
+        )
+        target = publisher.authorize_takeover(
+            claimed=claimed,
+            thread_id=thread_id,
+            run_id=run_id,
+            user_id="user-1",
+            operation_kind="run",
+        )
+        if target is not None:
+            await publisher.publish(target)
+        return target is not None
+
+    outcomes = await asyncio.gather(recover_once(), recover_once())
+
+    assert outcomes == [True, False]
+    terminal = await event_store.list_events(thread_id, run_id, event_types=["run.terminal"], user_id=None)
+    assert len(terminal) == 1
+    assert terminal[0]["content"] == {"status": "error"}
+    assert terminal[0]["metadata"]["recovered"] is True
 
 
 @pytest.mark.asyncio

@@ -18,7 +18,12 @@ from deerflow.persistence.models.run_event import RunEventRow, RunEventThreadSeq
 from deerflow.runtime.events.store.db import DbRunEventStore
 from deerflow.runtime.events.store.jsonl import JsonlRunEventStore
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
-from deerflow.runtime.events.terminal import TerminalEventConfirmation, confirm_terminal_event
+from deerflow.runtime.events.terminal import (
+    RecoveryTerminalPublisher,
+    RecoveryTerminalTargetConsumed,
+    TerminalEventConfirmation,
+    confirm_terminal_event,
+)
 
 
 @pytest_asyncio.fixture(params=["memory", "jsonl", "sqlite", "postgresql"])
@@ -198,3 +203,61 @@ async def test_database_ack_must_retain_owner_identity(stores, monkeypatch):
 
     monkeypatch.setattr(stores.first, "put_if_absent", omit_owner)
     assert await confirm(stores.first) == TerminalEventConfirmation.CONFLICT
+
+
+@pytest.mark.asyncio
+async def test_recovery_target_requires_successful_run_takeover():
+    store = MemoryRunEventStore()
+    publisher = RecoveryTerminalPublisher(store)
+    identity = dict(thread_id="thread", run_id="run", user_id="alice")
+
+    assert publisher.authorize_takeover(claimed=False, operation_kind="run", **identity) is None
+    assert publisher.authorize_takeover(claimed=True, operation_kind="checkpoint_write", **identity) is None
+    target = publisher.authorize_takeover(claimed=True, operation_kind="run", **identity)
+    assert target is not None
+    assert (target.thread_id, target.run_id, target.user_id, target.operation_kind, target.committed_status) == (
+        "thread",
+        "run",
+        "alice",
+        "run",
+        "error",
+    )
+
+    assert await publisher.publish(target) == TerminalEventConfirmation.CONFIRMED_NEW
+    event = (await store.list_events("thread", "run", user_id="alice"))[0]
+    assert event["content"] == {"status": "error"}
+    assert event["metadata"] == {"protocol_version": 1, "recovered": True}
+
+
+@pytest.mark.asyncio
+async def test_recovery_target_is_one_shot_across_lost_ack_retry():
+    store = MemoryRunEventStore()
+    publisher = RecoveryTerminalPublisher(store)
+    target = publisher.authorize_takeover(claimed=True, thread_id="thread", run_id="run", user_id="alice", operation_kind="run")
+    assert target is not None
+    entered, release = asyncio.Event(), asyncio.Event()
+    original = store.put_if_absent
+    attempts = []
+
+    async def commit_then_lose_first_ack(**kwargs):
+        result = await original(**kwargs)
+        attempts.append(result)
+        if len(attempts) == 1:
+            entered.set()
+            await release.wait()
+            raise OSError("ACK lost after commit")
+        return result
+
+    store.put_if_absent = commit_then_lose_first_ack
+    first = asyncio.create_task(publisher.publish(target))
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        with pytest.raises(RecoveryTerminalTargetConsumed):
+            await publisher.publish(target)
+    finally:
+        release.set()
+    assert await asyncio.wait_for(first, timeout=5) == TerminalEventConfirmation.CONFIRMED_EXISTING
+    assert [created for _event, created in attempts] == [True, False]
+    terminal = await store.list_events("thread", "run", user_id="alice")
+    assert len(terminal) == 1
+    assert terminal[0]["metadata"]["recovered"] is True
