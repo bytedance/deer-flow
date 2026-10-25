@@ -598,12 +598,21 @@ async def read_file_chunks(path: Path, *, chunk_size: int = 65536) -> AsyncItera
     def _open() -> Any:
         return open(path, "rb")
 
-    handle = await run_file_io(_open)
+    handle = None
+
+    async def prepare() -> None:
+        nonlocal handle
+        # Retain the handle even when cancellation arrives after the worker
+        # opened the file but before its result reaches this coroutine.
+        handle = await run_file_io(_open)
+
     try:
-        while chunk := await run_file_io(handle.read, chunk_size):
+        await await_drained(prepare())
+        while chunk := await await_drained(run_file_io(handle.read, chunk_size)):
             yield chunk
     finally:
-        await run_file_io(handle.close)
+        if handle is not None:
+            await await_drained(run_file_io(handle.close))
 
 
 def _copy_original_under_lock(paths: Paths, staging_path: Path, *, user_id: str, row: dict) -> None:
