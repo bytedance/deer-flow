@@ -1858,6 +1858,34 @@ async def test_launch_passes_user_language_origin_and_run_thread_title(trigger):
 
 
 @pytest.mark.asyncio
+async def test_manual_launch_origin_is_stable_across_retries():
+    task_repo = DummyTaskRepo([_provenance_task()])
+    run_repo = DummyRunRepo()
+    service = ScheduledTaskService(
+        task_repo=task_repo,
+        task_run_repo=run_repo,
+        launch_run=lambda **_kwargs: None,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_runs=3,
+    )
+    admitted = datetime(2026, 10, 7, 1, 0, tzinfo=UTC)
+    queued = {
+        "id": "task-run-prov",
+        "task_id": "task-prov",
+        "thread_id": "thread-prov",
+        "trigger": "manual",
+        "scheduled_for": admitted,
+    }
+
+    first, _ = await service._launch_provenance(task_repo.rows[0], queued, now=admitted + timedelta(hours=1))
+    second, _ = await service._launch_provenance(task_repo.rows[0], queued, now=admitted + timedelta(hours=2))
+
+    assert first["scheduled_for"] == admitted.isoformat()
+    assert first == second
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("updates", "trigger", "expected"),
     [
