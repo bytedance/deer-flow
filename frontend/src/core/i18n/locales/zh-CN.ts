@@ -84,6 +84,11 @@ export const zhCN: Translations = {
         title: "LightRAG",
         description: "从 LightRAG 检索文档与实体关系，并使用统一的来源引用。",
       },
+      knowledgePlatform: {
+        title: "知识空间与连接",
+        description:
+          "在管理员明确授权后管理多层级空间、资源共享与继承策略。需要安装和配置，不包含管理页面，也不改变全局检索权限。",
+      },
       knowledgeManagement: {
         title: "知识入库与处理",
         description:
@@ -280,6 +285,11 @@ export const zhCN: Translations = {
   home: {
     docs: "文档",
     blog: "博客",
+    searchDocs: "搜索文档…",
+    searchDocsLabel: "搜索文档",
+    searchNoResults: "未找到结果，请尝试更少或不同的关键词。",
+    searchLoadFailed: "搜索暂时不可用。",
+    searchLoading: "加载中…",
   },
 
   // Welcome
@@ -1619,6 +1629,9 @@ export const zhCN: Translations = {
   // Tool calls
   toolCalls: {
     details: "工具详情",
+    failed: "执行失败",
+    scheduleTaskPending: "定时任务操作",
+    stopScheduledTaskPending: "暂停此定时任务",
     toolName: "工具名称",
     callId: "调用 ID",
     input: "输入",
@@ -2393,6 +2406,9 @@ export const zhCN: Translations = {
         "该邮箱对应的账号已存在。请使用密码登录或联系管理员。",
       sso_not_allowed: "你的账号不允许使用 SSO 登录。请联系管理员。",
       account_disabled: "账号已停用，请联系管理员。",
+      invalid_email: "请输入有效的邮箱地址。",
+      password_too_short: "密码至少需要 6 个字符。",
+      registration_password_too_short: "密码至少需要 8 个字符。",
     },
   },
 };

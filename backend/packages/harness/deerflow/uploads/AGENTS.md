@@ -48,3 +48,13 @@ the descriptor whenever `fdopen` itself failed. Pass the raw descriptor only
 until `fdopen` succeeds, and keep cleanup best-effort so a leftover staged
 record is reported rather than becoming the caller's error. Coverage:
 `backend/tests/test_atomic_cleanup_preserves_primary_error.py`.
+
+Companion ownership validates both source and Markdown device, inode, size,
+mtime and ctime. Legacy three-field source identities and four-field Markdown
+identities fail closed with distinct debug diagnostics; never backfill their
+missing timestamps on read. Re-upload/re-convert to register a fresh association.
+Keep legacy rejection, unchanged record bytes, and explicit re-registration
+coverage in `backend/tests/test_upload_companions.py`.
+These metadata checks detect ordinary edits; they do not guarantee content
+integrity against a sandbox writer that can restore timestamps. Content hashing
+is a separate enhancement.

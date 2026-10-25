@@ -351,7 +351,7 @@ def _markdown_cell(value: object) -> str:
 
 def _export_results(columns: list[str], rows: list[tuple], output_file: str) -> str:
     """Export query results to a file (CSV, JSON, or Markdown)."""
-    os.makedirs(os.path.dirname(output_file), exist_ok=True)
+    os.makedirs(os.path.dirname(output_file) or ".", exist_ok=True)
     ext = os.path.splitext(output_file)[1].lower()
 
     if ext == ".csv":
@@ -382,8 +382,13 @@ def _export_results(columns: list[str], rows: list[tuple], output_file: str) -> 
                     val = val.hex()
                 record[col] = val
             records.append(record)
+        # Reject non-JSON numbers, including nested values, before touching the
+        # destination so a failed export cannot overwrite an existing result.
+        serialized = json.dumps(
+            records, indent=2, ensure_ascii=False, default=str, allow_nan=False
+        )
         with open(output_file, "w", encoding="utf-8") as f:
-            json.dump(records, f, indent=2, ensure_ascii=False, default=str)
+            f.write(serialized)
 
     elif ext == ".md":
         with open(output_file, "w", encoding="utf-8") as f:

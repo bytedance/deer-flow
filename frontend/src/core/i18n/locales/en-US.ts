@@ -90,6 +90,11 @@ export const enUS: Translations = {
         description:
           "Retrieve documents and entity relations from LightRAG with shared source citations.",
       },
+      knowledgePlatform: {
+        title: "Knowledge spaces and connections",
+        description:
+          "Manage hierarchical spaces, resource sharing and inherited policies with explicit administrator grants. Requires installation and configuration; no management page or global retrieval ACL is included.",
+      },
       knowledgeManagement: {
         title: "Knowledge ingestion and processing",
         description:
@@ -295,6 +300,11 @@ export const enUS: Translations = {
   home: {
     docs: "Docs",
     blog: "Blog",
+    searchDocs: "Search docs…",
+    searchDocsLabel: "Search documentation",
+    searchNoResults: "No results. Try fewer or different words.",
+    searchLoadFailed: "Search is unavailable right now.",
+    searchLoading: "Loading…",
   },
 
   // Welcome
@@ -1727,6 +1737,9 @@ export const enUS: Translations = {
   // Tool calls
   toolCalls: {
     details: "Tool details",
+    failed: "Failed",
+    scheduleTaskPending: "Scheduled task operation",
+    stopScheduledTaskPending: "Pause this scheduled task",
     toolName: "Tool name",
     callId: "Call ID",
     input: "Input",
@@ -2552,6 +2565,10 @@ export const enUS: Translations = {
         "SSO login is not allowed for your account. Contact your administrator.",
       account_disabled:
         "This account has been disabled. Contact your administrator.",
+      invalid_email: "Please enter a valid email address.",
+      password_too_short: "Password must be at least 6 characters.",
+      registration_password_too_short:
+        "Password must be at least 8 characters.",
     },
   },
 };

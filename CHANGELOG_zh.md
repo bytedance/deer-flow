@@ -1112,6 +1112,17 @@
 
 ### 修复
 
+- **线程：** `POST /api/threads` 现在会以 `422` 拒绝无法对应任何智能体的
+  `assistant_id`。此前该值会被直接保存，之后读取该线程（`GET` 线程、状态、历史）
+  都会返回 `500 Internal Server Error`，直到删除线程。修复前已这样保存的线程
+  改为按主智能体的状态结构读取；从这类线程创建的分支不保存 `assistant_id`，因此使用
+  主智能体。([#7445])
+
+- **前端：** 后端接受、但前端更严格的格式检查不接受的邮箱账号（如
+  `a&b@example.com`、`a@b.c` 或含 Unicode 的地址）现在可以正常进入工作区。此前这些
+  账号的会话会显示网关离线界面，且只要存在一个这样的账号，所有管理员的
+  “设置 → 用户”列表都会加载失败。([#7449])
+
 - **持久化：** 在已存在的数据库中 PostgreSQL 启动初始化失败时，现在会报告原始错误。
   此前 Gateway 会把任何包含 "does not exist" 的错误（例如迁移时缺少列或表）当作数据库
   不存在并执行 `CREATE DATABASE`，启动随之以 `database ... already exists` 或
@@ -10432,3 +10443,5 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7364]: https://github.com/bytedance/deer-flow/pull/7364
 [#7400]: https://github.com/bytedance/deer-flow/pull/7400
 [#7410]: https://github.com/bytedance/deer-flow/pull/7410
+[#7445]: https://github.com/bytedance/deer-flow/pull/7445
+[#7449]: https://github.com/bytedance/deer-flow/pull/7449

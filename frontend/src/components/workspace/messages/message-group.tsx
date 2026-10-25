@@ -35,6 +35,7 @@ import {
   resolveArtifactURL,
 } from "@/core/artifacts/utils";
 import { useI18n } from "@/core/i18n/hooks";
+import { isErrorToolMessage } from "@/core/messages/tool-error";
 import { formatTokenCount } from "@/core/messages/usage";
 import type { TokenDebugStep } from "@/core/messages/usage-model";
 import {
@@ -676,17 +677,24 @@ export function scheduleToolLabel(
   args: Record<string, unknown> | null | undefined,
   result: string | Record<string, unknown> | undefined,
   t: ReturnType<typeof useI18n>["t"],
+  failed = false,
 ): string | null {
   if (name !== "schedule_task" && name !== "stop_scheduled_task") {
     return null;
   }
-  // Both tools always return a JSON object, so text that does not parse is a
-  // tool-level failure (for example rejected arguments), never a success.
+  if (failed) return t.toolCalls.scheduleTaskFailed;
+  if (result == null || (typeof result === "string" && !result.trim())) {
+    return name === "stop_scheduled_task"
+      ? t.toolCalls.stopScheduledTaskPending
+      : t.toolCalls.scheduleTaskPending;
+  }
+  // Both tools return an object; a missing or invalid response cannot confirm
+  // that the requested operation succeeded.
   if (
-    (typeof result === "string" && result.trim() !== "") ||
-    (typeof result === "object" &&
-      result !== null &&
-      ("error" in result || "code" in result))
+    typeof result !== "object" ||
+    Array.isArray(result) ||
+    "error" in result ||
+    "code" in result
   ) {
     return t.toolCalls.scheduleTaskFailed;
   }
@@ -765,12 +773,25 @@ function ToolCall({
   const tokenLabel = tokenDebugStep
     ? formatDebugToken(tokenDebugStep, t)
     : null;
-  const resolveLabel = (fallback: React.ReactNode) =>
-    tokenDebugStep ? (
+  const failed = resultMessage ? isErrorToolMessage(resultMessage) : false;
+  const schedulerTool =
+    kind === "schedule_task" || kind === "stop_scheduled_task";
+  const resolveLabel = (fallback: React.ReactNode) => {
+    const label = tokenDebugStep ? (
       <DebugStepLabel label={tokenDebugStep.label} token={tokenLabel} />
     ) : (
       fallback
     );
+    if (!failed || (schedulerTool && !tokenDebugStep)) return label;
+    return (
+      <>
+        {label}
+        <span className="text-destructive ml-2 text-xs" role="status">
+          {t.toolCalls.failed}
+        </span>
+      </>
+    );
+  };
   const writeFilePath =
     (kind === "write_file" || kind === "str_replace") &&
     typeof args.path === "string"
@@ -1114,7 +1135,7 @@ function ToolCall({
     return (
       <ChainOfThoughtStep
         key={id}
-        label={resolveLabel(scheduleToolLabel(name, args, result, t))}
+        label={resolveLabel(scheduleToolLabel(name, args, result, t, failed))}
         icon={stop ? CalendarX2Icon : CalendarClockIcon}
         className={stop ? "text-sky-700 dark:text-sky-400" : undefined}
         data-testid={stop ? "scheduled-stop-step" : undefined}
