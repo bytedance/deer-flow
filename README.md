@@ -2924,15 +2924,17 @@ Outline titles are limited to 200 characters and fallback previews to 2,000
 characters per file, with truncation markers. Full uploaded files remain available
 for targeted reads.
 
-Converted upload outlines and previews require a matching source version, including
-modification timestamps. A detected source-version change invalidates its previous
-conversion, including equal-length edits. Older ownership records without source timestamps
-are also rejected; re-upload the source with `uploads.auto_convert_documents: true`
-to restore conversion-backed outlines. Files remain available, and unvalidated
-Markdown conversions appear as standalone files in the agent's historical listing.
-On Windows, `st_ctime_ns` may represent creation time; a same-size rewrite that
-restores the original `mtime` can evade validation. Timestamp checks are
-conservative metadata validation, not a guarantee of content equality.
+Converted upload outlines and previews require matching source and Markdown versions,
+including modification timestamps. A detected change to either file invalidates its
+previous conversion association, including equal-length edits. Older ownership records
+without source timestamps or the Markdown modification timestamp are also rejected;
+re-upload the source with `uploads.auto_convert_documents: true` to restore
+conversion-backed outlines. Debug logs distinguish these legacy records, which need
+re-registration, from a changed file. Files remain available, and unvalidated Markdown
+conversions appear as standalone files in the agent's historical listing.
+On Windows, `st_ctime_ns` may represent creation time; a same-size rewrite of either
+file that restores the original `mtime` can evade validation. Timestamp checks are
+conservative metadata validation, not a guarantee of content equality or tamper resistance.
 
 Sandbox image downloads enforce the 20 MiB vision limit while reading, including model-context rereads. Oversized streams stop at the first over-limit chunk. Custom sandbox providers must accept and enforce the `download_file(..., max_bytes=...)` keyword; older implementations fail the image read instead of falling back to an unrestricted download.
 

@@ -100,6 +100,26 @@ def test_each_source_timestamp_invalidates_companion(converted_upload, monkeypat
     assert "source identity or version timestamps do not match" in caplog.text
 
 
+def test_same_size_markdown_edit_invalidates_companion_on_windows(converted_upload, monkeypatch, caplog):
+    original, markdown = converted_upload
+    before = markdown.stat()
+    real_stat = Path.stat
+
+    def changed_markdown_stat(path, *args, **kwargs):
+        result = real_stat(path, *args, **kwargs)
+        if path == markdown:
+            fields = {name: getattr(before, name) for name in ("st_mode", "st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")}
+            fields["st_mtime_ns"] += 2_000_000_000
+            return SimpleNamespace(**fields)
+        return result
+
+    monkeypatch.setattr(Path, "stat", changed_markdown_stat)
+    with caplog.at_level("DEBUG", logger="deerflow.uploads.companions"):
+        assert resolve_companion(original) is None
+    assert "Markdown identity or version timestamp does not match" in caplog.text
+    assert "legacy Markdown identity" not in caplog.text
+
+
 def test_legacy_source_record_requires_reregistration(converted_upload, caplog):
     original, markdown = converted_upload
     record = next((original.parent.parent.parent / "upload-companions").glob("*.json"))
@@ -116,6 +136,28 @@ def test_legacy_source_record_requires_reregistration(converted_upload, caplog):
 
     register_companion(original, markdown)
     assert resolve_companion(original) == markdown
+
+
+def test_legacy_markdown_record_requires_reregistration(converted_upload, caplog):
+    original, markdown = converted_upload
+    record = next((original.parent.parent.parent / "upload-companions").glob("*.json"))
+    data = json.loads(record.read_text(encoding="utf-8"))
+    # The old four-field format retained ctime but did not record mtime.
+    data["markdown_identity"] = data["markdown_identity"][:3] + data["markdown_identity"][4:]
+    record.write_text(json.dumps(data), encoding="utf-8")
+    legacy = record.read_bytes()
+
+    with caplog.at_level("DEBUG", logger="deerflow.uploads.companions"):
+        assert resolve_companion(original) is None
+    assert "legacy Markdown identity lacks modification timestamp; re-register companion" in caplog.text
+    assert "Markdown identity or version timestamp does not match" not in caplog.text
+    assert companion_names(original.parent) == set()
+    assert extract_outline_for_file(original) == ([], [])
+    assert record.read_bytes() == legacy  # Do not bless stale content on read.
+
+    register_companion(original, markdown)
+    assert resolve_companion(original) == markdown
+    assert extract_outline_for_file(original)[0] == [{"title": "Original A", "line": 1}]
 
 
 def test_new_conversion_restores_outline_after_source_edit(converted_upload):
