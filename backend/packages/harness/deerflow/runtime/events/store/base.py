@@ -122,8 +122,12 @@ class RunEventStore(abc.ABC):
         events retain their original owner and must be validated by the caller.
 
         When ``lifecycle_guard`` is provided, stores evaluate it while holding
-        the same per-thread mutation fence used by event deletion. A false
+        the same store mutation fence used by event deletion. A false
         result raises :class:`RunEventLifecycleRejected` without writing.
+        That fence is non-reentrant: the guard must not call back into this
+        event store or acquire locks in an order that can invert the fence's
+        lock ordering, as doing so may deadlock. The built-in recovery guard
+        only reads the RunStore.
         """
 
     @abc.abstractmethod

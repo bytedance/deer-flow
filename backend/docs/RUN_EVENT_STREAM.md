@@ -104,7 +104,7 @@ claim, with the target bound to the claimed Run identity and its committed
 `error` outcome. The target is one-shot and cannot be reconstructed with another
 Run identity. A later same-status RunRow read cannot create that authority.
 Recovery receipts and terminal confirmation re-check the Run lifecycle inside
-the Event Store's per-thread mutation fence; a completed thread deletion wins,
+the Event Store's mutation fence; a completed thread deletion wins,
 so a stale target cannot recreate an orphan event.
 
 ### Evidence Ordering
