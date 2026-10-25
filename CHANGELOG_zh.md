@@ -1112,6 +1112,11 @@
 
 ### 修复
 
+- **记忆：** 自动上下文压缩在把即将被总结的消息保存到记忆时，不再阻塞事件循环。
+  使用 mem0、Honcho 或 OpenViking 后端时，这次保存是同步 HTTP 请求，Gateway 在记忆
+  服务器响应之前无法处理其他请求和流式输出。现在它与每轮结束后的记忆写入一样在工作
+  线程中执行。([#7530])
+
 - **沙箱：** AIO 提供方的异步 acquire 不再在事件循环上检查线程的技能目录。此前每次
   线程 acquire 选择沙箱 ID 时，都会在事件循环上直接执行文件系统 `stat` 和路径解析；
   `DEER_FLOW_HOME` 位于较慢或网络存储上时会阻塞事件循环。现在这一步与 acquire 的
@@ -10451,3 +10456,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7445]: https://github.com/bytedance/deer-flow/pull/7445
 [#7449]: https://github.com/bytedance/deer-flow/pull/7449
 [#7507]: https://github.com/bytedance/deer-flow/pull/7507
+[#7530]: https://github.com/bytedance/deer-flow/pull/7530

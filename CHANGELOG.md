@@ -1397,6 +1397,13 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
 
 ### Fixed
 
+- **memory:** Automatic context compaction no longer blocks the event loop
+  while it saves the messages it is about to summarize to memory. With the
+  mem0, Honcho or OpenViking backend, that save is a synchronous HTTP request,
+  so the Gateway stopped serving other requests and streams until the memory
+  server answered. It now runs in a worker, like the after-turn memory write.
+  ([#7530])
+
 - **sandbox:** The AIO provider's async acquire no longer checks the thread's
   skill directory on the event loop. Picking the sandbox ID ran a filesystem
   `stat` and path resolution inline on every thread acquire, which stalls the
@@ -13091,3 +13098,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7445]: https://github.com/bytedance/deer-flow/pull/7445
 [#7449]: https://github.com/bytedance/deer-flow/pull/7449
 [#7507]: https://github.com/bytedance/deer-flow/pull/7507
+[#7530]: https://github.com/bytedance/deer-flow/pull/7530
