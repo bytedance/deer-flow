@@ -998,6 +998,9 @@ still retain their error or partial-result status.
 
 #### MCP Server
 
+Tool steps mark explicit execution failures. Scheduled-task steps show completed
+operations only after a valid response, rather than when the request is issued.
+
 In the chat UI, enable **Token Usage → Debug** to inspect generic/MCP tool calls.
 Each **Tool details** panel starts collapsed and shows the tool name, call ID,
 input, and received result or explicit error. Large previews are truncated;
