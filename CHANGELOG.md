@@ -1401,8 +1401,9 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
   name an agent with `422`. It used to store the value, and every later read
   of the thread (`GET` thread, state, history) answered
   `500 Internal Server Error` until the thread was deleted. Threads saved that
-  way before this fix are read with the lead agent's schema. ([#7445])
-  
+  way before this fix are read with the lead agent's schema, and a branch of
+  such a thread stores no `assistant_id`, so it uses the lead agent. ([#7445])
+
 - **frontend:** Accounts whose email the backend accepted but the frontend's
   stricter pattern did not (for example `a&b@example.com`, `a@b.c` or a
   Unicode address) now get the normal workspace. Their sessions used to show
