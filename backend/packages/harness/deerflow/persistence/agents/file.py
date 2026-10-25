@@ -37,6 +37,7 @@ from deerflow.persistence.agents.base import (
     parse_agent_config,
 )
 from deerflow.runtime.user_context import DEFAULT_USER_ID
+from deerflow.utils.atomic_write import cleanup_failed_atomic_write
 
 logger = logging.getLogger(__name__)
 
@@ -257,7 +258,9 @@ class FileAgentStore(AgentStore):
                 staged.remove(tmp)
         finally:
             for tmp in staged:
-                tmp.unlink(missing_ok=True)
+                # A failing discard must not replace the error that aborted the
+                # publish, nor the result of a successful one.
+                cleanup_failed_atomic_write(tmp)
 
 
 def _stage_temp(target: Path, text: str) -> Path:
