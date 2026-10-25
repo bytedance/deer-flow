@@ -101,6 +101,12 @@ Display summaries use `strip_leading_think_blocks` before limiting text;
 
 ### Agent / Tool Assembly Off-Load
 
+One-shot input-polish and follow-up-suggestion helpers build providers through
+`run_assembly` before awaiting inference. Provider construction can read local
+credentials; keep it off the event loop and the default executor while preserving
+request context. Cancellation during construction must not start inference.
+Coverage: `tests/blocking_io/test_oneshot_llm_offloop.py`.
+
 `start_run` also resolves the factory through `run_assembly` before admission:
 cold imports cannot occupy the loop or its default pool, and import errors
 cannot admit a run. `tests/blocking_io/test_agent_factory_resolve_offloop.py`
