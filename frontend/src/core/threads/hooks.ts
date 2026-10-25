@@ -296,6 +296,9 @@ export function buildRunContext({
   return {
     ...extraContext,
     ...ownedSettings,
+    ...(typeof extraContext?.model_name === "string"
+      ? { model_name: extraContext.model_name }
+      : {}),
     ...(conversationReferences?.length
       ? { conversation_references: [...conversationReferences] }
       : {}),

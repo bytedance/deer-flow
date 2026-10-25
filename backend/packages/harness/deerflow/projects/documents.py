@@ -165,9 +165,13 @@ async def stage_document_bytes(paths: Paths, *, user_id: str, project_id: str, c
     callers reject a missing, foreign, or archived project first.
     """
     staging_path = _new_staging_path(paths, user_id=user_id, project_id=project_id)
-    handle = await run_file_io(_open_staging, staging_path.parent, staging_path)
+    handle = None
     digest = hashlib.sha256()
     size = 0
+
+    async def prepare() -> None:
+        nonlocal handle
+        handle = await run_file_io(_open_staging, staging_path.parent, staging_path)
 
     async def _aiter() -> AsyncIterator[bytes]:
         if isinstance(chunks, list):
@@ -178,15 +182,20 @@ async def stage_document_bytes(paths: Paths, *, user_id: str, project_id: str, c
                 yield chunk
 
     try:
+        # Retain the opened handle even when cancellation arrives during its
+        # worker-to-caller handoff. Only file operations are drained; waiting
+        # for the next incoming chunk must remain cancellable.
+        await await_drained(prepare())
         async for chunk in _aiter():
             size += len(chunk)
             if size > max_bytes:
                 raise ShelfUploadTooLargeError(f"File exceeds the {max_bytes}-byte limit")
             digest.update(chunk)
-            await run_file_io(handle.write, chunk)
-        await run_file_io(handle.close)
-    except Exception:
-        await run_file_io(_close_and_unlink, handle, staging_path)
+            await await_drained(run_file_io(handle.write, chunk))
+        await await_drained(run_file_io(handle.close))
+    except BaseException:
+        if handle is not None:
+            await await_drained(run_file_io(_close_and_unlink, handle, staging_path))
         raise
     return StagedDocument(staging_path=staging_path, sha256=digest.hexdigest(), size_bytes=size)
 

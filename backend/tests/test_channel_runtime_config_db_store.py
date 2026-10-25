@@ -234,6 +234,18 @@ def test_a_corrupt_legacy_file_is_kept(session_factory, tmp_path):
     assert legacy.read_text(encoding="utf-8") == "{not json"
 
 
+def test_an_undecodable_legacy_file_is_kept(session_factory, tmp_path, caplog):
+    """A file whose bytes are not UTF-8 is corrupt, not a crash: the import skips and keeps it."""
+    legacy = tmp_path / "runtime-config.json"
+    legacy.write_bytes(b'{"slack": {"enabled": "\xff"}}')
+
+    with caplog.at_level(logging.WARNING, logger="app.channels.runtime_config_store"):
+        assert _store(session_factory, cipher=_cipher(), legacy_path=legacy).import_legacy_json() == 0
+
+    assert legacy.read_bytes() == b'{"slack": {"enabled": "\xff"}}'
+    assert "Corrupt channel runtime config" in caplog.text
+
+
 def test_without_a_cipher_the_import_keeps_the_file(session_factory, tmp_path):
     legacy = tmp_path / "runtime-config.json"
     _write_legacy(legacy, {"slack": SLACK})

@@ -31,6 +31,12 @@ def _make_admin_user() -> User:
     return User(email="admin-test@example.com", password_hash="x", system_role="admin", id=uuid4())
 
 
+def _make_member_user() -> User:
+    from uuid import uuid4
+
+    return User(email="member-test@example.com", password_hash="x", system_role="user", id=uuid4())
+
+
 def _skill_content(name: str, description: str = "Demo skill") -> str:
     return f"---\nname: {name}\ndescription: {description}\n---\n\n# {name}\n"
 
@@ -778,7 +784,7 @@ def test_custom_skill_delete_preserves_history_and_allows_restore(monkeypatch, t
         assert refresh_calls == [("refresh", "default"), ("refresh", "default")]
 
 
-def _make_demo_custom_skill_app(monkeypatch, tmp_path: Path) -> FastAPI:
+def _patch_demo_custom_skill_config(monkeypatch, tmp_path: Path) -> SimpleNamespace:
     from deerflow.config.paths import Paths
 
     custom_dir = _user_custom_dir(tmp_path, "default") / "demo-skill"
@@ -793,7 +799,11 @@ def _make_demo_custom_skill_app(monkeypatch, tmp_path: Path) -> FastAPI:
     monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: Paths(base_dir=tmp_path))
     monkeypatch.setattr("deerflow.config.paths._paths", None)
     monkeypatch.setattr("app.gateway.routers.skills.get_effective_user_id", lambda: "default")
-    return _make_test_app(config)
+    return config
+
+
+def _make_demo_custom_skill_app(monkeypatch, tmp_path: Path, *, user_factory=None) -> FastAPI:
+    return _make_test_app(_patch_demo_custom_skill_config(monkeypatch, tmp_path), user_factory=user_factory)
 
 
 @pytest.mark.parametrize(
@@ -857,6 +867,69 @@ def test_custom_skill_corrupt_history_record_stays_server_error(monkeypatch, tmp
 
     assert response.status_code == 500
     assert response.json()["detail"].startswith(detail)
+
+
+@pytest.mark.parametrize(
+    ("path", "detail"),
+    [
+        ("/api/skills", "Failed to load skills."),
+        ("/api/skills/custom", "Failed to list custom skills."),
+        ("/api/skills/demo-skill", "Failed to get skill."),
+    ],
+)
+def test_member_skill_reads_keep_load_error_text_out_of_500(monkeypatch, tmp_path, caplog, path, detail):
+    """Any signed-in user reaches these reads, so a load failure's host path stays in the server log."""
+    import logging
+
+    extensions_config = tmp_path / "extensions_config.json"
+    extensions_config.write_text("{not json", encoding="utf-8")
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_config))
+    app = _make_demo_custom_skill_app(monkeypatch, tmp_path, user_factory=_make_member_user)
+
+    with TestClient(app) as client, caplog.at_level(logging.ERROR, logger=skills_router.__name__):
+        response = client.get(path)
+
+    assert response.status_code == 500
+    assert response.json() == {"detail": detail}
+    assert str(extensions_config) in caplog.text
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/skills",
+        "/api/skills/custom",
+        "/api/skills/demo-skill",
+        "/api/capabilities/installations/skills",
+    ],
+)
+def test_gateway_skill_reads_keep_load_error_text_out_of_500(monkeypatch, tmp_path, path):
+    """Drive the real Gateway app: capability discovery has no handler of its own, so its 500 body is TraceMiddleware's fixed fallback until a handler for the raised class or a changed fallback echoes the exception."""
+    import app.gateway.app as app_module
+    from deerflow.extensions import reset_loaded_extensions, reset_runtime_diagnostics
+
+    extensions_config = tmp_path / "extensions_config.json"
+    extensions_config.write_text("{not json", encoding="utf-8")
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_config))
+    monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "1")
+    config = _patch_demo_custom_skill_config(monkeypatch, tmp_path)
+    config.authorization = AuthorizationConfig(enabled=False)
+
+    def _no_config_yaml():
+        raise FileNotFoundError("config.yaml")
+
+    # create_app() reads only the plugin list from config.yaml; keep a local one out of the test.
+    monkeypatch.setattr(app_module, "get_app_config", _no_config_yaml)
+    try:
+        gateway = app_module.create_app()
+        gateway.dependency_overrides[get_config] = lambda: config
+        response = TestClient(gateway, raise_server_exceptions=False).get(path)
+    finally:
+        reset_loaded_extensions()
+        reset_runtime_diagnostics()
+
+    assert response.status_code == 500
+    assert str(tmp_path) not in response.text
 
 
 def test_custom_skill_delete_continues_when_history_write_is_readonly(monkeypatch, tmp_path):
@@ -1087,12 +1160,15 @@ def test_public_skill_toggle_clears_all_users_cache(monkeypatch, tmp_path):
     assert persisted["skills"]["public-skill"]["enabled"] is False
 
 
-def test_public_skill_toggle_creates_missing_extensions_config(monkeypatch, tmp_path):
+def test_public_skill_toggle_creates_missing_extensions_config_at_project_root(monkeypatch, tmp_path):
     from deerflow.config.extensions_config import ExtensionsConfig
 
-    backend_dir = tmp_path / "backend"
-    backend_dir.mkdir()
+    # The working directory's parent is not the project root: the new file
+    # must land where resolution looks first, not next to the cwd.
+    backend_dir = tmp_path / "runtime" / "backend"
+    backend_dir.mkdir(parents=True)
     monkeypatch.chdir(backend_dir)
+    monkeypatch.setenv("DEER_FLOW_PROJECT_ROOT", str(tmp_path))
     config_path = tmp_path / "extensions_config.json"
 
     def _load_skills(*, enabled_only: bool):
@@ -1128,6 +1204,7 @@ def test_public_skill_toggle_creates_missing_extensions_config(monkeypatch, tmp_
     assert json.loads(config_path.read_text(encoding="utf-8")) == {
         "skills": {"public-skill": {"enabled": False}},
     }
+    assert not (backend_dir.parent / "extensions_config.json").exists()
 
 
 def test_public_skill_toggle_rebuilds_projection_before_response(monkeypatch, tmp_path):

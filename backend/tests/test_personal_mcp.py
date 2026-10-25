@@ -3,6 +3,7 @@
 import asyncio
 import ipaddress
 import json
+import logging
 import os
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -16,7 +17,7 @@ from langchain_core.tools import ToolException
 
 from app.gateway.routers import personal_mcp
 from deerflow.config.extensions_config import ExtensionsConfig
-from deerflow.mcp.user_config import load_user_mcp_config, read_user_mcp_config, user_mcp_config_path
+from deerflow.mcp.user_config import load_user_mcp_config, personal_server_name, read_user_mcp_config, user_mcp_config_path
 from deerflow.runtime.user_context import reset_current_user, set_current_user
 
 
@@ -285,6 +286,70 @@ def test_untrusted_users_cannot_launch_packages_or_connect_to_private_hosts(pers
     monkeypatch.setattr("deerflow.community.url_safety.validate_public_http_url", lambda *a, **k: None)
     assert create(client, "alice", role="user").status_code == 200
     assert read_user_mcp_config("alice")["mcpServers"]["github"]["personal_public_network"] is True
+
+
+@pytest.mark.parametrize(
+    "provider,credentials",
+    [
+        ("dingtalk", {"access_token": "robot-token", "sign_secret": "SEC-secret"}),
+        ("wecom", {"webhook_key": "webhook-secret"}),
+        ("hubspot", {"access_token": "private-token"}),
+    ],
+)
+def test_ordinary_users_install_and_manage_bundled_connections(personal_client, monkeypatch, tmp_path, provider, credentials):
+    from app.gateway.deps import get_config
+    from app.gateway.routers import capabilities
+    from deerflow.capabilities.business import is_bundled_connection
+    from deerflow.mcp.personal_access import requires_admin
+
+    app = personal_client.app
+    app.include_router(capabilities.router)
+    app.dependency_overrides[get_config] = lambda: SimpleNamespace()
+    platform = tmp_path / "deployment.json"
+    platform.write_text(json.dumps({"mcpServers": {}}))
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(platform))
+    user = {"test-user": "alice", "test-role": "user"}
+    name = "my-" + provider
+    # The web UI installs every catalog connection with scope "user".
+    response = personal_client.post("/api/capabilities/installations", headers=user, json={"plugin_id": provider, "name": name, "scope": "user", "configuration": credentials})
+    assert response.status_code == 200, response.text
+    assert [item["name"] for item in response.json()["items"]] == [name]
+    for secret in credentials.values():
+        assert secret not in response.text
+    saved = next(iter(load_user_mcp_config("alice").mcp_servers.values()))
+    assert is_bundled_connection(saved.command, saved.args, saved.env)
+    assert set(saved.env.values()) == set(credentials.values())
+    # Saved under ordinary-user policy, so discovery and calls need no admin role.
+    assert not requires_admin(saved)
+
+    masked = personal_client.get("/api/mcp/personal/config", headers=user).json()["mcp_servers"][name]
+    masked["description"] = "Team notifications"
+    assert personal_client.put("/api/mcp/personal/config/server", headers=user, json={"server_name": name, "server": masked}).status_code == 200
+    for enabled in (False, True):
+        assert personal_client.patch("/api/mcp/personal/config", headers=user, json={"server_name": name, "enabled": enabled}).status_code == 200
+    saved = next(iter(load_user_mcp_config("alice").mcp_servers.values()))
+    assert saved.description == "Team notifications"
+    assert set(saved.env.values()) == set(credentials.values())
+    assert personal_client.delete("/api/mcp/personal/config/servers/" + name, headers=user).status_code == 200
+    assert read_user_mcp_config("alice")["mcpServers"] == {}
+
+
+def test_bundled_launcher_with_a_working_directory_requires_an_administrator(personal_client):
+    from deerflow.capabilities.business import connection_config
+
+    definition = {**connection_config("hubspot", {"access_token": "private-token"}), "cwd": "/srv"}
+    user = {"test-user": "alice", "test-role": "user"}
+    response = personal_client.post("/api/mcp/personal/config/servers", headers=user, json={"mcp_servers": {"crm": definition}})
+    assert response.status_code == 403
+    assert read_user_mcp_config("alice")["mcpServers"] == {}
+
+    assert personal_client.post("/api/mcp/personal/config/servers", headers={"test-user": "alice"}, json={"mcp_servers": {"crm": definition}}).status_code == 200
+    before = user_mcp_config_path("alice").read_bytes()
+    masked = personal_client.get("/api/mcp/personal/config", headers=user).json()["mcp_servers"]["crm"]
+    assert masked["cwd"] == "/srv"
+    assert personal_client.put("/api/mcp/personal/config/server", headers=user, json={"server_name": "crm", "server": masked}).status_code == 403
+    assert personal_client.patch("/api/mcp/personal/config", headers=user, json={"server_name": "crm", "enabled": True}).status_code == 403
+    assert user_mcp_config_path("alice").read_bytes() == before
 
 
 @pytest.mark.asyncio
@@ -620,3 +685,120 @@ async def test_unreachable_personal_task_server_keeps_other_personal_tools(perso
 
     notes_name = next(name for name, server in personal.mcp_servers.items() if server.url == "https://notes.example.com/mcp")
     assert [tool.name for tool in tools] == [f"{notes_name}_search"]
+
+
+@pytest.fixture
+def stored_oauth_rows(tmp_path):
+    """Install a shared OAuth token store; yields a ``(seed, keys)`` pair over its rows."""
+    import sqlalchemy as sa
+    from cryptography.fernet import Fernet
+    from sqlalchemy.orm import sessionmaker
+
+    from deerflow.config.credentials_key import CredentialsCipher
+    from deerflow.mcp.oauth_store import McpOAuthTokenStore, set_mcp_oauth_token_store
+    from deerflow.persistence.base import Base
+    from deerflow.persistence.mcp_oauth_tokens import McpOAuthTokenRow, SqlMcpOAuthTokenRepository
+
+    engine = sa.create_engine(f"sqlite:///{(tmp_path / 'oauth-tokens.db').as_posix()}")
+    Base.metadata.create_all(engine, tables=[McpOAuthTokenRow.__table__])
+    repo = SqlMcpOAuthTokenRepository(sessionmaker(engine, expire_on_commit=False))
+    previous = set_mcp_oauth_token_store(McpOAuthTokenStore(repo, cipher=CredentialsCipher.from_keys([Fernet.generate_key()])))
+
+    def seed(owner, server_key, scope="personal"):
+        assert repo.claim(scope, owner, server_key, config_fingerprint="f" * 64, expected_version=None, lease_owner="seed", lease_seconds=1.0, now=0.0)
+
+    def keys(owner, scope="personal"):
+        with engine.connect() as conn:
+            return set(conn.scalars(sa.select(McpOAuthTokenRow.server_key).where(McpOAuthTokenRow.scope == scope, McpOAuthTokenRow.owner_user_id == owner)))
+
+    try:
+        yield seed, keys
+    finally:
+        set_mcp_oauth_token_store(previous)
+        engine.dispose()
+
+
+def test_removed_or_edited_connections_drop_their_stored_oauth_tokens(personal_client, stored_oauth_rows):
+    """A removed or edited connection's runtime name never returns, so its token row would only hold ciphertext forever."""
+    seed, keys = stored_oauth_rows
+    client = personal_client
+    create(client, "alice", name="github")
+    create(client, "alice", name="linear")
+    create(client, "bob", name="github")
+    alice = set(load_user_mcp_config("alice").mcp_servers)
+    bob = set(load_user_mcp_config("bob").mcp_servers)
+    for name in alice:
+        seed("alice", name)
+    for name in bob:
+        seed("bob", name)
+    seed("alice", "personal_left-by-an-earlier-edit")
+    seed("", "github", scope="deployment")
+    github = personal_server_name("alice", "github", read_user_mcp_config("alice")["mcpServers"]["github"])
+    assert github in alice
+
+    # Turning a connection off and on restores its runtime name: its chain survives.
+    for enabled in (False, True):
+        result = client.patch("/api/mcp/personal/config", headers={"test-user": "alice"}, json={"server_name": "github", "enabled": enabled})
+        assert result.status_code == 200, result.text
+    assert keys("alice") == alice, "a toggle must keep the stored chain; an earlier orphan is swept"
+
+    result = client.put("/api/mcp/personal/config/server", headers={"test-user": "alice"}, json={"server_name": "linear", "server": {"type": "http", "url": "https://example.com/linear-v2", "headers": {"Authorization": "***"}}})
+    assert result.status_code == 200, result.text
+    assert keys("alice") == {github}, "the edited connection's old row is gone"
+
+    assert client.delete("/api/mcp/personal/config/servers/github", headers={"test-user": "alice"}).status_code == 200
+    assert keys("alice") == set()
+    assert keys("bob") == bob, "another owner's rows are untouched"
+    assert keys("", scope="deployment") == {"github"}, "deployment rows are untouched"
+
+
+def test_personal_config_save_survives_an_unavailable_token_store(personal_client, monkeypatch):
+    from deerflow.mcp.oauth_store import McpOAuthTokenStoreUnavailable, set_mcp_oauth_token_store
+
+    store = MagicMock()
+    store.forget_unconfigured.side_effect = McpOAuthTokenStoreUnavailable("down")
+    previous = set_mcp_oauth_token_store(store)
+    try:
+        assert create(personal_client, "alice").status_code == 200
+    finally:
+        set_mcp_oauth_token_store(previous)
+    assert "github" in read_user_mcp_config("alice")["mcpServers"]
+    store.forget_unconfigured.assert_called_once()
+
+
+@pytest.mark.parametrize("failure_stage", ["resolve", "read", "write"])
+@pytest.mark.parametrize(
+    ("method", "url", "body", "expected_detail"),
+    [
+        ("POST", "/api/mcp/personal/config/servers", {"mcp_servers": {"new": {"type": "http", "url": "https://example.com/new"}}}, "Failed to add personal MCP servers"),
+        ("PUT", "/api/mcp/personal/config/server", {"server_name": "github", "server": {"type": "http", "url": "https://example.com/updated"}}, "Failed to update personal MCP server"),
+        ("PATCH", "/api/mcp/personal/config", {"server_name": "github", "enabled": False}, "Failed to update personal MCP server state"),
+        ("DELETE", "/api/mcp/personal/config/servers/github", None, "Failed to delete personal MCP server"),
+    ],
+    ids=["create", "update", "state", "delete"],
+)
+def test_personal_mutation_storage_errors_have_fixed_details_and_server_logs(personal_client, monkeypatch, caplog, failure_stage, method, url, body, expected_detail):
+    assert create(personal_client, "alice").status_code == 200
+    path = user_mcp_config_path("alice")
+    before = path.read_bytes()
+    host_path = "/srv/private/deer-flow/users/alice/extensions_config.json"
+    error = PermissionError(13, "Permission denied", host_path)
+
+    def fail(*_args, **_kwargs):
+        raise error
+
+    boundary = {"resolve": "user_mcp_config_path", "read": "read_user_mcp_config", "write": "atomic_write_extensions_config"}[failure_stage]
+    monkeypatch.setattr(personal_mcp, boundary, fail)
+    with TestClient(personal_client.app, raise_server_exceptions=False) as client:
+        with caplog.at_level(logging.ERROR, logger="app.gateway.routers.personal_mcp"):
+            response = client.request(method, url, headers={"test-user": "alice"}, json=body)
+
+    assert response.status_code == 500
+    assert response.headers["content-type"].startswith("application/json"), response.text
+    assert response.json() == {"detail": expected_detail}
+    assert host_path not in response.text
+    assert path.read_bytes() == before
+    records = [record for record in caplog.records if record.name == "app.gateway.routers.personal_mcp"]
+    assert len(records) == 1
+    assert records[0].exc_info[1] is error
+    assert host_path in caplog.text

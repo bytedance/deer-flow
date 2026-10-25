@@ -174,6 +174,8 @@ Array previews coalesce consecutive generated markers only at the end into one o
 
 ### Key Patterns
 
+REST `core/api/fetcher.ts`: preserve Request; CSRF uses effective method/headers.
+
 Conversation exports read every persisted message page through
 `fetchThreadExportMessages` (200 rows/page). Run `mergeMessages` after history
 deduplication to restore earliest trusted positions for identities repeated across runs.

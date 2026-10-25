@@ -298,10 +298,12 @@ It does not require a separate signal-to-fact match.
 Search increments access heat only for facts it returns.
 Prompt injection and `get_context()` do not increment access heat.
 
-Usage and audit sidecars live below the agent `.metadata/` directory.
+Usage, audit, and per-thread extraction watermark sidecars live below the
+agent `.metadata/` directory.
 They must not change canonical Markdown timestamps or revisions.
 Write audits only after canonical persistence succeeds.
 User delete and clear operations must remove matching sidecar data.
+Updates feed after the furthest of the LRU and persisted watermark (best-effort IO).
 
 Staleness review reuses the regular updater call.
 It can keep, remove, or extend eligible aged facts.
@@ -317,6 +319,24 @@ Use the newest source creation time for the merged fact.
 Use the earliest source review deadline for its next review.
 
 #### Remote backends
+
+Mem0 search and management convert facts inside the read-policy boundary.
+Invalid score/categories/metadata fields omit field values from `Mem0APIError`s.
+Diagnostics carry only bounded opaque record IDs, otherwise `<unavailable>`;
+missing/null defaults stay compatible and local programming errors propagate.
+
+Mem0 normalizes JSON syntax, Unicode decoding, and parser recursion failures
+to Mem0APIError.
+It validates object response envelopes and lists of object records in the
+HTTP client before returning recall data. Invalid structures raise Mem0APIError,
+so existing read policies apply to search, injection, management and export.
+Validate every page; a malformed later page must not publish a partial listing.
+Missing results and valid empty lists retain the existing empty-read behavior.
+Decoding and structure errors identify the endpoint and list page without memory
+contents; structure errors also identify the invalid container or record type.
+Preserve decoding causes. Catch RecursionError only at JSON parsing; local
+programming errors must still propagate.
+Regressions use offline HTTP transports in `tests/test_mem0_response_policy.py`.
 
 Strict reads use the backend-neutral `MemoryReadError`.
 Backends declare their policy through `read_failures_are_fatal_for_config()`.
@@ -349,6 +369,16 @@ Honcho is a remote HTTP adapter for user-model memory.
 It creates one workspace per resolved `user_id`.
 A missing user fails closed to no memory.
 Its async methods offload synchronous HTTP work with `asyncio.to_thread`.
+Honcho's `from_config` consumes the `should_keep_hidden_message` host hook.
+Its write path drops hidden human messages unless that hook accepts them;
+the host default keeps valid user clarification answers and rejects framework context.
+Without a callable hook, standalone construction drops all hidden human messages.
+If the hook raises an `Exception`, skip only that hidden message and continue the batch.
+Log a generic warning without message metadata, content or exception text.
+Keep this boundary around the hook; do not change HTTP write errors or catch `BaseException`.
+Keep the filter inside `add` so sync, async and pre-compaction writes share it;
+`tests/test_honcho_hidden_messages.py` checks the real HTTP payloads, middleware and host factory;
+`tests/blocking_io/test_honcho_memory_backend.py` keeps the filter hook off the event loop.
 The default read failure policy logs and returns no results.
 `failure_policy.read: fail_closed` rethrows recall failures.
 
@@ -382,8 +412,8 @@ Keep these cross-component constraints in sync:
 - The pod grace period must include retrieval wait, flush time, and shutdown margin.
 - `retrieval_adapter` selects FTS5, a custom factory, or the empty fallback.
 - Eviction weights must total `1.0`.
-- `watermark_max_keys: 0` makes the conversation watermark cache unbounded.
-- A dropped watermark can re-extract one batch on the next turn.
+- `watermark_max_keys` caps the watermark LRU and each `watermarks.json`; `0` is unbounded.
+- A watermark missing from both can re-extract one batch on the next turn.
 
 #### Write-side near-duplicate fact gate (opt-in)
 

@@ -238,7 +238,7 @@ def _store_supports_terminal_completion(store: RunStore) -> bool:
 
 @dataclass(frozen=True)
 class TerminalCommitProof:
-    """Process-local evidence returned by one completed durable write."""
+    """Process-local proof of an acknowledged terminal transition."""
 
     status: RunStatus
     error: str | None
@@ -528,6 +528,12 @@ class RunManager:
     def _has_final_terminal_ack(self, record: RunRecord) -> bool:
         return not record.rollback_finalization_pending and self._has_terminal_ack(record)
 
+    def terminal_event_status(self, record: RunRecord) -> str | None:
+        """Return an attributable final outcome for this local worker only."""
+        if self._runs.get(record.run_id) is not record or record.store_only or record.owner_worker_id != self._worker_id or record.status in (RunStatus.pending, RunStatus.running) or not self._has_final_terminal_ack(record):
+            return None
+        return record.status.value
+
     def can_release_terminal_barrier(self, record: RunRecord) -> bool:
         """Keep durable ownership barriers through rollback's final error ACK."""
         return not self.heartbeat_enabled or self._store is None or record.ownership_lost or self._has_final_terminal_ack(record)
@@ -548,10 +554,11 @@ class RunManager:
     def _acknowledge_terminal(self, record: RunRecord, outcome: TerminalCommitProof, staged_revision: int) -> None:
         if self._runs.get(record.run_id) is not record or record.ownership_lost:
             return
-        # Publish the acknowledged outcome without an await. An older
-        # interrupted ACK cannot supersede a newer staged/acknowledged error.
+        # Publish the acknowledged outcome without an await. With a backing
+        # store, an older interrupted ACK cannot supersede a newer error.
+        # Storeless transitions are synchronous and retain local mutability.
         previous = record.terminal_commit_proof
-        if previous is None or previous.status == RunStatus.interrupted or outcome.status != RunStatus.interrupted:
+        if self._store is None or previous is None or previous.status == RunStatus.interrupted or outcome.status != RunStatus.interrupted:
             record.terminal_commit_proof = outcome
         authoritative = record.terminal_commit_proof
         if authoritative.status != RunStatus.interrupted or record.terminal_status_revision == staged_revision:
@@ -632,11 +639,14 @@ class RunManager:
                 record.run_id,
             )
             return False
+        terminal = status not in (RunStatus.pending, RunStatus.running)
+        outcome = self._terminal_outcome(record, status, error=error, stop_reason=stop_reason)
+        staged_revision = record.terminal_status_revision
         if self._store is None:
+            if terminal and not record.store_only:
+                self._acknowledge_terminal(record, outcome, staged_revision)
             return True
         if self.heartbeat_enabled and not record.store_only:
-            terminal = status not in (RunStatus.pending, RunStatus.running)
-            outcome = self._terminal_outcome(record, status, error=error, stop_reason=stop_reason)
             if terminal and self._has_terminal_ack(record, outcome):
                 return True
 
@@ -675,6 +685,11 @@ class RunManager:
                 record.run_id,
                 lambda: self._store.update_status(record.run_id, status.value, error=error, stop_reason=stop_reason, **({"goal_verdict": record.goal_verdict} if record.goal_verdict is not None else {})),
             )
+            # Preserve legacy single-worker recovery below, but only an explicit
+            # successful write can authorize a new terminal event. A matching row
+            # or a legacy None return does not attribute the commit to us.
+            if terminal and updated is True and not record.store_only:
+                self._acknowledge_terminal(record, outcome, staged_revision)
             if updated is False:
                 # ``update_status`` is now guarded by ``status IN ('pending','running')``.
                 # False can mean either:
@@ -1358,7 +1373,13 @@ class RunManager:
                 )
                 return
             proof = record.terminal_commit_proof
-            if self.heartbeat_enabled and proof is not None and proof.status != RunStatus.interrupted and self._terminal_outcome(record, status, error=error, stop_reason=stop_reason, goal_verdict=goal_verdict) != proof:
+            if (
+                self.heartbeat_enabled
+                and self._store is not None
+                and proof is not None
+                and proof.status != RunStatus.interrupted
+                and self._terminal_outcome(record, status, error=error, stop_reason=stop_reason, goal_verdict=goal_verdict) != proof
+            ):
                 logger.info("Skipped status change after acknowledged terminal outcome for run %s", run_id)
                 return
             record.status = status
@@ -1697,6 +1718,17 @@ class RunManager:
                 record.task.cancel()
         logger.info("Run %s cancellation signalled locally (action=%s)", run_id, action)
 
+    async def request_fenced_cancel(self, run_id, *, execution_fence, user_id):
+        """Persist cancellation under the extension epoch; the run owner consumes it."""
+        import inspect
+
+        if not self.heartbeat_enabled or self._store is None or "execution_fence" not in inspect.signature(self._store.request_cancel).parameters:
+            raise RunIdempotencyUnsupported("The configured RunStore does not support fenced cancellation")
+        record = await self.get(run_id, user_id=user_id)
+        if record is None:
+            raise ConflictError("Run unavailable")
+        await self._store.request_cancel(run_id, action="interrupt", execution_fence=execution_fence, user_id=user_id)
+
     async def cancel(self, run_id: str, *, action: str = "interrupt") -> CancelOutcome:
         """Request cancellation of a run.
 
@@ -1918,6 +1950,7 @@ class RunManager:
         evidence_agent_id: str | None = None,
         idempotency_request: dict[str, Any] | None = None,
         run_id: str | None = None,
+        execution_fence=None,
     ) -> RunRecord:
         """Atomically admit a normal agent run for a thread."""
         return await self._admit_thread_operation(
@@ -1935,6 +1968,7 @@ class RunManager:
             evidence_agent_id=evidence_agent_id,
             idempotency_request=idempotency_request,
             run_id=run_id,
+            execution_fence=execution_fence,
         )
 
     async def _close_cancelled_admission(self, record: RunRecord) -> None:
@@ -2008,6 +2042,7 @@ class RunManager:
         evidence_agent_id: str | None = None,
         idempotency_request: dict[str, Any] | None = None,
         run_id: str | None = None,
+        execution_fence=None,
     ) -> RunRecord:
         """Atomically check for inflight runs and create a new one.
 
@@ -2038,6 +2073,9 @@ class RunManager:
         lease_expires_at = self._compute_lease_expires_at()
         grace_seconds = self._run_ownership_config.grace_seconds if self._run_ownership_config else 10
 
+        if execution_fence is not None and (self._store is None or not _store_accepts_idempotency_parameter(self._store, "execution_fence") or multitask_strategy != "reject"):
+            raise RunIdempotencyUnsupported("The configured RunStore does not support execution fencing")
+
         interrupted_records: list[RunRecord] = []
         record = RunRecord(
             run_id=run_id,
@@ -2062,7 +2100,7 @@ class RunManager:
         )
 
         async with self._lock:
-            if idempotency_key is not None:
+            if idempotency_key is not None and execution_fence is None:
                 for existing in self._runs.values():
                     if existing.idempotency_key != idempotency_key:
                         continue
@@ -2129,6 +2167,8 @@ class RunManager:
                         "created_at": now,
                         "grace_seconds": grace_seconds,
                     }
+                    if execution_fence is not None:
+                        create_kwargs["execution_fence"] = execution_fence
                     if idempotency_key is not None:
                         create_kwargs["idempotency_key"] = idempotency_key
                     if evidence_origin != "unknown":

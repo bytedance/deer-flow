@@ -1,0 +1,19 @@
+{
+  "description": "Earlier real-task investigation; historical context, not validation of this narrow Goal fix.",
+  "paid_units": 12,
+  "task_types": 3,
+  "repeats_per_task_per_arm": 2,
+  "model": "deepseek-flash / DeepSeek-V4.1-Flash-1017",
+  "recursion_limit": 1000,
+  "output_ceiling": 65536,
+  "A_qualified": 4,
+  "A_total": 6,
+  "B_qualified": 1,
+  "B_total": 6,
+  "B_step_capped_units": 3,
+  "B_presentation_repair_units": 0,
+  "usage_priced_usd": 4.65303372,
+  "conclusion": "The broader experimental intervention was not supported for adoption. This patch addresses only a separately reproduced native loop-stop/Goal interaction.",
+  "local_source_summary_sha256": "aa24f93b4207af888556ac27a573d3cbc8355e7afd62b190d05f50e5c4d660e3",
+  "earlier_goal_investigation": "https://github.com/bytedance/deer-flow/issues/6555"
+}

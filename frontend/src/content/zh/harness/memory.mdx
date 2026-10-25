@@ -33,7 +33,7 @@ import { Callout } from "nextra/components";
 1. **两种模式都会注入**：每次对话开始时，Agent 当前记忆以受控的 token 预算（`max_injection_tokens`）注入到系统提示中。
 2. **中间件模式（默认）**：`MemoryMiddleware` 在每次 Lead Agent 轮次结束后运行，过滤对话、排队后台更新并自动提取新事实。更新通过 `debounce_seconds` 防抖以批量处理快速变化。
 3. **工具模式（实验性）**：DeerFlow 注册 `memory_search`、`memory_get`、`memory_add`、`memory_update`、`memory_delete` 五个工具，并跳过 `MemoryMiddleware`。模型自行决定何时搜索、读取或写入记忆，因此效果取决于模型的工具调用行为。这些显式 CRUD 工具不是被动的陈旧性复核路径；启用工具模式意味着运营方选择由模型主动更新/删除记忆，而不是依赖中间件的陈旧性保护栏。
-4. **按 Agent 记忆**：当自定义 Agent 激活时，其记忆独立于全局记忆存储。这保持不同 Agent 的知识隔离。
+4. **按 Agent 划分事实**：默认的 DeerMem 后端将各自定义 Agent 学到的事实保存在各自的事实目录中。同一用户的各 Agent 共用一个记忆文件。
 
 在工具模式中，五个 `memory_*` 工具名是保留名。如果 MCP 服务或自定义工具已经使用 `memory_search`、`memory_get`、`memory_add`、`memory_update` 或 `memory_delete`，已有工具会保留该名称，冲突的记忆工具会被跳过并记录告警。
 
@@ -212,48 +212,61 @@ memory:
 ```yaml
 memory:
   enabled: true
+  injection_enabled: true
+
+  # 后端选择：deermem（默认）| noop | openviking | 自定义 MemoryManager 子类的点号路径
+  manager_class: deermem
 
   # 运行模式：
   #   middleware - 默认；每轮结束后被动后台提取
   #   tool - 实验性；模型直接调用 memory_* 工具
   mode: middleware
 
-  # 全局记忆文件的存储路径。
-  # 默认：{base_dir}/memory.json（解析为 backend/.deer-flow/memory.json）
-  # 绝对路径按原样使用，相对路径相对于 base_dir 解析。
-  storage_path: memory.json
+  # DeerMem 私有参数必须放在 backend_config 下（而不是顶层），因为它们只属于 DeerMem
+  # ——换一个后端时，由该后端自行解释自己的 backend_config。写在顶层的旧字段会在加载时
+  # 被自动迁移进 backend_config，并合并打一条 WARNING；而以 .json 结尾的旧式文件路径
+  # storage_path 会被直接丢弃（详见 deerflow/config/memory_config.py）。
+  backend_config:
+    # 数据根目录，必须是目录。留空 = deer-flow 的 base_dir；按用户的记忆文件在
+    # {根目录}/users/{user_id}/memory.json。绝对路径即该根目录。
+    storage_path: ""
 
-  # 存储类（留空 = FileMemoryStorage，即默认的基于文件的 JSON 存储，不走 importlib；
-  # 自定义实现填 `module.Class` 点号路径）
-  storage_class: ""
+    # 存储类（留空 = FileMemoryStorage，即默认的可移植文件存储，不走 importlib；
+    # 自定义实现填 `module.Class` 点号路径）
+    storage_class: ""
 
-  # 处理排队记忆更新前等待的秒数（防抖）
-  debounce_seconds: 30
+    # 处理排队记忆更新前等待的秒数（防抖）
+    debounce_seconds: 30
 
-  # 记忆更新提取使用的模型（null = 使用默认模型）
-  model_name: null
+    # 记忆提取使用的模型。整段省略 = 宿主工厂注入应用默认模型（等同于旧写法
+    # model_name: null）；显式填写可换用更便宜或不同的模型。
+    model:
+      # provider: openai
+      # model: gpt-4o-mini
+      # api_key: $OPENAI_API_KEY
+      # base_url:               # 可选，用于 OpenAI 兼容网关
+      # temperature:            # 可选
 
-  # 要存储的最大事实数
-  max_facts: 100
+    # 要存储的最大事实数
+    max_facts: 100
 
-  # 存储事实所需的最低置信度分数（0.0–1.0）
-  fact_confidence_threshold: 0.7
+    # 存储事实所需的最低置信度分数（0.0–1.0）
+    fact_confidence_threshold: 0.7
 
-  # 是否将记忆注入到系统提示中
-  injection_enabled: true
-
-  # 注入到系统提示的最大 token 数
-  max_injection_tokens: 2000
+    # 注入到系统提示的最大 token 数
+    max_injection_tokens: 2000
 ```
 
 ## 全局记忆与按 Agent 记忆
 
-DeerFlow 支持两级记忆：
+DeerFlow 按用户划分记忆文件，按 Agent 划分事实目录：
 
-- **全局记忆**：存储在 `{base_dir}/memory.json`。在没有特定 Agent 激活或 Agent 没有按 Agent 记忆文件时使用。
-- **按 Agent 记忆**：存储在 `{base_dir}/agents/{agent_name}/memory.json`。当自定义 Agent 激活时使用，使该 Agent 学到的知识保持独立。
+- **按用户记忆**：`{base_dir}/users/{user_id}/memory.json`，存放该用户跨任务的摘要。`agent_name` 不会切换到另一个记忆文件。
+- **按 Agent 事实**：`{base_dir}/users/{user_id}/agents/{agent_name}/facts/`，与同一用户的记忆文件并列存放，使各 Agent 学到的事实相互独立。`{agent_name}` 这一段会被转为小写，且仅允许 `A-Z`、`a-z`、`0-9` 和 `-`。
 
-`MemoryMiddleware` 根据请求配置中的活跃 `agent_name` 自动选择正确的记忆文件。
+不带 `user_id` 的调用方会退回未分用户的遗留根 `{base_dir}/memory.json`（见 `deermem/core/paths.py` 的 `Legacy: no user_id` 分支）。
+
+`MemoryMiddleware` 根据请求配置中的活跃 `agent_name` 选择读取哪个 Agent 的 facts 目录。
 
 用于记忆存储的 Agent 名称通过 `AGENT_NAME_PATTERN` 验证，以确保文件系统安全。
 
@@ -261,11 +274,11 @@ DeerFlow 支持两级记忆：
 
 默认情况下，记忆文件存储在后端基础目录下：
 
-- 基础目录：`backend/.deer-flow/`
-- 全局记忆：`backend/.deer-flow/memory.json`
-- 按 Agent 记忆：`backend/.deer-flow/agents/{agent_name}/memory.json`
+- 基础目录：`backend/.deer-flow/`（即 `runtime_home()`，可用 `DEER_FLOW_HOME` 覆盖）
+- 按用户记忆：`backend/.deer-flow/users/{user_id}/memory.json`
+- 按 Agent 事实：`backend/.deer-flow/users/{user_id}/agents/{agent_name}/facts/`
 
-你可以用 `storage_path` 字段更改存储路径。相对路径相对于基础目录解析；使用绝对路径可以将记忆存储在自定义位置。
+你可以用 `memory.backend_config.storage_path` 更改这个根目录，且它的值必须是**目录**：绝对路径即该根目录，相对路径相对于宿主状态目录解析，留空则保持默认。以文件形态给出的旧写法（`storage_path: memory.json`）会被 `deerflow/config/memory_config.py` 打一条 WARNING 后丢弃；指向已存在文件的值会让 `DeerMemConfig` 在构造时直接抛错。
 
 ## 自定义存储后端
 

@@ -11,6 +11,7 @@ Exit codes:
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import shutil
@@ -869,6 +870,10 @@ def check_env_file(project_root: Path) -> CheckResult:
 
 
 def main() -> int:
+    # Keep reporting usable on terminals and pipes with legacy encodings.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(errors="replace")
+
     project_root = Path(__file__).resolve().parents[1]
 
     # Load .env early so key checks work
@@ -975,4 +980,11 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    # Parsed here rather than inside main(): the unit tests call main() in-process
+    # under pytest, whose argv must not reach argparse.
+    parser = argparse.ArgumentParser(
+        prog="python scripts/doctor.py",
+        description=("DeerFlow Health Check (make doctor): checks system requirements, configuration, LLM provider, and optional components, then prints an actionable report."),
+    )
+    parser.parse_args()
     sys.exit(main())

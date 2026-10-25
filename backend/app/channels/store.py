@@ -42,6 +42,7 @@ import logging
 import tempfile
 import threading
 import time
+from contextlib import suppress
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -134,14 +135,25 @@ class JsonChannelStore:
 
     def _save(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        fd = tempfile.NamedTemporaryFile(mode="w", dir=self._path.parent, suffix=".tmp", delete=False)
+        fd = tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", newline="", dir=self._path.parent, suffix=".tmp", delete=False)
         try:
             json.dump(self._data, fd, indent=2)
             fd.close()
             Path(fd.name).replace(self._path)
         except BaseException:
-            fd.close()
-            Path(fd.name).unlink(missing_ok=True)
+            # Cleanup is best-effort: a failing close or unlink must not take the
+            # original save error with it, and the unlink is still attempted after
+            # a failed close.
+            try:
+                fd.close()
+            except OSError:
+                with suppress(Exception):
+                    logger.warning("Failed to close temporary channel store file %s", fd.name, exc_info=True)
+            try:
+                Path(fd.name).unlink(missing_ok=True)
+            except OSError:
+                with suppress(Exception):
+                    logger.warning("Failed to remove temporary channel store file %s", fd.name, exc_info=True)
             raise
 
     # -- sync bodies -------------------------------------------------------
@@ -321,6 +333,9 @@ def _read_legacy_file(path: Path, *, log_missing: bool, on_corrupt: str) -> dict
     except FileNotFoundError:
         if log_missing:
             logger.debug("No legacy channel store at %s", path)
+        return None
+    except UnicodeDecodeError:
+        logger.warning(on_corrupt, path)
         return None
     except OSError:
         logger.warning(on_corrupt, path, exc_info=True)
