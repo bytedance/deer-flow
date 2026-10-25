@@ -72,17 +72,16 @@ Tests: `html-assets.dom.test.ts`, `artifact-file-preview.dom.test.tsx`,
    `/api/mcp/config` endpoints remain admin-only and are used by the Platform provided editor. Delete names are
    percent-encoded, including legacy empty and slash-containing names; every
    successful mutation invalidates `["mcpConfig"]` only after the response.
-   Current-chat MCP background tasks use `core/background-tasks`: the header
-   trigger is hidden for new/mock/static-demo threads and unless `/api/features`
-   reports the startup-scoped `mcp_tasks` capability; the list query is disabled
-   while that capability is unavailable, so default-disabled and memory-backend
-   deployments never poll an endpoint that cannot serve tasks. It lists at most
-   20 local task records, refreshes every 3 seconds while any task is active
-   (15 seconds otherwise), fetches bounded task details only while a user expands
-   a card, and cancels through the thread-scoped local-ID endpoint. The expanded view
-   shows result/preview, artifact metadata, input requests, and the latest poll,
-   notification-delivery, or cancellation error without exposing the persisted remote handle. A
-   persisted cancel request remains "Cancelling…" only while the task status is
+   Current-chat MCP tasks use `core/background-tasks`. Hide the header trigger for
+   new/mock/static-demo threads or without the startup-scoped `mcp_tasks` feature;
+   disable the list query too, so unsupported deployments never poll it. List at
+   most 20 local tasks; poll every 3 seconds while active and 15 otherwise. Fetch
+   bounded details only for expanded cards and cancel through thread-scoped local
+   IDs. Show result/preview, artifact metadata, input requests, and the latest poll,
+   notification-delivery, or cancellation error, never the remote handle. On
+   confirmed cancellation, cancel the exact detail query before seeding its terminal
+   cache and invalidate only the exact list, fencing stale or replacement reads.
+   A persisted cancel request remains "Cancelling…" only while the task status is
    still active; if remote cancellation keeps failing, the active card remains
    expandable and shows the attempt count plus the latest bounded error while
    the backend continues retrying. Notification delivery failures expose their

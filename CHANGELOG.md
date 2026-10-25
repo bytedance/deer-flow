@@ -1402,6 +1402,11 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
 
 ### Fixed
 
+- **frontend:** A confirmed background-task cancellation can no longer be
+  overwritten by a detail poll that started earlier. The expanded task card now
+  keeps its terminal `cancelled` state and stops polling instead of briefly
+  returning to `working`. ([issue #7177](https://github.com/bytedance/deer-flow/issues/7177))
+
 - **channels:** IM replies that present files no longer resolve those files
   on the event loop. For every artifact, both reply paths (`runs.wait` and
   streaming) resolved the virtual path (`realpath`), resolved the outputs
