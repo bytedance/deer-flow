@@ -2549,6 +2549,8 @@ before retaining a bounded diagnostic tail, so later TODO stacks or warnings
 do not erase the test evidence. Complete, consistent Node counters take
 precedence over incidental log text such as `12 passed` or `2 errors`;
 independently shaped summaries from other runners still contribute evidence.
+Pytest sibling summaries retain warning counts and the optional human-readable
+duration suffix printed for runs lasting at least a minute, such as `(0:01:05)`.
 
 For Maven and Gradle test acceptance, a `BUILD SUCCESS` / `BUILD SUCCESSFUL`
 banner alone remains `UNVERIFIED`: builds can succeed without running tests.

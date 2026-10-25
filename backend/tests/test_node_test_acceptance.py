@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from _pytest.terminal import format_session_duration
 from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.tools import StructuredTool
 from langgraph.graph import END, START, MessagesState, StateGraph
@@ -372,6 +373,29 @@ def test_summary_cache_is_bounded_and_tracks_compaction(executor_module, monkeyp
 def test_node_sibling_pytest_warning_summaries(node_passed, sibling, expected):
     verdict = _verdict(_summary(passed=node_passed, skipped=1) + "\n" + sibling)
     assert (verdict["leaves"][0]["checked"], verdict["all_hold"]) == expected
+
+
+@pytest.mark.parametrize("duration", [59.0, 60.0, 65.0, 3605.0, 86405.0, 172805.0])
+@pytest.mark.parametrize("prefix,newline,decoration", [("#", "\n", ""), ("ℹ", "\r\n", "===")])
+@pytest.mark.parametrize("node_passed", [0, 1])
+@pytest.mark.parametrize("summary,expected", [("1 failed, 1 passed, 1 warning", (True, False)), ("2 passed, 3 warnings", (True, True))])
+def test_harvest_preserves_pytest_sibling_duration(executor_module, monkeypatch, duration, prefix, newline, decoration, node_passed, summary, expected):
+    sibling = f"{decoration} {summary} in {format_session_duration(duration)} {decoration}".strip()
+    output = (_summary(prefix, passed=node_passed, skipped=1) + "\n" + sibling + "\n" + "diagnostic\n" * 150).replace("\n", newline)
+    messages = [AIMessage(content="", tool_calls=[{"name": "bash", "id": "mixed-test-call", "args": {"command": "make test"}}]), ToolMessage(content=output, tool_call_id="mixed-test-call")]
+    monkeypatch.setattr(executor_module, "_harvest_shell_persistence", lambda state: False)
+    executions = executor_module._harvest_bash_executions({"messages": messages})
+    assert len(executions[0]["output_tail"]) <= 1000
+    assert summary not in executions[0]["output_tail"]
+    assert executions[0]["test_summary"] == ("passed" if expected[1] else "failed")
+    verdict = check_acceptance_criteria(["tests_passed:make test"], bash_executions=executions)
+    assert (verdict["leaves"][0]["checked"], verdict["all_hold"]) == expected
+
+
+@pytest.mark.parametrize("suffix", [" (extra log text)", " (0:1:05)", " (0:61:05)", " (0:01:05) trailing log text"])
+def test_node_sibling_pytest_duration_does_not_admit_arbitrary_suffixes(suffix):
+    verdict = _verdict(_summary(passed=0, skipped=1) + "\n2 passed in 65.00s" + suffix)
+    assert (verdict["leaves"][0]["checked"], verdict["all_hold"]) == (False, False)
 
 
 @pytest.mark.parametrize("node_passed", [0, 1])
