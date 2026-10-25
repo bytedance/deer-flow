@@ -5,7 +5,6 @@ import atexit
 import json
 import logging
 import os
-import re
 import sys
 import threading
 import uuid
@@ -62,6 +61,7 @@ from deerflow.tracing import (
     build_tracing_callbacks,
     inject_langfuse_metadata,
 )
+from deerflow.utils.bash_exit import BASH_TOOL_NAMES, bash_exit_status
 from deerflow.utils.messages import message_content_to_text
 
 if TYPE_CHECKING:
@@ -471,22 +471,12 @@ def _harvest_tool_receipts(
 
 
 #: Bash-family tool names whose calls count as recorded command executions.
-_BASH_EVIDENCE_TOOL_NAMES = frozenset({"bash", "bash_tool"})
+_BASH_EVIDENCE_TOOL_NAMES = BASH_TOOL_NAMES
 #: Bounds for the harvested evidence: only the newest few executions travel,
-#: with command/output text capped (test summaries print at the tail).
+#: with command/output text capped and full-output summary semantics preserved.
 _BASH_EVIDENCE_MAX_ENTRIES = 20
 _BASH_EVIDENCE_COMMAND_CHARS = 500
 _BASH_EVIDENCE_OUTPUT_TAIL_CHARS = 1000
-
-#: Exit-status markers in bash *output text*: a nonzero exit does not raise —
-#: local sandboxes append ``Exit Code: N``; e2b/opensandbox emit
-#: ``Command exited with code N`` when the command produced no output.
-_BASH_EXIT_CODE_MARKER_RE = re.compile(r"Exit Code: (-?\d+)\s*$")
-#: Remote providers emit ``Command exited with code N`` ONLY as the complete
-#: output of a silent command — anchor it to the whole (trimmed) content so
-#: a successful command that merely prints the phrase while exercising an
-#: error path is not misrecorded as failed.
-_BASH_EXITED_WITH_CODE_RE = re.compile(r"Command exited with code (-?\d+)")
 
 
 def _bash_evidence_status(content: str, meta_status: str) -> tuple[str, str | None]:
@@ -495,16 +485,10 @@ def _bash_evidence_status(content: str, meta_status: str) -> tuple[str, str | No
     Returns ``(status, marker)``: the marker text actually seen (e.g. ``Exit
     Code: 5``), so consumers can report it instead of asserting a failure the
     harness cannot distinguish from the command's own trailing text. The
-    explicit marker is authoritative: ``deerflow_tool_meta`` reports the
-    generic ToolMessage status, which stays ``success`` for a nonzero exit
-    rendered as ordinary output text.
+    explicit marker takes precedence over generic metadata in old checkpoints
+    or provider stamps that report ``success`` for a nonzero shell exit.
     """
-    match = _BASH_EXIT_CODE_MARKER_RE.search(content) or _BASH_EXITED_WITH_CODE_RE.fullmatch(content.strip())
-    if match is None:
-        return meta_status, None
-    # Signal-killed local subprocesses report signed codes (Exit Code: -9);
-    # only an exact zero is a success.
-    return ("success" if int(match.group(1)) == 0 else "error"), " ".join(match.group(0).split())
+    return bash_exit_status(content) or (meta_status, None)
 
 
 def _harvest_shell_persistence(final_state: Any) -> bool | None:
@@ -545,14 +529,16 @@ def _harvest_shell_persistence(final_state: Any) -> bool | None:
 
 def _harvest_bash_executions(
     final_state: Any,
+    *,
+    summary_cache: dict[str, tuple[str, str]] | None = None,
 ) -> list[dict[str, Any]] | None:
     """Harvest bounded bash command/output evidence from one streamed state.
 
     RFC #4651 PR4: a ``tests_passed:<command>`` acceptance leaf must anchor to
     a specific recorded execution — the command text lets the parent match the
-    criterion against the call that actually ran, and the bounded output tail
-    carries the test-summary shape. The recorded status is the **actual shell
-    exit status**: a nonzero bash exit comes back as ordinary output text
+    criterion against the call that actually ran. A bounded summary stamp is
+    computed from the full tool output before retaining the diagnostic tail.
+    The recorded status is the **actual shell exit status**: a nonzero bash exit comes back as ordinary output text
     (local: a trailing ``Exit Code: N``; e2b/opensandbox with empty output:
     ``Command exited with code N``), which ``deerflow_tool_meta`` still reports
     as success — so an explicit exit marker wins, and the meta status is only
@@ -565,12 +551,17 @@ def _harvest_bash_executions(
     UNVERIFIED.
     """
     if not final_state:
+        if summary_cache is not None:
+            summary_cache.clear()
         return None
     messages = final_state.get("messages") if isinstance(final_state, dict) else None
     if not messages:
+        if summary_cache is not None:
+            summary_cache.clear()
         return None
     try:
         from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY
+        from deerflow.subagents.acceptance_checks import summarize_test_output
 
         commands: dict[str, tuple[str, str, bool]] = {}
         for message in messages:
@@ -589,20 +580,28 @@ def _harvest_bash_executions(
                 # selection-changing suffix like ``-k smoke`` could be cut).
                 commands[tool_call_id] = (name, command[:_BASH_EVIDENCE_COMMAND_CHARS], len(command) > _BASH_EVIDENCE_COMMAND_CHARS)
         if not commands:
+            if summary_cache is not None:
+                summary_cache.clear()
             return []
         executions: list[dict[str, Any]] = []
-        for message in messages:
-            if not isinstance(message, ToolMessage):
-                continue
+        # Only retained executions need full-output parsing. The per-run cache
+        # survives values chunks, but keeps at most the same newest 20 outputs.
+        tool_messages = [message for message in messages if isinstance(message, ToolMessage) and str(message.tool_call_id or "") in commands][-_BASH_EVIDENCE_MAX_ENTRIES:]
+        next_cache: dict[str, tuple[str, str]] = {}
+        for message in tool_messages:
             tool_call_id = str(message.tool_call_id or "")
-            entry = commands.get(tool_call_id)
-            if entry is None:
-                continue
+            entry = commands[tool_call_id]
             name, command, command_truncated = entry
             meta = (message.additional_kwargs or {}).get(TOOL_META_KEY) or {}
             meta_status = str(meta.get("status") or getattr(message, "status", "success") or "success")
             content = message.content if isinstance(message.content, str) else json.dumps(message.content, sort_keys=True, default=str)
             status, status_marker = _bash_evidence_status(content, meta_status)
+            cached = summary_cache.get(tool_call_id) if summary_cache is not None else None
+            if cached is not None and (cached[0] is content or cached[0] == content):
+                test_summary = cached[1]
+            else:
+                test_summary = summarize_test_output(content)
+            next_cache[tool_call_id] = (content, test_summary)
             output_tail = content[-_BASH_EVIDENCE_OUTPUT_TAIL_CHARS:]
             if len(content) > _BASH_EVIDENCE_OUTPUT_TAIL_CHARS and content[-_BASH_EVIDENCE_OUTPUT_TAIL_CHARS - 1] != "\n":
                 # A clipped test name/log line can look like a summary after
@@ -615,10 +614,14 @@ def _harvest_bash_executions(
                     "command": command,
                     "command_truncated": command_truncated,
                     "output_tail": output_tail,
+                    "test_summary": test_summary,
                     "status": status,
                     "status_marker": status_marker,
                 }
             )
+        if summary_cache is not None:
+            summary_cache.clear()
+            summary_cache.update(next_cache)
         # Provenance stamp: whether the producing sandbox reuses one
         # persistent shell session. Captured here — while the state that
         # carried the evidence is at hand — because the parent-side checker
@@ -1038,9 +1041,10 @@ class SubagentExecutor:
         # this exact set so a subagent cannot activate an undisclosed skill.
         self._available_skill_names: set[str] = set()
         # Guard middlewares that expose ``consume_stop_reason`` (currently
-        # ``TokenBudgetMiddleware`` and ``LoopDetectionMiddleware``), captured in
-        # ``_create_agent`` so ``_aexecute`` can read each after the run and
-        # surface whichever cap fired (token_capped / loop_capped) to the lead
+        # ``TokenBudgetMiddleware``, ``LoopDetectionMiddleware`` and
+        # ``ModelLengthFinishReasonMiddleware``), captured in ``_create_agent``
+        # so ``_aexecute`` can read each after the run and surface whichever
+        # cap fired (token_capped / loop_capped / model_length_capped) to the lead
         # (#3875 Phase 2). Collected as a list — every guard must be checked,
         # not just the first — because the v2 contract advertises more than one
         # cap reason.
@@ -1185,7 +1189,8 @@ class SubagentExecutor:
                 self.config.name,
             )
         # Collect every guard middleware that exposes ``consume_stop_reason``
-        # (TokenBudgetMiddleware, LoopDetectionMiddleware) so _aexecute can read
+        # (TokenBudgetMiddleware, LoopDetectionMiddleware,
+        # ModelLengthFinishReasonMiddleware) so _aexecute can read
         # each after the run and surface whichever cap fired. Duck-typed
         # (``hasattr``) so this file needs no import of the middleware classes;
         # a list (not ``next(...)``) so every guard is checked and a later one
@@ -1344,7 +1349,9 @@ class SubagentExecutor:
         Checks every guard middleware that exposes ``consume_stop_reason``
         (collected in :meth:`_create_agent`) and returns the first non-``None``
         reason — ``"token_capped"`` when the token-budget hard stop fired,
-        ``"loop_capped"`` when loop detection forced a stop, otherwise ``None``.
+        ``"loop_capped"`` when loop detection forced a stop,
+        ``"model_length_capped"`` when the provider cut the response at its
+        output limit, otherwise ``None``.
         Each guard's cap does not raise (the run still completes with a final
         answer), so this is how the executor learns a completion was actually
         capped. Typically at most one guard fires per run, but checking all of
@@ -1728,6 +1735,8 @@ class SubagentExecutor:
                 return None
             return _harvest_tool_receipts(final_state, prefer_citing_turn=prefer_citing_turn)
 
+        bash_summary_cache: dict[str, tuple[str, str]] = {}
+
         def current_bash_executions() -> list[dict[str, Any]] | None:
             # RFC #4651 PR4: evidence for tests_passed acceptance leaves.
             # Accumulated from every chunk (not harvested once at terminal) so
@@ -1735,7 +1744,7 @@ class SubagentExecutor:
             # execution. Criteria-free runs pay nothing.
             if not self.acceptance_criteria:
                 return None
-            return _harvest_bash_executions(final_state)
+            return _harvest_bash_executions(final_state, summary_cache=bash_summary_cache)
 
         try:
             if task_info is not None and task_store is not None:

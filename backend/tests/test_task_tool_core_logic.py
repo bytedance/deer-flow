@@ -1098,6 +1098,49 @@ def test_task_tool_context_mode_captures_dispatch_time_history(monkeypatch, cont
         assert captured.get("context_snapshot") is None
 
 
+@pytest.mark.parametrize("duplicate_id", [False, True])
+def test_task_dispatch_snapshot_does_not_include_unfinished_ambiguous_calls(monkeypatch, duplicate_id):
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    runtime = _make_runtime()
+    runtime.state["messages"] = [
+        HumanMessage(content="Keep the user requirement"),
+        AIMessage(
+            content="",
+            tool_calls=[
+                {"name": "bash", "args": {"command": "COMPLETED_COMMAND"}, "id": "finished"},
+                {"name": "task", "args": {"prompt": "UNFINISHED_DELEGATION"}, "id": "finished" if duplicate_id else "pending"},
+            ],
+        ),
+        ToolMessage(content="Observed command result", tool_call_id="finished", name="bash"),
+    ]
+    before = [message.model_dump() for message in runtime.state["messages"]]
+    captured = {}
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def execute_async(self, prompt, task_id=None):
+            return task_id
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: _make_subagent_config())
+    monkeypatch.setattr(task_tool_module, "get_background_task_result", lambda _: _make_result(FakeSubagentStatus.COMPLETED, result="done"))
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda event: None)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
+    result = _run_task_tool(runtime=runtime, prompt="Current delegated task", subagent_type="general-purpose", tool_call_id="current-dispatch", context_mode="snapshot")
+    assert _task_tool_message(result).additional_kwargs[SUBAGENT_STATUS_KEY] == "completed"
+    snapshot = captured["context_snapshot"]
+    assert "UNFINISHED_DELEGATION" not in snapshot.content_json
+    assert ("COMPLETED_COMMAND" in snapshot.content_json) is (not duplicate_id)
+    assert "Keep the user requirement" in snapshot.content_json
+    assert "Observed command result" in snapshot.content_json
+    assert [message.model_dump() for message in runtime.state["messages"]] == before
+
+
 def test_task_tool_context_mode_schema_rejects_unknown_mode():
     from pydantic import ValidationError
 
@@ -3595,3 +3638,76 @@ def test_task_tool_forwards_execution_only_knowledge_scope(monkeypatch):
         "mode": "selected",
         "dataset_ids": ["dataset-1"],
     }
+
+
+@pytest.mark.parametrize("status", [FakeSubagentStatus.COMPLETED, FakeSubagentStatus.FAILED, FakeSubagentStatus.CANCELLED, FakeSubagentStatus.TIMED_OUT])
+def test_one_task_model_is_local_and_used_before_tool_assembly(monkeypatch, status):
+    parent = _make_subagent_config()
+    app_config = SimpleNamespace(get_model_config=lambda name: object() if name == "child-B" else None)
+    runtime = _make_runtime(app_config=app_config)
+    seen = {}
+
+    class Executor:
+        def __init__(self, **kwargs):
+            seen.update(kwargs)
+
+        def execute_async(self, prompt, task_id=None):
+            return "execution"
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", Executor)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *args, **kwargs: parent)
+    monkeypatch.setattr(task_tool_module, "get_available_subagent_names", lambda **kwargs: ["general-purpose"])
+    monkeypatch.setattr(task_tool_module, "get_background_task_result", lambda _: _make_result(status, result="done", error="stopped"))
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _: None)
+    assemble = MagicMock(return_value=[])
+    monkeypatch.setattr("deerflow.tools.get_available_tools", assemble)
+    _run_task_tool(runtime=runtime, prompt="calculate", subagent_type="general-purpose", tool_call_id="choice", model_name="child-B")
+    assert seen["config"].model == "child-B"
+    assert seen["config"] is not parent
+    assert assemble.call_args.kwargs["model_name"] == "child-B"
+    assert parent.model == "inherit"
+    assert runtime.config["metadata"]["model_name"] == "ark-model"
+    assert runtime.context.get("model_name") is None
+
+
+def test_unknown_task_model_rejects_before_assembly(monkeypatch):
+    config = SimpleNamespace(get_model_config=lambda _: None)
+    runtime = _make_runtime(app_config=config)
+    monkeypatch.setattr(task_tool_module, "get_available_subagent_names", lambda **kwargs: ["general-purpose"])
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *args, **kwargs: _make_subagent_config())
+    assemble = MagicMock()
+    monkeypatch.setattr("deerflow.tools.get_available_tools", assemble)
+    message = _task_tool_message(_run_task_tool(runtime=runtime, prompt="calculate", subagent_type="general-purpose", tool_call_id="choice", model_name="unknown"))
+    assert message.additional_kwargs[SUBAGENT_STATUS_KEY] == "failed"
+    assert "not configured" in message.content
+    assemble.assert_not_called()
+
+
+def test_parallel_task_choices_do_not_mutate_parent_or_shared_config(monkeypatch):
+    shared = _make_subagent_config()
+    runtime = _make_runtime(app_config=SimpleNamespace(get_model_config=lambda _: object()))
+    seen = []
+
+    class Executor:
+        def __init__(self, **kwargs):
+            seen.append(kwargs)
+
+        def execute_async(self, prompt, task_id=None):
+            return task_id
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", Executor)
+    monkeypatch.setattr(task_tool_module, "get_available_subagent_names", lambda **kwargs: ["general-purpose"])
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *args, **kwargs: shared)
+    monkeypatch.setattr(task_tool_module, "get_background_task_result", lambda _: _make_result(FakeSubagentStatus.COMPLETED, result="done"))
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _: None)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
+
+    async def run_both():
+        return await asyncio.gather(*(task_tool_module.task_tool.coroutine(runtime=runtime, prompt="calculate", subagent_type="general-purpose", tool_call_id=name, model_name=name) for name in ["B", "C"]))
+
+    asyncio.run(run_both())
+    assert {entry["config"].model for entry in seen} == {"B", "C"}
+    assert shared.model == "inherit"
+    assert runtime.config["metadata"]["model_name"] == "ark-model"

@@ -8,46 +8,40 @@ DeerFlow's Next.js 16 frontend provides thread-based AI conversations with strea
 
 **Stack**: Next.js 16, React 19, TypeScript 5.8, Tailwind CSS 4, pnpm 10.26.2. Requires Node.js 22+ and pnpm 10.26.2+.
 
-### Core dependencies
+Core dependencies: `@langchain/langgraph-sdk` ^1.5.3 for orchestration/streaming,
+`@langchain/core` ^1.1.15, and `@tanstack/react-query` ^5.90.17 for server state.
+Registry UI: Shadcn, MagicUI, React Bits, Vercel AI SDK (see Code Style).
 
-- **LangGraph SDK** (`@langchain/langgraph-sdk` ^1.5.3) — Agent orchestration and streaming
-- **LangChain Core** (`@langchain/core` ^1.1.15) — Fundamental AI building blocks
-- **TanStack Query** (`@tanstack/react-query` ^5.90.17) — Server state management
-- **UI**: Shadcn UI, MagicUI, React Bits, and Vercel AI SDK elements (generated from registries — see Code Style)
-
-`pnpm-workspace.yaml` overrides vulnerable `@xmldom/xmldom` 0.9.x releases to
-0.9.12 for GHSA-965w-775f-mr7g. Nextra pulls it in through MathJax and
-`speech-rule-engine@4.1.2`, which pins 0.9.8. Keep the override until the
-upstream dependency chain resolves a patched version without it; regenerate
-`pnpm-lock.yaml` and verify the docs build when changing this constraint.
+`pnpm-workspace.yaml` pins vulnerable `@xmldom/xmldom` 0.9.x to patched
+0.9.12 (GHSA-965w-775f-mr7g) and Nextra 4.6.1's Zod dependencies to 4.3.6
+until upstream fixes missing-`children` validation. App schemas use Zod 4.6.6.
+Remove each override after its upstream fix; refresh the lockfile and test
+docs builds after changes.
 
 ## Commands
 
-| Command          | Purpose                                       |
-| ---------------- | --------------------------------------------- |
-| `pnpm dev`       | Start the development server with Webpack     |
-| `pnpm build`     | Production build                              |
-| `pnpm check`     | Lint + type check (run before committing)     |
-| `pnpm lint`      | ESLint only                                   |
-| `pnpm lint:fix`  | ESLint with auto-fix                          |
-| `pnpm format`    | Prettier check (`pnpm format:write` to apply) |
-| `pnpm test`      | Run unit tests with Rstest                    |
-| `pnpm test:e2e`  | Run E2E tests with Playwright (Chromium)      |
-| `pnpm typecheck` | TypeScript type check (`tsc --noEmit`)        |
-| `pnpm start`     | Start production server                       |
+Run from `frontend/`; host pnpm calls use `../scripts/pnpm.py`.
 
-Rstest unit tests under `tests/unit/` mirror `src/` (e.g., `tests/unit/core/api/stream-mode.test.ts` tests `src/core/api/stream-mode.ts`). Import source modules via `@/`.
+- `pnpm dev`: Webpack development server; `pnpm build` / `pnpm start`: production build/server.
+- `pnpm check`: ESLint + TypeScript (required before committing); `pnpm lint` / `pnpm typecheck`: individual checks; `pnpm lint:fix`: ESLint fixes.
+- `pnpm format` / `pnpm format:write`: Prettier check/write.
+- `pnpm test`: Rstest unit tests; `pnpm test:e2e`: Playwright Chromium E2E tests.
+
+Unit tests under `tests/unit/` mirror `src/`; import source via `@/`.
 
 Webpack is the default development bundler. Use `DEER_FLOW_DEV_BUNDLER=turbo` with `pnpm dev` to opt in to Turbopack when diagnosing a local Next.js bundler issue.
 
 On Windows `pnpm dev` binds `127.0.0.1` by default because Hyper-V/winnat excluded port ranges can reject Next's default `0.0.0.0` bind with `EACCES` (#2870). Pass `pnpm dev -- --hostname 0.0.0.0` to listen on a LAN interface instead.
 
-`rstest.config.ts` separates **node** (`*.test.ts` / `*.test.tsx`) for pure logic
-from **happy-dom** (`*.dom.test.ts` / `*.dom.test.tsx`) for components and hooks
-rendered with `@testing-library/react`'s `renderHook`. Keep the split: DOM tests
-cost roughly 3x more runtime. Hooks that depend on React effect ordering, unmount
-cleanup, or re-renders on store changes belong in `.dom.test.*`; do not mock React
-in node tests to cover those behaviors.
+`rstest.config.ts`: **node** runs `*.test.*` pure logic; **happy-dom** runs
+`*.dom.test.*` components/hooks via `@testing-library/react` render/renderHook.
+DOM costs ~3x: keep the split. Effect ordering, unmount cleanup and store
+re-renders need DOM tests with real React.
+
+Content/state suites may mock decorative `FlipDisplay` with
+`tests/unit/helpers/flip-display.tsx`, preserving children, classes and keyed
+remounts. Happy DOM 21's animation cancellation rejects `finished`; keep rejection
+reporting enabled. Real Motion behavior belongs in Playwright.
 
 E2E tests live under `tests/e2e/` and use Playwright with Chromium. They mock all backend APIs via `page.route()` network interception and test real page interactions (navigation, chat input, streaming responses). Config: `playwright.config.ts`. The real-backend auth contract in `tests/e2e-real-backend/auth-disabled-contract.spec.ts` and `backend/tests/test_auth_me_permissions.py` pin the complete route-permission list; update both when adding registered permissions (including `projects:read/write/delete`).
 
@@ -82,6 +76,8 @@ Chat pages pass `useThreadScheduledTaskEvents` data to `MessageList` (`scheduled
 Keep IM notification preferences viewer-fenced and separate from browser alerts; only confirmed server writes change switches.
 
 ## Architecture
+
+Model controls: `core/models/use-model-control` + HumanInputCard.
 
 Knowledge evidence is parsed in `core/citations/sources.ts` from version-1
 ToolMessage artifacts. Message rows receive sources from preceding loaded tool
@@ -167,6 +163,15 @@ DOM regression: `new-agent-save.dom.test.tsx`.
 - **Path alias**: `@/*` maps to `src/*`.
 - **Components**: `ui/` and `ai-elements/` are generated from registries (Shadcn, MagicUI, React Bits, Vercel AI SDK) — don't manually edit these.
 
+Sidebar customization: `components/workspace/workspace-sidebar-frame.tsx`.
+Rail/drawer mount one tree; `useWorkspaceSidebarExpanded` preserves desktop
+`SidebarProvider.open`. Keep polling/delete-dialog provider outside that tree.
+Reuse stock `Sidebar`; close before link navigation and on pathname changes,
+preserving page focus. Dismissal restores the opener or remounted rail trigger.
+`WorkspaceSidebarTrigger` owns surface icons/ARIA; keep generated UI unchanged.
+Test frame DOM behavior and `tests/e2e/sidebar.spec.ts`.
+Agents headers/actions wrap with the rail; sidebar E2E tests cover bounds.
+
 Scheduled-task list search filters the current authorized query result by title or
 prompt, composing with status/type filters and thread scope. Selection must derive
 from the filtered list so hidden tasks cannot remain actionable. Keep literal
@@ -232,13 +237,8 @@ round-trip validation must still reject newly entered skipped times.
 
 ## Contributing
 
-When adding features:
-
-1. Follow the established `src/` structure
-2. Add TypeScript types and proper error handling
-3. Write unit tests under `tests/unit/` (`pnpm test`) and E2E tests under `tests/e2e/` (`pnpm test:e2e`)
-4. Run `pnpm check` before committing
-5. Update this `AGENTS.md` when architecture, commands, or conventions change
+Follow `src/` ownership, add types/error handling and unit/E2E coverage, run
+`pnpm check`, and update this guide for architecture, command, or convention changes.
 
 Route asset budgets are enforced with `pnpm perf:check`. The command measures
 `/login` from a normal production build, then builds in static-demo mode for the

@@ -56,7 +56,7 @@ class ChannelLeaderLeaseConfig(BaseModel):
     grace_seconds: int = Field(
         default=10,
         ge=0,
-        description="Extra time after lease_expires_at before a peer may take an expired lease, absorbing a slow renewal. Worst-case failover is lease_seconds + grace_seconds.",
+        description="Extra time after lease_expires_at before a peer may take an expired lease, absorbing a slow renewal. Worst-case failover is lease_seconds + grace_seconds plus one renewal interval.",
     )
 
     @property

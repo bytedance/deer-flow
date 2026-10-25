@@ -44,6 +44,10 @@ with real ASGI requests and LangGraph SDK decoding.
 
 ### Checkpoint Channel Modes (`full` / `delta`)
 
+Reject missing selected/head tuples or pending Sends before delta rewrites.
+`Command(resume=...)` also rejects pending nodes except `__start__` on both.
+Use `CheckpointResumeRejected` to skip pre-write rollback; resume at head.
+
 Checkpointer storage runs in one of two channel modes, selected by `checkpoint_channel_mode` in `config.yaml` (default `full`). `delta` mode adopts LangGraph 1.2's `DeltaChannel` for `messages`: checkpoints store a sentinel + per-step writes instead of the full message list, so storage/serde grows O(N) instead of O(N²) in turns. All checkpointer backends (memory/sqlite/postgres) serve both modes unchanged — the semantics live in the compiled graph's channel table, not in the saver.
 
 **Mode is process-frozen and restart-required.** `make_lead_agent` and the embedded `DeerFlowClient` freeze the resolved mode (`runtime/checkpoint_mode.py::freeze_checkpoint_channel_mode`) before compiling the graph with the mode-matched schema (`agents/thread_state.py::get_thread_state_schema`, plus `adapt_state_schema_for_mode` / `normalize_middleware_state_schemas` for middleware state). Adapted middleware schemas are cached by schema, mode, and resolved snapshot frequency so a pre-freeze ephemeral graph cannot leave a stale default-frequency schema behind. A second, different mode or frequency in the same process raises `CheckpointModeReconfigurationError`. To switch: edit config, restart.
@@ -58,7 +62,7 @@ Checkpointer storage runs in one of two channel modes, selected by `checkpoint_c
 
 **Replay checkpoint lookup prefers lineage and degrades only for an explicitly missing legacy parent link.** Branch and regenerate paths first walk `parent_config`, which prevents a global chronological scan from selecting a sibling created by regeneration. `CheckpointParentMissingError` alone enables the bounded newest-first history fallback in `app/gateway/checkpoint_lineage.py`; cycles, dangling/non-addressable parents, target mismatches, and depth exhaustion raise `CheckpointLineageIntegrityError` and fail closed instead of selecting a sibling. The compatibility scans request 400 raw checkpoints so up to 200 duration-only entries do not consume the effective branch-history budget; the fallback scans oldest-to-newest internally, skips duration-only checkpoints, and accepts only checkpoints with an addressable id as the replay base. A source history with no discoverable pre-user checkpoint preserves the historical single-checkpoint branch behavior instead of rejecting the branch; regeneration remains unavailable for that inherited response. Existing single-checkpoint branches are not mutated by regenerate preparation, and no raw checkpoint tuple is copied across threads because delta state depends on ancestry and pending writes. Regenerate source-run lookup uses the current thread's exact event, then the server-stamped `run_id` on the copied human message, then verified RunManager content matching; it does not read parent-thread events. When an interrupted response was streamed but never checkpointed, regeneration accepts only the latest visible human message's server-stamped `run_id` after verifying that it belongs to the same thread and still has `interrupted` status. Storage or checkpoint-mode failures are not treated as a missing base and still fail closed.
 
-**A delta-mode run cannot fork; `runtime/runs/worker.py` linearizes the resume instead.** Resuming from an older checkpoint (regenerate, or any client-supplied `checkpoint`) forks the lineage, and delta state for a fork is not materializable: `BaseCheckpointSaver.get_delta_channel_history` — and the bespoke overrides in `InMemorySaver`/`PostgresSaver` — collect **every** `pending_writes` entry stored on each on-path ancestor, but a shared parent also carries the writes of the sibling child that was abandoned. Those writes replay into the fork, so the run starts from a message list still containing the answer it was supposed to replace (#4458: regenerating in a branched thread showed the superseded assistant message beside the new one after a reload; reproduced on postgres, sqlite, and the in-memory saver). Write-to-child ownership belongs to the upstream delta contract, so DeerFlow does not reimplement the walk: `_linearize_delta_checkpoint_resume` materializes the requested checkpoint's complete state and writes every channel onto the **current head** (which has no siblings) through the state mutation graph, using `Overwrite` for reducer channels and resetting newer head-only channels to their schema default (or `None` when no constructible default exists); it then drops the `checkpoint_id` selector and lets the run proceed linearly, while the abandoned turn stays in history as the rewritten head's ancestry. The worker holds `_checkpoint_thread_lock` across `_capture_rollback_point` and the optional linear rewrite, making the rollback snapshot and rewrite atomic with graph streaming and the preceding run's duration-metadata checkpoint write. Capture preserves the complete real pre-run state; cancel-with-rollback then linearly replaces the current delta head with that captured state rather than forking the now-shared pre-run checkpoint, so the abandoned turn is restored without replaying the resume sibling's writes. The worker also recomputes the current-run message boundary from the rewritten state and fails closed (an unreadable resume checkpoint raises rather than falling back to the corrupt fork). `full` mode keeps forking — its checkpoints carry complete `channel_values` and need no replay — so LangGraph branching semantics are unchanged there. Root namespace only; subgraph namespaces are left alone.
+**A delta-mode run cannot fork; `runtime/runs/worker.py` linearizes the resume instead.** An older-checkpoint resume creates siblings whose pending writes can replay into the fork, retaining a superseded answer. Write-to-child ownership belongs to the upstream delta contract, so DeerFlow does not reimplement the walk: `_linearize_delta_checkpoint_resume` materializes the requested checkpoint's complete state and writes every channel onto the **current head** (which has no siblings) through the state mutation graph, using `Overwrite` for reducer channels and resetting newer head-only channels to their schema default (or `None` when no constructible default exists); it then drops the `checkpoint_id` selector and lets the run proceed linearly, while the abandoned turn stays in history as the rewritten head's ancestry. The worker holds `_checkpoint_thread_lock` across `_capture_rollback_point` and the optional linear rewrite, making the rollback snapshot and rewrite atomic with graph streaming and the preceding run's duration-metadata checkpoint write. Capture preserves the complete real pre-run state; cancel-with-rollback then linearly replaces the current delta head with that captured state rather than forking the now-shared pre-run checkpoint, so the abandoned turn is restored without replaying the resume sibling's writes. The worker also recomputes the current-run message boundary from the rewritten state and fails closed (an unreadable resume checkpoint raises rather than falling back to the corrupt fork). `full` mode keeps forking — its checkpoints carry complete `channel_values` and need no replay — so LangGraph branching semantics are unchanged there. Root namespace only; subgraph namespaces are left alone.
 
 **Wholesale state replacement uses a state-only mutation graph + `Overwrite`.** `update_state` values pass through channel reducers (`add_messages` merge in full, append in delta), so replacing reducer values requires `Overwrite` rather than an ordinary update. Full-mode rollback and context compaction replace `messages`; delta resume and delta rollback replace every materialized channel and reset current-head-only channels to their schema default (or `None`). These writes go through `build_state_mutation_graph(as_node, mode, state_schema)`, and `state_schema` MUST be the thread's effective schema (`graph_state_schema(assistant_graph)`), because the base-ThreadState fallback silently discards written channels contributed by custom `AgentMiddleware.state_schema`. Channels absent from a full-mode fork write inherit the parent's channel blobs, so middleware channels survive rollback/compaction (locked by `test_rollback_preserves_middleware_contributed_channels` and `test_compact_thread_context_preserves_middleware_contributed_channels`). The compiled mutation graph has one no-op node (entry = finish) whose checkpoint machinery (channels/versions/metadata) is identical to the agent graph's but schedules no pending tasks, so the restored/compacted head stays idle instead of re-triggering the agent. Never hand-write checkpoints via `checkpointer.aput` for this; raw writers elsewhere must preserve checkpoint parentage — severed ancestry breaks delta replay (see `runtime/runs/worker.py` writer parenting and `checkpoint_patches.py`).
 
@@ -71,7 +75,13 @@ Checkpointer storage runs in one of two channel modes, selected by `checkpoint_c
 **Journal capture**: Image-only input stops batch scans and later human-event
 capture despite an empty summary. AI summaries strip leading think sections
 before the 2000-character cap, preserving events, literal answer tags, and
-prior useful summaries. Tests: `test_run_journal*.py` (callbacks, full/delta).
+prior useful summaries. When an admitted run is interrupted after root assistant
+text was published but before `on_llm_end`, the worker records the accumulated
+visible text as an interrupted partial `llm.ai.response` feed event after the
+agent stream closes. Completed responses win cancellation races by message ID;
+hidden, subgraph, unpublished, and ID-less chunks are not recovered. Partial
+events never enter authoritative checkpoint state. Tests: `test_run_journal*.py`
+(callbacks, full/delta) and `test_run_worker_rollback.py` (interruption recovery).
 
 **Per-call LLM telemetry** (`runtime/journal.py`): `RunJournal` adds observation-only keys
 to `llm.ai.response` metadata and to `llm.error` metadata (previously empty): `langchain_run_id`,
@@ -112,7 +122,9 @@ answers for paginated history. See `docs/skill-usage-ui.md`.
 
 **Run delivery receipts:** Finalize artifact evidence and terminal status before clearing an ordinary satisfied goal, under a checkpoint-write reservation. Delivery failure retains the goal without continuing. Only that clear writes `goal_outcome`; other goal writes remove it. Historical replay keeps the current goal and budget, and drops the old outcome. Scheduled exception below; details: `backend/docs/runtime-guidance-details.md`.
 
-Unmet goals stand down on run-level token/loop hard stops and retain the original stop reason; hidden continuations must not re-enter that run's shared safety state.
+**Workspace change detection:** Truncated snapshots cannot prove absence. Mark skipped delivery verification in the receipt. Details: `backend/docs/runtime-guidance-details.md`.
+
+Unmet goals stand down on run-level token/loop hard stops and retain the original stop reason; hidden continuations must not re-enter that run's shared safety state. Operation-based no-progress counting: `backend/docs/runtime-guidance-details.md`.
 
 **Deferred terminal commit:** With an event store, the worker stages its terminal
 status locally and commits it only after finalization's receipt and duration
@@ -359,6 +371,16 @@ so recovery need not inspect mutable thread state. All non-interactive policies
 allow disclosed, low-risk reversible assumptions only with achievement evidence;
 their evaluator responses must explicitly provide the assumption boolean.
 
+Goal evidence stays within 12,000 characters. Keep the selected recent work and
+omission labels intact; use remaining space to restore shortened user input
+rather than treating the 2,000-character request reservation as a hard cap.
+
+Only a malformed verdict from an explicitly normal model completion may retry,
+once, with the original evidence. Recheck cancellation, Goal identity and
+checkpoint/messages first. Each complete evaluator invocation keeps its own usage
+ID and observer call; one final decision updates Goal counters. Valid verdicts,
+length/safety stops, and transport/configuration errors are not format retries.
+
 Goal evaluator usage crosses a JSON-safe sink into
 `RunJournal.record_external_llm_usage_records` before response parsing or observer
 notification can fail. Critic tokens/cache reads and distinct calls belong to
@@ -397,3 +419,10 @@ unknown or cancelled write outcomes cannot yield a receipt or be replayed. Only
 proven-not-committed batches may be retried. Normal close stops new evidence
 producers and drains already admitted cross-thread callbacks inside its operation
 lock before flushing and detaching; do not reacquire that lock through `flush()`.
+
+The Worker requires its own final terminal ACK for `run.terminal`; rollback's
+intermediate ACK and matching row reads grant no authority. Keep hooks → Journal
+freeze/drain → singleton confirmation → Receipt → Seal → barrier release → END.
+Force close invalidates Receipt bounds. Preserve ownership checks, four-state
+confirmation, and partial evidence on failure without changing business status
+or SSE liveness. See [Run outcome protocol](../../../../docs/RUN_EVENT_STREAM.md#authoritative-run-outcome).
