@@ -84,6 +84,11 @@ export const zhCN: Translations = {
         title: "LightRAG",
         description: "从 LightRAG 检索文档与实体关系，并使用统一的来源引用。",
       },
+      knowledgePlatform: {
+        title: "知识空间与连接",
+        description:
+          "在管理员明确授权后管理多层级空间、资源共享与继承策略。需要安装和配置，不包含管理页面，也不改变全局检索权限。",
+      },
       knowledgeManagement: {
         title: "知识入库与处理",
         description:
