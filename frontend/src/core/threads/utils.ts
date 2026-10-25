@@ -86,6 +86,21 @@ export function textOfMessage(message: Message) {
 }
 
 /**
+ * Shorten notification body text to at most `maxChars` code points,
+ * appending an ellipsis when truncated without splitting surrogate pairs.
+ */
+export function truncateNotificationBody(
+  content: string,
+  maxChars = 200,
+): string {
+  const chars = Array.from(content);
+  if (chars.length <= maxChars) {
+    return content;
+  }
+  return `${chars.slice(0, Math.max(0, maxChars)).join("")}...`;
+}
+
+/**
  * The thread's title, or `untitledLabel` when it has none. UI callers pass
  * the localized `t.pages.untitled`; export filenames keep the English default.
  */

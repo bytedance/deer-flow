@@ -10,6 +10,7 @@ import {
   textOfMessage,
   THREAD_PINNED_METADATA_KEY,
   titleOfThread,
+  truncateNotificationBody,
 } from "@/core/threads/utils";
 
 function makeThread(
@@ -228,4 +229,26 @@ test("titleOfThread falls back to the given label for an untitled thread", () =>
   expect(titleOfThread(makeThread("Weekly report"), "未命名")).toBe(
     "Weekly report",
   );
+});
+
+test("truncateNotificationBody preserves short content within budget", () => {
+  const short = "Hello world";
+  expect(truncateNotificationBody(short)).toBe(short);
+
+  // 198 ascii + 1 emoji + 1 ascii = 200 code points (201 UTF-16 code units)
+  const fits = `${"a".repeat(198)}😀b`;
+  expect(truncateNotificationBody(fits)).toBe(fits);
+});
+
+test("truncateNotificationBody counts code points without splitting astral emoji", () => {
+  // Truncation lands directly on an emoji
+  const overflow = `${"a".repeat(199)}😀bc`;
+  const result = truncateNotificationBody(overflow);
+  expect(result).toBe(`${"a".repeat(199)}😀...`);
+  expect(result).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
+});
+
+test("truncateNotificationBody respects custom maxChars and non-positive bounds", () => {
+  expect(truncateNotificationBody("abcdef", 3)).toBe("abc...");
+  expect(truncateNotificationBody("abcdef", 0)).toBe("...");
 });

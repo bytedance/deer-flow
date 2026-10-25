@@ -80,7 +80,7 @@ import {
   selectContextUsage,
   threadTokenUsageToTokenUsage,
 } from "@/core/threads/token-usage";
-import { projectIdOfThread, textOfMessage } from "@/core/threads/utils";
+import { projectIdOfThread, textOfMessage, truncateNotificationBody } from "@/core/threads/utils";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
@@ -236,10 +236,7 @@ export default function ChatPage() {
         if (lastMessage) {
           const textContent = textOfMessage(lastMessage);
           if (textContent) {
-            body =
-              textContent.length > 200
-                ? textContent.substring(0, 200) + "..."
-                : textContent;
+            body = truncateNotificationBody(textContent);
           }
         }
         showNotification(state.title, { body });
