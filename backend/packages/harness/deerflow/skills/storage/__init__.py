@@ -128,6 +128,9 @@ def get_or_new_user_skill_storage(user_id: str, **kwargs) -> SkillStorage:
     if app_config is None:
         app_config = get_app_config()
     kwargs["app_config"] = app_config
+    # User-scoped storage must mount skills at the same configured root as
+    # public storage; an explicit caller override still wins.
+    kwargs.setdefault("container_path", app_config.skills.container_path)
 
     # Always acquire lock so move_to_end is safe — makes this a true LRU
     # cache instead of FIFO. The overhead is negligible since dict ops are
@@ -161,6 +164,14 @@ def user_should_see_legacy_skills(user_id: str, **kwargs) -> bool:
     if kwargs:
         from deerflow.config.paths import make_safe_user_id
 
+        # One-off constructions mount at the configured root too, same as the
+        # factory path; an explicit caller override still wins.
+        app_config = kwargs.get("app_config")
+        if app_config is None:
+            from deerflow.config import get_app_config
+
+            app_config = get_app_config()
+        kwargs.setdefault("container_path", app_config.skills.container_path)
         storage = UserScopedSkillStorage(make_safe_user_id(user_id), **kwargs)
     else:
         storage = get_or_new_user_skill_storage(user_id)
