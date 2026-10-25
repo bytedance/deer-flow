@@ -1911,6 +1911,14 @@ async def test_manual_trial_retry_reuses_the_admitted_origin():
         max_concurrent_runs=3,
         own_stop_available=True,
     )
+    attempted: list[dict] = []
+    original_attempt = service._attempt_queued_run
+
+    async def capture_attempt(task, queued, *, now):
+        attempted.append(dict(queued))
+        return await original_attempt(task, queued, now=now)
+
+    service._attempt_queued_run = capture_attempt
     admitted = datetime(2026, 10, 7, 1, 0, tzinfo=UTC)
 
     first = await service.dispatch_task(task_repo.rows[0], now=admitted, trigger="manual")
@@ -1922,6 +1930,8 @@ async def test_manual_trial_retry_reuses_the_admitted_origin():
     await service._drain_queue(now=admitted + timedelta(hours=2))
 
     assert len(launches) == 2, launches
+    assert attempted[0]["scheduled_for"] == admitted
+    assert attempted[1]["scheduled_for"] == admitted
     assert launches[0]["origin"]["scheduled_for"] == admitted.isoformat()
     assert launches[1]["origin"]["scheduled_for"] == admitted.isoformat()
     assert launches[0]["origin"] == launches[1]["origin"]
