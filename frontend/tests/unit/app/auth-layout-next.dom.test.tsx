@@ -4,13 +4,16 @@ import type { ReactNode } from "react";
 
 const replace = rs.fn();
 const push = rs.fn();
+// Next's app router object is stable across renders; a fresh object per call
+// would re-run every effect that depends on it.
+const router = { push, replace };
 const redirect = rs.fn((url: string) => {
   throw new Error(`NEXT_REDIRECT ${url}`);
 });
 let searchParams = new URLSearchParams();
 
 rs.mock("next/navigation", () => ({
-  useRouter: () => ({ push, replace }),
+  useRouter: () => router,
   usePathname: () => window.location.pathname,
   useSearchParams: () => searchParams,
   redirect: (url: string) => redirect(url),
@@ -96,13 +99,40 @@ describe("auth routes with a signed-in session", () => {
     expect(replace).toHaveBeenCalledTimes(1);
   });
 
-  it("still sends the SSO callback to the workspace for an unsafe next", async () => {
-    searchParams = new URLSearchParams({ next: "//evil.example/phish" });
+  // `/\n//…` and `/\t//…` become `//evil.example/phish` once the URL parser
+  // deletes the control character.
+  const UNSAFE_NEXT = [
+    "//evil.example/phish",
+    "/\n//evil.example/phish",
+    "/\t//evil.example/phish",
+  ];
 
-    await renderAuthRoute({ tag: "authenticated", user }, <AuthCallbackPage />);
+  it.each(UNSAFE_NEXT)(
+    "sends the SSO callback to the workspace for unsafe next %j",
+    async (next) => {
+      searchParams = new URLSearchParams({ next });
 
-    await waitFor(() => expect(replace).toHaveBeenCalledWith("/workspace"));
-  });
+      await renderAuthRoute(
+        { tag: "authenticated", user },
+        <AuthCallbackPage />,
+      );
+
+      await waitFor(() => expect(replace).toHaveBeenCalledWith("/workspace"));
+      expect(replace).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each(UNSAFE_NEXT)(
+    "sends a signed-in login visit to the workspace for unsafe next %j",
+    async (next) => {
+      searchParams = new URLSearchParams({ next });
+
+      await renderAuthRoute({ tag: "authenticated", user }, <LoginPage />);
+
+      await waitFor(() => expect(replace).toHaveBeenCalledWith("/workspace"));
+      expect(replace).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it("sends a signed-in login visit to its next path without the form", async () => {
     searchParams = new URLSearchParams({ next: DEEP_LINK });

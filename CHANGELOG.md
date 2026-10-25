@@ -1401,7 +1401,10 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
   as a shared chat link, instead of always opening the default workspace. The
   sign-in pages used to send every signed-in request to `/workspace`, which
   dropped the `next` path of `/auth/callback?next=...`. A signed-in visit to
-  `/login?next=...` lost its target the same way. ([#7467])
+  `/login?next=...` lost its target the same way. The frontend and Gateway
+  `next` checks now also reject control characters: browsers delete tab, LF
+  and CR from a URL, so `?next=%2F%0A%2F%2Fevil.example` could send a
+  sign-in to another site. ([#7467])
 
 - **threads:** `POST /api/threads` now rejects an `assistant_id` that cannot
   name an agent with `422`. It used to store the value, and every later read
