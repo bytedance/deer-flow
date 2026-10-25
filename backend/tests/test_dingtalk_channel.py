@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import threading
 import time
@@ -1853,6 +1854,115 @@ class TestCardMode:
             assert channel._incoming_messages == {}
             assert channel._card_repliers == {}
             assert channel._card_track_ids == {}
+
+        _run(go())
+
+
+class TestStreamTaskLifecycle:
+    @pytest.mark.parametrize("outcome", ["success", "failure", "cancelled"])
+    def test_tracks_and_finalizes_message_tasks(self, outcome, monkeypatch, caplog):
+        async def go():
+            channel = DingTalkChannel(MessageBus(), config={})
+            channel._running = True
+            frames = [{"sequence": index} for index in range(50 if outcome == "success" else 1)]
+            received = []
+            handler_tasks = []
+            keepalive_tasks = []
+            handlers_started = asyncio.Event()
+            release_handlers = asyncio.Event()
+            handlers_finalized = asyncio.Event()
+            close_stream = asyncio.Event()
+            keepalive_started = asyncio.Event()
+            keepalive_stopped = asyncio.Event()
+            failure = RuntimeError("stream handler failed")
+            loop = asyncio.get_running_loop()
+            previous_exception_handler = loop.get_exception_handler()
+            loop_errors = []
+            loop.set_exception_handler(lambda _loop, context: loop_errors.append(context))
+
+            async def background_task(frame):
+                received.append(frame)
+                handler_tasks.append(asyncio.current_task())
+                if len(received) == len(frames):
+                    handlers_started.set()
+                await release_handlers.wait()
+                if outcome == "failure":
+                    raise failure
+
+            async def keepalive(_websocket):
+                keepalive_tasks.append(asyncio.current_task())
+                keepalive_started.set()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    keepalive_stopped.set()
+
+            class WebSocket:
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, *_args):
+                    return None
+
+                async def __aiter__(self):
+                    for frame in frames:
+                        yield json.dumps(frame)
+                    await close_stream.wait()
+                    channel._running = False
+
+            client = SimpleNamespace(pre_start=MagicMock(), background_task=background_task, keepalive=keepalive)
+            monkeypatch.setattr(channel, "_open_stream_connection", AsyncMock(return_value={"endpoint": "wss://example.invalid/stream", "ticket": "test-ticket"}))
+            monkeypatch.setattr("websockets.connect", lambda _uri: WebSocket())
+            stream_task = asyncio.create_task(channel._serve_stream(client))
+            try:
+                await asyncio.wait_for(handlers_started.wait(), timeout=1)
+                await asyncio.wait_for(keepalive_started.wait(), timeout=1)
+                assert received == frames
+                assert channel._background_tasks == set(handler_tasks)
+                assert all(not task.done() for task in handler_tasks)
+
+                remaining = set(handler_tasks)
+
+                def finalized(task):
+                    remaining.remove(task)
+                    if not remaining:
+                        handlers_finalized.set()
+
+                # These observers run after the production done callbacks.
+                for task in handler_tasks:
+                    task.add_done_callback(finalized)
+                    if outcome == "cancelled":
+                        task.cancel()
+                release_handlers.set()
+                await asyncio.wait_for(handlers_finalized.wait(), timeout=1)
+                assert channel._background_tasks == set()
+                if outcome == "cancelled":
+                    assert all(task.cancelled() for task in handler_tasks)
+
+                close_stream.set()
+                await asyncio.wait_for(stream_task, timeout=1)
+                await asyncio.wait_for(keepalive_stopped.wait(), timeout=1)
+                assert channel._background_tasks == set()
+                client.pre_start.assert_called_once_with()
+                errors = [record for record in caplog.records if record.name == "app.channels.dingtalk" and record.levelno >= logging.ERROR]
+                if outcome == "failure":
+                    assert len(errors) == 1
+                    assert "stream message task" in errors[0].getMessage()
+                    assert errors[0].exc_info is not None
+                    assert errors[0].exc_info[1] is failure
+                else:
+                    assert errors == []
+                assert loop_errors == []
+            finally:
+                channel._running = False
+                close_stream.set()
+                release_handlers.set()
+                tasks = [stream_task, *handler_tasks, *keepalive_tasks]
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                loop.set_exception_handler(previous_exception_handler)
 
         _run(go())
 

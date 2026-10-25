@@ -95,6 +95,11 @@ Supported output formats (auto-detected from extension):
 - `.json` — JSON array of records
 - `.md` — Markdown table
 
+Relative output paths are resolved from the current working directory. A bare
+filename such as `report.csv` writes there directly; missing parent directories
+in paths such as `reports/report.csv` are created automatically.
+An existing file at the target path is overwritten without warning.
+
 JSON result column names must be unique. Use explicit SQL aliases for repeated
 names, for example `SELECT a.id AS left_id, b.id AS right_id FROM ...`.
 Duplicate names cause an error and leave any existing output file untouched.
