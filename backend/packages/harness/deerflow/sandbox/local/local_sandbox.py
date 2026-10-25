@@ -1,3 +1,4 @@
+import asyncio
 import ctypes
 import errno
 import locale
@@ -36,6 +37,14 @@ logger = logging.getLogger(__name__)
 DEFAULT_COMMAND_TIMEOUT_SECONDS = 600
 _COMMAND_CAPTURE_LIMIT_BYTES = 10 * 1024 * 1024
 _PIPE_DRAIN_JOIN_TIMEOUT_SECONDS = 0.2
+_ASYNC_READ_CHUNK_BYTES = 65536
+
+# Strong references to detached async drain tasks. Backgrounded children keep
+# the captured pipes open after execute_command_async returned; detached
+# readers keep draining until EOF, mirroring the sync path's daemon drain
+# threads. asyncio holds only weak references to running tasks, so this set
+# is load-bearing for keeping the readers alive (#4931's task-lifetime rule).
+_DAEMON_DRAIN_TASKS: set[asyncio.Task[None]] = set()
 
 
 #: Script suffixes a host interpreter opens by path but the shared skill-package
@@ -951,6 +960,180 @@ class LocalSandbox(Sandbox):
         elif returncode != 0:
             output += f"\nExit Code: {returncode}"
         return output if output else "(no output)"
+
+    async def execute_command_async(
+        self,
+        command: str,
+        env: dict[str, str] | None = None,
+        timeout: float | None = None,
+    ) -> str:
+        """Async counterpart of :meth:`execute_command`.
+
+        POSIX builds a true-async pipeline on ``asyncio.create_subprocess_exec``
+        that preserves :meth:`execute_command` semantics exactly — bounded
+        capture, prompt return while backgrounded children hold the pipes,
+        process-group kill on timeout with split-tail decoding, env scrubbing,
+        and the assembled output contract — so both paths produce identical
+        output while the caller's event loop stays responsive for the command's
+        duration.
+
+        Windows keeps the sync implementation (process-tree taskkill
+        semantics) bridged off the loop, and an event loop without subprocess
+        support falls back to the same bridge, so neither platform regresses
+        relative to the sync path. Cancellation mirrors
+        :func:`run_sync_lifecycle_operation`: an in-flight command runs to
+        completion and repeated cancellation cannot interrupt the drain.
+        """
+        from deerflow.sandbox.lease import run_sync_lifecycle_operation
+
+        _validate_extra_env(env)
+        if os.name == "nt" or getattr(self, "_async_exec_unsupported", False):
+            return await run_sync_lifecycle_operation(self.execute_command, command, env=env, timeout=timeout)
+        operation = asyncio.create_task(self._execute_command_async_impl(command, env, timeout))
+        try:
+            return await asyncio.shield(operation)
+        except asyncio.CancelledError as cancellation:
+            # Drain contract: the in-flight command runs to completion even
+            # though the caller was cancelled; repeated cancellation cannot
+            # interrupt the drain, and a late failure is logged without
+            # replacing the caller's cancellation.
+            while not operation.done():
+                try:
+                    await asyncio.shield(operation)
+                except asyncio.CancelledError:
+                    continue
+                except Exception:
+                    logger.warning("Cancelled async sandbox command failed while draining", exc_info=True)
+                    break
+            raise cancellation
+
+    async def _execute_command_async_impl(
+        self,
+        command: str,
+        env: dict[str, str] | None,
+        timeout: float | None,
+    ) -> str:
+        from deerflow.sandbox.lease import run_sync_lifecycle_operation
+
+        # Shell discovery and virtual-path resolution touch the filesystem;
+        # keep them off the loop like every other filesystem-touching sandbox
+        # step. Only the exec itself — the long part — runs on the loop.
+        shell, resolved_command = await run_sync_lifecycle_operation(self._resolve_exec_command, command)
+        if timeout is None:
+            timeout = DEFAULT_COMMAND_TIMEOUT_SECONDS
+        # Inherit os.environ minus platform secrets, then layer injected
+        # request-scoped secrets on top (#3861) — the same env contract as the
+        # sync path.
+        injected = {**self.environment, **(env or {})}
+        sandbox_env = build_sandbox_env(injected)
+
+        stdout_capture = _BoundedPipeCapture()
+        stderr_capture = _BoundedPipeCapture()
+        try:
+            process = await asyncio.create_subprocess_exec(
+                shell,
+                "-c",
+                resolved_command,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
+                env=sandbox_env,
+            )
+        except NotImplementedError:
+            # Selector event loops cannot spawn subprocesses; degrade
+            # permanently to the sync path so behavior matches today.
+            self._async_exec_unsupported = True
+            logger.warning("Event loop does not support subprocesses; async sandbox exec bridged to the sync path")
+            from deerflow.sandbox.lease import run_sync_lifecycle_operation
+
+            return await run_sync_lifecycle_operation(self.execute_command, command, env=env, timeout=timeout)
+
+        async def _drain(stream: asyncio.StreamReader, capture: _BoundedPipeCapture) -> None:
+            try:
+                while True:
+                    chunk = await stream.read(_ASYNC_READ_CHUNK_BYTES)
+                    if not chunk:
+                        return
+                    capture.append(chunk)
+            except Exception:
+                logger.debug("Async sandbox output reader stopped", exc_info=True)
+
+        readers = (
+            asyncio.create_task(_drain(process.stdout, stdout_capture)),
+            asyncio.create_task(_drain(process.stderr, stderr_capture)),
+        )
+        timed_out = False
+        try:
+            try:
+                await asyncio.wait_for(process.wait(), timeout)
+            except TimeoutError:
+                timed_out = True
+                # The kill can interrupt the child mid-write, leaving a partial
+                # multi-byte sequence at the capture end; authorize the trim
+                # retry so the valid prefix survives the strict decode.
+                stdout_capture.mark_split_tail()
+                stderr_capture.mark_split_tail()
+                await LocalSandbox._terminate_process_group_async(process)
+        finally:
+            # Same join posture as the sync path: give drained pipes a short
+            # grace, and hand still-open readers (backgrounded children) to
+            # the daemon set so they keep draining until EOF instead of dying
+            # on a closed transport.
+            if timed_out or not LocalSandbox._process_group_exists(process.pid):
+                grace = 10
+            else:
+                grace = _PIPE_DRAIN_JOIN_TIMEOUT_SECONDS
+            _, pending = await asyncio.wait(readers, timeout=grace)
+            for reader in pending:
+                _DAEMON_DRAIN_TASKS.add(reader)
+                reader.add_done_callback(_DAEMON_DRAIN_TASKS.discard)
+
+        stdout = stdout_capture.read()
+        stderr = stderr_capture.read()
+        returncode = process.returncode if process.returncode is not None else 0
+        output = self._assemble_command_output(stdout, stderr, returncode, timed_out, timeout)
+        # Reverse resolving local paths back to container paths may stat the
+        # host tree; keep it off the loop like the forward resolution above.
+        return await run_sync_lifecycle_operation(self._reverse_resolve_paths_in_output, output)
+
+    def _resolve_exec_command(self, command: str) -> tuple[str, str]:
+        """Resolve the shell and the command's virtual paths for execution."""
+        shell = self._get_shell()
+        return shell, self._resolve_paths_in_command(command, shell=shell)
+
+    async def execute_command_in_scope_async(
+        self,
+        command: str,
+        env: dict[str, str] | None = None,
+        timeout: float | None = None,
+        *,
+        scope_id: str | None = None,
+    ) -> str:
+        """Async twin of the sync scoped default: LocalSandbox has no
+        server-side shell sessions, so the scope is advisory only."""
+        del scope_id
+        return await self.execute_command_async(command, env=env, timeout=timeout)
+
+    @staticmethod
+    async def _terminate_process_group_async(process: asyncio.subprocess.Process) -> None:
+        """Async twin of :meth:`_terminate_process_group`: kill the command's
+        whole process group, then reap it. ``killpg`` is a non-blocking syscall,
+        so only the reap awaits the loop."""
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            # The process group is already gone (the command exited in the
+            # race between the timeout and this call); fall back to killing
+            # just the direct child.
+            try:
+                process.kill()
+            except OSError:
+                logger.debug("Process %s already exited before fallback kill", process.pid)
+        try:
+            await asyncio.wait_for(process.wait(), 10)
+        except TimeoutError:
+            logger.warning("Process group for pid %s did not exit after SIGKILL", process.pid)
 
     @staticmethod
     def _run_windows_command(
