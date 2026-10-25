@@ -1745,6 +1745,7 @@ existing output rather than writing invalid JSON.
 
 SQL execution errors, missing summary tables, and unsupported export formats also
 exit nonzero with diagnostics on stderr, leaving existing output files unchanged.
+Unsupported output extensions are rejected before creating parent directories.
 Successful analysis, including queries returning no rows, continues to exit zero
 and write results to stdout.
 

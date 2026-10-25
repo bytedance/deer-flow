@@ -116,6 +116,36 @@ def test_cli_failure_reports_stderr_without_overwriting(
         assert not output.exists()
 
 
+@pytest.mark.parametrize("filename", ["result.txt", "result"])
+def test_unsupported_export_rejects_before_creating_directories(
+    analysis, tmp_path, filename
+):
+    output = tmp_path / "missing" / "nested" / filename
+
+    with pytest.raises(ValueError, match="Unsupported output format"):
+        analysis["_export_results"](["id"], [(1,)], str(output))
+
+    assert not (tmp_path / "missing").exists()
+
+
+def test_cli_unsupported_export_does_not_create_directories(cached_source, tmp_path):
+    output = tmp_path / "missing" / "nested" / "result.txt"
+    completed = run_cli(
+        cached_source,
+        "--action",
+        "query",
+        "--sql",
+        "SELECT id FROM input",
+        "--output-file",
+        str(output),
+    )
+
+    assert completed.returncode == 1
+    assert "Unsupported output format" in completed.stderr
+    assert completed.stdout == ""
+    assert not (tmp_path / "missing").exists()
+
+
 @pytest.mark.parametrize(
     "args, expected",
     [

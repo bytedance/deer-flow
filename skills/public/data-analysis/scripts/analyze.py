@@ -351,8 +351,11 @@ def _markdown_cell(value: object) -> str:
 
 def _export_results(columns: list[str], rows: list[tuple], output_file: str) -> str:
     """Export query results to a file (CSV, JSON, or Markdown)."""
-    os.makedirs(os.path.dirname(output_file) or ".", exist_ok=True)
     ext = os.path.splitext(output_file)[1].lower()
+    if ext not in {".csv", ".json", ".md"}:
+        msg = f"Unsupported output format: {ext}. Use .csv, .json, or .md"
+        raise ValueError(msg)
+    os.makedirs(os.path.dirname(output_file) or ".", exist_ok=True)
 
     if ext == ".csv":
         import csv
@@ -398,10 +401,6 @@ def _export_results(columns: list[str], rows: list[tuple], output_file: str) -> 
             # Rows
             for row in rows:
                 f.write("| " + " | ".join(_markdown_cell(v) for v in row) + " |\n")
-    else:
-        msg = f"Unsupported output format: {ext}. Use .csv, .json, or .md"
-        raise ValueError(msg)
-
     msg = f"Results exported to {output_file} ({len(rows)} rows)"
     print(msg)
     return msg
