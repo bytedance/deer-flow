@@ -152,7 +152,7 @@ async def test_read_browser_batch_item_projects_report_and_captured_evidence() -
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("field,limit", [("id", 256), ("text", 16_000)])
+@pytest.mark.parametrize("field,limit", [("id", 256), ("dataset_id", 256), ("document_id", 256), ("chunk_id", 256), ("dataset_name", 512), ("document_name", 512), ("text", 16_000)])
 @pytest.mark.parametrize("oversized", [False, True])
 async def test_browser_evidence_bounds_legacy_rows(field, limit, oversized):
     source = {
@@ -186,9 +186,41 @@ async def test_browser_evidence_bounds_legacy_rows(field, limit, oversized):
     detail = await service.read_browser_batch_item(batch_id="batch-1", user_id="user-1", thread_id="thread-1", position=0)
     assert detail["report"] == "Stored report"
     assert detail["evidence"]["sources"] == ([] if oversized else [source])
-    assert detail["evidence"]["omitted_count"] == 2
+    assert detail["evidence"]["omitted_count"] == 2 + int(oversized)
     assert "prompt" not in detail
     assert "execution_spec" not in detail
+
+
+def test_browser_evidence_counts_valid_captured_excerpt_filtered_at_read():
+    from langchain_core.messages import ToolMessage
+
+    from deerflow.community.ragflow.formatting import format_retrieval_sources
+    from deerflow.community.ragflow.sources import durable_source_artifact
+    from deerflow.subagents.step_events import capture_step_message
+
+    content, artifact = format_retrieval_sources(
+        {"chunks": [{"id": "chunk", "dataset_id": "kb", "document_id": "doc", "content": "x" * 17_000}]},
+        dataset_names_by_id={"kb": "Knowledge base"},
+        max_chars_per_chunk=20_000,
+        max_total_chars=30_000,
+    )
+    captured = []
+    capture_step_message(ToolMessage(content=content, artifact=artifact, name="knowledge_search", tool_call_id="search", id="message"), captured, set())
+    source_id = artifact["knowledge_sources"]["sources"][0]["id"]
+    persisted = durable_source_artifact(captured, f"Claim [citation:1](#knowledge-{source_id})", max_chars=100_000)
+    assert len(persisted["knowledge_sources"]["sources"][0]["text"]) == 17_000
+    assert persisted["knowledge_sources"]["omitted_count"] == 0
+    assert service_module._browser_evidence_snapshot(persisted) == {"version": 1, "sources": [], "omitted_count": 1}
+
+
+@pytest.mark.parametrize("persisted_omissions", [0, 3])
+def test_browser_evidence_source_cap_preserves_omissions(persisted_omissions):
+    source = {"id": "a" * 32 + "-1", "provider": "ragflow", "dataset_id": "kb", "document_id": "doc", "chunk_id": "chunk", "dataset_name": "KB", "document_name": "Manual", "text": "Excerpt", "pages": [], "truncated": False}
+    artifact = {"knowledge_sources": {"version": 1, "sources": [source] * 103, "omitted_count": persisted_omissions}}
+    projected = service_module._browser_evidence_snapshot(artifact)
+    assert len(projected["sources"]) == 100
+    assert projected["omitted_count"] == persisted_omissions + 3
+    assert artifact["knowledge_sources"]["omitted_count"] == persisted_omissions
 
 
 @pytest.mark.asyncio

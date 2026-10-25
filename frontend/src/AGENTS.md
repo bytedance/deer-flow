@@ -99,7 +99,9 @@ Tests: `html-assets.dom.test.ts`, `artifact-file-preview.dom.test.tsx`,
    Never infer batch mode from prompts or inject full results into chat state.
    Review citations use only the selected persisted snapshot. Poll open details
    until their own response is terminal, independently of compact-list status;
-   stop on close. Show omitted counts even without sources; localize page labels.
+   stop on close. Compact attempt/status/update revisions invalidate the cached
+   detail so external retries refresh open dialogs without fetching closed ones.
+   Show omitted counts even without sources; localize page labels.
    Real-hook/HTTP tests: `thread-subagent-batch-review.dom.test.tsx`.
    Capability Center > Plugins > Lark uses a local generation only to suppress stale React
    callbacks; server-issued Lark flow generations must be passed through every

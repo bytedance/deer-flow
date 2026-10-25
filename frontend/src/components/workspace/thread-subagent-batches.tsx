@@ -347,6 +347,7 @@ function BatchItemRow({
   const detail = useSubagentBatchItemDetail(threadId, batchId, item.position, {
     enabled: detailOpen,
     polling: detailOpen,
+    revision: JSON.stringify([item.attempt, item.status, item.updated_at]),
   });
   return (
     <div className="bg-muted/40 rounded-lg p-2 text-xs">

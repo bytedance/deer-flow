@@ -26,7 +26,8 @@ Batch evidence uses nullable `result_artifact` (migration 0033), persisted with
 successful results under the same lease fence. Full-result exports and selected
 browser item reads expose bounded, cited RAG snapshots; compact `list_items`
 defers them. Browser reads recheck owner/thread, whitelist fields and bound legacy
-IDs/text, without provider fetches or a running worker. Cancelled, failed and stale
+IDs/text without provider fetches or a running worker. Count read-time size/source
+limit omissions without changing stored evidence. Cancelled, failed and stale
 attempts cannot publish evidence; retry clears it. Cover the formatter/step capture
 -> worker -> reopened SQLite -> authorized export chain in `tests/test_batch_rag_evidence.py`.
 Explicitly enabled nested tasks propagate report-bound omission IDs; filter and

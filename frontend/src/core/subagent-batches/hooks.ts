@@ -4,6 +4,7 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
+import { useEffect } from "react";
 import { toast } from "sonner";
 
 import {
@@ -75,8 +76,19 @@ export function useSubagentBatchItemDetail(
   threadId: string,
   batchId: string,
   position: number | null,
-  options: { enabled?: boolean; polling?: boolean } = {},
+  options: { enabled?: boolean; polling?: boolean; revision?: string } = {},
 ) {
+  const queryClient = useQueryClient();
+  useEffect(() => {
+    if (position === null || options.revision === undefined) return;
+    // A terminal detail stops polling, but another client can retry the item.
+    // Compact-list revisions invalidate this cached detail; disabled dialogs do
+    // not refetch until reopened.
+    void queryClient.invalidateQueries({
+      queryKey: subagentBatchItemDetailKey(threadId, batchId, position),
+      exact: true,
+    });
+  }, [queryClient, threadId, batchId, position, options.revision]);
   return useQuery({
     queryKey:
       position === null

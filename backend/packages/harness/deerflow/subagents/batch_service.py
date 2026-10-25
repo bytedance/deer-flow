@@ -60,18 +60,22 @@ def _browser_evidence_snapshot(artifact: object) -> dict[str, Any] | None:
     if not isinstance(raw_sources, list):
         return None
     sources: list[dict[str, Any]] = []
+    read_omissions = max(0, len(raw_sources) - 100)
     for source in raw_sources[:100]:
         if not isinstance(source, dict) or source.get("provider") != "ragflow":
             continue
         if not all(isinstance(source.get(field), str) for field in _BROWSER_EVIDENCE_FIELDS):
             continue
         if any(len(source[field]) > 512 for field in ("dataset_name", "document_name")):
+            read_omissions += 1
             continue
         if any(len(source[field]) > 256 for field in ("id", "dataset_id", "document_id", "chunk_id")):
+            read_omissions += 1
             continue
         # Keep legacy or manually repaired rows bounded at read time too;
         # write-time limits do not protect this endpoint from old oversized text.
         if len(source["text"]) > 16_000:
+            read_omissions += 1
             continue
         record = {field: source[field] for field in _BROWSER_EVIDENCE_FIELDS}
         pages = source.get("pages")
@@ -81,7 +85,7 @@ def _browser_evidence_snapshot(artifact: object) -> dict[str, Any] | None:
     omitted_count = payload.get("omitted_count", 0)
     if not isinstance(omitted_count, int) or isinstance(omitted_count, bool) or omitted_count < 0:
         omitted_count = 0
-    return {"version": 1, "sources": sources, "omitted_count": omitted_count}
+    return {"version": 1, "sources": sources, "omitted_count": omitted_count + read_omissions}
 
 
 # Strong references to scheduled registry releases: an event loop keeps only

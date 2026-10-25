@@ -7,6 +7,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 
 const mocks = rs.hoisted(() => ({ fetch: rs.fn(), workerRunning: false }));
@@ -30,6 +31,7 @@ import type {
   SubagentBatchItem,
   SubagentBatchItemDetail,
 } from "@/core/subagent-batches";
+import { subagentBatchItemsKey } from "@/core/subagent-batches/hooks";
 
 const translations = { "en-US": enUS, "zh-CN": zhCN };
 const BATCH_URL = "/api/threads/thread-1/subagent-batches";
@@ -39,6 +41,7 @@ const SECOND_SOURCE_ID = "0123456789abcdef0123456789abcdef-2";
 const clients: QueryClient[] = [];
 const noLocaleChange = () => undefined;
 let detail: SubagentBatchItemDetail;
+let compactItem: SubagentBatchItem;
 
 const batch: SubagentBatch = {
   id: "batch-1",
@@ -83,6 +86,7 @@ const item: SubagentBatchItem = {
 
 beforeEach(() => {
   mocks.workerRunning = false;
+  compactItem = { ...item };
   detail = {
     ...item,
     status: "succeeded",
@@ -115,7 +119,7 @@ beforeEach(() => {
       path === BATCH_URL
         ? [batch]
         : path === `${BATCH_URL}/batch-1/items`
-          ? [item]
+          ? [compactItem]
           : path === DETAIL_URL
             ? detail
             : undefined;
@@ -163,6 +167,60 @@ function detailRequests() {
 // Keep the component, query hooks, report renderer and citation dialogs real.
 // Only the HTTP boundary and unrelated worker capability are replaced.
 describe("stored batch result review", () => {
+  it("refreshes an open terminal detail after an external retry and completion", async () => {
+    compactItem = { ...item, status: "failed", error: "Previous failure" };
+    detail = {
+      ...detail,
+      status: "failed",
+      report: "Previous attempt",
+      error: "Previous failure",
+    };
+    const t = await openReview();
+    expect(await screen.findByText("Previous attempt")).toBeDefined();
+    const client = clients[0]!;
+
+    compactItem = {
+      ...compactItem,
+      status: "running",
+      attempt: 2,
+      updated_at: "2026-10-17T00:02:00Z",
+      error: null,
+    };
+    detail = { ...detail, ...compactItem, report: null, evidence: null };
+    await act(async () => {
+      await client.refetchQueries({
+        queryKey: subagentBatchItemsKey("thread-1", "batch-1"),
+        exact: true,
+      });
+    });
+    expect(await screen.findByText(t.noReport)).toBeDefined();
+    expect(screen.queryByText("Previous attempt")).toBeNull();
+
+    compactItem = {
+      ...compactItem,
+      status: "succeeded",
+      updated_at: "2026-10-17T00:03:00Z",
+      result_preview: "Retried report",
+    };
+    detail = { ...detail, ...compactItem, report: "**Retried report**" };
+    await act(async () => {
+      await client.refetchQueries({
+        queryKey: subagentBatchItemsKey("thread-1", "batch-1"),
+        exact: true,
+      });
+    });
+    expect(
+      await within(
+        screen.getByRole("dialog", { name: t.resultTitle }),
+      ).findByText("Retried report"),
+    ).toBeDefined();
+    const completedRequests = detailRequests();
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 2200));
+    });
+    expect(detailRequests()).toBe(completedRequests);
+  }, 10000);
+
   it("refreshes an open running detail, then stops polling on its own terminal response", async () => {
     mocks.workerRunning = true;
     detail = { ...detail, status: "running", report: null, evidence: null };
@@ -189,6 +247,17 @@ describe("stored batch result review", () => {
       expect(screen.queryByRole("dialog", { name: t.resultTitle })).toBeNull(),
     );
     const closedRequests = detailRequests();
+    compactItem = {
+      ...compactItem,
+      attempt: 2,
+      updated_at: "2026-10-17T00:02:00Z",
+    };
+    await act(async () => {
+      await clients[0]!.refetchQueries({
+        queryKey: subagentBatchItemsKey("thread-1", "batch-1"),
+        exact: true,
+      });
+    });
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 2200));
     });
