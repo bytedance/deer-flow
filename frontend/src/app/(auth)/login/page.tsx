@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button";
 import { FlickeringGrid } from "@/components/ui/flickering-grid";
 import { Input } from "@/components/ui/input";
 import { AuthDisabledContext, useAuth } from "@/core/auth/AuthProvider";
+import { isValidEmail } from "@/core/auth/email";
 import { resolveAuthNextPath } from "@/core/auth/next-path";
 import {
   loadRememberLoginPreference,
@@ -159,6 +160,15 @@ export default function LoginPage() {
       return;
     }
 
+    // The form is `noValidate`, so the browser no longer rejects addresses
+    // its `type="email"` rule dislikes (e.g. a non-ASCII local part, which
+    // the backend accepts — #7488). Apply the permissive JS check instead.
+    if (!isValidEmail(email)) {
+      setError(t.login.errors.invalidEmail);
+      setLoading(false);
+      return;
+    }
+
     try {
       const endpoint = isLogin
         ? "/api/v1/auth/login/local"
@@ -276,7 +286,7 @@ export default function LoginPage() {
           </div>
         )}
 
-        <form onSubmit={handleSubmit} className="space-y-2">
+        <form onSubmit={handleSubmit} noValidate className="space-y-2">
           <div className="flex flex-col space-y-1">
             <label htmlFor="email" className="text-sm font-medium">
               {t.login.email}

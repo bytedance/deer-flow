@@ -2396,6 +2396,7 @@ export const zhCN: Translations = {
         "该邮箱对应的账号已存在。请使用密码登录或联系管理员。",
       sso_not_allowed: "你的账号不允许使用 SSO 登录。请联系管理员。",
       account_disabled: "账号已停用，请联系管理员。",
+      invalidEmail: "请输入有效的邮箱地址。",
     },
   },
 };

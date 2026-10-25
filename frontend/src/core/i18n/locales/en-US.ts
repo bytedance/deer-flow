@@ -2555,6 +2555,7 @@ export const enUS: Translations = {
         "SSO login is not allowed for your account. Contact your administrator.",
       account_disabled:
         "This account has been disabled. Contact your administrator.",
+      invalidEmail: "Please enter a valid email address.",
     },
   },
 };

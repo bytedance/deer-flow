@@ -2049,6 +2049,7 @@ export interface Translations {
       sso_account_exists: string;
       sso_not_allowed: string;
       account_disabled: string;
+      invalidEmail: string;
     };
   };
 }
