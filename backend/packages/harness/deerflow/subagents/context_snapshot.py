@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -118,11 +119,14 @@ class ParentContextSnapshot:
         # Providers may reuse call ids across turns. Match each result to the
         # preceding call, including hidden frames so their results cannot be
         # reassigned to a visible call. Only retained pairs count as completed.
-        call_positions: dict[str, int] = {}
+        call_positions: dict[str, int | None] = {}
         completed_calls: set[tuple[int, str]] = set()
         for index, message in enumerate(messages):
             if isinstance(message, AIMessage):
-                call_positions.update((call["id"], index) for call in message.tool_calls)
+                # A result cannot identify one of several calls with the same
+                # id in this message. Claim the id without completing any call,
+                # so it cannot fall back to an earlier occurrence either.
+                call_positions.update((call_id, index if count == 1 else None) for call_id, count in Counter(call["id"] for call in message.tool_calls).items())
             elif isinstance(message, ToolMessage):
                 call_index = call_positions.pop(message.tool_call_id, None)
                 if call_index is not None and call_index in retained_positions and index in retained_positions:

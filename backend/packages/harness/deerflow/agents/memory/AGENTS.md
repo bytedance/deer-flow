@@ -320,6 +320,24 @@ Use the earliest source review deadline for its next review.
 
 #### Remote backends
 
+Mem0 search and management convert facts inside the read-policy boundary.
+Invalid score/categories/metadata fields omit field values from `Mem0APIError`s.
+Diagnostics carry only bounded opaque record IDs, otherwise `<unavailable>`;
+missing/null defaults stay compatible and local programming errors propagate.
+
+Mem0 normalizes JSON syntax, Unicode decoding, and parser recursion failures
+to Mem0APIError.
+It validates object response envelopes and lists of object records in the
+HTTP client before returning recall data. Invalid structures raise Mem0APIError,
+so existing read policies apply to search, injection, management and export.
+Validate every page; a malformed later page must not publish a partial listing.
+Missing results and valid empty lists retain the existing empty-read behavior.
+Decoding and structure errors identify the endpoint and list page without memory
+contents; structure errors also identify the invalid container or record type.
+Preserve decoding causes. Catch RecursionError only at JSON parsing; local
+programming errors must still propagate.
+Regressions use offline HTTP transports in `tests/test_mem0_response_policy.py`.
+
 Strict reads use the backend-neutral `MemoryReadError`.
 Backends declare their policy through `read_failures_are_fatal_for_config()`.
 `DynamicContextMiddleware` preserves that policy at its injection timeout.

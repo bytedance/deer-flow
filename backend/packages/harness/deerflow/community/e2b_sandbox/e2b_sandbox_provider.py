@@ -671,6 +671,9 @@ class E2BSandboxProvider(SandboxProvider):
                 self._sandboxes.pop(sid, None)
                 self._thread_sandboxes.pop(key, None)
             self._forget_mount_result(sid)
+            # The lease renewer would otherwise keep re-claiming this lease
+            # until shutdown: no later path sees the ID again.
+            self._release_ownership(sid)
             try:
                 sandbox.close()
             except Exception:
@@ -745,6 +748,8 @@ class E2BSandboxProvider(SandboxProvider):
                 target_id,
             )
             self._forget_mount_result(target_id)
+            # The warm entry's lease would outlive it; see the in-process reuse path.
+            self._release_ownership(target_id)
             self._complete_transition_remote_op(target_id, remote_destroyed=True)
             return None
 

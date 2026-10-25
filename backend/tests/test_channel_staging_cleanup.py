@@ -11,6 +11,7 @@ made the save fail — and the staged file, which for the two credential stores 
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
 import pytest
@@ -21,6 +22,22 @@ from app.channels.store import JsonChannelStore
 from app.channels.wechat import WechatChannel
 
 CLEANUP_ERRNO = 28
+
+# Replacing a file over a non-empty directory is EISDIR (errno 21) on POSIX and
+# WinError 5 (errno 13, PermissionError) on Windows. The regression this file
+# pins is "cleanup must not replace the save error", not the platform's errno,
+# so accept the platform's blocked-rename error and assert it is not the
+# cleanup error instead of hard-coding errno 21 (which failed on Windows dev
+# hosts).
+BLOCKED_RENAME_ERRORS: tuple[type[BaseException], ...] = (IsADirectoryError, PermissionError) if os.name == "nt" else (IsADirectoryError,)
+
+
+def _assert_blocked_rename_error(exc: BaseException) -> None:
+    """The save error must be the blocked rename, never the cleanup error."""
+    if os.name == "nt":
+        assert getattr(exc, "errno", None) != CLEANUP_ERRNO
+    else:
+        assert getattr(exc, "errno", None) == 21
 
 
 def _block_destination(destination: Path) -> None:
@@ -67,10 +84,10 @@ def test_json_channel_store_keeps_the_save_error(tmp_path, cleanup_fails, caplog
     store = JsonChannelStore(path)
     store._data = {"feishu:chat": {"thread_id": "t"}}
 
-    with caplog.at_level(logging.WARNING), pytest.raises(IsADirectoryError) as raised:
+    with caplog.at_level(logging.WARNING), pytest.raises(BLOCKED_RENAME_ERRORS) as raised:
         store._save()
 
-    assert raised.value.errno == 21
+    _assert_blocked_rename_error(raised.value)
     assert "Failed to remove temporary channel store file" in caplog.text
 
 
@@ -78,10 +95,10 @@ def test_runtime_config_store_keeps_the_save_error(tmp_path, cleanup_fails, capl
     store = ChannelRuntimeConfigStore(tmp_path / "channels.json")
     _block_destination(store._path)
 
-    with caplog.at_level(logging.WARNING), pytest.raises(IsADirectoryError) as raised:
+    with caplog.at_level(logging.WARNING), pytest.raises(BLOCKED_RENAME_ERRORS) as raised:
         store._save({"feishu": {"app_id": "id"}})
 
-    assert raised.value.errno == 21
+    _assert_blocked_rename_error(raised.value)
     assert "Failed to remove temporary channel runtime config file" in caplog.text
 
 
@@ -98,7 +115,7 @@ def test_wechat_auth_state_persist_failure_stays_attributable(tmp_path, cleanup_
 
     records = [r for r in caplog.records if "failed to persist auth state" in r.getMessage()]
     assert len(records) == 1
-    assert isinstance(records[0].exc_info[1], IsADirectoryError)
+    assert isinstance(records[0].exc_info[1], BLOCKED_RENAME_ERRORS)
     assert "Failed to remove temporary WeChat auth state file" in caplog.text
 
 
@@ -121,7 +138,7 @@ def test_runtime_config_store_still_removes_the_staged_file(tmp_path):
     store = ChannelRuntimeConfigStore(tmp_path / "channels.json")
     _block_destination(store._path)
 
-    with pytest.raises(IsADirectoryError):
+    with pytest.raises(BLOCKED_RENAME_ERRORS):
         store._save({"feishu": {"app_id": "id"}})
 
     assert _staged_files(tmp_path) == []
@@ -149,10 +166,10 @@ def test_a_raising_log_handler_does_not_replace_the_save_error(tmp_path, cleanup
         store = JsonChannelStore(path)
         store._data = {"feishu:chat": {"thread_id": "t"}}
 
-        with caplog.at_level(logging.WARNING), pytest.raises(IsADirectoryError) as raised:
+        with caplog.at_level(logging.WARNING), pytest.raises(BLOCKED_RENAME_ERRORS) as raised:
             store._save()
 
-        assert raised.value.errno == 21
+        _assert_blocked_rename_error(raised.value)
     finally:
         store_module.logger.removeHandler(handler)
 

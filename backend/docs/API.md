@@ -181,6 +181,12 @@ Content-Type: application/json
 }
 ```
 
+Optional `assistant_id` binds the thread to `lead_agent` or a custom agent.
+After trimming, lowercasing and mapping `_` to `-`, a custom name must contain
+only letters, digits and hyphens; any other value is rejected with `422`.
+Branches preserve valid stored IDs, including their original spelling. If a
+legacy source has an invalid ID, its new branch stores `null` and uses the lead agent.
+
 **Response:**
 ```json
 {
@@ -273,6 +279,16 @@ may be requested on a new thread after `/new`. Stateless `/api/langgraph/runs/*`
 endpoints do not support this header because requests without an explicit thread
 create a new temporary conversation.
 
+When an `input.messages` entry has no usable `id`, the Gateway assigns one
+before persisting the run input and invoking the graph. The same ID then appears
+in the run record and checkpoint, so a client rejoining an active run can match
+the two copies. Caller-supplied nonempty IDs are preserved. For keyed requests,
+the generated IDs are stable for retries with the same thread and key; unkeyed
+runs receive fresh IDs. During a rolling upgrade, route keyed requests with
+ID-less input and their retries to upgraded Gateway workers until all workers
+are upgraded. An older worker may reject a retry against a newly stamped run
+record with 409.
+
 **Rolling upgrades and keyed resume:** route all initial submissions and retries
 containing both `command.resume` and `Idempotency-Key` to upgraded Gateway workers
 only, across `/runs`, `/runs/stream` and `/runs/wait`, until every worker serving
@@ -338,6 +354,12 @@ does not accept this header and keeps the existing missing-stream close of
 - Unsupported options return `422`: `webhook`, `stream_resumable=true`, `after_seconds`, `feedback_keys`, any non-null `on_completion` value (including the SDK values `"complete"` and `"continue"`), `if_not_exists="reject"`, and `multitask_strategy="enqueue"`
 - `stream_resumable=false` is accepted: it is the LangGraph SDK's default and requests the non-resumable stream DeerFlow already serves
 - Undeclared SDK options, including `checkpoint_during` and `durability`, also return `422` instead of being silently discarded
+
+**Request Validation:**
+- `config.configurable` and `config.context` must be objects or `null`; any other value returns `422` (`invalid_run_config_section`)
+- An `assistant_id` that does not normalize to letters, digits and hyphens returns `422`, as does a non-string `agent_name` in `config.configurable`, `config.context` or `context`
+- A message in `input.messages` that cannot be parsed returns `400` naming its index
+- These checks run before a run is created
 
 When outputs changed during the run, `run.delivery` events retain the Slice 1
 facts (`presented`, `paths`, and `by_tool`) and add `produced_paths`,
@@ -1672,6 +1694,16 @@ POST   /api/scheduled-tasks/preview-cron
 | `end_at` | date-time \| null | Safety cap: no automatic run after this time. Without a UTC offset it is wall-clock time in the task's timezone. |
 | `stop_condition` | string \| null | The user's "stop when …" rule, stored in its own field. Whitespace collapses to single spaces; at most 500 characters; blank means none. It is never part of `prompt`: each launch appends it as an instruction to call `stop_scheduled_task` (or, with `scheduler.tool_enabled` off, to report a met rule). |
 | `notification_group_connection_id` | string \| null | One additional connected Feishu group belonging to the task owner. Select a group binding returned by `GET /api/channels/connections`; it must record `chat_type=group` and a matching chat/workspace ID. Omitted in PATCH preserves the target; null clears it. Invalid choices return `invalid_notification_group` (422), lookup outages return `scheduler_unavailable` (503). |
+
+For one-time `schedule_spec.run_at` and `end_at` without an offset, a local time
+skipped by a timezone clock change is rejected: `422 invalid_schedule` for
+`run_at`, or `422 invalid_request` for `end_at`, including an end-time renewal
+on Resume. This applies to REST and conversation scheduling. Ambiguous local
+times retain the earlier occurrence (`fold=0`); explicit offsets preserve the
+specified instant. Unchanged live once definitions keep their previously
+accepted execution time; a changed definition or a PATCH that rearms a terminal
+task is validated again. Ordinary Resume retains the admitted stored schedule
+without revalidating its wall time; a renewed `end_at` is still checked.
 
 In a PATCH, sending `null` clears `goal_objective`, `max_runs`, `end_at` or
 `stop_condition` or `notification_group_connection_id`; for every other field `null` means unchanged (`assistant_id:

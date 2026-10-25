@@ -155,9 +155,11 @@ in `tests/test_codex_retry_after.py` includes public sync/async HTTP retries.
 ### Claude Retry Delays (`claude_provider.py`)
 
 `_calc_backoff_ms` uses `utils.retry_after.bounded_retry_after_ms` for integer-second
-provider hints. Invalid or over-24-hour values retain local exponential backoff;
-finite negative values clamp to zero. Sync/async 429/500 regressions live in
-`tests/test_claude_provider_retry_after.py` and use offline provider doubles.
+provider hints and HTTP-date hints (including obsolete forms interpreted in UTC).
+Invalid or over-24-hour values retain local exponential backoff; finite negative
+values and past dates clamp to zero. Sync/async 429/500 regressions live in
+`tests/test_claude_provider_retry_after.py`; `tests/test_claude_retry_after_dates.py`
+exercises public invocation through real SDK clients with offline HTTP transports.
 
 ### Provider Retry Admission (`claude_provider.py`, `openai_codex_provider.py`)
 
@@ -199,6 +201,11 @@ request `stream=False`, including with `streaming=True` model defaults, then use
 the shared simulated chunker. Preserve terminal usage exactly once, XML/native
 tool calls, invalid calls, and the original messages. Offline SDK boundary tests:
 `tests/test_mindie_provider.py::test_public_stream_compatibility_through_sdk`.
+
+Whole-response and streaming newline decoding protect both triple-backtick and
+triple-tilde fences. The earliest opener wins, only the same delimiter closes it,
+and an unclosed fence keeps the remainder verbatim. Boundary and mixed-delimiter
+regressions live in `tests/test_mindie_newline_fences.py`.
 
 `_fix_messages` converts tool results to the XML text format expected by MindIE.
 Only tool-message `type=json` payloads join the text channel; other non-text

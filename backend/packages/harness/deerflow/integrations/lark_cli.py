@@ -1272,6 +1272,8 @@ def _publish_bytes_atomically(path: Path, content: bytes) -> None:
     staged skill files and manifests become read-only through
     ``make_skill_tree_sandbox_readable``. The parent directory is not fsynced,
     so this helper alone does not guarantee publication survives power loss.
+    A failed write, fsync, or replace leaves the previous file intact.
+    Removing the temporary is best-effort and must not replace that error.
     """
     fd, temporary_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
     temporary = Path(temporary_name)
