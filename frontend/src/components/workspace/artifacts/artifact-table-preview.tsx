@@ -19,6 +19,7 @@ import {
 import { useDelimitedPreview } from "@/core/artifacts/use-delimited-preview";
 import { writeTextToClipboard } from "@/core/clipboard";
 import { useI18n } from "@/core/i18n/hooks";
+import { truncateToCodePoints } from "@/core/utils/text";
 
 const PAGE_SIZE = 50;
 const MAX_DATA_ROWS = 200;
@@ -217,7 +218,7 @@ function TablePreview({
                                   setCopyStatus("");
                                 }}
                               >
-                                {value.slice(0, 120)}
+                                {truncateToCodePoints(value, 120)}
                               </button>
                             ) : (
                               <span className="whitespace-pre" title={value}>
