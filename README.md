@@ -1561,6 +1561,15 @@ input usage. It is also unavailable after a subagent dispatch because subagent
 usage may be attributed to that response. The result identifies whether a
 current-run boundary is known.
 
+The `recursion` snapshot reports the executing graph's checkpoint `step`,
+configured `limit`, and native `remaining` super-steps, including middleware
+nodes rather than just model turns. Steps accumulate across checkpointed
+turns; each invocation, including a resume, refreshes its budget. Therefore
+`remaining` is not `limit - step` and can exceed `limit` immediately after a
+resume. Nested agents report their own graph budget. Outside an active graph,
+the budget is unknown (`null`). Inspecting it does not extend the limit or
+guarantee enough steps to finish a task.
+
 Open **Capability Center** from the workspace sidebar to manage **Plugins**
 (MCP servers and Lark/Feishu integration) and **Skills**. Both catalogs support
 search; skill cards show concise descriptions with full descriptions in a detail

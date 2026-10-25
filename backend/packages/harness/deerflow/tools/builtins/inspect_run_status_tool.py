@@ -8,6 +8,8 @@ from typing import Any
 
 from langchain.tools import BaseTool, tool
 from langchain_core.messages import AIMessage
+from langgraph._internal._constants import CONFIG_KEY_SCRATCHPAD
+from langgraph._internal._scratchpad import PregelScratchpad
 
 from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
 from deerflow.tools.types import Runtime
@@ -36,7 +38,30 @@ def _current_messages(messages: list, context: Mapping[str, Any]) -> tuple[list,
     return messages, "visible_state"
 
 
-def snapshot_run_status(state: Mapping[str, Any], context: Mapping[str, Any], *, context_window: int | None) -> dict[str, Any]:
+def _recursion_status(config: Mapping[str, Any]) -> dict[str, int] | None:
+    """Read the executing graph's budget, never a persisted/user state value.
+
+    LangGraph's RemainingSteps managed value uses ``scratchpad.stop - step``.
+    ToolNode's Send path does not hydrate managed values into ToolRuntime.state,
+    so read the same execution scratchpad instead (verified with LangGraph
+    1.2.9). Keep this private dependency isolated and covered by real-graph tests.
+    Checkpoint steps accumulate across turns; stop is reset on each invocation,
+    including resumes, so ``recursion_limit - step`` is not a valid substitute.
+    """
+    configurable = config.get("configurable")
+    scratchpad = configurable.get(CONFIG_KEY_SCRATCHPAD) if isinstance(configurable, Mapping) else None
+    if not isinstance(scratchpad, PregelScratchpad):
+        return None
+    limit = config.get("recursion_limit")
+    step, stop = scratchpad.step, scratchpad.stop
+    if any(not isinstance(value, int) or isinstance(value, bool) for value in (limit, step, stop)):
+        return None
+    if limit <= 0 or step < 0 or stop < step:
+        return None
+    return {"step": step, "limit": limit, "remaining": stop - step}
+
+
+def snapshot_run_status(state: Mapping[str, Any], context: Mapping[str, Any], *, context_window: int | None, config: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Build a content-free snapshot; no message or todo text leaves the tool."""
     all_messages = state.get("messages")
     messages, scope = _current_messages(list(all_messages) if isinstance(all_messages, (list, tuple)) else [], context)
@@ -94,6 +119,7 @@ def snapshot_run_status(state: Mapping[str, Any], context: Mapping[str, Any], *,
         "context_fill": fill,
         "has_summary": isinstance(summary, str) and bool(summary.strip()),
         "todos": {"pending": pending, "in_progress": in_progress},
+        "recursion": _recursion_status(config) if config is not None else None,
     }
 
 
@@ -102,14 +128,19 @@ def build_inspect_run_status_tool(*, context_window: int | None) -> BaseTool:
 
     @tool("inspect_run_status")
     def inspect_run_status(runtime: Runtime) -> str:
-        """Inspect visible run usage, context fill, and progress counters.
+        """Inspect visible run usage, context fill, progress, and recursion budget.
 
         Read-only; returns no conversation text. Counts may omit compacted
         messages or provider-omitted usage. Context fill needs a configured
         window and an unaggregated model input report.
+        Recursion counts graph super-steps, including middleware, not model
+        turns. Its step is cumulative checkpoint position; limit and remaining
+        belong to this graph invocation. Resumes refresh the native budget, so
+        remaining can exceed limit and is not limit minus step. Unknown is null.
         """
         context = runtime.context if isinstance(runtime.context, Mapping) else {}
         state = runtime.state if isinstance(runtime.state, Mapping) else {}
-        return json.dumps(snapshot_run_status(state, context, context_window=context_window), separators=(",", ":"))
+        config = runtime.config if isinstance(runtime.config, Mapping) else {}
+        return json.dumps(snapshot_run_status(state, context, context_window=context_window, config=config), separators=(",", ":"))
 
     return inspect_run_status
