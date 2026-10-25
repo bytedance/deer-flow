@@ -119,6 +119,8 @@ acquire/output-transfer operations finish. A late create result is destroyed
 instead of published. `shutdown()` also fences admission and reports outstanding
 acquire/release operations or unconfirmed terminations with a retryable
 `RuntimeError`; it does not report complete while those resources remain owned.
+At process exit, incomplete cleanup is logged without an exception traceback;
+explicit `shutdown()` still raises so callers can retry.
 
 The SDK closes its HTTP transport even when a deletion fails. DeerFlow keeps
 the remote identity and retries only `SandboxManagerSync.kill_sandbox()` through

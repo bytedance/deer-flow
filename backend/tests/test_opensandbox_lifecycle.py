@@ -36,7 +36,14 @@ class Remote:
 
 
 @pytest.fixture
-def provider(monkeypatch):
+def exit_callbacks(monkeypatch):
+    callbacks = []
+    monkeypatch.setattr("deerflow.community.opensandbox.provider.atexit.register", callbacks.append)
+    return callbacks
+
+
+@pytest.fixture
+def provider(monkeypatch, exit_callbacks):
     config = dict(
         api_key="synthetic-secret",
         domain="synthetic.invalid",
@@ -52,7 +59,6 @@ def provider(monkeypatch):
         image="synthetic",
     )
     monkeypatch.setattr(OpenSandboxProvider, "_load_config", lambda self: config)
-    monkeypatch.setattr("deerflow.community.opensandbox.provider.atexit.register", lambda callback: None)
     remotes = []
     manager_calls = []
     managers = []
@@ -273,3 +279,43 @@ def test_invalidation_transfers_pending_ownership_before_close_worker_starts(pro
         future.result(timeout=5)
     provider.shutdown()
     assert provider._test_manager_calls == ["remote-1"]
+
+
+def test_atexit_logs_incomplete_cleanup_without_losing_retry(provider, exit_callbacks, caplog):
+    sandbox_id = provider.acquire("thread", user_id="owner")
+    sandbox = provider.get(sandbox_id)
+    remote = provider._test_remotes[0]
+    remote.failure = OSError("synthetic delete unavailable")
+    provider._test_manager_errors.append(OSError("synthetic retry unavailable"))
+    with pytest.raises(RuntimeError, match="OpenSandbox shutdown incomplete"):
+        provider.shutdown()
+
+    caplog.clear()
+    exit_callbacks[0]()
+    assert provider._pending_destroy[id(sandbox)] is sandbox
+    assert not provider._shutdown_complete
+    assert not provider._accepting
+    assert "OpenSandbox shutdown incomplete: 1 terminations pending" in caplog.text
+    assert all(record.exc_info is None for record in caplog.records)
+
+    provider.shutdown()
+    assert provider._shutdown_complete
+    assert not provider._pending_destroy
+    assert remote.destroy_calls == 1
+    assert provider._test_manager_calls == [remote.id, remote.id]
+
+
+def test_atexit_success_is_quiet(provider, exit_callbacks, caplog):
+    provider.acquire("thread", user_id="owner")
+    exit_callbacks[0]()
+    exit_callbacks[0]()
+    assert provider._test_remotes[0].destroy_calls == 1
+    assert provider._shutdown_complete
+    assert not caplog.records
+
+
+def test_atexit_preserves_unexpected_shutdown_errors(provider, exit_callbacks, monkeypatch):
+    with monkeypatch.context() as patch:
+        patch.setattr(provider, "_stop_idle_checker", lambda: (_ for _ in ()).throw(RuntimeError("reaper still running")))
+        with pytest.raises(RuntimeError, match="reaper still running"):
+            exit_callbacks[0]()

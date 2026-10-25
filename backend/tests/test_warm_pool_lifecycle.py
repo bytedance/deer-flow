@@ -100,9 +100,8 @@ def test_stop_idle_checker_rejects_live_thread_after_timeout() -> None:
     [
         ("deerflow.community.aio_sandbox.aio_sandbox_provider", "AioSandboxProvider"),
         ("deerflow.community.boxlite.provider", "BoxliteProvider"),
-        ("deerflow.community.tenki.provider", "TenkiSandboxProvider"),
-        # OpenSandbox uses a permanent admission fence and separate completion
-        # state; test_opensandbox_lifecycle exercises that retry via real init.
+        # Tenki and OpenSandbox keep permanent admission fences; their lifecycle
+        # suites exercise shutdown retries through real constructors.
     ],
 )
 def test_provider_shutdown_resets_guard_when_idle_checker_stop_fails(module_name: str, class_name: str) -> None:

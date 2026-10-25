@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import shutil
+import stat
 import tempfile
 import threading
 from collections.abc import Iterator
@@ -37,7 +38,7 @@ _process_locks: dict[Path, threading.RLock] = {}
 _held_projection_locks = threading.local()
 _MANIFEST_VERSION = 1
 _MAX_REBUILD_ATTEMPTS = 2
-_THREAD_PROJECTION_POLICY_VERSION = 1
+_THREAD_PROJECTION_POLICY_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -448,13 +449,56 @@ def _write_manifest(scope_root: Path, source_signature: str, view_signature: str
         raise
 
 
+def _thread_view_signature(paths: SkillProjectionPaths) -> str:
+    """Sign projected bytes/layout without NFS-sensitive inode/size/timestamps.
+
+    Unlike source/shared-view metadata checks, this reads every projected file
+    in bounded chunks. That cost preserves next-acquire repair of sandbox edits
+    without recopying the whole view when only filesystem metadata settles.
+    Symlinks are signed as links, never opened; special files are not read.
+    """
+    digest = hashlib.sha256()
+    for category in ("public", "custom", "legacy", "integrations"):
+        digest.update(f"root:{category}\0".encode())
+        stack = [(getattr(paths, category), Path("."))]
+        while stack:
+            current, relative_root = stack.pop()
+            with os.scandir(current) as entries:
+                ordered = sorted(entries, key=lambda entry: entry.name)
+            child_dirs: list[tuple[Path, Path]] = []
+            for entry in ordered:
+                relative = relative_root / entry.name
+                if entry.is_symlink():
+                    value = ["link", os.readlink(entry.path)]
+                elif entry.is_dir(follow_symlinks=False):
+                    value = ["dir"]
+                    child_dirs.append((Path(entry.path), relative))
+                elif entry.is_file(follow_symlinks=False):
+                    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+                    fd = os.open(entry.path, flags)
+                    try:
+                        metadata = os.fstat(fd)
+                        if not stat.S_ISREG(metadata.st_mode):
+                            raise ValueError(f"Projected skill file changed type: {entry.path}")
+                        with os.fdopen(fd, "rb", closefd=False) as stream:
+                            content = hashlib.file_digest(stream, "sha256").hexdigest()
+                        value = ["file", content, metadata.st_mode & 0o111]
+                    finally:
+                        os.close(fd)
+                else:
+                    value = ["special", stat.S_IFMT(entry.stat(follow_symlinks=False).st_mode)]
+                digest.update(json.dumps([category, relative.as_posix(), value], separators=(",", ":")).encode())
+            stack.extend(reversed(child_dirs))
+    return digest.hexdigest()
+
+
 def _view_signature(paths: SkillProjectionPaths, scope: str) -> str:
+    if scope == "thread":
+        return _thread_view_signature(paths)
     digest = hashlib.sha256()
     if scope == "public":
         _update_tree_digest(digest, paths.public, "public_view")
-    elif scope in {"user", "thread"}:
-        if scope == "thread":
-            _update_tree_digest(digest, paths.public, "public_view")
+    elif scope == "user":
         _update_tree_digest(digest, paths.custom, "custom_view")
         _update_tree_digest(digest, paths.legacy, "legacy_view")
         _update_tree_digest(digest, paths.integrations, "integrations_view")
@@ -489,9 +533,13 @@ def _thread_projection_is_fresh(
     if manifest_before is None or manifest_before.get("version") != _MANIFEST_VERSION:
         return False
     source_sig = _thread_source_signature(storage, allowed_skills)
+    if manifest_before.get("source_signature") != source_sig:
+        return False
+    # Thread view metadata can settle after a rebuild on shared storage. Check
+    # bytes/layout instead, retaining repair of out-of-band edits on any FS.
     view_sig = _view_signature(paths, "thread")
     manifest_after = _read_manifest(scope_root)
-    return manifest_before == manifest_after and manifest_before.get("source_signature") == source_sig and manifest_before.get("view_signature") == view_sig
+    return manifest_before == manifest_after and manifest_before.get("view_signature") == view_sig
 
 
 def _load_public_skills(storage: SkillStorage, *, enabled_only: bool) -> list[Skill]:

@@ -42,5 +42,6 @@ client bound to the original endpoint/auth. Only success or API 404/410 confirms
 termination. Transfer pending ownership atomically with deregistration; stale
 callbacks must not retire replacements. Pending remotes count toward capacity.
 Reset/shutdown fence admission; started acquire/output-sync workers keep ownership.
-Keep shutdown retryable without reopening admission. SDK failures before create
+Keep shutdown retryable without reopening admission. At exit, log only the typed
+incomplete-cleanup error; unexpected errors still propagate. SDK failures before create
 returns a handle and crash recovery remain outside this contract. Details: README.

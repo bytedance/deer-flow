@@ -75,8 +75,10 @@ Python and POSIX utilities required by the selected workload and output sync.
 The normal warm-up creates and destroys a separate remote before measurement.
 
 CLI `--replicas` and `--idle-timeout` override their YAML values, including their
-CLI defaults (3 and 600). `--image` overrides YAML only when supplied. Connection
-settings, including HTTPS and `use_server_proxy`, are retained. The exported
+CLI defaults (3 and 600). All providers reject negative `--idle-timeout` values
+before provider creation. Zero disables idle reaping, except that the
+`idle_timeout` scenario requires a positive value. `--image` overrides YAML only
+when supplied. Connection settings, including HTTPS and `use_server_proxy`, are retained. The exported
 configuration dimensions contain only image, replicas and idle timeout; credentials,
 endpoint and environment are not copied into result rows. Record non-secret SDK,
 server and deployment versions separately for reproducibility.

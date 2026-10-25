@@ -7,7 +7,7 @@ consumers read the structured facts carried inside
 - ``subagent_status``: one of ``SUBAGENT_STATUS_VALUES``.
 - ``subagent_stop_reason`` (optional): when a guardrail cap ended the run
   early, one of ``SUBAGENT_STOP_REASON_VALUES`` (``token_capped`` /
-  ``turn_capped`` / ``loop_capped``). Additive (#3875 Phase 2): a capped run
+  ``turn_capped`` / ``loop_capped`` / ``model_length_capped``). Additive (#3875 Phase 2): a capped run
   that still produced a final answer stays ``status=completed`` and carries
   the cap here; a capped run with no usable output is ``status=failed`` +
   ``stop_reason``. Old frontends ignore the unknown field.
@@ -90,12 +90,13 @@ SUBAGENT_STATUS_VALUES: tuple[SubagentStatusValue, ...] = (
 
 #: Why a guardrail cap ended a run early. Carried on the additive
 #: ``subagent_stop_reason`` field, never as a status enum value.
-SubagentStopReasonValue = Literal["token_capped", "turn_capped", "loop_capped"]
+SubagentStopReasonValue = Literal["token_capped", "turn_capped", "loop_capped", "model_length_capped"]
 
 SUBAGENT_STOP_REASON_VALUES: tuple[SubagentStopReasonValue, ...] = (
     "token_capped",
     "turn_capped",
     "loop_capped",
+    "model_length_capped",
 )
 
 #: Human-readable label folded into the model-visible result text when a cap
@@ -104,6 +105,7 @@ _STOP_REASON_LABELS: dict[SubagentStopReasonValue, str] = {
     "token_capped": "token budget",
     "turn_capped": "turn budget",
     "loop_capped": "repeated tool-call loop",
+    "model_length_capped": "model output length limit",
 }
 
 #: Statuses that carry a recoverable result in ``subagent_result_brief`` /

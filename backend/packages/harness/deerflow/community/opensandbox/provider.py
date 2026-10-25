@@ -85,6 +85,10 @@ def _import_manager():
     return SandboxManagerSync
 
 
+class _ShutdownIncompleteError(RuntimeError):
+    """Cleanup still owns remote operations or terminations that need retry."""
+
+
 class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxProvider):
     """Create one OpenSandbox environment per effective user/thread scope."""
 
@@ -117,7 +121,7 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
         # rather than re-resolving mutable SDK environment fallbacks.
         self._management_domain = self._config["domain"] or os.environ.get("OPEN_SANDBOX_DOMAIN") or "localhost:8080"
         self._management_api_key = self._config["api_key"] or os.environ.get("OPEN_SANDBOX_API_KEY", "")
-        atexit.register(self.shutdown)
+        atexit.register(self._shutdown_at_exit)
         self._start_idle_checker()
 
     @staticmethod
@@ -657,6 +661,12 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
         self._sandboxes.clear()
         self._thread_sandboxes.clear()
 
+    def _shutdown_at_exit(self) -> None:
+        try:
+            self.shutdown()
+        except _ShutdownIncompleteError as exc:
+            logger.warning("%s", exc)
+
     def shutdown(self) -> None:
         with self._shutdown_lock:
             with self._lock:
@@ -668,7 +678,7 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
             self._stop_idle_checker()
             with self._lock:
                 if self._operations:
-                    raise RuntimeError(f"OpenSandbox shutdown incomplete: {self._operations} acquire/release operations pending; retry shutdown")
+                    raise _ShutdownIncompleteError(f"OpenSandbox shutdown incomplete: {self._operations} acquire/release operations pending; retry shutdown")
                 sandboxes = list(self._sandboxes.values()) + [entry for entry, _ in self._warm_pool.values()] + list(self._pending_destroy.values())
                 self._sandboxes.clear()
                 self._warm_pool.clear()
@@ -679,7 +689,7 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
                 self._destroy_quietly(sandbox, context="shutdown")
             with self._lock:
                 if self._pending_destroy:
-                    raise RuntimeError(f"OpenSandbox shutdown incomplete: {len(self._pending_destroy)} terminations pending; retry shutdown")
+                    raise _ShutdownIncompleteError(f"OpenSandbox shutdown incomplete: {len(self._pending_destroy)} terminations pending; retry shutdown")
                 self._shutdown_complete = True
 
 

@@ -103,6 +103,7 @@ THREADS_HOST_PATH = os.environ.get("THREADS_HOST_PATH", "/.deer-flow/threads")
 DEER_FLOW_HOST_BASE_DIR = os.environ.get("DEER_FLOW_HOST_BASE_DIR", "/.deer-flow")
 SKILLS_PVC_NAME = os.environ.get("SKILLS_PVC_NAME", "")
 USERDATA_PVC_NAME = os.environ.get("USERDATA_PVC_NAME", "")
+USERDATA_VOLUME_NAME = "user-data"
 SKILLS_PVC_SUBPATH_TEMPLATE = os.environ.get("SKILLS_PVC_SUBPATH_TEMPLATE", "")
 SANDBOX_CONTAINER_PORT_RAW = os.environ.get("SANDBOX_CONTAINER_PORT", "8080")
 SANDBOX_SERVICE_TYPE = os.environ.get("SANDBOX_SERVICE_TYPE", "NodePort")
@@ -567,6 +568,7 @@ def _build_extra_volumes(
     *,
     skills_container_path: str = DEFAULT_SKILLS_CONTAINER_PATH,
 ) -> list[k8s_client.V1Volume]:
+    """Build hostPath extras; _build_volumes alone declares the user-data PVC."""
     volumes: list[k8s_client.V1Volume] = []
     for index, mount in enumerate(
         _validated_extra_mounts(
@@ -575,14 +577,8 @@ def _build_extra_volumes(
         )
     ):
         if USERDATA_PVC_NAME:
-            volumes.append(
-                k8s_client.V1Volume(
-                    name=_extra_mount_volume_name(index),
-                    persistent_volume_claim=k8s_client.V1PersistentVolumeClaimVolumeSource(
-                        claim_name=USERDATA_PVC_NAME,
-                    ),
-                )
-            )
+            # _build_volumes already declares this claim as user-data. Reuse
+            # that volume with per-mount subPaths instead of republishing it.
             continue
 
         volumes.append(
@@ -602,6 +598,7 @@ def _build_extra_volume_mounts(
     *,
     skills_container_path: str = DEFAULT_SKILLS_CONTAINER_PATH,
 ) -> list[k8s_client.V1VolumeMount]:
+    """Reference the shared PVC declared by _build_volumes, or hostPath extras."""
     mounts: list[k8s_client.V1VolumeMount] = []
     for index, mount in enumerate(
         _validated_extra_mounts(
@@ -610,7 +607,7 @@ def _build_extra_volume_mounts(
         )
     ):
         volume_mount = k8s_client.V1VolumeMount(
-            name=_extra_mount_volume_name(index),
+            name=USERDATA_VOLUME_NAME if USERDATA_PVC_NAME else _extra_mount_volume_name(index),
             mount_path=mount.container_path,
             read_only=mount.read_only,
         )
@@ -721,14 +718,14 @@ def _build_volumes(
 
     if USERDATA_PVC_NAME:
         userdata_vol = k8s_client.V1Volume(
-            name="user-data",
+            name=USERDATA_VOLUME_NAME,
             persistent_volume_claim=k8s_client.V1PersistentVolumeClaimVolumeSource(
                 claim_name=USERDATA_PVC_NAME,
             ),
         )
     else:
         userdata_vol = k8s_client.V1Volume(
-            name="user-data",
+            name=USERDATA_VOLUME_NAME,
             host_path=k8s_client.V1HostPathVolumeSource(
                 path=join_host_path(THREADS_HOST_PATH, thread_id, "user-data"),
                 type="DirectoryOrCreate",
@@ -770,24 +767,18 @@ def _build_volumes(
             if mount is None:
                 continue
             if USERDATA_PVC_NAME:
-                volumes.append(
-                    k8s_client.V1Volume(
-                        name=volume_name,
-                        persistent_volume_claim=k8s_client.V1PersistentVolumeClaimVolumeSource(
-                            claim_name=USERDATA_PVC_NAME,
-                        ),
-                    )
+                # Broker credentials use their own subPaths on user-data;
+                # only the broker container receives these mounts.
+                continue
+            volumes.append(
+                k8s_client.V1Volume(
+                    name=volume_name,
+                    host_path=k8s_client.V1HostPathVolumeSource(
+                        path=mount.host_path,
+                        type="Directory" if mount.read_only else "DirectoryOrCreate",
+                    ),
                 )
-            else:
-                volumes.append(
-                    k8s_client.V1Volume(
-                        name=volume_name,
-                        host_path=k8s_client.V1HostPathVolumeSource(
-                            path=mount.host_path,
-                            type="Directory" if mount.read_only else "DirectoryOrCreate",
-                        ),
-                    )
-                )
+            )
     return volumes
 
 
@@ -857,7 +848,7 @@ def _build_volume_mounts(
         mounts.extend(mount for mount in default_skill_mounts if mount.mount_path not in skill_overrides)
 
     userdata_mount = k8s_client.V1VolumeMount(
-        name="user-data",
+        name=USERDATA_VOLUME_NAME,
         mount_path="/mnt/user-data",
         read_only=False,
     )
@@ -946,6 +937,7 @@ def _build_lark_cli_broker_sidecars(
     container), so the plaintext app secret / OAuth tokens stay out of the
     sandbox filesystem. The config root is read-only and its nested locks mount
     is writable. The broker serves the command surface on loopback.
+    PVC mounts reuse the user-data volume declared solely by _build_volumes.
     """
     if not _lark_cli_broker_enabled(provision_lark_cli_broker):
         return []
@@ -963,7 +955,7 @@ def _build_lark_cli_broker_sidecars(
         if mount is None:
             continue
         sidecar_mount = k8s_client.V1VolumeMount(
-            name=volume_name,
+            name=USERDATA_VOLUME_NAME if USERDATA_PVC_NAME else volume_name,
             mount_path=sidecar_path,
             read_only=mount.read_only,
         )
