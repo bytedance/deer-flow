@@ -2,9 +2,10 @@
 
 `scripts/test-config-version.sh` exists so a host whose `uv` points at a mirror
 that blocks dependencies can still run `tests/test_config_version.py`. Nothing
-pins that contract today: dropping one `unset`, or moving the `export` above it,
-silently restores the failure it was added for. These tests run the real script
-with a stand-in `uv` and assert what that child actually received.
+pins that contract today: dropping one of the three `unset` names, or dropping or
+changing the `UV_DEFAULT_INDEX` export, silently restores the failure it was
+added for. These tests run the real script with a stand-in `uv` and assert what
+that child actually received.
 """
 
 from __future__ import annotations
