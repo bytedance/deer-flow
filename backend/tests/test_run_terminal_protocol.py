@@ -687,7 +687,11 @@ async def test_non_local_cancel_takeover_backfills_error_terminal(runtime):
     assert outcome == CancelOutcome.taken_over
     row = await runtime.runs.get(record.run_id, user_id=record.user_id)
     assert row is not None and row["status"] == "error"
-    confirmed_terminal(await terminal_events(runtime, record), record, "error", recovered=True)
+    delivery = await runtime.events.list_events(record.thread_id, record.run_id, event_types=["run.delivery"], user_id=None)
+    terminal = await terminal_events(runtime, record)
+    assert len(delivery) == 1
+    confirmed_terminal(terminal, record, "error", recovered=True)
+    assert delivery[0]["seq"] < terminal[0]["seq"]
 
 
 @pytest.mark.asyncio

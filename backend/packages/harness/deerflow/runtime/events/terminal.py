@@ -154,10 +154,12 @@ class RecoveryTerminalPublisher:
         )
 
     async def publish(self, target: RecoveryTerminalTarget) -> TerminalEventConfirmation:
-        """Consume *target* once and resolve its event confirmation."""
+        """Consume *target* once, backfill delivery, then confirm terminal evidence."""
         if not isinstance(target, RecoveryTerminalTarget):
             raise TypeError("RecoveryTerminalPublisher.publish requires a RecoveryTerminalTarget")
         identity = target._consume()
+        guard = self.lifecycle_guard(thread_id=identity.thread_id, run_id=identity.run_id, user_id=identity.user_id)
+        await self._ensure_delivery_receipt(identity, guard)
         try:
             confirmation = await confirm_terminal_event(
                 self._store,
@@ -167,7 +169,7 @@ class RecoveryTerminalPublisher:
                 user_id=identity.user_id,
                 recovered=True,
                 authorized=lambda: True,
-                lifecycle_guard=self.lifecycle_guard(thread_id=identity.thread_id, run_id=identity.run_id, user_id=identity.user_id),
+                lifecycle_guard=guard,
             )
         except Exception:
             # Cancellation is BaseException and must retain its independent
@@ -185,6 +187,25 @@ class RecoveryTerminalPublisher:
                 confirmation.value,
             )
         return confirmation
+
+    async def _ensure_delivery_receipt(self, identity: _RecoveryTargetIdentity, lifecycle_guard: Callable[[], Awaitable[bool]]) -> None:
+        """Best-effort zero-delivery receipt; terminal publication remains independent."""
+        try:
+            await self._store.put_if_absent(
+                thread_id=identity.thread_id,
+                run_id=identity.run_id,
+                event_type="run.delivery",
+                category="outputs",
+                content={"presented": 0, "paths": [], "by_tool": {}},
+                user_id=identity.user_id,
+                lifecycle_guard=lifecycle_guard,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to backfill delivery receipt for recovered run %s; continuing with terminal confirmation",
+                identity.run_id,
+                exc_info=True,
+            )
 
 
 class TerminalEventConfirmation(StrEnum):
@@ -248,16 +269,18 @@ async def confirm_terminal_event(
         if not authorized():
             raise RuntimeError("Terminal event lacks an attributable final commit ACK")
         try:
-            result = await store.put_if_absent(
-                thread_id=thread_id,
-                run_id=run_id,
-                event_type=RUN_TERMINAL_EVENT.event_type,
-                category=RUN_TERMINAL_EVENT.category,
-                content={"status": status},
-                metadata={"protocol_version": TERMINAL_PROTOCOL_VERSION, "recovered": recovered},
-                user_id=user_id,
-                lifecycle_guard=lifecycle_guard,
-            )
+            put_kwargs = {
+                "thread_id": thread_id,
+                "run_id": run_id,
+                "event_type": RUN_TERMINAL_EVENT.event_type,
+                "category": RUN_TERMINAL_EVENT.category,
+                "content": {"status": status},
+                "metadata": {"protocol_version": TERMINAL_PROTOCOL_VERSION, "recovered": recovered},
+                "user_id": user_id,
+            }
+            if lifecycle_guard is not None:
+                put_kwargs["lifecycle_guard"] = lifecycle_guard
+            result = await store.put_if_absent(**put_kwargs)
         except RunEventLifecycleRejected:
             return TerminalEventConfirmation.CONFLICT
         except Exception:

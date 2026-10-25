@@ -23,7 +23,8 @@ evidence through real Worker finalization and recovery takeover. Keep final
 commit authority, producer drain, singleton confirmation, and Seal boundaries
 observable. Recovery coverage must block after the committed claim, delete the
 Run/events, then prove the lifecycle guard cannot recreate terminal history;
-also pin delivery-before-terminal order. `test_terminal_event_confirmation.py`
+pin delivery-before-terminal order across all takeover entry points, and keep a
+legacy `put_if_absent` signature on the owner path. `test_terminal_event_confirmation.py`
 covers supported stores, non-replaceable one-shot recovery targets, and guarded
 singleton rejection; use `TEST_POSTGRES_URI` for independent PostgreSQL pools
 and real advisory contention. Release all storage/producer gates before bounded

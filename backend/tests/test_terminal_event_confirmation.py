@@ -29,6 +29,7 @@ from deerflow.runtime.events.terminal import (
     confirm_terminal_event,
 )
 from deerflow.runtime.runs.store.memory import MemoryRunStore
+from deerflow.runtime.user_context import AUTO
 
 
 @pytest_asyncio.fixture(params=["memory", "jsonl", "sqlite", "postgresql"])
@@ -287,6 +288,80 @@ async def test_lifecycle_guard_holds_store_fence_against_thread_delete(stores, m
 
 
 @pytest.mark.asyncio
+async def test_owner_confirmation_supports_legacy_store_signature():
+    class LegacyRunEventStore(MemoryRunEventStore):
+        async def put_if_absent(
+            self,
+            *,
+            thread_id,
+            run_id,
+            event_type,
+            category,
+            content="",
+            metadata=None,
+            created_at=None,
+            user_id: str | None | type(AUTO) = AUTO,
+        ):
+            return await super().put_if_absent(
+                thread_id=thread_id,
+                run_id=run_id,
+                event_type=event_type,
+                category=category,
+                content=content,
+                metadata=metadata,
+                created_at=created_at,
+                user_id=user_id,
+            )
+
+    store = LegacyRunEventStore()
+    confirmation = await confirm_terminal_event(
+        store,
+        thread_id="thread",
+        run_id="run",
+        status="error",
+        user_id="alice",
+        authorized=lambda: True,
+    )
+    assert confirmation == TerminalEventConfirmation.CONFIRMED_NEW
+    assert len(await store.list_events("thread", "run", user_id="alice")) == 1
+
+
+@pytest.mark.asyncio
+async def test_recovery_confirmation_fails_closed_for_legacy_store_signature():
+    class LegacyRunEventStore(MemoryRunEventStore):
+        async def put_if_absent(
+            self,
+            *,
+            thread_id,
+            run_id,
+            event_type,
+            category,
+            content="",
+            metadata=None,
+            created_at=None,
+            user_id: str | None | type(AUTO) = AUTO,
+        ):
+            return await super().put_if_absent(
+                thread_id=thread_id,
+                run_id=run_id,
+                event_type=event_type,
+                category=category,
+                content=content,
+                metadata=metadata,
+                created_at=created_at,
+                user_id=user_id,
+            )
+
+    store = LegacyRunEventStore()
+    publisher = await recovery_publisher(store)
+    target = publisher.authorize_takeover(claimed=True, thread_id="thread", run_id="run", user_id="alice", operation_kind="run")
+    assert target is not None
+
+    assert await publisher.publish(target) == TerminalEventConfirmation.UNKNOWN
+    assert await store.list_events("thread", "run", event_types=["run.terminal"], user_id="alice") == []
+
+
+@pytest.mark.asyncio
 async def test_recovery_target_requires_successful_run_takeover():
     store = MemoryRunEventStore()
     publisher = await recovery_publisher(store)
@@ -305,9 +380,13 @@ async def test_recovery_target_requires_successful_run_takeover():
     )
 
     assert await publisher.publish(target) == TerminalEventConfirmation.CONFIRMED_NEW
-    event = (await store.list_events("thread", "run", user_id="alice"))[0]
-    assert event["content"] == {"status": "error"}
-    assert event["metadata"] == {"protocol_version": 1, "recovered": True}
+    delivery = await store.list_events("thread", "run", event_types=["run.delivery"], user_id="alice")
+    terminal = await store.list_events("thread", "run", event_types=["run.terminal"], user_id="alice")
+    assert len(delivery) == 1
+    assert len(terminal) == 1
+    assert delivery[0]["seq"] < terminal[0]["seq"]
+    assert terminal[0]["content"] == {"status": "error"}
+    assert terminal[0]["metadata"] == {"protocol_version": 1, "recovered": True}
 
 
 @pytest.mark.asyncio
@@ -342,7 +421,9 @@ async def test_recovery_target_is_one_shot_across_lost_ack_retry():
     original = store.put_if_absent
     attempts = []
 
-    async def commit_then_lose_first_ack(**kwargs):
+    async def commit_then_lose_first_terminal_ack(**kwargs):
+        if kwargs["event_type"] != "run.terminal":
+            return await original(**kwargs)
         result = await original(**kwargs)
         attempts.append(result)
         if len(attempts) == 1:
@@ -351,7 +432,7 @@ async def test_recovery_target_is_one_shot_across_lost_ack_retry():
             raise OSError("ACK lost after commit")
         return result
 
-    store.put_if_absent = commit_then_lose_first_ack
+    store.put_if_absent = commit_then_lose_first_terminal_ack
     first = asyncio.create_task(publisher.publish(target))
     try:
         await asyncio.wait_for(entered.wait(), timeout=5)
@@ -361,7 +442,7 @@ async def test_recovery_target_is_one_shot_across_lost_ack_retry():
         release.set()
     assert await asyncio.wait_for(first, timeout=5) == TerminalEventConfirmation.CONFIRMED_EXISTING
     assert [created for _event, created in attempts] == [True, False]
-    terminal = await store.list_events("thread", "run", user_id="alice")
+    terminal = await store.list_events("thread", "run", event_types=["run.terminal"], user_id="alice")
     assert len(terminal) == 1
     assert terminal[0]["metadata"]["recovered"] is True
 
@@ -381,7 +462,8 @@ async def test_recovery_target_isolates_unexpected_confirmation_error(monkeypatc
     assert await publisher.publish(target) == TerminalEventConfirmation.UNKNOWN
     with pytest.raises(RecoveryTerminalTargetConsumed):
         await publisher.publish(target)
-    assert await store.list_events("thread", "run", user_id="alice") == []
+    assert await store.list_events("thread", "run", event_types=["run.delivery"], user_id="alice")
+    assert await store.list_events("thread", "run", event_types=["run.terminal"], user_id="alice") == []
 
 
 @pytest.mark.asyncio

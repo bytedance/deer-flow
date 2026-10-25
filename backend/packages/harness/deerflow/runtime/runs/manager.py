@@ -1505,29 +1505,6 @@ class RunManager:
         await self._fence_unconfirmed_terminal(record)
         return None
 
-    async def _ensure_delivery_receipt(self, record: RunRecord, *, lifecycle_guard: Callable[[], Awaitable[bool]] | None = None) -> bool:
-        """Idempotently persist a zero-delivery receipt during recovery."""
-        if self._event_store is None:
-            return True
-        try:
-            await self._event_store.put_if_absent(
-                thread_id=record.thread_id,
-                run_id=record.run_id,
-                event_type="run.delivery",
-                category="outputs",
-                content={"presented": 0, "paths": [], "by_tool": {}},
-                user_id=record.user_id,
-                lifecycle_guard=lifecycle_guard,
-            )
-            return True
-        except Exception:
-            logger.warning(
-                "Failed to backfill delivery receipt for recovered run %s; preserving its terminal status",
-                record.run_id,
-                exc_info=True,
-            )
-            return False
-
     async def set_finalizing(self, run_id: str, finalizing: bool) -> None:
         """Mark whether a run is performing post-cancel cleanup."""
         async with self._lock:
@@ -2477,8 +2454,6 @@ class RunManager:
             record.updated_at = now
             if record.operation_kind == ThreadOperationKind.run:
                 publisher = self._recovery_terminal_publisher
-                lifecycle_guard = publisher.lifecycle_guard(thread_id=record.thread_id, run_id=record.run_id, user_id=record.user_id) if publisher is not None else None
-                await self._ensure_delivery_receipt(record, lifecycle_guard=lifecycle_guard)
                 if publisher is not None:
                     target = publisher.authorize_takeover(
                         claimed=claimed,

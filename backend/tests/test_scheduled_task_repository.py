@@ -1524,8 +1524,11 @@ async def test_scheduler_recovery_claim_backfills_error_terminal(tmp_path, recov
         assert row is not None
         assert row["status"] == "error"
         assert row["evidence_seal_state"] == "partial"
+        delivery = await event_store.list_events(thread_id, run_id, event_types=["run.delivery"], user_id=None)
         terminal = await event_store.list_events(thread_id, run_id, event_types=["run.terminal"], user_id=None)
+        assert len(delivery) == 1
         assert len(terminal) == 1
+        assert delivery[0]["seq"] < terminal[0]["seq"]
         assert terminal[0]["content"] == {"status": "error"}
         assert terminal[0]["metadata"]["protocol_version"] == 1
         assert terminal[0]["metadata"]["recovered"] is True
