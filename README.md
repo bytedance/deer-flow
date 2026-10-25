@@ -254,6 +254,8 @@ fences, including unclosed fences, in complete and streamed replies.
    Optional per-model pricing must use one currency across all priced models.
    DeerFlow disables Console cost estimates when currencies are mixed rather
    than presenting an invalid aggregate.
+   For older runs without a per-model usage breakdown, Console attributes the
+   recorded total and input token counts to the run's model.
 
    Administrators can open **Settings → Models** to select a provider and enter
    only its **API Key** and **model ID**. Endpoints, authentication and adapters are
