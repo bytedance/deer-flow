@@ -135,6 +135,11 @@ That prompt is intended for coding agents. It tells the agent to clone the repo 
 
 With `run_events.backend: db`, caller-supplied ISO 8601 event timestamps are normalized to UTC before storage, preserving their instant when SQLite drops timezone information. Timestamps without an offset are treated as UTC. Previously stored timestamps are not rewritten.
 
+Run event streams include `run.terminal` for the owning worker's confirmed final
+Run status, while `run.end` continues to describe each root graph completion.
+Terminal publication is best effort; event persistence failure does not undo the
+Run outcome or prevent stream completion. See [Run Event Stream](backend/docs/RUN_EVENT_STREAM.md#authoritative-run-outcome).
+
 Operators can extend lead-agent, subagent, and DeerMem extraction prompts with
 literal prepend/append configuration without editing source templates. See
 [prompt overlays](backend/docs/CONFIGURATION.md#prompt-overlays).
@@ -249,6 +254,8 @@ fences, including unclosed fences, in complete and streamed replies.
    Optional per-model pricing must use one currency across all priced models.
    DeerFlow disables Console cost estimates when currencies are mixed rather
    than presenting an invalid aggregate.
+   For older runs without a per-model usage breakdown, Console attributes the
+   recorded total and input token counts to the run's model.
 
    Administrators can open **Settings → Models** to select a provider and enter
    only its **API Key** and **model ID**. Endpoints, authentication and adapters are
@@ -509,6 +516,7 @@ make docker-logs    # View logs
 ```
 
 `make docker-start` starts `provisioner` only when `config.yaml` uses provisioner mode (`sandbox.use: deerflow.community.aio_sandbox:AioSandboxProvider` with `provisioner_url`). Direct Compose users can add `--profile provisioner` to the dev command for the same mode; the default stack does not require Kubernetes.
+With `USERDATA_PVC_NAME`, sandbox data, extra mounts and Lark broker credentials share one `user-data` volume with separate `subPath` mounts, avoiding duplicate references to the same claim on NFS CSI drivers.
 
 Docker builds use the upstream `uv` registry by default. The gateway image installs with `uv sync --locked`, and `uv.lock` pins `https://pypi.org/simple`, so `UV_INDEX_URL` has to keep that value: exporting a mirror such as `https://pypi.tuna.tsinghua.edu.cn/simple` fails the build with ``The lockfile at `uv.lock` needs to be updated, but `--locked` was provided`` (reproduce in an already-synced environment with `cd backend && UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple uv sync --locked --check`; if the environment itself is stale, `--check` reports that instead for either index, so use `uv lock --check` to see it without syncing). Installing from a mirror requires regenerating the lock or dropping `--locked`, and both change what the image installs, so keep the default index for a checkout you intend to contribute back. `NPM_REGISTRY=https://registry.npmmirror.com` is independent of this: it applies to the frontend image's `pnpm` install and to the gateway image's Lark CLI install (`@larksuite/cli`, which `backend/Dockerfile` installs with npm).
 
@@ -542,6 +550,13 @@ The checkpoint storage settings `database.checkpoint_channel_mode` and
 `database.checkpoint_delta.snapshot_frequency` (default `10`) are exceptions:
 both are frozen when the process first builds an agent (including through
 `DeerFlowClient`) and require a process restart to change safely.
+
+In delta mode, a run selecting an older checkpoint reports an error before rewriting
+state if either the selected checkpoint or the current head has pending tool
+execution. For `Command(resume=...)`, other pending graph nodes also prevent the
+rewrite, except for the synthetic input entry node. Resume pending work from the
+latest checkpoint; to regenerate completed work, submit new input there. Full-mode
+resumes and ordinary replay without pending execution keep their existing behavior.
 
 The optional `database.checkpoint_cache` section (delta channel mode only)
 caches materialized checkpoint histories: `type` is `memory` (default) or
@@ -768,7 +783,7 @@ such a checkout, use `bash ./scripts/<name>.sh ...`.
    uv run python ../scripts/load_memory_sample.py --all-users
    ```
 
-   Bulk mode supports SQLite/PostgreSQL user registries, creates timestamped backups under `.deer-flow/memory-sample-backups/`, and rejects the non-persistent `database.backend: memory` mode. See [backend/docs/MEMORY_SETTINGS_REVIEW.md](backend/docs/MEMORY_SETTINGS_REVIEW.md) for the complete review flow.
+   Bulk mode supports SQLite/PostgreSQL user registries, creates a distinct timestamped backup directory for every import under `.deer-flow/memory-sample-backups/`, and rejects the non-persistent `database.backend: memory` mode. See [backend/docs/MEMORY_SETTINGS_REVIEW.md](backend/docs/MEMORY_SETTINGS_REVIEW.md) for the complete review flow.
 
 Local services always use their internal ports (`8001`, `3000`, and `2026`).
 The root `.env` variable `PORT` configures only the published Docker ingress;
@@ -983,6 +998,9 @@ still retain their error or partial-result status.
 
 #### MCP Server
 
+Tool steps mark explicit execution failures. Scheduled-task steps show completed
+operations only after a valid response, rather than when the request is issued.
+
 In the chat UI, enable **Token Usage → Debug** to inspect generic/MCP tool calls.
 Each **Tool details** panel starts collapsed and shows the tool name, call ID,
 input, and received result or explicit error. Large previews are truncated;
@@ -1093,6 +1111,10 @@ Invalid UTF-8 in `channels/store.json` follows the same recovery policy as malfo
 SQL migration warns and skips the file, leaving it unchanged so channels can start; the
 memory backend's JSON store warns and starts empty, replacing the file on its next write.
 
+On Windows, JSON runtime channel-config saves wait for a competing file-lock holder
+without the operating system's roughly ten-second cutoff. A wait reaching 50 retries
+(about ten seconds) logs the lock-file path once; permanent lock errors fail immediately.
+
 Conversation-binding, runtime channel-credential and WeChat auth-state saves preserve the original
 persistence failure when staged-file cleanup also fails. Remaining cleanup still runs, and warnings
 identify copies that could not be removed. Buzz keeps failed snapshots available for retry, even if
@@ -1125,6 +1147,9 @@ Attachments saved by the shared IM ingestion pipeline or Feishu/DingTalk's
 embedded downloads keep distinct filenames, including when concurrent uploads
 choose the same name. The final filename is passed to the agent and used for
 sandbox sync; an existing conversation file is not overwritten.
+Embedded client uploads also keep earlier same-name files under distinct names.
+Renamed originals and Markdown companions retain private source snapshots and
+become visible only after the complete copy is published.
 
 Feishu and DingTalk attachment transfers return standalone temporary sandboxes
 to the pool after synchronization, without interrupting an active run.
@@ -1337,6 +1362,8 @@ Scheduled-task result and lifecycle notices can also be pushed to a bound Feishu
 
 DingTalk's Markdown fallback displays tables as labeled blockquotes, preserving escaped pipes (`\|`) within cells and empty leading or trailing cells so values stay under the correct column labels.
 
+
+DingTalk token caching uses a two-hour fallback when the provider's token lifetime is invalid or no longer than the five-minute refresh margin, avoiding a refresh on every request.
 
 When DeerFlow runs in Docker Compose, IM channels execute inside the `gateway` container. In that case, do not point `channels.langgraph_url` or `channels.gateway_url` at `localhost`; use container service names such as `http://gateway:8001/api` and `http://gateway:8001`, or set `DEER_FLOW_CHANNELS_LANGGRAPH_URL` and `DEER_FLOW_CHANNELS_GATEWAY_URL`.
 
@@ -1621,6 +1648,11 @@ retrieval citations. Configure explicit user-to-workspace credential bindings;
 resource authorization remains with WeKnora. The extension directory includes
 its installation guide.
 
+The optional [knowledge platform extension](examples/deerflow-extension-knowledge-platform/README.md)
+adds connection policies, hierarchical spaces, members and explicit resource sharing.
+Space-routed management retains existing administrator and Provider grants. It is
+disabled by default and includes no management page or global chat retrieval ACL.
+
 The optional [knowledge management extension](examples/deerflow-extension-knowledge-management/README.md)
 adds administrator-authorized file, URL and manual ingestion, processing status,
 reprocessing and cancellation through WeKnora. Parsing, indexing and optional
@@ -1634,6 +1666,12 @@ Skills are what make DeerFlow do *almost anything*.
 
 A standard Agent Skill is a structured capability module — a Markdown file that defines a workflow, best practices, and references to supporting resources. DeerFlow ships with built-in skills for research, report generation, slide creation, web pages, image and video generation, and more. But the real power is extensibility: add your own skills, replace the built-in ones, or combine them into compound workflows.
 
+The video-generation skill derives reference-image MIME metadata from `.png`,
+`.jpg`, `.jpeg`, `.webp`, and `.gif` filename extensions (case-insensitive). A
+submitted reference with a missing or unrecognized extension raises a clear error
+before API submission. Filenames must match their contents; image bytes are not
+validated or converted, and provider-specific format restrictions still apply.
+
 The [music-generation skill](skills/public/music-generation/SKILL.md#output-handling) preserves existing output when the provider returns malformed, empty or unrecognized audio.
 
 Skills are loaded progressively — only when the task needs them, not all at once. This keeps the context window lean and makes DeerFlow work well even with token-sensitive models.
@@ -1645,6 +1683,11 @@ the exit status before presenting an output file.
 The bundled podcast-generation command returns a nonzero exit status and writes
 diagnostics to stderr when generation fails. Callers can check the status before
 presenting audio; an existing MP3 or generated transcript is not proof of success.
+
+The bundled chart-visualization command does the same for an unknown chart tool,
+a spec missing `tool`, or a chart-service HTTP failure. Successful chart URLs,
+including spreadsheets (`generate_spreadsheet`), stay on stdout. A mixed batch
+still prints URLs for the charts that succeeded, then exits with status 1.
 
 When deferred skill discovery is enabled, `describe_skill` ranks installed skills by bounded, Unicode-normalized intent-term coverage across names and descriptions. Natural multi-term requests can therefore find a relevant skill without requiring one exact phrase, while exact `select:` and required-name `+prefix` lookups remain available. Ranked searches use up to 256 characters and return up to five results; exact `select:` lists are not truncated and return all requested catalog matches.
 
@@ -1685,8 +1728,12 @@ before exporting. Duplicate names cause an error before the output file is opene
 preserving any existing file.
 The CLI names the repeated columns in a short stderr error and exits nonzero,
 so callers can correct their aliases without reading a traceback.
+JSON exports likewise reject non-finite numbers (`NaN` and infinities), including
+values nested in lists or structs, before opening the destination. Filter them
+or replace them with `NULL` in SQL; the CLI reports an error and preserves any
+existing output rather than writing invalid JSON.
 
-The **data-analysis** skill preserves each CSV file or Excel sheet when names collide across inputs. [Prepare its Python environment](skills/public/data-analysis/SKILL.md#environment-setup) explicitly with DuckDB and openpyxl; missing packages report setup instructions instead of installing themselves during analysis. Use the SQL names printed by `inspect` (such as `report`, `report_1`) for queries and summaries. Its cache follows ordered input basenames and contents, so renaming or reordering inputs rebuilds their table map instead of silently selecting a different source. Quoted original names also resolve without rewriting query text; apostrophes in upload paths and double quotes in column names are preserved through loading, inspection, queries, and summaries.
+The **data-analysis** skill preserves each CSV file or Excel sheet when names collide across inputs. [Prepare its Python environment](skills/public/data-analysis/SKILL.md#environment-setup) explicitly with DuckDB and openpyxl; missing packages report setup instructions instead of installing themselves during analysis. Use the SQL names printed by `inspect` (such as `report`, `report_1`) for queries and summaries. Its cache follows ordered input basenames and contents, so renaming or reordering inputs rebuilds their table map instead of silently selecting a different source. Quoted original names also resolve without rewriting query text; apostrophes in upload paths and double quotes in column names are preserved through loading, inspection, queries, and summaries. CSV, JSON, and Markdown exports accept bare filenames such as `report.csv` in the current working directory as well as nested relative and absolute paths.
 
 After an answer loads skills, its toolbar includes **Skills used**. Hover over or click the icon to see the skills and their sources; hovering a skill name underlines it. Select a skill to inspect its `SKILL.md` in the resizable side panel (a drawer on mobile). The view uses snapshots captured during successful configured read-tool loads or explicit slash activation, so later edits or removal of a skill do not rewrite its history. Repeated loads appear once per run, in first-load order. Range reads and bounded snapshots are labeled as partial; older conversations without captured evidence do not show this menu. Copy returns the captured Markdown, including YAML frontmatter. Package-relative links and images remain readable references rather than navigating away from the conversation. Skill loads performed through other tools, such as shell commands, are not inferred from answer text.
 
@@ -2332,6 +2379,8 @@ Streaming Markdown responses animate only newly arrived words; text that is alre
 
 In the Web UI, completed assistant turns can be branched into a new main conversation. Automatically inherited branch titles use the next free language-neutral numeric suffix (`Title (2)`, then `Title (3)` for another sibling or a branch of the numbered conversation) so generated sibling titles remain distinct without persisting a locale-specific label; matching explicit or renamed sibling titles also reserve their displayed suffix even though they carry no generated sequence metadata. An explicit API title is preserved. Renaming a branch clears its generated sequence, so its next automatic branch starts from the renamed title at `(2)`. Recent chats also groups loaded branches directly beneath a loaded parent with subtle tree connectors. Missing parents, malformed or cyclic lineage, and branches in a different pinned state stay visible at the top level instead of being hidden or moved across the pinned boundary. The new thread starts from that turn's checkpoint and keeps the preceding replay checkpoint, so the branched response can be regenerated immediately. The latest response can also be regenerated after an interruption, even when its streamed partial text never reached a checkpoint. Stopping mid-answer retains the assistant text that was already streamed in the thread's message feed, so refreshing no longer discards visible progress; that partial text remains outside authoritative completed checkpoint state. Regenerating the latest response preserves the thread's current title, including a title you renamed manually after the original response. Legacy or imported histories without checkpoint parent links use a bounded chronological fallback; if no earlier replay checkpoint exists, branching still succeeds with the legacy single-checkpoint shape, while regeneration remains unavailable for that inherited response. Existing single-checkpoint branches are left unchanged rather than attempting an unsafe checkpoint copy. Because workspace files are not checkpointed, the branch only receives a best-effort copy of the current workspace when you branch from the latest turn; branching from an older turn keeps just the restored message history so the branch never inherits files that were created in a later part of the conversation.
 
+Branches preserve the source conversation's valid agent selection. A branch of a legacy conversation with an invalid agent ID uses the lead agent instead.
+
 The Web UI reports completed task time once per run. This is total wall-clock time—including model reasoning, tool calls, and waiting—not a per-step or model-only thinking duration. Reasoning content remains available through its own separate disclosure.
 
 While a response streams, reasoning-only messages stay in the processing panel, including Anthropic thinking blocks. Once answer content arrives alongside reasoning, it appears in an assistant bubble.
@@ -2546,7 +2595,13 @@ For `tests_passed:node --test`, complete TAP or spec counter summaries must
 contain an actual pass and no failed or cancelled tests. Individual TAP `ok`
 points do not prove the run passed. Empty, all-skipped, all-todo, incomplete or
 inconsistent summaries remain `UNVERIFIED`; execution and shell-provenance
-checks still apply.
+checks still apply. Summary detection uses the complete recorded tool output
+before retaining a bounded diagnostic tail, so later TODO stacks or warnings
+do not erase the test evidence. Complete, consistent Node counters take
+precedence over incidental log text such as `12 passed` or `2 errors`;
+independently shaped summaries from other runners still contribute evidence.
+Pytest sibling summaries retain warning counts and the optional human-readable
+duration suffix printed for runs lasting at least a minute, such as `(0:01:05)`.
 
 For Maven and Gradle test acceptance, a `BUILD SUCCESS` / `BUILD SUCCESSFUL`
 banner alone remains `UNVERIFIED`: builds can succeed without running tests.
@@ -2700,7 +2755,9 @@ On sandboxes without an attested broker mode, lark-cli
 commands fail with an explicit unverified-mode error instead of running
 against an unauthenticated profile.
 
-Host-externalized tool outputs use the Gateway's normal file-creation umask.
+Host-externalized tool outputs use the Gateway's normal file-creation permissions.
+Restoring those outputs from shared blob storage applies the recovering Gateway's
+creation policy too, including its umask and any inherited default ACL.
 Host and sandbox outputs use deterministic filenames hashed from the raw tool
 call ID and output content. Missing, colliding, or oversized IDs cannot overwrite
 different output or make the filename too long; identical output can reuse its path.
@@ -2883,7 +2940,7 @@ recording the others. A concurrent scratch-file removal therefore does not
 discard the whole snapshot or suppress detection of other produced outputs.
 This remains a best-effort scan, not an atomic filesystem snapshot.
 
-Files presented through `present_files` remain part of the thread's artifact state, and the Web UI restores the artifact panel and selected document after a page refresh. When a completed response successfully presents between 2 and 50 files, its final file card also offers one ZIP download. Archive membership comes from the terminal delivery receipt rather than browser-supplied paths, and the ZIP contains the current file versions, which may have changed since the response. The currently selected formal artifact is refreshed once when the run finishes so edits become visible without a manual reload. Existing UTF-8 text artifacts under `/mnt/user-data/outputs` can also be edited and explicitly saved from the panel on Unix and Windows while the thread is idle; saves use content revisions to prevent overwriting agent changes. Source previews also recognize extensionless `Dockerfile` and `Makefile` artifacts by their file names. Unknown file types, including names such as `constructor` and `__proto__`, retain the download fallback.
+Files presented through `present_files` remain part of the thread's artifact state, and the Web UI restores the artifact panel and selected document after a page refresh. Long artifact lists scroll within the panel on desktop and in the mobile drawer, keeping every file reachable. When a completed response successfully presents between 2 and 50 files, its final file card also offers one ZIP download. Archive membership comes from the terminal delivery receipt rather than browser-supplied paths, and the ZIP contains the current file versions, which may have changed since the response. The currently selected formal artifact is refreshed once when the run finishes so edits become visible without a manual reload. Existing UTF-8 text artifacts under `/mnt/user-data/outputs` can also be edited and explicitly saved from the panel on Unix and Windows while the thread is idle; saves use content revisions to prevent overwriting agent changes. Source previews also recognize extensionless `Dockerfile` and `Makefile` artifacts by their file names. Unknown file types, including names such as `constructor` and `__proto__`, retain the download fallback.
 
 Unsaved artifact edits survive switching chats, workspace pages, or visiting the
 home page and returning in the same browser tab. Drafts stay in memory for the
@@ -2943,7 +3000,7 @@ continue to accept URL-encoded paths.
 
 The `write_file` guidance reflects the active model's output token limit, including custom-agent and thinking-mode overrides. For longer documents, the agent is guided to write sections with `append=True`; models without a known limit receive no numeric budget hint.
 
-With `AioSandboxProvider`, shell execution runs inside isolated containers. With `LocalSandboxProvider`, file tools still map to per-thread directories on the host, but host `bash` is disabled by default because it is not a secure isolation boundary. Re-enable host bash only for fully trusted local workflows. Host bash commands have a wall-clock timeout, and long-lived processes should be started in the background with output redirected to a workspace log. On Windows, Git Bash/MSYS argument-conversion exclusions are limited to safe non-root virtual path prefixes, so host-native CLI launchers retain their normal MSYS compatibility. When the local sandbox falls back to PowerShell, it captures output as UTF-8 so CJK text does not depend on the Gateway host locale.
+With `AioSandboxProvider`, shell execution runs inside isolated containers. With `LocalSandboxProvider`, file tools still map to per-thread directories on the host, but host `bash` is disabled by default because it is not a secure isolation boundary. Re-enable host bash only for fully trusted local workflows. Host bash commands have a wall-clock timeout, and long-lived processes should be started in the background with output redirected to a workspace log. If local command startup fails after spawning a child, DeerFlow attempts to kill and reap that child before propagating the startup error. On Windows, Git Bash/MSYS argument-conversion exclusions are limited to safe non-root virtual path prefixes, so host-native CLI launchers retain their normal MSYS compatibility. When the local sandbox falls back to PowerShell, it captures output as UTF-8 so CJK text does not depend on the Gateway host locale.
 
 Docker AIO sandboxes default to their existing open egress behavior for
 compatibility. Operators can set `sandbox.network.mode` to `isolated` or
@@ -3290,6 +3347,11 @@ editing the saved agent configuration to refresh the selection.
 
 DeerFlow can be used as an embedded Python library without running the full HTTP services. The `DeerFlowClient` provides direct in-process access to all agent and Gateway capabilities, returning the same response schemas as the HTTP Gateway API. The HTTP Gateway also exposes `DELETE /api/threads/{thread_id}` to remove DeerFlow-managed local thread data after the LangGraph thread itself has been deleted:
 
+An embedded `DeerFlowClient(config_path="custom/config.yaml")` keeps the process
+config singleton on that file, even after a working-directory change. Later edits
+to the file are still detected. Call `reload_app_config()` without a path to resume
+ambient config discovery, or `reset_app_config()` to clear the cached selection.
+
 For database-backed run events, deleting a run preserves its thread's sequence watermark. Thread deletion removes that watermark once no events remain, allowing a recreated thread to restart at sequence 1. Owner-scoped deletion preserves the watermark when another owner's events remain.
 
 Single-process JSONL event storage also retains the thread sequence watermark
@@ -3478,6 +3540,7 @@ Current MVP capabilities:
 - Run background scheduled executions as non-interactive DeerFlow runs (`ask_clarification` is not exposed there)
 - Persist a due execution as `queued` when its reused thread or the global execution budget is busy, then launch it when capacity is available; queued occurrences survive Gateway restarts and fail after `scheduler.queue_timeout_seconds`
 - Retrying a busy scheduled task keeps its execution slot while an earlier recovery pass is still in progress.
+- A scheduled run whose completion hook fails is finalized from its durable terminal run on the next scheduler poll instead of staying `running` until a restart.
 - Share execution slots fairly between task owners: one owner may have at most `scheduler.max_concurrent_runs_per_user` scheduled runs starting or running at a time (default 2, never more than `max_concurrent_runs`; `0` turns the per-owner cap off), and the waiting queue is drained owner by owner, so one owner's backlog never holds back another owner's run. A run that waits longer than `scheduler.queue_timeout_seconds` is skipped, and its history reads "Skipped: it waited too long for a free slot"
 - Freeze a task's definition while an occurrence is `queued`, `launching`, or `running`, so a durable occurrence cannot silently pick up a different prompt, thread, or schedule; transitioning a task to paused or deleting it cancels an existing waiting occurrence, while `launching`/`running` work must finish before those mutations are retried and an explicit manual trigger may still wait and run without resuming a paused schedule
 - Pause, resume, trigger, inspect history, and delete tasks

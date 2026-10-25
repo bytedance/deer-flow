@@ -1,5 +1,9 @@
 # Backend Tests
 
+When adding a scoped `AGENTS.md`, update `EXPECTED_GUIDANCE_PATHS` in
+`test_agent_guidance_check.py` in the same change. The explicit inventory pins
+guidance ownership and extends hard-budget checks to each approved guide.
+
 `test_image_result_url_safety.py` drives GroundRoute through `ainvoke` and an
 offline HTTPX transport. Patch only the provider's `httpx` reference; preserve
 the shared client and exercise real configuration resolution and URL screening.
@@ -14,6 +18,18 @@ ownership and capture cleanup. Retain the real XLSX conversion coverage.
 
 Backend tests must preserve the runtime invariants they exercise without changing production execution topology.
 
+`test_doctor_script.py` runs a copied doctor from a temporary checkout with an
+empty-model config. Drop inherited `DEER_FLOW_*`, `PYTHONPATH` and `PYTHONHOME`
+from child processes; cover help, invalid flags, normal reporting and an
+unrelated parent config that stays untouched. Keep argument parsing at the CLI
+entry point so in-process `doctor.main()` callers do not consume pytest's argv.
+
+`test_run_terminal_protocol.py` exercises authoritative `run.terminal`
+evidence through real Worker finalization. Keep final commit authority,
+producer drain, singleton confirmation, and Seal boundaries observable. Release all storage/producer gates before bounded cleanup,
+preserve healthy controls in refusal cases, and retain Journal/Seal compatibility
+coverage. `test_terminal_event_confirmation.py` covers supported stores; use
+`TEST_POSTGRES_URI` for independent PostgreSQL pools and real advisory contention. Protocol: [Run outcome](../docs/RUN_EVENT_STREAM.md#authoritative-run-outcome).
 `test_goal_loop_stop_probe.py` runs the standalone Goal-loop reproduction through the native graph, loop middleware, worker and checkpoints. Only model responses are scripted; do not replace the Goal decision or simulate the stop-reason write.
 
 InfoQuest fetch log assertions install the real `UrlRedactionFilter` on the
@@ -89,6 +105,11 @@ Upload case-collision coverage uses separate HTTP requests and preserves both
 reported payloads. Observe real filename-claim inputs to pin the disk seed;
 case-insensitive hosts can otherwise mask a missing seed through link retries.
 
+Same-name upload concurrency tests synchronize the first real claim: `os.open`
+for direct writes and `os.link` for staged copies. Cover native/fallback options,
+fresh/occupied copy names, every caller's exact bytes and no staging leftovers.
+Drain workers and abort barriers on failure; do not rely on scheduling or sleeps.
+
 Channel reload cancellation regressions must assert the worker returned the
 stale snapshot before checking that newer runtime config survived. Completion
 alone cannot prove the race: loader exceptions are caught and return `None`.
@@ -156,6 +177,13 @@ The 0033 batch-evidence migration fixture uses the same adapter. Its connection
 contract probes execute the actual migration test setup through SQLAlchemy's
 dialect argument conversion, stopping before database acquisition; the real
 SQLite/PostgreSQL cases still exercise upgrade, downgrade and re-upgrade.
+
+## DingTalk stream tasks
+
+DingTalk stream lifecycle tests drive `_serve_stream` with a fake websocket and
+real handler tasks. Use events to pin pending-task retention, completion cleanup,
+logged failures and quiet cancellation; drain handlers and keepalive tasks even
+when an assertion fails.
 
 ## Real Compose tests
 
@@ -333,6 +361,18 @@ against DeepSeek only with `DEER_FLOW_RUN_LIVE_TESTS=1` and
 `DEEPSEEK_TEST_API_KEY`, never in CI. Keep credentials and provider payloads out of
 committed evidence. A passing connectivity probe does not establish full agent
 compatibility; distinguish protocol assertions from observed live behavior.
+
+## Readability fallback regressions
+
+`test_web_fetch_relative_links.py` simulates degraded extraction without requiring
+Windows. The link-free article companion must retain the extractor's exact HTML
+and exclude resolved navigation links from Markdown; checking for raw `href=`
+attributes after Markdown conversion cannot detect an unwanted fallback.
+
+The authority-tag census also scans parser regexes as raw source. Classify
+Readability's ordinary HTML body tag as a reviewed test exemption, with markup
+preservation and nested framework-tag neutralization covered in
+`test_input_sanitization_middleware.py`.
 
 ## Classification request packing
 

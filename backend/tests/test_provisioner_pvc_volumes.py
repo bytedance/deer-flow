@@ -18,6 +18,108 @@ def _thread_skill_mounts(
     ]
 
 
+@pytest.mark.parametrize("volume_name", ["user-data", "shared-userdata"])
+@pytest.mark.parametrize("broker", [False, True])
+def test_pod_reuses_one_userdata_claim_for_all_subpaths(provisioner_module, broker, volume_name):
+    """One PVC volume serves sandbox projections and broker-only credentials."""
+    provisioner_module.USERDATA_VOLUME_NAME = volume_name
+    provisioner_module.USERDATA_PVC_NAME = "userdata-pvc"
+    provisioner_module.SKILLS_PVC_NAME = "skills-pvc"
+    provisioner_module.DEER_FLOW_HOST_BASE_DIR = "/state"
+    provisioner_module.LARK_CLI_BROKER_IMAGE = "deer-flow/lark-cli-broker:test"
+    extra_mounts = [
+        *_thread_skill_mounts(provisioner_module),
+        *TestLarkCliBrokerSidecar._credential_mounts(provisioner_module),
+    ]
+    pod = provisioner_module._build_pod(
+        "sandbox-1",
+        "thread-1",
+        user_id="alice",
+        extra_mounts=extra_mounts,
+        provision_lark_cli_broker=broker,
+    )
+    spec = provisioner_module.k8s_client.ApiClient().sanitize_for_serialization(pod)["spec"]
+    claim_volumes = [volume for volume in spec["volumes"] if "persistentVolumeClaim" in volume]
+    assert claim_volumes == [{"name": volume_name, "persistentVolumeClaim": {"claimName": "userdata-pvc"}}]
+    declared_names = {volume["name"] for volume in spec["volumes"]}
+    for container in [*spec["containers"], *spec.get("initContainers", [])]:
+        assert all(mount["name"] in declared_names for mount in container.get("volumeMounts", []))
+
+    sandbox_mounts = {mount["mountPath"]: mount for mount in spec["containers"][0]["volumeMounts"]}
+    for category in ("public", "custom", "legacy", "integrations"):
+        mount = sandbox_mounts[f"/mnt/skills/{category}"]
+        assert mount["name"] == volume_name
+        assert mount["subPath"] == f"deer-flow/users/alice/threads/thread-1/skills_view/{category}"
+        assert mount["readOnly"] is True
+    assert sandbox_mounts["/mnt/user-data"]["subPath"] == "deer-flow/users/alice/threads/thread-1/user-data"
+
+    if broker:
+        assert provisioner_module.LARK_CLI_CONFIG_CONTAINER_PATH not in sandbox_mounts
+        container = next(item for item in spec["containers"] if item["name"] == "lark-cli-broker")
+        mounts = {mount["mountPath"]: mount for mount in container["volumeMounts"]}
+        for mount in mounts.values():
+            assert mount["name"] == volume_name
+        assert mounts[provisioner_module.LARK_BROKER_SIDECAR_CONFIG_PATH]["subPath"] == "deer-flow/users/alice/integrations/lark-cli/config"
+        assert mounts[provisioner_module.LARK_BROKER_SIDECAR_CONFIG_PATH]["readOnly"] is True
+        assert mounts[provisioner_module.LARK_BROKER_SIDECAR_LOCKS_PATH]["readOnly"] is False
+        assert mounts[provisioner_module.LARK_BROKER_SIDECAR_DATA_PATH]["subPath"] == "deer-flow/users/alice/integrations/lark-cli/data"
+
+
+@pytest.mark.parametrize("skills_claim", ["skills-pvc", "userdata-pvc"])
+def test_unrestricted_pod_keeps_separate_skills_claim(provisioner_module, skills_claim):
+    """Pin the documented exception when both settings point at one claim."""
+    provisioner_module.USERDATA_PVC_NAME = "userdata-pvc"
+    provisioner_module.SKILLS_PVC_NAME = skills_claim
+    pod = provisioner_module._build_pod("sandbox-1", "thread-1", user_id="alice")
+    spec = provisioner_module.k8s_client.ApiClient().sanitize_for_serialization(pod)["spec"]
+    volumes = {volume["name"]: volume["persistentVolumeClaim"] for volume in spec["volumes"]}
+    assert volumes == {
+        "skills": {"claimName": skills_claim, "readOnly": True},
+        "user-data": {"claimName": "userdata-pvc"},
+    }
+    mounts = {mount["mountPath"]: mount for mount in spec["containers"][0]["volumeMounts"]}
+    assert mounts["/mnt/skills"]["name"] == "skills"
+    assert mounts["/mnt/skills"]["readOnly"] is True
+    assert mounts["/mnt/user-data"]["name"] == "user-data"
+
+
+def test_hostpath_pod_keeps_broker_credential_volumes(provisioner_module):
+    """HostPath broker credentials remain declared and isolated from sandbox."""
+    provisioner_module.USERDATA_PVC_NAME = ""
+    provisioner_module.SKILLS_PVC_NAME = ""
+    provisioner_module.DEER_FLOW_HOST_BASE_DIR = "/state"
+    provisioner_module.LARK_CLI_BROKER_IMAGE = "deer-flow/lark-cli-broker:test"
+    credentials = TestLarkCliBrokerSidecar._credential_mounts(provisioner_module)
+    pod = provisioner_module._build_pod(
+        "sandbox-1",
+        "thread-1",
+        user_id="alice",
+        extra_mounts=credentials,
+        provision_lark_cli_broker=True,
+    )
+    spec = provisioner_module.k8s_client.ApiClient().sanitize_for_serialization(pod)["spec"]
+    volumes = {volume["name"]: volume for volume in spec["volumes"]}
+    expected = {
+        "lark-cli-config": ("/state/users/alice/integrations/lark-cli/config", "Directory"),
+        "lark-cli-locks": ("/state/users/alice/integrations/lark-cli/config/locks", "DirectoryOrCreate"),
+        "lark-cli-data": ("/state/users/alice/integrations/lark-cli/data", "DirectoryOrCreate"),
+    }
+    for name, (path, directory_type) in expected.items():
+        assert volumes[name]["hostPath"] == {"path": path, "type": directory_type}
+    assert not any("persistentVolumeClaim" in volume for volume in volumes.values())
+    for container in [*spec["containers"], *spec.get("initContainers", [])]:
+        assert all(mount["name"] in volumes for mount in container.get("volumeMounts", []))
+    sandbox = spec["containers"][0]
+    assert not any(mount["name"] in expected for mount in sandbox["volumeMounts"])
+    broker = next(container for container in spec["containers"] if container["name"] == "lark-cli-broker")
+    mounts = {mount["name"]: mount for mount in broker["volumeMounts"]}
+    assert set(mounts) == set(expected)
+    assert mounts["lark-cli-config"]["readOnly"] is True
+    assert mounts["lark-cli-locks"]["readOnly"] is False
+    assert mounts["lark-cli-data"]["readOnly"] is False
+    assert all("subPath" not in mount for mount in mounts.values())
+
+
 # ── _build_volumes ─────────────────────────────────────────────────────
 
 
@@ -168,13 +270,12 @@ class TestBuildVolumes:
 
         volumes = provisioner_module._build_volumes("thread-1", extra_mounts=extra_mounts)
 
-        # Three skill projections + user-data (4 base) + 1 extra volume.
-        assert len(volumes) == 5
-        extra_vol = volumes[-1]
-        assert extra_vol.name == "extra-0"
-        assert extra_vol.persistent_volume_claim is not None
-        assert extra_vol.persistent_volume_claim.claim_name == "userdata-pvc"
-        assert extra_vol.host_path is None
+        # Three hostPath skill projections + one shared user-data PVC.
+        assert len(volumes) == 4
+        userdata_vol = next(volume for volume in volumes if volume.name == "user-data")
+        assert userdata_vol.persistent_volume_claim.claim_name == "userdata-pvc"
+        assert userdata_vol.host_path is None
+        assert not any(volume.name.startswith("extra-") for volume in volumes)
 
     def test_extra_mount_rejects_paths_outside_deerflow_state(self, provisioner_module):
         """Provisioner must not accept arbitrary hostPath mounts from clients."""
@@ -255,8 +356,8 @@ class TestBuildVolumes:
 
         assert all(volume.name != "skills" for volume in volumes)
         extra_volumes = [volume for volume in volumes if volume.name.startswith("extra-")]
-        assert len(extra_volumes) == 4
-        assert all(volume.persistent_volume_claim.claim_name == "userdata-pvc" for volume in extra_volumes)
+        assert extra_volumes == []
+        assert [volume.name for volume in volumes] == ["user-data"]
 
 
 # ── _build_volume_mounts ───────────────────────────────────────────────
@@ -411,7 +512,7 @@ class TestBuildVolumeMounts:
         mounts = provisioner_module._build_volume_mounts("thread-1", extra_mounts=extra_mounts)
 
         extra_mount = mounts[-1]
-        assert extra_mount.name == "extra-0"
+        assert extra_mount.name == "user-data"
         assert extra_mount.sub_path == "deer-flow/users/alice/integrations/lark-cli/config"
 
     def test_extra_mount_rejects_unknown_container_path(self, provisioner_module):

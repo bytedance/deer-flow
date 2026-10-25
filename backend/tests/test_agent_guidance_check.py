@@ -10,6 +10,7 @@ CHECKER_PATH = REPO_ROOT / "scripts" / "check_agent_guidance.py"
 EXPECTED_GUIDANCE_PATHS = {
     "AGENTS.md",
     "skills/public/data-analysis/AGENTS.md",
+    "skills/public/video-generation/AGENTS.md",
     "backend/AGENTS.md",
     "backend/tests/AGENTS.md",
     "frontend/AGENTS.md",
@@ -61,6 +62,7 @@ EXPECTED_GUIDANCE_PATHS = {
     "examples/deerflow-extension-workflows/AGENTS.md",
     "examples/deerflow-extension-weknora/AGENTS.md",
     "examples/deerflow-extension-knowledge-management/AGENTS.md",
+    "examples/deerflow-extension-knowledge-platform/AGENTS.md",
     "examples/deerflow-extension-lightrag/AGENTS.md",
 }
 

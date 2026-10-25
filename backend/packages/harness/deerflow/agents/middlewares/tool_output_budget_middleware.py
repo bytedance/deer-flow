@@ -34,7 +34,6 @@ import os
 import posixpath
 import re
 import shlex
-import tempfile
 import threading
 import uuid
 import weakref
@@ -950,12 +949,16 @@ def _write_restored_output(filepath: str, data: bytes) -> bool:
     tmp_path: str | None = None
     try:
         os.makedirs(directory, exist_ok=True)
-        fd, tmp_path = tempfile.mkstemp(prefix=f".{os.path.basename(filepath)}.", suffix=".tmp", dir=directory)
-        with os.fdopen(fd, "wb") as handle:
+        candidate_path = os.path.join(directory, f".tool-output-{uuid.uuid4().hex}.tmp")
+        # Match initial publication's creation permissions for mounted sandbox
+        # readers, while retaining the recovering Gateway's restrictive umask.
+        with open(candidate_path, "xb") as handle:
+            tmp_path = candidate_path
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(tmp_path, filepath)
+        tmp_path = None
         return True
     except OSError:
         logger.warning("Failed to restore externalized tool output on this Gateway", exc_info=True)
