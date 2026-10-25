@@ -25,6 +25,7 @@ const CHART_TYPE_MAP = {
   generate_radar_chart: "radar",
   generate_sankey_chart: "sankey",
   generate_scatter_chart: "scatter",
+  generate_spreadsheet: "spreadsheet",
   generate_treemap_chart: "treemap",
   generate_venn_chart: "venn",
   generate_violin_chart: "violin",
@@ -116,6 +117,7 @@ async function main() {
   }
 
   const specs = Array.isArray(spec) ? spec : [spec];
+  let failed = false;
 
   for (const item of specs) {
     const tool = item.tool;
@@ -125,12 +127,14 @@ async function main() {
       console.error(
         `Error: 'tool' field missing in spec: ${JSON.stringify(item)}`,
       );
+      failed = true;
       continue;
     }
 
     const chartType = CHART_TYPE_MAP[tool];
     if (!chartType) {
       console.error(`Error: Unknown tool '${tool}'`);
+      failed = true;
       continue;
     }
 
@@ -158,7 +162,12 @@ async function main() {
       }
     } catch (e) {
       console.error(`Error generating chart for ${tool}: ${e.message}`);
+      failed = true;
     }
+  }
+
+  if (failed) {
+    process.exit(1);
   }
 }
 
