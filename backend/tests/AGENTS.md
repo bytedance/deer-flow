@@ -14,6 +14,12 @@ ownership and capture cleanup. Retain the real XLSX conversion coverage.
 
 Backend tests must preserve the runtime invariants they exercise without changing production execution topology.
 
+`test_doctor_script.py` runs a copied doctor from a temporary checkout with an
+empty-model config. Drop inherited `DEER_FLOW_*`, `PYTHONPATH` and `PYTHONHOME`
+from child processes; cover help, invalid flags, normal reporting and an
+unrelated parent config that stays untouched. Keep argument parsing at the CLI
+entry point so in-process `doctor.main()` callers do not consume pytest's argv.
+
 `test_goal_loop_stop_probe.py` runs the standalone Goal-loop reproduction through the native graph, loop middleware, worker and checkpoints. Only model responses are scripted; do not replace the Goal decision or simulate the stop-reason write.
 
 InfoQuest fetch log assertions install the real `UrlRedactionFilter` on the

@@ -984,11 +984,7 @@ if __name__ == "__main__":
     # under pytest, whose argv must not reach argparse.
     parser = argparse.ArgumentParser(
         prog="python scripts/doctor.py",
-        description=(
-            "DeerFlow Health Check (make doctor): checks system requirements, "
-            "configuration, LLM provider, and optional components, then prints "
-            "an actionable report."
-        ),
+        description=("DeerFlow Health Check (make doctor): checks system requirements, configuration, LLM provider, and optional components, then prints an actionable report."),
     )
     parser.parse_args()
     sys.exit(main())
