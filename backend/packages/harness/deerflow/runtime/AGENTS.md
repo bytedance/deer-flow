@@ -40,9 +40,9 @@ with real ASGI requests and LangGraph SDK decoding.
 
 ### Checkpoint Channel Modes (`full` / `delta`)
 
-Before delta history rewrites, reject unreadable selected/head tuples or pending
-Sends on either (#7438). Skip compensating rollback for pre-write rejection;
-resume pending work from the latest head.
+Reject missing selected/head tuples or pending Sends before delta rewrites.
+`Command(resume=...)` also rejects pending nodes except `__start__` on both.
+Use `CheckpointResumeRejected` to skip pre-write rollback; resume at head.
 
 Checkpointer storage runs in one of two channel modes, selected by `checkpoint_channel_mode` in `config.yaml` (default `full`). `delta` mode adopts LangGraph 1.2's `DeltaChannel` for `messages`: checkpoints store a sentinel + per-step writes instead of the full message list, so storage/serde grows O(N) instead of O(N²) in turns. All checkpointer backends (memory/sqlite/postgres) serve both modes unchanged — the semantics live in the compiled graph's channel table, not in the saver.
 

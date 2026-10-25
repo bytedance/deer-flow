@@ -545,9 +545,10 @@ both are frozen when the process first builds an agent (including through
 
 In delta mode, a run selecting an older checkpoint reports an error before rewriting
 state if either the selected checkpoint or the current head has pending tool
-execution. Resume pending work from the latest checkpoint; to regenerate completed
-work, submit new input from the latest checkpoint. Full-mode resumes and ordinary
-replay without pending tool execution keep their existing behavior.
+execution. For `Command(resume=...)`, other pending graph nodes also prevent the
+rewrite, except for the synthetic input entry node. Resume pending work from the
+latest checkpoint; to regenerate completed work, submit new input there. Full-mode
+resumes and ordinary replay without pending execution keep their existing behavior.
 
 The optional `database.checkpoint_cache` section (delta channel mode only)
 caches materialized checkpoint histories: `type` is `memory` (default) or

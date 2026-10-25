@@ -15,6 +15,7 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.tools import tool
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from langgraph.graph import END, StateGraph
 from langgraph.types import Command
 
 from deerflow.agents.thread_state import get_thread_state_schema
@@ -92,7 +93,7 @@ async def _worker(graph, saver, manager, mode, config, graph_input, *, metadata=
     return record
 
 
-async def _paused_worker(saver, mode):
+async def _paused_worker(saver, mode, *, branch_tasks=False):
     calls = []
 
     @tool
@@ -101,7 +102,29 @@ async def _paused_worker(saver, mode):
         calls.append("probe")
         return "Probe result."
 
-    graph = create_agent(_ProbeModel(responses=[]), tools=[probe], state_schema=get_thread_state_schema(mode), checkpointer=saver)
+    model = _ProbeModel(responses=[])
+    if branch_tasks:
+
+        async def model_node(state):
+            message = await model.ainvoke(state["messages"])
+            if message.tool_calls:
+                human = next(message for message in reversed(state["messages"]) if isinstance(message, HumanMessage))
+                message = message.model_copy(update={"id": f"call-{human.id}"})
+            return {"messages": [message]}
+
+        async def tools_node(state):
+            calls.append("probe")
+            return {"messages": [ToolMessage(content="Probe result.", tool_call_id="probe-call", id="probe-result")]}
+
+        builder = StateGraph(get_thread_state_schema(mode))
+        builder.add_node("model", model_node)
+        builder.add_node("tools", tools_node)
+        builder.set_entry_point("model")
+        builder.add_conditional_edges("model", lambda state: "tools" if state["messages"][-1].tool_calls else END)
+        builder.add_edge("tools", "model")
+        graph = builder.compile(checkpointer=saver)
+    else:
+        graph = create_agent(model, tools=[probe], state_schema=get_thread_state_schema(mode), checkpointer=saver)
     config = _config(mode)
     await graph.ainvoke({"messages": [HumanMessage(content="hello", id="h1")]}, config)
     manager = RunManager()
@@ -122,7 +145,13 @@ async def _paused_worker(saver, mode):
 
 async def _earlier_checkpoint_without_sends(graph, saver, selector):
     history = [snapshot async for snapshot in graph.aget_state_history(_config("delta"))]
-    selected = next(snapshot for snapshot in history if any(message.id == "first-answer" for message in snapshot.values.get("messages", [])) and (snapshot.metadata.get("source") == "input" if selector == "input" else snapshot.next == ()))
+    selected = next(
+        snapshot
+        for snapshot in history
+        if any(message.id == "first-answer" for message in snapshot.values.get("messages", []))
+        and not any(message.id == "h2" for message in snapshot.values.get("messages", []))
+        and (snapshot.metadata.get("source") == "input" if selector == "input" else snapshot.next == ())
+    )
     selected_tuple = await saver.aget_tuple(selected.config)
     assert not (selected_tuple.checkpoint.get("channel_values") or {}).get("__pregel_tasks")
     return await graph.aget_state(selected.config)
@@ -293,3 +322,114 @@ async def test_worker_does_not_report_success_after_discarding_pending_tools(che
     messages = (await graph.aget_state(_config(mode))).values["messages"]
     assert any(isinstance(message, ToolMessage) and message.tool_call_id == "probe-call" for message in messages)
     assert messages[-1].content == FINAL_ANSWER
+
+
+@pytest.mark.parametrize("selector", ["paused", "input", "completed"])
+@pytest.mark.parametrize("cleanup", ["ordinary", "edit", "rollback", "edit-rollback"])
+async def test_worker_preserves_non_send_pending_nodes(checkpointer, monkeypatch, selector, cleanup):
+    graph, manager, calls, paused, head = await _paused_worker(checkpointer, "delta", branch_tasks=True)
+    selected = paused if selector == "paused" else await _earlier_checkpoint_without_sends(graph, checkpointer, selector)
+    for snapshot in (selected, head):
+        checkpoint_tuple = await checkpointer.aget_tuple(snapshot.config)
+        assert not (checkpoint_tuple.checkpoint.get("channel_values") or {}).get("__pregel_tasks")
+    assert selected.next == (("tools",) if selector == "paused" else ("__start__",) if selector == "input" else ())
+    checkpoint_id = selected.config["configurable"]["checkpoint_id"]
+    config = _config("delta", checkpoint_id)
+    original_set_status = manager.set_status_if_not_cancelled
+    if "rollback" in cleanup:
+
+        async def cancellation_wins(run_id, status, **kwargs):
+            # Inject the terminal decision, preserving the actual Worker cleanup.
+            if status == RunStatus.error and "pending execution" in (kwargs.get("error") or ""):
+                return "rollback"
+            return await original_set_status(run_id, status, **kwargs)
+
+        monkeypatch.setattr(manager, "set_status_if_not_cancelled", cancellation_wins)
+
+    record = await _worker(graph, checkpointer, manager, "delta", config, Command(resume="continue"), metadata={"replay_kind": "edit"} if "edit" in cleanup else None)
+
+    assert record.status == RunStatus.error
+    if "rollback" in cleanup:
+        assert record.error == "Rolled back by user"
+    else:
+        location = "selected" if selector == "paused" else "head"
+        assert f"the {location} checkpoint" in record.error
+        assert "pending execution" in record.error
+        assert record.run_id in record.error
+        assert checkpoint_id in record.error
+        assert (selected if location == "selected" else head).config["configurable"]["checkpoint_id"] in record.error
+    assert config["configurable"]["checkpoint_id"] == checkpoint_id
+    assert calls == []
+    after = await graph.aget_state(_config("delta"))
+    assert after.values == head.values
+    assert after.next == ("tools",)
+
+    monkeypatch.setattr(manager, "set_status_if_not_cancelled", original_set_status)
+    recovered = await _worker(graph, checkpointer, manager, "delta", _config("delta"), Command(resume="continue"))
+    assert recovered.status == RunStatus.success
+    assert calls == ["probe"]
+    messages = (await graph.aget_state(_config("delta"))).values["messages"]
+    assert any(isinstance(message, ToolMessage) and message.tool_call_id == "probe-call" for message in messages)
+    assert messages[-1].content == FINAL_ANSWER
+
+
+@pytest.mark.parametrize("selector", ["paused", "input", "completed"])
+async def test_non_send_fresh_input_replay_still_regenerates(checkpointer, selector):
+    graph, manager, calls, paused, head = await _paused_worker(checkpointer, "delta", branch_tasks=True)
+    selected = paused if selector == "paused" else await _earlier_checkpoint_without_sends(graph, checkpointer, selector)
+    for snapshot in (selected, head):
+        checkpoint_tuple = await checkpointer.aget_tuple(snapshot.config)
+        assert not (checkpoint_tuple.checkpoint.get("channel_values") or {}).get("__pregel_tasks")
+    config = _config("delta", selected.config["configurable"]["checkpoint_id"])
+
+    record = await _worker(graph, checkpointer, manager, "delta", config, {"messages": [HumanMessage(content="new request", id="h3")]})
+
+    assert record.status == RunStatus.success
+    assert "checkpoint_id" not in config["configurable"]
+    assert calls == ["probe"]
+    messages = (await graph.aget_state(_config("delta"))).values["messages"]
+    assert any(message.id == "h3" for message in messages)
+    assert messages[-1].content == FINAL_ANSWER
+
+
+@pytest.mark.parametrize("selector", ["input", "completed"])
+async def test_non_send_resume_without_pending_nodes_still_linearizes(checkpointer, selector):
+    graph, manager, calls, _, _ = await _paused_worker(checkpointer, "delta", branch_tasks=True)
+    await graph.ainvoke(Command(resume="continue"), _config("delta"))
+    head = await graph.aget_state(_config("delta"))
+    assert head.next == ()
+    selected = await _earlier_checkpoint_without_sends(graph, checkpointer, selector)
+    assert selected.next == (("__start__",) if selector == "input" else ())
+    config = _config("delta", selected.config["configurable"]["checkpoint_id"])
+
+    record = await _worker(graph, checkpointer, manager, "delta", config, Command(resume="continue"))
+
+    assert record.status == RunStatus.success
+    assert "checkpoint_id" not in config["configurable"]
+    assert calls == ["probe"]
+    after = await graph.aget_state(_config("delta"))
+    assert [message.id for message in after.values["messages"]] == [message.id for message in selected.values["messages"]]
+
+
+@pytest.mark.parametrize("edit_replay", [False, True])
+async def test_non_send_selected_nodes_reject_after_head_completed(checkpointer, edit_replay):
+    graph, manager, calls, selected, _ = await _paused_worker(checkpointer, "delta", branch_tasks=True)
+    await graph.ainvoke(Command(resume="continue"), _config("delta"))
+    head = await graph.aget_state(_config("delta"))
+    assert head.next == ()
+    selected = await graph.aget_state(selected.config)
+    assert selected.next == ("tools",)
+    selected_tuple = await checkpointer.aget_tuple(selected.config)
+    assert not (selected_tuple.checkpoint.get("channel_values") or {}).get("__pregel_tasks")
+    config = _config("delta", selected.config["configurable"]["checkpoint_id"])
+
+    record = await _worker(graph, checkpointer, manager, "delta", config, Command(resume="continue"), metadata={"replay_kind": "edit"} if edit_replay else None)
+
+    assert record.status == RunStatus.error
+    assert "the selected checkpoint" in record.error
+    assert "pending execution" in record.error
+    assert config["configurable"]["checkpoint_id"] == selected.config["configurable"]["checkpoint_id"]
+    assert calls == ["probe"]
+    after = await graph.aget_state(_config("delta"))
+    assert after.values == head.values
+    assert after.next == ()
