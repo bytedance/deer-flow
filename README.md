@@ -1709,6 +1709,10 @@ before exporting. Duplicate names cause an error before the output file is opene
 preserving any existing file.
 The CLI names the repeated columns in a short stderr error and exits nonzero,
 so callers can correct their aliases without reading a traceback.
+JSON exports likewise reject non-finite numbers (`NaN` and infinities), including
+values nested in lists or structs, before opening the destination. Filter them
+or replace them with `NULL` in SQL; the CLI reports an error and preserves any
+existing output rather than writing invalid JSON.
 
 The **data-analysis** skill preserves each CSV file or Excel sheet when names collide across inputs. [Prepare its Python environment](skills/public/data-analysis/SKILL.md#environment-setup) explicitly with DuckDB and openpyxl; missing packages report setup instructions instead of installing themselves during analysis. Use the SQL names printed by `inspect` (such as `report`, `report_1`) for queries and summaries. Its cache follows ordered input basenames and contents, so renaming or reordering inputs rebuilds their table map instead of silently selecting a different source. Quoted original names also resolve without rewriting query text; apostrophes in upload paths and double quotes in column names are preserved through loading, inspection, queries, and summaries.
 
