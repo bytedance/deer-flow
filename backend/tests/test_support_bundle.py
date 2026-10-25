@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import zipfile
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -23,6 +24,52 @@ def _isolate_runtime_paths(monkeypatch):
 def _zip_text(zip_path, name: str) -> str:
     with zipfile.ZipFile(zip_path) as zf:
         return zf.read(name).decode("utf-8")
+
+
+def test_default_bundles_keep_prior_outputs_within_one_second(tmp_path, monkeypatch):
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+
+    class SameSecondDatetime(datetime):
+        calls = 0
+
+        @classmethod
+        def now(cls, tz=None):
+            cls.calls += 1
+            return datetime(2026, 10, 25, 12, 0, 0, cls.calls, tzinfo=tz or UTC)
+
+    monkeypatch.setattr(support_bundle, "datetime", SameSecondDatetime)
+
+    first = support_bundle.create_support_bundle(project_root=project_root)
+    first_zip = first.read_bytes()
+    first_summary = support_bundle._issue_summary_sidecar_path(first)
+    first_draft = support_bundle._issue_draft_sidecar_path(first)
+    first_summary_text = first_summary.read_text(encoding="utf-8")
+    first_draft_text = first_draft.read_text(encoding="utf-8")
+
+    second = support_bundle.create_support_bundle(project_root=project_root)
+
+    assert first != second
+    assert first.name.startswith("deer-flow-support-bundle-20261025-120000-")
+    assert second.name.startswith("deer-flow-support-bundle-20261025-120000-")
+    assert first.read_bytes() == first_zip
+    assert first_summary.read_text(encoding="utf-8") == first_summary_text
+    assert first_draft.read_text(encoding="utf-8") == first_draft_text
+    assert support_bundle._issue_summary_sidecar_path(second).is_file()
+    assert support_bundle._issue_draft_sidecar_path(second).is_file()
+    assert len(list(first.parent.glob("*.zip"))) == 2
+    assert len(list(first.parent.glob("*-issue-summary.md"))) == 2
+    assert len(list(first.parent.glob("*-issue-draft.md"))) == 2
+
+
+def test_explicit_support_bundle_output_path_is_preserved(tmp_path):
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    output_path = tmp_path / "chosen.zip"
+
+    assert support_bundle.create_support_bundle(project_root=project_root, out_path=output_path) == output_path
+    assert support_bundle.create_support_bundle(project_root=project_root, out_path=output_path) == output_path
+    assert output_path.is_file()
 
 
 @pytest.mark.parametrize("failure", ["permission", "encoding"])
