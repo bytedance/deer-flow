@@ -153,6 +153,47 @@ _LOCAL_BASH_ROOT_PATH_COMMANDS = {
     "tail",
     "tar",
 }
+# Windows host paths. ``_ABSOLUTE_PATH_PATTERN`` knows POSIX spellings only: its
+# ``/`` never matches right after a drive colon and a backslash path holds no
+# ``/`` at all, yet PowerShell, cmd.exe and Git Bash resolve both against the
+# host filesystem. Every scan below is Windows-only: on POSIX ``C:/x`` and
+# ``\\x`` are ordinary relative names under the workspace.
+_WINDOWS_DRIVE_PATH_PATTERN = re.compile(r"(?<![A-Za-z0-9_])[A-Za-z]:[\\/][^\s\"'`;&|<>()]*")
+# ``\\?\C:\x`` is an extended-length host path and ``\\.\PhysicalDrive0``
+# opens a device; both are host paths in every argument position.
+_WINDOWS_DEVICE_PREFIX_PATTERN = re.compile(r"\\\\[?.]\\")
+# ``\\server\share`` is a UNC path; the host and share segments keep a regex
+# such as ``'\\server'`` out.
+_WINDOWS_UNC_PATH_PATTERN = re.compile(r"(?<![A-Za-z0-9_])\\\\[A-Za-z0-9._$-]+\\[^\s\"'`;&|<>()]*")
+# cmd.exe ``%NAME%`` and PowerShell ``$env:NAME`` expand at execution time, so a
+# separator after the variable names a host path (``%WINDIR%\win.ini``).
+# Requiring the separator keeps printf formats (``%s\n``) and URL escapes out.
+_WINDOWS_ENV_VAR_PATH_PATTERN = re.compile(r"%[A-Za-z_][A-Za-z0-9_]*(?::[^%]*)?%[\\/]|\$\{?env:[A-Za-z_][A-Za-z0-9_]*\}?[\\/]", re.IGNORECASE)
+# A standalone variable names a host directory (``cd %WINDIR%``); ``$NAME``
+# already fails that check.
+_WINDOWS_ENV_VAR_TARGET_PATTERN = re.compile(r"%[A-Za-z_][A-Za-z0-9_]*(?::[^%]*)?%|\$\{?env:[A-Za-z_][A-Za-z0-9_]*\}?", re.IGNORECASE)
+# ``$HOME\.ssh\id_rsa`` is the bash spelling of the same host path; a trailing
+# backslash with nothing after it stays literal text.
+_WINDOWS_SHELL_VARIABLE_PATH_PATTERN = re.compile(r"\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})\\(?=[^\s\"'`;&|<>()])")
+# A working-directory drive target (``C:``, ``C:Windows``): no separator for the
+# drive-path pattern above.
+_WINDOWS_DRIVE_SPEC_PATTERN = re.compile(r"[A-Za-z]:")
+# An attached option value puts a drive path after an option letter with no word
+# boundary before the colon (``curl -oC:/Windows/evil.exe``).
+_WINDOWS_ATTACHED_DRIVE_PATTERN = re.compile(r"-[A-Za-z]{1,3}(?P<path>[A-Za-z]:[\\/][^\s\"'`;&|<>()]*)")
+# shlex drops the backslash of an unquoted ``cd \Windows`` (the target token is
+# ``Windows``), so only the raw text shows a backslash-root working directory,
+# with option and parameter words possibly before it. A quoted span is text.
+_WINDOWS_CWD_ROOT_PATTERN = re.compile(r"(?:^|[\s;&|()<>`])(?:cd|chdir|pushd|set-location|push-location|sl)\s+(?:[^\s;&|()<>`'\"]+\s+)*\\[^\s\"'`;&|<>()]+", re.IGNORECASE)
+# PowerShell binds ``-Name value`` before the directory argument; only
+# ``-Path``/``-LiteralPath`` name the target of ``Set-Location``.
+_WINDOWS_CWD_PATH_PARAMETERS = frozenset({"-path", "-literalpath", "-lp"})
+# Unquoted ``..\..\secret`` loses its backslashes in the shlex token stream
+# (``....secret``), so the token-level dotdot check never sees the traversal.
+_WINDOWS_RAW_DOTDOT_PATTERN = re.compile(r"(?:^|(?<=[\s;&|()<>`\"'\\/,=]))\.\.[\\/]")
+# cmd.exe matches command names case-insensitively and knows ``chdir``;
+# PowerShell spells the same operation ``Set-Location``/``Push-Location``.
+_WINDOWS_CWD_COMMANDS = frozenset({"cd", "pushd", "chdir", "set-location", "push-location", "sl"})
 _SHELL_COMMAND_SEPARATORS = {";", "&&", "||", "|", "|&", "&", "(", ")"}
 _SHELL_REDIRECTION_OPERATORS = {
     "<",
@@ -1164,6 +1205,32 @@ def _is_in_spans(position: int, spans: list[tuple[int, int]]) -> bool:
     return any(start <= position < end for start, end in spans)
 
 
+def _is_embedded_in_spans(position: int, spans: list[tuple[int, int]]) -> bool:
+    """Return True when *position* is inside a span but not at its start.
+
+    ``C://Windows/win.ini`` makes the URL scan see a one-letter scheme, but
+    Windows still resolves it as the drive path ``C:/Windows/win.ini``. Only a
+    drive match embedded in a larger URL is URL text; one that starts the
+    URL-like span stays subject to the drive scan.
+    """
+    return any(start < position < end for start, end in spans)
+
+
+def _quoted_spans(command: str) -> list[tuple[int, int]]:
+    """Return the spans covered by single or double quotes in *command*."""
+    spans: list[tuple[int, int]] = []
+    quote = ""
+    start = 0
+    for index, char in enumerate(command):
+        if quote:
+            if char == quote:
+                spans.append((start, index + 1))
+                quote = ""
+        elif char in "'\"":
+            quote, start = char, index
+    return spans
+
+
 def _has_dotdot_path_segment(token: str) -> bool:
     if _is_non_file_url_token(token):
         return False
@@ -1624,6 +1691,73 @@ def _is_allowed_local_bash_absolute_path(
     return False
 
 
+def _windows_host_paths(command: str, allowed_paths: list[str], thread_data: ThreadDataState | None) -> list[str]:
+    """Return the Windows host paths *command* reaches that no POSIX scan sees.
+
+    Judged on the raw text because the shlex token stream drops unquoted
+    backslashes, which is how ``\\\\server\\share`` and ``%WINDIR%\\win.ini``
+    reach the host. Only unambiguously host-path spellings are scanned: a
+    single-backslash read root (``cat \\Windows\\win.ini``) and a bare
+    drive-relative argument (``cat C:Windows\\win.ini``) need per-tool argument
+    tables to stay clear of regex text (``grep -E '\\bword\\b'``). A drive path is
+    found wherever it appears, including in an interpreted script or after an
+    attached option letter; a backslash-root working directory shows only here.
+    """
+    url_spans = _non_file_url_spans(command)
+    unsafe: list[str] = []
+    for pattern in (
+        _WINDOWS_DRIVE_PATH_PATTERN,
+        _WINDOWS_DEVICE_PREFIX_PATTERN,
+        _WINDOWS_UNC_PATH_PATTERN,
+        _WINDOWS_ENV_VAR_PATH_PATTERN,
+        _WINDOWS_SHELL_VARIABLE_PATH_PATTERN,
+    ):
+        for match in pattern.finditer(command):
+            if _is_embedded_in_spans(match.start(), url_spans):
+                continue
+            path = match.group()
+            if pattern is _WINDOWS_DRIVE_PATH_PATTERN and _is_allowed_local_bash_absolute_path(path, allowed_paths, allow_system_paths=True, thread_data=thread_data):
+                continue
+            unsafe.append(path)
+    # An attached option value carries the drive path without a word boundary
+    # (``curl -oC:/Windows/evil.exe``), so the word-boundary scan above misses it.
+    for match in _WINDOWS_ATTACHED_DRIVE_PATTERN.finditer(command):
+        if not _is_embedded_in_spans(match.start("path"), url_spans):
+            unsafe.append(match.group("path"))
+    # A quoted span is text (``rg 'then cd \Windows' docs``), not a command, so
+    # the raw scans below skip it; the token-level dotdot check still sees a
+    # quoted traversal, whose backslashes survive shlex.
+    quoted_spans = _quoted_spans(command)
+    # ``cd \Windows`` keeps its backslash only in the raw text.
+    for match in _WINDOWS_CWD_ROOT_PATTERN.finditer(command):
+        if not _is_embedded_in_spans(match.start(), url_spans) and not _is_in_spans(match.start(), quoted_spans):
+            unsafe.append(match.group().strip())
+    for match in _WINDOWS_RAW_DOTDOT_PATTERN.finditer(command):
+        if not _is_in_spans(match.start(), url_spans) and not _is_in_spans(match.start(), quoted_spans):
+            raise PermissionError("Access denied: path traversal detected")
+    return unsafe
+
+
+def _is_local_bash_cwd_command(command_name: str) -> bool:
+    """Return True for a working-directory command on the active host.
+
+    POSIX bash is case-sensitive and knows ``cd``/``pushd`` only; Windows shells
+    match names case-insensitively and add cmd.exe ``chdir`` plus the
+    PowerShell ``Set-Location``/``Push-Location``/``sl`` forms.
+    """
+    if command_name in _LOCAL_BASH_CWD_COMMANDS:
+        return True
+    return _is_windows() and command_name.lower() in _WINDOWS_CWD_COMMANDS
+
+
+def _windows_cwd_parameter(token: str) -> tuple[str, str | None] | None:
+    """Return a PowerShell ``-Parameter[:value]`` token as its name and value."""
+    if not _is_windows() or not token.startswith("-") or token == "-":
+        return None
+    name, separator, value = token.partition(":") if ":" in token else token.partition("=")
+    return name.lower(), value if separator else None
+
+
 def _next_cd_target(tokens: list[str], start_index: int) -> tuple[str | None, int]:
     index = start_index
     while index < len(tokens):
@@ -1637,6 +1771,20 @@ def _next_cd_target(tokens: list[str], start_index: int) -> tuple[str | None, in
             index += 1
             continue
         if token in {"-L", "-P", "-e", "-@"}:
+            index += 1
+            continue
+        parameter = _windows_cwd_parameter(token)
+        if parameter is not None:
+            name, attached = parameter
+            if attached is not None:
+                if name in _WINDOWS_CWD_PATH_PARAMETERS:
+                    return attached, index + 1
+                index += 1
+                continue
+            if name not in _WINDOWS_CWD_PATH_PARAMETERS and index + 1 < len(tokens) and not tokens[index + 1].startswith(("/", "-")):
+                # A common parameter consumes its value (``-ErrorAction Stop``).
+                index += 2
+                continue
             index += 1
             continue
         if token.startswith("-") and token != "-":
@@ -1657,6 +1805,13 @@ def _validate_local_bash_cwd_target(command_name: str, target: str | None, allow
         _reject_path_traversal(target)
         if not _is_allowed_local_bash_absolute_path(target, allowed_paths, allow_system_paths=False, thread_data=thread_data):
             raise PermissionError(f"Unsafe working directory change in command: {command_name} {target}. Use paths under {VIRTUAL_PATH_PREFIX}")
+    # A drive target (``C:/Windows``, a bare ``C:``, the drive-relative
+    # ``C:Windows``), a backslash root (``\Windows``, ``\\server\share``) and a
+    # cmd/PowerShell variable expansion (``%WINDIR%``, ``$env:WINDIR``) are host
+    # directories on a Windows host and relative names on POSIX, where the
+    # checks above already apply.
+    if _is_windows() and (_WINDOWS_DRIVE_SPEC_PATTERN.match(target) or target.startswith("\\") or _WINDOWS_ENV_VAR_TARGET_PATTERN.search(target)):
+        raise PermissionError(f"Unsafe working directory change in command: {command_name} {target}. Use paths under {VIRTUAL_PATH_PREFIX}")
 
 
 def _validate_local_bash_root_path_args(command_name: str, tokens: list[str], start_index: int) -> None:
@@ -1719,14 +1874,14 @@ def _validate_local_bash_shell_tokens(command: str, allowed_paths: list[str], to
         at_command_start = False
         if command_name in _LOCAL_BASH_COMMAND_WRAPPERS and index + 1 < len(tokens):
             wrapped_name = tokens[index + 1].rsplit("/", 1)[-1]
-            if wrapped_name in _LOCAL_BASH_CWD_COMMANDS:
+            if _is_local_bash_cwd_command(wrapped_name):
                 target, next_index = _next_cd_target(tokens, index + 2)
                 _validate_local_bash_cwd_target(wrapped_name, target, allowed_paths, thread_data)
                 index = next_index
                 continue
             _validate_local_bash_root_path_args(wrapped_name, tokens, index + 2)
 
-        if command_name not in _LOCAL_BASH_CWD_COMMANDS:
+        if not _is_local_bash_cwd_command(command_name):
             _validate_local_bash_root_path_args(command_name, tokens, index + 1)
             index += 1
             continue
@@ -1790,7 +1945,7 @@ def _is_non_path_literal_fragment(fragment: str) -> bool:
 
 
 def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState | None) -> None:
-    """Validate absolute paths in local-sandbox bash commands.
+    r"""Validate absolute paths in local-sandbox bash commands.
 
     This validation is only a best-effort guard for the explicit
     ``sandbox.allow_host_bash: true`` opt-in. It is not a secure sandbox
@@ -1812,6 +1967,15 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
     exemption is withheld from any command that could redefine ``awk`` or
     re-read quoted text (see ``_awk_program_field_spans``);
     ``$PWD/...`` is checked like the relative path it is equivalent to.
+    On a Windows host the same rule covers the spellings that have no POSIX
+    ``/`` root: drive paths (``C:/...``, ``C:\...``, ``C:/``), Win32 device and
+    extended-length paths (``\\?\C:\...``, ``\\.\PhysicalDrive0``), UNC paths
+    (``\\server\share``) and cmd/PowerShell variable expansions
+    (``%WINDIR%\win.ini``, ``$env:SystemRoot\win.ini``, ``$HOME\.ssh\id_rsa``),
+    plus a working-directory target that is a drive (``cd C:``), a backslash
+    root or a variable. A drive path is judged wherever it appears, so an
+    interpreted script (``python -c "open('C:/Windows/win.ini')"``) is rejected
+    too. cmd.exe ``^`` escapes and delayed ``!VAR!`` expansion are out of scope.
     A windows-incompatible segment still rejects a path that is not already
     stored on the host; an existing host file may be read or renamed.
     """
@@ -1883,6 +2047,9 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
         if _is_in_spans(match.start(), url_spans):
             continue
         unsafe_paths.append(match.group())
+
+    if _is_windows():
+        unsafe_paths.extend(_windows_host_paths(command, allowed_paths, thread_data))
 
     if unsafe_paths:
         unsafe = ", ".join(sorted(dict.fromkeys(unsafe_paths)))
