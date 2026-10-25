@@ -2750,7 +2750,9 @@ On sandboxes without an attested broker mode, lark-cli
 commands fail with an explicit unverified-mode error instead of running
 against an unauthenticated profile.
 
-Host-externalized tool outputs use the Gateway's normal file-creation umask.
+Host-externalized tool outputs use the Gateway's normal file-creation permissions.
+Restoring those outputs from shared blob storage applies the recovering Gateway's
+creation policy too, including its umask and any inherited default ACL.
 Host and sandbox outputs use deterministic filenames hashed from the raw tool
 call ID and output content. Missing, colliding, or oversized IDs cannot overwrite
 different output or make the filename too long; identical output can reuse its path.
