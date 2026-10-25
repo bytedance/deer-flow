@@ -106,23 +106,8 @@ Users create **threads** (conversations), send messages, set thread-scoped `/goa
 
 ### Source Layout (`src/`)
 
-`AuthProvider` publishes the query owner (user ID, confirmed logout, or unknown
-auth). `QueryClientProvider` owns a mount-local client and remounts its consumers
-when that owner changes, clearing the old cache and cancelling old queries.
-Confirmed logout unmounts query consumers immediately; public and unknown-auth
-routes still render with an independent client. Keep auth outside the query
-provider. Superseded auth refreshes cannot restore an earlier owner.
-
-Unknown auth after a transport failure remains eligible for the 60-second
-visible-tab refresh. A visible browser `online` event revalidates unknown auth
-without waiting for that throttle; it does not authenticate on connectivity alone.
-Confirmed anonymous/logout and static demos do not probe. Keep wakeups single-flight,
-remove both listeners on unmount, and retain request-generation ownership when
-clearing the in-flight guard. DOM and browser regressions cover outage recovery.
-Coalesce a reconnect received during a pending refresh into one follow-up only
-if auth remains unknown; confirmed identity/logout and unmount discard that wake.
-
-Auth: trim emails; validate raw passwords.
+Read [auth ownership and recovery](src/core/auth/AGENTS.md) before changing
+`AuthProvider` or `QueryClientProvider`. Auth forms trim emails, not passwords.
 
 See [project structure](README.md#project-structure) for the directory map and
 [src/AGENTS.md](src/AGENTS.md) for component and domain ownership.
