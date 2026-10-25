@@ -4,6 +4,8 @@ Postgres bootstrap owns its session-scoped advisory lock until `pg_advisory_unlo
 
 Acquire that lock by polling `pg_try_advisory_lock`, never with a blocking `pg_advisory_lock`: the app engine's asyncpg `command_timeout` bounds every statement, so a blocking acquire fails a second instance's startup whenever a peer's migration outlasts it.
 
+`init_engine` auto-creates a Postgres database only on SQLSTATE `3D000`. Missing relations, columns and roles also "do not exist"; a `CREATE DATABASE` retry would mask them.
+
 When `database.postgres_schema` is configured, both async ORM connections and the synchronous SQLAlchemy connections used by DB-backed custom agents and managed subagents must use the same `search_path`; preserve this invariant when adding another persistence entry point.
 
 Alembic stamp/upgrade workers started inside `bootstrap_schema()` remain owned by the bootstrap critical section until the worker finishes. Drain those `asyncio.to_thread()` calls across host cancellation before releasing the in-process SQLite bootstrap lock or PostgreSQL advisory lock; otherwise another bootstrap can overlap a still-running migration worker.
@@ -30,6 +32,8 @@ Scheduled-task lifecycle rules live in one place each. `ScheduledTaskRepository.
 The per-owner run cap `scheduler.max_concurrent_runs_per_user` is effective `min(per_user, max_concurrent_runs)` (0 = off) and is checked in `claim_queued_run` right after the global count, under the same budget lock. `list_queued_runs` ranks same-thread FIFO heads per owner (`ROW_NUMBER() OVER (PARTITION BY owner)`) and orders the batch by that rank, so the drain is owner-fair even with the cap off; owners at their cap drop out before the batch limit, and orphan rows (task deleted while queued) are never held back by the cap. Scheduled-task repository boundaries coerce serialized timestamps before SQL `DateTime` binding.
 
 Recovery locks task/run pairs in task-id/run-id order and restores `run_id`, `started_at` and live errors before releasing launch claims. Launch/failure/timeout updates use one parent-first transaction to prevent interleaved claims. Queue timeout fails the occurrence and advances scheduled work to prevent immediate requeue.
+
+Single-instance polling also performs a non-destructive terminal-run reconciliation: a `running` occurrence whose durable `runs` row is already terminal is finalized from that row's status, error and goal verdict. Live runs are never taken over or interrupted; multi-instance reconciliation already covers terminal runs through lease ownership. This repairs a completion hook that failed after the run committed its terminal status.
 
 Expired-launch scans select candidates, not ownership. After taking the parent
 and occurrence locks, recheck launch status and lease expiry before recovery.
@@ -80,3 +84,15 @@ Unsupported owned calls fail closed; single-worker legacy calls remain supported
 These are scoped guards, not a generation
 protocol covering every mutation. Contract/lock-wait tests live in
 `tests/test_terminal_store_contract.py` (Postgres uses `TEST_POSTGRES_URI`).
+
+## Extension execution fences
+
+Migration 0047 owns `extension_execution_leases`. Public `ExecutionFence` carries
+namespace/resource/holder/epoch, not authority: Gateway binds it to the current
+plugin and user. SQL run admission and fenced cancellation take the run change
+clock first, then lock the lease row and check the database clock after lock wait,
+retaining that lock through commit. Unsupported stores fail closed. Fenced cancel
+persists a request for the existing run owner; never fall back to local cancellation
+when the extension generation is stale. Extension-owned state/quota/control logic
+stays in its package. Tests: `test_extension_execution_fence.py` (PostgreSQL via
+`DEERFLOW_TEST_WORKFLOW_POSTGRES`).

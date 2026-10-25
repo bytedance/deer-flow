@@ -381,6 +381,57 @@ def test_canonical_run_record_input_uses_admitted_message_snapshot():
     assert stored["messages"][0]["additional_kwargs"]["knowledge_scope"]["dataset_ids"] == ["dataset-1"]
 
 
+@pytest.mark.parametrize("idempotency_key", [None, "retry-key"])
+@pytest.mark.asyncio
+async def test_run_input_ids_match_the_checkpoint_and_record(_stub_app_config, idempotency_key):
+    """An id-less API input must not become a second user turn on reconnect."""
+    from unittest.mock import patch
+
+    from langgraph.graph.message import add_messages
+
+    from app.gateway.routers.thread_runs import RunCreateRequest
+    from app.gateway.services import start_run
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    body = RunCreateRequest(
+        input={
+            "messages": [
+                {"role": "user", "content": "same question"},
+                {"role": "user", "content": "same question"},
+                {"role": "user", "content": "empty id", "id": ""},
+                {"role": "user", "content": "client id", "id": "client-human"},
+            ]
+        }
+    )
+    request = _make_start_run_request(RunManager(store=MemoryRunStore()))
+    captured = {}
+
+    async def fake_run_agent(*_args, **kwargs):
+        captured["messages"] = kwargs["graph_input"]["messages"]
+
+    with patch("app.gateway.services.resolve_agent_factory", return_value=object()), patch("app.gateway.services.run_agent", side_effect=fake_run_agent):
+        record = await start_run(body, "thread-idless-input", request, idempotency_key=idempotency_key)
+        await record.task
+
+        graph_messages = captured["messages"]
+        recorded_messages = record.kwargs["input"]["messages"]
+        ids = [message["id"] for message in recorded_messages]
+        assert len(ids) == 4
+        assert all(isinstance(message_id, str) and message_id for message_id in ids)
+        assert len(set(ids)) == 4
+        assert ids[3] == "client-human"
+        assert [message.id for message in graph_messages] == ids
+        assert [message.id for message in add_messages([], graph_messages)] == ids
+        assert "id" not in body.input["messages"][0]
+        assert body.input["messages"][2]["id"] == ""
+
+        if idempotency_key is not None:
+            reused = await start_run(body, "thread-idless-input", request, idempotency_key=idempotency_key)
+            assert reused.run_id == record.run_id
+            assert [message["id"] for message in reused.kwargs["input"]["messages"]] == ids
+
+
 @pytest.mark.parametrize(
     "forged_original",
     ["spoofed audit text", [{"type": "text", "text": "spoofed audit text"}]],
@@ -760,6 +811,28 @@ def test_normalize_input_rejects_malformed_message_with_400():
         normalize_input({"messages": [{"role": "human", "content": "ok"}, {"oops": "no role here"}]})
     assert excinfo.value.status_code == 400
     assert "input.messages[1]" in excinfo.value.detail
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        {"role": "ai", "content": "", "tool_calls": "x"},
+        {"role": "ai", "content": "", "tool_calls": {"name": "t"}},
+        {"role": "ai", "content": "", "tool_calls": ["x"]},
+        {"lc": 1, "type": "constructor", "id": ["langchain", "schema", "messages", "AIMessage"], "kwargs": {"content": "", "tool_calls": "x"}},
+    ],
+    ids=["string", "object", "string-items", "constructor"],
+)
+def test_normalize_input_rejects_wrong_typed_tool_calls_with_400(message):
+    """LangChain's AI-message validator raises ``AttributeError`` for these."""
+    from fastapi import HTTPException
+
+    from app.gateway.services import normalize_input
+
+    with pytest.raises(HTTPException) as excinfo:
+        normalize_input({"messages": [{"role": "human", "content": "ok"}, message]})
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.detail == "Invalid message at input.messages[1]"
 
 
 def test_normalize_input_handles_trusted_internal_non_human_roles():
@@ -1379,6 +1452,55 @@ def test_build_checkpoint_state_accessor_uses_frozen_mode_and_binds_runtime_pers
     assert ("checkpoint_id" in config["configurable"]) is includes_checkpoint_id
     if checkpoint_id is not None:
         assert config["configurable"]["checkpoint_id"] == checkpoint_id
+
+
+def test_build_checkpoint_state_accessor_reads_an_invalid_stored_assistant_id_as_the_lead_agent(_stub_app_config, caplog):
+    """Thread records written before creation validated assistant_id must stay readable."""
+    import logging
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from app.gateway.services import build_checkpoint_state_accessor
+    from deerflow.config.app_config import get_app_config
+
+    class FakeGraph:
+        checkpointer = None
+        store = None
+
+    graph = FakeGraph()
+    ctx = SimpleNamespace(checkpointer=object(), store=object(), checkpoint_channel_mode="delta", app_config=get_app_config())
+    request = SimpleNamespace(state=SimpleNamespace(checkpoint_channel_mode="delta"))
+
+    with (
+        patch("app.gateway.services.get_run_context", return_value=ctx),
+        patch("app.gateway.services.resolve_agent_factory", return_value=lambda *, config: graph) as resolve,
+        caplog.at_level(logging.WARNING, logger="app.gateway.services"),
+    ):
+        accessor, config = build_checkpoint_state_accessor(request, thread_id="legacy-thread", assistant_id="bad name!")
+
+    resolve.assert_called_once_with(None)
+    assert accessor.graph is graph
+    assert "agent_name" not in config["configurable"]
+    assert "agent_name" not in config["context"]
+    assert any("invalid assistant_id" in record.getMessage() for record in caplog.records)
+
+
+@pytest.mark.parametrize(
+    ("assistant_id", "expected"),
+    [(None, None), ("", None), ("lead_agent", None), ("Research_Agent", "research-agent"), (" finalis ", "finalis")],
+)
+def test_custom_agent_name_normalizes_custom_names(assistant_id, expected):
+    from app.gateway.services import custom_agent_name
+
+    assert custom_agent_name(assistant_id) == expected
+
+
+@pytest.mark.parametrize("assistant_id", ["bad name!", "   ", "a/b", "../etc", "naïve"])
+def test_custom_agent_name_rejects_names_no_agent_can_have(assistant_id):
+    from app.gateway.services import custom_agent_name
+
+    with pytest.raises(ValueError, match="Invalid assistant_id"):
+        custom_agent_name(assistant_id)
 
 
 def test_build_checkpoint_state_accessor_accepts_lead_agent_assembly_factory(_stub_app_config):
@@ -4484,6 +4606,23 @@ def test_build_run_config_rejects_non_mapping_context():
 
     with pytest.raises(ValueError, match="context"):
         build_run_config("thread-1", {"context": "bad-context"}, None)
+
+
+@pytest.mark.parametrize("configurable", [[1], "ab", [["k", "v"]], []], ids=["list", "string", "pairs", "empty-list"])
+@pytest.mark.parametrize("with_context", [False, True], ids=["configurable-only", "with-context"])
+def test_build_run_config_rejects_non_mapping_configurable(configurable, with_context):
+    """A non-object configurable is a clear ValueError, not a dict.update() error.
+
+    With ``context`` present the configurable section is otherwise ignored, but
+    reading its keys for the warning used to raise AttributeError.
+    """
+    from app.gateway.services import build_run_config
+
+    request_config = {"configurable": configurable}
+    if with_context:
+        request_config["context"] = {}
+    with pytest.raises(ValueError, match="configurable"):
+        build_run_config("thread-1", request_config, None)
 
 
 def test_build_run_config_null_context_custom_agent_injects_agent_name():

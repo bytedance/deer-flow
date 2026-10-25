@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, rs } from "@rstest/core";
 import { createElement, type ComponentProps } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
+import { MessageArtifactPathsContext } from "@/components/workspace/messages/markdown-link";
 import {
   MessageGroup,
   scheduleToolLabel,
@@ -37,6 +38,24 @@ afterEach(() => {
 });
 
 describe("MessageGroup", () => {
+  it("resolves relative artifact links in chain-of-thought assistant text", () => {
+    const html = renderGroup(
+      [
+        {
+          id: "ai-1",
+          type: "ai",
+          content: "Inspect the [report](report.md).",
+        } as Message,
+      ],
+      { isLoading: true, threadId: "thread-1" },
+      ["/mnt/user-data/outputs/report.md"],
+    );
+
+    expect(html).toContain(
+      'href="/api/threads/thread-1/artifacts/mnt/user-data/outputs/report.md"',
+    );
+  });
+
   it.each(["array", "webz"])(
     "retains valid search links when %s results contain malformed entries",
     (shape) => {
@@ -633,13 +652,27 @@ describe("scheduler tool steps", () => {
   ] as const;
 
   it.each(actions)("labels schedule_task %s in en and zh", (action, en, zh) => {
-    expect(
-      scheduleToolLabel("schedule_task", { action }, undefined, enUS),
-    ).toBe(en);
-    expect(
-      scheduleToolLabel("schedule_task", { action }, undefined, zhCN),
-    ).toBe(zh);
+    expect(scheduleToolLabel("schedule_task", { action }, {}, enUS)).toBe(en);
+    expect(scheduleToolLabel("schedule_task", { action }, {}, zhCN)).toBe(zh);
   });
+
+  it.each([undefined, ""])(
+    "does not announce a completed operation for %j",
+    (result) => {
+      expect(
+        scheduleToolLabel("schedule_task", { action: "create" }, result, enUS),
+      ).toBe("Scheduled task operation");
+      expect(
+        scheduleToolLabel("schedule_task", { action: "create" }, result, zhCN),
+      ).toBe("定时任务操作");
+      expect(scheduleToolLabel("stop_scheduled_task", {}, result, enUS)).toBe(
+        "Pause this scheduled task",
+      );
+      expect(scheduleToolLabel("stop_scheduled_task", {}, result, zhCN)).toBe(
+        "暂停此定时任务",
+      );
+    },
+  );
 
   it("labels a coded error result as a failed change", () => {
     const error = { error: "Ask which timezone", code: "timezone_required" };
@@ -661,20 +694,15 @@ describe("scheduler tool steps", () => {
       "定时任务操作没有成功",
     );
     expect(
-      scheduleToolLabel(
-        "schedule_task",
-        { action: "toString" },
-        undefined,
-        enUS,
-      ),
+      scheduleToolLabel("schedule_task", { action: "toString" }, {}, enUS),
     ).toBe("Managed scheduled tasks");
   });
 
   it("labels the self-stop and ignores other tools", () => {
-    expect(scheduleToolLabel("stop_scheduled_task", {}, undefined, enUS)).toBe(
+    expect(scheduleToolLabel("stop_scheduled_task", {}, {}, enUS)).toBe(
       "Paused this scheduled task (takes effect when this run ends)",
     );
-    expect(scheduleToolLabel("stop_scheduled_task", {}, undefined, zhCN)).toBe(
+    expect(scheduleToolLabel("stop_scheduled_task", {}, {}, zhCN)).toBe(
       "已暂停此定时任务（本次运行结束后生效）",
     );
     expect(scheduleToolLabel("bash", {}, undefined, enUS)).toBeNull();
@@ -879,7 +907,9 @@ function expectRenderedInOrder(html: string, needles: string[]) {
 function renderGroup(
   messages: Message[],
   props: Omit<ComponentProps<typeof MessageGroup>, "messages"> = {},
+  artifactPaths: readonly string[] | null = null,
 ) {
+  const group = createElement(MessageGroup, { ...props, messages });
   return renderToStaticMarkup(
     createElement(
       I18nContext.Provider,
@@ -890,7 +920,13 @@ function renderGroup(
           t: enUS,
         },
       },
-      createElement(MessageGroup, { ...props, messages }),
+      artifactPaths === null
+        ? group
+        : createElement(
+            MessageArtifactPathsContext.Provider,
+            { value: artifactPaths },
+            group,
+          ),
     ),
   );
 }

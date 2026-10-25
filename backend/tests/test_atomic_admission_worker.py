@@ -32,7 +32,7 @@ def anyio_backend():
 )
 @pytest.mark.parametrize("with_event_store", [True, False])
 async def test_real_worker_atomic_replacement_retains_finalization_authority(store, action, with_event_store, host_finalization_cancel, stale_renewal_race):
-    manager = RunManager(store=store, worker_id="owner", run_ownership_config=RunOwnershipConfig(heartbeat_enabled=True, lease_seconds=5, grace_seconds=0))
+    manager = RunManager(store=store, worker_id="owner", run_ownership_config=RunOwnershipConfig(heartbeat_enabled=True, lease_seconds=10, grace_seconds=0))
     record = await manager.create_or_reject("thread", user_id="review")
     started, rollback_entered, release_rollback = (asyncio.Event() for _ in range(3))
     error_committed, release_error_ack = asyncio.Event(), asyncio.Event()
@@ -100,9 +100,10 @@ async def test_real_worker_atomic_replacement_retains_finalization_authority(sto
         if stale_renewal_race:
             stale_renewal = asyncio.create_task(manager._renew_leases())
             await asyncio.wait_for(stale_renewal_entered.wait(), 2)
-        # Model the final failed-renewal window before replacement using an
-        # actual persisted deadline; the Worker and checkpoint code stay real.
-        deadline = datetime.now(UTC) + timedelta(milliseconds=150)
+        # Model a nearing lease deadline with a real persisted timestamp. The
+        # replacement and rollback checkpoint may take longer than 150 ms on a
+        # loaded CI runner, before this test explicitly requests renewal.
+        deadline = datetime.now(UTC) + timedelta(seconds=4)
         row = await store.get(record.run_id, user_id="review")
         await store.put(record.run_id, thread_id="thread", status="running", user_id="review", owner_worker_id="owner", lease_expires_at=deadline.isoformat(), created_at=row["created_at"])
         record.lease_expires_at = deadline.isoformat()

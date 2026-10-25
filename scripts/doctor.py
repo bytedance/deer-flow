@@ -11,6 +11,7 @@ Exit codes:
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import shutil
@@ -979,4 +980,11 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    # Parsed here rather than inside main(): the unit tests call main() in-process
+    # under pytest, whose argv must not reach argparse.
+    parser = argparse.ArgumentParser(
+        prog="python scripts/doctor.py",
+        description=("DeerFlow Health Check (make doctor): checks system requirements, configuration, LLM provider, and optional components, then prints an actionable report."),
+    )
+    parser.parse_args()
     sys.exit(main())

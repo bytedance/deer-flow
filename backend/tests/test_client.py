@@ -3235,13 +3235,20 @@ class TestUploads:
                 patch("deerflow.client.get_uploads_dir", return_value=uploads_dir),
                 patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir),
             ):
-                client.upload_files("thread-1", [authored])
+                result = client.upload_files("thread-1", [authored])
 
             from deerflow.utils.file_outline import extract_outline_for_file
 
-            assert resolve_companion(uploads_dir / "a.pdf") is None
-            assert extract_outline_for_file(uploads_dir / "a.pdf") == ([], [])
-            assert extract_outline_for_file(uploads_dir / "a_1.md")[0] == [{"title": "My notes", "line": 1}]
+            # Same-name uploads can no longer clobber an earlier file in place
+            # (issue #3750): the authored copy lands under the next free
+            # suffix, and the a.pdf companion record stays valid because its
+            # markdown was never destroyed.
+            assert result["files"][0]["filename"] == "a_1_1.md"
+            assert resolve_companion(uploads_dir / "a.pdf") == uploads_dir / "a_1.md"
+            assert (uploads_dir / "a_1.md").read_text(encoding="utf-8") == "FROM:a.pdf"
+            assert (uploads_dir / "a_1_1.md").read_text(encoding="utf-8") == "# My notes"
+            assert extract_outline_for_file(uploads_dir / "a.pdf") == ([], ["FROM:a.pdf"])
+            assert extract_outline_for_file(uploads_dir / "a_1_1.md")[0] == [{"title": "My notes", "line": 1}]
 
     def test_upload_files_failed_conversion_releases_the_claimed_markdown_name(self, client):
         """A conversion that writes nothing must not reserve stem.md against a later companion.
@@ -5378,7 +5385,7 @@ class TestUploadDuplicateFilenames:
             assert companion.read_bytes() == source.read_bytes()
         assert len(list(uploads_dir.iterdir())) == 4
 
-    def test_sequential_upload_keeps_replacement_behavior(self, client, tmp_path):
+    def test_sequential_upload_preserves_existing_file_and_reports_claimed_name(self, client, tmp_path):
         uploads_dir = tmp_path / "uploads"
         uploads_dir.mkdir()
         first = tmp_path / "first" / "data.txt"
@@ -5392,9 +5399,14 @@ class TestUploadDuplicateFilenames:
             client.upload_files("t-dup", [first])
             result = client.upload_files("t-dup", [second])
 
-        assert result["files"][0]["filename"] == "data.txt"
-        assert (uploads_dir / "data.txt").read_bytes() == b"second"
-        assert len(list(uploads_dir.iterdir())) == 1
+        info = result["files"][0]
+        assert info["filename"] == "data_1.txt"
+        assert info["original_filename"] == "data.txt"
+        assert info["virtual_path"] == "/mnt/user-data/uploads/data_1.txt"
+        assert info["artifact_url"].endswith("/uploads/data_1.txt")
+        assert (uploads_dir / "data.txt").read_bytes() == b"first"
+        assert (uploads_dir / "data_1.txt").read_bytes() == b"second"
+        assert len(list(uploads_dir.iterdir())) == 2
 
     def test_duplicate_filenames_auto_renamed(self, client):
         """Two files with same basename → second gets _1 suffix."""
