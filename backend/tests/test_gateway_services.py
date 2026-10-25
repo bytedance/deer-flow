@@ -1454,6 +1454,55 @@ def test_build_checkpoint_state_accessor_uses_frozen_mode_and_binds_runtime_pers
         assert config["configurable"]["checkpoint_id"] == checkpoint_id
 
 
+def test_build_checkpoint_state_accessor_reads_an_invalid_stored_assistant_id_as_the_lead_agent(_stub_app_config, caplog):
+    """Thread records written before creation validated assistant_id must stay readable."""
+    import logging
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from app.gateway.services import build_checkpoint_state_accessor
+    from deerflow.config.app_config import get_app_config
+
+    class FakeGraph:
+        checkpointer = None
+        store = None
+
+    graph = FakeGraph()
+    ctx = SimpleNamespace(checkpointer=object(), store=object(), checkpoint_channel_mode="delta", app_config=get_app_config())
+    request = SimpleNamespace(state=SimpleNamespace(checkpoint_channel_mode="delta"))
+
+    with (
+        patch("app.gateway.services.get_run_context", return_value=ctx),
+        patch("app.gateway.services.resolve_agent_factory", return_value=lambda *, config: graph) as resolve,
+        caplog.at_level(logging.WARNING, logger="app.gateway.services"),
+    ):
+        accessor, config = build_checkpoint_state_accessor(request, thread_id="legacy-thread", assistant_id="bad name!")
+
+    resolve.assert_called_once_with(None)
+    assert accessor.graph is graph
+    assert "agent_name" not in config["configurable"]
+    assert "agent_name" not in config["context"]
+    assert any("invalid assistant_id" in record.getMessage() for record in caplog.records)
+
+
+@pytest.mark.parametrize(
+    ("assistant_id", "expected"),
+    [(None, None), ("", None), ("lead_agent", None), ("Research_Agent", "research-agent"), (" finalis ", "finalis")],
+)
+def test_custom_agent_name_normalizes_custom_names(assistant_id, expected):
+    from app.gateway.services import custom_agent_name
+
+    assert custom_agent_name(assistant_id) == expected
+
+
+@pytest.mark.parametrize("assistant_id", ["bad name!", "   ", "a/b", "../etc", "naïve"])
+def test_custom_agent_name_rejects_names_no_agent_can_have(assistant_id):
+    from app.gateway.services import custom_agent_name
+
+    with pytest.raises(ValueError, match="Invalid assistant_id"):
+        custom_agent_name(assistant_id)
+
+
 def test_build_checkpoint_state_accessor_accepts_lead_agent_assembly_factory(_stub_app_config):
     """Checkpoint reads accept the descriptor-carrying Gateway factory result."""
     from types import SimpleNamespace

@@ -318,6 +318,7 @@ def collect_review_facts(package: Path, repo_root: Path, python_executable: str)
         env=review_env(repo_root),
         capture_output=True,
         text=True,
+        encoding="utf-8",
         check=False,
     )
     if result.returncode != 0:
@@ -381,6 +382,11 @@ def review_env(repo_root: Path) -> dict[str, str]:
     harness_path = repo_root / "backend" / "packages" / "harness"
     existing_pythonpath = env.get("PYTHONPATH")
     env["PYTHONPATH"] = str(harness_path) if not existing_pythonpath else f"{harness_path}{os.pathsep}{existing_pythonpath}"
+    # The analyzer prints ensure_ascii=False JSON, so its stdio must be UTF-8
+    # regardless of the ambient locale, or non-ASCII skill facts crash the
+    # analyzer before the UTF-8-decoding parent ever sees them.
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUTF8"] = "1"
     return env
 
 

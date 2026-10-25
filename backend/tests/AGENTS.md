@@ -18,6 +18,18 @@ ownership and capture cleanup. Retain the real XLSX conversion coverage.
 
 Backend tests must preserve the runtime invariants they exercise without changing production execution topology.
 
+`test_doctor_script.py` runs a copied doctor from a temporary checkout with an
+empty-model config. Drop inherited `DEER_FLOW_*`, `PYTHONPATH` and `PYTHONHOME`
+from child processes; cover help, invalid flags, normal reporting and an
+unrelated parent config that stays untouched. Keep argument parsing at the CLI
+entry point so in-process `doctor.main()` callers do not consume pytest's argv.
+
+`test_run_terminal_protocol.py` exercises authoritative `run.terminal`
+evidence through real Worker finalization. Keep final commit authority,
+producer drain, singleton confirmation, and Seal boundaries observable. Release all storage/producer gates before bounded cleanup,
+preserve healthy controls in refusal cases, and retain Journal/Seal compatibility
+coverage. `test_terminal_event_confirmation.py` covers supported stores; use
+`TEST_POSTGRES_URI` for independent PostgreSQL pools and real advisory contention. Protocol: [Run outcome](../docs/RUN_EVENT_STREAM.md#authoritative-run-outcome).
 `test_goal_loop_stop_probe.py` runs the standalone Goal-loop reproduction through the native graph, loop middleware, worker and checkpoints. Only model responses are scripted; do not replace the Goal decision or simulate the stop-reason write.
 
 InfoQuest fetch log assertions install the real `UrlRedactionFilter` on the
@@ -342,6 +354,18 @@ against DeepSeek only with `DEER_FLOW_RUN_LIVE_TESTS=1` and
 `DEEPSEEK_TEST_API_KEY`, never in CI. Keep credentials and provider payloads out of
 committed evidence. A passing connectivity probe does not establish full agent
 compatibility; distinguish protocol assertions from observed live behavior.
+
+## Readability fallback regressions
+
+`test_web_fetch_relative_links.py` simulates degraded extraction without requiring
+Windows. The link-free article companion must retain the extractor's exact HTML
+and exclude resolved navigation links from Markdown; checking for raw `href=`
+attributes after Markdown conversion cannot detect an unwanted fallback.
+
+The authority-tag census also scans parser regexes as raw source. Classify
+Readability's ordinary HTML body tag as a reviewed test exemption, with markup
+preservation and nested framework-tag neutralization covered in
+`test_input_sanitization_middleware.py`.
 
 ## Classification request packing
 

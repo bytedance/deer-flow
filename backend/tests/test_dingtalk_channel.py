@@ -1023,22 +1023,23 @@ class TestAccessTokenValidation:
 
         _run(go())
 
-    def test_invalid_expire_in_uses_default(self):
+    @pytest.mark.parametrize("expire_in", ["invalid", float("inf"), 10**400, 0, -1, 1, 100, 299, 300, "300"])
+    def test_invalid_expire_in_uses_default(self, expire_in):
         async def go():
-            import time
             from unittest.mock import patch
 
             bus = MessageBus()
             channel = DingTalkChannel(bus, config={})
             channel._client_id = "k"
             channel._client_secret = "s"
+            call_count = 0
 
             class FakeResponse:
                 def raise_for_status(self):
                     pass
 
                 def json(self):
-                    return {"accessToken": "tok_ok", "expireIn": "invalid"}
+                    return {"accessToken": "tok_ok", "expireIn": expire_in}
 
             class FakeClient:
                 async def __aenter__(self):
@@ -1048,20 +1049,29 @@ class TestAccessTokenValidation:
                     pass
 
                 async def post(self, url, **kwargs):
+                    nonlocal call_count
+                    call_count += 1
                     return FakeResponse()
 
-            before = time.monotonic()
-            with patch("app.channels.dingtalk.httpx.AsyncClient", return_value=FakeClient()):
+            with (
+                patch("app.channels.dingtalk.httpx.AsyncClient", return_value=FakeClient()),
+                patch("app.channels.dingtalk.time.monotonic", return_value=1000.0) as clock,
+            ):
                 token = await channel._get_access_token()
+                clock.return_value = 1005.0
+                cached_token = await channel._get_access_token()
 
             assert token == "tok_ok"
-            assert channel._token_expires_at > before
+            assert cached_token == "tok_ok"
+            assert channel._token_expires_at == 7900.0
+            assert call_count == 1
 
         _run(go())
 
 
 class TestTokenCaching:
-    def test_token_is_cached_across_calls(self):
+    @pytest.mark.parametrize(("expire_in", "expected_expiry"), [(301, 1001.0), (3600, 4300.0), (7200, 7900.0)])
+    def test_token_is_cached_across_calls(self, expire_in, expected_expiry):
         async def go():
             from unittest.mock import patch
 
@@ -1077,7 +1087,7 @@ class TestTokenCaching:
                     pass
 
                 def json(self):
-                    return {"accessToken": "tok_abc", "expireIn": 7200}
+                    return {"accessToken": "tok_abc", "expireIn": expire_in}
 
             class FakeClient:
                 async def __aenter__(self):
@@ -1091,13 +1101,22 @@ class TestTokenCaching:
                     call_count += 1
                     return FakeResponse()
 
-            with patch("app.channels.dingtalk.httpx.AsyncClient", return_value=FakeClient()):
+            with (
+                patch("app.channels.dingtalk.httpx.AsyncClient", return_value=FakeClient()),
+                patch("app.channels.dingtalk.time.monotonic", return_value=1000.0) as clock,
+            ):
                 t1 = await channel._get_access_token()
+                clock.return_value = 1000.5
                 t2 = await channel._get_access_token()
+                assert channel._token_expires_at == expected_expiry
+                assert call_count == 1
+                clock.return_value = expected_expiry
+                t3 = await channel._get_access_token()
 
             assert t1 == "tok_abc"
             assert t2 == "tok_abc"
-            assert call_count == 1
+            assert t3 == "tok_abc"
+            assert call_count == 2
 
         _run(go())
 

@@ -58,6 +58,7 @@ class RunEventPattern:
 RUN_START_EVENT = RunEventDefinition("run.start", "trace")
 RUN_END_EVENT = RunEventDefinition("run.end", "outputs")
 RUN_ERROR_EVENT = RunEventDefinition("run.error", "error")
+RUN_TERMINAL_EVENT = RunEventDefinition("run.terminal", "trace")
 LLM_HUMAN_INPUT_EVENT = RunEventDefinition("llm.human.input", "message")
 LLM_AI_RESPONSE_EVENT = RunEventDefinition("llm.ai.response", "message")
 LLM_TOOL_RESULT_EVENT = RunEventDefinition("llm.tool.result", "message")
@@ -113,9 +114,11 @@ SUBAGENT_RUN_EVENT_DEFINITIONS = (
 )
 
 WORKSPACE_RUN_EVENT_DEFINITIONS = (WORKSPACE_CHANGES_EVENT,)
+WORKER_RUN_EVENT_DEFINITIONS = (RUN_TERMINAL_EVENT,)
 
 FIXED_RUN_EVENT_DEFINITIONS = (
     *JOURNAL_RUN_EVENT_DEFINITIONS,
     *SUBAGENT_RUN_EVENT_DEFINITIONS,
     *WORKSPACE_RUN_EVENT_DEFINITIONS,
+    *WORKER_RUN_EVENT_DEFINITIONS,
 )

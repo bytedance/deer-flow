@@ -251,6 +251,90 @@ describe("getServerSideUser — account_disabled contract", () => {
   });
 });
 
+// ── email contract ─────────────────────────────────────────────────
+
+// Each address is one the backend registers with EmailStr and returns from
+// /auth/me as shown (IDN domains come back in Unicode).
+const BACKEND_ACCEPTED_EMAILS = [
+  "a&b@example.com",
+  "a@b.c",
+  "a~b@example.com",
+  "josé@example.com",
+  "user@exämple.com",
+];
+
+describe("getServerSideUser — accepts every address the backend accepts", () => {
+  let saved: EnvSnapshot;
+
+  beforeEach(() => {
+    saved = snapshotEnv();
+    setEnv("DEER_FLOW_AUTH_DISABLED", undefined);
+    setEnv("NEXT_PUBLIC_STATIC_WEBSITE_ONLY", undefined);
+    rs.doMock("next/headers", () => ({
+      cookies: rs.fn(async () => ({
+        get: (name: string) =>
+          name === "access_token" ? { value: "stub-token" } : undefined,
+      })),
+    }));
+  });
+
+  afterEach(() => {
+    restoreEnv(saved);
+    rs.unstubAllGlobals();
+    rs.doUnmock("next/headers");
+  });
+
+  test.each(BACKEND_ACCEPTED_EMAILS)(
+    "authenticates a session for %s",
+    async (email) => {
+      const me = {
+        id: "u-1",
+        email,
+        system_role: "user",
+        needs_setup: false,
+        oauth_provider: null,
+        permissions: null,
+      };
+      rs.stubGlobal(
+        "fetch",
+        rs.fn(
+          async () =>
+            new Response(JSON.stringify(me), {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            }),
+        ),
+      );
+
+      const { getServerSideUser } = await loadFreshServerAuth();
+
+      await expect(getServerSideUser()).resolves.toMatchObject({
+        tag: "authenticated",
+        user: { email },
+      });
+    },
+  );
+});
+
+describe("userSchema email", () => {
+  test.each(BACKEND_ACCEPTED_EMAILS)("keeps %s verbatim", (email) => {
+    const parsed = userSchema.parse({
+      id: "1",
+      email,
+      system_role: "user",
+    });
+
+    expect(parsed.email).toBe(email);
+  });
+
+  test("still rejects an empty or missing email", () => {
+    expect(() =>
+      userSchema.parse({ id: "1", email: "", system_role: "user" }),
+    ).toThrow();
+    expect(() => userSchema.parse({ id: "1", system_role: "user" })).toThrow();
+  });
+});
+
 // ── system_role contract (RFC #4063 gap 2) ─────────────────────────
 
 describe("userSchema system_role", () => {
