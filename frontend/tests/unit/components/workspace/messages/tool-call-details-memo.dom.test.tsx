@@ -18,6 +18,8 @@ rs.mock("@/components/ui/button", () => ({
 import { ToolCallDetails } from "@/components/workspace/messages/tool-call-details";
 import { I18nProvider } from "@/core/i18n/context";
 
+type ToolMessageView = Extract<Message, { type: "tool" }>;
+
 const args = { query: "deer-flow" };
 
 function result(content: string) {
@@ -26,10 +28,10 @@ function result(content: string) {
     type: "tool",
     tool_call_id: "call-1",
     content,
-  } as unknown as Message;
+  } as unknown as ToolMessageView;
 }
 
-function Parent({ resultMessage }: { resultMessage?: Message }) {
+function Parent({ resultMessage }: { resultMessage?: ToolMessageView }) {
   const [, setTick] = useState(0);
   return (
     <>
@@ -46,7 +48,7 @@ function Parent({ resultMessage }: { resultMessage?: Message }) {
   );
 }
 
-function mount(resultMessage?: Message) {
+function mount(resultMessage?: ToolMessageView) {
   return render(
     <I18nProvider initialLocale="en-US">
       <Parent resultMessage={resultMessage} />
