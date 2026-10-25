@@ -689,6 +689,18 @@ export interface Translations {
     cancel: string;
     retryItem: string;
     exportResults: string;
+    viewResult: string;
+    resultTitle: string;
+    resultDescription: string;
+    report: string;
+    evidence: string;
+    noEvidence: string;
+    acceptance: string;
+    noReport: string;
+    loadResultFailed: string;
+    truncated: string;
+    omittedEvidence: (count: number) => string;
+    pagesLabel: string;
     viewItems: string;
     hideItems: string;
     itemsFailed: string;

@@ -435,3 +435,14 @@ freeze/drain → singleton confirmation → Receipt → Seal → barrier release
 Force close invalidates Receipt bounds. Preserve ownership checks, four-state
 confirmation, and partial evidence on failure without changing business status
 or SSE liveness. See [Run outcome protocol](../../../../docs/RUN_EVENT_STREAM.md#authoritative-run-outcome).
+Recovery uses a non-replaceable one-shot target, writes the zero-delivery receipt
+before `run.terminal`, and passes a Run-lifecycle guard into both singleton
+writes. Stores evaluate that guard under the same store mutation fence as
+event deletion; completed thread deletion wins over a stale recovery target.
+DB recovery guards use `RunRepository.get_in_session` when both stores share
+an engine, retaining that fence without a second pool checkout. Different engines
+and overridden Run lookups retain their ordinary read path. Plain callable guards
+remain supported; they must not acquire another connection from the writer's pool.
+Memory guard/deletion locks are per-thread, so a slow guard cannot block another
+thread. Coverage: `tests/test_recovery_terminal_pool.py` (PostgreSQL via
+`TEST_POSTGRES_URI`).
