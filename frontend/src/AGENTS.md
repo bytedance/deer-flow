@@ -90,18 +90,17 @@ Tests: `html-assets.dom.test.ts`, `artifact-file-preview.dom.test.tsx`,
    while a permanent rejection or exhausted five-attempt budget is shown as
    stopped rather than implying that retries will continue.
    Explicit durable native-subagent batches use `core/subagent-batches` and
-   `ThreadSubagentBatches`. `/api/features` reports SQL-repository availability
-   separately from the startup worker. A running worker exposes the trigger on
-   both default and Custom Agent chat pages; a stopped worker keeps threads with
-   durable history visible in read-only mode for inspection and JSONL export,
-   while deployments with neither a worker nor history keep the trigger hidden.
-   The panel renders bounded progress and incrementally paged item previews, controls pause/resume/cancel,
-   retries failed items, and exports JSONL. Worker-dependent mutations stay
-   disabled in read-only history mode, and persisted progress is normalized to
-   a bounded percentage before reaching the UI primitive. Item pagination uses a
-   fixed page size and an explicit load-more control; full results remain available
-   only through JSONL export. The panel must not infer batch mode from prompt text
-   or inject the complete result set into chat state.
+   `ThreadSubagentBatches`. `/api/features` separates SQL-repository availability
+   from startup worker state. Show the trigger on default and Custom Agent chats
+   when the worker runs, or read-only when durable history exists; hide it otherwise.
+   Normalize persisted progress to bounded percentages before rendering. Use fixed
+   item-preview page sizes with load-more; full results require JSONL export.
+   Gate pause/resume/cancel and failed-item retries on the worker.
+   Never infer batch mode from prompts or inject full results into chat state.
+   Review citations use only the selected persisted snapshot. Poll open details
+   until their own response is terminal, independently of compact-list status;
+   stop on close. Show omitted counts even without sources; localize page labels.
+   Real-hook/HTTP tests: `thread-subagent-batch-review.dom.test.tsx`.
    Capability Center > Plugins > Lark uses a local generation only to suppress stale React
    callbacks; server-issued Lark flow generations must be passed through every
    config/auth completion and across switch-or-register to authorization chains
@@ -247,11 +246,6 @@ outside code/images. Dialog excerpts render as plain text, never HTML or nested
 Markdown. Source records retain retrieval-time evidence, not live documents.
 Resolve knowledge destinations before testing the label in message and artifact
 link renderers: Sources lists use ordinary titles without a `citation:` prefix.
-
-Batch review scopes citations to the selected persisted snapshot. Poll an open
-detail until its own response is terminal, independently of compact-list status;
-stop on close. Show omitted counts with empty source lists and localize page labels.
-Real-hook/HTTP-boundary coverage: `thread-subagent-batch-review.dom.test.tsx`.
 
 Custom Agents save edited `knowledge_scope` defaults; removing knowledge access
 clears them atomically. `knowledgeScopeToSelection` keeps IDs, using IDs for
