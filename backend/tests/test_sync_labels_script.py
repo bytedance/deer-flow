@@ -21,14 +21,14 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # The script imports pyyaml at module load; the stub keeps these tests hermetic
 # (pyyaml is not a backend dependency — the Makefile runs the script with
 # `uv run --with pyyaml`).
-STUB_YAML = '''\
+STUB_YAML = """\
 def safe_load(text):
     return {
         "labels": [
             {"name": "test-label", "color": "#ff0000", "description": "中文 描述"},
         ]
     }
-'''
+"""
 
 LABELS_YAML = """\
 labels:
@@ -37,9 +37,7 @@ labels:
     description: "中文 描述"
 """
 
-pytestmark = pytest.mark.skipif(
-    os.name == "nt", reason="the stub gh is a POSIX shell script"
-)
+pytestmark = pytest.mark.skipif(os.name == "nt", reason="the stub gh is a POSIX shell script")
 
 
 @pytest.fixture
@@ -84,9 +82,7 @@ def _run(script_checkout: Path, tmp_path: Path, bin_dir: Path | None, *args: str
     )
 
 
-def test_success_path_emits_utf8_glyphs_into_non_utf8_stdout(
-    script_checkout: Path, tmp_path: Path
-):
+def test_success_path_emits_utf8_glyphs_into_non_utf8_stdout(script_checkout: Path, tmp_path: Path):
     bin_dir = _stub_gh(tmp_path, "exit 0")
 
     result = _run(script_checkout, tmp_path, bin_dir, "--repo", "octo/demo")
@@ -94,14 +90,12 @@ def test_success_path_emits_utf8_glyphs_into_non_utf8_stdout(
     # Before the fix this crashed with UnicodeEncodeError after the label was
     # already created on GitHub.
     assert result.returncode == 0, result.stderr
-    assert "✓ test-label".encode("utf-8") in result.stdout
-    assert "Done — 1 labels in sync.".encode("utf-8") in result.stdout
+    assert "✓ test-label".encode() in result.stdout
+    assert "Done — 1 labels in sync.".encode() in result.stdout
     assert b"UnicodeEncodeError" not in result.stderr
 
 
-def test_gh_failure_decodes_utf8_and_reports_gracefully(
-    script_checkout: Path, tmp_path: Path
-):
+def test_gh_failure_decodes_utf8_and_reports_gracefully(script_checkout: Path, tmp_path: Path):
     bin_dir = _stub_gh(tmp_path, "printf '%s\\n' '中文 失败' >&2\nexit 1")
 
     result = _run(script_checkout, tmp_path, bin_dir, "--repo", "octo/demo")
@@ -109,8 +103,8 @@ def test_gh_failure_decodes_utf8_and_reports_gracefully(
     # Before the fix the UTF-8 stderr was decoded with the host codec and
     # raised UnicodeDecodeError instead of printing the failure line.
     assert result.returncode == 1, result.stdout
-    assert "✗ test-label: 中文 失败".encode("utf-8") in result.stderr
-    assert "1 label(s) failed to sync".encode("utf-8") in result.stderr
+    assert "✗ test-label: 中文 失败".encode() in result.stderr
+    assert b"1 label(s) failed to sync" in result.stderr
     assert b"Traceback" not in result.stderr
     assert b"UnicodeDecodeError" not in result.stderr
 
@@ -121,4 +115,4 @@ def test_dry_run_works_under_ascii_stdout(script_checkout: Path, tmp_path: Path)
 
     assert result.returncode == 0, result.stderr
     assert b"[dry-run]" in result.stdout
-    assert "Done — 1 labels in sync.".encode("utf-8") in result.stdout
+    assert "Done — 1 labels in sync.".encode() in result.stdout
