@@ -10,7 +10,10 @@ stored verbatim; code files keep the translation.
 
 from __future__ import annotations
 
+import builtins
 import os
+import shutil
+import threading
 from pathlib import Path
 
 import pytest
@@ -107,3 +110,92 @@ def test_executable_content_still_translates_paths(tmp_path, name, content):
     assert Path(os.path.realpath(tmp_path)).as_posix() in stored
     # The reverse translation keeps the agent's view consistent with what it wrote.
     assert sandbox.read_file(virtual) == content
+
+
+@pytest.mark.parametrize("name", ["report.awk", "cleanup.sed", "plugin.lua", "plot.r", "run.tcl", "REPORT.AWK"])
+def test_interpreter_script_suffixes_translate_container_paths(tmp_path, name):
+    """``awk -f`` and friends open the script itself, so its container paths need host paths."""
+    sandbox = _sandbox(tmp_path)
+    content = 'BEGIN { while ((getline line < "/mnt/user-data/outputs/data.txt") > 0) print line }\n'
+    virtual = f"/mnt/user-data/workspace/{name}"
+
+    sandbox.write_file(virtual, content)
+
+    stored = (tmp_path / "workspace" / name).read_text(encoding="utf-8")
+    assert "/mnt/user-data" not in stored
+    assert Path(os.path.realpath(tmp_path)).as_posix() in stored
+    assert sandbox.read_file(virtual) == content
+
+
+@pytest.mark.skipif(shutil.which("awk") is None, reason="awk is not installed")
+def test_awk_script_written_through_the_sandbox_still_runs(tmp_path):
+    """An AWK program that opens a container path must run through ``execute_command``."""
+    sandbox = _sandbox(tmp_path)
+    (tmp_path / "outputs" / "data.txt").write_text("alpha\nbeta\n", encoding="utf-8")
+    sandbox.write_file(
+        "/mnt/user-data/workspace/report.awk",
+        'BEGIN { while ((getline line < "/mnt/user-data/outputs/data.txt") > 0) print line }\n',
+    )
+
+    output = sandbox.execute_command("awk -f /mnt/user-data/workspace/report.awk /dev/null", timeout=20)
+
+    assert "alpha" in output
+    assert "beta" in output
+
+
+def test_append_does_not_read_the_destination_before_classifying(tmp_path, monkeypatch):
+    """A ``.py`` suffix already settles it, so the append must not open the file for reading."""
+    sandbox = _sandbox(tmp_path)
+    virtual = "/mnt/user-data/outputs/events.py"
+    sandbox.write_file(virtual, "print('ready')\n")
+    destination = os.path.realpath(tmp_path / "outputs" / "events.py")
+    real_open = builtins.open
+
+    def guard_reads(file, mode="r", *args, **kwargs):
+        reads_only = not set(mode) & set("wa+")
+        if isinstance(file, str) and reads_only and os.path.realpath(file) == destination:
+            raise AssertionError("append opened the destination for reading")
+        return real_open(file, mode, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", guard_reads)
+
+    sandbox.write_file(virtual, "print('appended')\n", append=True)
+
+    assert (tmp_path / "outputs" / "events.py").read_text(encoding="utf-8") == "print('ready')\nprint('appended')\n"
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="named pipes are a POSIX primitive")
+def test_append_to_a_named_pipe_does_not_block_while_classifying(tmp_path):
+    """A suffix settles classification, so an append must not read the destination first.
+
+    Reading a FIFO waits for the other end and for data; the append used to
+    complete as soon as a reader was connected.
+    """
+    sandbox = _sandbox(tmp_path)
+    fifo = tmp_path / "outputs" / "events.py"
+    os.mkfifo(fifo)
+    received: list[str] = []
+
+    def read_pipe() -> None:
+        with open(fifo, encoding="utf-8") as reader:
+            received.append(reader.read())
+
+    reader_thread = threading.Thread(target=read_pipe, daemon=True)
+    reader_thread.start()
+
+    errors: list[BaseException] = []
+
+    def append_pipe() -> None:
+        try:
+            sandbox.write_file("/mnt/user-data/outputs/events.py", "ready\n", append=True)
+        except BaseException as exc:  # noqa: BLE001 - surfaced by the assertion below
+            errors.append(exc)
+
+    writer_thread = threading.Thread(target=append_pipe, daemon=True)
+    writer_thread.start()
+    writer_thread.join(5)
+
+    assert not writer_thread.is_alive(), "append blocked while classifying the destination"
+    assert errors == []
+    reader_thread.join(5)
+    assert received == ["ready\n"]
