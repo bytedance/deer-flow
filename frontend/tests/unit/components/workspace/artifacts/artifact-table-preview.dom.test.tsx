@@ -84,6 +84,31 @@ describe("ArtifactTablePreview", () => {
       }).value,
     ).toBe(longText);
   });
+  it("counts code points when previewing a long field", () => {
+    // 120 code points but 121 UTF-16 units: this fits, so no expand control.
+    const fits = `${"a".repeat(119)}😀`;
+    // 121 code points; a UTF-16 cut at 120 lands inside the surrogate pair.
+    const overflows = `${"a".repeat(118)}😀zz`;
+    state.result.rows = [
+      ["ID", "Overflows", "Fits"],
+      ["00123", overflows, fits],
+    ];
+    state.result.columnCount = 3;
+    mount();
+
+    expect(screen.getByRole("cell", { name: fits })).toBeTruthy();
+    expect(
+      screen.queryByRole("button", { name: "View cell: row 1, column 3" }),
+    ).toBeNull();
+
+    const preview = screen.getByRole("button", {
+      name: "View cell: row 1, column 2",
+    });
+    expect(preview.textContent).toBe(`${"a".repeat(118)}😀z`);
+    expect(preview.textContent).not.toMatch(
+      /[\uD800-\uDBFF](?![\uDC00-\uDFFF])/,
+    );
+  });
   it("offers an explicit retry without displaying stale data on failure", () => {
     state.status = "error";
     mount();

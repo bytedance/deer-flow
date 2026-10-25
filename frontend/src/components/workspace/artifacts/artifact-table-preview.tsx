@@ -184,9 +184,13 @@ function TablePreview({
                     </th>
                     {columns.map((column) => {
                       const value = row[column];
+                      // Budget by code points: a UTF-16 cut can split an
+                      // astral character and leave a lone surrogate in the cell.
+                      const characters =
+                        value === undefined ? [] : Array.from(value);
                       const expandable =
                         value !== undefined &&
-                        (value.length > 120 || /[\r\n]/.test(value));
+                        (characters.length > 120 || /[\r\n]/.test(value));
                       return (
                         <td
                           key={column}
@@ -217,7 +221,7 @@ function TablePreview({
                                   setCopyStatus("");
                                 }}
                               >
-                                {value.slice(0, 120)}
+                                {characters.slice(0, 120).join("")}
                               </button>
                             ) : (
                               <span className="whitespace-pre" title={value}>
