@@ -182,3 +182,11 @@ async def test_read_file_chunks_happy_path_unchanged(tmp_path, monkeypatch) -> N
 
     assert chunks == [b"abcd", b"efgh"]
     assert calls[0] == "_open" and calls[-1] == "close"
+
+
+async def test_missing_path_raises_file_not_found(tmp_path) -> None:
+    """Pins the open-failure path: the error surfaces as-is and the cleanup
+    skips the close (``retained`` is empty — no handle was ever opened)."""
+    with pytest.raises(FileNotFoundError):
+        async for _ in read_file_chunks(tmp_path / "absent.bin", chunk_size=4):
+            pass
