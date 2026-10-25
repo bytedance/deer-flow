@@ -1641,9 +1641,10 @@ async def update_thread_state(thread_id: ThreadId, body: ThreadStateUpdateReques
         checkpoint_thread_id = body.checkpoint.get("thread_id")
         if checkpoint_thread_id is not None and str(checkpoint_thread_id) != thread_id:
             raise HTTPException(status_code=400, detail="checkpoint thread_id does not match request thread_id")
-        raw_checkpoint_id = body.checkpoint.get("checkpoint_id")
-        if raw_checkpoint_id:
-            checkpoint_id = str(raw_checkpoint_id)
+        # The object selector is authoritative, including an explicitly empty id.
+        if "checkpoint_id" in body.checkpoint:
+            raw_checkpoint_id = body.checkpoint.get("checkpoint_id")
+            checkpoint_id = str(raw_checkpoint_id) if raw_checkpoint_id is not None else None
         raw_checkpoint_ns = body.checkpoint.get("checkpoint_ns")
         if raw_checkpoint_ns is not None:
             checkpoint_ns = str(raw_checkpoint_ns)
@@ -1669,13 +1670,14 @@ async def update_thread_state(thread_id: ThreadId, body: ThreadStateUpdateReques
     mutation_node = body.as_node or "manual_state_update"
     # Resolve through the shared boundary (thread metadata -> assistant_id ->
     # effective schema) so extension middleware channels stay writable.
-    accessor, read_config = await build_thread_checkpoint_state_mutation_accessor(
-        request,
-        thread_id=thread_id,
-        as_node=mutation_node,
-        checkpoint_id=checkpoint_id,
-        checkpoint_ns=checkpoint_ns,
-    )
+    mutation_kwargs = {
+        "thread_id": thread_id,
+        "as_node": mutation_node,
+        "checkpoint_id": checkpoint_id,
+    }
+    if checkpoint_ns:
+        mutation_kwargs["checkpoint_ns"] = checkpoint_ns
+    accessor, read_config = await build_thread_checkpoint_state_mutation_accessor(request, **mutation_kwargs)
     writable_channels = graph_writable_channels(getattr(accessor, "graph", None))
     if writable_channels is not None:
         unknown_fields = sorted(set(values) - writable_channels)
