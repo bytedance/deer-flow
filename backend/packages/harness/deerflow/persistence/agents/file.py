@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import logging
 import shutil
+import sys
 import tempfile
+import time
 from collections.abc import Hashable
 from pathlib import Path
 from typing import Any
@@ -37,6 +39,7 @@ from deerflow.persistence.agents.base import (
     parse_agent_config,
 )
 from deerflow.runtime.user_context import DEFAULT_USER_ID
+from deerflow.utils.atomic_write import retry_windows_atomic_operation
 
 logger = logging.getLogger(__name__)
 
@@ -253,11 +256,16 @@ class FileAgentStore(AgentStore):
                 staged.append(soul_tmp)
                 pending.append((soul_tmp, agent_dir / SOUL_FILENAME))
             for tmp, target in pending:
-                tmp.replace(target)
+                _replace_staged_file(tmp, target)
                 staged.remove(tmp)
         finally:
             for tmp in staged:
                 tmp.unlink(missing_ok=True)
+
+
+def _replace_staged_file(source: Path, target: Path) -> None:
+    """Keep atomic replacement when a Windows reader briefly denies deletion."""
+    retry_windows_atomic_operation(lambda: source.replace(target), windows=sys.platform == "win32", sleep=time.sleep)
 
 
 def _stage_temp(target: Path, text: str) -> Path:
