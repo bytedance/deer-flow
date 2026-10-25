@@ -702,6 +702,45 @@ def test_thread_recorded_with_an_invalid_assistant_id_stays_readable(isolated_ap
         assert [entry["values"]["title"] for entry in history.json()] == ["Legacy thread"]
 
 
+@pytest.mark.parametrize(
+    "assistant_id,expected",
+    [("bad name!", None), ("   ", None), ("a/b", None), ("../etc", None), (None, None), ("", ""), ("lead_agent", "lead_agent"), ("Research_Agent", "Research_Agent"), ("ghost-agent", "ghost-agent")],
+)
+def test_branch_inherits_only_a_valid_assistant_id(isolated_app, assistant_id, expected):
+    """Branches must not copy invalid legacy ids into a newly created metadata row."""
+    from starlette.testclient import TestClient
+
+    with TestClient(isolated_app, raise_server_exceptions=False) as client:
+        csrf_token = _register_user(client)
+        user_id = client.get("/api/v1/auth/me").json()["id"]
+        thread_id = str(uuid.uuid4())
+        client.portal.call(partial(isolated_app.state.thread_store.create, thread_id, assistant_id=assistant_id, user_id=user_id))
+        state = {
+            "messages": [HumanMessage(content="hello", id="legacy-human"), AIMessage(content="answer", id="legacy-answer")],
+            "title": "Legacy thread",
+        }
+        client.portal.call(partial(_write_checkpoint, isolated_app.state.checkpointer, thread_id=thread_id, state=state))
+
+        branch = client.post(
+            f"/api/threads/{thread_id}/branches",
+            json={"message_id": "legacy-answer"},
+            headers={"X-CSRF-Token": csrf_token},
+        )
+
+        assert branch.status_code == 200, branch.text
+        branch_id = branch.json()["thread_id"]
+        source_record = client.portal.call(partial(isolated_app.state.thread_store.get, thread_id, user_id=user_id))
+        branch_record = client.portal.call(partial(isolated_app.state.thread_store.get, branch_id, user_id=user_id))
+        assert source_record["assistant_id"] == assistant_id
+        assert branch_record["assistant_id"] == expected
+        assert branch_record["user_id"] == user_id
+        assert branch.json()["parent_thread_id"] == thread_id
+
+        branch_state = client.get(f"/api/threads/{branch_id}/state")
+        assert branch_state.status_code == 200, branch_state.text
+        assert [message["id"] for message in branch_state.json()["values"]["messages"]] == ["legacy-human", "legacy-answer"]
+
+
 def test_stream_run_executes_real_lead_agent_setup_agent_business_path(isolated_app, isolated_deer_flow_home: Path):
     """A runtime stream should execute real lead-agent business code and tools."""
     from starlette.testclient import TestClient

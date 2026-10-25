@@ -1213,11 +1213,19 @@ async def _branch_thread_with_reservation(
         logger.exception("Failed to write branch checkpoint for thread %s", sanitize_log_param(new_thread_id))
         raise HTTPException(status_code=500, detail="Failed to create branch") from None
 
+    branch_assistant_id = source_record.get("assistant_id")
+    try:
+        custom_agent_name(branch_assistant_id)
+    except ValueError:
+        # Read compatibility for legacy records must not copy an invalid id
+        # into a new thread. Preserve every valid spelling as create does.
+        branch_assistant_id = None
+
     async def _write_branch_row(project_id: str | None) -> None:
         try:
             await thread_store.create(
                 new_thread_id,
-                assistant_id=source_record.get("assistant_id"),
+                assistant_id=branch_assistant_id,
                 display_name=display_name,
                 metadata=branch_metadata,
                 project_id=project_id,

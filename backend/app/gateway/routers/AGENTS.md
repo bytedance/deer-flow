@@ -1,5 +1,9 @@
 # Router contracts
 
+Branch metadata inherits valid `assistant_id` values verbatim. Validate with
+`custom_agent_name` and clear invalid legacy values to null in the new row;
+leave the source record unchanged.
+
 Shared scheduled-task update validation preserves an unchanged future `once`
 instant on a live task inside `scheduler.min_once_delay_seconds`; new/changed
 instants and terminal reactivation still enforce the minimum delay.
