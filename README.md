@@ -535,8 +535,10 @@ Gateway runs use the top-level `recursion_limit` in `config.yaml` when an API
 request does not provide one. The default is `100`; valid per-request values
 take precedence, and `max_recursion_limit` (default `1000`) caps both. Changes
 apply to the next run without restarting the Gateway. This top-level setting
-applies to Gateway API runs; IM channel and embedded `DeerFlowClient` runs
-retain their own defaults and per-call override paths.
+applies to Gateway API and IM channel runs. A `recursion_limit` in an IM
+channel's `session.config` takes precedence, and GitHub channel runs keep
+their own floor. Embedded `DeerFlowClient` runs retain their own defaults and
+per-call override paths.
 
 A custom frontend can add an optional `context.client` to a Gateway run request:
 a client name, capabilities such as `artifacts` or `charts`, and display
@@ -1190,8 +1192,6 @@ channels:
   # Optional: global session defaults for all mobile channels
   session:
     assistant_id: lead_agent  # or a custom agent name; custom agents are routed via lead_agent + agent_name
-    config:
-      recursion_limit: 100
     context:
       thinking_enabled: true
       is_plan_mode: false
