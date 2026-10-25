@@ -49,6 +49,23 @@ def test_artifact_edit_keeps_the_publish_error_when_cleanup_fails(tmp_path, monk
     assert target.read_text(encoding="utf-8") == "original"
 
 
+def test_artifact_edit_success_is_quiet(tmp_path, caplog):
+    """The published path must not warn: its temp name is already gone."""
+    from app.gateway.routers import artifacts
+
+    target = tmp_path / "note.txt"
+    target.write_text("original", encoding="utf-8")
+    file_stat = os.stat(target)
+    caplog.clear()
+
+    with caplog.at_level("WARNING", logger="deerflow.utils.atomic_write"):
+        artifacts._replace_artifact_atomically(target, b"replacement", file_stat)
+
+    assert target.read_bytes() == b"replacement"
+    assert [p.name for p in tmp_path.iterdir() if p.name.startswith(artifacts._ARTIFACT_EDIT_TEMP_PREFIX)] == []
+    assert caplog.text == ""
+
+
 def test_lark_flow_state_write_keeps_the_write_error_when_cleanup_fails(tmp_path, monkeypatch, real_unlink):
     from deerflow.integrations import lark_cli
 
