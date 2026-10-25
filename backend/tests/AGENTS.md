@@ -18,6 +18,12 @@ ownership and capture cleanup. Retain the real XLSX conversion coverage.
 
 Backend tests must preserve the runtime invariants they exercise without changing production execution topology.
 
+`test_doctor_script.py` runs a copied doctor from a temporary checkout with an
+empty-model config. Drop inherited `DEER_FLOW_*`, `PYTHONPATH` and `PYTHONHOME`
+from child processes; cover help, invalid flags, normal reporting and an
+unrelated parent config that stays untouched. Keep argument parsing at the CLI
+entry point so in-process `doctor.main()` callers do not consume pytest's argv.
+
 `test_run_terminal_protocol.py` exercises authoritative `run.terminal`
 evidence through real Worker finalization. Keep final commit authority,
 producer drain, singleton confirmation, and Seal boundaries observable. Release all storage/producer gates before bounded cleanup,

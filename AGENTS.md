@@ -44,6 +44,10 @@ redirect `make dev`'s port wait. Nginx's IPv4+IPv6 `default_server` and Gateway'
 Require explicit bind addresses for new published ports;
 `backend/tests/test_compose_default_bind_host.py` pins every service in both files.
 
+Provisioner PVC mode declares `USERDATA_PVC_NAME` once as `user-data`; extra and
+Lark broker credential mounts reuse it with their existing subPaths and read-only
+flags. Keep credential mounts broker-only and keep distinct volumes in hostPath mode.
+
 ## Repository Map
 
 ```
@@ -226,8 +230,8 @@ Repo-wide conventions:
   Public skill script regressions live in `tests/skills/` and run in Skill Review CI
   independently of package review. Exercise dependency fallbacks with the optional
   import unavailable and mock HTTP transport to keep tests offline.
-  Video- and podcast-generation CLI failures must exit non-zero and write diagnostics to stderr;
-  keep success output on stdout and test the CLI boundary with offline transport.
+  Video, podcast, and chart-visualization CLI failures exit non-zero;
+  diagnostics on stderr, success URLs on stdout; test offline.
 - **Before pushing** — backend `make format`, frontend `pnpm check`.
   Backend CI enforces `ruff format --check`.
 - **Skill text encoding** — use explicit UTF-8 for textual skill resources.
