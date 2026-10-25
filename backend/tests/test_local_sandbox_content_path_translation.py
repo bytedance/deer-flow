@@ -165,15 +165,20 @@ def test_append_does_not_read_the_destination_before_classifying(tmp_path, monke
 
 
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="named pipes are a POSIX primitive")
-def test_append_to_a_named_pipe_does_not_block_while_classifying(tmp_path):
-    """A suffix settles classification, so an append must not read the destination first.
+@pytest.mark.parametrize("name", ["events.py", "events"], ids=["suffix-settles-the-answer", "extensionless-shebang-sniff"])
+def test_append_to_a_named_pipe_does_not_block_while_classifying(tmp_path, name):
+    """Classification must not wait on the destination, whichever shape settles it.
 
-    Reading a FIFO waits for the other end and for data; the append used to
-    complete as soon as a reader was connected.
+    A ``.py`` suffix settles the answer with no I/O; an extensionless name
+    reaches the shebang sniff, which has to open the destination without
+    waiting and reject the non-regular handle before reading. Reading a FIFO
+    waits for the other end and for data; the append used to complete as soon
+    as a reader was connected.
     """
     sandbox = _sandbox(tmp_path)
-    fifo = tmp_path / "outputs" / "events.py"
+    fifo = tmp_path / "outputs" / name
     os.mkfifo(fifo)
+    virtual = f"/mnt/user-data/outputs/{name}"
     received: list[str] = []
 
     def read_pipe() -> None:
@@ -187,7 +192,7 @@ def test_append_to_a_named_pipe_does_not_block_while_classifying(tmp_path):
 
     def append_pipe() -> None:
         try:
-            sandbox.write_file("/mnt/user-data/outputs/events.py", "ready\n", append=True)
+            sandbox.write_file(virtual, "ready\n", append=True)
         except BaseException as exc:  # noqa: BLE001 - surfaced by the assertion below
             errors.append(exc)
 
