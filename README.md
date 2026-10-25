@@ -2182,7 +2182,8 @@ Gateway-lifetime services, and eager FastAPI HTTP routers. The contract package 
 framework dependencies; extensions must declare FastAPI, LangChain, LangGraph, or other
 libraries they import.
 Cancelled subagents report `aborted` to task-lifecycle hooks after stream cleanup;
-hard timeouts retain their failure outcome.
+synchronous timeouts remain failures, and background hard timeouts retain their
+failure outcome.
 The [fetched-content screening example](examples/deerflow-extension-jev-screening/README.md)
 contributes one such middleware at the visible tool position. After operator opt-in it
 classifies the sanitized text a remote tool result shows the model, PII-redacted when

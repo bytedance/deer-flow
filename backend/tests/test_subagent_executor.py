@@ -7022,17 +7022,136 @@ class TestSubagentCancellationLifecycle:
         from deerflow.extensions.registry import ExtensionRegistry
 
         starts, stops = [], []
+        stopped = threading.Event()
 
         async def on_start(app_store, task_store, info):
             starts.append(info)
 
         async def on_stop(app_store, task_store, info, outcome):
             stops.append((info, outcome))
+            stopped.set()
 
         registry = ExtensionRegistry()
         with registry.attributed_to("test:lifecycle"):
             registry.task_lifecycle(SimpleNamespace(on_task_start=on_start, on_task_stop=on_stop))
-        return SimpleNamespace(extensions=registry.build(), starts=starts, stops=stops)
+        return SimpleNamespace(extensions=registry.build(), starts=starts, stops=stops, stopped=stopped)
+
+    @pytest.mark.parametrize("shared_holder", [False, True])
+    @pytest.mark.parametrize("stage", ["setup", "stream"])
+    def test_sync_timeout_preserves_failure_before_cancellation(self, classes, base_config, lifecycle, monkeypatch, shared_holder, stage):
+        from dataclasses import replace
+
+        from deerflow_extension_api import TaskOutcome
+
+        module = importlib.import_module("deerflow.subagents.executor")
+        entered, closed = threading.Event(), threading.Event()
+        worker_holders = []
+        executor = classes["SubagentExecutor"](config=replace(base_config, timeout_seconds=0.2), tools=[], run_id="run", extensions=lifecycle.extensions)
+        holder = classes["SubagentResult"](task_id="sync-timeout", trace_id="trace", status=classes["SubagentStatus"].PENDING) if shared_holder else None
+        original_execute = executor._aexecute
+        original_submit = module._submit_to_isolated_loop_in_context
+
+        async def initial_state(task):
+            if stage == "setup":
+                entered.set()
+                await asyncio.Event().wait()
+            return {}, [], None
+
+        async def stream(*args, **kwargs):
+            try:
+                entered.set()
+                await asyncio.Event().wait()
+                yield {}
+            finally:
+                closed.set()
+
+        async def track_worker(task, result_holder=None):
+            worker_holders.append(result_holder)
+            return await original_execute(task, result_holder)
+
+        def submit(context, factory):
+            future = original_submit(context, factory)
+            original_cancel = future.cancel
+
+            def cancel_and_drain():
+                cancelled = original_cancel()
+                # Force cancellation handling to finish before execute() catches
+                # the timeout, so a shared-holder race cannot pass by scheduling luck.
+                assert lifecycle.stopped.wait(timeout=5)
+                return cancelled
+
+            monkeypatch.setattr(future, "cancel", cancel_and_drain)
+            return future
+
+        monkeypatch.setattr(executor, "_build_initial_state", initial_state)
+        monkeypatch.setattr(executor, "_create_agent", AsyncMock(return_value=SimpleNamespace(astream=stream)))
+        monkeypatch.setattr(executor, "_aexecute", track_worker)
+        monkeypatch.setattr(module, "_submit_to_isolated_loop_in_context", submit)
+        monkeypatch.setattr(module, "build_tracing_callbacks", lambda: [])
+        monkeypatch.setattr(module, "inject_langfuse_metadata", lambda *args, **kwargs: None)
+        try:
+            result = executor.execute("synthetic sync timeout", holder)
+            assert entered.is_set()
+            assert lifecycle.stopped.wait(timeout=5)
+            assert result.status is classes["SubagentStatus"].FAILED
+            assert result.error == ""  # Preserve the synchronous TimeoutError result.
+            assert lifecycle.stops == [(lifecycle.starts[0], TaskOutcome.FAILED)]
+            assert worker_holders == [result]
+            assert result.task_id == lifecycle.starts[0].task_id
+            assert not shared_holder or result is holder
+            assert stage == "setup" or closed.is_set()
+            assert result.execution_done_event.wait(timeout=5)
+        finally:
+            module._shutdown_isolated_subagent_loop()
+
+    @pytest.mark.parametrize("shared_holder", [False, True])
+    def test_sync_timeout_returns_failure_before_stream_cleanup(self, classes, base_config, lifecycle, monkeypatch, shared_holder):
+        from dataclasses import replace
+
+        from deerflow_extension_api import TaskOutcome
+
+        from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
+        from deerflow.subagents.capacity import SubagentExecutionCapacity
+
+        module = importlib.import_module("deerflow.subagents.executor")
+        closing, release_close = threading.Event(), threading.Event()
+        capacity = SubagentExecutionCapacity(SubagentRuntimeConfig(max_running=1))
+
+        class Stream:
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                await asyncio.Event().wait()
+
+            async def aclose(self):
+                closing.set()
+                while not release_close.is_set():
+                    await asyncio.sleep(0.001)
+
+        executor = classes["SubagentExecutor"](config=replace(base_config, timeout_seconds=0.2), tools=[], run_id="run", extensions=lifecycle.extensions, execution_capacity=capacity)
+        holder = classes["SubagentResult"](task_id="slow-close", trace_id="trace", status=classes["SubagentStatus"].PENDING) if shared_holder else None
+        monkeypatch.setattr(executor, "_build_initial_state", AsyncMock(return_value=({}, [], None)))
+        monkeypatch.setattr(executor, "_create_agent", AsyncMock(return_value=SimpleNamespace(astream=lambda *args, **kwargs: Stream())))
+        monkeypatch.setattr(module, "build_tracing_callbacks", lambda: [])
+        monkeypatch.setattr(module, "inject_langfuse_metadata", lambda *args, **kwargs: None)
+        try:
+            result = executor.execute("synthetic slow cleanup", holder)
+            assert closing.wait(timeout=5)
+            assert result.status is classes["SubagentStatus"].FAILED
+            assert result.error == ""
+            assert not shared_holder or result is holder
+            assert not result.execution_done_event.is_set()
+            assert capacity.snapshot().running == 1
+            assert lifecycle.stops == []
+            release_close.set()
+            assert result.execution_done_event.wait(timeout=5)
+            assert result.status is classes["SubagentStatus"].FAILED
+            assert capacity.snapshot().running == 0
+            assert lifecycle.stops == [(lifecycle.starts[0], TaskOutcome.FAILED)]
+        finally:
+            release_close.set()
+            module._shutdown_isolated_subagent_loop()
 
     @pytest.mark.parametrize("mode", ["setup_cancel", "stream_cancel", "cooperative", "success", "failure", "timeout"])
     def test_background_outcome_matches_terminal_status(self, classes, base_config, lifecycle, monkeypatch, mode):

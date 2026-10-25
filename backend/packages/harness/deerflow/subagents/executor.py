@@ -2146,8 +2146,11 @@ class SubagentExecutor:
                 lambda: self._aexecute(task, result_holder),
             )
             return future.result(timeout=self.config.timeout_seconds)
-        except FuturesTimeoutError:
+        except FuturesTimeoutError as exc:
             if result_holder is not None:
+                # Publish the synchronous API's failure before cancellation can
+                # reach task-stop observers or win the terminal-state race.
+                result_holder.try_set_terminal(SubagentStatus.FAILED, error=str(exc))
                 result_holder.cancel_event.set()
             if future is not None:
                 future.cancel()
@@ -2179,19 +2182,19 @@ class SubagentExecutor:
         Returns:
             SubagentResult with the execution result.
         """
+        # Share one holder with the worker even when the caller did not supply
+        # one, so a timeout and its cleanup report the same terminal outcome.
+        result = result_holder
+        if result is None:
+            result = SubagentResult(
+                task_id=str(uuid.uuid4())[:8],
+                trace_id=self.trace_id,
+                status=SubagentStatus.PENDING,
+            )
         try:
-            return self._execute_in_isolated_loop(task, result_holder)
+            return self._execute_in_isolated_loop(task, result)
         except Exception as e:
             logger.exception(f"[trace={self.trace_id}] Subagent {self.config.name} execution failed")
-            # Create a result with error if we don't have one
-            if result_holder is not None:
-                result = result_holder
-            else:
-                result = SubagentResult(
-                    task_id=str(uuid.uuid4())[:8],
-                    trace_id=self.trace_id,
-                    status=SubagentStatus.RUNNING,
-                )
             result.try_set_terminal(SubagentStatus.FAILED, error=str(e))
             return result
 
