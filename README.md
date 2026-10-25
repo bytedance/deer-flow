@@ -998,6 +998,9 @@ still retain their error or partial-result status.
 
 #### MCP Server
 
+Tool steps mark explicit execution failures. Scheduled-task steps show completed
+operations only after a valid response, rather than when the request is issued.
+
 In the chat UI, enable **Token Usage → Debug** to inspect generic/MCP tool calls.
 Each **Tool details** panel starts collapsed and shows the tool name, call ID,
 input, and received result or explicit error. Large previews are truncated;
@@ -1725,7 +1728,7 @@ values nested in lists or structs, before opening the destination. Filter them
 or replace them with `NULL` in SQL; the CLI reports an error and preserves any
 existing output rather than writing invalid JSON.
 
-The **data-analysis** skill preserves each CSV file or Excel sheet when names collide across inputs. [Prepare its Python environment](skills/public/data-analysis/SKILL.md#environment-setup) explicitly with DuckDB and openpyxl; missing packages report setup instructions instead of installing themselves during analysis. Use the SQL names printed by `inspect` (such as `report`, `report_1`) for queries and summaries. Its cache follows ordered input basenames and contents, so renaming or reordering inputs rebuilds their table map instead of silently selecting a different source. Quoted original names also resolve without rewriting query text; apostrophes in upload paths and double quotes in column names are preserved through loading, inspection, queries, and summaries.
+The **data-analysis** skill preserves each CSV file or Excel sheet when names collide across inputs. [Prepare its Python environment](skills/public/data-analysis/SKILL.md#environment-setup) explicitly with DuckDB and openpyxl; missing packages report setup instructions instead of installing themselves during analysis. Use the SQL names printed by `inspect` (such as `report`, `report_1`) for queries and summaries. Its cache follows ordered input basenames and contents, so renaming or reordering inputs rebuilds their table map instead of silently selecting a different source. Quoted original names also resolve without rewriting query text; apostrophes in upload paths and double quotes in column names are preserved through loading, inspection, queries, and summaries. CSV, JSON, and Markdown exports accept bare filenames such as `report.csv` in the current working directory as well as nested relative and absolute paths.
 
 After an answer loads skills, its toolbar includes **Skills used**. Hover over or click the icon to see the skills and their sources; hovering a skill name underlines it. Select a skill to inspect its `SKILL.md` in the resizable side panel (a drawer on mobile). The view uses snapshots captured during successful configured read-tool loads or explicit slash activation, so later edits or removal of a skill do not rewrite its history. Repeated loads appear once per run, in first-load order. Range reads and bounded snapshots are labeled as partial; older conversations without captured evidence do not show this menu. Copy returns the captured Markdown, including YAML frontmatter. Package-relative links and images remain readable references rather than navigating away from the conversation. Skill loads performed through other tools, such as shell commands, are not inferred from answer text.
 
@@ -2747,7 +2750,9 @@ On sandboxes without an attested broker mode, lark-cli
 commands fail with an explicit unverified-mode error instead of running
 against an unauthenticated profile.
 
-Host-externalized tool outputs use the Gateway's normal file-creation umask.
+Host-externalized tool outputs use the Gateway's normal file-creation permissions.
+Restoring those outputs from shared blob storage applies the recovering Gateway's
+creation policy too, including its umask and any inherited default ACL.
 Host and sandbox outputs use deterministic filenames hashed from the raw tool
 call ID and output content. Missing, colliding, or oversized IDs cannot overwrite
 different output or make the filename too long; identical output can reuse its path.

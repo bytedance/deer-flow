@@ -11,13 +11,21 @@ write failure boundary. Invalid UTF-8 text or call IDs return `None` before
 file publication, allowing the tool wrappers to use the configured inline fallback.
 
 `_externalize` creates a unique sibling `.tool-output-*.tmp` with exclusive
-creation (`open(..., "x")`). Its mode is `0o666 & ~umask`, preserving ordinary
-file-creation permissions without reading or changing the process-wide umask.
+creation (`open(..., "x")`) requesting mode `0o666`. Effective permissions follow
+the process umask and any filesystem default ACL; without a default ACL the mode
+is `0o666 & ~umask`. The writer never reads or changes the process-wide umask.
 This matters when a mounted sandbox reads the output under a different UID.
-Restrictive operator umasks remain restrictive. It also passes `newline=""`, so
+It also passes `newline=""`, so
 the file holds exactly the bytes of the stamped blob ref on every platform;
 Windows text mode would write CRLF, and restore discards a file whose size or
 digest does not match.
+
+Blob recovery uses the same exclusive sibling creation in binary mode, subject
+to the recovering Gateway's umask and filesystem default ACL. It flushes, fsyncs and
+closes the complete file before replacement. A missing or mismatched local
+copy therefore does not become fixed-mode `0600` solely because it was restored;
+the same ordinary creation policy applies. Digest-matching local files are reused
+without changing their permissions.
 
 The writer closes its file before atomically replacing the deterministic final
 path. Concurrent publishers of identical output can safely reuse that path;
