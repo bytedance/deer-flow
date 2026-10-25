@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Any
 from langchain.agents import create_agent
 from langchain.tools import BaseTool
 from langchain_core.callbacks.base import BaseCallbackManager
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.runnables.config import var_child_runnable_config
 from langgraph.errors import GraphRecursionError
@@ -176,6 +176,10 @@ class SubagentResult:
     admission_failure: bool = False
     tool_receipts: list[dict[str, Any]] | None = field(default=None, kw_only=True)
     bash_executions: list[dict[str, Any]] | None = field(default=None, kw_only=True)
+    resumed_from: str | None = field(default=None, kw_only=True)
+    initial_task: str | None = field(default=None, kw_only=True)
+    subagent_type: str | None = field(default=None, kw_only=True)
+    is_superseded: bool = field(default=False, kw_only=True)
     knowledge_sources: list[dict[str, Any]] = field(default_factory=list, kw_only=True)
     _knowledge_messages: list[Any] = field(default_factory=list, init=False, repr=False)
     cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
@@ -188,6 +192,19 @@ class SubagentResult:
             self.ai_messages = []
         if self.status.is_terminal or self.completed_at is not None:
             self.execution_done_event.set()
+
+    def get_resumable_history(self) -> list[dict[str, Any]]:
+        """Return the raw message history suitable for resumption sanitization.
+
+        Always prefixes the original assignment prompt as a HumanMessage so
+        resumed subagent runs retain the original task context.
+        """
+        history: list[dict[str, Any]] = []
+        if self.initial_task:
+            history.append({"type": "human", "content": self.initial_task})
+        if self.ai_messages:
+            history.extend(self.ai_messages)
+        return history
 
     def update_token_usage_records(self, records: list[dict[str, int | str | None]]) -> None:
         """Publish cumulative usage, including timeout/cancel cleanup tails."""
@@ -424,6 +441,33 @@ _background_cleanup_requested: set[str] = set()
 # A timed-out public result can precede stream/resource cleanup. Keep the
 # execution task alive and observed until that cleanup settles on its owner loop.
 _background_execution_tasks: set[asyncio.Task[SubagentResult]] = set()
+
+# Bounded holding area for terminal-but-failed/interrupted subagent tasks eligible for resumption.
+_RESUMABLE_TASKS_MAX = 50
+_resumable_tasks: dict[str, SubagentResult] = {}
+_resumable_tasks_lock = threading.Lock()
+
+
+def get_resumable_holding_task(execution_id_or_task_id: str) -> SubagentResult | None:
+    """Get a task from the resumable holding area by execution_id or external_task_id."""
+    with _resumable_tasks_lock:
+        if execution_id_or_task_id in _resumable_tasks:
+            return _resumable_tasks[execution_id_or_task_id]
+        for result in _resumable_tasks.values():
+            if result.external_task_id == execution_id_or_task_id or result.task_id == execution_id_or_task_id:
+                return result
+        return None
+
+
+def _park_resumable_task_locked(result: SubagentResult) -> None:
+    """Park a terminal failed/interrupted task into the bounded resumable holding area."""
+    with _resumable_tasks_lock:
+        if len(_resumable_tasks) >= _RESUMABLE_TASKS_MAX:
+            oldest_key = next(iter(_resumable_tasks))
+            _resumable_tasks.pop(oldest_key, None)
+        _resumable_tasks[result.task_id] = result
+        if result.external_task_id:
+            _resumable_tasks[result.external_task_id] = result
 
 
 def _harvest_tool_receipts(
@@ -918,6 +962,8 @@ class SubagentExecutor:
         tool_progress_recorder: Any | None = None,
         context_snapshot: ParentContextSnapshot | None = None,
         thread_incarnation: str | None | object = _THREAD_INCARNATION_UNSET,
+        initial_messages: list[BaseMessage] | None = None,
+        resumed_from: str | None = None,
     ):
         """Initialize the executor.
 
@@ -1029,6 +1075,8 @@ class SubagentExecutor:
         self.loop_detection_recorder = loop_detection_recorder
         self.tool_promotion_recorder = tool_promotion_recorder
         self.tool_progress_recorder = tool_progress_recorder
+        self.initial_messages = list(initial_messages) if initial_messages is not None else None
+        self.resumed_from = resumed_from
 
         self._base_tools = _filter_tools(
             tools,
@@ -1592,18 +1640,33 @@ class SubagentExecutor:
         if mcp_routing_hints_section:
             system_parts.append(mcp_routing_hints_section)
 
-        messages: list[Any] = []
         if system_parts:
             self._assembled_system_prompt = self.config.prompt_overlay.apply("\n\n".join(system_parts))
+        else:
+            self._assembled_system_prompt = ""
+
+        messages: list[Any] = []
+        if self._assembled_system_prompt:
             messages.append(SystemMessage(content=self._assembled_system_prompt))
 
         if self.context_snapshot is not None:
             messages.append(self.context_snapshot.to_message())
 
-        # Then the actual task, with any lead-supplied acceptance criteria
+        if self.initial_messages:
+            from deerflow.subagents.recovery import sanitize_subagent_history
+
+            sanitized_messages = sanitize_subagent_history(self.initial_messages)
+            # The current run's freshly assembled SystemMessage (with updated tool schemas,
+            # MCP routing hints, and report contract) is authoritative. Discard any stale
+            # SystemMessage from the prior execution.
+            turns_to_replay = [m for m in sanitized_messages if not isinstance(m, SystemMessage)]
+            messages.extend(turns_to_replay)
+
+        # Append the task prompt, with any lead-supplied acceptance criteria
         # appended as untrusted data (see the channel note above).
-        task_content = f"{task}\n\n{criteria_block}" if criteria_block else task
-        messages.append(HumanMessage(content=task_content))
+        if task and task.strip():
+            task_content = f"{task}\n\n{criteria_block}" if criteria_block else task
+            messages.append(HumanMessage(content=task_content))
 
         state: dict[str, Any] = {
             "messages": messages,
@@ -1636,6 +1699,9 @@ class SubagentExecutor:
                 task_id=str(uuid.uuid4())[:8],
                 trace_id=self.trace_id,
                 status=SubagentStatus.PENDING,
+                resumed_from=self.resumed_from,
+                initial_task=task,
+                subagent_type=self.config.name,
             )
         with ensure_trace_context(self.deerflow_trace_id):
             try:
@@ -1678,6 +1744,9 @@ class SubagentExecutor:
                 trace_id=self.trace_id,
                 status=SubagentStatus.RUNNING,
                 started_at=_utcnow(),
+                resumed_from=self.resumed_from,
+                initial_task=task,
+                subagent_type=self.config.name,
             )
         sandbox_lease_owner_id = f"subagent:{result.task_id}"
         execution_context: dict[str, Any] | None = None
@@ -2205,6 +2274,9 @@ class SubagentExecutor:
             external_task_id=task_id,
             trace_id=self.trace_id,
             status=SubagentStatus.PENDING,
+            resumed_from=self.resumed_from,
+            initial_task=task,
+            subagent_type=self.config.name,
         )
 
         logger.info(
@@ -2364,9 +2436,11 @@ def list_background_tasks() -> list[SubagentResult]:
 
 
 def _remove_background_task_locked(execution_id: str) -> None:
-    _background_tasks.pop(execution_id, None)
+    result = _background_tasks.pop(execution_id, None)
     _background_futures.pop(execution_id, None)
     _background_cleanup_requested.discard(execution_id)
+    if result is not None and result.status != SubagentStatus.COMPLETED:
+        _park_resumable_task_locked(result)
 
 
 def _mark_background_execution_done(
