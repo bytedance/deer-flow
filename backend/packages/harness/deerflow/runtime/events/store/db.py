@@ -22,7 +22,7 @@ from deerflow.persistence.models.run_event import RunEventRow, RunEventThreadSeq
 from deerflow.persistence.run.model import CompletedRunSnapshotRow, RunRow
 from deerflow.persistence.run.sql import RunRepository
 from deerflow.runtime.events.message_identity import message_identity
-from deerflow.runtime.events.store.base import RunEventStore
+from deerflow.runtime.events.store.base import RunEventLifecycleRejected, RunEventStore, SessionAwareRunEventLifecycleGuard
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, get_current_user, resolve_user_id
 from deerflow.utils.time import coerce_iso
 
@@ -294,6 +294,7 @@ class DbRunEventStore(RunEventStore):
         metadata=None,
         created_at=None,
         user_id: str | None | _AutoSentinel = AUTO,
+        lifecycle_guard=None,
     ):
         """Idempotently insert a run-scoped singleton event.
 
@@ -310,6 +311,10 @@ class DbRunEventStore(RunEventStore):
             async with self._sf() as session:
                 async with session.begin():
                     max_seq = await self._max_seq_for_thread(session, thread_id)
+                    if lifecycle_guard is not None:
+                        admitted = await lifecycle_guard.check_in_session(session) if isinstance(lifecycle_guard, SessionAwareRunEventLifecycleGuard) else await lifecycle_guard()
+                        if not admitted:
+                            raise RunEventLifecycleRejected(f"Run lifecycle no longer admits terminal evidence for {thread_id}/{run_id}")
                     stmt = (
                         select(RunEventRow)
                         .where(
