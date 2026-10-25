@@ -29,6 +29,19 @@ export function mountSurface(
     controller = surface.mount(root, {
       ...context,
       signal: abort.signal,
+      requestBackend: context.requestBackend
+        ? async (path, options) => {
+            abort.signal.throwIfAborted();
+            const response = await context.requestBackend!(path, {
+              ...options,
+              signal: options?.signal
+                ? AbortSignal.any([abort.signal, options.signal])
+                : abort.signal,
+            });
+            abort.signal.throwIfAborted();
+            return response;
+          }
+        : undefined,
       openConversation: context.openConversation
         ? async (threadId) => {
             abort.signal.throwIfAborted();

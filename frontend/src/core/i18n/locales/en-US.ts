@@ -95,6 +95,11 @@ export const enUS: Translations = {
         description:
           "Manage hierarchical spaces, resource sharing and inherited policies with explicit administrator grants. Requires installation and configuration; no management page or global retrieval ACL is included.",
       },
+      knowledgeCenter: {
+        title: "Knowledge center",
+        description:
+          "Browse authorized spaces, import files, URLs and text, and inspect document processing. Requires the separately configured knowledge platform and management extensions.",
+      },
       knowledgeManagement: {
         title: "Knowledge ingestion and processing",
         description:

@@ -2,13 +2,14 @@
 
 Reject external `sandbox`, `thread_data`, `viewed_images`, `goal_outcome`. Non-null goals: valid text, int counters/limits >=0, no Overwrite; keep sparse data.
 
-Studio retains sanitized creation metadata.
+[Viewer fence](../../../docs/full-stack-plugins.md).
 
-Capability Center's `business` adapter validates bundled credentials and creates
-an MCP connection. The MCP API permits only its isolated launcher and credential
-environment keys; reject arbitrary commands and manifest-policy bypasses. Keep
-credentials out of tool schemas and preserve admin checks, masked atomic edits,
-and MCP cache reloads.
+Studio keeps sanitized creation metadata.
+
+Capability Center `business` validates credentials, creates MCP connections.
+MCP allows only its isolated launcher/credential environment keys; reject
+arbitrary commands/manifest-policy bypasses. Keep admin checks, masked
+atomic edits, cache reloads; exclude credentials from tool schemas.
 
 Memory shutdown resolves hot-reloaded config/backend, flushes, then closes as
 one `await_drained` operation. Resolve config inside the best-effort handler and
