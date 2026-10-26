@@ -21,10 +21,10 @@ resources unwind; each service `stop()` has a 30-second `asyncio.timeout`.
 Routers with persistent writes drain through
 `app.gateway.persistent_writes.run_drained_write`.
 
-Gateway lifespan closes the MCP session pool after `langgraph_runtime` exits:
-its run drain and extension-service teardown can still make MCP calls during
-earlier shutdown hooks. Keep the pool close bounded and failure-isolated, but
-do not move it ahead of those session producers.
+After `langgraph_runtime` exits (run drain and extension teardown), close MCP
+bounded and failure-isolated. Then drain off-thread
+`shutdown_sandbox_provider()` in `finally`, including cancellation. Never
+initialize for cleanup; log failures and retain native retryability.
 
 Retention holds durable thread admission and the checkpoint lock before
 checkpoint reads. Inspect root head/parent and leaf writes only; protect selectors,

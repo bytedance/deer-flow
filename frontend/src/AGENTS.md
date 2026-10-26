@@ -89,19 +89,19 @@ Tests: `html-assets.dom.test.ts`, `artifact-file-preview.dom.test.tsx`,
    bounded error and attempt count; retryable failures use backend backoff,
    while a permanent rejection or exhausted five-attempt budget is shown as
    stopped rather than implying that retries will continue.
-   Explicit durable native-subagent batches use `core/subagent-batches` and
-   `ThreadSubagentBatches`. `/api/features` reports SQL-repository availability
-   separately from the startup worker. A running worker exposes the trigger on
-   both default and Custom Agent chat pages; a stopped worker keeps threads with
-   durable history visible in read-only mode for inspection and JSONL export,
-   while deployments with neither a worker nor history keep the trigger hidden.
-   The panel renders bounded progress and incrementally paged item previews, controls pause/resume/cancel,
-   retries failed items, and exports JSONL. Worker-dependent mutations stay
-   disabled in read-only history mode, and persisted progress is normalized to
-   a bounded percentage before reaching the UI primitive. Item pagination uses a
-   fixed page size and an explicit load-more control; full results remain available
-   only through JSONL export. The panel must not infer batch mode from prompt text
-   or inject the complete result set into chat state.
+   `core/subagent-batches` / `ThreadSubagentBatches` own durable native batches.
+   `/api/features` separates SQL availability from startup worker state.
+   Show the trigger on default/Custom Agent chats with a running worker, or
+   read-only with durable history; hide otherwise. Bound persisted progress
+   percentages. Use fixed item-preview pages and load-more; full results need
+   JSONL export. Gate pause/resume/cancel and failed-item retries on the worker.
+   Never infer batches from prompts or put full results in chat state.
+   Review citations use only the selected persisted snapshot. Poll open details
+   until their own response is terminal, regardless of compact-list status;
+   stop on close. Compact attempt/status/update changes invalidate cached details
+   so external retries refresh open dialogs; never fetch closed details.
+   Show omitted counts even without sources; localize page labels.
+   Real-hook/HTTP tests: `thread-subagent-batch-review.dom.test.tsx`.
    Capability Center > Plugins > Lark uses a local generation only to suppress stale React
    callbacks; server-issued Lark flow generations must be passed through every
    config/auth completion and across switch-or-register to authorization chains
@@ -168,7 +168,7 @@ Edit-and-rerun is deliberately latest-turn-only. `core/messages/utils.ts::getLat
 
 `MessageGroup` builds its tool-result and browser-preview lookups once per processing group before converting messages to steps. The lookup preserves the first non-empty result and first screenshot-bearing browser view for each tool-call ID, matching the streamed-message display semantics without repeatedly scanning the full group for every tool call.
 
-Generic tool details receive the explicit Debug flag from `MessageGroup`, independent of token statistics. `tool-call-details.tsx` mounts payload previews only while expanded; `core/messages/tool-detail-preview.ts` caps text output at 12,000 characters, visits at most 12,000 values, and limits nesting to six levels. Serialization budgets include escaped strings, punctuation, indentation, closing delimiters, and truncation markers so structured previews remain valid JSON without a final mid-token slice. Generic calls keep the original ToolMessage content/status. Text is displayed verbatim (or as a bounded prefix), never passed through JSON.parse: reparsing can round numeric IDs, discard duplicate keys, and alter quoted strings. Objects/arrays are formatted only on expansion; specialized renderers retain their existing result conversion. An empty received payload is distinct from a missing message, and neither implies a running/completed state. Copy actions use the shared clipboard fallback, copy the displayed preview, and reset feedback after two seconds. Truncated containers include an inline ellipsis unless an object has already emitted a real ellipsis key; in that case, only the external truncation notice is guaranteed. Arrays stop after a child collapses because the text budget is exhausted, avoiding repeated trailing markers while preserving literal ellipsis elements. Cycle, accessor, and depth-limit markers do not suppress later siblings. Truncated string prefixes preserve complete UTF-16 surrogate pairs. Object traversal stops before a key exceeds the remaining text budget; never shorten property names, since shortened keys can collide with real data. Renderer routing and result conversion share `getToolCallKind`. Disclosure accessible names include the tool name and call ID.
+Use `core/messages/tool-error.ts` for tool/Debug failures; never classify text or partial results. Scheduler completion needs an object response. Keep details Debug-only via `MessageGroup`. `tool-call-details.tsx` mounts payload previews only while expanded; `core/messages/tool-detail-preview.ts` caps text output at 12,000 characters, visits at most 12,000 values, and limits nesting to six levels. Count escapes, punctuation, indentation, closing delimiters and truncation markers within the budget; never slice structured JSON mid-token. Generic calls keep the original ToolMessage content/status. Text is displayed verbatim (or as a bounded prefix), never passed through JSON.parse: reparsing can round numeric IDs, discard duplicate keys, and alter quoted strings. Format objects/arrays on expansion; retain specialized result conversion. An empty received payload is distinct from a missing message, and neither implies a running/completed state. Copy actions use the shared clipboard fallback, copy the displayed preview, and reset feedback after two seconds. Truncated containers include an inline ellipsis unless an object has already emitted a real ellipsis key; in that case, only the external truncation notice is guaranteed. Arrays stop after a child collapses because the text budget is exhausted, avoiding repeated trailing markers while preserving literal ellipsis elements. Cycle, accessor, and depth-limit markers do not suppress later siblings. Truncated string prefixes preserve complete UTF-16 surrogate pairs. Object traversal stops before a key exceeds the remaining text budget; never shorten property names, since shortened keys can collide with real data. Renderer routing and result conversion share `getToolCallKind`. Disclosure accessible names include the tool name and call ID.
 
 Array previews coalesce consecutive generated markers only at the end into one omitted-suffix notice. The serializer tracks marker provenance and complete entry boundaries; it must not deduplicate literal ellipsis values or shift the indices of later real elements. A cycle/accessor/depth-limit tail can therefore share one notice while the same markers in the middle retain their positions.
 

@@ -6,10 +6,10 @@ shape, even when invalid; never mix its MIME metadata with a conflicting legacy
 source. Both shapes use the existing referenceability gate and per-result deduplication.
 
 Free-text sandbox paths retain spaces inside matching ASCII/curly quote pairs,
-backticks or backslash-escaped wrappers. Exclude wrapper escapes without stripping
-literal path backslashes. Reject Python line boundaries and tabs; bound delimiter
-searches to the same line so later refs survive. Preserve bare-token boundaries
-and structured refs. Tests: `tests/test_artifact_registry.py`.
+CJK corner brackets, backticks or backslash-escaped wrappers. Exclude wrapper
+escapes without stripping literal path backslashes. Reject Python line boundaries
+and tabs; bound delimiter searches to the same line so later refs survive.
+Preserve bare-token boundaries and structured refs. Tests: `tests/test_artifact_registry.py`.
 
 `artifact_registry.py` checks remote file suffixes against the complete parsed
 URL path without case sensitivity. Free-text URL and sandbox-path extraction

@@ -78,11 +78,12 @@ def test_separate_uploads_preserve_existing_markdown(upload_case, tmp_path, in_l
         assert resolve_companion(uploads / first.name) == original_markdown
 
 
-def test_reupload_replaces_original_but_preserves_occupied_companion_names(upload_case, tmp_path):
+def test_reupload_preserves_original_and_occupied_companion_names(upload_case, tmp_path):
     client, uploads = upload_case
     source = tmp_path / "report.xlsx"
     _document(source, "FIRST DOCUMENT")
     client.upload_files("companion-thread", [source])
+    first_original = (uploads / source.name).read_bytes()
     first_markdown = (uploads / "report.md").read_bytes()
     occupied = uploads / "report_1.md"
     occupied.write_text("INDEPENDENT NOTES", encoding="utf-8")
@@ -92,11 +93,13 @@ def test_reupload_replaces_original_but_preserves_occupied_companion_names(uploa
 
     assert response["success"]
     info = response["files"][0]
-    assert info["filename"] == "report.xlsx"
-    assert (uploads / source.name).read_bytes() == source.read_bytes()
-    assert info["markdown_file"] == "report_2.md"
+    assert info["filename"] == "report_1.xlsx"
+    assert (uploads / source.name).read_bytes() == first_original
+    assert (uploads / info["filename"]).read_bytes() == source.read_bytes()
+    assert info["markdown_file"] == "report_1_1.md"
     assert (uploads / "report.md").read_bytes() == first_markdown
     assert occupied.read_text(encoding="utf-8") == "INDEPENDENT NOTES"
-    companion = uploads / "report_2.md"
+    companion = uploads / info["markdown_file"]
     assert "REPLACEMENT DOCUMENT" in companion.read_text(encoding="utf-8")
-    assert resolve_companion(uploads / source.name) == companion
+    assert resolve_companion(uploads / info["filename"]) == companion
+    assert resolve_companion(uploads / source.name) == uploads / "report.md"

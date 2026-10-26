@@ -145,9 +145,11 @@ configured default. `max_recursion_limit` (default `1000`) caps both sources to
 limit runaway LLM cost. Both settings are read per run, so changes apply to the
 next request without a Gateway restart.
 
-These settings apply to Gateway API runs. IM channel runs and embedded
-`DeerFlowClient` runs retain their own defaults and can be overridden through
-their channel/client-specific configuration or per-call options.
+These settings also apply to IM channel runs. A `recursion_limit` in an IM
+channel's `session.config` (for all channels, one channel or one user) takes
+precedence. The GitHub channel instead uses `250`, or a higher
+`session.config` value, unless the agent sets `github.recursion_limit`.
+Embedded `DeerFlowClient` runs retain their own defaults and per-call options.
 
 ### Models
 
@@ -453,7 +455,8 @@ backslash. The existing Python-literal fallback also parses the original value.
 
 Non-JSON raw-string parameters retain the gateway's multiline compatibility:
 literal `\n` outside fenced code becomes a real newline, and surrounding
-whitespace is trimmed. Escapes inside fenced code remain unchanged. This keeps
+whitespace is trimmed. Escapes inside matching triple-backtick or triple-tilde
+fences remain unchanged; an unclosed fence preserves the rest of the reply. This keeps
 multi-line file content and commands working. Raw strings cannot distinguish an
 intended literal `\n` from a gateway-escaped newline; structured JSON parameters
 avoid that ambiguity. Numeric conversion failures and unsafe Python-literal
@@ -803,7 +806,7 @@ These still need a manual pass:
 - cancel a run on B from A: it takes effect within about one heartbeat (~10 s; a lower `run_ownership.lease_seconds` makes the boundary easier to observe);
 - change an MCP filesystem server's args on A: B's local-bash allowlist follows;
 - edit a skill on A: B's system-prompt skills section changes within 30 s;
-- with `DEERFLOW_MI_KEEP_CHANNELS=1` and test bots configured: only one Gateway connects each platform (`GET /api/channels/` reports the same `leader` on both, Telegram logs no `409`, Discord answers once), `stop <leader> --kill` hands each provider to the other Gateway within `lease_seconds + grace_seconds`, and a plain `stop <leader>` hands them over on the other Gateway's next tick.
+- with `DEERFLOW_MI_KEEP_CHANNELS=1` and test bots configured: only one Gateway connects each platform (`GET /api/channels/` reports the same `leader` on both, Telegram logs no `409`, Discord answers once), `stop <leader> --kill` hands each provider to the other Gateway within `lease_seconds + grace_seconds` plus one renewal interval (50 s with the defaults), a plain `stop <leader>` hands them over on the other Gateway's next tick, and credentials saved or a disconnect made with `POST` / `DELETE /api/channels/{provider}/runtime-config` on the non-holder reach the holder within one renewal interval.
 
 ### IM channel leader lease (`channels.leader_lease`)
 
@@ -1618,6 +1621,8 @@ sandbox:
 ```
 
 When you configure `sandbox.mounts`, DeerFlow exposes those `container_path` values in the agent prompt so the agent can discover and operate on mounted directories directly instead of assuming everything must live under `/mnt/user-data`. See [Skills and sandbox paths](#skills-and-sandbox-paths) for Windows, WSL, and Docker path examples.
+
+Trailing slashes in `container_path` values are normalized when the config is loaded (`/mnt/reports/` behaves like `/mnt/reports`) — this applies to both `sandbox.mounts[].container_path` and `skills.container_path` — and the container root `/` or an empty value is rejected; mount a specific directory instead.
 
 #### Sandbox network policy
 

@@ -4,7 +4,7 @@ import logging
 import tempfile
 import threading
 from collections.abc import AsyncGenerator, Callable, Coroutine, Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any, BinaryIO, Literal
 
@@ -54,6 +54,7 @@ from deerflow.skills.security_static_scanner import (
 )
 from deerflow.skills.storage import SkillStorage, get_or_new_user_skill_storage
 from deerflow.skills.types import SKILL_MD_FILE, SkillCategory
+from deerflow.utils.atomic_write import cleanup_failed_atomic_write
 from deerflow.utils.file_io import await_drained
 from deerflow.utils.thread_id import ThreadId
 
@@ -347,7 +348,11 @@ def _load_user_skills(config: AppConfig) -> list[Skill]:
 
 
 def _copy_uploaded_skill_archive(source: BinaryIO) -> Path:
-    """Copy an uploaded archive to a bounded temporary file off the event loop."""
+    """Copy an uploaded archive to a bounded temporary file off the event loop.
+
+    A size-limit or read failure is the error the caller sees. Removing the
+    partial temporary is best-effort and must not replace that error.
+    """
     destination: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(prefix="deerflow-skill-", suffix=".skill", delete=False) as target:
@@ -361,7 +366,7 @@ def _copy_uploaded_skill_archive(source: BinaryIO) -> Path:
         return destination
     except Exception:
         if destination is not None:
-            destination.unlink(missing_ok=True)
+            cleanup_failed_atomic_write(destination)
         raise
 
 
@@ -578,10 +583,13 @@ async def upload_and_install_skill(
     except MultiPartException as e:
         raise HTTPException(status_code=400, detail=e.message) from e
     finally:
-        if form is not None:
-            await form.close()
+        # Discard before close. SpooledTemporaryFile.close can raise while
+        # flushing, which would mask the install outcome and skip the discard.
         if temporary_path is not None:
-            await asyncio.to_thread(temporary_path.unlink, missing_ok=True)
+            await asyncio.to_thread(cleanup_failed_atomic_write, temporary_path)
+        if form is not None:
+            with suppress(Exception):
+                await form.close()
 
 
 @router.post(

@@ -87,12 +87,13 @@ IN_PROCESS_CACHE_MAX_ENTRIES = 4096
 MAX_CHANNEL_AGENT_LIST_ITEMS = 50
 MAX_CHANNEL_AGENT_DESCRIPTION_CHARS = 120
 
-# Lead-agent recursion budget (LangGraph super-steps for the lead graph only).
-# This is independent of subagent depth: a `task()` dispatch runs the whole
-# subagent inside ONE lead tools-node step, and subagents enforce their own
-# limit via `subagents.max_turns` (see SubagentExecutor). Do not conflate this
-# 100 with the general-purpose subagent's max_turns.
-DEFAULT_RUN_CONFIG: dict[str, Any] = {"recursion_limit": 100}
+# No lead-agent recursion budget here: like Gateway API runs, IM runs get
+# the Gateway's configured top-level ``recursion_limit`` (clamped by
+# ``max_recursion_limit``) unless a session ``config.recursion_limit`` sets
+# one. The budget counts lead-graph super-steps only: a `task()` dispatch runs
+# the whole subagent inside ONE lead tools-node step, and subagents enforce
+# their own limit via `subagents.max_turns` (see SubagentExecutor).
+DEFAULT_RUN_CONFIG: dict[str, Any] = {}
 DEFAULT_RUN_CONTEXT: dict[str, Any] = {
     "thinking_enabled": True,
     "is_plan_mode": False,
@@ -1530,9 +1531,10 @@ async def _ingest_inbound_files_impl(thread_id: str, msg: InboundMessage, *, use
 
             created.append(
                 {
-                    "filename": safe_name,
+                    # Report the returned path rather than the pre-scan claim.
+                    "filename": dest.name,
                     "size": len(data),
-                    "path": f"/mnt/user-data/uploads/{safe_name}",
+                    "path": f"/mnt/user-data/uploads/{dest.name}",
                     "is_image": ftype == "image",
                 }
             )
@@ -1658,6 +1660,17 @@ class ChannelManager:
         # run after this manager has been shut down. Discarded via the same
         # task's done-callback (see _maybe_spawn_followup_watcher).
         self._followup_watcher_tasks: set[asyncio.Task] = set()
+
+    @staticmethod
+    def _notify_channel_thread_replaced(channel_name: str, old_thread_id: str) -> None:
+        """Tell the channel adapter that a thread was replaced (``/new``)."""
+        from .service import get_channel_service
+
+        service = get_channel_service()
+        if service:
+            channel = service.get_channel(channel_name)
+            if channel is not None:
+                channel.on_thread_replaced(old_thread_id)
 
     @staticmethod
     def _channel_supports_streaming(channel_name: str) -> bool:
@@ -2178,7 +2191,7 @@ class ChannelManager:
             if isinstance(override, int) and override > 0:
                 run_config["recursion_limit"] = override
             else:
-                run_config["recursion_limit"] = max(run_config.get("recursion_limit", 100), policy.default_recursion_limit)
+                run_config["recursion_limit"] = max(run_config.get("recursion_limit", 0), policy.default_recursion_limit)
 
         return assistant_id, run_config, run_context
 
@@ -3680,7 +3693,12 @@ class ChannelManager:
         if reply is None and command == "new":
             # Create a new thread through Gateway
             client = self._get_client()
+            old_thread_id = await self._lookup_thread_id(msg)
             await self._create_thread(client, msg)
+            # Retire pending interactive cards for the replaced thread so stale
+            # button clicks are correctly rejected instead of lingering.
+            if old_thread_id:
+                self._notify_channel_thread_replaced(msg.channel_name, old_thread_id)
             reply = "New conversation started."
         elif reply is None and command == "status":
             thread_id = await self._lookup_thread_id(msg)
