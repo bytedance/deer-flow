@@ -44,6 +44,7 @@ from app.gateway.utils import sanitize_log_param
 from app.mcp_tasks.errors import PermanentNotificationError
 from deerflow.agents.human_input import read_human_input_response
 from deerflow.agents.interaction_policy import resolve_run_interaction_policy
+from deerflow.agents.language import ui_locale
 from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, _REMINDER_DATE_KEY
 from deerflow.agents.middlewares.input_sanitization_middleware import frame_untrusted_text
 from deerflow.agents.middlewares.message_utils import _SUMMARY_MESSAGE_NAME, is_genuine_user_message
@@ -1032,7 +1033,13 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
         # ``build_run_config`` copies ``body.config['configurable']`` verbatim,
         # and ``configurable`` is persisted in checkpoints.
         existing_configurable.pop("client", None)
+        existing_configurable.pop("locale", None)
     existing_runtime_context = config.get("context")
+    if isinstance(existing_runtime_context, dict) and "locale" in existing_runtime_context:
+        locale = ui_locale(existing_runtime_context)
+        existing_runtime_context.pop("locale")
+        if locale is not None:
+            existing_runtime_context["locale"] = locale
     for section in (existing_configurable, existing_runtime_context):
         if isinstance(section, dict):
             for key in _MODEL_SELECTION_CONTEXT_KEYS:
@@ -1049,6 +1056,13 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
 
     configurable = config.setdefault("configurable", {})
     runtime_context = config.setdefault("context", {})
+    # UI language is public request data, never a checkpoint default. An
+    # explicit invalid/null value clears a legacy config.context preference.
+    if "locale" in context and isinstance(runtime_context, dict):
+        runtime_context.pop("locale", None)
+        locale = ui_locale(context)
+        if locale is not None:
+            runtime_context["locale"] = locale
     keys = _CONTEXT_CONFIGURABLE_KEYS | _CONTEXT_INTERNAL_CALLER_KEYS if internal else _CONTEXT_CONFIGURABLE_KEYS
     for key in keys:
         if key in context:
