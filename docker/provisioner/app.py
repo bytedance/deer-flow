@@ -621,7 +621,6 @@ def _build_volumes(
     thread_id: str,
     user_id: str = DEFAULT_USER_ID,
     *,
-    include_legacy_skills: bool = False,
     extra_mounts: list[ExtraMount] | None = None,
     skills_container_path: str = DEFAULT_SKILLS_CONTAINER_PATH,
     provision_lark_cli_runtime: bool = False,
@@ -635,7 +634,6 @@ def _build_volumes(
     ``LocalSandboxProvider`` and ``AioSandboxProvider``.
     """
     volumes: list[k8s_client.V1Volume] = []
-    del include_legacy_skills  # retained for request compatibility
     skills_root = _normalize_skills_container_path(skills_container_path)
     managed_skill_paths = _managed_skill_category_mount_paths(skills_root)
     validated_extra_mounts = _validated_extra_mounts(
@@ -786,7 +784,6 @@ def _build_volume_mounts(
     thread_id: str,
     user_id: str = DEFAULT_USER_ID,
     *,
-    include_legacy_skills: bool = False,
     extra_mounts: list[ExtraMount] | None = None,
     skills_container_path: str = DEFAULT_SKILLS_CONTAINER_PATH,
     provision_lark_cli_runtime: bool = False,
@@ -800,7 +797,6 @@ def _build_volume_mounts(
     scope that mount with ``SKILLS_PVC_SUBPATH_TEMPLATE``.
     """
     mounts: list[k8s_client.V1VolumeMount] = []
-    del include_legacy_skills  # retained for request compatibility
     skills_root = _normalize_skills_container_path(skills_container_path)
     managed_skill_paths = _managed_skill_category_mount_paths(skills_root)
     validated_extra_mounts = _validated_extra_mounts(
@@ -996,7 +992,6 @@ def _build_pod(
     thread_id: str,
     user_id: str = DEFAULT_USER_ID,
     *,
-    include_legacy_skills: bool = False,
     extra_mounts: list[ExtraMount] | None = None,
     skills_container_path: str = DEFAULT_SKILLS_CONTAINER_PATH,
     provision_lark_cli_runtime: bool = False,
@@ -1083,7 +1078,6 @@ def _build_pod(
                     volume_mounts=_build_volume_mounts(
                         thread_id,
                         user_id=user_id,
-                        include_legacy_skills=include_legacy_skills,
                         extra_mounts=extra_mounts,
                         skills_container_path=skills_container_path,
                         provision_lark_cli_runtime=provision_lark_cli_runtime,
@@ -1104,7 +1098,6 @@ def _build_pod(
             volumes=_build_volumes(
                 thread_id,
                 user_id=user_id,
-                include_legacy_skills=include_legacy_skills,
                 extra_mounts=extra_mounts,
                 skills_container_path=skills_container_path,
                 provision_lark_cli_runtime=provision_lark_cli_runtime,
@@ -1322,7 +1315,6 @@ def create_sandbox(req: CreateSandboxRequest):
                 sandbox_id,
                 thread_id,
                 user_id=user_id,
-                include_legacy_skills=include_legacy_skills,
                 extra_mounts=req.extra_mounts,
                 skills_container_path=skills_container_path,
                 provision_lark_cli_runtime=provision_lark_cli_runtime,
