@@ -1,5 +1,10 @@
 # Backend Tests
 
+`test_lark_broker_image.py` stages Python files from the broker Dockerfile's
+final-stage COPY instructions. Run shim installation and the health endpoint
+under `-I -S`, adding only the staged script directory to the import path;
+repository paths or installed Harness packages would hide missing image files.
+
 When adding a scoped `AGENTS.md`, update `EXPECTED_GUIDANCE_PATHS` in
 `test_agent_guidance_check.py` in the same change. The explicit inventory pins
 guidance ownership and extends hard-budget checks to each approved guide.
@@ -17,6 +22,10 @@ assert one source open, original metadata, preserved competing uploads, companio
 ownership and capture cleanup. Retain the real XLSX conversion coverage.
 
 Backend tests must preserve the runtime invariants they exercise without changing production execution topology.
+
+Provider cleanup tests use concrete configuration models and event gates.
+Surface owner-task failures while awaiting lifecycle events; join owners and
+event waiters during teardown.
 
 `test_bench_sandbox_prewarm.py` controls observation timestamps through the
 benchmark module's clock binding. Keep asyncio's clock real, initialize
