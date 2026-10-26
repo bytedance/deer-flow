@@ -41,6 +41,17 @@ from collections.abc import Callable
 # fail the lookahead and be emitted as the raw host path.
 _SEGMENT_BOUNDARY = r"(?=/|$|[^\w./-])"
 
+# The mirror rule on the left: a base must start a path, not continue one.
+# Without it ``/mnt/user-data`` matches inside the artifact URL
+# ``.../artifacts/mnt/user-data/outputs/x.html`` or a relative
+# ``backup/mnt/user-data``, and a mount at ``/data`` inside ``/var/data``.
+# ``/`` is deliberately allowed so ``file:///mnt/user-data`` still maps; ``.``
+# and ``~`` reject ``./`` and ``~/`` relative spellings. Forward-resolution
+# patterns (container → host) in ``LocalSandbox`` and ``sandbox.tools`` share
+# this rule, so it is public.
+PATH_START_BOUNDARY = r"(?<![\w.~-])"
+_PATH_START_BLOCKERS = re.compile(r"[\w.~-]")
+
 # The path tail following the base. ``[/\\]`` keeps Windows-separated paths
 # matching; the negated class stops at whitespace and shell punctuation so a
 # path embedded in a larger line is not over-consumed.
@@ -83,13 +94,13 @@ def build_output_mask_pattern(base: str, *, separator_agnostic: bool = False) ->
             bases are resolved with native separators.
 
     Returns:
-        A compiled pattern matching ``base`` at a segment boundary, plus an
-        optional path tail.
+        A compiled pattern matching ``base`` where it starts a path and ends
+        at a segment boundary, plus an optional path tail.
     """
     escaped = re.escape(base)
     if separator_agnostic:
         escaped = escaped.replace(r"\\", r"[/\\]")
-    return re.compile(escaped + _SEGMENT_BOUNDARY + _PATH_TAIL)
+    return re.compile(PATH_START_BOUNDARY + escaped + _SEGMENT_BOUNDARY + _PATH_TAIL)
 
 
 def replace_output_path_matches(
@@ -119,6 +130,9 @@ def replace_output_path_matches(
         match_start = searchable_output.find(searchable_base, search_from)
         if match_start < 0:
             break
+        if match_start > 0 and _PATH_START_BLOCKERS.fullmatch(searchable_output[match_start - 1]):
+            search_from = match_start + 1
+            continue
 
         base_end = match_start + len(searchable_base)
         match_end = base_end

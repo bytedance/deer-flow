@@ -11,12 +11,14 @@ expressions, run once on the parent commit. That run cannot be committed: after
 this lands there is no old inline expression left to diff against, only the
 frozen copies below. So the committed guard is the weaker snapshot, and its
 red-ness rests on those literals — not on the length of ``_BASES``. The tail has
-changed exactly once since then (it now stops at ``:``); the snapshot names that
-delta instead of re-freezing the literals, so any other drift still goes red.
+changed exactly once since then (it now stops at ``:``), and the base gained a
+left-hand path-start boundary; the snapshot names those deltas instead of
+re-freezing the literals, so any other drift still goes red.
 """
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
@@ -52,6 +54,15 @@ def _with_current_tail(legacy: str) -> str:
     return legacy.removesuffix(_LEGACY_TAIL) + _CURRENT_TAIL
 
 
+# The second intentional change: a base must start a path, so it no longer
+# matches inside a longer path or URL (``.../artifacts/mnt/user-data/...``).
+_CURRENT_START = r"(?<![\w.~-])"
+
+
+def _with_current_rules(legacy: str) -> str:
+    return _CURRENT_START + _with_current_tail(legacy)
+
+
 _BASES = [
     "/host/skills",
     "/host/dir with spaces",
@@ -70,13 +81,13 @@ _BASES = [
 @pytest.mark.parametrize("base", _BASES)
 def test_helper_reproduces_the_pre_extraction_expressions(base: str) -> None:
     """Byte-identical to what each call site built inline, for both separator modes,
-    apart from the one named tail change.
+    apart from the named tail and path-start changes.
 
     This is the anchor for the move itself: edit the helper in a way that changes
     either site's regex and this goes red.
     """
-    assert build_output_mask_pattern(base, separator_agnostic=True).pattern == _with_current_tail(_legacy_tools_pattern(base).pattern)
-    assert build_output_mask_pattern(base).pattern == _with_current_tail(_legacy_local_pattern(base).pattern)
+    assert build_output_mask_pattern(base, separator_agnostic=True).pattern == _with_current_rules(_legacy_tools_pattern(base).pattern)
+    assert build_output_mask_pattern(base).pattern == _with_current_rules(_legacy_local_pattern(base).pattern)
 
 
 def test_separator_agnostic_is_the_only_difference_between_the_two_modes() -> None:
@@ -277,3 +288,42 @@ def test_tools_mask_patterns_route_through_the_helper(tmp_path: Path) -> None:
     for pattern, variant, virtual_base in compiled:
         assert virtual_base == "/mnt/skills"
         assert pattern.pattern == build_output_mask_pattern(variant, separator_agnostic=True).pattern
+
+
+@pytest.mark.parametrize("mask", _MASKERS)
+@pytest.mark.parametrize(
+    ("output", "expected"),
+    [
+        # A base inside a longer path is not that path.
+        ("log at /var/data/app.log", "log at /var/data/app.log"),
+        ("backup/data/x and ./data/y and ~/data/z", "backup/data/x and ./data/y and ~/data/z"),
+        ("see https://example.com/data/report.csv", "see https://example.com/data/report.csv"),
+        # A base that starts a path still maps, including after ``/`` and punctuation.
+        ("file:///data/report.html", "file:///mnt/data/report.html"),
+        ("--out=/data/x, PATH=/data/bin:/data/lib", "--out=/mnt/data/x, PATH=/mnt/data/bin:/mnt/data/lib"),
+        ("/data/a (/data/b)", "/mnt/data/a (/mnt/data/b)"),
+    ],
+)
+def test_base_must_start_a_path(mask, output: str, expected: str) -> None:
+    """The left-hand mirror of the #4035/#4053 segment boundary.
+
+    Without it a mount at ``/data`` rewrites the unrelated ``/var/data/app.log``
+    into ``/var/mnt/data/app.log`` before the model sees it.
+    """
+    assert mask(output, "/data", "/mnt/data") == expected
+
+
+def test_local_sandbox_forward_patterns_require_a_path_start() -> None:
+    sandbox = LocalSandbox("t", [PathMapping(container_path="/mnt/user-data", local_path="/srv/t/user-data")])
+    resolved = os.path.realpath("/srv/t/user-data").replace("\\", "/")
+    url = "http://localhost:2026/api/threads/abc/artifacts/mnt/user-data/outputs/report.html"
+
+    command = sandbox._resolve_paths_in_command(f"curl -s {url} -o /mnt/user-data/outputs/copy.html; cat backup/mnt/user-data/b")
+    assert url in command
+    assert "backup/mnt/user-data/b" in command
+    assert command.count("/mnt/user-data") == 2
+
+    content = sandbox._resolve_paths_in_content(f'URL = "{url}"\nOUT = "/mnt/user-data/outputs/x"\n')
+    assert url in content
+    assert "/mnt/user-data/outputs/x" not in content
+    assert resolved.split(":", 1)[-1] in content
