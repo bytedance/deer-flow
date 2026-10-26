@@ -637,6 +637,13 @@ The bundled Docker, local and Helm nginx configs proxy Live Browser WebSocket up
 
 Browser login uses `HttpOnly` session cookies. The login page offers a "keep me signed in" option that extends the browser session when the request is HTTPS (including trusted `X-Forwarded-Proto: https`) or localhost HTTP. The localhost exception uses the direct request `Host` and ignores forwarded host headers. Public HTTP deployments, including many temporary sandbox URLs, fall back to session cookies by default. DeerFlow never stores the password in browser storage; the UI may remember only the email address.
 
+If an authentication refresh fails during a temporary network outage, a visible
+tab rechecks the unknown session when connectivity returns or on a later tab
+switch. Reconnects received in a background tab are remembered until it becomes
+visible, without waiting for the tab-switch throttle. Identity is restored only
+after a successful auth response; a confirmed expired session or explicit logout
+still requires signing in again.
+
 Password forms accept non-ASCII email addresses and trim surrounding email whitespace.
 Sign-in requires at least six password characters; creating an account or choosing
 a new password requires eight. These checks run before sending a request.
