@@ -13,7 +13,9 @@ do not probe. Keep wakeups single-flight and remove listeners on unmount.
 Only the current request may release its in-flight guard; confirmed user/logout
 supersedes that ownership. Coalesce reconnects during a pending refresh into one
 follow-up only if auth remains unknown. Success, 401/logout, account replacement
-and unmount discard the deferred wake.
+and unmount discard the deferred wake. Hidden tabs retain reconnect wakeups until
+visible, bypassing the tab-switch throttle once. Keep `isLoading` in the effect
+dependencies so failed requests that leave auth unchanged still drain pending wakes.
 
 Regressions: `tests/unit/core/auth/AuthProvider-recovery.dom.test.tsx` and
 `tests/e2e/auth-network-recovery.spec.ts` under `frontend/`, alongside query-owner

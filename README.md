@@ -637,8 +637,10 @@ Browser login uses `HttpOnly` session cookies. The login page offers a "keep me 
 
 If an authentication refresh fails during a temporary network outage, a visible
 tab rechecks the unknown session when connectivity returns or on a later tab
-switch. Identity is restored only after a successful auth response; a confirmed
-expired session or explicit logout still requires signing in again.
+switch. Reconnects received in a background tab are remembered until it becomes
+visible, without waiting for the tab-switch throttle. Identity is restored only
+after a successful auth response; a confirmed expired session or explicit logout
+still requires signing in again.
 
 Password forms accept non-ASCII email addresses and trim surrounding email whitespace.
 Sign-in requires at least six password characters; creating an account or choosing

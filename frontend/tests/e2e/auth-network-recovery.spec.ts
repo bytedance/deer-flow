@@ -2,7 +2,11 @@ import { expect, test } from "@playwright/test";
 
 import { mockLangGraphAPI } from "./utils/mock-api";
 
-for (const recoveryEvent of ["online", "visibilitychange"] as const) {
+for (const recoveryEvent of [
+  "online",
+  "visibilitychange",
+  "hidden reconnect",
+] as const) {
   test(`authentication recovers after a network failure on ${recoveryEvent}`, async ({
     page,
   }) => {
@@ -37,13 +41,33 @@ for (const recoveryEvent of ["online", "visibilitychange"] as const) {
     await expect(dialog.getByText("default@test.local")).toBeHidden();
     await expect(page).not.toHaveURL(/\/login/);
 
-    if (recoveryEvent === "visibilitychange") {
-      await page.clock.fastForward(60_001);
+    if (recoveryEvent === "hidden reconnect") {
+      await page.evaluate(() => {
+        Object.defineProperty(document, "visibilityState", {
+          configurable: true,
+          value: "hidden",
+        });
+        window.dispatchEvent(new Event("online"));
+      });
+      expect(requests).toBe(1);
+      await expect(dialog.getByText("recovered@test.local")).toBeHidden();
+      await page.clock.fastForward(30_000);
+      await page.evaluate(() => {
+        Object.defineProperty(document, "visibilityState", {
+          configurable: true,
+          value: "visible",
+        });
+        document.dispatchEvent(new Event("visibilitychange"));
+      });
+    } else {
+      if (recoveryEvent === "visibilitychange") {
+        await page.clock.fastForward(60_001);
+      }
+      await page.evaluate((event) => {
+        if (event === "online") window.dispatchEvent(new Event(event));
+        else document.dispatchEvent(new Event(event));
+      }, recoveryEvent);
     }
-    await page.evaluate((event) => {
-      if (event === "online") window.dispatchEvent(new Event(event));
-      else document.dispatchEvent(new Event(event));
-    }, recoveryEvent);
 
     await expect(dialog.getByText("recovered@test.local")).toBeVisible();
     expect(requests).toBe(2);

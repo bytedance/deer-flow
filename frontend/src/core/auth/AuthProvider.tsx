@@ -216,17 +216,17 @@ export function AuthProvider({
     if (staticMode) return;
 
     const checkUser = (reconnecting = false) => {
+      if (user === null && authKnown) return;
+      if (reconnecting) reconnectPendingRef.current = true;
       if (
         document.visibilityState !== "visible" ||
-        (user === null && authKnown)
+        authRefreshInFlightRef.current
       )
         return;
-      if (authRefreshInFlightRef.current) {
-        if (reconnecting) reconnectPendingRef.current = true;
-        return;
-      }
       const now = Date.now();
-      if (!reconnecting && now - lastCheckRef.current < 60_000) return;
+      if (!reconnectPendingRef.current && now - lastCheckRef.current < 60_000)
+        return;
+      reconnectPendingRef.current = false;
       lastCheckRef.current = now;
       void refreshUser();
     };
@@ -235,10 +235,10 @@ export function AuthProvider({
       if (!authKnown || authRefreshInFlightRef.current) checkUser(true);
     };
 
-    // Keep one wakeup if connectivity returned before a failed request settled.
+    // isLoading re-runs this effect when a failed request leaves auth unchanged.
     if (reconnectPendingRef.current && !authRefreshInFlightRef.current) {
-      reconnectPendingRef.current = false;
-      if (!authKnown) checkUser(true);
+      if (authKnown) reconnectPendingRef.current = false;
+      else checkUser();
     }
 
     document.addEventListener("visibilitychange", handleVisibilityChange);

@@ -222,17 +222,60 @@ test("a recovered 401 remains a confirmed logout", async () => {
   expect(fetch).toHaveBeenCalledTimes(1);
 });
 
-test("hidden tabs wait until visible before recovering unknown auth", async () => {
-  const fetch = rs.spyOn(globalThis, "fetch").mockResolvedValue(userResponse());
+test("a hidden-tab reconnect bypasses the failed visible-tab throttle", async () => {
+  const fetch = rs
+    .spyOn(globalThis, "fetch")
+    .mockRejectedValueOnce(new TypeError("Failed to fetch"))
+    .mockResolvedValueOnce(userResponse());
   const visibility = rs.spyOn(document, "visibilityState", "get");
+  mount();
+  await wake("visibilitychange");
+  expect(auth.user).toBeNull();
+  expect(owner).toBeUndefined();
+
   visibility.mockReturnValue("hidden");
-  mount(null, true);
+  rs.mocked(Date.now).mockReturnValue(100_001);
+  await wake("online");
   await wake("online");
   await wake("visibilitychange");
-  expect(fetch).not.toHaveBeenCalled();
+  expect(fetch).toHaveBeenCalledTimes(1);
+  expect(auth.user).toBeNull();
+
   visibility.mockReturnValue("visible");
+  rs.mocked(Date.now).mockReturnValue(130_000);
   await wake("visibilitychange");
   expect(screen.getByText("a@example.com")).toBeTruthy();
+  expect(owner).toBe("account-a");
+  await wake("visibilitychange");
+  expect(fetch).toHaveBeenCalledTimes(2);
+  expect(push).not.toHaveBeenCalled();
+});
+
+test("a reconnect survives a failed refresh settling while hidden", async () => {
+  let reject!: (reason: Error) => void;
+  const fetch = rs
+    .spyOn(globalThis, "fetch")
+    .mockImplementationOnce(
+      () => new Promise<Response>((_resolve, fail) => (reject = fail)),
+    )
+    .mockResolvedValueOnce(userResponse());
+  const visibility = rs.spyOn(document, "visibilityState", "get");
+  mount(null, true);
+  await wake("visibilitychange");
+  await wake("online");
+  visibility.mockReturnValue("hidden");
+  await act(async () => reject(new TypeError("Failed to fetch")));
+  expect(fetch).toHaveBeenCalledTimes(1);
+  expect(auth.user).toBeNull();
+  expect(owner).toBeUndefined();
+
+  visibility.mockReturnValue("visible");
+  rs.mocked(Date.now).mockReturnValue(130_000);
+  await wake("visibilitychange");
+  expect(screen.getByText("a@example.com")).toBeTruthy();
+  expect(owner).toBe("account-a");
+  expect(fetch).toHaveBeenCalledTimes(2);
+  expect(push).not.toHaveBeenCalled();
 });
 
 test("static demos do not probe even when auth starts unknown", async () => {
