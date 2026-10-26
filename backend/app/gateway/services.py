@@ -1331,9 +1331,9 @@ def build_run_config(
     load the matching ``agents/<name>/SOUL.md`` and per-agent config —
     without it the agent silently runs as the default lead agent.
 
-    This mirrors the channel manager's ``_resolve_run_params`` logic except for
-    the recursion default: Gateway API runs use the configured top-level
-    ``recursion_limit``, while IM channel runs retain their own default.
+    This mirrors the channel manager's ``_resolve_run_params`` logic. IM
+    channel runs send no ``recursion_limit`` unless their session config or
+    channel policy sets one, so they get the same configured default here.
     """
     # Lead-agent recursion budget (LangGraph super-steps for the lead graph
     # only). Independent of subagent depth: a `task()` dispatch runs the whole
@@ -2609,8 +2609,20 @@ async def start_run(
                 )
                 if start_producer_lease is not None:
                     producer_lease_started = await start_producer_lease(admission_run_id)
-                if getattr(bridge, "supports_cross_process", False) is True and not producer_lease_started:
-                    raise RuntimeError("Cross-process stream producer tracking is unavailable")
+                    if not producer_lease_started and getattr(bridge, "supports_cross_process", False) is True:
+                        # Best-effort: a cross-process bridge returns False only
+                        # after a transient backend error whose partial lease
+                        # registration was safely rolled back (nothing is left
+                        # tracked). An untracked producer falls back to the
+                        # historical conservative recovery path -- wait for the
+                        # real END or the retained-stream TTL rather than
+                        # synthesizing one -- so this run is no less safe than it
+                        # was before producer leases existed. Rejecting admission
+                        # here would instead turn a transient blip into a 500.
+                        logger.warning(
+                            "Stream producer tracking unavailable for run %s; admitting it with untracked (conservative) stream recovery",
+                            sanitize_log_param(admission_run_id),
+                        )
                 try:
                     record = await run_mgr.create_or_reject(
                         thread_id,
