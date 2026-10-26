@@ -1112,6 +1112,12 @@
 
 ### 修复
 
+- **鉴权：** 公开的认证路由（`/register`、`/setup-status`、`/providers`、
+  `/oauth/{provider}` 和 `/callback/{provider}`）不再在事件循环上读取 `config.yaml` 和
+  `extensions_config.json`。每个请求都会检查这两个文件（各做一次 `stat` 和完整的
+  sha256），编辑后还会在循环上重新解析 `config.yaml`，期间其他请求和流式输出都会
+  停顿。现在这次读取与 `/login/local` 一样在工作线程中执行。([#7576])
+
 - **鉴权：** 已认证的 Gateway 请求不再在事件循环上读取 `config.yaml` 和
   `extensions_config.json`。解析路由权限时，每个请求都会检查这两个文件（各做一次
   `stat` 和完整的 sha256），编辑后还会在循环上重新解析 `config.yaml`，期间其他请求和
@@ -10469,3 +10475,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7521]: https://github.com/bytedance/deer-flow/pull/7521
 [#7530]: https://github.com/bytedance/deer-flow/pull/7530
 [#7557]: https://github.com/bytedance/deer-flow/pull/7557
+[#7576]: https://github.com/bytedance/deer-flow/pull/7576
