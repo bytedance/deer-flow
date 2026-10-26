@@ -4,9 +4,10 @@ Agent runs execute on the Gateway event loop, so an async tool body runs there
 too. ``get_app_config()`` stats and hashes ``config.yaml`` and
 ``extensions_config.json`` on every call and reparses them after an edit, so a
 tool that resolved its config inline stalled every other run, request and
-stream on the loop. ``image_search`` and ``groundroute`` already offload it
-(``test_image_search.py``, ``test_groundroute_search_async.py``); these anchors
-cover every other async community tool entry point.
+stream on the loop. ``image_search``, ``groundroute``, ``webz`` and ``youcom``
+already offload it (``test_image_search.py``,
+``test_groundroute_search_async.py``); these anchors cover every other async
+community tool entry point.
 
 Each case swaps the module's ``get_app_config`` for a loader that performs a
 real file read and records the thread it ran on, so the strict gate fails if
@@ -37,6 +38,7 @@ from deerflow.community.crawl4ai import tools as crawl4ai_tools
 from deerflow.community.firecrawl import tools as firecrawl_tools
 from deerflow.community.infoquest import tools as infoquest_tools
 from deerflow.community.jina_ai import tools as jina_tools
+from deerflow.community.jsonify import tools as jsonify_tools
 from deerflow.community.lightrag import tools as lightrag_tools
 from deerflow.community.ragflow import tools as ragflow_tools
 from deerflow.community.searxng import tools as searxng_tools
@@ -137,6 +139,7 @@ _CASES = [
     pytest.param(infoquest_tools, _call(infoquest_tools.web_search_tool, query="q"), 1, id="infoquest-web_search"),
     pytest.param(infoquest_tools, _call(infoquest_tools.web_fetch_tool, url=_URL), 1, id="infoquest-web_fetch"),
     pytest.param(infoquest_tools, _call(infoquest_tools.image_search_tool, query="q"), 1, id="infoquest-image_search"),
+    pytest.param(jsonify_tools, _call(jsonify_tools.dataset_rows_tool, dataset="d"), 1, id="jsonify-dataset_rows"),
     pytest.param(ragflow_tools, lambda _tmp_path: ragflow_tools.knowledge_search_tool.coroutine("q", runtime=None), 1, id="ragflow-knowledge_search"),
     pytest.param(ragflow_tools, lambda _tmp_path: ragflow_tools.list_knowledge_bases_tool.coroutine(), 1, id="ragflow-list_knowledge_bases"),
     pytest.param(lightrag_tools, lambda _tmp_path: lightrag_tools.knowledge_search_tool.coroutine("q", runtime=None), 1, id="lightrag-knowledge_search"),
