@@ -2538,6 +2538,12 @@ Web chats accept direct model choices such as “ask MODEL to handle this”, �
 
 When a sub-agent ends with `return_direct=True` tools, including tools contributed by extension middleware, their outputs are returned in tool-call order. A failed tool marks the task as failed while preserving the batch outputs.
 
+After its stream closes, a cancelled sub-agent keeps its execution slot until
+sandbox cleanup and extension task-stop notifications finish under their existing
+error and timeout policies. Repeated cancellation does not abandon this cleanup.
+Task-stop reports an interrupted execution as aborted, preserving any completed,
+failed or timed-out outcome already published before cancellation.
+
 Ordinary `task` calls accept `context_mode="isolated"` (default) or
 `context_mode="snapshot"`. Isolated tasks receive their delegated prompt as
 before. Snapshot tasks also receive the parent's retained conversation and
