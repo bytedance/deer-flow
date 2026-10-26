@@ -172,6 +172,14 @@ hide unpinned calls behind unrelated settings.
 Channel JSON state coverage likewise checks each writer and Discord reader call
 within its owning class/method; unrelated encoding literals must not mask a regression.
 
+## Project trash purge
+
+Purge regressions use real original/companion files and the repository transaction.
+Inject initial and persistent unlink failures to exercise Windows retry semantics
+on every platform; assert rollback and a later successful purge. Plant real links
+with `support.symlinks.symlink_or_skip`, preserve target bytes/modes, and cover
+dangling links and removal before retry. Keep filesystem work off the event loop.
+
 ## PostgreSQL batch fixtures
 
 Batch fixtures use `support.postgres.asyncpg_test_url` to map libpq `sslmode`
