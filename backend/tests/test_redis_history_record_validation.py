@@ -9,6 +9,7 @@ from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.graph import StateGraph
 
 from deerflow.runtime.checkpoint_cache import redis as redis_cache
+from deerflow.runtime.checkpoint_cache.memory import MemoryCheckpointHistoryCache
 from deerflow.runtime.checkpoint_state import CheckpointStateAccessor
 from deerflow.runtime.checkpointer.cached_saver import CachedHistorySaver
 
@@ -108,5 +109,136 @@ async def test_valid_record_shapes_and_neighbor_entries_are_preserved(monkeypatc
         assert found["empty"] == {"writes": [], "seed": None}
         assert cache.stats().hits == 2
         assert cache.stats().misses == int(include_corrupt)
+    finally:
+        await cache.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entry", [{}, None, [], {"writes": None}, {"writes": ()}] + [{"writes": [bad]} for bad in BAD_WRITES])
+async def test_invalid_ingest_skips_only_bad_entry(monkeypatch, entry):
+    transport = RedisTransport()
+    monkeypatch.setattr(redis_cache, "_create_client", lambda *args, **kwargs: transport)
+    cache = redis_cache.RedisCheckpointHistoryCache("redis://unused", serde=JsonPlusSerializer(), ttl_seconds=60)
+    try:
+        await cache.aset_many({"before": {"writes": []}, "bad": entry, "after": {"writes": [("task", "items", ["saved"])]}})
+        assert set(transport.values) == {"before", "after"}
+        assert set(await cache.aget_many(["before", "after"])) == {"before", "after"}
+        assert cache.stats().write_serialization_failures == 0
+    finally:
+        await cache.aclose()
+
+
+@pytest.mark.asyncio
+async def test_invalid_ingest_logging_cannot_discard_valid_neighbor(monkeypatch):
+    transport = RedisTransport()
+    monkeypatch.setattr(redis_cache, "_create_client", lambda *args, **kwargs: transport)
+
+    def fail_log(*args, **kwargs):
+        raise RuntimeError("handler failed")
+
+    monkeypatch.setattr(redis_cache.logger, "warning", fail_log)
+    cache = redis_cache.RedisCheckpointHistoryCache("redis://unused", serde=JsonPlusSerializer(), ttl_seconds=60)
+    try:
+        await cache.aset_many({"bad": {"writes": [None]}, "good": {"writes": []}})
+        assert set(transport.values) == {"good"}
+    finally:
+        await cache.aclose()
+
+
+def build_history_graph(saver, steps=4):
+    builder = StateGraph(State)
+    for index in range(steps):
+        builder.add_node(str(index), lambda state, index=index: {"items": [f"saved{index}"]})
+        if index:
+            builder.add_edge(str(index - 1), str(index))
+    builder.set_entry_point("0")
+    builder.set_finish_point(str(steps - 1))
+    return builder.compile(checkpointer=saver)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_read", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("location", ["target", "ancestor"])
+@pytest.mark.parametrize("record_type", [tuple, list], ids=["tuple", "list"])
+async def test_foreign_channel_rebuilds_complete_history(async_read, location, record_type):
+    cache = MemoryCheckpointHistoryCache()
+    inner = InMemorySaver()
+    saver = CachedHistorySaver(inner, cache, key_prefix="channel-validation")
+    graph = build_history_graph(saver)
+    accessor = CheckpointStateAccessor.bind(graph, saver, mode="delta")
+    authority = CheckpointStateAccessor.bind(build_history_graph(inner), inner, mode="delta")
+    config = {"configurable": {"thread_id": "foreign-channel"}}
+    try:
+        # The memory backend supports sync reads even in a running loop. Keep
+        # both accessor entry points covered without a transport-only assertion.
+        graph.invoke({"items": ["input"]}, config)
+        target = inner.get_tuple(config)
+        poisoned = target
+        if location == "ancestor":
+            selected = None
+            for candidate in inner.list(config):
+                if candidate.parent_config is None:
+                    continue
+                parent = inner.get_tuple(candidate.parent_config)
+                if parent is not None and "items" not in (parent.checkpoint.get("channel_values") or {}):
+                    selected = candidate, parent
+                    break
+            assert selected is not None, "fixture must reach recursive non-snapshot composition"
+            target, poisoned = selected
+        expected = authority.get(target.config).values
+        assert expected["items"]
+        before = inner.get_delta_channel_history(config=target.config, channels=["items"])
+        cache.delete_thread("channel-validation", "foreign-channel")
+        key = saver._key(poisoned, "items")
+        bad = {"writes": [("task", "items", ["INJECTED"]), record_type(("task", "foreign-channel", ["FOREIGN"]))]}
+        cache.set_many({key: bad})
+        if location == "ancestor":
+            assert cache.get_many([saver._key(target, "items")]) == {}
+
+        observed = await accessor.aget(target.config) if async_read else accessor.get(target.config)
+        assert observed.values == expected
+        assert cache.get_many([key])[key] != bad
+        assert inner.get_delta_channel_history(config=target.config, channels=["items"]) == before
+        misses = cache.stats().misses
+        observed = await accessor.aget(target.config) if async_read else accessor.get(target.config)
+        assert observed.values == expected
+        assert cache.stats().misses == misses
+    finally:
+        await cache.aclose()
+
+
+def fold_text(state, writes):
+    return state + "".join(writes)
+
+
+class StringState(TypedDict):
+    items: Annotated[str, DeltaChannel(fold_text, snapshot_frequency=100)]
+
+
+@pytest.mark.asyncio
+async def test_plain_string_seed_remains_a_warm_valid_state(monkeypatch):
+    transport = RedisTransport()
+    monkeypatch.setattr(redis_cache, "_create_client", lambda *args, **kwargs: transport)
+    cache = redis_cache.RedisCheckpointHistoryCache("redis://unused", serde=JsonPlusSerializer(), ttl_seconds=60)
+    inner = InMemorySaver()
+    saver = CachedHistorySaver(inner, cache, key_prefix="string-seed")
+    builder = StateGraph(StringState)
+    builder.add_node("one", lambda state: {"items": "saved"})
+    builder.set_entry_point("one")
+    builder.set_finish_point("one")
+    graph = builder.compile(checkpointer=saver)
+    accessor = CheckpointStateAccessor.bind(graph, saver, mode="delta")
+    config = {"configurable": {"thread_id": "string-seed"}}
+    try:
+        await graph.ainvoke({"items": "input"}, config)
+        expected = (await accessor.aget(config)).values
+        assert expected == {"items": "inputsaved"}
+        target = await inner.aget_tuple(config)
+        key = saver._key(target, "items")
+        await cache.aset_many({key: {"writes": [], "seed": "inputsaved"}})
+        misses = cache.stats().misses
+        for _ in range(2):
+            assert (await accessor.aget(config)).values == expected
+        assert cache.stats().misses == misses
     finally:
         await cache.aclose()

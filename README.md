@@ -569,9 +569,10 @@ never frozen and workers sharing one checkpoint database may safely run
 different cache settings. Returned state snapshots have independent nested values,
 so editing one cannot change later checkpoint reads. Redis thread cleanup treats a configured `key_prefix`
 as literal text, including glob metacharacters, so deletion stays within that
-namespace and thread. Malformed Redis write records are cache misses: the whole
-entry is rebuilt from authoritative checkpoints instead of replaying partial or
-invalid history.
+namespace and thread. Redis rejects malformed write records on ingestion; malformed
+or wrong-channel cached histories are rebuilt in full from authoritative checkpoints.
+Seeds and write values remain opaque to the cache: these checks do not validate
+schema-specific state contents.
 
 Gateway checkpoint cleanup runs when the next run wins durable same-thread
 admission, before its first checkpoint read. It checks only the root head and
