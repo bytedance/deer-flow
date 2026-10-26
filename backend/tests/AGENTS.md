@@ -166,6 +166,13 @@ path reaches the native fixture so an unresolved-host rejection cannot mask it.
 The IPv4 fixture accepts only `AF_UNSPEC` and `AF_INET`; unsupported families
 must fail rather than receive a fabricated IPv4 answer.
 
+Async community tools read their config off the loop, once per call.
+`blocking_io/test_community_tool_config_reads.py` swaps each module's
+`get_app_config` for a loader that records its thread before a real file read,
+so a read the gate stops on the loop still counts; add new async tools there.
+The gate only flags IO under `deerflow.*`/`app.*` frames, so its meta-check
+calls a tool's sync config helper.
+
 The local sandbox's UTF-8 subprocess guard inspects each text-mode call with
 `ast`, checking both `encoding` and `errors`; module-wide literal counts can
 hide unpinned calls behind unrelated settings.
