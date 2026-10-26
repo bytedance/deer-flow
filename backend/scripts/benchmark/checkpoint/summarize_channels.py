@@ -149,7 +149,7 @@ def _summarize(rows: list[dict[str, Any]], *, metrics: list[str]) -> list[dict[s
         # A failed full row has no cadence, so it counts toward every swept
         # cadence's group at the same workload; a failed delta row counts only
         # toward its own cadence's group.
-        workload = tuple(key[index] for index in (0, 1, 3, 4))
+        workload = _workload_key(summary)
         summary["failed_rows"] = failed_full_rows[workload] + failed_delta_rows[key]
         for metric in metrics:
             full_values: list[float] = []

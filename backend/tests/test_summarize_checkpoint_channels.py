@@ -114,8 +114,10 @@ def test_summarize_reports_the_production_cadence_alongside_swept_cadences() -> 
     assert all(row["paired_repetitions"] == 1 for row in result)
 
 
-def test_summarize_counts_failed_full_rows_against_every_cadence_group() -> None:
-    """A failed full row has no cadence; it must count against each swept cadence's group."""
+@pytest.mark.parametrize("group_fields", [summarize._GROUP_FIELDS, tuple(reversed(summarize._GROUP_FIELDS))])
+def test_summarize_counts_failed_full_rows_against_every_cadence_group(monkeypatch: pytest.MonkeyPatch, group_fields: tuple[str, ...]) -> None:
+    """Failed full rows count per workload regardless of group field order."""
+    monkeypatch.setattr(summarize, "_GROUP_FIELDS", group_fields)
     rows = [
         {**_row("full", 0, 10, 1000), "snapshot_frequency": 10},
         {**_row("full", 1, 999, 9999, success=False), "snapshot_frequency": 10},
