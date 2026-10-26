@@ -5,9 +5,10 @@ from __future__ import annotations
 import asyncio
 import threading
 from collections import deque
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Coroutine
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from typing import Any
 
 from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
 
@@ -76,18 +77,24 @@ class SubagentExecutionCapacity:
                 timeout=self._config.queue_timeout_seconds,
             )
         except (TimeoutError, asyncio.CancelledError) as exc:
-            async with self._lock:
-                try:
-                    self._waiters.remove(waiter)
-                except ValueError:
-                    # A release transferred the slot just as the timeout fired.
-                    # If the future completed, this caller owns that transfer and
-                    # must release it before reporting the timeout.
-                    if waiter.done() and not waiter.cancelled():
-                        self._release_locked()
+            # A second cancellation while this cleanup waits for the lock must
+            # not skip it: a slot already transferred to the waiter would
+            # otherwise never be released.
+            await self._run_cancellation_safe(self._abandon_waiter(waiter))
             if isinstance(exc, asyncio.CancelledError):
                 raise
             raise SubagentCapacityTimeout(f"Timed out after {self._config.queue_timeout_seconds}s waiting for a subagent execution slot") from exc
+
+    async def _abandon_waiter(self, waiter: asyncio.Future[None]) -> None:
+        async with self._lock:
+            try:
+                self._waiters.remove(waiter)
+            except ValueError:
+                # A release transferred the slot just as the timeout fired.
+                # If the future completed, this caller owns that transfer and
+                # must release it before reporting the timeout.
+                if waiter.done() and not waiter.cancelled():
+                    self._release_locked()
 
     def _release_locked(self) -> None:
         while self._waiters:
@@ -107,22 +114,27 @@ class SubagentExecutionCapacity:
 
     async def _release_cancellation_safe(self) -> None:
         """Release an acquired slot before propagating repeated cancellation."""
-        release_task = asyncio.create_task(self._release())
+        await self._run_cancellation_safe(self._release())
+
+    @staticmethod
+    async def _run_cancellation_safe(cleanup: Coroutine[Any, Any, None]) -> None:
+        """Finish *cleanup* before propagating any cancellation received meanwhile."""
+        cleanup_task = asyncio.create_task(cleanup)
         cancellation: asyncio.CancelledError | None = None
-        while not release_task.done():
+        while not cleanup_task.done():
             try:
-                await asyncio.shield(release_task)
+                await asyncio.shield(cleanup_task)
             except asyncio.CancelledError as exc:
                 if cancellation is None:
                     cancellation = exc
 
         if cancellation is not None:
             try:
-                release_task.result()
+                cleanup_task.result()
             except Exception as exc:
                 raise cancellation from exc
             raise cancellation
-        release_task.result()
+        cleanup_task.result()
 
     @asynccontextmanager
     async def slot(self) -> AsyncIterator[None]:

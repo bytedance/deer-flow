@@ -97,3 +97,43 @@ async def test_repeated_cancellation_cannot_leak_running_slot(monkeypatch):
     async with asyncio.timeout(0.5):
         async with capacity.slot():
             pass
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transferred", [True, False])
+async def test_repeated_cancellation_of_queued_waiter_cannot_leak_slot(transferred):
+    """A second cancellation while an abandoned waiter waits for the lock must not strand its slot."""
+    capacity = SubagentExecutionCapacity(SubagentRuntimeConfig(max_running=1, max_queued=1, queue_timeout_seconds=30))
+    await capacity._acquire()
+    queued = asyncio.create_task(capacity._acquire())
+    async with asyncio.timeout(1):
+        while capacity.snapshot().queued == 0:
+            await asyncio.sleep(0)
+
+    await capacity._lock.acquire()
+    try:
+        if transferred:
+            # The owner releases just as the queued caller is cancelled: the
+            # slot is handed to a waiter whose caller is about to give up.
+            capacity._release_locked()
+        queued.cancel()
+        # Let the cancelled caller reach its cleanup, which blocks on the lock.
+        for _ in range(5):
+            await asyncio.sleep(0)
+        assert not queued.done()
+        queued.cancel()
+        for _ in range(5):
+            await asyncio.sleep(0)
+    finally:
+        capacity._lock.release()
+
+    with pytest.raises(asyncio.CancelledError):
+        await queued
+
+    if not transferred:
+        await capacity._release()
+    snapshot = capacity.snapshot()
+    assert (snapshot.running, snapshot.queued) == (0, 0)
+    async with asyncio.timeout(0.5):
+        async with capacity.slot():
+            pass
