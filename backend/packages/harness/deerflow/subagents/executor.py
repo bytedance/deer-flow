@@ -1878,6 +1878,11 @@ class SubagentExecutor:
                 return result
 
             cancelled_during_stream = False
+            # LangChain injects RunnableConfig into Serper/Jina tools separately
+            # from LangGraph's runtime.context. Carry only the Run identity and
+            # pinned policy snapshot so native and durable children resolve the
+            # same local Web attempt counter (or fail closed in another process).
+            run_config["context"] = {"run_id": self.run_id, "app_config": context.get("app_config")}
             stream = agent.astream(state, config=run_config, context=context, stream_mode="values")  # type: ignore[arg-type]
             try:
                 async for chunk in stream:

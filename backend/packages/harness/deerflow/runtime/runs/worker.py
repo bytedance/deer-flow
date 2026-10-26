@@ -1301,6 +1301,10 @@ async def run_agent(
             thread_incarnation=thread_incarnation,
             scheduler_capability=ctx.scheduler_capability,
         )
+        from deerflow.community.web_attempt_budget import register_run
+
+        budget_policy = getattr(ctx.app_config, "web_attempt_budget", None)
+        register_run(run_id, getattr(budget_policy, "max_attempts", None))
         register_sandbox_prewarm_cleanup(runtime_ctx)
         # Bind every checkpoint produced by this run to the effective agent
         # identity that produced its state. Manual compaction uses only this
@@ -2181,6 +2185,9 @@ async def run_agent(
                             run_id,
                         )
                     finally:
+                        from deerflow.community.web_attempt_budget import unregister_run
+
+                        unregister_run(run_id)
                         _release_run_scoped_references(
                             runnable_configs,
                             runtime_ctx,

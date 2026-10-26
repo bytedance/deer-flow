@@ -17,3 +17,9 @@ leases cover response stream cleanup, never retry backoff, idle client-pool clos
 stream-close ordering; re-verify on upgrades. Drain stream/client close on cancellation, with cancellation taking precedence over cleanup errors. Null bypasses only before first enablement; afterward all callers reuse the frozen policy until restart.
 Config: `backend/docs/CONFIGURATION.md`. Tests:
 `tests/test_jina_{client,retries,retry_after,response_limit,request_admission}.py`.
+
+The optional Run Web attempt budget is distinct from Jina concurrency
+admission. Its async HTTPX request hook reserves before each network dispatch,
+including retries and redirect hops. The counter is shared with Serper in one
+worker process; cross-process covered calls fail closed when enabled. Verify
+with `tests/test_web_attempt_budget.py`.

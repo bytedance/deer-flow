@@ -5433,6 +5433,8 @@ class TestSubagentGuardrailAttribution:
         assert context.get("oauth_provider") == "keycloak"
         assert context.get("oauth_id") == "subj-123"
         assert context.get("run_id") == "run-42"
+        assert fake_agent.captured_config["context"]["run_id"] == "run-42"
+        assert fake_agent.captured_config["context"].get("app_config") is context.get("app_config")
         assert context.get("is_subagent") is True
         lease_owner = context.get("sandbox_lease_owner_id")
         assert isinstance(lease_owner, str)
