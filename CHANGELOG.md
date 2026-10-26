@@ -1404,6 +1404,16 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
   each) up to three times, and reparsed `config.yaml` there after an edit,
   stalling other runs, requests and streams meanwhile. They now read the
   config once per call in a worker, as image search already did. ([#7580])
+  
+- **sandbox:** Stopping the Gateway no longer destroys AIO or E2B sandboxes
+  before in-flight runs drain. When the first sandbox use built the provider on
+  the event-loop thread, the provider's own SIGTERM/SIGINT handler destroyed
+  every sandbox synchronously as the signal arrived: the event loop froze for
+  the whole teardown and running tool calls lost their sandbox. The Gateway now
+  owns sandbox shutdown and closes the provider after the run drain and MCP
+  teardown; embedded clients and scripts keep the signal fallback, and SIGHUP
+  still cleans up. AIO acquire now refuses once shutdown has begun, as E2B
+  already did. ([#7560])
 
 - **frontend:** SSO sign-ins now return to the page that asked for them, such
   as a shared chat link, instead of always opening the default workspace. The
@@ -13133,4 +13143,6 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7521]: https://github.com/bytedance/deer-flow/pull/7521
 [#7530]: https://github.com/bytedance/deer-flow/pull/7530
 [#7557]: https://github.com/bytedance/deer-flow/pull/7557
+[#7560]: https://github.com/bytedance/deer-flow/pull/7560
 [#7580]: https://github.com/bytedance/deer-flow/pull/7580
+
