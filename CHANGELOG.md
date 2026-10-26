@@ -1397,6 +1397,14 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
 
 ### Fixed
 
+- **community:** Async community tools (Jina, Crawl4AI, Browserless, Tavily,
+  SearXNG, Firecrawl, InfoQuest, RAGFlow, LightRAG and the browser automation
+  tools) no longer read `config.yaml` and `extensions_config.json` on the
+  event loop. Each call checked both files (a `stat` and a full sha256 of
+  each) up to three times, and reparsed `config.yaml` there after an edit,
+  stalling other runs, requests and streams meanwhile. They now read the
+  config once per call in a worker, as image search already did. ([#7580])
+
 - **frontend:** SSO sign-ins now return to the page that asked for them, such
   as a shared chat link, instead of always opening the default workspace. The
   sign-in pages used to send every signed-in request to `/workspace`, which
@@ -13125,3 +13133,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7521]: https://github.com/bytedance/deer-flow/pull/7521
 [#7530]: https://github.com/bytedance/deer-flow/pull/7530
 [#7557]: https://github.com/bytedance/deer-flow/pull/7557
+[#7580]: https://github.com/bytedance/deer-flow/pull/7580

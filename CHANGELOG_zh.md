@@ -1112,6 +1112,12 @@
 
 ### 修复
 
+- **社区：** 异步社区工具（Jina、Crawl4AI、Browserless、Tavily、SearXNG、Firecrawl、
+  InfoQuest、RAGFlow、LightRAG 和浏览器自动化工具）不再在事件循环上读取 `config.yaml`
+  和 `extensions_config.json`。每次调用最多会把这两个文件检查三次（各做一次 `stat`
+  和完整的 sha256），编辑后还会在循环上重新解析 `config.yaml`，期间其他运行、请求和
+  流式输出都会停顿。现在它们与图片搜索一样，每次调用只在工作线程中读取一次配置。([#7580])
+
 - **前端：** SSO 登录后现在会回到发起登录的页面（例如分享的对话链接），不再总是打开
   默认工作区。此前登录相关页面会把所有已登录的请求都跳转到 `/workspace`，导致
   `/auth/callback?next=...` 中的 `next` 路径丢失；已登录时访问 `/login?next=...`
@@ -10477,3 +10483,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7521]: https://github.com/bytedance/deer-flow/pull/7521
 [#7530]: https://github.com/bytedance/deer-flow/pull/7530
 [#7557]: https://github.com/bytedance/deer-flow/pull/7557
+[#7580]: https://github.com/bytedance/deer-flow/pull/7580
