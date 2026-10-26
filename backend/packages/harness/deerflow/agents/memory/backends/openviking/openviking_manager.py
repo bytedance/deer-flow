@@ -576,7 +576,7 @@ def _load_official_integration() -> dict[str, Any]:
     except ImportError as exc:
         raise ImportError("The OpenViking memory backend requires langchain-openviking==0.1.0. Install DeerFlow backend dependencies and retry.") from exc
     if not has_request_actor_peer_support():
-        raise ImportError("The installed OpenViking SDK lacks request-scoped actor-peer support. Install openviking-sdk>=0.1.6,<0.2 and retry.")
+        raise ImportError("The installed OpenViking SDK lacks request-scoped actor-peer support. Install openviking-sdk>=0.1.6,<0.1.7 and retry.")
     return {
         "OpenVikingCommitPolicy": OpenVikingCommitPolicy,
         "OpenVikingPartialWriteError": OpenVikingPartialWriteError,
