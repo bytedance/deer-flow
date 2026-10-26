@@ -145,6 +145,12 @@ def parse_required_secrets(raw: object, skill_file: Path) -> tuple[SecretRequire
     environment-variable name are dropped with a warning, so one malformed
     declaration does not invalidate the whole skill. Raises ValueError only when
     the field is present but is not a list.
+
+    Duplicate names collapse into the first entry of that name, but a name is
+    required when *any* declaration of it is required: without that merge an
+    earlier ``optional: true`` entry hides a later required one and the skill
+    silently runs without the secret. This is the same fail-closed direction as
+    the malformed-``optional`` handling below (issue #5738).
     """
     if raw is None:
         return ()
@@ -152,7 +158,7 @@ def parse_required_secrets(raw: object, skill_file: Path) -> tuple[SecretRequire
         raise ValueError(f"required-secrets in {skill_file} must be a list")
 
     secrets: list[SecretRequirement] = []
-    seen: set[str] = set()
+    positions: dict[str, int] = {}
     for item in raw:
         if isinstance(item, str):
             name, optional = item.strip(), False
@@ -176,9 +182,12 @@ def parse_required_secrets(raw: object, skill_file: Path) -> tuple[SecretRequire
         if not _ENV_VAR_NAME_RE.match(name):
             logger.warning("Ignoring required-secrets entry with invalid env var name in %s: %r", skill_file, name)
             continue
-        if name in seen:
+        position = positions.get(name)
+        if position is not None:
+            if not optional and secrets[position].optional:
+                secrets[position] = SecretRequirement(name=name, optional=False)
             continue
-        seen.add(name)
+        positions[name] = len(secrets)
         secrets.append(SecretRequirement(name=name, optional=optional))
     return tuple(secrets)
 

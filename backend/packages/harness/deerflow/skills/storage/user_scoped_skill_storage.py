@@ -133,7 +133,7 @@ class UserScopedSkillStorage(LocalSkillStorage):
         )
         tmp_path = Path(tmp_path_str)
         try:
-            handle = os.fdopen(fd, "w", encoding="utf-8")
+            handle = os.fdopen(fd, "w", encoding="utf-8", newline="")
             fd = None  # The file object now owns the descriptor.
             with handle:
                 json.dump(states, handle, indent=2)
@@ -412,7 +412,7 @@ class UserScopedSkillStorage(LocalSkillStorage):
             target.parent.mkdir(parents=True, exist_ok=True)
             tmp_path = None
             try:
-                with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, dir=str(target.parent)) as tmp_file:
+                with tempfile.NamedTemporaryFile("w", encoding="utf-8", newline="", delete=False, dir=str(target.parent)) as tmp_file:
                     tmp_path = Path(tmp_file.name)
                     tmp_file.write(content)
                 tmp_path.replace(target)

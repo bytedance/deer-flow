@@ -637,12 +637,21 @@ The bundled Docker, local and Helm nginx configs proxy Live Browser WebSocket up
 
 Browser login uses `HttpOnly` session cookies. The login page offers a "keep me signed in" option that extends the browser session when the request is HTTPS (including trusted `X-Forwarded-Proto: https`) or localhost HTTP. The localhost exception uses the direct request `Host` and ignores forwarded host headers. Public HTTP deployments, including many temporary sandbox URLs, fall back to session cookies by default. DeerFlow never stores the password in browser storage; the UI may remember only the email address.
 
+If an authentication refresh fails during a temporary network outage, a visible
+tab rechecks the unknown session when connectivity returns or on a later tab
+switch. Reconnects received in a background tab are remembered until it becomes
+visible, without waiting for the tab-switch throttle. Identity is restored only
+after a successful auth response; a confirmed expired session or explicit logout
+still requires signing in again.
+
 Password forms accept non-ASCII email addresses and trim surrounding email whitespace.
 Sign-in requires at least six password characters; creating an account or choosing
 a new password requires eight. These checks run before sending a request.
 Passwords, including surrounding spaces, are submitted unchanged.
 
 OIDC/SSO authorization endpoints may include provider query parameters such as `?prompt=login`. DeerFlow preserves those parameters when adding the login request, including for configured `authorization_endpoint` overrides.
+
+After an SSO sign-in, DeerFlow returns you to the page that asked you to sign in instead of the default workspace. Opening the login page while already signed in does the same for its `next` target.
 
 Administrators can suspend and restore accounts from **Settings → Users** (admin-only; the section is hidden for ordinary users). The page lists each account's email, role, and status and exposes the same enable/disable operation as `PATCH /api/v1/admin/users/{id}`; the last remaining active admin cannot be disabled, and the Gateway's rejection detail is shown verbatim. A disabled account is rejected by every authentication surface, and its live sessions end on the next request with a login page that states the account has been disabled. Password login for a disabled account deliberately still answers "incorrect email or password" so the state is not disclosed to whoever holds the credentials.
 
@@ -708,6 +717,18 @@ currently use, run `git pull --ff-only`, then start the same mode again. Do not 
 version requires configuration changes, run `make config-upgrade` before restarting.
 See [Operations and Troubleshooting](frontend/src/content/en/application/operations-and-troubleshooting.mdx#upgrading-an-existing-checkout)
 for the commands for each mode.
+
+To continue a thread paused at a static `interrupt_before` or `interrupt_after`
+breakpoint, submit `input: null` (or omit `input`) to its `/runs`, `/runs/wait`,
+or `/runs/stream` endpoint. This continues pending graph work with the source
+turn's knowledge scope from the selected checkpoint (the head by default).
+An explicit empty object is new input, not a continuation; dynamic interrupts
+still require `command.resume`. In delta mode, historical continuation rejects
+rewrites that would discard pending execution; continue at the head instead.
+Continuations retain the checkpoint's MCP `background_tasks` projection; only
+dictionary input refreshes it from the task repository.
+Old null-input runs stored as `{}` cannot safely match a keyed null-input retry
+after upgrading and return 409. Check the original run before submitting a new key.
 
 When rolling out the resume-command idempotency fix across multiple Gateway
 workers or Pods, route **all keyed resume submissions and retries** (`command.resume`
@@ -1711,6 +1732,9 @@ Discovery follows operator-managed directory symlinks, but skips links back to a
 
 Skill Markdown and bundled text resources use UTF-8. Skill-creator CLI and review utilities read and write text explicitly as UTF-8 so localized skills behave consistently across operating systems.
 
+Custom-skill writes and security-scan staging preserve submitted line endings
+on every platform, so the scanner checks the bytes that will be stored.
+
 Skill-creator benchmark aggregation uses recorded `timing.json` token counts even
 when `grading.json` already contains the run duration. Recorded zero counts are
 preserved; output character counts remain a legacy proxy only when token data is missing.
@@ -2215,6 +2239,9 @@ not wrapped by middleware model-call hooks (goal, memory, title, and summarizati
 Gateway-lifetime services, and eager FastAPI HTTP routers. The contract package has no
 framework dependencies; extensions must declare FastAPI, LangChain, LangGraph, or other
 libraries they import.
+Cancelled subagents report `aborted` to task-lifecycle hooks after stream cleanup;
+synchronous timeouts remain failures, and background hard timeouts retain their
+failure outcome.
 The [fetched-content screening example](examples/deerflow-extension-jev-screening/README.md)
 contributes one such middleware at the visible tool position. After operator opt-in it
 classifies the sanitized text a remote tool result shows the model, PII-redacted when

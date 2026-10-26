@@ -21,10 +21,10 @@ resources unwind; each service `stop()` has a 30-second `asyncio.timeout`.
 Routers with persistent writes drain through
 `app.gateway.persistent_writes.run_drained_write`.
 
-After `langgraph_runtime` exits (run drain and extension teardown), close MCP
-bounded and failure-isolated. Then drain off-thread
-`shutdown_sandbox_provider()` in `finally`, including cancellation. Never
-initialize for cleanup; log failures and retain native retryability.
+`lifespan` first holds `hold_sandbox_shutdown_ownership()`. After
+`langgraph_runtime` drains runs and extensions, close MCP (bounded, isolated),
+then drain `shutdown_sandbox_provider()` off-loop in `finally`, even on
+cancel. Never allocate for cleanup; log failures, stay retryable.
 
 Retention holds durable thread admission and the checkpoint lock before
 checkpoint reads. Inspect root head/parent and leaf writes only; protect selectors,
@@ -140,7 +140,7 @@ owner-scoped assistant version selection remains enabled.
 | **GitHub Event-Driven Agents** | Custom agents can declare a `github:` block in their `config.yaml` to bind to repos and event triggers. Webhook fan-out publishes one `InboundMessage` per matching binding to the channel bus; `GitHubChannel` routes those messages through `ChannelManager`. The response `dispatch` summarizes matched/fired/skipped agents. |
 
 Edit-replay and messages-input clarification may replace checkpoint knowledge
-scope with a validated client snapshot; regenerate and `Command` resume always
+scope with a validated client snapshot; regenerate, null-input and `Command` resume
 recover checkpoint scope from the originating genuine user turn, skipping
 server-generated hidden context, and ignore client values. Scope admission
 treats `input.messages: null` as an empty message collection so
