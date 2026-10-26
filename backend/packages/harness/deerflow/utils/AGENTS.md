@@ -101,10 +101,13 @@ Display summaries use `strip_leading_think_blocks` before limiting text;
 
 ### Agent / Tool Assembly Off-Load
 
-One-shot input-polish and follow-up-suggestion helpers build providers through
-`run_assembly` before awaiting inference. Provider construction can read local
-credentials; keep it off the event loop and the default executor while preserving
-request context. Cancellation during construction must not start inference.
+One-shot input-polish, follow-up-suggestion, and project-file-summary helpers
+build providers through `run_assembly` before awaiting inference. Provider
+construction can read local credentials; keep it off the event loop and the
+default executor while preserving request context. Cancellation during
+construction must not start inference. This contract covers callers of
+`oneshot_llm.py`; standalone skill-moderation and goal-evaluator constructors
+are separate sites and are not covered by this offload.
 Coverage: `tests/blocking_io/test_oneshot_llm_offloop.py`.
 
 `start_run` also resolves the factory through `run_assembly` before admission:
