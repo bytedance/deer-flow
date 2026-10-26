@@ -1,17 +1,17 @@
 ### Checkpoint History Cache
 
-Lock registry/LRU/stats/lifecycle; exclude awaits, saver I/O, copy callbacks.
-Deep-copy nested writes/seeds on ingest/read on the caller/event-loop thread
-(`aget_many`/`aset_many` too): O(payload) CPU/allocation per entry,
-O(N²) for warm scans of N growing seeds. LRU bounds entries, not
-bytes/scan cost. Profile long histories before offload. Sync/async isolation:
+Lock registry/LRU/stats/lifecycle without awaits, saver I/O or copy callbacks.
+Deep-copy writes/seeds on caller-thread ingest/read (async too): O(payload)
+CPU/allocation per entry, O(N²) across N growing seeds. LRU bounds entries, not
+bytes/scan cost; profile before offload. Isolation:
 `tests/test_checkpoint_cache_payload_isolation.py`.
 
-Validate tuple/list write triples and string task/channel IDs on Redis read/write;
-skip bad ingests, rebuild bad reads. Bind hits to their requested channel in
-sync/async target/ancestor paths. Seed/value types are opaque, not schema-checked.
-Escape full literal stems before SCAN; recheck byte/string keys before UNLINK.
-Preserve namespace/thread bounds, cursor loop and outage/TTL fallback.
+Redis read/write records require tuple/list triples and string task/channel IDs;
+skip bad ingests, rebuild bad reads. Bind sync/async target/ancestor hits to the
+requested channel; seeds/values stay opaque. Warnings are best-effort: handler
+errors preserve cache fallbacks and valid neighbors, including Redis outages/purge.
+Escape literal stems for SCAN; recheck byte/string keys before UNLINK. Preserve
+namespace/thread bounds, cursor iteration and outage/TTL fallback.
 
 ### Stream Bridge Heartbeats
 

@@ -24,6 +24,12 @@ REDIS_INSTALL = "redis is required for the redis checkpoint cache backend. Insta
 _TAG_SEPARATOR = b"\x00"
 
 
+def _warn(message: str, *args: Any) -> None:
+    """Keep optional-cache diagnostics from changing fallback behavior."""
+    with suppress(Exception):
+        logger.warning(message, *args)
+
+
 def _create_client(redis_url: str, *, max_connections: int | None) -> Any:
     try:
         import redis.asyncio as redis_async
@@ -69,7 +75,7 @@ class RedisCheckpointHistoryCache:
             raws = await self._client.mget(keys)
         except _redis_error() as exc:
             # Performance-only bypass: a redis outage costs hits, never availability.
-            logger.warning("checkpoint history cache mget failed; treating as all-miss: %s", exc)
+            _warn("checkpoint history cache mget failed; treating as all-miss: %s", exc)
             self._misses += len(keys)
             return {}
         found: dict[str, dict[str, Any]] = {}
@@ -88,7 +94,7 @@ class RedisCheckpointHistoryCache:
             except Exception as exc:
                 # Cached history is optional. A malformed entry must not prevent
                 # rebuilding history from authoritative checkpoints.
-                logger.warning(
+                _warn(
                     "checkpoint history cache decode failed; treating as miss (key=%s): %s",
                     key,
                     type(exc).__name__,
@@ -106,10 +112,7 @@ class RedisCheckpointHistoryCache:
             pipe = self._client.pipeline(transaction=False)
             for key, entry in entries.items():
                 if not valid_history_entry(entry):
-                    # Optional-cache rejection must retain valid neighbors even
-                    # when an application-supplied log handler raises.
-                    with suppress(Exception):
-                        logger.warning("checkpoint history cache invalid entry; skipping (key=%s)", key)
+                    _warn("checkpoint history cache invalid entry; skipping (key=%s)", key)
                     continue
                 try:
                     tag, data = self._serde.dumps_typed(entry)
@@ -117,7 +120,7 @@ class RedisCheckpointHistoryCache:
                     self._write_serialization_failures += 1
                     # Cache writes are optional; one unserializable entry must not
                     # abort authoritative history reads or discard other entries.
-                    logger.warning(
+                    _warn(
                         "checkpoint history cache serialization failed; skipping (key=%s): %s",
                         key,
                         type(exc).__name__,
@@ -127,7 +130,7 @@ class RedisCheckpointHistoryCache:
             await pipe.execute()
         except _redis_error() as exc:
             # Writes are optional; the next read simply recomputes the history.
-            logger.warning("checkpoint history cache write failed; skipping: %s", exc)
+            _warn("checkpoint history cache write failed; skipping: %s", exc)
 
     async def adelete_thread(self, key_prefix: str, thread_id: str) -> None:
         """SCAN+UNLINK every entry of one thread. Failure degrades to
@@ -149,7 +152,7 @@ class RedisCheckpointHistoryCache:
                 if cursor == 0:
                     break
         except _redis_error() as exc:
-            logger.warning("checkpoint history cache thread purge failed; residual entries expire via TTL: %s", exc)
+            _warn("checkpoint history cache thread purge failed; residual entries expire via TTL: %s", exc)
 
     def stats(self) -> CheckpointCacheStats:
         return CheckpointCacheStats(

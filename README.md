@@ -573,6 +573,8 @@ namespace and thread. Redis rejects malformed write records on ingestion; malfor
 or wrong-channel cached histories are rebuilt in full from authoritative checkpoints.
 Seeds and write values remain opaque to the cache: these checks do not validate
 schema-specific state contents.
+Checkpoint reads, valid neighboring writes and optional-cache cleanup continue
+even if a warning handler fails.
 
 Gateway checkpoint cleanup runs when the next run wins durable same-thread
 admission, before its first checkpoint read. It checks only the root head and

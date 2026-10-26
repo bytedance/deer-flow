@@ -1,6 +1,8 @@
 """Malformed cache write records must rebuild from authoritative checkpoints."""
 
+from types import SimpleNamespace
 from typing import Annotated, TypedDict
+from unittest.mock import AsyncMock
 
 import pytest
 from langgraph.channels import DeltaChannel
@@ -51,9 +53,16 @@ class State(TypedDict):
 BAD_WRITES = [None, 17, "abc", {"task": "x"}, (), ("task", "items"), ("task", "items", [], "extra"), (17, "items", []), ("task", 17, [])]
 
 
+def fail_warning(*args, **kwargs):
+    raise RuntimeError("handler failed")
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("bad_write", BAD_WRITES, ids=["null", "number", "string", "mapping", "empty", "short", "long", "task-type", "channel-type"])
-async def test_bad_write_rebuilds_snapshot_and_replaces_corrupt_cache(monkeypatch, bad_write):
+@pytest.mark.parametrize("warning_handler_fails", [False, True], ids=["logging", "raising-handler"])
+async def test_bad_write_rebuilds_snapshot_and_replaces_corrupt_cache(monkeypatch, bad_write, warning_handler_fails):
+    if warning_handler_fails:
+        monkeypatch.setattr(redis_cache.logger, "warning", fail_warning)
     transport = RedisTransport()
     monkeypatch.setattr(redis_cache, "_create_client", lambda *args, **kwargs: transport)
     serde = JsonPlusSerializer()
@@ -133,14 +142,56 @@ async def test_invalid_ingest_logging_cannot_discard_valid_neighbor(monkeypatch)
     transport = RedisTransport()
     monkeypatch.setattr(redis_cache, "_create_client", lambda *args, **kwargs: transport)
 
-    def fail_log(*args, **kwargs):
-        raise RuntimeError("handler failed")
-
-    monkeypatch.setattr(redis_cache.logger, "warning", fail_log)
+    monkeypatch.setattr(redis_cache.logger, "warning", fail_warning)
     cache = redis_cache.RedisCheckpointHistoryCache("redis://unused", serde=JsonPlusSerializer(), ttl_seconds=60)
     try:
         await cache.aset_many({"bad": {"writes": [None]}, "good": {"writes": []}})
         assert set(transport.values) == {"good"}
+    finally:
+        await cache.aclose()
+
+
+@pytest.mark.asyncio
+async def test_serialization_logging_cannot_discard_valid_neighbors(monkeypatch):
+    transport = RedisTransport()
+    monkeypatch.setattr(redis_cache, "_create_client", lambda *args, **kwargs: transport)
+    monkeypatch.setattr(redis_cache.logger, "warning", fail_warning)
+    execute = AsyncMock(wraps=transport.execute)
+    monkeypatch.setattr(transport, "execute", execute)
+    cache = redis_cache.RedisCheckpointHistoryCache("redis://unused", serde=JsonPlusSerializer(), ttl_seconds=60)
+    try:
+        await cache.aset_many({"before": {"writes": []}, "bad": {"writes": [], "seed": object()}, "after": {"writes": [("task", "items", ["saved"])]}})
+
+        assert set(transport.values) == {"before", "after"}
+        assert set(await cache.aget_many(["before", "after"])) == {"before", "after"}
+        assert cache.stats().write_serialization_failures == 1
+        execute.assert_awaited_once()
+    finally:
+        await cache.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["read", "write", "purge"])
+async def test_warning_handler_failure_preserves_redis_error_fallback(monkeypatch, operation):
+    from redis.exceptions import RedisError
+
+    transport = RedisTransport()
+    monkeypatch.setattr(redis_cache, "_create_client", lambda *args, **kwargs: transport)
+    monkeypatch.setattr(redis_cache.logger, "warning", fail_warning)
+    cache = redis_cache.RedisCheckpointHistoryCache("redis://unused", serde=JsonPlusSerializer(), ttl_seconds=60)
+    error = RedisError("Redis unavailable")
+    try:
+        if operation == "read":
+            monkeypatch.setattr(transport, "mget", AsyncMock(side_effect=error))
+            assert await cache.aget_many(["one", "two"]) == {}
+            assert cache.stats().misses == 2
+        elif operation == "write":
+            monkeypatch.setattr(transport, "execute", AsyncMock(side_effect=error))
+            await cache.aset_many({"good": {"writes": []}})
+        else:
+            transport.connection_pool = SimpleNamespace(get_encoder=lambda: SimpleNamespace(encode=lambda key: key.encode()))
+            transport.scan = AsyncMock(side_effect=error)
+            await cache.adelete_thread("logging", "thread")
     finally:
         await cache.aclose()
 
