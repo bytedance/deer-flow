@@ -2374,6 +2374,9 @@ Unsent Web UI composer drafts survive page reloads and switching between convers
 
 If an attachment upload reports `success: false`, the Web UI stops the send even when the HTTP response is 200. The upload error is shown and the composer keeps its draft and attachments for correction or retry. Files already accepted by a partially successful upload remain on the server; this does not roll them back.
 
+Attachment cards in older and IM conversations remain visible when a filename or document outline contains empty-state text such as `(empty)`.
+Files reported as `>= 1 TB` also keep their attachment cards; the fallback uses 1 TB as the available size lower bound.
+
 The Web UI composer supports `@` references at the cursor or through the `@` button. Search enabled skills, documents in the current project, and other conversations in a grouped picker; selected references appear inline alongside the draft text and can be removed with normal editing. Multiple skills can be selected in one message (up to 16 unique skills); selecting a checked skill again removes it, with each selection checked against the current user registry and agent allowlist. Project files are attached only after ingestion succeeds; conversation references require the `read_conversation` capability and retain its per-run limit. If capability discovery fails, saved conversation references remain intact and sending waits for a successful retry. Polishing preserves complete reference labels when instructions are reordered. The file group also offers local uploads. `/goal`, `/compact`, and legacy `/skill-name` input remain supported.
 
 After picking an inline reference, typing continues immediately after it. Moving the cursor keeps the position you chose, including when editing text beside a reference.

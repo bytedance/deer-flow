@@ -1301,6 +1301,7 @@ export function stripInternalMarkers(content: string): string {
 // mirroring formatBytes). Convert them back to bytes so the parsed
 // FileInMessage.size honours its bytes contract and chips re-render at the
 // original magnitude instead of e.g. treating "177.6 KB" as 177 bytes.
+// The capped ">= 1 TB" display provides only a lower bound; use that 1 TB value.
 function parseHumanReadableSize(raw: string): number {
   const match = /([\d.]+)\s*(B|KB|MB|GB|TB)?/i.exec(raw.trim());
   if (!match) return 0;
@@ -1332,23 +1333,16 @@ export function parseUploadedFiles(content: string): FileInMessage[] {
 
   const uploadedFilesContent = match[2];
 
-  // Check if it's "No files have been uploaded yet."
-  if (uploadedFilesContent?.includes("No files have been uploaded yet.")) {
-    return [];
-  }
-
-  // Check if the backend reported no new files were uploaded in this message
-  if (uploadedFilesContent?.includes("(empty)")) {
-    return [];
-  }
-
   // Parse file list
   // Format: - filename (size)\n  Path: /path/to/file
+  // Empty-state messages have no file entries. Their text can also appear in
+  // filenames or document outlines/previews, so do not treat it as a sentinel
+  // for the entire block.
   // The filename itself may contain parentheses (e.g. "photo (1).png"), so
-  // the size group is anchored on the trailing "(<number> <unit>)" pair the
-  // backend emits instead of stopping the filename at the first "(".
+  // the size group is anchored on the trailing "(<number> <unit>)" or
+  // "(>= 1 TB)" the backend emits instead of stopping at the first "(".
   const fileRegex =
-    /- (.+)\s*\(([\d.]+\s*(?:B|KB|MB|GB|TB))\)\s*\n\s*Path:\s*([^\n]+)/gi;
+    /- (.+)\s*\(([\d.]+\s*(?:B|KB|MB|GB|TB)|>=\s*1 TB)\)\s*\n\s*Path:\s*([^\n]+)/gi;
   const files: FileInMessage[] = [];
   let fileMatch;
 

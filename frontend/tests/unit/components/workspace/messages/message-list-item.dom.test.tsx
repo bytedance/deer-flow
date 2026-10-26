@@ -131,6 +131,65 @@ describe("MessageListItem edit shortcuts during IME composition", () => {
   );
 });
 
+describe("MessageListItem upload context fallback", () => {
+  it.each(["current_uploads", "uploaded_files"])(
+    "keeps capped-size and ordinary attachment cards in a %s block",
+    (tag) => {
+      const message = {
+        id: "human-large-upload",
+        type: "human",
+        content: `<${tag}>
+The following files were uploaded in this message:
+
+- big.iso (>= 1 TB)
+  Path: /mnt/user-data/uploads/big.iso
+- normal.csv (2.0 KB)
+  Path: /mnt/user-data/uploads/normal.csv
+</${tag}>
+
+Summarize these files`,
+      } as Message;
+
+      renderRow(message, { showCopyButton: false });
+
+      expect(screen.getByText("big.iso")).toBeTruthy();
+      expect(screen.getByText("normal.csv")).toBeTruthy();
+      expect(screen.getByText("Summarize these files")).toBeTruthy();
+    },
+  );
+
+  it.each(["current_uploads", "uploaded_files"])(
+    "keeps attachment cards when a %s filename contains empty-state text",
+    (tag) => {
+      const message = {
+        id: "human-uploads",
+        type: "human",
+        content: `<${tag}>
+The following files were uploaded in this message:
+
+- report(empty).csv (1.0 KB)
+  Path: /mnt/user-data/uploads/report(empty).csv
+- normal.csv (2.0 KB)
+  Path: /mnt/user-data/uploads/normal.csv
+</${tag}>
+
+Summarize these files`,
+      } as Message;
+
+      renderRow(message, { showCopyButton: false });
+
+      expect(screen.getByText("report(empty).csv")).toBeTruthy();
+      expect(screen.getByText("normal.csv")).toBeTruthy();
+      expect(screen.getByText("Summarize these files")).toBeTruthy();
+      expect(
+        screen.queryByText(
+          "The following files were uploaded in this message:",
+        ),
+      ).toBeNull();
+    },
+  );
+});
+
 describe("MessageListItem copy-data derivation guard", () => {
   it("derives no copy data for an assistant row that never renders the toolbar", () => {
     const message = makeMessage("ai");

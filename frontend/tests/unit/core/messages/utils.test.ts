@@ -1089,6 +1089,99 @@ describe("human message internal context stripping", () => {
     ]);
   });
 
+  test.each(
+    ["current_uploads", "uploaded_files"].flatMap((tag) =>
+      [">= 1 TB", ">=1 TB", ">=   1 TB"].map((size) => [tag, size] as const),
+    ),
+  )("parses %s files with capped size %s", (tag, size) => {
+    const content = `<${tag}>
+The following files were uploaded in this message:
+
+- big (backup).iso (${size})
+  Path: /mnt/user-data/uploads/big (backup).iso
+- normal.csv (2.0 KB)
+  Path: /mnt/user-data/uploads/normal.csv
+</${tag}>`;
+
+    expect(parseUploadedFiles(content)).toEqual([
+      {
+        filename: "big (backup).iso",
+        size: 1024 ** 4,
+        path: "/mnt/user-data/uploads/big (backup).iso",
+      },
+      {
+        filename: "normal.csv",
+        size: 2048,
+        path: "/mnt/user-data/uploads/normal.csv",
+      },
+    ]);
+  });
+
+  test.each(
+    ["current_uploads", "uploaded_files"].flatMap((tag) =>
+      ["(empty)", "No files have been uploaded yet."].map(
+        (marker) => [tag, marker] as const,
+      ),
+    ),
+  )("parses %s files when a filename contains %s", (tag, marker) => {
+    const filename = `report ${marker}.csv`;
+    const content = `<${tag}>
+The following files were uploaded in this message:
+
+- ${filename} (1.0 KB)
+  Path: /mnt/user-data/uploads/${filename}
+- normal.csv (2.0 KB)
+  Path: /mnt/user-data/uploads/normal.csv
+</${tag}>`;
+
+    expect(parseUploadedFiles(content)).toEqual([
+      {
+        filename,
+        size: 1024,
+        path: `/mnt/user-data/uploads/${filename}`,
+      },
+      {
+        filename: "normal.csv",
+        size: 2048,
+        path: "/mnt/user-data/uploads/normal.csv",
+      },
+    ]);
+  });
+
+  test.each(
+    ["current_uploads", "uploaded_files"].flatMap((tag) =>
+      ["    L1: (empty)", "    > No files have been uploaded yet."].map(
+        (detail) => [tag, detail] as const,
+      ),
+    ),
+  )("parses %s files when document context contains %s", (tag, detail) => {
+    const content = `<${tag}>
+The following files were uploaded in this message:
+
+- report.md (1.0 KB)
+  Path: /mnt/user-data/uploads/report.md
+${detail}
+</${tag}>`;
+
+    expect(parseUploadedFiles(content)).toEqual([
+      {
+        filename: "report.md",
+        size: 1024,
+        path: "/mnt/user-data/uploads/report.md",
+      },
+    ]);
+  });
+
+  test.each(
+    ["current_uploads", "uploaded_files"].flatMap((tag) =>
+      ["(empty)", "No files have been uploaded yet."].map(
+        (marker) => [tag, marker] as const,
+      ),
+    ),
+  )("keeps a %s block with only %s empty", (tag, marker) => {
+    expect(parseUploadedFiles(`<${tag}>\n${marker}\n</${tag}>`)).toEqual([]);
+  });
+
   test("stripInternalMarkers removes current_uploads blocks on export", () => {
     const content =
       "<current_uploads>\n- paper.docx (177.6 KB)\n  Path: /mnt/user-data/uploads/paper.docx\n</current_uploads>\n\nExport me";
