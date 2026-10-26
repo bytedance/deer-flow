@@ -384,7 +384,11 @@ the next request without restarting the Gateway. IM channel runs get the same
 default unless a channel `session.config` sets `recursion_limit` (GitHub channel
 runs have their own floor; see
 [CONFIGURATION.md](CONFIGURATION.md#recursion-limits)); embedded
-`DeerFlowClient` runs retain their own defaults and override paths.
+`DeerFlowClient` runs retain their own defaults and override paths. A run that
+reaches the limit ends with status `error` and `stop_reason: "recursion_capped"`;
+its stream `error` event and the `/wait` error envelope use the name
+`GraphRecursionError`, and the message lists up to five outputs the run created
+but did not present.
 
 **Configurable Options:**
 - `model_name` (string): Override the default model

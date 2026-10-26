@@ -542,6 +542,8 @@ export const zhCN: Translations = {
           "已达到 token 预算。发送消息即可继续，新的运行会重新计算预算。",
         loopCapped:
           "重复工具调用触发了安全停止。调整要求后发送新消息即可重试，目标会保留。",
+        recursionCapped:
+          "运行达到了步数上限，未能完成。发送新消息即可继续，目标会保留。",
         missingEvidence:
           "目标检查：缺少依据。可以让它展示结果或说明卡在哪里；如果目标已不适用，用 /goal clear 清除目标。",
         runFailed:
@@ -1187,6 +1189,7 @@ export const zhCN: Translations = {
         noProgress: "连续多轮没有进展",
         tokenCapped: "已达到 token 预算",
         loopCapped: "重复工具调用触发了安全停止",
+        recursionCapped: "运行达到了步数上限",
         evaluatorFailed: "未能检查目标，这次运行本身可能没问题",
         noDurableEndOfTurn: "未能检查目标：没有保存最终回复",
         threadChanged: "未能检查目标：检查期间对话发生了变化",

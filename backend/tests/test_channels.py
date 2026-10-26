@@ -1567,6 +1567,40 @@ class TestChannelManager:
 
         _run(go())
 
+    def test_wait_reports_a_step_limit_stop_and_releases_dedupe_key(self, tmp_path):
+        """``/wait`` returns a step-limit stop only as an error: reply with its message, not a generic failure."""
+        from app.channels.manager import ChannelManager
+
+        step_limit_text = "The run stopped at its step limit (recursion_limit=100) before finishing. Created but not presented: /mnt/user-data/outputs/report.md. Send a message to continue."
+
+        async def go():
+            bus = MessageBus()
+            manager = ChannelManager(bus=bus, store=JsonChannelStore(path=tmp_path / "store.json"))
+            outbound_received: list[OutboundMessage] = []
+
+            async def capture_outbound(msg: OutboundMessage) -> None:
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+            manager._client = _make_mock_langgraph_client()
+            # The SDK's exception for the Gateway's /wait error envelope.
+            manager._client.runs.wait = AsyncMock(side_effect=Exception(f"GraphRecursionError: {step_limit_text}"))
+            await manager.start()
+
+            def _inbound() -> InboundMessage:
+                return InboundMessage(channel_name="wechat", chat_id="wx_user_1", user_id="wx_user_1", text="write the report", metadata={"message_id": "m-1"})
+
+            await bus.publish_inbound(_inbound())
+            await _wait_for(lambda: len(outbound_received) == 1)
+            assert [m.text for m in outbound_received] == [step_limit_text]
+
+            # The run ended, so a provider redelivery may retry it.
+            await bus.publish_inbound(_inbound())
+            await _wait_for(lambda: manager._client.runs.wait.call_count == 2)
+            await manager.stop()
+
+        _run(go())
+
     def test_fire_and_forget_thread_busy_releases_dedupe_key(self, tmp_path):
         """Same invariant for a fire-and-forget channel that does not buffer follow-ups."""
         import httpx
