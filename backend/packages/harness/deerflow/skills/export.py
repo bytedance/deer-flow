@@ -314,7 +314,11 @@ def _manifest(name, entries, blockers, warnings, snapshot, budget):
                             raw_name = secret.get("name")
                             secret_name = raw_name.strip() if isinstance(raw_name, str) else ""
                             if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", secret_name):
-                                optional = bool(secret.get("optional", False))
+                                # Only a literal boolean ``true`` is optional: the same
+                                # fail-closed read as parse_required_secrets (#5738).
+                                # validate_skill_frontmatter_text rejects the package
+                                # above, so a malformed value never reaches this line.
+                                optional = secret.get("optional") is True
                                 position = positions.get(secret_name)
                                 if position is not None:
                                     # First occurrence keeps its slot; a required
