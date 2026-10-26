@@ -8325,6 +8325,104 @@ class TestFeishuChannel:
 
         _run(go())
 
+    @staticmethod
+    def _streaming_alias_channel(tmp_path, *, fail_once: str | None = None):
+        """A Feishu channel with a running card and a store that records every alias write."""
+        from lark_oapi.api.im.v1 import (
+            CreateMessageReactionRequest,
+            CreateMessageReactionRequestBody,
+            Emoji,
+            PatchMessageRequest,
+            PatchMessageRequestBody,
+            ReplyMessageRequest,
+            ReplyMessageRequestBody,
+        )
+
+        from app.channels.feishu import FeishuChannel
+
+        class RecordingStore(JsonChannelStore):
+            def __init__(self, path):
+                super().__init__(path)
+                self.writes: list[str] = []
+                self.fail_once = fail_once
+
+            async def set_thread_id(self, channel_name, chat_id, thread_id, *, topic_id=None, user_id=""):
+                self.writes.append(topic_id)
+                if topic_id == self.fail_once:
+                    self.fail_once = None
+                    raise RuntimeError("offline store failure")
+                await super().set_thread_id(channel_name, chat_id, thread_id, topic_id=topic_id, user_id=user_id)
+
+        store = RecordingStore(tmp_path / "store.json")
+        channel = FeishuChannel(MessageBus(), config={"channel_store": store})
+        channel._api_client = MagicMock()
+        channel._ReplyMessageRequest = ReplyMessageRequest
+        channel._ReplyMessageRequestBody = ReplyMessageRequestBody
+        channel._PatchMessageRequest = PatchMessageRequest
+        channel._PatchMessageRequestBody = PatchMessageRequestBody
+        channel._CreateMessageReactionRequest = CreateMessageReactionRequest
+        channel._CreateMessageReactionRequestBody = CreateMessageReactionRequestBody
+        channel._Emoji = Emoji
+        reply_response = MagicMock()
+        reply_response.data.message_id = "om-running-card"
+        channel._api_client.im.v1.message.reply = MagicMock(return_value=reply_response)
+        channel._api_client.im.v1.message.patch = MagicMock()
+        channel._api_client.im.v1.message_reaction.create = MagicMock()
+        return channel, store
+
+    @staticmethod
+    def _streamed_chunk(text: str, *, is_final: bool) -> OutboundMessage:
+        return OutboundMessage(
+            channel_name="feishu",
+            chat_id="chat-1",
+            thread_id="thread-1",
+            text=text,
+            is_final=is_final,
+            thread_ts="om-source-msg",
+            metadata={"user_id": "ou-user", "message_id": "om-source-msg", "topic_id": "om-root", "root_id": "om-root", "parent_id": "om-parent", "thread_id": "omt-thread"},
+        )
+
+    def test_streaming_writes_each_thread_alias_once_per_reply(self, tmp_path):
+        aliases = ["om-source-msg", "om-running-card", "om-root", "om-parent", "omt-thread"]
+
+        async def go():
+            channel, store = self._streaming_alias_channel(tmp_path)
+            await channel._send_running_reply("om-source-msg")
+
+            await channel.send(self._streamed_chunk("He", is_final=False))
+            assert store.writes == aliases
+
+            for text in ("Hell", "Hello", "Hello wo"):
+                await channel.send(self._streamed_chunk(text, is_final=False))
+            assert store.writes == aliases
+            assert channel._api_client.im.v1.message.patch.call_count == 4
+
+            # An alias dropped mid-stream is restored: the final outbound writes
+            # every alias again, as each chunk used to.
+            await store.remove("feishu", "chat-1", topic_id="om-parent")
+            await channel.send(self._streamed_chunk("Hello world", is_final=True))
+            assert store.writes == aliases * 2
+            for topic_id in aliases:
+                assert await store.get_thread_id("feishu", "chat-1", topic_id=topic_id) == "thread-1"
+            assert "om-source-msg" not in channel._remembered_thread_aliases
+
+        _run(go())
+
+    def test_streaming_retries_a_failed_thread_alias_on_the_next_chunk(self, tmp_path):
+        async def go():
+            channel, store = self._streaming_alias_channel(tmp_path, fail_once="om-root")
+            await channel._send_running_reply("om-source-msg")
+
+            await channel.send(self._streamed_chunk("He", is_final=False))
+            assert await store.get_thread_id("feishu", "chat-1", topic_id="om-root") is None
+
+            store.writes.clear()
+            await channel.send(self._streamed_chunk("Hello", is_final=False))
+            assert store.writes == ["om-root"]
+            assert await store.get_thread_id("feishu", "chat-1", topic_id="om-root") == "thread-1"
+
+        _run(go())
+
 
 class TestFeishuSendFileSuccessChecks:
     """``send_file`` uploads via ``_upload_image``/``_upload_file`` (which already
