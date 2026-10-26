@@ -1397,6 +1397,14 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
 
 ### Fixed
 
+- **auth:** The public auth routes (`/register`, `/setup-status`,
+  `/providers`, `/oauth/{provider}` and `/callback/{provider}`) no longer read
+  `config.yaml` and `extensions_config.json` on the event loop. Each request
+  checked both files (a `stat` and a full sha256 of each), and reparsed
+  `config.yaml` there after an edit, stalling other requests and streams
+  meanwhile. The read now runs in a worker, as `/login/local` already did.
+  ([#7576])
+  
 - **sandbox:** Stopping the Gateway no longer destroys AIO or E2B sandboxes
   before in-flight runs drain. When the first sandbox use built the provider on
   the event-loop thread, the provider's own SIGTERM/SIGINT handler destroyed
@@ -13136,3 +13144,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7530]: https://github.com/bytedance/deer-flow/pull/7530
 [#7557]: https://github.com/bytedance/deer-flow/pull/7557
 [#7560]: https://github.com/bytedance/deer-flow/pull/7560
+[#7576]: https://github.com/bytedance/deer-flow/pull/7576
