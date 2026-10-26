@@ -6,13 +6,13 @@ import asyncio
 import os
 import stat
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from support.symlinks import symlink_or_skip
 
 from app.channels.base import Channel
-from app.channels.message_bus import InboundMessage, MessageBus, OutboundMessage, ResolvedAttachment
+from app.channels.message_bus import HUMAN_INPUT_REQUEST_METADATA_KEY, PENDING_CLARIFICATION_METADATA_KEY, InboundMessage, MessageBus, OutboundMessage, ResolvedAttachment
 
 
 def _run(coro):
@@ -820,6 +820,15 @@ class _DummyChannel(Channel):
         return True
 
 
+def _file_reply(tmp_path, *, channel_name="dummy", text="Your files are ready.", metadata=None):
+    attachments = []
+    for name in ("first.csv", "second.csv"):
+        path = tmp_path / name
+        path.write_text("value\n1\n")
+        attachments.append(ResolvedAttachment(f"/mnt/user-data/outputs/{name}", path, name, "text/csv", path.stat().st_size, False))
+    return OutboundMessage(channel_name=channel_name, chat_id="chat-1", thread_id="thread-1", thread_ts="source-1", connection_id="connection-1", owner_user_id="owner-1", text=text, attachments=attachments, metadata=metadata or {})
+
+
 class TestBaseChannelOnOutbound:
     def test_default_receive_file_returns_original_message(self):
         """The base Channel.receive_file returns the original message unchanged."""
@@ -891,7 +900,8 @@ class TestBaseChannelOnOutbound:
         assert len(ch.sent_messages) == 1
         assert len(ch.sent_files) == 0
 
-    def test_send_file_failure_does_not_block_others(self, tmp_path):
+    @pytest.mark.parametrize("failure", ["false", "exception"])
+    def test_send_file_failure_does_not_block_others(self, tmp_path, failure):
         """If one attachment upload fails, remaining attachments still get sent."""
         bus = MessageBus()
         ch = _DummyChannel(bus)
@@ -904,7 +914,9 @@ class TestBaseChannelOnOutbound:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
-                raise RuntimeError("upload failed")
+                if failure == "exception":
+                    raise RuntimeError("private upload details must not reach the chat")
+                return False
             return await original_send_file(msg, att)
 
         ch.send_file = flaky_send_file  # type: ignore
@@ -930,6 +942,96 @@ class TestBaseChannelOnOutbound:
         # First upload failed, second succeeded
         assert len(ch.sent_files) == 1
         assert ch.sent_files[0][1].filename == "ok.txt"
+        assert len(ch.sent_messages) == 2
+        feedback = ch.sent_messages[-1]
+        assert "1/2" in feedback.text
+        assert "fail.txt" in feedback.text and "ok.txt" not in feedback.text
+        assert "DeerFlow" in feedback.text
+        assert "private upload details" not in feedback.text
+        assert feedback.attachments == []
+        assert f1.exists() and f2.exists()
+
+    @pytest.mark.parametrize("locale,expected", [("en-US", "could not be sent"), ("zh-CN", "未能发送")])
+    def test_all_failed_files_get_one_localized_reply_in_the_same_conversation(self, tmp_path, locale, expected):
+        channel = _DummyChannel(MessageBus())
+        metadata = {"locale": locale, "context_token": "private-routing-token", PENDING_CLARIFICATION_METADATA_KEY: True, HUMAN_INPUT_REQUEST_METADATA_KEY: {"question": "Choose one"}}
+        msg = _file_reply(tmp_path, metadata=metadata)
+
+        async def refuse(message, attachment):
+            channel.sent_files.append((message, attachment))
+            return False
+
+        channel.send_file = refuse
+
+        async def deliver():
+            channel.bus.subscribe_outbound(channel._on_outbound)
+            await channel.bus.publish_outbound(msg)
+
+        _run(deliver())
+
+        assert len(channel.sent_messages) == 2
+        feedback = channel.sent_messages[-1]
+        assert expected in feedback.text
+        assert all(attachment.filename in feedback.text for attachment in msg.attachments)
+        assert str(tmp_path) not in feedback.text and "private-routing-token" not in feedback.text
+        assert (feedback.chat_id, feedback.thread_id, feedback.thread_ts, feedback.connection_id, feedback.owner_user_id) == (msg.chat_id, msg.thread_id, msg.thread_ts, msg.connection_id, msg.owner_user_id)
+        assert not feedback.attachments and not feedback.artifacts
+        assert feedback.metadata == {"locale": locale, "context_token": "private-routing-token"}
+        assert msg.metadata == metadata and len(msg.attachments) == 2
+
+    @pytest.mark.parametrize("text,expected", [("Your files are ready.", "does not support sending files"), ("文件已经生成。", "不支持发送附件")])
+    def test_unsupported_channel_explains_in_the_original_reply(self, tmp_path, text, expected):
+        class TextOnlyChannel(_DummyChannel):
+            send_file = Channel.send_file
+
+        channel = TextOnlyChannel(MessageBus())
+        original_text = f"{text}\n\nCreated Files: first.csv, second.csv"
+        msg = _file_reply(tmp_path, text=original_text)
+        _run(channel._on_outbound(msg))
+
+        assert len(channel.sent_messages) == 1
+        assert expected in channel.sent_messages[0].text
+        assert channel.sent_messages[0].text.index(expected) < channel.sent_messages[0].text.index(text)
+        assert all(a.filename in channel.sent_messages[0].text for a in msg.attachments)
+        assert all(channel.sent_messages[0].text.count(a.filename) == 1 for a in msg.attachments)
+        assert "DeerFlow" in channel.sent_messages[0].text
+        assert not channel.sent_files
+        assert msg.text == original_text and len(msg.attachments) == 2
+
+    def test_expired_feedback_does_not_retry_uploads_or_remove_files(self, tmp_path, caplog):
+        channel = _DummyChannel(MessageBus())
+        msg = _file_reply(tmp_path)
+        attempts = []
+
+        async def refuse(message, attachment):
+            attempts.append(attachment.filename)
+            return False
+
+        async def send(message):
+            channel.sent_messages.append(message)
+            if len(channel.sent_messages) > 1:
+                raise RuntimeError("reply window expired")
+
+        channel.send_file = refuse
+        channel.send = send
+        _run(channel._on_outbound(msg))
+
+        assert attempts == ["first.csv", "second.csv"]
+        assert len(channel.sent_messages) == 2
+        assert all(a.actual_path.exists() for a in msg.attachments)
+        assert "feedback" in caplog.text.lower()
+
+    def test_cancellation_during_upload_does_not_send_a_completion_notice(self, tmp_path):
+        channel = _DummyChannel(MessageBus())
+        msg = _file_reply(tmp_path)
+
+        async def cancelled(message, attachment):
+            raise asyncio.CancelledError
+
+        channel.send_file = cancelled
+        with pytest.raises(asyncio.CancelledError):
+            _run(channel._on_outbound(msg))
+        assert channel.sent_messages == [msg]
 
     def test_send_raises_skips_file_uploads(self, tmp_path):
         """When send() raises, file uploads are skipped entirely."""
@@ -982,6 +1084,63 @@ class TestBaseChannelOnOutbound:
 # ---------------------------------------------------------------------------
 # ChannelManager artifact resolution integration
 # ---------------------------------------------------------------------------
+
+
+class TestWecomAttachmentDeliveryFeedback:
+    def test_lost_reply_context_never_falls_back_to_a_proactive_send(self, tmp_path):
+        from types import SimpleNamespace
+
+        from app.channels.wecom import WeComChannel
+
+        channel = WeComChannel(MessageBus(), {})
+        msg = _file_reply(tmp_path, channel_name="wecom")
+        channel._ws_frames[msg.thread_ts] = {"body": {"msgid": msg.thread_ts}}
+        channel._ws_stream_ids[msg.thread_ts] = "stream-1"
+        channel._ws_client = SimpleNamespace(reply_stream=AsyncMock(), send_message=AsyncMock())
+
+        async def expired(message, attachment):
+            channel._clear_ws_context(msg.thread_ts)
+            return False
+
+        channel.send_file = expired
+        _run(channel._on_outbound(msg))
+
+        channel._ws_client.reply_stream.assert_awaited_once()
+        channel._ws_client.send_message.assert_not_awaited()
+        assert all(a.actual_path.exists() for a in msg.attachments)
+
+    @pytest.mark.parametrize("feedback_expired", [False, True])
+    def test_failed_upload_feedback_precedes_context_cleanup(self, tmp_path, feedback_expired):
+        from types import SimpleNamespace
+
+        from app.channels.wecom import WeComChannel
+
+        channel = WeComChannel(MessageBus(), {})
+        msg = _file_reply(tmp_path, channel_name="wecom")
+        frame = {"body": {"msgid": msg.thread_ts}}
+        channel._ws_frames[msg.thread_ts] = frame
+        channel._ws_stream_ids[msg.thread_ts] = "stream-1"
+        replies = []
+
+        async def reply(reply_frame, body):
+            assert channel._ws_frames[msg.thread_ts] is frame
+            assert reply_frame is frame
+            replies.append(body)
+            if feedback_expired:
+                raise RuntimeError("reply window expired")
+
+        channel._ws_client = SimpleNamespace(reply_stream=AsyncMock(), reply=AsyncMock(side_effect=reply))
+        channel._upload_media_ws = AsyncMock(return_value=None)
+        _run(channel._on_outbound(msg))
+
+        channel._ws_client.reply_stream.assert_awaited_once_with(frame, "stream-1", msg.text, True)
+        assert len(replies) == 1
+        assert replies[0]["msgtype"] == "text"
+        assert "could not be sent" in replies[0]["text"]["content"]
+        assert channel._upload_media_ws.await_count == 2
+        assert msg.thread_ts not in channel._ws_frames
+        assert msg.thread_ts not in channel._ws_stream_ids
+        assert all(a.actual_path.exists() for a in msg.attachments)
 
 
 class TestManagerArtifactResolution:
