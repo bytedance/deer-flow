@@ -1112,6 +1112,28 @@
 
 ### 修复
 
+- **前端：** SSO 登录后现在会回到发起登录的页面（例如分享的对话链接），不再总是打开
+  默认工作区。此前登录相关页面会把所有已登录的请求都跳转到 `/workspace`，导致
+  `/auth/callback?next=...` 中的 `next` 路径丢失；已登录时访问 `/login?next=...`
+  也会同样丢失目标页面。前端和 Gateway 对 `next` 的校验现在也会拒绝控制字符：浏览器会
+  删除 URL 中的制表符、LF 和 CR，因此 `?next=%2F%0A%2F%2Fevil.example` 可能把登录后的跳转
+  导向其他网站。([#7467])
+  
+- **鉴权：** 已认证的 Gateway 请求不再在事件循环上读取 `config.yaml` 和
+  `extensions_config.json`。解析路由权限时，每个请求都会检查这两个文件（各做一次
+  `stat` 和完整的 sha256），编辑后还会在循环上重新解析 `config.yaml`，期间其他请求和
+  流式输出都会停顿。现在这次读取与插件鉴权路径一样在工作线程中执行。([#7557])
+
+- **记忆：** 自动上下文压缩在把即将被总结的消息保存到记忆时，不再阻塞事件循环。
+  使用 mem0、Honcho 或 OpenViking 后端时，这次保存是同步 HTTP 请求，Gateway 在记忆
+  服务器响应之前无法处理其他请求和流式输出。现在它与每轮结束后的记忆写入一样在工作
+  线程中执行。([#7530])
+
+- **渠道：** IM 渠道的运行现在与 Gateway API 运行一样使用顶层 `recursion_limit`，不再固定
+  发送 `100`；此前多步任务可能在几轮工具调用后就中止，用户收不到回答。IM 渠道
+  `session.config` 中的 `recursion_limit` 仍然优先；早先的 README 示例把它设为 `100`，
+  如需跟随顶层设置，请从 `config.yaml` 删除这一行。GitHub 渠道的运行不变。([#7521])
+
 - **沙箱：** AIO 提供方的异步 acquire 不再在事件循环上检查线程的技能目录。此前每次
   线程 acquire 选择沙箱 ID 时，都会在事件循环上直接执行文件系统 `stat` 和路径解析；
   `DEER_FLOW_HOME` 位于较慢或网络存储上时会阻塞事件循环。现在这一步与 acquire 的
@@ -10450,4 +10472,8 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7410]: https://github.com/bytedance/deer-flow/pull/7410
 [#7445]: https://github.com/bytedance/deer-flow/pull/7445
 [#7449]: https://github.com/bytedance/deer-flow/pull/7449
+[#7467]: https://github.com/bytedance/deer-flow/pull/7467
 [#7507]: https://github.com/bytedance/deer-flow/pull/7507
+[#7521]: https://github.com/bytedance/deer-flow/pull/7521
+[#7530]: https://github.com/bytedance/deer-flow/pull/7530
+[#7557]: https://github.com/bytedance/deer-flow/pull/7557

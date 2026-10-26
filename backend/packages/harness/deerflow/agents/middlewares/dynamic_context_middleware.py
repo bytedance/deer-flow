@@ -58,6 +58,7 @@ from langchain.agents.middleware.types import ModelCallResult, ModelRequest, Mod
 from langchain_core.messages import HumanMessage, RemoveMessage, SystemMessage
 from langgraph.runtime import Runtime
 
+from deerflow.agents.language import UI_LANGUAGES, ui_locale
 from deerflow.agents.middlewares.message_utils import insert_after_leading_system_messages
 from deerflow.agents.middlewares.pii_redaction_middleware import redact_text
 from deerflow.projects.context import build_project_context_message, is_project_context_message, pinned_project_snapshot, project_context_insertion_index, render_documents_block, render_project_block
@@ -792,6 +793,16 @@ class DynamicContextMiddleware(AgentMiddleware):
         )
         return request.override(messages=insert_after_leading_system_messages(list(request.messages), [message]))
 
+    def _assemble_language_request(self, request: ModelRequest) -> ModelRequest:
+        locale = ui_locale(getattr(getattr(request, "runtime", None), "context", None))
+        if locale is None:
+            return request
+        message = HumanMessage(
+            content=f"<response_language_preference>\nPreferred language: {UI_LANGUAGES[locale]} ({locale})\n</response_language_preference>",
+            additional_kwargs={"hide_from_ui": True, **provenance_kwargs(ContentKind.MIDDLEWARE_INJECTION, "dynamic_context_language")},
+        )
+        return request.override(messages=insert_after_leading_system_messages(list(request.messages), [message]))
+
     def _record_context_event(self, messages: list, runtime: Runtime | None, project_block: str | None, documents_block: str | None) -> None:
         """Emit the run's single ``context:memory`` audit event, when due.
 
@@ -831,6 +842,7 @@ class DynamicContextMiddleware(AgentMiddleware):
     def wrap_model_call(self, request: ModelRequest, handler: Callable[[ModelRequest], ModelResponse]) -> ModelCallResult:
         request, project_block, documents_block = self._assemble_project_request(request)
         request = self._assemble_client_request(request)
+        request = self._assemble_language_request(request)
         response = handler(request)
         # Record only after the call succeeded: a failed assembly must not
         # claim the context was delivered.
@@ -842,6 +854,7 @@ class DynamicContextMiddleware(AgentMiddleware):
         # Pure in-memory rendering: no I/O, so it stays on the event loop.
         request, project_block, documents_block = self._assemble_project_request(request)
         request = self._assemble_client_request(request)
+        request = self._assemble_language_request(request)
         response = await handler(request)
         self._record_context_event(request.messages, getattr(request, "runtime", None), project_block, documents_block)
         return response

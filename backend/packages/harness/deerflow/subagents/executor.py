@@ -1747,7 +1747,6 @@ class SubagentExecutor:
                 return None
             return _harvest_bash_executions(final_state, summary_cache=bash_summary_cache)
 
-        cancelling = False
         try:
             if task_info is not None and task_store is not None:
                 await notify_task_start(
@@ -2006,9 +2005,6 @@ class SubagentExecutor:
                     tool_receipts=terminal_receipts(prefer_citing_turn=True),
                 )
 
-        except asyncio.CancelledError:
-            cancelling = True
-            raise
         except GraphRecursionError:
             # ``recursion_limit`` on run_config is ``self.config.max_turns``
             # scaled into super-steps (set above), so hitting it means the
@@ -2073,6 +2069,18 @@ class SubagentExecutor:
                         tool_receipts=terminal_receipts(),
                     )
 
+        except asyncio.CancelledError:
+            # The outer background wrapper observes cancellation only after this
+            # function's task-stop hook. Publish it here so observers see ABORTED;
+            # a previously published hard timeout still wins the terminal race.
+            result.try_set_terminal(
+                SubagentStatus.CANCELLED,
+                error="Cancelled by user",
+                token_usage_records=collector.snapshot_records() if collector is not None else None,
+                tool_receipts=terminal_receipts(),
+            )
+            raise
+
         except Exception as e:
             logger.exception(f"[trace={self.trace_id}] Subagent {self.config.name} async execution failed")
             result.try_set_terminal(
@@ -2083,11 +2091,9 @@ class SubagentExecutor:
             )
 
         finally:
-            # Cancellation (including wait_for's execution timeout) bypasses
-            # the terminal branches above. A completed model response can be
-            # in the collector before its graph node publishes a values chunk.
-            # Stream teardown has drained at this point; publish its final
-            # usage before the outer wrapper chooses CANCELLED or TIMED_OUT.
+            # A completed model response can be in the collector before its
+            # graph node publishes a values chunk. Publish final usage after
+            # stream teardown, including cancellation and hard-timeout cleanup.
             if collector is not None:
                 result.update_token_usage_records(collector.snapshot_records())
 
@@ -2111,7 +2117,7 @@ class SubagentExecutor:
                             task_store,
                             task_info,
                             subagent_task_outcome(
-                                cancelled=result.status is SubagentStatus.CANCELLED or (cancelling and not result.status.is_terminal),
+                                cancelled=result.status is SubagentStatus.CANCELLED,
                                 succeeded=result.status is SubagentStatus.COMPLETED,
                             ),
                             timeout=_EXTENSION_TASK_NOTIFY_TIMEOUT_SECONDS,
@@ -2149,7 +2155,8 @@ class SubagentExecutor:
             )
             return future.result(timeout=self.config.timeout_seconds)
         except FuturesTimeoutError as exc:
-            # Publish the sync API's failure before cancellation reaches task-stop.
+            # Publish the synchronous API's failure before cancellation can
+            # reach task-stop observers or win the terminal-state race.
             result_holder.try_set_terminal(SubagentStatus.FAILED, error=str(exc))
             result_holder.cancel_event.set()
             if future is not None:
@@ -2182,19 +2189,19 @@ class SubagentExecutor:
         Returns:
             SubagentResult with the execution result.
         """
+        # Share one holder with the worker even when the caller did not supply
+        # one, so a timeout and its cleanup report the same terminal outcome.
+        result = result_holder
+        if result is None:
+            result = SubagentResult(
+                task_id=str(uuid.uuid4())[:8],
+                trace_id=self.trace_id,
+                status=SubagentStatus.PENDING,
+            )
         try:
-            return self._execute_in_isolated_loop(task, result_holder)
+            return self._execute_in_isolated_loop(task, result)
         except Exception as e:
             logger.exception(f"[trace={self.trace_id}] Subagent {self.config.name} execution failed")
-            # Create a result with error if we don't have one
-            if result_holder is not None:
-                result = result_holder
-            else:
-                result = SubagentResult(
-                    task_id=str(uuid.uuid4())[:8],
-                    trace_id=self.trace_id,
-                    status=SubagentStatus.RUNNING,
-                )
             result.try_set_terminal(SubagentStatus.FAILED, error=str(e))
             return result
 
