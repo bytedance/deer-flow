@@ -3541,6 +3541,10 @@ origin project, or to a project you pick when the origin is gone or archived;
 if the target already holds an identical active file, the entries merge.
 Deleting a project moves its entire shelf to trash in the same step.
 
+Permanently deleting read-only documents also works on Windows. A file that is
+already missing does not block deletion; other filesystem errors keep the entry
+in Trash for retry. Permissions on symlink targets are preserved.
+
 ## Scheduled Tasks
 
 DeerFlow now includes a first-class scheduled-task MVP in the workspace.
