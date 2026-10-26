@@ -4,6 +4,7 @@ import logging
 from langchain.tools import tool
 from tavily import AsyncTavilyClient
 
+from deerflow.community.search_max_results import DEFAULT_MAX_RESULTS, coerce_max_results
 from deerflow.community.search_time_range import SearchTimeRange
 from deerflow.community.url_safety import safe_public_result_url
 from deerflow.config import get_app_config
@@ -53,9 +54,14 @@ async def web_search_tool(query: str, time_range: SearchTimeRange | None = None)
         time_range: Optional relative publication/update window. Use only when the request requires recent results.
     """
     config = get_app_config().get_tool_config("web_search")
-    max_results = 5
+    configured_max_results: object = DEFAULT_MAX_RESULTS
     if config is not None and "max_results" in config.model_extra:
-        max_results = config.model_extra.get("max_results")
+        configured_max_results = config.model_extra.get("max_results")
+    # The configured value is operator YAML, so a boolean, a fractional float,
+    # an .inf or a non-positive number reaches Tavily as an out-of-range or
+    # unencodable request. Normalize it on the shared bar first; a valid count
+    # still passes through with no upper bound applied.
+    max_results = coerce_max_results(configured_max_results, provider="Tavily", logger=logger)
 
     search_kwargs: dict[str, object] = {"max_results": max_results}
     if config is not None:

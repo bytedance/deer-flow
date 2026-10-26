@@ -916,6 +916,11 @@ empty or omitted `include_domains`. These filters compose with `max_results`
 and the model's optional `time_range`. The model-visible arguments remain `query`
 and `time_range`; the filters do not apply to `web_fetch` or other search providers.
 
+`max_results` must resolve to a positive integer. A boolean, a non-integral float,
+`.inf`, a non-positive number or a non-numeric string falls back to the default 5
+and logs a warning naming the entry, so an unusable value is never forwarded to the
+SDK; a valid count is passed through unchanged, with no upper bound applied.
+
 #### Jina fetch retries
 
 Jina's `web_fetch` keeps one attempt by default. Configure retries on its existing
