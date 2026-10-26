@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
+from pydantic import ValidationError
 
 from deerflow.config.app_config import AppConfig
 from deerflow.config.image_generation import (
@@ -24,6 +25,22 @@ def store(tmp_path, monkeypatch):
 def profile(**fields):
     values = {"name": "pictures", "provider": "openai", "model": "image-model", "base_url": "https://images.example/v1", "api_key": "synthetic-image-secret"}
     return ManagedImageGenerationProfile(**{**values, **fields})
+
+
+@pytest.mark.parametrize("model", ["image/variant", "image:variant"])
+@pytest.mark.parametrize("profile_type", [ImageGenerationProfile, ManagedImageGenerationProfile])
+def test_gemini_model_ids_cannot_change_the_request_path(model, profile_type):
+    fields = {"provider": "gemini", "model": model, "api_key": "synthetic-key"}
+    if profile_type is ManagedImageGenerationProfile:
+        fields["name"] = "gemini-image"
+    with pytest.raises(ValidationError, match="Gemini image model IDs"):
+        profile_type(**fields)
+
+
+@pytest.mark.parametrize("provider,base_url", [("openai", "https://images.example/v1"), ("minimax", None)])
+def test_non_gemini_model_ids_keep_their_existing_path_characters(provider, base_url):
+    image = ImageGenerationProfile(provider=provider, model="team/image:variant", base_url=base_url)
+    assert image.model == "team/image:variant"
 
 
 def test_encrypted_profile_revision_secret_and_precedence(store):

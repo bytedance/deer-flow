@@ -79,6 +79,8 @@ class ImageGenerationProfile(BaseModel):
     def provider_fields(self) -> ImageGenerationProfile:
         if self.provider == ImageProvider.OPENAI and not self.base_url:
             raise ValueError("OpenAI-compatible image providers require a base URL")
+        if self.provider == ImageProvider.GEMINI and ("/" in self.model or ":" in self.model):
+            raise ValueError("Gemini image model IDs cannot contain '/' or ':'")
         return self
 
     def usable(self) -> bool:

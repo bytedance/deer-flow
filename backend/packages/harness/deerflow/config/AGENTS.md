@@ -13,6 +13,8 @@ Top-level `image_generation` is a typed, single operator-owned profile; it
 reuses the managed profile's provider/model/URL/key validation. Legacy image
 variables in `sandbox.environment` remain a fallback, but the two YAML forms
 cannot coexist. Both server forms share the image resolver and admin probe API.
+Gemini model IDs exclude `/` and `:` because both probe and generation place
+the ID in a URL path; other providers send their model IDs in request bodies.
 AppConfig resolves YAML `$VAR` references once; the image resolver preserves
 the result verbatim, including secrets that start with `$`.
 `DEER_FLOW_MANAGED_IMAGE_PROFILES_ENABLED=false` disables catalog reads and

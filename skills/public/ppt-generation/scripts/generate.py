@@ -2,12 +2,18 @@ import json
 import os
 import sys
 from io import BytesIO
+from pathlib import Path
+from runpy import run_path
 
 from PIL import Image, ImageOps
 from pptx import Presentation
 from pptx.util import Inches
 
-from progress import ProgressError, require_complete
+# runpy callers do not add this script's directory to sys.path. Load the
+# sibling file by path so CLI and imported use share the same progress contract.
+_progress = run_path(str(Path(__file__).with_name("progress.py")))
+ProgressError = _progress["ProgressError"]
+require_complete = _progress["require_complete"]
 
 
 def generate_ppt(
@@ -55,7 +61,9 @@ def generate_ppt(
 
     # Add each slide image
     slides_info = plan.get("slides", [])
-    if len(slide_images) != len(slides_info):
+    # Older image-only plans may omit slide metadata. A declared slide list or
+    # progress record must still match exactly before composing a deck.
+    if ("slides" in plan or progress_file is not None) and len(slide_images) != len(slides_info):
         raise ValueError(
             f"Expected {len(slides_info)} slide images, received {len(slide_images)}"
         )

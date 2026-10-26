@@ -1791,6 +1791,8 @@ MiniMax, and OpenAI-compatible Images APIs. Admins configure an image model in
 **Settings → Models → Image models**, separately from chat models. Web profiles
 are encrypted under `DEER_FLOW_HOME/managed-image-profiles/`; back up both
 `catalog.enc` and `key`. They are not stored in the database or `config.yaml`.
+Gemini model IDs cannot contain `/` or `:` because the ID is part of the
+request URL.
 The administrator's default selection is stored alongside the catalog in
 `default.json`; back it up with the catalog. Only one web profile can be enabled.
 Settings can select the server or enabled web profile as the default for new
