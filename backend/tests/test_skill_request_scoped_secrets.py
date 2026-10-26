@@ -768,6 +768,32 @@ class TestRequiredSecretsParsing:
         assert by_name["EXPLICIT_REQUIRED"].optional is False
         assert by_name["REQUIRED_ONE"].optional is False
 
+    def test_duplicate_declarations_keep_first_position_and_required_wins(self, tmp_path):
+        from deerflow.skills.parser import parse_skill_file
+        from deerflow.skills.types import SkillCategory
+
+        # The required duplicate comes *after* an optional one: the secret must
+        # still be required, otherwise a caller that omits it never gets a
+        # missing-secret diagnostic (issue #7568).
+        skill_file = self._write_skill(
+            tmp_path,
+            "name: erp-report\ndescription: d\nrequired-secrets:\n  - name: ERP_TOKEN\n    optional: true\n  - ERP_TOKEN\n  - name: OTHER_TOKEN\n    optional: true",
+        )
+        skill = parse_skill_file(skill_file, SkillCategory.CUSTOM)
+        assert skill.required_secrets == (
+            SecretRequirement(name="ERP_TOKEN", optional=False),
+            SecretRequirement(name="OTHER_TOKEN", optional=True),
+        )
+
+    def test_optional_duplicates_stay_optional(self):
+        from deerflow.skills.parser import parse_required_secrets
+
+        requirements = parse_required_secrets(
+            [{"name": "ERP_TOKEN", "optional": True}, {"name": "ERP_TOKEN", "optional": True}],
+            Path("SKILL.md"),
+        )
+        assert requirements == (SecretRequirement(name="ERP_TOKEN", optional=True),)
+
     @pytest.mark.parametrize("value", ["false", "true", "no", 1, [], {}, None])
     def test_malformed_optional_fails_closed(self, value, caplog):
         from deerflow.skills.parser import parse_required_secrets
