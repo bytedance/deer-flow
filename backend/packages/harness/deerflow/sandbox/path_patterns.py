@@ -49,8 +49,17 @@ _SEGMENT_BOUNDARY = r"(?=/|$|[^\w./-])"
 # and ``~`` reject ``./`` and ``~/`` relative spellings. Forward-resolution
 # patterns (container → host) in ``LocalSandbox`` and ``sandbox.tools`` share
 # this rule, so it is public.
-PATH_START_BOUNDARY = r"(?<![\w.~-])"
+#
+# Known false negative: a value attached directly to a short option
+# (``curl -o/data/x``, ``ssh -i/data/key``, ``gcc -I/data/inc``) follows a
+# letter, so it is left virtual instead of being translated. Spell those with a
+# space (``-o /data/x``) or ``=``. Rejecting embedded roots matters more: the
+# alternative rewrites unrelated paths and URLs.
+#
+# The scanner and the regex lookbehind derive from one character class so
+# ``replace_output_path_matches`` and ``build_output_mask_pattern`` cannot drift.
 _PATH_START_BLOCKERS = re.compile(r"[\w.~-]")
+PATH_START_BOUNDARY = rf"(?<!{_PATH_START_BLOCKERS.pattern})"
 
 # The path tail following the base. ``[/\\]`` keeps Windows-separated paths
 # matching; the negated class stops at whitespace and shell punctuation so a
