@@ -32,6 +32,7 @@ from deerflow.community.firecrawl import tools as firecrawl_tools
 from deerflow.community.image_search import tools as image_search_tools
 from deerflow.community.search_max_results import DEFAULT_MAX_RESULTS, coerce_max_results
 from deerflow.community.serper import tools as serper_tools
+from deerflow.community.tavily import tools as tavily_tools
 from deerflow.community.youcom import tools as youcom_tools
 
 COMMUNITY_ROOT = Path(ddg_search_tools.__file__).resolve().parent.parent
@@ -46,6 +47,7 @@ SHARED_OWNER_PROVIDERS = {
     "serper": ("Serper", serper_tools),
     "fastcrw": ("fastCRW", fastcrw_tools),
     "firecrawl": ("Firecrawl", firecrawl_tools),
+    "tavily": ("Tavily", tavily_tools),
     "youcom": ("You.com", youcom_tools),
 }
 

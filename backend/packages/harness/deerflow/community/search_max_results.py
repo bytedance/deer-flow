@@ -10,8 +10,12 @@ re-deciding in each file what "invalid" means.
 You.com also uses this shared coercion, then applies its 100-result cap to
 the normalized count before sending the request.
 
+Tavily joined the shared owner after forwarding the configured value verbatim:
+an `.inf` there was not merely out of range, it encoded as the invalid JSON
+token `Infinity`.
+
 Other providers retain local normalization, including Exa's generic integer
-helper and SearXNG's inline validation; Tavily passes configured values through.
+helper and SearXNG's inline validation.
 ``tests/test_search_max_results_single_owner.py`` tracks the known helper and
 inline coercion patterns, rather than proving arbitrary provider semantics.
 
