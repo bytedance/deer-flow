@@ -39,8 +39,12 @@ skill bodies and manifest together, keeping earlier writes private. A write
 failure leaves the previous pack unchanged and discards staging; replacement
 moves the old target to a backup first and restores it on an ordinary
 publication error. Atomic writes fsync only their temporary files, so
-whole-tree durability after power loss is not guaranteed. Callers own final
-file modes: runtime artifacts executable, skill bodies and manifests read-only.
+whole-tree durability after power loss is not guaranteed.
+`_publish_bytes_atomically` removes a failed temporary through
+`cleanup_failed_atomic_write`, so an unlink or warning-log failure cannot
+replace the original publication error, including interruptions. Callers own
+final file modes: runtime artifacts executable, skill bodies and manifests
+read-only. Coverage: `tests/test_lark_cli_atomic_publish.py`.
 
 App registration and direct app switching replace the per-user Lark credential
 tree transactionally. Clear the old OAuth data before `lark-cli config init`:

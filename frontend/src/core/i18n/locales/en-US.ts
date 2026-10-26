@@ -45,6 +45,11 @@ export const enUS: Translations = {
         description:
           "Save versioned Agent workflows, resume within the same Gateway process and review exact retained output versions. No restart replay or hard monetary budget.",
       },
+      reportSections: {
+        title: "Sectioned long-form writing",
+        description:
+          "Write long reports section by section and assemble them into a downloadable Markdown document.",
+      },
       agentTeams: {
         title: "Agent teams",
         description:
@@ -84,6 +89,16 @@ export const enUS: Translations = {
         title: "LightRAG",
         description:
           "Retrieve documents and entity relations from LightRAG with shared source citations.",
+      },
+      knowledgePlatform: {
+        title: "Knowledge spaces and connections",
+        description:
+          "Manage hierarchical spaces, resource sharing and inherited policies with explicit administrator grants. Requires installation and configuration; no management page or global retrieval ACL is included.",
+      },
+      knowledgeManagement: {
+        title: "Knowledge ingestion and processing",
+        description:
+          "Ingest files, URLs and text through WeKnora and manage processing with explicit administrator grants. Requires installation and configuration; no management page is included.",
       },
       weknora: {
         title: "WeKnora knowledge retrieval",
@@ -285,6 +300,11 @@ export const enUS: Translations = {
   home: {
     docs: "Docs",
     blog: "Blog",
+    searchDocs: "Search docs…",
+    searchDocsLabel: "Search documentation",
+    searchNoResults: "No results. Try fewer or different words.",
+    searchLoadFailed: "Search is unavailable right now.",
+    searchLoading: "Loading…",
   },
 
   // Welcome
@@ -866,6 +886,18 @@ export const enUS: Translations = {
     cancel: "Cancel",
     retryItem: "Retry",
     exportResults: "Export JSONL",
+    viewResult: "Review result",
+    resultTitle: "Batch result",
+    resultDescription: "Stored report and captured evidence for this item.",
+    report: "Report",
+    evidence: "Captured evidence",
+    noEvidence: "No captured evidence",
+    acceptance: "Acceptance",
+    noReport: "No report has been stored yet.",
+    loadResultFailed: "Couldn't load batch result",
+    truncated: "Report truncated",
+    omittedEvidence: (count) => `${count} evidence entries omitted`,
+    pagesLabel: "Pages",
     viewItems: "View items",
     hideItems: "Hide items",
     itemsFailed: "Couldn't load batch items",
@@ -1717,6 +1749,9 @@ export const enUS: Translations = {
   // Tool calls
   toolCalls: {
     details: "Tool details",
+    failed: "Failed",
+    scheduleTaskPending: "Scheduled task operation",
+    stopScheduledTaskPending: "Pause this scheduled task",
     toolName: "Tool name",
     callId: "Call ID",
     input: "Input",
@@ -2542,6 +2577,10 @@ export const enUS: Translations = {
         "SSO login is not allowed for your account. Contact your administrator.",
       account_disabled:
         "This account has been disabled. Contact your administrator.",
+      invalid_email: "Please enter a valid email address.",
+      password_too_short: "Password must be at least 6 characters.",
+      registration_password_too_short:
+        "Password must be at least 8 characters.",
     },
   },
 };

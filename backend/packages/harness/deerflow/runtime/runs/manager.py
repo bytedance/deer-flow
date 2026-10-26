@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 
 from sqlalchemy.exc import IntegrityError as SAIntegrityError
 
+from deerflow.runtime.events.terminal import RecoveryTerminalPublisher
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, get_current_user, resolve_user_id
 from deerflow.utils.time import is_lease_expired
 from deerflow.utils.time import now_iso as _now_iso
@@ -238,7 +239,7 @@ def _store_supports_terminal_completion(store: RunStore) -> bool:
 
 @dataclass(frozen=True)
 class TerminalCommitProof:
-    """Process-local evidence returned by one completed durable write."""
+    """Process-local proof of an acknowledged terminal transition."""
 
     status: RunStatus
     error: str | None
@@ -342,6 +343,7 @@ class RunManager:
         worker_id: str | None = None,
         run_ownership_config: RunOwnershipConfig | None = None,
         event_store: RunEventStore | None = None,
+        recovery_terminal_publisher: RecoveryTerminalPublisher | None = None,
         on_orphans_recovered: OrphanRecoveryCallback | None = None,
     ) -> None:
         self._runs: dict[str, RunRecord] = {}
@@ -356,6 +358,9 @@ class RunManager:
         self._worker_id = worker_id or _generate_worker_id()
         self._run_ownership_config = run_ownership_config
         self._event_store = event_store
+        self._recovery_terminal_publisher = recovery_terminal_publisher
+        if self._recovery_terminal_publisher is None and event_store is not None and store is not None:
+            self._recovery_terminal_publisher = RecoveryTerminalPublisher(event_store, store)
         self._on_orphans_recovered = on_orphans_recovered
         self._heartbeat_task: asyncio.Task | None = None
         self._heartbeat_stop: asyncio.Event | None = None
@@ -528,6 +533,12 @@ class RunManager:
     def _has_final_terminal_ack(self, record: RunRecord) -> bool:
         return not record.rollback_finalization_pending and self._has_terminal_ack(record)
 
+    def terminal_event_status(self, record: RunRecord) -> str | None:
+        """Return an attributable final outcome for this local worker only."""
+        if self._runs.get(record.run_id) is not record or record.store_only or record.owner_worker_id != self._worker_id or record.status in (RunStatus.pending, RunStatus.running) or not self._has_final_terminal_ack(record):
+            return None
+        return record.status.value
+
     def can_release_terminal_barrier(self, record: RunRecord) -> bool:
         """Keep durable ownership barriers through rollback's final error ACK."""
         return not self.heartbeat_enabled or self._store is None or record.ownership_lost or self._has_final_terminal_ack(record)
@@ -548,10 +559,11 @@ class RunManager:
     def _acknowledge_terminal(self, record: RunRecord, outcome: TerminalCommitProof, staged_revision: int) -> None:
         if self._runs.get(record.run_id) is not record or record.ownership_lost:
             return
-        # Publish the acknowledged outcome without an await. An older
-        # interrupted ACK cannot supersede a newer staged/acknowledged error.
+        # Publish the acknowledged outcome without an await. With a backing
+        # store, an older interrupted ACK cannot supersede a newer error.
+        # Storeless transitions are synchronous and retain local mutability.
         previous = record.terminal_commit_proof
-        if previous is None or previous.status == RunStatus.interrupted or outcome.status != RunStatus.interrupted:
+        if self._store is None or previous is None or previous.status == RunStatus.interrupted or outcome.status != RunStatus.interrupted:
             record.terminal_commit_proof = outcome
         authoritative = record.terminal_commit_proof
         if authoritative.status != RunStatus.interrupted or record.terminal_status_revision == staged_revision:
@@ -632,11 +644,14 @@ class RunManager:
                 record.run_id,
             )
             return False
+        terminal = status not in (RunStatus.pending, RunStatus.running)
+        outcome = self._terminal_outcome(record, status, error=error, stop_reason=stop_reason)
+        staged_revision = record.terminal_status_revision
         if self._store is None:
+            if terminal and not record.store_only:
+                self._acknowledge_terminal(record, outcome, staged_revision)
             return True
         if self.heartbeat_enabled and not record.store_only:
-            terminal = status not in (RunStatus.pending, RunStatus.running)
-            outcome = self._terminal_outcome(record, status, error=error, stop_reason=stop_reason)
             if terminal and self._has_terminal_ack(record, outcome):
                 return True
 
@@ -675,6 +690,11 @@ class RunManager:
                 record.run_id,
                 lambda: self._store.update_status(record.run_id, status.value, error=error, stop_reason=stop_reason, **({"goal_verdict": record.goal_verdict} if record.goal_verdict is not None else {})),
             )
+            # Preserve legacy single-worker recovery below, but only an explicit
+            # successful write can authorize a new terminal event. A matching row
+            # or a legacy None return does not attribute the commit to us.
+            if terminal and updated is True and not record.store_only:
+                self._acknowledge_terminal(record, outcome, staged_revision)
             if updated is False:
                 # ``update_status`` is now guarded by ``status IN ('pending','running')``.
                 # False can mean either:
@@ -1358,7 +1378,13 @@ class RunManager:
                 )
                 return
             proof = record.terminal_commit_proof
-            if self.heartbeat_enabled and proof is not None and proof.status != RunStatus.interrupted and self._terminal_outcome(record, status, error=error, stop_reason=stop_reason, goal_verdict=goal_verdict) != proof:
+            if (
+                self.heartbeat_enabled
+                and self._store is not None
+                and proof is not None
+                and proof.status != RunStatus.interrupted
+                and self._terminal_outcome(record, status, error=error, stop_reason=stop_reason, goal_verdict=goal_verdict) != proof
+            ):
                 logger.info("Skipped status change after acknowledged terminal outcome for run %s", run_id)
                 return
             record.status = status
@@ -1478,27 +1504,6 @@ class RunManager:
         # Rejected CAS is never retried through a weaker status/completion path.
         await self._fence_unconfirmed_terminal(record)
         return None
-
-    async def _ensure_delivery_receipt(self, record: RunRecord) -> bool:
-        """Idempotently persist a zero-delivery receipt during recovery."""
-        if self._event_store is None:
-            return True
-        try:
-            await self._event_store.put_if_absent(
-                thread_id=record.thread_id,
-                run_id=record.run_id,
-                event_type="run.delivery",
-                category="outputs",
-                content={"presented": 0, "paths": [], "by_tool": {}},
-            )
-            return True
-        except Exception:
-            logger.warning(
-                "Failed to backfill delivery receipt for recovered run %s; preserving its terminal status",
-                record.run_id,
-                exc_info=True,
-            )
-            return False
 
     async def set_finalizing(self, run_id: str, finalizing: bool) -> None:
         """Mark whether a run is performing post-cancel cleanup."""
@@ -1697,6 +1702,17 @@ class RunManager:
                 record.task.cancel()
         logger.info("Run %s cancellation signalled locally (action=%s)", run_id, action)
 
+    async def request_fenced_cancel(self, run_id, *, execution_fence, user_id):
+        """Persist cancellation under the extension epoch; the run owner consumes it."""
+        import inspect
+
+        if not self.heartbeat_enabled or self._store is None or "execution_fence" not in inspect.signature(self._store.request_cancel).parameters:
+            raise RunIdempotencyUnsupported("The configured RunStore does not support fenced cancellation")
+        record = await self.get(run_id, user_id=user_id)
+        if record is None:
+            raise ConflictError("Run unavailable")
+        await self._store.request_cancel(run_id, action="interrupt", execution_fence=execution_fence, user_id=user_id)
+
     async def cancel(self, run_id: str, *, action: str = "interrupt") -> CancelOutcome:
         """Request cancellation of a run.
 
@@ -1862,6 +1878,16 @@ class RunManager:
             return CancelOutcome.unknown
 
         if taken:
+            if self._recovery_terminal_publisher is not None:
+                target = self._recovery_terminal_publisher.authorize_takeover(
+                    claimed=taken,
+                    thread_id=row["thread_id"],
+                    run_id=run_id,
+                    user_id=row.get("user_id"),
+                    operation_kind=row.get("operation_kind", "run"),
+                )
+                if target is not None:
+                    await self._recovery_terminal_publisher.publish(target)
             logger.warning("Run %s taken over by worker %s (action=%s)", run_id, self._worker_id, action)
             return CancelOutcome.taken_over
 
@@ -1918,6 +1944,7 @@ class RunManager:
         evidence_agent_id: str | None = None,
         idempotency_request: dict[str, Any] | None = None,
         run_id: str | None = None,
+        execution_fence=None,
     ) -> RunRecord:
         """Atomically admit a normal agent run for a thread."""
         return await self._admit_thread_operation(
@@ -1935,6 +1962,7 @@ class RunManager:
             evidence_agent_id=evidence_agent_id,
             idempotency_request=idempotency_request,
             run_id=run_id,
+            execution_fence=execution_fence,
         )
 
     async def _close_cancelled_admission(self, record: RunRecord) -> None:
@@ -2008,6 +2036,7 @@ class RunManager:
         evidence_agent_id: str | None = None,
         idempotency_request: dict[str, Any] | None = None,
         run_id: str | None = None,
+        execution_fence=None,
     ) -> RunRecord:
         """Atomically check for inflight runs and create a new one.
 
@@ -2038,6 +2067,9 @@ class RunManager:
         lease_expires_at = self._compute_lease_expires_at()
         grace_seconds = self._run_ownership_config.grace_seconds if self._run_ownership_config else 10
 
+        if execution_fence is not None and (self._store is None or not _store_accepts_idempotency_parameter(self._store, "execution_fence") or multitask_strategy != "reject"):
+            raise RunIdempotencyUnsupported("The configured RunStore does not support execution fencing")
+
         interrupted_records: list[RunRecord] = []
         record = RunRecord(
             run_id=run_id,
@@ -2062,7 +2094,7 @@ class RunManager:
         )
 
         async with self._lock:
-            if idempotency_key is not None:
+            if idempotency_key is not None and execution_fence is None:
                 for existing in self._runs.values():
                     if existing.idempotency_key != idempotency_key:
                         continue
@@ -2129,6 +2161,8 @@ class RunManager:
                         "created_at": now,
                         "grace_seconds": grace_seconds,
                     }
+                    if execution_fence is not None:
+                        create_kwargs["execution_fence"] = execution_fence
                     if idempotency_key is not None:
                         create_kwargs["idempotency_key"] = idempotency_key
                     if evidence_origin != "unknown":
@@ -2419,12 +2453,17 @@ class RunManager:
             record.stop_reason = stop_reason
             record.updated_at = now
             if record.operation_kind == ThreadOperationKind.run:
-                # The atomic takeover above must win before writing a zero-delivery
-                # receipt; otherwise a stale scan could race a heartbeat renewal and
-                # permanently overwrite a live run's later detailed receipt. The
-                # receipt remains best-effort, matching normal terminal delivery
-                # when its event store is unavailable.
-                await self._ensure_delivery_receipt(record)
+                publisher = self._recovery_terminal_publisher
+                if publisher is not None:
+                    target = publisher.authorize_takeover(
+                        claimed=claimed,
+                        thread_id=record.thread_id,
+                        run_id=record.run_id,
+                        user_id=record.user_id,
+                        operation_kind=record.operation_kind.value,
+                    )
+                    if target is not None:
+                        await publisher.publish(target)
                 recovered.append(record)
 
         if recovered:

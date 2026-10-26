@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import AsyncIterator
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Path, Query, Request
 from fastapi.responses import StreamingResponse
 
 from app.gateway.authz import require_permission
@@ -68,6 +68,26 @@ async def list_batch_items(
         raise HTTPException(status_code=422, detail="Unknown batch item status")
     repo, user_id, _batch = await _owned_batch(request, thread_id, batch_id)
     return await repo.list_items(batch_id, user_id=user_id, offset=offset, limit=limit, status=status) or []
+
+
+@router.get("/{batch_id}/items/{position}")
+@require_permission("threads", "read", owner_check=True)
+async def get_batch_item(
+    thread_id: ThreadId,
+    batch_id: str,
+    request: Request,
+    position: int = Path(..., ge=0),
+) -> dict:
+    _repo, user_id, _batch = await _owned_batch(request, thread_id, batch_id)
+    item = await get_subagent_batch_service(request).read_browser_batch_item(
+        batch_id=batch_id,
+        user_id=user_id,
+        thread_id=thread_id,
+        position=position,
+    )
+    if item is None:
+        raise HTTPException(status_code=404, detail="Subagent batch item not found")
+    return item
 
 
 @router.post("/{batch_id}/pause")

@@ -36,7 +36,7 @@ class Store:
             db.execute("CREATE TRIGGER IF NOT EXISTS workflow_artifacts_immutable BEFORE UPDATE ON workflow_artifacts BEGIN SELECT RAISE(ABORT, 'Artifact versions cannot be overwritten'); END")
             db.execute("CREATE TABLE IF NOT EXISTS workflow_definitions (owner TEXT NOT NULL, name TEXT NOT NULL, version TEXT NOT NULL, script TEXT NOT NULL, PRIMARY KEY(owner,name,version))")
 
-    def capture_artifact(self, owner, workflow, step_id, name, content):
+    def capture_artifact(self, owner, workflow, step_id, name, content, *, execution_record=None):
         if not isinstance(content, bytes) or len(content) > 2 * 1024 * 1024:
             raise ValueError("Artifact limit is 2 MiB")
         digest = hashlib.sha256(content).hexdigest()
@@ -54,6 +54,8 @@ class Store:
         }
         with closing(self.connect()) as db, db:
             db.execute("BEGIN IMMEDIATE")
+            if execution_record is not None:
+                self._lease(db, owner, execution_record)
             old = db.execute(
                 "SELECT info FROM workflow_artifacts WHERE owner=? AND workflow=? AND step_id=?",
                 (owner, workflow, step_id),
