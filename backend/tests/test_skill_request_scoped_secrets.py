@@ -785,6 +785,23 @@ class TestRequiredSecretsParsing:
             SecretRequirement(name="OTHER_TOKEN", optional=True),
         )
 
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            [{"name": "ERP_TOKEN", "optional": True}, "ERP_TOKEN"],
+            ["ERP_TOKEN", {"name": "ERP_TOKEN", "optional": True}],
+            [{"name": "ERP_TOKEN", "optional": True}, {"name": " ERP_TOKEN ", "optional": False}],
+        ],
+    )
+    def test_duplicate_declaration_keeps_required(self, raw):
+        from deerflow.skills.parser import parse_required_secrets
+
+        requirements = parse_required_secrets([*raw, "OTHER_TOKEN"], Path("SKILL.md"))
+        assert requirements == (
+            SecretRequirement(name="ERP_TOKEN", optional=False),
+            SecretRequirement(name="OTHER_TOKEN", optional=False),
+        )
+
     def test_optional_duplicates_stay_optional(self):
         from deerflow.skills.parser import parse_required_secrets
 
