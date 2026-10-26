@@ -1,5 +1,19 @@
 # Phase-4 knowledge center validation
 
+## CI follow-up on 2026-10-26
+
+The initial GitHub run passed frontend unit tests, all four browser shards,
+both replay-contract layers, package checks, blocking-I/O, lint, and backend
+shards 1/2/4. Backend shard 3 reported 9,607 passed and one guidance-budget
+failure: the merged runtime chain was 99,004 bytes against the 98,304-byte limit.
+Upstream reproduced and fixed that same failure in #7522. Main at
+`3d5107dc0dd13a1f83b696b6682483aea64da896` was merged into this branch;
+the guidance checker now reports **0 errors and 0 warnings**. The combined
+guidance/extension/auth/platform/bookmark regression passes **139 tests**;
+backend Ruff formatting and lint pass. Frontend extension unit tests remain
+**100 passed**. This records local follow-up evidence;
+the new head's remote CI result must be checked separately.
+
 Validated on 2026-10-25 on Windows with Python 3.12.15, Node 24.16.0 and pnpm 10.26.2, based on `885062e197d53abb771e6c3cd1fb1223e45e9bbb` (including phase 3, #7417).
 
 ## Passing checks
