@@ -716,6 +716,8 @@ turn's knowledge scope from the selected checkpoint (the head by default).
 An explicit empty object is new input, not a continuation; dynamic interrupts
 still require `command.resume`. In delta mode, historical continuation rejects
 rewrites that would discard pending execution; continue at the head instead.
+Continuations retain the checkpoint's MCP `background_tasks` projection; only
+dictionary input refreshes it from the task repository.
 Old null-input runs stored as `{}` cannot safely match a keyed null-input retry
 after upgrading and return 409. Check the original run before submitting a new key.
 

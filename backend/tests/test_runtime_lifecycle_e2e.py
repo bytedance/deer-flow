@@ -805,7 +805,7 @@ def test_stream_run_executes_real_lead_agent_setup_agent_business_path(isolated_
 @pytest.mark.parametrize("interrupt_at", ["interrupt_before", "interrupt_after"])
 @pytest.mark.parametrize("endpoint", ["", "/wait", "/stream"])
 @pytest.mark.parametrize("resume_input", ["null", "sdk-omitted"])
-def test_static_breakpoint_resumes_with_null_input(isolated_app, checkpoint_mode, interrupt_at, endpoint, resume_input):
+def test_static_breakpoint_resumes_with_null_input(isolated_app, checkpoint_mode, interrupt_at, endpoint, resume_input, caplog):
     from starlette.testclient import TestClient
 
     from deerflow.config.app_config import get_app_config
@@ -816,6 +816,7 @@ def test_static_breakpoint_resumes_with_null_input(isolated_app, checkpoint_mode
         patch("deerflow.agents.lead_agent.agent.create_chat_model", return_value=model),
         TestClient(isolated_app) as client,
     ):
+        assert isolated_app.state.mcp_task_repo is not None
         csrf_token = _register_user(client)
         thread_id = _create_thread(client, csrf_token)
         headers = {"X-CSRF-Token": csrf_token}
@@ -866,6 +867,7 @@ def test_static_breakpoint_resumes_with_null_input(isolated_app, checkpoint_mode
         assert state["next"] == [], state
         replies = [message["content"] for message in state["values"]["messages"] if message["type"] == "ai"]
         assert replies == ["One model call."]
+        assert "failed to project MCP task state" not in caplog.text
 
 
 @pytest.mark.parametrize("checkpoint_mode", ["full", "delta"])
