@@ -16,4 +16,6 @@ run in Skill Review CI, independent of package review.
 - **Skill script tests run offline.** Test a dependency fallback with the
   optional import unavailable, and mock the HTTP transport.
 - **A skill CLI exits non-zero on failure**, with diagnostics on stderr and
-  result URLs on stdout.
+  result URLs on stdout. Image generation uses that contract for missing
+  credentials, invalid input, reference-image warnings, and provider errors;
+  an older output file is not a new result.
