@@ -3194,6 +3194,14 @@ become available in the next batch, when rejected additions can be retried.
 
 ### Long-Term Memory
 
+Settings > Appearance > Language also supplies the preferred language for replies
+and new automatic DeerMem facts and summary updates on subsequent chat turns and
+replays. Explicit user language requests take precedence. Existing memories are
+not bulk translated, and other memory backends retain their own language policy.
+Model-native reasoning text may still use another language.
+Scheduled runs and MCP task notification runs do not inherit this preference;
+their replies and memory updates continue to infer language from run messages.
+
 Mem0 search and management reads apply `failure_policy.read` to invalid record
 scores, categories, and metadata. `fail_open` returns an empty result;
 `fail_closed` reports a read error. A malformed later record never returns a
