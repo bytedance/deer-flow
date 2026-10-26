@@ -28,6 +28,7 @@ from deerflow.mcp_scope import (
     THREAD_INCARNATION_METADATA_GUARD_KEY,
     runtime_thread_incarnation,
 )
+from deerflow.models.selection import authorize_selected_model
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox.security import LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE, is_host_bash_allowed
 from deerflow.subagents import SubagentExecutor, get_available_subagent_names, get_subagent_config
@@ -758,6 +759,7 @@ async def task_tool(
     acceptance_criteria: list[str] | None = None,
     description: str = "",
     context_mode: Literal["isolated", "snapshot"] = "isolated",
+    model_name: str | None = None,
 ) -> str | Command:
     """Delegate a bounded task to a specialized subagent in its own context.
 
@@ -864,6 +866,9 @@ async def task_tool(
             summary as background at dispatch time, increasing input tokens.
             The child keeps its own role/tools; later parent turns are not synced.
             Historical tool actions are not evidence of child completion.
+        model_name: Optional configured model name for this child only. Omit to
+            keep the subagent's configured/inherited model. Does not change the
+            parent conversation or the saved subagent configuration.
     """
     if context_mode not in {"isolated", "snapshot"}:
         return _task_result_command(tool_call_id=tool_call_id, status="failed", error=f"Unknown context_mode '{context_mode}'. Use isolated or snapshot.")
@@ -956,6 +961,20 @@ async def task_tool(
     # tool call delegated to a subagent (user_role=None).
     parent_context = runtime.context if runtime is not None else None
     parent_context = parent_context if isinstance(parent_context, dict) else {}
+    requested_model = parent_context.get("subagent_model_name")
+    if model_name is not None and requested_model is not None and model_name != requested_model:
+        return _task_result_command(tool_call_id=tool_call_id, status="failed", error="The child model conflicts with the user's selection.")
+    selected_model = model_name if model_name is not None else requested_model
+    if selected_model is not None:
+        resolved_config = runtime_app_config or await run_assembly(get_app_config)
+        try:
+            if not isinstance(selected_model, str) or not selected_model.strip():
+                raise ValueError("A configured model name is required.")
+            await run_assembly(authorize_selected_model, selected_model, context=parent_context, app_config=resolved_config)
+        except ValueError as exc:
+            return _task_result_command(tool_call_id=tool_call_id, status="failed", error=str(exc))
+        runtime_app_config = resolved_config
+        config = replace(config, model=selected_model)
     if parent_context.get(THREAD_INCARNATION_METADATA_GUARD_KEY) is True:
         runtime_thread_incarnation(runtime)
     user_role = parent_context.get("user_role")

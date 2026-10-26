@@ -28,25 +28,24 @@ import { Callout } from "nextra/components";
 1. 运行时中间件（`InputSanitizationMiddleware` 输入清理 → `ToolOutputBudgetMiddleware` 输出预算截断 → `ToolResultSanitizationMiddleware` 工具结果清理，随后是线程数据、上传、沙箱、悬空工具调用修补和 LLM 错误处理；工具回执（如启用）、授权/guardrail（如启用）、沙箱审计、读前写后（如启用）、工具进度（如启用）和工具错误处理随后执行）
 2. `DynamicContextMiddleware` — 当前日期和可选记忆上下文
 3. `SkillActivationMiddleware` — slash skill 激活
-4. `SkillToolPolicyMiddleware` — 将技能工具限制为当前激活的技能
-5. `DurableContextMiddleware` — 捕获持久摘要、委托和技能引用状态
-6. `SummarizationMiddleware` — 上下文压缩（如果启用）
-7. `TodoMiddleware` — 任务列表管理（仅计划模式）
-8. `TokenUsageMiddleware` — token 追踪（如果启用）
-9. `TitleMiddleware` — 自动生成线程标题
-10. `MemoryMiddleware` — 跨会话记忆注入和队列
-11. `ViewImageMiddleware` — 图像细节注入（如果模型支持视觉）
-12. `DeferredToolFilterMiddleware` — 隐藏延迟工具 schema（如果启用工具搜索）
-13. `SystemMessageCoalescingMiddleware` — 合并面向 provider 的 system messages
-14. `SubagentLimitMiddleware` — 限制并行子 Agent 调用（如果启用子 Agent）
-15. `LoopDetectionMiddleware` — 打破重复工具调用循环
-16. `TokenBudgetMiddleware` — 每次运行的 token 预算限制（如果启用）
-17. 自定义中间件（如有）
-18. 配置的扩展中间件（如有）
-19. `TerminalResponseMiddleware` — 重试一次空的最终响应
-20. `ModelLengthFinishReasonMiddleware` — 记录受长度限制的完成
-21. `SafetyFinishReasonMiddleware` — provider 安全终止后抑制工具执行（如果启用）
-22. `ClarificationMiddleware` — 拦截澄清请求（始终最后）
+4. `DurableContextMiddleware` — 捕获持久摘要、委托和技能引用状态
+5. `SummarizationMiddleware` — 上下文压缩（如果启用）
+6. `TodoMiddleware` — 任务列表管理（仅计划模式）
+7. `TokenUsageMiddleware` — token 追踪（如果启用）
+8. `TitleMiddleware` — 自动生成线程标题
+9. `MemoryMiddleware` — 跨会话记忆注入和队列
+10. `ViewImageMiddleware` — 图像细节注入（如果模型支持视觉）
+11. `DeferredToolFilterMiddleware` — 隐藏延迟工具 schema（如果启用工具搜索）
+12. `SystemMessageCoalescingMiddleware` — 合并面向 provider 的 system messages
+13. `SubagentLimitMiddleware` — 限制并行子 Agent 调用（如果启用子 Agent）
+14. `LoopDetectionMiddleware` — 打破重复工具调用循环
+15. `TokenBudgetMiddleware` — 每次运行的 token 预算限制（如果启用）
+16. 自定义中间件（如有）
+17. 配置的扩展中间件（如有）
+18. `TerminalResponseMiddleware` — 重试一次空的最终响应
+19. `ModelLengthFinishReasonMiddleware` — 记录受长度限制的完成
+20. `SafetyFinishReasonMiddleware` — provider 安全终止后抑制工具执行（如果启用）
+21. `ClarificationMiddleware` — 拦截澄清请求（始终最后）
 
 顺序很重要。Durable context 会在摘要压缩之前捕获已委托任务的派发状态、终态结果和已加载的技能引用，确保它们不会随原始 transcript 压缩而丢失。澄清总是最后运行，这样它可以在所有其他中间件完成后拦截。
 
@@ -251,6 +250,6 @@ extensions:
         max_tool_calls: 5
 ```
 
-配置的中间件会在内置中间件及可选的循环/token 保护之后加载。对于主 Agent 链，它位于终态响应、模型长度、安全和澄清尾部之前；子 Agent 链没有终态响应、模型长度或澄清阶段，因此配置中间件之后会继续执行可选的安全防护、`DurableContextMiddleware`、可选的 `SummarizationMiddleware`，随后是 `SubagentDateContextMiddleware` 和 `SystemMessageCoalescingMiddleware`。中间件路径会执行 Python 代码，因此应视为可信配置。嵌入式调用方也可以使用 `DeerFlowClient(middlewares=[...])`；它构建完整的主 Agent 链，并将中间件放在其终态响应、模型长度、安全和澄清尾部之前。`create_deerflow_agent(extra_middleware=[...])` 则构建较小的按功能组装的主 Agent 链；未锚定的额外中间件会紧接在 `ClarificationMiddleware` 之前放置（锚定中间件遵循其 `@Next`/`@Prev` 位置）。两个 API 均不会将中间件转发给子 Agent。
+配置的中间件会在内置中间件及可选的循环/token 保护之后加载。对于主 Agent 链，它位于终态响应、模型长度、安全和澄清尾部之前；子 Agent 链没有终态响应或澄清阶段，因此配置中间件之后会继续执行模型长度防护、可选的安全防护、`DurableContextMiddleware`、可选的 `SummarizationMiddleware`，随后是 `SubagentDateContextMiddleware` 和 `SystemMessageCoalescingMiddleware`。中间件路径会执行 Python 代码，因此应视为可信配置。嵌入式调用方也可以使用 `DeerFlowClient(middlewares=[...])`；它构建完整的主 Agent 链，并将中间件放在其终态响应、模型长度、安全和澄清尾部之前。`create_deerflow_agent(extra_middleware=[...])` 则构建较小的按功能组装的主 Agent 链；未锚定的额外中间件会紧接在 `ClarificationMiddleware` 之前放置（锚定中间件遵循其 `@Next`/`@Prev` 位置）。两个 API 均不会将中间件转发给子 Agent。
 
 应根据配置的所有者和插入位置选择注册方式。固定槽位（并未弃用）`extensions.middlewares` 可写在 `config.yaml` 或 `extensions_config.json` 中（前者优先），并同时作用于主 Agent 和子 Agent。通过顶层 `plugins:` 注册的打包扩展可在语义化扩展点贡献中间件。若贡献代码需要可提交、可编程且仅作用于主 Agent 的接线，请使用 `build_middlewares(..., custom_middlewares=[MyMiddleware()])`。

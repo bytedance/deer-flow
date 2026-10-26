@@ -25,6 +25,7 @@ from deerflow.config.paths import make_safe_user_id
 from deerflow.runtime import ConflictError, ThreadOperationKind
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
+from deerflow.utils.atomic_write import cleanup_failed_atomic_write
 from deerflow.utils.file_io import await_drained
 from deerflow.utils.text_detection import _is_active_content_mime_type, is_text_file_by_content
 from deerflow.utils.thread_id import ThreadId
@@ -142,12 +143,10 @@ def _replace_artifact_atomically(actual_path: Path, content: bytes, file_stat: o
         # clearing the whole 256-entry LRU costs nothing (see PR review).
         _sha256_of_file_cached.cache_clear()
     finally:
-        if temp_fd >= 0:
-            os.close(temp_fd)
-        try:
-            temp_path.unlink()
-        except FileNotFoundError:
-            pass
+        # The helper keeps the published case silent (the temp name is already
+        # gone), warns when a leftover temp cannot be removed, and never lets a
+        # cleanup error replace the edit's outcome.
+        cleanup_failed_atomic_write(temp_path, temp_fd if temp_fd >= 0 else None)
 
 
 def _sync_artifact_to_sandbox(sandbox, virtual_path: str, content: bytes) -> None:

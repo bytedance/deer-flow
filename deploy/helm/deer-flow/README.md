@@ -135,7 +135,7 @@ they resolve from the `secrets` map):
 
 ```yaml
 config: |
-  config_version: 61
+  config_version: 62
   models:
     - name: gpt-4
       use: langchain_openai:ChatOpenAI
@@ -390,7 +390,8 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   ```
 - **Credentials key.** The app Secret also holds `DEER_FLOW_CREDENTIALS_KEY`,
   the Fernet key the gateway encrypts stored credentials with (per-connection
-  IM channel credentials and the bot credentials entered in the web UI). The chart generates it once (32 random bytes,
+  IM channel credentials, the bot credentials entered in the web UI, and
+  rotating MCP OAuth refresh tokens). The chart generates it once (32 random bytes,
   urlsafe base64) and preserves it across upgrades via `lookup`; every gateway
   Pod reads the same value. **Back it up**: deleting the Secret or the release
   generates a new key, and credentials stored under the old one become
@@ -399,7 +400,8 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   values have been rewritten. An `existingAppSecret` should carry it; the env
   entry is optional, so without it a single Pod falls back to an auto-generated
   `.credentials_key` on the home volume, while a multi-instance gateway with
-  `channel_connections.enabled` refuses to start. If you add the key to an
+  `channel_connections.enabled` or a `refresh_token` MCP OAuth server refuses
+  to start. If you add the key to an
   `existingAppSecret` later, copy that file's value so stored credentials stay
   readable:
 
@@ -424,11 +426,15 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   auto-generated into a Secret (key `redis-url`) and injected as
   `DEER_FLOW_STREAM_BRIDGE_REDIS_URL`; `config.yaml` sets `stream_bridge.type:
   redis` by default. No-auth by default (ClusterIP isolation, matching compose);
-  set `redis.auth.password` to enable AUTH. For a managed Redis, disable the
-  bundled instance and point at it via `redis.external`. The gateway readiness
-  probe pings this Redis on every check and reports the pod unready while it
-  is unreachable, since without the bridge no run can publish, stream or be
-  cancelled from a peer pod.
+  set `redis.auth.password` to enable AUTH. A user-managed
+  `redis.existingSecret` takes precedence over that value: the bundled server
+  reads `redis-password` from the same Secret that supplies the gateway's
+  `redis-url`, and stays unauthenticated when that key is absent or empty — so
+  keep the URL and the raw password in agreement. For a managed Redis, disable
+  the bundled instance and point at it via `redis.external`. The gateway
+  readiness probe pings this Redis on every check and reports the pod unready
+  while it is unreachable, since without the bridge no run can publish, stream
+  or be cancelled from a peer pod.
 - **Persistence.** A PVC (`<release>-home`) backs `/app/backend/.deer-flow`
   (sqlite DB, memory, custom agents, per-thread user-data). The gateway mounts
   it with `subPath: deer-flow` so the layout matches the provisioner's PVC

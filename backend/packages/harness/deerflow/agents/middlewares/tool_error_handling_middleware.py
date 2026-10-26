@@ -75,7 +75,8 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             self._skills_root = app_config.skills.container_path
 
     def _storage(self):
-        # Same resolution order as SkillActivationMiddleware/SkillToolPolicyMiddleware:
+        # Same resolution order as SkillActivationMiddleware: the canonical
+        # path comes from the same user-scoped registry.
         # the registry must be the user-scoped one when a user context exists,
         # or per-user custom skills would never resolve to their Skill.name.
         from deerflow.skills.storage import get_or_new_skill_storage, get_or_new_user_skill_storage
@@ -165,7 +166,7 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         if entry is None:
             return message
         # Phase 3: a completed SKILL.md read only *activates* a skill (durable
-        # skill_context entry, allowed-tools policy, autonomous secret binding)
+        # skill_context entry, autonomous secret binding)
         # when the action-scoped ``skill:activate`` decision allows it. The
         # catalog/visibility layer (Layer 1) may expose the file itself — the
         # action decision is what gates the autonomous activation path the
@@ -602,12 +603,11 @@ def build_subagent_runtime_middlewares(
         user_id=user_id,
     )
 
-    # Enabled/configured skills are discoverable metadata, not automatically
-    # active authority. Mirror the lead agent's activation + policy pair so a
-    # subagent keeps its ordinary tool set until a slash command or a completed
-    # SKILL.md read activates the corresponding allowed-tools declaration.
+    # Enabled/configured skills are discoverable metadata, not authority over
+    # the tool set. Slash activation or a completed SKILL.md read loads the
+    # skill body (and binds its required-secrets) without narrowing tools;
+    # agent assembly/execution authorization owns the permission ceiling.
     from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
-    from deerflow.agents.middlewares.skill_tool_policy_middleware import SkillToolPolicyMiddleware
 
     slash_source_owner_token = secrets.token_urlsafe(24)
     middlewares.append(
@@ -623,17 +623,6 @@ def build_subagent_runtime_middlewares(
         from deerflow.agents.middlewares.tool_promotion_audit_middleware import DeferredToolPromotionAuditMiddleware
 
         middlewares.append(DeferredToolPromotionAuditMiddleware(deferred_setup.deferred_names, deferred_setup.catalog_hash))
-    middlewares.append(
-        SkillToolPolicyMiddleware(
-            available_skills=available_skills,
-            app_config=app_config,
-            user_id=user_id,
-            slash_source_owner_token=slash_source_owner_token,
-            # Persisted skill_context entries are re-authorized against the
-            # skill:activate decision before their allowed-tools apply.
-            skill_authorization=skill_authorization,
-        )
-    )
 
     if model_name is None and app_config.models:
         model_name = app_config.models[0].name
@@ -649,8 +638,8 @@ def build_subagent_runtime_middlewares(
 
     # Hide deferred (MCP) tool schemas from the subagent's model binding until
     # tool_search promotes them. This is the same wiring the lead agent gets. The deferred
-    # set + catalog hash come from the build-time setup (assembled after
-    # tool-policy filtering); promotion is read from graph state. Empty/None
+    # set + catalog hash come from the build-time setup (assembled from the
+    # subagent's authorized tool list); promotion is read from graph state. Empty/None
     # setup (deferral disabled or no MCP tool survived) is a pure no-op.
     if deferred_setup is not None and deferred_setup.deferred_names:
         from deerflow.agents.middlewares.deferred_tool_filter_middleware import DeferredToolFilterMiddleware
@@ -711,6 +700,17 @@ def build_subagent_runtime_middlewares(
     from deerflow.agents.middlewares.configured_extensions import load_configured_extension_middlewares
 
     middlewares.extend(load_configured_extension_middlewares(app_config))
+
+    # Same provider output-length guard the lead agent uses. A subagent answer
+    # cut off at the model's output limit would otherwise reach the lead as a
+    # clean ``completed``, and a tool call truncated at that boundary would
+    # still execute. The middleware drops such tool calls and exposes
+    # ``consume_stop_reason`` so the executor marks the result
+    # ``model_length_capped``. Registered before Safety, as on the lead chain,
+    # so reverse-order after_model dispatch runs Safety first.
+    from deerflow.agents.middlewares.model_length_finish_reason_middleware import ModelLengthFinishReasonMiddleware
+
+    middlewares.append(ModelLengthFinishReasonMiddleware())
 
     # Same provider safety-termination guard the lead agent uses — subagents
     # are equally exposed to truncated tool_calls returned with

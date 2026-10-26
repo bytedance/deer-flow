@@ -4,7 +4,7 @@ import logging
 import tempfile
 import threading
 from collections.abc import AsyncGenerator, Callable, Coroutine, Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any, BinaryIO, Literal
 
@@ -54,6 +54,7 @@ from deerflow.skills.security_static_scanner import (
 )
 from deerflow.skills.storage import SkillStorage, get_or_new_user_skill_storage
 from deerflow.skills.types import SKILL_MD_FILE, SkillCategory
+from deerflow.utils.atomic_write import cleanup_failed_atomic_write
 from deerflow.utils.file_io import await_drained
 from deerflow.utils.thread_id import ThreadId
 
@@ -347,7 +348,11 @@ def _load_user_skills(config: AppConfig) -> list[Skill]:
 
 
 def _copy_uploaded_skill_archive(source: BinaryIO) -> Path:
-    """Copy an uploaded archive to a bounded temporary file off the event loop."""
+    """Copy an uploaded archive to a bounded temporary file off the event loop.
+
+    A size-limit or read failure is the error the caller sees. Removing the
+    partial temporary is best-effort and must not replace that error.
+    """
     destination: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(prefix="deerflow-skill-", suffix=".skill", delete=False) as target:
@@ -361,7 +366,7 @@ def _copy_uploaded_skill_archive(source: BinaryIO) -> Path:
         return destination
     except Exception:
         if destination is not None:
-            destination.unlink(missing_ok=True)
+            cleanup_failed_atomic_write(destination)
         raise
 
 
@@ -508,7 +513,7 @@ async def list_skills(request: Request, config: AppConfig = Depends(get_config))
         skills = await asyncio.to_thread(_load_user_skills, config)
     except Exception as e:
         logger.error(f"Failed to load skills: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to load skills: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to load skills.") from e
 
     visible_skills = await _filter_visible_skills(request, config, skills)
 
@@ -578,10 +583,13 @@ async def upload_and_install_skill(
     except MultiPartException as e:
         raise HTTPException(status_code=400, detail=e.message) from e
     finally:
-        if form is not None:
-            await form.close()
+        # Discard before close. SpooledTemporaryFile.close can raise while
+        # flushing, which would mask the install outcome and skip the discard.
         if temporary_path is not None:
-            await asyncio.to_thread(temporary_path.unlink, missing_ok=True)
+            await asyncio.to_thread(cleanup_failed_atomic_write, temporary_path)
+        if form is not None:
+            with suppress(Exception):
+                await form.close()
 
 
 @router.post(
@@ -655,7 +663,7 @@ async def list_custom_skills(request: Request, config: AppConfig = Depends(get_c
         return SkillsListResponse(skills=[_skill_to_response(skill) for skill in visible_skills])
     except Exception as e:
         logger.error("Failed to list custom skills: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to list custom skills: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to list custom skills.") from e
 
 
 @router.get("/skills/diagnostics/custom", response_model=SkillDiagnosticsResponse, summary="List Owned Custom Skill YAML Errors")
@@ -1027,7 +1035,7 @@ async def get_skill(skill_name: str, request: Request, config: AppConfig = Depen
         raise
     except Exception as e:
         logger.error(f"Failed to get skill {skill_name}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to get skill: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to get skill.") from e
 
 
 def _write_extensions_skill_state(
@@ -1056,7 +1064,7 @@ def _write_extensions_skill_state(
     projection_update = skill_projection_mutation(storage, "public", remove_names=removal_names) if rebuild_public_projection and isinstance(storage, LocalSkillStorage) else nullcontext()
     config_path = ExtensionsConfig.resolve_config_path()
     if config_path is None:
-        config_path = Path.cwd().parent / "extensions_config.json"
+        config_path = ExtensionsConfig.default_config_path()
         logger.info(f"No existing extensions config found. Creating new config at: {config_path}")
 
     from deerflow.skills.mutations.guard import managed_global_state_write

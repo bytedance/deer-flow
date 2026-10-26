@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { writeTextToClipboard } from "@/core/clipboard";
 import { useI18n } from "@/core/i18n/hooks";
 import { formatToolDetail } from "@/core/messages/tool-detail-preview";
+import { isErrorToolMessage } from "@/core/messages/tool-error";
 
 export function ToolCallDetails({
   name,
@@ -43,7 +44,7 @@ export function ToolCallDetails({
           {resultMessage ? (
             <Payload
               label={
-                resultMessage.status === "error"
+                isErrorToolMessage(resultMessage)
                   ? t.toolCalls.error
                   : t.toolCalls.result
               }

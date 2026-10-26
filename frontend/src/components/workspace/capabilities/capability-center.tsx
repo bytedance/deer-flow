@@ -6,8 +6,8 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useState, useSyncExternalStore } from "react";
 
 import { Input } from "@/components/ui/input";
-import { SidebarTrigger } from "@/components/ui/sidebar";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { WorkspaceSidebarTrigger } from "@/components/workspace/workspace-sidebar-trigger";
 import { useI18n } from "@/core/i18n/hooks";
 
 const PluginGallery = dynamic(() =>
@@ -51,7 +51,7 @@ export function CapabilityCenter() {
   return (
     <div className="bg-background flex h-full min-h-0 flex-col">
       <div className="text-muted-foreground flex h-14 shrink-0 items-center gap-3 border-b px-4 text-xs md:px-8">
-        <SidebarTrigger className="md:hidden" />
+        <WorkspaceSidebarTrigger className="md:hidden" />
         <span>{t.breadcrumb.workspace}</span>
         <span className="opacity-40">/</span>
         <span className="text-foreground">{t.capabilities.title}</span>

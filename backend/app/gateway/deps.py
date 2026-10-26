@@ -296,9 +296,11 @@ def credentials_key_consumers(config: AppConfig) -> list[str]:
     """Return the enabled features that store data under ``DEER_FLOW_CREDENTIALS_KEY``.
 
     Each entry is the setting that enabled the feature, as refusal text spells
-    it. The Gateway loads the key only when this list is non-empty, and the
-    multi-instance gate below refuses a missing key only for these features, so
-    a deployment that stores no credentials keeps booting without one.
+    it. The Gateway loads the key at startup only when this list is non-empty,
+    and the multi-instance gate below refuses a missing key only for these
+    features, so a deployment that stores no credentials keeps booting without
+    one. Personal MCP OAuth connections are saved at runtime, so they cannot be
+    listed here; their store loads the key on first use.
     """
     consumers: list[str] = []
     connections = getattr(config, "channel_connections", None)
@@ -306,6 +308,13 @@ def credentials_key_consumers(config: AppConfig) -> list[str]:
         # ChannelConnectionRepository encrypts per-connection credentials, and
         # the runtime config store the bot credentials entered in the web UI.
         consumers.append("channel_connections.enabled=true")
+    extensions = getattr(config, "extensions", None)
+    if extensions is not None:
+        # deerflow.mcp.oauth_store keeps rotating refresh tokens in the database.
+        for name, server in extensions.get_enabled_mcp_servers().items():
+            oauth = server.oauth
+            if oauth is not None and oauth.enabled and oauth.grant_type == "refresh_token":
+                consumers.append(f"mcpServers.{name}.oauth.enabled=true")
     return consumers
 
 
@@ -889,6 +898,9 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         run_events_config = getattr(config, "run_events", None)
         app.state.run_events_config = run_events_config
         app.state.run_event_store = make_run_event_store(run_events_config)
+        from deerflow.runtime.events.terminal import RecoveryTerminalPublisher
+
+        app.state.recovery_terminal_publisher = RecoveryTerminalPublisher(app.state.run_event_store, app.state.run_store)
 
         from deerflow.extensions.run_evidence import StoreRunEvidenceReader, StoreRunEvidenceReaderFactory
 
@@ -965,10 +977,12 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             app.state.scheduled_task_repo = ScheduledTaskRepository(
                 sf,
                 run_repository=app.state.run_store,
+                recovery_terminal_publisher=app.state.recovery_terminal_publisher,
             )
             app.state.scheduled_task_run_repo = ScheduledTaskRunRepository(
                 sf,
                 run_repository=app.state.run_store,
+                recovery_terminal_publisher=app.state.recovery_terminal_publisher,
             )
             app.state.scheduled_task_event_repo = ScheduledTaskEventRepository(sf)
             # Per-user unread state and the activity feed's read clock.
@@ -1011,6 +1025,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             store=app.state.run_store,
             run_ownership_config=run_ownership_config,
             event_store=app.state.run_event_store,
+            recovery_terminal_publisher=app.state.recovery_terminal_publisher,
             on_orphans_recovered=terminalize_recovered_runs,
         )
         # Startup recovery: mark inflight runs whose lease has expired as error.
@@ -1185,6 +1200,53 @@ def get_subagent_batch_service(request: Request):
     return val
 
 
+def _run_admission_hook(*, checkpointer: Any):
+    """Prune metadata leaves inside the run's durable admission fence."""
+
+    async def handle(record: Any, config: dict[str, Any]) -> None:
+        try:
+            from app.gateway.checkpoint_retention import enforce_completed_run_retention
+
+            await enforce_completed_run_retention(
+                checkpointer=checkpointer,
+                thread_id=record.thread_id,
+                protect_checkpoint_ids=_selected_checkpoint_ids(config),
+            )
+        except Exception:
+            logger.warning(
+                "Checkpoint retention failed for thread %s before run %s (non-fatal)",
+                record.thread_id,
+                record.run_id,
+                exc_info=True,
+            )
+
+    return handle
+
+
+def _selected_checkpoint_ids(config: dict[str, Any]) -> frozenset[str]:
+    """Collect checkpoint selectors already validated for an admitted run."""
+    configurable = config.get("configurable", {})
+    selected: set[str] = set()
+    checkpoint_id = configurable.get("checkpoint_id")
+    if isinstance(checkpoint_id, str) and checkpoint_id:
+        selected.add(checkpoint_id)
+    checkpoint_map = configurable.get("checkpoint_map")
+    if isinstance(checkpoint_map, dict):
+        selected.update(value for value in checkpoint_map.values() if isinstance(value, str) and value)
+    return frozenset(selected)
+
+
+def _run_completion_hook(*, scheduled_task_service: Any | None):
+    """Notify the scheduler after ordinary run finalization."""
+
+    async def handle(record: Any) -> None:
+
+        if scheduled_task_service is not None:
+            await scheduled_task_service.handle_run_completion(record)
+
+    return handle
+
+
 def get_run_context(request: Request) -> RunContext:
     """Build a :class:`RunContext` from ``app.state`` singletons.
 
@@ -1198,9 +1260,11 @@ def get_run_context(request: Request) -> RunContext:
     host = getattr(request.app.state, "agent_runs_host", None)
     # Internal/channel and PAT runs deliberately receive no retained delegation.
     agent_runs = host.bind(request) if host is not None else None
+    checkpointer = get_checkpointer(request)
+    scheduled_task_service = getattr(request.app.state, "scheduled_task_service", None)
     return RunContext(
         agent_runs=agent_runs,
-        checkpointer=get_checkpointer(request),
+        checkpointer=checkpointer,
         store=get_store(request),
         event_store=get_run_event_store(request),
         run_events_config=getattr(request.app.state, "run_events_config", None),
@@ -1210,7 +1274,10 @@ def get_run_context(request: Request) -> RunContext:
         mcp_task_repo=getattr(request.app.state, "mcp_task_repo", None),
         app_config=get_config(),
         extensions=getattr(request.app.state, "extensions", None),
-        on_run_completed=getattr(request.app.state, "scheduled_task_service", None).handle_run_completion if getattr(request.app.state, "scheduled_task_service", None) is not None else None,
+        on_run_admitted=_run_admission_hook(checkpointer=checkpointer),
+        on_run_completed=_run_completion_hook(
+            scheduled_task_service=scheduled_task_service,
+        ),
     )
 
 
