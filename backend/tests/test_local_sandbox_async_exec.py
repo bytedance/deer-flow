@@ -10,14 +10,17 @@ in-flight command instead of orphaning it.
 from __future__ import annotations
 
 import asyncio
+import gc
 import os
 import time
+import weakref
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from deerflow.sandbox.local import local_sandbox
-from deerflow.sandbox.local.local_sandbox import _DAEMON_DRAIN_TASKS, LocalSandbox
+from deerflow.sandbox.local.local_sandbox import LocalSandbox
 
 posix_only = pytest.mark.skipif(os.name == "nt", reason="POSIX async subprocess semantics")
 
@@ -49,12 +52,19 @@ async def test_async_empty_output_placeholder() -> None:
     assert await sandbox.execute_command_async("true") == "(no output)"
 
 
+async def _wait_for_daemon_readers(readers: set[asyncio.Task[None]]) -> None:
+    """Finish only this command's readers before the test's loop closes."""
+    await asyncio.wait_for(asyncio.gather(*readers), timeout=5)
+
+
 @posix_only
 async def test_async_backgrounded_process_returns_promptly() -> None:
     """A backgrounded long-lived process must not block the async return any
     more than it blocks the sync path; its pipes are drained by a detached
     task that ends at EOF and leaves the strong-reference set."""
     sandbox = LocalSandbox("t")
+    daemon_tasks = local_sandbox._daemon_drain_tasks()
+    previous_readers = set(daemon_tasks)
     start = time.monotonic()
 
     output = await sandbox.execute_command_async("sleep 0.5 & echo serving", timeout=10)
@@ -62,11 +72,56 @@ async def test_async_backgrounded_process_returns_promptly() -> None:
     elapsed = time.monotonic() - start
     assert elapsed < 3, f"expected prompt return, took {elapsed:.1f}s"
     assert "serving" in output
-    for _ in range(50):
-        if not _DAEMON_DRAIN_TASKS:
-            break
-        await asyncio.sleep(0.1)
-    assert not _DAEMON_DRAIN_TASKS, "detached drain tasks must end at EOF and leave the strong-reference set"
+    readers = daemon_tasks - previous_readers
+    await _wait_for_daemon_readers(readers)
+    assert not daemon_tasks.intersection(readers), "completed readers must release their strong references"
+
+
+@posix_only
+async def test_async_detached_readers_do_not_retain_a_closed_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pending real reader tasks must not acquire a process-global lifetime."""
+
+    async def spawn(*args, **kwargs):
+        async def wait():
+            return 0
+
+        return SimpleNamespace(pid=2_147_483_647, returncode=0, stdout=asyncio.StreamReader(), stderr=asyncio.StreamReader(), wait=wait)
+
+    monkeypatch.setattr(local_sandbox.asyncio, "create_subprocess_exec", spawn)
+    monkeypatch.setattr(local_sandbox, "_PIPE_DRAIN_JOIN_TIMEOUT_SECONDS", 0)
+    monkeypatch.setattr(LocalSandbox, "_process_group_exists", staticmethod(lambda pid: True))
+    monkeypatch.setattr(LocalSandbox, "_resolve_exec_command", lambda self, command: ("/bin/sh", command))
+    monkeypatch.setattr(LocalSandbox, "_reverse_resolve_paths_in_output", lambda self, output: output)
+
+    def close_loop_with_pending_readers():
+        loop = asyncio.new_event_loop()
+        diagnostics = []
+        loop.set_exception_handler(lambda owner, context: diagnostics.append(context["message"]))
+
+        async def start_readers():
+            before = asyncio.all_tasks()
+            assert await LocalSandbox("detached").execute_command_async("ignored", timeout=1) == "(no output)"
+            readers = asyncio.all_tasks() - before
+            assert len(readers) == 2
+            references = [weakref.ref(reader) for reader in readers]
+            del readers
+            gc.collect()
+            assert all(reference() is not None for reference in references), "running-loop readers need strong ownership"
+            return references
+
+        try:
+            references = loop.run_until_complete(start_readers())
+            loop.run_until_complete(loop.shutdown_default_executor())
+        finally:
+            loop.close()
+        return weakref.ref(loop), references, diagnostics
+
+    loop_ref, reader_refs, diagnostics = await asyncio.to_thread(close_loop_with_pending_readers)
+    assert all(reference() not in local_sandbox._daemon_drain_tasks() for reference in reader_refs)
+    gc.collect()
+    assert loop_ref() is None, "a module-global reader registry retained the closed loop"
+    assert all(reference() is None for reference in reader_refs)
+    assert diagnostics.count("Task was destroyed but it is pending!") == 2
 
 
 @posix_only
@@ -137,8 +192,10 @@ async def test_async_windows_bridges_to_sync_path(monkeypatch: pytest.MonkeyPatc
         staticmethod(lambda args, timeout, env, **kwargs: ("partial out", "partial err", 0, True)),
     )
 
-    output = await LocalSandbox("t").execute_command_async("wait", timeout=1.5)
+    sandbox = LocalSandbox("t")
+    output = await sandbox.execute_command_async("wait", timeout=1.5)
 
+    assert sandbox._async_exec_unsupported is False
     assert "partial out" in output
     assert "Std Error:" in output
     assert "partial err" in output
@@ -146,20 +203,27 @@ async def test_async_windows_bridges_to_sync_path(monkeypatch: pytest.MonkeyPatc
     assert "Unexpected error" not in output
 
 
+@posix_only
 async def test_async_unsupported_loop_falls_back_to_sync_bridge(monkeypatch: pytest.MonkeyPatch) -> None:
     """An event loop without subprocess support degrades permanently to the
     sync path instead of failing the command."""
 
+    attempts = 0
+
     async def unsupported(*args: object, **kwargs: object) -> None:
+        nonlocal attempts
+        attempts += 1
         raise NotImplementedError
 
     monkeypatch.setattr(local_sandbox.asyncio, "create_subprocess_exec", unsupported)
     sandbox = LocalSandbox("t")
+    assert sandbox._async_exec_unsupported is False
 
-    output = await sandbox.execute_command_async("echo bridged")
-
-    assert "bridged" in output
+    assert "bridged" in await sandbox.execute_command_async("echo bridged")
+    assert "cached" in await sandbox.execute_command_async("echo cached")
+    assert attempts == 1
     assert sandbox._async_exec_unsupported is True
+    assert LocalSandbox("fresh")._async_exec_unsupported is False
 
 
 async def test_async_scoped_call_passthrough() -> None:

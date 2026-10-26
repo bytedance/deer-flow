@@ -39,12 +39,21 @@ _COMMAND_CAPTURE_LIMIT_BYTES = 10 * 1024 * 1024
 _PIPE_DRAIN_JOIN_TIMEOUT_SECONDS = 0.2
 _ASYNC_READ_CHUNK_BYTES = 65536
 
-# Strong references to detached async drain tasks. Backgrounded children keep
-# the captured pipes open after execute_command_async returned; detached
-# readers keep draining until EOF, mirroring the sync path's daemon drain
-# threads. asyncio holds only weak references to running tasks, so this set
-# is load-bearing for keeping the readers alive (#4931's task-lifetime rule).
-_DAEMON_DRAIN_TASKS: set[asyncio.Task[None]] = set()
+_DAEMON_DRAIN_TASKS_ATTRIBUTE = "_deerflow_local_command_drain_tasks"
+
+
+def _daemon_drain_tasks() -> set[asyncio.Task[None]]:
+    """Keep detached pipe readers alive for their owning loop's lifetime.
+
+    A module-global set (even in a weak-keyed loop mapping) would retain the
+    loop through each task. Let the loop own the strong references instead.
+    """
+    loop = asyncio.get_running_loop()
+    tasks: set[asyncio.Task[None]] | None = getattr(loop, _DAEMON_DRAIN_TASKS_ATTRIBUTE, None)
+    if tasks is None:
+        tasks = set()
+        setattr(loop, _DAEMON_DRAIN_TASKS_ATTRIBUTE, tasks)
+    return tasks
 
 
 #: Script suffixes a host interpreter opens by path but the shared skill-package
@@ -339,6 +348,7 @@ class LocalSandbox(Sandbox):
     #: Every call is a fresh ``subprocess.run([shell, "-c", ...])`` process —
     #: no shell state survives into the next command.
     persistent_shell_sessions = False
+    _async_exec_unsupported: bool = False
 
     @staticmethod
     def _shell_name(shell: str) -> str:
@@ -987,7 +997,7 @@ class LocalSandbox(Sandbox):
         from deerflow.sandbox.lease import run_sync_lifecycle_operation
 
         _validate_extra_env(env)
-        if os.name == "nt" or getattr(self, "_async_exec_unsupported", False):
+        if os.name == "nt" or self._async_exec_unsupported:
             return await run_sync_lifecycle_operation(self.execute_command, command, env=env, timeout=timeout)
         operation = asyncio.create_task(self._execute_command_async_impl(command, env, timeout))
         try:
@@ -1045,8 +1055,6 @@ class LocalSandbox(Sandbox):
             # permanently to the sync path so behavior matches today.
             self._async_exec_unsupported = True
             logger.warning("Event loop does not support subprocesses; async sandbox exec bridged to the sync path")
-            from deerflow.sandbox.lease import run_sync_lifecycle_operation
-
             return await run_sync_lifecycle_operation(self.execute_command, command, env=env, timeout=timeout)
 
         async def _drain(stream: asyncio.StreamReader, capture: _BoundedPipeCapture) -> None:
@@ -1085,9 +1093,11 @@ class LocalSandbox(Sandbox):
             else:
                 grace = _PIPE_DRAIN_JOIN_TIMEOUT_SECONDS
             _, pending = await asyncio.wait(readers, timeout=grace)
-            for reader in pending:
-                _DAEMON_DRAIN_TASKS.add(reader)
-                reader.add_done_callback(_DAEMON_DRAIN_TASKS.discard)
+            if pending:
+                daemon_tasks = _daemon_drain_tasks()
+                for reader in pending:
+                    daemon_tasks.add(reader)
+                    reader.add_done_callback(daemon_tasks.discard)
 
         stdout = stdout_capture.read()
         stderr = stderr_capture.read()
