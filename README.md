@@ -1122,6 +1122,8 @@ cleanup when migrating from legacy metadata credentials.
 
 DeerFlow supports receiving tasks from messaging apps. Channels auto-start when configured — no public IP required for any of them.
 
+Generated-file replies explain when a channel cannot send attachments. If some or all uploads fail, DeerFlow sends one combined notice naming the unsent files when the platform still accepts replies. Successful uploads add no duplicate confirmation. Files remain in the DeerFlow conversation; an expired reply window is logged without switching to proactive messaging.
+
 Cancelling a channel restart discards its pending configuration reload, preserving newer runtime settings applied afterward.
 
 Invalid UTF-8 in `channels/store.json` follows the same recovery policy as malformed JSON:
@@ -1736,6 +1738,8 @@ File reads accept raw repository-relative paths and preserve spaces, Unicode,
 `#`, `?`, and literal percent signs with either HTTP client.
 Directory listings ask for the repository's own default branch, so a repository that
 uses neither `main` nor `master` reports its current tree instead of a stale branch.
+The `issues` command excludes pull requests and follows additional pages to fill
+its requested issue limit; the `prs` command remains available for pull requests.
 
 Users can explicitly activate an enabled skill for a single turn by starting the request with `/skill-name`, for example `/data-analysis analyze uploads/foo.csv`. DeerFlow loads that skill's `SKILL.md` as hidden current-turn context while leaving the base prompt limited to skill metadata. Slash activation respects disabled skills, custom-agent skill whitelists, and existing channel commands such as `/new` and `/help`.
 
@@ -2374,6 +2378,10 @@ Visible-content detection (`has_visible_content`, shared by the empty-response, 
 Backend response cleanup preserves unrelated tag names such as `<think-tank>` and `<think:note>` in follow-up suggestions and polished drafts; only the exact `<think>` name (optionally followed by attributes) starts a reasoning block. Self-closing `<think/>` and `<think />` tags are empty reasoning blocks and leave the following answer intact. Delimiters inside quoted attributes, such as `<think note=">"/>`, also leave the following answer intact.
 
 The Web UI composer can polish draft input before sending. The rewrite runs as a short Gateway LLM request using the `input_polish` model configuration, keeps slash skill prefixes such as `/data-analysis`, and only replaces the local draft after the user clicks the polish button; it does not create a thread run or persist a message.
+
+Input polishing, follow-up suggestions, and background project-file summaries
+construct their model providers off the Gateway event loop, so local credential
+reads do not stall unrelated requests.
 
 When the agent asks for clarification, the Web UI shows the structured response card but keeps the normal composer available. Users can complete the card or send a free-form chat message to bypass it; that message closes the latest pending clarification and becomes the agent's next input. Accompanying answer text stays outside the execution steps panel, and answering the request keeps previously completed text in the conversation while the agent continues.
 
