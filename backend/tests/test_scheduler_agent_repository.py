@@ -258,6 +258,35 @@ async def test_no_verdict_once_is_failed_and_receipt_backfill_preserves_unmet(tm
 
 
 @pytest.mark.asyncio
+async def test_reconcile_keeps_terminal_run_when_newer_occurrence_is_active(tmp_path, database_backend):
+    async with database(tmp_path, backend=database_backend) as (_sf, tasks, runs):
+        await task(tasks)
+        await runs.create(
+            run_record_id="occ-old",
+            task_id="task",
+            thread_id="thread-old",
+            scheduled_for=NOW,
+            trigger="scheduled",
+            status="failed",
+        )
+        await runs.create(
+            run_record_id="occ-new",
+            task_id="task",
+            thread_id="thread-new",
+            scheduled_for=NOW + timedelta(minutes=1),
+            trigger="manual",
+            status="running",
+        )
+
+        assert await runs.reconcile_launched_run("occ-old", task_id="task", run_id="run-late", started_at=NOW + timedelta(seconds=1)) is True
+
+        rows = {row["id"]: row for row in await runs.list_by_task("task")}
+        assert rows["occ-old"]["status"] == "failed"
+        assert rows["occ-old"]["run_id"] == "run-late"
+        assert rows["occ-new"]["status"] == "running"
+
+
+@pytest.mark.asyncio
 async def test_success_resets_unmet_streak_and_old_callback_cannot_pause_new_parent(tmp_path, database_backend):
     async with database(tmp_path, backend=database_backend) as (sf, tasks, runs):
         await task(tasks, goal_objective="deliver report")
