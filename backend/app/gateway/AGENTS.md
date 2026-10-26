@@ -140,7 +140,7 @@ owner-scoped assistant version selection remains enabled.
 | **GitHub Event-Driven Agents** | Custom agents can declare a `github:` block in their `config.yaml` to bind to repos and event triggers. Webhook fan-out publishes one `InboundMessage` per matching binding to the channel bus; `GitHubChannel` routes those messages through `ChannelManager`. The response `dispatch` summarizes matched/fired/skipped agents. |
 
 Edit-replay and messages-input clarification may replace checkpoint knowledge
-scope with a validated client snapshot; regenerate and `Command` resume always
+scope with a validated client snapshot; regenerate, null-input and `Command` resume
 recover checkpoint scope from the originating genuine user turn, skipping
 server-generated hidden context, and ignore client values. Scope admission
 treats `input.messages: null` as an empty message collection so

@@ -59,7 +59,7 @@ Use `CheckpointStateAccessor` with the thread's effective schema for state reads
 and mutations; preserve mode gates, parentage and pending writes. State replacement
 uses `Overwrite`. Delta resume/rollback rewrites the current head rather than
 forking; reject missing selected/head tuples and pending Sends before writing.
-`Command(resume=...)` also rejects pending nodes except `__start__` on both;
+Null input and `Command(resume=...)` also reject pending nodes except `__start__` on both;
 `CheckpointResumeRejected` skips pre-write rollback. Resume at head.
 
 Before changing checkpoint modes, caches, replay lookup, state replacement or
