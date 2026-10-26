@@ -269,6 +269,9 @@ async def test_reconcile_keeps_terminal_run_when_newer_occurrence_is_active(tmp_
             trigger="scheduled",
             status="failed",
         )
+        # Seed the real terminal payload: runs.create cannot set error or
+        # finished_at, and the guard must preserve both, not just the status.
+        await runs.update_status("occ-old", status="failed", error="queue timeout", finished_at=NOW)
         await runs.create(
             run_record_id="occ-new",
             task_id="task",
@@ -282,6 +285,8 @@ async def test_reconcile_keeps_terminal_run_when_newer_occurrence_is_active(tmp_
 
         rows = {row["id"]: row for row in await runs.list_by_task("task")}
         assert rows["occ-old"]["status"] == "failed"
+        assert rows["occ-old"]["error"] == "queue timeout"
+        assert datetime.fromisoformat(rows["occ-old"]["finished_at"]) == NOW
         assert rows["occ-old"]["run_id"] == "run-late"
         assert rows["occ-new"]["status"] == "running"
 
