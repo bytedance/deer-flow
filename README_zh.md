@@ -462,8 +462,6 @@ channels:
   # 可选：所有移动端渠道共用的全局 session 默认值
   session:
     assistant_id: lead_agent  # 也可以填自定义 agent 名；渠道层会自动转换为 lead_agent + agent_name
-    config:
-      recursion_limit: 100
     context:
       thinking_enabled: true
       is_plan_mode: false
@@ -743,6 +741,10 @@ DeerFlow 可连接租户级 RAGFlow，并通过 `knowledge_search` 按 embedding
 对接 WeKnora v0.8.3，使用知识库/文档范围选择器和共享检索引用。
 需显式配置 DeerFlow 用户到 WeKnora 工作空间的凭据绑定；资源授权仍由 WeKnora 执行。
 安装与配置步骤见扩展目录中的英文指南。
+
+可选的[知识平台扩展](examples/deerflow-extension-knowledge-platform/README.md)
+提供连接策略、多层级空间、成员和显式资源共享。空间内管理调用仍需现有管理员与
+Provider 授权。默认关闭，不包含管理页面，也不改变聊天检索的全局权限。
 
 可选的[知识入库与处理扩展](examples/deerflow-extension-knowledge-management/README.md)
 通过 WeKnora 提供管理员授权的文件、网址和手工文本入库、处理状态查询、重新处理与取消。

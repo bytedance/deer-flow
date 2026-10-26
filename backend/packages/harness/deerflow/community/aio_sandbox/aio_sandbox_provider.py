@@ -2319,8 +2319,15 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         if cached_id is not None:
             return cached_id
 
-        # Deterministic ID for thread-specific, random for anonymous
-        sandbox_id = self._sandbox_id_for_thread(thread_id, user_id)
+        # Deterministic ID for thread-specific, random for anonymous. Deriving
+        # it checks the thread's skills_view on disk through Paths.base_dir, so
+        # it runs in a worker like the layers around it.
+        sandbox_id = await _run_started_acquire_worker(
+            self._acquire_worker_executor,
+            self._sandbox_id_for_thread,
+            thread_id,
+            user_id,
+        )
         if thread_id:
             key = self._thread_key(thread_id, user_id)
             with self._lock:

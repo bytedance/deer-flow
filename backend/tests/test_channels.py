@@ -5261,19 +5261,33 @@ class TestResolveRunParamsUserId:
         assert run_context["channel_user_id"] == "U-platform"
 
     def test_github_channel_gets_raised_recursion_limit(self):
-        """Autonomous GitHub coding runs (clone → edit → test → push → PR) need
-        more super-steps than an interactive chat turn. The default
-        ``recursion_limit`` of 100 is raised for the github channel only."""
+        """Autonomous GitHub coding runs (clone → edit → test → push → PR) get
+        a channel floor of 250 super-steps; other channels send no
+        ``recursion_limit`` and leave the budget to the Gateway."""
         manager = self._manager()
 
         gh_msg = InboundMessage(channel_name="github", chat_id="zhfeng/llm-gateway", user_id="zhfeng", text="hi")
         _, gh_config, _ = manager._resolve_run_params(gh_msg, "thread-1")
         assert gh_config["recursion_limit"] >= 250
 
-        # Interactive channels keep the default ceiling.
         slack_msg = InboundMessage(channel_name="slack", chat_id="C1", user_id="u", text="hi")
         _, slack_config, _ = manager._resolve_run_params(slack_msg, "thread-1")
-        assert slack_config["recursion_limit"] == 100
+        assert "recursion_limit" not in slack_config
+
+    def test_im_run_uses_gateway_configured_recursion_limit(self):
+        """An IM run without a session value gets the operator's top-level
+        ``recursion_limit``, like Gateway API runs, instead of a fixed 100."""
+        from app.gateway.services import build_run_config
+        from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
+
+        set_app_config(AppConfig.model_validate({"sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"}, "recursion_limit": 700}))
+        try:
+            manager = self._manager()
+            msg = InboundMessage(channel_name="telegram", chat_id="c", user_id="u", text="hi")
+            _, run_config, _ = manager._resolve_run_params(msg, "thread-1")
+            assert build_run_config("thread-1", run_config, None)["recursion_limit"] == 700
+        finally:
+            reset_app_config()
 
     def test_github_channel_recursion_limit_respects_higher_override(self):
         """An explicit higher recursion_limit in channel/user config must not be
