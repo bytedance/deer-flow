@@ -222,3 +222,38 @@ async def test_static_skill_scan_reads_lf_bytes(monkeypatch) -> None:
 
     assert findings == []
     assert seen == [LF_CONTENT.encode("utf-8")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("existing", [False, True], ids=["new-skill", "existing-skill"])
+@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
+async def test_skill_manage_static_scan_matches_stored_bytes(storage, monkeypatch, existing, newline) -> None:
+    """Agent-managed candidates must be scanned exactly as storage publishes them."""
+    import deerflow.tools.skill_manage_tool as skill_manage
+
+    if existing:
+        storage.write_custom_skill("demo-skill", "SKILL.md", LF_CONTENT)
+        storage.write_custom_skill("demo-skill", "notes.txt", "Keep this file.\n")
+    updates = {
+        "SKILL.md": LF_CONTENT.replace("Demo skill", "中文 skill").replace("\n", newline),
+        "scripts/helper.py": f'print("你好"){newline}',
+    }
+    seen: list[dict[str, bytes]] = []
+
+    def fake_scan(skill_dir, *, skill_name):
+        assert skill_name == "demo-skill"
+        seen.append({relative: (Path(skill_dir) / relative).read_bytes() for relative in updates})
+        if existing:
+            assert (Path(skill_dir) / "notes.txt").read_bytes() == b"Keep this file.\n"
+        return []
+
+    monkeypatch.setattr(skill_manage, "enforce_static_scan", fake_scan)
+    with _windows_text_writes(monkeypatch):
+        findings = await skill_manage._scan_static_candidate_or_raise("demo-skill", updates, storage if existing else None)
+        for relative, content in updates.items():
+            storage.write_custom_skill("demo-skill", relative, content)
+
+    published = {relative: (storage.get_custom_skill_dir("demo-skill") / relative).read_bytes() for relative in updates}
+    assert findings == []
+    assert published == {relative: content.encode("utf-8") for relative, content in updates.items()}
+    assert seen == [published]
