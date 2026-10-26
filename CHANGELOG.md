@@ -1397,6 +1397,14 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
 
 ### Fixed
 
+- **community:** Async community tools (Jina, Crawl4AI, Browserless, Tavily,
+  SearXNG, Firecrawl, InfoQuest, RAGFlow, LightRAG, Jsonify and the browser
+  automation tools) no longer read `config.yaml` and `extensions_config.json` on the
+  event loop. Each call checked both files (a `stat` and a full sha256 of
+  each) up to three times, and reparsed `config.yaml` there after an edit,
+  stalling other runs, requests and streams meanwhile. They now read the
+  config once per call in a worker, as image search already did. ([#7580])
+
 - **auth:** The public auth routes (`/register`, `/setup-status`,
   `/providers`, `/oauth/{provider}` and `/callback/{provider}`) no longer read
   `config.yaml` and `extensions_config.json` on the event loop. Each request
@@ -13145,3 +13153,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7557]: https://github.com/bytedance/deer-flow/pull/7557
 [#7560]: https://github.com/bytedance/deer-flow/pull/7560
 [#7576]: https://github.com/bytedance/deer-flow/pull/7576
+[#7580]: https://github.com/bytedance/deer-flow/pull/7580
