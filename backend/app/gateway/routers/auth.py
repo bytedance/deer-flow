@@ -1154,8 +1154,10 @@ def validate_next_param(next_param: str | None) -> str | None:
     """Validate and sanitize the ``next`` redirect parameter.
 
     Only allows relative paths starting with ``/``. Rejects protocol-relative
-    URLs (``//``), absolute URLs, URLs with embedded protocols, and backslashes
-    that URL parsers may reinterpret as forward slashes.
+    URLs (``//``), absolute URLs, URLs with embedded protocols, backslashes
+    that URL parsers may reinterpret as forward slashes, and control
+    characters: browsers delete tab, LF and CR before parsing a URL, so
+    ``/\\n//evil.example`` would otherwise reach the frontend as ``//evil.example``.
     """
     if not next_param:
         return None
@@ -1166,5 +1168,7 @@ def validate_next_param(next_param: str | None) -> str | None:
     if "\\" in next_param:
         return None
     if ":" in next_param:
+        return None
+    if any(ord(char) < 0x20 or ord(char) == 0x7F for char in next_param):
         return None
     return next_param
