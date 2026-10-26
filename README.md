@@ -1920,6 +1920,10 @@ overwriting them with an unevaluated fallback — so the Settings UI shows
 whether `lark-cli` will actually be present in the sandbox at chat time, rather
 than a green status hiding a later `command not found`.
 
+The optional [Lark CLI broker image](docker/lark-cli-broker/README.md) bundles
+its required Python helper modules, so the sidecar runs without a separate
+DeerFlow harness installation.
+
 In Lark broker mode, AIO's fresh Bash runs close inherited pipe stdin. Persistent
 terminal commands keep their input; the shim ignores terminal stdin. Explicit
 pipelines, heredocs, and file redirections still supply input normally, and the

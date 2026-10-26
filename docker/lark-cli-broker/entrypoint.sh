@@ -1,14 +1,14 @@
 #!/bin/sh
 # DeerFlow lark-cli broker entrypoint (Pattern B, issue #4338).
 #
-# Dispatches to one of two modes on the single stdlib-only module:
+# Dispatches to one of two modes on the broker script:
 #
 #   install-shim [dest]   write the shim + runtime marker into the shared
 #                         emptyDir (init-container mode), then exit 0.
 #   serve                 run the broker HTTP server on loopback (sidecar mode).
 #
-# The module is copied to /opt/broker/lark_broker.py and run as a script; it has
-# no third-party dependencies, so no harness install is needed in this image.
+# The script and its shared helpers live under /opt/broker and use only the
+# Python standard library; no harness installation is needed in this image.
 set -eu
 
 MODULE="/opt/broker/lark_broker.py"
