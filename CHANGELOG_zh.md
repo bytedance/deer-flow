@@ -1113,11 +1113,11 @@
 ### 修复
 
 - **社区工具：** 异步社区工具（Jina、Crawl4AI、Browserless、Tavily、SearXNG、Firecrawl、
-  InfoQuest、RAGFlow、LightRAG 和浏览器自动化工具）不再在事件循环上读取 `config.yaml`
+  InfoQuest、RAGFlow、LightRAG、Jsonify 和浏览器自动化工具）不再在事件循环上读取 `config.yaml`
   和 `extensions_config.json`。每次调用最多会把这两个文件检查三次（各做一次 `stat`
   和完整的 sha256），编辑后还会在循环上重新解析 `config.yaml`，期间其他运行、请求和
   流式输出都会停顿。现在它们与图片搜索一样，每次调用只在工作线程中读取一次配置。([#7580])
-  
+
 - **沙箱：** 停止 Gateway 时，AIO 和 E2B 沙箱不再在进行中的运行收尾之前被销毁。此前
   如果第一次使用沙箱时在事件循环线程上构造了提供方，提供方自己的 SIGTERM/SIGINT
   处理器会在信号到达时同步销毁所有沙箱：整个销毁期间事件循环冻结，正在执行的工具
