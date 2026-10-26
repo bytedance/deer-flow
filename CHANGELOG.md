@@ -1397,6 +1397,14 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
 
 ### Fixed
 
+- **channels:** Connecting Slack, Discord, Feishu, DingTalk, WeCom, Buzz or QQ
+  now opens a dialog that keeps the `/connect` command on screen with a copy
+  button, its expiry time and the binding status, instead of a toast that
+  disappears. The bots' `/connect` and `/goal` replies follow the owner's web UI
+  language (else `channel_connections.notification_locale`), and `/goal` in IM
+  reports whether the goal is in progress, why it stopped, or that it was met,
+  as the web goal bar does. ([#7591])
+
 - **community:** Async community tools (Jina, Crawl4AI, Browserless, Tavily,
   SearXNG, Firecrawl, InfoQuest, RAGFlow, LightRAG, Jsonify and the browser
   automation tools) no longer read `config.yaml` and `extensions_config.json` on the
@@ -13154,3 +13162,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7560]: https://github.com/bytedance/deer-flow/pull/7560
 [#7576]: https://github.com/bytedance/deer-flow/pull/7576
 [#7580]: https://github.com/bytedance/deer-flow/pull/7580
+[#7591]: https://github.com/bytedance/deer-flow/pull/7591
