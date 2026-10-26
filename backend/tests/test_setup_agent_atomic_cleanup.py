@@ -56,5 +56,23 @@ def test_publish_text_still_succeeds_and_leaves_no_temporary(tmp_path, caplog):
         module._publish_text(target, "replacement")
 
     assert target.read_text(encoding="utf-8") == "replacement"
-    assert [p.name for p in tmp_path.iterdir() if p.name.startswith(".SOUL.md.")] == []
+    # The staged name comes from ``NamedTemporaryFile`` (``tmpXXXXXXXX.tmp``), so
+    # assert the whole directory: nothing leaked and nothing else was created.
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["SOUL.md"]
     assert caplog.text == ""
+
+
+def test_publish_text_survives_a_discard_that_fails_after_publishing(tmp_path, monkeypatch, caplog, real_unlink):
+    """Removal can fail after a successful replace; the publish must still stand."""
+    from deerflow.tools.builtins import setup_agent_tool as module
+
+    target = tmp_path / "SOUL.md"
+    target.write_text("original", encoding="utf-8")
+    caplog.clear()
+    _fail_unlink_on(monkeypatch, lambda path: path.suffix == ".tmp", real_unlink)
+
+    with caplog.at_level("WARNING", logger="deerflow.utils.atomic_write"):
+        module._publish_text(target, "replacement")
+
+    assert target.read_text(encoding="utf-8") == "replacement"
+    assert "Failed to remove temporary output file" in caplog.text
