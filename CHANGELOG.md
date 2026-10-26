@@ -1405,7 +1405,7 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
   owns sandbox shutdown and closes the provider after the run drain and MCP
   teardown; embedded clients and scripts keep the signal fallback, and SIGHUP
   still cleans up. AIO acquire now refuses once shutdown has begun, as E2B
-  already did.
+  already did. ([#7560])
 
 - **memory:** Automatic context compaction no longer blocks the event loop
   while it saves the messages it is about to summarize to memory. With the
@@ -13117,3 +13117,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7507]: https://github.com/bytedance/deer-flow/pull/7507
 [#7521]: https://github.com/bytedance/deer-flow/pull/7521
 [#7530]: https://github.com/bytedance/deer-flow/pull/7530
+[#7560]: https://github.com/bytedance/deer-flow/pull/7560

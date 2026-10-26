@@ -1117,7 +1117,7 @@
   处理器会在信号到达时同步销毁所有沙箱：整个销毁期间事件循环冻结，正在执行的工具
   调用失去沙箱。现在由 Gateway 负责沙箱关闭，在运行收尾和 MCP 关闭之后再关闭提供方；
   嵌入式客户端和脚本保留信号兜底，SIGHUP 仍会清理。AIO 的 acquire 在关闭开始后会
-  拒绝请求，与 E2B 一致。
+  拒绝请求，与 E2B 一致。([#7560])
 
 - **记忆：** 自动上下文压缩在把即将被总结的消息保存到记忆时，不再阻塞事件循环。
   使用 mem0、Honcho 或 OpenViking 后端时，这次保存是同步 HTTP 请求，Gateway 在记忆
@@ -10470,3 +10470,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7507]: https://github.com/bytedance/deer-flow/pull/7507
 [#7521]: https://github.com/bytedance/deer-flow/pull/7521
 [#7530]: https://github.com/bytedance/deer-flow/pull/7530
+[#7560]: https://github.com/bytedance/deer-flow/pull/7560
