@@ -72,6 +72,83 @@ def test_summarize_omits_group_without_a_successful_pair() -> None:
     assert summarize._summarize([_row("full", 0, 10, 1000)], metrics=["write_total_ms"]) == []
 
 
+def test_summarize_pairs_every_swept_cadence_against_the_shared_full_baseline() -> None:
+    """Cadence is a delta-only sweep dimension; full mode runs once per cell.
+
+    ``bench_channels`` always runs full-mode cases at the production cadence
+    (its CLI help: "Sweep 100,250,500,1000 to compare cadence tradeoffs"), so
+    a swept delta cadence must pair against that shared full baseline instead
+    of being dropped for lacking a same-frequency full row.
+    """
+    rows = [
+        {**_row("full", 0, 10, 1000), "snapshot_frequency": 10},
+        {**_row("full", 1, 12, 1000), "snapshot_frequency": 10},
+        {**_row("delta", 0, 5, 200), "snapshot_frequency": 250},
+        {**_row("delta", 1, 7, 240), "snapshot_frequency": 250},
+        {**_row("delta", 0, 4, 180), "snapshot_frequency": 500},
+    ]
+
+    result = summarize._summarize(rows, metrics=["write_total_ms"])
+
+    by_frequency = {row["snapshot_frequency"]: row for row in result}
+    assert sorted(by_frequency) == [250, 500]
+    assert by_frequency[250]["paired_repetitions"] == 2
+    assert by_frequency[250]["full_write_total_ms"] == 11.0
+    assert by_frequency[250]["delta_write_total_ms"] == 6.0
+    assert by_frequency[500]["paired_repetitions"] == 1
+    assert by_frequency[500]["full_write_total_ms"] == 10.0
+    assert by_frequency[500]["delta_write_total_ms"] == 4.0
+
+
+def test_summarize_reports_the_production_cadence_alongside_swept_cadences() -> None:
+    """A sweep that includes the production cadence (e.g. 10,250) keeps reporting each cadence."""
+    rows = [
+        {**_row("full", 0, 10, 1000), "snapshot_frequency": 10},
+        {**_row("delta", 0, 5, 200), "snapshot_frequency": 10},
+        {**_row("delta", 0, 4, 180), "snapshot_frequency": 250},
+    ]
+
+    result = summarize._summarize(rows, metrics=["write_total_ms"])
+
+    assert [row["snapshot_frequency"] for row in result] == [10, 250]
+    assert all(row["paired_repetitions"] == 1 for row in result)
+
+
+def test_summarize_counts_failed_full_rows_against_every_cadence_group() -> None:
+    """A failed full row has no cadence; it must count against each swept cadence's group."""
+    rows = [
+        {**_row("full", 0, 10, 1000), "snapshot_frequency": 10},
+        {**_row("full", 1, 999, 9999, success=False), "snapshot_frequency": 10},
+        {**_row("delta", 0, 5, 200), "snapshot_frequency": 250},
+        {**_row("delta", 0, 4, 180), "snapshot_frequency": 500},
+    ]
+
+    result = summarize._summarize(rows, metrics=["write_total_ms"])
+
+    by_frequency = {row["snapshot_frequency"]: row for row in result}
+    assert sorted(by_frequency) == [250, 500]
+    assert by_frequency[250]["failed_rows"] == 1
+    assert by_frequency[500]["failed_rows"] == 1
+    assert by_frequency[250]["paired_repetitions"] == 1
+
+
+def test_main_summarizes_a_documented_cadence_sweep(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """The documented sweep must produce summaries and exit 0, not '(no comparable pairs)' + 1."""
+    path = tmp_path / "results.jsonl"
+    rows = [
+        {**_row("full", 0, 10, 1000), "snapshot_frequency": 10},
+        {**_row("delta", 0, 5, 200), "snapshot_frequency": 250},
+    ]
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+    rc = summarize.main([str(path), "--metrics", "write_total_ms", "--json"])
+
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert [row["snapshot_frequency"] for row in payload] == [250]
+    assert payload[0]["ratio_write_total_ms"] == 0.5
+
+
 def test_summarize_excludes_profiled_pairs_from_baseline_medians() -> None:
     rows = [
         _row("full", 0, 10, 1000),

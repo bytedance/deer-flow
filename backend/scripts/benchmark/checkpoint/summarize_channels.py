@@ -6,6 +6,10 @@ row enter metric medians. This prevents a failed or missing mode from turning
 different workloads into a misleading ratio. Ratios are always ``delta/full``:
 values below 1 mean delta used less time or storage.
 
+Cadence is a delta-only sweep dimension: ``bench_channels`` runs full mode
+once per cell at the production cadence, and every swept delta cadence pairs
+against that shared full baseline (like ``summarize_production``).
+
 Examples::
 
     python scripts/benchmark/checkpoint/summarize_channels.py results.jsonl
@@ -21,7 +25,7 @@ import csv
 import json
 import statistics
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -97,33 +101,62 @@ def _group_sort_key(key: tuple[Any, ...]) -> tuple[tuple[int, Any], ...]:
     return tuple((0, value) if isinstance(value, (int, float)) and not isinstance(value, bool) else (1, str(value)) for value in key)
 
 
+_WORKLOAD_FIELDS = ("backend", "scenario", "update_count", "payload_bytes")
+
+
+def _workload_key(row: dict[str, Any]) -> tuple[Any, ...]:
+    return tuple(row.get(field) for field in _WORKLOAD_FIELDS)
+
+
 def _summarize(rows: list[dict[str, Any]], *, metrics: list[str]) -> list[dict[str, Any]]:
-    groups: dict[tuple[Any, ...], list[dict[str, Any]]] = defaultdict(list)
+    # Cadence is a delta-only sweep dimension: bench_channels runs full mode
+    # once per cell at the production cadence, so full rows are the shared
+    # baseline every swept delta cadence pairs against — the same broadcast
+    # pairing summarize_production uses — rather than a member of one
+    # cadence's group. Grouping full rows under their own production-cadence
+    # frequency instead would leave every swept cadence without a pair.
+    full_rows: dict[tuple, dict[str, Any]] = {}
+    delta_groups: dict[tuple, dict[tuple, dict[str, Any]]] = defaultdict(dict)
+    failed_full_rows: Counter = Counter()
+    failed_delta_rows: Counter = Counter()
     for row in rows:
         if row.get("profiled"):
             continue
-        groups[_group_key(row)].append(row)
+        mode = row.get("mode")
+        if mode not in {"full", "delta"}:
+            continue
+        repetition_key = (*_workload_key(row), row.get(_INPUT_INDEX_FIELD), row.get("repetition"))
+        if not row.get("success"):
+            if mode == "full":
+                failed_full_rows[_workload_key(row)] += 1
+            else:
+                failed_delta_rows[_group_key(row)] += 1
+            continue
+        if mode == "full":
+            full_rows[repetition_key] = row
+        else:
+            delta_groups[_group_key(row)][repetition_key] = row
 
     summaries: list[dict[str, Any]] = []
-    for key, group in sorted(groups.items(), key=lambda item: _group_sort_key(item[0])):
-        by_repetition: dict[Any, dict[str, dict[str, Any]]] = defaultdict(dict)
-        for row in group:
-            if row.get("success") and row.get("mode") in {"full", "delta"}:
-                repetition_key = (row.get(_INPUT_INDEX_FIELD), row.get("repetition"))
-                by_repetition[repetition_key][row["mode"]] = row
-        pairs = [pair for pair in by_repetition.values() if "full" in pair and "delta" in pair]
+    for key in sorted(delta_groups, key=_group_sort_key):
+        deltas = delta_groups[key]
+        pairs = [(full_rows[repetition_key], delta) for repetition_key, delta in deltas.items() if repetition_key in full_rows]
         if not pairs:
             continue
 
         summary: dict[str, Any] = {field: key[index] for index, field in enumerate(_GROUP_FIELDS)}
         summary["paired_repetitions"] = len(pairs)
-        summary["failed_rows"] = sum(1 for row in group if not row.get("success"))
+        # A failed full row has no cadence, so it counts toward every swept
+        # cadence's group at the same workload; a failed delta row counts only
+        # toward its own cadence's group.
+        workload = tuple(key[index] for index in (0, 1, 3, 4))
+        summary["failed_rows"] = failed_full_rows[workload] + failed_delta_rows[key]
         for metric in metrics:
             full_values: list[float] = []
             delta_values: list[float] = []
-            for pair in pairs:
-                full_value = _numeric(pair["full"], metric)
-                delta_value = _numeric(pair["delta"], metric)
+            for full_row, delta_row in pairs:
+                full_value = _numeric(full_row, metric)
+                delta_value = _numeric(delta_row, metric)
                 if full_value is None or delta_value is None:
                     continue
                 full_values.append(full_value)
