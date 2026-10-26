@@ -593,17 +593,33 @@ async def read_file_chunks(path: Path, *, chunk_size: int = 65536) -> AsyncItera
 
     Shared by the from-thread promote path (thread file → shelf staging) and
     the attach path (staged shelf copy → thread-upload ingestion).
+
+    Cancellation contract: once an open/read/close has been admitted to the
+    file-I/O worker, the caller's cancellation is delivered only after that
+    operation settles (:func:`await_drained`). The opened handle is retained
+    the moment the worker returns it, so a cancellation racing the result
+    handoff cannot leak it, and the cleanup close never races an in-flight
+    read. Waiting for the next chunk (the ``yield`` itself) stays immediately
+    cancellable. (#7491)
     """
 
     def _open() -> Any:
         return open(path, "rb")
 
-    handle = await run_file_io(_open)
+    retained: list[Any] = []
+
+    async def _open_and_retain() -> Any:
+        handle = await run_file_io(_open)
+        retained.append(handle)
+        return handle
+
     try:
-        while chunk := await run_file_io(handle.read, chunk_size):
+        handle = await await_drained(_open_and_retain())
+        while chunk := await await_drained(run_file_io(handle.read, chunk_size)):
             yield chunk
     finally:
-        await run_file_io(handle.close)
+        for open_handle in retained:
+            await await_drained(run_file_io(open_handle.close))
 
 
 def _copy_original_under_lock(paths: Paths, staging_path: Path, *, user_id: str, row: dict) -> None:

@@ -1,7 +1,8 @@
 """Behavioral regressions for authoritative Run terminal evidence.
 
 Pinned baseline: fee0cd0c180874325305e995197db99f03fa6a6f. These tests
-exercise owner-side run.terminal publication through actual finalization.
+exercise owner-side run.terminal publication through actual finalization and
+confirmed recovery takeover publication.
 See backend/docs/RUN_EVENT_STREAM.md for the protocol.
 """
 
@@ -23,6 +24,7 @@ from langgraph.graph.message import add_messages
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+import deerflow.runtime.events.terminal as terminal_module
 import deerflow.runtime.runs.worker as worker_module
 from deerflow.config.paths import Paths
 from deerflow.config.run_ownership_config import RunOwnershipConfig
@@ -74,15 +76,39 @@ async def terminal_events(runtime, record):
     return await runtime.events.list_events(record.thread_id, record.run_id, event_types=["run.terminal"], user_id=None)
 
 
-def confirmed_terminal(events, record, status):
+def confirmed_terminal(events, record, status, *, recovered=False):
     assert len(events) == 1, f"expected one authoritative run.terminal({status}), got {events!r}"
     terminal = events[0]
     assert (terminal["thread_id"], terminal["run_id"], terminal["event_type"]) == (record.thread_id, record.run_id, "run.terminal")
     assert terminal["category"] == "trace"
     assert terminal["content"] == {"status": status}
     assert terminal["metadata"]["protocol_version"] == 1
-    assert terminal["metadata"]["recovered"] is False
+    assert terminal["metadata"]["recovered"] is recovered
     return terminal
+
+
+async def put_expired_run(runtime, *, operation_kind="run", user_id="alice"):
+    run_id = f"recovery-run-{uuid4()}"
+    thread_id = f"recovery-thread-{uuid4()}"
+    await runtime.runs.put(
+        run_id,
+        thread_id=thread_id,
+        user_id=user_id,
+        status="running",
+        operation_kind=operation_kind,
+        owner_worker_id="dead-owner",
+        lease_expires_at=(datetime.now(UTC) - timedelta(seconds=60)).isoformat(),
+    )
+    return SimpleNamespace(run_id=run_id, thread_id=thread_id, user_id=user_id)
+
+
+def recovery_manager(runtime, *, worker_id=None):
+    return RunManager(
+        store=runtime.runs,
+        event_store=runtime.events,
+        worker_id=worker_id or f"recovery-{uuid4()}",
+        run_ownership_config=RunOwnershipConfig(heartbeat_enabled=True, lease_seconds=300, grace_seconds=0),
+    )
 
 
 @pytest_asyncio.fixture
@@ -604,3 +630,324 @@ async def test_process_local_terminal_proof_allows_later_staged_outcome(heartbea
     assert await manager.persist_current_status(record.run_id)
     assert record.status == status
     assert manager.terminal_event_status(record) == status.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.no_auto_user
+async def test_orphan_recovery_claim_backfills_error_terminal(runtime):
+    record = await put_expired_run(runtime)
+    manager = recovery_manager(runtime)
+
+    recovered = await manager.reconcile_orphaned_inflight_runs(
+        error="orphan recovered",
+        before=datetime.now(UTC).isoformat(),
+        stop_reason="orphan_recovered",
+    )
+
+    assert [run.run_id for run in recovered] == [record.run_id]
+    row = await runtime.runs.get(record.run_id, user_id=record.user_id)
+    assert row is not None and row["status"] == "error"
+    confirmed_terminal(await terminal_events(runtime, record), record, "error", recovered=True)
+
+
+@pytest.mark.asyncio
+async def test_losing_orphan_recovery_claim_does_not_publish_terminal(runtime, monkeypatch):
+    record = await put_expired_run(runtime)
+    manager = recovery_manager(runtime)
+    original_scan = runtime.runs.list_inflight_with_expired_lease
+
+    async def stale_scan_then_owner_renews(**kwargs):
+        rows = await original_scan(**kwargs)
+        async with runtime.sf() as session:
+            await session.execute(update(RunRow).where(RunRow.run_id == record.run_id).values(lease_expires_at=(datetime.now(UTC) + timedelta(seconds=60)).isoformat()))
+            await session.commit()
+        return rows
+
+    monkeypatch.setattr(runtime.runs, "list_inflight_with_expired_lease", stale_scan_then_owner_renews)
+
+    recovered = await manager.reconcile_orphaned_inflight_runs(
+        error="must not win",
+        before=datetime.now(UTC).isoformat(),
+        stop_reason="orphan_recovered",
+    )
+
+    assert recovered == []
+    row = await runtime.runs.get(record.run_id, user_id=record.user_id)
+    assert row is not None and row["status"] == "running"
+    assert await terminal_events(runtime, record) == []
+
+
+@pytest.mark.asyncio
+async def test_non_local_cancel_takeover_backfills_error_terminal(runtime):
+    record = await put_expired_run(runtime, user_id=get_effective_user_id())
+    manager = recovery_manager(runtime)
+
+    outcome = await manager.cancel(record.run_id)
+
+    assert outcome == CancelOutcome.taken_over
+    row = await runtime.runs.get(record.run_id, user_id=record.user_id)
+    assert row is not None and row["status"] == "error"
+    delivery = await runtime.events.list_events(record.thread_id, record.run_id, event_types=["run.delivery"], user_id=None)
+    terminal = await terminal_events(runtime, record)
+    assert len(delivery) == 1
+    confirmed_terminal(terminal, record, "error", recovered=True)
+    assert delivery[0]["seq"] < terminal[0]["seq"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["event_store", "unexpected"])
+async def test_non_local_cancel_returns_taken_over_when_terminal_publish_fails(runtime, monkeypatch, failure):
+    record = await put_expired_run(runtime, user_id=get_effective_user_id())
+    manager = recovery_manager(runtime)
+    attempts = []
+    if failure == "event_store":
+        original = runtime.events.put_if_absent
+
+        async def fail_terminal(**kwargs):
+            if kwargs["event_type"] == "run.terminal":
+                attempts.append(kwargs)
+                raise OSError("terminal event unavailable")
+            return await original(**kwargs)
+
+        monkeypatch.setattr(runtime.events, "put_if_absent", fail_terminal)
+    else:
+
+        async def fail_confirmation(*args, **kwargs):
+            raise RuntimeError("unexpected confirmation failure")
+
+        monkeypatch.setattr(terminal_module, "confirm_terminal_event", fail_confirmation)
+
+    outcome = await manager.cancel(record.run_id)
+
+    assert outcome == CancelOutcome.taken_over
+    assert len(attempts) == (2 if failure == "event_store" else 0)
+    row = await runtime.runs.get(record.run_id, user_id=record.user_id)
+    assert row is not None and row["status"] == "error"
+    assert row["evidence_seal_state"] == "partial"
+    assert await terminal_events(runtime, record) == []
+
+
+@pytest.mark.asyncio
+async def test_non_run_takeover_claim_does_not_publish_terminal(runtime):
+    record = await put_expired_run(runtime, operation_kind="checkpoint_write")
+    manager = recovery_manager(runtime)
+
+    recovered = await manager.reconcile_orphaned_inflight_runs(
+        error="checkpoint write recovered",
+        before=datetime.now(UTC).isoformat(),
+        stop_reason="orphan_recovered",
+    )
+
+    assert recovered == []
+    row = await runtime.runs.get(record.run_id, user_id=record.user_id)
+    assert row is not None and row["status"] == "error"
+    assert await terminal_events(runtime, record) == []
+
+
+@pytest.mark.asyncio
+async def test_concurrent_orphan_recovery_only_winner_publishes_terminal(runtime):
+    record = await put_expired_run(runtime)
+    managers = [recovery_manager(runtime), recovery_manager(runtime)]
+
+    results = await asyncio.gather(
+        *(
+            manager.reconcile_orphaned_inflight_runs(
+                error="orphan recovered",
+                before=datetime.now(UTC).isoformat(),
+                stop_reason="orphan_recovered",
+            )
+            for manager in managers
+        )
+    )
+
+    assert sum(len(recovered) for recovered in results) == 1
+    row = await runtime.runs.get(record.run_id, user_id=record.user_id)
+    assert row is not None and row["status"] == "error"
+    confirmed_terminal(await terminal_events(runtime, record), record, "error", recovered=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["unknown", "conflict", "lost_ack"])
+async def test_recovery_terminal_failure_never_changes_committed_takeover(runtime, monkeypatch, failure):
+    record = await put_expired_run(runtime)
+    manager = recovery_manager(runtime)
+    attempts = []
+    existing = None
+    if failure == "conflict":
+        existing = await runtime.events.put(
+            thread_id=record.thread_id,
+            run_id=record.run_id,
+            event_type="run.terminal",
+            category="trace",
+            content={"status": "success"},
+            metadata={"protocol_version": 1, "recovered": False},
+        )
+    original = runtime.events.put_if_absent
+
+    async def fail_terminal(**kwargs):
+        nonlocal existing
+        if kwargs["event_type"] != "run.terminal":
+            return await original(**kwargs)
+        if failure == "unknown":
+            attempts.append(kwargs)
+            raise OSError("terminal store unavailable")
+        if failure == "lost_ack":
+            result = await original(**kwargs)
+            attempts.append(result)
+            if len(attempts) == 1:
+                raise OSError("terminal ACK lost after commit")
+            return result
+        return await original(**kwargs)
+
+    monkeypatch.setattr(runtime.events, "put_if_absent", fail_terminal)
+
+    recovered = await manager.reconcile_orphaned_inflight_runs(
+        error="orphan recovered",
+        before=datetime.now(UTC).isoformat(),
+        stop_reason="orphan_recovered",
+    )
+
+    assert [run.run_id for run in recovered] == [record.run_id]
+    row = await runtime.runs.get(record.run_id, user_id=record.user_id)
+    assert row is not None
+    assert row["status"] == "error"
+    assert row["evidence_seal_state"] == "partial"
+    terminal = await terminal_events(runtime, record)
+    if failure == "unknown":
+        assert len(attempts) == 2
+        assert terminal == []
+    elif failure == "conflict":
+        assert terminal == [existing]
+    else:
+        assert len(attempts) == 2
+        confirmed_terminal(terminal, record, "error", recovered=True)
+
+
+@pytest.mark.asyncio
+async def test_orphan_recovery_unexpected_publisher_error_preserves_recovery_flow(runtime, monkeypatch):
+    record = await put_expired_run(runtime)
+    manager = recovery_manager(runtime)
+
+    async def fail_confirmation(*args, **kwargs):
+        raise RuntimeError("unexpected confirmation failure")
+
+    monkeypatch.setattr(terminal_module, "confirm_terminal_event", fail_confirmation)
+
+    recovered = await manager.reconcile_orphaned_inflight_runs(
+        error="orphan recovered",
+        before=datetime.now(UTC).isoformat(),
+        stop_reason="orphan_recovered",
+    )
+
+    assert [run.run_id for run in recovered] == [record.run_id]
+    row = await runtime.runs.get(record.run_id, user_id=record.user_id)
+    assert row is not None and row["status"] == "error"
+    assert row["evidence_seal_state"] == "partial"
+    assert await terminal_events(runtime, record) == []
+    delivery = await runtime.events.list_events(record.thread_id, record.run_id, event_types=["run.delivery"], user_id=None)
+    assert len(delivery) == 1
+
+
+@pytest.mark.asyncio
+async def test_recovery_publication_cannot_resurrect_deleted_thread(runtime, monkeypatch):
+    record = await put_expired_run(runtime)
+    manager = recovery_manager(runtime)
+    publishing, release = asyncio.Event(), asyncio.Event()
+    original_confirm = terminal_module.confirm_terminal_event
+
+    async def pause_before_event_write(*args, **kwargs):
+        publishing.set()
+        await release.wait()
+        return await original_confirm(*args, **kwargs)
+
+    monkeypatch.setattr(terminal_module, "confirm_terminal_event", pause_before_event_write)
+    recovery = asyncio.create_task(
+        manager.reconcile_orphaned_inflight_runs(
+            error="orphan recovered",
+            before=datetime.now(UTC).isoformat(),
+            stop_reason="orphan_recovered",
+        )
+    )
+    try:
+        await asyncio.wait_for(publishing.wait(), timeout=5)
+        await runtime.runs.delete_by_thread(record.thread_id, user_id=record.user_id)
+        await runtime.events.delete_by_thread(record.thread_id, user_id=record.user_id)
+    finally:
+        release.set()
+    recovered = await asyncio.wait_for(recovery, timeout=5)
+
+    assert [run.run_id for run in recovered] == [record.run_id]
+    assert await runtime.runs.get(record.run_id, user_id=record.user_id) is None
+    assert await runtime.events.list_events(record.thread_id, record.run_id, user_id=None) == []
+    assert await runtime.events.list_messages(record.thread_id, user_id=None) == []
+
+
+@pytest.mark.asyncio
+async def test_recovery_delivery_receipt_precedes_terminal(runtime):
+    record = await put_expired_run(runtime)
+    manager = recovery_manager(runtime)
+
+    recovered = await manager.reconcile_orphaned_inflight_runs(
+        error="orphan recovered",
+        before=datetime.now(UTC).isoformat(),
+        stop_reason="orphan_recovered",
+    )
+
+    assert [run.run_id for run in recovered] == [record.run_id]
+    delivery = await runtime.events.list_events(record.thread_id, record.run_id, event_types=["run.delivery"], user_id=None)
+    terminal = await terminal_events(runtime, record)
+    assert len(delivery) == 1
+    assert delivery[0]["user_id"] == record.user_id
+    confirmed_terminal(terminal, record, "error", recovered=True)
+    assert delivery[0]["seq"] < terminal[0]["seq"]
+
+
+@pytest.mark.asyncio
+async def test_recovery_delivery_receipt_failure_does_not_block_terminal(runtime, monkeypatch):
+    record = await put_expired_run(runtime)
+    manager = recovery_manager(runtime)
+    original = runtime.events.put_if_absent
+
+    async def fail_delivery(**kwargs):
+        if kwargs["event_type"] == "run.delivery":
+            raise OSError("delivery receipt unavailable")
+        return await original(**kwargs)
+
+    monkeypatch.setattr(runtime.events, "put_if_absent", fail_delivery)
+
+    recovered = await manager.reconcile_orphaned_inflight_runs(
+        error="orphan recovered",
+        before=datetime.now(UTC).isoformat(),
+        stop_reason="orphan_recovered",
+    )
+
+    assert [run.run_id for run in recovered] == [record.run_id]
+    assert await runtime.events.list_events(record.thread_id, record.run_id, event_types=["run.delivery"], user_id=None) == []
+    confirmed_terminal(await terminal_events(runtime, record), record, "error", recovered=True)
+
+
+@pytest.mark.asyncio
+async def test_recovery_accepts_existing_owner_terminal_without_rewriting_source(runtime):
+    record = await put_expired_run(runtime)
+    owner_event, created = await runtime.events.put_if_absent(
+        thread_id=record.thread_id,
+        run_id=record.run_id,
+        event_type="run.terminal",
+        category="trace",
+        content={"status": "error"},
+        metadata={"protocol_version": 1, "recovered": False},
+        user_id=record.user_id,
+    )
+    assert created is True
+    manager = recovery_manager(runtime)
+
+    recovered = await manager.reconcile_orphaned_inflight_runs(
+        error="orphan recovered",
+        before=datetime.now(UTC).isoformat(),
+        stop_reason="orphan_recovered",
+    )
+
+    assert [run.run_id for run in recovered] == [record.run_id]
+    terminal = await terminal_events(runtime, record)
+    assert terminal == [owner_event]
+    assert terminal[0]["metadata"]["recovered"] is False

@@ -3124,8 +3124,6 @@ run_ownership:
 #   # Optional: default mobile/session settings for all IM channels
 #   session:
 #     assistant_id: lead_agent  # or a custom agent name; custom agents route via lead_agent + agent_name
-#     config:
-#       recursion_limit: 100
 #     context:
 #       thinking_enabled: true
 #       is_plan_mode: false

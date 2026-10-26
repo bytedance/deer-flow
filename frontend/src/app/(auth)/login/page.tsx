@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button";
 import { FlickeringGrid } from "@/components/ui/flickering-grid";
 import { Input } from "@/components/ui/input";
 import { AuthDisabledContext, useAuth } from "@/core/auth/AuthProvider";
+import { isValidEmail } from "@/core/auth/email";
 import { resolveAuthNextPath } from "@/core/auth/next-path";
 import {
   loadRememberLoginPreference,
@@ -151,14 +152,31 @@ export default function LoginPage() {
     e.preventDefault();
     setError("");
     setShowSsoHint(false);
-    setLoading(true);
 
     if (!isLogin && !regularSignupAllowed) {
       setError(t.login.adminSetupRequiredDescription);
-      setLoading(false);
       return;
     }
 
+    // The form is `noValidate`, so the browser no longer rejects addresses
+    // its `type="email"` rule dislikes (e.g. a non-ASCII local part, which
+    // the backend accepts — #7488). Apply the permissive JS check instead.
+    const address = email.trim();
+    if (!isValidEmail(address)) {
+      setError(t.login.errors.invalid_email);
+      return;
+    }
+
+    if (password.length < (isLogin ? 6 : 8)) {
+      setError(
+        isLogin
+          ? t.login.errors.password_too_short
+          : t.login.errors.registration_password_too_short,
+      );
+      return;
+    }
+
+    setLoading(true);
     try {
       const endpoint = isLogin
         ? "/api/v1/auth/login/local"
@@ -167,9 +185,9 @@ export default function LoginPage() {
         ? new URLSearchParams({
             password,
             remember_me: String(rememberMe),
-            username: email,
+            username: address,
           })
-        : JSON.stringify({ email, password, remember_me: rememberMe });
+        : JSON.stringify({ email: address, password, remember_me: rememberMe });
 
       const headers: HeadersInit = isLogin
         ? { "Content-Type": "application/x-www-form-urlencoded" }
@@ -202,7 +220,7 @@ export default function LoginPage() {
         return;
       }
 
-      saveRememberLoginPreference({ email, rememberMe });
+      saveRememberLoginPreference({ email: address, rememberMe });
 
       // Both login and register set a cookie — redirect to workspace
       router.push(redirectPath);
@@ -276,7 +294,7 @@ export default function LoginPage() {
           </div>
         )}
 
-        <form onSubmit={handleSubmit} className="space-y-2">
+        <form onSubmit={handleSubmit} noValidate className="space-y-2">
           <div className="flex flex-col space-y-1">
             <label htmlFor="email" className="text-sm font-medium">
               {t.login.email}

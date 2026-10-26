@@ -1397,6 +1397,33 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
 
 ### Fixed
 
+- **authz:** Authenticated Gateway requests no longer read `config.yaml` and
+  `extensions_config.json` on the event loop. Resolving route permissions
+  checked both files (a `stat` and a full sha256 of each) for every request,
+  and reparsed `config.yaml` there after an edit, stalling other requests and
+  streams meanwhile. The read now runs in a worker, as the plugin
+  authorization path already did. ([#7557])
+
+- **memory:** Automatic context compaction no longer blocks the event loop
+  while it saves the messages it is about to summarize to memory. With the
+  mem0, Honcho or OpenViking backend, that save is a synchronous HTTP request,
+  so the Gateway stopped serving other requests and streams until the memory
+  server answered. It now runs in a worker, like the after-turn memory write.
+  ([#7530])
+
+- **channels:** IM channel runs now use the top-level `recursion_limit`, as
+  Gateway API runs do, instead of a fixed `100` that could end a multi-step
+  task after a few tool-calling turns without an answer. A `recursion_limit`
+  in an IM channel's `session.config` still takes precedence; earlier README
+  examples set it to `100`, so delete that line from `config.yaml` to follow
+  the top-level value. GitHub channel runs are unchanged. ([#7521])
+
+- **sandbox:** The AIO provider's async acquire no longer checks the thread's
+  skill directory on the event loop. Picking the sandbox ID ran a filesystem
+  `stat` and path resolution inline on every thread acquire, which stalls the
+  loop when `DEER_FLOW_HOME` is on slow or network storage. It now runs in a
+  worker like the rest of acquire. ([#7507])
+
 - **threads:** `POST /api/threads` now rejects an `assistant_id` that cannot
   name an agent with `422`. It used to store the value, and every later read
   of the thread (`GET` thread, state, history) answered
@@ -13084,3 +13111,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7410]: https://github.com/bytedance/deer-flow/pull/7410
 [#7445]: https://github.com/bytedance/deer-flow/pull/7445
 [#7449]: https://github.com/bytedance/deer-flow/pull/7449
+[#7507]: https://github.com/bytedance/deer-flow/pull/7507
+[#7521]: https://github.com/bytedance/deer-flow/pull/7521
+[#7530]: https://github.com/bytedance/deer-flow/pull/7530
+[#7557]: https://github.com/bytedance/deer-flow/pull/7557
