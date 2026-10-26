@@ -433,6 +433,8 @@ DeerFlow 支持可配置的 MCP Server 和 skills，用来扩展能力。
 
 DeerFlow 支持从即时通讯应用接收任务。只要配置完成，对应渠道会自动启动，而且都不需要公网 IP。
 
+渠道不支持发送附件时，原回复会直接说明。部分或全部上传失败时，只要平台仍允许回复，DeerFlow 会补一条汇总提示，列出未发出的文件；全部成功时不重复确认。文件继续保留在 DeerFlow 会话中，回复窗口过期只记录失败，不自动切换为主动通知。
+
 `channels/store.json` 含无效 UTF-8 字节时，采用与 JSON 格式损坏相同的恢复方式：SQL 迁移记录警告并跳过，保留原文件，让渠道可以继续启动；memory 后端的 JSON 存储记录警告并从空状态开始，在下次写入时替换该文件。
 
 DeerFlow 还可以在 workspace UI 里暴露用户自有的 IM 渠道连接。启用 `channel_connections` 后，已登录用户可以从侧边栏 / Settings > Channels 绑定 Telegram、Slack、Discord、Feishu/Lark、DingTalk、WeChat、WeCom、QQ 或 Buzz。它复用现有的 `channels.*` 出站传输，因此不需要公网 IP 或 provider 回调地址。入站 IM 消息会以所连接的 DeerFlow 用户身份运行。设置和安全注意事项参见 [IM Channel Connections](backend/docs/IM_CHANNEL_CONNECTIONS.md)。
@@ -462,8 +464,6 @@ channels:
   # 可选：所有移动端渠道共用的全局 session 默认值
   session:
     assistant_id: lead_agent  # 也可以填自定义 agent 名；渠道层会自动转换为 lead_agent + agent_name
-    config:
-      recursion_limit: 100
     context:
       thinking_enabled: true
       is_plan_mode: false
@@ -743,6 +743,10 @@ DeerFlow 可连接租户级 RAGFlow，并通过 `knowledge_search` 按 embedding
 对接 WeKnora v0.8.3，使用知识库/文档范围选择器和共享检索引用。
 需显式配置 DeerFlow 用户到 WeKnora 工作空间的凭据绑定；资源授权仍由 WeKnora 执行。
 安装与配置步骤见扩展目录中的英文指南。
+
+可选的[知识平台扩展](examples/deerflow-extension-knowledge-platform/README.md)
+提供连接策略、多层级空间、成员和显式资源共享。空间内管理调用仍需现有管理员与
+Provider 授权。默认关闭，不包含管理页面，也不改变聊天检索的全局权限。
 
 可选的[知识入库与处理扩展](examples/deerflow-extension-knowledge-management/README.md)
 通过 WeKnora 提供管理员授权的文件、网址和手工文本入库、处理状态查询、重新处理与取消。

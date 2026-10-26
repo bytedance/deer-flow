@@ -84,6 +84,11 @@ export const zhCN: Translations = {
         title: "LightRAG",
         description: "从 LightRAG 检索文档与实体关系，并使用统一的来源引用。",
       },
+      knowledgePlatform: {
+        title: "知识空间与连接",
+        description:
+          "在管理员明确授权后管理多层级空间、资源共享与继承策略。需要安装和配置，不包含管理页面，也不改变全局检索权限。",
+      },
       knowledgeManagement: {
         title: "知识入库与处理",
         description:
@@ -280,6 +285,11 @@ export const zhCN: Translations = {
   home: {
     docs: "文档",
     blog: "博客",
+    searchDocs: "搜索文档…",
+    searchDocsLabel: "搜索文档",
+    searchNoResults: "未找到结果，请尝试更少或不同的关键词。",
+    searchLoadFailed: "搜索暂时不可用。",
+    searchLoading: "加载中…",
   },
 
   // Welcome
@@ -814,6 +824,18 @@ export const zhCN: Translations = {
     cancel: "取消",
     retryItem: "重试",
     exportResults: "导出 JSONL",
+    viewResult: "查看结果",
+    resultTitle: "批处理结果",
+    resultDescription: "查看该条目的持久化报告和已捕获证据。",
+    report: "报告",
+    evidence: "已捕获证据",
+    noEvidence: "没有已捕获证据",
+    acceptance: "验收结果",
+    noReport: "该条目还没有保存报告。",
+    loadResultFailed: "无法加载批处理结果",
+    truncated: "报告已截断",
+    omittedEvidence: (count) => `${count} 条证据未展示`,
+    pagesLabel: "页码",
     viewItems: "查看条目",
     hideItems: "收起条目",
     itemsFailed: "无法加载批处理条目",
@@ -1936,7 +1958,7 @@ export const zhCN: Translations = {
       lightDescription: "更明亮的配色，适合日间使用。",
       darkDescription: "更暗的配色，减少眩光方便专注。",
       languageTitle: "语言",
-      languageDescription: "在不同语言之间切换。",
+      languageDescription: "选择界面语言及回复时优先使用的语言。",
     },
     tools: {
       adminRequired: "需要管理员权限才能管理 MCP 工具。",
@@ -2396,6 +2418,9 @@ export const zhCN: Translations = {
         "该邮箱对应的账号已存在。请使用密码登录或联系管理员。",
       sso_not_allowed: "你的账号不允许使用 SSO 登录。请联系管理员。",
       account_disabled: "账号已停用，请联系管理员。",
+      invalid_email: "请输入有效的邮箱地址。",
+      password_too_short: "密码至少需要 6 个字符。",
+      registration_password_too_short: "密码至少需要 8 个字符。",
     },
   },
 };

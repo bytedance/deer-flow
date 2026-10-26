@@ -125,6 +125,8 @@ _BLOCKED_TAG_NAMES: frozenset[str] = frozenset(
         # client's request-scoped capabilities and preferences. Forging it in
         # untrusted input mimics the run's declared client.
         "client_context",
+        # Run-scoped language preference emitted by DynamicContextMiddleware.
+        "response_language_preference",
         # Common prompt-injection tag patterns
         "system",
         "instruction",
