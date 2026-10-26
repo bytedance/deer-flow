@@ -138,7 +138,9 @@ With `run_events.backend: db`, caller-supplied ISO 8601 event timestamps are nor
 Run event streams include `run.terminal` for the owning worker's confirmed final
 Run status, while `run.end` continues to describe each root graph completion.
 Terminal publication is best effort; event persistence failure does not undo the
-Run outcome or prevent stream completion. See [Run Event Stream](backend/docs/RUN_EVENT_STREAM.md#authoritative-run-outcome).
+Run outcome or prevent stream completion. Recovery with built-in SQL Run and Event stores
+sharing an engine uses one pooled connection for each guarded event write, so it
+can publish with only one pool slot available. See [Run Event Stream](backend/docs/RUN_EVENT_STREAM.md#authoritative-run-outcome).
 
 Operators can extend lead-agent, subagent, and DeerMem extraction prompts with
 literal prepend/append configuration without editing source templates. See
@@ -535,8 +537,10 @@ Gateway runs use the top-level `recursion_limit` in `config.yaml` when an API
 request does not provide one. The default is `100`; valid per-request values
 take precedence, and `max_recursion_limit` (default `1000`) caps both. Changes
 apply to the next run without restarting the Gateway. This top-level setting
-applies to Gateway API runs; IM channel and embedded `DeerFlowClient` runs
-retain their own defaults and per-call override paths.
+applies to Gateway API and IM channel runs. A `recursion_limit` in an IM
+channel's `session.config` takes precedence, and GitHub channel runs keep
+their own floor. Embedded `DeerFlowClient` runs retain their own defaults and
+per-call override paths.
 
 A custom frontend can add an optional `context.client` to a Gateway run request:
 a client name, capabilities such as `artifacts` or `charts`, and display
@@ -564,7 +568,8 @@ caches materialized checkpoint histories: `type` is `memory` (default) or
 Gateway/async-only; the sync TUI/embedded path supports `memory` only. The
 cache is performance-only — results are identical with it disabled — so it is
 never frozen and workers sharing one checkpoint database may safely run
-different cache settings. Redis thread cleanup treats a configured `key_prefix`
+different cache settings. Returned state snapshots have independent nested values,
+so editing one cannot change later checkpoint reads. Redis thread cleanup treats a configured `key_prefix`
 as literal text, including glob metacharacters, so deletion stays within that
 namespace and thread.
 
@@ -631,6 +636,11 @@ When fine-grained authorization is enabled, Live Browser connections require `th
 The bundled Docker, local and Helm nginx configs proxy Live Browser WebSocket upgrades with a 600-second read timeout for quiet streams. Helm uses nginx's default connection and send timeouts for the in-cluster Gateway. Any additional Ingress or reverse proxy must also allow WebSocket upgrades.
 
 Browser login uses `HttpOnly` session cookies. The login page offers a "keep me signed in" option that extends the browser session when the request is HTTPS (including trusted `X-Forwarded-Proto: https`) or localhost HTTP. The localhost exception uses the direct request `Host` and ignores forwarded host headers. Public HTTP deployments, including many temporary sandbox URLs, fall back to session cookies by default. DeerFlow never stores the password in browser storage; the UI may remember only the email address.
+
+Password forms accept non-ASCII email addresses and trim surrounding email whitespace.
+Sign-in requires at least six password characters; creating an account or choosing
+a new password requires eight. These checks run before sending a request.
+Passwords, including surrounding spaces, are submitted unchanged.
 
 OIDC/SSO authorization endpoints may include provider query parameters such as `?prompt=login`. DeerFlow preserves those parameters when adding the login request, including for configured `authorization_endpoint` overrides.
 
@@ -1186,8 +1196,6 @@ channels:
   # Optional: global session defaults for all mobile channels
   session:
     assistant_id: lead_agent  # or a custom agent name; custom agents are routed via lead_agent + agent_name
-    config:
-      recursion_limit: 100
     context:
       thinking_enabled: true
       is_plan_mode: false
@@ -1579,6 +1587,10 @@ search; skill cards show concise descriptions with full descriptions in a detail
 view. Built-in and user-created/imported skills are listed separately. The
 Community tab supports importing `.skill` archives into My skills.
 General preferences remain in Settings.
+
+The **ppt-generation** skill applies photo EXIF orientation before fitting and
+embedding slide images, so rotated or mirrored photos retain their displayed
+orientation.
 
 The **ppt-generation** skill preserves transparent slide images when composing a presentation, including grayscale and palette PNG transparency.
 
@@ -2669,7 +2681,7 @@ Native subagent hard timeouts publish `TIMED_OUT` at the execution deadline whil
 
 Durable `batch_task` workers use one app-owned plugin snapshot for tool assembly and execution. Recovered tasks adopt the new worker's plugin snapshot after a Gateway restart; plugin objects are never stored in durable task records.
 
-Ordinary `task` delegation and explicit durable `batch_task` execution share the startup-scoped `subagent_runtime` process capacity. Batch mode keeps large independent item sets in SQL with separate total, live, and running limits, restart recovery, bounded results, and a thread-scoped Web UI panel. The panel pages through bounded previews on demand; bulk stored results are available through the owner-scoped JSONL export, while internal execution and authorization context never enters owner-facing responses. If the batch worker is later stopped or disabled, threads with persisted batches retain read-only item inspection and JSONL export; execution controls remain disabled until the worker is running again. See `config.example.yaml` and [the implementation contract](docs/plans/2026-08-24-subagent-batch-capacity-implementation.md) for limits and recovery semantics.
+Ordinary `task` delegation and explicit durable `batch_task` execution share the startup-scoped `subagent_runtime` process capacity. Batch mode keeps large independent item sets in SQL with separate total, live, and running limits, restart recovery, bounded results, and a thread-scoped Web UI panel. The panel pages through bounded previews on demand and opens a selected item’s stored report and captured evidence for review. Citations open the matching saved excerpt without contacting the provider, and an open result refreshes until the item finishes and when the item list observes a later retry. Closed result dialogs do not fetch full details. Bulk stored results remain available through the owner-scoped JSONL export, while internal execution and authorization context never enters owner-facing responses. If the batch worker is later stopped or disabled, threads with persisted batches retain read-only item inspection and JSONL export; execution controls remain disabled until the worker is running again. See `config.example.yaml` and [the implementation contract](docs/plans/2026-08-24-subagent-batch-capacity-implementation.md) for limits and recovery semantics.
 
 While durable batch tools are available, a later owner turn can explicitly inspect selected results with `read_batch_result(batch_id, position=0, offset=0, max_chars=4000)`. The reader is restricted to the current user and thread, including in explicitly bound SDK graphs. It returns one window of a JSON document containing the stored report, execution/error state and separate acceptance criteria/verdict, without starting or waiting for work. Concatenate `content` windows before parsing: pass `next_offset` and the returned `revision` as `expected_revision` until `next_offset` is null. A changed item returns `restart_required`; discard prior windows and start at zero. Use `next_position` for a selected next item within `batch_status.total_items`. The maximum window is 8,192 characters; metadata shares the window budget, and JSON response framing adds overhead. `result_truncated` means storage already capped the report; continuation cannot recover discarded content. A succeeded item is not an accepted task, and unchecked criteria remain UNVERIFIED. No automatic result ingestion, waiting loop or UI change is added.
 
@@ -2677,7 +2689,9 @@ The complete escaped response also fits within 10,000 characters and the bound h
 
 Offline acceptance: `cd backend && PYTHONPATH=. uv run --locked pytest tests/test_batch_result_reader.py -k 'real_submission_worker or sdk_factory_graph' -q`. This exercises real submission, deterministic worker completion, database reopen and registered graph consumption; external model execution is replaced by a fake model/executor.
 
-Durable knowledge-research results also export nullable `result_artifact.knowledge_sources` snapshots. Each retained source pairs a citation ID in the stored report with the exact excerpt captured by `knowledge_search` or a delegated `task`, plus its RAGFlow dataset/document/chunk locator and pages. The existing authenticated `GET /api/threads/{thread_id}/subagent-batches/{batch_id}/results.jsonl` remains the entry point: find a report's `#knowledge-<id>` link in that row's `sources` by `id` to inspect the evidence after a Gateway restart or provider change. Compact item queries and the batch panel do not include these snapshots; this does not add clickable citations to batch previews.
+Durable knowledge-research results also export nullable `result_artifact.knowledge_sources` snapshots. Each retained source pairs a citation ID in the stored report with the exact excerpt captured by `knowledge_search` or a delegated `task`, plus its RAGFlow dataset/document/chunk locator and pages. The existing authenticated `GET /api/threads/{thread_id}/subagent-batches/{batch_id}/results.jsonl` remains the entry point: find a report's `#knowledge-<id>` link in that row's `sources` by `id` to inspect the evidence after a Gateway restart or provider change. Compact item queries do not include these snapshots; clickable citations are available in the selected result dialog, not batch previews.
+
+Browser review keeps at most 100 sources, with 16,000 characters per excerpt and bounded identifiers/names. Sources excluded by these read limits increase the displayed omission count; the persisted snapshot and JSONL export retain their original contents.
 
 Snapshots preserve whole excerpts, not freshly fetched provider content. They inherit the 100-source/1,000,000-text-character forwarding limits; the serialized snapshot has a separate character budget equal to `subagent_batches.max_result_chars`, in addition to the report's existing budget. `knowledge_sources.omitted_count` reports referenced records omitted by forwarding, snapshot projection checks or snapshot budgeting; malformed or unsupported producer artifacts filtered before candidate selection are not counted. Report truncation limits selection to complete citations in the stored text. Old/plain results have no snapshot (`null`); no historical evidence is reconstructed. Gateway startup adds a nullable JSON column through migration `0033_batch_result_artifact`. Back up the database before migrating; downgrading drops evidence snapshots while preserving report text. Cancelled, failed and stale attempts do not publish evidence, and explicit retries clear previous snapshots.
 
@@ -2921,15 +2935,17 @@ Outline titles are limited to 200 characters and fallback previews to 2,000
 characters per file, with truncation markers. Full uploaded files remain available
 for targeted reads.
 
-Converted upload outlines and previews require a matching source version, including
-modification timestamps. A detected source-version change invalidates its previous
-conversion, including equal-length edits. Older ownership records without source timestamps
-are also rejected; re-upload the source with `uploads.auto_convert_documents: true`
-to restore conversion-backed outlines. Files remain available, and unvalidated
-Markdown conversions appear as standalone files in the agent's historical listing.
-On Windows, `st_ctime_ns` may represent creation time; a same-size rewrite that
-restores the original `mtime` can evade validation. Timestamp checks are
-conservative metadata validation, not a guarantee of content equality.
+Converted upload outlines and previews require matching source and Markdown versions,
+including modification timestamps. A detected change to either file invalidates its
+previous conversion association, including equal-length edits. Older ownership records
+without source timestamps or the Markdown modification timestamp are also rejected;
+re-upload the source with `uploads.auto_convert_documents: true` to restore
+conversion-backed outlines. Debug logs distinguish these legacy records, which need
+re-registration, from a changed file. Files remain available, and unvalidated Markdown
+conversions appear as standalone files in the agent's historical listing.
+On Windows, `st_ctime_ns` may represent creation time; a same-size rewrite of either
+file that restores the original `mtime` can evade validation. Timestamp checks are
+conservative metadata validation, not a guarantee of content equality or tamper resistance.
 
 Sandbox image downloads enforce the 20 MiB vision limit while reading, including model-context rereads. Oversized streams stop at the first over-limit chunk. Custom sandbox providers must accept and enforce the `download_file(..., max_bytes=...)` keyword; older implementations fail the image read instead of falling back to an unrestricted download.
 
@@ -3172,6 +3188,14 @@ by sibling deletions or runtime failures (such as unavailable sources or policy 
 become available in the next batch, when rejected additions can be retried.
 
 ### Long-Term Memory
+
+Settings > Appearance > Language also supplies the preferred language for replies
+and new automatic DeerMem facts and summary updates on subsequent chat turns and
+replays. Explicit user language requests take precedence. Existing memories are
+not bulk translated, and other memory backends retain their own language policy.
+Model-native reasoning text may still use another language.
+Scheduled runs and MCP task notification runs do not inherit this preference;
+their replies and memory updates continue to infer language from run messages.
 
 Mem0 search and management reads apply `failure_policy.read` to invalid record
 scores, categories, and metadata. `fail_open` returns an empty result;
@@ -3519,6 +3543,10 @@ before the retention sweep reclaims it. Restore returns the document to its
 origin project, or to a project you pick when the origin is gone or archived;
 if the target already holds an identical active file, the entries merge.
 Deleting a project moves its entire shelf to trash in the same step.
+
+Permanently deleting read-only documents also works on Windows. A file that is
+already missing does not block deletion; other filesystem errors keep the entry
+in Trash for retry. Permissions on symlink targets are preserved.
 
 ## Scheduled Tasks
 

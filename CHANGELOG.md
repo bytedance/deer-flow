@@ -1405,6 +1405,19 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
   `next` checks now also reject control characters: browsers delete tab, LF
   and CR from a URL, so `?next=%2F%0A%2F%2Fevil.example` could send a
   sign-in to another site. ([#7467])
+  
+- **channels:** IM channel runs now use the top-level `recursion_limit`, as
+  Gateway API runs do, instead of a fixed `100` that could end a multi-step
+  task after a few tool-calling turns without an answer. A `recursion_limit`
+  in an IM channel's `session.config` still takes precedence; earlier README
+  examples set it to `100`, so delete that line from `config.yaml` to follow
+  the top-level value. GitHub channel runs are unchanged. ([#7521])
+
+- **sandbox:** The AIO provider's async acquire no longer checks the thread's
+  skill directory on the event loop. Picking the sandbox ID ran a filesystem
+  `stat` and path resolution inline on every thread acquire, which stalls the
+  loop when `DEER_FLOW_HOME` is on slow or network storage. It now runs in a
+  worker like the rest of acquire. ([#7507])
 
 - **threads:** `POST /api/threads` now rejects an `assistant_id` that cannot
   name an agent with `422`. It used to store the value, and every later read
@@ -13094,3 +13107,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7445]: https://github.com/bytedance/deer-flow/pull/7445
 [#7449]: https://github.com/bytedance/deer-flow/pull/7449
 [#7467]: https://github.com/bytedance/deer-flow/pull/7467
+[#7507]: https://github.com/bytedance/deer-flow/pull/7507
+[#7521]: https://github.com/bytedance/deer-flow/pull/7521

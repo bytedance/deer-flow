@@ -89,19 +89,19 @@ Tests: `html-assets.dom.test.ts`, `artifact-file-preview.dom.test.tsx`,
    bounded error and attempt count; retryable failures use backend backoff,
    while a permanent rejection or exhausted five-attempt budget is shown as
    stopped rather than implying that retries will continue.
-   Explicit durable native-subagent batches use `core/subagent-batches` and
-   `ThreadSubagentBatches`. `/api/features` reports SQL-repository availability
-   separately from the startup worker. A running worker exposes the trigger on
-   both default and Custom Agent chat pages; a stopped worker keeps threads with
-   durable history visible in read-only mode for inspection and JSONL export,
-   while deployments with neither a worker nor history keep the trigger hidden.
-   The panel renders bounded progress and incrementally paged item previews, controls pause/resume/cancel,
-   retries failed items, and exports JSONL. Worker-dependent mutations stay
-   disabled in read-only history mode, and persisted progress is normalized to
-   a bounded percentage before reaching the UI primitive. Item pagination uses a
-   fixed page size and an explicit load-more control; full results remain available
-   only through JSONL export. The panel must not infer batch mode from prompt text
-   or inject the complete result set into chat state.
+   `core/subagent-batches` / `ThreadSubagentBatches` own durable native batches.
+   `/api/features` separates SQL availability from startup worker state.
+   Show the trigger on default/Custom Agent chats with a running worker, or
+   read-only with durable history; hide otherwise. Bound persisted progress
+   percentages. Use fixed item-preview pages and load-more; full results need
+   JSONL export. Gate pause/resume/cancel and failed-item retries on the worker.
+   Never infer batches from prompts or put full results in chat state.
+   Review citations use only the selected persisted snapshot. Poll open details
+   until their own response is terminal, regardless of compact-list status;
+   stop on close. Compact attempt/status/update changes invalidate cached details
+   so external retries refresh open dialogs; never fetch closed details.
+   Show omitted counts even without sources; localize page labels.
+   Real-hook/HTTP tests: `thread-subagent-batch-review.dom.test.tsx`.
    Capability Center > Plugins > Lark uses a local generation only to suppress stale React
    callbacks; server-issued Lark flow generations must be passed through every
    config/auth completion and across switch-or-register to authorization chains
