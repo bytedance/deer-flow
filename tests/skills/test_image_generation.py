@@ -469,12 +469,14 @@ def test_guess_mime_by_extension():
         ("missing-prompt", "prompt.json"),
         ("overlong-prompt", "1500"),
         ("dall-e-extension", ".png extension"),
+        ("corrupt-reference", "Skipping invalid reference image"),
     ],
 )
 def test_cli_failure_exits_nonzero(monkeypatch, tmp_path, case, diagnostic):
     prompt = tmp_path / "prompt.json"
     output = tmp_path / "image.jpg"
     output.write_bytes(b"previous image")
+    reference_args: list[str] = []
     if case != "missing-prompt":
         if case == "overlong-prompt":
             body = json.dumps({"prompt": "x" * 1600})
@@ -493,18 +495,29 @@ def test_cli_failure_exits_nonzero(monkeypatch, tmp_path, case, diagnostic):
         monkeypatch.setenv("IMAGE_GENERATION_PROVIDER", "openai")
         monkeypatch.setenv("IMAGE_GENERATION_API_KEY", "synthetic-key")
         monkeypatch.setenv("IMAGE_GENERATION_MODEL", "dall-e-3")
+    elif case == "corrupt-reference":
+        # Gemini validates references before the credential check, so a corrupt
+        # file must not call the API when the key is absent.
+        monkeypatch.setenv("IMAGE_GENERATION_PROVIDER", "gemini")
+        reference = tmp_path / "corrupt.jpg"
+        reference.write_bytes(b"not-an-image")
+        reference_args = ["--reference-images", str(reference)]
 
     result = _run_image_cli(
         "--prompt-file",
         str(prompt),
         "--output-file",
         str(output),
+        *reference_args,
     )
 
     assert result.returncode == 1
     assert diagnostic in result.stderr
     assert result.stdout == ""
     assert output.read_bytes() == b"previous image"
+    if case == "corrupt-reference":
+        assert "invalid or corrupted" in result.stderr
+        assert "validation failure" in result.stderr
 
 
 @pytest.mark.parametrize("succeeds", [False, True], ids=["provider-error", "success"])

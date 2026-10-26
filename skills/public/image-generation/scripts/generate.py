@@ -25,7 +25,10 @@ def validate_image(image_path: str) -> bool:
             image.load()
         return True
     except Exception as exc:
-        print(f"Warning: Image '{image_path}' is invalid or corrupted: {exc}")
+        print(
+            f"Warning: Image '{image_path}' is invalid or corrupted: {exc}",
+            file=sys.stderr,
+        )
         return False
 
 
@@ -212,11 +215,15 @@ def _generate_image_gemini(
         if validate_image(ref_img):
             valid_reference_images.append(ref_img)
         else:
-            print(f"Skipping invalid reference image: {ref_img}")
+            print(
+                f"Skipping invalid reference image: {ref_img}",
+                file=sys.stderr,
+            )
     if len(valid_reference_images) < len(reference_images):
         skipped = len(reference_images) - len(valid_reference_images)
         print(
-            f"Note: {skipped} reference image(s) were skipped due to validation failure."
+            f"Note: {skipped} reference image(s) were skipped due to validation failure.",
+            file=sys.stderr,
         )
 
     for reference_image in valid_reference_images:

@@ -1701,8 +1701,8 @@ a spec missing `tool`, or a chart-service HTTP failure. Successful chart URLs,
 including spreadsheets (`generate_spreadsheet`), stay on stdout. A mixed batch
 still prints URLs for the charts that succeeded, then exits with status 1.
 
-The bundled image-generation command reports failures on stderr and exits with
-status 1, including missing credentials, invalid input, and provider errors.
+The bundled image-generation command reports failures on stderr and exits
+non-zero, including missing credentials, invalid input, and provider errors.
 Successful generation prints its result to stdout and exits 0. An existing
 image file is not proof that the latest command succeeded.
 

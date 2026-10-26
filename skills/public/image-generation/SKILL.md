@@ -152,9 +152,10 @@ Read the following template file only when matching the user request.
 ## Output Handling
 
 Generation failures — missing credentials, invalid input, and provider errors —
-exit with status 1 and write diagnostics to stderr. Successful generation exits 0
-and prints its result to stdout. Do not present an image from a command that
-exited nonzero; a file left by an earlier run is not a new result.
+exit non-zero and write diagnostics to stderr. Reference-image validation
+warnings go to stderr as well, so a failed run leaves stdout empty. Successful
+generation exits 0 and prints its result to stdout. Do not present an image from
+a command that exited non-zero; a file left by an earlier run is not a new result.
 
 After generation:
 
