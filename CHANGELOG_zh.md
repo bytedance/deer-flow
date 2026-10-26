@@ -1112,6 +1112,31 @@
 
 ### 修复
 
+- **鉴权：** 公开的认证路由（`/register`、`/setup-status`、`/providers`、
+  `/oauth/{provider}` 和 `/callback/{provider}`）不再在事件循环上读取 `config.yaml` 和
+  `extensions_config.json`。每个请求都会检查这两个文件（各做一次 `stat` 和完整的
+  sha256），编辑后还会在循环上重新解析 `config.yaml`，期间其他请求和流式输出都会
+  停顿。现在这次读取与 `/login/local` 一样在工作线程中执行。([#7576])
+  
+- **沙箱：** 停止 Gateway 时，AIO 和 E2B 沙箱不再在进行中的运行收尾之前被销毁。此前
+  如果第一次使用沙箱时在事件循环线程上构造了提供方，提供方自己的 SIGTERM/SIGINT
+  处理器会在信号到达时同步销毁所有沙箱：整个销毁期间事件循环冻结，正在执行的工具
+  调用失去沙箱。现在由 Gateway 负责沙箱关闭，在运行收尾和 MCP 关闭之后再关闭提供方；
+  嵌入式客户端和脚本保留信号兜底，SIGHUP 仍会清理。AIO 的 acquire 在关闭开始后会
+  拒绝请求，与 E2B 一致。([#7560])
+
+- **前端：** SSO 登录后现在会回到发起登录的页面（例如分享的对话链接），不再总是打开
+  默认工作区。此前登录相关页面会把所有已登录的请求都跳转到 `/workspace`，导致
+  `/auth/callback?next=...` 中的 `next` 路径丢失；已登录时访问 `/login?next=...`
+  也会同样丢失目标页面。前端和 Gateway 对 `next` 的校验现在也会拒绝控制字符：浏览器会
+  删除 URL 中的制表符、LF 和 CR，因此 `?next=%2F%0A%2F%2Fevil.example` 可能把登录后的跳转
+  导向其他网站。([#7467])
+  
+- **鉴权：** 已认证的 Gateway 请求不再在事件循环上读取 `config.yaml` 和
+  `extensions_config.json`。解析路由权限时，每个请求都会检查这两个文件（各做一次
+  `stat` 和完整的 sha256），编辑后还会在循环上重新解析 `config.yaml`，期间其他请求和
+  流式输出都会停顿。现在这次读取与插件鉴权路径一样在工作线程中执行。([#7557])
+
 - **记忆：** 自动上下文压缩在把即将被总结的消息保存到记忆时，不再阻塞事件循环。
   使用 mem0、Honcho 或 OpenViking 后端时，这次保存是同步 HTTP 请求，Gateway 在记忆
   服务器响应之前无法处理其他请求和流式输出。现在它与每轮结束后的记忆写入一样在工作
@@ -10460,6 +10485,10 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7410]: https://github.com/bytedance/deer-flow/pull/7410
 [#7445]: https://github.com/bytedance/deer-flow/pull/7445
 [#7449]: https://github.com/bytedance/deer-flow/pull/7449
+[#7467]: https://github.com/bytedance/deer-flow/pull/7467
 [#7507]: https://github.com/bytedance/deer-flow/pull/7507
 [#7521]: https://github.com/bytedance/deer-flow/pull/7521
 [#7530]: https://github.com/bytedance/deer-flow/pull/7530
+[#7557]: https://github.com/bytedance/deer-flow/pull/7557
+[#7560]: https://github.com/bytedance/deer-flow/pull/7560
+[#7576]: https://github.com/bytedance/deer-flow/pull/7576

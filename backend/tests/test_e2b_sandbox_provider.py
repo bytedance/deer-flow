@@ -3493,6 +3493,42 @@ def test_signal_handler_forwards_original_action_when_shutdown_cleanup_is_pendin
     assert p._shutdown_cleanup_pending is True
 
 
+@pytest.mark.parametrize(
+    ("host_owned", "expected"),
+    [(False, {"SIGTERM", "SIGINT", "SIGHUP"}), (True, {"SIGHUP"})],
+    ids=["standalone", "host-owned"],
+)
+def test_signal_handlers_leave_stop_signals_to_a_host_that_owns_shutdown(monkeypatch, host_owned, expected):
+    """The Gateway drains runs before sandbox shutdown; only SIGHUP, which uvicorn ignores, keeps the fallback."""
+    from deerflow.sandbox import sandbox_provider as registry
+
+    if not hasattr(signal, "SIGHUP"):
+        pytest.skip("SIGHUP not available on this platform")
+    p = _make_provider()
+    registered: dict[int, Any] = {}
+    forwarded: list[tuple[int, Any]] = []
+    shutdowns: list[None] = []
+
+    def original_handler(signum, frame):
+        forwarded.append((signum, frame))
+
+    monkeypatch.setattr(signal, "getsignal", lambda _signum: original_handler)
+    monkeypatch.setattr(signal, "signal", lambda signum, handler: registered.__setitem__(signum, handler))
+    monkeypatch.setattr(p, "shutdown", lambda: shutdowns.append(None))
+
+    if host_owned:
+        with registry.hold_sandbox_shutdown_ownership():
+            p._register_signal_handlers()
+    else:
+        p._register_signal_handlers()
+
+    assert {signal.Signals(signum).name for signum in registered} == expected
+    frame = object()
+    registered[signal.SIGHUP](signal.SIGHUP, frame)
+    assert shutdowns == [None]
+    assert forwarded == [(signal.SIGHUP, frame)]
+
+
 def test_shutdown_only_kills_sandboxes_owned_by_current_instance(monkeypatch):
     p = _make_provider()
     owned_client = FakeClient(sandbox_id="sb-owned")

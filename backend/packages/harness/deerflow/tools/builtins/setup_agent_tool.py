@@ -40,7 +40,7 @@ def _publish_text(target: Path, text: str) -> None:
         mode = 0o644
     temporary: Path | None = None
     try:
-        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=target.parent, suffix=".tmp", delete=False) as handle:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", newline="", dir=target.parent, suffix=".tmp", delete=False) as handle:
             temporary = Path(handle.name)
             handle.write(text)
             handle.flush()
