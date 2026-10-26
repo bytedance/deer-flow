@@ -1112,6 +1112,16 @@
 
 ### 修复
 
+- **渠道：** IM 渠道的运行现在与 Gateway API 运行一样使用顶层 `recursion_limit`，不再固定
+  发送 `100`；此前多步任务可能在几轮工具调用后就中止，用户收不到回答。IM 渠道
+  `session.config` 中的 `recursion_limit` 仍然优先；早先的 README 示例把它设为 `100`，
+  如需跟随顶层设置，请从 `config.yaml` 删除这一行。GitHub 渠道的运行不变。([#7521])
+
+- **沙箱：** AIO 提供方的异步 acquire 不再在事件循环上检查线程的技能目录。此前每次
+  线程 acquire 选择沙箱 ID 时，都会在事件循环上直接执行文件系统 `stat` 和路径解析；
+  `DEER_FLOW_HOME` 位于较慢或网络存储上时会阻塞事件循环。现在这一步与 acquire 的
+  其他步骤一样在工作线程中执行。([#7507])
+
 - **线程：** `POST /api/threads` 现在会以 `422` 拒绝无法对应任何智能体的
   `assistant_id`。此前该值会被直接保存，之后读取该线程（`GET` 线程、状态、历史）
   都会返回 `500 Internal Server Error`，直到删除线程。修复前已这样保存的线程
@@ -10445,3 +10455,5 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7410]: https://github.com/bytedance/deer-flow/pull/7410
 [#7445]: https://github.com/bytedance/deer-flow/pull/7445
 [#7449]: https://github.com/bytedance/deer-flow/pull/7449
+[#7507]: https://github.com/bytedance/deer-flow/pull/7507
+[#7521]: https://github.com/bytedance/deer-flow/pull/7521

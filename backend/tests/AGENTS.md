@@ -29,11 +29,17 @@ unrelated parent config that stays untouched. Keep argument parsing at the CLI
 entry point so in-process `doctor.main()` callers do not consume pytest's argv.
 
 `test_run_terminal_protocol.py` exercises authoritative `run.terminal`
-evidence through real Worker finalization. Keep final commit authority,
-producer drain, singleton confirmation, and Seal boundaries observable. Release all storage/producer gates before bounded cleanup,
-preserve healthy controls in refusal cases, and retain Journal/Seal compatibility
-coverage. `test_terminal_event_confirmation.py` covers supported stores; use
-`TEST_POSTGRES_URI` for independent PostgreSQL pools and real advisory contention. Protocol: [Run outcome](../docs/RUN_EVENT_STREAM.md#authoritative-run-outcome).
+evidence through real Worker finalization and recovery takeover. Keep final
+commit authority, producer drain, singleton confirmation, and Seal boundaries
+observable. Recovery coverage must block after the committed claim, delete the
+Run/events, then prove the lifecycle guard cannot recreate terminal history;
+pin delivery-before-terminal order across all takeover entry points, and keep a
+legacy `put_if_absent` signature on the owner path. `test_terminal_event_confirmation.py`
+covers supported stores, non-replaceable one-shot recovery targets, and guarded
+singleton rejection; use `TEST_POSTGRES_URI` for independent PostgreSQL pools
+and real advisory contention. Release all storage/producer gates before bounded
+cleanup, preserve healthy controls in refusal cases, and retain Journal/Seal
+compatibility coverage. Protocol: [Run outcome](../docs/RUN_EVENT_STREAM.md#authoritative-run-outcome).
 `test_goal_loop_stop_probe.py` runs the standalone Goal-loop reproduction through the native graph, loop middleware, worker and checkpoints. Only model responses are scripted; do not replace the Goal decision or simulate the stop-reason write.
 
 InfoQuest fetch log assertions install the real `UrlRedactionFilter` on the
@@ -165,6 +171,14 @@ The local sandbox's UTF-8 subprocess guard inspects each text-mode call with
 hide unpinned calls behind unrelated settings.
 Channel JSON state coverage likewise checks each writer and Discord reader call
 within its owning class/method; unrelated encoding literals must not mask a regression.
+
+## Project trash purge
+
+Purge regressions use real original/companion files and the repository transaction.
+Inject initial and persistent unlink failures to exercise Windows retry semantics
+on every platform; assert rollback and a later successful purge. Plant real links
+with `support.symlinks.symlink_or_skip`, preserve target bytes/modes, and cover
+dangling links and removal before retry. Keep filesystem work off the event loop.
 
 ## PostgreSQL batch fixtures
 
