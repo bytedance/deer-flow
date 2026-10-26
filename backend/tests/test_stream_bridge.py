@@ -108,6 +108,10 @@ class _FakeRedis:
     async def mget(self, *names):
         return [self.values.get(name) for name in names]
 
+    def _tail_is_end(self, stream_key):
+        entries = self.streams.get(stream_key, [])
+        return bool(entries and entries[-1][1].get("kind") == "end")
+
     def _has_end_marker(self, stream_key):
         return any(fields.get("kind") == "end" for _event_id, fields in self.streams.get(stream_key, []))
 
@@ -150,7 +154,10 @@ class _FakeRedis:
                 return 0
             if kind == "end" and stream_key not in self.streams:
                 return 2
-            if self._has_end_marker(stream_key):
+            if kind == "end":
+                if self._has_end_marker(stream_key):
+                    return 1
+            elif self._tail_is_end(stream_key):
                 return 1
             event_id = await self.xadd(
                 stream_key,
@@ -183,7 +190,10 @@ class _FakeRedis:
             token, maxlen, stream_ttl, kind, event, data = values
             if self.values.get(active_key) != token or self.values.get(tracking_key) != token:
                 return 0
-            if self._has_end_marker(stream_key):
+            if kind == "end":
+                if self._has_end_marker(stream_key):
+                    return 1
+            elif self._tail_is_end(stream_key):
                 return 1
             event_id = await self.xadd(
                 stream_key,
@@ -776,6 +786,53 @@ async def test_redis_publish_end_recognizes_legacy_end_before_late_events(redis_
     await redis_bridge.publish_end(run_id)
 
     assert [fields["kind"] for _event_id, fields in fake.streams[key]].count("end") == 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("owned", [False, True], ids=["recovery", "owner"])
+async def test_redis_legacy_midstream_end_allows_data_but_deduplicates_end(owned: bool):
+    """Data checks only the tail; END retries still inspect the retained window."""
+    fake = _FakeRedis()
+    bridge = RedisStreamBridge(redis_url="redis://fake", queue_maxsize=8, client=fake)
+    run_id = "redis-run-legacy-data-after-end"
+    key = bridge._stream_key(run_id)
+    if owned:
+        await bridge.start_producer_lease(run_id)
+    try:
+        await fake.xadd(key, {"kind": "end"})
+        await fake.xadd(key, {"kind": "event", "event": "legacy-late", "data": "{}"})
+        before = list(fake.streams[key])
+
+        await bridge.publish(run_id, "current-data", {"step": 2})
+
+        entries = list(fake.streams[key])
+        assert entries[:2] == before
+        assert len(entries) == 3
+        assert entries[-1][1]["event"] == "current-data"
+        await bridge.publish_end(run_id)
+        assert fake.streams[key] == entries
+    finally:
+        if owned:
+            await bridge.finish_producer_lease(run_id)
+
+
+@pytest.mark.anyio
+async def test_redis_owned_end_recreates_missing_buffer_with_live_lease():
+    """Only unowned recovery END is a no-op on a missing buffer."""
+    fake = _FakeRedis()
+    bridge = RedisStreamBridge(redis_url="redis://fake", client=fake)
+    run_id = "redis-run-owned-missing-buffer"
+    key = bridge._stream_key(run_id)
+    await bridge.start_producer_lease(run_id)
+    try:
+        await bridge.publish(run_id, "metadata", {})
+        await fake.delete(key)
+
+        await bridge.publish_end(run_id)
+
+        assert [fields["kind"] for _event_id, fields in fake.streams[key]] == ["end"]
+    finally:
+        await bridge.finish_producer_lease(run_id)
 
 
 @pytest.mark.anyio
@@ -2471,6 +2528,57 @@ async def test_redis_integration_cleanup_prevents_late_end_from_recreating_strea
     await real_redis_bridge.publish_end(run_id)
 
     assert await real_redis_bridge._redis.exists(key) == 0
+
+
+@pytest.mark.integration
+@requires_redis
+@pytest.mark.anyio
+@pytest.mark.parametrize("owned", [False, True], ids=["recovery", "owner"])
+async def test_redis_integration_legacy_midstream_end_allows_data_but_deduplicates_end(real_redis_bridge, owned: bool):
+    """Pin the fake's legacy-stream decisions against the real Lua scripts."""
+    client = real_redis_bridge._redis
+    bridge = RedisStreamBridge(redis_url=REDIS_TEST_URL, queue_maxsize=8, key_prefix=real_redis_bridge._key_prefix, client=client)
+    run_id = "integ-legacy-data-after-end"
+    key = bridge._stream_key(run_id)
+    if owned:
+        await bridge.start_producer_lease(run_id)
+    try:
+        await client.xadd(key, {"kind": "end"})
+        await client.xadd(key, {"kind": "event", "event": "legacy-late", "data": "{}"})
+        before = await client.xrange(key)
+
+        await bridge.publish(run_id, "current-data", {"step": 2})
+
+        entries = await client.xrange(key)
+        assert entries[:2] == before
+        assert len(entries) == 3
+        assert entries[-1][1]["event"] == "current-data"
+        await bridge.publish_end(run_id)
+        assert await client.xrange(key) == entries
+    finally:
+        if owned:
+            await bridge.finish_producer_lease(run_id)
+
+
+@pytest.mark.integration
+@requires_redis
+@pytest.mark.anyio
+async def test_redis_integration_owned_end_recreates_missing_buffer_with_live_lease(real_redis_bridge):
+    """A live owner retains the existing XADD behavior after buffer removal."""
+    bridge = real_redis_bridge
+    client = bridge._redis
+    run_id = "integ-owned-missing-buffer"
+    key = bridge._stream_key(run_id)
+    await bridge.start_producer_lease(run_id)
+    try:
+        await bridge.publish(run_id, "metadata", {})
+        await client.delete(key)
+
+        await bridge.publish_end(run_id)
+
+        assert [fields["kind"] for _event_id, fields in await client.xrange(key)] == ["end"]
+    finally:
+        await bridge.finish_producer_lease(run_id)
 
 
 @pytest.mark.integration

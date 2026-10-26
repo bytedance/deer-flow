@@ -498,8 +498,6 @@ class RedisStreamBridge(StreamBridge):
             if fields.get("kind") == _KIND_END:
                 return
             raise RuntimeError(f"Redis stream for run {run_id} has already ended")
-        if result == _XADD_STREAM_MISSING:
-            raise RuntimeError(f"Redis stream for run {run_id} disappeared during publication")
         if result:
             return
         self._cancel_lost_producer(run_id, lease)

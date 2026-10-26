@@ -52,7 +52,9 @@ when the tail is not END, preserving compatibility with old streams where an
 END was followed by late events. Do not add an unbounded boolean state key for
 this fast path; cleanup, expiry, and a new producer generation would then need a
 separate lifecycle contract. An unowned recovery END for a missing stream is a
-successful no-op. Coverage: `tests/test_stream_bridge.py`.
+successful no-op; a live owner's write retains its existing missing-buffer
+`XADD` behavior. Test fakes must mirror the END retained-window scan versus the
+ordinary-event tail-only check. Coverage: `tests/test_stream_bridge.py`.
 
 ### Memory Stream Replay
 
