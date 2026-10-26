@@ -36,6 +36,11 @@ export const extensionCatalog = [
     namespace: "community.workflows",
   },
   {
+    key: "reportSections",
+    package: "deerflow-extension-report-sections",
+    namespace: "community.report-sections",
+  },
+  {
     key: "retrieval",
     package: "deerflow-extension-retrieval",
     namespace: "example.retrieval",
@@ -44,6 +49,16 @@ export const extensionCatalog = [
     key: "knowledge",
     package: "deerflow-extension-knowledge",
     namespace: null,
+  },
+  {
+    key: "knowledgeManagement",
+    package: "deerflow-extension-knowledge-management",
+    namespace: "knowledge-management",
+  },
+  {
+    key: "knowledgePlatform",
+    package: "deerflow-extension-knowledge-platform",
+    namespace: "knowledge-platform",
   },
   { key: "lightrag", package: "deerflow-extension-lightrag", namespace: null },
   { key: "weknora", package: "deerflow-extension-weknora", namespace: null },

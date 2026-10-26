@@ -11,13 +11,21 @@ write failure boundary. Invalid UTF-8 text or call IDs return `None` before
 file publication, allowing the tool wrappers to use the configured inline fallback.
 
 `_externalize` creates a unique sibling `.tool-output-*.tmp` with exclusive
-creation (`open(..., "x")`). Its mode is `0o666 & ~umask`, preserving ordinary
-file-creation permissions without reading or changing the process-wide umask.
+creation (`open(..., "x")`) requesting mode `0o666`. Effective permissions follow
+the process umask and any filesystem default ACL; without a default ACL the mode
+is `0o666 & ~umask`. The writer never reads or changes the process-wide umask.
 This matters when a mounted sandbox reads the output under a different UID.
-Restrictive operator umasks remain restrictive. It also passes `newline=""`, so
+It also passes `newline=""`, so
 the file holds exactly the bytes of the stamped blob ref on every platform;
 Windows text mode would write CRLF, and restore discards a file whose size or
 digest does not match.
+
+Blob recovery uses the same exclusive sibling creation in binary mode, subject
+to the recovering Gateway's umask and filesystem default ACL. It flushes, fsyncs and
+closes the complete file before replacement. A missing or mismatched local
+copy therefore does not become fixed-mode `0600` solely because it was restored;
+the same ordinary creation policy applies. Digest-matching local files are reused
+without changing their permissions.
 
 The writer closes its file before atomically replacing the deterministic final
 path. Concurrent publishers of identical output can safely reuse that path;
@@ -76,3 +84,21 @@ after a later successful same-path `read_file`, `write_file`, or `str_replace`
 writes. Use the shared `tool_call_args` helpers (`pair_tool_call_results` and
 argument rewriting). Controls: `elide_superseded_writes` and
 `superseded_write_min_chars`.
+
+The placeholder is framework-owned text that the model can see in its own
+history, so it can be imitated. `write_file` therefore rejects a payload that
+*is* the placeholder rendered from `WRITE_ELISION_PLACEHOLDER_TEMPLATE`
+(`constants.py`), allowing only surrounding whitespace, instead of writing a
+deliverable that is ~200 bytes of placeholder (#7319). The match is
+whole-payload on purpose: a substring guard would block legitimate edits to
+this repository, whose `constants.py` and docs quote the template verbatim.
+Rendering and rejection derive from that one constant so they cannot drift.
+The character count must be an ASCII non-negative integer. A document beginning
+with the same prefix, including a quoted placeholder followed by more content,
+is allowed.
+
+Both sync and async `write_file` calls reject the placeholder before sandbox
+initialization, including when the sandbox provider is unavailable.
+
+This rejection applies only to `write_file`; `str_replace` does not validate
+`new_str` against the placeholder template.

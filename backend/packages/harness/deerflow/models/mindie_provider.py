@@ -254,10 +254,10 @@ class _EscapedNewlineStreamDecoder:
     """Decode literal `\\n` outside fenced code blocks across streamed chunks.
 
     `_decode_escaped_newlines_outside_fences` needs the whole reply to pair
-    ``` delimiters, and a token-sized chunk almost never contains both, so
+    ``` or ~~~ delimiters, and a token-sized chunk rarely contains both, so
     decoding chunks independently would also decode escapes inside fences.
     This decoder carries the fence state between chunks and holds back a
-    trailing partial ```/`\\n` sequence, so the joined stream equals the
+    trailing partial delimiter or `\\n` sequence, so the joined stream equals the
     one-shot decode of the same reply. A fence the stream never closes keeps
     its escapes: an unterminated fence still renders as code.
     """
@@ -305,7 +305,7 @@ class _EscapedNewlineStreamDecoder:
         return "".join(out)
 
     def flush(self) -> str:
-        """Return text held back for a partial ```/`\\n` at the end of the stream."""
+        """Return text held back for a partial delimiter/`\\n` at stream end."""
         pending, self._pending = self._pending, ""
         return pending
 

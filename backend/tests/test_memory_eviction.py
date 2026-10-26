@@ -79,6 +79,31 @@ def test_confidence_policy_coerces_non_float_confidence() -> None:
     assert [fact["id"] for fact in decision.kept] == ["b", "c"]
 
 
+def test_confidence_policy_scores_duplicate_fact_ids_per_record() -> None:
+    """Duplicate ids must not collide: rank and audit each record by its own score."""
+    facts = [
+        _fact("dup", confidence=0.9),
+        _fact("dup", confidence=0.1),
+        _fact("other", confidence=0.5),
+    ]
+
+    decision = select_facts_for_capacity(
+        facts,
+        max_facts=1,
+        policy=EVICTION_POLICY_CONFIDENCE,
+        now=NOW,
+    )
+
+    # The highest-confidence record wins even though its id repeats.
+    assert [fact["id"] for fact in decision.kept] == ["dup"]
+    assert decision.kept[0]["confidence"] == 0.9
+    assert [item.fact_id for item in decision.evicted] == ["dup", "other"]
+    assert [item.score for item in decision.evicted] == [0.1, 0.5]
+    # Public contract unchanged: scores stays keyed by fact_id (last write wins).
+    assert decision.scores["dup"].value == pytest.approx(0.1)
+    assert set(decision.scores) == {"dup", "other"}
+
+
 @pytest.mark.parametrize(
     "policy",
     [EVICTION_POLICY_CONFIDENCE, EVICTION_POLICY_HYBRID_V1],

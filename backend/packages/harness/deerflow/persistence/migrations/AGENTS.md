@@ -34,7 +34,7 @@ The empty-DB path keeps using `create_all` because `Base.metadata` is the only a
 `0039_user_disabled` → `0040_scheduled_group_notice` →
 `0041_im_notice_preferences` → `0042_channel_leases` →
 `0043_runtime_im_notices` → `0044_channel_runtime_configs` →
-`0045_completed_run_evidence` → `0046_skill_mutations` → `0047_mcp_oauth_tokens` (current head). The preference
+`0045_completed_run_evidence` → `0046_skill_mutations` → `0047_mcp_oauth_tokens` → `0048_extension_execution_leases` (current head). The preference
 revision adds a separate owner/key table with a cascading users foreign key and
 does not alter users; the project-documents revision adds a new owner-scoped
 shelf table, and the MCP lease-token revision adds two nullable token columns to
@@ -204,3 +204,6 @@ Tests: `test_migration_0041_im_notice_preferences.py`.
 - `0045_completed_run_evidence` adds nullable evidence sealing fields and completed-run snapshots after `0044_channel_runtime_configs`.
 - `0046_skill_mutations` adds durable owner enrollment, asset revisions, proposals, publication operations and scan leases.
 - `0047_mcp_oauth_tokens` creates the table-guarded `mcp_oauth_tokens` (PK `scope`, `owner_user_id` (`''` for deployment), `server_key`; encrypted token columns, chain and request fingerprints, `version`, refresh lease) with no backfill. The single-head pin lives in `tests/test_migration_0047_mcp_oauth_tokens.py`.
+
+- `0048_extension_execution_leases` adds generic extension execution fences after
+  the shipped OAuth revision; test upgrade/downgrade in `test_extension_execution_fence.py`.

@@ -17,6 +17,7 @@ from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.skills.permissions import make_skill_written_path_sandbox_readable
 from deerflow.skills.storage.skill_storage import SKILL_MD_FILE, SkillStorage, walk_skill_directories
 from deerflow.skills.types import SkillCategory
+from deerflow.utils.atomic_write import cleanup_failed_atomic_write
 
 logger = logging.getLogger(__name__)
 
@@ -108,14 +109,17 @@ class LocalSkillStorage(SkillStorage):
             target.parent.mkdir(parents=True, exist_ok=True)
             tmp_path = None
             try:
-                with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, dir=str(target.parent)) as tmp_file:
+                # newline="" publishes the caller's bytes: a default text write
+                # turns LF into os.linesep, so a SKILL.md written on Windows
+                # reached disk with CRLF that the API never returned.
+                with tempfile.NamedTemporaryFile("w", encoding="utf-8", newline="", delete=False, dir=str(target.parent)) as tmp_file:
                     tmp_path = Path(tmp_file.name)
                     tmp_file.write(content)
                 tmp_path.replace(target)
                 make_skill_written_path_sandbox_readable(self.get_custom_skill_dir(name), target)
             finally:
                 if tmp_path is not None:
-                    tmp_path.unlink(missing_ok=True)
+                    cleanup_failed_atomic_write(tmp_path)
 
     def remove_custom_skill_file(self, name: str, relative_path: str) -> str | None:
         removal = ((SkillCategory.CUSTOM, Path(name)),)
@@ -266,7 +270,10 @@ class LocalSkillStorage(SkillStorage):
         payload = {"ts": datetime.now(UTC).isoformat(), **record}
         history_path = self.get_skill_history_file(name)
         history_path.parent.mkdir(parents=True, exist_ok=True)
-        with history_path.open("a", encoding="utf-8") as f:
+        # JSONL records are LF-delimited on every host: a translated record
+        # boundary made read_history and any raw-byte reader describe different
+        # revisions of the same entry.
+        with history_path.open("a", encoding="utf-8", newline="") as f:
             f.write(json.dumps(payload, ensure_ascii=False))
             f.write("\n")
 

@@ -36,7 +36,7 @@ from typing import Any, Final, Literal, cast
 from deerflow_extension_api.agent_runs import AGENT_RUNS_CONTEXT_KEY
 from langchain_core.messages import AIMessage, AIMessageChunk
 from langgraph.checkpoint.base import empty_checkpoint
-from langgraph.types import Overwrite
+from langgraph.types import Command, Overwrite
 
 from deerflow.agents.goal_state import GoalEvaluation, GoalState
 from deerflow.agents.interaction_policy import RunInteractionPolicy, resolve_run_interaction_policy
@@ -972,7 +972,7 @@ async def run_agent(
     *,
     ctx: RunContext,
     agent_factory: Any,
-    graph_input: dict,
+    graph_input: dict[str, Any] | Command | None,
     config: dict,
     thread_incarnation: str | None | object = _THREAD_INCARNATION_UNSET,
     stream_modes: list[str] | None = None,
@@ -1033,6 +1033,7 @@ async def run_agent(
     # checkpoint lineage (see below).
     accessor: CheckpointStateAccessor | None = None
     rollback_point: RollbackPoint | None = None
+    checkpoint_resume_rejected = False
     journal = None
     partial_assistant_response: _PartialAssistantResponseAccumulator | None = None
     seq_stamper: _MessageSeqStamper | None = None
@@ -1156,7 +1157,8 @@ async def run_agent(
 
         # Keep cancellable preflight work under the worker's terminal guard so
         # cancellation cannot strand a pending RunRecord or stream subscriber.
-        if ctx.mcp_task_repo is not None and record.user_id is not None:
+        # Continuations keep their checkpointed projection and control input.
+        if isinstance(graph_input, dict) and ctx.mcp_task_repo is not None and record.user_id is not None:
             try:
                 if thread_incarnation is _THREAD_INCARNATION_UNSET:
                     raise RuntimeError("MCP task projection requires a server-owned thread incarnation")
@@ -1430,6 +1432,7 @@ async def run_agent(
                     config=config,
                     thread_id=thread_id,
                     run_id=run_id,
+                    resume_command=graph_input is None or _is_resume_command_input(graph_input),
                 )
             if resumed_messages is not None:
                 # The graph now starts from the selected state, so the
@@ -1750,6 +1753,7 @@ async def run_agent(
         await _finish_cancellation(record.abort_action)
 
     except Exception as exc:
+        checkpoint_resume_rejected = isinstance(exc, CheckpointResumeRejected)
         error_msg = f"{exc}"
         logger.exception("Run %s failed: %s", run_id, error_msg)
         await _ensure_stream_producer_lease()
@@ -1761,7 +1765,7 @@ async def run_agent(
             **terminal_status_kwargs,
         )
         if cancel_action is not None:
-            await _finish_cancellation(cancel_action)
+            await _finish_cancellation(cancel_action, restore_checkpoint=not checkpoint_resume_rejected)
         elif not record.ownership_lost:
             error_frame = {
                 "message": error_msg,
@@ -1801,7 +1805,9 @@ async def run_agent(
                         run_id,
                     )
 
-                if not record.ownership_lost and _is_edit_replay_run(record) and record.status != RunStatus.success:
+                # A rejected resume has not written state; compensating it through
+                # the state-only graph would itself discard the pending Sends.
+                if not record.ownership_lost and _is_edit_replay_run(record) and record.status != RunStatus.success and not checkpoint_resume_rejected:
                     if not record.finalizing:
                         await run_manager.set_finalizing(run_id, True)
                     try:
@@ -2081,14 +2087,35 @@ async def run_agent(
                 if not record.ownership_lost and journal is not None:
                     evidence_failure = None
                     try:
-                        evidence_receipt = await journal.finish_evidence()
+
+                        async def confirm_terminal() -> None:
+                            nonlocal evidence_failure
+                            from deerflow.runtime.events.terminal import confirm_terminal_event
+
+                            status = run_manager.terminal_event_status(record)
+                            if status is None:
+                                evidence_failure = "Terminal event lacks an attributable final commit ACK"
+                                raise RuntimeError(evidence_failure)
+                            confirmation = await confirm_terminal_event(
+                                event_store,
+                                thread_id=thread_id,
+                                run_id=run_id,
+                                status=status,
+                                user_id=record.user_id,
+                                authorized=lambda: run_manager.terminal_event_status(record) == status,
+                            )
+                            if not confirmation.confirmed:
+                                evidence_failure = f"Terminal event confirmation: {confirmation.value}."
+                                raise RuntimeError(evidence_failure)
+
+                        evidence_receipt = await journal.finish_evidence(before_receipt=confirm_terminal)
                         if evidence_receipt is not None:
                             if not evidence_execution_started:
                                 evidence_failure = "Lead graph execution did not begin; producer coverage is partial."
                             elif not await run_manager.seal_completed_evidence(run_id, evidence_receipt):
                                 evidence_failure = "The owning worker could not persist the journal seal."
                     except BaseException as exc:
-                        evidence_failure = f"Journal seal failed ({type(exc).__name__})."
+                        evidence_failure = evidence_failure or f"Journal seal failed ({type(exc).__name__})."
                         if not isinstance(exc, Exception):
                             deferred_finalization_interrupt = _defer_finalization_interrupt(deferred_finalization_interrupt, exc)
                         logger.warning("Failed to seal completed-run evidence for %s (non-fatal)", run_id, exc_info=True)
@@ -2907,6 +2934,15 @@ def _complete_state_replacement_values(
     return replacement_values
 
 
+def _is_resume_command_input(graph_input: Any) -> bool:
+    """Identify requests that need to preserve interrupted execution position."""
+    return isinstance(graph_input, Command) and graph_input.resume is not None
+
+
+class CheckpointResumeRejected(RuntimeError):
+    """Checkpoint preparation was rejected before any state write."""
+
+
 async def _linearize_delta_checkpoint_resume(
     *,
     accessor: CheckpointStateAccessor,
@@ -2914,6 +2950,7 @@ async def _linearize_delta_checkpoint_resume(
     config: dict[str, Any],
     thread_id: str,
     run_id: str,
+    resume_command: bool = False,
 ) -> list[Any] | None:
     """Replace a delta-mode checkpoint fork with an equivalent linear write.
 
@@ -2976,6 +3013,22 @@ async def _linearize_delta_checkpoint_resume(
     messages = values.get("messages") if isinstance(values, dict) else None
     if not isinstance(messages, list):
         raise RuntimeError(f"Run {run_id} could not materialize resume checkpoint {checkpoint_id}")
+    # Pending Sends cannot survive the state-only rewrite for any input shape.
+    # Resume commands also need branch-triggered execution positions preserved;
+    # fresh input may regenerate those nodes. Check both the selected state and
+    # the head that would be overwritten. The synthetic input entry is not work.
+    for location, checkpoint_config, inspected_snapshot in (("selected", source_config, snapshot), ("head", head.config, head)):
+        inspected_id = checkpoint_config["configurable"]["checkpoint_id"]
+        checkpoint_tuple = await accessor.aget_tuple(checkpoint_config)
+        if checkpoint_tuple is None:
+            raise CheckpointResumeRejected(f"Run {run_id} could not inspect pending execution for {location} checkpoint {inspected_id} while resuming checkpoint {checkpoint_id}")
+        pending_nodes = tuple(sorted(node for node in (getattr(inspected_snapshot, "next", None) or ()) if node != "__start__")) if resume_command else ()
+        if (checkpoint_tuple.checkpoint.get("channel_values") or {}).get("__pregel_tasks") or pending_nodes:
+            pending_detail = f" for {pending_nodes}" if pending_nodes else ""
+            raise CheckpointResumeRejected(
+                f"Run {run_id} cannot resume an older delta checkpoint {checkpoint_id}: the {location} checkpoint {inspected_id} has pending execution{pending_detail}. "
+                "Resume pending work from the latest checkpoint; to regenerate completed work, submit new input from the latest checkpoint."
+            )
     head_config["metadata"] = checkpoint_agent_binding_metadata(getattr(snapshot, "metadata", None))
 
     # Write through the thread's effective schema so every application and

@@ -191,6 +191,91 @@ def test_gemini_post_raises_on_http_error(monkeypatch, tmp_path):
         vid.generate_video(str(pf), [], str(tmp_path / "v.mp4"), "16:9")
 
 
+def test_gemini_poll_is_bounded(monkeypatch):
+    # The MiniMax path bounds its polling; the Gemini operation path must too.
+    polls = {"count": 0}
+
+    def fake_get(url, headers=None, **kw):
+        polls["count"] += 1
+        return FakeResp(json_data={"done": False})
+
+    monkeypatch.setattr(vid.requests, "get", fake_get)
+    with pytest.raises(Exception, match="timed out"):
+        vid._poll_gemini_operation("g", "operations/op", max_attempts=3, interval=0)
+    assert polls["count"] == 3
+
+
+def test_gemini_operation_error_is_reported(monkeypatch, tmp_path):
+    # A finished operation carrying an error must not surface as a KeyError on
+    # the missing "response" field.
+    monkeypatch.setenv("GEMINI_API_KEY", "g")
+
+    def fake_post(url, headers=None, json=None, **kw):
+        return FakeResp(json_data={"name": "operations/op"})
+
+    def fake_get(url, headers=None, **kw):
+        return FakeResp(json_data={"done": True, "error": {"code": 3, "message": "prompt rejected"}})
+
+    monkeypatch.setattr(vid.requests, "post", fake_post)
+    monkeypatch.setattr(vid.requests, "get", fake_get)
+    pf = tmp_path / "p.json"
+    pf.write_text("x", encoding="utf-8")
+    out = tmp_path / "v.mp4"
+    with pytest.raises(Exception, match="prompt rejected"):
+        vid.generate_video(str(pf), [], str(out), "16:9")
+    assert not out.exists()
+
+
+def test_gemini_filtered_sample_reports_reason(monkeypatch, tmp_path):
+    monkeypatch.setenv("GEMINI_API_KEY", "g")
+    reason = "The generated video was filtered by the safety system."
+
+    def fake_post(url, headers=None, json=None, **kw):
+        return FakeResp(json_data={"name": "operations/op"})
+
+    def fake_get(url, headers=None, **kw):
+        return FakeResp(
+            json_data={
+                "done": True,
+                "response": {
+                    "generateVideoResponse": {
+                        "raiMediaFilteredCount": 1,
+                        "raiMediaFilteredReasons": [reason],
+                    }
+                },
+            }
+        )
+
+    monkeypatch.setattr(vid.requests, "post", fake_post)
+    monkeypatch.setattr(vid.requests, "get", fake_get)
+    pf = tmp_path / "p.json"
+    pf.write_text("x", encoding="utf-8")
+    with pytest.raises(Exception, match="filtered by the safety system"):
+        vid.generate_video(str(pf), [], str(tmp_path / "v.mp4"), "16:9")
+
+
+def test_gemini_sample_without_uri_is_reported(monkeypatch, tmp_path):
+    monkeypatch.setenv("GEMINI_API_KEY", "g")
+
+    def fake_post(url, headers=None, json=None, **kw):
+        return FakeResp(json_data={"name": "operations/op"})
+
+    def fake_get(url, headers=None, **kw):
+        return FakeResp(
+            json_data={
+                "done": True,
+                "response": {"generateVideoResponse": {"generatedSamples": [{"video": {}}]}},
+            }
+        )
+
+    monkeypatch.setattr(vid.requests, "post", fake_post)
+    monkeypatch.setattr(vid.requests, "get", fake_get)
+    pf = tmp_path / "p.json"
+    pf.write_text("x", encoding="utf-8")
+    with pytest.raises(Exception, match="without a video URI"):
+        vid.generate_video(str(pf), [], str(tmp_path / "v.mp4"), "16:9")
+
+
 def test_gemini_forwards_aspect_ratio_to_predict_request(monkeypatch, tmp_path):
     monkeypatch.setenv("GEMINI_API_KEY", "g")
     captured = {}

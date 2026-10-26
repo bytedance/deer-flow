@@ -8,7 +8,7 @@ import logging
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, cast
 
-from app.channels.base import Channel, ChannelUnavailable
+from app.channels.base import Channel, ChannelUnavailable, attachment_delivery_text
 from app.channels.commands import is_known_channel_command
 from app.channels.connection_identity import attach_connection_identity
 from app.channels.message_bus import (
@@ -415,24 +415,23 @@ class WeComChannel(Channel):
         if msg.channel_name != self.name:
             return
 
-        try:
-            await self.send(msg)
-        except Exception:
-            logger.exception("Failed to send outbound message on channel %s", self.name)
-            if msg.is_final:
-                self._clear_ws_context(msg.thread_ts)
-            return
-
-        for attachment in msg.attachments:
-            try:
-                success = await self.send_file(msg, attachment)
-                if not success:
-                    logger.warning("[%s] file upload skipped for %s", self.name, attachment.filename)
-            except Exception:
-                logger.exception("[%s] failed to upload file %s", self.name, attachment.filename)
-
+        await super()._on_outbound(msg)
         if msg.is_final:
             self._clear_ws_context(msg.thread_ts)
+
+    async def _send_attachment_feedback(self, msg: OutboundMessage, failed: list[ResolvedAttachment]) -> None:
+        if not msg.thread_ts or msg.thread_ts not in self._ws_frames:
+            # send() without a frame uses the proactive API. A failed upload
+            # must not silently switch from the original reply to that path.
+            logger.warning("[WeCom] attachment feedback unavailable: reply context expired")
+            return
+        # The final stream is already finished. Reply with text on the same
+        # inbound frame instead of reopening that stream or pushing elsewhere.
+        try:
+            text = _clip_to_byte_limit(attachment_delivery_text(msg, failed), _WECOM_MAX_CONTENT_BYTES)
+            await self._ws_client.reply(self._ws_frames[msg.thread_ts], {"msgtype": "text", "text": {"content": text}})
+        except Exception:
+            logger.exception("[WeCom] failed to send attachment delivery feedback")
 
     async def send_file(self, msg: OutboundMessage, attachment: ResolvedAttachment) -> bool:
         if not msg.is_final:

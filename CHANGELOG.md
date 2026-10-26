@@ -1397,6 +1397,111 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
 
 ### Fixed
 
+- **community:** Async community tools (Jina, Crawl4AI, Browserless, Tavily,
+  SearXNG, Firecrawl, InfoQuest, RAGFlow, LightRAG, Jsonify and the browser
+  automation tools) no longer read `config.yaml` and `extensions_config.json` on the
+  event loop. Each call checked both files (a `stat` and a full sha256 of
+  each) up to three times, and reparsed `config.yaml` there after an edit,
+  stalling other runs, requests and streams meanwhile. They now read the
+  config once per call in a worker, as image search already did. ([#7580])
+
+- **auth:** The public auth routes (`/register`, `/setup-status`,
+  `/providers`, `/oauth/{provider}` and `/callback/{provider}`) no longer read
+  `config.yaml` and `extensions_config.json` on the event loop. Each request
+  checked both files (a `stat` and a full sha256 of each), and reparsed
+  `config.yaml` there after an edit, stalling other requests and streams
+  meanwhile. The read now runs in a worker, as `/login/local` already did.
+  ([#7576])
+  
+- **sandbox:** Stopping the Gateway no longer destroys AIO or E2B sandboxes
+  before in-flight runs drain. When the first sandbox use built the provider on
+  the event-loop thread, the provider's own SIGTERM/SIGINT handler destroyed
+  every sandbox synchronously as the signal arrived: the event loop froze for
+  the whole teardown and running tool calls lost their sandbox. The Gateway now
+  owns sandbox shutdown and closes the provider after the run drain and MCP
+  teardown; embedded clients and scripts keep the signal fallback, and SIGHUP
+  still cleans up. AIO acquire now refuses once shutdown has begun, as E2B
+  already did. ([#7560])
+
+- **frontend:** SSO sign-ins now return to the page that asked for them, such
+  as a shared chat link, instead of always opening the default workspace. The
+  sign-in pages used to send every signed-in request to `/workspace`, which
+  dropped the `next` path of `/auth/callback?next=...`. A signed-in visit to
+  `/login?next=...` lost its target the same way. The frontend and Gateway
+  `next` checks now also reject control characters: browsers delete tab, LF
+  and CR from a URL, so `?next=%2F%0A%2F%2Fevil.example` could send a
+  sign-in to another site. ([#7467])
+  
+- **authz:** Authenticated Gateway requests no longer read `config.yaml` and
+  `extensions_config.json` on the event loop. Resolving route permissions
+  checked both files (a `stat` and a full sha256 of each) for every request,
+  and reparsed `config.yaml` there after an edit, stalling other requests and
+  streams meanwhile. The read now runs in a worker, as the plugin
+  authorization path already did. ([#7557])
+
+- **memory:** Automatic context compaction no longer blocks the event loop
+  while it saves the messages it is about to summarize to memory. With the
+  mem0, Honcho or OpenViking backend, that save is a synchronous HTTP request,
+  so the Gateway stopped serving other requests and streams until the memory
+  server answered. It now runs in a worker, like the after-turn memory write.
+  ([#7530])
+
+- **channels:** IM channel runs now use the top-level `recursion_limit`, as
+  Gateway API runs do, instead of a fixed `100` that could end a multi-step
+  task after a few tool-calling turns without an answer. A `recursion_limit`
+  in an IM channel's `session.config` still takes precedence; earlier README
+  examples set it to `100`, so delete that line from `config.yaml` to follow
+  the top-level value. GitHub channel runs are unchanged. ([#7521])
+
+- **sandbox:** The AIO provider's async acquire no longer checks the thread's
+  skill directory on the event loop. Picking the sandbox ID ran a filesystem
+  `stat` and path resolution inline on every thread acquire, which stalls the
+  loop when `DEER_FLOW_HOME` is on slow or network storage. It now runs in a
+  worker like the rest of acquire. ([#7507])
+
+- **threads:** `POST /api/threads` now rejects an `assistant_id` that cannot
+  name an agent with `422`. It used to store the value, and every later read
+  of the thread (`GET` thread, state, history) answered
+  `500 Internal Server Error` until the thread was deleted. Threads saved that
+  way before this fix are read with the lead agent's schema, and a branch of
+  such a thread stores no `assistant_id`, so it uses the lead agent. ([#7445])
+
+- **frontend:** Accounts whose email the backend accepted but the frontend's
+  stricter pattern did not (for example `a&b@example.com`, `a@b.c` or a
+  Unicode address) now get the normal workspace. Their sessions used to show
+  the gateway-offline fallback, and one such account made the admin
+  **Settings → Users** list fail for every administrator. ([#7449])
+
+- **persistence:** A PostgreSQL bootstrap failure inside an existing database
+  now reports its own error. The Gateway treated any error mentioning "does not
+  exist", such as a missing column or relation during a migration, as a missing
+  database and ran `CREATE DATABASE`. Startup then failed with `database ...
+  already exists` or `permission denied to create database`, and the original
+  error was missing from the traceback. Only a missing database (SQLSTATE
+  `3D000`) is auto-created now. ([#7410])
+
+- **mcp:** Ordinary users can now install DingTalk, WeCom and HubSpot from
+  **Capability Center → Plugins**. Saving one of these bundled
+  connections as a non-administrator, including editing or enabling it later,
+  failed with `500 Internal Server Error` because the personal-connection check
+  read a `cwd` field the request model does not declare. A bundled connection
+  with a working directory still requires an administrator. ([#7400])
+
+- **examples:** The extension example's package tests pass again. Its test
+  registry lacked `knowledge_provider()`, so it no longer matched the
+  `ExtensionRegistry` protocol and the README's `pytest` run failed. Extension
+  Package Check now also runs the tests of bundled examples that ship them,
+  so a contract change that breaks them fails its pull request. ([#7364])
+
+- **gateway:** Run requests with a malformed body now get a client error
+  instead of `500 Internal Server Error`. A `config.configurable` or
+  `config.context` that is not an object, an invalid `assistant_id`, a
+  non-string `agent_name`, or an AI message whose `tool_calls` is not a list of
+  objects used to fail run admission unhandled. They now return `422` (`400`
+  for the message) before a run is created. On thread routes, a
+  `config.configurable` of `[]`, `""`, `0`, `false` or a list of key/value
+  pairs used to be accepted and is now rejected with `422` too. ([#7362])
+
 - **tui:** Quitting after `Ctrl+C` interrupted a run no longer hangs on the
   step that run is still finishing. The run thread was joined on exit, so the
   TUI closed but the shell prompt stayed blocked until a long tool call or model
@@ -13035,3 +13140,17 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7277]: https://github.com/bytedance/deer-flow/pull/7277
 [#7325]: https://github.com/bytedance/deer-flow/pull/7325
 [#7326]: https://github.com/bytedance/deer-flow/pull/7326
+[#7362]: https://github.com/bytedance/deer-flow/pull/7362
+[#7364]: https://github.com/bytedance/deer-flow/pull/7364
+[#7400]: https://github.com/bytedance/deer-flow/pull/7400
+[#7410]: https://github.com/bytedance/deer-flow/pull/7410
+[#7445]: https://github.com/bytedance/deer-flow/pull/7445
+[#7449]: https://github.com/bytedance/deer-flow/pull/7449
+[#7467]: https://github.com/bytedance/deer-flow/pull/7467
+[#7507]: https://github.com/bytedance/deer-flow/pull/7507
+[#7521]: https://github.com/bytedance/deer-flow/pull/7521
+[#7530]: https://github.com/bytedance/deer-flow/pull/7530
+[#7557]: https://github.com/bytedance/deer-flow/pull/7557
+[#7560]: https://github.com/bytedance/deer-flow/pull/7560
+[#7576]: https://github.com/bytedance/deer-flow/pull/7576
+[#7580]: https://github.com/bytedance/deer-flow/pull/7580

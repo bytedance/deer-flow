@@ -1112,6 +1112,86 @@
 
 ### 修复
 
+- **社区工具：** 异步社区工具（Jina、Crawl4AI、Browserless、Tavily、SearXNG、Firecrawl、
+  InfoQuest、RAGFlow、LightRAG、Jsonify 和浏览器自动化工具）不再在事件循环上读取 `config.yaml`
+  和 `extensions_config.json`。每次调用最多会把这两个文件检查三次（各做一次 `stat`
+  和完整的 sha256），编辑后还会在循环上重新解析 `config.yaml`，期间其他运行、请求和
+  流式输出都会停顿。现在它们与图片搜索一样，每次调用只在工作线程中读取一次配置。([#7580])
+
+- **鉴权：** 公开的认证路由（`/register`、`/setup-status`、`/providers`、
+  `/oauth/{provider}` 和 `/callback/{provider}`）不再在事件循环上读取 `config.yaml` 和
+  `extensions_config.json`。每个请求都会检查这两个文件（各做一次 `stat` 和完整的
+  sha256），编辑后还会在循环上重新解析 `config.yaml`，期间其他请求和流式输出都会
+  停顿。现在这次读取与 `/login/local` 一样在工作线程中执行。([#7576])
+  
+- **沙箱：** 停止 Gateway 时，AIO 和 E2B 沙箱不再在进行中的运行收尾之前被销毁。此前
+  如果第一次使用沙箱时在事件循环线程上构造了提供方，提供方自己的 SIGTERM/SIGINT
+  处理器会在信号到达时同步销毁所有沙箱：整个销毁期间事件循环冻结，正在执行的工具
+  调用失去沙箱。现在由 Gateway 负责沙箱关闭，在运行收尾和 MCP 关闭之后再关闭提供方；
+  嵌入式客户端和脚本保留信号兜底，SIGHUP 仍会清理。AIO 的 acquire 在关闭开始后会
+  拒绝请求，与 E2B 一致。([#7560])
+
+- **前端：** SSO 登录后现在会回到发起登录的页面（例如分享的对话链接），不再总是打开
+  默认工作区。此前登录相关页面会把所有已登录的请求都跳转到 `/workspace`，导致
+  `/auth/callback?next=...` 中的 `next` 路径丢失；已登录时访问 `/login?next=...`
+  也会同样丢失目标页面。前端和 Gateway 对 `next` 的校验现在也会拒绝控制字符：浏览器会
+  删除 URL 中的制表符、LF 和 CR，因此 `?next=%2F%0A%2F%2Fevil.example` 可能把登录后的跳转
+  导向其他网站。([#7467])
+  
+- **鉴权：** 已认证的 Gateway 请求不再在事件循环上读取 `config.yaml` 和
+  `extensions_config.json`。解析路由权限时，每个请求都会检查这两个文件（各做一次
+  `stat` 和完整的 sha256），编辑后还会在循环上重新解析 `config.yaml`，期间其他请求和
+  流式输出都会停顿。现在这次读取与插件鉴权路径一样在工作线程中执行。([#7557])
+
+- **记忆：** 自动上下文压缩在把即将被总结的消息保存到记忆时，不再阻塞事件循环。
+  使用 mem0、Honcho 或 OpenViking 后端时，这次保存是同步 HTTP 请求，Gateway 在记忆
+  服务器响应之前无法处理其他请求和流式输出。现在它与每轮结束后的记忆写入一样在工作
+  线程中执行。([#7530])
+
+- **渠道：** IM 渠道的运行现在与 Gateway API 运行一样使用顶层 `recursion_limit`，不再固定
+  发送 `100`；此前多步任务可能在几轮工具调用后就中止，用户收不到回答。IM 渠道
+  `session.config` 中的 `recursion_limit` 仍然优先；早先的 README 示例把它设为 `100`，
+  如需跟随顶层设置，请从 `config.yaml` 删除这一行。GitHub 渠道的运行不变。([#7521])
+
+- **沙箱：** AIO 提供方的异步 acquire 不再在事件循环上检查线程的技能目录。此前每次
+  线程 acquire 选择沙箱 ID 时，都会在事件循环上直接执行文件系统 `stat` 和路径解析；
+  `DEER_FLOW_HOME` 位于较慢或网络存储上时会阻塞事件循环。现在这一步与 acquire 的
+  其他步骤一样在工作线程中执行。([#7507])
+
+- **线程：** `POST /api/threads` 现在会以 `422` 拒绝无法对应任何智能体的
+  `assistant_id`。此前该值会被直接保存，之后读取该线程（`GET` 线程、状态、历史）
+  都会返回 `500 Internal Server Error`，直到删除线程。修复前已这样保存的线程
+  改为按主智能体的状态结构读取；从这类线程创建的分支不保存 `assistant_id`，因此使用
+  主智能体。([#7445])
+
+- **前端：** 后端接受、但前端更严格的格式检查不接受的邮箱账号（如
+  `a&b@example.com`、`a@b.c` 或含 Unicode 的地址）现在可以正常进入工作区。此前这些
+  账号的会话会显示网关离线界面，且只要存在一个这样的账号，所有管理员的
+  “设置 → 用户”列表都会加载失败。([#7449])
+
+- **持久化：** 在已存在的数据库中 PostgreSQL 启动初始化失败时，现在会报告原始错误。
+  此前 Gateway 会把任何包含 "does not exist" 的错误（例如迁移时缺少列或表）当作数据库
+  不存在并执行 `CREATE DATABASE`，启动随之以 `database ... already exists` 或
+  `permission denied to create database` 失败，原始错误也不会出现在 traceback 中。
+  现在只有数据库确实不存在（SQLSTATE `3D000`）时才会自动创建。([#7410])
+
+- **MCP：** 普通用户现在可以在“能力中心 → 插件”中安装钉钉、企业微信和 HubSpot。
+  此前非管理员保存这些内置连接（包括之后编辑或启用）会返回
+  `500 Internal Server Error`，因为个人连接检查读取了请求模型未声明的 `cwd` 字段。
+  设置了工作目录的内置连接仍需管理员权限。([#7400])
+
+- **示例：** 扩展示例的包测试重新通过。其测试用 registry 缺少
+  `knowledge_provider()`，不再满足 `ExtensionRegistry` 协议，按 README 运行
+  `pytest` 会失败。Extension Package Check 现在也会运行自带测试的内置示例的测试，
+  因此破坏这些测试的契约变更会在其 PR 中失败。([#7364])
+
+- **网关：** 请求体格式错误的运行请求现在返回客户端错误，而不是
+  `500 Internal Server Error`。此前 `config.configurable` 或 `config.context`
+  不是对象、`assistant_id` 无效、`agent_name` 不是字符串，或 AI 消息的 `tool_calls`
+  不是对象列表时，运行准入会抛出未处理的异常。现在这些请求在创建运行之前即返回
+  `422`（消息问题返回 `400`）。在线程路由上，此前会被接受的 `config.configurable`
+  取值 `[]`、`""`、`0`、`false` 或键值对列表，现在同样返回 `422`。([#7362])
+
 - **TUI：** 按 `Ctrl+C` 中断运行后再退出，不再卡在该运行仍在完成的步骤上。此前运行
   线程会在退出时被等待，TUI 已关闭但 shell 提示符一直阻塞，直到较长的工具调用或模型请求
   返回，再按 `Ctrl+C` 也只会打印 traceback。现在退出时会提示正在等待该步骤，并在其完成后
@@ -10405,3 +10485,18 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7277]: https://github.com/bytedance/deer-flow/pull/7277
 [#7325]: https://github.com/bytedance/deer-flow/pull/7325
 [#7326]: https://github.com/bytedance/deer-flow/pull/7326
+[#7362]: https://github.com/bytedance/deer-flow/pull/7362
+[#7364]: https://github.com/bytedance/deer-flow/pull/7364
+[#7400]: https://github.com/bytedance/deer-flow/pull/7400
+[#7410]: https://github.com/bytedance/deer-flow/pull/7410
+[#7445]: https://github.com/bytedance/deer-flow/pull/7445
+[#7449]: https://github.com/bytedance/deer-flow/pull/7449
+[#7467]: https://github.com/bytedance/deer-flow/pull/7467
+[#7507]: https://github.com/bytedance/deer-flow/pull/7507
+[#7521]: https://github.com/bytedance/deer-flow/pull/7521
+[#7530]: https://github.com/bytedance/deer-flow/pull/7530
+[#7557]: https://github.com/bytedance/deer-flow/pull/7557
+[#7560]: https://github.com/bytedance/deer-flow/pull/7560
+[#7580]: https://github.com/bytedance/deer-flow/pull/7580
+[#7576]: https://github.com/bytedance/deer-flow/pull/7576
+[#7580]: https://github.com/bytedance/deer-flow/pull/7580

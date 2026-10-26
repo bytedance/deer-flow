@@ -175,3 +175,41 @@ test("LightRAG discovery is localized without claiming a runtime registration", 
     expect(entry?.loaded).toBeUndefined();
   }
 });
+
+test("knowledge management discovery merges its namespace without implying activation", () => {
+  const management = { ...contribution, namespace: "knowledge-management" };
+  for (const [copy, title] of [
+    [enUS.extensions.catalog, "Knowledge ingestion and processing"],
+    [zhCN.extensions.catalog, "知识入库与处理"],
+  ] as const) {
+    const entry = extensionDirectory([], copy).find(
+      (item) => item.package === "deerflow-extension-knowledge-management",
+    );
+    expect(entry?.id).toBe(management.namespace);
+    expect(entry?.title).toBe(title);
+    expect(entry?.loaded).toBeUndefined();
+    const matches = extensionDirectory([management], copy).filter(
+      (item) => item.id === management.namespace,
+    );
+    expect(matches).toHaveLength(1);
+    expect(matches[0]?.loaded).toBe(management);
+  }
+});
+
+test("knowledge platform discovery is localized and does not imply a management page", () => {
+  for (const [copy, title] of [
+    [enUS.extensions.catalog, "Knowledge spaces and connections"],
+    [zhCN.extensions.catalog, "知识空间与连接"],
+  ] as const) {
+    const entry = extensionDirectory([], copy).find(
+      (item) => item.package === "deerflow-extension-knowledge-platform",
+    );
+    expect(entry?.id).toBe("knowledge-platform");
+    expect(entry?.title).toBe(title);
+    expect(entry?.description).toBe(copy.knowledgePlatform.description);
+    expect(entry?.guide).toBe(
+      "https://github.com/bytedance/deer-flow/tree/main/examples/deerflow-extension-knowledge-platform#readme",
+    );
+    expect(entry?.loaded).toBeUndefined();
+  }
+});
