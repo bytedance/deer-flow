@@ -5,15 +5,10 @@ Sandbox restore requires a thread ID, even forks.
 On startup failure, close reads and kill/reap the child, preserving the error.
 Only `finally` closes write ends.
 
-POSIX async commands await child exit with ordinary stdout/stderr pipe fds.
-Reuse the bounded daemon-thread readers from sync execution so background output
-outlives caller-loop teardown; pipe EOF must not hold up process exit. Parent
-write ends close after spawn, readers own transferred read ends through EOF,
-and startup failure closes unclaimed fds and reaps any returned child.
-Unsupported subprocess execution caches the sync fallback per `LocalSandbox`.
-Caller cancellation drains execution; loop shutdown reaps in-flight commands.
-Bash output masking/error sanitization resolve paths off-loop. Regressions cover
-default asyncio/uvloop and the full bash coroutine under the blocking-I/O gate.
+POSIX async exec uses pipe fds to separate exit from EOF; sync daemon readers
+outlive caller loops until EOF. Cache unsupported-loop fallback per instance.
+Drain caller cancellation; reap in-flight commands on loop shutdown. Mask bash
+output/error paths off-loop.
 
 On Linux/macOS, LocalSandbox non-append text writes use `_publish_file_revision` and the shared atomic byte publisher. Check write access without truncation; retain the source descriptor through metadata transfer. Preserve symlink mapping; publish only regular files. Pre-replace failures retain the old file and clean staging. Append/other platforms write in place. Replacement needs parent-directory write and metadata permissions; hard-link aliases retain the old inode. No concurrent-writer arbitration or power-loss recovery. Tests: `tests/test_local_sandbox_atomic_writes.py`.
 
