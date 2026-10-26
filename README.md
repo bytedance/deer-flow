@@ -3306,8 +3306,9 @@ are checked recursively as well.
 ## Embedded Python Client
 
 User messages are framed as untrusted input. Reserved XML-like tags are escaped
-for model context, with an encoding note instructing the agent to decode exactly
-once when reproducing the original text in files or code. This preserves XML
+for model context only when present; tag-free URLs and shell commands retain
+their ampersands unchanged. Encoded payloads include a note to decode exactly
+once when reproducing the original text in files, code, or tool-call arguments. This preserves XML
 angle brackets and literal HTML entities in verbatim-content requests while
 keeping user-supplied tags separate from framework instructions.
 
