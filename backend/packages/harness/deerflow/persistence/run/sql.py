@@ -12,7 +12,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import and_, case, delete, func, or_, select, text, update
+from sqlalchemy import and_, case, delete, func, literal, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -62,6 +62,19 @@ class RunRepository(RunStore):
         if value is None:
             raise RuntimeError("run-change clock did not return a position")
         return int(value)
+
+    @staticmethod
+    def _live_lease_predicate(session: AsyncSession, lease=RunRow.lease_expires_at):
+        # PostgreSQL clock_timestamp is evaluated after the row lock below,
+        # unlike transaction-start now(). SQLite evaluates its clock at UPDATE.
+        if session.bind.dialect.name == "postgresql":
+            return lease > func.clock_timestamp()
+        return func.julianday(lease) > func.julianday("now")
+
+    @staticmethod
+    async def _lock_owned_row(session: AsyncSession, run_id: str) -> None:
+        if session.bind.dialect.name == "postgresql":
+            await session.execute(select(RunRow.run_id).where(RunRow.run_id == run_id).with_for_update())
 
     @staticmethod
     def _normalize_model_name(model_name: str | None) -> str | None:
@@ -242,6 +255,26 @@ class RunRepository(RunStore):
                 return None
             return self._row_to_dict(row)
 
+    async def get_in_session(
+        self,
+        session: AsyncSession,
+        run_id: str,
+        *,
+        user_id: str | None | _AutoSentinel = AUTO,
+    ):
+        """Read through a compatible caller transaction without another checkout.
+
+        Keep custom ``get`` implementations and differently bound databases
+        on their normal read path. The caller owns this session's lifetime.
+        """
+        if type(self).get is not RunRepository.get or session.bind is not self._sf.kw.get("bind"):
+            return await self.get(run_id, user_id=user_id)
+        resolved_user_id = resolve_user_id(user_id, method_name="RunRepository.get")
+        row = await session.get(RunRow, run_id)
+        if row is None or (resolved_user_id is not None and row.user_id != resolved_user_id):
+            return None
+        return self._row_to_dict(row)
+
     async def list_changed(
         self,
         *,
@@ -376,7 +409,7 @@ class RunRepository(RunStore):
             result = await session.execute(stmt)
             return {row.run_id: self._row_to_dict(row) for row in result.scalars()}
 
-    async def update_status(self, run_id, status, *, error=None, stop_reason=None, goal_verdict=None) -> bool:
+    async def update_status(self, run_id, status, *, error=None, stop_reason=None, goal_verdict=None, owner_worker_id=None) -> bool:
         values: dict[str, Any] = {"status": status, "updated_at": datetime.now(UTC)}
         if error is not None:
             values["error"] = error
@@ -391,7 +424,15 @@ class RunRepository(RunStore):
         # completed run) cannot be overwritten by a late writer.
         async with self._sf() as session:
             values["change_seq"] = await self._next_change_seq(session)
-            result = await session.execute(update(RunRow).where(RunRow.run_id == run_id, RunRow.status.in_(("pending", "running", "interrupted"))).values(**values))
+            conditions = [RunRow.run_id == run_id, RunRow.status.in_(("pending", "running", "interrupted"))]
+            if owner_worker_id is not None:
+                await self._lock_owned_row(session, run_id)
+                conditions.extend([RunRow.owner_worker_id == owner_worker_id, self._live_lease_predicate(session)])
+                if status != "error":
+                    conditions.append(RunRow.status.in_(("pending", "running")))
+                if status == "success":
+                    conditions.append(RunRow.cancel_action.is_(None))
+            result = await session.execute(update(RunRow).where(*conditions).values(**values))
             await session.commit()
             return result.rowcount != 0
 
@@ -530,6 +571,8 @@ class RunRepository(RunStore):
         run_id: str,
         *,
         status: str,
+        require_terminal: bool = False,
+        owner_worker_id: str | None = None,
         total_input_tokens: int = 0,
         total_output_tokens: int = 0,
         total_tokens: int = 0,
@@ -566,22 +609,28 @@ class RunRepository(RunStore):
             values["last_ai_message"] = last_ai_message[:2000]
         if first_human_message is not None:
             values["first_human_message"] = first_human_message[:2000]
-        if error is not None:
+        if not require_terminal and error is not None:
             values["error"] = error
-        if goal_verdict is not None:
+        if not require_terminal and goal_verdict is not None:
             values["goal_verdict"] = self._safe_json(goal_verdict)
         allowed_sources = ["pending", "running"]
         if status not in allowed_sources:
             allowed_sources.append(status)
         if status == "error" and "interrupted" not in allowed_sources:
             allowed_sources.append("interrupted")
+        if require_terminal and status in ("pending", "running"):
+            return False
         async with self._sf() as session:
             values["change_seq"] = await self._next_change_seq(session)
+            conditions = [RunRow.run_id == run_id]
+            if require_terminal:
+                conditions.extend([RunRow.status == status, RunRow.owner_worker_id == owner_worker_id])
+            else:
+                conditions.append(RunRow.status.in_(tuple(allowed_sources)))
             result = await session.execute(
                 update(RunRow)
                 .where(
-                    RunRow.run_id == run_id,
-                    RunRow.status.in_(tuple(allowed_sources)),
+                    *conditions,
                 )
                 .values(**values)
             )
@@ -721,6 +770,7 @@ class RunRepository(RunStore):
         *,
         owner_worker_id: str,
         lease_expires_at: str,
+        allow_interrupted: bool = False,
     ) -> bool:
         lease_dt = datetime.fromisoformat(lease_expires_at)
         values: dict[str, Any] = {
@@ -729,7 +779,18 @@ class RunRepository(RunStore):
             "updated_at": datetime.now(UTC),
         }
         async with self._sf() as session:
-            result = await session.execute(update(RunRow).where(RunRow.run_id == run_id, RunRow.owner_worker_id == owner_worker_id, RunRow.status.in_(("pending", "running"))).values(**values))
+            await self._lock_owned_row(session, run_id)
+            result = await session.execute(
+                update(RunRow)
+                .where(
+                    RunRow.run_id == run_id,
+                    RunRow.owner_worker_id == owner_worker_id,
+                    RunRow.status.in_(("pending", "running", "interrupted") if allow_interrupted else ("pending", "running")),
+                    self._live_lease_predicate(session),
+                    self._live_lease_predicate(session, literal(lease_dt)),
+                )
+                .values(**values)
+            )
             await session.commit()
             return result.rowcount != 0
 
@@ -739,16 +800,20 @@ class RunRepository(RunStore):
         *,
         owner_worker_id: str,
         lease_expires_at: str,
+        allow_interrupted: bool = False,
     ) -> LeaseRenewal:
         """Renew the owner lease and read cancellation intent atomically."""
         lease_dt = datetime.fromisoformat(lease_expires_at)
         async with self._sf() as session:
+            await self._lock_owned_row(session, run_id)
             result = await session.execute(
                 update(RunRow)
                 .where(
                     RunRow.run_id == run_id,
                     RunRow.owner_worker_id == owner_worker_id,
-                    RunRow.status.in_(("pending", "running")),
+                    RunRow.status.in_(("pending", "running", "interrupted") if allow_interrupted else ("pending", "running")),
+                    self._live_lease_predicate(session),
+                    self._live_lease_predicate(session, literal(lease_dt)),
                 )
                 .values(
                     lease_expires_at=lease_dt,
@@ -762,17 +827,22 @@ class RunRepository(RunStore):
             return LeaseRenewal(renewed=False)
         return LeaseRenewal(renewed=True, cancel_action=row.cancel_action)
 
-    async def request_cancel(self, run_id: str, *, action: str) -> str | None:
+    async def request_cancel(self, run_id: str, *, action: str, execution_fence=None, user_id=None) -> str | None:
         """Atomically persist the first cancellation action on an active run."""
         if action not in ("interrupt", "rollback"):
             raise ValueError(f"Unsupported cancellation action: {action}")
         now = datetime.now(UTC)
         async with self._sf() as session:
             change_seq = await self._next_change_seq(session)
+            if execution_fence is not None:
+                from deerflow.persistence.extension_leases.fence import lock_execution_fence
+
+                await lock_execution_fence(session, execution_fence, user_id)
             result = await session.execute(
                 update(RunRow)
                 .where(
                     RunRow.run_id == run_id,
+                    *([RunRow.user_id == user_id] if execution_fence is not None else []),
                     RunRow.status.in_(("pending", "running")),
                 )
                 .values(
@@ -801,6 +871,7 @@ class RunRepository(RunStore):
         error: str | None = None,
         stop_reason: str | None = None,
         goal_verdict: dict[str, Any] | None = None,
+        owner_worker_id: str | None = None,
     ) -> StatusFinalization:
         """Atomically let completion win only before cancellation."""
         values: dict[str, Any] = {
@@ -816,12 +887,14 @@ class RunRepository(RunStore):
 
         async with self._sf() as session:
             values["change_seq"] = await self._next_change_seq(session)
+            conditions = [RunRow.run_id == run_id, RunRow.status.in_(("pending", "running")), RunRow.cancel_action.is_(None)]
+            if owner_worker_id is not None:
+                await self._lock_owned_row(session, run_id)
+                conditions.extend([RunRow.owner_worker_id == owner_worker_id, self._live_lease_predicate(session)])
             result = await session.execute(
                 update(RunRow)
                 .where(
-                    RunRow.run_id == run_id,
-                    RunRow.status.in_(("pending", "running")),
-                    RunRow.cancel_action.is_(None),
+                    *conditions,
                 )
                 .values(**values)
                 .returning(RunRow.run_id)
@@ -830,7 +903,10 @@ class RunRepository(RunStore):
                 await session.commit()
                 return StatusFinalization(finalized=True)
 
-            current = await session.execute(select(RunRow.cancel_action).where(RunRow.run_id == run_id))
+            cancellation_conditions = [RunRow.run_id == run_id]
+            if owner_worker_id is not None:
+                cancellation_conditions.extend([RunRow.owner_worker_id == owner_worker_id, RunRow.status.in_(("pending", "running")), self._live_lease_predicate(session)])
+            current = await session.execute(select(RunRow.cancel_action).where(*cancellation_conditions))
             cancel_action = current.scalar_one_or_none()
             await session.commit()
             return StatusFinalization(
@@ -957,6 +1033,7 @@ class RunRepository(RunStore):
         evidence_origin: str = "unknown",
         evidence_agent_id: str | None = None,
         idempotency_request: dict[str, Any] | None = None,
+        execution_fence=None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """Atomically create a run with cross-process thread-uniqueness.
 
@@ -1006,6 +1083,10 @@ class RunRepository(RunStore):
             # mutator. One position covers this atomic set of changes; run_id
             # provides deterministic ordering within the position.
             change_seq = await self._next_change_seq(session)
+            if execution_fence is not None:
+                from deerflow.persistence.extension_leases.fence import lock_execution_fence
+
+                await lock_execution_fence(session, execution_fence, resolved_user_id)
             claimed: list[dict[str, Any]] = []
 
             if idempotency_key is not None:

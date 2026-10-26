@@ -29,7 +29,10 @@ import threading
 import time
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
+
+from deerflow.utils.atomic_write import cleanup_failed_atomic_write
 
 logger = logging.getLogger(__name__)
 
@@ -471,19 +474,19 @@ def _write_text_atomically(path: str, content: str, *, mode: int) -> None:
     """
     directory = os.path.dirname(os.path.abspath(path))
     os.makedirs(directory, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(dir=directory, prefix=f".{os.path.basename(path)}.", suffix=".tmp")
+    fd, temporary_name = tempfile.mkstemp(dir=directory, prefix=f".{os.path.basename(path)}.", suffix=".tmp")
+    temporary = Path(temporary_name)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle = os.fdopen(fd, "w", encoding="utf-8")
+        fd = None  # The file object now owns the descriptor.
+        with handle:
             handle.write(content)
             handle.flush()
             os.chmod(temporary, mode)
             os.fsync(handle.fileno())
         os.replace(temporary, path)
     except BaseException:
-        try:
-            os.unlink(temporary)
-        except OSError:
-            pass
+        cleanup_failed_atomic_write(temporary, fd)
         raise
 
 

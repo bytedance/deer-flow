@@ -24,7 +24,7 @@ def _stub_app_config():
     reset_app_config()
 
 
-def _make_start_run_request(run_manager, *, thread_store=None, auth_source=None, state_user=None, headers=None):
+def _make_start_run_request(run_manager, *, thread_store=None, auth_source=None, state_user=None, headers=None, stream_bridge=None):
     from langgraph.checkpoint.memory import InMemorySaver
     from langgraph.store.memory import InMemoryStore
 
@@ -39,7 +39,7 @@ def _make_start_run_request(run_manager, *, thread_store=None, auth_source=None,
         state=state,
         app=SimpleNamespace(
             state=SimpleNamespace(
-                stream_bridge=SimpleNamespace(),
+                stream_bridge=stream_bridge or SimpleNamespace(),
                 run_manager=run_manager,
                 checkpointer=InMemorySaver(),
                 store=store,
@@ -106,6 +106,7 @@ async def test_sse_consumer_emits_gap_without_cancelling_run():
     evicted_id = bridge._streams[record.run_id].events[0].id
     await bridge.publish(record.run_id, "event-2", {"step": 2})
     await bridge.publish(record.run_id, "event-3", {"step": 3})
+    await bridge.publish(record.run_id, "event-4", {"step": 4})
     retained = bridge._streams[record.run_id].events
 
     worker_started = asyncio.Event()
@@ -378,6 +379,57 @@ def test_canonical_run_record_input_uses_admitted_message_snapshot():
 
     assert stored is not None
     assert stored["messages"][0]["additional_kwargs"]["knowledge_scope"]["dataset_ids"] == ["dataset-1"]
+
+
+@pytest.mark.parametrize("idempotency_key", [None, "retry-key"])
+@pytest.mark.asyncio
+async def test_run_input_ids_match_the_checkpoint_and_record(_stub_app_config, idempotency_key):
+    """An id-less API input must not become a second user turn on reconnect."""
+    from unittest.mock import patch
+
+    from langgraph.graph.message import add_messages
+
+    from app.gateway.routers.thread_runs import RunCreateRequest
+    from app.gateway.services import start_run
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    body = RunCreateRequest(
+        input={
+            "messages": [
+                {"role": "user", "content": "same question"},
+                {"role": "user", "content": "same question"},
+                {"role": "user", "content": "empty id", "id": ""},
+                {"role": "user", "content": "client id", "id": "client-human"},
+            ]
+        }
+    )
+    request = _make_start_run_request(RunManager(store=MemoryRunStore()))
+    captured = {}
+
+    async def fake_run_agent(*_args, **kwargs):
+        captured["messages"] = kwargs["graph_input"]["messages"]
+
+    with patch("app.gateway.services.resolve_agent_factory", return_value=object()), patch("app.gateway.services.run_agent", side_effect=fake_run_agent):
+        record = await start_run(body, "thread-idless-input", request, idempotency_key=idempotency_key)
+        await record.task
+
+        graph_messages = captured["messages"]
+        recorded_messages = record.kwargs["input"]["messages"]
+        ids = [message["id"] for message in recorded_messages]
+        assert len(ids) == 4
+        assert all(isinstance(message_id, str) and message_id for message_id in ids)
+        assert len(set(ids)) == 4
+        assert ids[3] == "client-human"
+        assert [message.id for message in graph_messages] == ids
+        assert [message.id for message in add_messages([], graph_messages)] == ids
+        assert "id" not in body.input["messages"][0]
+        assert body.input["messages"][2]["id"] == ""
+
+        if idempotency_key is not None:
+            reused = await start_run(body, "thread-idless-input", request, idempotency_key=idempotency_key)
+            assert reused.run_id == record.run_id
+            assert [message["id"] for message in reused.kwargs["input"]["messages"]] == ids
 
 
 @pytest.mark.parametrize(
@@ -759,6 +811,28 @@ def test_normalize_input_rejects_malformed_message_with_400():
         normalize_input({"messages": [{"role": "human", "content": "ok"}, {"oops": "no role here"}]})
     assert excinfo.value.status_code == 400
     assert "input.messages[1]" in excinfo.value.detail
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        {"role": "ai", "content": "", "tool_calls": "x"},
+        {"role": "ai", "content": "", "tool_calls": {"name": "t"}},
+        {"role": "ai", "content": "", "tool_calls": ["x"]},
+        {"lc": 1, "type": "constructor", "id": ["langchain", "schema", "messages", "AIMessage"], "kwargs": {"content": "", "tool_calls": "x"}},
+    ],
+    ids=["string", "object", "string-items", "constructor"],
+)
+def test_normalize_input_rejects_wrong_typed_tool_calls_with_400(message):
+    """LangChain's AI-message validator raises ``AttributeError`` for these."""
+    from fastapi import HTTPException
+
+    from app.gateway.services import normalize_input
+
+    with pytest.raises(HTTPException) as excinfo:
+        normalize_input({"messages": [{"role": "human", "content": "ok"}, message]})
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.detail == "Invalid message at input.messages[1]"
 
 
 def test_normalize_input_handles_trusted_internal_non_human_roles():
@@ -1378,6 +1452,55 @@ def test_build_checkpoint_state_accessor_uses_frozen_mode_and_binds_runtime_pers
     assert ("checkpoint_id" in config["configurable"]) is includes_checkpoint_id
     if checkpoint_id is not None:
         assert config["configurable"]["checkpoint_id"] == checkpoint_id
+
+
+def test_build_checkpoint_state_accessor_reads_an_invalid_stored_assistant_id_as_the_lead_agent(_stub_app_config, caplog):
+    """Thread records written before creation validated assistant_id must stay readable."""
+    import logging
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from app.gateway.services import build_checkpoint_state_accessor
+    from deerflow.config.app_config import get_app_config
+
+    class FakeGraph:
+        checkpointer = None
+        store = None
+
+    graph = FakeGraph()
+    ctx = SimpleNamespace(checkpointer=object(), store=object(), checkpoint_channel_mode="delta", app_config=get_app_config())
+    request = SimpleNamespace(state=SimpleNamespace(checkpoint_channel_mode="delta"))
+
+    with (
+        patch("app.gateway.services.get_run_context", return_value=ctx),
+        patch("app.gateway.services.resolve_agent_factory", return_value=lambda *, config: graph) as resolve,
+        caplog.at_level(logging.WARNING, logger="app.gateway.services"),
+    ):
+        accessor, config = build_checkpoint_state_accessor(request, thread_id="legacy-thread", assistant_id="bad name!")
+
+    resolve.assert_called_once_with(None)
+    assert accessor.graph is graph
+    assert "agent_name" not in config["configurable"]
+    assert "agent_name" not in config["context"]
+    assert any("invalid assistant_id" in record.getMessage() for record in caplog.records)
+
+
+@pytest.mark.parametrize(
+    ("assistant_id", "expected"),
+    [(None, None), ("", None), ("lead_agent", None), ("Research_Agent", "research-agent"), (" finalis ", "finalis")],
+)
+def test_custom_agent_name_normalizes_custom_names(assistant_id, expected):
+    from app.gateway.services import custom_agent_name
+
+    assert custom_agent_name(assistant_id) == expected
+
+
+@pytest.mark.parametrize("assistant_id", ["bad name!", "   ", "a/b", "../etc", "naïve"])
+def test_custom_agent_name_rejects_names_no_agent_can_have(assistant_id):
+    from app.gateway.services import custom_agent_name
+
+    with pytest.raises(ValueError, match="Invalid assistant_id"):
+        custom_agent_name(assistant_id)
 
 
 def test_build_checkpoint_state_accessor_accepts_lead_agent_assembly_factory(_stub_app_config):
@@ -2044,6 +2167,111 @@ async def test_start_run_checkpoint_validation_failure_does_not_admit_run(_stub_
 
 
 @pytest.mark.asyncio
+async def test_start_run_establishes_stream_producer_before_durable_admission(
+    _stub_app_config,
+):
+    from unittest.mock import patch
+
+    from app.gateway.services import start_run
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    run_store = MemoryRunStore()
+    run_manager = RunManager(store=run_store)
+    events = []
+    agent_started = asyncio.Event()
+    release = asyncio.Event()
+
+    class TrackingBridge:
+        supports_cross_process = True
+
+        async def start_producer_lease(self, run_id):
+            assert await run_store.get(run_id) is None
+            events.append(("start", run_id))
+            return True
+
+        def transfer_producer_lease(self, run_id, owner_task):
+            events.append(("transfer", run_id, owner_task))
+
+        async def finish_producer_lease(self, run_id):
+            events.append(("finish", run_id))
+
+    bridge = TrackingBridge()
+
+    async def fake_run_agent(_bridge, _manager, record, **_kwargs):
+        agent_started.set()
+        try:
+            await release.wait()
+        finally:
+            await _bridge.finish_producer_lease(record.run_id)
+
+    request = _make_start_run_request(
+        run_manager,
+        stream_bridge=bridge,
+    )
+    body = _run_create_request()
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
+    ):
+        record = await start_run(body, "thread-stream-producer-order", request)
+        try:
+            await asyncio.wait_for(agent_started.wait(), timeout=1)
+            assert events[:2] == [
+                ("start", record.run_id),
+                ("transfer", record.run_id, record.task),
+            ]
+            assert (await run_store.get(record.run_id))["status"] == "pending"
+        finally:
+            release.set()
+            await asyncio.wait_for(record.task, timeout=1)
+    assert events[-1] == ("finish", record.run_id)
+
+
+@pytest.mark.asyncio
+async def test_start_run_releases_preallocated_producer_after_admission_conflict(
+    _stub_app_config,
+):
+    from unittest.mock import patch
+
+    from app.gateway.services import BusyThreadConflict, start_run
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    run_manager = RunManager(store=MemoryRunStore())
+    await run_manager.create_or_reject("thread-stream-producer-conflict")
+    events = []
+
+    class TrackingBridge:
+        supports_cross_process = True
+
+        async def start_producer_lease(self, run_id):
+            events.append(("start", run_id))
+            return True
+
+        async def abort_producer_lease(self, run_id):
+            events.append(("abort", run_id))
+
+    request = _make_start_run_request(
+        run_manager,
+        stream_bridge=TrackingBridge(),
+    )
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        pytest.raises(BusyThreadConflict),
+    ):
+        await start_run(
+            _run_create_request(),
+            "thread-stream-producer-conflict",
+            request,
+        )
+
+    assert len(events) == 2
+    assert events[0][0] == "start"
+    assert events[1] == ("abort", events[0][1])
+
+
+@pytest.mark.asyncio
 async def test_pending_cancel_bypasses_thread_metadata_and_logs_failure(_stub_app_config, caplog):
     from unittest.mock import AsyncMock, patch
 
@@ -2222,6 +2450,51 @@ def test_merge_run_context_overrides_forwards_subagent_total_limit():
 
     assert config["configurable"]["max_total_subagents"] == 8
     assert config["context"]["max_total_subagents"] == 8
+
+
+@pytest.mark.parametrize("model_name", [None, "", "other", 7])
+def test_model_selection_pair_is_rejected_before_admission(model_name):
+    from fastapi import HTTPException
+
+    from app.gateway.services import merge_run_context_overrides
+
+    with pytest.raises(HTTPException) as error:
+        merge_run_context_overrides({}, {"model_name": model_name, "model_selection_requested": "chosen"})
+    assert error.value.status_code == 400
+    assert "must match model_name" in error.value.detail
+
+
+@pytest.mark.parametrize("internal", [False, True])
+@pytest.mark.parametrize("body_context", [None, {"subagent_model_name": "chosen"}])
+def test_model_selection_only_accepts_validated_top_level_context(internal, body_context):
+    from app.gateway.services import merge_run_context_overrides, strip_internal_context_keys
+
+    config = {section: {"model_name": "default", "subagent_model_name": ["malformed"], "model_selection_requested": "x" * 201} for section in ("context", "configurable")}
+    merge_run_context_overrides(config, body_context, internal=internal)
+    if not internal:
+        strip_internal_context_keys(config)
+    assert config["configurable"] == {"model_name": "default"}
+    expected = {"model_name": "default", **(body_context or {})}
+    assert config["context"] == expected
+
+
+def test_matching_unknown_model_selection_is_left_for_assembly():
+    from app.gateway.services import merge_run_context_overrides
+
+    config = {}
+    merge_run_context_overrides(config, {"model_name": "missing", "model_selection_requested": "missing"})
+    assert config["context"] == {"model_name": "missing", "model_selection_requested": "missing"}
+    assert "model_selection_requested" not in config["configurable"]
+
+
+def test_model_selection_rejects_conflicting_effective_context():
+    from fastapi import HTTPException
+
+    from app.gateway.services import merge_run_context_overrides
+
+    with pytest.raises(HTTPException) as error:
+        merge_run_context_overrides({"context": {"model_name": "other"}}, {"model_name": "chosen", "model_selection_requested": "chosen"})
+    assert error.value.status_code == 400
 
 
 def test_null_subagent_total_limit_from_api_context_builds_with_configured_cap():
@@ -4333,6 +4606,23 @@ def test_build_run_config_rejects_non_mapping_context():
 
     with pytest.raises(ValueError, match="context"):
         build_run_config("thread-1", {"context": "bad-context"}, None)
+
+
+@pytest.mark.parametrize("configurable", [[1], "ab", [["k", "v"]], []], ids=["list", "string", "pairs", "empty-list"])
+@pytest.mark.parametrize("with_context", [False, True], ids=["configurable-only", "with-context"])
+def test_build_run_config_rejects_non_mapping_configurable(configurable, with_context):
+    """A non-object configurable is a clear ValueError, not a dict.update() error.
+
+    With ``context`` present the configurable section is otherwise ignored, but
+    reading its keys for the warning used to raise AttributeError.
+    """
+    from app.gateway.services import build_run_config
+
+    request_config = {"configurable": configurable}
+    if with_context:
+        request_config["context"] = {}
+    with pytest.raises(ValueError, match="configurable"):
+        build_run_config("thread-1", request_config, None)
 
 
 def test_build_run_config_null_context_custom_agent_injects_agent_name():

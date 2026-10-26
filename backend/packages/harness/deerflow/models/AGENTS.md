@@ -24,6 +24,8 @@ nested underflow into zero. Regression coverage is in `tests/test_mindie_provide
 
 ### Model Factory (`packages/harness/deerflow/models/factory.py`)
 
+`selection.py` resolves direct user model controls against the visible catalog without model calls. `aliases` is presentation metadata, stripped from provider kwargs and assembly parameters. Gateway copies `subagent_model_name`/`model_selection_requested` into runtime context only. Explicit choices use `model:use` with no deny-to-default substitution; provider errors retain deployment policy. Bind selected child names through cloned task schemas; never mutate shared tools or agent configs.
+
 Request-admission waits follow the next scheduled admission and configured
 interval, capped at 50 ms; the cap must not become a minimum poll interval that
 limits high-RPM throughput. Local `AdmissionError` is structurally non-retriable
@@ -136,6 +138,15 @@ reported as text instead of raising `AttributeError`. SSE failures do not enter
 the HTTP-status retry loop.
 Offline HTTP-stream coverage: `tests/test_codex_stream_terminal_events.py`.
 
+### Codex Retry Delays (`openai_codex_provider.py`)
+
+Prefer numeric `retry-after-ms` over numeric or HTTP-date `Retry-After` hints.
+Interpret HTTP-date values in UTC, including the obsolete timezone-less asctime
+form. Apply `utils.retry_after.bounded_retry_after_ms` to every parsed delay:
+past dates retry immediately; malformed, non-finite or over-24-hour hints retain
+local exponential backoff. Keep millisecond hints numeric-only. Offline coverage
+in `tests/test_codex_retry_after.py` includes public sync/async HTTP retries.
+
 ### Claude Code Credentials (`packages/harness/deerflow/models/credential_loader.py`)
 
 - `ClaudeChatModel.model_post_init` calls `load_claude_code_credential()` for every instance, and `create_chat_model` builds fresh instances per run (lead agent, title, summarization, subagents)
@@ -144,9 +155,11 @@ Offline HTTP-stream coverage: `tests/test_codex_stream_terminal_events.py`.
 ### Claude Retry Delays (`claude_provider.py`)
 
 `_calc_backoff_ms` uses `utils.retry_after.bounded_retry_after_ms` for integer-second
-provider hints. Invalid or over-24-hour values retain local exponential backoff;
-finite negative values clamp to zero. Sync/async 429/500 regressions live in
-`tests/test_claude_provider_retry_after.py` and use offline provider doubles.
+provider hints and HTTP-date hints (including obsolete forms interpreted in UTC).
+Invalid or over-24-hour values retain local exponential backoff; finite negative
+values and past dates clamp to zero. Sync/async 429/500 regressions live in
+`tests/test_claude_provider_retry_after.py`; `tests/test_claude_retry_after_dates.py`
+exercises public invocation through real SDK clients with offline HTTP transports.
 
 ### Provider Retry Admission (`claude_provider.py`, `openai_codex_provider.py`)
 
@@ -189,6 +202,11 @@ the shared simulated chunker. Preserve terminal usage exactly once, XML/native
 tool calls, invalid calls, and the original messages. Offline SDK boundary tests:
 `tests/test_mindie_provider.py::test_public_stream_compatibility_through_sdk`.
 
+Whole-response and streaming newline decoding protect both triple-backtick and
+triple-tilde fences. The earliest opener wins, only the same delimiter closes it,
+and an unclosed fence keeps the remainder verbatim. Boundary and mixed-delimiter
+regressions live in `tests/test_mindie_newline_fences.py`.
+
 `_fix_messages` converts tool results to the XML text format expected by MindIE.
 Only tool-message `type=json` payloads join the text channel; other non-text
 blocks remain omitted. Keep the `<tool_response>` escaping boundary and the
@@ -218,7 +236,7 @@ Direct `AppConfig.from_file()` continues to read only operator configuration.
 `config/managed_model_providers.py` is the sole registry for provider IDs, labels,
 endpoints, protocols, authentication parameter mappings, adapters and request
 defaults. Capability rules match exact verified model IDs; unknown preset IDs
-have an unsupported-thinking contract, no vision and no inferred context window.
+have an unsupported-thinking contract, no vision and no inferred context window. Verified DeepSeek presets declare an effort vocabulary of `low`/`medium`/`high`/`max`/`xhigh` (default `low`) and alias the generic `minimal` preset onto `low`, so a saved per-agent `minimal` default serializes as a value the official endpoint accepts (issue #4514).
 Preset drafts cannot supply endpoints or adapter paths. Legacy custom
 `openai-compatible` records retain endpoint-based official DeepSeek detection;
 never infer that adapter from a model-name substring. Reads do not migrate the

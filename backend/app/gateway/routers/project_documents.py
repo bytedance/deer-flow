@@ -137,9 +137,37 @@ async def _require_project(request: Request, project_id: str) -> dict:
     return row
 
 
+async def _require_active_project(request: Request, project_id: str) -> dict:
+    """Owned ``status='active'`` project row, else 404 — checked before staging.
+
+    Staging creates ``users/{user_id}/projects/{project_id}/`` on disk, so a
+    missing, foreign, or archived project (or an id no row can carry) must be
+    rejected before any byte is written. The shelf insert re-checks under the
+    project row lock; this is the early exit, not the authority (§8.4).
+    """
+    row = await _require_project(request, project_id)
+    if row.get("status") != "active":
+        raise _not_found()
+    return row
+
+
 async def _stream_upload(file: UploadFile) -> AsyncIterator[bytes]:
     while chunk := await file.read(UPLOAD_CHUNK_SIZE):
         yield chunk
+
+
+async def _discard_staged_copy(staging_path: Path) -> None:
+    """Remove a staged shelf copy that is no longer needed.
+
+    Best-effort, mirroring ``routers/uploads.py::_remove_staged_file``: the caller
+    is about to return or raise its real outcome, and a removal failure (a Windows
+    handle still held elsewhere, a read-only mount) must neither replace that
+    outcome nor skip later teardown. The leftover is what the staging sweep owns.
+    """
+    try:
+        await run_file_io(staging_path.unlink, True)
+    except OSError:
+        logger.warning("Failed to remove staged shelf copy: %s", staging_path, exc_info=True)
 
 
 @router.get("", response_model=ProjectDocumentListResponse)
@@ -178,9 +206,9 @@ async def upload_project_document(
 ) -> ProjectDocumentUploadResponse:
     """Shelf exactly one file (§17.2): 201 created, or 200 on a content dedup hit.
 
-    Active projects only — the shelf insert locks the project row with
-    ``status='active'`` inside its transaction, so an archived/foreign/missing
-    project is the same 404 (§8.4, §11). The display name defaults to the
+    Active projects only — an archived/foreign/missing project is the same
+    404 (§8.4, §11), rejected before the body is staged and re-checked by the
+    shelf insert under the project row lock. The display name defaults to the
     multipart filename; both go through the same validation (400 when empty,
     separator-bearing, or over 255 UTF-8 bytes). Size reuses
     ``uploads.max_file_size`` (413, mirroring the uploads router).
@@ -190,6 +218,7 @@ async def upload_project_document(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
+    await _require_active_project(request, project_id)
     user_id = get_effective_user_id()
     paths = get_paths()
     max_file_size = _get_upload_limit(config, "max_file_size", DEFAULT_MAX_FILE_SIZE, legacy_key="max_single_file_size")
@@ -201,7 +230,7 @@ async def upload_project_document(
         # Unsafe project_id charset — fail closed, indistinguishable from missing.
         raise _not_found()
     if staged.size_bytes == 0:
-        await run_file_io(staged.staging_path.unlink, True)
+        await _discard_staged_copy(staged.staging_path)
         raise HTTPException(status_code=400, detail="Empty file")
 
     result = await add_staged_document(
@@ -287,9 +316,9 @@ async def promote_thread_file_to_shelf(
     The source is never moved — the shelf gets a project-owned snapshot with
     provenance (``source_thread_id``/``source_kind``/``source_name``), so
     deleting the thread cannot affect it. ``shelf_name`` defaults to the
-    source name and follows upload-name validation. The shelf insert locks
-    the project row with ``status='active'``, so an archived/foreign/missing
-    project is the same 404 as a source that fails confinement (§8.4, §11).
+    source name and follows upload-name validation. An archived/foreign/missing
+    project is the same 404 as a source that fails confinement (§8.4, §11),
+    rejected before staging and re-checked by the shelf insert's row lock.
     Response mirrors upload: 201 created, 200 on a content dedup hit (the
     existing row keeps its own name and provenance, §10.9).
     """
@@ -307,6 +336,7 @@ async def promote_thread_file_to_shelf(
     if source is None:
         raise _not_found()
 
+    await _require_active_project(request, project_id)
     max_file_size = _get_upload_limit(config, "max_file_size", DEFAULT_MAX_FILE_SIZE, legacy_key="max_single_file_size")
     try:
         staged = await stage_document_bytes(paths, user_id=user_id, project_id=project_id, chunks=read_file_chunks(source, chunk_size=UPLOAD_CHUNK_SIZE), max_bytes=max_file_size)
@@ -316,7 +346,7 @@ async def promote_thread_file_to_shelf(
         # Unsafe project_id charset — fail closed, indistinguishable from missing.
         raise _not_found()
     if staged.size_bytes == 0:
-        await run_file_io(staged.staging_path.unlink, True)
+        await _discard_staged_copy(staged.staging_path)
         raise HTTPException(status_code=400, detail="Empty file")
 
     result = await add_staged_document(
@@ -403,12 +433,15 @@ async def attach_project_document_to_thread(
         except Exception as exc:
             logger.error(f"Failed to attach {row['name']} to thread {thread_id}: {exc}")
             await service.cleanup_written()
-            raise HTTPException(status_code=500, detail=f"Failed to upload {row['name']}: {exc}")
+            raise HTTPException(status_code=500, detail=f"Failed to upload {row['name']}.")
         # Sync-phase failures (permissions/provider sync) follow ordinary
         # uploads: they propagate and the host files stay in place.
         await service.finalize()
     finally:
-        await run_file_io(staged_path.unlink, True)
+        # The staged copy is best-effort, so its removal can never replace the
+        # caller's outcome; ``aclose()`` is this endpoint's only teardown and must
+        # still run when the removal fails.
+        await _discard_staged_copy(staged_path)
         await service.aclose()
     return AttachDocumentResponse(
         filename=file_info["filename"],

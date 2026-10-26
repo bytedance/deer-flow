@@ -31,17 +31,29 @@ import tempfile
 import threading
 import time
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
+
+from app.channels.credential_staging import cleanup_stale_credential_staging, credential_staging_prefix
+from deerflow.utils.file_lock import retry_until_locked
 
 if TYPE_CHECKING:
     from deerflow.config.credentials_key import CredentialsCipher
     from deerflow.persistence.channel_runtime_configs import SqlChannelRuntimeConfigRepository, StoredChannelRuntimeConfig
 
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows fallback
+    fcntl = None  # type: ignore[assignment]
+    import msvcrt
+
 logger = logging.getLogger(__name__)
 
 RUNTIME_CHANNEL_DISABLED_FLAG = "_runtime_disabled"
+
+# About ten seconds at the shared helper's 0.2-second retry cadence.
+_LOCK_WAIT_WARNING_ATTEMPTS = 50
 
 
 class ChannelRuntimeConfigEncryptionUnavailable(RuntimeError):
@@ -81,28 +93,40 @@ def _runtime_config_file_lock(path: Path) -> Iterator[None]:
     target_path = path.resolve(strict=False) if path.is_symlink() else path.absolute()
     lock_path = target_path.parent / f".{target_path.name}.lock"
     with open(lock_path, "a+b") as lock_file:
-        if os.name == "nt":
-            import msvcrt
-
+        if fcntl is not None:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        else:  # pragma: no cover - Windows fallback
             lock_file.seek(0, os.SEEK_END)
             if lock_file.tell() == 0:
                 lock_file.write(b"\0")
                 lock_file.flush()
+            # LK_LOCK gives up after roughly ten seconds. Share the
+            # contention-only retry policy, retaining an indefinite wait.
             lock_file.seek(0)
-            msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
-        else:
-            import fcntl
+            retries = 0
 
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            def wait_for_lock(delay: float) -> None:
+                nonlocal retries
+                retries += 1
+                if retries == _LOCK_WAIT_WARNING_ATTEMPTS:
+                    # Diagnostics must not abort acquisition or flood the log.
+                    with suppress(Exception):
+                        logger.warning("Still waiting for channel runtime config lock %s after %d contention retries", lock_path, retries)
+                time.sleep(delay)
+
+            retry_until_locked(
+                lambda: msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1),
+                sleep=wait_for_lock,
+            )
 
         try:
             yield
         finally:
-            if os.name == "nt":
+            if fcntl is not None:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            else:  # pragma: no cover - Windows fallback
                 lock_file.seek(0)
                 msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
-            else:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 class ChannelRuntimeConfigStore:
@@ -120,6 +144,7 @@ class ChannelRuntimeConfigStore:
     def __init__(self, path: str | Path | None = None) -> None:
         self._path = Path(path) if path is not None else default_runtime_config_path()
         self._path.parent.mkdir(parents=True, exist_ok=True)
+        cleanup_stale_credential_staging(self._path)
         self._data: dict[str, dict[str, Any]] = self._load()
         self._lock = threading.Lock()
 
@@ -127,7 +152,7 @@ class ChannelRuntimeConfigStore:
         if self._path.exists():
             try:
                 raw = json.loads(self._path.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
+            except (json.JSONDecodeError, OSError, UnicodeDecodeError):
                 if fallback is not None:
                     logger.warning("Corrupt channel runtime config store at %s, rewriting it from this process's copy", self._path)
                     return {name: dict(config) for name, config in fallback.items()}
@@ -159,7 +184,9 @@ class ChannelRuntimeConfigStore:
         fd = tempfile.NamedTemporaryFile(
             mode="w",
             encoding="utf-8",
+            newline="",
             dir=self._path.parent,
+            prefix=credential_staging_prefix(self._path),
             suffix=".tmp",
             delete=False,
         )
@@ -176,8 +203,19 @@ class ChannelRuntimeConfigStore:
             except OSError:
                 logger.debug("Unable to chmod channel runtime config store at %s", self._path, exc_info=True)
         except BaseException:
-            fd.close()
-            Path(fd.name).unlink(missing_ok=True)
+            # Cleanup is best-effort: a failing close or unlink must not take the
+            # original save error with it, and the unlink is still attempted after
+            # a failed close.
+            try:
+                fd.close()
+            except OSError:
+                with suppress(Exception):
+                    logger.warning("Failed to close temporary channel runtime config file %s", fd.name, exc_info=True)
+            try:
+                Path(fd.name).unlink(missing_ok=True)
+            except OSError:
+                with suppress(Exception):
+                    logger.warning("Failed to remove temporary channel runtime config file %s", fd.name, exc_info=True)
             raise
 
     def load_all(self) -> dict[str, dict[str, Any]]:
@@ -346,9 +384,15 @@ class SqlChannelRuntimeConfigStore:
 
 def _read_legacy_file(path: Path) -> dict[str, Any] | None:
     """Parse ``runtime-config.json``; ``None`` when it is missing, unreadable or not an object (kept in place)."""
+    # Also runs after migration removed the legacy file: a crash-orphaned
+    # credential copy must not survive merely because the store now uses SQL.
+    cleanup_stale_credential_staging(path)
     try:
         raw = path.read_text(encoding="utf-8")
     except FileNotFoundError:
+        return None
+    except UnicodeDecodeError:
+        logger.warning("Corrupt channel runtime config %s; skipping the import (file kept)", path)
         return None
     except OSError:
         logger.warning("Cannot read channel runtime config %s; skipping the import (file kept)", path, exc_info=True)

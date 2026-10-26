@@ -12,15 +12,17 @@ from deerflow_extension_api import (
     extension,
 )
 
-from .service import NAMESPACE, Workflows
+from .constants import NAMESPACE
+from .service import Workflows
 
 
-@extension(api="0.2.7", name="workflows")
+@extension(api="0.2.9", name="workflows")
 def install(registry, config):
     enabled = config.get("enabled", False)
     if type(enabled) is not bool:
         raise ValueError("enabled must be boolean")
     defaults = {
+        "lease_seconds": 15,
         "concurrency": 2,
         "global_concurrency": 4,
         "max_calls": 16,
@@ -33,6 +35,7 @@ def install(registry, config):
         "memory_bytes": 16 * 1024 * 1024,
     }
     ceilings = {
+        "lease_seconds": 60,
         "concurrency": 4,
         "global_concurrency": 8,
         "max_calls": 32,
@@ -44,13 +47,18 @@ def install(registry, config):
         "cpu_seconds": 10,
         "memory_bytes": 32 * 1024 * 1024,
     }
-    if set(config) - set(defaults) - {"enabled", "storage_path", "agents"}:
+    if set(config) - set(defaults) - {"enabled", "storage_path", "storage_url", "agents"}:
         raise ValueError("Unknown workflow configuration; currency budgets are not supported")
+    storage_url = config.get("storage_url")
+    if storage_url is not None and (not isinstance(storage_url, str) or not storage_url.strip()):
+        raise ValueError("storage_url must be a PostgreSQL connection string")
     resolved = {**defaults, **config}
     for key in defaults:
         value = resolved[key]
         if type(value) is not int or not 1 <= value <= ceilings[key]:
             raise ValueError(f"Invalid workflow limit {key}")
+    if resolved["lease_seconds"] < 5:
+        raise ValueError("lease_seconds must be at least 5")
     if resolved["memory_bytes"] < 4 * 1024 * 1024:
         raise ValueError("memory_bytes must be at least 4 MiB")
     agents = config.get("agents", [])
@@ -92,7 +100,10 @@ def install(registry, config):
                 namespace=NAMESPACE,
                 title="Script workflows / 脚本工作流",
                 enabled=enabled,
-                description="Bounded background script orchestration of full Agents. Versioned definitions, live-process resume and authenticated output checkpoints. No restart replay or hard monetary budget.",
+                description=(
+                    "Bounded background script orchestration of full Agents. Versioned definitions, authenticated output checkpoints and session-authorized recovery and opt-in PostgreSQL multi-Gateway control. "
+                    "Uncertain child effects require reconciliation. No hard monetary budget."
+                ),
                 frontend=BrowserAssets("workflows.v1", Path(__file__).parent),
                 backend=tuple(
                     BackendAction(name, getattr(workflows, name))
@@ -106,6 +117,7 @@ def install(registry, config):
                         "definitions",
                         "get_definition",
                         "resume",
+                        "recover",
                         "decide",
                         "get_step",
                         "get_artifact",
@@ -116,7 +128,16 @@ def install(registry, config):
                     ModelTool(
                         "read_workflow_artifact",
                         "Read exact approved immutable file bytes, base64 in 16 KiB chunks. Pass workflow run_id, version, offset. Verify sha256 after assembling chunks. Never read the mutable original path as a substitute.",
-                        {"type": "object", "properties": {"run_id": {"type": "string"}, "version": {"type": "string"}, "offset": {"type": "integer", "minimum": 0}}, "required": ["run_id", "version"], "additionalProperties": False},
+                        {
+                            "type": "object",
+                            "properties": {
+                                "run_id": {"type": "string"},
+                                "version": {"type": "string"},
+                                "offset": {"type": "integer", "minimum": 0},
+                            },
+                            "required": ["run_id", "version"],
+                            "additionalProperties": False,
+                        },
                         workflows.read_artifact,
                     ),
                     ModelTool(
@@ -148,7 +169,8 @@ def install(registry, config):
                         "Launch an inspectable JavaScript orchestration script in the background and return a workflow run ID. Use agent({stepId,agentRef,task}), parallel([()=>...]), log(text), pause({stepId}) and "
                         "humanCheckpoint({stepId,sourceStepId,artifactVersion}). Await checkpoints alone after all calls. agent resolves to "
                         "{output,threadId,runId,status,artifactVersion}; args contains JSON arguments. Use unique step IDs, explicit bounded loops and await every Agent call. Only operator-allowed agent references are admitted with "
-                        "this caller's permissions. Keep request_id stable on retries. Resume retains the live worker only; restart ends resumability. Human decisions are browser-only and cover retained step output. "
+                        "this caller's permissions. Keep request_id stable on retries. After restart, an authenticated browser session can explicitly recover a compatible workflow. "
+                        "Pass timestamps and randomness in args; Date and Math.random are unavailable. Human decisions are browser-only and cover retained step output. "
                         "Inspect results on request; do not poll in a loop or equate Agent "
                         "success with product approval. No hard monetary cost guarantee.",
                         launch_schema,

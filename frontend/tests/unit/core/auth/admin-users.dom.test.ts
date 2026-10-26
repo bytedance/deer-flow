@@ -128,6 +128,25 @@ describe("admin user management client", () => {
     });
   });
 
+  test("lists users whose addresses only the backend's validator accepts", async () => {
+    // One such account used to fail the whole list for every administrator.
+    const rows = ["a&b@example.com", "a@b.c", "josé@example.com"].map(
+      (email, index) => ({
+        id: `u-${index}`,
+        email,
+        system_role: "user",
+        needs_setup: false,
+        oauth_provider: null,
+        disabled: false,
+      }),
+    );
+    globalThis.fetch = rs.fn(async () =>
+      jsonResponse(rows),
+    ) as unknown as typeof globalThis.fetch;
+
+    await expect(loadAdminUsers()).resolves.toEqual(rows);
+  });
+
   test("a malformed row rejects instead of rendering a phantom user", async () => {
     globalThis.fetch = rs.fn(async () =>
       jsonResponse([{ email: "no-id@example.com" }]),

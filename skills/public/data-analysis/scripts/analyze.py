@@ -13,6 +13,7 @@ import os
 import re
 import sys
 import tempfile
+from collections import Counter
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
@@ -337,9 +338,21 @@ def _format_table(columns: list[str], rows: list[tuple]) -> str:
     return result
 
 
+def _markdown_cell(value: object) -> str:
+    """Keep table delimiters and line breaks inside a single Markdown cell."""
+    return (
+        str(value)
+        .replace("\\", "\\\\")
+        .replace("|", "\\|")
+        .replace("\r\n", "\n")
+        .replace("\r", "\n")
+        .replace("\n", "<br>")
+    )
+
+
 def _export_results(columns: list[str], rows: list[tuple], output_file: str) -> str:
     """Export query results to a file (CSV, JSON, or Markdown)."""
-    os.makedirs(os.path.dirname(output_file), exist_ok=True)
+    os.makedirs(os.path.dirname(output_file) or ".", exist_ok=True)
     ext = os.path.splitext(output_file)[1].lower()
 
     if ext == ".csv":
@@ -351,6 +364,13 @@ def _export_results(columns: list[str], rows: list[tuple], output_file: str) -> 
             writer.writerows(rows)
 
     elif ext == ".json":
+        duplicates = [name for name, count in Counter(columns).items() if count > 1]
+        if duplicates:
+            raise ValueError(
+                "JSON export requires unique column names; duplicates: "
+                + ", ".join(repr(name) for name in duplicates)
+                + ". Use SQL aliases (AS) to give each result column a distinct name."
+            )
         records = []
         for row in rows:
             record = {}
@@ -363,19 +383,22 @@ def _export_results(columns: list[str], rows: list[tuple], output_file: str) -> 
                     val = val.hex()
                 record[col] = val
             records.append(record)
+        # Reject non-JSON numbers, including nested values, before touching the
+        # destination so a failed export cannot overwrite an existing result.
+        serialized = json.dumps(
+            records, indent=2, ensure_ascii=False, default=str, allow_nan=False
+        )
         with open(output_file, "w", encoding="utf-8") as f:
-            json.dump(records, f, indent=2, ensure_ascii=False, default=str)
+            f.write(serialized)
 
     elif ext == ".md":
         with open(output_file, "w", encoding="utf-8") as f:
             # Header
-            f.write("| " + " | ".join(columns) + " |\n")
+            f.write("| " + " | ".join(_markdown_cell(c) for c in columns) + " |\n")
             f.write("| " + " | ".join("---" for _ in columns) + " |\n")
             # Rows
             for row in rows:
-                f.write(
-                    "| " + " | ".join(str(v).replace("|", "\\|") for v in row) + " |\n"
-                )
+                f.write("| " + " | ".join(_markdown_cell(v) for v in row) + " |\n")
     else:
         msg = f"Unsupported output format: {ext}. Use .csv, .json, or .md"
         print(msg)
@@ -575,15 +598,17 @@ def main():
         )
         logger.info(f"Cached database saved to: {db_path}")
 
-    # Perform action
-    if args.action == "inspect":
-        action_inspect(con, table_map)
-    elif args.action == "query":
-        action_query(con, args.sql, table_map, args.output_file)
-    elif args.action == "summary":
-        action_summary(con, args.table, table_map)
-
-    con.close()
+    try:
+        if args.action == "inspect":
+            action_inspect(con, table_map)
+        elif args.action == "query":
+            action_query(con, args.sql, table_map, args.output_file)
+        elif args.action == "summary":
+            action_summary(con, args.table, table_map)
+    except ValueError as exc:
+        sys.exit(f"Error: {exc}")
+    finally:
+        con.close()
 
 
 if __name__ == "__main__":

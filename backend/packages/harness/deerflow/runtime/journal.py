@@ -421,6 +421,7 @@ class RunJournal(BaseCallbackHandler):
         self._seen_llm_starts: set[str] = set()  # langchain run_ids that fired on_chat_model_start
         self._current_run_tool_call_names: dict[str, str] = {}
         self._active_tool_names: dict[str, str] = {}
+        self._persisted_ai_message_identities: set[str] = set()
         self._persisted_tool_message_identities: set[str] = set()
 
         # Bumped once per successful event-store write. A reader that cached a
@@ -692,6 +693,8 @@ class RunJournal(BaseCallbackHandler):
                 messages,
                 caller=caller,
             )
+            if is_canonical_callback:
+                self._persisted_ai_message_identities.update(identity for message in messages if self._is_ai_message(message) and (identity := self._message_identity(message)) is not None)
 
         if should_schedule_progress:
             self._schedule_progress_flush()
@@ -891,6 +894,41 @@ class RunJournal(BaseCallbackHandler):
         if identity:
             self._persisted_tool_message_identities.add(identity)
         self._record_message_summary(message)
+
+    def record_interrupted_ai_responses(self, messages: Iterable[AIMessage]) -> int:
+        """Persist visible streamed text that never reached ``on_llm_end``.
+
+        The worker calls this only after its agent stream has closed and the run
+        has resolved to ``interrupted``. Completed callback responses win the
+        cancellation race by message identity, and repeated finalization is a
+        no-op. These feed events intentionally do not enter checkpoint state.
+        """
+        recorded = 0
+        for message in messages:
+            if self._closed or message.additional_kwargs.get("hide_from_ui") is True:
+                continue
+            identity = self._message_identity(message)
+            if identity is None or identity in self._persisted_ai_message_identities:
+                continue
+            if not self._message_text(message).strip():
+                continue
+            self._put(
+                event_type=LLM_AI_RESPONSE_EVENT.event_type,
+                category=LLM_AI_RESPONSE_EVENT.category,
+                content=message.model_dump(),
+                metadata={
+                    "caller": "lead_agent",
+                    "interrupted": True,
+                    "latency_ms": None,
+                    "llm_call_index": max(1, self._llm_call_index),
+                    "partial": True,
+                    "usage": {},
+                },
+            )
+            self._persisted_ai_message_identities.add(identity)
+            self._record_message_summary(message, caller="lead_agent")
+            recorded += 1
+        return recorded
 
     def _final_output_messages(self, outputs: Any) -> list[Any]:
         if isinstance(outputs, Mapping):
@@ -1725,27 +1763,40 @@ class RunJournal(BaseCallbackHandler):
             await asyncio.sleep(0)
 
     async def _drain_evidence(self) -> None:
+        """Freeze and drain while the caller holds the operation lock."""
         if self._closed:
             return
         await self._stop_evidence_producers()
-        await self.flush()
+        await self._flush_locked()
 
-    async def finish_evidence(self):
+    async def finish_evidence(self, *, before_receipt: Callable[[], Awaitable[None]] | None = None):
         """Stop declared producers and drain accepted work before capturing bounds.
 
         This is independent of terminal business status and does not detach the
         journal. Proven uncommitted writes remain available for explicit retry;
         unknown outcomes stay quarantined and never yield a durable receipt.
+        The worker's optional terminal confirmation runs after drain and before
+        bounds capture, under the same lock as flush and normal close.
         Unsupported stores return no durable receipt.
         """
-        if self._closed:
-            return None
-        await self._drain_evidence()
-        from deerflow.runtime.events.store.db import DbRunEventStore
+        async with self._operation_lock:
+            if self._abandoned:
+                raise RuntimeError(f"RunJournal for run {self.run_id} was force-closed; cannot finish evidence")
+            if self._closed:
+                return None
+            await self._drain_evidence()
+            if before_receipt is not None:
+                await before_receipt()
+            if self._abandoned:
+                raise RuntimeError(f"RunJournal for run {self.run_id} was force-closed; cannot capture evidence bounds")
+            from deerflow.runtime.events.store.db import DbRunEventStore
 
-        if isinstance(self._store, DbRunEventStore):
-            return await self._store.evidence_receipt(self.thread_id, self.run_id)
-        return None
+            if isinstance(self._store, DbRunEventStore):
+                receipt = await self._store.evidence_receipt(self.thread_id, self.run_id)
+                if self._abandoned:
+                    raise RuntimeError(f"RunJournal for run {self.run_id} was force-closed during evidence bounds capture")
+                return receipt
+            return None
 
     def _detach_runtime_dependencies(self) -> None:
         """Drop every external or potentially cyclic run-scoped reference."""
@@ -1772,6 +1823,7 @@ class RunJournal(BaseCallbackHandler):
         self._llm_start_times.clear()
         self._seen_llm_starts.clear()
         self._current_run_tool_call_names.clear()
+        self._persisted_ai_message_identities.clear()
         self._persisted_tool_message_identities.clear()
         self._produced_artifacts.clear()
         self._produced_artifact_keys.clear()

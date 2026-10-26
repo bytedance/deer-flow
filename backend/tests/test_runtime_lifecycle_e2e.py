@@ -16,6 +16,7 @@ import threading
 import time
 import uuid
 from contextlib import suppress
+from functools import partial
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -565,6 +566,179 @@ def test_stream_run_completes_and_persists_runtime_state(isolated_app):
         assert "llm.ai.response" in event_types
         assert any(row["content"]["content"] == "Run lifecycle E2E prompt" for row in message_events if row["event_type"] == "llm.human.input")
         assert any(row["content"]["content"] == "Lifecycle complete." for row in message_events if row["event_type"] == "llm.ai.response")
+
+
+_CONFIG_SECTION_ERROR = "invalid_run_config_section"
+_UNRESOLVED_AGENT_DETAIL = "knowledge_scope assistant configuration could not be resolved"
+
+
+@pytest.mark.parametrize(
+    ("overrides", "status_code", "detail"),
+    [
+        pytest.param({"config": {"configurable": [1]}}, 422, _CONFIG_SECTION_ERROR, id="configurable-list"),
+        pytest.param({"config": {"configurable": "ab"}}, 422, _CONFIG_SECTION_ERROR, id="configurable-string"),
+        pytest.param({"config": {"configurable": [["k", "v"]]}}, 422, _CONFIG_SECTION_ERROR, id="configurable-pairs"),
+        pytest.param({"config": {"context": [1]}}, 422, _CONFIG_SECTION_ERROR, id="context-list"),
+        pytest.param({"config": {"context": "x", "configurable": [1]}}, 422, _CONFIG_SECTION_ERROR, id="both-sections"),
+        pytest.param(
+            {"assistant_id": "bad name!"},
+            422,
+            "Invalid assistant_id 'bad name!': must contain only letters, digits, and hyphens after normalization.",
+            id="assistant-id-characters",
+        ),
+        pytest.param(
+            {"assistant_id": "   "},
+            422,
+            "Invalid assistant_id '   ': must contain only letters, digits, and hyphens after normalization.",
+            id="assistant-id-blank",
+        ),
+        pytest.param({"config": {"configurable": {"agent_name": 1}}}, 422, _UNRESOLVED_AGENT_DETAIL, id="configurable-agent-name"),
+        pytest.param({"config": {"context": {"agent_name": 1}}}, 422, _UNRESOLVED_AGENT_DETAIL, id="config-context-agent-name"),
+        pytest.param({"context": {"agent_name": 1}}, 422, _UNRESOLVED_AGENT_DETAIL, id="context-agent-name"),
+        pytest.param(
+            {"input": {"messages": [{"role": "user", "content": "hi"}, {"role": "ai", "content": "", "tool_calls": "x"}]}},
+            400,
+            "Invalid message at input.messages[1]",
+            id="tool-calls-string",
+        ),
+    ],
+)
+@pytest.mark.parametrize("route", ["thread", "stateless"])
+def test_malformed_run_body_is_rejected_before_a_run_is_created(isolated_app, overrides, status_code, detail, route):
+    """Bodies the request model accepts must still fail as client errors.
+
+    Each shape used to escape run admission as an unmapped exception and
+    answer 500. The thread route also proves nothing was admitted.
+    """
+    from starlette.testclient import TestClient
+
+    controller = _RunController()
+    factory = _make_agent_factory(controller, title="Rejected", answer="never")
+
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=factory),
+        TestClient(isolated_app, raise_server_exceptions=False) as client,
+    ):
+        csrf_token = _register_user(client)
+        thread_id = _create_thread(client, csrf_token)
+        path = f"/api/threads/{thread_id}/runs/wait" if route == "thread" else "/api/runs/wait"
+
+        response = client.post(path, json=_run_body(**overrides), headers={"X-CSRF-Token": csrf_token})
+
+        assert response.status_code == status_code, response.text
+        body = response.json()
+        if detail == _CONFIG_SECTION_ERROR:
+            assert [error["type"] for error in body["detail"]] == [_CONFIG_SECTION_ERROR]
+        else:
+            assert body == {"detail": detail}
+        assert not controller.started.is_set()
+        runs = client.get(f"/api/threads/{thread_id}/runs")
+        assert runs.status_code == 200, runs.text
+        assert runs.json() == []
+
+
+@pytest.mark.parametrize("assistant_id", ["bad name!", "   ", "a/b", "../etc"])
+def test_thread_create_rejects_an_assistant_id_that_names_no_agent(isolated_app, assistant_id):
+    """Such an id used to be stored, and every state read of the thread then answered 500."""
+    from starlette.testclient import TestClient
+
+    with TestClient(isolated_app, raise_server_exceptions=False) as client:
+        csrf_token = _register_user(client)
+        thread_id = str(uuid.uuid4())
+
+        response = client.post(
+            "/api/threads",
+            json={"thread_id": thread_id, "assistant_id": assistant_id},
+            headers={"X-CSRF-Token": csrf_token},
+        )
+
+        assert response.status_code == 422, response.text
+        [error] = response.json()["detail"]
+        assert error["loc"] == ["body", "assistant_id"]
+        assert f"Invalid assistant_id {assistant_id!r}" in error["msg"]
+        assert client.portal.call(partial(isolated_app.state.thread_store.get, thread_id, user_id=None)) is None
+
+
+@pytest.mark.parametrize("assistant_id", [None, "", "lead_agent", "Research_Agent"])
+def test_thread_create_keeps_a_valid_assistant_id_as_sent(isolated_app, assistant_id):
+    from starlette.testclient import TestClient
+
+    with TestClient(isolated_app, raise_server_exceptions=False) as client:
+        csrf_token = _register_user(client)
+        thread_id = str(uuid.uuid4())
+
+        response = client.post(
+            "/api/threads",
+            json={"thread_id": thread_id, "assistant_id": assistant_id},
+            headers={"X-CSRF-Token": csrf_token},
+        )
+
+        assert response.status_code == 200, response.text
+        assert client.portal.call(partial(isolated_app.state.thread_store.get, thread_id, user_id=None))["assistant_id"] == assistant_id
+        assert client.get(f"/api/threads/{thread_id}/state").status_code == 200
+
+
+def test_thread_recorded_with_an_invalid_assistant_id_stays_readable(isolated_app):
+    """A record written before creation validated assistant_id must not keep answering 500."""
+    from starlette.testclient import TestClient
+
+    with TestClient(isolated_app, raise_server_exceptions=False) as client:
+        csrf_token = _register_user(client)
+        user_id = client.get("/api/v1/auth/me").json()["id"]
+        thread_id = str(uuid.uuid4())
+        client.portal.call(partial(isolated_app.state.thread_store.create, thread_id, assistant_id="bad name!", user_id=user_id))
+        state = {"messages": [HumanMessage(content="hello", id="legacy-human")], "title": "Legacy thread"}
+        client.portal.call(partial(_write_checkpoint, isolated_app.state.checkpointer, thread_id=thread_id, state=state))
+
+        thread = client.get(f"/api/threads/{thread_id}")
+        thread_state = client.get(f"/api/threads/{thread_id}/state")
+        history = client.post(f"/api/threads/{thread_id}/history", json={}, headers={"X-CSRF-Token": csrf_token})
+
+        assert thread.status_code == 200, thread.text
+        assert thread.json()["values"]["title"] == "Legacy thread"
+        assert thread_state.status_code == 200, thread_state.text
+        assert thread_state.json()["values"]["title"] == "Legacy thread"
+        assert history.status_code == 200, history.text
+        assert [entry["values"]["title"] for entry in history.json()] == ["Legacy thread"]
+
+
+@pytest.mark.parametrize(
+    "assistant_id,expected",
+    [("bad name!", None), ("   ", None), ("a/b", None), ("../etc", None), (None, None), ("", ""), ("lead_agent", "lead_agent"), ("Research_Agent", "Research_Agent"), ("ghost-agent", "ghost-agent")],
+)
+def test_branch_inherits_only_a_valid_assistant_id(isolated_app, assistant_id, expected):
+    """Branches must not copy invalid legacy ids into a newly created metadata row."""
+    from starlette.testclient import TestClient
+
+    with TestClient(isolated_app, raise_server_exceptions=False) as client:
+        csrf_token = _register_user(client)
+        user_id = client.get("/api/v1/auth/me").json()["id"]
+        thread_id = str(uuid.uuid4())
+        client.portal.call(partial(isolated_app.state.thread_store.create, thread_id, assistant_id=assistant_id, user_id=user_id))
+        state = {
+            "messages": [HumanMessage(content="hello", id="legacy-human"), AIMessage(content="answer", id="legacy-answer")],
+            "title": "Legacy thread",
+        }
+        client.portal.call(partial(_write_checkpoint, isolated_app.state.checkpointer, thread_id=thread_id, state=state))
+
+        branch = client.post(
+            f"/api/threads/{thread_id}/branches",
+            json={"message_id": "legacy-answer"},
+            headers={"X-CSRF-Token": csrf_token},
+        )
+
+        assert branch.status_code == 200, branch.text
+        branch_id = branch.json()["thread_id"]
+        source_record = client.portal.call(partial(isolated_app.state.thread_store.get, thread_id, user_id=user_id))
+        branch_record = client.portal.call(partial(isolated_app.state.thread_store.get, branch_id, user_id=user_id))
+        assert source_record["assistant_id"] == assistant_id
+        assert branch_record["assistant_id"] == expected
+        assert branch_record["user_id"] == user_id
+        assert branch.json()["parent_thread_id"] == thread_id
+
+        branch_state = client.get(f"/api/threads/{branch_id}/state")
+        assert branch_state.status_code == 200, branch_state.text
+        assert [message["id"] for message in branch_state.json()["values"]["messages"]] == ["legacy-human", "legacy-answer"]
 
 
 def test_stream_run_executes_real_lead_agent_setup_agent_business_path(isolated_app, isolated_deer_flow_home: Path):

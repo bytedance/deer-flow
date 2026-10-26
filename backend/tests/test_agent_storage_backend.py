@@ -426,3 +426,10 @@ def test_get_agent_store_does_not_fallback_when_extensions_config_is_missing(tmp
     finally:
         reset_app_config()
         reset_extensions_config()
+
+
+def test_file_get_soul_rejects_path_traversal(file_home):
+    store = FileAgentStore()
+
+    with pytest.raises(ValueError, match="Invalid agent name"):
+        store.get_soul("../../u2/agents/planner", user_id="u1")

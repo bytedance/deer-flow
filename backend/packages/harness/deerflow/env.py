@@ -26,7 +26,10 @@ def load_selected_env_file() -> bool:
         if not selected or not path.is_file():
             raise ValueError("Expected a regular file")
         # Read fully before parsing so decode failures cannot partially load env.
-        contents = path.read_text(encoding="utf-8")
+        # utf-8-sig consumes a leading BOM (Notepad / PowerShell-written files):
+        # plain utf-8 keeps U+FEFF, and dotenv then parses the first variable
+        # under a BOM-prefixed key that no consumer reads.
+        contents = path.read_text(encoding="utf-8-sig")
     except (OSError, ValueError):
         raise ValueError("DEER_FLOW_ENV_FILE must point to a readable UTF-8 regular file. Check the path and permissions; relative paths use the backend process working directory.") from None
 
