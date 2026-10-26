@@ -93,6 +93,9 @@ with best-effort cleanup, preserving the original publication outcome.
 - **Recovery never takes over a live run.** It finalizes an occurrence whose
   durable run row is already terminal, and it returns expired launch claims to
   the queue.
+- **Late launch reconciliation keeps a terminal occurrence terminal** when a
+  newer occurrence owns the active slot; attach only `run_id`/`started_at`,
+  since reviving would violate the one-active index.
 - **The scheduler is single-instance by default.** Multi-instance mode needs
   shared PostgreSQL and the settings that startup validates.
 - **Run-history filters are occurrence states**, not task states. Apply the
