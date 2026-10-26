@@ -1001,6 +1001,39 @@ async def test_start_run_reuses_only_matching_resume_fingerprint(_stub_app_confi
     assert "different request" in str(excinfo.value.detail)
 
 
+@pytest.mark.parametrize("original_input", [None, {}], ids=["static-resume", "new-input"])
+@pytest.mark.anyio
+async def test_start_run_idempotency_distinguishes_static_resume_from_new_input(_stub_app_config, original_input):
+    from app.gateway.services import start_run
+
+    # {} also models a legacy null-input record, whose original intent is lost.
+    body = RunCreateRequest(input=original_input)
+    manager = RunManager(store=MemoryRunStore())
+    first = await manager.create_or_reject(
+        "thread-1",
+        user_id=None,
+        idempotency_key="static-resume-key",
+        kwargs={"input": original_input, "config": None},
+    )
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.services.run_agent", side_effect=AssertionError("worker must not attach")),
+        patch("app.gateway.services._recover_run_knowledge_scope", new=AsyncMock(return_value=None)),
+    ):
+        reused = await start_run(body, "thread-1", _make_start_run_request(manager), idempotency_key="static-resume-key")
+        with pytest.raises(HTTPException) as excinfo:
+            await start_run(
+                RunCreateRequest(input={} if original_input is None else None),
+                "thread-1",
+                _make_start_run_request(manager),
+                idempotency_key="static-resume-key",
+            )
+    assert reused.run_id == first.run_id
+    assert reused.idempotency_reused is True
+    assert excinfo.value.status_code == 409
+    assert "different request" in str(excinfo.value.detail)
+
+
 @pytest.mark.anyio
 async def test_start_run_persists_resume_fingerprint_without_payload(_stub_app_config):
     from app.gateway.services import _run_idempotency_request, start_run
