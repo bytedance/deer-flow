@@ -1,6 +1,6 @@
 ### Subagent System (`packages/harness/deerflow/subagents/`)
 
-Drain lease/task-stop cleanup across repeated cancellation.
+Drain cleanup; preserve terminal outcomes on cancel.
 
 Accumulate validated ToolMessage knowledge across values frames in
 `SubagentResult.knowledge_sources`: at most 100 sources, deduplicated by evidence ID.

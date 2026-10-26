@@ -7019,8 +7019,11 @@ async def test_deferred_cleanup_expiry_registers_removal_after_fence_opens(class
 class TestSubagentFinalizationCancellation:
     @pytest.mark.anyio
     @pytest.mark.parametrize("cleanup_stage", ["lease", "notify"])
-    @pytest.mark.parametrize("interrupted", [False, True])
-    async def test_caller_cancellation_drains_execution_tail(self, classes, base_config, monkeypatch, cleanup_stage, interrupted):
+    @pytest.mark.parametrize(
+        "interrupted,terminal_status,expected_outcome",
+        [(False, None, "completed"), (True, None, "aborted"), (True, "TIMED_OUT", "failed"), (True, "FAILED", "failed")],
+    )
+    async def test_caller_cancellation_drains_execution_tail(self, classes, base_config, monkeypatch, cleanup_stage, interrupted, terminal_status, expected_outcome):
         from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
         from deerflow.extensions import notify
         from deerflow.extensions.registry import ExtensionRegistry
@@ -7032,6 +7035,7 @@ class TestSubagentFinalizationCancellation:
         notification_release = asyncio.Event()
         lease_release = threading.Event()
         finished = []
+        outcomes = []
         sandbox = MagicMock()
         provider = MagicMock()
         provider.get.return_value = sandbox
@@ -7053,10 +7057,11 @@ class TestSubagentFinalizationCancellation:
             async def on_task_start(self, *args):
                 finished.append("start")
 
-            async def on_task_stop(self, *args):
+            async def on_task_stop(self, app_store, task_store, info, outcome):
                 if cleanup_stage == "notify":
                     cleanup_started.set()
                     await notification_release.wait()
+                outcomes.append(outcome.value)
                 finished.append("stop")
 
         registry = ExtensionRegistry()
@@ -7085,6 +7090,9 @@ class TestSubagentFinalizationCancellation:
         try:
             if interrupted:
                 await asyncio.wait_for(stream_started.wait(), 5)
+                if terminal_status is not None:
+                    holder.try_set_terminal(classes["SubagentStatus"][terminal_status], error="published before cancellation")
+                    holder.cancel_event.set()
                 execution.cancel()
             await asyncio.wait_for(cleanup_started.wait(), 5)
             assert stream_closed.is_set()
@@ -7110,8 +7118,55 @@ class TestSubagentFinalizationCancellation:
         assert manager.binding_for("subagent:tail-cleanup") is None
         assert capacity.snapshot().running == 0
         assert holder.execution_done_event.is_set()
+        assert outcomes == [expected_outcome]
+        if terminal_status is not None:
+            assert holder.status is classes["SubagentStatus"][terminal_status]
         if not interrupted:
             assert holder.status is classes["SubagentStatus"].COMPLETED
+
+    @pytest.mark.parametrize("with_holder", [False, True])
+    def test_sync_timeout_keeps_failed_notification(self, classes, base_config, monkeypatch, with_holder):
+        from deerflow.extensions.registry import ExtensionRegistry
+
+        stopped, drained = threading.Event(), threading.Event()
+        outcomes = []
+
+        class Observer:
+            async def on_task_start(self, *args):
+                pass
+
+            async def on_task_stop(self, app_store, task_store, info, outcome):
+                outcomes.append(outcome.value)
+                stopped.set()
+
+        registry = ExtensionRegistry()
+        with registry.attributed_to("cleanup:test"):
+            registry.task_lifecycle(Observer())
+
+        class Agent:
+            async def astream(self, *args, **kwargs):
+                await asyncio.Event().wait()
+                yield {}
+
+        base_config.timeout_seconds = 0.2
+        executor = classes["SubagentExecutor"](config=base_config, tools=[], run_id="cleanup-run", extensions=registry.build())
+        monkeypatch.setattr(executor, "_build_initial_state", AsyncMock(return_value=({}, [], None)))
+        monkeypatch.setattr(executor, "_create_agent", AsyncMock(return_value=Agent()))
+        original_execute = executor._aexecute
+
+        async def record_drain(task, result_holder=None):
+            try:
+                return await original_execute(task, result_holder)
+            finally:
+                drained.set()
+
+        monkeypatch.setattr(executor, "_aexecute", record_drain)
+        holder = classes["SubagentResult"](task_id="sync-timeout", trace_id="trace", status=classes["SubagentStatus"].PENDING) if with_holder else None
+        result = executor.execute("Task", holder)
+        assert result.status is classes["SubagentStatus"].FAILED
+        assert stopped.wait(5), "timed-out execution did not notify observers"
+        assert drained.wait(5), "timed-out execution did not release its resources"
+        assert outcomes == ["failed"]
 
     @pytest.mark.anyio
     @pytest.mark.parametrize("failure", ["error", "timeout"])

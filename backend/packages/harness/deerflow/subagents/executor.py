@@ -1747,6 +1747,7 @@ class SubagentExecutor:
                 return None
             return _harvest_bash_executions(final_state, summary_cache=bash_summary_cache)
 
+        cancelling = False
         try:
             if task_info is not None and task_store is not None:
                 await notify_task_start(
@@ -2005,6 +2006,9 @@ class SubagentExecutor:
                     tool_receipts=terminal_receipts(prefer_citing_turn=True),
                 )
 
+        except asyncio.CancelledError:
+            cancelling = True
+            raise
         except GraphRecursionError:
             # ``recursion_limit`` on run_config is ``self.config.max_turns``
             # scaled into super-steps (set above), so hitting it means the
@@ -2107,7 +2111,7 @@ class SubagentExecutor:
                             task_store,
                             task_info,
                             subagent_task_outcome(
-                                cancelled=result.status is SubagentStatus.CANCELLED,
+                                cancelled=result.status is SubagentStatus.CANCELLED or (cancelling and not result.status.is_terminal),
                                 succeeded=result.status is SubagentStatus.COMPLETED,
                             ),
                             timeout=_EXTENSION_TASK_NOTIFY_TIMEOUT_SECONDS,
@@ -2134,6 +2138,8 @@ class SubagentExecutor:
         long-lived isolated loop. Reusing that loop keeps shared async clients
         from being tied to a short-lived loop that gets closed per execution.
         """
+        if result_holder is None:
+            result_holder = SubagentResult(task_id=str(uuid.uuid4())[:8], trace_id=self.trace_id, status=SubagentStatus.PENDING)
         future: Future[SubagentResult] | None = None
         parent_context = _copy_isolated_subagent_context()
         try:
@@ -2142,9 +2148,10 @@ class SubagentExecutor:
                 lambda: self._aexecute(task, result_holder),
             )
             return future.result(timeout=self.config.timeout_seconds)
-        except FuturesTimeoutError:
-            if result_holder is not None:
-                result_holder.cancel_event.set()
+        except FuturesTimeoutError as exc:
+            # Publish the sync API's failure before cancellation reaches task-stop.
+            result_holder.try_set_terminal(SubagentStatus.FAILED, error=str(exc))
+            result_holder.cancel_event.set()
             if future is not None:
                 future.cancel()
             raise
