@@ -107,6 +107,23 @@ closed. Native discovery-budget errors fail the run rather than counting as
 successful unsupported rejections. Tests forbid socket connections and catalog-tool execution for all
 installed adapters.
 
+## Recorded synthetic result
+
+[Measured summary and source provenance](results/synthetic-v1.summary.json),
+from clean source revision `8543b79`, Python 3.12.3/WSL Linux, 30 repeats:
+
+| Adapter | Positive tool recall | Negative cases rejected | Extra candidates/promotions | Mean loaded tools | Mean expanded schema bytes |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Native keywords | 88.2% | 2/5 | 53 | 3.18 | 1,135.7 |
+| Raw regex control | 2.9% | 5/5 | 0 | 0.05 | 17.1 |
+| Routing-hint control | 100% | 3/5 | 22 | 1.86 | 655.1 |
+| SchemaRouter 0.17.0 | 100% | 1/5 | 82 | 4.59 | 1,657.0 |
+
+Higher recall came with more extra candidates and larger schema expansion in
+this fixture; this does not justify adopting a router or infer Agent quality.
+Timing observations are retained in the JSON, with the concurrent-validation
+context disclosed. This was not an isolated performance experiment.
+
 The framework is intended to accept a larger independently annotated synthetic
 fixture next. Live model-generated search queries, execution correctness, field
 value extraction, realistic workload distributions and large-catalog scaling
