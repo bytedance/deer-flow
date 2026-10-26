@@ -440,6 +440,44 @@ def _apply_stream_chunk_timeout_default(model_class: type, model_settings_from_c
     model_settings_from_config["stream_chunk_timeout"] = _DEFAULT_STREAM_CHUNK_TIMEOUT_SECONDS
 
 
+_GEMINI_MODEL_NAME_MARKERS: tuple[str, ...] = ("gemini",)
+
+
+def _warn_missing_thought_signature_patch(model_class: type, model_name: str, model_settings_from_config: dict) -> None:
+    """Warn when a Gemini model on a custom OpenAI-compatible endpoint skips the patch.
+
+    Gemini thinking models reached through an OpenAI-compatible gateway require the
+    ``thought_signature`` of every tool call to be echoed back on the following request.
+    ``langchain_openai.ChatOpenAI`` serialises only the standard tool-call fields and drops
+    the signature, so only ``deerflow.models.patched_openai.PatchedChatOpenAI`` can replay it
+    (issue #1180).
+
+    Opting in is a single ``use:`` key on the model profile. Omitting it surfaces only the
+    gateway's 400 ``... is missing a thought_signature`` message, which names nothing in
+    this repository, so the missing opt-in is reported here - where the operator can
+    still act on it - instead of at request time.
+
+    Deliberately narrow, so it cannot fire on the official OpenAI endpoint (no custom
+    ``base_url``), on non-OpenAI providers, or on profiles that already use the patch.
+    """
+    from deerflow.models.patched_openai import PatchedChatOpenAI
+
+    if not issubclass(model_class, BaseChatOpenAI) or issubclass(model_class, PatchedChatOpenAI):
+        return
+    if not (model_settings_from_config.get("base_url") or model_settings_from_config.get("openai_api_base")):
+        return
+    candidates = (str(model_settings_from_config.get("model") or ""), model_name)
+    if not any(marker in candidate.lower() for candidate in candidates for marker in _GEMINI_MODEL_NAME_MARKERS):
+        return
+    logger.warning(
+        "Model %s (%s): Gemini served through an OpenAI-compatible gateway needs "
+        "use: deerflow.models.patched_openai:PatchedChatOpenAI; without it the gateway rejects "
+        "the next request because a tool call is missing its thought_signature (issue #1180).",
+        model_name,
+        getattr(model_class, "__name__", "?"),
+    )
+
+
 # gpt-6 family must use the OpenAI Responses API when tools are attached.
 #
 # The locked ``langchain-openai==1.2.1`` still routes tool use through
@@ -651,6 +689,9 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
     # heuristics (stream_usage default below / stream_chunk_timeout) see the canonical endpoint key.
     _normalize_openai_base_url(model_class, model_settings_from_config)
     _apply_stream_chunk_timeout_default(model_class, model_settings_from_config)
+    # A Gemini model on a custom endpoint loses tool-call signatures unless it opts
+    # into the patched client (issue #1180); warn before construction.
+    _warn_missing_thought_signature_patch(model_class, name, model_settings_from_config)
     # gpt-6 + tools must route through the Responses API (see the helper docstring).
     _apply_openai_responses_api_default(model_class, model_settings_from_config)
 

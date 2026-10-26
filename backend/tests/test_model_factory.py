@@ -2812,3 +2812,83 @@ def test_gpt6_explicit_responses_config_wins_on_custom_endpoint(monkeypatch):
 
     assert captured.get("use_responses_api") is True
     assert captured.get("output_version") == "responses/v1"
+
+
+# ---------------------------------------------------------------------------
+# Gemini through an OpenAI-compatible gateway needs the patched client (issue #1180)
+# ---------------------------------------------------------------------------
+
+
+def test_warns_when_gemini_gateway_skips_patched_chatopenai(monkeypatch, caplog):
+    """A Gemini profile on a custom endpoint with plain ChatOpenAI loses tool-call
+
+    thought_signature values, and the gateway rejects the next request with a 400 that
+    names nothing in this repository. The factory must warn where the operator can act
+    on it.
+    """
+    import logging
+
+    from langchain_openai import ChatOpenAI
+
+    cfg = _make_app_config([_make_model_with_extras("gemini-2.5-flash", base_url="http://gateway.example.com/v1")])
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(ChatOpenAI, {}))
+
+    with caplog.at_level(logging.WARNING, logger=factory_module.__name__):
+        factory_module.create_chat_model(name="gemini-2.5-flash")
+
+    warnings = [rec for rec in caplog.records if rec.levelno == logging.WARNING]
+    assert any("PatchedChatOpenAI" in rec.getMessage() for rec in warnings)
+    assert any("thought_signature" in rec.getMessage() for rec in warnings)
+
+
+def test_no_warning_when_patched_chatopenai_already_used(monkeypatch, caplog):
+    """The opt-in is the fix, so a profile that already uses it must stay quiet."""
+    import logging
+
+    from deerflow.models.patched_openai import PatchedChatOpenAI
+
+    cfg = _make_app_config(
+        [
+            _make_model_with_extras(
+                "gemini-2.5-flash",
+                use="deerflow.models.patched_openai:PatchedChatOpenAI",
+                base_url="http://gateway.example.com/v1",
+            )
+        ]
+    )
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(PatchedChatOpenAI, {}))
+
+    with caplog.at_level(logging.WARNING, logger=factory_module.__name__):
+        factory_module.create_chat_model(name="gemini-2.5-flash")
+
+    assert not any("PatchedChatOpenAI" in rec.getMessage() for rec in caplog.records)
+
+
+def test_no_warning_for_gemini_without_custom_endpoint(monkeypatch, caplog):
+    """The official endpoint has no custom base_url, so the warning must not fire there."""
+    import logging
+
+    from langchain_openai import ChatOpenAI
+
+    cfg = _make_app_config([_make_model_with_extras("gemini-2.5-flash")])
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(ChatOpenAI, {}))
+
+    with caplog.at_level(logging.WARNING, logger=factory_module.__name__):
+        factory_module.create_chat_model(name="gemini-2.5-flash")
+
+    assert not any("PatchedChatOpenAI" in rec.getMessage() for rec in caplog.records)
+
+
+def test_no_warning_for_non_gemini_model_on_gateway(monkeypatch, caplog):
+    """Other vendors behind a gateway have no thought_signature requirement."""
+    import logging
+
+    from langchain_openai import ChatOpenAI
+
+    cfg = _make_app_config([_make_model_with_extras("gpt-5.1", base_url="http://gateway.example.com/v1")])
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(ChatOpenAI, {}))
+
+    with caplog.at_level(logging.WARNING, logger=factory_module.__name__):
+        factory_module.create_chat_model(name="gpt-5.1")
+
+    assert not any("PatchedChatOpenAI" in rec.getMessage() for rec in caplog.records)
