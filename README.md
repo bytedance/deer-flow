@@ -1711,6 +1711,9 @@ Discovery follows operator-managed directory symlinks, but skips links back to a
 
 Skill Markdown and bundled text resources use UTF-8. Skill-creator CLI and review utilities read and write text explicitly as UTF-8 so localized skills behave consistently across operating systems.
 
+Custom-skill writes and security-scan staging preserve submitted line endings
+on every platform, so the scanner checks the bytes that will be stored.
+
 Skill-creator benchmark aggregation uses recorded `timing.json` token counts even
 when `grading.json` already contains the run duration. Recorded zero counts are
 preserved; output character counts remain a legacy proxy only when token data is missing.
@@ -2212,6 +2215,9 @@ not wrapped by middleware model-call hooks (goal, memory, title, and summarizati
 Gateway-lifetime services, and eager FastAPI HTTP routers. The contract package has no
 framework dependencies; extensions must declare FastAPI, LangChain, LangGraph, or other
 libraries they import.
+Cancelled subagents report `aborted` to task-lifecycle hooks after stream cleanup;
+synchronous timeouts remain failures, and background hard timeouts retain their
+failure outcome.
 The [fetched-content screening example](examples/deerflow-extension-jev-screening/README.md)
 contributes one such middleware at the visible tool position. After operator opt-in it
 classifies the sanitized text a remote tool result shows the model, PII-redacted when
