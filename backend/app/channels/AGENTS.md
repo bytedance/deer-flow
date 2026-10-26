@@ -15,7 +15,7 @@ Finalize asyncgens; keep primary errors; propagate lone Bot errors.
 
 DingTalk retains tasks and logs failures.
 
-Shared attachment feedback preserves routing/cancellation, uses EN/ZH, and never retries or pushes proactively. WeCom keeps frame cleanup and refuses feedback after its reply context expires.
+Shared attachment feedback uses public `attachment_delivery_text`, preserves routing/cancellation, and never retries or pushes proactively. Built-in channels choose EN/ZH from the first non-empty reply line; an explicit locale overrides it. WeCom keeps frame cleanup and refuses feedback after its reply context expires.
 
 **Components**:
 - `message_bus.py` - Inbound queue → dispatcher; outbound uses a dispatch-start listener snapshot. Unsubscribe neither cancels nor drains captured callbacks.

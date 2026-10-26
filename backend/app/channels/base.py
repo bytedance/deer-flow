@@ -32,8 +32,12 @@ logger = logging.getLogger(__name__)
 T = TypeVar("T")
 
 
-def _attachment_delivery_text(msg: OutboundMessage, failed: list[ResolvedAttachment], *, unsupported: bool = False) -> str:
-    """Describe only the unsent files, without paths or provider errors."""
+def attachment_delivery_text(msg: OutboundMessage, failed: list[ResolvedAttachment], *, unsupported: bool = False) -> str:
+    """Format shared feedback without host paths or provider errors.
+
+    Built-in IM outbounds do not populate ``locale``; their notices follow
+    the first non-empty reply line. An explicit locale remains an override.
+    """
     locale = msg.metadata.get("locale")
     first_line = next((line for line in msg.text.splitlines() if line.strip()), "")
     chinese = locale.lower().startswith("zh") if isinstance(locale, str) else any("\u4e00" <= char <= "\u9fff" for char in first_line)
@@ -526,7 +530,7 @@ class Channel(ABC):
             unsupported = bool(msg.attachments) and getattr(self.send_file, "__func__", None) is Channel.send_file
             reply = msg
             if unsupported:
-                notice = _attachment_delivery_text(msg, msg.attachments, unsupported=True)
+                notice = attachment_delivery_text(msg, msg.attachments, unsupported=True)
                 reply = replace(msg, text=f"{notice}\n\n{msg.text}" if msg.text else notice, attachments=[])
             try:
                 await self.send(reply)
@@ -556,7 +560,7 @@ class Channel(ABC):
     async def _send_attachment_feedback(self, msg: OutboundMessage, failed: list[ResolvedAttachment]) -> None:
         """Reply in the same conversation; never resubmit files or push elsewhere."""
         metadata = {key: value for key, value in msg.metadata.items() if key not in {PENDING_CLARIFICATION_METADATA_KEY, HUMAN_INPUT_REQUEST_METADATA_KEY}}
-        feedback = replace(msg, text=_attachment_delivery_text(msg, failed), attachments=[], artifacts=[], metadata=metadata)
+        feedback = replace(msg, text=attachment_delivery_text(msg, failed), attachments=[], artifacts=[], metadata=metadata)
         try:
             await self.send(feedback)
         except Exception:

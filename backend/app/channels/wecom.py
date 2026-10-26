@@ -8,7 +8,7 @@ import logging
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, cast
 
-from app.channels.base import Channel, ChannelUnavailable, _attachment_delivery_text
+from app.channels.base import Channel, ChannelUnavailable, attachment_delivery_text
 from app.channels.commands import is_known_channel_command
 from app.channels.connection_identity import attach_connection_identity
 from app.channels.message_bus import (
@@ -428,7 +428,7 @@ class WeComChannel(Channel):
         # The final stream is already finished. Reply with text on the same
         # inbound frame instead of reopening that stream or pushing elsewhere.
         try:
-            text = _clip_to_byte_limit(_attachment_delivery_text(msg, failed), _WECOM_MAX_CONTENT_BYTES)
+            text = _clip_to_byte_limit(attachment_delivery_text(msg, failed), _WECOM_MAX_CONTENT_BYTES)
             await self._ws_client.reply(self._ws_frames[msg.thread_ts], {"msgtype": "text", "text": {"content": text}})
         except Exception:
             logger.exception("[WeCom] failed to send attachment delivery feedback")
