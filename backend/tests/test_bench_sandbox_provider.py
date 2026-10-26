@@ -223,9 +223,8 @@ def test_summary_preserves_all_failure_group() -> None:
     ]
 
 
-@pytest.mark.parametrize("provider", ["boxlite", "aio-docker"])
 @pytest.mark.parametrize("skip_seconds", [0.0, 0.5, 7.5, float("inf")])
-def test_health_check_skip_seconds_is_forwarded_and_serialized(monkeypatch, tmp_path, provider, skip_seconds):
+def test_boxlite_health_check_skip_seconds_is_forwarded_and_serialized(monkeypatch, tmp_path, skip_seconds):
     captured_config: dict[str, Any] = {}
 
     def _factory(config: dict[str, Any]):
@@ -237,13 +236,13 @@ def test_health_check_skip_seconds_is_forwarded_and_serialized(monkeypatch, tmp_
             "health_check_skip_seconds": config.get("health_check_skip_seconds"),
         }
 
-    monkeypatch.setitem(bench.PROVIDER_FACTORIES, provider, _factory)
+    monkeypatch.setitem(bench.PROVIDER_FACTORIES, "boxlite", _factory)
     output_path = tmp_path / "out.jsonl"
 
     rc = bench.main(
         [
             "--provider",
-            provider,
+            "boxlite",
             "--iterations",
             "1",
             "--warmup-iterations",
@@ -258,6 +257,43 @@ def test_health_check_skip_seconds_is_forwarded_and_serialized(monkeypatch, tmp_
     assert rc == 0
     assert captured_config["health_check_skip_seconds"] == skip_seconds
     row = __import__("json").loads(output_path.read_text(encoding="utf-8").splitlines()[0])
+    assert row["health_check_skip_seconds"] == skip_seconds
+
+
+@pytest.mark.parametrize("skip_seconds", [0.0, 0.5, 7.5, float("inf")])
+def test_aio_factory_health_check_skip_seconds_is_forwarded_and_serialized(monkeypatch, tmp_path, skip_seconds):
+    import deerflow.community.aio_sandbox.aio_sandbox_provider as provider_mod
+
+    captured_config: dict[str, Any] = {}
+
+    class _FactoryProvider(_FakeProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            sandbox_config = provider_mod.get_app_config().sandbox
+            captured_config["health_check_skip_seconds"] = sandbox_config.health_check_skip_seconds
+            self._config = {"image": "resolved/aio:latest"}
+
+    monkeypatch.setattr(provider_mod, "AioSandboxProvider", _FactoryProvider)
+    output_path = tmp_path / "out.jsonl"
+
+    rc = bench.main(
+        [
+            "--provider",
+            "aio-docker",
+            "--iterations",
+            "1",
+            "--warmup-iterations",
+            "0",
+            "--health-check-skip-seconds",
+            str(skip_seconds),
+            "--output",
+            str(output_path),
+        ]
+    )
+
+    assert rc == 0
+    assert captured_config["health_check_skip_seconds"] == skip_seconds
+    row = json.loads(output_path.read_text(encoding="utf-8").splitlines()[0])
     assert row["health_check_skip_seconds"] == skip_seconds
 
 

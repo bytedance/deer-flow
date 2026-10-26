@@ -241,6 +241,7 @@ def _make_aio_provider(config: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
         "container_prefix": config.get("container_prefix"),
         "replicas": config.get("replicas", 3),
         "idle_timeout": config.get("idle_timeout", 600),
+        "health_check_skip_seconds": config.get("health_check_skip_seconds", 0.0),
         "mounts": config.get("mounts", []),
         "environment": config.get("environment", {}),
         "provisioner_url": config.get("provisioner_url", ""),
