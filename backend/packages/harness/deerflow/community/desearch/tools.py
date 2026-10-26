@@ -18,7 +18,7 @@ from deerflow.config import get_app_config
 logger = logging.getLogger(__name__)
 
 _DESEARCH_URL = "https://api.desearch.ai/web"
-_DESEARCH_MAX_RESULTS = 20
+_DESEARCH_MAX_RESULTS = 10
 _api_key_warned: set[str] = set()
 
 
@@ -137,7 +137,7 @@ def web_search_tool(query: str, max_results: int = 5) -> str:
 
     Args:
         query: Search keywords describing what you want to find. Be specific for better results.
-        max_results: Maximum number of search results to return. Default is 5, capped at 20.
+        max_results: Maximum number of search results to return. Default is 5, capped at 10.
     """
     config = get_app_config().get_tool_config("web_search")
     extra = (config.model_extra or {}) if config is not None else {}

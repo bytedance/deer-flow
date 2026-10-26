@@ -162,7 +162,7 @@ tools:
     api_key: $DESEARCH_API_KEY
     max_results: 5
 ```
-Web search using the [Desearch API](https://desearch.ai). Requires an API key. `max_results` defaults to 5 and is capped at 20 locally. Time range and domain filters are not supported. See the [docs](https://desearch.ai/docs).
+Web search using the [Desearch API](https://desearch.ai). Requires an API key. DeerFlow sends one GET /web request per search; the endpoint returns up to 20 results per request. `max_results` defaults to 5 and is capped at 10 locally. Time range and domain filters are not supported. See the [docs](https://desearch.ai/docs).
 
 No extra dependency required.
 

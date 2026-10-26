@@ -159,7 +159,7 @@ tools:
     api_key: $DESEARCH_API_KEY
     max_results: 5
 ```
-使用 [Desearch API](https://desearch.ai) 搜索网页，需要 API Key。`max_results` 默认为 5，在本地最多返回 20 条结果。不支持时间范围或域名过滤。详见[文档](https://desearch.ai/docs)。
+使用 [Desearch API](https://desearch.ai) 搜索网页，需要 API Key。DeerFlow 每次搜索发送一个 GET /web 请求；该端点每次请求最多返回 20 条结果。`max_results` 默认为 5，在本地最多返回 10 条结果。不支持时间范围或域名过滤。详见[文档](https://desearch.ai/docs)。
 
 无需额外依赖。
 

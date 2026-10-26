@@ -106,7 +106,7 @@ class TestGetApiKey:
 
 @pytest.mark.parametrize(
     "value, expected",
-    [(3, 3), ("7", 7), (4.0, 4), (True, 5), (False, 5), (3.5, 5), ("oops", 5), (None, 5), (0, 5), (-3, 5), (float("inf"), 5), (float("-inf"), 5), (float("nan"), 5), (999, 20)],
+    [(3, 3), ("7", 7), (4.0, 4), (True, 5), (False, 5), (3.5, 5), ("oops", 5), (None, 5), (0, 5), (-3, 5), (float("inf"), 5), (float("-inf"), 5), (float("nan"), 5), (999, 10)],
 )
 def test_configured_result_count_uses_shared_coercion(value, expected, mock_config_with_key, caplog):
     mock_config_with_key.return_value.get_tool_config.return_value.model_extra["max_results"] = value
@@ -303,13 +303,14 @@ def test_503_redacts_api_key(mock_config_with_key, caplog, nested):
     assert result["message"] in caplog.text
 
 
-@pytest.mark.parametrize("count, expected", [(0, 5), (-9, 5), (1, 1), (20, 20), (50, 20)])
+@pytest.mark.parametrize("count, expected", [(0, 5), (-9, 5), (1, 1), (10, 10), (20, 10), (50, 10)])
 def test_result_count_is_clamped_locally(mock_config_no_key, count, expected):
     with patch.dict("os.environ", {"DESEARCH_API_KEY": "key"}), patch("deerflow.community.desearch.tools.httpx.Client") as client:
         get = client.return_value.__enter__.return_value.get
         get.return_value = _make_response({"data": _search_rows(25)})
         result = _run("q", count)
         assert result["total_results"] == expected
+        get.assert_called_once()
         assert get.call_args.kwargs["params"] == {"query": "q"}
 
 

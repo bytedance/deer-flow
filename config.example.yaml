@@ -959,10 +959,12 @@ tools:
 
   # Web search tool (uses Desearch, requires DESEARCH_API_KEY)
   # Sign up at https://desearch.ai (docs: https://desearch.ai/docs)
+  # One GET /web request per search; endpoint returns up to 20 results per request.
+  # DeerFlow returns at most 10 results (default 5).
   # - name: web_search
   #   group: web
   #   use: deerflow.community.desearch.tools:web_search_tool
-  #   max_results: 5                 # Capped at 20, applied locally
+  #   max_results: 5                 # Capped at 10, applied locally
   #   # api_key: $DESEARCH_API_KEY   # Optional if the env var is set
 
   # Web search tool (uses Serply - Google Search API, requires SERPLY_API_KEY)
