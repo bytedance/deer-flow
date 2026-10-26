@@ -59,8 +59,10 @@ Use `CheckpointStateAccessor` with the thread's effective schema for state reads
 and mutations; preserve mode gates, parentage and pending writes. State replacement
 uses `Overwrite`. Delta resume/rollback rewrites the current head rather than
 forking; reject missing selected/head tuples and pending Sends before writing.
-`Command(resume=...)` also rejects pending nodes except `__start__` on both;
+Null input and `Command(resume=...)` also reject pending nodes except `__start__` on both;
 `CheckpointResumeRejected` skips pre-write rollback. Resume at head.
+Project MCP tasks only into dict input; `None`/`Command` retain checkpointed tasks
+without querying the repository or replacing the control input.
 
 Before changing checkpoint modes, caches, replay lookup, state replacement or
 rollback, read the [checkpoint contracts](../../../../docs/runtime-guidance-details.md#checkpoint-channel-modes-and-replay).

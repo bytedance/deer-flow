@@ -718,6 +718,18 @@ version requires configuration changes, run `make config-upgrade` before restart
 See [Operations and Troubleshooting](frontend/src/content/en/application/operations-and-troubleshooting.mdx#upgrading-an-existing-checkout)
 for the commands for each mode.
 
+To continue a thread paused at a static `interrupt_before` or `interrupt_after`
+breakpoint, submit `input: null` (or omit `input`) to its `/runs`, `/runs/wait`,
+or `/runs/stream` endpoint. This continues pending graph work with the source
+turn's knowledge scope from the selected checkpoint (the head by default).
+An explicit empty object is new input, not a continuation; dynamic interrupts
+still require `command.resume`. In delta mode, historical continuation rejects
+rewrites that would discard pending execution; continue at the head instead.
+Continuations retain the checkpoint's MCP `background_tasks` projection; only
+dictionary input refreshes it from the task repository.
+Old null-input runs stored as `{}` cannot safely match a keyed null-input retry
+after upgrading and return 409. Check the original run before submitting a new key.
+
 When rolling out the resume-command idempotency fix across multiple Gateway
 workers or Pods, route **all keyed resume submissions and retries** (`command.resume`
 with `Idempotency-Key`, on thread-scoped `/runs`, `/runs/stream`, or `/runs/wait`)

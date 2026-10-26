@@ -226,6 +226,11 @@ def test_start_run_installs_fresh_capability_without_persisting_it(monkeypatch):
         empty = await services.start_run(RunCreateRequest(input={"messages": None}, conversation_references=["source"]), "empty-input", request)
         await empty.task
         assert callable(captured[3]["ctx"].conversation_reader)
+        static_resume = await services.start_run(RunCreateRequest(input=None, conversation_references=["source"]), "static-resume", request)
+        await static_resume.task
+        assert callable(captured[4]["ctx"].conversation_reader)
+        assert captured[4]["graph_input"] is None
+        assert static_resume.kwargs["input"] is None
         with pytest.raises(HTTPException) as invalid:
             await services.start_run(RunCreateRequest(input={"messages": "bad input"}, conversation_references=["source"]), "invalid-input", request)
         assert invalid.value.status_code == 422

@@ -295,7 +295,7 @@ PYTHONPATH=. uv run python scripts/benchmark/checkpoint/summarize_production.py 
 ## Checkpoint channel modes and replay
 
 Reject missing selected/head tuples or pending Sends before delta rewrites.
-`Command(resume=...)` also rejects pending nodes except `__start__` on both.
+Null input and `Command(resume=...)` also reject pending nodes except `__start__` on both.
 Use `CheckpointResumeRejected` to skip pre-write rollback; resume at head.
 
 Checkpointer storage runs in one of two channel modes, selected by `checkpoint_channel_mode` in `config.yaml` (default `full`). `delta` mode adopts LangGraph 1.2's `DeltaChannel` for `messages`: checkpoints store a sentinel + per-step writes instead of the full message list, so storage/serde grows O(N) instead of O(N²) in turns. All checkpointer backends (memory/sqlite/postgres) serve both modes unchanged — the semantics live in the compiled graph's channel table, not in the saver.
