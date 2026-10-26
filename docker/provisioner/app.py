@@ -510,6 +510,7 @@ class CreateSandboxRequest(BaseModel):
     thread_id: str | None = Field(default=None, pattern=SAFE_THREAD_ID_PATTERN)
     user_id: str = Field(default=DEFAULT_USER_ID, pattern=SAFE_USER_ID_PATTERN)
     extra_mounts: list[ExtraMount] = Field(default_factory=list)
+    # Accepted and logged for older Gateway requests; no longer gates mounts.
     include_legacy_skills: bool = False
     # Sent explicitly by new Gateways; the default keeps old Gateways compatible.
     skills_container_path: str = DEFAULT_SKILLS_CONTAINER_PATH
