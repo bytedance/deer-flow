@@ -266,6 +266,14 @@ fences, including unclosed fences, in complete and streamed replies.
    Newly saved models are enabled and immediately refresh existing chat and Agent
    model selectors, without editing YAML or restarting the Gateway.
 
+   The Moonshot (China) preset recognizes `kimi-k3.1-pro` and
+   `kimi-k3.1-pro-highspeed` with required thinking, image input and native
+   `low` / `high` / `max` reasoning effort (default `max`). Thinking stays on
+   even when a caller requests it off. Requests to the official endpoint omit
+   the unsupported thinking switch and fixed sampling parameters. See the
+   [model registration reference](backend/docs/CONFIGURATION.md#models-registered-through-the-web)
+   for the image-input and parameter constraints.
+
    **Custom OpenAI-compatible** still supports existing/custom base URLs and
    unauthenticated endpoints. **Advanced settings** retains display name, token
    limits and vision overrides; unknown IDs do not receive invented capabilities.
