@@ -1112,7 +1112,7 @@
 
 ### 修复
 
-- **社区：** 异步社区工具（Jina、Crawl4AI、Browserless、Tavily、SearXNG、Firecrawl、
+- **社区工具：** 异步社区工具（Jina、Crawl4AI、Browserless、Tavily、SearXNG、Firecrawl、
   InfoQuest、RAGFlow、LightRAG 和浏览器自动化工具）不再在事件循环上读取 `config.yaml`
   和 `extensions_config.json`。每次调用最多会把这两个文件检查三次（各做一次 `stat`
   和完整的 sha256），编辑后还会在循环上重新解析 `config.yaml`，期间其他运行、请求和
