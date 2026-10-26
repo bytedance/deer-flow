@@ -29,7 +29,7 @@ def fallback_client(monkeypatch):
         finally:
             connection.close()
         captured.update(url=request.full_url, timeout=timeout, headers=request.headers)
-        response = io.BytesIO(b'{"ok": true}')
+        response = io.BytesIO(captured.get("body", b'{"ok": true}'))
         response.status = 200
         return response
 
@@ -102,10 +102,11 @@ def test_fallback_search_preserves_query(fallback_client, query):
 
 def test_fallback_issues_preserves_filters(fallback_client):
     client, captured = fallback_client
+    captured["body"] = b'[{"number": 1}]'
 
     assert client.get_issues(
         "owner", "repo", state="open", limit=10, labels="bug,help wanted"
-    ) == {"ok": True}
+    ) == [{"number": 1}]
 
     assert parse_qs(urlsplit(captured["url"]).query) == {
         "state": ["open"],

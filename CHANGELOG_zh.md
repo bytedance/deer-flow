@@ -1112,6 +1112,11 @@
 
 ### 修复
 
+- **记忆：** 自动上下文压缩在把即将被总结的消息保存到记忆时，不再阻塞事件循环。
+  使用 mem0、Honcho 或 OpenViking 后端时，这次保存是同步 HTTP 请求，Gateway 在记忆
+  服务器响应之前无法处理其他请求和流式输出。现在它与每轮结束后的记忆写入一样在工作
+  线程中执行。([#7530])
+
 - **渠道：** IM 渠道的运行现在与 Gateway API 运行一样使用顶层 `recursion_limit`，不再固定
   发送 `100`；此前多步任务可能在几轮工具调用后就中止，用户收不到回答。IM 渠道
   `session.config` 中的 `recursion_limit` 仍然优先；早先的 README 示例把它设为 `100`，
@@ -10457,3 +10462,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7449]: https://github.com/bytedance/deer-flow/pull/7449
 [#7507]: https://github.com/bytedance/deer-flow/pull/7507
 [#7521]: https://github.com/bytedance/deer-flow/pull/7521
+[#7530]: https://github.com/bytedance/deer-flow/pull/7530
