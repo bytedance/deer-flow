@@ -90,11 +90,12 @@ local function tail_is_end(stream_key)
   return #entries > 0 and entry_is_end(entries[1][2])
 end
 
-local function has_end_marker(stream_key)
+local function has_end_marker(stream_key, legacy_scan_enabled)
   if tail_is_end(stream_key) then return true end
+  if legacy_scan_enabled ~= "1" then return false end
   -- Compatibility path for retained streams written by the old buggy writer:
-  -- an END may precede later entries, so event publication only checks the tail
-  -- while the rare END-publication path scans the bounded retained window.
+  -- an END may precede later entries. The first END on a normal stream also
+  -- reaches this scan; operators may disable it only after legacy buffers drain.
   local entries = redis.call("xrange", stream_key, "-", "+")
   for _, entry in ipairs(entries) do
     if entry_is_end(entry[2]) then return true end
@@ -108,7 +109,7 @@ _COMPARE_XADD_SCRIPT = (
 if redis.call("get", KEYS[1]) ~= ARGV[1] then return 0 end
 if redis.call("get", KEYS[2]) ~= ARGV[1] then return 0 end
 if ARGV[4] == "end" then
-  if has_end_marker(KEYS[3]) then return 1 end
+  if has_end_marker(KEYS[3], ARGV[7]) then return 1 end
 elseif tail_is_end(KEYS[3]) then
   return 1
 end
@@ -126,7 +127,7 @@ _XADD_IF_NO_ACTIVE_PRODUCER_SCRIPT = (
 if redis.call("exists", KEYS[1]) == 1 then return 0 end
 if ARGV[3] == "end" and redis.call("exists", KEYS[2]) == 0 then return 2 end
 if ARGV[3] == "end" then
-  if has_end_marker(KEYS[2]) then return 1 end
+  if has_end_marker(KEYS[2], ARGV[6]) then return 1 end
 elseif tail_is_end(KEYS[2]) then
   return 1
 end
@@ -187,11 +188,13 @@ class RedisStreamBridge(StreamBridge):
         max_connections: int | None = None,
         stream_ttl_seconds: int | None = 86400,
         producer_lease_recovery_enabled: bool = False,
+        legacy_end_scan_enabled: bool = True,
         client: Redis | None = None,
     ) -> None:
         super().__init__(heartbeat_interval=heartbeat_interval)
         self._redis_url = redis_url
         self._maxsize = max(1, queue_maxsize)
+        self._legacy_end_scan_enabled = legacy_end_scan_enabled
         self._key_prefix = key_prefix.rstrip(":")
         if stream_ttl_seconds is not None and stream_ttl_seconds > 0:
             self._stream_ttl_seconds = stream_ttl_seconds
@@ -490,6 +493,7 @@ class RedisStreamBridge(StreamBridge):
             fields.get("kind", _KIND_EVENT),
             fields.get("event", ""),
             fields.get("data", ""),
+            int(self._legacy_end_scan_enabled),
         )
         if result == _XADD_BLOCKED:
             self._cancel_lost_producer(run_id, lease)
@@ -498,10 +502,8 @@ class RedisStreamBridge(StreamBridge):
             if fields.get("kind") == _KIND_END:
                 return
             raise RuntimeError(f"Redis stream for run {run_id} has already ended")
-        if result:
-            return
-        self._cancel_lost_producer(run_id, lease)
-        raise RuntimeError(f"Redis stream producer lease was lost for run {run_id}")
+        # Every remaining successful Lua reply is an XADD stream ID.
+        assert isinstance(result, (str, bytes)), f"Unexpected Redis stream append result: {result!r}"
 
     async def _xadd_without_active_producer(
         self,
@@ -520,6 +522,7 @@ class RedisStreamBridge(StreamBridge):
             fields.get("kind", _KIND_EVENT),
             fields.get("event", ""),
             fields.get("data", ""),
+            int(self._legacy_end_scan_enabled),
         )
         if result == _XADD_BLOCKED:
             raise RuntimeError(f"Cannot publish stream data for run {run_id} because another active producer exists")
@@ -532,9 +535,8 @@ class RedisStreamBridge(StreamBridge):
                 logger.debug("Skipping stream END for %s: retained stream no longer exists", run_id)
                 return
             raise RuntimeError(f"Redis stream for run {run_id} no longer exists")
-        if result:
-            return
-        raise RuntimeError(f"Cannot publish stream data for run {run_id} because another active producer exists")
+        # Every remaining successful Lua reply is an XADD stream ID.
+        assert isinstance(result, (str, bytes)), f"Unexpected Redis stream append result: {result!r}"
 
     async def _stop_producer_lease(
         self,

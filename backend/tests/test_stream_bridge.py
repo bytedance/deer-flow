@@ -5,7 +5,7 @@ import os
 import re
 import uuid
 from collections import defaultdict
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import anyio
 import pytest
@@ -147,15 +147,15 @@ class _FakeRedis:
                 return 0
             await self.delete(stream_key, tracking_key, active_key)
             return 1
-        if numkeys == 2 and len(values) == 5:
+        if numkeys == 2 and len(values) == 6:
             active_key, stream_key = keys
-            maxlen, stream_ttl, kind, event, data = values
+            maxlen, stream_ttl, kind, event, data, legacy_scan_enabled = values
             if active_key in self.values:
                 return 0
             if kind == "end" and stream_key not in self.streams:
                 return 2
             if kind == "end":
-                if self._has_end_marker(stream_key):
+                if self._tail_is_end(stream_key) or (int(legacy_scan_enabled) and self._has_end_marker(stream_key)):
                     return 1
             elif self._tail_is_end(stream_key):
                 return 1
@@ -187,11 +187,11 @@ class _FakeRedis:
             return 1
         if numkeys == 3:
             active_key, tracking_key, stream_key = keys
-            token, maxlen, stream_ttl, kind, event, data = values
+            token, maxlen, stream_ttl, kind, event, data, legacy_scan_enabled = values
             if self.values.get(active_key) != token or self.values.get(tracking_key) != token:
                 return 0
             if kind == "end":
-                if self._has_end_marker(stream_key):
+                if self._tail_is_end(stream_key) or (int(legacy_scan_enabled) and self._has_end_marker(stream_key)):
                     return 1
             elif self._tail_is_end(stream_key):
                 return 1
@@ -2313,6 +2313,7 @@ async def test_make_stream_bridge_passes_redis_options(monkeypatch):
             max_connections=50,
             stream_ttl_seconds=42,
             producer_lease_recovery_enabled=True,
+            legacy_end_scan_enabled=False,
         )
     )
     try:
@@ -2321,6 +2322,7 @@ async def test_make_stream_bridge_passes_redis_options(monkeypatch):
             assert bridge.heartbeat_interval == 2.5
             assert bridge._stream_ttl_seconds == 42
             assert bridge.producer_lease_recovery_enabled is True
+            assert bridge._legacy_end_scan_enabled is False
         assert captured["max_connections"] == 50
         assert captured["decode_responses"] is True
     finally:
@@ -2778,3 +2780,80 @@ async def test_redis_integration_stream_ttl_reclaims_key():
         async for existing_key in client.scan_iter(f"{key_prefix}:*"):
             await client.delete(existing_key)
         await client.aclose()
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_stream_bridge_config_legacy_end_scan_switch(enabled):
+    assert StreamBridgeConfig().legacy_end_scan_enabled is True
+    assert StreamBridgeConfig(legacy_end_scan_enabled=enabled).legacy_end_scan_enabled is enabled
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("owned", [False, True], ids=["recovery", "owner"])
+@pytest.mark.parametrize("enabled", [True, False], ids=["compatibility-scan", "tail-only"])
+async def test_redis_end_scan_switch_and_tail_fast_path(owned, enabled):
+    fake = _FakeRedis()
+    fake._has_end_marker = Mock(wraps=fake._has_end_marker)
+    bridge = RedisStreamBridge(redis_url="redis://fake", queue_maxsize=8, legacy_end_scan_enabled=enabled, client=fake)
+    run_id = "scan-switch"
+    if owned:
+        await bridge.start_producer_lease(run_id)
+    try:
+        await bridge.publish(run_id, "values", {"content": "x" * 4096})
+        assert fake._has_end_marker.call_count == 0
+        await bridge.publish_end(run_id)
+        assert fake._has_end_marker.call_count == int(enabled)
+        await bridge.publish_end(run_id)
+        with pytest.raises(RuntimeError, match="already ended"):
+            await bridge.publish(run_id, "late", {})
+        assert fake._has_end_marker.call_count == int(enabled)
+        assert [fields["kind"] for _, fields in fake.streams[bridge._stream_key(run_id)]] == ["event", "end"]
+    finally:
+        if owned:
+            await bridge.finish_producer_lease(run_id)
+        await bridge.close()
+
+
+@pytest.mark.integration
+@requires_redis
+@pytest.mark.anyio
+@pytest.mark.parametrize("owned", [False, True], ids=["recovery", "owner"])
+@pytest.mark.parametrize("enabled", [True, False], ids=["compatibility-scan", "tail-only"])
+async def test_redis_integration_end_scan_switch_with_xrange_denied(real_redis_bridge, owned, enabled):
+    """Deny XRANGE so real Lua proves that tail-only END never scans history."""
+    from redis.asyncio import ConnectionPool, Redis
+    from redis.exceptions import ResponseError
+
+    admin = real_redis_bridge._redis
+    server = await admin.info("server")
+    if int(server["redis_version"].split(".", 1)[0]) < 6:
+        pytest.skip("This scan-path probe uses Redis 6+ ACLs")
+    username = "end-scan-" + uuid.uuid4().hex
+    prefix = real_redis_bridge._key_prefix
+    await admin.acl_setuser(username, enabled=True, reset=True, passwords=["+fixture-password"], keys=[f"{prefix}:*"], categories=["+all"], commands=["-xrange"])
+    pool = ConnectionPool.from_url(REDIS_TEST_URL, decode_responses=True)
+    pool.connection_kwargs.update(username=username, password="fixture-password")
+    client = Redis(connection_pool=pool)
+    bridge = RedisStreamBridge(redis_url=REDIS_TEST_URL, queue_maxsize=8, key_prefix=prefix, legacy_end_scan_enabled=enabled, client=client)
+    run_id = "scan-switch-acl"
+    try:
+        if owned:
+            await bridge.start_producer_lease(run_id)
+        await bridge.publish(run_id, "values", {"content": "x" * 4096})
+        if enabled:
+            with pytest.raises(ResponseError, match="(?i)acl|permission|user executing|allowed"):
+                await bridge.publish_end(run_id)
+            assert await admin.xlen(bridge._stream_key(run_id)) == 1
+        else:
+            await bridge.publish_end(run_id)
+            await bridge.publish_end(run_id)
+            with pytest.raises(RuntimeError, match="already ended"):
+                await bridge.publish(run_id, "late", {})
+            assert [fields["kind"] for _, fields in await admin.xrange(bridge._stream_key(run_id))] == ["event", "end"]
+    finally:
+        try:
+            await bridge.close()
+        finally:
+            await client.aclose()
+            await pool.disconnect()
+            await admin.acl_deluser(username)

@@ -47,14 +47,15 @@ Reconnect cursor parsing requires ASCII digits and must treat integer-conversion
 Keep the producer-token check first, then END detection, then `XADD` in one Lua
 script. Ordinary event publication checks only the stream tail (`XREVRANGE ...
 COUNT 1`), so token streaming remains O(1) as retained history grows. END
-publication checks the tail first and scans the bounded retained window only
-when the tail is not END, preserving compatibility with old streams where an
-END was followed by late events. Do not add an unbounded boolean state key for
+publication checks the tail first. With `legacy_end_scan_enabled` (default true),
+a non-END tail triggers a full retained-window scan even on first END; its
+payload-byte cost blocks Redis. Disable only after old writers stop and legacy
+buffers expire or are removed; restart all Gateways together. Disabled mode is
+tail-only and cannot deduplicate an old mid-stream END. Do not add an unbounded boolean state key for
 this fast path; cleanup, expiry, and a new producer generation would then need a
 separate lifecycle contract. An unowned recovery END for a missing stream is a
 successful no-op; a live owner's write retains its existing missing-buffer
-`XADD` behavior. Test fakes must mirror the END retained-window scan versus the
-ordinary-event tail-only check. Coverage: `tests/test_stream_bridge.py`.
+`XADD` behavior. Test fakes must mirror the scan switch and both tail fast paths. Coverage: `tests/test_stream_bridge.py`.
 
 ### Memory Stream Replay
 
