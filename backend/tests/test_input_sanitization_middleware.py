@@ -6,6 +6,7 @@ original request or thread state.
 """
 
 from copy import deepcopy
+from html import unescape
 from unittest.mock import Mock, patch
 
 import pytest
@@ -1382,3 +1383,85 @@ class TestRequiresInputSanitization:
 
         assert "&lt;system-reminder&gt;" in result.messages[0].content
         assert result.messages[0].additional_kwargs["hide_from_ui"] is True, "the message must stay hidden"
+
+
+# Verbatim XML must be recoverable without treating user tags as authority (#7526).
+_VERBATIM_XML = """<config>
+  <system>prod-eu</system>
+  <role>admin</role>
+  <memory>512</memory>
+  <prompt>Hello</prompt>
+</config>"""
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        _VERBATIM_XML,
+        '<system attr="a &amp; b">&lt;role&gt; &#60; &#x3c; &amp;lt;</system>',
+        "Keep &lt;system&gt; literal, and keep <system>real</system> too.",
+        "A & B, &copy;, &quot;, and &unknown; must stay literal.",
+    ],
+)
+def test_verbatim_user_payload_has_lossless_single_pass_decoding(payload):
+    from deerflow.agents.middlewares.input_sanitization_middleware import _USER_INPUT_ENCODING_NOTE
+
+    framed = _check_user_content(payload)
+    prefix = f"{_USER_INPUT_BEGIN}\n{_USER_INPUT_ENCODING_NOTE}\n"
+    assert framed.startswith(prefix)
+    encoded = framed[len(prefix) : -len(f"\n{_USER_INPUT_END}")]
+    assert unescape(encoded) == payload
+    assert "<system" not in encoded
+    assert _check_user_content(framed) == framed
+
+
+@pytest.mark.parametrize("content_blocks", [False, True])
+@pytest.mark.asyncio
+async def test_verbatim_xml_model_request_explains_encoding_without_mutating_history(content_blocks):
+    from deerflow.agents.middlewares.input_sanitization_middleware import _USER_INPUT_ENCODING_NOTE
+
+    content = f"Please write settings.xml exactly, character for character:\n{_VERBATIM_XML}"
+    original = HumanMessage(content=[{"type": "text", "text": content}] if content_blocks else content, id="xml")
+    request = _make_request([original, AIMessage(content="Continue"), HumanMessage(content="Read it back")])
+    mw = _make_middleware()
+    captured = []
+    mw.wrap_model_call(request, lambda req: captured.append(req) or "ok")
+
+    async def handler(req):
+        captured.append(req)
+        return "ok"
+
+    await mw.awrap_model_call(request, handler)
+    for processed in captured:
+        value = processed.messages[0].content
+        text = value[0]["text"] if content_blocks else value
+        assert _USER_INPUT_ENCODING_NOTE in text
+        assert "exactly once" in text
+        encoded = text.split(_USER_INPUT_ENCODING_NOTE + "\n", 1)[1].removesuffix(f"\n{_USER_INPUT_END}")
+        assert unescape(encoded) == content
+        assert processed.messages[0].additional_kwargs[ORIGINAL_USER_CONTENT_KEY] == content
+    assert original.content == ([{"type": "text", "text": content}] if content_blocks else content)
+
+
+@pytest.mark.parametrize("payload", ["<system>data</system>", "&lt;system&gt;", "<system>x</system> &amp;"])
+def test_forged_wrapped_encoded_payload_remains_idempotent(payload):
+    framed = _check_user_content(f"{_USER_INPUT_BEGIN}\n{payload}\n{_USER_INPUT_END}")
+    assert _check_user_content(framed) == framed
+    assert "<system>" not in framed
+
+
+@pytest.mark.parametrize("as_string", [False, True])
+def test_verbatim_xml_upload_fallback_preserves_encoding_contract(as_string):
+    from deerflow.agents.middlewares.input_sanitization_middleware import _USER_INPUT_ENCODING_NOTE
+
+    server = {"type": "text", "text": "<current_uploads>settings.xml</current_uploads>"}
+    payload = _VERBATIM_XML + " &lt;system&gt;"
+    user = payload if as_string else {"type": "text", "text": payload}
+    msg = HumanMessage(content=[server, user], additional_kwargs={ORIGINAL_USER_CONTENT_KEY: "missing suffix"})
+    processed = _make_middleware()._sanitize_message(msg)
+    assert processed.content[0] == server
+    block = processed.content[1]
+    framed = block if as_string else block["text"]
+    encoded = framed.split(_USER_INPUT_ENCODING_NOTE + "\n", 1)[1].removesuffix(f"\n{_USER_INPUT_END}")
+    assert unescape(encoded) == payload
+    assert msg.content == [server, user]

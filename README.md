@@ -3305,6 +3305,12 @@ are checked recursively as well.
 
 ## Embedded Python Client
 
+User messages are framed as untrusted input. Reserved XML-like tags are escaped
+for model context, with an encoding note instructing the agent to decode exactly
+once when reproducing the original text in files or code. This preserves XML
+angle brackets and literal HTML entities in verbatim-content requests while
+keeping user-supplied tags separate from framework instructions.
+
 `chat()` and `stream()` preserve text appended by model middleware before the
 first state snapshot, emitting only the suffix after the streamed text.
 
