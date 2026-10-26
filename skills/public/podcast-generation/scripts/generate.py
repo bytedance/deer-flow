@@ -329,7 +329,55 @@ def generate_markdown(script: Script, title: str = "Podcast Script") -> str:
     return "\n".join(lines)
 
 
-def _validate_output_paths(script_file: str, output_file: str, transcript_file: str | None) -> None:
+_ASCII_CASE_TRANSLATION = str.maketrans(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"
+)
+
+
+def _existing_ancestor(path: str) -> tuple[tuple[int, int], tuple[str, ...], str]:
+    missing = []
+    while True:
+        try:
+            info = os.stat(path)
+            return (info.st_dev, info.st_ino), tuple(reversed(missing)), path
+        except FileNotFoundError:
+            parent = os.path.dirname(path)
+            if parent == path:
+                raise
+            missing.append(os.path.basename(path))
+            path = parent
+
+
+def _missing_paths_alias(first: str, second: str) -> bool:
+    first = os.path.normcase(os.path.realpath(first))
+    second = os.path.normcase(os.path.realpath(second))
+    if first == second:
+        return True
+    if sys.platform != "darwin":
+        return False
+
+    first_identity, first_missing, ancestor = _existing_ancestor(first)
+    second_identity, second_missing, _ = _existing_ancestor(second)
+    if first_identity != second_identity or tuple(
+        part.translate(_ASCII_CASE_TRANSLATION) for part in first_missing
+    ) != tuple(part.translate(_ASCII_CASE_TRANSLATION) for part in second_missing):
+        return False
+    try:
+        # Darwin's _PC_CASE_SENSITIVE; Python does not export its name.
+        case_sensitive = os.pathconf(ancestor, 11)
+    except (OSError, ValueError):
+        case_sensitive = None
+    if case_sensitive not in (0, 1):
+        raise ValueError(
+            f"Cannot determine whether {first!r} and {second!r} collide on this volume; "
+            "choose names that differ by more than case"
+        )
+    return case_sensitive == 0
+
+
+def _validate_output_paths(
+    script_file: str, output_file: str, transcript_file: str | None
+) -> None:
     paths = [("script_file", script_file), ("output_file", output_file)]
     if transcript_file:
         paths.append(("transcript_file", transcript_file))
@@ -338,11 +386,12 @@ def _validate_output_paths(script_file: str, output_file: str, transcript_file: 
             try:
                 same_file = os.path.samefile(previous_path, path)
             except FileNotFoundError:
-                same_file = os.path.normcase(os.path.realpath(previous_path)) == os.path.normcase(
-                    os.path.realpath(path)
-                )
+                same_file = _missing_paths_alias(previous_path, path)
             if same_file:
-                raise ValueError(f"{previous_name} and {name} must refer to different files")
+                raise ValueError(
+                    f"{previous_name} and {name} must refer to different files: "
+                    f"{previous_path!r} and {path!r}"
+                )
 
 
 def generate_podcast(script_file: str, output_file: str,

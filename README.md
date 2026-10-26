@@ -1670,6 +1670,10 @@ diagnostics to stderr when generation fails. Callers can check the status before
 presenting audio; an existing MP3 or generated transcript is not proof of success.
 The input JSON, MP3 and optional transcript must refer to different files;
 matching resolved paths and existing file aliases are rejected before writes or TTS calls.
+On macOS, missing paths differing only by ASCII letter case are checked against their existing parent
+volume's case policy. If that policy cannot be determined, choose names differing
+by more than case. Collision diagnostics include both original path arguments.
+Non-ASCII case differences, Unicode normalization aliases in missing names, and concurrent filesystem changes are outside this preflight.
 
 The bundled chart-visualization command does the same for an unknown chart tool,
 a spec missing `tool`, or a chart-service HTTP failure. Successful chart URLs,
