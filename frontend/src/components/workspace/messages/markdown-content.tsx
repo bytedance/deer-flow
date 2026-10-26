@@ -53,7 +53,11 @@ const StreamingCodeBlockContext = createContext(false);
 
 function useSmoothStreamingContent(content: string, isLoading: boolean) {
   const initialContent =
-    isLoading && content.length >= SMOOTH_REVEAL_MIN_DELTA ? "" : content;
+    isLoading && content.length >= SMOOTH_REVEAL_MIN_DELTA
+      ? ""
+      : isLoading
+        ? content.slice(0, snapForwardToCodePoint(content, content.length))
+        : content;
   const [displayContent, setDisplayContent] = useState(initialContent);
   const displayContentRef = useRef(initialContent);
   const targetContentRef = useRef(content);
@@ -116,6 +120,12 @@ function useSmoothStreamingContent(content: string, isLoading: boolean) {
             ),
         ),
       );
+      if (nextLength <= latest.length) {
+        // The stream currently ends with half of a surrogate pair. Wait for
+        // the next content update instead of committing it or polling forever.
+        revealStartedAtRef.current = null;
+        return;
+      }
       const next = target.slice(0, nextLength);
       displayContentRef.current = next;
       setDisplayContent(next);

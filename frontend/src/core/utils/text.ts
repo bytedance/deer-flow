@@ -34,14 +34,25 @@ export function truncateToCodePoints(
  *
  * `String.prototype.slice` cuts by code unit; an emoji outside the BMP
  * spans two units, and a prefix ending between them is corrupt for as long
- * as the animation holds it. Indices at or past either end are returned
- * unchanged.
+ * as the animation holds it. If a streaming chunk currently ends with a lone
+ * high surrogate, a cut at that end is held before it until the matching low
+ * surrogate arrives. Indices beyond either end are returned unchanged.
  */
 export function snapForwardToCodePoint(
   text: string,
   unitIndex: number,
 ): number {
-  if (unitIndex <= 0 || unitIndex >= text.length) {
+  if (unitIndex <= 0) {
+    return unitIndex;
+  }
+  if (unitIndex >= text.length) {
+    if (unitIndex === text.length && text.length > 0) {
+      const last = text.charCodeAt(text.length - 1);
+      const endsWithHighSurrogate = last >= 0xd800 && last <= 0xdbff;
+      if (endsWithHighSurrogate) {
+        return text.length - 1;
+      }
+    }
     return unitIndex;
   }
   const previous = text.charCodeAt(unitIndex - 1);
