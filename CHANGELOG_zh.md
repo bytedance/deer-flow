@@ -1116,6 +1116,11 @@
 
 ### 修复
 
+- **网页抓取：** 缓存 Readability.js 不可用的探测结果，并在 Node 抽取器首次出现
+  进程启动失败后停止重试。没有可用 Node/npm 工具链的安装环境会在后续抓取中直接使用
+  现有且保留链接的 Python 回退，不再重复执行失败的子进程探测；单篇文档导致的非零退出
+  仍会在后续页面重试 Node。([#5973])
+
 - **渠道：** 展示文件的 IM 回复不再在事件循环上解析这些文件。此前两条回复路径（`runs.wait`
   和流式）都会对每个产物内联解析虚拟路径（`realpath`）、解析输出根目录并用 `stat` 检查文件，
   在网络存储上会让其他渠道和请求停顿。现在这些工作在工作线程中进行。([#7594])
@@ -9919,6 +9924,7 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#5965]: https://github.com/bytedance/deer-flow/pull/5965
 [#5966]: https://github.com/bytedance/deer-flow/pull/5966
 [#5968]: https://github.com/bytedance/deer-flow/pull/5968
+[#5973]: https://github.com/bytedance/deer-flow/issues/5973
 [#5977]: https://github.com/bytedance/deer-flow/pull/5977
 [#5978]: https://github.com/bytedance/deer-flow/pull/5978
 [#5980]: https://github.com/bytedance/deer-flow/pull/5980
