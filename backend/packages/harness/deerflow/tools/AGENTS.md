@@ -1,5 +1,11 @@
 ### Tool System (`packages/harness/deerflow/tools/`)
 
+`skill_manage_tool.py` stages candidate text with UTF-8 and `newline=""`,
+matching skill storage. Scan the exact submitted bytes for `SKILL.md` and
+supporting files, including overlays on existing trees.
+`tests/test_text_writes_keep_lf_bytes.py` emulates Windows writes and compares
+scanner input with published bytes for LF and CRLF content.
+
 Artifact capture accepts standard top-level `url`/`mime_type` content blocks and
 legacy `source.url`/`source.mime_type`. A present top-level `url` selects that
 shape, even when invalid; never mix its MIME metadata with a conflicting legacy
