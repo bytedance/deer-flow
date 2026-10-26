@@ -45,6 +45,10 @@ export const zhCN: Translations = {
         description:
           "保存版本化 Agent 工作流，在同一 Gateway 进程内恢复，并确认确切的保留输出版本。不支持重启回放或硬金额预算。",
       },
+      reportSections: {
+        title: "分段长文写作",
+        description: "逐段撰写长报告，并将各章节汇总为可下载的 Markdown 文档。",
+      },
       agentTeams: {
         title: "Agent 团队",
         description: "让完整 Custom Agent 通过 @成员、共享记录与任务交接协作。",
@@ -75,6 +79,20 @@ export const zhCN: Translations = {
         title: "本地检索示例",
         description:
           "使用固定示例文档演示只读检索与结构化工具结果，不连接外部知识库。",
+      },
+      lightrag: {
+        title: "LightRAG",
+        description: "从 LightRAG 检索文档与实体关系，并使用统一的来源引用。",
+      },
+      knowledgePlatform: {
+        title: "知识空间与连接",
+        description:
+          "在管理员明确授权后管理多层级空间、资源共享与继承策略。需要安装和配置，不包含管理页面，也不改变全局检索权限。",
+      },
+      knowledgeManagement: {
+        title: "知识入库与处理",
+        description:
+          "通过 WeKnora 导入文件、网址和文本，并在管理员明确授权后管理处理任务。需要安装和配置，不包含管理页面。",
       },
       weknora: {
         title: "WeKnora 知识检索",
@@ -229,6 +247,15 @@ export const zhCN: Translations = {
     showBrowser: "打开浏览器面板",
   },
 
+  browserStream: {
+    connecting: "正在连接…",
+    disconnected: "连接已断开",
+    handshakeTimeout:
+      "实时浏览器连接超时。请检查网络或代理设置，然后关闭并重新开启 Live 以重试。",
+    connectionFailed:
+      "实时浏览器连接失败或已关闭。请检查网络连接和访问权限，然后关闭并重新开启 Live 以重试。",
+  },
+
   skillUsage: {
     used: "使用的技能",
     title: "技能",
@@ -258,6 +285,11 @@ export const zhCN: Translations = {
   home: {
     docs: "文档",
     blog: "博客",
+    searchDocs: "搜索文档…",
+    searchDocsLabel: "搜索文档",
+    searchNoResults: "未找到结果，请尝试更少或不同的关键词。",
+    searchLoadFailed: "搜索暂时不可用。",
+    searchLoading: "加载中…",
   },
 
   // Welcome
@@ -508,6 +540,8 @@ export const zhCN: Translations = {
           "连续几轮没有进展。回复说明还缺什么，或用 /goal 换个说法重新设置目标。",
         tokenCapped:
           "已达到 token 预算。发送消息即可继续，新的运行会重新计算预算。",
+        loopCapped:
+          "重复工具调用触发了安全停止。调整要求后发送新消息即可重试，目标会保留。",
         missingEvidence:
           "目标检查：缺少依据。可以让它展示结果或说明卡在哪里；如果目标已不适用，用 /goal clear 清除目标。",
         runFailed:
@@ -790,6 +824,18 @@ export const zhCN: Translations = {
     cancel: "取消",
     retryItem: "重试",
     exportResults: "导出 JSONL",
+    viewResult: "查看结果",
+    resultTitle: "批处理结果",
+    resultDescription: "查看该条目的持久化报告和已捕获证据。",
+    report: "报告",
+    evidence: "已捕获证据",
+    noEvidence: "没有已捕获证据",
+    acceptance: "验收结果",
+    noReport: "该条目还没有保存报告。",
+    loadResultFailed: "无法加载批处理结果",
+    truncated: "报告已截断",
+    omittedEvidence: (count) => `${count} 条证据未展示`,
+    pagesLabel: "页码",
     viewItems: "查看条目",
     hideItems: "收起条目",
     itemsFailed: "无法加载批处理条目",
@@ -1140,6 +1186,7 @@ export const zhCN: Translations = {
         maxContinuations: "已达到继续处理的次数上限",
         noProgress: "连续多轮没有进展",
         tokenCapped: "已达到 token 预算",
+        loopCapped: "重复工具调用触发了安全停止",
         evaluatorFailed: "未能检查目标，这次运行本身可能没问题",
         noDurableEndOfTurn: "未能检查目标：没有保存最终回复",
         threadChanged: "未能检查目标：检查期间对话发生了变化",
@@ -1594,6 +1641,9 @@ export const zhCN: Translations = {
   // Tool calls
   toolCalls: {
     details: "工具详情",
+    failed: "执行失败",
+    scheduleTaskPending: "定时任务操作",
+    stopScheduledTaskPending: "暂停此定时任务",
     toolName: "工具名称",
     callId: "调用 ID",
     input: "输入",
@@ -1979,7 +2029,7 @@ export const zhCN: Translations = {
       lightDescription: "更明亮的配色，适合日间使用。",
       darkDescription: "更暗的配色，减少眩光方便专注。",
       languageTitle: "语言",
-      languageDescription: "在不同语言之间切换。",
+      languageDescription: "选择界面语言及回复时优先使用的语言。",
     },
     tools: {
       adminRequired: "需要管理员权限才能管理 MCP 工具。",
@@ -2439,6 +2489,9 @@ export const zhCN: Translations = {
         "该邮箱对应的账号已存在。请使用密码登录或联系管理员。",
       sso_not_allowed: "你的账号不允许使用 SSO 登录。请联系管理员。",
       account_disabled: "账号已停用，请联系管理员。",
+      invalid_email: "请输入有效的邮箱地址。",
+      password_too_short: "密码至少需要 6 个字符。",
+      registration_password_too_short: "密码至少需要 8 个字符。",
     },
   },
 };

@@ -3,7 +3,7 @@ import os
 import sys
 from io import BytesIO
 
-from PIL import Image
+from PIL import Image, ImageOps
 from pptx import Presentation
 from pptx.util import Inches
 
@@ -71,8 +71,12 @@ def generate_ppt(
 
         # Load and process image
         with Image.open(image_path) as img:
-            # Convert to RGB if necessary (for PNG with transparency)
-            if img.mode in ("RGBA", "P"):
+            img = ImageOps.exif_transpose(img)
+            image_format = "JPEG"
+            if "A" in img.getbands() or "transparency" in img.info:
+                img = img.convert("RGBA")
+                image_format = "PNG"
+            elif img.mode == "P":
                 img = img.convert("RGB")
 
             # Calculate dimensions to fill slide while maintaining aspect ratio
@@ -99,7 +103,7 @@ def generate_ppt(
 
             # Save processed image to bytes
             img_bytes = BytesIO()
-            img.save(img_bytes, format="JPEG", quality=95)
+            img.save(img_bytes, format=image_format, quality=95)
             img_bytes.seek(0)
 
             # Add image to slide

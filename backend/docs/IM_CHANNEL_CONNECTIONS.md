@@ -183,6 +183,14 @@ graph TB
 
 For the special GitHub case (`fire_and_forget=True` channel policy), the manager calls `runs.create()` and returns once the run is `pending` — no outbound reply, because GitHub agents post via the `gh` CLI from inside their sandbox. See [GITHUB_AGENTS.md](GITHUB_AGENTS.md) for the full GitHub flow.
 
+## Attachment delivery feedback
+
+The shared channel outbound path sends text before uploading attachments. Channels inheriting the default, unsupported `send_file` implementation explain the limitation in that first reply instead of attempting uploads. Supported channels continue trying the other attachments after an individual failure, then send one combined notice listing only unsent files. Successful uploads need no additional confirmation.
+
+The notice stays in the original conversation, preserves connection/owner routing, and carries no attachments or clarification-card payload. Built-in IM outbounds do not currently populate `metadata.locale`, so their notices choose Chinese or English from the first non-empty response line. This path does not read user language preferences; an explicitly supplied locale still overrides the heuristic. Files stay in the original DeerFlow conversation for download. If the platform no longer accepts the notice, the upload failures and notice failure remain in the logs; no proactive notification, regeneration, or new upload retry is started.
+
+WeCom reuses this shared processing, sends failure notices as text replies on the original inbound frame after the final stream, and retains its frame/stream cleanup after delivery. Provider-specific upload protocols, reply windows, and send ordering are unchanged.
+
 ## Owner-scoped File Storage
 
 `ChannelManager` resolves the storage owner **once** at the top of `_handle_chat` via `_channel_storage_user_id(msg)` and threads that value through the entire file pipeline. The same identity is used as the run `user_id` in `run_context` and as the bucket for memory, uploads, and outputs — so the bucket the agent reads/writes is always the bucket where channel files were staged.
@@ -719,6 +727,43 @@ redelivery of the same message on the new holder is dropped instead of
 executing the turn twice; a request the Gateway rejected, or a failure before
 the request was sent, still releases the key for a retry. See
 [IM channel leader lease](CONFIGURATION.md#im-channel-leader-lease-channelsleader_lease).
+
+### Duplicate and late deliveries
+
+The inbound dedupe key is `(channel, workspace, chat, message id)`; with a
+PostgreSQL database every instance shares it for 10 minutes, and it fails open
+on a database error. Discord keys a message by its guild (`dm` for a direct
+message, which used to get no key at all) and by the channel it was posted in,
+so two instances that route a reply in a thread differently still see one
+message. A Discord session on every instance receives every message, so the
+adapter claims that key before it creates a Discord thread for the message:
+only the instance that wins the claim creates one. A claimed message that is
+never processed (a failed or cancelled hand-off, a shutdown that discards it
+from the queue) gives the key back, so a peer can still take it.
+
+Past the dedupe window, after a restart, or while the dedupe store is down, a
+redelivery still reaches the run request. Every run request for a message
+with a dedupe key carries an `Idempotency-Key` derived from it, and the human
+message id is derived from the same key, so the Gateway returns the run it
+admitted for the first delivery instead of starting another one (on a
+`memory` database, only while that Gateway process still holds the run). The
+Gateway scopes these internal keys by owner rather than by thread, so a
+redelivery that arrives after `/new` rebound the conversation to a fresh thread
+gets a 409 for the admitted run, answered with the same note, instead of
+running again there. The
+redelivery then attaches to that run: a streaming channel replays its events,
+or, once they are gone, the manager reads this message's turn from the thread
+state; a `runs.wait` channel reads that turn as well, and a run that is still
+in progress is answered with a short "already being processed" note. A
+redelivered message is not run again even when its first run failed; a new
+message is. Messages without a dedupe key (no stable message id or workspace)
+are not covered.
+
+The first message of a new conversation binds it to a thread with an
+insert-if-absent claim on `channel_conversations` (connected users) or
+`channel_thread_bindings` (unbound chats). An instance that created a thread
+but lost the claim adopts the winner's thread and deletes its own, empty one;
+`/new` still rebinds the conversation to a fresh thread.
 
 ## Security Notes
 

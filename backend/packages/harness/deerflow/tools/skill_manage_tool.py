@@ -9,6 +9,7 @@ import shutil
 import tempfile
 import threading
 from collections import deque
+from collections.abc import Awaitable, Callable
 from concurrent.futures import Future
 from pathlib import Path
 from typing import Any, NoReturn
@@ -16,8 +17,9 @@ from weakref import WeakValueDictionary
 
 from langchain.tools import tool
 
-from deerflow.agents.lead_agent.prompt import refresh_user_skills_system_prompt_cache_async
+from deerflow.agents.lead_agent.prompt import SkillCacheResetPublishError, publish_skills_cache_reset, refresh_user_skills_system_prompt_cache_async
 from deerflow.runtime.user_context import resolve_runtime_user_id
+from deerflow.skills.package_files import is_code_file
 from deerflow.skills.security_scanner import scan_skill_content
 from deerflow.skills.security_static_scanner import (
     StaticFinding,
@@ -30,6 +32,7 @@ from deerflow.skills.storage.skill_storage import SkillStorage
 from deerflow.skills.types import SKILL_MD_FILE
 from deerflow.tools.sync import make_sync_tool_wrapper
 from deerflow.tools.types import Runtime
+from deerflow.utils.file_io import await_drained
 
 logger = logging.getLogger(__name__)
 
@@ -162,7 +165,9 @@ async def _scan_static_candidate_or_raise(name: str, updates: dict[str, str], sk
             for relative_path, content in updates.items():
                 target = skill_dir / relative_path
                 target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text(content, encoding="utf-8")
+                # Match the bytes skill storage publishes, including on Windows.
+                # Default text mode would rewrite LF before the scanner reads it.
+                target.write_text(content, encoding="utf-8", newline="")
             return enforce_static_scan(skill_dir, skill_name=name)
 
     try:
@@ -175,6 +180,37 @@ async def _scan_static_candidate_or_raise(name: str, updates: dict[str, str], sk
 
 async def _to_thread(func, /, *args, **kwargs):
     return await asyncio.to_thread(func, *args, **kwargs)
+
+
+async def _write_and_record(skill_storage: SkillStorage, name: str, relative_path: str, content: str, record: dict[str, Any]) -> None:
+    await _to_thread(skill_storage.write_custom_skill, name, relative_path, content)
+    await _to_thread(skill_storage.append_history, name, record)
+
+
+async def _settle_skill_mutation(user_id: str, name: str, persist: Callable[[], Awaitable[object]]) -> None:
+    """Apply a skill change and propagate it to every Gateway process sharing the home volume.
+
+    The write, its history record, this process's prompt-cache refresh and the
+    shared skills cache reset marker settle as one drained unit, like the
+    mutation tails of the Gateway skill routes: cancelling ``asyncio.to_thread``
+    abandons the await, not the worker, so a cancelled run would otherwise
+    unwind with the write landed and this process and its peers still serving
+    the previous skill list. The marker write is filesystem IO and runs off the
+    event loop.
+    """
+
+    async def _tail() -> None:
+        await persist()
+        await refresh_user_skills_system_prompt_cache_async(user_id)
+        try:
+            await _to_thread(publish_skills_cache_reset, user_id=user_id)
+        except SkillCacheResetPublishError as exc:
+            # Logged here because a cancelled run never sees the raise below.
+            logger.error("Custom skill %r changed, but the shared skills cache reset could not be published", name, exc_info=True)
+            # The change is durable; say so, or the model reads a failed write and retries it.
+            raise SkillCacheResetPublishError(f"The change to custom skill '{name}' was applied, but other Gateway processes were not notified and may keep serving the previous skill list: {exc}") from exc
+
+    await await_drained(_tail())
 
 
 async def _skill_manage_impl(
@@ -216,13 +252,8 @@ async def _skill_manage_impl(
             static_findings = await _scan_static_candidate_or_raise(name, {SKILL_MD_FILE: content})
             scan = await _scan_or_raise(content, executable=False, location=f"{name}/{SKILL_MD_FILE}", static_findings=static_findings)
             scan["static_findings"] = static_findings
-            await _to_thread(skill_storage.write_custom_skill, name, SKILL_MD_FILE, content)
-            await _to_thread(
-                skill_storage.append_history,
-                name,
-                _history_record(action="create", file_path=SKILL_MD_FILE, prev_content=None, new_content=content, thread_id=thread_id, scanner=scan),
-            )
-            await refresh_user_skills_system_prompt_cache_async(user_id)
+            record = _history_record(action="create", file_path=SKILL_MD_FILE, prev_content=None, new_content=content, thread_id=thread_id, scanner=scan)
+            await _settle_skill_mutation(user_id, name, lambda: _write_and_record(skill_storage, name, SKILL_MD_FILE, content, record))
             return f"Created custom skill '{name}'."
         if action == "edit":
             await _to_thread(skill_storage.ensure_custom_skill_is_editable, name)
@@ -233,13 +264,8 @@ async def _skill_manage_impl(
             scan = await _scan_or_raise(content, executable=False, location=f"{name}/{SKILL_MD_FILE}", static_findings=static_findings)
             scan["static_findings"] = static_findings
             prev_content = await _to_thread(skill_storage.read_custom_skill, name)
-            await _to_thread(skill_storage.write_custom_skill, name, SKILL_MD_FILE, content)
-            await _to_thread(
-                skill_storage.append_history,
-                name,
-                _history_record(action="edit", file_path=SKILL_MD_FILE, prev_content=prev_content, new_content=content, thread_id=thread_id, scanner=scan),
-            )
-            await refresh_user_skills_system_prompt_cache_async(user_id)
+            record = _history_record(action="edit", file_path=SKILL_MD_FILE, prev_content=prev_content, new_content=content, thread_id=thread_id, scanner=scan)
+            await _settle_skill_mutation(user_id, name, lambda: _write_and_record(skill_storage, name, SKILL_MD_FILE, content, record))
             return f"Updated custom skill '{name}'."
 
         if action == "patch":
@@ -258,29 +284,20 @@ async def _skill_manage_impl(
             static_findings = await _scan_static_candidate_or_raise(name, {SKILL_MD_FILE: new_content})
             scan = await _scan_or_raise(new_content, executable=False, location=f"{name}/{SKILL_MD_FILE}", static_findings=static_findings)
             scan["static_findings"] = static_findings
-            await _to_thread(skill_storage.write_custom_skill, name, SKILL_MD_FILE, new_content)
-            await _to_thread(
-                skill_storage.append_history,
-                name,
-                _history_record(action="patch", file_path=SKILL_MD_FILE, prev_content=prev_content, new_content=new_content, thread_id=thread_id, scanner=scan),
-            )
-            await refresh_user_skills_system_prompt_cache_async(user_id)
+            record = _history_record(action="patch", file_path=SKILL_MD_FILE, prev_content=prev_content, new_content=new_content, thread_id=thread_id, scanner=scan)
+            await _settle_skill_mutation(user_id, name, lambda: _write_and_record(skill_storage, name, SKILL_MD_FILE, new_content, record))
             return f"Patched custom skill '{name}' ({replacement_count} replacement(s) applied, {occurrences} match(es) found)."
 
         if action == "delete":
-            await _to_thread(
-                skill_storage.delete_custom_skill,
-                name,
-                history_meta=_history_record(
-                    action="delete",
-                    file_path=SKILL_MD_FILE,
-                    prev_content=None,
-                    new_content=None,
-                    thread_id=thread_id,
-                    scanner={"decision": "allow", "reason": "Deletion requested."},
-                ),
+            record = _history_record(
+                action="delete",
+                file_path=SKILL_MD_FILE,
+                prev_content=None,
+                new_content=None,
+                thread_id=thread_id,
+                scanner={"decision": "allow", "reason": "Deletion requested."},
             )
-            await refresh_user_skills_system_prompt_cache_async(user_id)
+            await _settle_skill_mutation(user_id, name, lambda: _to_thread(skill_storage.delete_custom_skill, name, history_meta=record))
             return f"Deleted custom skill '{name}'."
 
         if action == "write_file":
@@ -293,30 +310,36 @@ async def _skill_manage_impl(
             from deerflow.skills.mutations.guard import read_optional_text
 
             prev_content = await _to_thread(read_optional_text, skill_storage, target)
-            executable = "scripts/" in path or path.startswith("scripts/")
+            # Executable content is whatever the shared package-file rule classifies
+            # as code: a file under the top-level ``scripts/`` directory, a code-suffix
+            # file anywhere in the package, or an extensionless file that starts with
+            # a shebang. Classify with that shared rule instead of re-deriving it; a
+            # substring test here also caught static support files such as
+            # references/scripts/overview.md and templates/my-scripts/setup.md, while
+            # the ``scripts/``-member rule alone would downgrade runnable files such as
+            # references/scripts/helper.py or assets/my-scripts/tool.js to static.
+            executable = is_code_file(path, content[:8].encode("utf-8", "surrogatepass"))
             static_findings = await _scan_static_candidate_or_raise(name, {path: content}, skill_storage)
             scan = await _scan_or_raise(content, executable=executable, location=f"{name}/{path}", static_findings=static_findings)
             scan["static_findings"] = static_findings
-            await _to_thread(skill_storage.write_custom_skill, name, path, content)
-            await _to_thread(
-                skill_storage.append_history,
-                name,
-                _history_record(action="write_file", file_path=path, prev_content=prev_content, new_content=content, thread_id=thread_id, scanner=scan),
-            )
-            await refresh_user_skills_system_prompt_cache_async(user_id)
+            record = _history_record(action="write_file", file_path=path, prev_content=prev_content, new_content=content, thread_id=thread_id, scanner=scan)
+            await _settle_skill_mutation(user_id, name, lambda: _write_and_record(skill_storage, name, path, content, record))
             return f"Wrote '{path}' for custom skill '{name}'."
 
         if action == "remove_file":
             await _to_thread(skill_storage.ensure_custom_skill_is_editable, name)
             if path is None:
                 raise ValueError("path is required for remove_file.")
-            prev_content = await _to_thread(skill_storage.remove_custom_skill_file, name, path)
-            await _to_thread(
-                skill_storage.append_history,
-                name,
-                _history_record(action="remove_file", file_path=path, prev_content=prev_content, new_content=None, thread_id=thread_id, scanner={"decision": "allow", "reason": "Deletion requested."}),
-            )
-            await refresh_user_skills_system_prompt_cache_async(user_id)
+
+            async def _remove_and_record() -> None:
+                prev_content = await _to_thread(skill_storage.remove_custom_skill_file, name, path)
+                await _to_thread(
+                    skill_storage.append_history,
+                    name,
+                    _history_record(action="remove_file", file_path=path, prev_content=prev_content, new_content=None, thread_id=thread_id, scanner={"decision": "allow", "reason": "Deletion requested."}),
+                )
+
+            await _settle_skill_mutation(user_id, name, _remove_and_record)
             return f"Removed '{path}' from custom skill '{name}'."
 
         if await _to_thread(skill_storage.public_skill_exists, name):

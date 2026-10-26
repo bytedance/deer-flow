@@ -89,19 +89,19 @@ Tests: `html-assets.dom.test.ts`, `artifact-file-preview.dom.test.tsx`,
    bounded error and attempt count; retryable failures use backend backoff,
    while a permanent rejection or exhausted five-attempt budget is shown as
    stopped rather than implying that retries will continue.
-   Explicit durable native-subagent batches use `core/subagent-batches` and
-   `ThreadSubagentBatches`. `/api/features` reports SQL-repository availability
-   separately from the startup worker. A running worker exposes the trigger on
-   both default and Custom Agent chat pages; a stopped worker keeps threads with
-   durable history visible in read-only mode for inspection and JSONL export,
-   while deployments with neither a worker nor history keep the trigger hidden.
-   The panel renders bounded progress and incrementally paged item previews, controls pause/resume/cancel,
-   retries failed items, and exports JSONL. Worker-dependent mutations stay
-   disabled in read-only history mode, and persisted progress is normalized to
-   a bounded percentage before reaching the UI primitive. Item pagination uses a
-   fixed page size and an explicit load-more control; full results remain available
-   only through JSONL export. The panel must not infer batch mode from prompt text
-   or inject the complete result set into chat state.
+   `core/subagent-batches` / `ThreadSubagentBatches` own durable native batches.
+   `/api/features` separates SQL availability from startup worker state.
+   Show the trigger on default/Custom Agent chats with a running worker, or
+   read-only with durable history; hide otherwise. Bound persisted progress
+   percentages. Use fixed item-preview pages and load-more; full results need
+   JSONL export. Gate pause/resume/cancel and failed-item retries on the worker.
+   Never infer batches from prompts or put full results in chat state.
+   Review citations use only the selected persisted snapshot. Poll open details
+   until their own response is terminal, regardless of compact-list status;
+   stop on close. Compact attempt/status/update changes invalidate cached details
+   so external retries refresh open dialogs; never fetch closed details.
+   Show omitted counts even without sources; localize page labels.
+   Real-hook/HTTP tests: `thread-subagent-batch-review.dom.test.tsx`.
    Capability Center > Plugins > Lark uses a local generation only to suppress stale React
    callbacks; server-issued Lark flow generations must be passed through every
    config/auth completion and across switch-or-register to authorization chains
@@ -168,11 +168,13 @@ Edit-and-rerun is deliberately latest-turn-only. `core/messages/utils.ts::getLat
 
 `MessageGroup` builds its tool-result and browser-preview lookups once per processing group before converting messages to steps. The lookup preserves the first non-empty result and first screenshot-bearing browser view for each tool-call ID, matching the streamed-message display semantics without repeatedly scanning the full group for every tool call.
 
-Generic tool details receive the explicit Debug flag from `MessageGroup`, independent of token statistics. `tool-call-details.tsx` mounts payload previews only while expanded; `core/messages/tool-detail-preview.ts` caps text output at 12,000 characters, visits at most 12,000 values, and limits nesting to six levels. Serialization budgets include escaped strings, punctuation, indentation, closing delimiters, and truncation markers so structured previews remain valid JSON without a final mid-token slice. Generic calls keep the original ToolMessage content/status. Text is displayed verbatim (or as a bounded prefix), never passed through JSON.parse: reparsing can round numeric IDs, discard duplicate keys, and alter quoted strings. Objects/arrays are formatted only on expansion; specialized renderers retain their existing result conversion. An empty received payload is distinct from a missing message, and neither implies a running/completed state. Copy actions use the shared clipboard fallback, copy the displayed preview, and reset feedback after two seconds. Truncated containers include an inline ellipsis unless an object has already emitted a real ellipsis key; in that case, only the external truncation notice is guaranteed. Arrays stop after a child collapses because the text budget is exhausted, avoiding repeated trailing markers while preserving literal ellipsis elements. Cycle, accessor, and depth-limit markers do not suppress later siblings. Truncated string prefixes preserve complete UTF-16 surrogate pairs. Object traversal stops before a key exceeds the remaining text budget; never shorten property names, since shortened keys can collide with real data. Renderer routing and result conversion share `getToolCallKind`. Disclosure accessible names include the tool name and call ID.
+Use `core/messages/tool-error.ts` for tool/Debug failures; never classify text or partial results. Scheduler completion needs an object response. Keep details Debug-only via `MessageGroup`. `tool-call-details.tsx` mounts payload previews only while expanded; `core/messages/tool-detail-preview.ts` caps text output at 12,000 characters, visits at most 12,000 values, and limits nesting to six levels. Count escapes, punctuation, indentation, closing delimiters and truncation markers within the budget; never slice structured JSON mid-token. Generic calls keep the original ToolMessage content/status. Text is displayed verbatim (or as a bounded prefix), never passed through JSON.parse: reparsing can round numeric IDs, discard duplicate keys, and alter quoted strings. Format objects/arrays on expansion; retain specialized result conversion. An empty received payload is distinct from a missing message, and neither implies a running/completed state. Copy actions use the shared clipboard fallback, copy the displayed preview, and reset feedback after two seconds. Truncated containers include an inline ellipsis unless an object has already emitted a real ellipsis key; in that case, only the external truncation notice is guaranteed. Arrays stop after a child collapses because the text budget is exhausted, avoiding repeated trailing markers while preserving literal ellipsis elements. Cycle, accessor, and depth-limit markers do not suppress later siblings. Truncated string prefixes preserve complete UTF-16 surrogate pairs. Object traversal stops before a key exceeds the remaining text budget; never shorten property names, since shortened keys can collide with real data. Renderer routing and result conversion share `getToolCallKind`. Disclosure accessible names include the tool name and call ID.
 
 Array previews coalesce consecutive generated markers only at the end into one omitted-suffix notice. The serializer tracks marker provenance and complete entry boundaries; it must not deduplicate literal ellipsis values or shift the indices of later real elements. A cycle/accessor/depth-limit tail can therefore share one notice while the same markers in the middle retain their positions.
 
 ### Key Patterns
+
+REST `core/api/fetcher.ts`: preserve Request; CSRF uses effective method/headers.
 
 Conversation exports read every persisted message page through
 `fetchThreadExportMessages` (200 rows/page). Run `mergeMessages` after history
@@ -225,7 +227,8 @@ export on a page error or non-advancing cursor; demos keep their fixture path.
 Model picker, chat entry pages, branch tree, and browser-control ownership are
 detailed in `frontend/docs/conversation-ui-ownership.md`.
 
-- `src/core/threads/hooks.ts` owns pre-submit upload state and thread submission. The optimistic human bubble (before and after upload) and the submitted message all build `additional_kwargs` through `buildHumanMessageAdditionalKwargs`, so quote/reference metadata and staged project files survive the upload; never replace them with only the uploaded files.
+- `core/threads/hooks.ts` owns uploads/sends. Both optimistic and submitted humans use `buildHumanMessageAdditionalKwargs` to retain quote/reference metadata and staged project files.
+- `core/uploads/api.ts` rejects `success: false` before send or composer clear. Keep the existing retry path; accepted files are not rolled back.
 - `src/components/workspace/chats/chat-box.tsx` owns the desktop right-panel layout, and **all three** right panels (artifacts, sidecar, browser) share one `ResizablePanelGroup` — do not fork a non-resizable branch per panel kind, which is how the artifacts divider silently lost its drag handle (#4465). Open/close is `collapse()` / `resize()` on the side panel's imperative handle, not conditional rendering, so the width can animate. Three constraints hold that together: the size transition is applied from the group as `[&>[data-panel]]:transition-[flex-grow]` because the sized flex item is the library's own `[data-panel]` element rather than the child `className` lands on; it is applied only while an open/close is in flight, so a drag is not interpolated frame by frame; and during the animation the panel content is held at its final width in `cqw` and clipped, because a reflowing message list re-runs its scroll-to-bottom (pinned by `tests/e2e/sidecar-chat.spec.ts`'s no-animated-scroll test) and a re-wrapping composer changes which responsive labels it shows. Because the panel is `collapsible`, the library can also collapse it to `0%` on its own when a drag crosses `minSize`, without going through the state that owns it. `onResize` records the last positive size while the pointer moves, but the owning `sidecar` / `browserView` / `artifactsOpen` state must only mirror a final `0%` layout from `onLayoutChanged`, after pointer release; closing on the first `0%` resize frame breaks a continuous drag that reaches the edge and then reverses before release.
 
 `ask_clarification` ToolMessages delimit runs despite hidden human replies; skill

@@ -54,6 +54,7 @@ def test_non_finite_frontmatter_has_stable_error_code():
         validate_candidate(content, content, "example")
 
 
+@pytest.mark.skipif(os.name != "posix", reason="package capture requires POSIX filesystem primitives")
 def test_package_snapshot_covers_support_bytes_and_execute_flags(tmp_path):
     (tmp_path / "SKILL.md").write_text(BASE, encoding="utf-8")
     support = tmp_path / "script.sh"
@@ -68,6 +69,7 @@ def test_package_snapshot_covers_support_bytes_and_execute_flags(tmp_path):
     assert before_mode.digest != capture_package(tmp_path).digest
 
 
+@pytest.mark.skipif(os.name != "posix", reason="package capture requires POSIX filesystem primitives")
 def test_snapshot_detached_from_live_files(tmp_path):
     main = tmp_path / "SKILL.md"
     main.write_text(BASE, encoding="utf-8")
@@ -109,6 +111,7 @@ def test_automatic_capture_rejects_links_and_special_files(tmp_path, kind):
         capture_package(root)
 
 
+@pytest.mark.skipif(os.name != "posix", reason="package capture requires POSIX filesystem primitives")
 def test_snapshot_never_returns_a_partially_captured_package(tmp_path):
     (tmp_path / "SKILL.md").write_text(BASE, encoding="utf-8")
     for index in range(256):

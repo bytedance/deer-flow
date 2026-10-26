@@ -218,7 +218,6 @@ function ModelEditor({
   const [draft, setDraft] = useState(() => modelDraft(model));
   const [key, setKey] = useState("");
   const [clearKey, setClearKey] = useState(false);
-  const [connectionChanged, setConnectionChanged] = useState(false);
   const [pending, setPending] = useState(false);
   const [result, setResult] = useState("");
   const active = useRef(true);
@@ -235,7 +234,7 @@ function ModelEditor({
     model?.provider === draft.provider &&
     (draft.provider !== "openai-compatible" ||
       model?.base_url === draft.base_url);
-  const canKeepKey = sameConnection && !connectionChanged && model?.has_api_key;
+  const canKeepKey = sameConnection && model?.has_api_key;
   const requiresKey =
     provider?.requires_api_key ?? draft.provider !== "openai-compatible";
   const missingKey = requiresKey && ((!key.trim() && !canKeepKey) || clearKey);
@@ -252,7 +251,6 @@ function ModelEditor({
       ...(value === "openai-compatible" ? { base_url: "" } : {}),
     });
     setKey("");
-    setConnectionChanged(true);
     setClearKey(false);
     setResult("");
     abort.current?.abort();
@@ -261,11 +259,7 @@ function ModelEditor({
     return {
       config: {
         ...draft,
-        ...(clearKey || (connectionChanged && !key)
-          ? { api_key: "" }
-          : key
-            ? { api_key: key }
-            : {}),
+        ...(clearKey ? { api_key: "" } : key ? { api_key: key } : {}),
       },
       expected_revision: model?.revision ?? null,
     };
@@ -351,14 +345,13 @@ function ModelEditor({
                     onChange={(e) => {
                       setDraft({ ...draft, base_url: e.target.value });
                       setKey("");
-                      setConnectionChanged(true);
                       setClearKey(false);
                       setResult("");
                     }}
                   />
                 </label>
               )}
-              {model && (connectionChanged || !sameConnection) && (
+              {model && !sameConnection && (
                 <p role="status">{text.providerChanged}</p>
               )}
               <label className="block space-y-1">

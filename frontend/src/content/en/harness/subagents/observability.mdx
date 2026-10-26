@@ -63,7 +63,7 @@ The terminal `ToolMessage` of a `task` carries these keys in `additional_kwargs`
 | Key                           | Meaning                                                    |
 | ----------------------------- | ---------------------------------------------------------- |
 | `subagent_status`             | One of the five terminal statuses                          |
-| `subagent_stop_reason`        | `token_capped` / `turn_capped` / `loop_capped`, optional   |
+| `subagent_stop_reason`        | `token_capped` / `turn_capped` / `loop_capped` / `model_length_capped`, optional |
 | `subagent_error`              | Error text for non-`completed` results, up to 2,000 characters |
 | `subagent_result_brief`       | Result brief for `completed`, up to 2,000 characters       |
 | `subagent_result_sha256`      | SHA-256 of the full result                                 |
@@ -112,9 +112,12 @@ Durable batches have no SSE; the workspace UI polls, every 2 seconds while a bat
 | `POST /{batch_id}/resume`                  | Resume                                                                           |
 | `POST /{batch_id}/cancel`                  | Cancel; 503 when the worker is not running                                       |
 | `POST /{batch_id}/items/{item_id}/retry`   | Retry one item; only `failed` items, otherwise 409                               |
+| `GET /{batch_id}/items/{position}`         | Read one owner/thread-scoped report and captured evidence snapshot                |
 | `GET /{batch_id}/results.jsonl`            | Stream every item as NDJSON, including full results and acceptance verdicts      |
 
 Batch statuses: `queued`, `running`, `paused` are active; `completed`, `failed`, `cancelled` are terminal. Item statuses: `pending` is waiting and not counted as active; `queued`, `leased`, `running` are active; `succeeded`, `failed`, `cancelled` are terminal. When a batch ends with failed items and no succeeded items it is `failed`, otherwise `completed`.
+
+The selected-item route is the browser review contract. `position` is the immutable submission position, and the response contains the stored report, execution/acceptance fields, and a bounded `evidence` snapshot from the completed run. It never returns the original prompt or execution specification, never refetches a provider, and remains readable when the worker is stopped. The workspace batch panel opens this detail view on demand; compact item polling still returns previews only.
 
 ## Extension observers
 

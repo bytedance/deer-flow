@@ -19,9 +19,11 @@ import { getAPIClient } from "../api";
 import { fetch } from "../api/fetcher";
 import { getBackendBaseURL } from "../config";
 import { useI18n } from "../i18n/hooks";
+import type { Locale } from "../i18n/locale";
 import { getMessageRunId } from "../messages/run-duration";
+import { isErrorToolMessage } from "../messages/tool-error";
 import {
-  hasContent,
+  extractContentFromMessage,
   hasToolCalls,
   isHiddenFromUIMessage,
 } from "../messages/utils";
@@ -156,22 +158,6 @@ export type PendingPreparedReplayMask = {
 
 export type ToolResultStatus = "pending" | "success" | "error";
 
-function isErrorToolMessage(message: Message): boolean {
-  if (message.type !== "tool") {
-    return false;
-  }
-  if (message.status === "error") {
-    return true;
-  }
-  const metadata = message.additional_kwargs?.deerflow_tool_meta;
-  return (
-    typeof metadata === "object" &&
-    metadata !== null &&
-    "status" in metadata &&
-    metadata.status === "error"
-  );
-}
-
 export function getToolResultStatus(
   messages: Message[],
   toolName: string,
@@ -276,15 +262,18 @@ export function buildThreadSubmitMessages({
  * attached them, and never from local settings. A stray key in settings is
  * dropped rather than forwarded, so a stale value can never grant access.
  * `client_timezone` carries the browser's zone (scheduled-task default only).
+ * `locale` carries the live UI language and overrides any saved value.
  */
 export function buildRunContext({
   settings,
   threadId,
+  locale,
   extraContext,
   conversationReferences,
 }: {
   settings: LocalSettings["context"];
   threadId: string;
+  locale?: Locale;
   extraContext?: Record<string, unknown>;
   conversationReferences?: string[];
 }): Record<string, unknown> {
@@ -296,6 +285,9 @@ export function buildRunContext({
   return {
     ...extraContext,
     ...ownedSettings,
+    ...(typeof extraContext?.model_name === "string"
+      ? { model_name: extraContext.model_name }
+      : {}),
     ...(conversationReferences?.length
       ? { conversation_references: [...conversationReferences] }
       : {}),
@@ -312,6 +304,7 @@ export function buildRunContext({
             ? "low"
             : undefined),
     thread_id: threadId,
+    ...(locale ? { locale } : {}),
     ...clientTimezoneContext(),
   };
 }
@@ -1072,7 +1065,9 @@ export function restoreReconnectedTurnMessageOrder(
     if (
       message.type === "ai" &&
       !isHiddenFromUIMessage(message) &&
-      hasContent(message) &&
+      // Thinking-only blocks (Anthropic) are not completed answers: require
+      // extractable text/image content to close the turn.
+      extractContentFromMessage(message).length > 0 &&
       !hasToolCalls(message)
     ) {
       candidateStart = index + 1;
@@ -1968,7 +1963,7 @@ export function useThreadStream({
   onStart,
   onFinish,
 }: ThreadStreamOptions) {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const currentViewThreadId = displayThreadId ?? threadId ?? null;
   const currentViewThreadIdRef = useRef(currentViewThreadId);
   currentViewThreadIdRef.current = currentViewThreadId;
@@ -2805,6 +2800,7 @@ export function useThreadStream({
             context: buildRunContext({
               settings: context,
               threadId,
+              locale,
               extraContext,
               conversationReferences: options?.conversationReferences,
             }),
@@ -2828,6 +2824,7 @@ export function useThreadStream({
     [
       thread,
       t.uploads.uploadingFiles,
+      locale,
       context,
       queryClient,
       humanMessageCount,
@@ -2944,7 +2941,7 @@ export function useThreadStream({
           // Replaying a turn never carries conversation references: the grant
           // is per send, so a regenerate or edit runs without them unless the
           // user attaches them again.
-          context: buildRunContext({ settings: context, threadId }),
+          context: buildRunContext({ settings: context, threadId, locale }),
         });
         void queryClient.invalidateQueries({ queryKey: ["thread", threadId] });
         void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
@@ -2981,6 +2978,7 @@ export function useThreadStream({
     },
     [
       context,
+      locale,
       humanMessageCount,
       persistedMessages,
       queryClient,

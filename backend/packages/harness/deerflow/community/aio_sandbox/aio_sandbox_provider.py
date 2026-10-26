@@ -906,7 +906,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                     deferred += 1
                     logger.debug("Deferring container %s during reconciliation: this instance is tearing it down", info.sandbox_id)
                     continue
-                self._warm_pool[info.sandbox_id] = (info, current_time)
+                self._warm_pool[info.sandbox_id] = (info, time.monotonic())
                 self._warm_pool_identity[info.sandbox_id] = None
             self._unowned_since.pop(info.sandbox_id, None)
             adopted += 1
@@ -1514,7 +1514,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 logger.warning(f"Error closing sandbox {sandbox_id} after losing its lease: {e}")
 
     def _cleanup_idle_sandboxes(self, idle_timeout: float) -> None:
-        current_time = time.time()
+        current_time = time.monotonic()
         active_to_destroy = []
 
         with self._lock:
@@ -1540,7 +1540,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 # Already released or destroyed by another path — skip.
                 logger.info(f"Sandbox {sandbox_id} already gone before idle destroy, skipping")
                 return False
-            if (time.time() - last_activity) < idle_timeout:
+            if (time.monotonic() - last_activity) < idle_timeout:
                 # Re-acquired (activity updated) since the snapshot — skip.
                 logger.info(f"Sandbox {sandbox_id} was re-acquired before idle destroy, skipping")
                 return False
@@ -1561,7 +1561,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         if timeout <= 0:
             return
 
-        now = time.time()
+        now = time.monotonic()
         expired: list[tuple[str, SandboxInfo]] = []
         with self._lock:
             for sandbox_id, (entry, timestamp) in self._warm_pool.items():
@@ -1840,7 +1840,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
             suffix = " (post-lock check)" if post_lock else ""
             logger.info(f"Reusing in-process sandbox {existing_id} for user/thread {effective_user_id}/{thread_id}{suffix}")
-            self._last_activity[existing_id] = time.time()
+            self._last_activity[existing_id] = time.monotonic()
 
         # Fail closed: an OwnershipBackendError propagates rather than handing out
         # a sandbox we could not publish ownership for.
@@ -2008,7 +2008,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             self._sandbox_infos[sandbox_id] = info
             getattr(self, "_cleanup_retry_ids", set()).discard(sandbox_id)
             self._active_sandbox_identity[sandbox_id] = key
-            self._last_activity[sandbox_id] = time.time()
+            self._last_activity[sandbox_id] = time.monotonic()
             self._thread_sandboxes[key] = sandbox_id
 
         self._bind_image_profile_context(sandbox, thread_id, effective_user_id)
@@ -2090,7 +2090,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 self._sandbox_infos[info.sandbox_id] = info
                 getattr(self, "_cleanup_retry_ids", set()).discard(info.sandbox_id)
                 self._active_sandbox_identity[info.sandbox_id] = key
-                self._last_activity[info.sandbox_id] = time.time()
+                self._last_activity[info.sandbox_id] = time.monotonic()
                 self._thread_sandboxes[key] = info.sandbox_id
         except Exception:
             try:
@@ -2139,7 +2139,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 self._sandbox_infos[sandbox_id] = info
                 getattr(self, "_cleanup_retry_ids", set()).discard(sandbox_id)
                 self._active_sandbox_identity[sandbox_id] = key
-                self._last_activity[sandbox_id] = time.time()
+                self._last_activity[sandbox_id] = time.monotonic()
                 if key is not None:
                     self._thread_sandboxes[key] = sandbox_id
         except Exception:
@@ -2426,8 +2426,15 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         if cached_id is not None:
             return cached_id
 
-        # Deterministic ID for thread-specific, random for anonymous
-        sandbox_id = await asyncio.to_thread(self._sandbox_id_for_thread, thread_id, user_id)
+        # Deterministic ID for thread-specific, random for anonymous. Deriving
+        # it checks the thread's skills_view on disk through Paths.base_dir, so
+        # it runs in a worker like the layers around it.
+        sandbox_id = await _run_started_acquire_worker(
+            self._acquire_worker_executor,
+            self._sandbox_id_for_thread,
+            thread_id,
+            user_id,
+        )
         if thread_id:
             key = self._thread_key(thread_id, user_id)
             with self._lock:
@@ -2979,7 +2986,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 return None
             sandbox = self._sandboxes.get(sandbox_id)
             if sandbox is not None:
-                self._last_activity[sandbox_id] = time.time()
+                self._last_activity[sandbox_id] = time.monotonic()
         return sandbox
 
     def get_scoped(
@@ -3000,7 +3007,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 return None
             sandbox = self._sandboxes.get(sandbox_id)
             if sandbox is not None:
-                self._last_activity[sandbox_id] = time.time()
+                self._last_activity[sandbox_id] = time.monotonic()
             return sandbox
 
     def release(self, sandbox_id: str) -> None:
@@ -3064,7 +3071,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             self._last_activity.pop(sandbox_id, None)
             # Park in warm pool — container keeps running
             if info and sandbox_id not in self._warm_pool:
-                self._warm_pool[sandbox_id] = (info, time.time())
+                self._warm_pool[sandbox_id] = (info, time.monotonic())
                 self._warm_pool_identity[sandbox_id] = thread_keys_to_remove[0] if thread_keys_to_remove else active_identity
 
         if sandbox is not None:

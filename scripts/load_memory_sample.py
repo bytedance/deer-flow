@@ -7,8 +7,10 @@ import argparse
 import asyncio
 import copy
 import json
+import os
 import shutil
 import sys
+import tempfile
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
@@ -59,6 +61,28 @@ def load_json_file(path: Path) -> dict[str, Any]:
 def require_persistent_database(backend: str) -> None:
     if backend == "memory":
         raise SystemExit("--all-users requires database.backend sqlite or postgres")
+
+
+def create_target_backup(target: Path) -> Path:
+    """Reserve a unique sidecar before copying so earlier backups survive."""
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    fd, name = tempfile.mkstemp(prefix=f"{target.name}.bak-{timestamp}-", dir=target.parent)
+    os.close(fd)
+    backup = Path(name)
+    try:
+        shutil.copy2(target, backup)
+    except BaseException:
+        backup.unlink(missing_ok=True)
+        raise
+    return backup
+
+
+def reserve_bulk_backup_root(base_dir: Path) -> Path:
+    """Create a unique backup directory before any user memory is replaced."""
+    parent = base_dir / "memory-sample-backups"
+    parent.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    return Path(tempfile.mkdtemp(prefix=f"{timestamp}-", dir=parent))
 
 
 def load_sample_for_users(
@@ -135,7 +159,7 @@ async def load_sample_for_all_users(
         user_ids = await SQLiteUserRepository(session_factory).list_user_ids()
         backup_root = None
         if user_ids and not no_backup:
-            backup_root = get_paths().base_dir / "memory-sample-backups" / datetime.now().strftime("%Y%m%d-%H%M%S")
+            backup_root = await asyncio.to_thread(reserve_bulk_backup_root, get_paths().base_dir)
 
         count = await asyncio.to_thread(
             load_sample_for_users,
@@ -178,9 +202,7 @@ def main(argv: list[str] | None = None) -> int:
 
     backup_path: Path | None = None
     if target.exists() and not args.no_backup:
-        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        backup_path = target.with_name(f"{target.name}.bak-{timestamp}")
-        shutil.copy2(target, backup_path)
+        backup_path = create_target_backup(target)
 
     shutil.copy2(source, target)
 

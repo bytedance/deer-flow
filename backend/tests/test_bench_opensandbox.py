@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from datetime import timedelta
 from types import SimpleNamespace
 
@@ -248,10 +249,12 @@ def test_image_override_and_failed_construction_restore_config(transport):
 
 
 def test_idle_reaping_forces_a_new_remote(transport, monkeypatch, tmp_path):
-    from deerflow.community import warm_pool_lifecycle
-
     clock = [100.0]
-    monkeypatch.setattr(warm_pool_lifecycle.time, "time", lambda: clock[0])
+    # Warm-pool idle age is written and read on the monotonic clock, so freeze
+    # that one and let the benchmark's sleep advance it. Freezing `time.time`
+    # instead leaves both ends of the comparison on the real clock: the entry
+    # never expires, the reaper removes nothing, and the next turn is a warm hit.
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
     monkeypatch.setattr(bench.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
     output = tmp_path / "idle.jsonl"
     assert (
@@ -285,3 +288,15 @@ def test_unsupported_options_fail_before_creating_resources(transport, extra):
     with pytest.raises(SystemExit, match="opensandbox"):
         bench.main(["--provider", "opensandbox", *extra])
     assert not transport.remotes
+
+
+@pytest.mark.parametrize("provider", ["opensandbox", "boxlite", "aio-docker"])
+def test_negative_idle_timeout_fails_before_provider_creation(monkeypatch, provider):
+    assert provider in bench.PROVIDER_FACTORIES
+
+    def unexpected_provider(*args, **kwargs):
+        pytest.fail("invalid idle timeout must be rejected before provisioning")
+
+    monkeypatch.setitem(bench.PROVIDER_FACTORIES, provider, unexpected_provider)
+    with pytest.raises(SystemExit, match="idle timeout must be nonnegative"):
+        bench.main(["--provider", provider, "--scenario", "warm_same_thread", "--idle-timeout", "-5"])

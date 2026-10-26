@@ -8,55 +8,50 @@ DeerFlow's Next.js 16 frontend provides thread-based AI conversations with strea
 
 **Stack**: Next.js 16, React 19, TypeScript 5.8, Tailwind CSS 4, pnpm 10.26.2. Requires Node.js 22+ and pnpm 10.26.2+.
 
-### Core dependencies
+Core dependencies: `@langchain/langgraph-sdk` ^1.5.3 for orchestration/streaming,
+`@langchain/core` ^1.1.15, and `@tanstack/react-query` ^5.90.17 for server state.
+Registry UI: Shadcn, MagicUI, React Bits, Vercel AI SDK (see Code Style).
 
-- **LangGraph SDK** (`@langchain/langgraph-sdk` ^1.5.3) — Agent orchestration and streaming
-- **LangChain Core** (`@langchain/core` ^1.1.15) — Fundamental AI building blocks
-- **TanStack Query** (`@tanstack/react-query` ^5.90.17) — Server state management
-- **UI**: Shadcn UI, MagicUI, React Bits, and Vercel AI SDK elements (generated from registries — see Code Style)
-
-`pnpm-workspace.yaml` overrides vulnerable `@xmldom/xmldom` 0.9.x releases to
-0.9.12 for GHSA-965w-775f-mr7g. Nextra pulls it in through MathJax and
-`speech-rule-engine@4.1.2`, which pins 0.9.8. Keep the override until the
-upstream dependency chain resolves a patched version without it; regenerate
-`pnpm-lock.yaml` and verify the docs build when changing this constraint.
+`pnpm-workspace.yaml` pins vulnerable `@xmldom/xmldom` 0.9.x to patched
+0.9.12 (GHSA-965w-775f-mr7g) and Nextra 4.6.1's Zod dependencies to 4.3.6
+until upstream fixes missing-`children` validation. App schemas use Zod 4.6.6.
+Remove each override after its upstream fix; refresh the lockfile and test
+docs builds after changes.
 
 ## Commands
 
-| Command          | Purpose                                       |
-| ---------------- | --------------------------------------------- |
-| `pnpm dev`       | Start the development server with Webpack     |
-| `pnpm build`     | Production build                              |
-| `pnpm check`     | Lint + type check (run before committing)     |
-| `pnpm lint`      | ESLint only                                   |
-| `pnpm lint:fix`  | ESLint with auto-fix                          |
-| `pnpm format`    | Prettier check (`pnpm format:write` to apply) |
-| `pnpm test`      | Run unit tests with Rstest                    |
-| `pnpm test:e2e`  | Run E2E tests with Playwright (Chromium)      |
-| `pnpm typecheck` | TypeScript type check (`tsc --noEmit`)        |
-| `pnpm start`     | Start production server                       |
+Run from `frontend/`; host pnpm calls use `../scripts/pnpm.py`.
 
-Rstest unit tests under `tests/unit/` mirror `src/` (e.g., `tests/unit/core/api/stream-mode.test.ts` tests `src/core/api/stream-mode.ts`). Import source modules via `@/`.
+- `pnpm dev`: Webpack development server; `pnpm build` / `pnpm start`: production build/server.
+- `pnpm check`: ESLint + TypeScript (required before committing); `pnpm lint` / `pnpm typecheck`: individual checks; `pnpm lint:fix`: ESLint fixes.
+- `pnpm format` / `pnpm format:write`: Prettier check/write.
+- `pnpm test`: Rstest unit tests; `pnpm test:e2e`: Playwright Chromium E2E tests.
+
+Unit tests under `tests/unit/` mirror `src/`; import source via `@/`.
 
 Webpack is the default development bundler. Use `DEER_FLOW_DEV_BUNDLER=turbo` with `pnpm dev` to opt in to Turbopack when diagnosing a local Next.js bundler issue.
 
 On Windows `pnpm dev` binds `127.0.0.1` by default because Hyper-V/winnat excluded port ranges can reject Next's default `0.0.0.0` bind with `EACCES` (#2870). Pass `pnpm dev -- --hostname 0.0.0.0` to listen on a LAN interface instead.
 
-`rstest.config.ts` separates **node** (`*.test.ts` / `*.test.tsx`) for pure logic
-from **happy-dom** (`*.dom.test.ts` / `*.dom.test.tsx`) for components and hooks
-rendered with `@testing-library/react`'s `renderHook`. Keep the split: DOM tests
-cost roughly 3x more runtime. Hooks that depend on React effect ordering, unmount
-cleanup, or re-renders on store changes belong in `.dom.test.*`; do not mock React
-in node tests to cover those behaviors.
+`rstest.config.ts`: **node** runs `*.test.*` pure logic; **happy-dom** runs
+`*.dom.test.*` components/hooks via `@testing-library/react` render/renderHook.
+DOM costs ~3x: keep the split. Effect ordering, unmount cleanup and store
+re-renders need DOM tests with real React.
+
+Content/state suites may mock decorative `FlipDisplay` with
+`tests/unit/helpers/flip-display.tsx`, preserving children, classes and keyed
+remounts. Happy DOM 21's animation cancellation rejects `finished`; keep rejection
+reporting enabled. Real Motion behavior belongs in Playwright.
 
 E2E tests live under `tests/e2e/` and use Playwright with Chromium. They mock all backend APIs via `page.route()` network interception and test real page interactions (navigation, chat input, streaming responses). Config: `playwright.config.ts`. The real-backend auth contract in `tests/e2e-real-backend/auth-disabled-contract.spec.ts` and `backend/tests/test_auth_me_permissions.py` pin the complete route-permission list; update both when adding registered permissions (including `projects:read/write/delete`).
 
-Use `run-history.ts`, not the unpaged runs hook. Show counts only after a
-successful read. Use task/page query keys and live offsets; fetch 51 rows for
-50 displayed rows plus a next-page sentinel, without appending pages. Only page
-zero polls or refreshes on focus/reconnect. Task switches reset to page zero;
-consumed AbortSignals cancel stale reads. Offsets are live, so mutations or
-navigation may reveal newly inserted runs.
+CI runs four E2E shards; only shard 1 runs auth recovery. Suite reports stay separate.
+
+Use `run-history.ts` for scheduled runs; show counts only after successful
+reads. Query by task/page with live offsets: fetch 51 rows for 50 shown plus a
+next-page sentinel, never append. Only page zero polls or refreshes on
+focus/reconnect. Task changes reset to zero; consumed AbortSignals cancel stale
+reads. Mutations and navigation can reveal newly inserted runs.
 Run status `unmet` identifies a finished occurrence whose scheduled goal was not satisfied; keep it distinct from execution failure.
 `core/scheduled-tasks/goal-outcome.ts` maps goal verdicts and host reason codes for run history; show known codes as localized labels; unknown codes, raw run errors and the evaluator's reason stay behind the run row's Details. Check-failure codes are "unchecked", not a miss. `contracts/scheduled_goal_notes_contract.json` pins the host strings it and `run-error.ts` match.
 Scheduled-task views read state through the pure `core/scheduled-tasks` helpers (`status.ts`, `actions.ts`, `format.ts`, `describeTaskSchedule`, `errors.ts`) so list, detail and chat card agree. "Is a run active?" is `status === "running"` or `active_run_status` (a recurring task stays `enabled` while it runs). Default views show no IDs, ISO times, cron strings or enum names; errors localize by `detail.code` (`contracts/scheduled_task_errors_contract.json`) with raw text only behind Details. `tests/e2e/utils/readable.ts` and `tests/unit/helpers/readable.ts` assert this.
@@ -84,6 +79,7 @@ Keep IM notification preferences viewer-fenced and separate from browser alerts;
 ## Architecture
 
 Image-model settings behavior is documented in the image-generation section of `../README.md`.
+Model controls: `core/models/use-model-control` + HumanInputCard.
 
 Knowledge evidence is parsed in `core/citations/sources.ts` from version-1
 ToolMessage artifacts. Message rows receive sources from preceding loaded tool
@@ -112,16 +108,17 @@ Users create **threads** (conversations), send messages, set thread-scoped `/goa
 
 ### Source Layout (`src/`)
 
-- `app/` — Next.js routes: chat/workspace, agents, auth, showcase, artifact views,
-  localized docs/blog, and API handlers.
-- `components/` — generated `ui/` and `ai-elements/`; application components under
-  `workspace/`, `landing/`, and `docs/`.
-- `core/` — domain logic, API clients, state/hooks, i18n, and Markdown renderers.
-- `hooks/`, `lib/`, `typings/` — shared hooks, utilities, and ambient types.
-- `content/`, `styles/` — MDX content and Tailwind styles.
-- `env.js`, `mdx-components.ts` — environment validation and MDX component map.
+`AuthProvider` publishes the query owner (user ID, confirmed logout, or unknown
+auth). `QueryClientProvider` owns a mount-local client and remounts its consumers
+when that owner changes, clearing the old cache and cancelling old queries.
+Confirmed logout unmounts query consumers immediately; public and unknown-auth
+routes still render with an independent client. Keep auth outside the query
+provider. Superseded auth refreshes cannot restore an earlier owner.
 
-Read [src/AGENTS.md](src/AGENTS.md) for component and domain ownership.
+Auth: trim emails; validate raw passwords.
+
+See [project structure](README.md#project-structure) for the directory map and
+[src/AGENTS.md](src/AGENTS.md) for component and domain ownership.
 
 ## Code Style
 
@@ -170,6 +167,15 @@ DOM regression: `new-agent-save.dom.test.tsx`.
 - **Path alias**: `@/*` maps to `src/*`.
 - **Components**: `ui/` and `ai-elements/` are generated from registries (Shadcn, MagicUI, React Bits, Vercel AI SDK) — don't manually edit these.
 
+Sidebar customization: `components/workspace/workspace-sidebar-frame.tsx`.
+Rail/drawer mount one tree; `useWorkspaceSidebarExpanded` preserves desktop
+`SidebarProvider.open`. Keep polling/delete-dialog provider outside that tree.
+Reuse stock `Sidebar`; close before link navigation and on pathname changes,
+preserving page focus. Dismissal restores the opener or remounted rail trigger.
+`WorkspaceSidebarTrigger` owns surface icons/ARIA; keep generated UI unchanged.
+Test frame DOM behavior and `tests/e2e/sidebar.spec.ts`.
+Agents headers/actions wrap with the rail; sidebar E2E tests cover bounds.
+
 Scheduled-task list search filters the current authorized query result by title or
 prompt, composing with status/type filters and thread scope. Selection must derive
 from the filtered list so hidden tasks cannot remain actionable. Keep literal
@@ -201,18 +207,19 @@ NEXT_PUBLIC_LANGGRAPH_BASE_URL=http://localhost:8001/api
 
 Leave these unset for the standard `make dev` / Docker flow, where nginx serves the public `/api/langgraph/*` prefix and rewrites it to Gateway's native `/api/*` routes.
 
-`make build-static` creates a standalone read-only demo and copies `.next/static`
-and `public` into the output. In static mode, `core/api/static-response.ts`
-resolves Gateway REST reads with the bundled capability catalog and safe
-installation projections from existing same-origin `/mock/api` fixtures; writes
-and unknown API routes fail locally.
-The homepage client counter calls `/github-stars`, outside the Gateway proxy.
-That dynamic route reads the server-only `GITHUB_OAUTH_TOKEN` at runtime, caches
-GitHub data for one hour, and returns 204 when the count is unavailable. Start
-the standalone server from `frontend/` with `node --env-file=.env
-.next/standalone/server.js` to load the current credentials.
+`make build-static` emits a standalone read-only demo, copying `.next/static`
+and `public`. In static mode, `core/api/static-response.ts` serves Gateway reads
+from bundled capabilities and safe installation projections in same-origin
+`/mock/api` fixtures; writes and unknown routes fail locally.
+The homepage counter uses `/github-stars`, outside Gateway. It reads server-only
+`GITHUB_OAUTH_TOKEN` at runtime, caches GitHub data for one hour, and returns 204
+when unavailable. From `frontend/`, run `node --env-file=.env
+.next/standalone/server.js` to load credentials.
 
-To reach a dev server on anything other than localhost — a LAN address, or a proxied hostname — list the host in `DEER_FLOW_DEV_ALLOWED_ORIGINS` (comma-separated; a full URL is reduced to its host). It feeds Next's `allowedDevOrigins`, which gates `/_next/*`, fonts, and HMR. Without it those requests get a 403 and the page renders server-side but never hydrates, so nothing on it — including the login form — responds. Development only; production builds ignore it.
+For non-localhost dev access, set `DEER_FLOW_DEV_ALLOWED_ORIGINS` to comma-separated
+hosts (URLs reduce to hosts). Next's `allowedDevOrigins` gates `/_next/*`, fonts
+and HMR; otherwise 403s prevent hydration and interactions, including login.
+Production ignores this setting.
 
 One-time schedule input uses `validZonedLocalToUtcIso` to reject wall times that
 do not round-trip in the selected timezone. Invalid input emits an empty spec and
@@ -228,6 +235,7 @@ round-trip validation must still reject newly entered skipped times.
 
 ## Resources
 
+- [DESIGN.md](DESIGN.md) — tokens, type, components, a11y rules; read before UI work
 - [LangGraph Documentation](https://langchain-ai.github.io/langgraph/)
 - [LangChain Core Concepts](https://js.langchain.com/docs/concepts)
 - [TanStack Query Documentation](https://tanstack.com/query/latest)
@@ -235,22 +243,22 @@ round-trip validation must still reject newly entered skipped times.
 
 ## Contributing
 
-When adding features:
+Follow `src/` ownership, add types/error handling and unit/E2E coverage, run
+`pnpm check`, and update this guide for architecture, command, or convention changes.
 
-1. Follow the established `src/` structure
-2. Add TypeScript types and proper error handling
-3. Write unit tests under `tests/unit/` (`pnpm test`) and E2E tests under `tests/e2e/` (`pnpm test:e2e`)
-4. Run `pnpm check` before committing
-5. Update this `AGENTS.md` when architecture, commands, or conventions change
+Docs search: `pnpm build` runs `scripts/build-search-index.mjs`: route-based
+language, then replace `public/_pagefind/` (generated). `DocsHtmlLang` syncs
+runtime language. Only `Header.search` renders search (`Layout search={null}`).
+`MobileNav` uses Headless UI `Portal.Group` inside Radix's scroll boundary;
+selections close at the same hash too. Pin behavior with DOM and
+`tests/e2e/docs-search-mobile.spec.ts` tests; index tests use temporary files.
 
-Route asset budgets are enforced with `pnpm perf:check`. The command measures
-`/login` from a normal production build, then builds in static-demo mode for the
-fixture-backed workspace routes. It starts the production server on temporary local
-ports, measures the unique JavaScript and CSS files referenced by representative
-routes, writes the detailed result to `.next/performance-results.json`, and compares
-totals with `performance-budgets.json`. Fix route ownership or split points when a
-budget fails; do not raise a ceiling without documenting and reviewing the measured
-regression.
+`pnpm perf:check` measures `/login` in a production build and fixture-backed
+workspace routes in a static-demo build. It starts servers on temporary local
+ports, measures unique JavaScript/CSS for representative routes, writes
+`.next/performance-results.json`, and checks `performance-budgets.json`.
+Fix route ownership or split points when over budget; document and review
+measured regressions before raising ceilings.
 
 Chat archive is a thread metadata flag (`deerflow_archived === true`), independent
 of run status. Sidebar and Chats explicitly request the Gateway's optional
@@ -341,7 +349,7 @@ shared-MCP administrator checks remain authoritative; this adds no personal scop
 
 <!-- BEGIN:nextjs-agent-rules -->
 
-# This is NOT the Next.js you know
+## This is NOT the Next.js you know
 
 This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` (resolved from this file's directory; in monorepos the `next` package may not be visible from the repo root) before writing any code. Heed deprecation notices.
 

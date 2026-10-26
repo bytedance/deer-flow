@@ -50,6 +50,17 @@ except ImportError:
     requests = RequestsFallback()
 
 
+class GitHubAPIError(RuntimeError):
+    """A fetch this client could not complete.
+
+    The two content readers used to answer with strings such as
+    ``"[README not found: HTTP 404]"``, which put a failure on the same channel and with the
+    same exit code as a successful body: a rate-limited run and a missing README looked alike
+    to whoever read stdout. Raising keeps the HTTP status visible on stderr and out of the
+    content path.
+    """
+
+
 class GitHubAPI:
     """GitHub API client for repository analysis."""
 
@@ -98,7 +109,7 @@ class GitHubAPI:
                 f"/repos/{owner}/{repo}/readme", accept="application/vnd.github.raw"
             )
         except Exception as e:
-            return f"[README not found: {e}]"
+            raise GitHubAPIError(f"README fetch failed for {owner}/{repo}: {e}") from e
 
     def get_tree(
         self, owner: str, repo: str, branch: str = "HEAD", recursive: bool = True
@@ -121,7 +132,9 @@ class GitHubAPI:
                 accept="application/vnd.github.raw",
             )
         except Exception as e:
-            return f"[File not found: {e}]"
+            raise GitHubAPIError(
+                f"File fetch failed for {owner}/{repo}:{path}: {e}"
+            ) from e
 
     def get_languages(self, owner: str, repo: str) -> Dict[str, int]:
         """Get repository languages and their bytes."""
@@ -159,16 +172,28 @@ class GitHubAPI:
         labels: Optional[str] = None,
     ) -> List[Dict]:
         """
-        Get repository issues.
+        Get repository issues, excluding pull requests.
 
         Args:
             state: 'open', 'closed', or 'all'
             labels: Comma-separated label names
         """
-        params = {"state": state, "per_page": min(limit, 100)}
+        limit = min(limit, 100)
+        if limit <= 0:
+            return []
+        params = {"state": state, "per_page": limit}
         if labels:
             params["labels"] = labels
-        return self._get(f"/repos/{owner}/{repo}/issues", params)
+        issues = []
+        page = 1
+        while len(issues) < limit:
+            items = self._get(f"/repos/{owner}/{repo}/issues", params)
+            issues.extend(item for item in items if "pull_request" not in item)
+            if len(items) < limit:
+                break
+            page += 1
+            params["page"] = page
+        return issues[:limit]
 
     def get_pull_requests(
         self, owner: str, repo: str, state: str = "all", limit: int = 30

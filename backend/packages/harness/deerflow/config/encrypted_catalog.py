@@ -8,6 +8,7 @@ from pathlib import Path
 
 from deerflow.config.extensions_config import extensions_config_file_lock
 from deerflow.config.secret_file import read_or_create_secret_file
+from deerflow.utils.atomic_write import cleanup_failed_atomic_write
 
 
 class EncryptedCatalog:
@@ -65,4 +66,6 @@ class EncryptedCatalog:
             os.replace(temporary, path)
         finally:
             if temporary is not None:
-                temporary.unlink(missing_ok=True)
+                # A cleanup failure must not hide a successful publication or
+                # the original write error.
+                cleanup_failed_atomic_write(temporary)
