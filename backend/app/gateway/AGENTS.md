@@ -10,13 +10,13 @@ environment keys; reject arbitrary commands and manifest-policy bypasses. Keep
 credentials out of tool schemas and preserve admin checks, masked atomic edits,
 and MCP cache reloads.
 
-Memory shutdown resolves hot-reloaded config/backend, flushes, then closes as
-one `await_drained` operation. Resolve config inside the best-effort handler and
-off-loop so malformed edits cannot abort teardown. Cancellation waits for owned
-workers; `close()` must be quick or internally bounded because the host sets no
-timeout. Budget it, the flush timeout, and other hooks in the pod grace period.
-Likewise drain extension `stop_services()` across cancellation before later
-resources unwind; each service `stop()` has a 30-second `asyncio.timeout`.
+Memory shutdown resolves hot-reloaded config/backend, flushes and closes in one
+`await_drained` operation. Resolve config off-loop inside the best-effort handler
+so malformed edits cannot abort teardown. Cancellation waits for owned workers.
+The host sets no close timeout: `close()` must be quick or internally bounded;
+budget it, flush timeout and other hooks within pod grace. Drain extension
+`stop_services()` across cancellation before later resources unwind; each
+service `stop()` has a 30-second `asyncio.timeout`.
 
 Routers with persistent writes drain through
 `app.gateway.persistent_writes.run_drained_write`.
@@ -43,13 +43,12 @@ locations and keeps `merge_run_context_overrides` clear. Admission and
 `/api/features` use `conversation_references_enabled()` as the sole configured
 predicate.
 
-FastAPI listens on port 8001. `GET /health` is liveness; `GET /health/ready`
-concurrently probes the ORM engine, the checkpointer/Store and the stream
-bridge backend (`StreamBridge.ping()`) under one deadline and per-kind gates,
-from startup snapshots. Unreachable or unresolved gating backends return 503;
-`memory` reports `not_configured`; the provisioner `/health` verdict is
-report-only. See `health.py`. `GATEWAY_ENABLE_DOCS=false` disables `/docs`,
-`/redoc`, and `/openapi.json`.
+FastAPI listens on 8001. `GET /health` is liveness; `GET /health/ready` concurrently
+probes startup snapshots of ORM, checkpointer/Store and stream bridge
+(`StreamBridge.ping()`) under one deadline and per-kind gates. Unreachable or
+unresolved gating backends return 503; `memory` reports `not_configured`;
+provisioner `/health` is report-only. See `health.py`. `GATEWAY_ENABLE_DOCS=false`
+disables `/docs`, `/redoc` and `/openapi.json`.
 
 `build_run_config()` resolves the default LangGraph super-step budget from the
 hot-reloaded top-level `recursion_limit` setting. A valid request-level value
@@ -58,7 +57,12 @@ takes precedence; invalid values fall back to that default, and
 
 Durable MCP notifications use internal Agent runs. Keep their trusted delivery instruction outside the user-input boundary, and frame serialized remote events as untrusted before model invocation. Strict thread existence/ownership admission dead-letters events whose task outlives its deleted chat instead of recreating the thread. `start_run` marks run-manager admission conflicts with `BusyThreadConflict`; the notification launcher retries only that typed 409 and treats other 409 responses as permanent.
 
-CORS is same-origin by default when requests enter through nginx on port 2026. Split-origin or port-forwarded browser clients must opt in with `GATEWAY_CORS_ORIGINS` (exact origins); Gateway `CORSMiddleware` and `CSRFMiddleware` both read that variable so browser CORS and auth-origin checks stay aligned. Those clients also need `CORS_EXPOSED_HEADERS` (`csrf_middleware.py`): run-creating routes return the run's id in `Content-Location`, which is not CORS-safelisted, so JS cannot read it unless it is exposed — and the LangGraph SDK resolves run metadata from that header alone, so withholding it breaks `useStream`'s `onCreated` and thread-gated actions.
+CORS defaults to same-origin behind nginx on 2026. Split-origin and port-forwarded
+browser clients must set exact `GATEWAY_CORS_ORIGINS`, shared by `CORSMiddleware`
+and `CSRFMiddleware`. Expose `Content-Location` through `CORS_EXPOSED_HEADERS`
+(`csrf_middleware.py`): run-creating routes put the run ID there, and the LangGraph
+SDK uses only that header for run metadata. Without exposure, JS cannot read it,
+breaking `useStream.onCreated` and thread-gated actions.
 
 Browser sessions belong to `app.gateway.auth.session_cookie`. Login's `remember_me`
 flag never stores passwords. `SessionCookiePolicy` persists `HttpOnly access_token`
