@@ -68,6 +68,9 @@ working-directory changes cannot redirect it. Failed explicit loads preserve the
 prior pin; reset, injection and argument-less reload clear it. Ambient reads never
 pin a path. Runtime-scoped overrides bypass the singleton lock;
 `peek_loaded_app_config()` also returns the existing snapshot without locking.
+Each read stats and hashes `config.yaml` and `extensions_config.json`, so async
+request paths call it through `asyncio.to_thread` (Gateway route and plugin
+authorization in `app/gateway/authz.py`).
 
 **Config Hot-Reload Boundary**: Gateway dependencies route through `get_app_config()` on every request, so per-run fields like `models[*].max_tokens`, `summarization.*`, `title.*`, `memory.*`, `subagents.*`, `verification.*`, `tools[*]`, and the agent system prompt pick up `config.yaml` edits on the next message. `AppConfig` is intentionally **not** cached on `app.state` — `lifespan()` keeps a local `startup_config` variable for one-shot bootstrap work and passes it to `langgraph_runtime(app, startup_config)`.
 
