@@ -1407,6 +1407,15 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
   still cleans up. AIO acquire now refuses once shutdown has begun, as E2B
   already did. ([#7560])
 
+- **frontend:** SSO sign-ins now return to the page that asked for them, such
+  as a shared chat link, instead of always opening the default workspace. The
+  sign-in pages used to send every signed-in request to `/workspace`, which
+  dropped the `next` path of `/auth/callback?next=...`. A signed-in visit to
+  `/login?next=...` lost its target the same way. The frontend and Gateway
+  `next` checks now also reject control characters: browsers delete tab, LF
+  and CR from a URL, so `?next=%2F%0A%2F%2Fevil.example` could send a
+  sign-in to another site. ([#7467])
+  
 - **authz:** Authenticated Gateway requests no longer read `config.yaml` and
   `extensions_config.json` on the event loop. Resolving route permissions
   checked both files (a `stat` and a full sha256 of each) for every request,
@@ -13121,6 +13130,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7410]: https://github.com/bytedance/deer-flow/pull/7410
 [#7445]: https://github.com/bytedance/deer-flow/pull/7445
 [#7449]: https://github.com/bytedance/deer-flow/pull/7449
+[#7467]: https://github.com/bytedance/deer-flow/pull/7467
 [#7507]: https://github.com/bytedance/deer-flow/pull/7507
 [#7521]: https://github.com/bytedance/deer-flow/pull/7521
 [#7530]: https://github.com/bytedance/deer-flow/pull/7530
