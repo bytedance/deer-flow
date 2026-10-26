@@ -14,6 +14,7 @@ from deerflow.knowledge_scope import canonicalize_knowledge_scope
 from deerflow.persistence.agents import get_agent_store
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.tools.types import Runtime
+from deerflow.utils.atomic_write import cleanup_failed_atomic_write
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +49,9 @@ def _publish_text(target: Path, text: str) -> None:
         temporary.replace(target)
     finally:
         if temporary is not None:
-            temporary.unlink(missing_ok=True)
+            # The publish outcome is already decided; a temp we cannot discard
+            # must not replace it with the cleanup error.
+            cleanup_failed_atomic_write(temporary)
 
 
 @tool(parse_docstring=True)
