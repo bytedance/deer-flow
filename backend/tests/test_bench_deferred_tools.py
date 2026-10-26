@@ -31,7 +31,7 @@ def write_dataset(tmp_path, data=None):
     return path
 
 
-def test_native_paths_use_same_post_policy_catalog(tmp_path):
+def test_native_paths_use_same_post_policy_catalog(tmp_path, monkeypatch):
     data = load_dataset(write_dataset(tmp_path))
     report = evaluate(data, adapters=["keywords", "regex", "auto-promote"], repeats=2)
     assert len(report["rows"]) == 6
@@ -46,6 +46,15 @@ def test_native_paths_use_same_post_policy_catalog(tmp_path):
                 assert row["tool_recall"] == 1
                 assert row["field_recall"] == 1
             assert row["latency_ms"]["samples"] == 2
+
+    from deerflow.tools.builtins.tool_search import DeferredToolCatalog, ToolSearchLimitError
+
+    def exhausted(self, query):
+        raise ToolSearchLimitError("probe budget exhausted")
+
+    monkeypatch.setattr(DeferredToolCatalog, "search", exhausted)
+    with pytest.raises(ValueError, match="budget"):
+        evaluate(data, adapters=["keywords"], repeats=1)
 
 
 @pytest.mark.parametrize("change", ["duplicate_case", "unknown_allowed", "denied_expected", "unknown_field", "duplicate_tool", "not_synthetic", "unknown_key"])

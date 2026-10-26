@@ -103,7 +103,8 @@ production source hashes, Python/platform and package versions, adapter identity
 and the optional SchemaRouter package source digest. There are no random seeds,
 model prompts, inference parameters or retries: this is deterministic local
 discovery. Repeat results must agree; denied names or over-budget results fail
-closed. Tests forbid socket connections and catalog-tool execution for all
+closed. Native discovery-budget errors fail the run rather than counting as
+successful unsupported rejections. Tests forbid socket connections and catalog-tool execution for all
 installed adapters.
 
 The framework is intended to accept a larger independently annotated synthetic

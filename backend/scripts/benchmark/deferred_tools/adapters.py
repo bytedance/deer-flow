@@ -85,6 +85,8 @@ def build_adapter(name, definitions):
             return {}, 2
         command = setup.tool_search_tool.invoke({"type": "tool_call", "id": "benchmark-search", "name": "tool_search", "args": {"query": f"keywords:{query}" if name == "keywords" else query}})
         content = command.update["messages"][0].content
+        if not command.update["promoted"]["names"] and content.startswith("Tool search stopped:"):
+            raise ValueError("Native discovery budget exhausted; this is not a valid unsupported rejection")
         selected = json.loads(content) if command.update["promoted"]["names"] else []
         return {item["name"]: item["parameters"] for item in selected}, len(content.encode("utf-8"))
 
