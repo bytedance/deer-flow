@@ -1397,6 +1397,16 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
 
 ### Fixed
 
+- **runtime:** Loop-detection warnings now ask the agent to present the files
+  it already created in `/mnt/user-data/outputs` before its final answer, so a
+  warned run no longer fails its delivery check with finished files left
+  undelivered. A run that reaches `recursion_limit` now ends with
+  `stop_reason: recursion_capped` and a plain message that lists the outputs it
+  created but did not present, instead of LangGraph's raw error. An active goal
+  stands down without an evaluator call and stays active, `/wait` names the
+  error `GraphRecursionError`, and IM channels reply with the message instead
+  of a generic failure. ([#7588])
+
 - **community:** Async community tools (Jina, Crawl4AI, Browserless, Tavily,
   SearXNG, Firecrawl, InfoQuest, RAGFlow, LightRAG, Jsonify and the browser
   automation tools) no longer read `config.yaml` and `extensions_config.json` on the
@@ -13154,3 +13164,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7560]: https://github.com/bytedance/deer-flow/pull/7560
 [#7576]: https://github.com/bytedance/deer-flow/pull/7576
 [#7580]: https://github.com/bytedance/deer-flow/pull/7580
+[#7588]: https://github.com/bytedance/deer-flow/pull/7588

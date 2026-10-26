@@ -1112,6 +1112,13 @@
 
 ### 修复
 
+- **运行时：** 循环检测警告现在会让 agent 在作答前，先交付已经写入
+  `/mnt/user-data/outputs` 的文件，被警告的运行不会再因为做好的文件没交付而判为失败。
+  运行达到 `recursion_limit` 时，现在以 `stop_reason: recursion_capped` 结束，并给出
+  一条说明，列出已生成但未交付的文件，而不是 LangGraph 的原始报错。进行中的目标会直接
+  停止续跑（不调用评估模型）并保持活跃；`/wait` 把这个错误命名为
+  `GraphRecursionError`；IM 渠道也会回复这条说明，而不是笼统的错误提示。([#7588])
+
 - **社区工具：** 异步社区工具（Jina、Crawl4AI、Browserless、Tavily、SearXNG、Firecrawl、
   InfoQuest、RAGFlow、LightRAG、Jsonify 和浏览器自动化工具）不再在事件循环上读取 `config.yaml`
   和 `extensions_config.json`。每次调用最多会把这两个文件检查三次（各做一次 `stat`
@@ -10500,3 +10507,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7580]: https://github.com/bytedance/deer-flow/pull/7580
 [#7576]: https://github.com/bytedance/deer-flow/pull/7576
 [#7580]: https://github.com/bytedance/deer-flow/pull/7580
+[#7588]: https://github.com/bytedance/deer-flow/pull/7588
