@@ -3032,15 +3032,15 @@ async def _run_bash_tool_after_async_sandbox_init(runtime: Runtime, command: str
     except SandboxError as e:
         return f"Error: {e}"
     except Exception as e:
-        return f"Error: Unexpected error initializing sandbox: {_sanitize_error(e, runtime)}"
+        detail = await run_sync_lifecycle_operation(_sanitize_error, e, runtime)
+        return f"Error: Unexpected error initializing sandbox: {detail}"
 
 
 async def _bash_tool_body_async(runtime: Runtime, command: str) -> str:
     """Async twin of the bash_tool body: prepare runs in a worker thread (it
     touches the filesystem), the sandbox exec runs on the loop through
-    execute_command_async when the sandbox supports it, and output finishing is
-    pure. Behavior matches the sync body otherwise, including the
-    secret-redaction state on error paths."""
+    execute_command_async when supported. Output masking stays off-loop because
+    it resolves filesystem paths. Error paths preserve secret-redaction state."""
     redaction = _BashRedactionCell()
     try:
         invocation = await run_sync_lifecycle_operation(_prepare_bash_invocation, runtime, command, redaction)
@@ -3051,7 +3051,7 @@ async def _bash_tool_body_async(runtime: Runtime, command: str) -> str:
             env=invocation.env,
             timeout=invocation.timeout,
         )
-        return _finish_bash_output(output, invocation)
+        return await run_sync_lifecycle_operation(_finish_bash_output, output, invocation)
     except _HostBashDisabledError:
         return f"Error: {LOCAL_HOST_BASH_DISABLED_MESSAGE}"
     except SandboxError as e:
@@ -3059,7 +3059,8 @@ async def _bash_tool_body_async(runtime: Runtime, command: str) -> str:
     except PermissionError as e:
         return mask_secret_values(f"Error: {e}", redaction.env)
     except Exception as e:
-        return mask_secret_values(f"Error: Unexpected error executing command: {_sanitize_error(e, runtime)}", redaction.env)
+        detail = await run_sync_lifecycle_operation(_sanitize_error, e, runtime)
+        return mask_secret_values(f"Error: Unexpected error executing command: {detail}", redaction.env)
 
 
 bash_tool.coroutine = _bash_tool_async

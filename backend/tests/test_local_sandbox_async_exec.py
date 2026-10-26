@@ -10,12 +10,11 @@ in-flight command instead of orphaning it.
 from __future__ import annotations
 
 import asyncio
-import gc
 import os
+import shlex
+import sys
 import time
-import weakref
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -52,76 +51,61 @@ async def test_async_empty_output_placeholder() -> None:
     assert await sandbox.execute_command_async("true") == "(no output)"
 
 
-async def _wait_for_daemon_readers(readers: set[asyncio.Task[None]]) -> None:
-    """Finish only this command's readers before the test's loop closes."""
-    await asyncio.wait_for(asyncio.gather(*readers), timeout=5)
+@posix_only
+@pytest.mark.parametrize("exit_code", [0, 7])
+async def test_async_deadline_preserves_completed_command_and_background_child(tmp_path: Path, monkeypatch, exit_code: int) -> None:
+    """A delayed exit observation must not overwrite success or kill background work."""
+    release = tmp_path / "release-background"
+    completed = tmp_path / "background-completed"
+    background = (
+        "import pathlib, sys, time; "
+        "release, completed = map(pathlib.Path, sys.argv[1:]); "
+        "deadline = time.monotonic() + 5\n"
+        "while not release.exists() and time.monotonic() < deadline: time.sleep(0.01)\n"
+        "if release.exists(): completed.write_text('done')\n"
+    )
+    command = f"{shlex.quote(sys.executable)} -c {shlex.quote(background)} {shlex.quote(str(release))} {shlex.quote(str(completed))} >/dev/null 2>&1 & printf complete; exit {exit_code}"
+    original_wait_for = asyncio.wait_for
+    deadline_delivered = False
+
+    async def deadline_after_exit(awaitable, timeout):
+        nonlocal deadline_delivered
+        if deadline_delivered:
+            return await original_wait_for(awaitable, timeout)
+        deadline_delivered = True
+        await original_wait_for(awaitable, timeout)
+        # Deliver the timer boundary after the real shell has already exited.
+        raise TimeoutError
+
+    monkeypatch.setattr(asyncio, "wait_for", deadline_after_exit)
+    try:
+        output = await LocalSandbox("t").execute_command_async(command, timeout=10)
+    finally:
+        release.touch()
+
+    async def wait_for_background() -> None:
+        while not completed.exists():
+            await asyncio.sleep(0.01)
+
+    await original_wait_for(wait_for_background(), timeout=3)
+    assert completed.read_text() == "done"
+    assert output == ("complete" if exit_code == 0 else "complete\nExit Code: 7")
 
 
 @posix_only
-async def test_async_backgrounded_process_returns_promptly() -> None:
-    """A backgrounded long-lived process must not block the async return any
-    more than it blocks the sync path; its pipes are drained by a detached
-    task that ends at EOF and leaves the strong-reference set."""
-    sandbox = LocalSandbox("t")
-    daemon_tasks = local_sandbox._daemon_drain_tasks()
-    previous_readers = set(daemon_tasks)
+async def test_async_backgrounded_process_returns_promptly(tmp_path: Path) -> None:
+    marker = tmp_path / "background-completed"
     start = time.monotonic()
-
-    output = await sandbox.execute_command_async("sleep 0.5 & echo serving", timeout=10)
-
-    elapsed = time.monotonic() - start
-    assert elapsed < 3, f"expected prompt return, took {elapsed:.1f}s"
+    output = await LocalSandbox("t").execute_command_async(f"(sleep 0.5; printf done > {shlex.quote(str(marker))}) & echo serving", timeout=10)
+    assert time.monotonic() - start < 3
     assert "serving" in output
-    readers = daemon_tasks - previous_readers
-    await _wait_for_daemon_readers(readers)
-    assert not daemon_tasks.intersection(readers), "completed readers must release their strong references"
 
+    async def wait_for_background() -> None:
+        while not marker.exists():
+            await asyncio.sleep(0.01)
 
-@posix_only
-async def test_async_detached_readers_do_not_retain_a_closed_loop(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Pending real reader tasks must not acquire a process-global lifetime."""
-
-    async def spawn(*args, **kwargs):
-        async def wait():
-            return 0
-
-        return SimpleNamespace(pid=2_147_483_647, returncode=0, stdout=asyncio.StreamReader(), stderr=asyncio.StreamReader(), wait=wait)
-
-    monkeypatch.setattr(local_sandbox.asyncio, "create_subprocess_exec", spawn)
-    monkeypatch.setattr(local_sandbox, "_PIPE_DRAIN_JOIN_TIMEOUT_SECONDS", 0)
-    monkeypatch.setattr(LocalSandbox, "_process_group_exists", staticmethod(lambda pid: True))
-    monkeypatch.setattr(LocalSandbox, "_resolve_exec_command", lambda self, command: ("/bin/sh", command))
-    monkeypatch.setattr(LocalSandbox, "_reverse_resolve_paths_in_output", lambda self, output: output)
-
-    def close_loop_with_pending_readers():
-        loop = asyncio.new_event_loop()
-        diagnostics = []
-        loop.set_exception_handler(lambda owner, context: diagnostics.append(context["message"]))
-
-        async def start_readers():
-            before = asyncio.all_tasks()
-            assert await LocalSandbox("detached").execute_command_async("ignored", timeout=1) == "(no output)"
-            readers = asyncio.all_tasks() - before
-            assert len(readers) == 2
-            references = [weakref.ref(reader) for reader in readers]
-            del readers
-            gc.collect()
-            assert all(reference() is not None for reference in references), "running-loop readers need strong ownership"
-            return references
-
-        try:
-            references = loop.run_until_complete(start_readers())
-            loop.run_until_complete(loop.shutdown_default_executor())
-        finally:
-            loop.close()
-        return weakref.ref(loop), references, diagnostics
-
-    loop_ref, reader_refs, diagnostics = await asyncio.to_thread(close_loop_with_pending_readers)
-    assert all(reference() not in local_sandbox._daemon_drain_tasks() for reference in reader_refs)
-    gc.collect()
-    assert loop_ref() is None, "a module-global reader registry retained the closed loop"
-    assert all(reference() is None for reference in reader_refs)
-    assert diagnostics.count("Task was destroyed but it is pending!") == 2
+    await asyncio.wait_for(wait_for_background(), timeout=3)
+    assert marker.read_text() == "done"
 
 
 @posix_only
@@ -232,3 +216,94 @@ async def test_async_scoped_call_passthrough() -> None:
     sandbox = LocalSandbox("t")
 
     assert await sandbox.execute_command_in_scope_async("echo scoped", scope_id="scope-1") == await sandbox.execute_command_async("echo scoped")
+
+
+@posix_only
+async def test_async_second_pipe_failure_closes_first_pipe(monkeypatch) -> None:
+    original_pipe = os.pipe
+    descriptors = []
+
+    def pipe():
+        if descriptors:
+            raise OSError("second pipe failed")
+        pair = original_pipe()
+        descriptors.extend(pair)
+        return pair
+
+    monkeypatch.setattr(local_sandbox.os, "pipe", pipe)
+    with pytest.raises(OSError, match="second pipe failed"):
+        await LocalSandbox("t").execute_command_async("true")
+    for descriptor in descriptors:
+        with pytest.raises(OSError):
+            os.fstat(descriptor)
+
+
+@posix_only
+async def test_async_reader_start_failure_reaps_child_and_closes_pipes(monkeypatch) -> None:
+    original_spawn = asyncio.create_subprocess_exec
+    original_start = LocalSandbox._start_pipe_drain
+    processes = []
+    descriptors = []
+    threads = []
+
+    async def spawn(*args, **kwargs):
+        descriptors.extend((kwargs["stdout"], kwargs["stderr"]))
+        process = await original_spawn(*args, **kwargs)
+        processes.append(process)
+        return process
+
+    def start(fd, name):
+        descriptors.append(fd)
+        if threads:
+            raise RuntimeError("reader start failed")
+        capture, thread = original_start(fd, name)
+        threads.append(thread)
+        return capture, thread
+
+    monkeypatch.setattr(local_sandbox.asyncio, "create_subprocess_exec", spawn)
+    monkeypatch.setattr(LocalSandbox, "_start_pipe_drain", staticmethod(start))
+    with pytest.raises(RuntimeError, match="reader start failed"):
+        await LocalSandbox("t").execute_command_async("sleep 30")
+    assert processes[0].returncode is not None
+    assert processes[0].returncode < 0
+    assert not threads[0].is_alive()
+    for descriptor in descriptors:
+        with pytest.raises(OSError):
+            os.fstat(descriptor)
+
+
+@posix_only
+async def test_async_capture_stays_bounded_and_still_drains() -> None:
+    emitted = local_sandbox._COMMAND_CAPTURE_LIMIT_BYTES + 1024
+    script = f"import os; os.write(1, b'x' * {emitted}); os.write(2, b'finished')"
+    output = await LocalSandbox("t").execute_command_async(f"{shlex.quote(sys.executable)} -c {shlex.quote(script)}", timeout=10)
+    assert f"output truncated after 10485760 of {emitted} bytes" in output
+    assert output.endswith("Std Error:\nfinished")
+
+
+@posix_only
+async def test_async_stdin_is_immediate_eof() -> None:
+    output = await LocalSandbox("t").execute_command_async("read x; echo got", timeout=2)
+    assert output.strip() == "got"
+
+
+@posix_only
+async def test_repeated_cancellation_keeps_command_drain(tmp_path: Path, monkeypatch) -> None:
+    spawned = asyncio.Event()
+    original_spawn = asyncio.create_subprocess_exec
+    marker = tmp_path / "completed"
+
+    async def spawn(*args, **kwargs):
+        process = await original_spawn(*args, **kwargs)
+        spawned.set()
+        return process
+
+    monkeypatch.setattr(local_sandbox.asyncio, "create_subprocess_exec", spawn)
+    task = asyncio.create_task(LocalSandbox("t").execute_command_async(f"sleep 0.3; printf done > {shlex.quote(str(marker))}", timeout=3))
+    await spawned.wait()
+    task.cancel()
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert marker.read_text() == "done"

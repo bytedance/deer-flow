@@ -37,25 +37,6 @@ logger = logging.getLogger(__name__)
 DEFAULT_COMMAND_TIMEOUT_SECONDS = 600
 _COMMAND_CAPTURE_LIMIT_BYTES = 10 * 1024 * 1024
 _PIPE_DRAIN_JOIN_TIMEOUT_SECONDS = 0.2
-_ASYNC_READ_CHUNK_BYTES = 65536
-
-_DAEMON_DRAIN_TASKS_ATTRIBUTE = "_deerflow_local_command_drain_tasks"
-
-
-def _daemon_drain_tasks() -> set[asyncio.Task[None]]:
-    """Keep detached pipe readers alive for their owning loop's lifetime.
-
-    A module-global set (even in a weak-keyed loop mapping) would retain the
-    loop through each task. Let the loop own the strong references instead.
-    """
-    loop = asyncio.get_running_loop()
-    tasks: set[asyncio.Task[None]] | None = getattr(loop, _DAEMON_DRAIN_TASKS_ATTRIBUTE, None)
-    if tasks is None:
-        tasks = set()
-        setattr(loop, _DAEMON_DRAIN_TASKS_ATTRIBUTE, tasks)
-    return tasks
-
-
 #: Script suffixes a host interpreter opens by path but the shared skill-package
 #: classifier does not list. ``awk -f``, ``sed -f``, ``lua``, ``Rscript``, and
 #: ``tclsh`` all read the file named on the command line, so container paths
@@ -1003,18 +984,14 @@ class LocalSandbox(Sandbox):
         try:
             return await asyncio.shield(operation)
         except asyncio.CancelledError as cancellation:
-            # Drain contract: the in-flight command runs to completion even
-            # though the caller was cancelled; repeated cancellation cannot
-            # interrupt the drain, and a late failure is logged without
-            # replacing the caller's cancellation.
-            while not operation.done():
-                try:
-                    await asyncio.shield(operation)
-                except asyncio.CancelledError:
-                    continue
-                except Exception:
-                    logger.warning("Cancelled async sandbox command failed while draining", exc_info=True)
-                    break
+            from deerflow.sandbox.lease import _drain_task_after_cancellation
+
+            try:
+                await _drain_task_after_cancellation(operation)
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.warning("Cancelled async sandbox command failed while draining", exc_info=True)
             raise cancellation
 
     async def _execute_command_async_impl(
@@ -1037,74 +1014,91 @@ class LocalSandbox(Sandbox):
         injected = {**self.environment, **(env or {})}
         sandbox_env = build_sandbox_env(injected)
 
-        stdout_capture = _BoundedPipeCapture()
-        stderr_capture = _BoundedPipeCapture()
+        # Ordinary pipe fds keep asyncio's process wait independent of EOF.
+        # Reuse sync exec's daemon readers so background output can also
+        # outlive a short-lived caller loop.
+        read_fds: list[int] = []
+        write_fds: list[int] = []
+        process = None
         try:
-            process = await asyncio.create_subprocess_exec(
-                shell,
-                "-c",
-                resolved_command,
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                start_new_session=True,
-                env=sandbox_env,
-            )
-        except NotImplementedError:
-            # Selector event loops cannot spawn subprocesses; degrade
-            # permanently to the sync path so behavior matches today.
-            self._async_exec_unsupported = True
-            logger.warning("Event loop does not support subprocesses; async sandbox exec bridged to the sync path")
+            for _ in range(2):
+                read_fd, write_fd = os.pipe()
+                read_fds.append(read_fd)
+                write_fds.append(write_fd)
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    shell,
+                    "-c",
+                    resolved_command,
+                    stdin=asyncio.subprocess.DEVNULL,
+                    stdout=write_fds[0],
+                    stderr=write_fds[1],
+                    start_new_session=True,
+                    env=sandbox_env,
+                )
+            except NotImplementedError:
+                self._async_exec_unsupported = True
+                logger.warning("Event loop does not support subprocesses; async sandbox exec bridged to the sync path")
+        finally:
+            # The parent owns write ends; unclaimed read ends stay here only
+            # when no process was returned (including unsupported loops).
+            for fd in write_fds:
+                with suppress(OSError):
+                    os.close(fd)
+            if process is None:
+                for fd in read_fds:
+                    with suppress(OSError):
+                        os.close(fd)
+        if process is None:
             return await run_sync_lifecycle_operation(self.execute_command, command, env=env, timeout=timeout)
 
-        async def _drain(stream: asyncio.StreamReader, capture: _BoundedPipeCapture) -> None:
-            try:
-                while True:
-                    chunk = await stream.read(_ASYNC_READ_CHUNK_BYTES)
-                    if not chunk:
-                        return
-                    capture.append(chunk)
-            except Exception:
-                logger.debug("Async sandbox output reader stopped", exc_info=True)
-
-        readers = (
-            asyncio.create_task(_drain(process.stdout, stdout_capture)),
-            asyncio.create_task(_drain(process.stderr, stderr_capture)),
-        )
+        drains: list[tuple[_BoundedPipeCapture, threading.Thread]] = []
         timed_out = False
+
+        def join_drains() -> None:
+            grace = 10 if timed_out or not self._process_group_exists(process.pid) else _PIPE_DRAIN_JOIN_TIMEOUT_SECONDS
+            for _, thread in drains:
+                thread.join(timeout=grace)
+                if thread.is_alive():
+                    logger.debug("Subprocess output drain thread still active after command returned")
+
         try:
+            for name in ("stdout", "stderr"):
+                drains.append(self._start_pipe_drain(read_fds[0], f"deerflow-bash-{name}-drain"))
+                read_fds.pop(0)  # Ownership transfers only after thread.start succeeds.
             try:
                 await asyncio.wait_for(process.wait(), timeout)
             except TimeoutError:
-                timed_out = True
-                # The kill can interrupt the child mid-write, leaving a partial
-                # multi-byte sequence at the capture end; authorize the trim
-                # retry so the valid prefix survives the strict decode.
-                stdout_capture.mark_split_tail()
-                stderr_capture.mark_split_tail()
-                await LocalSandbox._terminate_process_group_async(process)
-        finally:
-            # Same join posture as the sync path: give drained pipes a short
-            # grace, and hand still-open readers (backgrounded children) to
-            # the daemon set so they keep draining until EOF instead of dying
-            # on a closed transport.
-            if timed_out or not LocalSandbox._process_group_exists(process.pid):
-                grace = 10
-            else:
-                grace = _PIPE_DRAIN_JOIN_TIMEOUT_SECONDS
-            _, pending = await asyncio.wait(readers, timeout=grace)
-            if pending:
-                daemon_tasks = _daemon_drain_tasks()
-                for reader in pending:
-                    daemon_tasks.add(reader)
-                    reader.add_done_callback(daemon_tasks.discard)
+                if process.returncode is None:
+                    timed_out = True
+                    for capture, _ in drains:
+                        capture.mark_split_tail()
+                    await self._terminate_process_group_async(process)
+        except BaseException:
+            from deerflow.sandbox.lease import _drain_task_after_cancellation
 
-        stdout = stdout_capture.read()
-        stderr = stderr_capture.read()
+            async def cleanup() -> None:
+                try:
+                    await self._terminate_process_group_async(process)
+                finally:
+                    await run_sync_lifecycle_operation(join_drains)
+
+            try:
+                await _drain_task_after_cancellation(asyncio.create_task(cleanup()))
+            except BaseException:
+                logger.warning("Async sandbox process cleanup failed", exc_info=True)
+            raise
+        finally:
+            # Reads not transferred to a reader still belong to this operation.
+            for fd in read_fds:
+                with suppress(OSError):
+                    os.close(fd)
+
+        await run_sync_lifecycle_operation(join_drains)
+        stdout = drains[0][0].read()
+        stderr = drains[1][0].read()
         returncode = process.returncode if process.returncode is not None else 0
         output = self._assemble_command_output(stdout, stderr, returncode, timed_out, timeout)
-        # Reverse resolving local paths back to container paths may stat the
-        # host tree; keep it off the loop like the forward resolution above.
         return await run_sync_lifecycle_operation(self._reverse_resolve_paths_in_output, output)
 
     def _resolve_exec_command(self, command: str) -> tuple[str, str]:
