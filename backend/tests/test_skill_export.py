@@ -448,6 +448,14 @@ def test_required_secrets_normalization_and_invalid_warning(package):
 
 
 @requires_safe_capture
+def test_required_secrets_duplicate_keeps_required(package):
+    storage, root = package
+    (root / "SKILL.md").write_text("---\nname: sample\ndescription: Example\nrequired-secrets:\n - name: API_KEY\n   optional: true\n - API_KEY\n - name: OPTIONAL_KEY\n   optional: true\n---\n", encoding="utf-8")
+    manifest = export.export_manifest(storage, "sample")
+    assert manifest["requirements"]["required_secrets"] == [{"name": "API_KEY", "optional": False}, {"name": "OPTIONAL_KEY", "optional": True}]
+
+
+@requires_safe_capture
 def test_mtime_does_not_change_revision(package):
     storage, root = package
     before = export.export_manifest(storage, "sample")["revision"]

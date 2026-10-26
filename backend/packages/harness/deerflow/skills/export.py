@@ -306,16 +306,21 @@ def _manifest(name, entries, blockers, warnings, snapshot, budget):
                 secrets = metadata.get("required-secrets")
                 if secrets is not None:
                     requirements["required_secrets"] = []
-                    seen = set()
+                    seen = {}
                     for secret in secrets:
                         if isinstance(secret, str):
                             secret = {"name": secret, "optional": False}
                         if isinstance(secret, dict):
                             raw_name = secret.get("name")
                             secret_name = raw_name.strip() if isinstance(raw_name, str) else ""
-                            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", secret_name) and secret_name not in seen:
-                                seen.add(secret_name)
-                                requirements["required_secrets"].append({"name": secret_name, "optional": bool(secret.get("optional", False))})
+                            optional = bool(secret.get("optional", False))
+                            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", secret_name) and secret_name in seen:
+                                # Match the runtime parser: a required duplicate wins.
+                                if not optional:
+                                    seen[secret_name]["optional"] = False
+                            elif re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", secret_name):
+                                seen[secret_name] = {"name": secret_name, "optional": optional}
+                                requirements["required_secrets"].append(seen[secret_name])
                             elif not secret_name or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", secret_name):
                                 warnings.append(_issue("skill_export_invalid_declaration", "A malformed required-secrets declaration was omitted; inspect SKILL.md.", "SKILL.md"))
                         else:

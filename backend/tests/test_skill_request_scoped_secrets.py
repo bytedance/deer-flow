@@ -780,6 +780,29 @@ class TestRequiredSecretsParsing:
         assert f"non-boolean optional value of type {type(value).__name__}" in caplog.text
         assert "required-secrets entry 'ERP_TOKEN' as required" in caplog.text
 
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            [{"name": "ERP_TOKEN", "optional": True}, "ERP_TOKEN"],
+            ["ERP_TOKEN", {"name": "ERP_TOKEN", "optional": True}],
+            [{"name": "ERP_TOKEN", "optional": True}, {"name": " ERP_TOKEN ", "optional": False}],
+        ],
+    )
+    def test_duplicate_declaration_keeps_required(self, raw):
+        from deerflow.skills.parser import parse_required_secrets
+
+        requirements = parse_required_secrets([*raw, "OTHER_TOKEN"], Path("SKILL.md"))
+        assert requirements == (
+            SecretRequirement(name="ERP_TOKEN", optional=False),
+            SecretRequirement(name="OTHER_TOKEN", optional=False),
+        )
+
+    def test_duplicate_optional_declarations_stay_optional(self):
+        from deerflow.skills.parser import parse_required_secrets
+
+        requirements = parse_required_secrets([{"name": "ERP_TOKEN", "optional": True}, {"name": "ERP_TOKEN", "optional": True}], Path("SKILL.md"))
+        assert requirements == (SecretRequirement(name="ERP_TOKEN", optional=True),)
+
     def test_invalid_env_name_entry_is_dropped(self, tmp_path):
         from deerflow.skills.parser import parse_skill_file
         from deerflow.skills.types import SkillCategory
