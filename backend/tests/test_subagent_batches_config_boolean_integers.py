@@ -42,16 +42,12 @@ BATCH_BOOL_FIELDS = BATCH_INT_FIELDS + ("poll_interval_seconds",)
 
 
 @pytest.mark.parametrize("value", [True, False])
-@pytest.mark.parametrize("field", BATCH_INT_FIELDS)
-def test_batch_int_fields_reject_booleans(field: str, value: bool) -> None:
-    with pytest.raises(ValidationError, match="must be an integer, not a boolean"):
+@pytest.mark.parametrize("field", BATCH_BOOL_FIELDS)
+def test_batch_numeric_fields_reject_booleans(field: str, value: bool) -> None:
+    # "not a boolean" matches both the int ("an integer") and float ("a number")
+    # wordings, so one parametrized test pins the rejection for all ten fields.
+    with pytest.raises(ValidationError, match="not a boolean"):
         SubagentBatchesConfig(**{field: value})
-
-
-@pytest.mark.parametrize("value", [True, False])
-def test_batch_poll_interval_rejects_booleans(value: bool) -> None:
-    with pytest.raises(ValidationError, match="must be a number, not a boolean"):
-        SubagentBatchesConfig(poll_interval_seconds=value)
 
 
 def test_batch_config_keeps_numeric_inputs() -> None:
