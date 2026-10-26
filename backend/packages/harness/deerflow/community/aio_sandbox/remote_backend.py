@@ -57,8 +57,6 @@ _RESERVED_SANDBOX_MOUNT_PATHS = (
 )
 
 _LARK_CLI_RUNTIME_CONTAINER_PATH = "/mnt/integrations/lark-cli/runtime"
-_LARK_CLI_CONFIG_CONTAINER_PATH = "/mnt/integrations/lark-cli/config"
-_LARK_CLI_DATA_CONTAINER_PATH = "/mnt/integrations/lark-cli/data"
 _AIO_DEFAULT_MAX_SHELL_SESSIONS = 10
 
 
