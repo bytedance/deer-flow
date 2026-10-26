@@ -18,6 +18,10 @@ ownership and capture cleanup. Retain the real XLSX conversion coverage.
 
 Backend tests must preserve the runtime invariants they exercise without changing production execution topology.
 
+Provider cleanup tests use concrete configuration models and event gates.
+Surface owner-task failures while awaiting lifecycle events; join owners and
+event waiters during teardown.
+
 `test_bench_sandbox_prewarm.py` controls observation timestamps through the
 benchmark module's clock binding. Keep asyncio's clock real, initialize
 `Trace.started` from the controlled clock, and advance ticks at event gates.

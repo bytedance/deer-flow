@@ -20,7 +20,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 62
+config_version: 63
 
 # Optional operator-owned literal prompt extensions (see CONFIGURATION.md):
 # lead_prompt_overlay:
@@ -2990,6 +2990,13 @@ run_ownership:
 #   stream_ttl_seconds: 86400    # rolling TTL for retained stream buffers.
 #                                # Refreshed on each publish/publish_end; set 0
 #                                # to disable. This is not a run timeout.
+#   legacy_end_scan_enabled: true  # restart-required Redis compatibility scan.
+#                                # First END scans all retained payloads while true.
+#                                # Set false only after all old writers stop and
+#                                # every legacy buffer expires or is removed.
+#                                # With TTL disabled, remove old buffers explicitly.
+#                                # Restart all Gateways together; false uses only
+#                                # the tail for O(1) END detection.
 #   producer_lease_recovery_enabled: false  # restart-required activation gate.
 #                                # First roll this binary to every Gateway and
 #                                # drain pre-upgrade runs; then enable on every
