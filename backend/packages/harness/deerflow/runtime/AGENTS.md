@@ -4,6 +4,19 @@ The memory history cache is shared by sync saver wrappers. Its threading lock
 serializes lookup/LRU promotion, population/eviction, thread purge, close, and
 statistics snapshots. Keep cache critical sections free of awaits and saver I/O;
 immutable histories do not make the mutable LRU registry thread-safe.
+Memory entries own deep copies of write payloads and snapshot seeds on ingest
+and read. Clone payloads outside the registry lock: user-defined copy callbacks
+can re-enter the cache. Preserve sync/async state isolation through
+`CheckpointStateAccessor`; tests live in `tests/test_checkpoint_cache_payload_isolation.py`.
+
+Copies run synchronously on the caller's thread, including `aget_many` and
+`aset_many` on the event loop. Each ingest or cache hit copies the whole
+entry, so CPU and allocation costs grow with payload size. A warm scan of
+N checkpoints can repeatedly copy growing snapshot seeds, reaching O(N²)
+total copied data. The LRU entry cap bounds entry count, not payload bytes
+or scan cost. Profile long-thread history reads before offloading copies
+to worker threads; preserve payload isolation and copy callbacks outside
+the registry lock.
 
 ### Redis Checkpoint Cache Purge
 
@@ -422,3 +435,14 @@ freeze/drain → singleton confirmation → Receipt → Seal → barrier release
 Force close invalidates Receipt bounds. Preserve ownership checks, four-state
 confirmation, and partial evidence on failure without changing business status
 or SSE liveness. See [Run outcome protocol](../../../../docs/RUN_EVENT_STREAM.md#authoritative-run-outcome).
+Recovery uses a non-replaceable one-shot target, writes the zero-delivery receipt
+before `run.terminal`, and passes a Run-lifecycle guard into both singleton
+writes. Stores evaluate that guard under the same store mutation fence as
+event deletion; completed thread deletion wins over a stale recovery target.
+DB recovery guards use `RunRepository.get_in_session` when both stores share
+an engine, retaining that fence without a second pool checkout. Different engines
+and overridden Run lookups retain their ordinary read path. Plain callable guards
+remain supported; they must not acquire another connection from the writer's pool.
+Memory guard/deletion locks are per-thread, so a slow guard cannot block another
+thread. Coverage: `tests/test_recovery_terminal_pool.py` (PostgreSQL via
+`TEST_POSTGRES_URI`).
