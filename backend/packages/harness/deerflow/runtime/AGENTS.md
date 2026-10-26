@@ -42,6 +42,18 @@ Memory/Redis bridges keep startup-only `stream_bridge.heartbeat_interval_seconds
 
 Reconnect cursor parsing requires ASCII digits and must treat integer-conversion failures as malformed input. Redis cursors additionally require unsigned 64-bit components; use the same parser before sending a cursor to `XREAD` and when detecting replay gaps. Preserve malformed-cursor policy: memory replays retained events, Redis tails active streams and replays ended streams through `end`. `tests/test_stream_bridge.py` directly tests both parsers offline, including oversized sequences, Redis component overflow, non-ASCII digits, and valid uint64 boundaries; integration tests also exercise malformed cursors against real Redis.
 
+### Redis Stream END Publication
+
+Keep the producer-token check first, then END detection, then `XADD` in one Lua
+script. Ordinary event publication checks only the stream tail (`XREVRANGE ...
+COUNT 1`), so token streaming remains O(1) as retained history grows. END
+publication checks the tail first and scans the bounded retained window only
+when the tail is not END, preserving compatibility with old streams where an
+END was followed by late events. Do not add an unbounded boolean state key for
+this fast path; cleanup, expiry, and a new producer generation would then need a
+separate lifecycle contract. An unowned recovery END for a missing stream is a
+successful no-op. Coverage: `tests/test_stream_bridge.py`.
+
 ### Memory Stream Replay
 
 Memory keeps the exact last evicted event ID as bounded per-run metadata. A
