@@ -87,12 +87,13 @@ IN_PROCESS_CACHE_MAX_ENTRIES = 4096
 MAX_CHANNEL_AGENT_LIST_ITEMS = 50
 MAX_CHANNEL_AGENT_DESCRIPTION_CHARS = 120
 
-# Lead-agent recursion budget (LangGraph super-steps for the lead graph only).
-# This is independent of subagent depth: a `task()` dispatch runs the whole
-# subagent inside ONE lead tools-node step, and subagents enforce their own
-# limit via `subagents.max_turns` (see SubagentExecutor). Do not conflate this
-# 100 with the general-purpose subagent's max_turns.
-DEFAULT_RUN_CONFIG: dict[str, Any] = {"recursion_limit": 100}
+# No lead-agent recursion budget here: like Gateway API runs, IM runs get
+# the Gateway's configured top-level ``recursion_limit`` (clamped by
+# ``max_recursion_limit``) unless a session ``config.recursion_limit`` sets
+# one. The budget counts lead-graph super-steps only: a `task()` dispatch runs
+# the whole subagent inside ONE lead tools-node step, and subagents enforce
+# their own limit via `subagents.max_turns` (see SubagentExecutor).
+DEFAULT_RUN_CONFIG: dict[str, Any] = {}
 DEFAULT_RUN_CONTEXT: dict[str, Any] = {
     "thinking_enabled": True,
     "is_plan_mode": False,
@@ -2190,7 +2191,7 @@ class ChannelManager:
             if isinstance(override, int) and override > 0:
                 run_config["recursion_limit"] = override
             else:
-                run_config["recursion_limit"] = max(run_config.get("recursion_limit", 100), policy.default_recursion_limit)
+                run_config["recursion_limit"] = max(run_config.get("recursion_limit", 0), policy.default_recursion_limit)
 
         return assistant_id, run_config, run_context
 

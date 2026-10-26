@@ -44,6 +44,7 @@ from app.gateway.utils import sanitize_log_param
 from app.mcp_tasks.errors import PermanentNotificationError
 from deerflow.agents.human_input import read_human_input_response
 from deerflow.agents.interaction_policy import resolve_run_interaction_policy
+from deerflow.agents.language import ui_locale
 from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, _REMINDER_DATE_KEY
 from deerflow.agents.middlewares.input_sanitization_middleware import frame_untrusted_text
 from deerflow.agents.middlewares.message_utils import _SUMMARY_MESSAGE_NAME, is_genuine_user_message
@@ -1032,7 +1033,13 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
         # ``build_run_config`` copies ``body.config['configurable']`` verbatim,
         # and ``configurable`` is persisted in checkpoints.
         existing_configurable.pop("client", None)
+        existing_configurable.pop("locale", None)
     existing_runtime_context = config.get("context")
+    if isinstance(existing_runtime_context, dict) and "locale" in existing_runtime_context:
+        locale = ui_locale(existing_runtime_context)
+        existing_runtime_context.pop("locale")
+        if locale is not None:
+            existing_runtime_context["locale"] = locale
     for section in (existing_configurable, existing_runtime_context):
         if isinstance(section, dict):
             for key in _MODEL_SELECTION_CONTEXT_KEYS:
@@ -1049,6 +1056,13 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
 
     configurable = config.setdefault("configurable", {})
     runtime_context = config.setdefault("context", {})
+    # UI language is public request data, never a checkpoint default. An
+    # explicit invalid/null value clears a legacy config.context preference.
+    if "locale" in context and isinstance(runtime_context, dict):
+        runtime_context.pop("locale", None)
+        locale = ui_locale(context)
+        if locale is not None:
+            runtime_context["locale"] = locale
     keys = _CONTEXT_CONFIGURABLE_KEYS | _CONTEXT_INTERNAL_CALLER_KEYS if internal else _CONTEXT_CONFIGURABLE_KEYS
     for key in keys:
         if key in context:
@@ -1331,9 +1345,9 @@ def build_run_config(
     load the matching ``agents/<name>/SOUL.md`` and per-agent config —
     without it the agent silently runs as the default lead agent.
 
-    This mirrors the channel manager's ``_resolve_run_params`` logic except for
-    the recursion default: Gateway API runs use the configured top-level
-    ``recursion_limit``, while IM channel runs retain their own default.
+    This mirrors the channel manager's ``_resolve_run_params`` logic. IM
+    channel runs send no ``recursion_limit`` unless their session config or
+    channel policy sets one, so they get the same configured default here.
     """
     # Lead-agent recursion budget (LangGraph super-steps for the lead graph
     # only). Independent of subagent depth: a `task()` dispatch runs the whole
@@ -2609,8 +2623,20 @@ async def start_run(
                 )
                 if start_producer_lease is not None:
                     producer_lease_started = await start_producer_lease(admission_run_id)
-                if getattr(bridge, "supports_cross_process", False) is True and not producer_lease_started:
-                    raise RuntimeError("Cross-process stream producer tracking is unavailable")
+                    if not producer_lease_started and getattr(bridge, "supports_cross_process", False) is True:
+                        # Best-effort: a cross-process bridge returns False only
+                        # after a transient backend error whose partial lease
+                        # registration was safely rolled back (nothing is left
+                        # tracked). An untracked producer falls back to the
+                        # historical conservative recovery path -- wait for the
+                        # real END or the retained-stream TTL rather than
+                        # synthesizing one -- so this run is no less safe than it
+                        # was before producer leases existed. Rejecting admission
+                        # here would instead turn a transient blip into a 500.
+                        logger.warning(
+                            "Stream producer tracking unavailable for run %s; admitting it with untracked (conservative) stream recovery",
+                            sanitize_log_param(admission_run_id),
+                        )
                 try:
                     record = await run_mgr.create_or_reject(
                         thread_id,

@@ -1,5 +1,10 @@
 ### Agent System
 
+Web runs may supply `context.locale` (`en-US` / `zh-CN`) as a response-language
+preference; explicit user language requests win. DynamicContext projects it as
+request-only human data, leaving the static system prompt independent of locale.
+Clients without a supported locale retain message-language inference.
+
 `AppConfig.lead_prompt_overlay` wraps the fully rendered lead system prompt with
 literal operator prepend/append text. Do not template-format these extensions
 or source them from run context. The graph and assembly descriptor must see the

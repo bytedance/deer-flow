@@ -145,9 +145,11 @@ configured default. `max_recursion_limit` (default `1000`) caps both sources to
 limit runaway LLM cost. Both settings are read per run, so changes apply to the
 next request without a Gateway restart.
 
-These settings apply to Gateway API runs. IM channel runs and embedded
-`DeerFlowClient` runs retain their own defaults and can be overridden through
-their channel/client-specific configuration or per-call options.
+These settings also apply to IM channel runs. A `recursion_limit` in an IM
+channel's `session.config` (for all channels, one channel or one user) takes
+precedence. The GitHub channel instead uses `250`, or a higher
+`session.config` value, unless the agent sets `github.recursion_limit`.
+Embedded `DeerFlowClient` runs retain their own defaults and per-call options.
 
 ### Models
 
