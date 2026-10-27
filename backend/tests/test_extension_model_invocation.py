@@ -194,7 +194,8 @@ async def test_doc_classification_example_uses_public_contract(host):
     from pathlib import Path
 
     doc = (Path(__file__).resolve().parents[1] / "docs" / "extension-model-invocation.md").read_text(encoding="utf-8")
-    code = doc.split("```python\n", 1)[1].split("```", 1)[0]
+    service_section = doc.split("## Call from a service\n", 1)[1]
+    code = service_section.split("```python\n", 1)[1].split("```", 1)[0]
     namespace = {}
     exec(compile(code, "extension-model-invocation.md", "exec"), namespace)
     loaded, services, _ = await host.start([GRANT], service_type=namespace["Classifier"])
@@ -588,3 +589,17 @@ async def test_cancelled_constructor_retains_slot_and_never_dispatches(host):
         await asyncio.gather(*invoker._budget.workers, return_exceptions=True)
         await stop_services(loaded)
     host.model.ainvoke.assert_not_called()
+
+
+def test_service_role_invoker_does_not_accept_direct_chat_model_names(host):
+    async def scenario():
+        loaded, services, diagnostics = await host.start([GRANT])
+        assert not diagnostics
+        try:
+            with pytest.raises(ModelInvocationFailed, match="browser-bound"):
+                await services[0].deps.model_invoker.invoke(request(model_name="host-model"))
+            host.factory.assert_not_called()
+        finally:
+            await stop_services(loaded)
+
+    asyncio.run(scenario())

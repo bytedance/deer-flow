@@ -262,3 +262,9 @@ Personal MCP is owner-only; platform MCP shared.
 ### Web model provider presets
 
 Managed model routes expose provider metadata; routing stays server-owned. Align validation, probing, storage, keys, and revisions.
+
+Plugin page model calls use `plugin_chat_models.PluginChatModelRuntime`: bind
+only trusted session/auth_disabled requests to the actual user and installed
+namespace, reuse authorize_model_use and the host chat factory, and close retained
+handles at shutdown. Internal/PAT/model-tool calls receive no chat_models handle.
+Shared per-namespace admission and end-to-end deadlines include authorization.

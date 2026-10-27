@@ -1,9 +1,9 @@
-"""Provider-neutral, non-streaming text model calls granted by the host."""
+"""Provider-neutral text calls through host grants or user-bound chat access."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal, Protocol
 
 
@@ -16,7 +16,7 @@ class ModelInvocationUnavailable(ModelInvocationError):
 
 
 class ModelInvocationUnauthorized(ModelInvocationError):
-    """The requested logical role is not granted to this installation."""
+    """The requested role or user-selected chat model is not allowed."""
 
 
 class ModelInvocationFailed(ModelInvocationError):
@@ -40,6 +40,9 @@ class ModelInvocationRequest:
     purpose: str | None = None
     response_schema: Mapping[str, object] | None = None
     timeout_seconds: float | None = None
+    # Browser-bound chat access selects a configured model directly.
+    # Operator-granted service invokers continue to require model_role.
+    model_name: str | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "messages", tuple(self.messages))

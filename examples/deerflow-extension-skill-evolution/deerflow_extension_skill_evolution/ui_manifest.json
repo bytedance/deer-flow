@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "entry": "static/index.mjs",
+  "files": [
+    "static/index.mjs",
+    "static/style.css",
+    "static/modules.mjs",
+    "static/common.mjs",
+    "static/skill.mjs",
+    "static/trajectory-cache.mjs"
+  ]
+}

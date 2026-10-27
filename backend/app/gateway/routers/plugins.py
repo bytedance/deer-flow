@@ -138,12 +138,15 @@ async def invoke_plugin_action(request: Request, namespace: str, action_name: st
     try:
         async with asyncio.timeout(30):
             runs = resolve_agent_runs(request)
+            chat_runtime = getattr(request.app.state, "plugin_chat_models", None)
+            chat_models = await chat_runtime.bind(request, namespace) if chat_runtime is not None else None
             return await action.handler(
                 MappingProxyType(payload),
                 ActionContext(
                     principal,
                     MappingProxyType(settings),
                     agent_runs=runs.for_plugin(namespace) if runs is not None else None,
+                    chat_models=chat_models,
                     interaction="session" if getattr(request.state, "auth_source", None) == "session" and not principal.is_internal else "other",
                 ),
             )
