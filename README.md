@@ -473,6 +473,12 @@ fences, including unclosed fences, in complete and streamed replies.
    TAVILY_API_KEY=your-tavily-api-key
    ```
 
+   `make dev` and `make start` read `.env` as data, never as a shell script, so a
+   value means what the Gateway reads: `$$`, backticks and `$(...)` stay as
+   written, and an unquoted value may contain spaces. `$NAME`, `${NAME}`,
+   `${NAME:-default}` and an unquoted leading `~` still expand, and
+   single-quoted values stay literal.
+
    </details>
 
 For an explicit backend dotenv file, export `DEER_FLOW_ENV_FILE` before startup,
