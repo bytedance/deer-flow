@@ -10,6 +10,7 @@ import json
 import logging
 import math
 import mimetypes
+import os
 import secrets
 import shutil
 import tempfile
@@ -21,6 +22,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlparse
+from uuid import uuid4
 
 import httpx
 from cryptography.hazmat.primitives import padding
@@ -32,6 +34,7 @@ from app.channels.commands import is_known_channel_command
 from app.channels.connection_identity import attach_connection_identity
 from app.channels.credential_staging import cleanup_stale_credential_staging, credential_staging_prefix
 from app.channels.message_bus import INBOUND_FILE_CLEANUP_KEY, InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment, cleanup_inbound_files
+from deerflow.utils.atomic_write import cleanup_failed_atomic_write
 from deerflow.utils.file_io import await_drained
 
 logger = logging.getLogger(__name__)
@@ -1705,11 +1708,21 @@ class WechatChannel(Channel):
     def _save_state(self) -> None:
         if not self._cursor_path:
             return
+        staged: Path | None = None
         try:
             self._cursor_path.parent.mkdir(parents=True, exist_ok=True)
-            self._cursor_path.write_text(json.dumps({"get_updates_buf": self._get_updates_buf}, ensure_ascii=False, indent=2), encoding="utf-8", newline="")
+            # Stage beside the target and replace: a truncated cursor file would
+            # otherwise be unreadable on the next start and lose the position.
+            staged = self._cursor_path.with_name(f".{self._cursor_path.name}.{uuid4().hex}.tmp")
+            staged.write_text(json.dumps({"get_updates_buf": self._get_updates_buf}, ensure_ascii=False, indent=2), encoding="utf-8", newline="")
+            os.replace(staged, self._cursor_path)
+            staged = None
         except OSError:
             logger.warning("[WeChat] failed to persist cursor state to %s", self._cursor_path)
+        finally:
+            if staged is not None:
+                # A leftover stage must not replace the outcome above.
+                cleanup_failed_atomic_write(staged)
 
     def _load_auth_state(self) -> None:
         if not self._auth_path:
