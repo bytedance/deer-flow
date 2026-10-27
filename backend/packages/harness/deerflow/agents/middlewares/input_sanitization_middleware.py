@@ -206,41 +206,44 @@ def neutralize_untrusted_tags(text: str) -> str:
     return _neutralize_boundary_tokens(text)
 
 
+class _FramedUserText(str):
+    """Request-local encoding provenance; JSON/plain strings cannot carry it.
+
+    Immutable text produced by this module can be reused without encoding it
+    again. Serialization intentionally discards this marker: restored or
+    caller-supplied strings must be treated as user data, even if their bytes
+    exactly match our framing and encoding note. Never persist this as metadata.
+    """
+
+
 def frame_untrusted_text(text: str) -> str:
     """Frame user text with reversible tag encoding and explicit decoding guidance.
 
-    Only when blocked tags are present, escape original ampersands first so one HTML decoding pass
+    When blocked tags or a copied encoding note are present, escape original
+    ampersands first so one HTML decoding pass
     recovers literal entities as well as XML. Remote-result neutralization stays
     separate: its consumers do not opt into this user-payload encoding contract.
     Boundary tokens retain their existing neutralization behavior.
     """
-    if not text.strip():
+    if isinstance(text, _FramedUserText) or not text.strip():
         return text
     if text.startswith(_USER_INPUT_BEGIN) and text.endswith(_USER_INPUT_END):
+        # Retain legacy boundary handling, but a copied encoding note is data,
+        # never evidence of a completed transform. Only the request-local type
+        # above can establish that the text was framed by this module.
         inner = text[len(_USER_INPUT_BEGIN) : -len(_USER_INPUT_END)]
-        # Our encoded frames must not be ampersand-escaped again. Still scan
-        # for raw blocked tags and forged inner boundaries on every call.
-        note_prefix = f"\n{_USER_INPUT_ENCODING_NOTE}\n"
-        if inner.startswith(note_prefix):
-            payload = inner[len(note_prefix) :]
-            # A canonical encoded frame contains no raw blocked tags. Their
-            # presence proves this payload still needs encoding; preserve its
-            # literal entities too, rather than trusting the user-forgeable note.
-            if _BLOCKED_TAG_PATTERN.search(payload):
-                inner = "\n" + _encode_user_payload(payload)
-            return f"{_USER_INPUT_BEGIN}{_neutralize_boundary_tokens(inner)}{_USER_INPUT_END}"
         processed = _encode_user_payload(inner)
         if processed != inner:
-            processed = "\n" + processed
-        return f"{_USER_INPUT_BEGIN}{_neutralize_boundary_tokens(processed)}{_USER_INPUT_END}"
+            processed = "\n" + processed + "\n"
+        return _FramedUserText(f"{_USER_INPUT_BEGIN}{_neutralize_boundary_tokens(processed)}{_USER_INPUT_END}")
     text = _encode_user_payload(text)
     text = _neutralize_boundary_tokens(text)
-    return f"{_USER_INPUT_BEGIN}\n{text}\n{_USER_INPUT_END}"
+    return _FramedUserText(f"{_USER_INPUT_BEGIN}\n{text}\n{_USER_INPUT_END}")
 
 
 def _encode_user_payload(text: str) -> str:
     """Encode once, announcing the transform only when bytes actually change."""
-    if not _BLOCKED_TAG_PATTERN.search(text):
+    if not _BLOCKED_TAG_PATTERN.search(text) and _USER_INPUT_ENCODING_NOTE not in text:
         return text
     encoded = _BLOCKED_TAG_PATTERN.sub(_escape_tag_match, text.replace("&", "&amp;"))
     return f"{_USER_INPUT_ENCODING_NOTE}\n{encoded}"
@@ -291,7 +294,8 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
                     continue
                 text_parts.append(text)
                 text_blocks.append(block)
-        return "\n".join(text_parts), text_blocks
+        # Preserve request-local provenance for a single already-framed block.
+        return (text_parts[0] if len(text_parts) == 1 else "\n".join(text_parts)), text_blocks
 
     @staticmethod
     def _rebuild_content(

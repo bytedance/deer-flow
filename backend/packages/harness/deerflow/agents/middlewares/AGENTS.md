@@ -59,12 +59,13 @@ No match: skip inspection, log ID. Tests: `test_read_mark_tool_call_correlation.
 
 1. **InputSanitizationMiddleware** - First, so it is the outermost `wrap_model_call` wrapper; every inner middleware (including LLM retries) sees sanitized messages. `additional_kwargs.original_user_content` is server-owned provenance: Gateway strips caller-supplied values for non-internal run requests, trusted IM calls may carry the string they captured before adding transport/file context, and the middleware replaces any non-string value before wrapping. Uploads and sanitization retain first-writer-wins only for validated strings. Caller markers are marked `untrusted_input`, never stripped; scope is every turn.
 
-   Only payloads with raw blocked tags escape all original ampersands first
-   and carry an Input encoding note. Tag-free ampersands pass through. Reproduce user
+   Payloads with raw blocked tags or a copied encoding note escape all original
+   ampersands first and carry a fresh note. Other tag-free ampersands pass through. Reproduce user
    data with exactly one HTML decoding pass; decoded tags never gain framework
    authority. Keep remote-result `neutralize_untrusted_tags` separate from this
-   encoding contract. Repeated calls must not double-encode frames; a copied
-   encoding note with raw blocked tags requires re-encoding its payload.
+   encoding contract. `_FramedUserText` carries request-local provenance for
+   idempotent reuse; serialized/plain strings never prove encoding state. Copied
+   notes are user data, including when followed only by literal entities.
 
    **KnowledgeScopeMiddleware** follows input sanitization: it exposes only Gateway-admitted execution scope, removes scope/display data from model messages, and blocks `knowledge_search`, `knowledge_entries_search` and `entity_relations_search` when disabled without reading storage or RAGFlow.
 2. **ToolOutputBudgetMiddleware** - Budgets model-bound text/JSON with limits/exemptions; externalizes to thread outputs (`tool_output.storage_subdir`, default `.tool-results`, `TOOL_RESULTS_DIRNAME`) with synopsis/`read_file` refs. Preserve mixed-result media. Restore blob refs across hosts; hash/write failures fall back inline. Internal files bypass workspace/delivery scans. Publication/elision/bash exit marker: [contract](TOOL_OUTPUT_PERSISTENCE.md). Elision: `tool_call_args`; retain newest `keep_recent_writes` writes. Controls: `elide_superseded_writes`, `superseded_write_min_chars`.
