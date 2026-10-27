@@ -551,6 +551,10 @@ async def _get_viewed_image_blob_response(
 
     virtual_path = f"/{path.lstrip('/')}"
     try:
+        store = await asyncio.to_thread(get_blob_store_if_enabled)
+        if store is None:
+            return None
+
         from app.gateway.services import build_thread_checkpoint_state_accessor
 
         accessor, config = await build_thread_checkpoint_state_accessor(request, thread_id=thread_id)
@@ -585,14 +589,11 @@ async def _get_viewed_image_blob_response(
         blob_ref = BlobRef.model_validate(blob_ref_data)
         if blob_ref.kind != "viewed-image" or blob_ref.sha256 != expected_sha256 or blob_ref.size != expected_size or blob_ref.content_type != mime_type:
             return None
-        store = await asyncio.to_thread(get_blob_store_if_enabled)
-        if store is None:
-            return None
         content = await asyncio.to_thread(store.get_bytes, blob_ref)
         if len(content) != expected_size or hashlib.sha256(content).hexdigest() != expected_sha256:
             return None
-    except Exception:
-        logger.debug("Could not resolve viewed-image blob for thread artifact", exc_info=True)
+    except Exception as exc:
+        logger.warning("Could not resolve viewed-image blob for thread artifact (%s)", type(exc).__name__)
         return None
 
     etag = f'"{expected_sha256}"'

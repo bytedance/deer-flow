@@ -69,6 +69,9 @@ The producer migrations are independently revertible:
    existing authorized thread record, including for trusted internal owner
    requests. A deleted or untracked thread cannot expose retained checkpoint
    blobs; legacy local-file artifact reads keep their existing access policy.
+   After authorization, a disabled-store check skips checkpoint access. Store
+   initialization/read failures retain the 404 response and log a warning with
+   the exception type only, without raw backend messages or tracebacks.
    IM channels and `present_file_tool` still use local-path reads. Store initialization or write
    failures return a generic tool error; model-read failures fall through to the
    validated sandbox/host compatibility paths.

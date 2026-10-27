@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import logging
 import os
 import stat
 import threading
@@ -7,6 +8,7 @@ import zipfile
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from _router_auth_helpers import call_unwrapped, make_authed_test_app
@@ -209,7 +211,7 @@ def test_shared_image_blob_requires_existing_thread_access(tmp_path, monkeypatch
             # Checkpoint cleanup can fail independently of metadata deletion.
             asyncio.run(thread_store.delete("thread-1", user_id=owner))
 
-    metadata_reads, blob_reads = [], []
+    metadata_reads, blob_reads, store_probes = [], [], []
 
     class Accessor:
         async def aget(self, _config):
@@ -225,8 +227,12 @@ def test_shared_image_blob_requires_existing_thread_access(tmp_path, monkeypatch
             blob_reads.append(requested_ref)
             return image_bytes
 
+    def get_store():
+        store_probes.append(True)
+        return SharedStore()
+
     monkeypatch.setattr(services, "build_thread_checkpoint_state_accessor", build_accessor)
-    monkeypatch.setattr("deerflow.storage.get_blob_store_if_enabled", lambda: SharedStore())
+    monkeypatch.setattr("deerflow.storage.get_blob_store_if_enabled", get_store)
     monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda *_args, **_kwargs: tmp_path / "absent.png")
     user = SimpleNamespace(id="reader", system_role=INTERNAL_SYSTEM_ROLE if internal else "user")
     app = make_authed_test_app(user_factory=lambda: user)
@@ -241,9 +247,71 @@ def test_shared_image_blob_requires_existing_thread_access(tmp_path, monkeypatch
         assert response.content == image_bytes
         assert blob_reads == [ref]
         assert metadata_reads == [True]
+        assert store_probes == [True]
     else:
         assert not metadata_reads
         assert not blob_reads
+        assert not store_probes
+
+
+@pytest.fixture
+def shared_image_blob_request(tmp_path, monkeypatch):
+    from app.gateway import services
+    from deerflow.storage import BlobRef
+
+    payload = b"\x89PNG\r\n\x1a\nimage"
+    virtual_path = "/mnt/user-data/outputs/chart.png"
+    ref = BlobRef(sha256=hashlib.sha256(payload).hexdigest(), size=len(payload), kind="viewed-image", content_type="image/png")
+    metadata = {"mime_type": "image/png", "size": len(payload), "sha256": ref.sha256, "blob_ref": ref.model_dump(mode="json")}
+    accessor = SimpleNamespace(aget=AsyncMock(return_value=SimpleNamespace(values={"viewed_images": {virtual_path: metadata}})))
+    build_accessor = AsyncMock(return_value=(accessor, {"configurable": {"thread_id": "thread-1"}}))
+    monkeypatch.setattr(services, "build_thread_checkpoint_state_accessor", build_accessor)
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda *_args, **_kwargs: tmp_path / "absent.png")
+    app = make_authed_test_app()
+    app.include_router(artifacts_router.router)
+    with TestClient(app) as client:
+        yield SimpleNamespace(client=client, url=f"/api/threads/thread-1/artifacts/{virtual_path.lstrip('/')}", build_accessor=build_accessor, accessor=accessor, ref=ref, payload=payload)
+
+
+def test_disabled_blob_storage_skips_checkpoint_reads(shared_image_blob_request, monkeypatch):
+    scenario = shared_image_blob_request
+    get_store = Mock(return_value=None)
+    monkeypatch.setattr("deerflow.storage.get_blob_store_if_enabled", get_store)
+
+    response = scenario.client.get(scenario.url)
+
+    assert response.status_code == 404
+    assert "Artifact not found" in response.json()["detail"]
+    get_store.assert_called_once_with()
+    scenario.build_accessor.assert_not_awaited()
+    scenario.accessor.aget.assert_not_awaited()
+
+
+@pytest.mark.parametrize("failure_stage", ["initialize", "read"])
+def test_shared_image_blob_store_failures_warn_without_details(shared_image_blob_request, monkeypatch, caplog, failure_stage):
+    from deerflow.storage import BlobReadError
+
+    scenario = shared_image_blob_request
+    private_detail = "sensitive-backend-detail-not-for-logs"
+    error = RuntimeError(private_detail) if failure_stage == "initialize" else BlobReadError(private_detail)
+    read_blob = Mock(side_effect=error)
+    get_store = Mock(side_effect=error) if failure_stage == "initialize" else Mock(return_value=SimpleNamespace(get_bytes=read_blob))
+    monkeypatch.setattr("deerflow.storage.get_blob_store_if_enabled", get_store)
+
+    with caplog.at_level(logging.WARNING, logger=artifacts_router.__name__):
+        response = scenario.client.get(scenario.url)
+
+    assert response.status_code == 404
+    records = [record for record in caplog.records if record.name == artifacts_router.__name__ and record.levelno == logging.WARNING]
+    assert len(records) == 1
+    assert records[0].getMessage() == f"Could not resolve viewed-image blob for thread artifact ({type(error).__name__})"
+    assert private_detail not in caplog.text
+    assert private_detail not in response.text
+    get_store.assert_called_once_with()
+    if failure_stage == "initialize":
+        scenario.build_accessor.assert_not_awaited()
+    else:
+        read_blob.assert_called_once_with(scenario.ref)
 
 
 def test_local_artifact_keeps_legacy_missing_thread_access(tmp_path, monkeypatch):
