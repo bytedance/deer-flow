@@ -6,6 +6,10 @@ DeerFlow's application tables (`runs`, `threads_meta`, `feedback`, `users`, `run
 
 **Hybrid bootstrap** (`persistence/bootstrap.py::bootstrap_schema`, invoked from `persistence/engine.py::init_engine`):
 
+0049 adds nullable producer identities (no backfill) and strict policy. Install
+its PostgreSQL guard in both Alembic and metadata `after_create` for fresh bootstrap.
+Activated policy forbids downgrade; dispose migration engines even on refusal.
+
 | DB state                                  | Action                                  |
 |-------------------------------------------|-----------------------------------------|
 | empty (no DeerFlow tables)                | `create_all` + `alembic stamp head`     |
@@ -34,7 +38,7 @@ The empty-DB path keeps using `create_all` because `Base.metadata` is the only a
 `0039_user_disabled` → `0040_scheduled_group_notice` →
 `0041_im_notice_preferences` → `0042_channel_leases` →
 `0043_runtime_im_notices` → `0044_channel_runtime_configs` →
-`0045_completed_run_evidence` → `0046_skill_mutations` → `0047_mcp_oauth_tokens` → `0048_extension_execution_leases` (current head). The preference
+`0045_completed_run_evidence` → `0046_skill_mutations` → `0047_mcp_oauth_tokens` → `0048_extension_execution_leases` → `0049_run_producer_fencing` (current head). The preference
 revision adds a separate owner/key table with a cascading users foreign key and
 does not alter users; the project-documents revision adds a new owner-scoped
 shelf table, and the MCP lease-token revision adds two nullable token columns to

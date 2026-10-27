@@ -2791,6 +2791,11 @@ run_events:
   backend: memory
   max_trace_content: 10240
   track_token_usage: true
+  # Restart-required; strict requires database.backend: postgres and backend: db.
+  # Stop every Gateway, activate the database policy, then restart all with the
+  # matching cutover ID. See README.md#configuration for the offline cutover.
+  producer_fencing: "off"
+  # producer_cutover_id: deployment-2026-10-27
 
 # ============================================================================
 # Agent Storage Configuration

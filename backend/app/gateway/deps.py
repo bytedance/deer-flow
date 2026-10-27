@@ -898,6 +898,15 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         run_events_config = getattr(config, "run_events", None)
         app.state.run_events_config = run_events_config
         app.state.run_event_store = make_run_event_store(run_events_config)
+        if sf is not None:
+            from deerflow.persistence.run.producer import validate_producer_fencing
+
+            # An activated database also forbids a memory/JSONL downgrade.
+            await validate_producer_fencing(
+                sf,
+                mode=getattr(run_events_config, "producer_fencing", "off"),
+                cutover_id=getattr(run_events_config, "producer_cutover_id", None),
+            )
         from deerflow.runtime.events.terminal import RecoveryTerminalPublisher
 
         app.state.recovery_terminal_publisher = RecoveryTerminalPublisher(app.state.run_event_store, app.state.run_store)

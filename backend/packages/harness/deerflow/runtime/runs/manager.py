@@ -285,6 +285,9 @@ class RunRecord:
     first_human_message: str | None = None
     finalizing: bool = False
     owner_worker_id: str | None = None
+    run_incarnation: str | None = None
+    producer_epoch: str | None = None
+    evidence_retention_revision: int = 0
     lease_expires_at: str | None = None
     # Process-local fencing signal. Once set, this worker must not perform
     # further durable run/thread finalization because its lease ownership is
@@ -505,11 +508,23 @@ class RunManager:
         """
         if self._store is None:
             return
-        await self._call_store_with_retry(
+        admitted = await self._call_store_with_retry(
             "put",
             record.run_id,
             lambda: self._store.put(record.run_id, **self._store_put_payload(record)),
         )
+        self._bind_admitted_producer(record, admitted)
+
+    def _bind_admitted_producer(self, record: RunRecord, row: dict | None) -> None:
+        # Bind only a successful local admission, never snapshot recreation or a
+        # same-status historical row read. Unsupported stores remain legacy.
+        if self._store is None or getattr(self._store, "supports_event_producer_fencing", False) is not True:
+            return
+        if row is None or row.get("run_id") != record.run_id or row.get("owner_worker_id") != self._worker_id or row.get("thread_id") != record.thread_id or row.get("user_id") != record.user_id:
+            raise RunStartupError("Run producer admission identity could not be bound")
+        record.run_incarnation = row.get("run_incarnation")
+        record.producer_epoch = row.get("producer_epoch")
+        record.evidence_retention_revision = row.get("evidence_retention_revision", 0)
 
     async def _persist_to_store(self, record: RunRecord, *, error: str | None = None) -> bool:
         """Best-effort persist run record to backing store."""
@@ -780,6 +795,9 @@ class RunManager:
             last_ai_message=row.get("last_ai_message"),
             first_human_message=row.get("first_human_message"),
             owner_worker_id=row.get("owner_worker_id"),
+            run_incarnation=row.get("run_incarnation"),
+            producer_epoch=row.get("producer_epoch"),
+            evidence_retention_revision=row.get("evidence_retention_revision", 0),
             evidence_origin=row.get("evidence_origin") or "unknown",
             evidence_agent_id=row.get("evidence_agent_id"),
             lease_expires_at=row.get("lease_expires_at"),
@@ -1885,6 +1903,8 @@ class RunManager:
                     run_id=run_id,
                     user_id=row.get("user_id"),
                     operation_kind=row.get("operation_kind", "run"),
+                    run_incarnation=row.get("run_incarnation"),
+                    retention_revision=row.get("evidence_retention_revision", 0),
                 )
                 if target is not None:
                     await self._recovery_terminal_publisher.publish(target)
@@ -2172,7 +2192,7 @@ class RunManager:
                     if idempotency_request is not None:
                         create_kwargs["idempotency_request"] = idempotency_request
                     try:
-                        await self._call_store_with_retry(
+                        admitted, _ = await self._call_store_with_retry(
                             "create_thread_operation_atomic",
                             run_id,
                             lambda: self._store.create_thread_operation_atomic(**create_kwargs),
@@ -2215,7 +2235,7 @@ class RunManager:
                     max_retries = 3
                     for attempt in range(max_retries):
                         try:
-                            await self._atomic_replacement(
+                            admitted, _ = await self._atomic_replacement(
                                 local_inflight,
                                 multitask_strategy,
                                 lambda: self._call_store_with_retry(
@@ -2243,6 +2263,8 @@ class RunManager:
                     # store write is needed for them.
 
             # 3) Only now safe to register locally — store insert succeeded.
+            if self._store is not None:
+                self._bind_admitted_producer(record, admitted)
             self._runs[run_id] = record
             self._index_run_locked(record)
             self._arm_lease_deadline(record)
@@ -2461,6 +2483,8 @@ class RunManager:
                         run_id=record.run_id,
                         user_id=record.user_id,
                         operation_kind=record.operation_kind.value,
+                        run_incarnation=record.run_incarnation,
+                        retention_revision=record.evidence_retention_revision,
                     )
                     if target is not None:
                         await publisher.publish(target)

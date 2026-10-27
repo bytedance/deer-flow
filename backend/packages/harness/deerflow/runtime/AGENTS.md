@@ -353,6 +353,18 @@ JSONL's single-process deployment constraint. Regression coverage is in
 
 ## Completed-evidence provenance
 
+SQL Run admissions return their incarnation/epoch from the committing transaction;
+Manager binds that snapshot without a later identity lookup. `run_agent` installs
+host authority in a private ContextVar, inherited by owned tasks and offloaded
+callbacks, never metadata/configurable. Strict DB admission enforces one Run per
+batch through all original write APIs. Terminal/delivery narrow the grant only
+after existing final ACK/one-shot takeover checks. Post-terminal audit grants
+name individual `audit.*` types and retain incarnation/retention fencing.
+Completion hooks remain legal after business terminal commit while the producer
+is open. The Worker explicitly closes after Journal drain and Subagent buffer
+completion; uncertain drains conservatively leave it open. C1a has no producer
+lease/expiry task or automatic terminal publication and does not fix C06.
+
 Gateway admission and RunManager validate host-owned evidence origin against the shared `EVIDENCE_ORIGINS` in `runtime/runs/schemas.py`. Preserve the string values and reject client metadata as provenance; only trusted Python entry points set the admission argument.
 
 Idempotent resume reuse preserves both the private request identity and the original evidence origin/agent across worker and store boundaries. A retry must not relabel existing evidence. Memory/SQLite parity is covered in `tests/test_completed_evidence_admission.py`.

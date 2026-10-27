@@ -205,6 +205,8 @@ frontend reconnect can deduplicate the user's message.
 
 ## Development Workflow
 
+R4-C1a PostgreSQL event fencing requires [offline activation](../README.md#configuration).
+
 ### Test-Driven Development (TDD) — MANDATORY
 
 **Every new feature or bug fix MUST be accompanied by unit tests. No exceptions.**

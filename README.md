@@ -142,6 +142,39 @@ Run outcome or prevent stream completion. Recovery with built-in SQL Run and Eve
 sharing an engine uses one pooled connection for each guarded event write, so it
 can publish with only one pool slot available. See [Run Event Stream](backend/docs/RUN_EVENT_STREAM.md#authoritative-run-outcome).
 
+PostgreSQL deployments using DB run events can opt into strict Producer Fencing,
+which rejects Journal writes after takeover or deletion revokes their Run identity.
+Activation requires stopping every Gateway and using the offline cutover command;
+all restarted Gateways must use the same cutover ID. This does not recover missing
+terminal events. To activate:
+
+1. Deploy this version everywhere with `run_events.producer_fencing: "off"`.
+   Let migration 0049 and recovery of previously active Runs complete, then drain
+   admissions and completion hooks. A terminal Run status alone does not prove
+   its producer has drained.
+2. Stop every Gateway, Worker and other database client, including checkpointer
+   pools and monitoring clients, and keep them stopped during activation.
+3. From the repository root, using the installed backend environment, run:
+
+   ```bash
+   uv run --no-sync --project backend python backend/scripts/run_producer_fencing.py \
+     --config config.yaml --cutover-id deployment-2026-10-27 --all-gateways-stopped
+   ```
+
+   The command refuses activation if other database sessions or pending/running
+   Runs remain. Use a deployment ID that every Gateway will share.
+4. Set `database.backend: postgres`, `run_events.backend: db`,
+   `run_events.producer_fencing: strict` and
+   `run_events.producer_cutover_id: deployment-2026-10-27` everywhere, then restart.
+   Verify a new Run persists its initial event, Journal/Hook, delivery and terminal
+   events and closes normally; unaware old writers must receive a database rejection.
+
+Activation is durable: missing or mismatched cutover IDs and downgrades to `"off"`
+or unsupported stores fail startup. This release requires controlled downtime;
+it does not support a mixed-version rolling cutover. A crashed producer may stay
+open until explicitly closed or revoked by authorized takeover/deletion; no
+producer-expiry or terminal-reconciliation job is introduced.
+
 Operators can extend lead-agent, subagent, and DeerMem extraction prompts with
 literal prepend/append configuration without editing source templates. See
 [prompt overlays](backend/docs/CONFIGURATION.md#prompt-overlays).

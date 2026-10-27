@@ -52,6 +52,14 @@ missing or strictly older leases remain recoverable.
 
 ## Run terminal authority and lease expiry
 
+R4-C1a: admissions mint incarnation/epoch; snapshots preserve identity/state.
+Takeover/peer replacement/delete revoke; same-owner finalizers remain open.
+Lock order: local Thread → optional Change Clock → optional Extension fence →
+SQL Thread → RunRow (held through Event commit); never acquire Clock afterward.
+The INSERT trigger takes the shared cutover lock last; offline activation takes
+only its exclusive counterpart. Strict startup cannot downgrade durable policy.
+[Offline cutover](../../../../../README.md#configuration).
+
 `RunRepository.update_status(..., owner_worker_id=...)` and
 `finalize_if_not_cancelled(..., owner_worker_id=...)` require that owner and a
 live lease. Increment the change clock before taking the run row lock to retain
