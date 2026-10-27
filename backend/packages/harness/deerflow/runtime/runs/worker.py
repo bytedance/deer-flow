@@ -974,7 +974,7 @@ async def run_agent(
     *,
     ctx: RunContext,
     agent_factory: Any,
-    graph_input: dict,
+    graph_input: dict[str, Any] | Command | None,
     config: dict,
     thread_incarnation: str | None | object = _THREAD_INCARNATION_UNSET,
     stream_modes: list[str] | None = None,
@@ -1159,7 +1159,8 @@ async def run_agent(
 
         # Keep cancellable preflight work under the worker's terminal guard so
         # cancellation cannot strand a pending RunRecord or stream subscriber.
-        if ctx.mcp_task_repo is not None and record.user_id is not None:
+        # Continuations keep their checkpointed projection and control input.
+        if isinstance(graph_input, dict) and ctx.mcp_task_repo is not None and record.user_id is not None:
             try:
                 if thread_incarnation is _THREAD_INCARNATION_UNSET:
                     raise RuntimeError("MCP task projection requires a server-owned thread incarnation")
@@ -1433,7 +1434,7 @@ async def run_agent(
                     config=config,
                     thread_id=thread_id,
                     run_id=run_id,
-                    resume_command=_is_resume_command_input(graph_input),
+                    resume_command=graph_input is None or _is_resume_command_input(graph_input),
                 )
             if resumed_messages is not None:
                 # The graph now starts from the selected state, so the

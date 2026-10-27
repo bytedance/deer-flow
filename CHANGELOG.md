@@ -1397,6 +1397,41 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
 
 ### Fixed
 
+- **community:** Async community tools (Jina, Crawl4AI, Browserless, Tavily,
+  SearXNG, Firecrawl, InfoQuest, RAGFlow, LightRAG, Jsonify and the browser
+  automation tools) no longer read `config.yaml` and `extensions_config.json` on the
+  event loop. Each call checked both files (a `stat` and a full sha256 of
+  each) up to three times, and reparsed `config.yaml` there after an edit,
+  stalling other runs, requests and streams meanwhile. They now read the
+  config once per call in a worker, as image search already did. ([#7580])
+
+- **auth:** The public auth routes (`/register`, `/setup-status`,
+  `/providers`, `/oauth/{provider}` and `/callback/{provider}`) no longer read
+  `config.yaml` and `extensions_config.json` on the event loop. Each request
+  checked both files (a `stat` and a full sha256 of each), and reparsed
+  `config.yaml` there after an edit, stalling other requests and streams
+  meanwhile. The read now runs in a worker, as `/login/local` already did.
+  ([#7576])
+
+- **sandbox:** Stopping the Gateway no longer destroys AIO or E2B sandboxes
+  before in-flight runs drain. When the first sandbox use built the provider on
+  the event-loop thread, the provider's own SIGTERM/SIGINT handler destroyed
+  every sandbox synchronously as the signal arrived: the event loop froze for
+  the whole teardown and running tool calls lost their sandbox. The Gateway now
+  owns sandbox shutdown and closes the provider after the run drain and MCP
+  teardown; embedded clients and scripts keep the signal fallback, and SIGHUP
+  still cleans up. AIO acquire now refuses once shutdown has begun, as E2B
+  already did. ([#7560])
+
+- **frontend:** SSO sign-ins now return to the page that asked for them, such
+  as a shared chat link, instead of always opening the default workspace. The
+  sign-in pages used to send every signed-in request to `/workspace`, which
+  dropped the `next` path of `/auth/callback?next=...`. A signed-in visit to
+  `/login?next=...` lost its target the same way. The frontend and Gateway
+  `next` checks now also reject control characters: browsers delete tab, LF
+  and CR from a URL, so `?next=%2F%0A%2F%2Fevil.example` could send a
+  sign-in to another site. ([#7467])
+
 - **authz:** Authenticated Gateway requests no longer read `config.yaml` and
   `extensions_config.json` on the event loop. Resolving route permissions
   checked both files (a `stat` and a full sha256 of each) for every request,
@@ -13111,7 +13146,11 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7410]: https://github.com/bytedance/deer-flow/pull/7410
 [#7445]: https://github.com/bytedance/deer-flow/pull/7445
 [#7449]: https://github.com/bytedance/deer-flow/pull/7449
+[#7467]: https://github.com/bytedance/deer-flow/pull/7467
 [#7507]: https://github.com/bytedance/deer-flow/pull/7507
 [#7521]: https://github.com/bytedance/deer-flow/pull/7521
 [#7530]: https://github.com/bytedance/deer-flow/pull/7530
 [#7557]: https://github.com/bytedance/deer-flow/pull/7557
+[#7560]: https://github.com/bytedance/deer-flow/pull/7560
+[#7576]: https://github.com/bytedance/deer-flow/pull/7576
+[#7580]: https://github.com/bytedance/deer-flow/pull/7580
