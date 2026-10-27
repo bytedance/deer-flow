@@ -86,3 +86,46 @@ def test_wechat_cursor_state_publishes_utf8_lf_bytes(tmp_path: Path) -> None:
     text = channel._cursor_path.read_bytes().decode("utf-8")
     assert "\r" not in text
     assert json.loads(text) == {"get_updates_buf": "游标-1"}
+
+
+def _method_calls(filename: str, class_name: str, method_name: str) -> list[ast.Call]:
+    module = ast.parse((CHANNELS / filename).read_text(encoding="utf-8"))
+    owner = next(node for node in module.body if isinstance(node, ast.ClassDef) and node.name == class_name)
+    method = next(
+        node
+        for node in owner.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == method_name
+    )
+    return [node for node in ast.walk(method) if isinstance(node, ast.Call)]
+
+
+@pytest.mark.parametrize(
+    ("filename", "class_name", "method_name"),
+    [
+        ("discord.py", "DiscordChannel", "_persist_thread_mappings"),
+        ("wechat.py", "WechatChannel", "_save_state"),
+    ],
+)
+def test_json_channel_state_writers_publish_through_the_helper(filename: str, class_name: str, method_name: str) -> None:
+    """Platform-independent: the call shape, not just the bytes it happens to emit.
+
+    CI runs with ``PYTHONUTF8=1``, so a regression to ``write_text(...)`` without
+    ``encoding=`` would still produce valid UTF-8 there; only a source-level check
+    catches it on every platform.
+    """
+    calls = _method_calls(filename, class_name, method_name)
+    names = [
+        call.func.attr if isinstance(call.func, ast.Attribute) else call.func.id
+        for call in calls
+        if isinstance(call.func, (ast.Attribute, ast.Name))
+    ]
+    assert "publish_bytes_atomically" in names, f"{filename}:{class_name}.{method_name} must publish through the helper"
+
+    for call in calls:
+        if not isinstance(call.func, ast.Attribute) or call.func.attr not in {"write_text", "write_bytes"}:
+            continue
+        keywords = {keyword.arg: keyword.value for keyword in call.keywords}
+        encoding = keywords.get("encoding")
+        assert isinstance(encoding, ast.Constant) and encoding.value == "utf-8", (
+            f"{filename}:{call.lineno} writes text without an explicit utf-8 encoding"
+        )
