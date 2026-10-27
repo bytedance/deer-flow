@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <title>DDFW-Agent</title>
+  <rect width="64" height="64" rx="14" fill="#162b3d"/>
+  <g fill="white" fill-rule="evenodd">
+    <path d="M10 9h9c15 0 15 21 0 21h-9zm5 5v11h4c8 0 8-11 0-11z"/>
+    <path d="M35 9h9c15 0 15 21 0 21h-9zm5 5v11h4c8 0 8-11 0-11z"/>
+    <path d="M10 35h17v5H15v4h10v5H15v8h-5z"/>
+    <path d="M32 35h5l3 14 3-11h5l3 11 3-14h5l-5 22h-6l-3-11-3 11h-5z"/>
+  </g>
+</svg>

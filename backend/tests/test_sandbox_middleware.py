@@ -272,9 +272,9 @@ def test_non_owner_skill_policy_preserves_lazy_init_without_projection_or_acquir
     prepare_calls: list[tuple[str, str]] = []
     original_prepare = middleware._prepare_agent_skill_projection
 
-    def _prepare(thread_id: str, *, user_id: str):
+    def _prepare(thread_id: str, *, user_id: str, runtime=None):
         prepare_calls.append((thread_id, user_id))
-        return original_prepare(thread_id, user_id=user_id)
+        return original_prepare(thread_id, user_id=user_id, runtime=runtime)
 
     monkeypatch.setattr(middleware, "_prepare_agent_skill_projection", _prepare)
     set_sandbox_provider(provider)

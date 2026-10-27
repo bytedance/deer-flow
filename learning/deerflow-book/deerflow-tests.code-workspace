@@ -1,0 +1,24 @@
+{
+  "folders": [
+    {
+      "name": "deer-flow",
+      "path": "../.."
+    }
+  ],
+  "settings": {
+    "python.defaultInterpreterPath": "${workspaceFolder}/backend/.venv",
+    "python.testing.pytestEnabled": true,
+    "python.testing.unittestEnabled": false,
+    "python.testing.cwd": "${workspaceFolder}",
+    "python.testing.pytestArgs": [
+      "backend/tests/test_count_file_lines.py",
+      "-q"
+    ]
+  },
+  "extensions": {
+    "recommendations": [
+      "ms-python.python",
+      "ms-python.debugpy"
+    ]
+  }
+}

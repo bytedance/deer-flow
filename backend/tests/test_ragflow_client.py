@@ -12,6 +12,40 @@ from deerflow.community.ragflow.client import (
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("dataset_id", ["dataset-100", "missing"])
+async def test_legacy_dataset_filter_falls_back_to_paginated_catalog(dataset_id) -> None:
+    requests = []
+
+    async def handler(request):
+        requests.append(request)
+        if "ids" in request.url.params:
+            return httpx.Response(200, json={"code": 102, "message": "Field: <ids> - Message: <Extra inputs are not permitted>"})
+        page = int(request.url.params["page"])
+        data = [{"id": f"dataset-{i}"} for i in range(100)] if page == 1 else [{"id": "dataset-100"}]
+        return httpx.Response(200, json={"code": 0, "data": data, "total": 101})
+
+    client = RAGFlowClient(base_url="http://ragflow.test", api_key="secret", transport=httpx.MockTransport(handler))
+    result = await client.list_datasets(dataset_id=dataset_id)
+    assert result == ([{"id": "dataset-100"}] if dataset_id == "dataset-100" else [])
+    assert len(requests) == 3
+    assert [r.url.params.get("page") for r in requests] == [None, "1", "2"]
+
+
+@pytest.mark.anyio
+async def test_dataset_filter_does_not_mask_other_validation_errors() -> None:
+    requests = []
+
+    async def handler(request):
+        requests.append(request)
+        return httpx.Response(200, json={"code": 102, "message": "Field: <name> - Message: <Extra inputs are not permitted>"})
+
+    client = RAGFlowClient(base_url="http://ragflow.test", api_key="secret", transport=httpx.MockTransport(handler))
+    with pytest.raises(RAGFlowAPIError):
+        await client.list_datasets(dataset_id="dataset-1")
+    assert len(requests) == 1
+
+
+@pytest.mark.anyio
 async def test_list_datasets_filters_by_bound_id_in_one_request() -> None:
     requests: list[httpx.Request] = []
 

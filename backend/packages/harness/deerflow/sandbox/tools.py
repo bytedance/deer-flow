@@ -1493,6 +1493,21 @@ def _resolve_runtime_thread_id(runtime: Runtime) -> str | None:
     return thread_id
 
 
+def _refresh_skill_authorization(runtime):
+    from deerflow.security.skill_access import skill_authorization_enabled
+    from deerflow.skills.projection import refresh_authorized_thread_skills
+
+    if not skill_authorization_enabled():
+        return None
+    provider = get_sandbox_provider()
+    if not provider.supports_agent_skill_isolation:
+        raise SandboxRuntimeError("Sandbox provider cannot enforce skill authorization")
+    thread_id = _resolve_runtime_thread_id(runtime)
+    if not thread_id:
+        raise SandboxRuntimeError("Thread ID is required for skill authorization")
+    return refresh_authorized_thread_skills(thread_id, user_id=resolve_runtime_user_id(runtime), runtime=runtime)
+
+
 def ensure_sandbox_initialized(runtime: Runtime | None = None) -> Sandbox:
     """Ensure sandbox is initialized, acquiring lazily if needed.
 
@@ -1526,6 +1541,8 @@ def ensure_sandbox_initialized(runtime: Runtime | None = None) -> Sandbox:
             app_config=safe_app_config(),
         )
 
+    projection = _refresh_skill_authorization(runtime)
+
     # Check if sandbox already exists in state. A fork-restored execution keeps
     # the wrapper so after_agent cannot park the parent's sandbox, but it still
     # binds a non-releasing holder: parent cleanup cannot close the client under
@@ -1551,6 +1568,8 @@ def ensure_sandbox_initialized(runtime: Runtime | None = None) -> Sandbox:
             if sandbox is not None:
                 if runtime.context is not None:
                     runtime.context["sandbox_id"] = sandbox_id  # Ensure sandbox_id is in context for releasing in after_agent
+                if projection is not None:
+                    provider.sync_agent_skills(sandbox_id, thread_id=thread_id, user_id=resolve_runtime_user_id(runtime), projection=projection)
                 return sandbox
             # Sandbox was released, fall through to acquire new one
 
@@ -1582,6 +1601,8 @@ def ensure_sandbox_initialized(runtime: Runtime | None = None) -> Sandbox:
 
     if runtime.context is not None:
         runtime.context["sandbox_id"] = sandbox_id  # Ensure sandbox_id is in context for releasing in after_agent
+    if projection is not None:
+        provider.sync_agent_skills(sandbox_id, thread_id=thread_id, user_id=user_id, projection=projection)
     return sandbox
 
 
@@ -1606,6 +1627,8 @@ async def ensure_sandbox_initialized_async(runtime: Runtime | None = None) -> Sa
             app_config=await safe_app_config_async(),
         )
 
+    projection = await asyncio.to_thread(_refresh_skill_authorization, runtime)
+
     # Same borrowed-holder rule as the sync path above: keep the fork wrapper
     # while counting the child as an active client user.
     sandbox_state, fork_restored = unwrap_sandbox(runtime.state.get("sandbox"))
@@ -1629,6 +1652,8 @@ async def ensure_sandbox_initialized_async(runtime: Runtime | None = None) -> Sa
             if sandbox is not None:
                 if runtime.context is not None:
                     runtime.context["sandbox_id"] = sandbox_id
+                if projection is not None:
+                    await provider.sync_agent_skills_async(sandbox_id, thread_id=thread_id, user_id=resolve_runtime_user_id(runtime), projection=projection)
                 return sandbox
 
     thread_id = _resolve_runtime_thread_id(runtime)
@@ -1656,6 +1681,8 @@ async def ensure_sandbox_initialized_async(runtime: Runtime | None = None) -> Sa
 
     if runtime.context is not None:
         runtime.context["sandbox_id"] = sandbox_id
+    if projection is not None:
+        await provider.sync_agent_skills_async(sandbox_id, thread_id=thread_id, user_id=user_id, projection=projection)
     return sandbox
 
 

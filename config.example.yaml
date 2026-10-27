@@ -20,7 +20,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 40
+config_version: 41
 
 # ============================================================================
 # Logging
@@ -709,6 +709,8 @@ models:
 # Define groups of tools for organization and access control
 
 tool_groups:
+  # - name: enterprise # Optional enterprise group messaging
+  # - name: image_generation # Optional company-managed GPT Image 2
   - name: web
   - name: file:read
   - name: file:write
@@ -722,6 +724,27 @@ tool_groups:
 # Configure available tools for the agent to use
 
 tools:
+  # Enterprise group messaging. Bind personal WeCom group webhook destinations
+  # under /workspace/enterprise. Uses the existing scheduler and user tool grants.
+  # - name: enterprise_messaging
+  #   group: enterprise
+  #   use: deerflow.integrations.enterprise.tools:enterprise_messaging
+  # AliMail read-only inbox and AI organization; requires its own tool grant.
+  # - name: enterprise_mail
+  #   group: enterprise
+  #   use: deerflow.integrations.enterprise.mail_tool:enterprise_mail
+  # AliMail drafts and user-confirmed SMTP sending; independent from inbox access.
+  # AI can only draft; the user reviews and confirms in Enterprise connections.
+  # - name: enterprise_mail_compose
+  #   group: enterprise
+  #   use: deerflow.integrations.enterprise.mail_compose_tool:enterprise_mail_compose
+  # Company GPT Image 2 (requires enterprise UserAuthorizationProvider + POSIX Gateway).
+  # Put the key ONLY in ${DEER_FLOW_HOME}/security/gpt_image2.key (0600).
+  # Grant tool:gpt_image2 and skill:public:gpt-image2 to approved users/groups.
+  # - name: gpt_image2
+  #   group: image_generation
+  #   use: deerflow.community.gpt_image2.tools:gpt_image2_tool
+
   # RAGFlow knowledge retrieval (read-only). Uncomment this single entry.
   # `datasets` is optional. Omit it to list every tenant-visible dataset at
   # search time; an explicit `datasets: []` is invalid. Empty datasets are
@@ -734,6 +757,9 @@ tools:
   # - name: knowledge_search
   #   group: knowledge
   #   use: deerflow.community.ragflow.tools:knowledge_search_tool
+  #   # Also connects Workspace > Knowledge base; administrators may upload/parse
+  #   # shared documents. The optional dataset allowlist gates both reads/writes.
+  #   # Docker Desktop with host RAGFlow: http://host.docker.internal:9380
   #   base_url: http://localhost:9380  # Docker: use a backend-reachable URL
   #   api_key: $RAGFLOW_API_KEY
   #   datasets:  # Optional operator-controlled allowlist
@@ -1359,6 +1385,14 @@ sandbox:
   bash_command_timeout: 600
 
 # Option 2: Container-based AIO Sandbox
+# Optional single-Gateway user reuse: see docs/USER_SANDBOX_POOLS.md.
+# After the offline data-layout migration, set sandbox.use to
+# deerflow.community.aio_sandbox.user_pool:UserAioSandboxProvider.
+# replicas then becomes a hard active+warm container limit; acquire_timeout
+# bounds per-user/capacity waits. Suggested idle_timeout: 3600;
+# prewarm_on_login: true warms authorized users after authenticated /auth/me.
+# sandbox.network.address_pool (choose a LAN/VPN-safe RFC1918 CIDR) plus
+# subnet_prefix: 28 allocates only 16 addresses per bridge network.
 # Executes commands in isolated containers (Docker or Apple Container)
 # On macOS: Prefers Apple Container when available, but keeps Docker while this
 # sandbox prefix still has managed Docker containers to reconcile after a mode change
@@ -1390,12 +1424,14 @@ sandbox:
 #
 #   # Optional: outbound network policy for locally managed Docker sandboxes.
 #   # open keeps the current behavior. isolated denies all outbound traffic.
+#   # public automatically allows public HTTP/HTTPS destinations without approval,
+#   # while keeping the restricted network and private-address checks enabled.
 #   # allowlist permits the listed HTTP/HTTPS domains; denied public domains can
 #   # optionally be approved from the Human Input card. Restricted modes require
 #   # Docker Engine 28+ and are not supported by Apple Container or provisioner mode.
 #   # Private, loopback, link-local, multicast, and cloud metadata addresses are always denied.
 #   network:
-#     mode: allowlist                    # open | isolated | allowlist (default: open)
+#     mode: allowlist                    # open | isolated | allowlist | public (default: open)
 #     allow_domains:
 #       - pypi.org
 #       - files.pythonhosted.org

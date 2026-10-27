@@ -287,7 +287,8 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
         # Use explicit reasoning_effort from frontend if provided (low/medium/high)
         explicit_effort = kwargs.pop("reasoning_effort", None)
         if not thinking_enabled:
-            model_settings_from_config["reasoning_effort"] = "none"
+            # Some Codex models require reasoning even for basic/background calls.
+            model_settings_from_config["reasoning_effort"] = (model_config.when_thinking_disabled or {}).get("reasoning_effort", "none")
         elif explicit_effort and explicit_effort in ("low", "medium", "high", "xhigh"):
             model_settings_from_config["reasoning_effort"] = explicit_effort
         elif "reasoning_effort" not in model_settings_from_config:

@@ -23,11 +23,13 @@ from app.gateway.routers import (
     channel_connections,
     channels,
     console,
+    enterprise,
     features,
     feedback,
     github_webhooks,
     input_polish,
     integrations,
+    knowledge_base,
     mcp,
     mcp_tasks,
     memory,
@@ -41,6 +43,7 @@ from app.gateway.routers import (
     thread_runs,
     threads,
     uploads,
+    user_security,
 )
 from app.gateway.trace_middleware import TraceMiddleware
 from deerflow.config import app_config as deerflow_app_config
@@ -428,7 +431,20 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 set_subagent_batch_submitter(batch_service)
                 app.state.subagent_batches_available = True
 
-        yield
+        from deerflow.integrations.enterprise.runtime import set_scheduler
+
+        set_scheduler(lambda **kwargs: enterprise.schedule_from_tool(app, **kwargs))
+        from app.gateway.sandbox_prewarm import USER_POOL_PROVIDER, close_prewarm_tasks
+
+        if startup_config.sandbox.use == USER_POOL_PROVIDER:
+            from deerflow.sandbox.sandbox_provider import get_sandbox_provider
+
+            await asyncio.to_thread(get_sandbox_provider)
+        try:
+            yield
+        finally:
+            set_scheduler(None)
+            await close_prewarm_tasks()
 
         try:
             await auth.close_oidc_service()
@@ -822,6 +838,8 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # Scheduled tasks API is mounted at /api/scheduled-tasks
     app.include_router(scheduled_tasks.router)
+    app.include_router(knowledge_base.router)
+    app.include_router(enterprise.router)
 
     # Agents API is mounted at /api/agents
     app.include_router(agents.router)
@@ -846,6 +864,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # Auth API is mounted at /api/v1/auth
     app.include_router(auth.router)
+    app.include_router(user_security.router)
 
     # Feedback API is mounted at /api/threads/{thread_id}/runs/{run_id}/feedback
     app.include_router(feedback.router)

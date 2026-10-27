@@ -19,7 +19,6 @@ const SETTINGS_SECTIONS = new Set<SettingsSection>([
   "subagents",
   "skills",
   "notification",
-  "about",
 ]);
 
 function asSettingsSection(value: string | null): SettingsSection | null {

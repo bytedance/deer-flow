@@ -40,6 +40,43 @@ E2E tests live under `tests/e2e/` and use Playwright with Chromium. They mock al
 
 ## Architecture
 
+Account settings include `AccountNicknameSettings`, keyed by authenticated user ID.
+`core/auth/profile.ts` reads/patches the session-only `/api/v1/auth/profile` endpoint.
+The `account-profile` query cache and drafts are owner-scoped; failed saves retain
+the draft, and an empty nickname clears the preference. Tests: `account-nickname.dom`.
+
+`/workspace/enterprise` (Enterprise connections) contains only WeCom group bindings
+and Alibaba enterprise mail. Group messages and schedules are arranged in chat;
+the page has no standalone message composer or delivery-history section.
+`core/enterprise` owns API types and localized copy. Query keys include user ID
+and the editor remounts on account changes. Webhook drafts stay in memory and
+clear after save/cancel; responses never contain secrets.
+`mail-panel.tsx` independently checks `enterprise_mail` access, binds encrypted
+AliMail credentials and displays read-only keyword previews with UIDVALIDITY
+pagination. Secrets stay in component memory; mail bodies render as plain text.
+AI organization creates a normal owned chat/run, passing only account ID and
+filters; the tool fetches messages with fresh authorization. Preserve a link to
+the created chat on ambiguous launch failure rather than auto-retrying. Schedules
+use the existing Scheduled tasks page. Tests: enterprise/mail unit and browser E2E.
+
+`mail-outbox.tsx` adds a separate compose permission check, plain-text draft preview
+and explicit recipient/content confirmation inside the mail section. AI links
+use `?mail_draft=<id>`; all query keys remain user-scoped. Sending submits only the
+immutable draft ID and confirmation. Never automatically retry a POST; after a
+lost response disable sending until a read-only status refresh. `sending` records
+may be polled, but never resubmitted. Tests: mail-outbox.dom and enterprise-mail E2E.
+
+`/workspace/knowledge-base` sits immediately below Scheduled tasks in the sidebar.
+`core/knowledge-base` owns its authenticated API client, user-scoped query keys,
+document polling and feature-local English/Chinese copy. The Gateway supplies
+`can_upload`/`can_create`; UI controls are not an authorization boundary. Upload
+files sequentially and lock dataset selection during mutations. Display upload
+and parse-start outcomes independently so a failed parse never causes an automatic
+duplicate upload. Parse retries operate on the existing document ID. Document
+lists use explicit pagination and poll every 3 seconds while parsing (15 seconds
+otherwise), stopping on errors or background tabs. UI and API tests live in
+`tests/unit/{components/workspace,core/knowledge-base}`.
+
 ```
 Frontend (Next.js) ──▶ LangGraph SDK ──▶ LangGraph Backend (lead_agent)
                                               ├── Sub-Agents
@@ -76,6 +113,51 @@ More specific `AGENTS.md` files under `src/` contain the frontend sections split
 - **Components**: `ui/` and `ai-elements/` are generated from registries (Shadcn, MagicUI, React Bits, Vercel AI SDK) — don't manually edit these.
 
 ## Environment
+
+### DDFW-Agent deployment branding
+
+The root `/` route redirects server-side to `/login`; it no longer renders the
+marketing landing page. The existing auth layout sends authenticated users to
+`/workspace`, while anonymous users see the combined login/registration page.
+Keep entry redirects temporary and preserve the existing setup/auth checks.
+`tests/e2e/landing.spec.ts` covers the root redirect and authenticated continuation.
+
+The Tools settings page also mounts `UserToolSecurityPanel`. Its session-only
+`/api/user-security` APIs expose only credential status, never saved values.
+Personal credential drafts live only in component memory and clear on success;
+do not persist them in localStorage, query keys or analytics. Administrators
+select a registered user's email before changing exact resource grants. The
+backend catalog excludes bundled tools/Skills and sandbox execution, which are
+available by default. Display added tool/MCP/skill resources only; optional
+labels are presentation, exact targets are request identities. Personal overrides
+use the target-user catalog returned by `/grants`, including owned custom Skills. Keep
+the selected account separate from the editable email field so a draft edit
+cannot redirect a permission mutation. The backend remains the permission
+boundary. `user-tool-security.dom.test.tsx` covers these interactions.
+
+The admin-only `UserGroupSecurityPanel` owns group CRUD, memberships and exact
+group grants. Group queries include the signed-in user ID; membership/grant
+mutations invalidate group details, group lists, user grant details and personal
+tool status. Key the editor by selected group ID and lock selection during writes.
+Personal exceptions use inherit/allow/deny, with a separate effective permission
+label and inherited memberships. The backend applies deny precedence; do not
+derive effective access from the select value alone. Group membership never
+changes the personal credential form or sandbox identity.
+
+The application UI uses the DDFW-Agent name in authentication, navigation, landing,
+welcome, and notification copy in both locales. `public/images/ddfw.svg` is the
+wordmark mask; `public/favicon.svg` and the matching ICO are the browser icons.
+Keep expanded and collapsed sidebar branding consistent. Internal API paths,
+storage keys, package names, and upstream license/acknowledgment sources retain
+their original identifiers.
+
+The workspace Settings and more menu exposes Settings only. About is excluded
+from the settings section type, navigation, lazy content, and `?settings=`
+deep-link allowlist; the workspace header has no upstream repository shortcut.
+Custom-agent availability still comes from `/api/features` and the deployment's
+`config.yaml -> agents_api.enabled`, not from a frontend hardcoded override.
+`tests/unit/components/workspace/enterprise-shell.dom.test.tsx` covers this UI
+contract, including the mobile-compatible sidebar states and old About links.
 
 Backend API URLs are optional; an nginx proxy is used by default:
 

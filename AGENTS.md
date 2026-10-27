@@ -12,6 +12,22 @@ guide rather than expecting full detail here:
 - **[frontend/AGENTS.md](frontend/AGENTS.md)** — frontend depth: Next.js App Router layout,
   thread/streaming data flow, code style, commands.
 
+## DeerFlow Learning Sessions
+
+When the user asks to **开始学习** (start learning) or **结束今天的学习**
+(finish today's learning) in this repository, follow
+[the learning session protocol](learning/DEERFLOW_STUDY_PROTOCOL.md).
+Read the sole [source reading route](learning/deerflow-book/DeerFlow核心源码阅读路线.md) and
+[current learning journal](learning/learn-codebase-journal.md) to resume progress.
+Other learning plans were removed at the user's request; do not recreate or
+resume a parallel curriculum. The protocol and journal govern sessions and
+record progress, not a separate learning route.
+The user has authorized the assistant to coordinate `codebase-onboarding`, `how`,
+and `learn-codebase`; the default session budget is 90 minutes. Treat these
+phrases as triggers only when the user intends to start or end a session, not
+when quoting or editing them. Keep this workflow scoped to learning; other
+repository work follows the normal module instructions.
+
 ## What is DeerFlow
 
 DeerFlow is a LangGraph-based AI super-agent system with a full-stack architecture. The

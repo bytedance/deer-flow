@@ -80,6 +80,62 @@ def test_projection_contains_only_enabled_skills(projection_env) -> None:
     assert not (projected.public / "disabled-skill").exists()
 
 
+@pytest.mark.no_auto_user
+def test_user_grants_force_thread_projection_and_revoke_files(projection_env):
+    from deerflow.security.store import UserSecurityStore
+
+    env = projection_env
+    env.config.authorization = SimpleNamespace(enabled=True, provider=SimpleNamespace(use="deerflow.authz.user_policy:UserAuthorizationProvider", config={"store_path": str(env.root / "security")}))
+    _write_skill(env.skills_root / "public", "data-analysis")
+    _write_skill(env.storage.get_user_custom_root(), "private-extra")
+    runtime = SimpleNamespace(context={"user_id": "alice", "user_role": "user"})
+    store = UserSecurityStore(env.root / "security")
+    projection = ensure_thread_skill_projection(env.storage, "thread-1", None, runtime=runtime)
+    assert (projection.public / "data-analysis" / "SKILL.md").exists()
+    assert not (projection.custom / "private-extra").exists()
+    store.set_grant("alice", "skill", "custom:alice:private-extra", True, actor="admin")
+    projection = ensure_thread_skill_projection(env.storage, "thread-1", None, runtime=runtime)
+    assert (projection.custom / "private-extra" / "SKILL.md").exists()
+    store.set_grant("alice", "skill", "custom:alice:private-extra", False, actor="admin")
+    ensure_thread_skill_projection(env.storage, "thread-1", None, runtime=runtime)
+    assert not (projection.custom / "private-extra").exists()
+    # An Agent allowlist remains an additional restriction, including for admins.
+    projection = ensure_thread_skill_projection(env.storage, "thread-1", set(), runtime=SimpleNamespace(context={"user_id": "alice", "user_role": "admin"}))
+    assert not (projection.public / "data-analysis").exists()
+
+
+@pytest.mark.no_auto_user
+def test_sandbox_reuse_revokes_grants_without_widening_lead_allowlist(projection_env, monkeypatch):
+    from unittest.mock import Mock
+
+    from deerflow.sandbox.tools import ensure_sandbox_initialized
+    from deerflow.security.store import UserSecurityStore
+
+    env = projection_env
+    env.config.authorization = SimpleNamespace(enabled=True, provider=SimpleNamespace(use="deerflow.authz.user_policy:UserAuthorizationProvider", config={"store_path": str(env.root / "security")}))
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: env.config)
+    monkeypatch.setattr("deerflow.skills.storage.get_or_new_user_skill_storage", lambda *args, **kwargs: env.storage)
+    monkeypatch.setattr("deerflow.sandbox.tools.authorize_sandbox_execution", lambda **kwargs: None)
+    monkeypatch.setattr("deerflow.sandbox.tools.safe_app_config", lambda: env.config)
+    runtime = SimpleNamespace(context={"user_id": "alice", "user_role": "user", "thread_id": "thread-1"}, state={"sandbox": {"sandbox_id": "existing"}}, config={})
+    _write_skill(env.skills_root / "public", "data-analysis")
+    _write_skill(env.storage.get_user_custom_root(), "private-extra")
+    store = UserSecurityStore(env.root / "security")
+    store.set_grant("alice", "skill", "custom:alice:private-extra", True, actor="admin")
+    projection = ensure_thread_skill_projection(env.storage, "thread-1", {"private-extra"}, runtime=runtime)
+    sandbox = object()
+    provider = SimpleNamespace(supports_agent_skill_isolation=True, get=lambda _: sandbox, sync_agent_skills=Mock())
+    monkeypatch.setattr("deerflow.sandbox.tools.get_sandbox_provider", lambda: provider)
+    assert ensure_sandbox_initialized(runtime) is sandbox
+    assert (projection.custom / "private-extra" / "SKILL.md").exists()
+    assert not (projection.public / "data-analysis").exists()
+    store.set_grant("alice", "skill", "custom:alice:private-extra", False, actor="admin")
+    assert ensure_sandbox_initialized(runtime) is sandbox
+    assert not (projection.custom / "private-extra").exists()
+    assert not (projection.public / "data-analysis").exists()
+    assert provider.sync_agent_skills.call_count == 2
+
+
 def test_projection_rebuild_removes_newly_disabled_skill(projection_env) -> None:
     env = projection_env
     _write_skill(env.skills_root / "public", "demo-skill")

@@ -168,7 +168,7 @@ class RunRecord:
     user_id: str | None = None
     created_at: str = ""
     updated_at: str = ""
-    task: asyncio.Task | None = field(default=None, repr=False)
+    task: asyncio.Task | None = field(default=None, repr=False)#创建时占位，后续传入task实例
     # Serializes startup if an admitted run is ever handed to more than one worker path.
     start_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
     abort_event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)

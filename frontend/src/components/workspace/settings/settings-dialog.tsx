@@ -3,7 +3,6 @@
 import {
   BellIcon,
   CableIcon,
-  InfoIcon,
   BrainIcon,
   PaletteIcon,
   PlugZapIcon,
@@ -92,12 +91,6 @@ const SubagentSettingsPage = dynamic(
     ),
   { loading: SettingsPageLoading },
 );
-const AboutSettingsPage = dynamic(
-  () =>
-    import("./about-settings-page").then((module) => module.AboutSettingsPage),
-  { loading: SettingsPageLoading },
-);
-
 export type SettingsSection =
   | "account"
   | "appearance"
@@ -107,8 +100,7 @@ export type SettingsSection =
   | "tools"
   | "subagents"
   | "skills"
-  | "notification"
-  | "about";
+  | "notification";
 
 type SettingsDialogProps = React.ComponentProps<typeof Dialog> & {
   defaultSection?: SettingsSection;
@@ -122,7 +114,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
 
   useEffect(() => {
     // When opening the dialog, ensure the active section follows the caller's intent.
-    // This allows triggers like "About" to open the dialog directly on that page.
+    // Menu and deep-link triggers share the same section selection.
     if (dialogProps.open) {
       setActiveSection(defaultSection);
     }
@@ -167,7 +159,6 @@ export function SettingsDialog(props: SettingsDialogProps) {
         icon: UsersRoundIcon,
       },
       { id: "skills", label: t.settings.sections.skills, icon: SparklesIcon },
-      { id: "about", label: t.settings.sections.about, icon: InfoIcon },
     ],
     [
       t.settings.sections.account,
@@ -179,7 +170,6 @@ export function SettingsDialog(props: SettingsDialogProps) {
       t.settings.sections.subagents,
       t.settings.sections.skills,
       t.settings.sections.notification,
-      t.settings.sections.about,
     ],
   );
   return (
@@ -237,7 +227,6 @@ export function SettingsDialog(props: SettingsDialogProps) {
               {activeSection === "notification" && <NotificationSettingsPage />}
               {activeSection === "channels" && <ChannelsSettingsPage />}
               {activeSection === "integrations" && <IntegrationsSettingsPage />}
-              {activeSection === "about" && <AboutSettingsPage />}
             </div>
           </ScrollArea>
         </div>

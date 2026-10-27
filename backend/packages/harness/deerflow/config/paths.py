@@ -127,6 +127,9 @@ class Paths:
 
     def __init__(self, base_dir: str | Path | None = None) -> None:
         self._base_dir = Path(base_dir).resolve() if base_dir is not None else None
+        # Storage layout persists independently of the selected sandbox provider.
+        # The marker is written only by the offline, restartable migration.
+        self.pooled_user_data = (self.base_dir / ".user-sandbox-data-v1").is_file()
 
     @property
     def host_base_dir(self) -> Path:
@@ -333,7 +336,7 @@ class Paths:
         Host: `{base_dir}/threads/{thread_id}/user-data/workspace/`
         Sandbox: `/mnt/user-data/workspace/`
         """
-        return self.thread_dir(thread_id, user_id=user_id) / "user-data" / "workspace"
+        return self.sandbox_user_data_dir(thread_id, user_id=user_id) / "workspace"
 
     def sandbox_uploads_dir(self, thread_id: str, *, user_id: str | None = None) -> Path:
         """
@@ -341,7 +344,7 @@ class Paths:
         Host: `{base_dir}/threads/{thread_id}/user-data/uploads/`
         Sandbox: `/mnt/user-data/uploads/`
         """
-        return self.thread_dir(thread_id, user_id=user_id) / "user-data" / "uploads"
+        return self.sandbox_user_data_dir(thread_id, user_id=user_id) / "uploads"
 
     def sandbox_outputs_dir(self, thread_id: str, *, user_id: str | None = None) -> Path:
         """
@@ -349,7 +352,7 @@ class Paths:
         Host: `{base_dir}/threads/{thread_id}/user-data/outputs/`
         Sandbox: `/mnt/user-data/outputs/`
         """
-        return self.thread_dir(thread_id, user_id=user_id) / "user-data" / "outputs"
+        return self.sandbox_user_data_dir(thread_id, user_id=user_id) / "outputs"
 
     def acp_workspace_dir(self, thread_id: str, *, user_id: str | None = None) -> Path:
         """
@@ -360,6 +363,8 @@ class Paths:
         Each thread gets its own isolated ACP workspace so that concurrent
         sessions cannot read each other's ACP agent outputs.
         """
+        if self.pooled_user_data and user_id is not None:
+            return self.user_dir(user_id) / "sandbox-acp" / _validate_thread_id(thread_id)
         return self.thread_dir(thread_id, user_id=user_id) / "acp-workspace"
 
     def sandbox_user_data_dir(self, thread_id: str, *, user_id: str | None = None) -> Path:
@@ -368,6 +373,8 @@ class Paths:
         Host: `{base_dir}/threads/{thread_id}/user-data/`
         Sandbox: `/mnt/user-data/`
         """
+        if self.pooled_user_data and user_id is not None:
+            return self.user_dir(user_id) / "sandbox-data" / _validate_thread_id(thread_id)
         return self.thread_dir(thread_id, user_id=user_id) / "user-data"
 
     def host_thread_dir(self, thread_id: str, *, user_id: str | None = None) -> str:
@@ -378,6 +385,8 @@ class Paths:
 
     def host_sandbox_user_data_dir(self, thread_id: str, *, user_id: str | None = None) -> str:
         """Host path for a thread's user-data root."""
+        if self.pooled_user_data and user_id is not None:
+            return _join_host_path(self._host_base_dir_str(), "users", _validate_user_id(user_id), "sandbox-data", _validate_thread_id(thread_id))
         return _join_host_path(self.host_thread_dir(thread_id, user_id=user_id), "user-data")
 
     def host_sandbox_work_dir(self, thread_id: str, *, user_id: str | None = None) -> str:
@@ -394,6 +403,8 @@ class Paths:
 
     def host_acp_workspace_dir(self, thread_id: str, *, user_id: str | None = None) -> str:
         """Host path for the ACP workspace mount source."""
+        if self.pooled_user_data and user_id is not None:
+            return _join_host_path(self._host_base_dir_str(), "users", _validate_user_id(user_id), "sandbox-acp", _validate_thread_id(thread_id))
         return _join_host_path(self.host_thread_dir(thread_id, user_id=user_id), "acp-workspace")
 
     def host_user_custom_skills_dir(self, user_id: str) -> str:
@@ -425,6 +436,7 @@ class Paths:
         the sandbox container at ``/mnt/acp-workspace`` even before the first
         ACP agent invocation.
         """
+        self.thread_dir(thread_id, user_id=user_id).mkdir(parents=True, exist_ok=True)
         for d in [
             self.sandbox_work_dir(thread_id, user_id=user_id),
             self.sandbox_uploads_dir(thread_id, user_id=user_id),
@@ -442,6 +454,11 @@ class Paths:
         thread_dir = self.thread_dir(thread_id, user_id=user_id)
         if thread_dir.exists():
             shutil.rmtree(thread_dir)
+        if self.pooled_user_data and user_id is not None:
+            for directory in (self.sandbox_user_data_dir(thread_id, user_id=user_id), self.acp_workspace_dir(thread_id, user_id=user_id)):
+                directory.resolve().relative_to(self.user_dir(user_id).resolve())
+                if directory.exists():
+                    shutil.rmtree(directory)
 
     def resolve_virtual_path(self, thread_id: str, virtual_path: str, *, user_id: str | None = None) -> Path:
         """Resolve a sandbox virtual path to the actual host filesystem path.

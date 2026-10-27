@@ -34,7 +34,7 @@ export async function Header({ className, homeURL, locale }: HeaderProps) {
           rel={isExternalHome ? "noopener noreferrer" : undefined}
           className="font-serif text-xl whitespace-nowrap"
         >
-          DeerFlow
+          DDFW-Agent
         </a>
       </div>
       <nav className="ml-auto hidden items-center gap-5 text-sm font-medium sm:flex md:mr-8 md:gap-8">

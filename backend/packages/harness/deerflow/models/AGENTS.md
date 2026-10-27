@@ -6,6 +6,7 @@
 - Supports `supports_vision` flag for image understanding models
 - Config values starting with `$` resolved as environment variables
 - Missing provider modules surface actionable install hints from reflection resolvers (for example `uv add langchain-google-genai`)
+- Codex profiles may set `when_thinking_disabled.reasoning_effort` to the minimum supported effort for reasoning-only models. The Codex factory transform must preserve that explicit override (including when the caller supplies a different runtime effort); without an override, disabled thinking still maps to `none`. Regression coverage lives in `tests/test_model_factory.py`.
 
 ### vLLM Provider (`packages/harness/deerflow/models/vllm_provider.py`)
 

@@ -140,7 +140,7 @@ def test_make_lead_agent_uses_server_auth_identity_for_all_user_scoped_inputs(mo
         captured["agent_config_user_id"] = user_id
         return AgentConfig(name=name)
 
-    def _load_skills(available_skills, *, app_config, user_id=None):
+    def _load_skills(available_skills, *, app_config, user_id=None, runtime=None):
         captured["skills_user_id"] = user_id
         return []
 
@@ -183,8 +183,18 @@ def test_make_lead_agent_uses_server_auth_identity_for_all_user_scoped_inputs(mo
     }
 
 
-def test_make_lead_agent_scopes_bootstrap_middlewares_to_custom_agent(monkeypatch):
+@pytest.mark.parametrize("enterprise_skills", [False, True])
+def test_make_lead_agent_scopes_bootstrap_middlewares_to_custom_agent(monkeypatch, tmp_path, enterprise_skills):
+    from deerflow.config.authorization_config import AuthorizationConfig, AuthorizationProviderConfig
+
     app_config = _make_app_config([_make_model("safe-model", supports_thinking=False)])
+    app_config.authorization = AuthorizationConfig(
+        enabled=enterprise_skills,
+        provider=AuthorizationProviderConfig(
+            use="deerflow.authz.user_policy:UserAuthorizationProvider",
+            config={"store_path": str(tmp_path / "security")},
+        ),
+    )
     middleware_calls: list[dict[str, object]] = []
     prompt_calls: list[dict[str, object]] = []
 
@@ -199,14 +209,14 @@ def test_make_lead_agent_scopes_bootstrap_middlewares_to_custom_agent(monkeypatc
     monkeypatch.setattr(tools_module, "get_available_tools", lambda **kwargs: [])
 
     lead_agent_module._make_lead_agent(
-        {"configurable": {"agent_name": "game", "is_bootstrap": True}},
+        {"configurable": {"agent_name": "game", "is_bootstrap": True}, "context": {"user_id": "test-user-autouse", "user_role": "user"}},
         app_config=app_config,
     )
 
     assert len(middleware_calls) == 1
     assert middleware_calls[0]["agent_name"] == "game"
     assert middleware_calls[0]["available_skills"] == {"bootstrap"}
-    assert middleware_calls[0]["owns_agent_skill_projection"] is False
+    assert middleware_calls[0]["owns_agent_skill_projection"] is enterprise_skills
     assert len(prompt_calls) == 1
 
 

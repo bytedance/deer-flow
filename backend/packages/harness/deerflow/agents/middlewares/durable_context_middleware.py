@@ -9,6 +9,7 @@ written back to state.
 
 from __future__ import annotations
 
+import asyncio
 import posixpath
 from collections.abc import Awaitable, Callable, Collection
 from html import escape
@@ -243,10 +244,12 @@ class DurableContextMiddleware(AgentMiddleware[AgentState]):
 
     def _inject(self, request: ModelRequest) -> ModelRequest:
         state = request.state or {}
+        from deerflow.security.skill_access import filter_authorized_skill_context
+
         data_block = _render_durable_context_data(
             state.get("summary_text"),
             state.get("delegations") or [],
-            state.get("skill_context") or [],
+            filter_authorized_skill_context(state.get("skill_context") or [], runtime=request.runtime),
         )
         if not data_block:
             return request
@@ -283,4 +286,4 @@ class DurableContextMiddleware(AgentMiddleware[AgentState]):
         request: ModelRequest,
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelCallResult:
-        return await handler(self._inject(request))
+        return await handler(await asyncio.to_thread(self._inject, request))

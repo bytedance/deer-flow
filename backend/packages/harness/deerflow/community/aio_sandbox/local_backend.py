@@ -28,6 +28,7 @@ from deerflow.utils.network import get_free_port, release_port
 from .backend import SandboxBackend, wait_for_sandbox_ready
 from .network_proxy import RELAY_AUTH_HEADER, RELAY_TOKEN_ENV
 from .sandbox_info import SandboxInfo
+from .subnet_pool import create_network
 
 logger = logging.getLogger(__name__)
 
@@ -597,6 +598,11 @@ class LocalContainerBackend(SandboxBackend):
                 "enable_icc": False,
             },
         }
+        if self._network_config.get("address_pool"):
+            material["ipam"] = {
+                "address_pool": self._network_config["address_pool"],
+                "subnet_prefix": self._network_config.get("subnet_prefix", 28),
+            }
         encoded = json.dumps(material, sort_keys=True, separators=(",", ":")).encode()
         return hashlib.sha256(encoded).hexdigest()
 
@@ -992,7 +998,7 @@ class LocalContainerBackend(SandboxBackend):
                 return
             raise RuntimeError(f"Restricted sandbox network {network_name} exists with incompatible policy or isolation settings")
         labels = self._restricted_labels(sandbox_id, "network")
-        result = subprocess.run(
+        result = create_network(
             [
                 "docker",
                 "network",
@@ -1007,9 +1013,7 @@ class LocalContainerBackend(SandboxBackend):
                 *(item for key, value in labels.items() for item in ("--label", f"{key}={value}")),
                 network_name,
             ],
-            capture_output=True,
-            text=True,
-            timeout=15,
+            self._network_config,
         )
         if result.returncode != 0:
             raise RuntimeError(f"Failed to create restricted sandbox network: {result.stderr.strip()}")
@@ -1021,7 +1025,7 @@ class LocalContainerBackend(SandboxBackend):
                 return
             raise RuntimeError(f"Restricted sandbox egress network {network_name} exists with incompatible policy or isolation settings")
         labels = self._restricted_labels(sandbox_id, "egress-network")
-        result = subprocess.run(
+        result = create_network(
             [
                 "docker",
                 "network",
@@ -1033,9 +1037,7 @@ class LocalContainerBackend(SandboxBackend):
                 *(item for key, value in labels.items() for item in ("--label", f"{key}={value}")),
                 network_name,
             ],
-            capture_output=True,
-            text=True,
-            timeout=15,
+            self._network_config,
         )
         if result.returncode != 0:
             raise RuntimeError(f"Failed to create restricted sandbox egress network: {result.stderr.strip()}")

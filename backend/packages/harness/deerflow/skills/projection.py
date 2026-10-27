@@ -389,7 +389,7 @@ def _read_manifest(scope_root: Path) -> dict | None:
     return value if isinstance(value, dict) else None
 
 
-def _write_manifest(scope_root: Path, source_signature: str, view_signature: str | None = None) -> None:
+def _write_manifest(scope_root: Path, source_signature: str, view_signature: str | None = None, *, allowed_skills: set[str] | None = None) -> None:
     scope_root.mkdir(parents=True, exist_ok=True)
     target = _manifest_path(scope_root)
     fd, temporary_name = tempfile.mkstemp(prefix=".projection-manifest-", suffix=".tmp", dir=scope_root)
@@ -397,6 +397,7 @@ def _write_manifest(scope_root: Path, source_signature: str, view_signature: str
     payload = {
         "version": _MANIFEST_VERSION,
         "source_signature": source_signature,
+        "allowed_skills": None if allowed_skills is None else sorted(allowed_skills),
     }
     if view_signature is not None:
         payload["view_signature"] = view_signature
@@ -427,12 +428,20 @@ def _view_signature(paths: SkillProjectionPaths, scope: str) -> str:
 def _thread_source_signature(
     storage: SkillStorage,
     allowed_skills: set[str] | None,
+    *,
+    runtime=None,
 ) -> str:
     """Sign every input that changes a thread's effective skill view."""
     digest = hashlib.sha256()
     digest.update(f"policy-version:{_THREAD_PROJECTION_POLICY_VERSION}\0".encode())
     digest.update(f"public:{_source_signature(storage, 'public')}\0".encode())
     digest.update(f"user:{_source_signature(storage, 'user')}\0".encode())
+    from deerflow.security.skill_access import filter_authorized_skills, skill_authorization_enabled, skill_resource_target
+
+    if skill_authorization_enabled(getattr(storage, "_app_config", None)):
+        permitted = filter_authorized_skills(storage.load_skills(enabled_only=True), user_id=storage.user_id, app_config=storage._app_config, runtime=runtime)
+        targets = sorted(skill_resource_target(skill, storage.user_id) for skill in permitted)
+        digest.update(json.dumps(targets, separators=(",", ":")).encode())
     policy = None if allowed_skills is None else sorted(allowed_skills)
     digest.update(json.dumps(policy, separators=(",", ":"), ensure_ascii=True).encode())
     return digest.hexdigest()
@@ -442,6 +451,8 @@ def _thread_projection_is_fresh(
     storage: SkillStorage,
     paths: SkillProjectionPaths,
     allowed_skills: set[str] | None,
+    *,
+    runtime=None,
 ) -> bool:
     scope_root = paths.public.parent
     if not all(path.is_dir() for path in (paths.public, paths.custom, paths.legacy, paths.integrations)):
@@ -449,7 +460,7 @@ def _thread_projection_is_fresh(
     manifest_before = _read_manifest(scope_root)
     if manifest_before is None or manifest_before.get("version") != _MANIFEST_VERSION:
         return False
-    source_sig = _thread_source_signature(storage, allowed_skills)
+    source_sig = _thread_source_signature(storage, allowed_skills, runtime=runtime)
     view_sig = _view_signature(paths, "thread")
     manifest_after = _read_manifest(scope_root)
     return manifest_before == manifest_after and manifest_before.get("source_signature") == source_sig and manifest_before.get("view_signature") == view_sig
@@ -550,6 +561,8 @@ def _rebuild_thread_locked(
     storage: SkillStorage,
     paths: SkillProjectionPaths,
     allowed_skills: set[str] | None,
+    *,
+    runtime=None,
 ) -> None:
     """Rebuild one thread's effective view, removing old authority first.
 
@@ -562,13 +575,15 @@ def _rebuild_thread_locked(
     category_roots = (paths.public, paths.custom, paths.legacy, paths.integrations)
     try:
         for _attempt in range(_MAX_REBUILD_ATTEMPTS):
-            before = _thread_source_signature(storage, allowed_skills)
+            before = _thread_source_signature(storage, allowed_skills, runtime=runtime)
             # User-scoped loading performs the same name-shadow resolution as
             # prompt discovery. Use that effective catalog for every category;
             # independently loading public skills would expose both copies when
             # a custom or integration skill shadows a built-in skill by name.
             all_effective_skills = storage.load_skills(enabled_only=False)
-            enabled_skills = [skill for skill in all_effective_skills if skill.enabled]
+            from deerflow.security.skill_access import filter_authorized_skills
+
+            enabled_skills = filter_authorized_skills([skill for skill in all_effective_skills if skill.enabled], user_id=storage.user_id, app_config=storage._app_config, runtime=runtime)
             if allowed_skills is not None:
                 enabled_skills = [skill for skill in enabled_skills if skill.name in allowed_skills]
 
@@ -599,9 +614,9 @@ def _rebuild_thread_locked(
                 _category_boundaries(all_effective_skills, SkillCategory.INTEGRATION),
                 enforce_symlink_boundary=True,
             )
-            after = _thread_source_signature(storage, allowed_skills)
+            after = _thread_source_signature(storage, allowed_skills, runtime=runtime)
             if before == after:
-                _write_manifest(scope_root, after, _view_signature(paths, "thread"))
+                _write_manifest(scope_root, after, _view_signature(paths, "thread"), allowed_skills=allowed_skills)
                 return
         raise RuntimeError("Skills changed repeatedly while rebuilding the thread sandbox projection")
     except Exception:
@@ -613,6 +628,8 @@ def ensure_thread_skill_projection(
     storage: SkillStorage,
     thread_id: str,
     allowed_skills: set[str] | None,
+    *,
+    runtime=None,
 ) -> SkillProjectionPaths | None:
     """Ensure the filesystem view for one run's effective Agent skill policy.
 
@@ -623,11 +640,13 @@ def ensure_thread_skill_projection(
     """
     paths = get_thread_skill_projection_paths(storage, thread_id)
     scope_root = paths.public.parent
-    if allowed_skills is None and not scope_root.exists():
+    from deerflow.security.skill_access import skill_authorization_enabled
+
+    if allowed_skills is None and not scope_root.exists() and not skill_authorization_enabled(getattr(storage, "_app_config", None)):
         return None
 
     try:
-        fresh = _thread_projection_is_fresh(storage, paths, allowed_skills)
+        fresh = _thread_projection_is_fresh(storage, paths, allowed_skills, runtime=runtime)
     except Exception:
         fresh = False
     if fresh:
@@ -635,8 +654,8 @@ def ensure_thread_skill_projection(
 
     with _projection_lock(scope_root):
         try:
-            if not _thread_projection_is_fresh(storage, paths, allowed_skills):
-                _rebuild_thread_locked(storage, paths, allowed_skills)
+            if not _thread_projection_is_fresh(storage, paths, allowed_skills, runtime=runtime):
+                _rebuild_thread_locked(storage, paths, allowed_skills, runtime=runtime)
         except Exception:
             _clear_projection_scope(
                 scope_root,
@@ -647,6 +666,31 @@ def ensure_thread_skill_projection(
             )
             raise
     return paths
+
+
+def refresh_authorized_thread_skills(thread_id: str, *, user_id: str, runtime=None):
+    """Refresh grants without changing the lead Agent's persisted allowlist.
+
+    Subagents share the same physical sandbox, so their local discovery policy
+    must never replace this policy. Missing manifests fail closed instead of
+    silently changing a previously restricted thread to unrestricted.
+    """
+    from deerflow.config import get_app_config
+    from deerflow.security.skill_access import skill_authorization_enabled
+    from deerflow.skills.storage import get_or_new_user_skill_storage
+
+    config = get_app_config()
+    if not skill_authorization_enabled(config):
+        return None
+    storage = get_or_new_user_skill_storage(user_id, app_config=config)
+    paths = get_thread_skill_projection_paths(storage, thread_id)
+    manifest = _read_manifest(paths.public.parent)
+    if manifest is None or "allowed_skills" not in manifest:
+        raise RuntimeError("The lead Agent must prepare its authorized skill projection before sandbox use")
+    policy = manifest["allowed_skills"]
+    if policy is not None and (not isinstance(policy, list) or not all(isinstance(name, str) for name in policy)):
+        raise RuntimeError("Invalid lead Agent skill projection policy")
+    return ensure_thread_skill_projection(storage, thread_id, None if policy is None else set(policy), runtime=runtime)
 
 
 def rebuild_skill_projections(

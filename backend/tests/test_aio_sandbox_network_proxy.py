@@ -18,6 +18,46 @@ def test_domain_matches_exact_and_leading_wildcard_only() -> None:
     assert not network_proxy.domain_matches("pythonhosted.org", "*.pythonhosted.org")
 
 
+def test_public_policy_needs_no_allowlist_or_stored_grants(tmp_path, monkeypatch) -> None:
+    database = tmp_path / "no-grants-needed.sqlite3"
+    monkeypatch.setattr(network_proxy, "POLICY_DB", database)
+    monkeypatch.setenv("DEERFLOW_NETWORK_MODE", "public")
+    monkeypatch.setenv("DEERFLOW_ALLOW_DOMAINS_JSON", "[]")
+    assert network_proxy.policy_allows("www.gstatic.com", 443)
+    assert network_proxy.policy_allows("previously-unknown.example", 80)
+    assert not database.exists()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("address", ["127.0.0.1", "192.168.10.1", "169.254.169.254", "::1", "fc00::1"])
+async def test_public_proxy_still_blocks_private_dns_without_prompt(monkeypatch, tmp_path, address) -> None:
+    monkeypatch.setenv("DEERFLOW_NETWORK_MODE", "public")
+    monkeypatch.setenv("DEERFLOW_RECORD_DENIALS", "0")
+    database = tmp_path / "no-approval.sqlite3"
+    monkeypatch.setattr(network_proxy, "POLICY_DB", database)
+    proxy = await asyncio.start_server(network_proxy.handle_proxy, "127.0.0.1", 0)
+    port = proxy.sockets[0].getsockname()[1]
+
+    async def private_dns(*_args, **_kwargs):
+        family = socket.AF_INET6 if ":" in address else socket.AF_INET
+        return [(family, socket.SOCK_STREAM, 6, "", (address, 443))]
+
+    monkeypatch.setattr(asyncio.get_running_loop(), "getaddrinfo", private_dns)
+    try:
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        writer.write(b"CONNECT private.example:443 HTTP/1.1\r\nHost: private.example:443\r\n\r\n")
+        await writer.drain()
+        response = await asyncio.wait_for(reader.read(), timeout=2)
+        writer.close()
+        await writer.wait_closed()
+        assert b"403 Forbidden" in response
+        assert b"did not resolve exclusively to public addresses" in response
+        assert not database.exists()
+    finally:
+        proxy.close()
+        await proxy.wait_closed()
+
+
 def test_address_is_public_rejects_host_private_link_local_and_metadata() -> None:
     for address in (
         "127.0.0.1",
@@ -247,7 +287,8 @@ async def test_chunked_request_body_rejects_non_hex_size() -> None:
 
 
 @pytest.mark.anyio
-async def test_http_proxy_relays_exactly_one_request_per_connection(monkeypatch) -> None:
+@pytest.mark.parametrize("mode", ["allowlist", "public"])
+async def test_http_proxy_relays_exactly_one_request_per_connection(monkeypatch, mode) -> None:
     received: asyncio.Future[bytes] = asyncio.get_running_loop().create_future()
 
     async def upstream_handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -270,7 +311,9 @@ async def test_http_proxy_relays_exactly_one_request_per_connection(monkeypatch)
 
     monkeypatch.setattr(network_proxy, "resolve_public", fake_resolve_public)
     monkeypatch.setattr(network_proxy, "_open_public", fake_open_public)
-    monkeypatch.setattr(network_proxy, "policy_allows", lambda host, port: (host, port) == ("allowed.example", 80))
+    monkeypatch.setenv("DEERFLOW_NETWORK_MODE", mode)
+    if mode == "allowlist":
+        monkeypatch.setattr(network_proxy, "policy_allows", lambda host, port: (host, port) == ("allowed.example", 80))
 
     proxy = await asyncio.start_server(network_proxy.handle_proxy, "127.0.0.1", 0)
     proxy_port = proxy.sockets[0].getsockname()[1]

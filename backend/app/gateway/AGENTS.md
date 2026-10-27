@@ -1,5 +1,23 @@
 ### Gateway API (`app/gateway/`)
 
+`routers/knowledge_base.py` owns session-only `/api/knowledge-base`: dataset
+listing/creation, paginated document listing, single-file multipart uploads and
+parse retries. It shares the RAGFlow `knowledge_search` tool config and dataset
+allowlist. Reads recheck the configured authorization provider for that tool;
+writes additionally require an administrator. Authorize and resolve dataset
+access before consuming multipart bodies. Upload parsing bounds file bytes to
+50 MiB and total framing to 1 MiB extra, closes spool files, and accepts one file
+per request. Upstream requests are async; config and policy construction run off
+the event loop. Upload success survives parse-start failures, with
+`parsing_started=false` for an explicit retry. Return allowlisted metadata and
+generic structured errors, never raw provider errors or credentials. Dataset
+creation is disabled with an operator allowlist; no Agent write tool is exposed.
+Tests: `test_knowledge_base.py`, existing `test_ragflow_client.py` and
+`test_ragflow_tools.py`.
+RAGFlow v0.26.2 rejects the newer `ids` dataset filter. The client falls back to
+its bounded, paginated accessible catalog only for that exact schema rejection,
+then matches the ID locally; authorization and other provider errors still fail.
+
 FastAPI listens on port 8001; health: `GET /health` (liveness) and `GET /health/ready` (readiness; concurrently probes the ORM engine behind `database:` plus the effective LangGraph checkpointer/Store backend - the legacy `checkpointer:` section, otherwise derived from `database:`, resolved from the startup config snapshot recorded on `app.state` - beneath a single bounded deadline, with connection-opening probes serialized behind a strict per-process gate, 503 while either is unreachable or the startup backend cannot be resolved, `not_configured` for process-local backends such as `backend=memory`). Set `GATEWAY_ENABLE_DOCS=false` to disable the default `/docs`, `/redoc`, and `/openapi.json` endpoints.
 
 Durable MCP notifications use internal Agent runs. Keep their trusted delivery instruction outside the user-input boundary, and frame serialized remote events as untrusted before model invocation. Strict thread existence/ownership admission dead-letters events whose task outlives its deleted chat instead of recreating the thread.
@@ -40,6 +58,10 @@ create/update writes and all legacy versions sanitized, ordinary
 owner-scoped assistant version selection remains enabled.
 
 **Routers**:
+
+`GET/PATCH /api/v1/auth/profile` reads/updates only the session owner's nickname
+in the private user-security store. No caller-supplied owner is accepted. Blank
+values clear the preference; names are limited to 80 characters without controls.
 
 | Router | Endpoints |
 |--------|-----------|
@@ -138,3 +160,25 @@ Proxied through nginx: `/api/langgraph/*` → Gateway LangGraph-compatible runti
 archive/search behavior, read [Thread lifecycle invariants](../../docs/THREAD_LIFECYCLE.md).
 It owns lineage and settled-checkpoint rules, legacy fallback boundaries, archive
 filtering before pagination, owner isolation, and activity-time preservation.
+
+### Enterprise connections
+
+`routers/enterprise.py` owns session-only destination CRUD, explicit sends,
+delivery history and fixed-message schedules. Both HTTP and chat schedule paths
+check `tool:enterprise_messaging`, `threads:write` and `runs:create`; all target
+lookups use the authenticated owner. Lifespan installs/removes the harness
+scheduling bridge; do not import Gateway code into the harness. No credentials
+or provider response bodies may appear in API/tool results.
+
+`routers/enterprise_mail_outbox.py` adds session-only immutable mail drafts and
+explicit confirmation at `/api/enterprise/mail/drafts/{id}/send`. Every request
+checks the separate `enterprise_mail_compose` grant and owner. All SMTP/storage
+operations run in workers; the durable claim prevents duplicate submissions even
+if the HTTP request is interrupted. The model tool has no send action.
+
+User sandbox prewarming lives in `sandbox_prewarm.py`. Authenticated `/auth/me`
+schedules a bounded background warmup only for the user-pool provider and after
+live sandbox authorization. It copies the authenticated user context, coalesces
+requests per user, and drains pending warmups during Gateway shutdown. User-pool
+construction happens off the event loop before lifespan yields; the offline
+storage migration and one-Gateway lease must already be valid.

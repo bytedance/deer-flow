@@ -6,8 +6,9 @@ import { ThemeProvider } from "@/components/theme-provider";
 import { DEFAULT_LOCALE } from "@/core/i18n/locale";
 
 export const metadata: Metadata = {
-  title: "DeerFlow",
-  description: "A LangChain-based framework for building super agents.",
+  title: "DDFW-Agent",
+  description: "DDFW-Agent enterprise AI workspace.",
+  icons: { icon: "/favicon.svg" },
 };
 
 export default function RootLayout({

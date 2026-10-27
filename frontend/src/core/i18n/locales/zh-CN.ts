@@ -85,11 +85,11 @@ export const zhCN: Translations = {
   welcome: {
     greeting: "你好，欢迎回来！",
     description:
-      "欢迎使用 🦌 DeerFlow，一个完全开源的超级智能体。通过内置和自定义的 Skills，\nDeerFlow 可以帮你搜索网络、分析数据，还能为你生成幻灯片、\n图片、视频、播客及网页等，几乎可以做任何事情。",
+      "欢迎使用 DDFW-Agent，一个超级智能体。通过内置和自定义的 Skills，\nDDFW-Agent 可以帮你搜索网络、分析数据，还能为你生成幻灯片、\n图片、视频、播客及网页等，几乎可以做任何事情。",
 
     createYourOwnSkill: "创建你自己的 Agent SKill",
     createYourOwnSkillDescription:
-      "创建你的 Agent Skill 来释放 DeerFlow 的潜力。通过自定义技能，DeerFlow\n可以帮你搜索网络、分析数据，还能为你生成幻灯片、\n网页等作品，几乎可以做任何事情。",
+      "创建你的 Agent Skill 来释放 DDFW-Agent 的潜力。通过自定义技能，DDFW-Agent\n可以帮你搜索网络、分析数据，还能为你生成幻灯片、\n网页等作品，几乎可以做任何事情。",
   },
 
   // Clipboard
@@ -178,7 +178,7 @@ export const zhCN: Translations = {
     voiceInputStartLabel: "语音输入",
     voiceInputStopLabel: "停止语音输入",
     voiceInputStart:
-      "语音输入。DeerFlow 只接收转写文本，音频由浏览器或系统语音服务处理。",
+      "语音输入。DDFW-Agent 只接收转写文本，音频由浏览器或系统语音服务处理。",
     voiceInputStop: "停止语音输入",
     voiceInputListening: "正在聆听... 点击停止语音输入。",
     voiceInputUnsupported:
@@ -294,6 +294,8 @@ export const zhCN: Translations = {
     demoChats: "演示对话",
     agents: "智能体",
     scheduledTasks: "定时任务",
+    knowledgeBase: "知识库",
+    enterprise: "企业连接",
     agentsDisabledTooltip: "功能未启用",
   },
 
@@ -311,11 +313,11 @@ export const zhCN: Translations = {
     cancelling: "正在取消…",
     cancelFailed: "取消任务失败",
     cancellationRetrying: (attempt) =>
-      `第 ${attempt} 次取消失败；DeerFlow 将继续重试。`,
+      `第 ${attempt} 次取消失败；DDFW-Agent 将继续重试。`,
     notificationRetrying: (attempt) =>
-      `第 ${attempt} 次聊天通知失败；DeerFlow 将退避后重试。`,
+      `第 ${attempt} 次聊天通知失败；DDFW-Agent 将退避后重试。`,
     notificationStopped: "聊天通知因反复失败或永久拒绝，已停止重试。",
-    trackingDegraded: "状态检查有所延迟，DeerFlow 仍在重试。",
+    trackingDegraded: "状态检查有所延迟，DDFW-Agent 仍在重试。",
     viewDetails: "查看详情",
     hideDetails: "收起详情",
     detailsFailed: "无法加载任务详情",
@@ -415,7 +417,7 @@ export const zhCN: Translations = {
       threadIdPlaceholder: "线程 ID",
       reuseNoticeTitle: "使用该线程的历史对话",
       reuseNoticeDescription:
-        "如果触发时该线程正在运行，DeerFlow 会将本次执行排队，并在线程空闲后启动；超过配置的最长等待时间后会标记为失败。",
+        "如果触发时该线程正在运行，DDFW-Agent 会将本次执行排队，并在线程空闲后启动；超过配置的最长等待时间后会标记为失败。",
     },
     filters: {
       allStatuses: "全部状态",
@@ -539,13 +541,13 @@ export const zhCN: Translations = {
     save: "保存智能体",
     saving: "正在保存智能体...",
     saveRequested:
-      "已提交保存请求，DeerFlow 正在根据当前对话生成并保存初版智能体。",
+      "已提交保存请求，DDFW-Agent 正在根据当前对话生成并保存初版智能体。",
     saveHint:
       "你可以在右上角的菜单里随时保存这个智能体，就算目前还只是初稿也可以。",
     saveCommandMessage:
       "请现在根据我们目前已经讨论的全部内容保存这个自定义智能体。这就是我明确的保存确认。如果仍有少量细节缺失，请根据上下文做出合理假设，生成一份简洁的英文初始 SOUL.md，并直接调用 setup_agent，不要再向我索要额外确认。",
     agentCreatedPendingRefresh:
-      "智能体已创建，但 DeerFlow 暂时还无法读取到它。请稍后刷新当前页面。",
+      "智能体已创建，但 DDFW-Agent 暂时还无法读取到它。请稍后刷新当前页面。",
     more: "更多操作",
     agentCreated: "智能体已创建！",
     startChatting: "开始对话",
@@ -578,13 +580,13 @@ export const zhCN: Translations = {
 
   // Workspace
   workspace: {
-    officialWebsite: "访问 DeerFlow 官方网站",
-    githubTooltip: "访问 DeerFlow 的 GitHub 仓库",
+    officialWebsite: "访问 DDFW-Agent 官方网站",
+    githubTooltip: "访问 DDFW-Agent 的 GitHub 仓库",
     settingsAndMore: "设置和更多",
-    visitGithub: "在 GitHub 上查看 DeerFlow",
+    visitGithub: "在 GitHub 上查看 DDFW-Agent",
     reportIssue: "报告问题",
     contactUs: "联系我们",
-    about: "关于 DeerFlow",
+    about: "关于 DDFW-Agent",
     logout: "退出登录",
     gatewayUnavailable: "网关暂时不可用。",
     gatewayUnavailableRetrying: "正在后台重试…",
@@ -681,21 +683,21 @@ export const zhCN: Translations = {
     saveAndConnect: "保存并连接",
     saveChanges: "保存修改",
     descriptions: {
-      buzz: "通过 DeerFlow 智能体接收 Buzz 频道消息和私聊。",
-      telegram: "通过 DeerFlow Bot 接收 Telegram 私聊消息。",
+      buzz: "通过 DDFW-Agent 智能体接收 Buzz 频道消息和私聊。",
+      telegram: "通过 DDFW-Agent Bot 接收 Telegram 私聊消息。",
       slack: "接收 Slack 工作区消息和提及。",
-      discord: "通过 DeerFlow Bot 接收 Discord 服务器消息。",
-      feishu: "通过 DeerFlow 应用接收飞书和 Lark 消息。",
-      dingtalk: "通过 DeerFlow Bot 接收钉钉 Stream Push 消息。",
-      wechat: "通过 DeerFlow Bot 接收微信 iLink 消息。",
-      wecom: "通过 DeerFlow AI Bot 接收企业微信消息。",
+      discord: "通过 DDFW-Agent Bot 接收 Discord 服务器消息。",
+      feishu: "通过 DDFW-Agent 应用接收飞书和 Lark 消息。",
+      dingtalk: "通过 DDFW-Agent Bot 接收钉钉 Stream Push 消息。",
+      wechat: "通过 DDFW-Agent Bot 接收微信 iLink 消息。",
+      wecom: "通过 DDFW-Agent AI Bot 接收企业微信消息。",
     },
     connectedAs: (name: string) => `已连接为 ${name}。`,
   },
 
   // Page titles (document title)
   pages: {
-    appName: "DeerFlow",
+    appName: "DDFW-Agent",
     chats: "对话",
     newChat: "新对话",
     untitled: "未命名",
@@ -720,7 +722,7 @@ export const zhCN: Translations = {
     writeFile: "写入文件",
     clickToViewContent: "点击查看文件内容",
     writeTodos: "更新 To-do 列表",
-    skillInstallTooltip: "安装技能并使其可在 DeerFlow 中使用",
+    skillInstallTooltip: "安装技能并使其可在 DDFW-Agent 中使用",
     browserNavigate: (url: string) => `在浏览器中打开 ${url}`,
     browserNavigateGeneric: "在浏览器中打开页面",
     browserClick: "在浏览器中点击元素",
@@ -815,7 +817,7 @@ export const zhCN: Translations = {
     noResults: "未找到结果。",
     actions: "操作",
     keyboardShortcuts: "键盘快捷键",
-    keyboardShortcutsDescription: "使用键盘快捷键更快地操作 DeerFlow。",
+    keyboardShortcutsDescription: "使用键盘快捷键更快地操作 DDFW-Agent。",
     openCommandPalette: "打开命令面板",
     toggleSidebar: "切换侧边栏",
   },
@@ -823,7 +825,7 @@ export const zhCN: Translations = {
   // Settings
   settings: {
     title: "设置",
-    description: "根据你的偏好调整 DeerFlow 的界面和行为。",
+    description: "根据你的偏好调整 DDFW-Agent 的界面和行为。",
     sections: {
       account: "账号",
       appearance: "外观",
@@ -839,7 +841,7 @@ export const zhCN: Translations = {
     memory: {
       title: "记忆",
       description:
-        "DeerFlow 会在后台不断从你的对话中自动学习。这些记忆能帮助 DeerFlow 更好地理解你，并提供更个性化的体验。",
+        "DDFW-Agent 会在后台不断从你的对话中自动学习。这些记忆能帮助 DDFW-Agent 更好地理解你，并提供更个性化的体验。",
       empty: "暂无可展示的记忆数据。",
       rawJson: "原始 JSON",
       exportButton: "导出记忆",
@@ -926,6 +928,67 @@ export const zhCN: Translations = {
       languageDescription: "在不同语言之间切换。",
     },
     tools: {
+      security: {
+        resourceTypes: { tool: "工具", mcp_server: "MCP", skill: "技能" },
+        noExtensions: "暂无需要配置权限的新增扩展。内置工具和技能默认可用。",
+        groupsTitle: "用户组",
+        groupsDescription:
+          "用户组用于授予新增工具和技能的访问权限。用户可以加入多个组，组权限取并集，个人拒绝优先。凭据和沙箱仍按个人隔离。",
+        newGroupName: "新用户组名称",
+        createGroup: "创建用户组",
+        selectGroup: "选择用户组",
+        noGroups: "暂无用户组。",
+        groupName: "用户组名称",
+        renameGroup: "重命名用户组",
+        deleteGroup: "删除用户组",
+        deleteGroupDescription:
+          "确认删除该组及其成员关系？个人权限和凭据将保留。",
+        confirmDeleteGroup: "确认删除",
+        cancelGroupDelete: "取消",
+        memberEmail: "成员邮箱",
+        addMember: "添加成员",
+        removeMember: "移除成员",
+        noMembers: "暂无成员。",
+        groupAccess: "组授权",
+        membersTitle: "成员",
+        groupGrantsTitle: "组权限",
+        memberships: "所属用户组",
+        noMemberships: "尚未加入用户组。",
+        personalOverride: "个人权限覆盖",
+        inherit: "继承",
+        allow: "允许",
+        deny: "拒绝",
+        effectiveAccess: "生效权限",
+        allowed: "已允许",
+        denied: "已拒绝",
+        overrideDescription:
+          "继承使用组权限；允许添加个人授权；拒绝会阻止访问，即使组已授权。",
+        groupsLoadError: "无法加载用户组，请重试。",
+        groupSaveError: "保存用户组失败，请检查名称、邮箱和你的权限后重试。",
+        personalTitle: "我的工具凭据",
+        personalDescription:
+          "凭据加密保存，仅用于你的调用；保存后不会回显原文。",
+        noServers: "尚未为你的账号授权 MCP 服务。",
+        myTools: "我获授权的扩展",
+        requestAccess:
+          "内置工具和技能默认可用。新增工具和技能请联系管理员，通过用户或用户组授权。",
+        grantsTitle: "用户扩展授权",
+        grantsDescription:
+          "内置工具和技能默认可用。仅新增工具、MCP 集成和技能需要用户或用户组授权；MCP 集成需同时授权服务及其工具。",
+        userEmail: "用户邮箱",
+        loadUser: "查看用户",
+        userError: "无法读取该用户，请检查邮箱后重试。",
+        adminAccess: "管理员通过账号角色获得工具权限，但仍需配置本人的凭据。",
+        authorize: "授权",
+        credential: "凭据",
+        configured: "已配置",
+        notConfigured: "未配置",
+        save: "保存",
+        remove: "删除我的凭据",
+        unsupported: "该服务不可用或不支持个人凭据，请联系管理员。",
+        loadError: "无法加载扩展权限。",
+        saveError: "保存失败，请检查权限后重试。",
+      },
       title: "工具",
       description: "管理 MCP 工具的配置和启用状态。",
       adminRequired: "需要管理员权限才能管理 MCP 工具。",
@@ -1005,7 +1068,7 @@ export const zhCN: Translations = {
     },
     channels: {
       title: "渠道",
-      description: "连接可在浏览器外向 DeerFlow 发送消息的即时通讯账号。",
+      description: "连接可在浏览器外向 DDFW-Agent 发送消息的即时通讯账号。",
       disabled:
         "当前服务器未启用渠道连接。请联系管理员开启 channel_connections。",
     },
@@ -1056,7 +1119,7 @@ export const zhCN: Translations = {
         changeAppButton: "切换飞书 Bot",
         changeAppTitle: "切换到其他飞书 App",
         changeAppDescription:
-          "把你的 DeerFlow 账号指向另一个 Lark/飞书 App。只影响你自己的账号，不影响其他用户。",
+          "把你的 DDFW-Agent 账号指向另一个 Lark/飞书 App。只影响你自己的账号，不影响其他用户。",
         changeAppIdLabel: "App ID",
         changeAppSecretLabel: "App Secret",
         changeAppAuthResetNote:
@@ -1068,9 +1131,9 @@ export const zhCN: Translations = {
         brandLark: "Lark",
         connectionStarted: "连接链接已打开",
         connectionReady: "连接准备已完成，正在打开授权链接",
-        authStarted: "授权页已打开，DeerFlow 会自动检测授权结果。",
+        authStarted: "授权页已打开，DDFW-Agent 会自动检测授权结果。",
         authorizationStillPending:
-          "还没有检测到授权完成。请在浏览器完成授权；DeerFlow 会继续自动检测。如果页面没有更新，可点击“我已完成授权”。",
+          "还没有检测到授权完成。请在浏览器完成授权；DDFW-Agent 会继续自动检测。如果页面没有更新，可点击“我已完成授权”。",
         permissionTitle: "授权范围",
         permissionDescription:
           "默认只完成基础登录，不会申请任何业务权限。按需在这里勾选要授权的业务域；已连接用户可以重新授权继续追加（scope 会累积）。",
@@ -1174,10 +1237,10 @@ export const zhCN: Translations = {
           "首次连接需要在浏览器里完成一次飞书确认。打开下面的链接按提示完成；完成后回到这里继续授权。",
         openAuthLinkTitle: "在浏览器中完成飞书授权",
         openAuthLinkDescription:
-          "打开下面的链接完成授权。DeerFlow 会持续自动检测，并在授权通过后保存连接状态。",
+          "打开下面的链接完成授权。DDFW-Agent 会持续自动检测，并在授权通过后保存连接状态。",
         waitingAuthTitle: "等待飞书授权完成",
         waitingAuthDescription:
-          "请在刚打开的浏览器页面完成授权。DeerFlow 会自动更新这里的状态；下方按钮只是兜底操作。",
+          "请在刚打开的浏览器页面完成授权。DDFW-Agent 会自动更新这里的状态；下方按钮只是兜底操作。",
         openAuthLink: "打开链接",
         copyAuthLink: "复制链接",
         completeAuth: "我已完成授权",
@@ -1202,7 +1265,7 @@ export const zhCN: Translations = {
           "本次连接流程已向飞书验证当前用户授权。需要刷新授权或追加权限时，可重新连接。",
         authNextTitle: "下一步完成浏览器授权",
         authNextDescription:
-          "点击“连接飞书”后，DeerFlow 会先检查当前状态；未连接或授权过期时会拉起浏览器授权。",
+          "点击“连接飞书”后，DDFW-Agent 会先检查当前状态；未连接或授权过期时会拉起浏览器授权。",
       },
     },
     skills: {
@@ -1211,7 +1274,7 @@ export const zhCN: Translations = {
       createSkill: "新建技能",
       emptyTitle: "还没有技能",
       emptyDescription:
-        "将你的 Agent Skill 文件夹放在 DeerFlow 根目录下的 `/skills/custom` 文件夹中。",
+        "将你的 Agent Skill 文件夹放在 DDFW-Agent 根目录下的 `/skills/custom` 文件夹中。",
       emptyButton: "创建你的第一个技能",
       adminRequired: "需要管理员权限才能管理 Agent Skill。",
       installAdminRequired: "需要管理员权限才能安装 Agent Skill。",
@@ -1224,18 +1287,26 @@ export const zhCN: Translations = {
     notification: {
       title: "通知",
       description:
-        "DeerFlow 只会在窗口不活跃时发送完成通知，特别适合长时间任务：你可以先去做别的事，完成后会收到提醒。",
+        "DDFW-Agent 只会在窗口不活跃时发送完成通知，特别适合长时间任务：你可以先去做别的事，完成后会收到提醒。",
       requestPermission: "请求通知权限",
       deniedHint:
         "通知权限已被拒绝。可在浏览器的网站设置中重新开启，以接收完成提醒。",
       testButton: "发送测试通知",
-      testTitle: "DeerFlow",
+      testTitle: "DDFW-Agent",
       testBody: "这是一条测试通知。",
       notSupported: "当前浏览器不支持通知功能。",
       disableNotification: "关闭通知",
     },
     account: {
       profileTitle: "个人信息",
+      nickname: "用户昵称",
+      nicknamePlaceholder: "希望 AI 怎么称呼你？",
+      nicknameHint: "AI 会优先用这个昵称称呼你。最多 80 个字符，留空可清除。",
+      saveNickname: "保存昵称",
+      nicknameSaved: "昵称已保存，后续对话将使用新的称呼。",
+      nicknameSaveFailed: "昵称保存失败，请重试。",
+      nicknameLoadFailed: "昵称加载失败，请重试。",
+      retry: "重试",
       email: "邮箱",
       role: "角色",
       ssoProvider: "SSO",
@@ -1243,7 +1314,7 @@ export const zhCN: Translations = {
       changePasswordDescription: "更新你的账号密码。",
       ssoPasswordDescription: "密码由你的 SSO 提供商管理。",
       ssoPasswordMessage:
-        "此账号通过 {provider} 登录，DeerFlow 无法在此管理或修改密码。请前往你的 SSO 提供商账号设置中进行操作。",
+        "此账号通过 {provider} 登录，DDFW-Agent 无法在此管理或修改密码。请前往你的 SSO 提供商账号设置中进行操作。",
       currentPassword: "当前密码",
       newPassword: "新密码",
       confirmNewPassword: "确认新密码",
@@ -1269,14 +1340,14 @@ export const zhCN: Translations = {
     passwordPlaceholder: "•••••••",
     rememberMe: "保持登录",
     rememberMeDescription:
-      "下次打开 DeerFlow 时尽量保持当前会话，仅保存邮箱，不保存密码。",
+      "下次打开 DDFW-Agent 时尽量保持当前会话，仅保存邮箱，不保存密码。",
     pleaseWait: "请稍候...",
     signIn: "登录",
     createAccount: "创建账号",
     createAdminAccount: "创建管理员账号",
     adminSetupRequiredTitle: "需要先完成管理员初始化",
     adminSetupRequiredDescription:
-      "DeerFlow 需要先创建管理员账号，然后才能创建新的普通账号。",
+      "DDFW-Agent 需要先创建管理员账号，然后才能创建新的普通账号。",
     orContinueWith: "或使用以下方式登录",
     ssoHint: "如果你的账号使用单点登录（SSO），请改用下方的选项登录。",
     continueWith: (provider: string) => `使用 ${provider} 登录`,

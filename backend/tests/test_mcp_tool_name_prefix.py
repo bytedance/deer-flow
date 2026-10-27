@@ -118,6 +118,7 @@ async def test_mcp_tool_name_prefix_can_be_disabled_per_server_without_disabling
         patch("deerflow.mcp.tools.build_servers_config", return_value=servers_config),
         patch("deerflow.mcp.tools.get_initial_oauth_headers", new_callable=AsyncMock, return_value={}),
         patch("deerflow.mcp.tools.build_mcp_tool_interceptors", return_value=[]),
+        patch("deerflow.mcp.tools.user_security_enabled", return_value=False),
         patch("langchain_mcp_adapters.client.MultiServerMCPClient", FakeClient),
         patch("langchain_mcp_adapters.tools.load_mcp_tools", side_effect=fake_load_mcp_tools),
         patch("deerflow.mcp.tools._make_session_pool_tool", side_effect=lambda tool, *_args, **_kwargs: tool) as wrap_tool,
@@ -163,3 +164,32 @@ async def test_unprefixed_stdio_tool_keeps_server_like_original_name(tmp_path: P
         await wrapped.coroutine(query="repositories")
 
     mock_session.call_tool.assert_awaited_once_with("github_search", {"query": "repositories"})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("security_enabled", [True, False])
+@pytest.mark.parametrize("server,raw_name,prefix", [("crm", "view_image", False), ("web", "search", True)])
+async def test_user_security_reserves_default_bound_names_at_discovery(monkeypatch, security_enabled, server, raw_name, prefix):
+    monkeypatch.setattr("deerflow.mcp.tools.user_security_enabled", lambda: security_enabled)
+    config = ExtensionsConfig(mcp_servers={server: McpServerConfig(type="http", url="https://example.test/mcp", tool_name_prefix=prefix)})
+    bound_name = f"{server}_{raw_name}" if prefix else raw_name
+    safe_name = f"{server}_lookup" if prefix else "lookup"
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            self.callbacks = None
+            self.tool_interceptors = []
+
+        async def get_tools(self, **kwargs):
+            return [_tool(bound_name), _tool(safe_name)]
+
+    with (
+        patch("deerflow.mcp.tools.ExtensionsConfig.from_file", return_value=config),
+        patch("deerflow.mcp.tools.build_servers_config", return_value={server: {"transport": "http", "url": "https://example.test/mcp"}}),
+        patch("deerflow.mcp.tools.get_initial_oauth_headers", new_callable=AsyncMock, return_value={}),
+        patch("deerflow.mcp.tools.build_mcp_tool_interceptors", return_value=[]),
+        patch("langchain_mcp_adapters.client.MultiServerMCPClient", FakeClient),
+        patch("langchain_mcp_adapters.tools.load_mcp_tools", new_callable=AsyncMock, return_value=[_tool(bound_name), _tool(safe_name)]),
+    ):
+        tools = await get_mcp_tools()
+    assert {tool.name for tool in tools} == ({safe_name} if security_enabled else {bound_name, safe_name})

@@ -29,8 +29,8 @@ export function WorkspaceHeader({ className }: { className?: string }) {
       >
         {state === "collapsed" ? (
           <div className="group-has-data-[collapsible=icon]/sidebar-wrapper:-translate-y flex w-full cursor-pointer items-center justify-center">
-            <div className="text-primary block pt-1 font-serif group-hover/workspace-header:hidden">
-              DF
+            <div className="text-primary block w-10 pt-1 text-center font-serif text-[10px] leading-tight font-semibold tracking-tight group-hover/workspace-header:hidden">
+              DDFW-Agent
             </div>
             <SidebarTrigger className="hidden pl-2 group-hover/workspace-header:block" />
           </div>
@@ -38,11 +38,11 @@ export function WorkspaceHeader({ className }: { className?: string }) {
           <div className="flex items-center justify-between gap-2">
             {env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" ? (
               <Link href="/" className="text-primary ml-2 font-serif">
-                DeerFlow
+                DDFW-Agent
               </Link>
             ) : (
               <div className="text-primary ml-2 cursor-default font-serif">
-                DeerFlow
+                DDFW-Agent
               </div>
             )}
             <SidebarTrigger />

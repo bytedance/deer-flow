@@ -1,5 +1,11 @@
 ### Middleware Chain
 
+DynamicContext also projects the current account nickname on each model request.
+It reads the private user-profile store off the event loop using runtime-resolved
+owner identity. Only static addressing rules use SystemMessage; the escaped
+nickname is hidden HumanMessage data. Neither message is written into checkpoints,
+so edits/clears take effect in existing chats without retaining an old preference.
+
 Persisted delegation verdicts are untrusted durable context; ledger rendering revalidates them and ignores malformed values.
 
 Assembly order: `tool_error_handling_middleware.py::_build_runtime_middlewares` (exposed as `build_lead_runtime_middlewares`), then `../lead_agent/agent.py::build_middlewares` appends lead-only entries. Optional entries require their config/runtime condition.
@@ -49,9 +55,10 @@ it to that middleware's declaration in the same change.
 5. **UploadsMiddleware** - Tracks and injects newly uploaded files into conversation (lead agent only); upload existence checks use the same runtime-resolved user bucket as thread-data creation
 6. **SandboxMiddleware** - Acquires sandbox, stores `sandbox_id` in state. The
    lead runtime normally owns the thread's physical Agent-skill projection;
-   delegated subagents and the prompt-only bootstrap agent are non-owners, so
-   their narrower discovery allowlists never rebuild the shared thread view or
-   force eager sandbox acquisition.
+   delegated subagents are non-owners, so their narrower discovery allowlists
+   never rebuild the shared thread view or force eager sandbox acquisition.
+   Bootstrap is also a non-owner unless enterprise skill grants are enabled;
+   that mode prepares its explicit bootstrap-only view before sandbox reads.
 7. **DanglingToolCallMiddleware** - Injects placeholder ToolMessages for AIMessage tool_calls that lack responses (e.g., user interruption), preserving raw provider tool-call payloads in `additional_kwargs["tool_calls"]`; malformed tool-call names and arguments are sanitized in the model-bound request so strict OpenAI-compatible providers do not reject the next request
 8. **LLMErrorHandlingMiddleware** - Converts provider/model failures to recoverable assistant errors. Async cancellation at admission, provider execution, retry events, or backoff releases only the call's own half-open probe (ownership assigned under the circuit lock), then propagates unchanged, without retry or failure accounting.
 9. **Authorization / GuardrailMiddleware** - Up to two independent pre-tool-call gates run here. When `authorization.enabled`, the `AuthorizationProvider` instance already used for Layer 1 capability filtering is wrapped by `GuardrailAuthorizationAdapter` and reused for Layer 2 execution checks. A generated `tool_search` bypasses the adapter's second provider call only when the current build has a concrete deferred setup; its catalog was already filtered by Layer 1, and an ordinary same-named tool without that deferred setup receives no exemption. When `guardrails.enabled`, the explicitly configured `GuardrailProvider` is appended after authorization and still evaluates every call, including `tool_search`. Authorization therefore runs outermost and can deny before an external guardrail call; both use the existing middleware's fail-closed, audit, sync/async, and error-`ToolMessage` behavior. See the authorization RFC and [docs/GUARDRAILS.md](../../../../../docs/GUARDRAILS.md).

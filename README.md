@@ -1,5 +1,119 @@
 # 🦌 DeerFlow - 2.0
 
+### Account nickname
+
+**Settings → Account → Nickname** saves how AI should address you. The preference
+is private to each account, applies to existing and new chats, and can be cleared.
+
+### Enterprise connections
+
+**Workspace → Enterprise connections** contains two sections: WeCom groups and
+Alibaba enterprise mail. Bind personal group-robot webhooks here, then use the
+`enterprise_messaging` tool in chat to send text messages or create one-time or
+recurring messages in Scheduled tasks, with owner isolation, encrypted credentials
+and durable delivery receipts.
+Configure/grant the tool before use. With user authorization enabled, administrators
+have access; direct and group grants take effect on the next page request or tool
+call. AliMail supports private IMAP connections, read-only inbox previews and AI
+classification, summaries and action items in a new chat. Configure/grant the
+separate `enterprise_mail` tool and enter the email password; use a third-party
+client password when required by Alibaba Mail security settings. Original messages
+and read status stay unchanged. The separate `enterprise_mail_compose` permission
+adds plain-text email drafts and SMTP sending through the connected mailbox.
+Use **Write email → Save and preview → Confirm and send** on this page, or ask AI
+to prepare a draft and open its review link. AI cannot send directly; a user
+confirms the exact recipients and content in the page. See
+[Enterprise connections](docs/ENTERPRISE_CONNECTIONS.md) for setup,
+delivery semantics and the single-node deployment limit.
+
+### RAGFlow knowledge base
+
+**Workspace → Knowledge base** (below Scheduled tasks) lists the RAGFlow datasets
+available to the configured `knowledge_search` tool. Administrators can create
+datasets and upload multiple files, one at a time, up to 50 MiB per file. Uploads
+start parsing automatically; the page shows parsing progress and supports retrying
+parsing without uploading the file again. A successful upload is kept even if
+the parsing request fails. Configure the dataset's embedding/parser models in
+RAGFlow before ingestion; documents become searchable after parsing succeeds.
+
+Add the RAGFlow `knowledge_search` example from `config.example.yaml` to your
+local `config.yaml`, including the `knowledge` tool group. Set its `api_key` via
+`$RAGFLOW_API_KEY` in the Gateway environment and set `base_url` to a URL reachable
+from the Gateway. For Docker Desktop with RAGFlow on host port 9380, use
+`http://host.docker.internal:9380`. The API key remains on the backend.
+
+These are **shared operator-managed datasets**, not private chat attachments.
+Knowledge-base browsing requires an interactive login and the same authorization
+as `knowledge_search`; uploads, parsing and creation additionally require an
+administrator. In per-user tool isolation mode, grant `knowledge_search` through
+Settings → Tools. The optional `datasets` allowlist applies to every read/write
+operation. When an allowlist is set, create datasets in RAGFlow and add their IDs
+to that allowlist; in-app dataset creation is disabled. This does not add writable
+tools to the Agent's toolset.
+
+The integration uses the [RAGFlow HTTP API](https://ragflow.io/docs/http_api_reference).
+RAGFlow v0.26.2 is supported, including its older dataset-list filter contract.
+
+### DDFW-Agent per-user tool isolation
+
+The opt-in `deerflow.authz.user_policy:UserAuthorizationProvider` enables exact
+per-user grants and encrypted personal MCP credentials. In **Settings → Tools**,
+administrators look up a registered user's email and authorize added tools,
+MCP servers and Skills. The fixed set of bundled tools and public Skills is
+available to every authenticated user without grants; independent sandbox
+execution is also available by default. Newly added capabilities require grants,
+even when installed in the public Skills directory.
+Users save their own credentials in **My tool credentials**. Credentials are
+never displayed after saving and cannot fall back to another user's token.
+
+Administrators can also create and rename user groups, add existing accounts by
+email, and grant tools to a whole group under **Settings → Tools → User groups**.
+Users may join multiple groups: their group grants combine with personal allows,
+and a personal **Deny** takes precedence. **Inherit** clears the personal exception
+and follows group access. The UI shows both the selected mode and effective
+permission. Administrator-role access remains controlled by the account role.
+Leaving or deleting a group removes that group's grants on the next invocation;
+other groups and direct personal grants remain. Group membership never shares
+personal credentials, files, memory or execution sandboxes.
+
+This mode supports HTTP/SSE MCP endpoints with personal header authentication;
+Gateway-hosted stdio MCP and background MCP task polling are disabled. Grant
+both an MCP server and its individual tools. Removing a grant takes effect on subsequent invocations,
+including tools assembled before the change. Already-running external actions
+cannot be undone by revocation.
+
+Skill permissions apply to discovery, activation, deferred descriptions, and
+subsequent sandbox accesses. Unauthorized packages are excluded from the
+conversation's filesystem projection. Private custom Skills remain owner-scoped:
+a grant enables the owner's use and does not publish the package to other users.
+Previously read/copied instructions and completed actions cannot be recalled.
+Historical denies for bundled capabilities are ignored; only added capabilities
+appear in permission controls. MCP tool names that collide with bundled names
+are reserved and rejected; configure a distinct server/name prefix for extensions.
+
+Use an isolated Docker sandbox provider for untrusted users; LocalSandbox's
+directory mapping is not an operating-system security boundary. Keep the
+Gateway's private `security/users.db` and `security/master.key` together in
+backups and out of user/container mounts. This private store supports a
+single-node deployment. Model-provider credentials remain administrator-managed;
+this feature does not provide personal ChatGPT OAuth sign-in.
+
+Enable the policy in the operator's `config.yaml` and restart the Gateway:
+
+```yaml
+authorization:
+  enabled: true
+  fail_closed: true
+  provider:
+    use: deerflow.authz.user_policy:UserAuthorizationProvider
+```
+
+Execution isolation is keyed by authenticated user **and conversation**, with
+subagents in that conversation sharing its sandbox. Containers start on demand;
+idle cleanup and Docker CPU/memory/process limits bound their resource use.
+The AIO warm-pool `replicas` setting is a retention target, not a hard active-user
+concurrency limit. The Docker socket belongs only to the trusted Gateway.
+
 English | [中文](./README_zh.md) | [日本語](./README_ja.md) | [Français](./README_fr.md) | [Русский](./README_ru.md)
 
 [![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](./backend/pyproject.toml)
@@ -211,6 +325,7 @@ That prompt is intended for coding agents. It tells the agent to clone the repo 
    ```
 
    - Codex CLI reads `~/.codex/auth.json`
+   - For Codex models that require reasoning (for example GPT-6 Astra), set `when_thinking_disabled: {reasoning_effort: low}` in the model profile. This keeps basic-mode and background calls at the model's minimum effort; models without that override continue to use `none` when thinking is disabled.
    - Claude Code accepts `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_CREDENTIALS_PATH`, or `~/.claude/.credentials.json`
    - ACP agent entries are separate from model providers — if you configure `acp_agents.codex`, point it at a Codex ACP adapter such as `npx -y @zed-industries/codex-acp`
    - MiniMax Code speaks ACP directly. Install and authenticate it, then add it as an ACP agent:
@@ -1639,3 +1754,68 @@ Your unwavering commitment and expertise have been the driving force behind Deer
 ## Star History
 
 [![Star History Chart](https://star-history.dera.page/svg?repos=bytedance/deer-flow&type=Date)](https://star-history.dera.page/#bytedance/deer-flow&Date)
+
+## DDFW-Agent enterprise deployment
+
+For public web browsing without repeated network confirmations, configure
+`sandbox.network.mode: public` with the local Docker AIO provider and restart the
+Gateway. This permits public HTTP/HTTPS through the sandbox proxy while keeping
+private networks, host/loopback and cloud metadata addresses blocked. User,
+tool/Skill and credential isolation remain enforced. Database access through a
+Gateway tool or MCP remains controlled by that tool's own authorization. Existing
+sandboxes are replaced under the new policy when next acquired; user files persist.
+
+Opening the deployment root (for example `http://localhost:2026/`) goes directly
+to the account login/registration page. Signed-in users continue into the
+workspace automatically; the introduction landing page is no longer shown.
+
+This checkout brands the application as **DDFW-Agent**, including login, navigation, welcome messages, and browser icons. The workspace **Settings and more** menu retains Settings; upstream website, GitHub, issue-reporting, contact, and About entries are hidden. The Settings dialog and its deep links also omit About.
+
+Enable the custom-agent module in your local root `config.yaml`:
+
+```yaml
+agents_api:
+  enabled: true
+```
+
+The Gateway reloads this setting automatically. Refresh the workspace to load the enabled Agents entry and the updated branding. Existing model profiles and user data are preserved.
+
+### Company GPT Image 2
+
+The optional native `gpt_image2` tool supports text-to-image and editing up to four
+reference images uploaded to the current conversation. Its companion `gpt-image2`
+Skill guides prompts and editing. Results appear as downloadable PNG artifacts.
+It calls the [OpenAI Images API](https://developers.openai.com/api/docs/guides/image-generation)
+using company billing; it does not require an MCP server or a personal API-key field.
+
+Enable the commented `image_generation` group and `gpt_image2` tool entry in
+`config.example.yaml` in your local `config.yaml`, and restart the Gateway. This
+integration requires the enterprise `UserAuthorizationProvider` and a POSIX
+Gateway (the Docker deployment supports it). Store the company API key in
+`${DEER_FLOW_HOME}/security/gpt_image2.key`, readable only by the Gateway account
+(mode `0600`); the default data home is `backend/.deer-flow`. Never mount this
+private security directory into an execution sandbox or put the key in a Skill.
+
+In **Settings → Tools**, grant approved users/groups both the `gpt_image2` tool
+and `public:gpt-image2` Skill. Administrators already have access; ordinary users
+start without access. These additions are intentionally outside the default
+permission exemptions. Revocation is checked again before every paid request.
+
+Try: “用 GPT Image 2 生成一张 DDFW-Agent 的宣传海报。” For edits, upload an image
+and describe the change. Each call generates one image, with square, portrait or
+landscape sizes and low/medium/high quality (medium by default). Reference files
+and results stay scoped to the conversation owner. There are at most two active
+image requests **per Gateway process**, a five-minute request timeout, and no
+automatic retries: a timed-out request may already have been billed. This limit
+is not a daily spending quota or a distributed limit across multiple workers.
+
+### User sandbox reuse
+
+Single-Gateway Docker deployments can opt into a sandbox per active user.
+Ordinary chats reuse the user's container and queue sandbox work across chats;
+files retain separate conversation directories. Explicit Agent skill allowlists
+keep their own isolated containers. Login prewarming, a hard active-plus-warm
+container limit, and idle expiry reduce cold starts without keeping every
+employee's container running forever. Dedicated small bridge subnets avoid
+exhausting Docker's default network pools. Setup, storage migration, limits and
+rollback are documented in [User sandbox pools](docs/USER_SANDBOX_POOLS.md).

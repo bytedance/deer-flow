@@ -24,6 +24,13 @@ def build_mcp_tool_interceptors(
     target_logger: logging.Logger = logger,
 ) -> list[Any]:
     """Build OAuth, user-scoped auth, context headers, then custom MCP interceptors."""
+    from deerflow.authz.user_policy import user_security_enabled
+
+    if user_security_enabled():
+        from deerflow.mcp.personal_auth import build_personal_auth_interceptor
+
+        # No later interceptor may replace the caller's identity/credential.
+        return [build_personal_auth_interceptor(extensions_config)]
     interceptors: list[Any] = []
     oauth_interceptor = oauth_builder(extensions_config)
     if oauth_interceptor is not None:

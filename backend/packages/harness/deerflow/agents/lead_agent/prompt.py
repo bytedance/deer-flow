@@ -170,7 +170,7 @@ def get_cached_enabled_skills() -> list[Skill]:
     return []
 
 
-def get_enabled_skills_for_config(app_config: AppConfig | None = None, user_id: str | None = None) -> list[Skill]:
+def _get_unfiltered_enabled_skills_for_config(app_config: AppConfig | None = None, user_id: str | None = None) -> list[Skill]:
     """Return enabled skills using the caller's config source and user scope.
 
     When a concrete ``app_config`` is supplied, cache the loaded skills by that
@@ -210,6 +210,12 @@ def get_enabled_skills_for_config(app_config: AppConfig | None = None, user_id: 
             while len(_enabled_skills_by_config_cache) > _ENABLED_SKILLS_BY_CONFIG_CACHE_MAXSIZE:
                 _enabled_skills_by_config_cache.popitem(last=False)
     return list(skills)
+
+
+def get_enabled_skills_for_config(app_config: AppConfig | None = None, user_id: str | None = None, *, runtime=None) -> list[Skill]:
+    from deerflow.security.skill_access import filter_authorized_skills
+
+    return filter_authorized_skills(_get_unfiltered_enabled_skills_for_config(app_config, user_id), user_id=user_id, app_config=app_config, runtime=runtime)
 
 
 def _skill_mutability_label(category: SkillCategory | str) -> str:
@@ -869,6 +875,7 @@ def get_skills_prompt_section(
     app_config: AppConfig | None = None,
     user_id: str | None = None,
     skill_names: frozenset[str] | None = None,
+    runtime=None,
 ) -> str:
     """Generate the skills prompt section.
 
@@ -901,8 +908,11 @@ def get_skills_prompt_section(
 
     # ── Deferred discovery path — storage not needed (caller supplies names) ─
     if skill_names is not None:
+        from deerflow.security.skill_access import skill_authorization_enabled
         from deerflow.skills.describe import get_skill_index_prompt_section
 
+        if skill_authorization_enabled(app_config):
+            skill_names = skill_names & {s.name for s in get_enabled_skills_for_config(app_config, user_id=user_id, runtime=runtime)}
         return get_skill_index_prompt_section(
             skill_names=skill_names,
             container_base_path=container_base_path,
@@ -914,10 +924,12 @@ def get_skills_prompt_section(
         storage = get_or_new_user_skill_storage(user_id, app_config=app_config)
     else:
         storage = get_or_new_skill_storage(app_config=app_config)
-    all_skills = storage.load_skills(enabled_only=False)
+    from deerflow.security.skill_access import filter_authorized_skills
+
+    all_skills = filter_authorized_skills(storage.load_skills(enabled_only=False), user_id=user_id, app_config=app_config, runtime=runtime)
     disabled_skills = [s for s in all_skills if not s.enabled]
 
-    skills = get_enabled_skills_for_config(app_config, user_id=user_id)
+    skills = get_enabled_skills_for_config(app_config, user_id=user_id, runtime=runtime)
 
     if not skills and not disabled_skills and not skill_evolution_enabled:
         return ""
@@ -1060,6 +1072,7 @@ def apply_prompt_template(
     skill_names: frozenset[str] | None = None,
     allowed_subagents: list[str] | None = None,
     subagent_execution_capacity: int | None = None,
+    runtime=None,
 ) -> str:
     # Include subagent section only if enabled (from runtime parameter)
     n = (
@@ -1124,6 +1137,7 @@ def apply_prompt_template(
         app_config=app_config,
         user_id=user_id,
         skill_names=skill_names,
+        runtime=runtime,
     )
 
     # Get deferred tools section (tool_search)

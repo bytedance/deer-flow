@@ -483,8 +483,8 @@ def build_middlewares(
         agent_name: If provided, MemoryMiddleware will use per-agent memory storage.
         custom_middlewares: Optional list of custom middlewares to inject into the chain.
         owns_agent_skill_projection: Whether this lead middleware chain owns the
-            thread's physical skill projection. Prompt-only bootstrap agents do
-            not; their narrow skill set must not replace the thread view.
+            thread's physical skill projection. Bootstrap agents own a narrow
+            projection only when enterprise skill grants require isolation.
         app_config: Explicit AppConfig; falls back to ``get_app_config()`` when omitted.
         deferred_setup: Optional deferred-MCP-tool setup that attaches
             ``DeferredToolFilterMiddleware`` when ``tool_search`` is enabled.
@@ -740,11 +740,11 @@ def _available_skill_names(agent_config, is_bootstrap: bool) -> set[str] | None:
     return None
 
 
-def _load_enabled_available_skills(available_skills: set[str] | None, *, app_config: AppConfig, user_id: str | None = None) -> list[Skill]:
+def _load_enabled_available_skills(available_skills: set[str] | None, *, app_config: AppConfig, user_id: str | None = None, runtime=None) -> list[Skill]:
     try:
         from deerflow.agents.lead_agent.prompt import get_enabled_skills_for_config
 
-        skills = get_enabled_skills_for_config(app_config, user_id=user_id)
+        skills = get_enabled_skills_for_config(app_config, user_id=user_id, runtime=runtime)
     except Exception:
         logger.exception("Failed to load enabled skills")
         raise
@@ -993,7 +993,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
             existing = list(existing)
         config["callbacks"] = [*existing, *tracing_callbacks]
 
-    enabled_skills = _load_enabled_available_skills(available_skills, app_config=resolved_app_config, user_id=resolved_user_id)
+    enabled_skills = _load_enabled_available_skills(available_skills, app_config=resolved_app_config, user_id=resolved_user_id, runtime=cfg)
 
     # Build skill search setup (deferred skill discovery).
     # Controlled by skills.deferred_discovery — independent from tool_search.enabled.
@@ -1003,6 +1003,8 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
     container_base_path = resolved_app_config.skills.container_path
 
     if is_bootstrap:
+        from deerflow.security.skill_access import skill_authorization_enabled
+
         # Special bootstrap agent with minimal prompt for initial custom agent creation flow
         # Keep the bootstrap skill set intentionally narrow so agent creation
         # remains deterministic before the custom agent's own config exists.
@@ -1041,7 +1043,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
             model_name=model_name,
             agent_name=agent_name,
             available_skills=set(_BOOTSTRAP_SKILL_NAMES),
-            owns_agent_skill_projection=False,
+            owns_agent_skill_projection=skill_authorization_enabled(resolved_app_config),
             app_config=resolved_app_config,
             deferred_setup=setup,
             mcp_routing_middleware=mcp_routing_middleware,
@@ -1058,6 +1060,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
             deferred_names=setup.deferred_names,
             user_id=resolved_user_id,
             skill_names=skill_setup.skill_names or None,
+            runtime=cfg,
             allowed_subagents=allowed_subagents,
             subagent_execution_capacity=subagent_execution_capacity,
         )
@@ -1176,6 +1179,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
         mcp_routing_hints_section=mcp_routing_hints_section,
         user_id=resolved_user_id,
         skill_names=skill_setup.skill_names or None,
+        runtime=cfg,
         allowed_subagents=allowed_subagents,
         subagent_execution_capacity=subagent_execution_capacity,
     )

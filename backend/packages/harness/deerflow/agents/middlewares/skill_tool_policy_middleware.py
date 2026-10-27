@@ -100,13 +100,15 @@ class SkillToolPolicyMiddleware(AgentMiddleware[AgentState]):
             return _POLICY_SOURCE_SKILL_CONTEXT, tuple(paths)
         return _POLICY_SOURCE_PASSIVE, ()
 
-    def _active_skills_for_paths(self, paths: tuple[str, ...]) -> tuple[list[Skill], bool]:
+    def _active_skills_for_paths(self, paths: tuple[str, ...], runtime=None) -> tuple[list[Skill], bool]:
         if not paths:
             return [], False
 
         try:
             storage = self._storage()
-            skills = storage.load_skills(enabled_only=False)
+            from deerflow.security.skill_access import filter_authorized_skills
+
+            skills = filter_authorized_skills(storage.load_skills(enabled_only=False), user_id=self._user_id, app_config=self._app_config, runtime=runtime)
             container_root = storage.get_container_root()
         except Exception:
             logger.exception("Failed to load active skills for allowed-tools policy")
@@ -137,8 +139,8 @@ class SkillToolPolicyMiddleware(AgentMiddleware[AgentState]):
             return [], True
         return active, False
 
-    def _allowed_names_for_paths(self, paths: tuple[str, ...]) -> set[str] | None:
-        active_skills, policy_failed = self._active_skills_for_paths(paths)
+    def _allowed_names_for_paths(self, paths: tuple[str, ...], runtime=None) -> set[str] | None:
+        active_skills, policy_failed = self._active_skills_for_paths(paths, runtime=runtime)
         if policy_failed:
             return set(ALWAYS_AVAILABLE_BUILTIN_TOOL_NAMES)
         allowed = allowed_tool_names_for_skills(active_skills)
@@ -195,11 +197,16 @@ class SkillToolPolicyMiddleware(AgentMiddleware[AgentState]):
     ) -> set[str] | None:
         resolved_policy = self._active_policy(request) if policy is None else policy
         _, paths = resolved_policy
+        from deerflow.security.skill_access import skill_authorization_enabled
+
+        if paths and skill_authorization_enabled(self._app_config):
+            # A model-step decision cannot outlive a revoked user/group grant.
+            return self._allowed_names_for_paths(paths, runtime=request.runtime)
         context = self._runtime_context(request)
         decision = self._read_policy_decision(context, resolved_policy)
         if decision is not _MISSING_POLICY_DECISION:
             return decision
-        return self._allowed_names_for_paths(paths)
+        return self._allowed_names_for_paths(paths, runtime=request.runtime)
 
     def _filter_model_request(
         self,
@@ -210,7 +217,7 @@ class SkillToolPolicyMiddleware(AgentMiddleware[AgentState]):
     ) -> ModelRequest:
         resolved_policy = self._active_policy(request) if policy is None else policy
         _, paths = resolved_policy
-        allowed = self._allowed_names_for_paths(paths) if refresh_decision else self._allowed_names(request, policy=resolved_policy)
+        allowed = self._allowed_names_for_paths(paths, runtime=request.runtime) if refresh_decision else self._allowed_names(request, policy=resolved_policy)
         if refresh_decision:
             self._store_policy_decision(request, resolved_policy, allowed)
         if allowed is None:

@@ -78,7 +78,9 @@ def build_describe_skill_tool(
           - "chart visualization" -- keyword search, best matches (up to 5)
           - "+podcast gen" -- require "podcast" in the name, rank by remaining terms (up to 5)
         """
-        matched = catalog.search(name)
+        from deerflow.security.skill_access import filter_authorized_skills
+
+        matched = filter_authorized_skills(catalog.search(name))
         if not matched:
             content = f"No skills matched: {name}"
         else:

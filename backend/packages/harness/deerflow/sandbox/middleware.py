@@ -84,7 +84,7 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         self._available_skills = set(available_skills) if available_skills is not None else None
         self._owns_agent_skill_projection = owns_agent_skill_projection
 
-    def _prepare_agent_skill_projection(self, thread_id: str, *, user_id: str):
+    def _prepare_agent_skill_projection(self, thread_id: str, *, user_id: str, runtime=None):
         """Build the run's physical skill view before any sandbox is reused."""
         if not self._owns_agent_skill_projection:
             # Subagents inherit the lead's thread id and sandbox state. Their
@@ -94,16 +94,19 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
             return None
 
         from deerflow.config.paths import get_paths
+        from deerflow.security.skill_access import skill_authorization_enabled
+
+        requires_authorization = skill_authorization_enabled()
 
         # Preserve the zero-copy shared view for ordinary threads. A thread
         # that previously used a restricted Agent keeps its stable mount root;
         # an unrestricted run repopulates that root with all enabled skills.
-        if self._available_skills is None and not get_paths().thread_skills_view_dir(thread_id, user_id=user_id).exists():
+        if not requires_authorization and self._available_skills is None and not get_paths().thread_skills_view_dir(thread_id, user_id=user_id).exists():
             return None
 
         provider = get_sandbox_provider()
         if not provider.supports_agent_skill_isolation:
-            if self._available_skills is not None:
+            if requires_authorization or self._available_skills is not None:
                 raise SandboxRuntimeError(f"Sandbox provider {provider.__class__.__name__} cannot enforce per-Agent skill filesystem isolation")
             # The thread projection may have been created under a different
             # provider. An unrestricted run does not need that policy view and
@@ -116,7 +119,7 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
 
         app_config = get_app_config()
         storage = get_or_new_user_skill_storage(user_id, app_config=app_config)
-        return ensure_thread_skill_projection(storage, thread_id, self._available_skills)
+        return ensure_thread_skill_projection(storage, thread_id, self._available_skills, runtime=runtime)
 
     @staticmethod
     def _require_projection_support(provider, projection) -> None:
@@ -230,7 +233,7 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
             return super().before_agent(state, runtime)
         self._apply_network_policy_response(state, runtime)
         user_id = resolve_runtime_user_id(runtime)
-        projection = self._prepare_agent_skill_projection(thread_id, user_id=user_id)
+        projection = self._prepare_agent_skill_projection(thread_id, user_id=user_id, runtime=runtime)
         owner_id = ensure_sandbox_lease_owner(runtime.context)
 
         # Preserve lazy initialization for threads that use the shared view.
@@ -354,6 +357,7 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
             self._prepare_agent_skill_projection,
             thread_id,
             user_id=user_id,
+            runtime=runtime,
         )
         owner_id = ensure_sandbox_lease_owner(runtime.context)
 

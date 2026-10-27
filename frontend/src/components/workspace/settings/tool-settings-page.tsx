@@ -37,6 +37,7 @@ import type { MCPServerConfig } from "@/core/mcp/types";
 import { env } from "@/env";
 
 import { SettingsSection } from "./settings-section";
+import { UserToolSecurityPanel } from "./user-tool-security";
 
 export function ToolSettingsPage() {
   const { t } = useI18n();
@@ -59,6 +60,7 @@ export function ToolSettingsPage() {
       ) : (
         config && <MCPServerList servers={config.mcp_servers} />
       )}
+      <UserToolSecurityPanel />
     </SettingsSection>
   );
 }

@@ -24,6 +24,7 @@ from deerflow.config.extensions_config import (
     reload_extensions_config,
 )
 from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.security.skill_access import filter_authorized_skills
 from deerflow.skills import Skill
 from deerflow.skills.installer import SkillAlreadyExistsError, SkillSecurityScanError
 from deerflow.skills.security_scanner import scan_skill_content
@@ -178,6 +179,10 @@ def _get_user_skill_storage(config: AppConfig) -> SkillStorage:
     return get_or_new_user_skill_storage(get_effective_user_id(), app_config=config)
 
 
+def _load_authorized_skills(config: AppConfig) -> list[Skill]:
+    return filter_authorized_skills(_get_user_skill_storage(config).load_skills(enabled_only=False), app_config=config)
+
+
 def _copy_uploaded_skill_archive(source: BinaryIO) -> Path:
     """Copy an uploaded archive to a bounded temporary file off the event loop."""
     destination: Path | None = None
@@ -273,7 +278,7 @@ async def _install_skill_archive(archive_path: Path, config: AppConfig) -> Skill
 async def list_skills(config: AppConfig = Depends(get_config)) -> SkillsListResponse:
     try:
         # Use user-scoped storage: loads public (global) + custom (user-level + fallback)
-        skills = _get_user_skill_storage(config).load_skills(enabled_only=False)
+        skills = await asyncio.to_thread(_load_authorized_skills, config)
         return SkillsListResponse(skills=[_skill_to_response(skill) for skill in skills])
     except Exception as e:
         logger.error(f"Failed to load skills: {e}", exc_info=True)
@@ -381,7 +386,7 @@ async def list_custom_skills(config: AppConfig = Depends(get_config)) -> SkillsL
     skills including legacy ones.
     """
     try:
-        skills = [skill for skill in _get_user_skill_storage(config).load_skills(enabled_only=False) if skill.category == SkillCategory.CUSTOM]
+        skills = [skill for skill in await asyncio.to_thread(_load_authorized_skills, config) if skill.category == SkillCategory.CUSTOM]
         return SkillsListResponse(skills=[_skill_to_response(skill) for skill in skills])
     except Exception as e:
         logger.error("Failed to list custom skills: %s", e, exc_info=True)
@@ -564,7 +569,7 @@ async def rollback_custom_skill(skill_name: str, body: SkillRollbackRequest, req
 async def get_skill(skill_name: str, config: AppConfig = Depends(get_config)) -> SkillResponse:
     try:
         skill_name = skill_name.replace("\r\n", "").replace("\n", "")
-        skills = _get_user_skill_storage(config).load_skills(enabled_only=False)
+        skills = await asyncio.to_thread(_load_authorized_skills, config)
         skill = next((s for s in skills if s.name == skill_name), None)
 
         if skill is None:

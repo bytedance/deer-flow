@@ -2,6 +2,25 @@
 
 ## Project Overview
 
+Enterprise outbound messaging and scheduling: see
+[enterprise/AGENTS.md](packages/harness/deerflow/integrations/enterprise/AGENTS.md).
+Providers: WeCom group webhooks, read-only AliMail IMAP (`enterprise_mail`) and
+separately granted AliMail drafts/SMTP (`enterprise_mail_compose`). AI creates
+drafts; only an authenticated interactive session can confirm submission.
+
+Enterprise image integration: `packages/harness/deerflow/community/gpt_image2/`
+implements the optional native `gpt_image2` tool with the managed
+`skills/public/gpt-image2` Skill. It requires the enterprise authorization provider,
+checks live tool grants before reading the Gateway-private
+`${DEER_FLOW_HOME}/security/gpt_image2.key`, and never injects that company secret
+into model context or sandbox mounts. `service.py` owns async API orchestration;
+`files.py` uses POSIX directory descriptors and no-follow opens for thread-owned
+reference/output files. All policy, config, credential, Pillow and filesystem I/O
+runs in worker threads. Limits: one PNG per request, four references (20 MiB each,
+40 MiB combined), two in-flight requests per process, 300-second HTTP deadline,
+32 MiB response cap, no automatic retries. This is not a global billing quota.
+Tests: `tests/test_gpt_image2.py` and `tests/blocking_io/test_gpt_image2_runtime.py`.
+
 DeerFlow is a LangGraph-based AI super agent system with a full-stack architecture. The backend provides a "super agent" with sandbox execution, persistent memory, subagent delegation, and extensible tool integration - all operating in per-thread isolated environments.
 
 **Architecture**:
@@ -256,6 +275,11 @@ Direct pytest collection or execution of `tests/test_client_live.py` remains
 skipped unless `DEER_FLOW_RUN_LIVE_TESTS=1` is set. Do not add that opt-in to
 default CI workflows.
 
+`tests/test_count_file_lines.py` covers the `count_file_lines` tool's line-count
+boundaries, missing-file propagation, reader-call arguments, and model-visible
+parameter schema. It mocks file reading and runs offline; it does not establish
+real sandbox access, runtime injection, or cross-user isolation.
+
 Jina request-failure logging tests set a dummy API key so the separate once-per-process
 missing-key warning cannot make assertions depend on test order or shard placement.
 Missing-key behavior has its own tests in `tests/test_jina_client.py`.
@@ -307,6 +331,76 @@ The frontend uses environment variables to connect to backend services:
 When using `make dev` from root, the frontend automatically connects through nginx.
 
 ## Key Features
+
+### Per-user tool security
+
+Account nicknames use the same Gateway-private `security/users.db` in a
+`user_profiles` table keyed by authenticated user ID, independent of tool grants.
+This follows the existing single-node private-store schema initialization, not
+the application ORM/Alembic schema. `/api/v1/auth/profile` is session-only and
+offloads validated read/write operations. `DynamicContextMiddleware` reads the
+current nickname in a worker for each model request, so existing chats see edits
+without persisting stale profile messages or changing static prompt caches.
+Tests: `test_user_nickname.py` and `blocking_io/test_user_nickname.py`.
+
+`deerflow.authz.user_policy:UserAuthorizationProvider` provides opt-in exact
+per-user grants through the existing assembly filter and execution guardrail.
+The fixed baseline in `security/defaults.py` is open to authenticated users;
+new tools/MCP/Skills require exact grants. MCP bound names may not collide with
+`DEFAULT_TOOL_TARGETS`: discovery/catalog filtering and the final personal-auth
+interceptor enforce this, including prefix combinations and older wrappers.
+Never derive default exemptions from
+live discovery or directory placement. Historical baseline denies do not block
+default capabilities. Administrators retain role access but must supply their
+own personal MCP credential. The
+Gateway's session-only `/api/user-security` router owns self-service credentials
+and administrator grant mutations. Personal identity always comes from auth,
+never request JSON. All store/discovery work runs outside the event loop.
+
+`deerflow.security.store.UserSecurityStore` stores grants, audit records and
+Fernet ciphertext under `{DEER_FLOW_HOME}/security/`; `master.key` must be backed
+up with `users.db` and must never be mounted into an execution sandbox. Ciphertext
+binds both user and server. A missing key with stored credentials fails closed.
+This store is for a single-node deployment, not a distributed database backend.
+
+Validation failures on `/api/user-security` use a private APIRoute wrapper: never
+return FastAPI's raw validation inputs, which can contain submitted secrets.
+The execution sandbox must use a container provider in this mode. AIO isolation
+is user + thread scoped, with Docker socket access restricted to the Gateway.
+Its `replicas` is a soft warm-capacity target; multiworker deployments must use
+Redis ownership rather than the local memory ownership configuration.
+
+In this mode MCP supports HTTP/SSE personal authentication only. The final
+transport interceptor rereads config/grants/credentials on each call and refuses
+shared credential fallback, embedded URL credentials, Gateway stdio execution,
+and background MCP task polling. The admin catalog uses actual bound tool names.
+Tests: `test_user_security.py`, `test_user_security_router.py`,
+`test_personal_mcp_auth.py`.
+
+`security/groups.py` extends the same private store with stable-ID groups,
+memberships, exact group grants and personal denies. `store.grants(user_id)`
+returns `(direct UNION group grants) EXCEPT personal denies` in one SQL query,
+so assembly, execution guardrails, sandbox checks and MCP credentials all use
+the same fresh permissions. `grant_details` reads sources and effective grants
+in one transaction. Group mutation transactions audit actor/target and enforce
+foreign-key cascades; deletion affects memberships/grants only. Existing
+credential ciphertext/keys and direct grants survive the additive schema change.
+Groups do not determine account roles or credential/sandbox ownership.
+`/api/user-security/groups` and `/overrides` are session-only and admin-only.
+Override modes are inherit/allow/deny; legacy grant removal only removes direct
+access and can leave inherited access intact. Tests: `test_user_groups.py` plus
+the router and MCP regressions above.
+
+Skill targets are `category:package-path`; private custom targets additionally
+include their owner (`custom:user-id:package-path`). `security/skill_access.py`
+filters fresh grants after metadata cache lookup and before prompt, activation,
+description and durable-context reuse. API discovery is filtered separately from
+canonical storage, keeping administrator management possible. Thread projections
+include authorized targets in their signature and refresh before sandbox tools,
+preserving the lead Agent allowlist for shared subagent execution. Grants never
+publish another user's custom package. Target-user permission lookup includes
+that user's extension catalog so administrators can authorize private Skills.
+Tests: `test_skill_user_authorization.py` and the user-security/router suites.
 
 ### Web Search Recency
 

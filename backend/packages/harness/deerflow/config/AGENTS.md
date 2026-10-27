@@ -1,5 +1,15 @@
 ### Configuration System
 
+Sandbox schema v41 adds optional `sandbox.network.address_pool` (a canonical
+RFC1918 IPv4 CIDR), `subnet_prefix` (24..29, default 28), and
+`sandbox.prewarm_on_login`. The pool is operator-planned against LAN/VPN routes;
+Docker atomically rejects allocation overlaps, which the allocator retries on
+a different subnet. IPAM settings participate in the restricted policy digest.
+User-pool selection, capacity and prewarm settings require a Gateway restart.
+Its active+warm cap is hard; the original AIO provider keeps its existing
+capacity semantics. See `docs/USER_SANDBOX_POOLS.md` for the required offline
+storage migration and single-Gateway boundary.
+
 **Main Configuration** (`config.yaml`):
 
 Setup: Copy `config.example.yaml` to `config.yaml` in the **project root** directory.

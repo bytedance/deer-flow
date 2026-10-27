@@ -1,0 +1,151 @@
+// Kept with this optional feature to avoid adding its copy to the chat bundle.
+export const knowledgeMessages = {
+  "zh-CN": {
+    title: "知识库",
+    description: "将资料存入 RAGFlow，解析完成后即可在对话中检索。",
+    choose: "选择知识库",
+    create: "新建知识库",
+    name: "知识库名称",
+    namePlaceholder: "例如：产品资料",
+    cancel: "取消",
+    save: "创建",
+    refresh: "刷新",
+    connected: "已连接 RAGFlow",
+    shared: "这里的资料为共享知识，已获授权的用户可以检索。",
+    readonly: "你有查看权限。上传文件和新建知识库请联系管理员。",
+    emptyTitle: "还没有可用的知识库",
+    empty: "新建一个知识库，然后上传需要检索的资料。",
+    emptyReadonly: "请管理员在 RAGFlow 中配置可访问的知识库。",
+    upload: "上传文件",
+    uploadHint: "拖放文件到这里，或点击选择文件",
+    uploadLimit:
+      "支持 PDF、Word、Excel、TXT 等文档，每个文件最大 50 MiB。上传后自动开始解析。",
+    uploading: "正在上传，请勿关闭页面…",
+    uploaded: "已上传，正在解析",
+    parsePending: "已上传，解析未启动。请在文件列表中点击“开始解析”。",
+    uploadFailed: "上传失败",
+    remove: "移除",
+    retry: "重试",
+    clear: "清除记录",
+    documents: "文件",
+    filename: "文件名",
+    size: "大小",
+    statusLabel: "状态",
+    chunks: "分段",
+    actions: "操作",
+    parse: "开始解析",
+    retryParse: "重新解析",
+    parsingStarted: "已提交解析",
+    noDocuments: "上传第一份资料",
+    noDocumentsHint:
+      "文件及解析进度会显示在这里。解析完成后可在对话中要求检索知识库。",
+    previous: "上一页",
+    next: "下一页",
+    page: "页",
+    total: "个文件",
+    loading: "正在加载知识库…",
+    failedHint: "请检查 RAGFlow 的解析和嵌入模型配置后重试。",
+    statuses: {
+      pending: "待解析",
+      parsing: "解析中",
+      cancelled: "已停止",
+      ready: "可检索",
+      failed: "解析失败",
+      unknown: "未知状态",
+    },
+    errors: {
+      ragflow_not_configured:
+        "尚未连接 RAGFlow。请管理员配置后端的 RAGFlow 地址和 API Key 后刷新。",
+      ragflow_unavailable:
+        "暂时无法完成 RAGFlow 请求。请检查服务、API Key 和模型配置，然后重试。",
+      knowledge_access_denied:
+        "你尚未获得知识库访问权限，请联系管理员开启 knowledge_search 权限。",
+      knowledge_admin_required: "只有管理员可以修改共享知识库。",
+      dataset_not_found: "知识库已不存在或不在授权范围内，请刷新列表。",
+      document_not_found: "文件已不存在，请刷新列表。",
+      upload_too_large: "文件超过上传大小限制。",
+      invalid_upload: "请选择有效的非空文件。",
+      dataset_creation_disabled: "当前仅允许使用指定的知识库，请联系管理员。",
+      request_failed: "请求失败，请检查连接后重试。",
+    },
+  },
+  "en-US": {
+    title: "Knowledge base",
+    description:
+      "Store documents in RAGFlow and search them in chats once parsing finishes.",
+    choose: "Select a knowledge base",
+    create: "New knowledge base",
+    name: "Knowledge base name",
+    namePlaceholder: "e.g. Product documents",
+    cancel: "Cancel",
+    save: "Create",
+    refresh: "Refresh",
+    connected: "Connected to RAGFlow",
+    shared:
+      "These documents are shared with users authorized to search this knowledge base.",
+    readonly:
+      "You have read access. Contact an administrator to upload documents or create a knowledge base.",
+    emptyTitle: "No knowledge bases available",
+    empty:
+      "Create a knowledge base, then upload the documents you want to search.",
+    emptyReadonly:
+      "Ask an administrator to configure an accessible RAGFlow knowledge base.",
+    upload: "Upload files",
+    uploadHint: "Drop files here or click to choose",
+    uploadLimit:
+      "PDF, Word, Excel, TXT and other documents, up to 50 MiB each. Parsing starts after upload.",
+    uploading: "Uploading. Keep this page open…",
+    uploaded: "Uploaded; parsing requested",
+    parsePending:
+      "Uploaded, but parsing did not start. Use Start parsing in the file list.",
+    uploadFailed: "Upload failed",
+    remove: "Remove",
+    retry: "Retry",
+    clear: "Clear results",
+    documents: "Files",
+    filename: "File name",
+    size: "Size",
+    statusLabel: "Status",
+    chunks: "Chunks",
+    actions: "Actions",
+    parse: "Start parsing",
+    retryParse: "Retry parsing",
+    parsingStarted: "Parsing requested",
+    noDocuments: "Upload your first document",
+    noDocumentsHint:
+      "Files and parsing progress appear here. Once ready, ask to search the knowledge base in a chat.",
+    previous: "Previous",
+    next: "Next",
+    page: "Page",
+    total: "files",
+    loading: "Loading knowledge base…",
+    failedHint:
+      "Check the parser and embedding model configuration in RAGFlow, then retry.",
+    statuses: {
+      pending: "Pending",
+      parsing: "Parsing",
+      cancelled: "Stopped",
+      ready: "Searchable",
+      failed: "Parsing failed",
+      unknown: "Unknown",
+    },
+    errors: {
+      ragflow_not_configured:
+        "RAGFlow is not connected. Ask an administrator to configure its backend URL and API key, then refresh.",
+      ragflow_unavailable:
+        "RAGFlow could not complete this request. Check the service, API key and model configuration, then retry.",
+      knowledge_access_denied:
+        "Ask an administrator to grant knowledge_search access.",
+      knowledge_admin_required:
+        "Only administrators can change the shared knowledge base.",
+      dataset_not_found:
+        "This knowledge base is missing or outside the allowed scope. Refresh the list.",
+      document_not_found: "This file no longer exists. Refresh the list.",
+      upload_too_large: "This file exceeds the upload limit.",
+      invalid_upload: "Choose a valid, non-empty file.",
+      dataset_creation_disabled:
+        "Only specified knowledge bases are allowed. Contact an administrator.",
+      request_failed: "Request failed. Check your connection and retry.",
+    },
+  },
+};

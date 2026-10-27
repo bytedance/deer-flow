@@ -20,6 +20,9 @@ class SandboxProvider(ABC):
     # provider's current Agent-accessible tool surface. Host-backed providers
     # must return False whenever shell access can bypass managed path mappings.
     supports_agent_skill_isolation: bool = False
+    # True only when acquire_async drains its worker and rolls back any result
+    # before propagating cancellation. The lease manager may then cancel waits.
+    cancellation_safe_acquire: bool = False
 
     @abstractmethod
     def acquire(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:

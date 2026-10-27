@@ -932,6 +932,28 @@ def test_codex_provider_disables_reasoning_when_thinking_disabled(monkeypatch):
     assert FakeChatModel.captured_kwargs.get("reasoning_effort") == "none"
 
 
+@pytest.mark.parametrize("runtime_effort", [None, "high"])
+def test_codex_provider_honors_configured_effort_when_thinking_disabled(monkeypatch, runtime_effort):
+    """Reasoning-only models must keep their configured minimum even in basic mode."""
+    cfg = _make_app_config(
+        [
+            _make_model(
+                "codex",
+                use="deerflow.models.openai_codex_provider:CodexChatModel",
+                supports_thinking=True,
+                supports_reasoning_effort=True,
+                when_thinking_disabled={"reasoning_effort": "low"},
+            )
+        ]
+    )
+    _patch_factory(monkeypatch, cfg, model_class=FakeCodexChatModel)
+    monkeypatch.setattr(codex_provider_module, "CodexChatModel", FakeCodexChatModel)
+
+    factory_module.create_chat_model(name="codex", thinking_enabled=False, reasoning_effort=runtime_effort)
+
+    assert FakeChatModel.captured_kwargs.get("reasoning_effort") == "low"
+
+
 def test_codex_provider_preserves_explicit_reasoning_effort(monkeypatch):
     cfg = _make_app_config(
         [

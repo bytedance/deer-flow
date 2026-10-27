@@ -1,5 +1,45 @@
 ### Sandbox System (`packages/harness/deerflow/sandbox/`)
 
+**User AIO pools:** the opt-in
+`deerflow.community.aio_sandbox.user_pool:UserAioSandboxProvider` supports one
+Gateway process and local Docker. A held process file lease rejects a second
+pool owner. User admission serializes different threads until the final
+execution lease releases the view; views use separate shell scope IDs. Ordinary
+threads share a deterministic user container with data-only per-user mounts;
+explicit `allowed_skills` projections fall back to thread containers. Never
+mount the whole user/thread metadata tree. `/mnt/user-data` and the read-only
+ACP view switch only under user admission, through trusted Docker argv setup.
+Task subprocesses receive `DEERFLOW_SANDBOX_TASK`; release closes managed shell
+sessions and the user terminal server, and recycles containers with remaining
+tagged processes. This is a user trust boundary, not an adversarial boundary
+between conversations; hostile execution belongs in thread mode.
+
+`replicas` is a hard active+warm cap in this provider; provisioning is serialized
+and capacity waits use a dedicated bounded executor. `cancellation_safe_acquire`
+allows the execution-lease manager to interrupt admission while the provider
+drains/rolls back its worker before propagating cancellation. Other providers
+retain the existing shield-and-reconcile contract. Idle cleanup protects leased
+views and reaps only this prefix's aged networks without any container reference,
+including stopped containers. Do not use global Docker network prune.
+
+The offline `user_storage.migrate_user_data` migration moves only user-data and
+ACP directories; `.user-sandbox-data-v1` selects the persistent layout in `Paths`.
+The Gateway must be stopped during migration. Missing source/present destination
+is restartable; conflicting source+destination fails without overwriting.
+The marker persists when reverting to thread mode. Tests: `test_user_sandbox_*`,
+`test_sandbox_subnet_pool.py`, existing lease/provider/mount suites.
+
+**Public web egress:** local Docker AIO `sandbox.network.mode: public` automatically
+allows HTTP port 80 and HTTPS CONNECT port 443 through the existing policy proxy.
+It retains the internal-only sandbox network, TLS SNI validation, IP-literal
+rejection and validation of every resolved address (including IPv6). Private,
+loopback, link-local, multicast and metadata targets remain blocked. Public mode
+does not record approval events or consult temporary grants; `approval` and
+`allow_domains` only affect allowlist mode. The default remains `open` for upstream
+compatibility; open has different semantics and does not retain these boundaries.
+Mode/source changes alter the policy digest and trigger provider-owned sandbox
+replacement on reuse. Workspace/uploads/outputs remain on their existing mounts.
+
 **Interface**: Abstract `Sandbox` exposes `execute_command(command, env=None)`, additive `execute_command_in_scope(..., scope_id=...)` / `release_command_scope(scope_id)` hooks, `read_file`, `write_file`, `list_dir`, `glob`, and `grep`. Providers without server-side shell sessions use pass-through scoped hooks, preserving third-party subclasses. `grep` accepts one text file or a directory tree. Optional `env` injects per-call variables (request-scoped secrets — see Request-Scoped Secrets below); `LocalSandbox` merges them into the host subprocess environment and `AioSandbox` uses a fresh `bash.exec(env=...)` session.
 **Provider Pattern**: `SandboxProvider` has an `acquire`, `acquire_async`, `get`, `release` lifecycle. Async agent/tool paths use async lifecycle hooks so Docker creation, discovery, cross-process locking, readiness polling, and release stay off the event loop. Providers that enforce a lead Agent's explicit skill policy across its tool surface set `supports_agent_skill_isolation=True`; bind-mount providers observe prepared thread roots, while upload providers implement `sync_agent_skills`. Host-backed providers report false whenever an enabled shell can bypass path mappings. The middleware fails closed before acquiring from an unsupported provider under an explicit policy.
 **Shared components** (RFC #4741): remote providers derive deterministic IDs with `derive_sandbox_scope_token` (`sandbox/identity.py`; its keyword-only SHA-256/16-hex contract must not change or existing containers become orphaned), and serialize selected acquire/release transitions with `AcquireSerializer` (`sandbox/acquire_serialization.py`): a refcounted per-key `threading.Lock` table with bounded growth, a bounded dedicated executor so async waits never touch the event loop or default executor, worker-owned cancellation cleanup independent of a cancelled event-loop task resuming, and idempotent `close()` from provider `shutdown()`/`reset()`. AIO keys by `(user_id, thread_id)`; E2B by `(user_id, thread_id, skills_root)`; BoxLite/Tenki/OpenSandbox by the derived id. `thread_id=None` acquires (random UUIDs) bypass the serializer.
@@ -86,6 +126,8 @@
 
 
 **Shared warm-pool lifecycle:** community sandbox providers that keep released sandboxes alive for fast reuse share `deerflow.community.warm_pool_lifecycle.WarmPoolLifecycleMixin`. The mixin owns the common `DEFAULT_IDLE_TIMEOUT=600`, `IDLE_CHECK_INTERVAL=60`, `DEFAULT_REPLICAS=3`, idle-checker loop, warm-pool expiry, oldest-warm eviction, replica counting, and soft-cap logging. Providers remain responsible for their own active registries, creation/discovery, health checks, and destroy hook (`_destroy_warm_entry`): AIO destroys `SandboxInfo` through its backend; Boxlite closes loop-affine `BoxliteBox` handles; Tenki closes the microVM session (`TenkiSandbox.close`, which terminates the remote sandbox). AIO keeps active-idle cleanup outside the mixin and delegates only warm-pool expiry to the shared helper.
+
+**Skill grants**: With `UserAuthorizationProvider`, the lead prepares an explicit authorized thread skill view even without an Agent allowlist. Sandbox tools refresh effective user/group grants before reuse or acquisition and synchronize provider files. The projection manifest retains the lead allowlist for shared subagent use; an absent/invalid manifest or unsupported isolation provider fails closed. This filters canonical `/mnt/skills` exposure; storage catalogs and source packages remain unchanged.
 
 **Virtual Path System**:
 - Agent sees: `/mnt/user-data/{workspace,uploads,outputs}`, `/mnt/skills`

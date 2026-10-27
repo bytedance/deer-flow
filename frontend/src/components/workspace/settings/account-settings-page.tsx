@@ -10,6 +10,7 @@ import { useAuth } from "@/core/auth/AuthProvider";
 import { parseAuthError } from "@/core/auth/types";
 import { useI18n } from "@/core/i18n/hooks";
 
+import { AccountNicknameSettings } from "./account-nickname-settings";
 import { SettingsSection } from "./settings-section";
 
 export function AccountSettingsPage() {
@@ -96,6 +97,7 @@ export function AccountSettingsPage() {
             )}
           </div>
         </div>
+        {user && <AccountNicknameSettings key={user.id} userId={user.id} />}
       </SettingsSection>
 
       {!isSsoUser ? (

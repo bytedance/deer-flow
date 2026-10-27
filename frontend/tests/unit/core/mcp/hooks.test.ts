@@ -119,6 +119,9 @@ describe("MCP server state mutation", () => {
     expect(invalidateQueries).toHaveBeenCalledWith({
       queryKey: ["mcpConfig"],
     });
+    expect(invalidateQueries).toHaveBeenCalledWith({
+      queryKey: ["user-tool-security"],
+    });
     expect(mockedToastError).not.toHaveBeenCalled();
   });
 
@@ -209,6 +212,9 @@ describe("MCP server CRUD mutation", () => {
       }
       expect(invalidateQueries).toHaveBeenCalledWith({
         queryKey: ["mcpConfig"],
+      });
+      expect(invalidateQueries).toHaveBeenCalledWith({
+        queryKey: ["user-tool-security"],
       });
       expect(mockedToastError).not.toHaveBeenCalled();
     },

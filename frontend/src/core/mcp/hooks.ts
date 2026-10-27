@@ -35,7 +35,11 @@ export function getEnableMCPServerMutationOptions(queryClient: QueryClient) {
   return {
     mutationFn: ({ serverName, enabled }: EnableMCPServerVariables) =>
       updateMCPServerState(serverName, enabled),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["mcpConfig"] }),
+    onSuccess: () =>
+      Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["mcpConfig"] }),
+        queryClient.invalidateQueries({ queryKey: ["user-tool-security"] }),
+      ]).then(() => undefined),
     onError: (error: Error) => {
       toast.error(error.message);
     },
@@ -74,7 +78,11 @@ export function getMCPServerMutationOptions(queryClient: QueryClient) {
           return deleteMCPServer(variables.serverName);
       }
     },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["mcpConfig"] }),
+    onSuccess: () =>
+      Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["mcpConfig"] }),
+        queryClient.invalidateQueries({ queryKey: ["user-tool-security"] }),
+      ]).then(() => undefined),
     onError: (error: Error) => {
       toast.error(error.message);
     },

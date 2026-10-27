@@ -16,9 +16,6 @@ import { SidebarTrigger } from "@/components/ui/sidebar";
 import { useI18n } from "@/core/i18n/hooks";
 import { cn } from "@/lib/utils";
 
-import { GithubIcon } from "./github-icon";
-import { Tooltip } from "./tooltip";
-
 export function WorkspaceContainer({
   className,
   children,
@@ -92,18 +89,6 @@ export function WorkspaceHeader({
           </BreadcrumbList>
         </Breadcrumb>
       </div>
-      <div className="pr-4">
-        <Tooltip content={t.workspace.githubTooltip}>
-          <a
-            href="https://github.com/bytedance/deer-flow"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="opacity-75 transition hover:opacity-100"
-          >
-            <GithubIcon className="size-6" />
-          </a>
-        </Tooltip>
-      </div>
     </header>
   );
 }
@@ -133,5 +118,7 @@ function nameOfSegment(
   if (!segment) return t.common.home;
   if (segment === "workspace") return t.breadcrumb.workspace;
   if (segment === "chats") return t.breadcrumb.chats;
+  if (segment === "knowledge-base") return t.sidebar.knowledgeBase;
+  if (segment === "enterprise") return t.sidebar.enterprise;
   return segment[0]?.toUpperCase() + segment.slice(1);
 }

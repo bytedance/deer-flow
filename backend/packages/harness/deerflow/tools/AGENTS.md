@@ -1,5 +1,12 @@
 ### Tool System (`packages/harness/deerflow/tools/`)
 
+Optional enterprise `gpt_image2` is a config-defined async community tool, registered
+as `deerflow.community.gpt_image2.tools:gpt_image2_tool`. It returns a `Command`
+adding the owner-scoped PNG to `artifacts` and a matching `ToolMessage`, so callers
+do not need a second `present_files` call. Both `tool:gpt_image2` and its companion
+`skill:public:gpt-image2` remain managed additions, outside `security/defaults.py`.
+The tool performs a fresh permission check even when already bound to an agent.
+
 `get_available_tools(groups, include_mcp, model_name, subagent_enabled)` assembles:
 1. **Config-defined tools** - Resolved from `config.yaml` via `resolve_variable()`
 2. **MCP tools** - From enabled MCP servers (lazy initialized, cached with resolved-path + content-signature invalidation)

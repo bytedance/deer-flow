@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -31,7 +32,7 @@ class RAGFlowProtocolError(RAGFlowError):
 
 
 class RAGFlowClient:
-    """Direct HTTP client for DeerFlow's read-only retrieval tools.
+    """Direct HTTP client for retrieval tools and Gateway knowledge management.
 
     The client deliberately owns no cache or persistent state. A fresh HTTP
     session is opened for each method call so callers do not need to manage a
@@ -64,6 +65,7 @@ class RAGFlowClient:
         *,
         params: dict[str, object] | list[tuple[str, str]] | None = None,
         json: dict[str, Any] | None = None,
+        files: dict[str, tuple[str, bytes, str]] | None = None,
     ) -> dict[str, Any]:
         request_headers = {
             "Authorization": f"Bearer {self._api_key}",
@@ -79,7 +81,7 @@ class RAGFlowClient:
 
         try:
             async with httpx.AsyncClient(**client_kwargs) as client:
-                response = await client.request(method, path, params=params, json=json)
+                response = await client.request(method, path, params=params, json=json, files=files)
         except httpx.TimeoutException:
             raise RAGFlowConnectionError(f"RAGFlow request timed out after {self.timeout:g} seconds.") from None
         except httpx.RequestError as exc:
@@ -122,7 +124,15 @@ class RAGFlowClient:
             # successful empty list for an inaccessible ID, allowing callers to
             # classify only that result as a missing binding while preserving all
             # real API errors.
-            payload = await self._request("GET", "/datasets", params={"ids": dataset_id})
+            try:
+                payload = await self._request("GET", "/datasets", params={"ids": dataset_id})
+            except RAGFlowAPIError as exc:
+                # v0.26.2 rejects the newer plural filter. Enumerating the
+                # accessible catalog preserves missing/inaccessible semantics
+                # without guessing from the singular filter's generic errors.
+                if "Field: <ids> - Message: <Extra inputs are not permitted>" not in str(exc):
+                    raise
+                return [item for item in await self.list_datasets() if item.get("id") == dataset_id]
             data = payload.get("data")
             if not isinstance(data, list):
                 raise RAGFlowProtocolError("RAGFlow returned an invalid dataset list.")
@@ -156,6 +166,35 @@ class RAGFlowClient:
                 return datasets
 
         raise RAGFlowProtocolError(f"RAGFlow dataset listing exceeded {_MAX_DATASET_PAGES} pages.")
+
+    async def create_dataset(self, name: str) -> dict[str, Any]:
+        payload = await self._request("POST", "/datasets", json={"name": name, "permission": "me"})
+        data = payload.get("data")
+        if not isinstance(data, dict) or not isinstance(data.get("id"), str):
+            raise RAGFlowProtocolError("RAGFlow returned an invalid dataset.")
+        return data
+
+    async def list_documents(self, dataset_id: str, *, page: int = 1, page_size: int = 20, document_id: str | None = None) -> dict[str, Any]:
+        params: dict[str, object] = {"page": page, "page_size": page_size}
+        if document_id is not None:
+            params["id"] = document_id
+        payload = await self._request("GET", f"/datasets/{quote(dataset_id, safe='')}/documents", params=params)
+        data = payload.get("data")
+        if not isinstance(data, dict) or not isinstance(data.get("docs"), list) or not isinstance(data.get("total"), int):
+            raise RAGFlowProtocolError("RAGFlow returned an invalid document list.")
+        return data
+
+    async def upload_document(self, dataset_id: str, *, filename: str, content: bytes, content_type: str) -> list[dict[str, Any]]:
+        payload = await self._request("POST", f"/datasets/{quote(dataset_id, safe='')}/documents", files={"file": (filename, content, content_type)})
+        data = payload.get("data")
+        if not isinstance(data, list) or not data or any(not isinstance(item, dict) or not isinstance(item.get("id"), str) for item in data):
+            raise RAGFlowProtocolError("RAGFlow returned an invalid upload result.")
+        return data
+
+    async def parse_documents(self, dataset_id: str, document_ids: list[str]) -> None:
+        if not document_ids:
+            raise ValueError("document_ids must not be empty")
+        await self._request("POST", f"/datasets/{quote(dataset_id, safe='')}/chunks", json={"document_ids": document_ids})
 
     async def retrieve(
         self,

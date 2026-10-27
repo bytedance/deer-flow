@@ -529,7 +529,8 @@ def test_restricted_start_refuses_to_remove_resources_with_stale_policy(monkeypa
     assert created == []
 
 
-def test_network_proxy_uses_read_only_root_and_bounded_policy_storage(monkeypatch):
+@pytest.mark.parametrize("mode", ["allowlist", "public"])
+def test_network_proxy_uses_read_only_root_and_bounded_policy_storage(monkeypatch, mode):
     backend = LocalContainerBackend(
         image="sandbox:latest",
         base_port=8080,
@@ -537,9 +538,9 @@ def test_network_proxy_uses_read_only_root_and_bounded_policy_storage(monkeypatc
         config_mounts=[],
         environment={},
     )
-    backend._network_mode = "allowlist"
+    backend._network_mode = mode
     backend._network_config = {
-        "mode": "allowlist",
+        "mode": mode,
         "allow_domains": [],
         "approval": "prompt",
         "proxy_image": "proxy:latest",
@@ -570,6 +571,8 @@ def test_network_proxy_uses_read_only_root_and_bounded_policy_storage(monkeypatc
     assert "--cap-drop=ALL" in create
     assert "no-new-privileges" in create
     assert "DEERFLOW_RELAY_TOKEN=test-relay-token" in create
+    assert f"DEERFLOW_NETWORK_MODE={mode}" in create
+    assert f"DEERFLOW_RECORD_DENIALS={int(mode == 'allowlist')}" in create
 
 
 def test_start_container_filters_nested_config_mounts_for_policy_scoped_skills(

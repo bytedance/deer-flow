@@ -112,7 +112,7 @@ def _static_rules() -> tuple[str, ...]:
 
 def _policy_mode() -> str:
     value = os.environ.get("DEERFLOW_NETWORK_MODE", "isolated")
-    return value if value in {"isolated", "allowlist"} else "isolated"
+    return value if value in {"isolated", "allowlist", "public"} else "isolated"
 
 
 def _is_granted(host: str, port: int, now: float) -> bool:
@@ -128,6 +128,10 @@ def _is_granted(host: str, port: int, now: float) -> bool:
 
 
 def policy_allows(host: str, port: int, now: float | None = None) -> bool:
+    # This only gates domain approval. handle_proxy still rejects IP literals,
+    # validates every DNS answer and connects to the validated public address.
+    if _policy_mode() == "public":
+        return True
     now = time.time() if now is None else now
     if _policy_mode() != "allowlist":
         return False

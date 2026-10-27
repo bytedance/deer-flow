@@ -313,8 +313,12 @@ class SandboxLeaseManager:
             # Provider implementations commonly offload container startup to a
             # worker thread, which cannot be stopped by cancelling the awaiter.
             # Reconcile the result before relinquishing the serializer.
+            if self._provider.cancellation_safe_acquire is True:
+                acquire_task.cancel()
             try:
                 sandbox_id = await _drain_task_after_cancellation(acquire_task)
+            except asyncio.CancelledError:
+                raise cancellation
             except Exception:
                 logger.warning(
                     "Cancelled sandbox acquire failed during reconciliation",
@@ -375,6 +379,11 @@ class SandboxLeaseManager:
                 )
             if release_previous and previous is not None:
                 self._provider.release(previous.sandbox_id)
+
+    def has_holders(self, sandbox_id: str) -> bool:
+        """Read execution liveness without provider I/O (idle-reaper guard)."""
+        with self._metadata_lock:
+            return bool(self._owners_by_sandbox.get(sandbox_id))
 
     async def retain_async(
         self,

@@ -58,7 +58,7 @@ export function Hero({ className }: { className?: string }) {
         )}
       </div>
       <FlickeringGrid
-        className="absolute inset-0 z-0 mask-[url(/images/deer.svg)] mask-size-[100vw] mask-center mask-no-repeat md:mask-size-[72vh]"
+        className="absolute inset-0 z-0 mask-[url(/images/ddfw.svg)] mask-size-[100vw] mask-center mask-no-repeat md:mask-size-[72vh]"
         squareSize={4}
         gridGap={4}
         color={"white"}
@@ -67,7 +67,7 @@ export function Hero({ className }: { className?: string }) {
       />
       <div className="container-md relative z-10 mx-auto flex min-h-[92svh] flex-col items-center justify-center px-4 pt-20 pb-14">
         <h1 className="text-center text-5xl leading-tight font-bold break-words md:text-6xl">
-          DeerFlow
+          DDFW-Agent
         </h1>
         <div className="mt-3 flex w-full max-w-full min-w-0 items-center justify-center gap-x-2 text-center text-2xl font-semibold md:text-4xl">
           <HeroWordRotate words={HERO_WORDS} />

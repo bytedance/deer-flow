@@ -1,20 +1,36 @@
 import ipaddress
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 SandboxOwnershipType = Literal["memory", "redis"]
 SandboxOverflowPolicy = Literal["wait", "reject", "burst"]
-SandboxNetworkMode = Literal["open", "isolated", "allowlist"]
+SandboxNetworkMode = Literal["open", "isolated", "allowlist", "public"]
 SandboxNetworkApproval = Literal["deny", "prompt"]
 
 
 class SandboxNetworkConfig(BaseModel):
     """Outbound network policy for locally managed AIO sandboxes."""
 
+    address_pool: str | None = Field(default=None, description="Optional dedicated RFC1918 IPv4 pool for AIO bridge networks. Must not overlap LAN/VPN routes. Omit to use Docker's defaults.")
+    subnet_prefix: int = Field(default=28, ge=24, le=29, description="Prefix length of each bridge network allocated from address_pool.")
+
+    @model_validator(mode="after")
+    def _validate_address_pool(self):
+        if self.address_pool is None:
+            return self
+        pool = ipaddress.ip_network(self.address_pool, strict=True)
+        private_ranges = [ipaddress.ip_network(value) for value in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")]
+        if pool.version != 4 or not any(pool.subnet_of(private) for private in private_ranges):
+            raise ValueError("sandbox network address_pool must be an RFC1918 IPv4 subnet")
+        if pool.prefixlen > self.subnet_prefix or self.subnet_prefix - pool.prefixlen > 16:
+            raise ValueError("sandbox network pool must contain 1 to 65536 configured subnets")
+        self.address_pool = str(pool)
+        return self
+
     mode: SandboxNetworkMode = Field(
         default="open",
-        description="open keeps the current Docker networking behavior; isolated denies all egress; allowlist permits configured domains and optional runtime approval.",
+        description="open keeps Docker networking; isolated denies egress; allowlist permits configured domains and optional approval; public permits public HTTP(S) without approval while retaining network isolation.",
     )
     allow_domains: list[str] = Field(
         default_factory=list,
@@ -199,7 +215,7 @@ class SandboxConfig(BaseModel):
     acquire_timeout: int = Field(
         default=30,
         gt=0,
-        description="Seconds that E2B wait policy waits for capacity.",
+        description="Seconds that E2B or UserAioSandboxProvider waits for sandbox capacity; user pools also apply this deadline to same-user conversation waits.",
     )
     burst_limit: int = Field(
         default=0,
@@ -210,6 +226,7 @@ class SandboxConfig(BaseModel):
         default=None,
         description="Prefix for container names",
     )
+    prewarm_on_login: bool = Field(default=False, description="UserAioSandboxProvider: prepare an authorized user's sandbox in the background after opening their authenticated workspace.")
     idle_timeout: int | None = Field(
         default=None,
         description="Idle timeout in seconds before released warm sandboxes/VMs are stopped (default: 600 = 10 minutes). Set to 0 to disable.",

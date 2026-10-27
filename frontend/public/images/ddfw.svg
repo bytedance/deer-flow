@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 662 320">
+  <title>DDFW-Agent</title>
+  <g fill="white" fill-rule="evenodd">
+    <path d="M20 40h60c90 0 90 160 0 160H20zm34 32v96h25c44 0 44-96 0-96z"/>
+    <path d="M174 40h60c90 0 90 160 0 160h-60zm34 32v96h25c44 0 44-96 0-96z"/>
+    <path d="M330 40h110v32h-76v35h66v32h-66v61h-34z"/>
+    <path d="M458 40h34l20 108 23-80h30l23 80 20-108h34l-34 160h-33l-25-82-25 82h-33z"/>
+  </g>
+  <text x="331" y="288" text-anchor="middle" fill="white" font-family="Arial, sans-serif" font-size="72" font-weight="600">-Agent</text>
+</svg>

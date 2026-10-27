@@ -1,0 +1,6 @@
+{
+  "sandbox": {
+    "provider": "local"
+  },
+  "path": "report.txt"
+}

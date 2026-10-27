@@ -265,7 +265,7 @@ def test_make_lead_agent_empty_skills_passed_correctly(monkeypatch):
     monkeypatch.setattr(lead_agent_module, "_resolve_model_name", lambda x=None, **kwargs: "default-model")
     monkeypatch.setattr(lead_agent_module, "create_chat_model", lambda **kwargs: "model")
     monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
-    monkeypatch.setattr(lead_agent_module, "_load_enabled_available_skills", lambda available_skills, *, app_config, user_id=None: [])
+    monkeypatch.setattr(lead_agent_module, "_load_enabled_available_skills", lambda available_skills, *, app_config, user_id=None, runtime=None: [])
     monkeypatch.setattr(lead_agent_module, "build_middlewares", lambda *args, **kwargs: [])
     monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
 
@@ -314,7 +314,7 @@ def test_make_lead_agent_custom_skill_allowlist_does_not_activate_tool_policy(mo
     monkeypatch.setattr(lead_agent_module, "apply_prompt_template", lambda **kwargs: "mock_prompt")
     monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
     monkeypatch.setattr(lead_agent_module, "load_agent_config", lambda x, *, user_id=None: AgentConfig(name="test", skills=["restricted", "legacy"]))
-    monkeypatch.setattr(lead_agent_module, "_load_enabled_available_skills", lambda available_skills, *, app_config, user_id=None: [_make_skill("restricted", ["read_file", "web_search"]), _make_skill("legacy", None)])
+    monkeypatch.setattr(lead_agent_module, "_load_enabled_available_skills", lambda available_skills, *, app_config, user_id=None, runtime=None: [_make_skill("restricted", ["read_file", "web_search"]), _make_skill("legacy", None)])
     monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [NamedTool("task"), NamedTool("bash"), NamedTool("read_file"), NamedTool("web_search")])
 
     mock_app_config = MagicMock()
@@ -359,7 +359,7 @@ def test_make_lead_agent_all_legacy_skills_preserve_all_tools(monkeypatch):
     monkeypatch.setattr(lead_agent_module, "apply_prompt_template", lambda **kwargs: "mock_prompt")
     monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
     monkeypatch.setattr(lead_agent_module, "load_agent_config", lambda x, *, user_id=None: AgentConfig(name="test", skills=None))
-    monkeypatch.setattr(lead_agent_module, "_load_enabled_available_skills", lambda available_skills, *, app_config, user_id=None: [_make_skill("legacy", None)])
+    monkeypatch.setattr(lead_agent_module, "_load_enabled_available_skills", lambda available_skills, *, app_config, user_id=None, runtime=None: [_make_skill("legacy", None)])
     monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [NamedTool("bash"), NamedTool("read_file")])
 
     mock_app_config = MagicMock()
@@ -460,7 +460,7 @@ def test_default_lead_agent_does_not_apply_installed_skill_allowlists(monkeypatc
     monkeypatch.setattr(
         lead_agent_module,
         "_load_enabled_available_skills",
-        lambda available_skills, *, app_config, user_id=None: [_make_skill("skill-reviewer", ["review_skill_package"])],
+        lambda available_skills, *, app_config, user_id=None, runtime=None: [_make_skill("skill-reviewer", ["review_skill_package"])],
     )
     monkeypatch.setattr(
         "deerflow.tools.get_available_tools",
@@ -544,7 +544,7 @@ def test_make_lead_agent_drops_update_agent_on_github_channel(monkeypatch):
     monkeypatch.setattr(lead_agent_module, "apply_prompt_template", lambda **kwargs: "mock_prompt")
     monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
     monkeypatch.setattr(lead_agent_module, "load_agent_config", lambda x, *, user_id=None: AgentConfig(name="test", skills=None))
-    monkeypatch.setattr(lead_agent_module, "_load_enabled_available_skills", lambda available_skills, *, app_config, user_id=None: [_make_skill("legacy", None)])
+    monkeypatch.setattr(lead_agent_module, "_load_enabled_available_skills", lambda available_skills, *, app_config, user_id=None, runtime=None: [_make_skill("legacy", None)])
     monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [NamedTool("bash"), NamedTool("read_file")])
 
     mock_app_config = MagicMock()
@@ -583,7 +583,7 @@ def test_make_lead_agent_keeps_update_agent_on_non_webhook_channels(monkeypatch)
     monkeypatch.setattr(lead_agent_module, "apply_prompt_template", lambda **kwargs: "mock_prompt")
     monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
     monkeypatch.setattr(lead_agent_module, "load_agent_config", lambda x, *, user_id=None: AgentConfig(name="test", skills=None))
-    monkeypatch.setattr(lead_agent_module, "_load_enabled_available_skills", lambda available_skills, *, app_config, user_id=None: [_make_skill("legacy", None)])
+    monkeypatch.setattr(lead_agent_module, "_load_enabled_available_skills", lambda available_skills, *, app_config, user_id=None, runtime=None: [_make_skill("legacy", None)])
     monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [NamedTool("bash")])
 
     mock_app_config = MagicMock()

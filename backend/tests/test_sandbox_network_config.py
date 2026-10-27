@@ -18,6 +18,12 @@ def test_sandbox_network_normalizes_domains() -> None:
     assert config.allow_domains == ["pypi.org", "*.pythonhosted.org"]
 
 
+def test_sandbox_network_accepts_public_mode_without_domain_rules() -> None:
+    config = SandboxNetworkConfig(mode="public")
+    assert config.mode == "public"
+    assert config.allow_domains == []
+
+
 @pytest.mark.parametrize(
     "domain",
     [

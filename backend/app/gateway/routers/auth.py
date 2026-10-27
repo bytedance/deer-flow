@@ -11,7 +11,7 @@ from ipaddress import ip_address, ip_network
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, Response, status
 from fastapi.security import OAuth2PasswordRequestForm
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 from starlette.responses import RedirectResponse
 
 from app.gateway.auth import (
@@ -37,7 +37,9 @@ from app.gateway.auth.session_cookie_state import SKIP_AUTH_CSRF_COOKIE_STATE_AT
 from app.gateway.auth.user_provisioning import get_or_provision_oidc_user
 from app.gateway.csrf_middleware import CSRF_COOKIE_NAME, _request_origin, auth_csrf_cookie_settings, generate_csrf_token, is_secure_request
 from app.gateway.deps import get_current_user_from_request, get_local_provider
+from deerflow.authz.user_policy import get_user_security_store
 from deerflow.config.auth_config import OIDCProviderConfig
+from deerflow.security.user_profile import normalize_nickname
 
 logger = logging.getLogger(__name__)
 
@@ -562,6 +564,9 @@ async def change_password(request: Request, response: Response, body: ChangePass
 async def get_me(request: Request):
     """Get current authenticated user info."""
     user = await get_current_user_from_request(request)
+    from app.gateway.sandbox_prewarm import schedule_user_sandbox_prewarm
+
+    schedule_user_sandbox_prewarm(user)
     return UserResponse(
         id=str(user.id),
         email=user.email,
@@ -585,6 +590,31 @@ def require_session_source(request: Request) -> None:
 
     if getattr(request.state, "auth_source", None) != AUTH_SOURCE_SESSION:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="This endpoint requires interactive session authentication")
+
+
+class UserProfileResponse(BaseModel):
+    nickname: str | None = None
+
+
+class UserProfileUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    nickname: str | None = Field(max_length=80)
+
+    _nickname = field_validator("nickname")(classmethod(lambda cls, value: normalize_nickname(value)))
+
+
+@router.get("/profile", response_model=UserProfileResponse, dependencies=[Depends(require_session_source)])
+async def get_account_profile(request: Request):
+    user = await get_current_user_from_request(request)
+    nickname = await asyncio.to_thread(lambda: get_user_security_store().get_nickname(str(user.id)))
+    return UserProfileResponse(nickname=nickname)
+
+
+@router.patch("/profile", response_model=UserProfileResponse, dependencies=[Depends(require_session_source)])
+async def update_account_profile(request: Request, body: UserProfileUpdate):
+    user = await get_current_user_from_request(request)
+    nickname = await asyncio.to_thread(lambda: get_user_security_store().set_nickname(str(user.id), body.nickname))
+    return UserProfileResponse(nickname=nickname)
 
 
 class PATCreateRequest(BaseModel):

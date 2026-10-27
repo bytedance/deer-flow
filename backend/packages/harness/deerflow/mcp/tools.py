@@ -14,6 +14,7 @@ from urllib.parse import unquote, urlparse
 from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.config import get_config
 
+from deerflow.authz.user_policy import user_security_enabled
 from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig, resolve_effective_mcp_routing
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, Paths, get_paths
 from deerflow.constants import DEFAULT_MCP_SESSION_INIT_TIMEOUT, MCP_TMP_SUBDIR
@@ -30,6 +31,7 @@ from deerflow.mcp.tasks.runtime import (
 )
 from deerflow.reflection import resolve_variable
 from deerflow.runtime.user_context import resolve_runtime_user_id
+from deerflow.security.defaults import DEFAULT_TOOL_TARGETS
 from deerflow.tools.mcp_metadata import tag_mcp_routing, tag_mcp_tool
 from deerflow.tools.sync import make_sync_tool_wrapper
 from deerflow.tools.types import Runtime
@@ -866,6 +868,7 @@ async def get_mcp_tools() -> list[BaseTool]:
         # internally which cannot be closed from a different async task, so
         # pooling them causes RuntimeError on cleanup (see #3203).
         wrapped_tools: list[BaseTool] = []
+        reserve_default_names = await asyncio.to_thread(user_security_enabled)
         # Route each tool by the server that actually produced it: tools_by_server[i]
         # corresponds to the i-th server in servers_config. Inferring the source server by
         # scanning servers_config for a name prefix is ambiguous when one server name is a
@@ -878,6 +881,9 @@ async def get_mcp_tools() -> list[BaseTool]:
             tool_name_prefix = server_cfg.tool_name_prefix if server_cfg is not None else True
             current_server_tools: list[BaseTool] = []
             for tool in server_tools:
+                if reserve_default_names and tool.name in DEFAULT_TOOL_TARGETS:
+                    logger.warning("Dropping MCP tool from server %r with reserved default name %r", source_name, tool.name)
+                    continue
                 if not _VALID_MCP_TOOL_NAME.fullmatch(tool.name or ""):
                     logger.warning(
                         "Dropping MCP tool from server '%s' with invalid name %r: tool names must match %s. A name outside this charset cannot be bound as a function tool and could forge prompt structure when listed as a deferred tool.",

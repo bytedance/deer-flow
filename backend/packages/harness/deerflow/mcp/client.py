@@ -20,6 +20,12 @@ def build_server_params(server_name: str, config: McpServerConfig) -> dict[str, 
         Dictionary of server parameters for langchain-mcp-adapters.
     """
     transport_type = config.type or "stdio"
+    from deerflow.authz.user_policy import user_security_enabled
+
+    if user_security_enabled():
+        from deerflow.mcp.personal_auth import validate_personal_server
+
+        validate_personal_server(config)
     params: dict[str, Any] = {"transport": transport_type}
 
     if transport_type == "stdio":

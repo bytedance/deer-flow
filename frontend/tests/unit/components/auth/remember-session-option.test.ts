@@ -27,7 +27,7 @@ describe("RememberSessionOption", () => {
 
     expect(markup).toContain("保持登录");
     expect(markup).toContain(
-      "下次打开 DeerFlow 时尽量保持当前会话，仅保存邮箱，不保存密码。",
+      "下次打开 DDFW-Agent 时尽量保持当前会话，仅保存邮箱，不保存密码。",
     );
     expect(markup).not.toContain("Keep me signed in");
   });

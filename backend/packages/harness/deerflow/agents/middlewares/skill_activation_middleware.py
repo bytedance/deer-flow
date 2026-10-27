@@ -144,13 +144,15 @@ class SkillActivationMiddleware(AgentMiddleware):
             raise FileNotFoundError(resolved_file)
         return resolved_file.read_text(encoding="utf-8")
 
-    def _resolve_activation(self, text: str) -> _ActivationResolution | None:
+    def _resolve_activation(self, text: str, runtime=None) -> _ActivationResolution | None:
         reference = parse_slash_skill_reference(text)
         if reference is None:
             return None
 
         storage = self._storage()
-        skills = storage.load_skills(enabled_only=False)
+        from deerflow.security.skill_access import filter_authorized_skills
+
+        skills = filter_authorized_skills(storage.load_skills(enabled_only=False), user_id=self._user_id, app_config=self._app_config, runtime=runtime)
         skill = next((candidate for candidate in skills if candidate.name == reference.name), None)
         if skill is None:
             return _ActivationResolution(failure_message=f"Skill `/{reference.name}` is not installed.")
@@ -292,7 +294,7 @@ Follow this skill before choosing a general workflow. Load supporting resources 
             return None
 
         content = get_original_user_content_text(target.content, target.additional_kwargs)
-        resolution = self._resolve_activation(content)
+        resolution = self._resolve_activation(content, runtime=run_context)
         if resolution is None:
             return None
         return target_index, target, resolution, run_key
@@ -411,7 +413,7 @@ Follow this skill before choosing a general workflow. Load supporting resources 
         request_secrets = extract_request_secrets(context)
         sources: list[tuple[str, tuple[SecretRequirement, ...]]] = []
         if request_secrets:
-            registry = self._load_skill_registry_by_path()
+            registry = self._load_skill_registry_by_path(runtime=request.runtime)
             if registry is not None:
                 # Slash source: exempt from the ``secrets-autonomous`` opt-out
                 # (explicit ceremony), but still enabled + allowlist checked.
@@ -456,7 +458,7 @@ Follow this skill before choosing a general workflow. Load supporting resources 
             )
         self._record_secret_binding(context, audit_state, hook=hook)
 
-    def _load_skill_registry_by_path(self) -> dict[str, Skill] | None:
+    def _load_skill_registry_by_path(self, runtime=None) -> dict[str, Skill] | None:
         """Load the live skill registry keyed by normalized container file path.
 
         Reloaded every call on purpose (not cached): load_skills re-reads the
@@ -477,7 +479,9 @@ Follow this skill before choosing a general workflow. Load supporting resources 
         """
         try:
             storage = self._storage()
-            skills = storage.load_skills(enabled_only=False)
+            from deerflow.security.skill_access import filter_authorized_skills
+
+            skills = filter_authorized_skills(storage.load_skills(enabled_only=False), user_id=self._user_id, app_config=self._app_config, runtime=runtime)
             container_root = storage.get_container_root()
         except Exception:
             logger.exception("Failed to load skills while resolving secret bindings")
