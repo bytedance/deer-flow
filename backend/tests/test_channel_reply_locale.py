@@ -9,7 +9,9 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from app.channels import goal_status
 from app.channels.reply_locale import CONNECT_REPLY_TEXT, ReplyLocaleResolver, connect_reply_text, resolve_reply_locale
+from app.scheduler.notification_text import NOTIFICATION_LOCALES
 from deerflow.persistence.base import Base
 from deerflow.persistence.user.model import UserRow
 from deerflow.persistence.user.preferences import UserPreferencesRepository
@@ -105,9 +107,11 @@ def test_chinese_connect_replies_space_latin_names_only():
     assert connect_reply_text("private_chat_only", provider="wechat", locale="zh-CN") == "请在与机器人的私聊中发送绑定码。"
 
 
-def test_connect_reply_table_has_the_same_keys_in_every_language():
-    assert set(CONNECT_REPLY_TEXT) == {"en-US", "zh-CN"}
-    assert set(CONNECT_REPLY_TEXT["en-US"]) == set(CONNECT_REPLY_TEXT["zh-CN"])
+@pytest.mark.parametrize("table", [CONNECT_REPLY_TEXT, goal_status._TEXT], ids=["connect", "goal"])
+def test_reply_tables_have_the_same_keys_in_every_language(table):
+    assert set(table) == set(NOTIFICATION_LOCALES)
+    for locale in NOTIFICATION_LOCALES:
+        assert set(table[locale]) == set(table["en-US"])
 
 
 @pytest.mark.anyio
