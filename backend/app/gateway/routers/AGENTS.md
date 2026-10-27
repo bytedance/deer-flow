@@ -1,5 +1,10 @@
 # Router contracts
 
+`GET /api/plugins/diagnostics` uses `require_admin_user` before reading the
+canonical runtime diagnostic snapshot. Return bounded entry-point identifiers,
+known levels and fixed summaries; raw messages stay in logs. Never clear the
+sink or expand PAT permissions.
+
 Branch metadata inherits valid `assistant_id` values verbatim. Validate with
 `custom_agent_name` and clear invalid legacy values to null in the new row;
 leave the source record unchanged.
