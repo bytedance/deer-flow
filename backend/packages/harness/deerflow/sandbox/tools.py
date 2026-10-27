@@ -42,7 +42,7 @@ from deerflow.sandbox.lease import (
 )
 from deerflow.sandbox.local.local_sandbox import LocalSandbox, escape_powershell_path
 from deerflow.sandbox.overwrite import unwrap_sandbox
-from deerflow.sandbox.path_patterns import build_output_mask_pattern, normalize_mask_tail, replace_output_path_matches
+from deerflow.sandbox.path_patterns import PATH_START_BOUNDARY, build_output_mask_pattern, normalize_mask_tail, replace_output_path_matches
 from deerflow.sandbox.prewarm import claim_sandbox_prewarm
 from deerflow.sandbox.read_file_contract import (
     READ_FILE_EMPTY,
@@ -1921,7 +1921,9 @@ def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState 
         # bare root still matches and the sibling is rewritten into the thread's
         # host directory — a real path outside the mount contract. Same defect as
         # #4035 (reverse patterns) and #4053 (masking patterns), mirrored into
-        # this direction.
+        # this direction. ``PATH_START_BOUNDARY`` is the left-hand counterpart:
+        # the root must start a path, so an artifact URL such as
+        # ``.../artifacts/mnt/user-data/outputs/x.html`` is not rewritten.
         #
         # The class mirrors ``LocalSandbox._content_pattern``'s rather than
         # ``_command_pattern``'s: a virtual root can legitimately be followed by
@@ -1933,7 +1935,7 @@ def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState 
         # boundary above admits PATH-style concatenation, but a tail that ran
         # through the ``:`` swallowed every later entry of the list, leaving
         # those virtual paths unresolved in the command.
-        pattern = re.compile(rf"{re.escape(VIRTUAL_PATH_PREFIX)}(?=/|$|[^\w./-])(/[^\s\"';&|<>():]*)?")
+        pattern = re.compile(rf"{PATH_START_BOUNDARY}{re.escape(VIRTUAL_PATH_PREFIX)}(?=/|$|[^\w./-])(/[^\s\"';&|<>():]*)?")
 
         def replace_user_data_match(match: re.Match) -> str:
             resolved = replace_virtual_path(match.group(0), thread_data).replace("\\", "/")

@@ -999,7 +999,8 @@ class DiscordChannel(Channel):
         """Run the bind flow on the Gateway loop; replies go back through the Discord loop."""
         state = await self._connection_repo.consume_oauth_state(provider="discord", state=code)
         if state is None:
-            await self._run_on_discord_loop(self._send_connection_reply(message, "Discord connection code is invalid or expired."))
+            text = await self._connect_reply_text("invalid_code")
+            await self._run_on_discord_loop(self._send_connection_reply(message, text))
             return True
 
         guild = getattr(message, "guild", None)
@@ -1007,7 +1008,8 @@ class DiscordChannel(Channel):
         author = getattr(message, "author", None)
         user_id = str(getattr(author, "id", "") or "")
         if not user_id:
-            await self._run_on_discord_loop(self._send_connection_reply(message, "Discord connection could not be completed from this message."))
+            text = await self._connect_reply_text("incomplete", owner_user_id=state["owner_user_id"])
+            await self._run_on_discord_loop(self._send_connection_reply(message, text))
             return True
 
         guild_id = str(getattr(guild, "id", "") or "") or None
@@ -1024,7 +1026,8 @@ class DiscordChannel(Channel):
             },
             status="connected",
         )
-        await self._run_on_discord_loop(self._send_connection_reply(message, "Discord connected to DeerFlow."))
+        text = await self._connect_reply_text("connected", owner_user_id=state["owner_user_id"])
+        await self._run_on_discord_loop(self._send_connection_reply(message, text))
         return True
 
     @staticmethod

@@ -1,5 +1,10 @@
 # Backend Tests
 
+`test_lark_broker_image.py` stages Python files from the broker Dockerfile's
+final-stage COPY instructions. Run shim installation and the health endpoint
+under `-I -S`, adding only the staged script directory to the import path;
+repository paths or installed Harness packages would hide missing image files.
+
 When adding a scoped `AGENTS.md`, update `EXPECTED_GUIDANCE_PATHS` in
 `test_agent_guidance_check.py` in the same change. The explicit inventory pins
 guidance ownership and extends hard-budget checks to each approved guide.
@@ -17,6 +22,10 @@ assert one source open, original metadata, preserved competing uploads, companio
 ownership and capture cleanup. Retain the real XLSX conversion coverage.
 
 Backend tests must preserve the runtime invariants they exercise without changing production execution topology.
+
+Provider cleanup tests use concrete configuration models and event gates.
+Surface owner-task failures while awaiting lifecycle events; join owners and
+event waiters during teardown.
 
 `test_bench_sandbox_prewarm.py` controls observation timestamps through the
 benchmark module's clock binding. Keep asyncio's clock real, initialize
@@ -41,6 +50,8 @@ and real advisory contention. Release all storage/producer gates before bounded
 cleanup, preserve healthy controls in refusal cases, and retain Journal/Seal
 compatibility coverage. Protocol: [Run outcome](../docs/RUN_EVENT_STREAM.md#authoritative-run-outcome).
 `test_goal_loop_stop_probe.py` runs the standalone Goal-loop reproduction through the native graph, loop middleware, worker and checkpoints. Only model responses are scripted; do not replace the Goal decision or simulate the stop-reason write.
+
+`test_run_recursion_capped.py` drives a real graph through the worker until LangGraph raises `GraphRecursionError`. Only model responses are scripted; do not raise the error or write the stop reason by hand.
 
 InfoQuest fetch log assertions install the real `UrlRedactionFilter` on the
 capture handler with fixture-scoped cleanup. Expect scheme/host context with
@@ -165,6 +176,13 @@ guard: the strict gate must still reject on-loop resolution. Assert each tool
 path reaches the native fixture so an unresolved-host rejection cannot mask it.
 The IPv4 fixture accepts only `AF_UNSPEC` and `AF_INET`; unsupported families
 must fail rather than receive a fabricated IPv4 answer.
+
+Async community tools read their config off the loop, once per call.
+`blocking_io/test_community_tool_config_reads.py` swaps each module's
+`get_app_config` for a loader that records its thread before a real file read,
+so a read the gate stops on the loop still counts; add new async tools there.
+The gate only flags IO under `deerflow.*`/`app.*` frames, so its meta-check
+calls a tool's sync config helper.
 
 The local sandbox's UTF-8 subprocess guard inspects each text-mode call with
 `ast`, checking both `encoding` and `errors`; module-wide literal counts can

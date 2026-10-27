@@ -88,3 +88,8 @@ State updates synchronize titles into thread metadata only for the root checkpoi
 namespace. Nonroot writes preserve the conversation title, branch-title sequence
 and activity timestamp. `tests/test_threads_router.py` checks metadata/search
 isolation and root title synchronization in full and delta modes.
+
+Unauthenticated auth routes (`/register`, `/setup-status`, `/providers`,
+`/oauth/{provider}`, `/callback/{provider}`, the `/login/local` throttle) read
+`get_app_config()` through `asyncio.to_thread`: each read stats and hashes the
+config files. Coverage: `tests/blocking_io/test_auth_router_config_reads.py`.

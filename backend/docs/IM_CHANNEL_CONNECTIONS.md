@@ -23,6 +23,12 @@ The selection is written to the new Gateway thread's channel metadata and, for a
 Because selecting an agent always creates a new thread instead of mutating the current one, an existing conversation keeps its original runtime, prompt, skills, and checkpoint lineage.
 `/agent use lead_agent` starts a new conversation with the default agent.
 
+### Goal status (`/goal`)
+
+`/goal <condition>` sets a goal on the chat's conversation and starts a run with the condition as the task; `/goal clear` clears it. `/goal` alone reports what the web goal bar shows: the goal, `In progress.` while a run is pending or running, and once auto-continue has stood down, why (for example `Stopped: the continuation limit was reached.` or `Waiting for you: it needs your input.`). A met goal is cleared and recorded in the thread state, so `/goal` answers `Goal met: <goal>` until the next goal change. Reasons come only from host-written codes; the goal checker's notes and provider errors are never sent.
+
+DeerFlow's own replies here and to `/connect` use the binding owner's web UI language (the `locale` user preference), else `channel_connections.notification_locale` (`en-US` by default). A reply with no known owner, such as one to an invalid or expired code, uses the configured default. Agent replies are not translated.
+
 Connect codes are deliberately **bind-time defenses**, not chat-time defenses. After binding, ordinary `allowed_users` continue to gate regular messages exactly as before.
 
 ## Connect-code Flow
@@ -37,22 +43,22 @@ sequenceDiagram
     participant Store as SQL store<br/>channel_oauth_states
     participant Worker as Provider worker<br/>(Telegram/Slack/...)
     participant Repo as ChannelConnection repo<br/>(upsert_connection)
+    participant Chat as IM chat
 
     Browser->>Gateway: POST /api/channels/{provider}/connect
     Gateway->>Store: insert code (token_urlsafe(16), TTL=600s, single-use)
     Gateway-->>Browser: code + (Telegram: deep-link URL)
 
-    Note over Browser,Worker: User sends /connect <code> (or /start <code>) to the provider bot
-
+    Chat->>Worker: /connect <code> (Telegram: /start <code>)
     Worker->>Store: consume_oauth_state(code)
     alt valid + unexpired
         Store-->>Worker: ok (state consumed once)
         Worker->>Repo: upsert_connection(provider, external_account_id, workspace_id, owner_user_id)
         Repo-->>Worker: connection row (active)
-        Worker-->>Browser: success reply (via channel callback)
+        Worker-->>Chat: "connected" reply in the code owner's web UI language
     else invalid / expired / used
         Store-->>Worker: reject
-        Worker-->>Browser: rejected (no reply in chat)
+        Worker-->>Chat: "invalid or expired" reply in channel_connections.notification_locale
     end
 
     Note over Repo: Partial unique index uq_channel_connection_active_identity<br/>revokes prior owner's active row for the same identity
@@ -380,6 +386,8 @@ When `channel_connections.enabled` and `require_bound_identity` are true, auth-e
 Upgrade note: existing auth-enabled deployments that already have `channel_connections.enabled: true` will start rejecting ordinary unbound IM messages after this field is introduced because `require_bound_identity` defaults to true. Legacy operator-owned/open-bot deployments that intentionally allow unbound platform users to create DeerFlow runs should set `require_bound_identity: false` before upgrading and restart the service.
 
 ## Connect Flow
+
+Every worker answers the bind message in the chat: `<Provider> connected to DeerFlow.` on success, otherwise that the code (Telegram: the link) is invalid or expired, or that the bind could not be completed from that message. Replies use the code owner's web UI language once the code is consumed, else `channel_connections.notification_locale` ([reply language](#goal-status-goal)).
 
 Telegram:
 
