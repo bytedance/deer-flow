@@ -44,6 +44,7 @@ from app.gateway.utils import sanitize_log_param
 from app.mcp_tasks.errors import PermanentNotificationError
 from deerflow.agents.human_input import read_human_input_response
 from deerflow.agents.interaction_policy import resolve_run_interaction_policy
+from deerflow.agents.language import ui_locale
 from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, _REMINDER_DATE_KEY
 from deerflow.agents.middlewares.input_sanitization_middleware import frame_untrusted_text
 from deerflow.agents.middlewares.message_utils import _SUMMARY_MESSAGE_NAME, is_genuine_user_message
@@ -599,8 +600,10 @@ def _normalize_input_messages(
     for index, item in enumerate(messages):
         try:
             message = convert_to_messages([item])[0]
-        except (ValueError, TypeError, NotImplementedError, KeyError) as exc:
-            # LangChain's error may contain the complete caller message.
+        except (ValueError, TypeError, NotImplementedError, KeyError, AttributeError) as exc:
+            # LangChain's error may contain the complete caller message. Its
+            # message validators raise AttributeError for some wrong-typed
+            # fields, e.g. a string ``tool_calls`` on an AI message.
             raise HTTPException(
                 status_code=400,
                 detail=f"Invalid message at {location}[{index}]",
@@ -741,6 +744,40 @@ def normalize_input(raw_input: dict[str, Any] | None, *, trusted_internal: bool 
         if result.get("goal") is not None:
             result = {**result, "goal": _normalize_external_goal(result["goal"], location="input.goal"), "goal_outcome": None}
     return result
+
+
+def _assign_missing_run_input_message_ids(graph_input: dict[str, Any], *, thread_id: str, idempotency_key: str | None) -> dict[str, Any]:
+    """Give the run record and graph the same IDs before add_messages runs.
+
+    Keyed retries must produce the same IDs before run admission compares their
+    input. Unkeyed runs get fresh IDs so repeated text remains a new turn.
+    Caller-supplied IDs and the original request objects are left untouched.
+    """
+    messages = graph_input.get("messages")
+    if not isinstance(messages, list):
+        return graph_input
+
+    used_ids = {message.id for message in messages if isinstance(message, BaseMessage) and message.id}
+    assigned = []
+    changed = False
+    for index, message in enumerate(messages):
+        if not isinstance(message, BaseMessage) or message.id:
+            assigned.append(message)
+            continue
+        attempt = 0
+        while True:
+            if idempotency_key is None:
+                message_id = str(uuid.uuid4())
+            else:
+                name = f"deerflow:run-input:{thread_id}:{idempotency_key}:{index}:{attempt}"
+                message_id = str(uuid.uuid5(uuid.NAMESPACE_URL, name))
+            if message_id not in used_ids:
+                break
+            attempt += 1
+        used_ids.add(message_id)
+        assigned.append(message.model_copy(update={"id": message_id}))
+        changed = True
+    return {**graph_input, "messages": assigned} if changed else graph_input
 
 
 def _canonical_run_record_input(
@@ -996,7 +1033,13 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
         # ``build_run_config`` copies ``body.config['configurable']`` verbatim,
         # and ``configurable`` is persisted in checkpoints.
         existing_configurable.pop("client", None)
+        existing_configurable.pop("locale", None)
     existing_runtime_context = config.get("context")
+    if isinstance(existing_runtime_context, dict) and "locale" in existing_runtime_context:
+        locale = ui_locale(existing_runtime_context)
+        existing_runtime_context.pop("locale")
+        if locale is not None:
+            existing_runtime_context["locale"] = locale
     for section in (existing_configurable, existing_runtime_context):
         if isinstance(section, dict):
             for key in _MODEL_SELECTION_CONTEXT_KEYS:
@@ -1013,6 +1056,13 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
 
     configurable = config.setdefault("configurable", {})
     runtime_context = config.setdefault("context", {})
+    # UI language is public request data, never a checkpoint default. An
+    # explicit invalid/null value clears a legacy config.context preference.
+    if "locale" in context and isinstance(runtime_context, dict):
+        runtime_context.pop("locale", None)
+        locale = ui_locale(context)
+        if locale is not None:
+            runtime_context["locale"] = locale
     keys = _CONTEXT_CONFIGURABLE_KEYS | _CONTEXT_INTERNAL_CALLER_KEYS if internal else _CONTEXT_CONFIGURABLE_KEYS
     for key in keys:
         if key in context:
@@ -1258,6 +1308,23 @@ def _clamp_recursion_limit(value: Any, max_limit: int, default_limit: int) -> in
     return min(value, max_limit)
 
 
+def custom_agent_name(assistant_id: str | None) -> str | None:
+    """Return the custom agent *assistant_id* selects, or ``None`` for the lead agent.
+
+    Custom names are normalized (trimmed, lowercased, ``_`` to ``-``) and must
+    then contain only letters, digits and hyphens.
+
+    Raises:
+        ValueError: *assistant_id* cannot name an agent.
+    """
+    if not assistant_id or assistant_id == _DEFAULT_ASSISTANT_ID:
+        return None
+    normalized = assistant_id.strip().lower().replace("_", "-")
+    if not normalized or not re.fullmatch(r"[a-z0-9-]+", normalized):
+        raise ValueError(f"Invalid assistant_id {assistant_id!r}: must contain only letters, digits, and hyphens after normalization.")
+    return normalized
+
+
 def build_run_config(
     thread_id: str,
     request_config: dict[str, Any] | None,
@@ -1278,9 +1345,9 @@ def build_run_config(
     load the matching ``agents/<name>/SOUL.md`` and per-agent config —
     without it the agent silently runs as the default lead agent.
 
-    This mirrors the channel manager's ``_resolve_run_params`` logic except for
-    the recursion default: Gateway API runs use the configured top-level
-    ``recursion_limit``, while IM channel runs retain their own default.
+    This mirrors the channel manager's ``_resolve_run_params`` logic. IM
+    channel runs send no ``recursion_limit`` unless their session config or
+    channel policy sets one, so they get the same configured default here.
     """
     # Lead-agent recursion budget (LangGraph super-steps for the lead graph
     # only). Independent of subagent depth: a `task()` dispatch runs the whole
@@ -1290,6 +1357,9 @@ def build_run_config(
     default_recursion_limit, max_recursion_limit = _resolve_gateway_recursion_limits()
     config: dict[str, Any] = {"recursion_limit": default_recursion_limit}
     if request_config:
+        caller_configurable = request_config.get("configurable")
+        if caller_configurable is not None and not isinstance(caller_configurable, Mapping):
+            raise ValueError("request config 'configurable' must be a mapping or null.")
         # LangGraph >= 0.6.0 introduced ``context`` as the preferred way to
         # pass thread-level data and rejects requests that include both
         # ``configurable`` and ``context``.  If the caller already sends
@@ -1299,7 +1369,7 @@ def build_run_config(
                 logger.warning(
                     "build_run_config: client sent both 'context' and 'configurable'; preferring 'context' (LangGraph >= 0.6.0). thread_id=%s, caller_configurable keys=%s",
                     thread_id,
-                    list((request_config.get("configurable") or {}).keys()),
+                    list((caller_configurable or {}).keys()),
                 )
             context_value = request_config["context"]
             if context_value is None:
@@ -1326,7 +1396,7 @@ def build_run_config(
             config["configurable"] = {"thread_id": thread_id}
         else:
             configurable = {"thread_id": thread_id}
-            configurable.update(request_config.get("configurable") or {})
+            configurable.update(caller_configurable or {})
             configurable["thread_id"] = thread_id
             config["configurable"] = configurable
         for k, v in request_config.items():
@@ -1352,10 +1422,8 @@ def build_run_config(
 
     # Inject custom agent name when the caller specified a non-default assistant.
     # Honour an explicit agent_name in either runtime options container.
-    if assistant_id and assistant_id != _DEFAULT_ASSISTANT_ID:
-        normalized = assistant_id.strip().lower().replace("_", "-")
-        if not normalized or not re.fullmatch(r"[a-z0-9-]+", normalized):
-            raise ValueError(f"Invalid assistant_id {assistant_id!r}: must contain only letters, digits, and hyphens after normalization.")
+    normalized = custom_agent_name(assistant_id)
+    if normalized is not None:
         configurable = config.setdefault("configurable", {})
         runtime_context = config.setdefault("context", {})
         explicit_agent_name: str | None = None
@@ -1393,6 +1461,7 @@ def build_checkpoint_state_mutation_accessor(
     thread_id: str,
     as_node: str,
     checkpoint_id: str | None = None,
+    checkpoint_ns: str = "",
     state_schema: Any | None = None,
 ) -> tuple[CheckpointStateAccessor, dict[str, Any]]:
     """Build a state-only graph whose writer node finishes immediately.
@@ -1406,7 +1475,7 @@ def build_checkpoint_state_mutation_accessor(
     config: dict[str, Any] = {
         "configurable": {
             "thread_id": thread_id,
-            "checkpoint_ns": "",
+            "checkpoint_ns": checkpoint_ns,
         }
     }
     if checkpoint_id is not None:
@@ -1419,6 +1488,7 @@ def build_checkpoint_state_mutation_accessor(
         get_checkpointer(request),
         store=getattr(request.app.state, "store", None),
         mode=mode,
+        direct_namespace=True,
     )
     return accessor, config
 
@@ -1583,12 +1653,21 @@ def build_checkpoint_state_accessor(
     thread_id: str,
     assistant_id: str | None = None,
     checkpoint_id: str | None = None,
+    checkpoint_ns: str = "",
 ) -> tuple[CheckpointStateAccessor, dict[str, Any]]:
     """Build the mode-selected lead graph used for materialized checkpoint state."""
     ctx = get_run_context(request)
+    try:
+        custom_agent_name(assistant_id)
+    except ValueError:
+        # Thread creation did not always validate assistant_id, so a stored
+        # one may name no agent. Run creation rejects such a name, so no run
+        # ran as it: read with the lead agent's schema instead of failing.
+        logger.warning("Thread %s records an invalid assistant_id; reading its state with the lead agent schema", sanitize_log_param(thread_id))
+        assistant_id = None
     config = build_run_config(thread_id, None, None, assistant_id=assistant_id)
     configurable = config.setdefault("configurable", {})
-    configurable["checkpoint_ns"] = ""
+    configurable["checkpoint_ns"] = checkpoint_ns
     if checkpoint_id is not None:
         configurable["checkpoint_id"] = checkpoint_id
 
@@ -1634,6 +1713,7 @@ async def abuild_checkpoint_state_accessor(
     thread_id: str,
     assistant_id: str | None = None,
     checkpoint_id: str | None = None,
+    checkpoint_ns: str = "",
 ) -> tuple[CheckpointStateAccessor, dict[str, Any]]:
     """Async variant of :func:`build_checkpoint_state_accessor`.
 
@@ -1647,13 +1727,14 @@ async def abuild_checkpoint_state_accessor(
     identity changed while it waited rebuilds instead of reusing the
     winner's graph.
     """
-    return await run_assembly(
-        build_checkpoint_state_accessor,
-        request,
-        thread_id=thread_id,
-        assistant_id=assistant_id,
-        checkpoint_id=checkpoint_id,
-    )
+    kwargs: dict[str, Any] = {
+        "thread_id": thread_id,
+        "assistant_id": assistant_id,
+        "checkpoint_id": checkpoint_id,
+    }
+    if checkpoint_ns:
+        kwargs["checkpoint_ns"] = checkpoint_ns
+    return await run_assembly(build_checkpoint_state_accessor, request, **kwargs)
 
 
 async def resolve_thread_assistant_id(
@@ -1686,6 +1767,7 @@ async def build_thread_checkpoint_state_accessor(
     *,
     thread_id: str,
     checkpoint_id: str | None = None,
+    checkpoint_ns: str = "",
     fail_closed: bool = False,
 ) -> tuple[CheckpointStateAccessor, dict[str, Any]]:
     """Single resolution boundary for state endpoints.
@@ -1695,12 +1777,14 @@ async def build_thread_checkpoint_state_accessor(
     ``AgentMiddleware.state_schema`` from the response.
     """
     assistant_id = await resolve_thread_assistant_id(request, thread_id, fail_closed=fail_closed)
-    return await abuild_checkpoint_state_accessor(
-        request,
-        thread_id=thread_id,
-        assistant_id=assistant_id,
-        checkpoint_id=checkpoint_id,
-    )
+    kwargs: dict[str, Any] = {
+        "thread_id": thread_id,
+        "assistant_id": assistant_id,
+        "checkpoint_id": checkpoint_id,
+    }
+    if checkpoint_ns:
+        kwargs["checkpoint_ns"] = checkpoint_ns
+    return await abuild_checkpoint_state_accessor(request, **kwargs)
 
 
 async def build_thread_checkpoint_state_mutation_accessor(
@@ -1709,6 +1793,7 @@ async def build_thread_checkpoint_state_mutation_accessor(
     thread_id: str,
     as_node: str,
     checkpoint_id: str | None = None,
+    checkpoint_ns: str = "",
 ) -> tuple[CheckpointStateAccessor, dict[str, Any]]:
     """Mutation accessor compiled with the thread's effective state schema.
 
@@ -1716,20 +1801,24 @@ async def build_thread_checkpoint_state_mutation_accessor(
     so writes carrying materialized state do not silently discard
     extension-owned channels.
     """
-    read_accessor, _read_config = await build_thread_checkpoint_state_accessor(
-        request,
-        thread_id=thread_id,
-        checkpoint_id=checkpoint_id,
-        fail_closed=True,
-    )
+    read_kwargs: dict[str, Any] = {
+        "thread_id": thread_id,
+        "checkpoint_id": checkpoint_id,
+        "fail_closed": True,
+    }
+    if checkpoint_ns:
+        read_kwargs["checkpoint_ns"] = checkpoint_ns
+    read_accessor, _read_config = await build_thread_checkpoint_state_accessor(request, **read_kwargs)
     state_schema = graph_state_schema(getattr(read_accessor, "graph", None))
-    return build_checkpoint_state_mutation_accessor(
-        request,
-        thread_id=thread_id,
-        as_node=as_node,
-        checkpoint_id=checkpoint_id,
-        state_schema=state_schema,
-    )
+    mutation_kwargs: dict[str, Any] = {
+        "thread_id": thread_id,
+        "as_node": as_node,
+        "checkpoint_id": checkpoint_id,
+        "state_schema": state_schema,
+    }
+    if checkpoint_ns:
+        mutation_kwargs["checkpoint_ns"] = checkpoint_ns
+    return build_checkpoint_state_mutation_accessor(request, **mutation_kwargs)
 
 
 async def apply_checkpoint_to_run_config(
@@ -1882,11 +1971,19 @@ async def _recover_run_knowledge_scope(
     *,
     thread_id: str,
     target_message_id: str | None,
+    checkpoint_id: str | None = None,
+    checkpoint_ns: str = "",
 ) -> object | None:
-    """Resolve one replay/resume scope from the authoritative latest checkpoint."""
+    """Recover the source turn's scope from the selected checkpoint or head."""
+    checkpoint_kwargs: dict[str, Any] = {}
+    if checkpoint_id is not None:
+        checkpoint_kwargs["checkpoint_id"] = checkpoint_id
+    if checkpoint_ns:
+        checkpoint_kwargs["checkpoint_ns"] = checkpoint_ns
     accessor, config = await build_thread_checkpoint_state_accessor(
         request,
         thread_id=thread_id,
+        **checkpoint_kwargs,
     )
     try:
         snapshot = await accessor.aget(config)
@@ -1946,13 +2043,16 @@ def _current_human_message(graph_input: object) -> HumanMessage | None:
 
 async def _load_scope_agent_config(
     *,
-    assistant_id: str | None,
+    assistant_id: object,
     user_id: str | None,
 ) -> Any | None:
     if not assistant_id or assistant_id == _DEFAULT_ASSISTANT_ID:
         return None
-    normalized = assistant_id.strip().lower().replace("_", "-")
     try:
+        # The caller's config/context ``agent_name`` arrives here unvalidated.
+        if not isinstance(assistant_id, str):
+            raise ValueError("agent_name must be a string")
+        normalized = assistant_id.strip().lower().replace("_", "-")
         return await asyncio.to_thread(
             load_agent_config,
             normalized,
@@ -2160,7 +2260,15 @@ async def start_run(
         if command and command.get("resume") is not None:
             graph_input = Command(resume=command["resume"])
         else:
-            graph_input = normalized_input
+            # LangGraph continues pending work with None; {} starts new input.
+            graph_input = normalized_input if body.input is not None else None
+        # Keep the idempotency identity in the caller's pre-stamp shape. A
+        # keyed retry can then reuse a run even though its stored run input has
+        # Gateway-issued IDs, and old id-less run records remain comparable.
+        request_input = _canonical_run_record_input(body.input, graph_input) if idempotency_key else None
+        knowledge_default_request_hash = hashlib.sha256(json.dumps(request_input, sort_keys=True, ensure_ascii=False).encode()).hexdigest() if idempotency_key else None
+        if isinstance(graph_input, dict):
+            graph_input = _assign_missing_run_input_message_ids(graph_input, thread_id=thread_id, idempotency_key=idempotency_key)
         # deerflow_trace_id is server-issued, so the caller's value is replaced
         # here at the trust boundary. body.metadata forks two ways -- through
         # build_run_config into config["metadata"], which the run worker
@@ -2181,7 +2289,11 @@ async def start_run(
             run_metadata[DEERFLOW_ORIGIN_KEY] = origin
         run_metadata[DEERFLOW_TRACE_METADATA_KEY] = ensure_trace_id()
 
-        config = build_run_config(thread_id, body.config, run_metadata, assistant_id=body.assistant_id)
+        try:
+            config = build_run_config(thread_id, body.config, run_metadata, assistant_id=body.assistant_id)
+        except ValueError as exc:
+            # Raised only for the caller's own config sections or assistant_id.
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         if isinstance(config.get("metadata"), dict):
             config["metadata"] = _admit_scheduler_metadata(config["metadata"], trusted=scheduled_task_runtime is not None)
             config["metadata"].pop(DEERFLOW_ORIGIN_KEY, None)
@@ -2204,7 +2316,7 @@ async def start_run(
         scope_graph_input = graph_input if isinstance(graph_input, dict) else {"messages": []}
         current_human_message = _current_human_message(graph_input)
         current_message_has_scope = current_human_message is not None and KNOWLEDGE_SCOPE_KEY in current_human_message.additional_kwargs
-        replay_requires_scope_recovery = isinstance(graph_input, Command) or (isinstance(target_message_id, str) and bool(target_message_id) and (replay_kind != "edit" or not current_message_has_scope))
+        replay_requires_scope_recovery = graph_input is None or isinstance(graph_input, Command) or (isinstance(target_message_id, str) and bool(target_message_id) and (replay_kind != "edit" or not current_message_has_scope))
         is_human_input_response = current_human_message is not None and "human_input_response" in current_human_message.additional_kwargs
         # Clarification and edit-replay messages may intentionally replace the
         # source scope. If either client omits its current selector snapshot,
@@ -2212,11 +2324,16 @@ async def start_run(
         # run to every operator-approved dataset. Other replay paths always use
         # server recovery regardless of client input.
         is_scope_recovery = replay_requires_scope_recovery or (is_human_input_response and not current_message_has_scope)
+        recovery_checkpoint: dict[str, Any] = {}
+        if graph_input is None:
+            configurable = config.get("configurable") or {}
+            recovery_checkpoint = {key: configurable[key] for key in ("checkpoint_id", "checkpoint_ns") if configurable.get(key)}
         recovery_scope = (
             await _recover_run_knowledge_scope(
                 request,
                 thread_id=thread_id,
                 target_message_id=(target_message_id if isinstance(target_message_id, str) else None),
+                **recovery_checkpoint,
             )
             if is_scope_recovery
             else None
@@ -2241,8 +2358,6 @@ async def start_run(
         # Keep the pre-default identity even when the agent is initially
         # unbound: adding a default must not reject an already-accepted retry.
         # The durable input still exposes the original accepted scope.
-        request_input = _canonical_run_record_input(body.input, graph_input) if idempotency_key else None
-        knowledge_default_request_hash = hashlib.sha256(json.dumps(request_input, sort_keys=True, ensure_ascii=False).encode()).hexdigest() if idempotency_key else None
         accepts_knowledge_default = not is_scope_recovery and not current_message_has_scope and knowledge_default_request_hash is not None
         admitted_knowledge_scope = admit_message_knowledge_scope(
             scope_graph_input,
@@ -2522,8 +2637,20 @@ async def start_run(
                 )
                 if start_producer_lease is not None:
                     producer_lease_started = await start_producer_lease(admission_run_id)
-                if getattr(bridge, "supports_cross_process", False) is True and not producer_lease_started:
-                    raise RuntimeError("Cross-process stream producer tracking is unavailable")
+                    if not producer_lease_started and getattr(bridge, "supports_cross_process", False) is True:
+                        # Best-effort: a cross-process bridge returns False only
+                        # after a transient backend error whose partial lease
+                        # registration was safely rolled back (nothing is left
+                        # tracked). An untracked producer falls back to the
+                        # historical conservative recovery path -- wait for the
+                        # real END or the retained-stream TTL rather than
+                        # synthesizing one -- so this run is no less safe than it
+                        # was before producer leases existed. Rejecting admission
+                        # here would instead turn a transient blip into a 500.
+                        logger.warning(
+                            "Stream producer tracking unavailable for run %s; admitting it with untracked (conservative) stream recovery",
+                            sanitize_log_param(admission_run_id),
+                        )
                 try:
                     record = await run_mgr.create_or_reject(
                         thread_id,
@@ -2550,6 +2677,7 @@ async def start_run(
                         # Bootstrap and unresolved legacy identities stay read-only.
                         evidence_agent_id=(None if scope_runtime_config.get("is_bootstrap") else (_DEFAULT_ASSISTANT_ID if scope_assistant_id == _DEFAULT_ASSISTANT_ID else getattr(agent_config, "name", None))),
                         run_id=admission_run_id,
+                        **({"execution_fence": request.state.extension_execution_fence} if getattr(request.state, "extension_execution_fence", None) is not None else {}),
                     )
                 except RunIdempotencyUnsupported as exc:
                     raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -2579,7 +2707,7 @@ async def start_run(
                         # today's default; explicit scopes and recovery do not use
                         # this compatibility path.
                         matches_legacy_default_request = accepts_knowledge_default and "knowledge_default_request_hash" not in stored and stored_input == request_input
-                        matches_input = matches_default_request or matches_legacy_default_request or stored_input == body.input or stored_input == run_record_input
+                        matches_input = matches_default_request or matches_legacy_default_request or stored_input == body.input or stored_input == request_input or stored_input == run_record_input
                     if not matches_idempotency_request or not matches_input or record.assistant_id != body.assistant_id or stored.get("conversation_references", []) != conversation_references:
                         raise HTTPException(
                             status_code=409,
@@ -2948,7 +3076,11 @@ def serialize_wait_run_status(record: RunRecord) -> dict[str, Any]:
     """Return durable status and the error envelope recognized by the SDK."""
     result: dict[str, Any] = {"status": record.status.value, "error": record.error}
     if record.status == RunStatus.error:
-        result["__error__"] = {"error": "RunError", "message": record.error or "Run failed."}
+        # A run stopped at its step limit keeps the error name of its stream
+        # error frame, so callers such as IM channels can show its message
+        # instead of a generic failure.
+        name = "GraphRecursionError" if getattr(record, "stop_reason", None) == "recursion_capped" else "RunError"
+        result["__error__"] = {"error": name, "message": record.error or "Run failed."}
     return result
 
 

@@ -566,7 +566,7 @@ class TestAttach:
 
             assert response.status_code == 500
             assert response.json() == {"detail": "Failed to upload report.txt."}
-            assert str(staged_path) in caplog.text
+            assert str(disk_full) in caplog.text
             assert not (_thread_uploads("thread-1") / "report.txt").exists()
 
     def test_attach_sync_failure_retains_host_file(self, tmp_path):

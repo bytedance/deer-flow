@@ -5,16 +5,20 @@ context -> model references the handle in a later tool call -> resolution
 rewrites it to the real reference at the tool-call boundary.
 """
 
+import json
 import re
+from pathlib import PurePosixPath
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
 import pytest
 from _agent_e2e_helpers import FakeToolCallingModel
 from langchain.agents import create_agent
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import tool
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.prebuilt.tool_node import ToolCallRequest
 
 from deerflow.agents.middlewares.artifact_capture_middleware import ArtifactCaptureMiddleware
 from deerflow.agents.middlewares.artifact_resolution_middleware import ArtifactResolutionMiddleware
@@ -223,3 +227,36 @@ def test_glob_directory_survives_capture_checkpoint_and_resolved_listing(tmp_pat
     assert found["consumed_by"] == ["call_ls"]
     persisted = next(entry for entry in agent.get_state(config).values["tool_artifacts"] if entry["tool_call_id"] == "call_glob")
     assert persisted["real_ref"] == real_ref
+
+
+@pytest.mark.parametrize(("opener", "closer"), [("「", "」"), ("『", "』")])
+def test_corner_quoted_artifact_resolves_after_source_message_is_gone(tmp_path, opener, closer):
+    filename = "季度 报告.txt"
+    (tmp_path / filename).write_text("report contents", encoding="utf-8")
+    real_ref = f"/mnt/user-data/outputs/{filename}"
+    runtime = SimpleNamespace(context={"thread_id": THREAD_ID})
+    source = ToolMessage(id="corner-report", content=f"已生成{opener}{real_ref}{closer}。", tool_call_id="call_make", name="make_file")
+    update = ArtifactCaptureMiddleware().before_model({"messages": [source]}, runtime)
+    assert update is not None
+    # Restore only the persisted registry: the tool result may have been compacted away.
+    registry = json.loads(json.dumps(update["tool_artifacts"]))
+    assert len(registry) == 1
+    request = ToolCallRequest(
+        tool_call={"name": "read_file", "args": {"path": registry[0]["handle"]}, "id": "call_read", "type": "tool_call"},
+        tool=None,
+        state={"messages": [], "tool_artifacts": registry},
+        runtime=runtime,
+    )
+    reads = []
+
+    def read_report(resolved):
+        path = resolved.tool_call["args"]["path"]
+        reads.append(path)
+        relative = PurePosixPath(path).relative_to("/mnt/user-data/outputs")
+        return ToolMessage(content=(tmp_path / str(relative)).read_text(encoding="utf-8"), tool_call_id="call_read")
+
+    result = ArtifactResolutionMiddleware().wrap_tool_call(request, read_report)
+
+    assert reads == [real_ref]
+    assert result.content == "report contents"
+    assert registry[0]["display_name"] == filename

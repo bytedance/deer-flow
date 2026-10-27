@@ -747,7 +747,10 @@ async def update_user_profile(body: UserProfileUpdateRequest, request: Request) 
     def _write_profile() -> Path:
         user_md_path = get_paths().user_md_file(user_id)
         user_md_path.parent.mkdir(parents=True, exist_ok=True)
-        user_md_path.write_text(body.content, encoding="utf-8")
+        # newline="" stores the submitted text verbatim; a default text write
+        # would turn its LF into CRLF on Windows, so the bytes on disk no longer
+        # matched the content this endpoint accepts and returns.
+        user_md_path.write_text(body.content, encoding="utf-8", newline="")
         return user_md_path
 
     try:

@@ -179,6 +179,8 @@ class Lifecycle:
             retained = await asyncio.to_thread(self.store.get, owner, run_id)
             entry = self.entries.get(run_id)
             record = entry["record"] if entry else retained
+            if self.clustered:
+                await self.check_configuration(self.new_entry(owner, record, context.agent_runs))
             if human:
                 row = next(
                     (r for r in record.get("checkpoints", []) if r["step_id"] == payload["step_id"]),
@@ -210,6 +212,12 @@ class Lifecycle:
                 if row["status"] == "resumed":
                     return {"run_id": run_id, "status": "resumed"}
                 status = "resumed"
+            if self.clustered and record["status"] == ("waiting_approval" if human else "paused"):
+                if human and row.get("artifact_kind") == "file":
+                    await asyncio.to_thread(self.store.artifact, owner, run_id, row["artifact_version"])
+                command = {"kind": "checkpoint", "step_id": row["step_id"], "attempt": row["attempt"], "artifact_version": row.get("artifact_version"), "status": status}
+                await self.remote_command(owner, record, context, command)
+                return {"run_id": run_id, "status": status}
             if not entry or record["status"] != ("waiting_approval" if human else "paused") or entry["cancel"].is_set():
                 raise ValueError("Live checkpoint unavailable; recover the workflow first after restart")
             # Revalidate both the retained capability and this caller's live grant.

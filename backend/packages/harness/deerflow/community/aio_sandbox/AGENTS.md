@@ -82,6 +82,24 @@ lock, only for the entry that passed reuse checks; a changed entry must retry.
 Partial shutdown raises and remains retryable; successful resources are not retried,
 and cleanup infrastructure closes only after every owned teardown completes.
 
+Signal handlers are a fallback for hosts without a lifespan (embedded
+`DeerFlowClient`, scripts). The handler runs `shutdown()` synchronously and
+force-destroys every sandbox, so on the Gateway's event-loop thread it would
+freeze the loop and kill in-flight runs before uvicorn starts the drain. Under
+`hold_sandbox_shutdown_ownership()` the constructor therefore installs only
+SIGHUP, which uvicorn does not handle; SIGTERM/SIGINT go to uvicorn and the
+lifespan hook shuts the provider down after the run drain and MCP teardown. A
+provider built before the declaration keeps its handlers: the Gateway declares
+first, and uvicorn already replaced any earlier handler and re-raises captured
+signals only after lifespan shutdown.
+
+`shutdown()` closes admission (`_admission_closed`) under `_lock` before its
+snapshot and never reopens it, even when a failed teardown resets
+`_shutdown_called` for retry. `acquire`/`acquire_async`, the post-serializer
+recheck and every active commit (warm reclaim, discovery, create) then raise
+`SandboxCapacityExceededError(reason="shutdown")`. A refused warm reclaim stays
+warm for shutdown to destroy; a refused create rolls back its container.
+
 Broker capability failures are unknown, never confirmed negatives. Cache only
 successful observations per provisioner endpoint/auth identity; a failed refresh
 may retain a confirmed broker requirement. A provisioner lark-configuration conflict marks its create response; the

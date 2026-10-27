@@ -165,9 +165,13 @@ async def stage_document_bytes(paths: Paths, *, user_id: str, project_id: str, c
     callers reject a missing, foreign, or archived project first.
     """
     staging_path = _new_staging_path(paths, user_id=user_id, project_id=project_id)
-    handle = await run_file_io(_open_staging, staging_path.parent, staging_path)
+    handle = None
     digest = hashlib.sha256()
     size = 0
+
+    async def prepare() -> None:
+        nonlocal handle
+        handle = await run_file_io(_open_staging, staging_path.parent, staging_path)
 
     async def _aiter() -> AsyncIterator[bytes]:
         if isinstance(chunks, list):
@@ -178,15 +182,20 @@ async def stage_document_bytes(paths: Paths, *, user_id: str, project_id: str, c
                 yield chunk
 
     try:
+        # Retain the opened handle even when cancellation arrives during its
+        # worker-to-caller handoff. Only file operations are drained; waiting
+        # for the next incoming chunk must remain cancellable.
+        await await_drained(prepare())
         async for chunk in _aiter():
             size += len(chunk)
             if size > max_bytes:
                 raise ShelfUploadTooLargeError(f"File exceeds the {max_bytes}-byte limit")
             digest.update(chunk)
-            await run_file_io(handle.write, chunk)
-        await run_file_io(handle.close)
-    except Exception:
-        await run_file_io(_close_and_unlink, handle, staging_path)
+            await await_drained(run_file_io(handle.write, chunk))
+        await await_drained(run_file_io(handle.close))
+    except BaseException:
+        if handle is not None:
+            await await_drained(run_file_io(_close_and_unlink, handle, staging_path))
         raise
     return StagedDocument(staging_path=staging_path, sha256=digest.hexdigest(), size_bytes=size)
 
@@ -584,17 +593,33 @@ async def read_file_chunks(path: Path, *, chunk_size: int = 65536) -> AsyncItera
 
     Shared by the from-thread promote path (thread file → shelf staging) and
     the attach path (staged shelf copy → thread-upload ingestion).
+
+    Cancellation contract: once an open/read/close has been admitted to the
+    file-I/O worker, the caller's cancellation is delivered only after that
+    operation settles (:func:`await_drained`). The opened handle is retained
+    the moment the worker returns it, so a cancellation racing the result
+    handoff cannot leak it, and the cleanup close never races an in-flight
+    read. Waiting for the next chunk (the ``yield`` itself) stays immediately
+    cancellable. (#7491)
     """
 
     def _open() -> Any:
         return open(path, "rb")
 
-    handle = await run_file_io(_open)
+    retained: list[Any] = []
+
+    async def _open_and_retain() -> Any:
+        handle = await run_file_io(_open)
+        retained.append(handle)
+        return handle
+
     try:
-        while chunk := await run_file_io(handle.read, chunk_size):
+        handle = await await_drained(_open_and_retain())
+        while chunk := await await_drained(run_file_io(handle.read, chunk_size)):
             yield chunk
     finally:
-        await run_file_io(handle.close)
+        for open_handle in retained:
+            await await_drained(run_file_io(open_handle.close))
 
 
 def _copy_original_under_lock(paths: Paths, staging_path: Path, *, user_id: str, row: dict) -> None:

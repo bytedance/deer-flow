@@ -14,14 +14,14 @@ import threading
 from contextlib import suppress
 from dataclasses import dataclass
 from functools import cached_property
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import NamedTuple
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.sandbox.download import DEFAULT_DOWNLOAD_LIMIT, download_limit
 from deerflow.sandbox.env_policy import build_sandbox_env
 from deerflow.sandbox.local.list_dir import list_dir
-from deerflow.sandbox.path_patterns import replace_output_path_matches
+from deerflow.sandbox.path_patterns import PATH_START_BOUNDARY, replace_output_path_matches
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
 from deerflow.sandbox.search import GrepMatch, find_glob_matches, find_grep_matches, path_matches
 from deerflow.utils.atomic_write import publish_bytes_atomically
@@ -36,6 +36,69 @@ logger = logging.getLogger(__name__)
 DEFAULT_COMMAND_TIMEOUT_SECONDS = 600
 _COMMAND_CAPTURE_LIMIT_BYTES = 10 * 1024 * 1024
 _PIPE_DRAIN_JOIN_TIMEOUT_SECONDS = 0.2
+
+
+#: Script suffixes a host interpreter opens by path but the shared skill-package
+#: classifier does not list. ``awk -f``, ``sed -f``, ``lua``, ``Rscript``, and
+#: ``tclsh`` all read the file named on the command line, so container paths
+#: inside it need the same translation as ``.py``/``.sh``. The shared set is
+#: left alone: it also decides what SkillScan and the installer treat as
+#: package code, which is a separate contract from what the host shell runs.
+_INTERPRETER_SCRIPT_SUFFIXES = frozenset({".awk", ".lua", ".r", ".sed", ".tcl"})
+
+
+def _existing_regular_file_head(path: str) -> bytes:
+    """Return the first two bytes of an existing regular file, else ``b""``.
+
+    ``write_file(append=True)`` asks this for the interpreter line of an
+    extensionless destination. Only a regular file may be opened: opening a
+    FIFO for reading blocks until the other end connects, which would turn an
+    append that used to complete into a hang. ``O_NONBLOCK`` keeps the open
+    itself from waiting, and the ``fstat`` check rejects the handle before any
+    read.
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+    except OSError:
+        return b""
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return b""
+        return os.read(fd, 2)
+    except OSError:
+        return b""
+    finally:
+        with suppress(OSError):
+            os.close(fd)
+
+
+def _content_path_translation_applies(path: str, content: str, *, append: bool, resolved_path: str) -> bool:
+    """Whether container paths inside ``content`` are translated to host paths.
+
+    The translation exists so a script the agent wrote can run under a host
+    interpreter (PR #1935). Documents, data files, and configs are not
+    executed, so their bytes are stored verbatim: rewriting them put host
+    paths into deliverables while ``read_file`` masked the rewrite back to
+    virtual paths (#7461).
+
+    A suffix settles the classification by itself, so only an extensionless
+    destination is inspected for a shebang. That keeps named files free of
+    I/O and leaves an append to a pipe or device untouched.
+    """
+    from deerflow.skills.package_files import is_code_file, is_code_path
+
+    posix = PurePosixPath(path.replace("\\", "/"))
+    if is_code_path(path) or posix.suffix.lower() in _INTERPRETER_SCRIPT_SUFFIXES:
+        return True
+    if posix.suffix:
+        # A non-script suffix settles it: a shebang cannot make ``.md`` a program.
+        return False
+    head = content[:2].encode("utf-8", "surrogatepass")
+    if append and not head.startswith(b"#!"):
+        # An extensionless script's interpreter line sits at the top of the
+        # existing file, not in the text being appended.
+        head = _existing_regular_file_head(resolved_path) or head
+    return is_code_file(path, head)
 
 
 def _publish_file_revision(path: str, content: str) -> None:
@@ -435,7 +498,7 @@ class LocalSandbox(Sandbox):
         # substitution resumes after a match, so a tail that ran through a
         # ":"-joined list ($PATH, $PYTHONPATH) swallowed every later entry and
         # left those container paths unresolved.
-        patterns = [re.escape(m.container_path) + r"(?=/|$|[\s\"';&|<>()])(?:/[^\s\"';&|<>():]*)?" for m in mappings]
+        patterns = [PATH_START_BOUNDARY + re.escape(m.container_path) + r"(?=/|$|[\s\"';&|<>()])(?:/[^\s\"';&|<>():]*)?" for m in mappings]
         return re.compile("|".join(f"({p})" for p in patterns))
 
     @cached_property
@@ -448,7 +511,7 @@ class LocalSandbox(Sandbox):
         # write_file content regularly stores PATH-style exports, and a tail
         # that ran through the ":" left the later list entries virtual in the
         # host file (read_file masked them back, so the corruption was hidden).
-        patterns = [re.escape(m.container_path) + r"(?=/|$|[^\w./-])(?:/[^\s\"';&|<>():]*)?" for m in mappings]
+        patterns = [PATH_START_BOUNDARY + re.escape(m.container_path) + r"(?=/|$|[^\w./-])(?:/[^\s\"';&|<>():]*)?" for m in mappings]
         return re.compile("|".join(f"({p})" for p in patterns))
 
     @cached_property
@@ -887,6 +950,7 @@ class LocalSandbox(Sandbox):
         timed_out = False
         stdout_read_fd, stdout_write_fd = os.pipe()
         stderr_read_fd, stderr_write_fd = os.pipe()
+        process = None
         try:
             process = subprocess.Popen(
                 args,
@@ -897,20 +961,30 @@ class LocalSandbox(Sandbox):
                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
                 env=env,
             )
-        except Exception:
-            for fd in (stdout_read_fd, stdout_write_fd, stderr_read_fd, stderr_write_fd):
+        except BaseException:
+            # Include interruptions during and after Popen; the read ends have
+            # no drain-thread owner yet. The finally block owns the write ends.
+            for fd in (stdout_read_fd, stderr_read_fd):
                 try:
                     os.close(fd)
                 except OSError:
-                    # Preserve the original Popen failure; fd cleanup is best-effort.
+                    # Preserve the original startup failure; fd cleanup is best-effort.
                     pass
+            if process is not None:
+                # Cleanup must not replace the startup error, even on another
+                # interruption. Reap independently if killing the child fails.
+                with suppress(BaseException):
+                    process.kill()
+                with suppress(BaseException):
+                    process.wait(timeout=10)
             raise
         finally:
+            # A single owner prevents a second close from hitting a recycled fd.
             for fd in (stdout_write_fd, stderr_write_fd):
                 try:
                     os.close(fd)
                 except OSError:
-                    # The write fd may already be closed by the exception cleanup above.
+                    # Closing is best-effort; preserve the command's result or startup error.
                     pass
 
         if encoding is None:
@@ -1011,6 +1085,7 @@ class LocalSandbox(Sandbox):
         timed_out = False
         stdout_read_fd, stdout_write_fd = os.pipe()
         stderr_read_fd, stderr_write_fd = os.pipe()
+        process = None
         try:
             process = subprocess.Popen(
                 args,
@@ -1021,35 +1096,43 @@ class LocalSandbox(Sandbox):
                 start_new_session=True,
                 env=env,
             )
-        except Exception:
-            for fd in (stdout_read_fd, stdout_write_fd, stderr_read_fd, stderr_write_fd):
+            # With start_new_session=True, the new process is also the
+            # process-group leader, so its PID is the stable group identifier.
+            process_group_id = process.pid
+        except BaseException:
+            # Include interruptions during and after Popen; the read ends have
+            # no drain-thread owner yet. The finally block owns the write ends.
+            for fd in (stdout_read_fd, stderr_read_fd):
                 try:
                     os.close(fd)
                 except OSError:
-                    # Preserve the original Popen failure; fd cleanup is best-effort.
+                    # Preserve the original startup failure; fd cleanup is best-effort.
                     pass
+            if process is not None:
+                # Cleanup must not replace the startup error, even on another
+                # interruption. Reap independently if killing the child fails.
+                with suppress(BaseException):
+                    process.kill()
+                with suppress(BaseException):
+                    process.wait(timeout=10)
             raise
         finally:
+            # A single owner prevents a second close from hitting a recycled fd.
             for fd in (stdout_write_fd, stderr_write_fd):
                 try:
                     os.close(fd)
                 except OSError:
-                    # The write fd may already be closed by the exception cleanup above.
+                    # Closing is best-effort; preserve the command's result or startup error.
                     pass
 
         stdout_capture, stdout_thread = LocalSandbox._start_pipe_drain(stdout_read_fd, "deerflow-bash-stdout-drain")
         stderr_capture, stderr_thread = LocalSandbox._start_pipe_drain(stderr_read_fd, "deerflow-bash-stderr-drain")
         try:
-            process_group_id = os.getpgid(process.pid)
-        except OSError:
-            process_group_id = None
-
-        try:
             try:
                 process.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
                 timed_out = True
-                LocalSandbox._terminate_process_group(process)
+                LocalSandbox._terminate_process_group(process, process_group_id)
             returncode = process.returncode if process.returncode is not None else 0
         finally:
             join_timeout = 10 if timed_out or not LocalSandbox._process_group_exists(process_group_id) else _PIPE_DRAIN_JOIN_TIMEOUT_SECONDS
@@ -1063,14 +1146,14 @@ class LocalSandbox(Sandbox):
         return stdout, stderr, returncode, timed_out
 
     @staticmethod
-    def _terminate_process_group(process: subprocess.Popen) -> None:
+    def _terminate_process_group(process: subprocess.Popen, process_group_id: int) -> None:
         """Kill the command's whole process group, then reap it.
 
         Falls back to killing just the direct child if the group is already
         gone (e.g. the command exited between the timeout and this call).
         """
         try:
-            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+            os.killpg(process_group_id, signal.SIGKILL)
         except (ProcessLookupError, PermissionError, OSError):
             # The process group is already gone (the command exited in the race
             # between the timeout and this call); fall back to killing just the
@@ -1217,9 +1300,11 @@ class LocalSandbox(Sandbox):
             dir_path = os.path.dirname(resolved_path)
             if dir_path:
                 os.makedirs(dir_path, exist_ok=True)
-            # Resolve container paths in content to local paths
-            # using the content-specific resolver (forward-slash safe)
-            resolved_content = self._resolve_paths_in_content(content)
+            # Resolve container paths in content to local paths, but only for
+            # executable content: a script needs host-resolvable paths when
+            # bash runs it, while a document's bytes must survive the write.
+            translate_paths = _content_path_translation_applies(path, content, append=append, resolved_path=resolved_path)
+            resolved_content = self._resolve_paths_in_content(content) if translate_paths else content
             if append or sys.platform not in {"darwin", "linux"}:
                 # Other hosts retain their existing write/ACL semantics.
                 with open(resolved_path, "a" if append else "w", encoding="utf-8", newline="") as f:

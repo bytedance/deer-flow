@@ -1763,27 +1763,40 @@ class RunJournal(BaseCallbackHandler):
             await asyncio.sleep(0)
 
     async def _drain_evidence(self) -> None:
+        """Freeze and drain while the caller holds the operation lock."""
         if self._closed:
             return
         await self._stop_evidence_producers()
-        await self.flush()
+        await self._flush_locked()
 
-    async def finish_evidence(self):
+    async def finish_evidence(self, *, before_receipt: Callable[[], Awaitable[None]] | None = None):
         """Stop declared producers and drain accepted work before capturing bounds.
 
         This is independent of terminal business status and does not detach the
         journal. Proven uncommitted writes remain available for explicit retry;
         unknown outcomes stay quarantined and never yield a durable receipt.
+        The worker's optional terminal confirmation runs after drain and before
+        bounds capture, under the same lock as flush and normal close.
         Unsupported stores return no durable receipt.
         """
-        if self._closed:
-            return None
-        await self._drain_evidence()
-        from deerflow.runtime.events.store.db import DbRunEventStore
+        async with self._operation_lock:
+            if self._abandoned:
+                raise RuntimeError(f"RunJournal for run {self.run_id} was force-closed; cannot finish evidence")
+            if self._closed:
+                return None
+            await self._drain_evidence()
+            if before_receipt is not None:
+                await before_receipt()
+            if self._abandoned:
+                raise RuntimeError(f"RunJournal for run {self.run_id} was force-closed; cannot capture evidence bounds")
+            from deerflow.runtime.events.store.db import DbRunEventStore
 
-        if isinstance(self._store, DbRunEventStore):
-            return await self._store.evidence_receipt(self.thread_id, self.run_id)
-        return None
+            if isinstance(self._store, DbRunEventStore):
+                receipt = await self._store.evidence_receipt(self.thread_id, self.run_id)
+                if self._abandoned:
+                    raise RuntimeError(f"RunJournal for run {self.run_id} was force-closed during evidence bounds capture")
+                return receipt
+            return None
 
     def _detach_runtime_dependencies(self) -> None:
         """Drop every external or potentially cyclic run-scoped reference."""

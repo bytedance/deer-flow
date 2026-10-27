@@ -73,7 +73,7 @@ STARTUP_ONLY_FIELDS: dict[str, str] = {
     ),
     "channel_connections": (
         "start_channel_service() wires the connection repository and channel workers once at startup, and the channel-connections router caches the merged provider config on app.state; "
-        "the scheduled-task notification delivery worker captures channel_connections.notification_locale when it starts. channel_connections.* edits need a restart."
+        "the scheduled-task notification delivery worker and ChannelService (for the IM /connect and /goal replies) capture channel_connections.notification_locale when they start. channel_connections.* edits need a restart."
     ),
     "scheduler": (
         "ScheduledTaskService is constructed and started once during Gateway lifespan startup; enabled, poll_interval_seconds, lease_seconds, "

@@ -62,6 +62,7 @@ from deerflow.tracing import (
     inject_langfuse_metadata,
 )
 from deerflow.utils.bash_exit import BASH_TOOL_NAMES, bash_exit_status
+from deerflow.utils.file_io import await_drained
 from deerflow.utils.messages import message_content_to_text
 
 if TYPE_CHECKING:
@@ -473,7 +474,7 @@ def _harvest_tool_receipts(
 #: Bash-family tool names whose calls count as recorded command executions.
 _BASH_EVIDENCE_TOOL_NAMES = BASH_TOOL_NAMES
 #: Bounds for the harvested evidence: only the newest few executions travel,
-#: with command/output text capped (test summaries print at the tail).
+#: with command/output text capped and full-output summary semantics preserved.
 _BASH_EVIDENCE_MAX_ENTRIES = 20
 _BASH_EVIDENCE_COMMAND_CHARS = 500
 _BASH_EVIDENCE_OUTPUT_TAIL_CHARS = 1000
@@ -529,14 +530,16 @@ def _harvest_shell_persistence(final_state: Any) -> bool | None:
 
 def _harvest_bash_executions(
     final_state: Any,
+    *,
+    summary_cache: dict[str, tuple[str, str]] | None = None,
 ) -> list[dict[str, Any]] | None:
     """Harvest bounded bash command/output evidence from one streamed state.
 
     RFC #4651 PR4: a ``tests_passed:<command>`` acceptance leaf must anchor to
     a specific recorded execution — the command text lets the parent match the
-    criterion against the call that actually ran, and the bounded output tail
-    carries the test-summary shape. The recorded status is the **actual shell
-    exit status**: a nonzero bash exit comes back as ordinary output text
+    criterion against the call that actually ran. A bounded summary stamp is
+    computed from the full tool output before retaining the diagnostic tail.
+    The recorded status is the **actual shell exit status**: a nonzero bash exit comes back as ordinary output text
     (local: a trailing ``Exit Code: N``; e2b/opensandbox with empty output:
     ``Command exited with code N``), which ``deerflow_tool_meta`` still reports
     as success — so an explicit exit marker wins, and the meta status is only
@@ -549,12 +552,17 @@ def _harvest_bash_executions(
     UNVERIFIED.
     """
     if not final_state:
+        if summary_cache is not None:
+            summary_cache.clear()
         return None
     messages = final_state.get("messages") if isinstance(final_state, dict) else None
     if not messages:
+        if summary_cache is not None:
+            summary_cache.clear()
         return None
     try:
         from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY
+        from deerflow.subagents.acceptance_checks import summarize_test_output
 
         commands: dict[str, tuple[str, str, bool]] = {}
         for message in messages:
@@ -573,20 +581,28 @@ def _harvest_bash_executions(
                 # selection-changing suffix like ``-k smoke`` could be cut).
                 commands[tool_call_id] = (name, command[:_BASH_EVIDENCE_COMMAND_CHARS], len(command) > _BASH_EVIDENCE_COMMAND_CHARS)
         if not commands:
+            if summary_cache is not None:
+                summary_cache.clear()
             return []
         executions: list[dict[str, Any]] = []
-        for message in messages:
-            if not isinstance(message, ToolMessage):
-                continue
+        # Only retained executions need full-output parsing. The per-run cache
+        # survives values chunks, but keeps at most the same newest 20 outputs.
+        tool_messages = [message for message in messages if isinstance(message, ToolMessage) and str(message.tool_call_id or "") in commands][-_BASH_EVIDENCE_MAX_ENTRIES:]
+        next_cache: dict[str, tuple[str, str]] = {}
+        for message in tool_messages:
             tool_call_id = str(message.tool_call_id or "")
-            entry = commands.get(tool_call_id)
-            if entry is None:
-                continue
+            entry = commands[tool_call_id]
             name, command, command_truncated = entry
             meta = (message.additional_kwargs or {}).get(TOOL_META_KEY) or {}
             meta_status = str(meta.get("status") or getattr(message, "status", "success") or "success")
             content = message.content if isinstance(message.content, str) else json.dumps(message.content, sort_keys=True, default=str)
             status, status_marker = _bash_evidence_status(content, meta_status)
+            cached = summary_cache.get(tool_call_id) if summary_cache is not None else None
+            if cached is not None and (cached[0] is content or cached[0] == content):
+                test_summary = cached[1]
+            else:
+                test_summary = summarize_test_output(content)
+            next_cache[tool_call_id] = (content, test_summary)
             output_tail = content[-_BASH_EVIDENCE_OUTPUT_TAIL_CHARS:]
             if len(content) > _BASH_EVIDENCE_OUTPUT_TAIL_CHARS and content[-_BASH_EVIDENCE_OUTPUT_TAIL_CHARS - 1] != "\n":
                 # A clipped test name/log line can look like a summary after
@@ -599,10 +615,14 @@ def _harvest_bash_executions(
                     "command": command,
                     "command_truncated": command_truncated,
                     "output_tail": output_tail,
+                    "test_summary": test_summary,
                     "status": status,
                     "status_marker": status_marker,
                 }
             )
+        if summary_cache is not None:
+            summary_cache.clear()
+            summary_cache.update(next_cache)
         # Provenance stamp: whether the producing sandbox reuses one
         # persistent shell session. Captured here — while the state that
         # carried the evidence is at hand — because the parent-side checker
@@ -1716,6 +1736,8 @@ class SubagentExecutor:
                 return None
             return _harvest_tool_receipts(final_state, prefer_citing_turn=prefer_citing_turn)
 
+        bash_summary_cache: dict[str, tuple[str, str]] = {}
+
         def current_bash_executions() -> list[dict[str, Any]] | None:
             # RFC #4651 PR4: evidence for tests_passed acceptance leaves.
             # Accumulated from every chunk (not harvested once at terminal) so
@@ -1723,7 +1745,7 @@ class SubagentExecutor:
             # execution. Criteria-free runs pay nothing.
             if not self.acceptance_criteria:
                 return None
-            return _harvest_bash_executions(final_state)
+            return _harvest_bash_executions(final_state, summary_cache=bash_summary_cache)
 
         try:
             if task_info is not None and task_store is not None:
@@ -2047,6 +2069,18 @@ class SubagentExecutor:
                         tool_receipts=terminal_receipts(),
                     )
 
+        except asyncio.CancelledError:
+            # The outer background wrapper observes cancellation only after this
+            # function's task-stop hook. Publish it here so observers see ABORTED;
+            # a previously published hard timeout still wins the terminal race.
+            result.try_set_terminal(
+                SubagentStatus.CANCELLED,
+                error="Cancelled by user",
+                token_usage_records=collector.snapshot_records() if collector is not None else None,
+                tool_receipts=terminal_receipts(),
+            )
+            raise
+
         except Exception as e:
             logger.exception(f"[trace={self.trace_id}] Subagent {self.config.name} async execution failed")
             result.try_set_terminal(
@@ -2057,44 +2091,47 @@ class SubagentExecutor:
             )
 
         finally:
-            # Cancellation (including wait_for's execution timeout) bypasses
-            # the terminal branches above. A completed model response can be
-            # in the collector before its graph node publishes a values chunk.
-            # Stream teardown has drained at this point; publish its final
-            # usage before the outer wrapper chooses CANCELLED or TIMED_OUT.
+            # A completed model response can be in the collector before its
+            # graph node publishes a values chunk. Publish final usage after
+            # stream teardown, including cancellation and hard-timeout cleanup.
             if collector is not None:
                 result.update_token_usage_records(collector.snapshot_records())
-            if execution_context is not None:
-                try:
-                    from deerflow.sandbox.lease import release_sandbox_execution_lease_async
 
-                    await release_sandbox_execution_lease_async(execution_context)
-                except Exception:
-                    logger.warning(
-                        "[trace=%s] Failed to release sandbox execution lease for subagent %s",
-                        self.trace_id,
-                        self.config.name,
-                        exc_info=True,
-                    )
-            if task_info is not None and task_store is not None:
-                try:
-                    await notify_task_stop(
-                        loaded_extensions,
-                        task_store,
-                        task_info,
-                        subagent_task_outcome(
-                            cancelled=result.status is SubagentStatus.CANCELLED,
-                            succeeded=result.status is SubagentStatus.COMPLETED,
-                        ),
-                        timeout=_EXTENSION_TASK_NOTIFY_TIMEOUT_SECONDS,
-                    )
-                except Exception:
-                    logger.warning(
-                        "[trace=%s] Extension task-stop notification failed for subagent %s (non-fatal)",
-                        self.trace_id,
-                        self.config.name,
-                        exc_info=True,
-                    )
+            async def cleanup_execution() -> None:
+                if execution_context is not None:
+                    try:
+                        from deerflow.sandbox.lease import release_sandbox_execution_lease_async
+
+                        await release_sandbox_execution_lease_async(execution_context)
+                    except Exception:
+                        logger.warning(
+                            "[trace=%s] Failed to release sandbox execution lease for subagent %s",
+                            self.trace_id,
+                            self.config.name,
+                            exc_info=True,
+                        )
+                if task_info is not None and task_store is not None:
+                    try:
+                        await notify_task_stop(
+                            loaded_extensions,
+                            task_store,
+                            task_info,
+                            subagent_task_outcome(
+                                cancelled=result.status is SubagentStatus.CANCELLED,
+                                succeeded=result.status is SubagentStatus.COMPLETED,
+                            ),
+                            timeout=_EXTENSION_TASK_NOTIFY_TIMEOUT_SECONDS,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "[trace=%s] Extension task-stop notification failed for subagent %s (non-fatal)",
+                            self.trace_id,
+                            self.config.name,
+                            exc_info=True,
+                        )
+
+            # Keep capacity and execution-done ownership until the whole tail settles.
+            await await_drained(cleanup_execution())
 
         return result
 
@@ -2107,6 +2144,8 @@ class SubagentExecutor:
         long-lived isolated loop. Reusing that loop keeps shared async clients
         from being tied to a short-lived loop that gets closed per execution.
         """
+        if result_holder is None:
+            result_holder = SubagentResult(task_id=str(uuid.uuid4())[:8], trace_id=self.trace_id, status=SubagentStatus.PENDING)
         future: Future[SubagentResult] | None = None
         parent_context = _copy_isolated_subagent_context()
         try:
@@ -2115,9 +2154,11 @@ class SubagentExecutor:
                 lambda: self._aexecute(task, result_holder),
             )
             return future.result(timeout=self.config.timeout_seconds)
-        except FuturesTimeoutError:
-            if result_holder is not None:
-                result_holder.cancel_event.set()
+        except FuturesTimeoutError as exc:
+            # Publish the synchronous API's failure before cancellation can
+            # reach task-stop observers or win the terminal-state race.
+            result_holder.try_set_terminal(SubagentStatus.FAILED, error=str(exc))
+            result_holder.cancel_event.set()
             if future is not None:
                 future.cancel()
             raise
@@ -2148,19 +2189,19 @@ class SubagentExecutor:
         Returns:
             SubagentResult with the execution result.
         """
+        # Share one holder with the worker even when the caller did not supply
+        # one, so a timeout and its cleanup report the same terminal outcome.
+        result = result_holder
+        if result is None:
+            result = SubagentResult(
+                task_id=str(uuid.uuid4())[:8],
+                trace_id=self.trace_id,
+                status=SubagentStatus.PENDING,
+            )
         try:
-            return self._execute_in_isolated_loop(task, result_holder)
+            return self._execute_in_isolated_loop(task, result)
         except Exception as e:
             logger.exception(f"[trace={self.trace_id}] Subagent {self.config.name} execution failed")
-            # Create a result with error if we don't have one
-            if result_holder is not None:
-                result = result_holder
-            else:
-                result = SubagentResult(
-                    task_id=str(uuid.uuid4())[:8],
-                    trace_id=self.trace_id,
-                    status=SubagentStatus.RUNNING,
-                )
             result.try_set_terminal(SubagentStatus.FAILED, error=str(e))
             return result
 
