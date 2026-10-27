@@ -55,7 +55,11 @@ export function useCancelBackgroundTask(threadId: string) {
   const { t } = useI18n();
   return useMutation({
     mutationFn: (taskId: string) => cancelBackgroundTask(threadId, taskId),
-    onSuccess: (task) => {
+    onSuccess: async (task) => {
+      await queryClient.cancelQueries({
+        queryKey: backgroundTaskQueryKey(threadId, task.task_id),
+        exact: true,
+      });
       queryClient.setQueryData(
         backgroundTaskQueryKey(threadId, task.task_id),
         task,
@@ -76,6 +80,7 @@ export function useCancelBackgroundTask(threadId: string) {
       );
       void queryClient.invalidateQueries({
         queryKey: backgroundTasksQueryKey(threadId),
+        exact: true,
       });
     },
     onError: (error: Error) => {
