@@ -500,3 +500,10 @@ over shell exports and the `$NAME`/`${NAME:-x}`/leading-`~` expansion that
 shell-quoted exports for `eval`. `test_serve_dotenv.py` and the launcher-block
 cases in `test_support_bundle.py` run the real block; harnesses that copy
 `serve.sh` with a `.env` must copy the parser too.
+
+## Channel artifact turn sequencing
+
+`test_channels.py` models consecutive artifact-producing turns by awaiting an
+async outbound callback before sending the next inbound message. Keep the real
+worker-pool concurrency, preserve per-turn artifact assertions, and stop the
+manager in `finally` so a failure cannot leave tasks using a closed test loop.
