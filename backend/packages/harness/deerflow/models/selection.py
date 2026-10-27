@@ -23,12 +23,50 @@ _PATTERNS = (
     (None, r"^(?:please\s+)?use\s+(.+?)\s+to\s+"),
 )
 
-# A determiner opens a description ("a regression model", "the attached model"),
-# not a configured model name; the module resolves direct names only.
-_DESCRIPTION_OPENERS = re.compile(r"^(?:an?|the|this|that|these|those|my|our|your|his|her|its|their)\b", re.IGNORECASE)
+# A reference to a kind of model ("a regression model", "a data model") is a task
+# requirement, not a chat-model choice. The set that has to be listed is the class
+# nouns, not the model names: model names grow every release, these do not. A
+# phrase whose head word is absent from this set is treated as a name and asked
+# about, so a model nobody has heard of yet still reaches the selector.
+_DESCRIPTION_HEADS = frozenset({
+    "regression", "data", "language", "attached", "selected", "current", "same", "other",
+    "local", "remote", "custom", "base", "vision", "embedding", "reward", "teacher", "student",
+    "statistical", "predictive", "simulation", "business", "domain", "world", "role", "threat",
+    "pricing", "learning", "graphical", "probabilistic", "generative", "ml", "ai",
+})
+_DETERMINERS = frozenset({"a", "an", "the", "this", "that", "these", "those", "my", "our", "your", "his", "her", "its", "their"})
+_NOUN_WORDS = frozenset({"model", "models"})
 
 
-def _may_name_a_model(query: str) -> bool:
+def _configured_name_tokens(model: Any) -> set[str]:
+    """Tokens that identify a configured model, including camel-case initials."""
+    tokens: set[str] = set()
+    for spelling in _spellings(model):
+        for token in _tokens(spelling):
+            if len(token) > 1 or token.isdigit():
+                tokens.add(token)
+        for word in re.findall(r"[A-Za-z]+", spelling):
+            capitals = "".join(re.findall(r"[A-Z]", word))
+            if len(capitals) > 1:
+                tokens.add(capitals.casefold())
+    return tokens
+
+
+def _mentions_a_configured_model(query: str, models: list[Any]) -> bool:
+    """True when a word in the query identifies a model the host actually offers."""
+    wanted = {token for token in _tokens(query) if token not in _DETERMINERS and token not in _NOUN_WORDS}
+    if not wanted:
+        return False
+    return any(wanted & _configured_name_tokens(model) for model in models)
+
+
+def _describes_a_class(query: str) -> bool:
+    """True when the phrase names a kind of model rather than a name to resolve."""
+    tokens = [token for token in _tokens(query) if token not in _DETERMINERS and token not in _NOUN_WORDS]
+    return bool(tokens) and tokens[-1] in _DESCRIPTION_HEADS
+
+
+def _may_name_a_model(query: str, models: list[Any]) -> bool:
     """Tell an unmatched model name apart from an ordinary noun phrase.
 
     Unknown versioned or explicitly named models must not fall through to a
@@ -36,9 +74,16 @@ def _may_name_a_model(query: str) -> bool:
     """
     if re.search(r"\bv\d|模型", query, re.IGNORECASE):
         return True
+    # A name the host actually offers decides this on its own; where it sits in
+    # the sentence and which article precedes it are irrelevant. Without this,
+    # "the Claude Opus model" was read as a description of a method.
+    if _mentions_a_configured_model(query, models):
+        return True
     if not re.search(r"\bmodel\b", query, re.IGNORECASE):
         return False
-    return _DESCRIPTION_OPENERS.match(query) is None
+    # No configured name and the word "model": task text only when the phrase is
+    # a class we know how to name, so an unknown brand still asks.
+    return not _describes_a_class(query)
 
 
 def _tokens(value: str) -> list[str]:
@@ -90,7 +135,7 @@ def resolve_model_control(text: str, models: list[Any], *, model_name: str | Non
         candidates = [model for model in models if _matches(query, model)]
     # "Use Python to ..." is an ordinary task. Unknown versioned or explicitly
     # named models, however, must not fall through to a misleading model reply.
-    if not candidates and model_name is None and not _may_name_a_model(query):
+    if not candidates and model_name is None and not _may_name_a_model(query, models):
         return result
     offset = len(text) - len(text.lstrip()) + match.end()
     if match.groupdict().get("action") in {"处理", "计算", "回答", "分析", "生成", "写", "做"}:
