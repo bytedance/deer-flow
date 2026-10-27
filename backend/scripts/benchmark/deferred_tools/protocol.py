@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 from jsonschema import Draft202012Validator
+from jsonschema.exceptions import SchemaError
 
 
 def canonical_bytes(value):
@@ -37,7 +38,10 @@ def load_dataset(path: Path):
             raise ValueError("Tool names must be unique nonempty strings")
         _strings(tool["routing_keywords"])
         schema = tool["parameters"]
-        Draft202012Validator.check_schema(schema)
+        try:
+            Draft202012Validator.check_schema(schema)
+        except SchemaError as exc:
+            raise ValueError(f"Invalid parameter schema for tool {name}") from exc
         if not isinstance(schema, dict) or schema.get("type") != "object" or not isinstance(schema.get("properties"), dict):
             raise ValueError("Tool parameters must declare object properties")
         tools[name] = tool

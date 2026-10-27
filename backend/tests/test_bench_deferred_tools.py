@@ -199,6 +199,38 @@ def test_cli_writes_complete_report_and_refuses_existing_output(tmp_path):
     assert error.value.code == 2
 
 
+def test_provenance_supports_a_symlinked_import_path(tmp_path, monkeypatch):
+    from scripts.benchmark.deferred_tools import runner
+
+    fixture = write_dataset(tmp_path)
+    expected = runner.provenance(fixture)
+    backend = Path(runner.__file__).resolve().parents[3]
+    alias = tmp_path / "linked-backend"
+    try:
+        alias.symlink_to(backend, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"Directory symlinks are unavailable: {exc}")
+    monkeypatch.setattr(runner, "__file__", str(alias / "scripts/benchmark/deferred_tools/runner.py"))
+    actual = runner.provenance(fixture)
+    assert actual["sources"] == expected["sources"]
+    assert actual["fixture_sha256"] == expected["fixture_sha256"]
+
+
+def test_invalid_parameter_schema_has_clean_cli_diagnostics(tmp_path, capsys):
+    from scripts.benchmark.deferred_tools.runner import main
+
+    data = dataset()
+    data["tools"][0]["parameters"]["required"] = "oops"
+    path = write_dataset(tmp_path, data)
+    with pytest.raises(SystemExit) as error:
+        main(["--fixture", str(path), "--output-dir", str(tmp_path / "report")])
+    assert error.value.code == 2
+    stderr = capsys.readouterr().err
+    assert "Benchmark failed:" in stderr
+    assert "Traceback" not in stderr
+    assert not (tmp_path / "report").exists()
+
+
 def test_optional_adapter_never_silently_substitutes_a_different_version(tmp_path, monkeypatch):
     from scripts.benchmark.deferred_tools import adapters
 

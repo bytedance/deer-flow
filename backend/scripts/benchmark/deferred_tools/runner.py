@@ -93,7 +93,7 @@ def provenance(dataset_path):
     backend = Path(__file__).resolve().parents[3]
     git = subprocess.run(["git", "rev-parse", "HEAD"], cwd=backend, text=True, capture_output=True, check=True).stdout.strip()
     dirty = bool(subprocess.run(["git", "status", "--porcelain"], cwd=backend, text=True, capture_output=True, check=True).stdout.strip())
-    files = list(Path(__file__).parent.glob("*.py")) + [
+    files = list(Path(__file__).resolve().parent.glob("*.py")) + [
         backend / "packages/harness/deerflow/tools/builtins/tool_search.py",
         backend / "packages/harness/deerflow/tools/mcp_metadata.py",
         backend / "packages/harness/deerflow/agents/middlewares/mcp_routing_middleware.py",
