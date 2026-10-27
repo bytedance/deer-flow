@@ -9,7 +9,15 @@ file IO ran on the event loop for every create/edit request — the same seam
 
 The rest of this module already reads its own file work in a worker
 (``load_agent_config``, ``_preview_cron`` and ``prepare_resume_updates`` all go
-through ``asyncio.to_thread``), so these two calls were the remaining pair.
+through ``asyncio.to_thread``), so these two reads were the remaining inline
+ones in this file.
+
+Both routes also reach a second live-config read through the notification-group
+seam: ``_validate_notification_group`` -> ``channel_connections``
+``._get_channel_connections_config``, whose ``_get_app_config()`` call ran
+inline on the loop (nothing in production populates
+``app.state.channel_connections_config``, so that is the path every request
+takes). ``test_notification_group_lookup_reads_config_off_the_loop`` pins it.
 
 The strict Blockbuster gate from ``tests/blocking_io/conftest.py`` fails a test
 whose body performs blocking IO on the loop, so an anchor cannot pass by
@@ -112,3 +120,26 @@ async def test_the_config_read_itself_is_what_trips_the_gate() -> None:
     await asyncio.to_thread(get_app_config)
     with pytest.raises(BlockingError):
         get_app_config()
+
+
+async def test_notification_group_lookup_reads_config_off_the_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The create/edit routes reach a second live-config read through this seam.
+
+    ``_validate_notification_group`` -> ``channel_connections``
+    ``._get_channel_connections_config`` read ``_get_app_config()`` inline. The
+    seam wraps its work in ``except Exception`` and reports 503, which would
+    also swallow a BlockingError raised on the loop, so the anchor records the
+    reading thread instead of relying on the gate raising.
+    """
+    from app.gateway.routers import channel_connections
+
+    recorder = _ConfigRecorder()
+    monkeypatch.setattr(channel_connections, "_get_app_config", recorder.read)
+    # Stop after the config read, before the repository touches the database.
+    monkeypatch.setattr(channel_connections, "_get_repository", MagicMock(side_effect=RuntimeError("stop here")))
+
+    with pytest.raises(HTTPException):
+        await routes._validate_notification_group(_request(), "group-1", user_id="7")
+
+    assert recorder.calls == 1, "the seam must read the live config"
+    assert recorder.threads[0] != _main_thread(), "the config read must run in a worker, not on the loop"

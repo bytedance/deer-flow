@@ -201,7 +201,12 @@ async def _get_channel_connections_config(request: Request) -> ChannelConnection
     # since the last one.
     config = getattr(request.app.state, "channel_connections_config", None)
     if not isinstance(config, ChannelConnectionsConfig):
-        config = _get_app_config().channel_connections
+        # No production code populates ``app.state.channel_connections_config``
+        # (only tests inject it), so this is the path every request takes. The
+        # read stats and hashes config.yaml and extensions_config.json, so keep
+        # it in a worker like the store resolution above.
+        app_config = await asyncio.to_thread(_get_app_config)
+        config = app_config.channel_connections
     if not (config.enabled and config.telegram.enabled):
         # Only the Telegram deep-link username comes from the runtime store.
         return config
@@ -214,7 +219,7 @@ async def _get_channels_config(request: Request) -> dict[str, Any]:
 
 
 async def _load_channels_config(request: Request, config: ChannelConnectionsConfig) -> dict[str, Any]:
-    app_config = _get_app_config()
+    app_config = await asyncio.to_thread(_get_app_config)
     extra = app_config.model_extra or {}
     channels_config = extra.get("channels")
     result = dict(channels_config) if isinstance(channels_config, dict) else {}
