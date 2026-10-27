@@ -6,11 +6,13 @@ since all mutations happen within the same event loop).
 
 from __future__ import annotations
 
+import asyncio
 import bisect
+import weakref
 from datetime import UTC, datetime
 
 from deerflow.runtime.events.message_identity import message_identity
-from deerflow.runtime.events.store.base import RunEventStore
+from deerflow.runtime.events.store.base import RunEventLifecycleRejected, RunEventStore
 from deerflow.runtime.user_context import AUTO, _AutoSentinel
 
 
@@ -30,6 +32,16 @@ class MemoryRunEventStore(RunEventStore):
         self._events_by_run: dict[str, dict[str, list[dict]]] = {}  # thread_id -> run_id -> seq-sorted events
         self._messages_by_run: dict[str, dict[str, list[dict]]] = {}  # thread_id -> run_id -> seq-sorted messages
         self._seq_counters: dict[str, int] = {}  # thread_id -> last assigned seq
+        # Guarded singleton writes may await a lifecycle callback, so deletion
+        # needs an explicit fence rather than relying on no-await atomicity.
+        self._mutation_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
+
+    def _get_mutation_lock(self, thread_id: str) -> asyncio.Lock:
+        lock = self._mutation_locks.get(thread_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._mutation_locks[thread_id] = lock
+        return lock
 
     def _next_seq(self, thread_id: str) -> int:
         current = self._seq_counters.get(thread_id, 0)
@@ -104,24 +116,27 @@ class MemoryRunEventStore(RunEventStore):
         content="",
         metadata=None,
         created_at=None,
+        user_id: str | None | _AutoSentinel = AUTO,
+        lifecycle_guard=None,
     ):
-        # No await occurs between the lookup and append, so this is atomic for
-        # the backend's documented single-event-loop concurrency model.
-        for event in self._events_by_run.get(thread_id, {}).get(run_id, []):
-            if event["event_type"] == event_type:
-                return event, False
-        return (
-            self._put_one(
-                thread_id=thread_id,
-                run_id=run_id,
-                event_type=event_type,
-                category=category,
-                content=content,
-                metadata=metadata,
-                created_at=created_at,
-            ),
-            True,
-        )
+        async with self._get_mutation_lock(thread_id):
+            if lifecycle_guard is not None and not await lifecycle_guard():
+                raise RunEventLifecycleRejected(f"Run lifecycle no longer admits terminal evidence for {thread_id}/{run_id}")
+            for event in self._events_by_run.get(thread_id, {}).get(run_id, []):
+                if event["event_type"] == event_type:
+                    return event, False
+            return (
+                self._put_one(
+                    thread_id=thread_id,
+                    run_id=run_id,
+                    event_type=event_type,
+                    category=category,
+                    content=content,
+                    metadata=metadata,
+                    created_at=created_at,
+                ),
+                True,
+            )
 
     async def list_messages(self, thread_id, *, limit=50, before_seq=None, after_seq=None, user_id: str | None | _AutoSentinel = AUTO):
         # ``messages`` is messages-only and seq-sorted, so the seq window is a
@@ -220,24 +235,26 @@ class MemoryRunEventStore(RunEventStore):
         accepted for interface parity with the user-scoped backends and ignored
         — the same convention as this store's read methods.
         """
-        events = self._events.pop(thread_id, [])
-        self._messages.pop(thread_id, None)
-        self._events_by_run.pop(thread_id, None)
-        self._messages_by_run.pop(thread_id, None)
-        self._seq_counters.pop(thread_id, None)
-        return len(events)
+        async with self._get_mutation_lock(thread_id):
+            events = self._events.pop(thread_id, [])
+            self._messages.pop(thread_id, None)
+            self._events_by_run.pop(thread_id, None)
+            self._messages_by_run.pop(thread_id, None)
+            self._seq_counters.pop(thread_id, None)
+            return len(events)
 
     async def delete_by_run(self, thread_id, run_id, *, user_id: str | None | _AutoSentinel = AUTO):
         """Delete one run's events; ``user_id`` is accepted for parity only."""
-        all_events = self._events.get(thread_id, [])
-        if not all_events:
-            return 0
-        remaining = [e for e in all_events if e["run_id"] != run_id]
-        removed = len(all_events) - len(remaining)
-        self._events[thread_id] = remaining
-        # Keep the message projection in lockstep (same surviving dict objects).
-        self._messages[thread_id] = [e for e in remaining if e["category"] == "message"]
-        # Drop the deleted run from the run-keyed projections.
-        self._events_by_run.get(thread_id, {}).pop(run_id, None)
-        self._messages_by_run.get(thread_id, {}).pop(run_id, None)
-        return removed
+        async with self._get_mutation_lock(thread_id):
+            all_events = self._events.get(thread_id, [])
+            if not all_events:
+                return 0
+            remaining = [e for e in all_events if e["run_id"] != run_id]
+            removed = len(all_events) - len(remaining)
+            self._events[thread_id] = remaining
+            # Keep the message projection in lockstep (same surviving dict objects).
+            self._messages[thread_id] = [e for e in remaining if e["category"] == "message"]
+            # Drop the deleted run from the run-keyed projections.
+            self._events_by_run.get(thread_id, {}).pop(run_id, None)
+            self._messages_by_run.get(thread_id, {}).pop(run_id, None)
+            return removed

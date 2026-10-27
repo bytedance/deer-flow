@@ -31,6 +31,7 @@ from app.gateway.routers.browser import _browser_tools_enabled
 from deerflow.config.credentials_key import CREDENTIALS_KEY_ENV_VAR, GENERATE_KEY_COMMAND
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.config.deployment_config import MULTI_INSTANCE_ENV_VAR, DeploymentConfig, multi_instance_declaration
+from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.config.run_ownership_config import RunOwnershipConfig
 from deerflow.config.stream_bridge_config import StreamBridgeConfig
 
@@ -876,6 +877,32 @@ def test_credentials_key_consumers_name_the_enabled_features():
     assert credentials_key_consumers(_with_channel_connections(_cluster_ready())) == ["channel_connections.enabled=true"]
 
 
+def _with_mcp_oauth(config, *, grant_type: str = "refresh_token", oauth_enabled: bool = True, server_enabled: bool = True):
+    oauth = {"enabled": oauth_enabled, "token_url": "https://auth.example.invalid/token", "grant_type": grant_type, "refresh_token": "seed", "client_id": "client", "client_secret": "secret"}
+    config.extensions = ExtensionsConfig.model_validate({"mcpServers": {"reports": {"enabled": server_enabled, "type": "http", "url": "https://mcp.example.invalid/mcp", "oauth": oauth}}})
+    return config
+
+
+def test_rotating_mcp_oauth_servers_store_tokens_under_the_credentials_key():
+    """mcp_oauth_tokens keeps refresh_token connections' tokens encrypted; client_credentials stay in process."""
+    assert credentials_key_consumers(_with_mcp_oauth(_cluster_ready())) == ["mcpServers.reports.oauth.enabled=true"]
+    assert credentials_key_consumers(_with_mcp_oauth(_cluster_ready(), grant_type="client_credentials")) == []
+    assert credentials_key_consumers(_with_mcp_oauth(_cluster_ready(), oauth_enabled=False)) == []
+    assert credentials_key_consumers(_with_mcp_oauth(_cluster_ready(), server_enabled=False)) == []
+
+
+def test_declared_multi_instance_with_rotating_mcp_oauth_requires_the_credentials_key(monkeypatch):
+    """A peer that cannot decrypt the stored chain falls back to the consumed seed and gets invalid_grant."""
+    with pytest.raises(SystemExit) as exc_info:
+        _enforce_credentials_key(_with_mcp_oauth(_cluster_ready(deployment_multi_instance=True)))
+    msg = str(exc_info.value)
+    assert CREDENTIALS_KEY_ENV_VAR in msg
+    assert "mcpServers.reports.oauth.enabled=true" in msg
+    assert "or set mcpServers.reports.oauth.enabled=false" in msg
+    monkeypatch.setenv(CREDENTIALS_KEY_ENV_VAR, _VALID_KEY)
+    _enforce_credentials_key(_with_mcp_oauth(_cluster_ready(deployment_multi_instance=True)))
+
+
 def test_declared_multi_instance_with_channel_connections_requires_the_credentials_key():
     """Each instance would otherwise generate its own key file and could not read its peers' credentials."""
     with pytest.raises(SystemExit) as exc_info:
@@ -988,8 +1015,8 @@ def test_multi_worker_rejects_disabled_leader_lease_with_an_enabled_channel(monk
     assert "discord, telegram" in msg  # sorted, only the enabled ones
     assert "slack" not in msg
     assert "409" in msg
-    assert "Set GATEWAY_WORKERS=1" in msg
-    _assert_lease_is_not_offered_as_a_remedy(msg)
+    assert "set GATEWAY_WORKERS=1" in msg
+    _assert_lease_is_offered_as_the_remedy(msg)
 
 
 @pytest.mark.parametrize("leader_lease", [None, {}, {"enabled": "auto"}, {"enabled": True}, {"enabled": True, "lease_seconds": 15, "grace_seconds": 5}])
@@ -1023,22 +1050,21 @@ def test_declared_multi_instance_rejects_disabled_leader_lease_for_ui_connectabl
     assert "IM channels telegram are enabled" in msg
     assert "deployment.multi_instance=false and run a single Gateway instance" in msg
     assert "channel_connections.<provider>.enabled=false" in msg
-    _assert_lease_is_not_offered_as_a_remedy(msg)
+    _assert_lease_is_offered_as_the_remedy(msg)
 
 
-def _assert_lease_is_not_offered_as_a_remedy(msg: str) -> None:
-    """Transport arbitration ships separately: until then auto/true only bypass the refusal.
+def _assert_lease_is_offered_as_the_remedy(msg: str) -> None:
+    """The leader lease now arbitrates each provider's transport, so it is the first remedy.
 
-    The remedies the refusal may offer are the ones that work today -- a single
-    instance or disabled channels. Recommending ``auto``/``true`` would send an
-    operator straight back into the duplicate connections the clause exists to
-    prevent (review on #6746).
+    While the arbitration had not shipped, ``auto``/``true`` only bypassed the
+    refusal and the message had to say so (review on #6746). With
+    ``channel_leases`` in place the refusal leads with the setting that keeps
+    every instance running, then the single-instance and channel-disable fallbacks.
     """
-    assert "Set channels.leader_lease.enabled to auto" not in msg
-    assert "so one instance owns" not in msg
-    assert "reserved" in msg and "not a remedy" in msg
     remedies = msg.split("diverges). ", 1)[1]
-    assert remedies.startswith(("Set GATEWAY_WORKERS=1", "Set deployment.multi_instance=false", "Unset DEER_FLOW_MULTI_INSTANCE")), remedies
+    assert remedies.startswith("Set channels.leader_lease.enabled to auto (the default) or true so one instance holds each provider's connection"), remedies
+    assert "reserved" not in msg and "not a remedy" not in msg
+    assert "alternatively " in remedies and "or disable those channels" in remedies
 
 
 def test_disabled_channel_connections_master_switch_does_not_count_providers():
@@ -1049,6 +1075,39 @@ def test_disabled_channel_connections_master_switch_does_not_count_providers():
 def test_single_instance_ignores_a_disabled_leader_lease():
     """Without a multi-process signal the clause is inert, like every other clause of the gate."""
     _enforce_postgres_for_multi_worker(_channels_cluster(leader_lease={"enabled": False}, channels={"telegram": {"enabled": True}}))
+
+
+def test_single_instance_explicit_leader_lease_needs_a_sql_database():
+    """``enabled: true`` turns the lease on without peers; its table needs sqlite or postgres."""
+    config = _channels_cluster(leader_lease={"enabled": True}, channels={"telegram": {"enabled": True}})
+    config.database = DatabaseConfig(backend="memory")
+    with pytest.raises(SystemExit) as exc_info:
+        _enforce_postgres_for_multi_worker(config)
+    msg = str(exc_info.value)
+    assert "channels.leader_lease.enabled=true" in msg
+    assert "database.backend is 'memory'" in msg
+    assert "IM channels telegram are enabled" in msg
+
+
+@pytest.mark.parametrize("backend", ["sqlite", "postgres"])
+def test_single_instance_explicit_leader_lease_runs_on_a_sql_database(backend):
+    config = _channels_cluster(leader_lease={"enabled": True}, channels={"telegram": {"enabled": True}})
+    config.database = DatabaseConfig(backend=backend)
+    _enforce_postgres_for_multi_worker(config)
+
+
+@pytest.mark.parametrize(
+    ("leader_lease", "channels"),
+    [
+        ({"enabled": "auto"}, {"telegram": {"enabled": True}}),  # auto stays off on a single instance
+        ({"enabled": True}, {"telegram": {"enabled": False}}),  # nothing for the lease to arbitrate
+        ({"enabled": True}, {"github": {"enabled": True}}),  # webhooks are never arbitrated
+    ],
+)
+def test_single_instance_memory_database_passes_when_the_lease_has_nothing_to_hold(leader_lease, channels):
+    config = _channels_cluster(leader_lease=leader_lease, channels=channels)
+    config.database = DatabaseConfig(backend="memory")
+    _enforce_postgres_for_multi_worker(config)
 
 
 @pytest.mark.parametrize("block", [{"enabled": "maybe"}, {"lease_seconds": 0}, {"grace_seconds": -1}, {"enable": False}, "auto"])

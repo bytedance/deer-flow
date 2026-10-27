@@ -58,13 +58,18 @@ from langchain.agents.middleware.types import ModelCallResult, ModelRequest, Mod
 from langchain_core.messages import HumanMessage, RemoveMessage, SystemMessage
 from langgraph.runtime import Runtime
 
+from deerflow.agents.language import UI_LANGUAGES, ui_locale
+from deerflow.agents.middlewares.message_utils import insert_after_leading_system_messages
+from deerflow.agents.middlewares.pii_redaction_middleware import redact_text
 from deerflow.projects.context import build_project_context_message, is_project_context_message, pinned_project_snapshot, project_context_insertion_index, render_documents_block, render_project_block
+from deerflow.runtime.client_context import client_context_limits, render_client_context_for_prompt
 from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.utils.messages import INJECTED_USER_MESSAGE_ID_SUFFIX, ORIGINAL_USER_CONTENT_KEY, strip_injected_user_message_id_suffix
 
 if TYPE_CHECKING:
     from deerflow.config.app_config import AppConfig
+    from deerflow.config.pii_redaction_config import PiiRedactionConfig
 
 logger = logging.getLogger(__name__)
 
@@ -404,22 +409,30 @@ class DynamicContextMiddleware(AgentMiddleware):
         self._injected_memory_message_id: str | None = None
 
     def release_policy_parameters(self) -> dict[str, object]:
-        """Declare memory/date behavior and the shelf index's rendering caps.
+        """Declare memory/date behavior, the shelf index's rendering caps and client delivery.
 
         ``memory_enabled`` gates the memory half of the injected context;
         ``shelf_index_max_entries`` / ``shelf_index_max_bytes`` change the
-        model-visible ``<documents>`` block this middleware renders. All three
-        are model-visible policy, so the effective (post-config-resolution)
+        model-visible ``<documents>`` block this middleware renders, and the
+        ``client_context_*`` entries describe the request-only ``<client_context>``
+        block. All are model-visible policy, so the effective (post-config-resolution)
         values are part of the assembly identity — runs under different
         policies must not share a fingerprint.
         """
         max_entries, max_bytes = self._shelf_index_limits()
+        pii_redaction_config = self._pii_redaction_config()
         return {
             "current_date_timezone": _effective_date_timezone_name(),
             "memory_enabled": self._memory_enabled,
             "shelf_index_max_entries": max_entries,
             "shelf_index_max_bytes": max_bytes,
+            "client_context_delivery": "framed_request_message_after_system_prompt",
+            "client_context_limits": client_context_limits(),
+            "client_context_pii_redaction": bool(pii_redaction_config and pii_redaction_config.enabled),
         }
+
+    def _pii_redaction_config(self) -> PiiRedactionConfig | None:
+        return self._app_config.pii_redaction if self._app_config is not None else None
 
     def _build_full_reminder(self, runtime: Runtime | None = None, *, query: str | None = None) -> tuple[str, str | None]:
         """Return (date_reminder, memory_block | None).
@@ -753,6 +766,43 @@ class DynamicContextMiddleware(AgentMiddleware):
         message = build_project_context_message(block, run_id)
         return request.override(messages=[*messages[:index], message, *messages[index:]]), project_block, documents_block
 
+    def _assemble_client_request(self, request: ModelRequest) -> ModelRequest:
+        """Insert the run's ``context.client`` as one transient data message.
+
+        The values come from the request body, so they never enter system
+        text: the block is rendered (and sanitized again — direct graph
+        callers bypass the Gateway) from ``runtime.context["client"]`` into a
+        hidden HumanMessage right after the leading SystemMessages, where an
+        unchanged client keeps the cached prefix stable across runs. Like the
+        project message it is request-only: never a state update and never
+        flagged ``dynamic_context_reminder``, so a later run without
+        ``client`` simply has no block. It is added inside the outer
+        ``PiiRedactionMiddleware``, so the configured policy is applied here.
+        """
+        context = getattr(getattr(request, "runtime", None), "context", None)
+        block = render_client_context_for_prompt(context.get("client")) if isinstance(context, dict) else None
+        if block is None:
+            return request
+        block = redact_text(block, self._pii_redaction_config())
+        message = HumanMessage(
+            content=block,
+            additional_kwargs={
+                "hide_from_ui": True,
+                **provenance_kwargs(ContentKind.MIDDLEWARE_INJECTION, "dynamic_context_client"),
+            },
+        )
+        return request.override(messages=insert_after_leading_system_messages(list(request.messages), [message]))
+
+    def _assemble_language_request(self, request: ModelRequest) -> ModelRequest:
+        locale = ui_locale(getattr(getattr(request, "runtime", None), "context", None))
+        if locale is None:
+            return request
+        message = HumanMessage(
+            content=f"<response_language_preference>\nPreferred language: {UI_LANGUAGES[locale]} ({locale})\n</response_language_preference>",
+            additional_kwargs={"hide_from_ui": True, **provenance_kwargs(ContentKind.MIDDLEWARE_INJECTION, "dynamic_context_language")},
+        )
+        return request.override(messages=insert_after_leading_system_messages(list(request.messages), [message]))
+
     def _record_context_event(self, messages: list, runtime: Runtime | None, project_block: str | None, documents_block: str | None) -> None:
         """Emit the run's single ``context:memory`` audit event, when due.
 
@@ -791,6 +841,8 @@ class DynamicContextMiddleware(AgentMiddleware):
     @override
     def wrap_model_call(self, request: ModelRequest, handler: Callable[[ModelRequest], ModelResponse]) -> ModelCallResult:
         request, project_block, documents_block = self._assemble_project_request(request)
+        request = self._assemble_client_request(request)
+        request = self._assemble_language_request(request)
         response = handler(request)
         # Record only after the call succeeded: a failed assembly must not
         # claim the context was delivered.
@@ -801,6 +853,8 @@ class DynamicContextMiddleware(AgentMiddleware):
     async def awrap_model_call(self, request: ModelRequest, handler: Callable[[ModelRequest], Awaitable[ModelResponse]]) -> ModelCallResult:
         # Pure in-memory rendering: no I/O, so it stays on the event loop.
         request, project_block, documents_block = self._assemble_project_request(request)
+        request = self._assemble_client_request(request)
+        request = self._assemble_language_request(request)
         response = await handler(request)
         self._record_context_event(request.messages, getattr(request, "runtime", None), project_block, documents_block)
         return response

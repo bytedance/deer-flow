@@ -37,12 +37,13 @@ from .sandbox_info import SandboxInfo
 
 logger = logging.getLogger(__name__)
 
+_LARK_CLI_RUNTIME_CONTAINER_PATH = "/mnt/integrations/lark-cli/runtime"
 _PROVISIONER_EXTRA_MOUNT_PATHS = {
     "/mnt/acp-workspace",
     "/mnt/integrations/lark-cli/config",
     "/mnt/integrations/lark-cli/config/locks",
     "/mnt/integrations/lark-cli/data",
-    "/mnt/integrations/lark-cli/runtime",
+    _LARK_CLI_RUNTIME_CONTAINER_PATH,
 }
 _MANAGED_SKILL_CATEGORY_NAMES = (
     "public",
@@ -56,9 +57,6 @@ _RESERVED_SANDBOX_MOUNT_PATHS = (
     "/mnt/integrations/lark-cli",
 )
 
-_LARK_CLI_RUNTIME_CONTAINER_PATH = "/mnt/integrations/lark-cli/runtime"
-_LARK_CLI_CONFIG_CONTAINER_PATH = "/mnt/integrations/lark-cli/config"
-_LARK_CLI_DATA_CONTAINER_PATH = "/mnt/integrations/lark-cli/data"
 _AIO_DEFAULT_MAX_SHELL_SESSIONS = 10
 
 

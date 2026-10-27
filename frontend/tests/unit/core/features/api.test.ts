@@ -110,6 +110,7 @@ describe("scheduled tasks feature", () => {
           available: true,
           running: false,
           tool_enabled: false,
+          group_notifications: true,
           min_interval_seconds: 30,
         },
       }),
@@ -118,6 +119,7 @@ describe("scheduled tasks feature", () => {
       available: true,
       running: false,
       toolEnabled: false,
+      groupNotifications: true,
       minIntervalSeconds: 30,
     });
   });
@@ -130,6 +132,7 @@ describe("scheduled tasks feature", () => {
       available: true,
       running: true,
       toolEnabled: false,
+      groupNotifications: false,
       minIntervalSeconds: 60,
     });
   });
@@ -138,13 +141,18 @@ describe("scheduled tasks feature", () => {
     mockedFetch.mockResolvedValueOnce(
       jsonResponse({
         agents_api: { enabled: true },
-        scheduled_tasks: { available: false, min_interval_seconds: "10" },
+        scheduled_tasks: {
+          available: false,
+          min_interval_seconds: "10",
+          group_notifications: "true",
+        },
       }),
     );
     await expect(fetchScheduledTasksFeature()).resolves.toEqual({
       available: false,
       running: true,
       toolEnabled: false,
+      groupNotifications: false,
       minIntervalSeconds: 60,
     });
   });

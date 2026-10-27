@@ -1,5 +1,16 @@
 ### Python Extension System (Runtime and Distribution)
 
+`registry.knowledge_provider(name, provider)` (extension-api 0.2.7) adds an
+operator-installed read-only `deerflow.knowledge.RetrievalProvider`. The host
+validates advertised async operations, attributes entries and rolls them back
+positionally with every other contribution. Provider configuration, API calls
+and response mapping stay in extensions; core owns capabilities, Scope
+admission and source validation. Catalog and execution resolve the same loaded
+snapshot, with run-bound snapshots taking precedence over the singleton.
+See [the contract](../../../../docs/KNOWLEDGE.md) and the packaged
+`examples/deerflow-extension-knowledge` sample. Older registry implementations
+return False; never silently ignore unsupported registration.
+
 Third-party Python packages can expose an `install(registry, config)` function and be
 loaded, in deterministic order, from the startup-only top-level `plugins:` list in
 `config.yaml`. Keep this list out of `extensions_config.json`: the latter is writable
@@ -11,11 +22,18 @@ Packaged extensions use one PEP 621 entry point in the
 `deerflow.extensions` group, for example
 `example = "deerflow_extension_example:install"`. The operator CLI is dispatched from
 the existing `deerflow` console script to `extensions/cli.py` and exposes only these
-surfaces: `install SOURCE [--yes]`, `upgrade SOURCE [--yes]`, `list`, `enable NAME`,
+surfaces: `install SOURCE [--yes]`, `upgrade SOURCE [--yes]`, `list [--json]`, `enable NAME`,
 `disable NAME`, and `remove NAME`. `NAME` resolves against the entry-point name, distribution name, or
 `module:install` value. The root `make extension-*` targets are convenience wrappers;
 because they execute from `backend/`, documentation should use absolute local source
 paths with `SOURCE=` unless backend-relative behavior is intentional.
+
+`list --json` serializes the existing `list_configured()` inventory as an ordered
+array with only `name`, `package`, `entry_point`, `enabled`, and `required`. Keep
+the manager's `"-"` package fallback and schema defaults/coercion. Validate the
+whole inventory before writing stdout; failures use the existing stderr/non-zero
+path. Listing must not resolve entry points, mutate files, or expose private config
+or source metadata. CLI coverage lives in `tests/test_extension_list_json.py`.
 
 `ExtensionManager` owns the package/config transaction. Install runs a controlled
 `uv add --project <backend> --group extensions --no-workspace --no-sync -- <source>`, updates the dedicated
@@ -46,7 +64,14 @@ full dependency resolve invites a second interrupt that escapes the handler mid-
 File snapshots capture the original permission bits alongside the bytes; rollback applies
 that mode to a temporary file before atomically replacing the destination, including when
 restoring `config.yaml` after a failed removal. A failed write, chmod, or replace leaves the
-current destination untouched and removes the temporary file.
+current destination untouched. Temporary cleanup uses `cleanup_failed_atomic_write`, so a
+failed unlink or its warning log cannot replace the original error, including interruptions.
+Pass the raw descriptor only until `fdopen` succeeds; a close failure still attempts
+the unlink. The managed `plugins:` rewrite uses the same cleanup and records the
+temporary path before writing, so a short write still removes the hidden file.
+Restoring a file that did not exist uses the same helper, so an unlink or
+warning failure cannot replace the original operation error or skip later
+restores. Coverage: `tests/test_extension_atomic_write_cleanup.py`.
 Package mutation is deferred from environment mutation: after `uv add/remove`
 updates the declaration and lock, one `uv sync --locked --all-packages` preserves the same
 config-/environment-detected optional extras as normal startup. All three uv calls pin the
@@ -145,10 +170,11 @@ entry, the manager owns the controlled locked sync.
 
 The public package is `packages/extension-api/` and must never import `deerflow` or carry
 framework dependencies. Extensions declare any FastAPI, LangChain, or LangGraph imports
-themselves. Its registry contract exposes eight contribution kinds: middleware
+themselves. Its registry contract exposes nine contribution kinds: middleware
 contributors, task-lifecycle contributors, system-model-call observers, agent-assembly
-observers, context-compaction observers, Gateway-lifetime services, eager routers, and
-experimental full-stack plugins (`registry.plugin()`, see `docs/full-stack-plugins.md`). Middleware contributions declare lead/subagent scope, stable
+observers, context-compaction observers, Gateway-lifetime services, eager routers,
+experimental full-stack plugins (`registry.plugin()`, see `docs/full-stack-plugins.md`),
+and read-only knowledge providers (`registry.knowledge_provider()`, above). Middleware contributions declare lead/subagent scope, stable
 order, and a semantic placement (`MODEL_LOGICAL`, `MODEL_PHYSICAL`, `TOOL_VISIBLE`,
 `TOOL_RAW`, or `STANDARD`) rather than a fragile list index. `extensions/stack.py` is the
 single final composition point; do not inject inside
@@ -258,7 +284,11 @@ snapshot immutable in fact rather than only by declaration. Gateway registers on
 hooks and async system observations are dispatched to that loop even when the caller is a
 subagent's isolated loop, while synchronous system callbacks submit fire-and-forget work
 there. Shutdown stops accepting detached observations before the memory shutdown flush and
-resets the loop only after in-flight run/subagent drain ordering is complete.
+resets the loop only after in-flight run/subagent drain ordering is complete. The
+synchronous dispatch admission check, submission, and pending-future registration share
+a process-local lock with suspension; draining snapshots the set only after suspension
+acquires that lock, so an accepted observation cannot be registered after the shutdown
+snapshot. Completion callbacks take the same lock before removing futures.
 
 `ContextCompactionObserver` reports the one moment a lossy context transform can still be
 described: `DeerFlowSummarizationMiddleware.compact_state()` / `acompact_state()` hash each
@@ -418,15 +448,23 @@ Tests for hook behavior must create and invoke their own hook fixtures.
 
 ## Full-stack contributions
 
-`registry.plugin(PluginContribution(...))` registers optional browser code, backend actions
-and model tools under one deployment-owned namespace. The public method defaults to False
-for older hosts; accepted contributions share source attribution and positional rollback.
-`plugins.py` in Gateway serves descriptors, hashed JS assets and authenticated action calls.
-No online settings write API is added. `plugin_tools.py` joins normal tool assembly with
-the run's extension snapshot; task delegation passes that snapshot explicitly. Browser
-public-field projection is an allowlist. Package code is trusted, not sandboxed. See
-`docs/full-stack-plugins.md` and the independently packaged bookmark example.
+`registry.plugin(PluginContribution(...))` adds browser/backend/tools under one
+namespace; old hosts return False. Preserve source attribution and positional rollback.
+Gateway `plugins.py`: descriptors, hashed JS, authenticated actions; no online
+settings write API. `plugin_tools.py` uses the run snapshot, passed explicitly
+to delegation. Browser fields are allowlisted. Code is trusted, not sandboxed.
 
+`ModelTool` defaults to JSON content. Opt-in `content_and_artifact` requires
+`PluginToolResult`. Require string artifact keys throughout; validate JSON jointly
+within 64 KiB and snapshot artifacts. Keep identity, policy/deadline and citation
+gates. Test ToolNode and checkpoint replay. See `docs/full-stack-plugins.md`.
+
+Evolution host grants (`host_access.evidence` / `skill_mutations`) compose with
+`host_access.model_invocation` through `HostAccess`. Evolution grants require a
+unique stable name and entry point; model-only grants retain their per-install
+identity and permit repeated entry points. Keep all granted dependencies when
+wrapping services with `ModelInvocationService`. The additive evolution contracts
+ship in extension API 0.2.7, after 0.2.6's PluginToolResult contract.
 Full Agent run control is an optional `deerflow_extension_api.AgentRuns` handle
 on action/tool contexts and the request resolver. Gateway owns principal binding,
 revocation and ordinary route admission in `app/gateway/extension_agent_runs.py`.
@@ -436,6 +474,16 @@ and revoked before host shutdown; PAT/internal grants remain unsupported.
 Unstamped internal launches receive no handle and must still start normally.
 Action/tool dispatch scopes handles to each registered plugin namespace for
 idempotency isolation; request-resolved handles use `for_plugin` explicitly.
+`configuration_revision` (API 0.2.7) rechecks grants and returns a process-local
+HMAC of declarative app/extensions and Agent config/SOUL, not effective assembly,
+memory, referenced files or provider state. Never expose raw secret configuration.
+Durable revisions use the shared host signing secret. Preserve Python set identity
+until canonical encoding: unordered config sets must hash identically across
+process hash seeds, while ordered model/tool lists must retain their order.
+`configuration_evidence` reads persisted, run-bound actual assembly versions; the
+worker captures descriptors even without observers and persists before execution.
+`read_artifact` authorizes bounded output bytes off-loop; extensions retain immutable
+versions themselves. Workflow preview/approval/consumption must share those bytes.
 
 **Recorded extension-first exception.** The project-shelf summary pipeline
 (`projects/summaries.py`) ships in core: its consumer-visible surface (the
@@ -447,3 +495,9 @@ plugin boundary, and the lifecycle hook would be a durable core contract with
 a single consumer. The generator sits behind the narrow `enqueue_summary`
 interface so a future document-lifecycle hook can lift generation into an
 extension without touching schema or rendering.
+
+Extension API 0.2.9 adds `ExecutionFence` to AgentRuns.start/cancel. Accept only the
+capability's plugin namespace and recheck the authenticated user as usual. Stamp
+fences on internal request state, never HTTP context/config. Forward admission to
+the RunStore transaction; require run heartbeats and a shared stream bridge. Fenced
+cancel uses the durable cancellation request, consumed by the existing child owner.

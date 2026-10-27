@@ -235,6 +235,50 @@ def test_grep_case_insensitive_and_file_scope(provider, tree):
     assert truncated is False
 
 
+@pytest.mark.parametrize(
+    ("pattern", "line"),
+    [
+        ("alpha.beta", "alpha.beta"),
+        ("hello world", "hello world"),
+        ("x[0]", "x[0]"),
+        ("path\\file", "path\\file"),
+        ("a+b", "a+b"),
+    ],
+    ids=["dot", "space", "brackets", "backslash", "plus"],
+)
+def test_grep_literal_matches_regex_metacharacters(provider, tmp_path, pattern, line):
+    # A literal pattern is matched verbatim: the sandbox must hand the RAW
+    # pattern to ``grep -F``. Re-escaping it first (``alpha\.beta``) makes
+    # fixed-string grep search for the backslash as part of the text, so an
+    # exact line never matches (#5626).
+    root = tmp_path / "literal"
+    root.mkdir()
+    (root / "sample.txt").write_text(f"header\n{line}\ntrailer\n", encoding="utf-8")
+
+    matches, truncated = provider.sandbox.grep(str(root), pattern, literal=True)
+
+    assert [(m.line_number, m.line) for m in matches] == [(2, line)]
+    assert truncated is False
+
+
+@pytest.mark.parametrize("single_file", [False, True], ids=["directory", "file"])
+@pytest.mark.parametrize("case_sensitive", [False, True], ids=["ignore-case", "match-case"])
+def test_grep_literal_finds_long_lines_with_bounded_prefix_summaries(provider, tmp_path, single_file, case_sensitive):
+    root = tmp_path / "long-lines"
+    root.mkdir()
+    target = root / "data.json"
+    target.write_text("header\n" + "x" * 2500 + "Needle[0].value\nNeedle0Xvalue\n", encoding="utf-8")
+    search_root = target if single_file else root
+    pattern = "Needle[0].value" if case_sensitive else "needle[0].VALUE"
+
+    matches, truncated = provider.sandbox.grep(str(search_root), pattern, literal=True, case_sensitive=case_sensitive)
+
+    # Search the full eligible line even when the fixed-length preview ends
+    # before the needle. `truncated` describes result limits, not preview text.
+    assert [(match.path, match.line_number, match.line) for match in matches] == [(str(target), 2, "x" * 197 + "...")]
+    assert truncated is False
+
+
 def test_grep_glob_filter_is_root_relative(provider, tree):
     matches, truncated = provider.sandbox.grep(str(tree), "needle", glob="nested/*.txt")
     assert [(m.path, m.line_number) for m in matches] == [(str(tree / "nested" / "result.txt"), 1)]

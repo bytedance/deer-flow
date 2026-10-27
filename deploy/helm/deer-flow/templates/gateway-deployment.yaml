@@ -101,8 +101,12 @@ spec:
                   external provisioner's key is never touched and the gateway boots
                   as it did before the key existed, failing sandbox calls at use
                   time. With the bundled provisioner the key is injected below and
-                  required, so no default is needed. */}}
-            - {{ if not .Values.provisioner.enabled }}export PROVISIONER_API_KEY="${PROVISIONER_API_KEY:-}" && {{ end }}cd backend && PYTHONPATH=. uv run --no-sync uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --workers 1 --timeout-graceful-shutdown {{ .Values.gateway.uvicornGracefulShutdownSeconds | int }}
+                  required, so no default is needed.
+                  The command execs uv so it replaces sh as the container's PID 1:
+                  a forking `sh -c` has no SIGTERM handler, so the kubelet's
+                  SIGTERM would be dropped and the graceful-shutdown budget
+                  below would never start (#6835). */}}
+            - {{ if not .Values.provisioner.enabled }}export PROVISIONER_API_KEY="${PROVISIONER_API_KEY:-}" && {{ end }}cd backend && PYTHONPATH=. exec uv run --no-sync uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --workers 1 --timeout-graceful-shutdown {{ .Values.gateway.uvicornGracefulShutdownSeconds | int }}
           env:
             - name: CI
               value: "true"
@@ -191,7 +195,7 @@ spec:
                   (bundled StatefulSet, external databaseUrl, or an existing
                   Secret). In sqlite/memory mode the env is omitted and
                   config.yaml's database.postgres_url is never read. */ -}}
-            {{- $pgConfigured := or .Values.postgresql.enabled .Values.postgresql.external.databaseUrl .Values.postgresql.external.existingSecret .Values.postgresql.existingSecret -}}
+            {{- $pgConfigured := or .Values.postgresql.enabled .Values.postgresql.external.databaseUrl (include "deer-flow.databaseUserSecret" .) -}}
             {{- if $pgConfigured }}
             - name: DATABASE_URL
               valueFrom:

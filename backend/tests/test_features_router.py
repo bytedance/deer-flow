@@ -37,6 +37,7 @@ def _app_with_config(
     scheduled_task_repo_available: bool = False,
     scheduler_running: bool = False,
     scheduler_tool_enabled: bool = False,
+    channel_connections_enabled: bool | None = None,
 ) -> FastAPI:
     app = FastAPI()
     app.state.scheduled_task_repo = object() if scheduled_task_repo_available else None
@@ -62,6 +63,8 @@ def _app_with_config(
         ),
         scheduler=SimpleNamespace(enabled=scheduler_running, tool_enabled=scheduler_tool_enabled, min_once_delay_seconds=60),
     )
+    if channel_connections_enabled is not None:
+        fake_config.channel_connections = SimpleNamespace(enabled=channel_connections_enabled)
     search_tool = SimpleNamespace(use=knowledge_search_provider) if knowledge_search_provider is not None else None
     fake_config.get_tool_config = lambda name: search_tool if name == "knowledge_search" else None
     app.dependency_overrides[get_config] = lambda: fake_config
@@ -86,7 +89,7 @@ def test_features_reports_agents_api_enabled() -> None:
         "knowledge_base": {
             "scope_selection_enabled": False,
         },
-        "scheduled_tasks": {"available": False, "running": False, "tool_enabled": False, "min_interval_seconds": 60},
+        "scheduled_tasks": {"available": False, "running": False, "tool_enabled": False, "min_interval_seconds": 60, "group_notifications": False},
         "thread_activity": {"available": False},
     }
 
@@ -109,7 +112,7 @@ def test_features_reports_agents_api_disabled() -> None:
         "knowledge_base": {
             "scope_selection_enabled": False,
         },
-        "scheduled_tasks": {"available": False, "running": False, "tool_enabled": False, "min_interval_seconds": 60},
+        "scheduled_tasks": {"available": False, "running": False, "tool_enabled": False, "min_interval_seconds": 60, "group_notifications": False},
         "thread_activity": {"available": False},
     }
 
@@ -256,7 +259,19 @@ def test_features_reports_scheduled_tasks_process_state(repo: bool, running: boo
     with TestClient(app) as client:
         response = client.get("/api/features")
     assert response.status_code == 200
-    assert response.json()["scheduled_tasks"] == {**expected, "min_interval_seconds": 60}
+    assert response.json()["scheduled_tasks"] == {**expected, "min_interval_seconds": 60, "group_notifications": False}
+
+
+@pytest.mark.parametrize("repo", [False, True])
+@pytest.mark.parametrize("connections", [None, False, True])
+@pytest.mark.parametrize("running", [False, True])
+def test_features_group_notifications_require_repository_and_channel_connections(repo, connections, running):
+    app = _app_with_config(agents_api_enabled=True, scheduled_task_repo_available=repo, scheduler_running=running, channel_connections_enabled=connections)
+    with TestClient(app) as client:
+        response = client.get("/api/features")
+    assert response.status_code == 200
+    # Existing tasks remain configurable even while the local poller is stopped.
+    assert response.json()["scheduled_tasks"]["group_notifications"] is (repo and connections is True)
 
 
 class _SqlRunStore:

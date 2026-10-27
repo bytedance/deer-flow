@@ -762,7 +762,10 @@ def test_output_sync_is_bounded(output_sync_provider, monkeypatch, caplog, limit
         monkeypatch.setattr(provider, "_MAX_SYNC_LISTING_BYTES", 4)
     else:
         monkeypatch.setattr(provider, "_SYNC_DEADLINE_SECONDS", 1)
-        monkeypatch.setattr("deerflow.community.opensandbox.provider.time", types.SimpleNamespace(monotonic=iter([0, 2]).__next__, time=time.time))
+        monkeypatch.setattr(
+            "deerflow.community.opensandbox.provider.time",
+            types.SimpleNamespace(monotonic=iter([0, 2, 2]).__next__, time=time.time),
+        )
     provider.release(sandbox_id)
     if limit in {"files", "bytes"}:
         assert (outputs / "first.txt").read_bytes() == b"123"
@@ -1071,6 +1074,27 @@ def test_reset_parks_active_and_shutdown_destroys_active_and_warm(monkeypatch: p
     assert provider._sandboxes == {} and provider._warm_pool == {}
 
 
+def test_reset_parks_with_monotonic_timestamp_and_reaper_expires_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider, sdk = _install(monkeypatch)
+    sandbox_id = provider.acquire("active", user_id="user")
+    remote = sdk.remotes[0]
+    monkeypatch.setattr(time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(time, "time", lambda: 1_000_000.0)
+
+    provider.reset()
+    assert provider._warm_pool[sandbox_id][1] == 100.0
+
+    # This reset path was omitted by #6996. A backwards wall-clock step must not
+    # prevent the shared reaper from observing ten elapsed monotonic seconds.
+    monkeypatch.setattr(time, "monotonic", lambda: 110.0)
+    monkeypatch.setattr(time, "time", lambda: -1_000_000.0)
+    provider._reap_expired_warm(idle_timeout=5)
+
+    assert sandbox_id not in provider._warm_pool
+    assert remote.destroy_calls == 1
+    provider.shutdown()
+
+
 def test_shutdown_stops_idle_reaper(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(OpenSandboxProvider, "IDLE_CHECK_INTERVAL", 0.01)
     provider, _ = _install(monkeypatch, config={"idle_timeout": 60})
@@ -1093,6 +1117,72 @@ def test_execute_forwards_env_timeout_and_combines_streams() -> None:
     assert box.execute_command("result-output") == "stdout\nresult\nstderr"
     assert box.execute_command("silent-failure") == "Command exited with code 9"
     assert box.execute_command("missing-complete") == "Error: OpenSandbox command completed without an exit code: stream ended"
+
+
+def _command_error_execution(*, error_value: str, exit_code: int | None = None, error_name: str = "CommandExecError", stdout: tuple[str, ...] = (), stderr: tuple[str, ...] = (), result: tuple[str, ...] = ()) -> Any:
+    execution = _execution(stdout=stdout, stderr=stderr, result=result, exit_code=exit_code)
+    return types.SimpleNamespace(**vars(execution), error=types.SimpleNamespace(name=error_name, value=error_value))
+
+
+@pytest.mark.parametrize(
+    ("stdout", "stderr", "result", "expected_body"),
+    [
+        ((), (), (), ""),
+        (("partial output",), (), (), "partial output\n"),
+        (("out-1", "out-2"), ("stderr",), ("result",), "out-1\nout-2\nresult\nstderr\n"),
+    ],
+)
+def test_execute_command_server_side_deadline_appends_exit_marker(stdout: tuple[str, ...], stderr: tuple[str, ...], result: tuple[str, ...], expected_body: str) -> None:
+    # The SDK cannot parse this deadline error value as an integer, so it
+    # returns an Execution with exit_code=None rather than raising TimeoutError.
+    remote = _FakeRemote("remote")
+    remote.commands.run = lambda command, opts=None: _command_error_execution(error_value="context deadline exceeded", stdout=stdout, stderr=stderr, result=result)  # type: ignore[method-assign]
+    box = _box(remote, sandbox_timeout=timedelta(seconds=60), default_command_timeout=120)
+
+    assert box.execute_command("sleep 9999", timeout=5) == f"{expected_body}Error: command timed out\nExit Code: 124"
+
+
+@pytest.mark.parametrize("error_value", ["credential lookup failed", "context canceled", "signal: killed", "timeout while starting process", ""])
+def test_execute_command_other_missing_exit_codes_are_not_timeouts(error_value: str) -> None:
+    remote = _FakeRemote("remote")
+    remote.commands.run = lambda command, opts=None: _command_error_execution(error_value=error_value)  # type: ignore[method-assign]
+    box = _box(remote, sandbox_timeout=timedelta(seconds=60), default_command_timeout=120)
+
+    assert box.execute_command("true", timeout=5) == f"Error: OpenSandbox command completed without an exit code: CommandExecError: {error_value}"
+
+
+@pytest.mark.parametrize("exit_code", [-1, 7, 124])
+def test_execute_command_numeric_error_events_keep_their_exit_code(exit_code: int) -> None:
+    # execd sends ordinary nonzero exits through CommandExecError too. In
+    # particular, -1 only proves signal termination, not a command deadline.
+    remote = _FakeRemote("remote")
+    remote.commands.run = lambda command, opts=None: _command_error_execution(error_value=str(exit_code), exit_code=exit_code, stdout=("partial output",))  # type: ignore[method-assign]
+    box = _box(remote, sandbox_timeout=timedelta(seconds=60), default_command_timeout=120)
+
+    assert box.execute_command("exit-or-signal", timeout=5) == f"partial output\nCommandExecError: {exit_code}\nExit Code: {exit_code}"
+
+
+@pytest.mark.parametrize("exit_code", [None, 7])
+def test_execute_command_deadline_text_on_other_errors_is_not_a_command_timeout(exit_code: int | None) -> None:
+    remote = _FakeRemote("remote")
+    remote.commands.run = lambda command, opts=None: _command_error_execution(error_value="context deadline exceeded", exit_code=exit_code, error_name="OtherError")  # type: ignore[method-assign]
+    box = _box(remote, sandbox_timeout=timedelta(seconds=60), default_command_timeout=120)
+
+    result = box.execute_command("true", timeout=5)
+    assert "OtherError: context deadline exceeded" in result
+    assert "command timed out" not in result
+    assert not result.endswith("Exit Code: 124")
+
+
+@pytest.mark.parametrize("message", ["", "context deadline exceeded"])
+def test_execute_command_transport_exception_is_not_a_shell_timeout(message: str) -> None:
+    remote = _FakeRemote("remote")
+    remote.command_error = TimeoutError(message)
+    box = _box(remote, sandbox_timeout=timedelta(seconds=60), default_command_timeout=120)
+
+    # Even an injected builtin TimeoutError must not turn a provider/renewal
+    # failure into an authoritative shell exit. The real SDK wraps this error.
+    assert box.execute_command("true", timeout=5) == f"Error: {message}"
 
 
 def test_operations_renew_remote_lifetime_and_bound_default_commands() -> None:

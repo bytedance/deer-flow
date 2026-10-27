@@ -79,8 +79,8 @@ class TypeSafeSignalClassifier:
         if mode not in MODES:
             raise ValueError(f"memory.signal_classification.mode must be one of {list(MODES)}, got {mode!r}")
         self._mode = mode
-        connection: TypeSafeConnection = resolve_connection(
-            settings={
+        self._connection = self._resolve_connection(
+            {
                 "api_key": api_key,
                 "api_key_env": api_key_env,
                 "base_url": base_url,
@@ -89,12 +89,9 @@ class TypeSafeSignalClassifier:
                 "deadline_seconds": deadline_seconds,
                 "max_attempts": max_attempts,
                 "retry_backoff": retry_backoff,
-            },
-            defaults=typesafe_defaults(),
-            configuration_source=CONFIGURATION_SOURCE,
+            }
         )
-        self._connection = connection
-        self._client = TypeSafeClient(connection, transport_factory=transport_factory)
+        self._client = self._build_client(self._connection, transport_factory=transport_factory)
         self.hint_threshold = finite_float("hint_threshold", hint_threshold, minimum=0.0, maximum=1.0)
         affirmation_criteria = _side_criteria(criteria, QUESTION_AFFIRMATION)
         negation_criteria = _side_criteria(criteria, QUESTION_NEGATION)
@@ -117,6 +114,19 @@ class TypeSafeSignalClassifier:
         }
         self._cache = AnswerCache(size=self.cache_size, ttl_seconds=self.cache_ttl_seconds)
 
+    # --- dialect hooks ------------------------------------------------------
+
+    def _resolve_connection(self, settings: dict[str, object]) -> TypeSafeConnection:
+        """Resolve this provider's effective connection: consumer config, then its own defaults."""
+        return resolve_connection(settings=settings, defaults=typesafe_defaults(), configuration_source=CONFIGURATION_SOURCE)
+
+    def _build_client(self, connection: TypeSafeConnection, *, transport_factory: TransportFactory | None) -> TypeSafeClient:
+        return TypeSafeClient(connection, transport_factory=transport_factory)
+
+    def _judge_state(self, batch_text: str) -> object:
+        """What the provider judges. A dialect whose endpoint takes plain input text overrides it."""
+        return conversation_tail_state(batch_text)
+
     # --- side interface (shared with the coordinator) ---------------------
 
     def questions(self) -> Mapping[str, Question]:
@@ -125,7 +135,7 @@ class TypeSafeSignalClassifier:
 
     def ask(self, batch_text: str, questions: Mapping[str, Question]):
         """Send ``questions`` about ``batch_text`` through this side's client."""
-        return self._client.ask(conversation_tail_state(batch_text), questions)
+        return self._client.ask(self._judge_state(batch_text), questions)
 
     def sharing_key(self, **dimensions: object) -> str:
         """Internal sharing identity (credential fingerprint, connection, limits, cache)."""
@@ -192,7 +202,7 @@ class TypeSafeSignalClassifier:
         if not missing:
             assert cached is not None
             return self.interpret(answers, model=cached.model_for(self._questions), cached=True)
-        answer_set = self._client.ask(conversation_tail_state(request.batch_text), missing)
+        answer_set = self._client.ask(self._judge_state(request.batch_text), missing)
         answers.update(answer_set.answers)
         models.update({question_id: answer_set.model for question_id in answer_set.answers})
         if answer_set.answers:

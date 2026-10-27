@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from deerflow.runtime.events.store.base import RunEventLifecycleRejected
 from deerflow.runtime.events.store.jsonl import JsonlRunEventStore
 
 
@@ -251,3 +252,38 @@ async def test_latest_page_does_not_retain_older_matching_payloads(tmp_path, sco
         tracemalloc.stop()
     assert [r["seq"] for r in page] == [1023, 1024]
     assert peak < 2 * 1024 * 1024
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("admitted", [False, True])
+@pytest.mark.parametrize("event_type,expected_seq,created", [("llm.ai.response", 1025, False), ("run.terminal", 1030, True)])
+async def test_guarded_singleton_preserves_bounded_scan(long_log, monkeypatch, admitted, event_type, expected_seq, created):
+    store = long_log
+    calls = []
+
+    async def guard():
+        assert store._get_write_lock("chat").locked()
+        calls.append("guard")
+        return admitted
+
+    if not admitted:
+
+        def forbidden_scan(*args):
+            pytest.fail("a rejected lifecycle must not start a history scan")
+
+        monkeypatch.setattr(store, "_iter_run_events", forbidden_scan)
+
+    tracemalloc.start()
+    try:
+        if admitted:
+            event, was_created = await store.put_if_absent(thread_id="chat", run_id="run-a", event_type=event_type, category="trace", lifecycle_guard=guard)
+            assert (event["seq"], was_created) == (expected_seq, created)
+        else:
+            with pytest.raises(RunEventLifecycleRejected):
+                await store.put_if_absent(thread_id="chat", run_id="run-a", event_type=event_type, category="trace", lifecycle_guard=guard)
+            assert store._seq_counters == {}
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert calls == ["guard"]
+    assert peak < 2 * 1024 * 1024, f"guarded singleton retained {peak:,} bytes"

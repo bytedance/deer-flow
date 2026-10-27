@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import threading
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -21,11 +23,12 @@ from app.channels.dingtalk import (
     _DingTalkMessageHandler,
     _extract_text_from_rich_text,
     _is_dingtalk_command,
-    _normalize_allowed_users,
     _normalize_conversation_type,
+    _parse_allowed_users,
 )
 from app.channels.message_bus import InboundMessageType, MessageBus, OutboundMessage
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
+from deerflow.sandbox.lease import discard_sandbox_lease_manager, get_sandbox_lease_manager
 
 
 def _run(coro):
@@ -119,32 +122,55 @@ class TestDingTalkMessageHandlerSdkContract:
 
 
 # ---------------------------------------------------------------------------
-# _normalize_allowed_users tests
+# _parse_allowed_users tests
 # ---------------------------------------------------------------------------
 
 
-class TestNormalizeAllowedUsers:
-    def test_none_returns_empty(self):
-        assert _normalize_allowed_users(None) == set()
+class TestParseAllowedUsers:
+    @pytest.mark.parametrize("allowed_users", [None, [], (), set(), frozenset(), "", " "])
+    def test_unset_or_empty_allows_everyone_quietly(self, allowed_users, caplog):
+        with caplog.at_level(logging.WARNING, logger="app.channels.dingtalk"):
+            assert _parse_allowed_users(allowed_users) is None
+        assert caplog.records == []
 
-    def test_empty_list_returns_empty(self):
-        assert _normalize_allowed_users([]) == set()
+    @pytest.mark.parametrize("collection", [list, tuple, set, frozenset])
+    def test_listed_staff_ids(self, collection):
+        assert _parse_allowed_users(collection(["user1", " user2 "])) == {"user1", "user2"}
 
-    def test_list_of_strings(self):
-        result = _normalize_allowed_users(["user1", "user2"])
-        assert result == {"user1", "user2"}
-
-    def test_single_string(self):
-        result = _normalize_allowed_users("user1")
-        assert result == {"user1"}
+    def test_single_string_is_one_entry(self):
+        assert _parse_allowed_users("user1") == {"user1"}
 
     def test_numeric_values_converted_to_string(self):
-        result = _normalize_allowed_users([123, 456])
-        assert result == {"123", "456"}
+        assert _parse_allowed_users([123, 456]) == {"123", "456"}
 
-    def test_scalar_treated_as_single_value(self):
-        result = _normalize_allowed_users(12345)
-        assert result == {"12345"}
+    def test_numeric_scalar_is_one_entry(self):
+        assert _parse_allowed_users(12345) == {"12345"}
+
+    @pytest.mark.parametrize("allowed_users", ["user1,user2", ","])
+    def test_scalar_with_separators_stays_one_literal_id_and_warns(self, allowed_users, caplog):
+        with caplog.at_level(logging.WARNING, logger="app.channels.dingtalk"):
+            assert _parse_allowed_users(allowed_users) == {allowed_users}
+        assert "YAML list" in caplog.text
+
+    def test_invalid_entries_are_dropped_with_a_warning(self, caplog):
+        with caplog.at_level(logging.WARNING, logger="app.channels.dingtalk"):
+            assert _parse_allowed_users(["user1", True, 4.2, None, "  "]) == {"user1"}
+        assert "True" in caplog.text
+        assert "4.2" in caplog.text
+        assert not any(record.levelno == logging.ERROR for record in caplog.records)
+
+    @pytest.mark.parametrize(
+        "allowed_users",
+        [[""], ["", "  "], [None], [True], {"user1": True}, {}, True, 4.2],
+        ids=["blank-entry", "blank-entries", "null-entry", "bool-entry", "mapping", "empty-mapping", "bool-scalar", "float-scalar"],
+    )
+    def test_allowlist_without_a_valid_staff_id_denies_everyone(self, allowed_users, caplog):
+        # A mapping must not authorize its keys, and a list whose entries are
+        # all blank (e.g. ``[$DINGTALK_STAFF_ID]`` with the variable set to an
+        # empty string) must not turn into "allow all".
+        with caplog.at_level(logging.ERROR, logger="app.channels.dingtalk"):
+            assert _parse_allowed_users(allowed_users) == frozenset()
+        assert any(record.levelno == logging.ERROR for record in caplog.records)
 
 
 # ---------------------------------------------------------------------------
@@ -647,6 +673,28 @@ class TestAllowedUsersFiltering:
 
         _run(go())
 
+    @pytest.mark.parametrize(
+        ("allowed_users", "admitted"),
+        [([""], False), ({"user_001": True}, False), ([" user_001 "], True), (frozenset({"user_001"}), True)],
+        ids=["blank-entry", "mapping", "padded-entry", "frozenset"],
+    )
+    def test_allowlist_gate_uses_parsed_staff_ids(self, allowed_users, admitted):
+        async def go():
+            bus = MessageBus()
+            bus.publish_inbound = AsyncMock()
+            channel = DingTalkChannel(bus, config={"allowed_users": allowed_users})
+            channel._client_id = "test_key"
+            channel._main_loop = asyncio.get_event_loop()
+            channel._running = True
+            channel._send_running_reply = AsyncMock()
+
+            channel._on_chatbot_message(_make_chatbot_message(sender_staff_id="user_001"))
+
+            await asyncio.sleep(0.1)
+            assert (not bus.inbound_queue.empty()) is admitted
+
+        _run(go())
+
     def test_empty_allowed_users_allows_all(self):
         async def go():
             bus = MessageBus()
@@ -976,22 +1024,23 @@ class TestAccessTokenValidation:
 
         _run(go())
 
-    def test_invalid_expire_in_uses_default(self):
+    @pytest.mark.parametrize("expire_in", ["invalid", float("inf"), 10**400, 0, -1, 1, 100, 299, 300, "300"])
+    def test_invalid_expire_in_uses_default(self, expire_in):
         async def go():
-            import time
             from unittest.mock import patch
 
             bus = MessageBus()
             channel = DingTalkChannel(bus, config={})
             channel._client_id = "k"
             channel._client_secret = "s"
+            call_count = 0
 
             class FakeResponse:
                 def raise_for_status(self):
                     pass
 
                 def json(self):
-                    return {"accessToken": "tok_ok", "expireIn": "invalid"}
+                    return {"accessToken": "tok_ok", "expireIn": expire_in}
 
             class FakeClient:
                 async def __aenter__(self):
@@ -1001,20 +1050,29 @@ class TestAccessTokenValidation:
                     pass
 
                 async def post(self, url, **kwargs):
+                    nonlocal call_count
+                    call_count += 1
                     return FakeResponse()
 
-            before = time.monotonic()
-            with patch("app.channels.dingtalk.httpx.AsyncClient", return_value=FakeClient()):
+            with (
+                patch("app.channels.dingtalk.httpx.AsyncClient", return_value=FakeClient()),
+                patch("app.channels.dingtalk.time.monotonic", return_value=1000.0) as clock,
+            ):
                 token = await channel._get_access_token()
+                clock.return_value = 1005.0
+                cached_token = await channel._get_access_token()
 
             assert token == "tok_ok"
-            assert channel._token_expires_at > before
+            assert cached_token == "tok_ok"
+            assert channel._token_expires_at == 7900.0
+            assert call_count == 1
 
         _run(go())
 
 
 class TestTokenCaching:
-    def test_token_is_cached_across_calls(self):
+    @pytest.mark.parametrize(("expire_in", "expected_expiry"), [(301, 1001.0), (3600, 4300.0), (7200, 7900.0)])
+    def test_token_is_cached_across_calls(self, expire_in, expected_expiry):
         async def go():
             from unittest.mock import patch
 
@@ -1030,7 +1088,7 @@ class TestTokenCaching:
                     pass
 
                 def json(self):
-                    return {"accessToken": "tok_abc", "expireIn": 7200}
+                    return {"accessToken": "tok_abc", "expireIn": expire_in}
 
             class FakeClient:
                 async def __aenter__(self):
@@ -1044,13 +1102,22 @@ class TestTokenCaching:
                     call_count += 1
                     return FakeResponse()
 
-            with patch("app.channels.dingtalk.httpx.AsyncClient", return_value=FakeClient()):
+            with (
+                patch("app.channels.dingtalk.httpx.AsyncClient", return_value=FakeClient()),
+                patch("app.channels.dingtalk.time.monotonic", return_value=1000.0) as clock,
+            ):
                 t1 = await channel._get_access_token()
+                clock.return_value = 1000.5
                 t2 = await channel._get_access_token()
+                assert channel._token_expires_at == expected_expiry
+                assert call_count == 1
+                clock.return_value = expected_expiry
+                t3 = await channel._get_access_token()
 
             assert t1 == "tok_abc"
             assert t2 == "tok_abc"
-            assert call_count == 1
+            assert t3 == "tok_abc"
+            assert call_count == 2
 
         _run(go())
 
@@ -1686,7 +1753,7 @@ class TestCardMode:
             mock_message.rich_text_content = None
 
             channel._main_loop = asyncio.get_running_loop()
-            channel._allowed_users = set()
+            channel._allowed_users = None
             channel._running = True
             channel._send_running_reply = AsyncMock()
 
@@ -1791,6 +1858,115 @@ class TestCardMode:
         _run(go())
 
 
+class TestStreamTaskLifecycle:
+    @pytest.mark.parametrize("outcome", ["success", "failure", "cancelled"])
+    def test_tracks_and_finalizes_message_tasks(self, outcome, monkeypatch, caplog):
+        async def go():
+            channel = DingTalkChannel(MessageBus(), config={})
+            channel._running = True
+            frames = [{"sequence": index} for index in range(50 if outcome == "success" else 1)]
+            received = []
+            handler_tasks = []
+            keepalive_tasks = []
+            handlers_started = asyncio.Event()
+            release_handlers = asyncio.Event()
+            handlers_finalized = asyncio.Event()
+            close_stream = asyncio.Event()
+            keepalive_started = asyncio.Event()
+            keepalive_stopped = asyncio.Event()
+            failure = RuntimeError("stream handler failed")
+            loop = asyncio.get_running_loop()
+            previous_exception_handler = loop.get_exception_handler()
+            loop_errors = []
+            loop.set_exception_handler(lambda _loop, context: loop_errors.append(context))
+
+            async def background_task(frame):
+                received.append(frame)
+                handler_tasks.append(asyncio.current_task())
+                if len(received) == len(frames):
+                    handlers_started.set()
+                await release_handlers.wait()
+                if outcome == "failure":
+                    raise failure
+
+            async def keepalive(_websocket):
+                keepalive_tasks.append(asyncio.current_task())
+                keepalive_started.set()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    keepalive_stopped.set()
+
+            class WebSocket:
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, *_args):
+                    return None
+
+                async def __aiter__(self):
+                    for frame in frames:
+                        yield json.dumps(frame)
+                    await close_stream.wait()
+                    channel._running = False
+
+            client = SimpleNamespace(pre_start=MagicMock(), background_task=background_task, keepalive=keepalive)
+            monkeypatch.setattr(channel, "_open_stream_connection", AsyncMock(return_value={"endpoint": "wss://example.invalid/stream", "ticket": "test-ticket"}))
+            monkeypatch.setattr("websockets.connect", lambda _uri: WebSocket())
+            stream_task = asyncio.create_task(channel._serve_stream(client))
+            try:
+                await asyncio.wait_for(handlers_started.wait(), timeout=1)
+                await asyncio.wait_for(keepalive_started.wait(), timeout=1)
+                assert received == frames
+                assert channel._background_tasks == set(handler_tasks)
+                assert all(not task.done() for task in handler_tasks)
+
+                remaining = set(handler_tasks)
+
+                def finalized(task):
+                    remaining.remove(task)
+                    if not remaining:
+                        handlers_finalized.set()
+
+                # These observers run after the production done callbacks.
+                for task in handler_tasks:
+                    task.add_done_callback(finalized)
+                    if outcome == "cancelled":
+                        task.cancel()
+                release_handlers.set()
+                await asyncio.wait_for(handlers_finalized.wait(), timeout=1)
+                assert channel._background_tasks == set()
+                if outcome == "cancelled":
+                    assert all(task.cancelled() for task in handler_tasks)
+
+                close_stream.set()
+                await asyncio.wait_for(stream_task, timeout=1)
+                await asyncio.wait_for(keepalive_stopped.wait(), timeout=1)
+                assert channel._background_tasks == set()
+                client.pre_start.assert_called_once_with()
+                errors = [record for record in caplog.records if record.name == "app.channels.dingtalk" and record.levelno >= logging.ERROR]
+                if outcome == "failure":
+                    assert len(errors) == 1
+                    assert "stream message task" in errors[0].getMessage()
+                    assert errors[0].exc_info is not None
+                    assert errors[0].exc_info[1] is failure
+                else:
+                    assert errors == []
+                assert loop_errors == []
+            finally:
+                channel._running = False
+                close_stream.set()
+                release_handlers.set()
+                tasks = [stream_task, *handler_tasks, *keepalive_tasks]
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                loop.set_exception_handler(previous_exception_handler)
+
+        _run(go())
+
+
 class TestStop:
     def test_stop_retains_live_stream_thread_after_join_timeout(self):
         async def go():
@@ -1805,6 +1981,183 @@ class TestStop:
 
             thread.join.assert_called_once_with(timeout=5)
             assert channel._thread is thread
+
+        _run(go())
+
+    @staticmethod
+    def _channel() -> DingTalkChannel:
+        return DingTalkChannel(MessageBus(), config={"client_id": "id", "client_secret": "secret"})
+
+    def test_stop_closes_live_stream_connection_and_exits_thread(self, monkeypatch):
+        pytest.importorskip("dingtalk_stream")
+        import dingtalk_stream
+        from support.local_sockets import LocalHttpServer
+        from websockets.asyncio.server import serve
+
+        async def go():
+            connected = asyncio.Event()
+            closed = asyncio.Event()
+
+            async def handler(websocket):
+                connected.set()
+                try:
+                    async for _ in websocket:
+                        pass
+                finally:
+                    closed.set()
+
+            async with serve(handler, "127.0.0.1", 0) as server:
+                port = server.sockets[0].getsockname()[1]
+                async with LocalHttpServer(body={"endpoint": f"ws://127.0.0.1:{port}", "ticket": "ticket"}) as tickets:
+                    monkeypatch.setattr(dingtalk_stream.DingTalkStreamClient, "OPEN_CONNECTION_API", tickets.url)
+                    channel = self._channel()
+                    await channel.start()
+                    thread = channel._thread
+                    assert thread is not None and thread.is_alive()
+                    await asyncio.wait_for(connected.wait(), 5)
+
+                    started = time.monotonic()
+                    await channel.stop()
+                    elapsed = time.monotonic() - started
+
+                    assert elapsed < 5, f"stop() took {elapsed:.2f}s"
+                    await asyncio.wait_for(closed.wait(), 5)
+                    assert not thread.is_alive()
+                    assert channel._thread is None
+                    assert channel._stream_client is None
+                    assert channel.is_running is False
+
+                    # The ticket request mirrors DingTalkStreamClient.open_connection().
+                    request = tickets.requests[0]
+                    assert request["clientId"] == "id"
+                    assert request["clientSecret"] == "secret"
+                    assert {"type": "CALLBACK", "topic": dingtalk_stream.chatbot.ChatbotMessage.TOPIC} in request["subscriptions"]
+                    assert request["ua"].startswith("dingtalk-sdk-python/v")
+                    assert "localIp" in request
+
+        _run(go())
+
+    def test_stop_aborts_transport_when_peer_never_acks_close(self, monkeypatch, caplog):
+        pytest.importorskip("dingtalk_stream")
+        import dingtalk_stream
+        from support.local_sockets import LocalHttpServer, StalledWebSocketServer, transport_socket, wait_until
+
+        from app.channels import dingtalk as dingtalk_module
+
+        caplog.set_level(logging.WARNING, logger="app.channels.dingtalk")
+
+        async def go():
+            async with StalledWebSocketServer() as peer, LocalHttpServer(body={"endpoint": peer.url, "ticket": "ticket"}) as tickets:
+                monkeypatch.setattr(dingtalk_stream.DingTalkStreamClient, "OPEN_CONNECTION_API", tickets.url)
+                monkeypatch.setattr(dingtalk_module, "DINGTALK_STREAM_CLOSE_TIMEOUT_SECONDS", 0.5)
+                channel = self._channel()
+                await channel.start()
+                thread = channel._thread
+                await asyncio.wait_for(peer.accepted.wait(), 5)
+                websocket = await wait_until(lambda: channel._stream_client is not None and channel._stream_client.websocket)
+                sock = transport_socket(websocket)
+                assert sock.fileno() != -1
+
+                started = time.monotonic()
+                await channel.stop()
+                elapsed = time.monotonic() - started
+
+                assert elapsed < 5, f"stop() took {elapsed:.2f}s"
+                assert not thread.is_alive()
+                assert channel._thread is None
+                # The socket is released by stop() itself, not by a later GC pass.
+                assert sock.fileno() == -1
+                assert "transport aborted" in caplog.text
+                await asyncio.wait_for(peer.closed.wait(), 5)
+
+        _run(go())
+
+    def test_stop_interrupts_open_connection_retry_sleep(self, monkeypatch):
+        pytest.importorskip("dingtalk_stream")
+        import dingtalk_stream
+        from support.local_sockets import LocalHttpServer
+
+        async def go():
+            async with LocalHttpServer(status=500, body={"error": "nope"}) as tickets:
+                monkeypatch.setattr(dingtalk_stream.DingTalkStreamClient, "OPEN_CONNECTION_API", tickets.url)
+                channel = self._channel()
+                await channel.start()
+                thread = channel._thread
+                await asyncio.wait_for(tickets.accepted.wait(), 5)
+
+                started = time.monotonic()
+                await channel.stop()
+                elapsed = time.monotonic() - started
+
+                assert elapsed < 5, f"stop() took {elapsed:.2f}s"
+                assert not thread.is_alive()
+                assert channel._thread is None
+
+        _run(go())
+
+    def test_stop_cancels_stalled_ticket_request_without_lingering_threads(self, monkeypatch):
+        pytest.importorskip("dingtalk_stream")
+        import dingtalk_stream
+        from support.local_sockets import LocalHttpServer
+
+        def forbidden_open_connection(self):
+            raise AssertionError("the SDK's timeout-less open_connection() must not run")
+
+        async def go():
+            async with LocalHttpServer(stall=True) as tickets:
+                monkeypatch.setattr(dingtalk_stream.DingTalkStreamClient, "OPEN_CONNECTION_API", tickets.url)
+                monkeypatch.setattr(dingtalk_stream.DingTalkStreamClient, "open_connection", forbidden_open_connection)
+                await asyncio.to_thread(lambda: None)  # warm the test loop's own executor before the baseline
+                baseline = {thread.ident for thread in threading.enumerate()}
+                channel = self._channel()
+                await channel.start()
+                thread = channel._thread
+                await asyncio.wait_for(tickets.accepted.wait(), 5)
+
+                started = time.monotonic()
+                await channel.stop()
+                elapsed = time.monotonic() - started
+
+                assert elapsed < 5, f"stop() took {elapsed:.2f}s"
+                assert not thread.is_alive()
+                # The cancelled request released its connection ...
+                await asyncio.wait_for(tickets.closed.wait(), 5)
+                # ... and nothing non-daemon is left to block interpreter exit.
+                lingering = [t.name for t in threading.enumerate() if t.ident not in baseline and t.is_alive() and not t.daemon]
+                assert lingering == []
+
+        _run(go())
+
+    def test_stop_before_stream_client_exists_never_connects(self, monkeypatch):
+        pytest.importorskip("dingtalk_stream")
+        import dingtalk_stream
+        from support.local_sockets import LocalHttpServer
+
+        gate = threading.Event()
+
+        class _GatedStreamClient(dingtalk_stream.DingTalkStreamClient):
+            def __init__(self, *args, **kwargs):
+                gate.wait(timeout=5)
+                super().__init__(*args, **kwargs)
+
+        monkeypatch.setattr(dingtalk_stream, "DingTalkStreamClient", _GatedStreamClient)
+
+        async def go():
+            async with LocalHttpServer(body={"endpoint": "ws://127.0.0.1:1", "ticket": "ticket"}) as tickets:
+                monkeypatch.setattr(dingtalk_stream.DingTalkStreamClient, "OPEN_CONNECTION_API", tickets.url)
+                channel = self._channel()
+                await channel.start()
+                thread = channel._thread
+
+                stop_task = asyncio.create_task(channel.stop())
+                await asyncio.sleep(0.05)
+                assert not stop_task.done()
+                gate.set()
+                await stop_task
+
+                assert not thread.is_alive()
+                assert channel._thread is None
+                assert tickets.requests == []
 
         _run(go())
 
@@ -1878,6 +2231,29 @@ def _patch_uploads(monkeypatch, uploads_dir, *, sandbox_id="local", sandbox=None
         release=lambda sid: None,
     )
     monkeypatch.setattr("app.channels.dingtalk.get_sandbox_provider", lambda: provider)
+    return provider
+
+
+@pytest.fixture
+def non_local_upload(tmp_path, monkeypatch):
+    channel = DingTalkChannel(MessageBus(), config={})
+    channel._download_by_code = AsyncMock(return_value=b"BYTES")
+    uploads = tmp_path / "uploads"
+    uploads.mkdir()
+    sandbox = SimpleNamespace(update_file=MagicMock(), release_command_scope=MagicMock())
+    provider = _patch_uploads(monkeypatch, uploads, sandbox_id="aio:box1", sandbox=sandbox)
+    provider.release = MagicMock()
+    message = channel._make_inbound(
+        chat_id="c",
+        user_id="u",
+        text="hi",
+        thread_ts="m",
+        files=[{"type": "file", "download_code": "dc", "filename": "a.pdf"}],
+    )
+    try:
+        yield SimpleNamespace(channel=channel, provider=provider, sandbox=sandbox, message=message)
+    finally:
+        discard_sandbox_lease_manager(provider)
 
 
 class TestExtractFiles:
@@ -2473,6 +2849,82 @@ class TestReceiveFile:
             await channel.receive_file(msg, "t1", user_id="default")
 
             fake_sandbox.update_file.assert_called_once_with(f"{VIRTUAL_PATH_PREFIX}/uploads/a.pdf", b"BYTES")
+
+        _run(go())
+
+    def test_non_local_upload_releases_standalone_sandbox(self, non_local_upload):
+        async def go():
+            upload = non_local_upload
+            result = await asyncio.wait_for(upload.channel.receive_file(upload.message, "t1", user_id="default"), timeout=5)
+
+            assert result.text == f"{VIRTUAL_PATH_PREFIX}/uploads/a.pdf\n\nhi"
+            upload.sandbox.update_file.assert_called_once_with(f"{VIRTUAL_PATH_PREFIX}/uploads/a.pdf", b"BYTES")
+            upload.sandbox.release_command_scope.assert_called_once()
+            upload.provider.release.assert_called_once_with("aio:box1")
+
+        _run(go())
+
+    @pytest.mark.parametrize("run_finishes_first", [False, True])
+    def test_non_local_upload_releases_only_after_upload_and_run_finish(self, non_local_upload, run_finishes_first):
+        async def go():
+            upload = non_local_upload
+            manager = get_sandbox_lease_manager(upload.provider)
+            await manager.retain_async("active-run", "aio:box1", thread_id="t1", user_id="default")
+            started = asyncio.Event()
+            finish_update = threading.Event()
+            update_finished = threading.Event()
+            loop = asyncio.get_running_loop()
+
+            def update_file(path, content):
+                loop.call_soon_threadsafe(started.set)
+                try:
+                    if not finish_update.wait(timeout=10):
+                        raise TimeoutError("test did not release sandbox update")
+                finally:
+                    update_finished.set()
+
+            upload.sandbox.update_file.side_effect = update_file
+            task = asyncio.create_task(upload.channel.receive_file(upload.message, "t1", user_id="default"))
+            try:
+                await asyncio.wait_for(started.wait(), timeout=5)
+                upload.provider.release.assert_not_called()
+                assert not update_finished.is_set()
+
+                if run_finishes_first:
+                    await manager.release_async("active-run")
+                    upload.provider.release.assert_not_called()
+                    assert not update_finished.is_set()
+
+                finish_update.set()
+                result = await asyncio.wait_for(task, timeout=5)
+                assert result.text == f"{VIRTUAL_PATH_PREFIX}/uploads/a.pdf\n\nhi"
+                assert update_finished.is_set()
+                if not run_finishes_first:
+                    upload.provider.release.assert_not_called()
+                    assert manager.binding_for("active-run") == "aio:box1"
+                    await manager.release_async("active-run")
+
+                upload.provider.release.assert_called_once_with("aio:box1")
+                assert manager.binding_for("active-run") is None
+                assert upload.sandbox.release_command_scope.call_count == 2
+            finally:
+                finish_update.set()
+                await asyncio.gather(task, return_exceptions=True)
+                await manager.release_async("active-run")
+
+        _run(go())
+
+    def test_failed_non_local_upload_releases_standalone_sandbox(self, non_local_upload):
+        async def go():
+            upload = non_local_upload
+            upload.sandbox.update_file.side_effect = RuntimeError("sandbox transport down")
+
+            result = await asyncio.wait_for(upload.channel.receive_file(upload.message, "t1", user_id="default"), timeout=5)
+
+            assert result.text == "[failed to load file: a.pdf]\n\nhi"
+            upload.sandbox.update_file.assert_called_once_with(f"{VIRTUAL_PATH_PREFIX}/uploads/a.pdf", b"BYTES")
+            upload.sandbox.release_command_scope.assert_called_once()
+            upload.provider.release.assert_called_once_with("aio:box1")
 
         _run(go())
 

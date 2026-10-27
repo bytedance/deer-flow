@@ -23,6 +23,13 @@ This changes retained allocations, not the storage format or deployment model:
   behavior and can request unbounded results. Gateway pagination uses positive limits.
 - Deletion counts and `put_if_absent` checks also stream; mutation fencing,
   sequence watermarks, Unicode framing and incomplete-tail handling are unchanged.
+- Apply filters and exclusive cursors before stable `(seq, encounter position)`
+  selection. Do not stop at a physical sequence boundary or the first match for
+  every ID: legacy logs can be out of order, and attribution needs the newest
+  valid AI event while identity lookup needs the earliest sequence.
+- Guarded singleton writes check the Run lifecycle under the mutation fence
+  before scanning, reusing or creating an event. Rejection starts no scan;
+  admission retains bounded selection even over a large historical run.
 
 ## Reproduce
 
@@ -60,7 +67,9 @@ The exact byte figures vary by interpreter and run. The regression suite uses a
 more generous space bound: thirteen real-file query/mutation cases each operate on
 more than 16 MiB of logs with a small result and must remain below 2 MiB of traced
 peak allocation. Ordering, filtering, cursor windows, identity selection and
-mid-iteration snapshot cancellation have separate behavioral assertions.
+mid-iteration snapshot cancellation have separate behavioral assertions. Four
+additional large-log cases cover admitted/rejected lifecycle guards for both
+existing and absent singleton events.
 
 ```bash
 uv run pytest tests/test_jsonl_event_store_bounded_reads.py \

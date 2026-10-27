@@ -117,6 +117,80 @@ def test_timing_config_requires_positive_finite_values():
     assert channel._retry_delay == 0.25
 
 
+def test_qrcode_status_uses_dedicated_request_timeout():
+    from app.channels.wechat import WechatChannel
+
+    async def go():
+        channel = WechatChannel(bus=MessageBus(), config={"bot_token": "test-token"})
+        request = AsyncMock(return_value={"status": "wait"})
+        channel._request_public_get_json = request  # type: ignore[method-assign]
+
+        await channel.request_login_status("qr-token")
+
+        request.assert_awaited_once_with(
+            "/ilink/bot/get_qrcode_status",
+            params={"qrcode": "qr-token"},
+            timeout=WechatChannel.DEFAULT_QRCODE_STATUS_TIMEOUT,
+        )
+
+    _run(go())
+
+
+def test_qrcode_poll_request_timeout_is_bounded_by_remaining_deadline(monkeypatch):
+    from app.channels import wechat as wechat_module
+    from app.channels.wechat import WechatChannel
+
+    async def go():
+        channel = WechatChannel(
+            bus=MessageBus(),
+            config={"bot_token": "test-token", "qrcode_poll_timeout": 10},
+        )
+        channel.request_login_qrcode = AsyncMock(return_value={"qrcode": "qr-token"})  # type: ignore[method-assign]
+        channel.request_login_status = AsyncMock(  # type: ignore[method-assign]
+            return_value={"status": "confirmed", "bot_token": "bound-token"}
+        )
+        channel._save_auth_state_drained = AsyncMock(return_value={"status": "confirmed"})  # type: ignore[method-assign]
+
+        monotonic_values = iter([0.0, 9.0])
+        monkeypatch.setattr(wechat_module, "_monotonic", lambda: next(monotonic_values))
+
+        result = await channel._bind_via_qrcode()
+
+        assert result == {"status": "confirmed"}
+        channel.request_login_status.assert_awaited_once_with("qr-token", timeout=1.0)
+
+    _run(go())
+
+
+def test_qrcode_poll_request_is_cancelled_at_total_deadline(monkeypatch):
+    from app.channels import wechat as wechat_module
+    from app.channels.wechat import WechatChannel
+
+    async def go():
+        channel = WechatChannel(
+            bus=MessageBus(),
+            config={"bot_token": "test-token", "qrcode_poll_timeout": 1},
+        )
+        channel.request_login_qrcode = AsyncMock(return_value={"qrcode": "qr-token"})  # type: ignore[method-assign]
+
+        async def request_status(_qrcode, **_kwargs):
+            await asyncio.sleep(10)
+
+        channel.request_login_status = request_status  # type: ignore[method-assign]
+        save_auth_state = AsyncMock(return_value={"status": "timeout"})
+        channel._save_auth_state_drained = save_auth_state  # type: ignore[method-assign]
+
+        monotonic_values = iter([0.0, 0.0])
+        monkeypatch.setattr(wechat_module, "_monotonic", lambda: next(monotonic_values))
+
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(channel._bind_via_qrcode(), timeout=2)
+
+        assert save_auth_state.await_args_list[-1].kwargs["status"] == "timeout"
+
+    _run(go())
+
+
 def test_handle_update_publishes_private_chat_message():
     from app.channels.wechat import WechatChannel
 
@@ -1254,6 +1328,115 @@ def test_handle_update_downloads_inbound_file(monkeypatch, tmp_path: Path):
         assert stored.read_bytes() == plaintext
 
     _run(go())
+
+
+@pytest.mark.parametrize("separate_updates", [False, True])
+@pytest.mark.parametrize("filename", ["report.pdf", "报告.pdf"])
+def test_handle_update_preserves_same_name_attachments(tmp_path: Path, monkeypatch, separate_updates, filename):
+    from app.channels.manager import _ingest_inbound_files
+    from app.channels.wechat import WechatChannel, _encrypt_aes_128_ecb
+    from deerflow.config.paths import Paths
+
+    upload_paths = Paths(tmp_path / "owner-data")
+    monkeypatch.setattr("deerflow.uploads.manager.get_paths", lambda: upload_paths)
+
+    async def go():
+        bus = MessageBus()
+        published = []
+
+        async def capture(msg):
+            published.append(msg)
+
+        bus.publish_inbound = capture  # type: ignore[method-assign]
+        channel = WechatChannel(bus=bus, config={"bot_token": "test-token", "state_dir": str(tmp_path)})
+        aes_key = b"1234567890abcdef"
+        payloads = [b"FIRST ATTACHMENT", b"SECOND ATTACHMENT"]
+        encrypted = {f"https://cdn.weixin.qq.com/file-{index}.bin": _encrypt_aes_128_ecb(payload, aes_key) for index, payload in enumerate(payloads)}
+
+        async def download(url, **kwargs):
+            return encrypted[url]
+
+        channel._download_cdn_bytes = download  # type: ignore[method-assign]
+        items = [{"type": 4, "file_item": {"file_name": filename, "aeskey": aes_key.hex(), "media": {"full_url": url}}} for url in encrypted]
+        batches = [[item] for item in items] if separate_updates else [items]
+        for index, batch in enumerate(batches):
+            await channel._handle_update({"message_type": 1, "message_id": 303 + index, "from_user_id": "wx-user-1", "context_token": "ctx-file", "item_list": batch})
+
+        assert len(published) == len(batches)
+        files = [file for msg in published for file in msg.files]
+        assert len(files) == 2
+        paths = [Path(file["path"]) for file in files]
+        assert len(set(paths)) == 2
+        assert [path.read_bytes() for path in paths] == payloads
+        assert [file["filename"] for file in files] == [filename, filename]
+        assert [file["size"] for file in files] == [len(payload) for payload in payloads]
+
+        created = []
+        for msg in published:
+            created.extend(await _ingest_inbound_files("wechat-thread", msg, user_id="owner-1"))
+        saved_names = [filename, f"{Path(filename).stem}_1.pdf"]
+        assert [file["filename"] for file in created] == saved_names
+        target = upload_paths.sandbox_uploads_dir("wechat-thread", user_id="owner-1")
+        assert [(target / name).read_bytes() for name in saved_names] == payloads
+        assert not upload_paths.sandbox_uploads_dir("wechat-thread").exists()
+        assert all(not path.parent.exists() for path in paths)
+
+    _run(go())
+
+
+def test_concurrent_download_staging_preserves_each_payload(tmp_path: Path):
+    from concurrent.futures import ThreadPoolExecutor
+
+    from app.channels.wechat import WechatChannel
+
+    channel = WechatChannel(bus=MessageBus(), config={"state_dir": str(tmp_path)})
+    payloads = [f"ATTACHMENT {index}".encode() for index in range(8)]
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        paths = list(pool.map(lambda payload: channel._stage_downloaded_file("report.pdf", payload), payloads))
+
+    assert all(path is not None for path in paths)
+    assert len(set(paths)) == len(payloads)
+    assert [path.name for path in paths] == ["report.pdf"] * len(payloads)
+    assert [path.read_bytes() for path in paths] == payloads
+
+
+def test_failed_download_staging_cleans_only_its_own_files(tmp_path: Path, monkeypatch, caplog):
+    from app.channels.wechat import WechatChannel
+
+    channel = WechatChannel(bus=MessageBus(), config={"state_dir": str(tmp_path)})
+    first = channel._stage_downloaded_file("report.pdf", b"FIRST ATTACHMENT")
+    before = set(tmp_path.rglob("*"))
+    real_write = Path.write_bytes
+
+    def fail_write(path, content):
+        real_write(path, content[:3])
+        (path.parent / "partial").mkdir()
+        real_write(path.parent / "partial" / "chunk", b"partial write")
+        raise OSError("simulated disk failure")
+
+    monkeypatch.setattr(Path, "write_bytes", fail_write)
+    with caplog.at_level(logging.ERROR):
+        second = channel._stage_downloaded_file("report.pdf", b"SECOND ATTACHMENT")
+
+    assert second is None
+    assert first.read_bytes() == b"FIRST ATTACHMENT"
+    assert set(tmp_path.rglob("*")) == before
+    assert "failed to persist inbound media file" in caplog.text
+
+
+def test_download_staging_allocation_failure_is_reported(tmp_path: Path, monkeypatch, caplog):
+    from app.channels.wechat import WechatChannel
+
+    channel = WechatChannel(bus=MessageBus(), config={"state_dir": str(tmp_path)})
+
+    def fail_allocate(**kwargs):
+        raise OSError("simulated directory allocation failure")
+
+    monkeypatch.setattr("app.channels.wechat.tempfile.mkdtemp", fail_allocate)
+    with caplog.at_level(logging.ERROR):
+        assert channel._stage_downloaded_file("report.pdf", b"ATTACHMENT") is None
+    assert list((tmp_path / "downloads").iterdir()) == []
+    assert "failed to persist inbound media file" in caplog.text
 
 
 def test_handle_update_downloads_inbound_file_with_media_aeskey_hex(monkeypatch, tmp_path: Path):

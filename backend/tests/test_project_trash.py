@@ -12,11 +12,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import stat
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from support.symlinks import symlink_or_skip
 
 from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
 from deerflow.persistence.projects import ProjectDocumentRepository, ProjectRepository
@@ -74,6 +76,17 @@ def _age(path: Path, *, hours: float) -> None:
     os.utime(path, (ts, ts))
 
 
+async def _trashed_document_with_companion(env):
+    project = await env.projects.create(name="P", user_id=_USER)
+    row = await _add(env, project["id"], name="notes.txt", data=b"hello")
+    original = original_file_path(env.paths, user_id=_USER, row=row)
+    derived = converted_markdown_path(env.paths, user_id=_USER, row=row)
+    derived.parent.mkdir(parents=True, exist_ok=True)
+    derived.write_text("# converted", encoding="utf-8")
+    await _trash(env, row)
+    return row, original, derived
+
+
 class TestPurgeFiles:
     async def test_purge_unlinks_namespace_files_and_rmdirs_empty_parents(self, env):
         project = await env.projects.create(name="P", user_id=_USER)
@@ -111,6 +124,36 @@ class TestPurgeFiles:
         assert purged is True
         assert await env.docs.get(row["id"], include_trashed=True, user_id=_USER) is None
 
+    async def test_purge_removes_read_only_document_files(self, env):
+        """A read-only document still purges.
+
+        Windows refuses ``unlink`` on a read-only file (``WinError 5``) where
+        POSIX needs only a writable parent, so a restored archive or a
+        mode-preserving sync must not leave a trashed row unpurgeable. Windows
+        fails here before the fix; POSIX passes either way.
+        """
+        project = await env.projects.create(name="P", user_id=_USER)
+        row = await _add(env, project["id"], name="notes.txt", data=b"hello")
+        derived = converted_markdown_path(env.paths, user_id=_USER, row=row)
+        derived.parent.mkdir(parents=True, exist_ok=True)
+        derived.write_text("# converted")
+        original = original_file_path(env.paths, user_id=_USER, row=row)
+        await _trash(env, row)
+        protected = (original, derived)
+        for path in protected:
+            path.chmod(0o444)
+        try:
+            purged = await env.docs.purge(row["id"], remove_files=make_purge_file_remover(env.paths, user_id=_USER), user_id=_USER)
+
+            assert purged is True
+            assert not original.exists()
+            assert not derived.exists()
+            assert await env.docs.get(row["id"], include_trashed=True, user_id=_USER) is None
+        finally:
+            for path in protected:
+                if path.exists():
+                    path.chmod(0o644)
+
     async def test_partial_unlink_failure_retains_row_and_retry_completes(self, env, monkeypatch):
         """§13 purge ordering: original unlinked, derived unlink raises —
         the row stays trashed (retryable); the retry tolerates the missing
@@ -146,6 +189,131 @@ class TestPurgeFiles:
         assert await env.docs.purge(row["id"], remove_files=remover, user_id=_USER) is True
         assert not derived.exists()
         assert await env.docs.get(row["id"], include_trashed=True, user_id=_USER) is None
+
+    async def test_permission_retry_clears_read_only_on_original_and_companion(self, env, monkeypatch):
+        row, original, derived = await _trashed_document_with_companion(env)
+        attempts = dict.fromkeys((original, derived), 0)
+        real_unlink = Path.unlink
+
+        def windows_unlink(self, *args, **kwargs):
+            if self in attempts:
+                attempts[self] += 1
+                if attempts[self] == 1:
+                    raise PermissionError("simulated Windows read-only file")
+                assert self.lstat().st_mode & stat.S_IWRITE, "retry did not clear the read-only bit"
+            return real_unlink(self, *args, **kwargs)
+
+        for path in attempts:
+            path.chmod(0o444)
+        monkeypatch.setattr(Path, "unlink", windows_unlink)
+        try:
+            assert await env.docs.purge(row["id"], remove_files=make_purge_file_remover(env.paths, user_id=_USER), user_id=_USER) is True
+            assert attempts == {original: 2, derived: 2}
+            assert not original.exists()
+            assert not derived.exists()
+            assert await env.docs.get(row["id"], include_trashed=True, user_id=_USER) is None
+        finally:
+            for path in attempts:
+                if path.exists():
+                    path.chmod(0o644)
+
+    @pytest.mark.parametrize("retry_error_type", [PermissionError, OSError])
+    async def test_failed_permission_retry_retains_row_and_retry_completes(self, env, monkeypatch, retry_error_type):
+        row, original, derived = await _trashed_document_with_companion(env)
+        attempts = 0
+        retry_error = retry_error_type("retry still blocked")
+        real_unlink = Path.unlink
+
+        def blocked_unlink(self, *args, **kwargs):
+            nonlocal attempts
+            if self == derived:
+                attempts += 1
+                if attempts == 1:
+                    raise PermissionError("first unlink blocked")
+                if attempts == 2:
+                    raise retry_error
+            return real_unlink(self, *args, **kwargs)
+
+        derived.chmod(0o444)
+        monkeypatch.setattr(Path, "unlink", blocked_unlink)
+        remover = make_purge_file_remover(env.paths, user_id=_USER)
+        try:
+            with pytest.raises(retry_error_type) as caught:
+                await env.docs.purge(row["id"], remove_files=remover, user_id=_USER)
+            assert caught.value is retry_error
+            assert attempts == 2
+            assert not original.exists()
+            assert derived.exists()
+            retained = await env.docs.get(row["id"], include_trashed=True, user_id=_USER)
+            assert retained is not None and retained["trashed_at"]
+
+            assert await env.docs.purge(row["id"], remove_files=remover, user_id=_USER) is True
+            assert attempts == 3
+            assert not derived.exists()
+            assert await env.docs.get(row["id"], include_trashed=True, user_id=_USER) is None
+        finally:
+            if derived.exists():
+                derived.chmod(0o644)
+
+    async def test_file_removed_during_permission_retry_still_purges(self, env, monkeypatch):
+        row, original, derived = await _trashed_document_with_companion(env)
+        attempts = 0
+        real_unlink = Path.unlink
+
+        def concurrently_removed(self, *args, **kwargs):
+            nonlocal attempts
+            if self == original:
+                attempts += 1
+                if attempts == 1:
+                    raise PermissionError("first unlink blocked")
+                real_unlink(self, *args, **kwargs)
+                raise FileNotFoundError("peer removed file before retry")
+            return real_unlink(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "unlink", concurrently_removed)
+        assert await env.docs.purge(row["id"], remove_files=make_purge_file_remover(env.paths, user_id=_USER), user_id=_USER) is True
+        assert attempts == 2
+        assert not original.exists()
+        assert not derived.exists()
+        assert await env.docs.get(row["id"], include_trashed=True, user_id=_USER) is None
+
+    @pytest.mark.parametrize("target_exists", [True, False], ids=["read-only-target", "dangling-link"])
+    async def test_permission_retry_preserves_symlink_target(self, env, monkeypatch, tmp_path, target_exists):
+        row, original, derived = await _trashed_document_with_companion(env)
+        target = tmp_path / "outside-document.txt"
+        attempts = 0
+        real_unlink = Path.unlink
+
+        def permission_once(self, *args, **kwargs):
+            nonlocal attempts
+            if self == original:
+                attempts += 1
+                if attempts == 1:
+                    raise PermissionError("first symlink unlink blocked")
+            return real_unlink(self, *args, **kwargs)
+
+        try:
+            if target_exists:
+                target.write_bytes(b"outside document storage")
+                target.chmod(0o444)
+                target_mode = target.stat().st_mode
+            original.unlink()
+            symlink_or_skip(original, target)
+            monkeypatch.setattr(Path, "unlink", permission_once)
+
+            assert await env.docs.purge(row["id"], remove_files=make_purge_file_remover(env.paths, user_id=_USER), user_id=_USER) is True
+            assert attempts == 2
+            assert not original.is_symlink()
+            assert not derived.exists()
+            assert await env.docs.get(row["id"], include_trashed=True, user_id=_USER) is None
+            if target_exists:
+                assert target.read_bytes() == b"outside document storage"
+                assert target.stat().st_mode == target_mode
+            else:
+                assert not target.exists()
+        finally:
+            if target.exists():
+                target.chmod(0o644)
 
 
 class TestRestoreService:

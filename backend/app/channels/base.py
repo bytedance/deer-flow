@@ -9,11 +9,13 @@ from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable, Coroutine
 from concurrent.futures import CancelledError as FutureCancelledError
 from concurrent.futures import Future
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, TypeVar
 
 from app.channels.commands import extract_connect_code
 from app.channels.message_bus import (
+    HUMAN_INPUT_REQUEST_METADATA_KEY,
+    PENDING_CLARIFICATION_METADATA_KEY,
     InboundMessage,
     InboundMessageType,
     InboundQueueClosedError,
@@ -30,6 +32,26 @@ logger = logging.getLogger(__name__)
 T = TypeVar("T")
 
 
+def attachment_delivery_text(msg: OutboundMessage, failed: list[ResolvedAttachment], *, unsupported: bool = False) -> str:
+    """Format shared feedback without host paths or provider errors.
+
+    Built-in IM outbounds do not populate ``locale``; their notices follow
+    the first non-empty reply line. An explicit locale remains an override.
+    """
+    locale = msg.metadata.get("locale")
+    first_line = next((line for line in msg.text.splitlines() if line.strip()), "")
+    chinese = locale.lower().startswith("zh") if isinstance(locale, str) else any("\u4e00" <= char <= "\u9fff" for char in first_line)
+    if unsupported:
+        return "当前渠道不支持发送附件。请到 DeerFlow 会话下载文件。" if chinese else "This channel does not support sending files. Open the DeerFlow conversation to download them."
+    filenames = "\n".join("- " + " ".join(attachment.filename.split()) for attachment in failed)
+    sent = len(msg.attachments) - len(failed)
+    if chinese:
+        status = f"已发送 {sent}/{len(msg.attachments)} 个附件，以下附件未能发送：" if sent else "附件未能发送："
+        return f"{status}\n{filenames}\n文件仍保留在 DeerFlow 会话中，可前往下载。"
+    status = f"Sent {sent}/{len(msg.attachments)} files. These files could not be sent:" if sent else "These files could not be sent in this chat:"
+    return f"{status}\n{filenames}\nThe files remain available in the DeerFlow conversation."
+
+
 class ChannelUnavailable(Exception):
     """Local connectivity failure: the channel cannot accept traffic right now.
 
@@ -41,6 +63,50 @@ class ChannelUnavailable(Exception):
 
 class ChannelStopTimeout(RuntimeError):
     """A channel still owns a live provider worker after bounded teardown."""
+
+
+PRIVATE_LOOP_DRAIN_TIMEOUT_SECONDS = 1.0
+
+
+def shutdown_private_loop(loop: asyncio.AbstractEventLoop, *, drain_timeout: float = PRIVATE_LOOP_DRAIN_TIMEOUT_SECONDS) -> None:
+    """Cancel what is still scheduled on a thread-private SDK loop, then close it.
+
+    Runs on the thread that owns ``loop`` once its ``run_until_complete`` or
+    ``run_forever`` has returned. Provider SDKs leave their own tasks behind
+    (lark-oapi's ping and receive loops, dingtalk-stream's keepalive); cancelling
+    them with a bounded drain keeps the thread exit inside the channel's stop
+    budget, and a task that refuses to finish is abandoned with the loop rather
+    than joined.
+    """
+    try:
+        pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
+        for task in pending:
+            task.cancel()
+        if pending:
+            loop.run_until_complete(asyncio.wait(pending, timeout=drain_timeout))
+        loop.run_until_complete(loop.shutdown_asyncgens())
+    except Exception:
+        logger.debug("Error draining a private channel loop before close", exc_info=True)
+    finally:
+        asyncio.set_event_loop(None)
+        loop.close()
+
+
+def abort_connection_transport(connection: Any) -> bool:
+    """Tear down a ``websockets`` connection's transport if its close handshake did not finish.
+
+    ``connection.close()`` waits for the peer's close frame and only aborts the
+    transport after its own ``close_timeout``; a caller that bounds that wait more
+    tightly (channel stop budgets do) cancels before the abort, and the socket
+    then lives until garbage collection. Returns True when a transport was
+    aborted; the caller should yield to its loop once so ``connection_lost``
+    runs before the loop is stopped.
+    """
+    transport = getattr(connection, "transport", None)
+    if transport is None or transport.is_closing():
+        return False
+    transport.abort()
+    return True
 
 
 @dataclass(eq=False, slots=True)
@@ -71,6 +137,8 @@ class Channel(ABC):
         self.config = config
         self._running = False
         self._connection_repo: Any = config.get("connection_repo")
+        # Language of the /connect replies (a ReplyLocaleResolver); ChannelService injects it.
+        self._reply_locale: Any = config.get("reply_locale")
         # Provider SDK callbacks often run on a dedicated thread and submit
         # preparation work to the Gateway loop. Submission and shutdown share
         # this lock so stop() cannot miss a future created concurrently.
@@ -95,6 +163,13 @@ class Channel(ABC):
     @abstractmethod
     async def stop(self) -> None:
         """Gracefully stop the channel."""
+
+    def on_thread_replaced(self, old_thread_id: str) -> None:
+        """Notify the adapter that a conversation's thread was replaced (e.g. ``/new``).
+
+        Subclasses override this to clean up per-thread state such as pending
+        interactive card registrations.  The default is a no-op.
+        """
 
     # -- outbound ----------------------------------------------------------
 
@@ -156,6 +231,14 @@ class Channel(ABC):
         bindings. The outbox target remains the external account identity.
         """
         await self.send_notification(target=target, text_markdown=text_markdown)
+
+    async def send_group_notification_for_owner(self, *, owner_user_id: str | None, target: str, text_markdown: str) -> None:
+        """Push to an explicitly selected group binding, never a personal fallback.
+
+        ``target`` is the owner's connection ID, not a provider chat ID.
+        Providers must revalidate that binding before sending to its group.
+        """
+        raise NotImplementedError(f"channel '{self.name}' does not support group notifications")
 
     # -- helpers -----------------------------------------------------------
 
@@ -369,6 +452,20 @@ class Channel(ABC):
             return None
         return extract_connect_code(text)
 
+    async def _connect_reply_text(self, key: str, *, owner_user_id: str | None = None) -> str:
+        """A ``/connect`` (Telegram ``/start``) reply in its reader's language.
+
+        Once the code is consumed, pass its ``owner_user_id``: the reply follows
+        that user's web UI language. Before that (an invalid or expired code)
+        it uses ``channel_connections.notification_locale``. Never raises.
+        """
+        # Deferred: it loads the scheduler's locale list, and importing
+        # app.channels must stay light (tests/test_channel_capabilities.py).
+        from app.channels.reply_locale import ReplyLocaleResolver, connect_reply_text
+
+        resolver = self._reply_locale or ReplyLocaleResolver()
+        return connect_reply_text(key, provider=self.name, locale=await resolver.locale_for(owner_user_id))
+
     def _make_inbound(
         self,
         chat_id: str,
@@ -443,19 +540,49 @@ class Channel(ABC):
         partial deliveries (files without accompanying text).
         """
         if msg.channel_name == self.name:
+            # The inherited implementation explicitly means "unsupported".
+            # Inspect the bound method so custom and instance overrides keep
+            # working without a second provider-capabilities registry.
+            unsupported = bool(msg.attachments) and getattr(self.send_file, "__func__", None) is Channel.send_file
+            reply = msg
+            if unsupported:
+                notice = attachment_delivery_text(msg, msg.attachments, unsupported=True)
+                reply = replace(msg, text=f"{notice}\n\n{msg.text}" if msg.text else notice, attachments=[])
             try:
-                await self.send(msg)
+                await self.send(reply)
             except Exception:
                 logger.exception("Failed to send outbound message on channel %s", self.name)
                 return  # Do not attempt file uploads when the text message failed
 
-            for attachment in msg.attachments:
-                try:
-                    success = await self.send_file(msg, attachment)
-                    if not success:
-                        logger.warning("[%s] file upload skipped for %s", self.name, attachment.filename)
-                except Exception:
-                    logger.exception("[%s] failed to upload file %s", self.name, attachment.filename)
+            if unsupported:
+                return
+            failed = await self._send_attachments(msg)
+            if failed:
+                await self._send_attachment_feedback(msg, failed)
+
+    async def _send_attachments(self, msg: OutboundMessage) -> list[ResolvedAttachment]:
+        """Try each upload once; platform-specific retries stay in the adapter."""
+        failed: list[ResolvedAttachment] = []
+        for attachment in msg.attachments:
+            try:
+                if await self.send_file(msg, attachment):
+                    continue
+                logger.warning("[%s] file upload skipped for %s", self.name, attachment.filename)
+            except Exception:
+                logger.exception("[%s] failed to upload file %s", self.name, attachment.filename)
+            failed.append(attachment)
+        return failed
+
+    async def _send_attachment_feedback(self, msg: OutboundMessage, failed: list[ResolvedAttachment]) -> None:
+        """Reply in the same conversation; never resubmit files or push elsewhere."""
+        metadata = {key: value for key, value in msg.metadata.items() if key not in {PENDING_CLARIFICATION_METADATA_KEY, HUMAN_INPUT_REQUEST_METADATA_KEY}}
+        feedback = replace(msg, text=attachment_delivery_text(msg, failed), attachments=[], artifacts=[], metadata=metadata)
+        try:
+            await self.send(feedback)
+        except Exception:
+            # The platform may no longer accept a reply. Retain files and logs;
+            # do not turn this into a proactive notification.
+            logger.exception("[%s] failed to send attachment delivery feedback", self.name)
 
     async def receive_file(self, msg: InboundMessage, thread_id: str, *, user_id: str | None = None) -> InboundMessage:
         """

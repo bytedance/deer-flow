@@ -1,3 +1,11 @@
+### Command deadline reporting
+
+Normalize only `CommandExecError` / `context deadline exceeded` with no numeric
+exit code to `Exit Code: 124`, preserving partial output. Keep transport errors,
+other missing-code errors and numeric exits unchanged. A signal-only `-1` does
+not prove a deadline. Tests must use execution results, not a fake-only raised
+`TimeoutError`, for the deadline contract.
+
 ### OpenSandbox output synchronization
 
 Release mirrors scoped regular output files to `Paths.sandbox_outputs_dir()`

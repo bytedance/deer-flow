@@ -108,6 +108,7 @@ export function useScheduledTasksFeature() {
     available: feature.available,
     running: feature.running,
     toolEnabled: feature.toolEnabled,
+    groupNotifications: feature.groupNotifications,
     minIntervalSeconds: feature.minIntervalSeconds,
     isLoading: isPending,
   };
