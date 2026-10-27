@@ -1112,6 +1112,11 @@
 
 ### 修复
 
+- **渠道：** 飞书流式回复不再在每个分块上重写相同的线程绑定。此前每次向运行中卡片发送消息都会
+  重新保存该回复的全部别名（每个分块约五次 `set_thread_id`：每次都是在存储锁下完整重写
+  `store.json`，或一次数据库 upsert），而实际只有 `updated_at` 变化。现在非最终分块对每个
+  别名每次回复只写一次，写入失败会在下一个分块重试，最终消息仍会写入全部别名。([#7593])
+
 - **社区工具：** 异步社区工具（Jina、Crawl4AI、Browserless、Tavily、SearXNG、Firecrawl、
   InfoQuest、RAGFlow、LightRAG、Jsonify 和浏览器自动化工具）不再在事件循环上读取 `config.yaml`
   和 `extensions_config.json`。每次调用最多会把这两个文件检查三次（各做一次 `stat`
@@ -10500,3 +10505,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7580]: https://github.com/bytedance/deer-flow/pull/7580
 [#7576]: https://github.com/bytedance/deer-flow/pull/7576
 [#7580]: https://github.com/bytedance/deer-flow/pull/7580
+[#7593]: https://github.com/bytedance/deer-flow/pull/7593

@@ -1397,6 +1397,14 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
 
 ### Fixed
 
+- **channels:** A streamed Feishu reply no longer rewrites the same thread
+  bindings on every chunk. Each outbound to the running card stored all of
+  the reply's aliases again (about five `set_thread_id` writes per chunk: a
+  full `store.json` rewrite under the store lock each, or a database upsert),
+  although nothing but `updated_at` changed. Non-final chunks now store each
+  alias once per reply, a failed write is retried on the next chunk, and the
+  final outbound still writes them all. ([#7593])
+
 - **community:** Async community tools (Jina, Crawl4AI, Browserless, Tavily,
   SearXNG, Firecrawl, InfoQuest, RAGFlow, LightRAG, Jsonify and the browser
   automation tools) no longer read `config.yaml` and `extensions_config.json` on the
@@ -13154,3 +13162,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7560]: https://github.com/bytedance/deer-flow/pull/7560
 [#7576]: https://github.com/bytedance/deer-flow/pull/7576
 [#7580]: https://github.com/bytedance/deer-flow/pull/7580
+[#7593]: https://github.com/bytedance/deer-flow/pull/7593
