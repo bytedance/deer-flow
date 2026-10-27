@@ -100,6 +100,61 @@ def test_descriptions_of_a_model_are_task_text(text):
 
 
 @pytest.mark.parametrize(
+    "text,scope",
+    [
+        ("Use the Claude Opus model for this turn: summarize this report", "turn"),
+        ("Use my Claude Opus model for this task: summarize this report", "turn"),
+        ("From now on use the Claude Opus model", "conversation"),
+        ("Use the DeepSeek model to summarize this report", None),
+    ],
+)
+def test_explicit_names_behind_a_determiner_keep_the_selection_flow(text, scope):
+    result = resolve_model_control(text, [DS, OPUS])
+    assert result["status"] == "unavailable"
+    assert result["scope"] == scope
+
+
+WRAPPERS = (
+    "Use the {s} model for this turn: summarize this report",
+    "Use my {s} model for this task: summarize this report",
+    "Use the latest {s} model for this turn: summarize this report",
+    "From now on use the {s} model",
+    "Use the {s} model to summarize this report",
+)
+
+
+@pytest.mark.parametrize(
+    "spelling",
+    ["ds-flash-1017", "DeepSeek v4.1 Flash 1017", "ds v4.1 f", "ds flash", "opus", "Claude Opus"],
+)
+@pytest.mark.parametrize("wrapper", WRAPPERS)
+def test_a_configured_name_is_never_dismissed_as_task_text(spelling, wrapper):
+    """Every configured spelling, in every wrapper, must still reach the selector."""
+    result = resolve_model_control(wrapper.format(s=spelling), [DS, OPUS])
+    assert result["status"] != "none"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Use the Claude model for this turn: summarize this report",
+        "Use the Qwen model for this turn: summarize this report",
+        "Use the transformer model to encode the text",
+    ],
+)
+def test_only_known_class_words_are_task_text(text):
+    """A phrase that names nothing this host offers must still ask, not run."""
+    assert resolve_model_control(text, [DS])["status"] == "unavailable"
+
+
+def test_names_from_any_catalog_are_recognised():
+    """The list is whatever the host configures, not a fixed set of vendors."""
+    other = [model("qwen-max", "通义千问 Max", ["qwen"]), model("kimi-k2", "Kimi K2")]
+    assert resolve_model_control("From now on use the Qwen model", other)["status"] == "unavailable"
+    assert resolve_model_control("Use my Kimi K2 model for this task: x", other)["scope"] == "turn"
+
+
+@pytest.mark.parametrize(
     "text",
     [
         "Use Gemini model to analyze these sales figures",
