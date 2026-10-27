@@ -242,14 +242,23 @@ def _truncate(text: str, *, limit: int) -> str:
 _NO_EXTRA_REASON = frozenset({"goal_not_met_yet", "unknown"})
 
 
+def goal_reason_text(code: object, locale: str) -> str | None:
+    """Readable text of a host goal reason code (``blocked:`` prefix optional), else None.
+
+    ``locale`` is one of ``NOTIFICATION_LOCALES``. Only host-defined codes have
+    text, so evaluator or provider wording never passes through. The IM
+    ``/goal`` reply (``app/channels/goal_status.py``) shares these texts.
+    """
+    if not isinstance(code, str):
+        return None
+    return _GOAL_REASON_TEXT[locale].get(code.removeprefix("blocked:"))
+
+
 def _reason_text(code: object, locale: str) -> str | None:
     """Readable reason for a goal code, or None when it would add nothing."""
-    texts = _GOAL_REASON_TEXT[locale]
-    if isinstance(code, str):
-        code = code.removeprefix("blocked:")
-    if not isinstance(code, str) or code not in texts or code in _NO_EXTRA_REASON:
+    if isinstance(code, str) and code.removeprefix("blocked:") in _NO_EXTRA_REASON:
         return None
-    return texts[code]
+    return goal_reason_text(code, locale)
 
 
 def _with_reason(key: str, code: object, locale: str) -> str:

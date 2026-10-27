@@ -1713,6 +1713,24 @@ export const enUS: Translations = {
       expiredTitle: "QR code expired",
       failedTitle: "Unable to connect",
     },
+    bindingCode: {
+      description: (provider: string) =>
+        `Send this command to the ${provider} bot to link it to your DeerFlow account.`,
+      loading: "Generating a binding code…",
+      copy: "Copy command",
+      copied: "Copied",
+      copyFailed: "Could not copy. Select and copy the command above.",
+      expiresAt: (time: string) => `Expires at ${time}`,
+      waiting: (provider: string) => `Waiting for your message in ${provider}…`,
+      connected: (provider: string) => `${provider} is connected`,
+      done: "Done",
+      expired: "This binding code has expired.",
+      newCode: "Generate a new code",
+      failed: "Could not create a binding code.",
+      tooManyCodes:
+        "Too many unused codes. Use a code you already have or wait about 10 minutes for them to expire.",
+      retry: "Try again",
+    },
     setupDescription:
       "Enter the values needed by this server process. They are not written to config.yaml.",
     saveAndConnect: "Save and connect",

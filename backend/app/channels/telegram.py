@@ -1052,7 +1052,8 @@ class TelegramChannel(Channel):
 
         state = await self._connection_repo.consume_oauth_state(provider="telegram", state=state_token)
         if state is None:
-            await self._run_on_telegram_loop(update.message.reply_text("Telegram connection link is invalid or expired."))
+            text = await self._connect_reply_text("invalid_link")
+            await self._run_on_telegram_loop(update.message.reply_text(text))
             return True
 
         owner_user_id = state["owner_user_id"]
@@ -1073,7 +1074,8 @@ class TelegramChannel(Channel):
             status="connected",
         )
         logger.info("[Telegram] bound chat=%s user=%s to DeerFlow user=%s connection=%s", chat_id, user_id, owner_user_id, connection["id"])
-        await self._run_on_telegram_loop(update.message.reply_text("Telegram connected to DeerFlow."))
+        text = await self._connect_reply_text("connected", owner_user_id=owner_user_id)
+        await self._run_on_telegram_loop(update.message.reply_text(text))
         return True
 
     async def _bind_connection_from_start_token(self, update, state_token: str) -> bool:
