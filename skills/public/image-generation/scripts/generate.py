@@ -143,6 +143,9 @@ def _detect_reference_mime(image_path: str) -> str:
             "JPEG": "image/jpeg",
             "GIF": "image/gif",
             "WEBP": "image/webp",
+            "BMP": "image/bmp",
+            "TIFF": "image/tiff",
+            "MPO": "image/jpeg",
         }.get(image_format)
         if content_mime:
             return content_mime

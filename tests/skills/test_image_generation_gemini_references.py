@@ -146,6 +146,32 @@ def test_gemini_skips_corrupt_references(monkeypatch, tmp_path):
     assert parts[0]["inlineData"]["mimeType"] == "image/png"
 
 
+def test_gemini_bmp_reference_labeled_by_content(monkeypatch, tmp_path):
+    """A BMP payload stored under a .jpg name is labeled image/bmp, not image/jpeg."""
+    captured, _ = _gemini_scaffold(monkeypatch, tmp_path)
+    prompt = tmp_path / "prompt.json"
+    prompt.write_text("use the reference", encoding="utf-8")
+    bmp = _real_image(tmp_path, "photo.jpg", "BMP")
+
+    img.generate_image(str(prompt), [bmp], str(tmp_path / "output.png"))
+
+    inline = _inline_parts(captured["posts"][0])[0]["inlineData"]
+    assert inline["mimeType"] == "image/bmp"
+
+
+def test_gemini_tiff_reference_labeled_by_content(monkeypatch, tmp_path):
+    """A TIFF payload stored under a .jpg name is labeled image/tiff, not image/jpeg."""
+    captured, _ = _gemini_scaffold(monkeypatch, tmp_path)
+    prompt = tmp_path / "prompt.json"
+    prompt.write_text("use the reference", encoding="utf-8")
+    tiff = _real_image(tmp_path, "photo.jpg", "TIFF")
+
+    img.generate_image(str(prompt), [tiff], str(tmp_path / "output.png"))
+
+    inline = _inline_parts(captured["posts"][0])[0]["inlineData"]
+    assert inline["mimeType"] == "image/tiff"
+
+
 class _BlockPIL:
     """Import finder that makes Pillow look unavailable."""
 
@@ -160,6 +186,11 @@ def test_gemini_reference_free_generation_without_pillow(monkeypatch, tmp_path):
     import sys
 
     captured, _ = _gemini_scaffold(monkeypatch, tmp_path)
+    # Purge cached PIL modules so the meta_path blocker actually intercepts:
+    # a meta_path finder is only consulted on cache misses, and PIL is already
+    # imported by this test module, so without the purge the block never fires.
+    for name in [n for n in sys.modules if n == "PIL" or n.startswith("PIL.")]:
+        monkeypatch.delitem(sys.modules, name)
     blocker = _BlockPIL()
     monkeypatch.setattr(sys, "meta_path", [blocker, *sys.meta_path])
     prompt = tmp_path / "prompt.json"
