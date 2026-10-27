@@ -28,3 +28,7 @@ Wiki lexical search retries only successful empty pages with up to four distinct
 whitespace-separated keywords of at least two characters. Keep retries in the
 same authorized base, validate every response, deduplicate title/excerpt pairs,
 and never retry provider/auth/schema errors. Nonempty phrase results stay intact.
+
+Batch document checks at four per search; retain dataset/ID request-local keys
+and hit order. Drain sibling tasks on errors/cancellation. Validate selected
+documents before search, and only the consumed hit prefix before returning it.
