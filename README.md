@@ -144,6 +144,12 @@ can publish with only one pool slot available. See [Run Event Stream](backend/do
 
 PostgreSQL deployments using DB run events can opt into strict Producer Fencing,
 which rejects Journal writes after takeover or deletion revokes their Run identity.
+Before activation, the database guard skips Thread/RunRow locks and retains a
+shared cutover lock until each INSERT transaction ends. Off-mode event INSERTs
+require `READ COMMITTED` (also accepting PostgreSQL's `READ UNCOMMITTED`);
+`REPEATABLE READ` and `SERIALIZABLE` are rejected to prevent stale policy snapshots
+from bypassing activation. A write that loses a race with activation rolls back
+with SQLSTATE `40001`; retry the entire transaction with strict producer authority.
 Activation requires stopping every Gateway and using the offline cutover command;
 all restarted Gateways must use the same cutover ID. This does not recover missing
 terminal events. To activate:

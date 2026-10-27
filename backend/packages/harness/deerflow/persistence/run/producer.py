@@ -19,9 +19,24 @@ def install_event_guard(connection) -> None:
     connection.execute(
         text(f"""
 CREATE OR REPLACE FUNCTION {quoted}.run_event_producer_guard() RETURNS trigger
-LANGUAGE plpgsql SET search_path TO {quoted}, pg_catalog AS $guard$
+LANGUAGE plpgsql VOLATILE SET search_path TO {quoted}, pg_catalog AS $guard$
 DECLARE r record; a jsonb; strict_mode boolean;
 BEGIN
+    SELECT strict INTO strict_mode FROM run_producer_policy WHERE id=1;
+    IF NOT coalesce(strict_mode, false) THEN
+        -- A retained snapshot cannot observe activation after waiting. Never
+        -- let it bypass strict enforcement using an old off/missing policy.
+        IF current_setting('transaction_isolation') NOT IN ('read committed', 'read uncommitted') THEN
+            RAISE EXCEPTION 'Off-mode run events require READ COMMITTED isolation' USING ERRCODE='0A000';
+        END IF;
+        PERFORM pg_advisory_xact_lock_shared(hashtext('deerflow.event_fence/' || current_schema())::bigint);
+        SELECT strict INTO strict_mode FROM run_producer_policy WHERE id=1;
+        IF coalesce(strict_mode, false) THEN
+            -- Do not acquire earlier Thread/Run locks while holding this gate.
+            RAISE EXCEPTION 'Producer policy changed; retry the transaction' USING ERRCODE='40001';
+        END IF;
+        RETURN NEW;
+    END IF;
     PERFORM pg_advisory_xact_lock(hashtext(NEW.thread_id)::bigint);
     SELECT * INTO r FROM runs WHERE run_id=NEW.run_id FOR UPDATE;
     -- Cutover takes only this final lock, never a Clock/Thread/Run lock.
