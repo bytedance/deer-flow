@@ -148,11 +148,19 @@ SSL modes are preserved; conflicting `ssl`/`sslmode` settings are rejected.
 Explicit `channel_binding` options are rejected because asyncpg cannot enforce
 them. Synchronous psycopg and LangGraph DSNs retain their libpq options.
 
-PostgreSQL deployments using DB run events can opt into strict Producer Fencing,
-which rejects Journal writes after takeover or deletion revokes their Run identity.
-Before activation, the database guard skips Thread/RunRow locks and retains a
-shared cutover lock until each INSERT transaction ends. Off-mode event INSERTs
-require `READ COMMITTED` (also accepting PostgreSQL's `READ UNCOMMITTED`);
+With a fencing-capable SQL RunStore and `DbRunEventStore`, host-authorized
+producer writes validate the persisted Run incarnation, producer epoch and state
+even with `run_events.producer_fencing: "off"`. Stale Journal flushes after
+takeover or deletion may therefore be rejected in the default configuration.
+On PostgreSQL, these writes hold the Thread Fence and RunRow lock through commit.
+
+On PostgreSQL, `run_events.producer_fencing: "strict"` additionally enables
+database-level authorization checks against raw SQL and unaware legacy writers
+after an offline cutover. The `"off"` setting keeps application-level producer
+validation active. Before activation, the database INSERT trigger skips its
+Thread/RunRow locks and retains a shared cutover lock until each INSERT
+transaction ends. This does not remove the application locks above. Off-mode
+event INSERTs require `READ COMMITTED` (also accepting PostgreSQL's `READ UNCOMMITTED`);
 `REPEATABLE READ` and `SERIALIZABLE` are rejected to prevent stale policy snapshots
 from bypassing activation. A write that loses a race with activation rolls back
 with SQLSTATE `40001`; retry the entire transaction with strict producer authority.
