@@ -1,5 +1,7 @@
 ### MCP System (`packages/harness/deerflow/mcp/`)
 
+Inline `AudioContent` raises `NotImplementedError`, matching the adapter's unsupported-audio behavior. Never stringify its base64 payload into text; `ToolErrorHandlingMiddleware` reports a recoverable tool error. Coverage: `tests/test_mcp_audio_content.py`.
+
 Poll and cancel snapshot writes rejected by the ownership fence log the discard;
 neither path changes retry semantics when a peer owns the task. The shared
 `McpTaskService._apply_cancel_snapshot` checks the control lease and logs rejected
