@@ -1397,6 +1397,12 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
 
 ### Fixed
 
+- **channels:** IM replies that present files no longer resolve those files
+  on the event loop. For every artifact, both reply paths (`runs.wait` and
+  streaming) resolved the virtual path (`realpath`), resolved the outputs
+  root and checked the file with `stat` inline, stalling other channels and
+  requests on network-backed storage. They now do it in a worker. ([#7594])
+
 - **community:** Async community tools (Jina, Crawl4AI, Browserless, Tavily,
   SearXNG, Firecrawl, InfoQuest, RAGFlow, LightRAG, Jsonify and the browser
   automation tools) no longer read `config.yaml` and `extensions_config.json` on the
@@ -13154,3 +13160,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7560]: https://github.com/bytedance/deer-flow/pull/7560
 [#7576]: https://github.com/bytedance/deer-flow/pull/7576
 [#7580]: https://github.com/bytedance/deer-flow/pull/7580
+[#7594]: https://github.com/bytedance/deer-flow/pull/7594

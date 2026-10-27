@@ -1112,6 +1112,10 @@
 
 ### 修复
 
+- **渠道：** 展示文件的 IM 回复不再在事件循环上解析这些文件。此前两条回复路径（`runs.wait`
+  和流式）都会对每个产物内联解析虚拟路径（`realpath`）、解析输出根目录并用 `stat` 检查文件，
+  在网络存储上会让其他渠道和请求停顿。现在这些工作在工作线程中进行。([#7594])
+
 - **社区工具：** 异步社区工具（Jina、Crawl4AI、Browserless、Tavily、SearXNG、Firecrawl、
   InfoQuest、RAGFlow、LightRAG、Jsonify 和浏览器自动化工具）不再在事件循环上读取 `config.yaml`
   和 `extensions_config.json`。每次调用最多会把这两个文件检查三次（各做一次 `stat`
@@ -10500,3 +10504,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7580]: https://github.com/bytedance/deer-flow/pull/7580
 [#7576]: https://github.com/bytedance/deer-flow/pull/7576
 [#7580]: https://github.com/bytedance/deer-flow/pull/7580
+[#7594]: https://github.com/bytedance/deer-flow/pull/7594
