@@ -835,6 +835,35 @@ def test_replace_virtual_paths_in_command_does_not_rewrite_prefix_siblings(sibli
 
 
 @pytest.mark.parametrize(
+    "embedded",
+    [
+        "http://localhost:2026/api/threads/abc/artifacts/mnt/user-data/outputs/report.html",
+        "https://example.com/mnt/user-data/outputs/a.txt",
+        "backup/mnt/user-data/outputs/a.txt",
+        "./mnt/user-data/outputs/a.txt",
+    ],
+)
+def test_replace_virtual_paths_in_command_does_not_rewrite_embedded_roots(embedded: str) -> None:
+    """The left-hand mirror of the prefix-sibling rule above.
+
+    ``/mnt/user-data`` inside a longer path or URL — notably DeerFlow's own
+    artifact URLs — is not a virtual path. Rewriting it splices the thread's host
+    directory into the URL, so the request misses and leaks the host layout.
+    """
+    result = replace_virtual_paths_in_command(f"curl -s {embedded}", _THREAD_DATA)
+
+    assert result == f"curl -s {embedded}"
+    assert "/tmp/deer-flow/threads/t1" not in result
+
+
+def test_replace_virtual_paths_in_command_still_rewrites_roots_that_start_a_path() -> None:
+    result = replace_virtual_paths_in_command("cat file:///mnt/user-data/outputs/a.txt --out=/mnt/user-data/outputs/b.txt", _THREAD_DATA)
+
+    assert "/mnt/user-data" not in result
+    assert result.count("/tmp/deer-flow/threads/t1/user-data/outputs/") == 2
+
+
+@pytest.mark.parametrize(
     ("command", "expected"),
     [
         # The bare root, at end of string and before shell/text punctuation, must

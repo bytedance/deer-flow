@@ -1,29 +1,17 @@
-### Checkpoint Cache Concurrency
+### Checkpoint History Cache
 
-The memory history cache is shared by sync saver wrappers. Its threading lock
-serializes lookup/LRU promotion, population/eviction, thread purge, close, and
-statistics snapshots. Keep cache critical sections free of awaits and saver I/O;
-immutable histories do not make the mutable LRU registry thread-safe.
-Memory entries own deep copies of write payloads and snapshot seeds on ingest
-and read. Clone payloads outside the registry lock: user-defined copy callbacks
-can re-enter the cache. Preserve sync/async state isolation through
-`CheckpointStateAccessor`; tests live in `tests/test_checkpoint_cache_payload_isolation.py`.
+Lock registry/LRU/stats/lifecycle without awaits, saver I/O or copy callbacks.
+Deep-copy writes/seeds on caller-thread ingest/read (async too): O(payload)
+CPU/allocation per entry, O(N²) across N growing seeds. LRU bounds entries, not
+bytes/scan cost; profile before offload. Isolation:
+`tests/test_checkpoint_cache_payload_isolation.py`.
 
-Copies run synchronously on the caller's thread, including `aget_many` and
-`aset_many` on the event loop. Each ingest or cache hit copies the whole
-entry, so CPU and allocation costs grow with payload size. A warm scan of
-N checkpoints can repeatedly copy growing snapshot seeds, reaching O(N²)
-total copied data. The LRU entry cap bounds entry count, not payload bytes
-or scan cost. Profile long-thread history reads before offloading copies
-to worker threads; preserve payload isolation and copy callbacks outside
-the registry lock.
-
-### Redis Checkpoint Cache Purge
-
-Thread purge escapes Redis glob metacharacters in the complete literal key stem
-before SCAN, and checks returned byte/string keys against that stem before UNLINK.
-Do not interpret operator `key_prefix` text as a pattern or widen thread deletion
-to sibling namespaces. Keep the cursor loop and outage/TTL fallback unchanged.
+Redis read/write records require tuple/list triples and string task/channel IDs;
+skip bad ingests, rebuild bad reads. Bind sync/async target/ancestor hits to the
+requested channel; seeds/values stay opaque. Warnings are best-effort: handler
+errors preserve cache fallbacks and valid neighbors, including Redis outages/purge.
+Escape literal stems for SCAN; recheck byte/string keys before UNLINK. Preserve
+namespace/thread bounds, cursor iteration and outage/TTL fallback.
 
 ### Stream Bridge Heartbeats
 
@@ -138,7 +126,7 @@ answers for paginated history. See `docs/skill-usage-ui.md`.
 
 **Workspace change detection:** Truncated snapshots cannot prove absence. Mark skipped delivery verification in the receipt. Details: `backend/docs/runtime-guidance-details.md`.
 
-Unmet goals stand down on run-level token/loop hard stops and retain the original stop reason; hidden continuations must not re-enter that run's shared safety state. Operation-based no-progress counting: `backend/docs/runtime-guidance-details.md`.
+Unmet goals stand down on run-level token/loop hard stops and retain the original stop reason; a step-limit stop (`recursion_capped`) stands down without an evaluator call. Hidden continuations must not re-enter that run's shared safety state. Operation-based no-progress counting: `backend/docs/runtime-guidance-details.md`.
 
 **Deferred terminal commit:** Keep terminal commit authority on the owning
 Worker's confirmed ACK; row reads never grant it. Renew leases through receipt,

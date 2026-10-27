@@ -213,6 +213,8 @@ fences, including unclosed fences, in complete and streamed replies.
 
    Jina fetches support opt-in bounded retries via `max_retries` (default `0`) and `retry_budget_seconds` (default `30`) in the tool configuration. Valid `Retry-After` hints set a minimum wait for HTTP 429/503; 429 without a valid hint stays terminal. Hints that cannot fit the remaining budget stop retries. Local backoff remains randomized. Retries may increase upstream requests and cost; see [Jina fetch retries](backend/docs/CONFIGURATION.md#jina-fetch-retries).
 
+   At DEBUG level, Jina emits one bounded crawl completion summary with attempts, elapsed/backoff seconds, outcome and stop reason. See [diagnostics](backend/docs/CONFIGURATION.md#jina-crawl-diagnostics) for configuration and correlation.
+
    Jina also accepts an opt-in `max_response_bytes` tool setting (positive integer; omitted/null disables it). It stops oversized decoded responses before extraction, with no partial success or retry. This leaves the 4096-character output cap unchanged and does not bound HTTPX decompressor allocations or wire bandwidth; see [response budget](backend/docs/CONFIGURATION.md#jina-response-byte-budget).
 
    Jina can also bound concurrent HTTP attempts and FIFO waiting with the opt-in `request_admission` tool extra. One immutable budget is shared across clients and agent threads in each process; replicas have independent budgets. See [Jina request admission](backend/docs/CONFIGURATION.md#jina-request-admission).
@@ -540,7 +542,10 @@ apply to the next run without restarting the Gateway. This top-level setting
 applies to Gateway API and IM channel runs. A `recursion_limit` in an IM
 channel's `session.config` takes precedence, and GitHub channel runs keep
 their own floor. Embedded `DeerFlowClient` runs retain their own defaults and
-per-call override paths.
+per-call override paths. A run that reaches its limit stops with a plain message
+that names up to five files it created in `/mnt/user-data/outputs` without
+presenting them; send a message to continue. IM channels reply with the same
+message.
 
 A custom frontend can add an optional `context.client` to a Gateway run request:
 a client name, capabilities such as `artifacts` or `charts`, and display
@@ -571,7 +576,12 @@ never frozen and workers sharing one checkpoint database may safely run
 different cache settings. Returned state snapshots have independent nested values,
 so editing one cannot change later checkpoint reads. Redis thread cleanup treats a configured `key_prefix`
 as literal text, including glob metacharacters, so deletion stays within that
-namespace and thread.
+namespace and thread. Redis rejects malformed write records on ingestion; malformed
+or wrong-channel cached histories are rebuilt in full from authoritative checkpoints.
+Seeds and write values remain opaque to the cache: these checks do not validate
+schema-specific state contents.
+Checkpoint reads, valid neighboring writes and optional-cache cleanup continue
+even if a warning handler fails.
 
 Gateway checkpoint cleanup runs when the next run wins durable same-thread
 admission, before its first checkpoint read. It checks only the root head and
@@ -2469,11 +2479,11 @@ After each Gateway-backed run, DeerFlow evaluates the visible conversation, incl
 The evaluator keeps recent work and the latest user request within a fixed evidence budget, using spare room to retain more of long user input.
 If a normally completed evaluator response has an invalid verdict format, DeerFlow evaluates the same evidence once more unless you cancel or change the thread. Both calls are counted; a second failure stops automatic continuation without repeating the task or its tools.
 
-For tool-using turns, successful operation results drive the no-progress count: changing only reply wording or a sandbox tool's UI explanation does not reset it, while newly observed work can keep it going. Text-only turns keep their reply-based check. An unmet goal still stops automatic continuation after a token or loop-detection hard stop and stays active for a later user turn.
+For tool-using turns, successful operation results drive the no-progress count: changing only reply wording or a sandbox tool's UI explanation does not reset it, while newly observed work can keep it going. Text-only turns keep their reply-based check. An unmet goal still stops automatic continuation after a token or loop-detection hard stop, or when the run reaches its step limit, and stays active for a later user turn.
 
 Regenerating an earlier response keeps the goal currently set for the chat and its used continuation budget. It does not restore a goal that was cleared or achieved. The earlier answer's completion record is removed when its historical checkpoint is replayed.
 
-The Web UI shows the active goal above the composer, says why auto-continue stopped, and shows a "Goal met" notice after a goal is met. Editing the last message is off while a goal is set. The same command is available from the TUI and supported IM channels. In the Web UI and supported IM channels, setting `/goal <completion condition>` also starts a run with the condition as the task; status and clear commands only manage goal state. Setting or clearing a goal is rejected while that thread has a run in flight, including a run owned by another Gateway worker, so the goal checkpoint cannot branch away from an active run's checkpoint lineage.
+The Web UI shows the active goal above the composer, says why auto-continue stopped, and shows a "Goal met" notice after a goal is met. Editing the last message is off while a goal is set. The same command is available from the TUI and supported IM channels. In IM, `/goal` also says whether the goal is in progress, why auto-continue stopped, or that it was met (until the next goal change), in the binding owner's web UI language (else `channel_connections.notification_locale`). In the Web UI and supported IM channels, setting `/goal <completion condition>` also starts a run with the condition as the task; status and clear commands only manage goal state. Setting or clearing a goal is rejected while that thread has a run in flight, including a run owned by another Gateway worker, so the goal checkpoint cannot branch away from an active run's checkpoint lineage.
 
 When your role lacks `runs:create`, the Web UI rejects a new task or `/goal <completion condition>` before preparing the thread or saving the goal, and keeps your draft for retry. Goal status, goal clearing, and `/compact` remain governed by their own endpoint permissions.
 
@@ -2830,6 +2840,8 @@ An explicit zero per-tool override disables externalization while preserving
 any positive global fallback limit.
 Structured JSON tool results follow these budgets, including results mixed with
 media; externalization keeps the full JSON available through a file reference.
+Superseded `write_file` payload elision is opt-in because enabling it rewrites
+earlier model-request prefixes when later file actions supersede a write.
 MindIE renders JSON tool results as escaped text, with configured tool exemptions
 preserved. Enabled PII redaction scans nested JSON keys and values before rendering.
 Mounted sandboxes running under another UID need read access through the shared
@@ -2934,7 +2946,7 @@ The read-before-write gate ties each read mark to that `read_file` call's result
 
 On Linux and macOS, local sandbox `write_file` replacements and `str_replace` stage complete text before replacing the destination, so write, flush or publication errors retain the previous file. Existing write access is checked; ownership, permission bits, ACLs and extended attributes are transferred before writing staging content. Failure to transfer metadata aborts the save. Successful revisions get a fresh modification time, including empty saves; source-descriptor cleanup errors are warnings and do not change the save result. Files with set-id bits, macOS file flags or content-bound Linux privilege attributes are refused unchanged. Replacement requires parent-directory write access and publishes a new inode; other hard links retain the previous version. Symlinks follow the existing path-validation rules. Append writes, other host platforms (including Windows), shell writes and remote providers keep their existing behavior. This is not a concurrent-writer or power-loss recovery guarantee.
 
-Loop warnings let agents save collected results before their final answer. If the save is blocked by the read-before-write gate, the agent may read the target file and retry the save once. A looping or stopped tool must be replaced by an available alternative; if no permitted save path exists or the retry fails, the final answer includes the collected results and reports that the file was not saved. Recovery calls still count toward the loop limits, and a hard stop prevents further tool execution.
+Loop warnings let agents save collected results before their final answer. If the save is blocked by the read-before-write gate, the agent may read the target file and retry the save once. A looping or stopped tool must be replaced by an available alternative; if no permitted save path exists or the retry fails, the final answer includes the collected results and reports that the file was not saved. When `present_files` is available, the warning also asks the agent to present the files it already created in `/mnt/user-data/outputs` before answering, so finished outputs are delivered. Recovery calls still count toward the loop limits, and a hard stop prevents further tool execution.
 
 Ranged `read_file` calls count lines the same way on every sandbox provider: a line ends only at a newline. On E2B, BoxLite, Tenki, and OpenSandbox, a file with bare carriage returns (such as a saved progress log), form feeds, or Unicode line separators therefore returns the same lines as on the local sandbox, and the `start_line` a truncated read suggests points at the next unread line.
 
@@ -3197,6 +3209,8 @@ when retries are exhausted. Turn Live off and on to start a fresh retry budget.
 
 **Strict Tool-Call Recovery**: When a provider or middleware interrupts a tool-call loop, DeerFlow now strips provider-level raw tool-call metadata on forced-stop assistant messages and injects placeholder tool results for dangling calls before the next model invocation. This keeps OpenAI-compatible reasoning models that strictly validate `tool_call_id` sequences from failing with malformed history errors.
 
+**Provider Safety Stops**: With `safety_finish_reason.enabled`, native OpenAI Responses `status=incomplete` with `incomplete_details.reason=content_filter` suppresses tool calls, including malformed calls, and removes their native frames from subsequent requests. Empty filtered responses receive an explanation; visible partial answers without tool calls are preserved.
+
 **Visible Tool-Run Completion**: For interactive turns, DeerFlow retries an empty post-tool final response once, then surfaces a visible error instead of reporting a silent successful run.
 
 **Run History**: Image-only user input is recorded once per run, even when the agent makes multiple model calls. Its media content remains in history without requiring a text summary.
@@ -3404,6 +3418,15 @@ text, including when nested in other containers. Dictionary keys and values
 are checked recursively as well.
 
 ## Embedded Python Client
+
+User messages are framed as untrusted input. Reserved XML-like tags are escaped
+for model context only when present; tag-free URLs and shell commands retain
+their ampersands unchanged. Encoded payloads include a note to decode exactly
+once when reproducing the original text in files, code, or tool-call arguments. This preserves XML
+angle brackets and literal HTML entities in verbatim-content requests while
+keeping user-supplied tags separate from framework instructions. Copied encoding
+notes are treated as user text; only request-local program state permits reuse
+of an already encoded frame.
 
 `chat()` and `stream()` preserve text appended by model middleware before the
 first state snapshot, emitting only the suffix after the streamed text.
