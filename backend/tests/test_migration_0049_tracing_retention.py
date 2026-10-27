@@ -12,7 +12,8 @@ from deerflow.persistence import bootstrap
 
 def test_retention_is_single_head_after_the_merge():
     script = ScriptDirectory(str(bootstrap._MIGRATIONS_DIR))
-    assert script.get_heads() == ["0049_tracing_retention"]
+    assert script.get_heads() == ["0050_merge_tracing_extension"]
+    assert set(script.get_revision("0050_merge_tracing_extension").down_revision) == {"0049_tracing_retention", "0048_extension_execution_leases"}
     assert script.get_revision("0049_tracing_retention").down_revision == "0048_merge_tracing_mcp_oauth"
 
 
@@ -22,7 +23,7 @@ def test_upgrade_backfills_unknown_rows_without_rewriting_ciphertext(tmp_path):
     cfg = bootstrap._get_alembic_config(async_engine)
     engine = create_engine(f"sqlite:///{tmp_path / 'migration.db'}")
     try:
-        command.upgrade(cfg, "head")
+        command.upgrade(cfg, "0049_tracing_retention")
         command.downgrade(cfg, "0048_merge_tracing_mcp_oauth")
         with engine.begin() as connection:
             connection.execute(
@@ -32,7 +33,7 @@ def test_upgrade_backfills_unknown_rows_without_rewriting_ciphertext(tmp_path):
                 ),
                 {"id": "a" * 32},
             )
-        command.upgrade(cfg, "head")
+        command.upgrade(cfg, "0049_tracing_retention")
         with engine.connect() as connection:
             row = connection.execute(text("SELECT retention_state, created_at, payload_ciphertext FROM run_tracing_snapshots")).one()
             assert row[0] == "unmanaged" and row[1] is not None and row[2] == "retained-old-ciphertext"
@@ -42,7 +43,7 @@ def test_upgrade_backfills_unknown_rows_without_rewriting_ciphertext(tmp_path):
         command.downgrade(cfg, "0048_merge_tracing_mcp_oauth")
         with engine.connect() as connection:
             assert connection.scalar(text("SELECT payload_ciphertext FROM run_tracing_snapshots")) == "retained-old-ciphertext"
-        command.upgrade(cfg, "head")
+        command.upgrade(cfg, "0049_tracing_retention")
         with engine.connect() as connection:
             assert connection.scalar(text("SELECT retention_state FROM run_tracing_snapshots")) == "unmanaged"
     finally:

@@ -195,7 +195,7 @@ spec:
                   (bundled StatefulSet, external databaseUrl, or an existing
                   Secret). In sqlite/memory mode the env is omitted and
                   config.yaml's database.postgres_url is never read. */ -}}
-            {{- $pgConfigured := or .Values.postgresql.enabled .Values.postgresql.external.databaseUrl .Values.postgresql.external.existingSecret .Values.postgresql.existingSecret -}}
+            {{- $pgConfigured := or .Values.postgresql.enabled .Values.postgresql.external.databaseUrl (include "deer-flow.databaseUserSecret" .) -}}
             {{- if $pgConfigured }}
             - name: DATABASE_URL
               valueFrom:

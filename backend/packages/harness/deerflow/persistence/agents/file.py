@@ -37,6 +37,7 @@ from deerflow.persistence.agents.base import (
     parse_agent_config,
 )
 from deerflow.runtime.user_context import DEFAULT_USER_ID
+from deerflow.utils.atomic_write import cleanup_failed_atomic_write
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +65,9 @@ class FileAgentStore(AgentStore):
         return paths.user_agent_dir(effective_user, name).exists() or paths.agent_dir(name).exists()
 
     def get_soul(self, name: str, *, user_id: str | None = None) -> str | None:
+        # Every other read/write method validates the name; without this, a
+        # ".." segment reaches resolve_agent_dir and escapes the user's tree.
+        name = validate_agent_name(name)
         agent_dir = resolve_agent_dir(name, user_id=user_id)
         soul_path = agent_dir / SOUL_FILENAME
         # resolve_agent_dir requires config.yaml; SOUL.md loading does not, so
@@ -242,22 +246,29 @@ class FileAgentStore(AgentStore):
         try:
             if config is not None:
                 config_text = yaml.dump(config, default_flow_style=False, allow_unicode=True, sort_keys=False)
-                config_tmp = _stage_temp(agent_dir / "config.yaml", config_text)
-                staged.append(config_tmp)
+                config_tmp = _stage_temp(agent_dir / "config.yaml", config_text, staged)
                 pending.append((config_tmp, agent_dir / "config.yaml"))
             if soul is not None:
-                soul_tmp = _stage_temp(agent_dir / SOUL_FILENAME, soul)
-                staged.append(soul_tmp)
+                soul_tmp = _stage_temp(agent_dir / SOUL_FILENAME, soul, staged)
                 pending.append((soul_tmp, agent_dir / SOUL_FILENAME))
             for tmp, target in pending:
                 tmp.replace(target)
                 staged.remove(tmp)
         finally:
             for tmp in staged:
-                tmp.unlink(missing_ok=True)
+                # A failing discard must not replace the error that aborted the
+                # publish, nor the result of a successful one.
+                cleanup_failed_atomic_write(tmp)
 
 
-def _stage_temp(target: Path, text: str) -> Path:
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=target.parent, suffix=".tmp", delete=False) as f:
+def _stage_temp(target: Path, text: str, staged: list[Path]) -> Path:
+    # newline="" keeps the operator's/agent's bytes: the default text write
+    # translates LF into os.linesep, so SOUL.md and config.yaml landed with
+    # CRLF on Windows while every reader saw LF.
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", newline="", dir=target.parent, suffix=".tmp", delete=False) as f:
+        # Register the path before writing: a failing ``write`` must still reach
+        # the caller's cleanup, or the staged file leaks with no attempt and no log.
+        path = Path(f.name)
+        staged.append(path)
         f.write(text)
-        return Path(f.name)
+        return path

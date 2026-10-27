@@ -1,5 +1,16 @@
 ### Memory System
 
+`locale.py::with_memory_locale` captures a supported run `context.locale` on
+queued message copies only, after PII redaction, for normal/async/emergency
+writes. Stamp every message so filtering and watermark slicing retain the
+preference; strip inbound/stale `deerflow_ui_locale` metadata when no supported
+run locale exists. Never change checkpoint messages or memory backend APIs.
+Bundled DeerMem reads this optional metadata into its human data message,
+keeping system text static and the portable backend free of host imports.
+Language influences new prose, not JSON keys or bulk translation of stored facts.
+`test_ui_language_preference.py` pins DeerMem's locale keys and display names
+to the host allowlist without importing host code into the portable backend.
+
 DeerMem `prompt_prepend`/`prompt_append` wrap the first system message from
 `memory_update` after formatting, without touching its human data message or
 cached templates. This is the live summary/fact extraction path; do not wire
@@ -13,6 +24,8 @@ This directory owns memory capture, storage, retrieval, prompt injection, and mo
 - `manager.py` defines the backend-neutral `MemoryManager` contract.
 - `agents/middlewares/memory_middleware.py` queues filtered conversations for passive capture.
 - `summarization_hook.py` connects memory work to the summarization lifecycle.
+  Async compaction runs it in a worker: `add_nowait` is sync HTTP for mem0,
+  Honcho and OpenViking (`tests/blocking_io/test_summarization_memory_flush.py`).
 - `tools.py` provides `memory_search`, `memory_get`, `memory_add`, `memory_update`, and `memory_delete`.
 - `backends/deermem/` contains the default local backend.
 - `backends/mem0/`, `backends/openviking/`, and `backends/honcho/` contain optional adapters.
@@ -320,6 +333,26 @@ Use the earliest source review deadline for its next review.
 
 #### Remote backends
 
+Mem0 search and management convert facts inside the read-policy boundary.
+Context injection also deduplicates inside that boundary; unhashable record IDs
+raise a value-redacted `Mem0APIError` (`tests/test_mem0_context_record_ids.py`).
+Invalid score/categories/metadata fields omit field values from `Mem0APIError`s.
+Diagnostics carry only bounded opaque record IDs, otherwise `<unavailable>`;
+missing/null defaults stay compatible and local programming errors propagate.
+
+Mem0 normalizes JSON syntax, Unicode decoding, and parser recursion failures
+to Mem0APIError.
+It validates object response envelopes and lists of object records in the
+HTTP client before returning recall data. Invalid structures raise Mem0APIError,
+so existing read policies apply to search, injection, management and export.
+Validate every page; a malformed later page must not publish a partial listing.
+Missing results and valid empty lists retain the existing empty-read behavior.
+Decoding and structure errors identify the endpoint and list page without memory
+contents; structure errors also identify the invalid container or record type.
+Preserve decoding causes. Catch RecursionError only at JSON parsing; local
+programming errors must still propagate.
+Regressions use offline HTTP transports in `tests/test_mem0_response_policy.py`.
+
 Strict reads use the backend-neutral `MemoryReadError`.
 Backends declare their policy through `read_failures_are_fatal_for_config()`.
 `DynamicContextMiddleware` preserves that policy at its injection timeout.
@@ -351,6 +384,16 @@ Honcho is a remote HTTP adapter for user-model memory.
 It creates one workspace per resolved `user_id`.
 A missing user fails closed to no memory.
 Its async methods offload synchronous HTTP work with `asyncio.to_thread`.
+Honcho's `from_config` consumes the `should_keep_hidden_message` host hook.
+Its write path drops hidden human messages unless that hook accepts them;
+the host default keeps valid user clarification answers and rejects framework context.
+Without a callable hook, standalone construction drops all hidden human messages.
+If the hook raises an `Exception`, skip only that hidden message and continue the batch.
+Log a generic warning without message metadata, content or exception text.
+Keep this boundary around the hook; do not change HTTP write errors or catch `BaseException`.
+Keep the filter inside `add` so sync, async and pre-compaction writes share it;
+`tests/test_honcho_hidden_messages.py` checks the real HTTP payloads, middleware and host factory;
+`tests/blocking_io/test_honcho_memory_backend.py` keeps the filter hook off the event loop.
 The default read failure policy logs and returns no results.
 `failure_policy.read: fail_closed` rethrows recall failures.
 

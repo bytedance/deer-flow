@@ -33,5 +33,5 @@ async def test_scheduled_task_service_shutdown_is_bounded(monkeypatch: pytest.Mo
 
 
 def test_lifespan_uses_bounded_scheduled_task_shutdown() -> None:
-    source = inspect.getsource(gateway_app.lifespan)
+    source = inspect.getsource(gateway_app._gateway_lifespan)
     assert "await _shutdown_scheduled_task_service(app)" in source

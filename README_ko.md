@@ -378,7 +378,7 @@ Docker 빌드는 기본적으로 업스트림 `uv` 레지스트리를 사용합�
 
 백엔드 프로세스는 다음 설정 접근 시 `config.yaml` 변경 사항을 자동으로 반영하므로, 개발 중 모델 메타데이터를 업데이트할 때 수동으로 재시작할 필요가 없습니다.
 
-Gateway 실행(run)은 API 요청이 값을 지정하지 않은 경우 최상위 `recursion_limit` 값(`config.yaml`에 설정)을 사용합니다. 기본값은 `100`이며, 유효한 요청별 값이 우선하고 `max_recursion_limit`(기본값 `1000`)이 두 값 모두의 상한이 됩니다. 변경 사항은 Gateway를 재시작하지 않아도 다음 실행부터 적용됩니다. 이 최상위 설정은 Gateway API 실행에 적용되며, IM 채널 실행과 임베디드 `DeerFlowClient` 실행은 각자의 기본값과 호출별 재정의 경로를 그대로 유지합니다.
+Gateway 실행(run)은 API 요청이 값을 지정하지 않은 경우 최상위 `recursion_limit` 값(`config.yaml`에 설정)을 사용합니다. 기본값은 `100`이며, 유효한 요청별 값이 우선하고 `max_recursion_limit`(기본값 `1000`)이 두 값 모두의 상한이 됩니다. 변경 사항은 Gateway를 재시작하지 않아도 다음 실행부터 적용됩니다. 이 최상위 설정은 Gateway API 실행과 IM 채널 실행에 적용됩니다. IM 채널의 `session.config`에 지정한 `recursion_limit`이 우선하며, GitHub 채널 실행은 자체 하한을 유지합니다. 임베디드 `DeerFlowClient` 실행은 각자의 기본값과 호출별 재정의 경로를 그대로 유지합니다.
 체크포인트 저장소 설정인 `database.checkpoint_channel_mode`와 `database.checkpoint_delta.snapshot_frequency`(기본값 `10`)는 예외입니다. 두 설정 모두 프로세스가 처음 에이전트를 빌드할 때(`DeerFlowClient`를 통한 경우 포함) 고정되므로, 안전하게 변경하려면 프로세스를 재시작해야 합니다.
 
 선택 사항인 `database.checkpoint_cache` 섹션(delta 채널 모드 전용)은 구체화된 체크포인트 이력을 캐시합니다. `type`은 `memory`(기본값) 또는 `redis`이며, `max_entries: 0`으로 설정하면 캐시가 비활성화됩니다. `redis` 백엔드는 Gateway/비동기 경로 전용이며, 동기 TUI/임베디드 경로는 `memory`만 지원합니다. 이 캐시는 성능만을 위한 것으로 비활성화해도 결과가 동일합니다. 따라서 고정되는 일이 없으며, 하나의 체크포인트 데이터베이스를 공유하는 워커들이 서로 다른 캐시 설정으로 실행되어도 안전합니다. Redis 스레드 정리는 설정된 `key_prefix`를 glob 메타문자까지 포함해 리터럴 텍스트로 취급하므로, 삭제는 해당 네임스페이스와 스레드 안에서만 이루어집니다.
@@ -706,8 +706,6 @@ channels:
   # Optional: global session defaults for all mobile channels
   session:
     assistant_id: lead_agent  # or a custom agent name; custom agents are routed via lead_agent + agent_name
-    config:
-      recursion_limit: 100
     context:
       thinking_enabled: true
       is_plan_mode: false
@@ -1927,7 +1925,7 @@ deerflow --recursion-limit 250 --print "task" # override the headless agent-loop
 
 스트리밍 대화록(Markdown으로 렌더링된 답변), 간결한 도구 활동 카드, `/` 슬래시 명령 팔레트, 화면 전용 `/clear`, `/goal` 목표 관리, `/model` 및 `/threads` 선택기, 입력 기록, PageUp/PageDown 대화록 탐색, `Esc` / `Ctrl+C` 중단을 갖춘 키보드 중심의 채팅 화면입니다. 입력창(composer)은 붙여 넣은 코드, 스택 트레이스, 여러 문단으로 된 프롬프트의 줄바꿈과 들여쓰기를 보존하며, `Enter`를 누르면 전체 문서를 보냅니다. 대화록이 갱신될 때 위로 스크롤한 상태라면 읽던 위치를 유지하고, 맨 아래로 돌아오면 다시 새 출력을 따라갑니다. `/clear`는 스레드나 저장된 대화를 삭제하지 않고 현재 터미널 화면에서 행만 제거합니다. `/new`와 `/clear`는 실행 중에는 진행 중인 화면 상태를 재설정하는 대신 기다려 달라고 안내합니다. TUI에서 연 세션은 웹 UI 사이드바에도 표시됩니다. TUI는 로컬 기본 사용자로 공유 스레드 저장소에 기록하므로, **Gateway를 실행하지 않고도** 터미널과 웹이 동기화된 상태를 유지합니다.
 
-실행 중에는 `/resume`, `/threads`, `/switch`가 대화를 전환하기 전에 기다려 달라고 안내합니다. 잘못된 `/resume` 참조는 TUI를 닫거나 현재 대화를 바꾸지 않고 오류만 표시합니다. 중단 후에는 두 프롬프트가 같은 대화를 사용하더라도 이전 실행에서 늦게 도착한 스트림 동작이 다음 실행의 화면이나 상태를 바꿀 수 없습니다. 이미 진행 중인 도구 호출은 끝까지 완료되므로, 완료될 때까지 그 대화의 새 프롬프트는 경쟁 상태를 피하도록 알림과 함께 보류되며, `/new`와 `/resume`은 계속 사용할 수 있습니다. 실행을 시작할 수 없으면 TUI가 오류를 보고하고 유휴 상태로 돌아가므로 재시도할 수 있습니다. 보류되었거나 시작할 수 없는 메시지는 입력창에 남아 있으므로 `Enter`로 다시 보낼 수 있습니다.
+실행 중에는 `/resume`, `/threads`, `/switch`가 대화를 전환하기 전에 기다려 달라고 안내합니다. 잘못된 `/resume` 참조는 TUI를 닫거나 현재 대화를 바꾸지 않고 오류만 표시합니다. 중단 후에는 두 프롬프트가 같은 대화를 사용하더라도 이전 실행에서 늦게 도착한 스트림 동작이 다음 실행의 화면이나 상태를 바꿀 수 없습니다. 이미 진행 중인 도구 호출은 끝까지 완료되므로, 완료될 때까지 그 대화의 새 프롬프트는 경쟁 상태를 피하도록 알림과 함께 보류되며, `/new`와 `/resume`은 계속 사용할 수 있습니다. 종료할 때도 그 단계가 끝나기를 기다렸다가 TUI를 닫으며, `Ctrl+C`를 한 번 더 누르면 그 단계를 저장하지 않고 바로 종료합니다. 실행을 시작할 수 없으면 TUI가 오류를 보고하고 유휴 상태로 돌아가므로 재시도할 수 있습니다. 보류되었거나 시작할 수 없는 메시지는 입력창에 남아 있으므로 `Enter`로 다시 보낼 수 있습니다.
 
 입력창의 마지막 행에서 `Down`은 입력 기록을 탐색하는 중이 아니면 보내지 않은 초안을 건드리지 않습니다. 기록을 불러온 뒤에는 앞으로 이동해 저장해 둔 초안을 복원합니다.
 

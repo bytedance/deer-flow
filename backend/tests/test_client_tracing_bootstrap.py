@@ -56,7 +56,7 @@ def offline_turn(monkeypatch):
 
 def _assert_authority_ready(config, expected_snapshots):
     with sqlite3.connect(config.database.sqlite_path) as connection:
-        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == ("0049_tracing_retention",)
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == ("0050_merge_tracing_extension",)
         assert connection.execute("SELECT id FROM tracing_admission_fence").fetchall() == [(1,)]
         assert connection.execute("SELECT count(*) FROM run_tracing_snapshots").fetchone() == (expected_snapshots,)
 

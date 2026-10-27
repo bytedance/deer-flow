@@ -65,7 +65,7 @@ async def test_tracing_schema_matches_orm_for_fresh_and_upgraded_database(tmp_pa
                 return compare_metadata(context, Base.metadata)
 
             assert await connection.run_sync(diff) == []
-            assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == "0049_tracing_retention"
+            assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == "0050_merge_tracing_extension"
         await asyncio.to_thread(command.downgrade, cfg, PREVIOUS)
         async with engine.connect() as connection:
             assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == PREVIOUS

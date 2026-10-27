@@ -1106,11 +1106,134 @@
 
 ### 变更
 
+- **工具输出：** 被后续操作取代的 `write_file` 载荷省略现在改为显式启用。该优化仍可
+  使用，但默认会保持发送给模型的历史只追加，避免后续文件操作使 provider 的提示词缓存
+  前缀失效。([#7319](https://github.com/bytedance/deer-flow/issues/7319))
+
 - **技能：** 将 `allowed-tools` 作为不强制执行的兼容性元数据。激活技能不再隐藏或
   阻止智能体配置与宿主授权已经允许的工具，即使该声明为空也是如此。保留解析、校验、
   导出、技能激活权限，以及现有的密钥和用户隔离边界。([#6935])
 
 ### 修复
+
+- **渠道：** 飞书流式回复不再在每个分块上重写相同的线程绑定。此前每次向运行中卡片发送消息都会
+  重新保存该回复的全部别名（每个分块约五次 `set_thread_id`：每次都是在存储锁下完整重写
+  `store.json`，或一次数据库 upsert），而实际只有 `updated_at` 变化。现在非最终分块对每个
+  别名每次回复只写一次，写入失败会在下一个分块重试，最终消息仍会写入全部别名。([#7593])
+  
+- **运行时：** 循环检测警告现在会让 agent 在作答前，先交付已经写入
+  `/mnt/user-data/outputs` 的文件，被警告的运行不会再因为做好的文件没交付而判为失败。
+  运行达到 `recursion_limit` 时，现在以 `stop_reason: recursion_capped` 结束，并给出
+  一条说明，列出已生成但未交付的文件，而不是 LangGraph 的原始报错。进行中的目标会直接
+  停止续跑（不调用评估模型）并保持活跃；`/wait` 把这个错误命名为
+  `GraphRecursionError`；IM 渠道也会回复这条说明，而不是笼统的错误提示。([#7588])
+  
+- **渠道：** 连接 Slack、Discord、飞书、钉钉、企业微信、Buzz 或 QQ 时，现在会打开
+  一个对话框，持续显示 `/connect` 命令，并提供复制按钮、过期时间和绑定状态，不再只是
+  一闪而过的提示。机器人对 `/connect` 和 `/goal` 的回复会跟随用户在网页端选择的语言
+  （否则使用 `channel_connections.notification_locale`）；IM 中的 `/goal` 也会像网页端
+  目标栏一样，说明目标是否在进行、为什么停止或已经达成。([#7591])
+
+- **社区工具：** 异步社区工具（Jina、Crawl4AI、Browserless、Tavily、SearXNG、Firecrawl、
+  InfoQuest、RAGFlow、LightRAG、Jsonify 和浏览器自动化工具）不再在事件循环上读取 `config.yaml`
+  和 `extensions_config.json`。每次调用最多会把这两个文件检查三次（各做一次 `stat`
+  和完整的 sha256），编辑后还会在循环上重新解析 `config.yaml`，期间其他运行、请求和
+  流式输出都会停顿。现在它们与图片搜索一样，每次调用只在工作线程中读取一次配置。([#7580])
+
+- **鉴权：** 公开的认证路由（`/register`、`/setup-status`、`/providers`、
+  `/oauth/{provider}` 和 `/callback/{provider}`）不再在事件循环上读取 `config.yaml` 和
+  `extensions_config.json`。每个请求都会检查这两个文件（各做一次 `stat` 和完整的
+  sha256），编辑后还会在循环上重新解析 `config.yaml`，期间其他请求和流式输出都会
+  停顿。现在这次读取与 `/login/local` 一样在工作线程中执行。([#7576])
+  
+- **沙箱：** 停止 Gateway 时，AIO 和 E2B 沙箱不再在进行中的运行收尾之前被销毁。此前
+  如果第一次使用沙箱时在事件循环线程上构造了提供方，提供方自己的 SIGTERM/SIGINT
+  处理器会在信号到达时同步销毁所有沙箱：整个销毁期间事件循环冻结，正在执行的工具
+  调用失去沙箱。现在由 Gateway 负责沙箱关闭，在运行收尾和 MCP 关闭之后再关闭提供方；
+  嵌入式客户端和脚本保留信号兜底，SIGHUP 仍会清理。AIO 的 acquire 在关闭开始后会
+  拒绝请求，与 E2B 一致。([#7560])
+
+- **前端：** SSO 登录后现在会回到发起登录的页面（例如分享的对话链接），不再总是打开
+  默认工作区。此前登录相关页面会把所有已登录的请求都跳转到 `/workspace`，导致
+  `/auth/callback?next=...` 中的 `next` 路径丢失；已登录时访问 `/login?next=...`
+  也会同样丢失目标页面。前端和 Gateway 对 `next` 的校验现在也会拒绝控制字符：浏览器会
+  删除 URL 中的制表符、LF 和 CR，因此 `?next=%2F%0A%2F%2Fevil.example` 可能把登录后的跳转
+  导向其他网站。([#7467])
+  
+- **鉴权：** 已认证的 Gateway 请求不再在事件循环上读取 `config.yaml` 和
+  `extensions_config.json`。解析路由权限时，每个请求都会检查这两个文件（各做一次
+  `stat` 和完整的 sha256），编辑后还会在循环上重新解析 `config.yaml`，期间其他请求和
+  流式输出都会停顿。现在这次读取与插件鉴权路径一样在工作线程中执行。([#7557])
+
+- **记忆：** 自动上下文压缩在把即将被总结的消息保存到记忆时，不再阻塞事件循环。
+  使用 mem0、Honcho 或 OpenViking 后端时，这次保存是同步 HTTP 请求，Gateway 在记忆
+  服务器响应之前无法处理其他请求和流式输出。现在它与每轮结束后的记忆写入一样在工作
+  线程中执行。([#7530])
+
+- **渠道：** IM 渠道的运行现在与 Gateway API 运行一样使用顶层 `recursion_limit`，不再固定
+  发送 `100`；此前多步任务可能在几轮工具调用后就中止，用户收不到回答。IM 渠道
+  `session.config` 中的 `recursion_limit` 仍然优先；早先的 README 示例把它设为 `100`，
+  如需跟随顶层设置，请从 `config.yaml` 删除这一行。GitHub 渠道的运行不变。([#7521])
+
+- **沙箱：** AIO 提供方的异步 acquire 不再在事件循环上检查线程的技能目录。此前每次
+  线程 acquire 选择沙箱 ID 时，都会在事件循环上直接执行文件系统 `stat` 和路径解析；
+  `DEER_FLOW_HOME` 位于较慢或网络存储上时会阻塞事件循环。现在这一步与 acquire 的
+  其他步骤一样在工作线程中执行。([#7507])
+
+- **线程：** `POST /api/threads` 现在会以 `422` 拒绝无法对应任何智能体的
+  `assistant_id`。此前该值会被直接保存，之后读取该线程（`GET` 线程、状态、历史）
+  都会返回 `500 Internal Server Error`，直到删除线程。修复前已这样保存的线程
+  改为按主智能体的状态结构读取；从这类线程创建的分支不保存 `assistant_id`，因此使用
+  主智能体。([#7445])
+
+- **前端：** 后端接受、但前端更严格的格式检查不接受的邮箱账号（如
+  `a&b@example.com`、`a@b.c` 或含 Unicode 的地址）现在可以正常进入工作区。此前这些
+  账号的会话会显示网关离线界面，且只要存在一个这样的账号，所有管理员的
+  “设置 → 用户”列表都会加载失败。([#7449])
+
+- **持久化：** 在已存在的数据库中 PostgreSQL 启动初始化失败时，现在会报告原始错误。
+  此前 Gateway 会把任何包含 "does not exist" 的错误（例如迁移时缺少列或表）当作数据库
+  不存在并执行 `CREATE DATABASE`，启动随之以 `database ... already exists` 或
+  `permission denied to create database` 失败，原始错误也不会出现在 traceback 中。
+  现在只有数据库确实不存在（SQLSTATE `3D000`）时才会自动创建。([#7410])
+
+- **MCP：** 普通用户现在可以在“能力中心 → 插件”中安装钉钉、企业微信和 HubSpot。
+  此前非管理员保存这些内置连接（包括之后编辑或启用）会返回
+  `500 Internal Server Error`，因为个人连接检查读取了请求模型未声明的 `cwd` 字段。
+  设置了工作目录的内置连接仍需管理员权限。([#7400])
+
+- **示例：** 扩展示例的包测试重新通过。其测试用 registry 缺少
+  `knowledge_provider()`，不再满足 `ExtensionRegistry` 协议，按 README 运行
+  `pytest` 会失败。Extension Package Check 现在也会运行自带测试的内置示例的测试，
+  因此破坏这些测试的契约变更会在其 PR 中失败。([#7364])
+
+- **网关：** 请求体格式错误的运行请求现在返回客户端错误，而不是
+  `500 Internal Server Error`。此前 `config.configurable` 或 `config.context`
+  不是对象、`assistant_id` 无效、`agent_name` 不是字符串，或 AI 消息的 `tool_calls`
+  不是对象列表时，运行准入会抛出未处理的异常。现在这些请求在创建运行之前即返回
+  `422`（消息问题返回 `400`）。在线程路由上，此前会被接受的 `config.configurable`
+  取值 `[]`、`""`、`0`、`false` 或键值对列表，现在同样返回 `422`。([#7362])
+
+- **TUI：** 按 `Ctrl+C` 中断运行后再退出，不再卡在该运行仍在完成的步骤上。此前运行
+  线程会在退出时被等待，TUI 已关闭但 shell 提示符一直阻塞，直到较长的工具调用或模型请求
+  返回，再按 `Ctrl+C` 也只会打印 traceback。现在退出时会提示正在等待该步骤，并在其完成后
+  关闭；再按一次 `Ctrl+C` 即可立即退出。([#7326])
+  
+- **TUI：** 流式对话记录不再丢弃与已显示文本重复或在其基础上延伸的 token。此前增量
+  按前缀合并，`ha` + `ha` 显示为 `ha`，`1` + `10` 显示为 `10`，以 Markdown 标记开头的
+  回答还会丢失之后单独出现的同一标记（闭合的 `**`、列表符号、表格竖线、闭合代码块）。
+  现在每个增量都按原样追加。([#7325])
+
+- **沙箱：** acquire 发现 E2B VM 已不存在（缓存客户端已失效，或暖池中的 VM 在停放期间被
+  回收）时，释放该 VM 的所有权租约。此前租约会一直保留并续约到 Gateway 关闭，每个被回收的
+  VM 都会留下一个跟踪 ID 和一个持续续约的所有权键。([#7277])
+  
+- **认证：** OIDC 提供方以 `200` 返回非预期 JSON 对象的响应体（例如维护中的 HTML
+  页面）时，SSO 登录与回调不再以 `500` 失败。discovery、token、JWKS 与 UserInfo
+  响应体、格式错误的 ID token 头以及缺少可用端点的 discovery 文档，现在都走既有的
+  `502` / `/login?error=sso_failed` 路径，被拒绝的 discovery 文档也不再被缓存。
+  格式错误的 UserInfo 响应体会像 UserInfo 请求失败一样被跳过，不再让 ID token
+  有效的登录中断。([#7258])
 
 - **MCP：** 使用 OAuth `refresh_token` 授权的 MCP 服务器，在提供方轮换 refresh token
   （Auth0、Okta、Google）时，跨 Gateway 重启、工具缓存重置、个人连接的多次运行以及多个
@@ -5256,6 +5379,13 @@
 
 ### 安全
 
+- **上传：** 线程上传（`POST /api/threads/{thread_id}/uploads`）、删除上传文件
+  （`DELETE /api/threads/{thread_id}/uploads/{filename}`）以及把资料库文档附加到线程，
+  其 `500` 响应的 detail 不再包含原始 `OSError` 文本。此前遇到权限错误，或磁盘已满到
+  无法创建暂存文件时，响应会返回该线程上传目录的宿主机绝对路径（含用户 ID 和线程 ID）。
+  现在它们返回 `Failed to upload <name>.` / `Failed to delete <name>.`，完整错误只记录在
+  Gateway 日志中。([#7217])
+  
 - **agents：** 自定义智能体与用户画像路由的 `500` detail 不再包含原始异常文本。
   此前无法解析的智能体 `config.yaml` 或文件系统错误（如 `[Errno 13]`）会让响应
   带出 `users/<user_id>/` 下的宿主机绝对路径；现在返回与智能体导入、导出一致的
@@ -10371,4 +10501,27 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7170]: https://github.com/bytedance/deer-flow/pull/7170
 [#7205]: https://github.com/bytedance/deer-flow/pull/7205
 [#7207]: https://github.com/bytedance/deer-flow/pull/7207
+[#7217]: https://github.com/bytedance/deer-flow/pull/7217
 [#7255]: https://github.com/bytedance/deer-flow/pull/7255
+[#7258]: https://github.com/bytedance/deer-flow/pull/7258
+[#7277]: https://github.com/bytedance/deer-flow/pull/7277
+[#7325]: https://github.com/bytedance/deer-flow/pull/7325
+[#7326]: https://github.com/bytedance/deer-flow/pull/7326
+[#7362]: https://github.com/bytedance/deer-flow/pull/7362
+[#7364]: https://github.com/bytedance/deer-flow/pull/7364
+[#7400]: https://github.com/bytedance/deer-flow/pull/7400
+[#7410]: https://github.com/bytedance/deer-flow/pull/7410
+[#7445]: https://github.com/bytedance/deer-flow/pull/7445
+[#7449]: https://github.com/bytedance/deer-flow/pull/7449
+[#7467]: https://github.com/bytedance/deer-flow/pull/7467
+[#7507]: https://github.com/bytedance/deer-flow/pull/7507
+[#7521]: https://github.com/bytedance/deer-flow/pull/7521
+[#7530]: https://github.com/bytedance/deer-flow/pull/7530
+[#7557]: https://github.com/bytedance/deer-flow/pull/7557
+[#7560]: https://github.com/bytedance/deer-flow/pull/7560
+[#7580]: https://github.com/bytedance/deer-flow/pull/7580
+[#7576]: https://github.com/bytedance/deer-flow/pull/7576
+[#7580]: https://github.com/bytedance/deer-flow/pull/7580
+[#7588]: https://github.com/bytedance/deer-flow/pull/7588
+[#7591]: https://github.com/bytedance/deer-flow/pull/7591
+[#7593]: https://github.com/bytedance/deer-flow/pull/7593

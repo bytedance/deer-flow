@@ -2219,6 +2219,114 @@ def test_reclaim_warm_pool_sandbox_returns_none_on_seed_mismatch(monkeypatch):
     assert "sb-other" in p._warm_pool
 
 
+def _assert_lease_dropped(p, sandbox_id: str) -> None:
+    assert sandbox_id not in p._owned_sandbox_ids
+    assert p._ownership.owner(sandbox_id) is None
+    # The renewer re-claims a lapsed lease it still tracks, so a single
+    # leftover ID would hold the shared lease until shutdown.
+    p._refresh_owned_leases()
+    assert sandbox_id not in p._owned_sandbox_ids
+    assert p._ownership.owner(sandbox_id) is None
+
+
+@pytest.mark.parametrize("dead_signal", ["is_dead", "ping"])
+def test_acquire_releases_lease_of_dead_in_process_sandbox(monkeypatch, tmp_path, dead_signal):
+    _setup_paths(monkeypatch, tmp_path)
+    p = _make_provider()
+    _install_fake_sdk(monkeypatch, p)
+    dead_id = p.acquire("t1", user_id="u1")
+    assert p._ownership.owner(dead_id) == p._owner_id
+    if dead_signal == "is_dead":
+        p._sandboxes[dead_id]._dead = True
+    else:
+        p._sandboxes[dead_id].client.commands = FakeCommandsAPI([FakeCommandsAPI.GONE])
+
+    fresh_id = p.acquire("t1", user_id="u1")
+
+    assert fresh_id != dead_id
+    _assert_lease_dropped(p, dead_id)
+    assert p._ownership.owner(fresh_id) == p._owner_id
+    assert fresh_id in p._owned_sandbox_ids
+
+
+def test_acquire_releases_lease_of_reaped_warm_pool_sandbox(monkeypatch, tmp_path):
+    _setup_paths(monkeypatch, tmp_path)
+    p = _make_provider()
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+    dead_id = p.acquire("t1", user_id="u1")
+    p.release(dead_id)
+    assert dead_id in p._warm_pool
+    assert p._ownership.owner(dead_id) == p._owner_id
+
+    def missing_sandbox(_sid, **_kw):
+        raise RuntimeError(FakeCommandsAPI.NOT_FOUND_MSG)
+
+    fake_cls.connect_factory = missing_sandbox
+
+    fresh_id = p.acquire("t1", user_id="u1")
+
+    assert fresh_id != dead_id
+    _assert_lease_dropped(p, dead_id)
+    assert p._ownership.owner(fresh_id) == p._owner_id
+    assert p._transitioning_slots == 0
+
+
+def _transient_error(*_args, **_kwargs):
+    # Not one of the trusted gone signatures: the VM may still be alive.
+    raise RuntimeError("connection reset by peer")
+
+
+def test_acquire_keeps_lease_when_in_process_ping_fails_transiently(monkeypatch, tmp_path):
+    _setup_paths(monkeypatch, tmp_path)
+    p = _make_provider()
+    _install_fake_sdk(monkeypatch, p)
+    sandbox_id = p.acquire("t1", user_id="u1")
+    p._sandboxes[sandbox_id].client.commands = FakeCommandsAPI([_transient_error])
+
+    assert p.acquire("t1", user_id="u1") == sandbox_id
+    assert sandbox_id in p._owned_sandbox_ids
+    assert p._ownership.owner(sandbox_id) == p._owner_id
+
+
+def test_acquire_keeps_lease_when_warm_pool_reconnect_fails_transiently(monkeypatch, tmp_path):
+    _setup_paths(monkeypatch, tmp_path)
+    p = _make_provider()
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+    warm_id = p.acquire("t1", user_id="u1")
+    p.release(warm_id)
+    fake_cls.connect_factory = _transient_error
+
+    fresh_id = p.acquire("t1", user_id="u1")
+
+    assert fresh_id != warm_id
+    assert warm_id not in p._warm_pool
+    assert warm_id in p._owned_sandbox_ids
+    assert p._ownership.owner(warm_id) == p._owner_id
+    # Eviction releases the lease once the VM's state is known.
+    assert warm_id in p._eviction_tombstones
+
+
+def test_dead_sandbox_lease_release_failure_does_not_block_rebuild(monkeypatch, tmp_path):
+    from deerflow.community.aio_sandbox.ownership import OwnershipBackendError
+
+    _setup_paths(monkeypatch, tmp_path)
+    p = _make_provider()
+    _install_fake_sdk(monkeypatch, p)
+    dead_id = p.acquire("t1", user_id="u1")
+    p._sandboxes[dead_id]._dead = True
+
+    def unavailable(_sid):
+        raise OwnershipBackendError("redis down")
+
+    monkeypatch.setattr(p._ownership, "release", unavailable)
+
+    fresh_id = p.acquire("t1", user_id="u1")
+
+    assert fresh_id != dead_id
+    # Without a renewer the shared lease expires on its own TTL.
+    assert dead_id not in p._owned_sandbox_ids
+
+
 class _FakePaginator:
     """Mirror of e2b SDK's ``SandboxPaginator``: items via ``next_items``."""
 
@@ -3383,6 +3491,42 @@ def test_signal_handler_forwards_original_action_when_shutdown_cleanup_is_pendin
 
     assert forwarded == [(signal.SIGTERM, frame)]
     assert p._shutdown_cleanup_pending is True
+
+
+@pytest.mark.parametrize(
+    ("host_owned", "expected"),
+    [(False, {"SIGTERM", "SIGINT", "SIGHUP"}), (True, {"SIGHUP"})],
+    ids=["standalone", "host-owned"],
+)
+def test_signal_handlers_leave_stop_signals_to_a_host_that_owns_shutdown(monkeypatch, host_owned, expected):
+    """The Gateway drains runs before sandbox shutdown; only SIGHUP, which uvicorn ignores, keeps the fallback."""
+    from deerflow.sandbox import sandbox_provider as registry
+
+    if not hasattr(signal, "SIGHUP"):
+        pytest.skip("SIGHUP not available on this platform")
+    p = _make_provider()
+    registered: dict[int, Any] = {}
+    forwarded: list[tuple[int, Any]] = []
+    shutdowns: list[None] = []
+
+    def original_handler(signum, frame):
+        forwarded.append((signum, frame))
+
+    monkeypatch.setattr(signal, "getsignal", lambda _signum: original_handler)
+    monkeypatch.setattr(signal, "signal", lambda signum, handler: registered.__setitem__(signum, handler))
+    monkeypatch.setattr(p, "shutdown", lambda: shutdowns.append(None))
+
+    if host_owned:
+        with registry.hold_sandbox_shutdown_ownership():
+            p._register_signal_handlers()
+    else:
+        p._register_signal_handlers()
+
+    assert {signal.Signals(signum).name for signum in registered} == expected
+    frame = object()
+    registered[signal.SIGHUP](signal.SIGHUP, frame)
+    assert shutdowns == [None]
+    assert forwarded == [(signal.SIGHUP, frame)]
 
 
 def test_shutdown_only_kills_sandboxes_owned_by_current_instance(monkeypatch):

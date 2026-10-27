@@ -5,9 +5,10 @@ projects-root-relative, so no file ever moves, §10.6); the only filesystem
 work on the restore path is the post-commit merge cleanup of the discarded
 namespace, best-effort with the sweep as backstop. Purge unlinks the
 original and ``derived/converted.md`` inside the repository's continuously
-row-locked transaction — ``FileNotFoundError`` counts as already removed,
-any other unlink error rolls the row deletion back and keeps the trashed
-row retryable. The retention sweep runs lazily on the trash listing and
+row-locked transaction — ``FileNotFoundError`` counts as already removed, a
+read-only file has its attribute cleared and is unlinked once more, and any
+other unlink error rolls the row deletion back and keeps the trashed row
+retryable. The retention sweep runs lazily on the trash listing and
 once at gateway startup (no daemon, §15.9): it invokes the same guarded
 purge for expired rows, then reconciles storage (``.staging`` and
 unreferenced files older than 24 hours only) and detects — never deletes —
@@ -22,6 +23,7 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import stat
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -51,6 +53,30 @@ def _rmdir_if_empty(directory: Path) -> None:
         pass
 
 
+def _unlink_document_file(path: Path) -> None:
+    """Unlink one document file, clearing a Windows read-only bit and retrying.
+
+    Windows refuses ``unlink`` on a read-only file (``WinError 5``) where POSIX
+    needs only a writable parent, so a restored archive or a mode-preserving
+    sync leaves the trashed document unpurgeable. ``FileNotFoundError`` counts
+    as already removed (§8.3), including during the retry. Attribute changes
+    skip symlinks so their targets keep their permissions. Any other error
+    propagates so the purge transaction rolls back and keeps the row retryable.
+    """
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
+    except PermissionError:
+        try:
+            mode = path.lstat().st_mode
+            if not stat.S_ISLNK(mode):
+                path.chmod(mode | stat.S_IWRITE)
+            path.unlink()
+        except FileNotFoundError:
+            return
+
+
 def _unlink_document_files(paths: Paths, *, user_id: str, row: dict) -> None:
     """Worker-thread: unlink a row's original + derived companion, then rmdir
     empty parents (best-effort). ``FileNotFoundError`` counts as already
@@ -60,10 +86,7 @@ def _unlink_document_files(paths: Paths, *, user_id: str, row: dict) -> None:
     original = original_file_path(paths, user_id=user_id, row=row)
     derived = converted_markdown_path(paths, user_id=user_id, row=row)
     for path in (original, derived):
-        try:
-            path.unlink()
-        except FileNotFoundError:
-            pass
+        _unlink_document_file(path)
     namespace = paths.project_document_path(user_id, row["stored_relpath"])
     documents_dir = namespace.parents[2]
     for directory in (original.parent, derived.parent, namespace, namespace.parent, namespace.parent.parent):

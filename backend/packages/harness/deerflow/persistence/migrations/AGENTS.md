@@ -36,7 +36,9 @@ The empty-DB path keeps using `create_all` because `Base.metadata` is the only a
 `0043_runtime_im_notices` → `0044_channel_runtime_configs` →
 `0045_completed_run_evidence` → `0046_skill_mutations`, then the independent
 `0047_mcp_oauth_tokens` and `0047_tracing_profiles` revisions join at
-`0048_merge_tracing_mcp_oauth`, then `0049_tracing_retention` (current head).
+`0048_merge_tracing_mcp_oauth`, then `0049_tracing_retention`. The upstream
+`0048_extension_execution_leases` revision branches from `0047_mcp_oauth_tokens`;
+both histories join at `0050_merge_tracing_extension` (current head).
 The retention revision timestamps snapshots and defaults old rows to protected
 `unmanaged` lifecycle state; it does not infer that missing run rows are unused.
 Both existing 0047 revision IDs and
@@ -215,3 +217,6 @@ Tests: `test_migration_0041_im_notice_preferences.py`.
 - `0045_completed_run_evidence` adds nullable evidence sealing fields and completed-run snapshots after `0044_channel_runtime_configs`.
 - `0046_skill_mutations` adds durable owner enrollment, asset revisions, proposals, publication operations and scan leases.
 - `0047_mcp_oauth_tokens` creates the table-guarded `mcp_oauth_tokens` (PK `scope`, `owner_user_id` (`''` for deployment), `server_key`; encrypted token columns, chain and request fingerprints, `version`, refresh lease) with no backfill. The single-head pin lives in `tests/test_migration_0047_mcp_oauth_tokens.py`.
+
+- `0048_extension_execution_leases` adds generic extension execution fences after
+  the shipped OAuth revision; test upgrade/downgrade in `test_extension_execution_fence.py`.

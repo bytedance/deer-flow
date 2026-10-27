@@ -64,6 +64,7 @@ from app.gateway.routers import (
 from app.gateway.trace_middleware import TraceMiddleware
 from deerflow.config import app_config as deerflow_app_config
 from deerflow.logging_config import DEFAULT_LOG_DATE_FORMAT, DEFAULT_LOG_FORMAT, configure_logging
+from deerflow.sandbox.sandbox_provider import hold_sandbox_shutdown_ownership
 from deerflow.tracing.monocle import setup_monocle_tracing_if_enabled
 from deerflow.uploads.manager import cleanup_stale_upload_staging_files
 from deerflow.utils.file_io import await_drained
@@ -584,35 +585,56 @@ async def _start_scheduled_task_notification_delivery(app: FastAPI, startup_conf
 
 @asynccontextmanager
 async def _runtime_with_mcp_pool_shutdown(app: FastAPI, startup_config: AppConfig) -> AsyncGenerator[None, None]:
-    """Close pooled MCP transports after runtime producers have stopped."""
+    """Close MCP transports and initialized sandboxes after runtime shutdown."""
     try:
         async with langgraph_runtime(app, startup_config):
             yield
     finally:
-        # RunManager drains active graph tasks when langgraph_runtime exits.
-        # Those tasks can still acquire new MCP sessions during earlier
-        # shutdown hooks, so closing the pool inside the runtime leaves fresh
-        # owner tasks and transports alive after the only close pass.
         try:
-            from deerflow.mcp.session_pool import get_session_pool
+            # RunManager drains active graph tasks when langgraph_runtime exits.
+            # Those tasks can still acquire new MCP sessions during earlier
+            # shutdown hooks, so closing the pool inside the runtime leaves fresh
+            # owner tasks and transports alive after the only close pass.
+            try:
+                from deerflow.mcp.session_pool import get_session_pool
 
-            await asyncio.wait_for(
-                get_session_pool().close_all(),
-                timeout=_SHUTDOWN_HOOK_TIMEOUT_SECONDS,
-            )
-        except TimeoutError:
-            logger.warning(
-                "MCP session pool shutdown exceeded %.1fs; proceeding with worker exit.",
-                _SHUTDOWN_HOOK_TIMEOUT_SECONDS,
-            )
-        except Exception:
-            logger.exception("Failed to close MCP sessions")
+                await asyncio.wait_for(
+                    get_session_pool().close_all(),
+                    timeout=_SHUTDOWN_HOOK_TIMEOUT_SECONDS,
+                )
+            except TimeoutError:
+                logger.warning(
+                    "MCP session pool shutdown exceeded %.1fs; proceeding with worker exit.",
+                    _SHUTDOWN_HOOK_TIMEOUT_SECONDS,
+                )
+            except Exception:
+                logger.exception("Failed to close MCP sessions")
+        finally:
+            # Lazy tool initialization may run off the main thread, where a
+            # provider cannot install signal handlers. Close only the existing
+            # provider after runtime shutdown and MCP teardown, without allocating.
+            try:
+                from deerflow.sandbox.sandbox_provider import shutdown_sandbox_provider
+
+                await await_drained(asyncio.to_thread(shutdown_sandbox_provider))
+            except Exception:
+                logger.exception("Failed to shut down sandbox provider")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan handler."""
+    # Claim sandbox shutdown before any startup step can build a provider: a
+    # provider built on the event-loop thread would otherwise install SIGTERM/
+    # SIGINT handlers that destroy every sandbox before uvicorn starts the run
+    # drain. `_runtime_with_mcp_pool_shutdown` closes the provider afterwards.
+    with hold_sandbox_shutdown_ownership():
+        async with _gateway_lifespan(app):
+            yield
 
+
+@asynccontextmanager
+async def _gateway_lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Load config and check necessary environment variables at startup.
     # `startup_config` is a local snapshot used only for one-shot bootstrap
     # work (logging level, langgraph_runtime engines, channels). Request-time

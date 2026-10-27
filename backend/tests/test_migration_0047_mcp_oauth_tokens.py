@@ -1,4 +1,4 @@
-"""Migration 0047: the shared, encrypted ``mcp_oauth_tokens`` table."""
+"""Migration 0047: the shared, encrypted ``mcp_oauth_tokens`` table, following the Skill host schema."""
 
 from __future__ import annotations
 
@@ -43,8 +43,11 @@ NULLABLE = {"access_token_enc", "token_request_fingerprint", "token_type", "acce
 pytestmark = pytest.mark.asyncio
 
 
-async def test_0047_oauth_retains_its_original_parent():
+async def test_0047_remains_in_the_single_migration_chain():
+    assert bootstrap._get_head_revision() == "0050_merge_tracing_extension"
     script = ScriptDirectory(str(bootstrap._MIGRATIONS_DIR))
+    assert script.get_heads() == ["0050_merge_tracing_extension"]
+    assert script.get_revision("0048_extension_execution_leases").down_revision == REVISION
     assert script.get_revision(REVISION).down_revision == PREVIOUS
     assert script.get_revision(PREVIOUS).down_revision == "0045_completed_run_evidence"
     # alembic_version.version_num is VARCHAR(32).
@@ -179,6 +182,6 @@ async def test_bootstrap_provisions_the_table_on_an_empty_database(tmp_path):
         await bootstrap.bootstrap_schema(engine, backend="sqlite")
         assert set((await _shape(engine))["columns"]) == COLUMNS
         async with engine.connect() as conn:
-            assert (await conn.execute(sa.text("SELECT version_num FROM alembic_version"))).scalar_one() == "0049_tracing_retention"
+            assert (await conn.execute(sa.text("SELECT version_num FROM alembic_version"))).scalar_one() == bootstrap._get_head_revision()
     finally:
         await engine.dispose()
