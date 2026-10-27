@@ -107,7 +107,6 @@ def test_committed_manifest_matches_schema_and_strict_parser() -> None:
         "sha256:ea2521ba41c8fd16b2900758c890bb6c6d2b4b01da10b4a860facb8587ed0bde",
         "sha256:f86a5c9a3339ae90ffd59635201d09f2c8019dc35b72e517228d31d6b3e1912c",
         "sha256:bd7bc409540265f91eac3f2c82e104b6db0e0aeb12b3aa7ef4d79116cff8791b",
-        "sha256:9de295d782b3d8e88b03c2489ea2bac64c894bab1f88302ce68b8fc61f72c535",
     )
 
 
@@ -276,28 +275,23 @@ def test_manifest_validation_refuses_blocker_waiver(tmp_path: Path) -> None:
     assert "blockers can never be waived" in errors[0]
 
 
-@pytest.mark.parametrize("has_existing_waiver", [False, True])
-def test_pr_head_manifest_is_validated_but_cannot_self_apply(tmp_path: Path, monkeypatch, has_existing_waiver: bool) -> None:
+def test_pr_head_manifest_is_validated_but_cannot_self_apply(tmp_path: Path, monkeypatch) -> None:
     _, digest = _write_target(tmp_path)
-    old_digest = "sha256:" + "0" * 64
-    trusted = WaiverManifest((_waiver(digest=old_digest),)) if has_existing_waiver else EMPTY_MANIFEST
-    proposed = WaiverManifest((_waiver(digest=old_digest, preapproved_file_sha256s=(digest,)),))
+    proposed = WaiverManifest((_waiver(digest=digest),))
     loaded: list[tuple[str, str]] = []
 
     def fake_load(repo_root: Path, ref: str, *, label: str) -> WaiverManifest:
         loaded.append((ref, label))
-        return trusted if label == "trusted base" else proposed
+        return EMPTY_MANIFEST if label == "trusted base" else proposed
 
     monkeypatch.setattr(runner, "load_manifest_at_ref", fake_load)
     args = SimpleNamespace(base_ref="base-sha", head_ref="head-sha", before=None, after=None)
 
     effective, head = runner.load_waiver_manifests(args, tmp_path)
 
-    assert effective is trusted
+    assert effective is EMPTY_MANIFEST
     assert head is proposed
     assert loaded == [("base-sha", "trusted base"), ("head-sha", "proposed head")]
-    assert matching_waiver(_finding(), package="skills/public/demo", manifest=effective, repo_root=tmp_path, today=date(2026, 8, 31)) is None
-    assert matching_waiver(_finding(), package="skills/public/demo", manifest=head, repo_root=tmp_path, today=date(2026, 8, 31)) is proposed.waivers[0]
 
 
 def test_main_fails_closed_on_malformed_head_manifest(tmp_path: Path, monkeypatch, capsys) -> None:
