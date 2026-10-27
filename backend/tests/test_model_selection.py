@@ -199,6 +199,34 @@ def test_generic_use_matches_a_complete_catalog_spelling(field):
     assert text[chosen["task_offset"] :] == "summarize this report"
 
 
+@pytest.mark.parametrize("field", ["name", "model", "display_name", "aliases"])
+def test_generic_use_matches_a_catalog_spelling_after_a_determiner(field):
+    configured = model("host-config", "Host Display")
+    setattr(configured, field, ["Research Model"] if field == "aliases" else "Research Model")
+    text = "Use the Research Model to summarize this report"
+    initial = resolve_model_control(text, [configured])
+    assert initial["status"] == "ambiguous"
+    assert initial["scope"] is None
+    assert initial["candidates"] == [{"name": configured.name, "label": configured.display_name}]
+    chosen = resolve_model_control(text, [configured], scope="turn")
+    assert chosen["status"] == "resolved"
+    assert chosen["model_name"] == configured.name
+    assert text[chosen["task_offset"] :] == "summarize this report"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Use a regression model to analyze these sales figures",
+        "Use the data model to analyze these sales figures",
+        "Use my forecasting model to analyze these sales figures",
+    ],
+)
+def test_determiner_does_not_turn_a_generic_phrase_into_a_selection(text):
+    configured = model("data-chat", "Data Chat", ["research model"])
+    assert resolve_model_control(text, [configured])["status"] == "none"
+
+
 @pytest.mark.parametrize("name", ["the-model", "a model", "my model", "latest model", "model"])
 def test_generic_use_preserves_literal_catalog_names_before_unwrapping(name):
     configured = model(name, name)

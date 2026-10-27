@@ -11,6 +11,11 @@ from typing import Any, Literal
 
 ModelScope = Literal["task", "turn", "conversation"]
 
+# Determiners that may sit in front of a catalog spelling without changing which
+# model the user named; the rest of the phrase must still match verbatim.
+_DETERMINERS = r"a|an|the|this|that|my|our|your|his|her|its|their"
+_LEADING_DETERMINER = re.compile(rf"^(?:{_DETERMINERS})\s+")
+
 _PATTERNS = (
     ("conversation", r"^(?:请)?(?:以后|今后|接下来)(?:这个对话|这段对话|这里)?(?:都|一直|默认)?(?:用|使用|改用|换成)\s*(.+?)(?:模型)?(?:[，。：:]|$)"),
     ("conversation", r"^(?:please\s+)?from now on\s+use\s+(.+?)(?:[,:]|$)"),
@@ -30,9 +35,14 @@ def _matches_task_model(query: str, model: Any) -> bool:
     spellings = {" ".join(value.casefold().split()) for value in _spellings(model)}
     if normalized in spellings:
         return True
+    # A determiner in front of a spelling still names that model: the rest must
+    # match the catalog verbatim, so a catalog name ending in "model" matches
+    # here while "regression model" or "data model" do not.
+    if _LEADING_DETERMINER.sub("", normalized) in spellings:
+        return True
     # Grammatical wrappers never establish intent: the entire remaining name
     # must be in the catalog. In particular, "data" must not match "data-chat".
-    wrapped = re.fullmatch(r"(?:(?:a|an|the|this|that|my|our|your|his|her|its|their)\s+)?(.+?)\s+model", normalized)
+    wrapped = re.fullmatch(rf"(?:(?:{_DETERMINERS})\s+)?(.+?)\s+model", normalized)
     return wrapped is not None and wrapped.group(1) in spellings
 
 
