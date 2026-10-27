@@ -6,13 +6,11 @@ import asyncio
 import io
 import json
 import logging
-import os
 import threading
 from concurrent.futures import Future
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
-from uuid import uuid4
 
 import httpx
 
@@ -30,7 +28,7 @@ from app.channels.message_bus import (
     OutboundMessage,
     ResolvedAttachment,
 )
-from deerflow.utils.atomic_write import cleanup_failed_atomic_write
+from deerflow.utils.atomic_write import publish_bytes_atomically
 from deerflow.utils.file_io import await_drained
 
 logger = logging.getLogger(__name__)
@@ -275,22 +273,15 @@ class DiscordChannel(Channel):
         lock so a concurrent record cannot mutate the dict mid-serialization.
         """
         with self._thread_store_lock:
-            staged: Path | None = None
             try:
                 snapshot = dict(self._active_threads)
                 self._thread_store_path.parent.mkdir(parents=True, exist_ok=True)
-                # Stage beside the target and replace, so a crash mid-write cannot
-                # leave a truncated mapping that the next start would fail to read.
-                staged = self._thread_store_path.with_name(f".{self._thread_store_path.name}.{uuid4().hex}.tmp")
-                staged.write_text(json.dumps(snapshot, indent=2), encoding="utf-8", newline="")
-                os.replace(staged, self._thread_store_path)
-                staged = None
+                # Publish through the shared helper: it fsyncs the staged bytes
+                # before the rename (so a machine crash cannot leave an empty
+                # mapping behind) and re-applies an existing file's mode.
+                publish_bytes_atomically(self._thread_store_path, json.dumps(snapshot, indent=2).encode("utf-8"))
             except Exception:
                 logger.exception("[Discord] failed to persist thread mappings")
-            finally:
-                if staged is not None:
-                    # A leftover stage must not replace the outcome above.
-                    cleanup_failed_atomic_write(staged)
 
     async def _persist_thread_mappings_async(self) -> None:
         """Persist mappings without letting cancellation detach the worker thread."""

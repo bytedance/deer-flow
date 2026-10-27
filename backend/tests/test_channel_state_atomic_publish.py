@@ -32,16 +32,18 @@ def _wechat(tmp_path):
     return channel
 
 
-def _truncating_write_text(monkeypatch):
-    """Write half the payload, then fail the way a full disk or a crash would."""
-    real_write_bytes = Path.write_bytes
+def _fail_staged_write(monkeypatch):
+    """Fail the staged write the way a full disk would, before any rename.
 
-    def partial(self, data, *args, **kwargs):
-        payload = data.encode("utf-8") if isinstance(data, str) else data
-        real_write_bytes(self, payload[: len(payload) // 2])
+    With the shared helper this is the earliest injectable point: the bytes are
+    written to a sibling, fsync fails, and the rename never happens. The point of
+    the test is that the live file is untouched by that failure.
+    """
+
+    def failing_fsync(_fd):
         raise OSError("disk full")
 
-    monkeypatch.setattr(Path, "write_text", partial)
+    monkeypatch.setattr("deerflow.utils.atomic_write.os.fsync", failing_fsync)
 
 
 def _no_sidecar(target: Path) -> bool:
@@ -59,12 +61,12 @@ def test_discord_state_is_replaced_whole(tmp_path):
     assert _no_sidecar(target)
 
 
-def test_discord_interrupted_write_keeps_the_previous_mapping(tmp_path, monkeypatch):
+def test_discord_failed_staged_write_keeps_the_previous_mapping(tmp_path, monkeypatch):
     channel = _discord(tmp_path)
     target = tmp_path / "state" / "discord-threads.json"
     target.parent.mkdir(parents=True)
     target.write_text('{"kept": true}', encoding="utf-8")
-    _truncating_write_text(monkeypatch)
+    _fail_staged_write(monkeypatch)
 
     channel._persist_thread_mappings()
 
@@ -83,12 +85,12 @@ def test_wechat_state_is_replaced_whole(tmp_path):
     assert _no_sidecar(target)
 
 
-def test_wechat_interrupted_write_keeps_the_previous_cursor(tmp_path, monkeypatch):
+def test_wechat_failed_staged_write_keeps_the_previous_cursor(tmp_path, monkeypatch):
     channel = _wechat(tmp_path)
     target = tmp_path / "state" / "wechat-cursor.json"
     target.parent.mkdir(parents=True)
     target.write_text('{"get_updates_buf": "kept"}', encoding="utf-8")
-    _truncating_write_text(monkeypatch)
+    _fail_staged_write(monkeypatch)
 
     channel._save_state()
 
