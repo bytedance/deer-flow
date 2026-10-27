@@ -342,6 +342,26 @@ Plan from the model name. Plans/regions without a preset can use the custom
 OpenAI-compatible option if their documented protocol is compatible; native
 protocols need a verified backend preset or operator YAML configuration.
 
+The `moonshot-cn` preset recognizes the exact IDs `kimi-k3.1-pro` and
+`kimi-k3.1-pro-highspeed`. Both require thinking, preserve reasoning history,
+and accept top-level `reasoning_effort` values `low`, `high` and `max`, with
+`max` as the default. The existing reasoning contract keeps thinking enabled
+when a caller requests it off. Unsupported effort values use the default;
+these models do not declare aliases for the generic effort vocabulary.
+
+For these two models at the official `https://api.moonshot.cn/v1` endpoint,
+`PatchedChatDeepSeek` omits `thinking` and the fixed sampling parameters
+`temperature`, `top_p`, `n`, `presence_penalty` and `frequency_penalty` from
+the final request, including values supplied through `extra_body`. Moonshot
+uses its fixed values (respectively `1.0`, `0.95`, `1`, `0`, `0`). This rule
+also applies to explicit YAML profiles using that adapter and endpoint;
+Kimi K2.5, unknown model IDs and custom endpoints retain their existing behavior.
+Image capability covers base64/data-URL images and provider file IDs, not
+public image URLs; DeerFlow's image middleware uses base64. This declaration
+does not add video UI support. See the official
+[K3.1 quickstart](https://platform.kimi.com/docs/guide/kimi-k3-1-pro-quickstart)
+and [model parameter reference](https://platform.kimi.com/docs/api/models-overview).
+
 Endpoint/auth sources used for these presets include the official
 [OpenAI SDK](https://github.com/openai/openai-python/blob/main/src/openai/_client.py),
 [Anthropic SDK](https://github.com/anthropics/anthropic-sdk-python/blob/main/src/anthropic/_client.py),
