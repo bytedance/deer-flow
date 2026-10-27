@@ -19,6 +19,14 @@ from deerflow.community.web_attempt_budget import (
     unregister_run,
 )
 from deerflow.config.web_attempt_budget_config import WebAttemptBudgetConfig
+from deerflow.runtime.runs.worker import _build_runtime_context, _install_runtime_context
+
+
+def _runtime_config(run_id: str, app_config=None) -> dict:
+    context = {"run_id": run_id}
+    if app_config is not None:
+        context["app_config"] = app_config
+    return {"configurable": {"__pregel_runtime": SimpleNamespace(context=context)}}
 
 
 def test_config_is_off_by_default_and_rejects_invalid_limits():
@@ -32,8 +40,8 @@ def test_atomic_reservations_across_threads_and_run_isolation():
     register_run("budget-test-a", 4)
     register_run("budget-test-b", 1)
     try:
-        a = counter_for_config({"context": {"run_id": "budget-test-a"}})
-        b = counter_for_config({"context": {"run_id": "budget-test-b"}})
+        a = counter_for_config(_runtime_config("budget-test-a"))
+        b = counter_for_config(_runtime_config("budget-test-b"))
 
         def reserve():
             try:
@@ -50,22 +58,62 @@ def test_atomic_reservations_across_threads_and_run_isolation():
     finally:
         unregister_run("budget-test-a")
         unregister_run("budget-test-b")
-    assert counter_for_config({"context": {"run_id": "budget-test-a"}}) is None
+    assert counter_for_config(_runtime_config("budget-test-a")) is None
 
 
 def test_unavailable_cross_process_counter_fails_closed():
     policy = SimpleNamespace(web_attempt_budget=WebAttemptBudgetConfig(max_attempts=2))
-    counter = counter_for_config({"context": {"run_id": "parent-on-another-worker", "app_config": policy}})
+    counter = counter_for_config(_runtime_config("parent-on-another-worker", policy))
     with pytest.raises(WebAttemptBudgetExceeded):
         counter.reserve()
     child_config = {
         "configurable": {
-            "__pregel_runtime": SimpleNamespace(context={"run_id": "parent-on-another-worker"}),
-            "context": {"run_id": "parent-on-another-worker", "app_config": policy},
+            "__pregel_runtime": SimpleNamespace(context={"run_id": "parent-on-another-worker", "app_config": policy}),
+            "context": {"run_id": "forged", "app_config": policy},
         }
     }
     with pytest.raises(WebAttemptBudgetExceeded):
         counter_for_config(child_config).reserve()
+
+
+def test_caller_mergeable_config_cannot_choose_the_charged_run():
+    policy = SimpleNamespace(web_attempt_budget=WebAttemptBudgetConfig(max_attempts=2))
+    register_run("budget-trusted", 2)
+    register_run("budget-victim", 1)
+    try:
+        for forged in (
+            {"context": {"run_id": "budget-victim", "app_config": policy}},
+            {"configurable": {"context": {"run_id": "budget-victim", "app_config": policy}}},
+        ):
+            assert counter_for_config(forged) is None
+
+        trusted = {
+            "configurable": {
+                "__pregel_runtime": SimpleNamespace(context={"run_id": "budget-trusted", "app_config": policy}),
+                "context": {"run_id": "budget-victim", "app_config": policy},
+            },
+            "context": {"run_id": "budget-victim", "app_config": policy},
+        }
+        assert counter_for_config(trusted) is counter_for_config(_runtime_config("budget-trusted", policy))
+        assert counter_for_config(trusted).used == 0
+    finally:
+        unregister_run("budget-trusted")
+        unregister_run("budget-victim")
+
+
+def test_worker_replaces_forged_budget_identity_and_policy():
+    policy = SimpleNamespace(web_attempt_budget=WebAttemptBudgetConfig(max_attempts=2))
+    forged_policy = SimpleNamespace(web_attempt_budget=WebAttemptBudgetConfig(max_attempts=1))
+    forged = {"run_id": "other-run", "app_config": forged_policy}
+    runtime_context = _build_runtime_context("thread", "real-run", forged)
+    assert runtime_context["run_id"] == "real-run"
+    assert "app_config" not in runtime_context
+
+    runtime_context = _build_runtime_context("thread", "real-run", forged, policy)
+    config = {"context": dict(forged)}
+    _install_runtime_context(config, runtime_context)
+    assert config["context"]["run_id"] == "real-run"
+    assert config["context"]["app_config"] is policy
 
 
 @pytest.mark.anyio
@@ -87,7 +135,7 @@ async def test_serper_and_jina_share_one_counter_including_redirect(monkeypatch)
     monkeypatch.setenv("JINA_API_KEY", "test-key")
     register_run("budget-test-shared", 2)
     try:
-        counter = counter_for_config({"context": {"run_id": "budget-test-shared"}})
+        counter = counter_for_config(_runtime_config("budget-test-shared"))
         data, error = serper._serper_post("https://google.serper.dev/search", "test", "q", 1, attempt_budget=counter)
         assert data == {"organic": []} and error is None
         assert (await JinaClient().crawl("https://example.com", trust_env=False, attempt_budget=counter)).endswith("web_attempt_budget_exhausted)")
@@ -113,7 +161,7 @@ async def test_jina_retry_consumes_each_attempt(monkeypatch):
     monkeypatch.setenv("JINA_API_KEY", "test-key")
     register_run("budget-test-retry", 1)
     try:
-        counter = counter_for_config({"context": {"run_id": "budget-test-retry"}})
+        counter = counter_for_config(_runtime_config("budget-test-retry"))
         assert "web_attempt_budget_exhausted" in await JinaClient().crawl("https://example.com", trust_env=False, max_retries=1, attempt_budget=counter)
         assert len(sent) == 1
     finally:
@@ -148,7 +196,7 @@ async def test_tool_runtime_config_passes_shared_counter_without_model_argument(
     monkeypatch.setattr(jina_tools, "get_app_config", lambda: SimpleNamespace(get_tool_config=lambda _: None))
     register_run("budget-test-tool", 2)
     try:
-        config = {"context": {"run_id": "budget-test-tool"}}
+        config = _runtime_config("budget-test-tool")
         serper.web_search_tool.invoke({"query": "sample"}, config=config)
         await jina_tools.web_fetch_tool.ainvoke({"url": "https://example.com"}, config=config)
         assert seen == [counter_for_config(config)], captured_configs

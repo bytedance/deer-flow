@@ -46,18 +46,13 @@ def unregister_run(run_id: str) -> None:
 
 
 def counter_for_config(config: Any) -> _Counter | None:
-    context = None
-    policy_context = None
-    if isinstance(config, dict):
-        configurable = config.get("configurable", {})
-        if isinstance(configurable, dict):
-            runtime = configurable.get("__pregel_runtime")
-            context = getattr(runtime, "context", None)
-            policy_context = configurable.get("context")
-            if not isinstance(context, dict):
-                context = policy_context
-        if not isinstance(context, dict):
-            context = config.get("context")
+    """Read the server-built LangGraph runtime, never caller-mergeable config."""
+    if not isinstance(config, dict):
+        return None
+    configurable = config.get("configurable")
+    if not isinstance(configurable, dict):
+        return None
+    context = getattr(configurable.get("__pregel_runtime"), "context", None)
     if not isinstance(context, dict):
         return None
     run_id = context.get("run_id")
@@ -69,7 +64,7 @@ def counter_for_config(config: Any) -> _Counter | None:
         return counter
     # A child running in another process cannot see the parent's local
     # counter. Deny rather than silently treating its attempts as unlimited.
-    app_config = context.get("app_config") or (policy_context.get("app_config") if isinstance(policy_context, dict) else None)
+    app_config = context.get("app_config")
     policy = getattr(app_config, "web_attempt_budget", None)
     if getattr(policy, "max_attempts", None) is not None:
         return _Counter(0)

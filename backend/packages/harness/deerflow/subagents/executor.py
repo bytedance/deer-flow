@@ -1824,6 +1824,13 @@ class SubagentExecutor:
                 context[THREAD_INCARNATION_CONTEXT_KEY] = self.thread_incarnation
             if self.app_config is not None:
                 context["app_config"] = self.app_config
+            else:
+                # Durable children still need the operator policy to fail
+                # closed when the parent's process-local counter is absent.
+                resolved_config = self._get_resolved_app_config()
+                budget_policy = getattr(resolved_config, "web_attempt_budget", None)
+                if getattr(budget_policy, "max_attempts", None) is not None:
+                    context["app_config"] = resolved_config
             # Propagate guardrail attribution so delegated tool calls are
             # evaluated with the parent run's identity (role-aware policy,
             # audit). user_id reuses the resolved tracing id; on every
@@ -1878,11 +1885,6 @@ class SubagentExecutor:
                 return result
 
             cancelled_during_stream = False
-            # LangChain injects RunnableConfig into Serper/Jina tools separately
-            # from LangGraph's runtime.context. Carry only the Run identity and
-            # pinned policy snapshot so native and durable children resolve the
-            # same local Web attempt counter (or fail closed in another process).
-            run_config["context"] = {"run_id": self.run_id, "app_config": context.get("app_config")}
             stream = agent.astream(state, config=run_config, context=context, stream_mode="values")  # type: ignore[arg-type]
             try:
                 async for chunk in stream:
