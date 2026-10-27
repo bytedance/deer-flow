@@ -28,12 +28,11 @@ _PATTERNS = (
 # nouns, not the model names: model names grow every release, these do not. A
 # phrase whose head word is absent from this set is treated as a name and asked
 # about, so a model nobody has heard of yet still reaches the selector.
-_DESCRIPTION_HEADS = frozenset({
-    "regression", "data", "language", "attached", "selected", "current", "same", "other",
-    "local", "remote", "custom", "base", "vision", "embedding", "reward", "teacher", "student",
-    "statistical", "predictive", "simulation", "business", "domain", "world", "role", "threat",
-    "pricing", "learning", "graphical", "probabilistic", "generative", "ml", "ai",
-})
+_DESCRIPTION_HEADS = frozenset(
+    "regression data language attached selected current same other local remote custom base vision "
+    "embedding reward teacher student statistical predictive simulation business domain world role "
+    "threat pricing learning graphical probabilistic generative ml ai".split()
+)
 _DETERMINERS = frozenset({"a", "an", "the", "this", "that", "these", "those", "my", "our", "your", "his", "her", "its", "their"})
 _NOUN_WORDS = frozenset({"model", "models"})
 
