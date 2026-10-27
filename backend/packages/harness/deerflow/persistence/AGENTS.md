@@ -52,7 +52,7 @@ missing or strictly older leases remain recoverable.
 
 ## Run terminal authority and lease expiry
 
-R4-C1a: admissions mint incarnation/epoch; snapshots preserve identity/state.
+Run admissions mint incarnation/epoch; snapshots preserve identity/state.
 Takeover/peer replacement/delete revoke; same-owner finalizers remain open.
 Lock order: local Thread → optional Change Clock → optional Extension fence →
 SQL Thread → RunRow (held through Event commit); never acquire Clock afterward.

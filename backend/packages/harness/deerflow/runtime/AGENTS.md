@@ -362,8 +362,8 @@ after existing final ACK/one-shot takeover checks. Post-terminal audit grants
 name individual `audit.*` types and retain incarnation/retention fencing.
 Completion hooks remain legal after business terminal commit while the producer
 is open. The Worker explicitly closes after Journal drain and Subagent buffer
-completion; uncertain drains conservatively leave it open. C1a has no producer
-lease/expiry task or automatic terminal publication and does not fix C06.
+completion; uncertain drains conservatively leave it open. Closure is explicit;
+elapsed time or business terminal status alone grants no recovery publication authority.
 
 Gateway admission and RunManager validate host-owned evidence origin against the shared `EVIDENCE_ORIGINS` in `runtime/runs/schemas.py`. Preserve the string values and reject client metadata as provenance; only trusted Python entry points set the admission argument.
 

@@ -80,7 +80,7 @@ async def test_takeover_first_writer_waits_then_rejects_old_epoch(producer_pg):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("delete", [False, True])
-async def test_c07_delayed_journal_cannot_commit_after_recovery_publication(producer_pg, delete):
+async def test_delayed_journal_cannot_commit_after_recovery_publication(producer_pg, delete):
     db = producer_pg
     writer, _ = await db.actors.start("writer_late")
     writer.send("go")
