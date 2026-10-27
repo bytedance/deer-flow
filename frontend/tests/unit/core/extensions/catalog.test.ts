@@ -95,6 +95,36 @@ test("merges by namespace without duplicating catalog entries or guessing backen
   ).toBeUndefined();
 });
 
+test("self-evolution discovery is localized and merges only its registered namespace", () => {
+  const evolution = {
+    ...contribution,
+    namespace: "community.skill-evolution",
+    title: "Deployment evolution title",
+  };
+  for (const [copy, title] of [
+    [enUS.extensions.catalog, "Agent self-evolution"],
+    [zhCN.extensions.catalog, "Agent 自演进"],
+  ] as const) {
+    const catalogOnly = extensionDirectory([], copy).find(
+      (entry) => entry.package === "deerflow-extension-skill-evolution",
+    );
+    expect(catalogOnly).toMatchObject({
+      id: evolution.namespace,
+      title,
+      guide:
+        "https://github.com/bytedance/deer-flow/tree/main/examples/deerflow-extension-skill-evolution#readme",
+    });
+    expect(catalogOnly?.description).toBeTruthy();
+    expect(catalogOnly?.loaded).toBeUndefined();
+    const matches = extensionDirectory([evolution], copy).filter(
+      (entry) => entry.id === evolution.namespace,
+    );
+    expect(matches).toHaveLength(1);
+    expect(matches[0]?.title).toBe(title);
+    expect(matches[0]?.loaded).toBe(evolution);
+  }
+});
+
 test("preserves custom deployment extensions and module failures", () => {
   const failed = {
     ...contribution,

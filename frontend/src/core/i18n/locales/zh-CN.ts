@@ -89,6 +89,11 @@ export const zhCN: Translations = {
         description:
           "在管理员明确授权后管理多层级空间、资源共享与继承策略。需要安装和配置，不包含管理页面，也不改变全局检索权限。",
       },
+      skillEvolution: {
+        title: "Agent 自演进",
+        description:
+          "让 Agent 基于使用证据、反馈和轨迹激活点，对自身技能提出改进、人工审核并支持版本回滚。需要安装和管理员授权；技能校验与存储仍由宿主负责。",
+      },
       knowledgeManagement: {
         title: "知识入库与处理",
         description:

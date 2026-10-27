@@ -2253,6 +2253,10 @@ This reports configured state without executing plugins or changing files; it do
 not verify package installation or successful Gateway loading. Configuration errors
 exit non-zero with diagnostics on stderr and no inventory on stdout.
 
+The extension directory includes [Agent self-evolution](examples/deerflow-extension-skill-evolution/README.md)
+with English and Chinese discovery metadata. A catalog entry does not confirm
+that the extension is installed or enabled in your deployment.
+
 A managed package declares exactly one standard PEP 621 entry point:
 
 ```toml

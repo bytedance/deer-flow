@@ -411,6 +411,8 @@ plugin loaders/pages/actions: viewer-bound auth, native actions, i18n and
 mount/dispose/abort fencing. Shadow DOM is not a sandbox. Bundled extensions need
 typed en/zh `core/extensions/catalog.ts` entries with their namespace.
 Catalog entries are not proof of installation or activation.
+The self-evolution catalog entry uses `community.skill-evolution`; keep its
+typed en/zh discovery metadata aligned with the bundled extension.
 
 ### Composer references
 
