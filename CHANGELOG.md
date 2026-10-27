@@ -1402,6 +1402,15 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
 
 ### Fixed
 
+- **channels:** DingTalk AI cards no longer fetch an access token on the
+  Gateway event loop. Card creation and card streaming went through
+  dingtalk-stream's synchronous `get_access_token()`, which posts with
+  `requests` and no timeout, so the first card and every SDK token refresh
+  (about every two hours) stalled every channel, request and stream for the
+  whole request, indefinitely if DingTalk stalled. Card calls now use the
+  channel's own bounded token, and a token failure while streaming falls back
+  to a Markdown reply instead of dropping the update. ([#7597])
+
 - **channels:** A streamed Feishu reply no longer rewrites the same thread
   bindings on every chunk. Each outbound to the running card stored all of
   the reply's aliases again (about five `set_thread_id` writes per chunk: a
@@ -13196,3 +13205,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7588]: https://github.com/bytedance/deer-flow/pull/7588
 [#7591]: https://github.com/bytedance/deer-flow/pull/7591
 [#7593]: https://github.com/bytedance/deer-flow/pull/7593
+[#7597]: https://github.com/bytedance/deer-flow/pull/7597

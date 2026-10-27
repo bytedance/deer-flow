@@ -1116,6 +1116,12 @@
 
 ### 修复
 
+- **渠道：** 钉钉 AI 卡片不再在 Gateway 事件循环上获取 access token。此前创建卡片和流式更新卡片
+  都会调用 dingtalk-stream 的同步 `get_access_token()`，它用 `requests` 发请求且没有超时，因此
+  首张卡片以及之后每次 SDK token 刷新（约每两小时一次）都会在整个请求期间阻塞所有渠道、请求和
+  流；钉钉无响应时会一直阻塞。现在卡片调用使用渠道自身带超时的 token，流式更新时 token 获取失败
+  会回退为 Markdown 回复，而不是丢弃这次更新。([#7597])
+
 - **渠道：** 飞书流式回复不再在每个分块上重写相同的线程绑定。此前每次向运行中卡片发送消息都会
   重新保存该回复的全部别名（每个分块约五次 `set_thread_id`：每次都是在存储锁下完整重写
   `store.json`，或一次数据库 upsert），而实际只有 `updated_at` 变化。现在非最终分块对每个
@@ -10525,3 +10531,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7588]: https://github.com/bytedance/deer-flow/pull/7588
 [#7591]: https://github.com/bytedance/deer-flow/pull/7591
 [#7593]: https://github.com/bytedance/deer-flow/pull/7593
+[#7597]: https://github.com/bytedance/deer-flow/pull/7597
