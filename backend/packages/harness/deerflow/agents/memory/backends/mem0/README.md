@@ -79,3 +79,8 @@ page; no partial context is returned. Diagnostics identify the ID field without
 echoing the invalid ID or memory content. Existing scalar and absent-ID
 handling, first-occurrence ordering, and whole-entry character budgets remain
 unchanged.
+
+Listings reject an empty page that claims a successor or a repeated continuation
+when more items are needed. These provider errors follow the configured read
+policy without returning a partial listing. Terminal empty pages and the
+configured item limit remain valid; continuation URLs are never followed.

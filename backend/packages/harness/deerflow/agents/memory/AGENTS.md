@@ -346,6 +346,8 @@ It validates object response envelopes and lists of object records in the
 HTTP client before returning recall data. Invalid structures raise Mem0APIError,
 so existing read policies apply to search, injection, management and export.
 Validate every page; a malformed later page must not publish a partial listing.
+Reject empty nonterminal pages and repeated continuations before another request;
+pagination failures follow the read policy for the whole listing.
 Missing results and valid empty lists retain the existing empty-read behavior.
 Decoding and structure errors identify the endpoint and list page without memory
 contents; structure errors also identify the invalid container or record type.
