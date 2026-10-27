@@ -61,6 +61,17 @@ YAML loading and both middleware tool-call paths in `test_tool_output_config_lim
 
 **Config Caching**: `get_app_config()` caches the parsed config, but automatically reloads it when the resolved config path or file content signature changes. The signature includes file metadata and a content digest, so Gateway and LangGraph reads stay aligned with `config.yaml` edits even on object-store or network mounts where mtime can remain stale. The loader reads the file once through `file_signature.read_config_with_signature` and parses those same bytes, so the recorded signature always describes the parsed content: a write that races the load can only cause one extra reload, never a cache that holds one revision under another revision's signature (which the comparison could never detect). The cached `extensions` snapshot follows the process extensions singleton: `get_app_config()` also reloads when `get_extensions_config()` returns a new instance (see **Extensions Config Caching** below), and the loader takes that instance before reading `config.yaml`, so it can only be older than the YAML it merges with, never newer.
 
+AppConfig singleton reads, reloads, resets and injections share `_app_config_lock`;
+publish the parsed revision, signature, extensions snapshot and explicit source pin
+within that critical section. An explicit reload pins an absolute path, so later
+working-directory changes cannot redirect it. Failed explicit loads preserve the
+prior pin; reset, injection and argument-less reload clear it. Ambient reads never
+pin a path. Runtime-scoped overrides bypass the singleton lock;
+`peek_loaded_app_config()` also returns the existing snapshot without locking.
+Each read stats and hashes `config.yaml` and `extensions_config.json`, so async
+request paths call it through `asyncio.to_thread` (Gateway route and plugin
+authorization in `app/gateway/authz.py`).
+
 **Config Hot-Reload Boundary**: Gateway dependencies route through `get_app_config()` on every request, so per-run fields like `models[*].max_tokens`, `summarization.*`, `title.*`, `memory.*`, `subagents.*`, `verification.*`, `tools[*]`, and the agent system prompt pick up `config.yaml` edits on the next message. `AppConfig` is intentionally **not** cached on `app.state` — `lifespan()` keeps a local `startup_config` variable for one-shot bootstrap work and passes it to `langgraph_runtime(app, startup_config)`.
 
 Infrastructure fields are **restart-required**. The authoritative list lives in `packages/harness/deerflow/config/reload_boundary.py::STARTUP_ONLY_FIELDS` and is mirrored by the standardised `"startup-only:"` prefix on the corresponding `Field(description=...)` in `AppConfig` or an explicitly registered nested config model, so IDE hover on those fields surfaces the reason inline (no need to context-switch into this table). Currently registered: `plugins`, `database`, `checkpointer`, `run_events`, `agent_storage`, `stream_bridge`, `sandbox`, `skills.container_path`, `log_level`, `logging`, `channels`, `channels.leader_lease` (validated by `channel_leader_lease_config.py` from the non-schema `channels` mapping; the multi-process gate refuses `enabled: false` while a non-GitHub channel is enabled), `channel_connections`, `scheduler`, `mcp_tasks`, `subagent_runtime`, `subagent_batches`, `run_ownership`, `dedupe_storage`, `auth.local.throttle_storage` (the login throttle store is installed once by `langgraph_runtime`; `max_login_attempts` / `lockout_seconds` stay live-read). Adding a new restart-required field requires updating the registry; drift is pinned by `tests/test_reload_boundary.py`. `scheduler.recursion_limit` is the exception inside that section: it is read from `get_app_config()` at each scheduled dispatch, so a YAML edit applies to the next run without restarting the poller.
@@ -112,8 +123,10 @@ can become stale or inaccessible when a host editor replaces a file on save.
 Configuration priority:
 1. Explicit `config_path` argument
 2. `DEER_FLOW_EXTENSIONS_CONFIG_PATH` environment variable
-3. `extensions_config.json` in current directory (backend/)
-4. `extensions_config.json` in parent directory (project root - **recommended location**)
+3. `extensions_config.json`, then legacy `mcp_config.json`, in the project root (`DEER_FLOW_PROJECT_ROOT`, else the current directory) - **recommended location**
+4. Legacy `backend/` and repository-root copies, located from the harness source tree
+
+When the search finds nothing, the Gateway skill toggle and MCP writers create the file at `ExtensionsConfig.default_config_path()` (the project root, step 3), so the next resolution reads back what they wrote; `DeerFlowClient` raises instead of creating one.
 
 Extensions are optional only in the fallback *search* mode (priority 3-4 above): `ExtensionsConfig.resolve_config_path()` returns `None` when neither an explicit `config_path` nor `DEER_FLOW_EXTENSIONS_CONFIG_PATH` is given and the search locations find nothing. An explicit `config_path` argument or a set `DEER_FLOW_EXTENSIONS_CONFIG_PATH` (priority 1-2) is an operator assertion that one particular file must be used, so a missing file in either of those modes raises `FileNotFoundError` instead — including when the file existed earlier and has since been deleted. The MCP tools cache's staleness check (`deerflow.mcp.cache._resolve_config_path`) is a narrow, deliberate exception to that rule: it catches that `FileNotFoundError` locally and treats it as "unconfigured" so a previously-valid config disappearing mid-run degrades the cache to serving its last-known-good tools instead of raising out of a per-request hot path (see the MCP System section below).
 
@@ -176,7 +189,7 @@ Tests: `tests/test_secret_file.py`, `tests/test_credentials_key.py`.
 
 **`extensions_config.json`**:
 - `mcpServers` - Map of server name → config (enabled, type, command, args, env, url, headers, oauth, description, `routing`, `tools`, `tool_call_timeout`, `session_init_timeout`). `routing.mode="prefer"` emits `<mcp_routing_hints>` prompt guidance; if `tool_search` defers the hinted tool, `McpRoutingMiddleware` can also auto-promote matching deferred schemas before the model call. It does not hard-disable other tools. `session_init_timeout` (default `DEFAULT_MCP_SESSION_INIT_TIMEOUT` = 60s, `null` to disable) bounds server bring-up: tool discovery and persistent stdio session initialization, so a hung server cannot block agent construction indefinitely; durable HTTP/SSE task calls use it for their ephemeral session initialization too. `tool_call_timeout` bounds individual stdio calls and durable-task calls on every transport; other HTTP/SSE tools use transport-level timeouts.
-- `tool_search.auto_promote_top_k` - Global MCP routing auto-promote breadth. Default `3`, clamped to `1..5`; applies only when `tool_search.enabled=true` and only to deferred MCP tools with `routing.mode="prefer"` and non-empty keywords. For lead agents the deferred catalog is built from the full configured MCP set; auto-promotion never grants authority because an active skill's runtime policy still filters model-visible schemas, `tool_search` results, and execution.
+- `tool_search.auto_promote_top_k` - Global MCP routing auto-promote breadth. Default `3`, clamped to `1..5`; applies only when `tool_search.enabled=true` and only to deferred MCP tools with `routing.mode="prefer"` and non-empty keywords. For lead agents the deferred catalog is built from the full configured MCP set; auto-promotion never grants authority — it only raises visibility for tools already admitted to the agent's catalog, while assembly and execution authorization still apply independently.
 - `skills` - Map of skill name → state (enabled)
 - `middlewares` - `AgentMiddleware` entries for lead and subagent runtime extension: class-path strings or `{class, kwargs}` objects. `kwargs` values must be JSON types; YAML dates and timestamps are coerced to ISO strings so they match JSON. `config.yaml -> extensions` can override these fields after validation; overrides are replace-per-field, not list concatenation.
 
@@ -186,8 +199,11 @@ Values beginning with `$` are resolved from the environment when the file is loa
 
 `AgentConfig.knowledge_scope` uses the versioned `KnowledgeScope` contract as a
 Gateway new-turn default. The API preserves omitted updates and clears explicit
-null; file and SQL stores persist it in the existing config document. Keep it
-outside `MANAGED_AGENT_CONFIG_FIELDS` so harness self-updates preserve it;
+null; file and SQL stores persist it in the existing config document. Both
+`update_agent` and HTTP PUT pass the effective groups to
+`preserve_non_managed_fields`: a changed list excluding knowledge clears the
+inherited default, but explicit API scope fields still win. Keep it outside
+`MANAGED_AGENT_CONFIG_FIELDS` so unrelated self-updates preserve it;
 `setup_agent` also preserves the binding when re-bootstrapping. Admission uses
 explicit message scope before this default and snapshots it onto the current
 human message. Resolve the executing agent with runtime context over configurable,

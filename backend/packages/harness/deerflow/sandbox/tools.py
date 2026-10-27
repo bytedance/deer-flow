@@ -6,6 +6,7 @@ import os
 import posixpath
 import re
 import shlex
+import string
 from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
@@ -23,7 +24,7 @@ from deerflow.authz.sandbox_authz import (
 )
 from deerflow.config import get_app_config
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
-from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
+from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH, WRITE_ELISION_PLACEHOLDER_TEMPLATE
 from deerflow.runtime.secret_context import read_active_secrets
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox.env_policy import is_blocked_env_name
@@ -39,8 +40,10 @@ from deerflow.sandbox.lease import (
     sandbox_command_scope,
     sandbox_lease_owner,
 )
+from deerflow.sandbox.local.local_sandbox import LocalSandbox, escape_powershell_path
 from deerflow.sandbox.overwrite import unwrap_sandbox
-from deerflow.sandbox.path_patterns import build_output_mask_pattern, normalize_mask_tail, replace_output_path_matches
+from deerflow.sandbox.path_patterns import PATH_START_BOUNDARY, build_output_mask_pattern, normalize_mask_tail, replace_output_path_matches
+from deerflow.sandbox.prewarm import claim_sandbox_prewarm
 from deerflow.sandbox.read_file_contract import (
     READ_FILE_EMPTY,
     READ_FILE_INVALID_END_LINE,
@@ -69,6 +72,29 @@ _SANDBOX_AUTHORIZATION_CHECKED: ContextVar[bool] = ContextVar(
 )
 
 _ABSOLUTE_PATH_PATTERN = re.compile(r"(?<![:\w])(?<!:/)/(?:[^\s\"'`;&|<>()]+)")
+# ``$NAME/...`` expands to a host path at runtime (``$HOME/.ssh/id_rsa``), but
+# the absolute-path regex skips a ``/`` that follows a word character, so the
+# bare-name form needs its own scan. Positional ``$1/etc/passwd`` slips the
+# same way, and ``bash -c`` gets no positionals, so it expands to ``/etc/passwd``.
+# ``${NAME}/``, ``~/`` and special parameters (``$@/``, ``$?/``) already surface
+# through the absolute-path regex because ``}``, ``~``, ``@`` and ``?`` are not
+# word chars. The remainder is captured in a lookahead so a skipped prefix does
+# not hide a later one (``$1/$2/etc/passwd``).
+# The one structural exemption is a ``$`` inside the single-quoted inline
+# program of an awk-family command (``awk '{print $NF/2}'``): bash expands
+# nothing there and awk reads ``$NAME`` as a field reference. See
+# ``_awk_program_field_spans`` for what keeps that exemption narrow.
+_SHELL_VARIABLE_PATH_PATTERN = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*|[0-9])/(?=([^\s\"'`;&|<>()]*))")
+# ``~name/`` expands to that user's home (``~root/.ssh/id_rsa``) and slips the
+# absolute-path regex for the same reason. Tilde expansion only applies at the
+# start of a word or after ``=``/``:``, so ``HEAD~1/`` stays out of scope.
+_NAMED_TILDE_PATH_PATTERN = re.compile(r"(?<![^\s=:;&|<>()\"'`])~[A-Za-z0-9._-]+/[^\s\"'`;&|<>()]*")
+# ``PWD`` written anywhere except as a ``$PWD`` expansion (``PWD=/``,
+# ``read PWD``, ``for PWD in``) may rebind it away from the workspace.
+_PWD_REBIND_PATTERN = re.compile(r"(?<!\$)\bPWD\b")
+# ``CDPATH`` makes a relative ``cd docs`` land outside the workspace without any
+# absolute path in the command.
+_CDPATH_PATTERN = re.compile(r"\bCDPATH\b")
 # A ``{...}`` block holding a single identifier-like placeholder (e.g. ``{id}``
 # in a REST template or ``{port}`` in an f-string). Bash brace expansion such as
 # ``{passwd,shadow}`` or ``{,.bak}`` does NOT match (commas/dots/empty inner).
@@ -679,6 +705,12 @@ def _sanitize_error(error: Exception, runtime: Runtime | None = None) -> str:
     msg = f"{type(error).__name__}: {error}"
     if runtime is not None and is_local_sandbox(runtime):
         thread_data = get_thread_data(runtime)
+        # OSError renders filenames with repr(), escaping Windows backslashes.
+        if isinstance(error, OSError):
+            for filename in (error.filename, error.filename2):
+                if filename is not None:
+                    masked = mask_local_paths_in_output(os.fsdecode(filename), thread_data)
+                    msg = msg.replace(repr(filename), repr(masked))
         msg = mask_local_paths_in_output(msg, thread_data)
     return msg
 
@@ -994,6 +1026,7 @@ def validate_local_tool_path(path: str, thread_data: ThreadDataState | None, *, 
 
     Allowed virtual-path families:
       - ``/mnt/user-data/*``  — always allowed (read + write)
+      - ``/mnt/user-data``    — the bare root, allowed only when *read_only* is True
       - ``/mnt/skills/*``     — allowed only when *read_only* is True
       - ``/mnt/acp-workspace/*`` — allowed only when *read_only* is True
       - Custom mount paths (from config.yaml) — respects per-mount ``read_only`` flag
@@ -1028,8 +1061,10 @@ def validate_local_tool_path(path: str, thread_data: ThreadDataState | None, *, 
             raise PermissionError(f"Write access to ACP workspace is not allowed: {path}")
         return
 
-    # User-data paths
-    if path.startswith(f"{VIRTUAL_PATH_PREFIX}/"):
+    # User-data paths. The bare root passes for reads because the local
+    # provider maps it for parity with AIO; the resolver still rejects it,
+    # and only ls lists it, one allowed directory at a time.
+    if path.startswith(f"{VIRTUAL_PATH_PREFIX}/") or (read_only and path == VIRTUAL_PATH_PREFIX):
         return
 
     # Custom mount paths — respect read_only config
@@ -1081,6 +1116,29 @@ def _resolve_and_validate_user_data_path(path: str, thread_data: ThreadDataState
     return str(resolved)
 
 
+def _user_data_root_dirs(path: str, thread_data: ThreadDataState) -> dict[str, str] | None:
+    """Map virtual to host workspace/uploads/outputs when *path* is the user-data root.
+
+    The local provider maps the root so ``ls`` matches AIO, but its host
+    directory can hold more than the three allowed directories. Callers list
+    each of them instead of walking the root. Any other path returns None.
+    """
+    mappings = _thread_virtual_to_actual_mappings(thread_data)
+    user_data_root = mappings.pop(VIRTUAL_PATH_PREFIX, None)
+    if user_data_root is None or Path(replace_virtual_path(path, thread_data)).resolve() != Path(user_data_root).resolve():
+        return None
+    return mappings
+
+
+def _list_user_data_root(sandbox: Sandbox, user_data_dirs: dict[str, str]) -> list[str]:
+    """List each allowed directory and one level below it, matching ls depth 2."""
+    entries: list[str] = []
+    for virtual_dir, actual_dir in user_data_dirs.items():
+        entries.append(f"{virtual_dir}/")
+        entries.extend(sandbox.list_dir(actual_dir, max_depth=1))
+    return entries
+
+
 def _is_non_file_url_token(token: str) -> bool:
     """Return True for URL tokens that should not be interpreted as paths."""
     values = [token]
@@ -1126,6 +1184,334 @@ def _split_shell_tokens(command: str) -> list[str]:
 
 
 _SHELL_PATH_HARD_TERMINATORS = frozenset("\"'`;&|<>()")
+
+_AWK_COMMAND_NAMES = frozenset({"awk", "gawk", "mawk", "nawk"})
+# awk options whose value is the next word. ``-f`` is handled separately: it
+# means there is no inline program, so the first operand is an input file. Any
+# other option (gawk's ``--assign``, ``-e``, ...) may also consume the next
+# word, so it forfeits the exemption.
+_AWK_OPTIONS_WITH_VALUE = frozenset({"-F", "-v"})
+# Command words that can make a later ``awk`` word run something other than
+# awk, or re-read quoted text: definitions (``alias``, ``function``, ``name()``
+# handled in the walk), ``eval``, sourcing, ``hash -p``, ``enable -f`` (loads a
+# builtin under any name) and a ``PATH`` rebind.
+# Any of them anywhere in the command forfeits the exemption for the whole
+# command; the words are compared after basename reduction.
+_AWK_EXEMPTION_BLOCKING_COMMANDS = frozenset({".", "alias", "autoload", "enable", "eval", "function", "hash", "source"})
+# ``name[...]=`` at a command start is never an environment prefix for awk, but
+# zsh's ``functions[awk]=...`` / ``aliases[awk]=...`` define a function or alias.
+_SHELL_ARRAY_ASSIGNMENT_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\[")
+# awk keywords after which ``/`` opens a regex literal (``print /re/``), and the
+# keywords whose closing ``)`` is followed by a pattern (``if (x) /re/``) rather
+# than a divisor (``($2+$3)/2``).
+_AWK_REGEX_KEYWORDS = frozenset({"case", "delete", "do", "else", "exit", "getline", "in", "print", "printf", "return"})
+_AWK_CONDITION_KEYWORDS = frozenset({"for", "if", "while"})
+_AWK_WORD_CHARS = frozenset(string.ascii_letters + string.digits + "_")
+_SHELL_WORD_OPERATOR_CHARS = frozenset(";&|()<>\n\r")
+
+
+def _awk_word_before(program: str, position: int) -> str | None:
+    """The identifier, number or ``]`` that ends just before *position*, or None.
+
+    Scans backward over spaces and tabs only, so the token must sit on the same
+    line. Returns ``"]"`` or ``")"`` for a closing bracket, the word for an
+    identifier or number, and None for anything else (operators, punctuation,
+    start of line).
+    """
+    end = position
+    while end > 0 and program[end - 1] in " \t":
+        end -= 1
+    if end == 0:
+        return None
+    if program[end - 1] in "])":
+        return program[end - 1]
+    start = end
+    while start > 0 and program[start - 1] in _AWK_WORD_CHARS:
+        start -= 1
+    return program[start:end] or None
+
+
+def _awk_program_code_spans(program: str, offset: int) -> list[tuple[int, int]] | None:
+    """Spans of *program* (shifted by *offset*) that awk reads as code, not string text.
+
+    A ``$NAME/`` in awk code is a field reference; inside a string literal it
+    is text that ``system("...")`` or ``getline < "..."`` may hand to a shell,
+    so string literals are left out. Rather than lex awk fully, walk the
+    program once: a ``"`` toggles a string literal (``\\`` escapes inside),
+    ``#`` outside one starts a comment that runs to the end of the line, and
+    inside a literal ``/`` and ``#`` are plain text (``split($0, p, "/")``).
+    A ``/`` outside a literal must be division, which in awk follows an
+    identifier, number, ``]`` or a ``)`` that does not close an ``if``,
+    ``while`` or ``for`` condition, all on the same line. Any other ``/``
+    (``gsub(/"/, ...)``, ``if (x) /re/``, a ``/`` at the start of a line)
+    opens a regex literal whose ``"`` would desynchronise the tracker, so
+    return None and the caller grants no exemption.
+    """
+    spans: list[tuple[int, int]] = []
+    in_string = False
+    segment_start = 0
+    open_parens: list[int] = []
+    last_closed_opener: int | None = None
+    position = 0
+    while position < len(program):
+        char = program[position]
+        if in_string:
+            if char == "\\":
+                position += 1
+            elif char == '"':
+                in_string = False
+                segment_start = position + 1
+        elif char == '"':
+            spans.append((offset + segment_start, offset + position))
+            in_string = True
+        elif char == "#":
+            newline = program.find("\n", position)
+            position = len(program) if newline == -1 else newline
+            continue
+        elif char == "(":
+            open_parens.append(position)
+        elif char == ")":
+            last_closed_opener = open_parens.pop() if open_parens else None
+        elif char == "/":
+            word = _awk_word_before(program, position)
+            if word == ")":
+                if last_closed_opener is None or _awk_word_before(program, last_closed_opener) in _AWK_CONDITION_KEYWORDS:
+                    return None
+            elif word is None or word in _AWK_REGEX_KEYWORDS:
+                return None
+        position += 1
+    if not in_string:
+        spans.append((offset + segment_start, offset + len(program)))
+    return spans
+
+
+class _ShellWord:
+    """One word of a scanned shell command.
+
+    ``text`` is the word with quotes removed; ``single_quoted`` is the span of
+    the word's content in the original command when the whole word is exactly
+    one single-quoted string, else None. ``kind`` is ``"word"``, ``"op"`` (a
+    command separator, including ``(`` and ``)``) or ``"redir"``.
+    """
+
+    __slots__ = ("kind", "single_quoted", "text")
+
+    def __init__(self, kind: str, text: str, single_quoted: tuple[int, int] | None = None) -> None:
+        self.kind = kind
+        self.text = text
+        self.single_quoted = single_quoted
+
+
+def _scan_shell_words(command: str) -> list[list[_ShellWord]] | None:
+    """Split *command* into word lists, one per command context, bash-style.
+
+    The first list is the top-level command; every ``$(...)`` substitution adds
+    its own list, since quoting starts afresh inside it and its first word is
+    a command. Single quotes, double quotes with ``\\`` escapes, ``\\x``
+    escapes, ``#`` comments at the start of a word, ``2>``-style redirections
+    and the ``;``, ``&&``, ``||``, ``|``, ``|&``, ``&``, ``(``, ``)`` and
+    newline separators follow bash. Returns None, so that no exemption is
+    granted, for anything it does not model: a backslash-newline (bash splices
+    the lines before parsing, which can spell ``awk`` across lines), backticks,
+    ``$'...'`` strings, a heredoc, an unmatched ``)`` and unbalanced quotes.
+    """
+    if "\\\n" in command or "\\\r" in command:
+        return None
+    contexts: list[list[_ShellWord]] = []
+
+    def scan(position: int, nested: bool) -> int | None:
+        items: list[_ShellWord] = []
+        contexts.append(items)
+        text: list[str] = []
+        quoted_spans: list[tuple[int, int]] = []
+        in_word = False
+        plain_so_far = True  # no quotes or substitutions seen in this word yet
+        depth = 0
+        n = len(command)
+
+        def flush() -> None:
+            nonlocal text, quoted_spans, in_word, plain_so_far
+            if in_word:
+                joined = "".join(text)
+                span = quoted_spans[0] if len(quoted_spans) == 1 and quoted_spans[0][1] - quoted_spans[0][0] == len(joined) else None
+                items.append(_ShellWord("word", joined, span))
+            text, quoted_spans, in_word, plain_so_far = [], [], False, True
+
+        while position < n:
+            char = command[position]
+            if char in " \t":
+                flush()
+                position += 1
+            elif char == "#" and not in_word:
+                newline = command.find("\n", position)
+                position = n if newline == -1 else newline
+            elif char in _SHELL_WORD_OPERATOR_CHARS:
+                if char in "<>" and in_word and plain_so_far and "".join(text).isdigit():
+                    text, in_word = [], False  # ``2>``: the digits belong to the operator
+                flush()
+                if char == ")":
+                    if depth == 0:
+                        return position + 1 if nested else None
+                    depth -= 1
+                    items.append(_ShellWord("op", ")"))
+                    position += 1
+                    continue
+                if char == "(":
+                    depth += 1
+                end = position + 1
+                group = "&|" if char in "&|" else "<>&|" if char in "<>" else ""
+                while end < n and command[end] in group:
+                    end += 1
+                operator = command[position:end]
+                if operator.startswith("<<") and not operator.startswith("<<<"):
+                    return None  # heredoc bodies are re-read by the shell
+                items.append(_ShellWord("redir" if char in "<>" else "op", operator))
+                position = end
+            elif char == "`":
+                return None
+            elif char == "'":
+                end = command.find("'", position + 1)
+                if end == -1:
+                    return None
+                quoted_spans.append((position + 1, end))
+                text.append(command[position + 1 : end])
+                in_word, plain_so_far = True, False
+                position = end + 1
+            elif char == '"':
+                position += 1
+                while position < n and command[position] != '"':
+                    if command[position] == "\\":
+                        position += 2
+                    elif command[position] == "`":
+                        return None
+                    elif command.startswith("$(", position):
+                        after = scan(position + 2, True)
+                        if after is None:
+                            return None
+                        position = after
+                    else:
+                        position += 1
+                if position >= n:
+                    return None
+                text.append("\x00")  # opaque: content is never a bare awk program
+                in_word, plain_so_far = True, False
+                position += 1
+            elif command.startswith("$'", position):
+                return None
+            elif command.startswith("$(", position):
+                after = scan(position + 2, True)
+                if after is None:
+                    return None
+                text.append("\x00")
+                in_word, plain_so_far = True, False
+                position = after
+            elif char == "\\":
+                if position + 1 >= n:
+                    return None
+                text.append(command[position + 1])
+                in_word, plain_so_far = True, False
+                position += 2
+            else:
+                text.append(char)
+                in_word = True
+                position += 1
+        flush()
+        if nested or depth:
+            return None
+        return position
+
+    if scan(0, False) is None:
+        return None
+    return contexts
+
+
+def _awk_inline_program_span(items: list[_ShellWord], index: int) -> tuple[tuple[int, int] | None, int]:
+    """Return the span of a wholly single-quoted awk program and the next index."""
+    while index < len(items):
+        item = items[index]
+        if item.kind == "op":
+            break
+        if item.kind == "redir" or item.text in _AWK_OPTIONS_WITH_VALUE:
+            index += 2
+            continue
+        if item.text == "--file" or item.text.startswith(("-f", "--file=")):
+            return None, index + 1
+        if item.text == "--":
+            index += 1
+            break
+        if not item.text.startswith("-") or item.text == "-":
+            break
+        if not item.text.startswith(("-F", "-v")):
+            return None, index + 1
+        index += 1
+    if index < len(items) and items[index].kind == "word" and items[index].single_quoted is not None:
+        return items[index].single_quoted, index + 1
+    return None, index + 1
+
+
+def _awk_program_field_spans(command: str) -> list[tuple[int, int]]:
+    """Spans where ``$NAME/`` is an awk field reference rather than a path.
+
+    Only the single-quoted inline program of an awk-family command qualifies:
+    bash performs no expansion inside single quotes and awk reads ``$`` as its
+    field operator. The command word is found the way
+    ``_validate_local_bash_shell_tokens`` finds it (after separators,
+    assignments, prefix keywords and ``command``/``builtin``, reduced to its
+    basename), at the top level and inside every ``$(...)``. Text
+    re-interpreted by another shell (``sh -c '...'``, ``eval``, double-quoted
+    programs) never qualifies, because the command word there is not awk. The
+    exemption assumes the word ``awk`` runs the real awk, so a command that
+    defines or could redefine commands (``alias``, ``function``, ``name()``,
+    ``autoload``, zsh's ``functions[...]=`` / ``aliases[...]=`` arrays,
+    ``eval``, ``source``, ``hash``, ``enable``, ``PATH=``) gets no exemption
+    at all. That
+    list is best-effort, like the rest of this guard. Inside the program, awk string
+    literals are left out: ``system("cat $HOME/x")`` hands that text to a
+    shell. A program whose ``"`` may sit in a regex literal gets no exemption.
+    """
+    contexts = _scan_shell_words(command)
+    if contexts is None:
+        return []
+
+    field_spans: list[tuple[int, int]] = []
+    for items in contexts:
+        at_command_start = True
+        index = 0
+        while index < len(items):
+            item = items[index]
+            if item.text.startswith("PATH=") or (index + 1 < len(items) and items[index + 1].kind == "op" and items[index + 1].text.startswith("(")):
+                return []  # PATH rebind or ``name ()`` function definition
+            if at_command_start and item.kind == "word" and _SHELL_ARRAY_ASSIGNMENT_PATTERN.match(item.text):
+                return []  # zsh ``functions[awk]=...`` / ``aliases[awk]=...``
+            if item.kind == "op":
+                at_command_start = True
+                index += 1
+                continue
+            if item.kind == "redir":
+                index += 1 if item.text.endswith("&") and item.text not in ("&>", "&>>") else 2
+                continue
+            if not at_command_start:
+                index += 1
+                continue
+            if _is_shell_assignment(item.text):
+                index += 1
+                continue
+            name = item.text.rsplit("/", 1)[-1]
+            if name in _LOCAL_BASH_COMMAND_PREFIX_KEYWORDS or name in _LOCAL_BASH_COMMAND_END_KEYWORDS or name in _LOCAL_BASH_COMMAND_WRAPPERS:
+                index += 1
+                continue
+            if name in _AWK_EXEMPTION_BLOCKING_COMMANDS:
+                return []
+            at_command_start = False
+            if name not in _AWK_COMMAND_NAMES:
+                index += 1
+                continue
+            program, index = _awk_inline_program_span(items, index + 1)
+            if program is None:
+                continue
+            start, end = program
+            field_spans.extend(_awk_program_code_spans(command[start:end], start) or [])
+    return field_spans
 
 
 def _absolute_path_token_occurrences(command: str, tokens: list[str]) -> list[tuple[int, int, str]]:
@@ -1294,6 +1680,8 @@ def _validate_local_bash_shell_tokens(command: str, allowed_paths: list[str], to
     """Conservatively reject relative path escapes missed by absolute-path scanning."""
     if re.search(r"\$\([^)]*\b(?:cd|pushd)\b", command):
         raise PermissionError(f"Unsafe working directory change in command substitution. Use paths under {VIRTUAL_PATH_PREFIX}")
+    if _CDPATH_PATTERN.search(command):
+        raise PermissionError(f"Unsafe working directory change via CDPATH. Use paths under {VIRTUAL_PATH_PREFIX}")
 
     for token in tokens:
         if _is_shell_command_separator(token) or _is_shell_redirection_operator(token):
@@ -1416,6 +1804,14 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
     A small allowlist of common system path prefixes is kept for executable
     and device references (e.g. /bin/sh, /dev/null). Quoted shell words are
     validated whole, so a space inside quotes is not treated as a new segment.
+    A shell variable used as a path prefix (``$HOME/...``, ``$1/...``) or a named
+    home (``~root/...``) is rejected like ``${HOME}/...`` and ``~/...``, since its
+    runtime value is unknown here, except inside the single-quoted inline
+    program of awk/gawk/mawk/nawk (outside awk string literals), where bash
+    expands nothing and ``$NF/2`` or ``($2+$3)/2`` is field arithmetic; that
+    exemption is withheld from any command that could redefine ``awk`` or
+    re-read quoted text (see ``_awk_program_field_spans``);
+    ``$PWD/...`` is checked like the relative path it is equivalent to.
     A windows-incompatible segment still rejects a path that is not already
     stored on the host; an existing host file may be read or renamed.
     """
@@ -1434,9 +1830,20 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
     path_token_occurrences = _absolute_path_token_occurrences(command, tokens)
     url_spans = _non_file_url_spans(command)
 
+    # Inside the single-quoted program of an awk command a ``/`` after ``)``
+    # is division (``($2+$3)/2``); only awk string literals, which the spans
+    # leave out, can carry text to a shell. Only a single-segment match
+    # (``/2``, ``/n``, ``/NR``) is exempt, so anything shaped like ``/a/b``
+    # is still rejected should the scanner ever misjudge a span.
+    awk_field_spans: list[tuple[int, int]] | None = None
     for match in _ABSOLUTE_PATH_PATTERN.finditer(command):
         if _is_in_spans(match.start(), url_spans):
             continue
+        if "/" not in match.group()[1:]:
+            if awk_field_spans is None:
+                awk_field_spans = _awk_program_field_spans(command)
+            if _is_in_spans(match.start(), awk_field_spans):
+                continue
         absolute_path = match.group()
         if _is_non_path_literal_fragment(absolute_path):
             continue
@@ -1448,12 +1855,41 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
 
         unsafe_paths.append(candidate)
 
+    # A variable's value is unknown here, so its path is never allowed. The one
+    # exception is ``$PWD``: ``$PWD/.venv/bin`` names the same file as the
+    # relative ``.venv/bin``, which this guard already accepts, unless the
+    # command rebinds ``PWD`` itself.
+    # The prose exemption used above does not apply: ``$HOME/文档`` is a real
+    # host directory.
+    pwd_is_workspace = not _PWD_REBIND_PATTERN.search(command)
+    for match in _SHELL_VARIABLE_PATH_PATTERN.finditer(command):
+        if _is_in_spans(match.start(), url_spans):
+            continue
+        if awk_field_spans is None:
+            awk_field_spans = _awk_program_field_spans(command)
+        if _is_in_spans(match.start(), awk_field_spans):
+            continue
+        name, remainder = match.group(1), match.group(2)
+        if name == "PWD" and pwd_is_workspace:
+            continue
+        # ``$1/1024`` and ``$1/$2`` are awk-style field arithmetic
+        # (``awk '{print $1/$2}'``), not paths: standard top-level host
+        # directories do not start with a digit.
+        if name.isdigit() and remainder.removeprefix("$")[:1].isdigit():
+            continue
+        unsafe_paths.append(match.group() + remainder)
+
+    for match in _NAMED_TILDE_PATH_PATTERN.finditer(command):
+        if _is_in_spans(match.start(), url_spans):
+            continue
+        unsafe_paths.append(match.group())
+
     if unsafe_paths:
         unsafe = ", ".join(sorted(dict.fromkeys(unsafe_paths)))
         raise PermissionError(f"Unsafe absolute paths in command: {unsafe}. Use paths under {VIRTUAL_PATH_PREFIX}. {_LOCAL_BASH_PATH_RECOVERY_GUIDANCE}")
 
 
-def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState | None) -> str:
+def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState | None, *, shell: str | None = None) -> str:
     """Replace /mnt/user-data virtual paths in a command string for local sandbox.
 
     Skills paths (/mnt/skills) and ACP workspace paths (/mnt/acp-workspace)
@@ -1466,6 +1902,7 @@ def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState 
     Args:
         command: The command string that may contain virtual paths.
         thread_data: The thread data containing actual paths.
+        shell: Local execution shell, auto-detected when omitted.
 
     Returns:
         The command with user-data virtual paths replaced.
@@ -1484,17 +1921,27 @@ def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState 
         # bare root still matches and the sibling is rewritten into the thread's
         # host directory — a real path outside the mount contract. Same defect as
         # #4035 (reverse patterns) and #4053 (masking patterns), mirrored into
-        # this direction.
+        # this direction. ``PATH_START_BOUNDARY`` is the left-hand counterpart:
+        # the root must start a path, so an artifact URL such as
+        # ``.../artifacts/mnt/user-data/outputs/x.html`` is not rewritten.
         #
         # The class mirrors ``LocalSandbox._content_pattern``'s rather than
         # ``_command_pattern``'s: a virtual root can legitimately be followed by
         # ``:`` (PATH-style concatenation) or ``,``, which the shell-oriented
         # class rejects — narrowing to it would stop translating paths that
         # translate today. ``$`` covers a command ending exactly at the root.
-        pattern = re.compile(rf"{re.escape(VIRTUAL_PATH_PREFIX)}(?=/|$|[^\w./-])(/[^\s\"';&|<>()]*)?")
+        #
+        # The tail ends at ``:`` (like ``path_patterns._PATH_TAIL``): the
+        # boundary above admits PATH-style concatenation, but a tail that ran
+        # through the ``:`` swallowed every later entry of the list, leaving
+        # those virtual paths unresolved in the command.
+        pattern = re.compile(rf"{PATH_START_BOUNDARY}{re.escape(VIRTUAL_PATH_PREFIX)}(?=/|$|[^\w./-])(/[^\s\"';&|<>():]*)?")
 
         def replace_user_data_match(match: re.Match) -> str:
-            return replace_virtual_path(match.group(0), thread_data).replace("\\", "/")
+            resolved = replace_virtual_path(match.group(0), thread_data).replace("\\", "/")
+            if LocalSandbox._is_powershell(shell or LocalSandbox._get_shell()):
+                return escape_powershell_path(match, resolved)
+            return resolved
 
         result = pattern.sub(replace_user_data_match, result)
 
@@ -1847,14 +2294,16 @@ async def ensure_sandbox_initialized_async(runtime: Runtime | None = None) -> Sa
     provider = get_sandbox_provider()
     user_id = resolve_runtime_user_id(runtime)
     owner_id = sandbox_lease_owner(runtime.context)
-    if owner_id is None:
-        sandbox_id = await provider.acquire_async(thread_id, user_id=user_id)
-    else:
-        sandbox_id = await get_sandbox_lease_manager(provider).acquire_async(
-            owner_id,
-            thread_id,
-            user_id=user_id,
-        )
+    sandbox_id = await claim_sandbox_prewarm(runtime, provider=provider)
+    if sandbox_id is None:
+        if owner_id is None:
+            sandbox_id = await provider.acquire_async(thread_id, user_id=user_id)
+        else:
+            sandbox_id = await get_sandbox_lease_manager(provider).acquire_async(
+                owner_id,
+                thread_id,
+                user_id=user_id,
+            )
 
     runtime.state["sandbox"] = {"sandbox_id": sandbox_id}
 
@@ -2522,6 +2971,7 @@ def ls_tool(runtime: Runtime, path: str, description: str = "") -> str:
         ensure_thread_directories_exist(runtime)
         requested_path = path
         thread_data = None
+        user_data_dirs = None
         if is_local_sandbox(runtime):
             thread_data = get_thread_data(runtime)
             validate_local_tool_path(path, thread_data, read_only=True)
@@ -2533,9 +2983,11 @@ def ls_tool(runtime: Runtime, path: str, description: str = "") -> str:
                 # from the sandbox mapping's user_id).
                 pass
             elif not _is_custom_mount_path(path):
-                path = _resolve_and_validate_user_data_path(path, thread_data)
+                user_data_dirs = _user_data_root_dirs(path, thread_data)
+                if user_data_dirs is None:
+                    path = _resolve_and_validate_user_data_path(path, thread_data)
             # Custom mount paths and skills/ACP paths are resolved by LocalSandbox._resolve_path()
-        children = sandbox.list_dir(path)
+        children = _list_user_data_root(sandbox, user_data_dirs) if user_data_dirs is not None else sandbox.list_dir(path)
         if not children:
             return "(empty)"
         output = "\n".join(children)
@@ -2559,8 +3011,9 @@ def ls_tool(runtime: Runtime, path: str, description: str = "") -> str:
         return f"Error: {e}"
     except FileNotFoundError:
         return f"Error: Directory not found: {requested_path}"
-    except PermissionError:
-        return f"Error: Permission denied: {requested_path}"
+    except PermissionError as e:
+        detail = _sanitize_error(e, runtime) if e.filename is not None else requested_path
+        return f"Error: Permission denied: {detail}"
     except Exception as e:
         return f"Error: Unexpected error listing directory: {_sanitize_error(e, runtime)}"
 
@@ -2624,8 +3077,9 @@ def glob_tool(
         return f"Error: Directory not found: {requested_path}"
     except NotADirectoryError:
         return f"Error: Path is not a directory: {requested_path}"
-    except PermissionError:
-        return f"Error: Permission denied: {requested_path}"
+    except PermissionError as e:
+        detail = _sanitize_error(e, runtime) if e.filename is not None else requested_path
+        return f"Error: Permission denied: {detail}"
     except Exception as e:
         return f"Error: Unexpected error searching paths: {_sanitize_error(e, runtime)}"
 
@@ -2725,8 +3179,9 @@ def grep_tool(
         return f"Error: Path is not a directory: {requested_path}"
     except re.error as e:
         return f"Error: Invalid regex pattern: {e}"
-    except PermissionError:
-        return f"Error: Permission denied: {requested_path}"
+    except PermissionError as e:
+        detail = _sanitize_error(e, runtime) if e.filename is not None else requested_path
+        return f"Error: Permission denied: {detail}"
     except Exception as e:
         return f"Error: Unexpected error searching file contents: {_sanitize_error(e, runtime)}"
 
@@ -2878,6 +3333,21 @@ async def _read_file_tool_async(
 read_file_tool.coroutine = _read_file_tool_async
 
 
+def _reject_elision_placeholder_content(content: str) -> str | None:
+    """Reject a complete framework placeholder, allowing surrounding whitespace."""
+    pattern = re.escape(WRITE_ELISION_PLACEHOLDER_TEMPLATE).replace(re.escape("{chars}"), r"[0-9]+")
+    if re.fullmatch(pattern, content.strip()) is None:
+        return None
+    return (
+        "Error: write_file content is the tool-output elision placeholder, which is "
+        "framework-generated history text rather than file content. Nothing was written. "
+        "The placeholder stands in for a write_file payload that the harness removed from "
+        "the model-bound request because a later read or write superseded it; the real "
+        "content is the file on disk. Call read_file on the target path and write the "
+        "actual content."
+    )
+
+
 def _effective_write_file_max_bytes() -> int:
     """Return the active size cap for non-append write_file calls.
 
@@ -2931,12 +3401,23 @@ def write_file_tool(
     Operators can override the cap via env var `DEERFLOW_WRITE_FILE_MAX_BYTES`
     (0 disables the guard entirely). Raising it risks streaming timeouts.
 
+    PLACEHOLDER GUARD (issue #7319):
+    A call whose content is the tool-output budget middleware's elision
+    placeholder is rejected. That text is framework-owned history compression,
+    never file content: the model occasionally copies it out of its own elided
+    history and submits it as a write, which silently replaces a real
+    deliverable with a ~200-byte placeholder. Re-read the source and write the
+    actual content instead.
+
     Args:
         path: The **absolute** path to the file to write to.
         content: The content to write to the file.
         description: Optional short explanation of this write shown in the UI.
         append: Whether to append content to the end of the file instead of overwriting it. Defaults to False.
     """
+    placeholder_error = _reject_elision_placeholder_content(content)
+    if placeholder_error is not None:
+        return placeholder_error
     if not append:
         max_bytes = _effective_write_file_max_bytes()
         if max_bytes > 0:
@@ -2988,6 +3469,9 @@ async def _write_file_tool_async(
     description: str = "",
     append: bool = False,
 ) -> str:
+    placeholder_error = _reject_elision_placeholder_content(content)
+    if placeholder_error is not None:
+        return placeholder_error
     return await _run_sync_tool_after_async_sandbox_init(write_file_tool.func, runtime, path, content, description, append)
 
 

@@ -12,6 +12,7 @@ https://unbrowse.ai/app.
 import json
 import logging
 import os
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 from langchain.tools import tool
@@ -24,6 +25,7 @@ _UNBROWSE_MCP_URL = "https://unbrowse.ai/api/mcp"
 _UNBROWSE_SCRAPE_TOOL = "unbrowse.scrape"
 _UNBROWSE_TIMEOUT = 90
 _UNBROWSE_FETCH_MAX_CHARS = 4096
+_UNBROWSE_FINAL_URL_MAX_CHARS = 500
 _DEFAULT_RENDER = "auto"
 _RENDER_MODES = ("auto", "never", "always")
 _api_key_warned: set[str] = set()
@@ -141,6 +143,20 @@ def _clip(value: object, limit: int) -> str:
     return text if limit <= 0 else text[:limit]
 
 
+def _strip_url_userinfo(url: str) -> str:
+    """Remove URL credentials; omit unparseable HTTP(S) destinations."""
+    try:
+        parsed = urlsplit(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            return ""
+    except ValueError:
+        # Never echo raw credentials when parsing the authority fails.
+        return ""
+    if "@" not in parsed.netloc:
+        return url
+    return urlunsplit(parsed._replace(netloc=parsed.netloc.rsplit("@", 1)[-1]))
+
+
 @tool("web_fetch", parse_docstring=True)
 def web_fetch_tool(url: str) -> str:
     """Fetch the contents of a web page at a given URL.
@@ -165,10 +181,19 @@ def web_fetch_tool(url: str) -> str:
     if error is not None:
         return f"Error: {error}"
 
+    metadata = data.get("metadata")
+    status = metadata.get("statusCode") if isinstance(metadata, dict) else None
+    failure = ""
+    if isinstance(status, int) and not isinstance(status, bool) and 400 <= status <= 599:
+        failure = f"target page responded with HTTP {status}"
+        final_url = data.get("finalUrl")
+        if isinstance(final_url, str) and (safe_final_url := _strip_url_userinfo(final_url.strip())):
+            failure += f" (final URL: {_clip(safe_final_url, _UNBROWSE_FINAL_URL_MAX_CHARS)})"
+
     content = _clip(data.get("markdown") or "", _UNBROWSE_FETCH_MAX_CHARS)
     if not content:
-        return "Error: No content found"
+        return f"Error: No content found ({failure})" if failure else "Error: No content found"
 
-    metadata = data.get("metadata")
     title = (metadata.get("title") if isinstance(metadata, dict) else None) or "Untitled"
-    return f"# {title}\n\n{content}"
+    warning = f"Warning: {failure}.\n\n" if failure else ""
+    return f"{warning}# {title}\n\n{content}"

@@ -12,7 +12,7 @@ import time
 
 import jwt
 from fastapi import Request, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from app.gateway.auth.config import get_auth_config
 from app.gateway.csrf_middleware import is_secure_request
@@ -51,7 +51,9 @@ def _verify_state_signed(signed: str, max_age: int = OIDC_STATE_MAX_AGE) -> OIDC
         if time.time() - payload.issued_at > max_age:
             return None
         return payload
-    except jwt.PyJWTError:
+    except (jwt.PyJWTError, ValidationError):
+        # A state cookie signed with our secret but missing required claims is not a server error:
+        # it is an unusable state, and the callback must answer 403 rather than 500.
         return None
 
 

@@ -67,6 +67,26 @@ class OpenAICompatibleLengthDetector:
         )
 
 
+class OpenAIResponsesLengthDetector:
+    """Responses API output-token cap, including ``response.incomplete`` SSE."""
+
+    name = "openai_responses_length"
+
+    def detect(self, message: AIMessage) -> ModelLengthTermination | None:
+        for container_name in ("response_metadata", "additional_kwargs"):
+            metadata = getattr(message, container_name, None)
+            if not isinstance(metadata, dict) or metadata.get("status") != "incomplete":
+                continue
+            details = metadata.get("incomplete_details")
+            if isinstance(details, dict) and details.get("reason") == "max_output_tokens":
+                return ModelLengthTermination(
+                    detector=self.name,
+                    reason_field="incomplete_details.reason",
+                    reason_value="max_output_tokens",
+                )
+        return None
+
+
 class AnthropicMaxTokensDetector:
     """Anthropic ``stop_reason == "max_tokens"`` signal."""
 
@@ -113,6 +133,7 @@ def default_detectors() -> list[ModelLengthTerminationDetector]:
         OpenAICompatibleLengthDetector(),
         AnthropicMaxTokensDetector(),
         GeminiMaxTokensDetector(),
+        OpenAIResponsesLengthDetector(),
     ]
 
 
@@ -122,5 +143,6 @@ __all__ = [
     "ModelLengthTermination",
     "ModelLengthTerminationDetector",
     "OpenAICompatibleLengthDetector",
+    "OpenAIResponsesLengthDetector",
     "default_detectors",
 ]

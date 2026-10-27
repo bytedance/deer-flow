@@ -13,6 +13,7 @@ from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from app.gateway.deps import require_admin_user
+from app.gateway.mcp_oauth_tokens import forget_unconfigured_mcp_oauth_tokens
 from app.gateway.persistent_writes import run_drained_write
 from deerflow.config.extensions_config import (
     ExtensionsConfig,
@@ -28,7 +29,6 @@ from deerflow.config.extensions_config import (
     reload_extensions_config,
     validate_raw_extensions_config,
 )
-from deerflow.config.runtime_paths import project_root
 from deerflow.constants import DEFAULT_MCP_SESSION_INIT_TIMEOUT
 from deerflow.mcp.cache import (
     McpReconciliationPending,
@@ -1250,6 +1250,8 @@ def _commit_mcp_config_write(
     # Re-parse so the committed fence sees the ledger we just wrote.
     candidate = validate_raw_extensions_config(raw_data)
     atomic_write_extensions_config(config_path, raw_data)
+    # Disabled servers keep their stored OAuth tokens; removed ones cannot use them again.
+    forget_unconfigured_mcp_oauth_tokens(None, candidate.mcp_servers.keys())
     try:
         reload_extensions_config()
         return prepare_mcp_reconciliation(candidate, config_path=config_path)
@@ -1300,7 +1302,7 @@ def _apply_mcp_config_update(body: McpConfigUpdateRequest) -> dict:
     # same sidecar path for the complete read-modify-write cycle.
     config_path = ExtensionsConfig.resolve_config_path()
     if config_path is None:
-        config_path = project_root() / "extensions_config.json"
+        config_path = ExtensionsConfig.default_config_path()
         logger.info(f"No existing extensions config found. Creating new config at: {config_path}")
 
     with extensions_config_write_lock, extensions_config_file_lock(config_path):
@@ -1398,7 +1400,7 @@ def _mcp_config_path(*, create: bool) -> Path:
     config_path = ExtensionsConfig.resolve_config_path()
     if config_path is None:
         if create:
-            config_path = project_root() / "extensions_config.json"
+            config_path = ExtensionsConfig.default_config_path()
             logger.info("No existing extensions config found. Creating new config at: %s", config_path)
         else:
             raise HTTPException(
@@ -1639,7 +1641,7 @@ async def update_mcp_configuration(request: Request, body: McpConfigUpdateReques
         raise
     except Exception as e:
         logger.error(f"Failed to update MCP configuration: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to update MCP configuration: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to update MCP configuration")
 
 
 @router.post(
@@ -1661,7 +1663,7 @@ async def create_mcp_servers(request: Request, body: McpConfigUpdateRequest) -> 
         raise
     except Exception as e:
         logger.error("Failed to add MCP servers: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to add MCP servers: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to add MCP servers")
 
 
 @router.put(
@@ -1686,7 +1688,7 @@ async def update_mcp_server(request: Request, body: McpServerConfigUpdateRequest
         raise
     except Exception as e:
         logger.error("Failed to update MCP server %s: %s", body.server_name, e, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to update MCP server: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to update MCP server")
 
 
 @router.delete(
@@ -1707,7 +1709,7 @@ async def delete_mcp_server(request: Request, server_name: str) -> McpConfigResp
         raise
     except Exception as e:
         logger.error("Failed to delete MCP server %s: %s", server_name, e, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to delete MCP server: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to delete MCP server")
 
 
 @router.patch(
@@ -1728,4 +1730,4 @@ async def update_mcp_server_state(request: Request, body: McpServerStateUpdateRe
         raise
     except Exception as e:
         logger.error("Failed to update MCP server %s state: %s", body.server_name, e, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to update MCP server state: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to update MCP server state")

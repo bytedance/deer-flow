@@ -41,3 +41,35 @@ def test_merge_promoted_replaces_malformed_existing_without_crash():
     result = merge_promoted({"names": ["stale"]}, {"catalog_hash": "abc", "names": ["search"]})
 
     assert result == {"catalog_hash": "abc", "names": ["search"]}
+
+
+def test_merge_promoted_unions_names_within_same_turn():
+    existing = {"catalog_hash": "abc", "names": ["search"], "turn_id": "user-1"}
+
+    result = merge_promoted(existing, {"catalog_hash": "abc", "names": ["fetch"], "turn_id": "user-1"})
+
+    assert result == {"catalog_hash": "abc", "names": ["search", "fetch"], "turn_id": "user-1"}
+
+
+def test_merge_promoted_replaces_names_on_new_turn():
+    existing = {"catalog_hash": "abc", "names": ["search"], "turn_id": "user-1"}
+
+    result = merge_promoted(existing, {"catalog_hash": "abc", "names": ["fetch"], "turn_id": "user-2"})
+
+    assert result == {"catalog_hash": "abc", "names": ["fetch"], "turn_id": "user-2"}
+
+
+def test_merge_promoted_tool_search_update_inherits_current_turn():
+    existing = {"catalog_hash": "abc", "names": [], "turn_id": "user-1"}
+
+    result = merge_promoted(existing, {"catalog_hash": "abc", "names": ["search"]})
+
+    assert result == {"catalog_hash": "abc", "names": ["search"], "turn_id": "user-1"}
+
+
+def test_merge_promoted_recovers_from_malformed_existing_names():
+    existing = {"catalog_hash": "abc", "names": "not-a-list", "turn_id": "user-1"}
+
+    result = merge_promoted(existing, {"catalog_hash": "abc", "names": ["search"]})
+
+    assert result == {"catalog_hash": "abc", "names": ["search"], "turn_id": "user-1"}

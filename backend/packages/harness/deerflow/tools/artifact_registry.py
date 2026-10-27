@@ -28,7 +28,17 @@ _HANDLE_LENGTH = 8
 
 # Virtual sandbox path prefix (used by local stdio MCP servers whose files live
 # inside the mounted user-data tree).
+_SANDBOX_PATH_PREFIX = "/mnt/user-data/"
 _SANDBOX_PATH_PATTERN = re.compile(r"/mnt/user-data/\S+")
+
+# Delimiters a tool result may wrap a path in. A delimited span is one value, so a
+# filename inside it keeps its spaces; the bare token scan below keeps its
+# whitespace boundary, because nothing tells it where such a name would end.
+_REF_QUOTE_DELIMITERS = {'"': '"', "'": "'", "`": "`", "“": "”", "‘": "’", "「": "」", "『": "』"}
+_REF_LINE_BOUNDARY_PATTERN = re.compile(r"[\r\n\v\f\x1c-\x1e\x85\u2028\u2029]")
+_SPAN_BARE = "bare"
+_SPAN_QUOTED = "quoted"
+_SPAN_UNTERMINATED = "unterminated"
 
 # Scan complete URLs before checking the path, so extensions in query strings
 # cannot truncate a reference or turn a non-file URL into a file artifact.
@@ -47,8 +57,8 @@ _STRUCTURED_TASK_KEYS = frozenset({"task_id", "job_id"})
 # quotes/brackets/backticks that markdown- and JSON-formatted tool output
 # commonly wraps paths in, including CJK punctuation. `\S+` would otherwise
 # consume them into `real_ref`.
-_REF_TRAILING_NOISE_CHARS = ".,;:)]}\"'`\u3002\uff0c\uff1b\uff1a\u3001\uff09\u3011\u300b\u201d\u2019"
-_CJK_CLOSING_DELIMITERS = {"）": "（", "】": "【", "》": "《", "”": "“", "’": "‘"}
+_REF_TRAILING_NOISE_CHARS = ".,;:)]}\"'`\u3002\uff0c\uff1b\uff1a\u3001\uff09\u3011\u300b\u300d\u300f\u201d\u2019"
+_REF_CLOSING_DELIMITERS = {")": "(", "]": "[", "}": "{", "）": "（", "】": "【", "》": "《", "」": "「", "』": "『", "”": "“", "’": "‘"}
 
 # Content-block and structured-key refs are trusted only in these shapes.
 # `data:`/`blob:` URIs can carry arbitrarily large embedded payloads (MCP
@@ -131,16 +141,16 @@ def _make_entry(
 
 
 def _strip_ref_trailing_noise(raw: str) -> str:
-    """Strip prose closers while preserving paired CJK characters inside a ref."""
+    """Strip prose closers while preserving paired ASCII/CJK delimiters inside a ref."""
     end = len(raw.rstrip(_REF_TRAILING_NOISE_CHARS))
     if end == len(raw):
         return raw
 
-    unmatched_openers = dict.fromkeys(_CJK_CLOSING_DELIMITERS.values(), 0)
+    unmatched_openers = dict.fromkeys(_REF_CLOSING_DELIMITERS.values(), 0)
     for index, char in enumerate(raw):
         if char in unmatched_openers:
             unmatched_openers[char] += 1
-        elif (opener := _CJK_CLOSING_DELIMITERS.get(char)) and unmatched_openers[opener]:
+        elif (opener := _REF_CLOSING_DELIMITERS.get(char)) and unmatched_openers[opener]:
             unmatched_openers[opener] -= 1
             # An opener outside the detected token is prose; an opener inside
             # it makes this closer part of a literal directory name or URL.
@@ -148,20 +158,78 @@ def _strip_ref_trailing_noise(raw: str) -> str:
     return raw[:end]
 
 
+def _classify_span(text: str, start: int) -> tuple[str, int | None]:
+    """How the sandbox path at ``start`` is delimited, and where a quoted span ends.
+
+    ``bare`` paths keep the whitespace boundary. A ``quoted`` span ends at the matching
+    delimiter on the same line, which is what keeps ``"report final.pdf"`` whole;
+    ``unterminated`` is a span whose delimiter never closes on that line, and it produces
+    no reference at all rather than a prefix of a filename that does not exist.
+    """
+    opener = text[start - 1] if start else ""
+    if opener not in _REF_QUOTE_DELIMITERS:
+        return _SPAN_BARE, None
+    line_break = _REF_LINE_BOUNDARY_PATTERN.search(text, start)
+    line_end = line_break.start() if line_break else len(text)
+    # Odd backslash runs escape the wrapper; even runs leave it unescaped.
+    # Exclude only the wrapper marker, without decoding backslashes in the path.
+    escape_start = start - 1
+    while escape_start and text[escape_start - 1] == "\\":
+        escape_start -= 1
+    escape_prefix = text[escape_start : start - 1]
+    closer_marker = (escape_prefix if len(escape_prefix) % 2 else "") + _REF_QUOTE_DELIMITERS[opener]
+    closer = text.find(closer_marker, start, line_end)
+    if closer == -1:
+        return _SPAN_UNTERMINATED, None
+    return _SPAN_QUOTED, closer
+
+
+def _is_referenceable_sandbox_path(raw: str) -> bool:
+    """A sandbox path may contain spaces only when the tool delimited it.
+
+    The size and single-line bounds still apply: a delimited span can carry prose, and an
+    unbounded or multi-line value must not become a handle.
+    """
+    if not raw.startswith(_SANDBOX_PATH_PREFIX) or len(raw) == len(_SANDBOX_PATH_PREFIX):
+        return False
+    if _REF_LINE_BOUNDARY_PATTERN.search(raw) or "\t" in raw or raw != raw.strip():
+        return False
+    try:
+        return len(raw.encode("utf-8")) <= _STRUCTURED_DATA_MAX_BYTES
+    except UnicodeError:
+        return False
+
+
 def _detect_refs_in_text(text: str) -> list[dict[str, str]]:
     """Conservatively detect file paths and remote file URLs in free text."""
     refs: list[dict[str, str]] = []
     seen: set[str] = set()
-    for match in _SANDBOX_PATH_PATTERN.finditer(text):
-        raw = _strip_ref_trailing_noise(match.group(0))
-        if raw in seen or not _is_referenceable_url(raw):
+    cursor = 0
+    while (start := text.find(_SANDBOX_PATH_PREFIX, cursor)) != -1:
+        cursor = start + 1
+        kind, span_end = _classify_span(text, start)
+        if kind == _SPAN_UNTERMINATED:
+            # The opener says the path runs past this point or onto another line; a
+            # whitespace-truncated prefix would name a file that does not exist.
+            continue
+        if kind == _SPAN_QUOTED:
+            assert span_end is not None
+            raw = text[start:span_end]
+            cursor = span_end
+        else:
+            match = _SANDBOX_PATH_PATTERN.match(text, start)
+            if match is None:
+                continue
+            cursor = match.end()
+            raw = _strip_ref_trailing_noise(match.group(0))
+        if raw in seen or not _is_referenceable_sandbox_path(raw):
             continue
         seen.add(raw)
         refs.append(
             {
                 "type": "file",
                 "ref": raw,
-                "display": raw.split("/")[-1],
+                "display": _display_name_for_ref(raw),
             }
         )
     for match in _REMOTE_URL_PATTERN.finditer(text):

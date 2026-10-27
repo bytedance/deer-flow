@@ -4,9 +4,11 @@
 Gateway event loop: at startup, on every supervision tick (every
 ``lease_seconds // 3`` seconds per provider), from readiness requests and at
 shutdown. Every statement goes through the async session (aiosqlite /
-asyncpg) and every ``wait_for`` bound is a loop timer. If any of it regresses
-onto the loop — a synchronous driver call, a blocking clock or lock — the
-strict Blockbuster gate raises ``BlockingError`` here.
+asyncpg) and every ``wait_for`` bound is a loop timer. The same tick reads the
+runtime config versions and re-reads a changed provider's config through the
+synchronous runtime config store, both in worker threads. If any of it
+regresses onto the loop — a synchronous driver call, a blocking clock or
+lock — the strict Blockbuster gate raises ``BlockingError`` here.
 
 The engine and schema are built off the loop: that is fixture work, not the
 production path under test.
@@ -21,16 +23,22 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 import sqlalchemy as sa
+from cryptography.fernet import Fernet
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
+from sqlalchemy.orm import sessionmaker
 
 # Pre-import so lazy imports inside the service are cached no-ops under the gate.
 import deerflow.persistence.models  # noqa: F401
 from app.channels.leadership import ChannelLeadership, RenewOutcome
+from app.channels.runtime_config_store import SqlChannelRuntimeConfigStore
 from app.channels.service import ChannelService
 from app.channels.store import JsonChannelStore
 from deerflow import reflection
+from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
+from deerflow.config.credentials_key import CredentialsCipher
 from deerflow.persistence.base import Base
 from deerflow.persistence.channel_leases import ChannelLeaseRow, SqlChannelLeaseRepository
+from deerflow.persistence.channel_runtime_configs import ChannelRuntimeConfigRow, SqlChannelRuntimeConfigRepository
 
 pytestmark = pytest.mark.asyncio
 
@@ -55,6 +63,7 @@ async def repo(tmp_path) -> AsyncIterator[SqlChannelLeaseRepository]:
 
 class _Transport:
     def __init__(self, *, bus: object, config: dict) -> None:
+        self.config = config
         self.is_running = False
 
     async def start(self) -> None:
@@ -96,3 +105,41 @@ async def test_service_supervision_and_shutdown_do_not_block_loop(repo, tmp_path
     assert service.get_status()["channels"]["telegram"]["leader"] == "A"
     await service.stop()
     assert (await repo.get("telegram")).live is False
+
+
+def _build_runtime_store(path: Path) -> SqlChannelRuntimeConfigStore:
+    engine = sa.create_engine(f"sqlite:///{path.as_posix()}")
+    Base.metadata.create_all(engine, tables=[ChannelRuntimeConfigRow.__table__])
+    cipher = CredentialsCipher.from_keys([Fernet.generate_key()])
+    store = SqlChannelRuntimeConfigStore(SqlChannelRuntimeConfigRepository(sessionmaker(engine, expire_on_commit=False)), cipher=cipher)
+    store.set_provider_config("telegram", {"enabled": True, "bot_token": "t-1"})
+    return store
+
+
+async def test_supervision_applies_a_peer_runtime_config_save_without_blocking_loop(repo, tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(reflection, "resolve_class", lambda *_args, **_kwargs: _Transport)
+    set_app_config(AppConfig.model_validate({"sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"}, "channel_connections": {"enabled": True, "telegram": {"enabled": True}}}))
+    runtime_store = await asyncio.to_thread(_build_runtime_store, tmp_path / "runtime.db")
+    store_path = await asyncio.to_thread(lambda: tmp_path / "store.json")
+    service = ChannelService(
+        channels_config={"telegram": {"enabled": True, "bot_token": "t-1"}},
+        store=JsonChannelStore(store_path),
+        leadership=ChannelLeadership(repo, owner_id="A", lease_seconds=30, grace_seconds=10),
+        runtime_config_store=runtime_store,
+    )
+
+    async def noop() -> None:
+        return None
+
+    service.manager.start = noop
+    service.manager.stop = noop
+    service._start_supervisor = lambda: None
+    try:
+        await service.start()
+        await asyncio.to_thread(runtime_store.set_provider_config, "telegram", {"enabled": True, "bot_token": "t-2"})
+        await service._supervise_once()
+        await asyncio.gather(*list(service._lease_actions.values()))
+        assert service.get_channel("telegram").config["bot_token"] == "t-2"
+        await service.stop()
+    finally:
+        reset_app_config()

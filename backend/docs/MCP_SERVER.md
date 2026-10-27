@@ -392,7 +392,7 @@ runtime-internal. Query the current thread through:
 Task toolsets require `database.backend: sqlite` or `postgres`; startup fails
 instead of falling back to a synchronous submit when persistence or the task
 runtime is disabled. Restart recovery also requires the remote service to keep
-the task alive and recognize its ID after DeerFlow reconnects. A stdio server
+the task alive and recognize its ID after DeerFlow reconnects. Status and cancellation calls renew their control lease while executing and saving their result; the lease duration is a crash-recovery window, not a tool-call timeout. See [control-call leases](mcp-control-leases.md) for ownership loss, cancellation cleanup, and SQLite claim serialization. A stdio server
 must therefore persist its own tasks; multi-instance deployments should
 normally use an independently running HTTP/SSE service.
 
@@ -412,11 +412,19 @@ Tool-cache resets and rediscovery keep that state. Token rotation does not
 modify the parsed configuration or trigger the startup-snapshot drift guard;
 real operator configuration changes still require a restart.
 
-This state is process-local and is never written back to `extensions_config.json`
-or an environment variable. A restarted Gateway needs a valid configured
-refresh token, and separate Gateway workers do not coordinate token rotation.
+This state is never written back to `extensions_config.json` or an environment
+variable. With a SQL database, a `refresh_token` connection's tokens are also kept
+in the shared `mcp_oauth_tokens` table, so a restarted Gateway and its peers
+continue the rotated chain (see
+[Refresh-token rotation](#refresh-token-rotation-across-restarts-and-replicas)).
 Personal MCP connections remain owner-scoped and do not use this deployment
-state, even if their runtime names match a deployment server.
+state, even if their runtime names match a deployment server. A personal
+server's runtime name is derived from its complete definition, so editing,
+disabling, or deleting it while a task is in flight leaves the persisted task
+handle unresolvable. That task fails permanently with the connection error
+instead of retrying forever; if the user had requested cancellation, it also
+ends as `failed` because the remote task can no longer be reached. Restoring
+the same definition does not revive an already terminal task.
 
 When `user_auth` is enabled on an HTTP/SSE server, background status and
 cancellation calls use the persisted task owner's configured credential,
@@ -474,6 +482,62 @@ Example:
    }
 }
 ```
+
+### Refresh-token rotation across restarts and replicas
+
+Providers such as Auth0, Okta and Google rotate refresh tokens: every refresh
+returns a new one and invalidates the old one. With `database.backend: sqlite`
+or `postgres`, the Gateway keeps each `refresh_token` connection's latest access
+token and refresh token in the `mcp_oauth_tokens` table (migration
+`0047_mcp_oauth_tokens`), encrypted with `DEER_FLOW_CREDENTIALS_KEY` (see
+[CONFIGURATION.md](CONFIGURATION.md#credentials-encryption-key-deer_flow_credentials_key)):
+
+- A restart, a tool-cache reset, or a later run of a personal connection
+  continues from the stored chain instead of the configured `refresh_token`.
+- Gateway replicas share one chain. Before refreshing, a replica re-reads the
+  row and uses a peer's still-valid access token. Otherwise it claims the
+  refresh with a 30-second lease, so only one replica calls the token endpoint
+  and the others wait for its result. The holder renews the lease while the
+  token request runs (HTTP timeouts bound each read, not the whole response)
+  and abandons a request after 120 seconds. No row lock is held during the
+  token request.
+- If the new tokens cannot be stored (the database is briefly unavailable),
+  the process keeps using them, retries storing them every few seconds, and
+  stores them before its next refresh, so nobody falls back to the refresh
+  token it already consumed.
+- A stored access token is reused only by processes that request it the same
+  way (`extra_token_params` such as `resource`, and the response-field
+  settings). After such a change the next request refreshes from the stored
+  refresh token instead, so the chain is kept.
+- The configured `refresh_token` is only the seed. The row records which
+  `token_url`, `client_id`, `grant_type`, `scope`, `audience` and seed it
+  continues (as a SHA-256 fingerprint). After you change any of them, the next
+  refresh starts again from the configured value. To recover from a revoked
+  chain (`invalid_grant`), configure a new `refresh_token`; changing only
+  `client_secret` keeps the stored chain.
+- Personal connections get one row per owner, keyed by their runtime name.
+  Editing a personal connection changes that name, so it starts again from its
+  configured refresh token. Saving a configuration deletes the rows of the
+  connections it no longer has: an edited or deleted personal connection, or a
+  deployment server removed through the MCP configuration API (a server removed
+  by hand-editing `extensions_config.json` is dropped on the next API save).
+  Disabling a connection keeps its row, so re-enabling it continues the chain.
+- When the provider rejects the refresh token (`invalid_grant`), the tool call
+  fails with an error that names the server and asks for a new refresh token.
+  If the instance fell back to the seed because it could not decrypt the chain
+  another instance stored, the error also says that every instance needs the
+  same `DEER_FLOW_CREDENTIALS_KEY`.
+- `client_credentials` tokens are not stored; each process requests its own.
+- Tokens stay in process memory, as before, with `database.backend: memory`,
+  in the embedded `DeerFlowClient` (no Gateway), or when the credentials key
+  cannot be loaded. If the database cannot be read or written, the refresh
+  fails instead of consuming a refresh token that nothing records; a still-valid
+  access token keeps working.
+- A declared multi-instance deployment (`deployment.multi_instance: true`) with
+  an enabled `refresh_token` OAuth server refuses to start without a shared
+  `DEER_FLOW_CREDENTIALS_KEY`. Personal OAuth connections are saved at runtime,
+  so that startup check cannot see them; set the variable on every
+  multi-instance deployment that uses them.
 
 ## Request-Scoped Headers (HTTP/SSE MCP Servers)
 

@@ -34,7 +34,7 @@ class _Provider(WarmPoolLifecycleMixin[str]):
 
 def test_replica_count_includes_active_and_warm_entries() -> None:
     provider = _Provider(replicas=2, active_count=1)
-    provider._warm_pool["warm-1"] = ("entry-1", time.time())
+    provider._warm_pool["warm-1"] = ("entry-1", time.monotonic())
 
     assert provider._replica_count() == (2, 2)
 
@@ -61,7 +61,7 @@ def test_evict_oldest_warm_returns_none_when_pool_empty() -> None:
 
 def test_reap_expired_warm_destroys_only_expired_entries() -> None:
     provider = _Provider()
-    now = time.time()
+    now = time.monotonic()
     provider._warm_pool["expired"] = ("entry-expired", now - 100)
     provider._warm_pool["fresh"] = ("entry-fresh", now)
 
@@ -74,7 +74,7 @@ def test_reap_expired_warm_destroys_only_expired_entries() -> None:
 
 def test_reap_expired_warm_noops_when_timeout_disabled() -> None:
     provider = _Provider(idle_timeout=0)
-    provider._warm_pool["expired"] = ("entry-expired", time.time() - 100)
+    provider._warm_pool["expired"] = ("entry-expired", time.monotonic() - 100)
 
     provider._reap_expired_warm(idle_timeout=0)
 
@@ -100,7 +100,8 @@ def test_stop_idle_checker_rejects_live_thread_after_timeout() -> None:
     [
         ("deerflow.community.aio_sandbox.aio_sandbox_provider", "AioSandboxProvider"),
         ("deerflow.community.boxlite.provider", "BoxliteProvider"),
-        ("deerflow.community.tenki.provider", "TenkiSandboxProvider"),
+        # Tenki separates the permanent admission fence from cleanup completion;
+        # test_tenki_lifecycle exercises its retry through the real constructor.
         ("deerflow.community.opensandbox.provider", "OpenSandboxProvider"),
     ],
 )
@@ -123,7 +124,7 @@ def test_provider_shutdown_resets_guard_when_idle_checker_stop_fails(module_name
 def test_start_idle_checker_uses_monkeypatchable_interval(monkeypatch) -> None:
     provider = _Provider(idle_timeout=0.01)
     monkeypatch.setattr(_Provider, "IDLE_CHECK_INTERVAL", 0.01)
-    provider._warm_pool["expired"] = ("entry-expired", time.time() - 10)
+    provider._warm_pool["expired"] = ("entry-expired", time.monotonic() - 10)
 
     provider._start_idle_checker()
     deadline = time.time() + 1
@@ -135,3 +136,31 @@ def test_start_idle_checker_uses_monkeypatchable_interval(monkeypatch) -> None:
     assert provider.destroyed == [("expired", "entry-expired", "idle_timeout")]
     assert provider._idle_checker_thread is not None
     assert not provider._idle_checker_thread.is_alive()
+
+
+@pytest.mark.parametrize("wall_step", [10_000.0, -10_000.0])
+def test_reap_expired_warm_ignores_wall_clock_steps(monkeypatch, wall_step: float) -> None:
+    """NTP/VM wall-clock jumps cannot change a warm entry's monotonic idle age."""
+    provider = _Provider()
+    parked_at = time.monotonic() - 1
+    provider._warm_pool["fresh"] = ("entry-fresh", parked_at)
+    wall_now = time.time()
+    monkeypatch.setattr(time, "time", lambda: wall_now + wall_step)
+
+    provider._reap_expired_warm(idle_timeout=600)
+
+    assert provider._warm_pool == {"fresh": ("entry-fresh", parked_at)}
+    assert provider.destroyed == []
+
+
+def test_reap_expired_warm_uses_elapsed_monotonic_time_when_wall_clock_moves_backward(monkeypatch) -> None:
+    """A backward wall step cannot preserve an entry whose real idle age expired."""
+    provider = _Provider()
+    provider._warm_pool["expired"] = ("entry-expired", time.monotonic() - 601)
+    wall_now = time.time()
+    monkeypatch.setattr(time, "time", lambda: wall_now - 10_000)
+
+    provider._reap_expired_warm(idle_timeout=600)
+
+    assert provider._warm_pool == {}
+    assert provider.destroyed == [("expired", "entry-expired", "idle_timeout")]

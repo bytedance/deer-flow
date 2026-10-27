@@ -2,6 +2,8 @@
 
 Like the original DeerFlow 1.0, we would love to give the community a minimalistic and easy-to-use web interface with a more modern and flexible architecture.
 
+Switching accounts reloads projects, custom agents, models, and other cached workspace data for the new account. Logging out immediately hides the previous account's data; refreshing the same account preserves its cache.
+
 ## Tech Stack
 
 - **Framework**: [Next.js 16](https://nextjs.org/) with [App Router](https://nextjs.org/docs/app)
@@ -65,6 +67,11 @@ pnpm build
 # Start production server
 pnpm start
 ```
+
+Production builds recreate `public/_pagefind/` from the current documentation,
+with separate English and Chinese indexes. The index step replaces its generated
+output directory to prevent old assets accumulating. Mobile docs search results scroll inside
+the menu and close it after selection, including the section already open.
 
 ## Site Map
 

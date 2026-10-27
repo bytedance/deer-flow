@@ -2,13 +2,15 @@
 
 import json
 import logging
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
 
 KEYED_ENDPOINT = "https://api.you.com/v1/search"
 KEYLESS_ENDPOINT = "https://api.you.com/v1/agents/search"
+
+pytestmark = pytest.mark.anyio
 
 
 @pytest.fixture
@@ -37,15 +39,15 @@ def _make_response(payload: object) -> MagicMock:
 
 
 def _patch_get(mock_resp: MagicMock):
-    """Patch httpx.Client so the context-managed .get returns mock_resp."""
-    patcher = patch("deerflow.community.youcom.tools.httpx.Client")
+    """Patch httpx.AsyncClient so the context-managed .get returns mock_resp."""
+    patcher = patch("deerflow.community.youcom.tools.httpx.AsyncClient")
     mock_client_cls = patcher.start()
-    mock_client_cls.return_value.__enter__.return_value.get.return_value = mock_resp
+    mock_client_cls.return_value.__aenter__.return_value.get = AsyncMock(return_value=mock_resp)
     return patcher, mock_client_cls
 
 
 def _get_call(mock_client_cls):
-    return mock_client_cls.return_value.__enter__.return_value.get.call_args
+    return mock_client_cls.return_value.__aenter__.return_value.get.call_args
 
 
 def _web(**overrides) -> dict:
@@ -54,16 +56,16 @@ def _web(**overrides) -> dict:
     return result
 
 
-class TestGetApiKey:
+class TestResolveToolSettings:
     def test_returns_config_key_when_present(self):
         with patch("deerflow.community.youcom.tools.get_app_config") as mock:
             tool_config = MagicMock()
             tool_config.model_extra = {"api_key": "from-config"}
             mock.return_value.get_tool_config.return_value = tool_config
 
-            from deerflow.community.youcom.tools import _get_api_key
+            from deerflow.community.youcom.tools import _resolve_tool_settings
 
-            assert _get_api_key("web_search") == "from-config"
+            assert _resolve_tool_settings("web_search")[0] == "from-config"
 
     def test_falls_back_to_env_when_config_key_blank(self):
         with patch("deerflow.community.youcom.tools.get_app_config") as mock:
@@ -71,27 +73,27 @@ class TestGetApiKey:
             tool_config.model_extra = {"api_key": "   "}
             mock.return_value.get_tool_config.return_value = tool_config
             with patch.dict("os.environ", {"YDC_API_KEY": "env-key"}, clear=True):
-                from deerflow.community.youcom.tools import _get_api_key
+                from deerflow.community.youcom.tools import _resolve_tool_settings
 
-                assert _get_api_key("web_search") == "env-key"
+                assert _resolve_tool_settings("web_search")[0] == "env-key"
 
     def test_returns_none_when_no_key_anywhere(self):
         """No key is not an error: it selects the keyless endpoint."""
         with patch("deerflow.community.youcom.tools.get_app_config") as mock:
             mock.return_value.get_tool_config.return_value = None
             with patch.dict("os.environ", {}, clear=True):
-                from deerflow.community.youcom.tools import _get_api_key
+                from deerflow.community.youcom.tools import _resolve_tool_settings
 
-                assert _get_api_key("web_search") is None
+                assert _resolve_tool_settings("web_search")[0] is None
 
 
 class TestEndpointSelection:
-    def test_configured_key_uses_keyed_endpoint_with_header(self, mock_config_with_key):
+    async def test_configured_key_uses_keyed_endpoint_with_header(self, mock_config_with_key):
         patcher, mock_client_cls = _patch_get(_make_response({"results": {"web": [_web()]}}))
         try:
             from deerflow.community.youcom.tools import web_search_tool
 
-            web_search_tool.invoke({"query": "test"})
+            await web_search_tool.ainvoke({"query": "test"})
             call = _get_call(mock_client_cls)
         finally:
             patcher.stop()
@@ -100,14 +102,14 @@ class TestEndpointSelection:
         assert call.kwargs["headers"]["X-API-Key"] == "test-ydc-key"
         assert call.kwargs["params"] == {"query": "test", "count": 5}
 
-    def test_no_key_uses_keyless_endpoint_without_auth_header(self, mock_config_no_key):
+    async def test_no_key_uses_keyless_endpoint_without_auth_header(self, mock_config_no_key):
         """The keyless endpoint rejects an auth header, so none may be sent."""
         with patch.dict("os.environ", {}, clear=True):
             patcher, mock_client_cls = _patch_get(_make_response({"results": {"web": [_web()]}}))
             try:
                 from deerflow.community.youcom.tools import web_search_tool
 
-                web_search_tool.invoke({"query": "test"})
+                await web_search_tool.ainvoke({"query": "test"})
                 call = _get_call(mock_client_cls)
             finally:
                 patcher.stop()
@@ -115,13 +117,13 @@ class TestEndpointSelection:
         assert call.args[0] == KEYLESS_ENDPOINT
         assert "X-API-Key" not in call.kwargs["headers"]
 
-    def test_env_key_uses_keyed_endpoint(self, mock_config_no_key):
+    async def test_env_key_uses_keyed_endpoint(self, mock_config_no_key):
         with patch.dict("os.environ", {"YDC_API_KEY": "env-key"}, clear=True):
             patcher, mock_client_cls = _patch_get(_make_response({"results": {"web": [_web()]}}))
             try:
                 from deerflow.community.youcom.tools import web_search_tool
 
-                web_search_tool.invoke({"query": "test"})
+                await web_search_tool.ainvoke({"query": "test"})
                 call = _get_call(mock_client_cls)
             finally:
                 patcher.stop()
@@ -130,7 +132,7 @@ class TestEndpointSelection:
         assert call.kwargs["headers"]["X-API-Key"] == "env-key"
 
     @pytest.mark.parametrize("with_key", [True, False])
-    def test_identifies_deerflow_in_user_agent(self, with_key, mock_config_no_key):
+    async def test_identifies_deerflow_in_user_agent(self, with_key, mock_config_no_key):
         """Both endpoints identify DeerFlow so You.com can attribute the traffic."""
         env = {"YDC_API_KEY": "k"} if with_key else {}
         with patch.dict("os.environ", env, clear=True):
@@ -138,7 +140,7 @@ class TestEndpointSelection:
             try:
                 from deerflow.community.youcom.tools import web_search_tool
 
-                web_search_tool.invoke({"query": "test"})
+                await web_search_tool.ainvoke({"query": "test"})
                 call = _get_call(mock_client_cls)
             finally:
                 patcher.stop()
@@ -149,7 +151,7 @@ class TestEndpointSelection:
 
 
 class TestWebSearchTool:
-    def test_returns_normalized_list_with_joined_snippets(self, mock_config_with_key):
+    async def test_returns_normalized_list_with_joined_snippets(self, mock_config_with_key):
         payload = {
             "results": {
                 "web": [
@@ -162,7 +164,7 @@ class TestWebSearchTool:
         try:
             from deerflow.community.youcom.tools import web_search_tool
 
-            parsed = json.loads(web_search_tool.invoke({"query": "vector databases"}))
+            parsed = json.loads(await web_search_tool.ainvoke({"query": "vector databases"}))
         finally:
             patcher.stop()
 
@@ -171,7 +173,7 @@ class TestWebSearchTool:
             {"title": "B", "url": "https://ex.com/b", "snippet": "s3"},
         ]
 
-    def test_falls_back_to_description_when_no_snippets(self, mock_config_with_key):
+    async def test_falls_back_to_description_when_no_snippets(self, mock_config_with_key):
         """News hits carry only a description; web hits with empty snippets do too."""
         payload = {
             "results": {
@@ -183,13 +185,13 @@ class TestWebSearchTool:
         try:
             from deerflow.community.youcom.tools import web_search_tool
 
-            parsed = json.loads(web_search_tool.invoke({"query": "news"}))
+            parsed = json.loads(await web_search_tool.ainvoke({"query": "news"}))
         finally:
             patcher.stop()
 
         assert [r["snippet"] for r in parsed] == ["web-desc", "news-desc"]
 
-    def test_web_and_news_merged_and_trimmed_to_count(self, mock_config_with_key):
+    async def test_web_and_news_merged_and_trimmed_to_count(self, mock_config_with_key):
         """`count` applies per section, so the merged list can overshoot it."""
         payload = {
             "results": {
@@ -201,31 +203,31 @@ class TestWebSearchTool:
         try:
             from deerflow.community.youcom.tools import web_search_tool
 
-            parsed = json.loads(web_search_tool.invoke({"query": "test"}))
+            parsed = json.loads(await web_search_tool.ainvoke({"query": "test"}))
         finally:
             patcher.stop()
 
         assert len(parsed) == 5
         assert [r["title"] for r in parsed] == ["W0", "W1", "W2", "W3", "W4"]
 
-    def test_agent_max_results_is_honored_over_config(self, mock_config_with_key):
+    async def test_agent_max_results_is_honored_over_config(self, mock_config_with_key):
         patcher, mock_client_cls = _patch_get(_make_response({"results": {"web": [_web()]}}))
         try:
             from deerflow.community.youcom.tools import web_search_tool
 
-            web_search_tool.invoke({"query": "test", "max_results": 20})
+            await web_search_tool.ainvoke({"query": "test", "max_results": 20})
             params = _get_call(mock_client_cls).kwargs["params"]
         finally:
             patcher.stop()
 
         assert params["count"] == 20
 
-    def test_config_max_results_used_when_caller_omits(self, mock_config_with_key):
+    async def test_config_max_results_used_when_caller_omits(self, mock_config_with_key):
         patcher, mock_client_cls = _patch_get(_make_response({"results": {"web": [_web()]}}))
         try:
             from deerflow.community.youcom.tools import web_search_tool
 
-            web_search_tool.invoke({"query": "test"})
+            await web_search_tool.ainvoke({"query": "test"})
             params = _get_call(mock_client_cls).kwargs["params"]
         finally:
             patcher.stop()
@@ -233,7 +235,7 @@ class TestWebSearchTool:
         assert params["count"] == 5
 
     @pytest.mark.parametrize(("max_results", "expected"), [(0, 5), (-2, 5), (1, 1), (100, 100), ("500", 100)])
-    def test_max_results_clamped_to_provider_bounds(self, max_results, expected):
+    async def test_max_results_clamped_to_provider_bounds(self, max_results, expected):
         with patch("deerflow.community.youcom.tools.get_app_config") as mock:
             tool_config = MagicMock()
             tool_config.model_extra = {"api_key": "k", "max_results": max_results}
@@ -242,14 +244,14 @@ class TestWebSearchTool:
             try:
                 from deerflow.community.youcom.tools import web_search_tool
 
-                web_search_tool.invoke({"query": "test"})
+                await web_search_tool.ainvoke({"query": "test"})
                 params = _get_call(mock_client_cls).kwargs["params"]
             finally:
                 patcher.stop()
 
         assert params["count"] == expected
 
-    def test_invalid_max_results_falls_back_to_default_with_warning(self, caplog):
+    async def test_invalid_max_results_falls_back_to_default_with_warning(self, caplog):
         with patch("deerflow.community.youcom.tools.get_app_config") as mock:
             tool_config = MagicMock()
             tool_config.model_extra = {"api_key": "k", "max_results": "not-a-number"}
@@ -259,7 +261,7 @@ class TestWebSearchTool:
                 from deerflow.community.youcom.tools import web_search_tool
 
                 with caplog.at_level(logging.WARNING, logger="deerflow.community.youcom.tools"):
-                    web_search_tool.invoke({"query": "test"})
+                    await web_search_tool.ainvoke({"query": "test"})
                 params = _get_call(mock_client_cls).kwargs["params"]
             finally:
                 patcher.stop()
@@ -267,46 +269,46 @@ class TestWebSearchTool:
         assert params["count"] == 5
         assert any("Invalid You.com max_results" in record.message for record in caplog.records)
 
-    def test_empty_results_returns_error_json(self, mock_config_with_key):
+    async def test_empty_results_returns_error_json(self, mock_config_with_key):
         patcher, _ = _patch_get(_make_response({"results": {"web": []}}))
         try:
             from deerflow.community.youcom.tools import web_search_tool
 
-            parsed = json.loads(web_search_tool.invoke({"query": "no results"}))
+            parsed = json.loads(await web_search_tool.ainvoke({"query": "no results"}))
         finally:
             patcher.stop()
 
         assert parsed["error"] == "No results found"
         assert parsed["query"] == "no results"
 
-    def test_missing_results_section_returns_error_json(self, mock_config_with_key):
+    async def test_missing_results_section_returns_error_json(self, mock_config_with_key):
         patcher, _ = _patch_get(_make_response({"metadata": {"latency": 0.1}}))
         try:
             from deerflow.community.youcom.tools import web_search_tool
 
-            parsed = json.loads(web_search_tool.invoke({"query": "test"}))
+            parsed = json.loads(await web_search_tool.ainvoke({"query": "test"}))
         finally:
             patcher.stop()
 
         assert parsed["error"] == "No results found"
 
-    def test_non_dict_payload_returns_format_error(self, mock_config_with_key):
+    async def test_non_dict_payload_returns_format_error(self, mock_config_with_key):
         patcher, _ = _patch_get(_make_response(["not", "a", "dict"]))
         try:
             from deerflow.community.youcom.tools import web_search_tool
 
-            parsed = json.loads(web_search_tool.invoke({"query": "test"}))
+            parsed = json.loads(await web_search_tool.ainvoke({"query": "test"}))
         finally:
             patcher.stop()
 
         assert "unexpected response format" in parsed["error"]
 
-    def test_partial_fields_default_to_empty_string(self, mock_config_with_key):
+    async def test_partial_fields_default_to_empty_string(self, mock_config_with_key):
         patcher, _ = _patch_get(_make_response({"results": {"web": [{}]}}))
         try:
             from deerflow.community.youcom.tools import web_search_tool
 
-            parsed = json.loads(web_search_tool.invoke({"query": "test"}))
+            parsed = json.loads(await web_search_tool.ainvoke({"query": "test"}))
         finally:
             patcher.stop()
 
@@ -321,7 +323,7 @@ class TestWebSearchTool:
             (500, None),
         ],
     )
-    def test_http_error_returns_structured_error(self, status, hint, mock_config_with_key):
+    async def test_http_error_returns_structured_error(self, status, hint, mock_config_with_key):
         mock_resp = MagicMock()
         mock_resp.raise_for_status.side_effect = httpx.HTTPStatusError(
             str(status),
@@ -332,7 +334,7 @@ class TestWebSearchTool:
         try:
             from deerflow.community.youcom.tools import web_search_tool
 
-            parsed = json.loads(web_search_tool.invoke({"query": "test"}))
+            parsed = json.loads(await web_search_tool.ainvoke({"query": "test"}))
         finally:
             patcher.stop()
 
@@ -340,13 +342,13 @@ class TestWebSearchTool:
         if hint:
             assert hint in parsed["error"]
 
-    def test_network_exception_returns_error_json(self, mock_config_with_key):
+    async def test_network_exception_returns_error_json(self, mock_config_with_key):
         patcher, mock_client_cls = _patch_get(MagicMock())
-        mock_client_cls.return_value.__enter__.return_value.get.side_effect = Exception("timeout")
+        mock_client_cls.return_value.__aenter__.return_value.get.side_effect = Exception("timeout")
         try:
             from deerflow.community.youcom.tools import web_search_tool
 
-            parsed = json.loads(web_search_tool.invoke({"query": "test"}))
+            parsed = json.loads(await web_search_tool.ainvoke({"query": "test"}))
         finally:
             patcher.stop()
 
@@ -358,7 +360,7 @@ class TestWebSearchTool:
     [float("inf"), True, 3.5],
     ids=["yaml-inf", "bool", "non-integral-float"],
 )
-def test_invalid_max_results_shapes_fall_back_to_default(raw):
+async def test_invalid_max_results_shapes_fall_back_to_default(raw):
     """Invalid max_results shapes fall back to the default, never crash or truncate.
 
     These pin the shared-owner bar for this provider: a YAML ``.inf`` makes
@@ -375,7 +377,7 @@ def test_invalid_max_results_shapes_fall_back_to_default(raw):
         try:
             from deerflow.community.youcom.tools import web_search_tool
 
-            web_search_tool.invoke({"query": "test"})
+            await web_search_tool.ainvoke({"query": "test"})
             params = _get_call(mock_client_cls).kwargs["params"]
         finally:
             patcher.stop()

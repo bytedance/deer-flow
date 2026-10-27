@@ -189,8 +189,34 @@ def test_skills_writer_preserves_the_lifecycle_ledger(
     monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
     monkeypatch.setattr("app.gateway.routers.skills.reload_extensions_config", lambda *a, **k: None)
 
-    skills_router._write_extensions_skill_state(MagicMock(), "demo", False, rebuild_public_projection=False)
+    skills_router._write_extensions_skill_state(MagicMock(_app_config=None), "demo", False, rebuild_public_projection=False)
 
     written = json.loads(cfg.read_text(encoding="utf-8"))
     assert written["mcpLifecycle"] == ledger  # preserved byte-for-value, never recomputed
     assert written["skills"]["demo"]["enabled"] is False
+
+
+def test_removed_servers_drop_their_stored_oauth_tokens_and_disabled_ones_keep_them(
+    reconciler,  # noqa: F811 - fixture imported from the sibling suite
+    monkeypatch,
+    tmp_path,
+):
+    """A removed server's mcp_oauth_tokens row can never be read again; a disabled one may be re-enabled."""
+    from unittest.mock import MagicMock
+
+    from deerflow.mcp.oauth_store import set_mcp_oauth_token_store
+
+    cfg = tmp_path / "extensions_config.json"
+    _write(cfg, {"A": _stdio("npx"), "B": _stdio("uvx")})
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
+    store = MagicMock()
+    store.forget_unconfigured.return_value = 0
+    previous = set_mcp_oauth_token_store(store)
+    try:
+        mcp_router._apply_mcp_server_state_update(McpServerStateUpdateRequest(server_name="A", enabled=False))
+        mcp_router._apply_mcp_server_delete("B")
+    finally:
+        set_mcp_oauth_token_store(previous)
+
+    calls = [(call.args[0], set(call.args[1])) for call in store.forget_unconfigured.call_args_list]
+    assert calls == [(None, {"A", "B"}), (None, {"A"})]

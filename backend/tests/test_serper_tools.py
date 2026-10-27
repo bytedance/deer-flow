@@ -223,56 +223,56 @@ class TestGetApiKey:
             mock.return_value.get_tool_config.assert_called_with("image_search")
 
 
-class TestCoerceMaxResults:
-    def test_returns_value_when_valid_positive_int(self):
-        from deerflow.community.serper.tools import _coerce_max_results
+class TestCountForRequest:
+    """Serper delegates "invalid" to the shared owner, then applies its 10-result cap."""
 
-        assert _coerce_max_results(3) == 3
+    def test_returns_value_when_valid_positive_int(self):
+        from deerflow.community.serper.tools import _count_for_request
+
+        assert _count_for_request(3) == 3
 
     def test_returns_value_for_numeric_string(self):
-        from deerflow.community.serper.tools import _coerce_max_results
+        from deerflow.community.serper.tools import _count_for_request
 
-        assert _coerce_max_results("7") == 7
+        assert _count_for_request("7") == 7
 
-    def test_caps_value_at_default_maximum(self):
-        from deerflow.community.serper.tools import _coerce_max_results
+    def test_keeps_integral_float(self):
+        from deerflow.community.serper.tools import _count_for_request
 
-        assert _coerce_max_results(999) == 10
+        assert _count_for_request(4.0) == 4
 
-    def test_respects_custom_maximum(self):
-        from deerflow.community.serper.tools import _coerce_max_results
+    def test_caps_value_at_serper_maximum(self):
+        from deerflow.community.serper.tools import _count_for_request
 
-        assert _coerce_max_results(999, max_allowed=3) == 3
+        assert _count_for_request(999) == 10
 
-    def test_returns_default_for_non_numeric_string(self):
-        from deerflow.community.serper.tools import _coerce_max_results
+    @pytest.mark.parametrize("value", ["oops", None, object(), 0, -3, float("inf")])
+    def test_returns_default_for_invalid_values(self, value):
+        from deerflow.community.serper.tools import _count_for_request
 
-        assert _coerce_max_results("oops") == 5
+        assert _count_for_request(value) == 5
 
-    def test_returns_default_for_none(self):
-        from deerflow.community.serper.tools import _coerce_max_results
+    @pytest.mark.parametrize("value", [True, False])
+    def test_rejects_booleans(self, value):
+        """bool is an int subclass, so it must never be coerced to 1 (#5865)."""
+        from deerflow.community.serper.tools import _count_for_request
 
-        assert _coerce_max_results(None) == 5
+        assert _count_for_request(value) == 5
 
-    def test_returns_default_for_non_coercible_object(self):
-        from deerflow.community.serper.tools import _coerce_max_results
+    def test_rejects_non_integral_float(self):
+        """A fractional float is a miswritten config value, not a truncation candidate (#5865)."""
+        from deerflow.community.serper.tools import _count_for_request
 
-        assert _coerce_max_results(object()) == 5
+        assert _count_for_request(3.5) == 5
 
-    def test_returns_default_for_zero(self):
-        from deerflow.community.serper.tools import _coerce_max_results
+    def test_warns_under_the_serper_label_on_the_module_logger(self, caplog):
+        from deerflow.community.serper.tools import _count_for_request
 
-        assert _coerce_max_results(0) == 5
+        with caplog.at_level(logging.WARNING, logger="deerflow.community.serper.tools"):
+            _count_for_request(True)
 
-    def test_returns_default_for_negative(self):
-        from deerflow.community.serper.tools import _coerce_max_results
-
-        assert _coerce_max_results(-3) == 5
-
-    def test_respects_custom_default(self):
-        from deerflow.community.serper.tools import _coerce_max_results
-
-        assert _coerce_max_results("bad", default=2) == 2
+        assert "Invalid Serper max_results=True; using default 5" in caplog.text
+        assert [record.name for record in caplog.records] == ["deerflow.community.serper.tools"]
 
 
 class TestMissingKeyError:
@@ -1344,13 +1344,6 @@ def test_package_exports_image_search_tool():
     from deerflow.community.serper.tools import image_search_tool as direct_image_search_tool
 
     assert image_search_tool is direct_image_search_tool
-
-
-def test_coerce_max_results_inf_falls_back_to_default():
-    """A YAML `.inf` max_results must fall back to the default, not crash."""
-    import deerflow.community.serper.tools as serper_mod
-
-    assert serper_mod._coerce_max_results(float("inf")) == 5
 
 
 class TestSearchTimeRange:

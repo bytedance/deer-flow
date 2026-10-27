@@ -6,6 +6,41 @@ capture/fetch publication. It writes and fsyncs a hidden exclusive sibling befor
 umask; replacements preserve existing permission bits before publication. Never
 read the process umask by changing it in this threaded runtime. Behavioral tests
 for both tool imports live in `tests/test_browser_outputs_atomic.py`.
+`cleanup_failed_atomic_write` shares best-effort cleanup across this publisher,
+`skills/projection.py`'s private manifest writer, project document staging,
+extension snapshot rollback (including removal of a file that did not exist),
+the managed plugins-block rewrite, custom-skill file writes, per-user
+skill-state writes, Gateway upload staging, and the Gateway skill-archive
+upload copy and its post-install discard. The upload route discards that
+archive before closing the multipart form and suppresses close errors.
+Use it on publication failure or after deciding to discard an owned
+temporary; pass a raw descriptor only until `fdopen` succeeds, or an explicitly
+transferred duplicate descriptor owned by the cleanup caller. Shelf discards
+must preserve both a rejected project's 404 and a dedup hit's 200 response.
+Callers retain their own serialization, permissions and publication policy.
+Shelf `stage_document_bytes` drains preparation, writes, close and failure
+cleanup before propagating cancellation. Retain the opened handle across its
+handoff, but leave waiting for incoming chunks cancellable; regressions in
+`tests/test_project_document_staging_cancellation.py` cover both shelf entry points.
+Local Linux/macOS text revisions opt into a short `temporary_prefix` and
+`preserve_metadata_from` (a caller-owned descriptor). Staging starts at `0600`;
+`file_revision_metadata` transfers ownership, mode, ACLs and xattrs before data.
+macOS uses native descriptor ACL APIs and `fcopyfile(COPYFILE_XATTR)`; Linux uses
+descriptor xattrs, including its access ACL, removing inherited extras. Errors
+abort; never ignore metadata permission failures. Refuse set-id bits, macOS file
+flags and content-bound privilege attributes rather than reattach stale privileges to new
+content. Other publisher callers retain their existing mode-only contract.
+Do not restore old timestamps on a content revision, including an empty save.
+Source-descriptor close failures are best-effort warnings, not save failures;
+guard diagnostics so the publication result or original interruption survives.
+Failure cleanup must preserve the original publication exception, including
+interruptions. Descriptor close and sibling unlink are separate best-effort
+operations: a close failure must not prevent the unlink attempt.
+Attempt warning logs for cleanup `OSError`s with the temporary path and exception
+details. Guard logging-handler exceptions so diagnostics neither replace the
+publication exception (including interruptions) nor skip remaining cleanup.
+Both tools take collision names from `output_names.output_name_candidates`
+(name, `-1`..`-1000`, five timestamps); claim each atomically, never pre-check.
 
 ### Model Retry Hints
 
@@ -66,6 +101,15 @@ Display summaries use `strip_leading_think_blocks` before limiting text;
 
 ### Agent / Tool Assembly Off-Load
 
+One-shot input-polish, follow-up-suggestion, and project-file-summary helpers
+build providers through `run_assembly` before awaiting inference. Provider
+construction can read local credentials; keep it off the event loop and the
+default executor while preserving request context. Cancellation during
+construction must not start inference. This contract covers callers of
+`oneshot_llm.py`; standalone skill-moderation and goal-evaluator constructors
+are separate sites and are not covered by this offload.
+Coverage: `tests/blocking_io/test_oneshot_llm_offloop.py`.
+
 `start_run` also resolves the factory through `run_assembly` before admission:
 cold imports cannot occupy the loop or its default pool, and import errors
 cannot admit a run. `tests/blocking_io/test_agent_factory_resolve_offloop.py`
@@ -106,8 +150,9 @@ and preserve the generic `+xml` rule.
 
 ### Conversion Worker Ownership
 
-`convert_file_to_markdown` drains large-file conversion workers across caller
-cancellation before returning control to source-file cleanup. Keep conversion
+`convert_file_to_markdown` offloads parsing for every source size: compressed
+Office files can require seconds of work below 1 MiB. It drains conversion workers
+across caller cancellation before returning control to source-file cleanup. Keep conversion
 inside `await_drained`, including when the worker fails or cancellation repeats;
 upload ingestion owns a temporary source that it removes in `finally`. Coverage
 lives in `tests/test_file_conversion_cancellation.py`.
@@ -137,9 +182,17 @@ retain their existing portability exemptions.
 ### Advisory File Lock Retries
 
 `file_lock.retry_until_locked` owns contention-only acquisition retries for the
-Windows Lark and extension-manager locks and bounded skill-projection reads.
+Windows Lark, extension-manager and channel runtime-config locks and bounded
+skill-projection reads.
 Retry only EACCES/EAGAIN/EDEADLK; other errors propagate without sleeping.
 Keep per-caller policies: Lark has a 15-minute Windows file-lock deadline,
-extension management waits indefinitely, and skill export retains its existing
-deadline, 0.02-second cadence and cancellation check. Clocks and sleeps are
-injectable; tests must not patch the shared stdlib time module.
+extension management and channel runtime config wait indefinitely, and skill
+export retains its existing deadline, 0.02-second cadence and cancellation
+check. Clocks and sleeps are injectable; tests must not patch the shared stdlib
+time module.
+The channel caller wraps its injected sleep to warn once after 50 contention
+retries; the helper remains responsible for error classification and cadence.
+
+`parse_retry_after_date_ms(raw, now=...)` owns HTTP-date parsing for Claude, Codex
+and LLM error middleware. Interpret timezone-less asctime as UTC and apply the
+shared delay bound. Callers retain numeric/header precedence and local backoff.

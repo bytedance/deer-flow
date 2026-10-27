@@ -43,6 +43,28 @@ def test_reuses_an_existing_value_without_generating(tmp_path: Path) -> None:
     assert path.read_text(encoding="utf-8") == "existing-value\n"
 
 
+def test_a_bom_prefixed_secret_still_validates(tmp_path: Path) -> None:
+    """A secret file saved by a Windows editor may carry a UTF-8 BOM.
+
+    U+FEFF is not whitespace, so the strip never removes it and validation
+    rejects the value — for ``.credentials_key`` that refuses startup and
+    leaves every stored secret unreadable. The BOM is an encoding artifact,
+    never part of a legitimate secret, so the reader consumes it.
+    """
+    path = tmp_path / ".secret"
+    path.write_bytes(b"\xef\xbb\xbf" + b"existing-value\n")
+
+    def validate(value: str) -> None:
+        if value != "existing-value":
+            raise ValueError("not the expected secret")
+
+    def generate() -> str:
+        raise AssertionError("a readable secret must never be regenerated")
+
+    assert read_or_create_secret_file(path, generate, validate=validate) == "existing-value"
+    assert path.read_bytes().startswith(b"\xef\xbb\xbf"), "reading must not rewrite the file"
+
+
 def test_a_peer_that_publishes_first_wins(tmp_path: Path) -> None:
     """Deterministic race: the peer creates the file between our existence check and our create.
 

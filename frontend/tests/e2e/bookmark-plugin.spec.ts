@@ -6,6 +6,8 @@ import path from "node:path";
 
 import { expect, test } from "@playwright/test";
 
+import { extensionCatalog } from "../../src/core/extensions/catalog";
+
 import { mockLangGraphAPI, MOCK_THREAD_ID } from "./utils/mock-api";
 
 let gateway: ChildProcess;
@@ -448,7 +450,52 @@ for (const locale of ["en-US", "zh-CN"]) {
         exact: true,
       }),
     ).toBeVisible();
-    await expect(page.getByRole("article")).toHaveCount(9);
+    await expect(page.getByRole("article")).toHaveCount(
+      extensionCatalog.length,
+    );
+    const management = page.getByRole("article").filter({
+      hasText: zh ? "知识入库与处理" : "Knowledge ingestion and processing",
+    });
+    await expect(management).toHaveCount(1);
+    await expect(management).toContainText(
+      zh
+        ? "需要安装和配置，不包含管理页面。"
+        : "Requires installation and configuration; no management page is included.",
+    );
+    const lightrag = page.getByRole("article").filter({ hasText: "LightRAG" });
+    await expect(lightrag).toHaveCount(1);
+    await expect(lightrag).toContainText(
+      zh
+        ? "从 LightRAG 检索文档与实体关系，并使用统一的来源引用。"
+        : "Retrieve documents and entity relations from LightRAG with shared source citations.",
+    );
+    const weknoraTitle = zh
+      ? "WeKnora 知识检索"
+      : "WeKnora knowledge retrieval";
+    const weknora = page.getByRole("article").filter({ hasText: weknoraTitle });
+    await expect(weknora).toHaveCount(1);
+    await expect(weknora).toContainText(
+      zh
+        ? "需要管理员安装并配置访问权限。"
+        : "Requires administrator installation and access configuration.",
+    );
+    await weknora
+      .getByRole("button", {
+        name: zh ? `查看 ${weknoraTitle}` : `View ${weknoraTitle}`,
+        exact: true,
+      })
+      .click();
+    await expect(
+      page.getByRole("link", {
+        name: zh ? "查看安装说明" : "Installation guide",
+      }),
+    ).toHaveAttribute("href", /deerflow-extension-weknora#readme$/);
+    await page
+      .getByRole("button", {
+        name: zh ? "全部扩展" : "All extensions",
+        exact: true,
+      })
+      .click();
     const knowledgeTitle = zh ? "知识范围选择示例" : "Knowledge scope example";
     const knowledge = page
       .getByRole("article")
@@ -485,8 +532,8 @@ for (const locale of ["en-US", "zh-CN"]) {
     await expect(workflow).toHaveCount(1);
     await expect(workflow).toContainText(
       zh
-        ? "不支持恢复、人工审批或硬金额预算"
-        : "no resume, human approval or hard monetary budget",
+        ? "不支持重启回放或硬金额预算"
+        : "No restart replay or hard monetary budget",
     );
     await workflow
       .getByRole("button", {
@@ -638,10 +685,10 @@ test("catalog remains discoverable when runtime discovery fails", async ({
   await expect(
     page.getByRole("alert").filter({ hasText: "Extensions unavailable." }),
   ).toBeVisible();
-  await expect(page.getByRole("article")).toHaveCount(9);
+  await expect(page.getByRole("article")).toHaveCount(extensionCatalog.length);
   await expect(
     page.getByRole("article").filter({ hasText: "Catalog extension" }),
-  ).toHaveCount(9);
+  ).toHaveCount(extensionCatalog.length);
   await expect(
     page.getByRole("article").filter({ hasText: "Script workflows" }),
   ).toHaveCount(1);

@@ -29,10 +29,12 @@ The empty-DB path keeps using `create_all` because `Base.metadata` is the only a
 `0028_parked_attempts` → `0029_scheduler_agent_tasks` →
 `0030_notification_claim_tokens` → `0031_scheduled_streak_boundary` →
 `0032_activity_and_task_events` → `0033_batch_result_artifact` → `0034_run_event_seq_watermark` →
-`0035_login_throttle` → `0036_run_idempotency_request` → `0037_project_document_summaries` →
-`0038_channel_thread_bindings` → `0039_user_disabled` →
-`0040_scheduled_group_notice` → `0041_im_notice_preferences` →
-`0042_channel_leases` (current head). The preference
+`0035_login_throttle` → `0036_run_idempotency_request` →
+`0037_project_document_summaries` → `0038_channel_thread_bindings` →
+`0039_user_disabled` → `0040_scheduled_group_notice` →
+`0041_im_notice_preferences` → `0042_channel_leases` →
+`0043_runtime_im_notices` → `0044_channel_runtime_configs` →
+`0045_completed_run_evidence` → `0046_skill_mutations` → `0047_mcp_oauth_tokens` → `0048_extension_execution_leases` (current head). The preference
 revision adds a separate owner/key table with a cascading users foreign key and
 does not alter users; the project-documents revision adds a new owner-scoped
 shelf table, and the MCP lease-token revision adds two nullable token columns to
@@ -186,10 +188,10 @@ on installs that never enabled it. The convention is:
 - `migrations/versions/0037_project_document_summaries.py` — adds nullable `project_documents.summary` (best-effort LLM one-line description, off by default; no backfill, so legacy rows stay NULL and the bootstrap forward-compat floor is unchanged); chains after `0036_run_idempotency_request`. Test: `tests/test_migration_0037_project_document_summaries.py`
 - `migrations/versions/0038_channel_thread_bindings.py` — creates `channel_thread_bindings` (`key` PK = the legacy `channel_name:chat_id[:topic_id]` string, parsed `channel_name`/`chat_id`/nullable `topic_id`, `thread_id`, `user_id` (`""` when unknown, never NULL), epoch `Double` `created_at`/`updated_at` + `ix_channel_thread_bindings_channel_chat`), the shared successor of the per-process `channels/store.json` that `ChannelManager` used for unbound IM conversations (`persistence/channel_thread_bindings/`: `SqlChannelThreadBindingRepository` upserts with a dialect-native `ON CONFLICT (key) DO UPDATE` that keeps `created_at`, deletes a chat's base + topic rows by key prefix with `startswith(autoescape=True)`, and imports with batched `ON CONFLICT DO NOTHING` so two replicas importing the same file concurrently neither duplicate nor clobber a row; `app/channels/store.py::SqlChannelStore.import_legacy_json` runs that once from `ChannelService.start()` and renames the file to `store.json.migrated`). The shape is 1:1 with the JSON entries so the import is lossless; `split_binding_key` parses legacy keys on the first two colons exactly as the old `list_entries()` did (lookups always match the full `key`). Table create/drop and the index are guarded with a fresh inspector in both directions. New table, so the bootstrap forward-compat floor is unchanged; chains after `0037_project_document_summaries`. Test: `tests/test_migration_0038_channel_thread_bindings.py`
 - `migrations/versions/0042_channel_leases.py` — creates `channel_leases` (`provider` PK, `owner_id`, fencing `epoch` BIGINT, database-clock epoch `Double` `lease_expires_at`/`updated_at`, `transport_running`), the per-provider IM leader lease behind `channels.leader_lease` (`persistence/channel_leases/`: acquire is one dialect-native upsert whose `DO UPDATE ... WHERE lease_expires_at + grace < now OR owner_id = :me` bumps the epoch; renew extends only a live lease at the holder's epoch; release sets the expiry to 0; every `now` is the database clock, never an instance's). Table create/drop is guarded with a fresh inspector in both directions. New table, so the bootstrap forward-compat floor is unchanged; chains after `0041_im_notice_preferences`. Test: `tests/test_migration_0042_channel_leases.py`
+- `migrations/versions/0044_channel_runtime_configs.py` — creates `channel_runtime_configs` (`provider` PK, nullable `config_ciphertext`, `disconnected`, `version` BIGINT, `updated_at`), the shared successor of `channels/runtime-config.json`. `persistence/channel_runtime_configs/` is a sync repository on `app_sync_sqlalchemy_url` (callers run in threads): `save` upserts and bumps `version`, `insert_missing` uses `ON CONFLICT DO NOTHING`. `app/channels/runtime_config_store.py` encrypts the JSON block with `DEER_FLOW_CREDENTIALS_KEY`; a disconnect has NULL ciphertext. Rows are never deleted. Table-guarded both ways; no data moved (the Gateway imports the JSON file). Test: `tests/test_migration_0044_channel_runtime_configs.py`
 - `persistence/bootstrap.py` — `bootstrap_schema(engine, backend=...)`, the three-branch provisioning decision, locked revision validation, and the narrow 0019 forward-compatibility exception
 - `extensions/loader.py::load_extensions` — registers each spec's `table_prefix` with `register_extension_table_prefix()`
 - Tests: `tests/test_persistence_bootstrap.py` (branches), `tests/test_persistence_bootstrap_concurrency.py` (concurrency), `tests/test_persistence_bootstrap_regression.py` (issue #3682), `tests/test_persistence_migrations_env.py` (filter, including extension-owned tables), `tests/test_extension_loader.py::TestTablePrefixRegistration` (spec-to-filter wiring), `tests/blocking_io/test_persistence_bootstrap.py` (asyncio.to_thread anchor), `tests/test_migration_0004_run_ownership_dedupe.py` + `tests/test_migration_0007_scheduled_run_active_dedupe.py` (dedupe-before-unique-index pre-steps), `tests/test_migration_0025_repair_run_change_seq.py` (issue #5516 skipped-revision heal)
-
 
 `0041_im_notice_preferences` adds the owner/provider proactive-notification
 boolean table without a users FK (local synthetic IM owners are supported).
@@ -198,3 +200,10 @@ It follows 0040 without reparenting history, has no backfill and leaves the
 forward-compatibility floor unchanged. Downgrade removes the saved choices;
 reenabling a provider never reopens notifications canceled before downgrade.
 Tests: `test_migration_0041_im_notice_preferences.py`.
+
+- `0045_completed_run_evidence` adds nullable evidence sealing fields and completed-run snapshots after `0044_channel_runtime_configs`.
+- `0046_skill_mutations` adds durable owner enrollment, asset revisions, proposals, publication operations and scan leases.
+- `0047_mcp_oauth_tokens` creates the table-guarded `mcp_oauth_tokens` (PK `scope`, `owner_user_id` (`''` for deployment), `server_key`; encrypted token columns, chain and request fingerprints, `version`, refresh lease) with no backfill. The single-head pin lives in `tests/test_migration_0047_mcp_oauth_tokens.py`.
+
+- `0048_extension_execution_leases` adds generic extension execution fences after
+  the shipped OAuth revision; test upgrade/downgrade in `test_extension_execution_fence.py`.
