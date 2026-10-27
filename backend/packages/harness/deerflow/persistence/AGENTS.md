@@ -1,5 +1,11 @@
 # Persistence lifecycle
 
+`postgres_url.normalize_asyncpg_url` maps libpq `sslmode` to asyncpg `ssl`,
+preserving modes and credentials. Reject conflicting/repeated SSL options and
+unsupported `channel_binding`; never silently drop authentication requirements.
+`DatabaseConfig.app_sqlalchemy_url` and test fixtures share it; synchronous
+psycopg/checkpointer DSNs retain their libpq options.
+
 Postgres bootstrap owns its session-scoped advisory lock until `pg_advisory_unlock` completes. Drain that unlock across host cancellation before leaving the SQLAlchemy connection context; repeated cancellation must not return a pooled session while it still holds the bootstrap mutex. Ordinary database errors remain best-effort and are logged.
 
 Acquire that lock by polling `pg_try_advisory_lock`, never with a blocking `pg_advisory_lock`: the app engine's asyncpg `command_timeout` bounds every statement, so a blocking acquire fails a second instance's startup whenever a peer's migration outlasts it.

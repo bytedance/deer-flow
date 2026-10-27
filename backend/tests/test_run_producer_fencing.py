@@ -11,6 +11,7 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from support.postgres import asyncpg_test_url
 
 from deerflow.persistence.models.run_event import RunEventRow, RunEventThreadSeqRow
 from deerflow.persistence.run.model import CompletedRunSnapshotRow, RunChangeClockRow, RunRow
@@ -27,7 +28,7 @@ async def producer_db(request, tmp_path):
         if not uri:
             pytest.skip("requires TEST_POSTGRES_URI")
         schema = "producer_" + uuid4().hex
-        engine = create_async_engine(uri, connect_args={"server_settings": {"search_path": schema, "application_name": schema}})
+        engine = create_async_engine(asyncpg_test_url(uri), connect_args={"server_settings": {"search_path": schema, "application_name": schema}})
     else:
         engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'producer.db'}")
     try:

@@ -8,6 +8,7 @@ import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from support.postgres import asyncpg_test_url
 
 from deerflow.config.run_events_config import RunEventsConfig
 from deerflow.persistence.base import Base
@@ -23,7 +24,7 @@ async def cutover_db():
     import deerflow.persistence.models  # noqa: F401
 
     schema = "cutover_" + uuid4().hex
-    engine = create_async_engine(uri, pool_size=1, max_overflow=0, connect_args={"server_settings": {"search_path": schema, "application_name": schema}})
+    engine = create_async_engine(asyncpg_test_url(uri), pool_size=1, max_overflow=0, connect_args={"server_settings": {"search_path": schema, "application_name": schema}})
     async with engine.begin() as conn:
         await conn.execute(text(f'CREATE SCHEMA "{schema}"'))
         await conn.run_sync(Base.metadata.create_all)
@@ -77,7 +78,7 @@ async def test_cutover_refuses_other_database_sessions(cutover_db):
     from deerflow.persistence.run.producer import activate_producer_fencing
 
     _, sf, schema = cutover_db
-    other = create_async_engine(os.environ["TEST_POSTGRES_URI"], connect_args={"server_settings": {"search_path": schema}})
+    other = create_async_engine(asyncpg_test_url(os.environ["TEST_POSTGRES_URI"]), connect_args={"server_settings": {"search_path": schema}})
     try:
         async with other.connect():
             with pytest.raises(RuntimeError, match="sessions"):

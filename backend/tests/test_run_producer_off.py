@@ -9,6 +9,7 @@ import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from support.postgres import asyncpg_test_url
 from test_run_producer_cutover import cutover_db as cutover_db
 
 from deerflow.persistence.run.producer import activate_producer_fencing
@@ -28,7 +29,7 @@ async def off_db(cutover_db, request):
 
 
 def peer_engine(schema, **kwargs):
-    return create_async_engine(os.environ["TEST_POSTGRES_URI"], pool_size=2, max_overflow=0, connect_args={"server_settings": {"search_path": schema, "statement_timeout": "6000"}}, **kwargs)
+    return create_async_engine(asyncpg_test_url(os.environ["TEST_POSTGRES_URI"]), pool_size=2, max_overflow=0, connect_args={"server_settings": {"search_path": schema, "statement_timeout": "6000"}}, **kwargs)
 
 
 @pytest.mark.asyncio

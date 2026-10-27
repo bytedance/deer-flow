@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from support.postgres import asyncpg_test_url
 
 
 def test_cli_requires_stopped_cluster_acknowledgement():
@@ -73,7 +74,7 @@ async def test_real_offline_command_bootstraps_and_activates_postgres(tmp_path):
         ),
         encoding="utf-8",
     )
-    engine = create_async_engine(uri, connect_args={"server_settings": {"search_path": schema}})
+    engine = create_async_engine(asyncpg_test_url(uri), connect_args={"server_settings": {"search_path": schema}})
     try:
         script = Path(__file__).resolve().parents[1] / "scripts" / "run_producer_fencing.py"
         process = await asyncio.create_subprocess_exec(sys.executable, str(script), "--config", str(config), "--cutover-id", "cli-test", "--all-gateways-stopped", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)

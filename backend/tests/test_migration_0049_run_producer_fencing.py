@@ -8,6 +8,7 @@ import pytest
 from alembic import command
 from sqlalchemy import inspect, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from support.postgres import asyncpg_test_url
 
 from deerflow.persistence import bootstrap
 from deerflow.persistence.run.producer import activate_producer_fencing
@@ -26,7 +27,7 @@ async def test_migration_and_bootstrap(tmp_path, backend, fresh):
         if not uri:
             pytest.skip("requires TEST_POSTGRES_URI")
         schema = "fence_migration_" + uuid4().hex
-        engine = create_async_engine(uri, connect_args={"server_settings": {"search_path": schema, "application_name": schema}})
+        engine = create_async_engine(asyncpg_test_url(uri), connect_args={"server_settings": {"search_path": schema, "application_name": schema}})
     else:
         engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'migration.db'}")
     cfg = bootstrap._get_alembic_config(engine, postgres_schema=schema or "")

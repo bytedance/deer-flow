@@ -142,6 +142,12 @@ Run outcome or prevent stream completion. Recovery with built-in SQL Run and Eve
 sharing an engine uses one pooled connection for each guarded event write, so it
 can publish with only one pool slot available. See [Run Event Stream](backend/docs/RUN_EVENT_STREAM.md#authoritative-run-outcome).
 
+PostgreSQL async ORM connections and the offline command accept `postgres://`
+and `postgresql://` URLs, including `?sslmode=disable` or `?sslmode=verify-full`.
+SSL modes are preserved; conflicting `ssl`/`sslmode` settings are rejected.
+Explicit `channel_binding` options are rejected because asyncpg cannot enforce
+them. Synchronous psycopg and LangGraph DSNs retain their libpq options.
+
 PostgreSQL deployments using DB run events can opt into strict Producer Fencing,
 which rejects Journal writes after takeover or deletion revokes their Run identity.
 Before activation, the database guard skips Thread/RunRow locks and retains a

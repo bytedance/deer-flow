@@ -9,6 +9,7 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from support.postgres import asyncpg_test_url
 from support.producer_process import ProducerActors, receive
 
 from deerflow.persistence.models.run_event import RunEventRow, RunEventThreadSeqRow
@@ -23,6 +24,7 @@ async def producer_pg():
     uri = os.environ.get("TEST_POSTGRES_URI")
     if not uri:
         pytest.skip("requires TEST_POSTGRES_URI")
+    uri = asyncpg_test_url(uri)
     schema = "producer_race_" + uuid4().hex
     engine = create_async_engine(uri, pool_size=1, max_overflow=0, pool_timeout=1, connect_args={"server_settings": {"search_path": schema}})
     sf = async_sessionmaker(engine, expire_on_commit=False)
