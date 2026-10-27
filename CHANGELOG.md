@@ -1402,6 +1402,12 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
 
 ### Fixed
 
+- **channels:** IM replies that present files no longer resolve those files
+  on the event loop. For every artifact, both reply paths (`runs.wait` and
+  streaming) resolved the virtual path (`realpath`), resolved the outputs
+  root and checked the file with `stat` inline, stalling other channels and
+  requests on network-backed storage. They now do it in a worker. ([#7594])
+  
 - **channels:** A streamed Feishu reply no longer rewrites the same thread
   bindings on every chunk. Each outbound to the running card stored all of
   the reply's aliases again (about five `set_thread_id` writes per chunk: a
@@ -13196,3 +13202,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7588]: https://github.com/bytedance/deer-flow/pull/7588
 [#7591]: https://github.com/bytedance/deer-flow/pull/7591
 [#7593]: https://github.com/bytedance/deer-flow/pull/7593
+[#7594]: https://github.com/bytedance/deer-flow/pull/7594

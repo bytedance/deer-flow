@@ -281,7 +281,11 @@ def main():
         print(f"Error: No SKILL.md found at {skill_path}", file=sys.stderr)
         sys.exit(1)
 
-    name, original_description, content = parse_skill_md(skill_path)
+    try:
+        name, original_description, content = parse_skill_md(skill_path)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
     description = args.description or original_description
     project_root = find_project_root()
 

@@ -444,6 +444,8 @@ This handles the full optimization loop automatically. It splits the eval set in
 
 The trigger evaluator processes buffered CLI events after the child exits, including a final event without a trailing newline.
 
+Description optimization requires PyYAML (also used by the package validator). Name and description fields are parsed as YAML strings, including escaped quotes, comments and block scalars. Invalid metadata stops the evaluator, optimizer or description-improvement command with an `Error:` on stderr and exit status 1.
+
 ### How skill triggering works
 
 Understanding the triggering mechanism helps design better eval queries. Skills appear in Claude's `available_skills` list with their name + description, and Claude decides whether to consult a skill based on that description. The important thing to know is that Claude only consults skills for tasks it can't easily handle on its own — simple, one-step queries like "read this PDF" may not trigger a skill even if the description matches perfectly, because Claude can handle them directly with basic tools. Complex, multi-step, or specialized queries reliably trigger skills when the description matches.
