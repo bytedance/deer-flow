@@ -1756,14 +1756,15 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             or self._configured_skills_container_path() != DEFAULT_SKILLS_CONTAINER_PATH
         )
         expected_id = self._sandbox_id_for_thread(thread_id, effective_user_id)
-        current_base_id = self._base_sandbox_id_for_thread(thread_id, effective_user_id) if root_scoped_identity else None
+        current_base_id = self._base_sandbox_id_for_thread(thread_id, effective_user_id)
         stale_id: str | None = None
         with self._lock:
             if key not in self._thread_sandboxes:
                 return None
 
             existing_id = self._thread_sandboxes[key]
-            if root_scoped_identity and existing_id != expected_id and getattr(self._sandboxes.get(existing_id), "_deerflow_base_identity", None) != current_base_id:
+            tracked_base_id = getattr(self._sandboxes.get(existing_id), "_deerflow_base_identity", None)
+            if root_scoped_identity and existing_id != expected_id and existing_id != current_base_id and tracked_base_id != current_base_id:
                 stale_id = existing_id
             elif self._being_torn_down_locally(existing_id):
                 # A reaper thread in this process is stopping this container.
@@ -1788,7 +1789,10 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 raise SandboxPolicyReplacementDeferredError(stale_id, reason="has an outdated skills identity but is still in use or cannot be destroyed; retry shortly")
             return None
 
-        if existing_id != expected_id:
+        # Only our deterministic base ID or a tagged profile-scoped container
+        # proves this mismatch is an image rotation. Other cached IDs retain
+        # their existing ownership and health-check reuse path.
+        if existing_id != expected_id and (existing_id == current_base_id or tracked_base_id == current_base_id):
             # An image-profile rotation changes the deterministic container ID
             # without changing the skills identity. Park the old container only
             # after its execution holders drain; a later turn must acquire the

@@ -4,6 +4,8 @@ Local AIO image profiles scope container IDs to the selected profile generation.
 When that identity changes, an idle cached container is parked before the next
 acquire; an execution holder defers replacement until it drains. Do not refresh
 the old container's activity on later turns or destroy a live holder.
+Only a deterministic base ID or a container tagged with that base ID enters the
+image rotation path; unrelated cached IDs keep normal ownership checks.
 Image configuration errors do not block generic sandbox tools.
 For managed image profiles, cache only confirmed positive per-command
 environment support for the current local backend/image. Legacy negatives and

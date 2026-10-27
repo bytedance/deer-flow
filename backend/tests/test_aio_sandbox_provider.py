@@ -636,6 +636,7 @@ def test_image_profile_rotation_waits_for_holder_then_parks_old_container(tmp_pa
 
     provider, sandbox, aio_mod = _make_provider_with_active_sandbox(tmp_path, "old-image-id")
     provider._thread_sandboxes = {("alice", "thread-image"): "old-image-id"}
+    sandbox._deerflow_base_identity = provider._base_sandbox_id_for_thread("thread-image", "alice")
     monkeypatch.setattr(provider, "_thread_skill_projection_active", lambda *_args: False)
     monkeypatch.setattr(provider, "_configured_skills_container_path", lambda: aio_mod.DEFAULT_SKILLS_CONTAINER_PATH)
     monkeypatch.setattr(provider, "_sandbox_id_for_thread", lambda *_args: "new-image-id")
