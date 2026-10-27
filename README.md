@@ -3204,6 +3204,8 @@ when retries are exhausted. Turn Live off and on to start a fresh retry budget.
 
 **Strict Tool-Call Recovery**: When a provider or middleware interrupts a tool-call loop, DeerFlow now strips provider-level raw tool-call metadata on forced-stop assistant messages and injects placeholder tool results for dangling calls before the next model invocation. This keeps OpenAI-compatible reasoning models that strictly validate `tool_call_id` sequences from failing with malformed history errors.
 
+**Provider Safety Stops**: With `safety_finish_reason.enabled`, native OpenAI Responses `status=incomplete` with `incomplete_details.reason=content_filter` suppresses tool calls, including malformed calls, and removes their native frames from subsequent requests. Empty filtered responses receive an explanation; visible partial answers without tool calls are preserved.
+
 **Visible Tool-Run Completion**: For interactive turns, DeerFlow retries an empty post-tool final response once, then surfaces a visible error instead of reporting a silent successful run.
 
 **Run History**: Image-only user input is recorded once per run, even when the agent makes multiple model calls. Its media content remains in history without requiring a text summary.
