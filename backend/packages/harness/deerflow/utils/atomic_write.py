@@ -13,11 +13,13 @@ logger = logging.getLogger(__name__)
 
 
 def cleanup_failed_atomic_write(temporary: Path, fd: int | None = None) -> None:
-    """Release an owned temporary without replacing the caller's active error.
+    """Release an owned temporary without replacing the caller's outcome.
 
     Pass *fd* only while the raw descriptor is still owned by the caller;
     successful ``fdopen`` transfers that ownership to the file object.
-    Filesystem and logging-handler errors remain independent best-effort steps.
+    An explicitly transferred duplicate descriptor is also caller-owned.
+    Also use this to discard staging after a publication decision. Filesystem
+    and logging-handler errors remain independent best-effort steps.
     """
     # Cleanup and diagnostics are best-effort: keep the original error
     # and attempt unlink even if closing an untransferred descriptor fails.

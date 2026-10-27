@@ -107,14 +107,14 @@ def test_middleware_order_includes_configured_extension_tail(path: Path) -> None
     content = " ".join((REPO_ROOT / path).read_text(encoding="utf-8").split())
     markers = (
         (
-            "`SkillToolPolicyMiddleware`",
+            "`SkillActivationMiddleware`",
             "Configured extension middlewares (if any)",
             "`TerminalResponseMiddleware`",
             "`ModelLengthFinishReasonMiddleware`",
         )
         if "/en/" in path.as_posix()
         else (
-            "`SkillToolPolicyMiddleware`",
+            "`SkillActivationMiddleware`",
             "配置的扩展中间件（如有）",
             "`TerminalResponseMiddleware`",
             "`ModelLengthFinishReasonMiddleware`",

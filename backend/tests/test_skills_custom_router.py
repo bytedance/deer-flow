@@ -31,6 +31,12 @@ def _make_admin_user() -> User:
     return User(email="admin-test@example.com", password_hash="x", system_role="admin", id=uuid4())
 
 
+def _make_member_user() -> User:
+    from uuid import uuid4
+
+    return User(email="member-test@example.com", password_hash="x", system_role="user", id=uuid4())
+
+
 def _skill_content(name: str, description: str = "Demo skill") -> str:
     return f"---\nname: {name}\ndescription: {description}\n---\n\n# {name}\n"
 
@@ -778,6 +784,154 @@ def test_custom_skill_delete_preserves_history_and_allows_restore(monkeypatch, t
         assert refresh_calls == [("refresh", "default"), ("refresh", "default")]
 
 
+def _patch_demo_custom_skill_config(monkeypatch, tmp_path: Path) -> SimpleNamespace:
+    from deerflow.config.paths import Paths
+
+    custom_dir = _user_custom_dir(tmp_path, "default") / "demo-skill"
+    custom_dir.mkdir(parents=True, exist_ok=True)
+    (custom_dir / "SKILL.md").write_text(_skill_content("demo-skill"), encoding="utf-8")
+
+    config = SimpleNamespace(
+        skills=SimpleNamespace(get_skills_path=lambda: tmp_path / "skills", container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage"),
+        skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
+    )
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: Paths(base_dir=tmp_path))
+    monkeypatch.setattr("deerflow.config.paths._paths", None)
+    monkeypatch.setattr("app.gateway.routers.skills.get_effective_user_id", lambda: "default")
+    return config
+
+
+def _make_demo_custom_skill_app(monkeypatch, tmp_path: Path, *, user_factory=None) -> FastAPI:
+    return _make_test_app(_patch_demo_custom_skill_config(monkeypatch, tmp_path), user_factory=user_factory)
+
+
+@pytest.mark.parametrize(
+    ("skill_name", "detail"),
+    [
+        ("Bad_Name", "hyphen-case"),
+        ("a" * 65, "64 characters or fewer"),
+    ],
+)
+def test_custom_skill_history_rejects_invalid_name(monkeypatch, tmp_path, caplog, skill_name, detail):
+    """An invalid name is a 400 like delete and rollback, not a logged 500."""
+    import logging
+
+    app = _make_demo_custom_skill_app(monkeypatch, tmp_path)
+
+    with TestClient(app) as client, caplog.at_level(logging.ERROR, logger=skills_router.__name__):
+        response = client.get(f"/api/skills/custom/{skill_name}/history")
+
+    assert response.status_code == 400
+    assert detail in response.json()["detail"]
+    assert "Failed to read history" not in caplog.text
+
+
+def test_custom_skill_delete_rejects_invalid_name_before_mutation_tail(monkeypatch, tmp_path, caplog):
+    """A malformed name is a 400 the drained delete tail never sees, so nothing is logged."""
+    import logging
+
+    app = _make_demo_custom_skill_app(monkeypatch, tmp_path)
+
+    with TestClient(app) as client, caplog.at_level(logging.ERROR, logger=skills_router.__name__):
+        response = client.delete("/api/skills/custom/Bad_Name")
+
+    assert response.status_code == 400
+    assert "hyphen-case" in response.json()["detail"]
+    assert caplog.records == []
+
+
+@pytest.mark.parametrize(
+    "history_bytes",
+    [
+        pytest.param(b"{not json\n", id="malformed-json"),
+        pytest.param(b'{"action": "human_edit", "prev_content": "\xff"}\n', id="non-utf8"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("method", "path", "body", "detail"),
+    [
+        ("GET", "/api/skills/custom/demo-skill/history", None, "Failed to read history:"),
+        ("POST", "/api/skills/custom/demo-skill/rollback", {"history_index": -1}, "Failed to roll back custom skill:"),
+    ],
+)
+def test_custom_skill_corrupt_history_record_stays_server_error(monkeypatch, tmp_path, method, path, body, detail, history_bytes):
+    """Only the name maps to 400: a corrupt history file (JSONDecodeError and UnicodeDecodeError are ValueErrors too) is a server fault."""
+    app = _make_demo_custom_skill_app(monkeypatch, tmp_path)
+    history_file = _user_custom_dir(tmp_path, "default") / ".history" / "demo-skill.jsonl"
+    history_file.parent.mkdir(parents=True, exist_ok=True)
+    history_file.write_bytes(history_bytes)
+
+    with TestClient(app) as client:
+        response = client.request(method, path, json=body)
+
+    assert response.status_code == 500
+    assert response.json()["detail"].startswith(detail)
+
+
+@pytest.mark.parametrize(
+    ("path", "detail"),
+    [
+        ("/api/skills", "Failed to load skills."),
+        ("/api/skills/custom", "Failed to list custom skills."),
+        ("/api/skills/demo-skill", "Failed to get skill."),
+    ],
+)
+def test_member_skill_reads_keep_load_error_text_out_of_500(monkeypatch, tmp_path, caplog, path, detail):
+    """Any signed-in user reaches these reads, so a load failure's host path stays in the server log."""
+    import logging
+
+    extensions_config = tmp_path / "extensions_config.json"
+    extensions_config.write_text("{not json", encoding="utf-8")
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_config))
+    app = _make_demo_custom_skill_app(monkeypatch, tmp_path, user_factory=_make_member_user)
+
+    with TestClient(app) as client, caplog.at_level(logging.ERROR, logger=skills_router.__name__):
+        response = client.get(path)
+
+    assert response.status_code == 500
+    assert response.json() == {"detail": detail}
+    assert str(extensions_config) in caplog.text
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/skills",
+        "/api/skills/custom",
+        "/api/skills/demo-skill",
+        "/api/capabilities/installations/skills",
+    ],
+)
+def test_gateway_skill_reads_keep_load_error_text_out_of_500(monkeypatch, tmp_path, path):
+    """Drive the real Gateway app: capability discovery has no handler of its own, so its 500 body is TraceMiddleware's fixed fallback until a handler for the raised class or a changed fallback echoes the exception."""
+    import app.gateway.app as app_module
+    from deerflow.extensions import reset_loaded_extensions, reset_runtime_diagnostics
+
+    extensions_config = tmp_path / "extensions_config.json"
+    extensions_config.write_text("{not json", encoding="utf-8")
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_config))
+    monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "1")
+    config = _patch_demo_custom_skill_config(monkeypatch, tmp_path)
+    config.authorization = AuthorizationConfig(enabled=False)
+
+    def _no_config_yaml():
+        raise FileNotFoundError("config.yaml")
+
+    # create_app() reads only the plugin list from config.yaml; keep a local one out of the test.
+    monkeypatch.setattr(app_module, "get_app_config", _no_config_yaml)
+    try:
+        gateway = app_module.create_app()
+        gateway.dependency_overrides[get_config] = lambda: config
+        response = TestClient(gateway, raise_server_exceptions=False).get(path)
+    finally:
+        reset_loaded_extensions()
+        reset_runtime_diagnostics()
+
+    assert response.status_code == 500
+    assert str(tmp_path) not in response.text
+
+
 def test_custom_skill_delete_continues_when_history_write_is_readonly(monkeypatch, tmp_path):
     skills_root = tmp_path / "skills"
     from deerflow.config.paths import Paths
@@ -1006,12 +1160,15 @@ def test_public_skill_toggle_clears_all_users_cache(monkeypatch, tmp_path):
     assert persisted["skills"]["public-skill"]["enabled"] is False
 
 
-def test_public_skill_toggle_creates_missing_extensions_config(monkeypatch, tmp_path):
+def test_public_skill_toggle_creates_missing_extensions_config_at_project_root(monkeypatch, tmp_path):
     from deerflow.config.extensions_config import ExtensionsConfig
 
-    backend_dir = tmp_path / "backend"
-    backend_dir.mkdir()
+    # The working directory's parent is not the project root: the new file
+    # must land where resolution looks first, not next to the cwd.
+    backend_dir = tmp_path / "runtime" / "backend"
+    backend_dir.mkdir(parents=True)
     monkeypatch.chdir(backend_dir)
+    monkeypatch.setenv("DEER_FLOW_PROJECT_ROOT", str(tmp_path))
     config_path = tmp_path / "extensions_config.json"
 
     def _load_skills(*, enabled_only: bool):
@@ -1047,6 +1204,7 @@ def test_public_skill_toggle_creates_missing_extensions_config(monkeypatch, tmp_
     assert json.loads(config_path.read_text(encoding="utf-8")) == {
         "skills": {"public-skill": {"enabled": False}},
     }
+    assert not (backend_dir.parent / "extensions_config.json").exists()
 
 
 def test_public_skill_toggle_rebuilds_projection_before_response(monkeypatch, tmp_path):
