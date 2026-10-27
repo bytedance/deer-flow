@@ -1407,6 +1407,16 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
   working Node/npm toolchain now use the existing link-preserving Python
   fallback on later fetches without repeating the failed subprocess probe;
   document-specific non-zero exits still retry Node on later pages. ([#5973])
+  
+- **scripts:** `make dev` and `make start` no longer run the checkout `.env`
+  as a shell script. `serve.sh` sourced it, so `$$` became the shell's PID,
+  backticks and `$(...)` ran commands, and an unquoted value with a space ran
+  its second word as a command and stopped the launcher with exit 127. Those
+  values also beat the Gateway's own `.env` read, so a `$$` in
+  `AUTH_JWT_SECRET` changed the secret on every launch. The launcher now
+  parses `.env` like python-dotenv, keeps its precedence over shell exports and
+  its `$NAME`, `${NAME:-default}` and leading `~` expansion, and leaves `$$`,
+  backticks and `$(...)` as written. ([#7606])
 
 - **channels:** IM replies that present files no longer resolve those files
   on the event loop. For every artifact, both reply paths (`runs.wait` and
@@ -13210,3 +13220,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7591]: https://github.com/bytedance/deer-flow/pull/7591
 [#7593]: https://github.com/bytedance/deer-flow/pull/7593
 [#7594]: https://github.com/bytedance/deer-flow/pull/7594
+[#7606]: https://github.com/bytedance/deer-flow/pull/7606

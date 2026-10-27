@@ -1120,6 +1120,13 @@
   进程启动失败后停止重试。没有可用 Node/npm 工具链的安装环境会在后续抓取中直接使用
   现有且保留链接的 Python 回退，不再重复执行失败的子进程探测；单篇文档导致的非零退出
   仍会在后续页面重试 Node。([#5973])
+  
+- **脚本：** `make dev` 和 `make start` 不再把检出目录的 `.env` 当作 shell 脚本执行。此前
+  `serve.sh` 用 `source` 读取它，`$$` 会变成 shell 的 PID，反引号和 `$(...)` 会执行命令，未加引号
+  且含空格的值会把第二个词当作命令运行，启动脚本以退出码 127 中止。这些值还会覆盖 Gateway
+  自己读取的 `.env`，例如 `AUTH_JWT_SECRET` 中的 `$$` 会让密钥每次启动都变化。现在启动脚本按
+  python-dotenv 的规则解析 `.env`，保留其优先于 shell 导出变量的行为以及 `$NAME`、
+  `${NAME:-default}` 和开头 `~` 的展开，`$$`、反引号和 `$(...)` 则保持原样。([#7606])
 
 - **渠道：** 展示文件的 IM 回复不再在事件循环上解析这些文件。此前两条回复路径（`runs.wait`
   和流式）都会对每个产物内联解析虚拟路径（`realpath`）、解析输出根目录并用 `stat` 检查文件，
@@ -10535,3 +10542,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7591]: https://github.com/bytedance/deer-flow/pull/7591
 [#7593]: https://github.com/bytedance/deer-flow/pull/7593
 [#7594]: https://github.com/bytedance/deer-flow/pull/7594
+[#7606]: https://github.com/bytedance/deer-flow/pull/7606
