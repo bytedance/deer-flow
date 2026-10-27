@@ -1389,6 +1389,11 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
 
 ### Changed
 
+- **tool output:** Superseded `write_file` payload elision is now opt-in. The
+  optimization remains available, but the default keeps model-bound history
+  append-only so later file actions do not invalidate provider prompt-cache
+  prefixes. ([#7319](https://github.com/bytedance/deer-flow/issues/7319))
+
 - **skills:** Treat `allowed-tools` as non-enforced compatibility metadata.
   Activating a skill no longer hides or blocks tools that Agent configuration
   and host authorization already permit, including when the declaration is
@@ -1397,6 +1402,16 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
 
 ### Fixed
 
+- **runtime:** Loop-detection warnings now ask the agent to present the files
+  it already created in `/mnt/user-data/outputs` before its final answer, so a
+  warned run no longer fails its delivery check with finished files left
+  undelivered. A run that reaches `recursion_limit` now ends with
+  `stop_reason: recursion_capped` and a plain message that lists the outputs it
+  created but did not present, instead of LangGraph's raw error. An active goal
+  stands down without an evaluator call and stays active, `/wait` names the
+  error `GraphRecursionError`, and IM channels reply with the message instead
+  of a generic failure. ([#7588])
+  
 - **channels:** Connecting Slack, Discord, Feishu, DingTalk, WeCom, Buzz or QQ
   now opens a dialog that keeps the `/connect` command on screen with a copy
   button, its expiry time and the binding status, instead of a toast that
@@ -13170,4 +13185,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7576]: https://github.com/bytedance/deer-flow/pull/7576
 [#7580]: https://github.com/bytedance/deer-flow/pull/7580
 [#7585]: https://github.com/bytedance/deer-flow/pull/7585
+[#7588]: https://github.com/bytedance/deer-flow/pull/7588
 [#7591]: https://github.com/bytedance/deer-flow/pull/7591

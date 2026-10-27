@@ -449,6 +449,7 @@ export interface Translations {
         noProgress: string;
         tokenCapped: string;
         loopCapped: string;
+        recursionCapped: string;
         missingEvidence: string;
         runFailed: string;
         needsInputCard: string;
@@ -1026,6 +1027,7 @@ export interface Translations {
         noProgress: string;
         tokenCapped: string;
         loopCapped: string;
+        recursionCapped: string;
         evaluatorFailed: string;
         noDurableEndOfTurn: string;
         threadChanged: string;
