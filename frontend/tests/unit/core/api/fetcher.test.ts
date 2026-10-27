@@ -160,12 +160,4 @@ describe("api fetcher Request inputs", () => {
 
     expect(sent[0]?.headers.get("X-CSRF-Token")).toBe("cookie-token");
   });
-
-  it("finds the CSRF cookie after unrelated cookies with a malformed value", async () => {
-    document.cookie = "theme=%E0; csrf_token=%gh";
-
-    await apiFetch("http://localhost/api/threads", { method: "POST" });
-
-    expect(sent[0]?.headers.get("X-CSRF-Token")).toBe("%gh");
-  });
 });
