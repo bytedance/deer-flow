@@ -53,12 +53,15 @@ def replace_main(root, content: bytes, *, operation_id: str) -> None:
                 except FileNotFoundError:
                     pass
                 except OSError:
-                    # The publication outcome is already decided. A leftover is
-                    # swept later by ``cleanup_temporary`` from
-                    # ``resolve_prepared`` for this same operation, so the
-                    # discard must not replace that outcome with its own error.
-                    # ``suppress`` keeps a raising logging handler from becoming
-                    # that error either, matching ``cleanup_failed_atomic_write``.
+                    # The publication outcome is already decided. A leftover from
+                    # a failed publication is swept later by ``cleanup_temporary``
+                    # when ``resolve_prepared`` classifies the outcome (reached
+                    # from ``publish_prepared``'s except path or from recovery);
+                    # a leftover after a decided-successful publication is not
+                    # revisited, so the discard must not replace that outcome
+                    # with its own error. ``suppress`` keeps a raising logging
+                    # handler from becoming that error either, matching
+                    # ``cleanup_failed_atomic_write``.
                     with suppress(Exception):
                         logger.warning("Failed to remove skill mutation temporary %s", temporary, exc_info=True)
         finally:

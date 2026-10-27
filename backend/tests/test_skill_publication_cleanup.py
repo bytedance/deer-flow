@@ -3,8 +3,10 @@
 ``replace_main`` publishes ``SKILL.md`` through a ``.host-mutation-*`` sibling and
 discards it on exit. That discard only tolerated ``FileNotFoundError``, so any
 other ``OSError`` replaced the publish error — or turned a decided outcome into a
-cleanup failure. A leftover temp is still caught later by
-``assert_temporary_absent``, so reporting is enough here.
+cleanup failure. A leftover from a failed publication is swept later by
+``cleanup_temporary`` when ``resolve_prepared`` classifies the outcome, so
+reporting is enough here; ``assert_temporary_absent`` never sees it, because its
+only caller checks a freshly minted operation id.
 """
 
 from __future__ import annotations
