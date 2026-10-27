@@ -2724,6 +2724,8 @@ async def _prepare_goal_continuation_input(
         if run_stop_reason in _GOAL_RUN_ERROR_STOP_REASONS:
             # Checked first: otherwise the stop would read as a missing receipt
             # or cost an evaluator call, depending on the last message's text.
+            # Keep it ahead of the evaluator section: the step-limit caller in
+            # run_agent passes no evaluator_model_factory or usage_callback.
             evaluation = GoalEvaluation(
                 satisfied=False,
                 blocker="run_failed",
