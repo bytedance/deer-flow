@@ -34,6 +34,7 @@ import pytest
 from langchain.agents.middleware.types import ModelRequest
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, ToolMessage
+from langchain_core.tools import StructuredTool
 
 from deerflow.agents.middlewares.model_content_compatibility_middleware import (
     ModelContentCompatibilityMiddleware,
@@ -93,6 +94,11 @@ def _url_file_block(url: str, mime_type: str | None = None) -> dict:
     if mime_type is not None:
         block["mime_type"] = mime_type
     return block
+
+
+def _lookup(query: str) -> str:
+    """Look up a value."""
+    return query
 
 
 class TestUrlFileBlocksBecomeTextPlaceholders:
@@ -216,6 +222,62 @@ class TestFileUrlProviderGating:
         prepared = _run_sync(ModelContentCompatibilityMiddleware(), _model_request([message], model=model))
 
         assert prepared.messages[0].content == [block]
+
+    @pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
+    @pytest.mark.parametrize(
+        ("model_kwargs", "model_settings", "tools", "expects_responses"),
+        [
+            pytest.param({"output_version": "responses/v1"}, {}, [], True, id="output-version"),
+            pytest.param({"reasoning": {"effort": "low"}}, {}, [], True, id="model-reasoning"),
+            pytest.param({"model_kwargs": {"previous_response_id": "resp_test"}}, {}, [], True, id="model-default-params"),
+            pytest.param({"output_version": "responses/v1", "use_responses_api": False}, {}, [], False, id="explicit-chat-completions"),
+            pytest.param({}, {"reasoning": {"effort": "low"}}, [], True, id="request-reasoning"),
+            pytest.param({}, {}, [{"type": "web_search"}], True, id="native-web-search"),
+            pytest.param(
+                {},
+                {},
+                [
+                    {
+                        "title": "lookup",
+                        "description": "Look up a value.",
+                        "type": "object",
+                        "properties": {"query": {"type": "string"}},
+                        "required": ["query"],
+                    }
+                ],
+                False,
+                id="json-schema-tool",
+            ),
+            pytest.param({}, {}, [StructuredTool.from_function(_lookup)], False, id="base-tool"),
+        ],
+    )
+    async def test_openai_file_url_matches_request_serializer(self, model_kwargs, model_settings, tools, expects_responses, asynchronous):
+        """Preserve documents when the real adapter infers Responses routing."""
+        from langchain_openai import ChatOpenAI
+
+        url = "https://example.com/report.pdf"
+        block = _url_file_block(url, "application/pdf")
+        message = HumanMessage(content=[block])
+        model = ChatOpenAI(model="gpt-5", api_key="test-key", **model_kwargs)
+        request = _model_request([message], model=model).override(model_settings=model_settings, tools=tools)
+        payload_kwargs = model.bind_tools(tools, **model_settings).kwargs if tools else model_settings
+        if expects_responses:
+            assert model.use_responses_api is None
+            original_payload = model._get_request_payload(request.messages, **payload_kwargs)
+            assert original_payload["input"][0]["content"] == [{"type": "input_file", "file_url": url}]
+
+        middleware = ModelContentCompatibilityMiddleware()
+        prepared = await _run_async(middleware, request) if asynchronous else _run_sync(middleware, request)
+        payload = model._get_request_payload(prepared.messages, **payload_kwargs)
+
+        if expects_responses:
+            assert prepared.messages[0].content == [block]
+            assert payload["input"][0]["content"] == [{"type": "input_file", "file_url": url}]
+        else:
+            placeholder = [{"type": "text", "text": f"[Resource (application/pdf) available at {url}]"}]
+            assert prepared.messages[0].content == placeholder
+            assert payload["messages"][0]["content"] == placeholder
+            assert "input" not in payload
 
     def test_anthropic_model_preserves_http_file_block(self):
         from langchain_anthropic import ChatAnthropic

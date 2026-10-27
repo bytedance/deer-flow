@@ -82,6 +82,8 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import AnyMessage
+from langchain_core.utils.function_calling import convert_to_openai_tool
+from langchain_openai.chat_models.base import BaseChatOpenAI
 
 from deerflow.agents.middlewares.input_sanitization_middleware import neutralize_untrusted_tags
 from deerflow.tools.resource_placeholder import model_visible_location, resource_placeholder_text
@@ -116,8 +118,8 @@ def _is_http_url(url: str) -> bool:
         return False
 
 
-def _accepts_http_file_urls(model: Any) -> bool:
-    """Whether *model*'s request serializer accepts http(s) file URLs.
+def _accepts_http_file_urls(request: ModelRequest) -> bool:
+    """Whether the selected request serializer accepts http(s) file URLs.
 
     Chat Completions rejects any URL-sourced ``file`` block, but the OpenAI
     Responses API (``input_file`` with ``file_url``) and Anthropic
@@ -125,14 +127,22 @@ def _accepts_http_file_urls(model: Any) -> bool:
     a block persisted for those providers must survive the rewrite, or the
     document silently drops out of the model request.
     """
+    model = request.model
     if model is None:
         return False
+    if isinstance(model, BaseChatOpenAI):
+        # Match the adapter's routing decision, including implicit Responses
+        # parameters and tools bound by the agent after this middleware.
+        payload = {**model._default_params, **request.model_settings}
+        if request.tools:
+            payload["tools"] = [convert_to_openai_tool(tool) for tool in request.tools]
+        return model._use_responses_api(payload)
     if getattr(model, "use_responses_api", False):
         return True
     return isinstance(model, ChatAnthropic)
 
 
-def _sanitize_block(block: Any, model: Any) -> Any:
+def _sanitize_block(block: Any, accepts_http_file_urls: bool) -> Any:
     """Return *block* unchanged, or its text-placeholder replacement.
 
     Identity is the unchanged signal for the caller: the same object comes back
@@ -150,7 +160,7 @@ def _sanitize_block(block: Any, model: Any) -> Any:
         if "url" not in block:
             return block
         url = _str_or_none(block.get("url"))
-        if url and _is_http_url(url) and _accepts_http_file_urls(model):
+        if url and _is_http_url(url) and accepts_http_file_urls:
             # The selected provider serializes http(s) file URLs natively
             # (Responses API ``input_file`` / Anthropic ``document`` URL):
             # keep the block instead of dropping a readable document.
@@ -175,7 +185,7 @@ def _sanitize_block(block: Any, model: Any) -> Any:
     return block
 
 
-def _sanitize_message(message: AnyMessage, model: Any) -> AnyMessage:
+def _sanitize_message(message: AnyMessage, accepts_http_file_urls: bool) -> AnyMessage:
     """Return *message* unchanged, or a copy with incompatible blocks replaced.
 
     Role-agnostic on purpose: any message with list-form content can carry a
@@ -184,18 +194,18 @@ def _sanitize_message(message: AnyMessage, model: Any) -> AnyMessage:
     content = message.content
     if not isinstance(content, list):
         return message
-    patched = [_sanitize_block(block, model) for block in content]
+    patched = [_sanitize_block(block, accepts_http_file_urls) for block in content]
     if all(new is old for new, old in zip(patched, content, strict=True)):
         return message
     return message.model_copy(update={"content": patched})
 
 
-def _sanitize_messages(messages: list[AnyMessage], model: Any) -> list[AnyMessage] | None:
+def _sanitize_messages(messages: list[AnyMessage], accepts_http_file_urls: bool) -> list[AnyMessage] | None:
     """Rewrite *messages* for the model request, or ``None`` when nothing changed."""
     updated: list[AnyMessage] = []
     changed = False
     for message in messages:
-        patched = _sanitize_message(message, model)
+        patched = _sanitize_message(message, accepts_http_file_urls)
         changed = changed or patched is not message
         updated.append(patched)
     return updated if changed else None
@@ -229,7 +239,7 @@ class ModelContentCompatibilityMiddleware(AgentMiddleware[AgentState]):
 
     @staticmethod
     def _sanitize_request(request: ModelRequest) -> ModelRequest:
-        patched = _sanitize_messages(request.messages, request.model)
+        patched = _sanitize_messages(request.messages, _accepts_http_file_urls(request))
         if patched is None:
             return request
         return request.override(messages=patched)
