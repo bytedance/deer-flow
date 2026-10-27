@@ -62,8 +62,9 @@ patches preserve each other's changes, and same-field writes are last-commit-win
 Storage requires SQLite or PostgreSQL (`503` when unavailable). Browser
 notification permission remains device-local and is not changed by this API.
 `locale` is the web UI language; the web app writes it after sign-in and on
-every language switch, and scheduled-task IM notices are written in it (without
-it they use `channel_connections.notification_locale`).
+every language switch, and scheduled-task IM notices and the IM `/connect` and
+`/goal` replies are written in it (without it they use
+`channel_connections.notification_locale`).
 
 ### Personal Access Tokens
 
@@ -384,7 +385,11 @@ the next request without restarting the Gateway. IM channel runs get the same
 default unless a channel `session.config` sets `recursion_limit` (GitHub channel
 runs have their own floor; see
 [CONFIGURATION.md](CONFIGURATION.md#recursion-limits)); embedded
-`DeerFlowClient` runs retain their own defaults and override paths.
+`DeerFlowClient` runs retain their own defaults and override paths. A run that
+reaches the limit ends with status `error` and `stop_reason: "recursion_capped"`;
+its stream `error` event and the `/wait` error envelope use the name
+`GraphRecursionError`, and the message lists up to five outputs the run created
+but did not present.
 
 **Configurable Options:**
 - `model_name` (string): Override the default model

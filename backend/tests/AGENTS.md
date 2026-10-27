@@ -51,6 +51,8 @@ cleanup, preserve healthy controls in refusal cases, and retain Journal/Seal
 compatibility coverage. Protocol: [Run outcome](../docs/RUN_EVENT_STREAM.md#authoritative-run-outcome).
 `test_goal_loop_stop_probe.py` runs the standalone Goal-loop reproduction through the native graph, loop middleware, worker and checkpoints. Only model responses are scripted; do not replace the Goal decision or simulate the stop-reason write.
 
+`test_run_recursion_capped.py` drives a real graph through the worker until LangGraph raises `GraphRecursionError`. Only model responses are scripted; do not raise the error or write the stop reason by hand.
+
 InfoQuest fetch log assertions install the real `UrlRedactionFilter` on the
 capture handler with fixture-scoped cleanup. Expect scheme/host context with
 redacted paths, so isolated runs and full-suite logging configuration agree;
@@ -488,3 +490,10 @@ Multi-instance harness tests use `support.shell.require_script_bash()` for shell
 smoke checks. Keep config content and secret stability checks portable; isolate
 POSIX owner-only permission assertions so Windows skips only those checks.
 Nginx path expectations must include quoted-string escaping for native paths.
+
+## Channel artifact turn sequencing
+
+`test_channels.py` models consecutive artifact-producing turns by awaiting an
+async outbound callback before sending the next inbound message. Keep the real
+worker-pool concurrency, preserve per-turn artifact assertions, and stop the
+manager in `finally` so a failure cannot leave tasks using a closed test loop.

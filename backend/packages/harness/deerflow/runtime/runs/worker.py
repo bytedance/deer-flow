@@ -36,6 +36,7 @@ from typing import Any, Final, Literal, cast
 from deerflow_extension_api.agent_runs import AGENT_RUNS_CONTEXT_KEY
 from langchain_core.messages import AIMessage, AIMessageChunk
 from langgraph.checkpoint.base import empty_checkpoint
+from langgraph.errors import GraphRecursionError
 from langgraph.types import Command, Overwrite
 
 from deerflow.agents.goal_state import GoalEvaluation, GoalState
@@ -351,6 +352,26 @@ async def _persist_delivery_receipt(
 
 _DELIVERY_INCOMPLETE_ERROR = "Artifact delivery incomplete: no produced output artifact was presented"
 _DELIVERY_RECEIPT_FAILED_ERROR = "Artifact delivery verification failed: terminal delivery receipt could not be persisted"
+_RECURSION_CAPPED_STOP_REASON = "recursion_capped"
+_RECURSION_CAPPED_LISTED_OUTPUTS = 5
+
+
+def _recursion_capped_message(recursion_limit: object, delivery_content: dict[str, Any] | None) -> str:
+    """Say a run hit its step budget, listing outputs it created but never presented.
+
+    LangGraph's own text points at a config key and a troubleshooting URL; users
+    see it as an unexplained failure and assume the files they waited for are lost.
+    """
+    limit = f" (recursion_limit={recursion_limit})" if isinstance(recursion_limit, int) and not isinstance(recursion_limit, bool) else ""
+    message = f"The run stopped at its step limit{limit} before finishing."
+    content = delivery_content or {}
+    presented = set(content.get("matched_paths") or [])
+    unpresented = [path for path in content.get("produced_paths") or [] if path not in presented]
+    if unpresented:
+        listed = ", ".join(unpresented[:_RECURSION_CAPPED_LISTED_OUTPUTS])
+        more = len(unpresented) - _RECURSION_CAPPED_LISTED_OUTPUTS
+        message += f" Created but not presented: {listed}{f' and {more} more' if more > 0 else ''}."
+    return f"{message} Send a message to continue."
 
 
 def _empty_delivery_content() -> dict[str, Any]:
@@ -1758,13 +1779,54 @@ async def run_agent(
     except Exception as exc:
         checkpoint_resume_rejected = isinstance(exc, CheckpointResumeRejected)
         error_msg = f"{exc}"
-        logger.exception("Run %s failed: %s", run_id, error_msg)
+        stop_status_kwargs: dict[str, Any] = {}
+        if isinstance(exc, GraphRecursionError) and evidence_execution_started:
+            # The run used up its step budget: an expected stop, not a crash.
+            # Report it plainly with the outputs it never presented, and stand
+            # the goal down without an evaluator call.
+            logger.warning("Run %s stopped at its step limit: %s", run_id, error_msg)
+            produced_output_paths = await _produced_output_paths(
+                pre_run_workspace_snapshot,
+                thread_id=thread_id,
+                user_id=workspace_changes_user_id,
+                extra_excluded_dir_names=workspace_excluded_dir_names,
+            )
+            delivery_content = _delivery_content_with_outputs(
+                journal.get_delivery_content() if journal is not None else _empty_delivery_content(),
+                produced_output_paths,
+                pre_run_snapshot=pre_run_workspace_snapshot,
+            )
+            error_msg = _recursion_capped_message(config.get("recursion_limit"), delivery_content)
+            if not record.abort_event.is_set():
+                await _prepare_goal_continuation_input(
+                    bridge=bridge,
+                    accessor=accessor,
+                    checkpointer=checkpointer,
+                    thread_id=thread_id,
+                    run_id=run_id,
+                    model_name=record.model_name,
+                    app_config=ctx.app_config,
+                    abort_event=record.abort_event,
+                    user_id=resolve_runtime_user_id(runtime),
+                    deerflow_trace_id=deerflow_trace_id,
+                    task_store=task_store,
+                    extensions=extensions,
+                    run_stop_reason=_RECURSION_CAPPED_STOP_REASON,
+                    interaction_policy=resolve_run_interaction_policy(config),
+                    expected_goal=scheduled_goal,
+                    verdict_callback=capture_goal_verdict,
+                )
+                record.goal_verdict = final_goal_verdict
+            stop_status_kwargs = {"stop_reason": _RECURSION_CAPPED_STOP_REASON, "goal_verdict": record.goal_verdict}
+        else:
+            logger.exception("Run %s failed: %s", run_id, error_msg)
         await _ensure_stream_producer_lease()
         await _ensure_finalizing_before_edit_failure(run_manager, record)
         cancel_action = await run_manager.set_status_if_not_cancelled(
             run_id,
             RunStatus.error,
             error=error_msg,
+            **stop_status_kwargs,
             **terminal_status_kwargs,
         )
         if cancel_action is not None:
@@ -2250,6 +2312,9 @@ async def run_agent(
 # ---------------------------------------------------------------------------
 
 _GOAL_RUN_HARD_STOP_REASONS = frozenset({"token_capped", "loop_capped"})
+# Stops that end the run with an error before the turn has a final reply: the
+# goal stands down without an evaluator call, since there is nothing to judge.
+_GOAL_RUN_ERROR_STOP_REASONS = frozenset({_RECURSION_CAPPED_STOP_REASON})
 
 
 @dataclass(frozen=True)
@@ -2664,6 +2729,21 @@ async def _prepare_goal_continuation_input(
         conversation_signature_before = visible_conversation_signature(messages)
         evidence_signature = latest_visible_assistant_signature(messages)
         operation_progress = observe_goal_operations(goal, messages)
+
+        if run_stop_reason in _GOAL_RUN_ERROR_STOP_REASONS:
+            # Checked first: otherwise the stop would read as a missing receipt
+            # or cost an evaluator call, depending on the last message's text.
+            # Keep it ahead of the evaluator section: the step-limit caller in
+            # run_agent passes no evaluator_model_factory or usage_callback.
+            evaluation = GoalEvaluation(
+                satisfied=False,
+                blocker="run_failed",
+                reason="The run reached its step limit before finishing.",
+                evidence_summary="",
+            )
+            no_progress_count = compute_no_progress_count(goal, evaluation, evidence_signature=evidence_signature, operation_progress=operation_progress)
+            await _persist(goal, evaluation, no_progress_count, stand_down_reason=run_stop_reason)
+            return None
 
         if _ends_on_human_input_request(messages):
             # The agent asked the user something. Continuing would tell it to keep
