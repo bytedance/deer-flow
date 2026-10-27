@@ -32,6 +32,7 @@ from app.channels.capabilities import CHANNEL_CAPABILITIES
 from app.channels.commands import KNOWN_CHANNEL_COMMANDS
 from app.channels.connection_identity import lookup_thread_id
 from app.channels.dedupe_store import InboundDedupeStore, MemoryInboundDedupeStore
+from app.channels.goal_status import goal_reply_text, goal_status_text, is_active_goal_state
 from app.channels.message_bus import (
     HUMAN_INPUT_REQUEST_METADATA_KEY,
     HUMAN_INPUT_RESPONSE_METADATA_KEY,
@@ -44,6 +45,7 @@ from app.channels.message_bus import (
     ResolvedAttachment,
     cleanup_inbound_files,
 )
+from app.channels.reply_locale import ReplyLocaleResolver
 from app.channels.run_policy import CHANNEL_RUN_POLICY, ChannelRunPolicy
 from app.channels.store import ChannelStore
 from app.gateway.csrf_middleware import CSRF_COOKIE_NAME, CSRF_HEADER_NAME, generate_csrf_token
@@ -87,12 +89,13 @@ IN_PROCESS_CACHE_MAX_ENTRIES = 4096
 MAX_CHANNEL_AGENT_LIST_ITEMS = 50
 MAX_CHANNEL_AGENT_DESCRIPTION_CHARS = 120
 
-# Lead-agent recursion budget (LangGraph super-steps for the lead graph only).
-# This is independent of subagent depth: a `task()` dispatch runs the whole
-# subagent inside ONE lead tools-node step, and subagents enforce their own
-# limit via `subagents.max_turns` (see SubagentExecutor). Do not conflate this
-# 100 with the general-purpose subagent's max_turns.
-DEFAULT_RUN_CONFIG: dict[str, Any] = {"recursion_limit": 100}
+# No lead-agent recursion budget here: like Gateway API runs, IM runs get
+# the Gateway's configured top-level ``recursion_limit`` (clamped by
+# ``max_recursion_limit``) unless a session ``config.recursion_limit`` sets
+# one. The budget counts lead-graph super-steps only: a `task()` dispatch runs
+# the whole subagent inside ONE lead tools-node step, and subagents enforce
+# their own limit via `subagents.max_turns` (see SubagentExecutor).
+DEFAULT_RUN_CONFIG: dict[str, Any] = {}
 DEFAULT_RUN_CONTEXT: dict[str, Any] = {
     "thinking_enabled": True,
     "is_plan_mode": False,
@@ -562,6 +565,28 @@ def _is_thread_busy_error(exc: BaseException | None) -> bool:
 def _is_admitted_run_conflict(exc: BaseException | None) -> bool:
     """True for a 409 about this message's own keyed run (see ``_ADMITTED_RUN_CONFLICT_DETAILS``)."""
     return isinstance(exc, ConflictError) and any(detail in str(exc) for detail in _ADMITTED_RUN_CONFLICT_DETAILS)
+
+
+# The Gateway names a run that stopped at its step limit after LangGraph's
+# GraphRecursionError, in its stream error frame and its /wait error. The
+# message says the run stopped and lists the outputs it never presented.
+_STEP_LIMIT_ERROR_NAME = "GraphRecursionError"
+
+
+def _step_limit_text(error: Any) -> str | None:
+    """The message of a step-limit stream error frame or ``/wait`` error, else ``None``.
+
+    The SDK raises a ``/wait`` error envelope as ``Exception("<name>: <message>")``.
+    """
+    if isinstance(error, BaseException):
+        name, _, message = str(error).partition(": ")
+    elif isinstance(error, dict):
+        name, message = error.get("name"), error.get("message")
+    else:
+        return None
+    if name != _STEP_LIMIT_ERROR_NAME or not isinstance(message, str) or not message.strip():
+        return None
+    return message.strip()
 
 
 def _is_run_status_result(result: Any) -> bool:
@@ -1391,7 +1416,11 @@ def _prepare_artifact_delivery(
     *,
     user_id: str | None = None,
 ) -> tuple[str, list[ResolvedAttachment]]:
-    """Resolve attachments and append filename fallbacks to the text response."""
+    """Resolve attachments and append filename fallbacks to the text response.
+
+    Blocking: every artifact is resolved through ``realpath`` and checked with
+    ``stat``, so the async reply paths call this through ``asyncio.to_thread``.
+    """
     attachments: list[ResolvedAttachment] = []
     if not artifacts:
         return response_text, attachments
@@ -1530,9 +1559,10 @@ async def _ingest_inbound_files_impl(thread_id: str, msg: InboundMessage, *, use
 
             created.append(
                 {
-                    "filename": safe_name,
+                    # Report the returned path rather than the pre-scan claim.
+                    "filename": dest.name,
                     "size": len(data),
-                    "path": f"/mnt/user-data/uploads/{safe_name}",
+                    "path": f"/mnt/user-data/uploads/{dest.name}",
                     "is_image": ftype == "image",
                 }
             )
@@ -1564,6 +1594,7 @@ class ChannelManager:
         require_bound_identity: bool = False,
         inbound_dedupe_store: InboundDedupeStore | None = None,
         get_stream_bridge: Callable[[], StreamBridge | None] | None = None,
+        reply_locale: ReplyLocaleResolver | None = None,
     ) -> None:
         if isinstance(max_concurrency, bool) or not isinstance(max_concurrency, int) or max_concurrency <= 0:
             raise ValueError("max_concurrency must be a positive integer")
@@ -1580,6 +1611,9 @@ class ChannelManager:
         self._channel_sessions = dict(channel_sessions or {})
         self._connection_repo = connection_repo
         self._require_bound_identity = require_bound_identity
+        # Language of the /goal replies; ChannelService passes the owner-aware
+        # resolver, and a directly built manager replies in en-US.
+        self._reply_locale = reply_locale or ReplyLocaleResolver()
         # Zero-arg accessor for the FastAPI app's StreamBridge singleton,
         # threaded in from app.py's lifespan via start_channel_service() ->
         # ChannelService.__init__ (mirrors how ScheduledTaskService gets a
@@ -1658,6 +1692,17 @@ class ChannelManager:
         # run after this manager has been shut down. Discarded via the same
         # task's done-callback (see _maybe_spawn_followup_watcher).
         self._followup_watcher_tasks: set[asyncio.Task] = set()
+
+    @staticmethod
+    def _notify_channel_thread_replaced(channel_name: str, old_thread_id: str) -> None:
+        """Tell the channel adapter that a thread was replaced (``/new``)."""
+        from .service import get_channel_service
+
+        service = get_channel_service()
+        if service:
+            channel = service.get_channel(channel_name)
+            if channel is not None:
+                channel.on_thread_replaced(old_thread_id)
 
     @staticmethod
     def _channel_supports_streaming(channel_name: str) -> bool:
@@ -2178,7 +2223,7 @@ class ChannelManager:
             if isinstance(override, int) and override > 0:
                 run_config["recursion_limit"] = override
             else:
-                run_config["recursion_limit"] = max(run_config.get("recursion_limit", 100), policy.default_recursion_limit)
+                run_config["recursion_limit"] = max(run_config.get("recursion_limit", 0), policy.default_recursion_limit)
 
         return assistant_id, run_config, run_context
 
@@ -3395,6 +3440,13 @@ class ChannelManager:
                 await self._release_inbound_dedupe_key(msg)
                 await self._send_error(msg, THREAD_BUSY_MESSAGE)
                 return
+            if step_limit_text := _step_limit_text(exc):
+                logger.warning("[Manager] run stopped at its step limit: thread_id=%s", thread_id)
+                await self._send_error(msg, step_limit_text)
+                # The run ended, as after a terminal error frame: release the key
+                # only after the reply, so a redelivery cannot overtake it.
+                await self._release_inbound_dedupe_key(msg)
+                return
             if recovery := await self._stale_pin_recovery(msg, exc, expected_pin=expected_pin, thread_id=thread_id):
                 await self._release_inbound_dedupe_key(msg)
                 await self._send_error(msg, recovery.text)
@@ -3424,7 +3476,7 @@ class ChannelManager:
         # Reuse the storage owner cached at the top of _handle_chat so uploads and
         # artifact delivery always resolve to the same bucket, even if a future
         # channel.receive_file returns a rewritten InboundMessage.
-        response_text, attachments = _prepare_artifact_delivery(thread_id, response_text, artifacts, user_id=storage_user_id)
+        response_text, attachments = await asyncio.to_thread(_prepare_artifact_delivery, thread_id, response_text, artifacts, user_id=storage_user_id)
 
         if not response_text:
             if attachments:
@@ -3489,6 +3541,7 @@ class ChannelManager:
         last_published_len = 0
         last_publish_at = 0.0
         stream_error: BaseException | None = None
+        step_limit_text: str | None = None
         replay_gap = False
         pin_recovery_text: str | None = None
         pinned_model_value = run_context.get("model_name")
@@ -3532,6 +3585,7 @@ class ChannelManager:
                     # The v1 SDK yields backend errors as frames, not exceptions.
                     # Keep draining the stream and use the existing failure path.
                     stream_error = _RunFailedFrame("Agent run failed.")
+                    step_limit_text = _step_limit_text(error_data)
                 elif event == "gap":
                     # A reused run whose events are no longer replayable.
                     replay_gap = True
@@ -3596,7 +3650,11 @@ class ChannelManager:
             # Reuse the storage owner resolved by _handle_chat so artifact delivery
             # matches the upload bucket and we avoid re-running _safe_user_id_for_run
             # (and its possible filesystem touch) on the streaming-error path.
-            response_text, attachments = _prepare_artifact_delivery(thread_id, response_text, artifacts, user_id=storage_user_id)
+            response_text, attachments = await asyncio.to_thread(_prepare_artifact_delivery, thread_id, response_text, artifacts, user_id=storage_user_id)
+            if step_limit_text:
+                # The last text is mid-task narration: say the run stopped, in
+                # place of the generic failure, so the user knows to continue.
+                response_text = f"{response_text}\n\n{step_limit_text}" if response_text else step_limit_text
 
             if not response_text:
                 if attachments:
@@ -3680,7 +3738,12 @@ class ChannelManager:
         if reply is None and command == "new":
             # Create a new thread through Gateway
             client = self._get_client()
+            old_thread_id = await self._lookup_thread_id(msg)
             await self._create_thread(client, msg)
+            # Retire pending interactive cards for the replaced thread so stale
+            # button clicks are correctly rejected instead of lingering.
+            if old_thread_id:
+                self._notify_channel_thread_replaced(msg.channel_name, old_thread_id)
             reply = "New conversation started."
         elif reply is None and command == "status":
             thread_id = await self._lookup_thread_id(msg)
@@ -3978,30 +4041,66 @@ class ChannelManager:
             response.raise_for_status()
             return response.json() or {}
 
+    async def _goal_reply(self, msg: InboundMessage, key: str) -> str:
+        """A fixed ``/goal`` reply in the owner's language."""
+        return goal_reply_text(key, await self._reply_locale.locale_for(_effective_owner_user_id(msg)))
+
+    async def _goal_status_reply(self, msg: InboundMessage, thread_id: str | None, *, headers: dict[str, str]) -> str:
+        """``/goal`` with no argument: the goal's state, why it stopped, or that it was met."""
+        locale = await self._reply_locale.locale_for(_effective_owner_user_id(msg))
+        if not thread_id:
+            return goal_reply_text("none", locale)
+        try:
+            goal = (await self._goal_request("get", thread_id, headers=headers)).get("goal")
+            active = is_active_goal_state(goal)
+            # A met goal is cleared; its goal_outcome record stays in the thread
+            # state until the next goal change.
+            outcome = None if active else await self._goal_outcome(msg, thread_id)
+        except Exception:
+            logger.exception("Failed to fetch goal from gateway")
+            return goal_reply_text("fetch_failed", locale)
+        running = active and await self._thread_run_in_flight(msg, thread_id)
+        return goal_status_text(goal, outcome, running=running, locale=locale)
+
+    async def _thread_run_in_flight(self, msg: InboundMessage, thread_id: str) -> bool:
+        """Whether the thread's newest run is pending or running; False when unreadable."""
+        try:
+            page = await self._fetch_gateway_json(f"/api/threads/{quote(thread_id, safe='')}/runs/page?limit=1", msg=msg)
+        except Exception:
+            logger.warning("[Manager] failed to read the newest run for /goal: thread_id=%s", thread_id, exc_info=True)
+            return False
+        runs = page.get("data") if isinstance(page, Mapping) else None
+        newest = runs[0] if isinstance(runs, list) and runs else None
+        return isinstance(newest, Mapping) and newest.get("status") in ("pending", "running")
+
+    async def _goal_outcome(self, msg: InboundMessage, thread_id: str) -> Any:
+        """The thread's ``goal_outcome`` (its latest met goal), or None. Raises when unreadable."""
+        try:
+            state = await self._fetch_gateway_json(f"/api/threads/{quote(thread_id, safe='')}/state", msg=msg)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return None  # no checkpoint yet, so no goal was ever met here
+            raise
+        values = state.get("values") if isinstance(state, Mapping) else None
+        return values.get("goal_outcome") if isinstance(values, Mapping) else None
+
     async def _handle_goal_command(self, msg: InboundMessage, args: str) -> str | None:
         command = parse_goal_command(args)
         thread_id = await self._lookup_thread_id(msg)
         headers = _owner_headers(msg) or create_internal_auth_headers()
 
         if command.kind == "status":
-            if not thread_id:
-                return "No active goal."
-            try:
-                goal = (await self._goal_request("get", thread_id, headers=headers)).get("goal")
-            except Exception:
-                logger.exception("Failed to fetch goal from gateway")
-                return "Failed to fetch goal information."
-            return f"Goal: {goal.get('objective')}" if goal else "No active goal."
+            return await self._goal_status_reply(msg, thread_id, headers=headers)
 
         if command.kind == "clear":
             if not thread_id:
-                return "Goal cleared."
+                return await self._goal_reply(msg, "cleared")
             try:
                 await self._goal_request("delete", thread_id, headers=headers)
             except Exception:
                 logger.exception("Failed to clear goal through gateway")
-                return "Failed to clear goal."
-            return "Goal cleared."
+                return await self._goal_reply(msg, "clear_failed")
+            return await self._goal_reply(msg, "cleared")
 
         if not thread_id:
             thread_id, _ = await self._create_first_thread(self._get_client(), msg)
@@ -4010,7 +4109,7 @@ class ChannelManager:
             await self._goal_request("put", thread_id, headers=headers, json={"objective": command.objective})
         except Exception:
             logger.exception("Failed to set goal through gateway")
-            return "Failed to set goal."
+            return await self._goal_reply(msg, "set_failed")
 
         from dataclasses import replace as _dc_replace
 

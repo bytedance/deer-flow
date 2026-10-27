@@ -11,8 +11,8 @@ loopback. The sandbox gets a tiny ``lark-cli`` shim on ``PATH`` that forwards
 argv/stdin to the broker, so the raw credential files never exist in the sandbox
 filesystem.
 
-Everything here is Python-3-stdlib only so the same module can run inside the
-minimal broker sidecar image without extra dependencies.
+The broker and its bundled DeerFlow utility modules use only Python's standard
+library, so the minimal sidecar needs no third-party Python packages.
 """
 
 from __future__ import annotations
@@ -32,6 +32,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+# Keep the standalone image's Python COPY list in sync with this import and its
+# transitive dependencies: docker/lark-cli-broker/Dockerfile.
 from deerflow.utils.atomic_write import cleanup_failed_atomic_write
 
 logger = logging.getLogger(__name__)

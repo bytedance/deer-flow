@@ -7,20 +7,24 @@ import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
+import sys
 import threading
+from contextlib import suppress
 from dataclasses import dataclass
 from functools import cached_property
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import NamedTuple
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.sandbox.download import DEFAULT_DOWNLOAD_LIMIT, download_limit
 from deerflow.sandbox.env_policy import build_sandbox_env
 from deerflow.sandbox.local.list_dir import list_dir
-from deerflow.sandbox.path_patterns import replace_output_path_matches
+from deerflow.sandbox.path_patterns import PATH_START_BOUNDARY, replace_output_path_matches
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
-from deerflow.sandbox.search import GrepMatch, find_glob_matches, find_grep_matches
+from deerflow.sandbox.search import GrepMatch, find_glob_matches, find_grep_matches, path_matches
+from deerflow.utils.atomic_write import publish_bytes_atomically
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +36,91 @@ logger = logging.getLogger(__name__)
 DEFAULT_COMMAND_TIMEOUT_SECONDS = 600
 _COMMAND_CAPTURE_LIMIT_BYTES = 10 * 1024 * 1024
 _PIPE_DRAIN_JOIN_TIMEOUT_SECONDS = 0.2
+
+
+#: Script suffixes a host interpreter opens by path but the shared skill-package
+#: classifier does not list. ``awk -f``, ``sed -f``, ``lua``, ``Rscript``, and
+#: ``tclsh`` all read the file named on the command line, so container paths
+#: inside it need the same translation as ``.py``/``.sh``. The shared set is
+#: left alone: it also decides what SkillScan and the installer treat as
+#: package code, which is a separate contract from what the host shell runs.
+_INTERPRETER_SCRIPT_SUFFIXES = frozenset({".awk", ".lua", ".r", ".sed", ".tcl"})
+
+
+def _existing_regular_file_head(path: str) -> bytes:
+    """Return the first two bytes of an existing regular file, else ``b""``.
+
+    ``write_file(append=True)`` asks this for the interpreter line of an
+    extensionless destination. Only a regular file may be opened: opening a
+    FIFO for reading blocks until the other end connects, which would turn an
+    append that used to complete into a hang. ``O_NONBLOCK`` keeps the open
+    itself from waiting, and the ``fstat`` check rejects the handle before any
+    read.
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+    except OSError:
+        return b""
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return b""
+        return os.read(fd, 2)
+    except OSError:
+        return b""
+    finally:
+        with suppress(OSError):
+            os.close(fd)
+
+
+def _content_path_translation_applies(path: str, content: str, *, append: bool, resolved_path: str) -> bool:
+    """Whether container paths inside ``content`` are translated to host paths.
+
+    The translation exists so a script the agent wrote can run under a host
+    interpreter (PR #1935). Documents, data files, and configs are not
+    executed, so their bytes are stored verbatim: rewriting them put host
+    paths into deliverables while ``read_file`` masked the rewrite back to
+    virtual paths (#7461).
+
+    A suffix settles the classification by itself, so only an extensionless
+    destination is inspected for a shebang. That keeps named files free of
+    I/O and leaves an append to a pipe or device untouched.
+    """
+    from deerflow.skills.package_files import is_code_file, is_code_path
+
+    posix = PurePosixPath(path.replace("\\", "/"))
+    if is_code_path(path) or posix.suffix.lower() in _INTERPRETER_SCRIPT_SUFFIXES:
+        return True
+    if posix.suffix:
+        # A non-script suffix settles it: a shebang cannot make ``.md`` a program.
+        return False
+    head = content[:2].encode("utf-8", "surrogatepass")
+    if append and not head.startswith(b"#!"):
+        # An extensionless script's interpreter line sits at the top of the
+        # existing file, not in the text being appended.
+        head = _existing_regular_file_head(resolved_path) or head
+    return is_code_file(path, head)
+
+
+def _publish_file_revision(path: str, content: str) -> None:
+    target = Path(os.path.realpath(path))
+    # Rename checks the parent, not the target's write permission. Check the
+    # existing file without truncating it before staging a replacement inode.
+    try:
+        fd = os.open(target, os.O_WRONLY | getattr(os, "O_NONBLOCK", 0))
+    except FileNotFoundError:
+        fd = None
+    try:
+        if fd is not None:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise OSError(errno.EINVAL, "Text revisions require a regular file", path)
+        publish_bytes_atomically(target, content.encode("utf-8"), temporary_prefix=".deerflow-write-", preserve_metadata_from=fd)
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                with suppress(Exception):
+                    logger.warning("Failed to close file revision source descriptor for %s", target, exc_info=True)
 
 
 class _BoundedPipeCapture:
@@ -409,7 +498,7 @@ class LocalSandbox(Sandbox):
         # substitution resumes after a match, so a tail that ran through a
         # ":"-joined list ($PATH, $PYTHONPATH) swallowed every later entry and
         # left those container paths unresolved.
-        patterns = [re.escape(m.container_path) + r"(?=/|$|[\s\"';&|<>()])(?:/[^\s\"';&|<>():]*)?" for m in mappings]
+        patterns = [PATH_START_BOUNDARY + re.escape(m.container_path) + r"(?=/|$|[\s\"';&|<>()])(?:/[^\s\"';&|<>():]*)?" for m in mappings]
         return re.compile("|".join(f"({p})" for p in patterns))
 
     @cached_property
@@ -422,7 +511,7 @@ class LocalSandbox(Sandbox):
         # write_file content regularly stores PATH-style exports, and a tail
         # that ran through the ":" left the later list entries virtual in the
         # host file (read_file masked them back, so the corruption was hidden).
-        patterns = [re.escape(m.container_path) + r"(?=/|$|[^\w./-])(?:/[^\s\"';&|<>():]*)?" for m in mappings]
+        patterns = [PATH_START_BOUNDARY + re.escape(m.container_path) + r"(?=/|$|[^\w./-])(?:/[^\s\"';&|<>():]*)?" for m in mappings]
         return re.compile("|".join(f"({p})" for p in patterns))
 
     @cached_property
@@ -861,6 +950,7 @@ class LocalSandbox(Sandbox):
         timed_out = False
         stdout_read_fd, stdout_write_fd = os.pipe()
         stderr_read_fd, stderr_write_fd = os.pipe()
+        process = None
         try:
             process = subprocess.Popen(
                 args,
@@ -871,20 +961,30 @@ class LocalSandbox(Sandbox):
                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
                 env=env,
             )
-        except Exception:
-            for fd in (stdout_read_fd, stdout_write_fd, stderr_read_fd, stderr_write_fd):
+        except BaseException:
+            # Include interruptions during and after Popen; the read ends have
+            # no drain-thread owner yet. The finally block owns the write ends.
+            for fd in (stdout_read_fd, stderr_read_fd):
                 try:
                     os.close(fd)
                 except OSError:
-                    # Preserve the original Popen failure; fd cleanup is best-effort.
+                    # Preserve the original startup failure; fd cleanup is best-effort.
                     pass
+            if process is not None:
+                # Cleanup must not replace the startup error, even on another
+                # interruption. Reap independently if killing the child fails.
+                with suppress(BaseException):
+                    process.kill()
+                with suppress(BaseException):
+                    process.wait(timeout=10)
             raise
         finally:
+            # A single owner prevents a second close from hitting a recycled fd.
             for fd in (stdout_write_fd, stderr_write_fd):
                 try:
                     os.close(fd)
                 except OSError:
-                    # The write fd may already be closed by the exception cleanup above.
+                    # Closing is best-effort; preserve the command's result or startup error.
                     pass
 
         if encoding is None:
@@ -985,6 +1085,7 @@ class LocalSandbox(Sandbox):
         timed_out = False
         stdout_read_fd, stdout_write_fd = os.pipe()
         stderr_read_fd, stderr_write_fd = os.pipe()
+        process = None
         try:
             process = subprocess.Popen(
                 args,
@@ -995,35 +1096,43 @@ class LocalSandbox(Sandbox):
                 start_new_session=True,
                 env=env,
             )
-        except Exception:
-            for fd in (stdout_read_fd, stdout_write_fd, stderr_read_fd, stderr_write_fd):
+            # With start_new_session=True, the new process is also the
+            # process-group leader, so its PID is the stable group identifier.
+            process_group_id = process.pid
+        except BaseException:
+            # Include interruptions during and after Popen; the read ends have
+            # no drain-thread owner yet. The finally block owns the write ends.
+            for fd in (stdout_read_fd, stderr_read_fd):
                 try:
                     os.close(fd)
                 except OSError:
-                    # Preserve the original Popen failure; fd cleanup is best-effort.
+                    # Preserve the original startup failure; fd cleanup is best-effort.
                     pass
+            if process is not None:
+                # Cleanup must not replace the startup error, even on another
+                # interruption. Reap independently if killing the child fails.
+                with suppress(BaseException):
+                    process.kill()
+                with suppress(BaseException):
+                    process.wait(timeout=10)
             raise
         finally:
+            # A single owner prevents a second close from hitting a recycled fd.
             for fd in (stdout_write_fd, stderr_write_fd):
                 try:
                     os.close(fd)
                 except OSError:
-                    # The write fd may already be closed by the exception cleanup above.
+                    # Closing is best-effort; preserve the command's result or startup error.
                     pass
 
         stdout_capture, stdout_thread = LocalSandbox._start_pipe_drain(stdout_read_fd, "deerflow-bash-stdout-drain")
         stderr_capture, stderr_thread = LocalSandbox._start_pipe_drain(stderr_read_fd, "deerflow-bash-stderr-drain")
         try:
-            process_group_id = os.getpgid(process.pid)
-        except OSError:
-            process_group_id = None
-
-        try:
             try:
                 process.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
                 timed_out = True
-                LocalSandbox._terminate_process_group(process)
+                LocalSandbox._terminate_process_group(process, process_group_id)
             returncode = process.returncode if process.returncode is not None else 0
         finally:
             join_timeout = 10 if timed_out or not LocalSandbox._process_group_exists(process_group_id) else _PIPE_DRAIN_JOIN_TIMEOUT_SECONDS
@@ -1037,14 +1146,14 @@ class LocalSandbox(Sandbox):
         return stdout, stderr, returncode, timed_out
 
     @staticmethod
-    def _terminate_process_group(process: subprocess.Popen) -> None:
+    def _terminate_process_group(process: subprocess.Popen, process_group_id: int) -> None:
         """Kill the command's whole process group, then reap it.
 
         Falls back to killing just the direct child if the group is already
         gone (e.g. the command exited between the timeout and this call).
         """
         try:
-            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+            os.killpg(process_group_id, signal.SIGKILL)
         except (ProcessLookupError, PermissionError, OSError):
             # The process group is already gone (the command exited in the race
             # between the timeout and this call); fall back to killing just the
@@ -1191,14 +1300,17 @@ class LocalSandbox(Sandbox):
             dir_path = os.path.dirname(resolved_path)
             if dir_path:
                 os.makedirs(dir_path, exist_ok=True)
-            # Resolve container paths in content to local paths
-            # using the content-specific resolver (forward-slash safe)
-            resolved_content = self._resolve_paths_in_content(content)
-            mode = "a" if append else "w"
-            # newline="" writes the content as given; the default would turn
-            # every "\n" into "\r\n" on Windows (breaking `bash run.sh`).
-            with open(resolved_path, mode, encoding="utf-8", newline="") as f:
-                f.write(resolved_content)
+            # Resolve container paths in content to local paths, but only for
+            # executable content: a script needs host-resolvable paths when
+            # bash runs it, while a document's bytes must survive the write.
+            translate_paths = _content_path_translation_applies(path, content, append=append, resolved_path=resolved_path)
+            resolved_content = self._resolve_paths_in_content(content) if translate_paths else content
+            if append or sys.platform not in {"darwin", "linux"}:
+                # Other hosts retain their existing write/ACL semantics.
+                with open(resolved_path, "a" if append else "w", encoding="utf-8", newline="") as f:
+                    f.write(resolved_content)
+            else:
+                _publish_file_revision(resolved_path, resolved_content)
             # Track this path so read_file knows to reverse-resolve on read.
             # Only agent-written files get reverse-resolved; user uploads and
             # external tool output are left untouched.
@@ -1207,9 +1319,64 @@ class LocalSandbox(Sandbox):
             # Re-raise with the original path for clearer error messages, hiding internal resolved paths
             raise type(e)(e.errno, e.strerror, path) from None
 
+    def _virtual_search_mounts(self, path: str) -> list[tuple[str, Path]] | None:
+        """Search only mounted children of an unmapped virtual parent.
+
+        Default skills have four category mounts, not an aggregate host root.
+        Never substitute an incidental host directory for that virtual view.
+        Mapped roots (including policy-scoped skill views) keep their normal walk.
+        """
+        if self._find_path_mapping(path) is not None:
+            return None
+        prefix = path.rstrip("/") + "/"
+        mounts = None
+        for mapping in self.path_mappings:
+            if not mapping.container_path.startswith(prefix):
+                continue
+            child = mapping.container_path[len(prefix) :]
+            if not child or "/" in child:
+                continue
+            if mounts is None:
+                mounts = []
+            # Explicit mounts stay visible; ignore rules apply within each mount.
+            root = Path(self._resolved_local_paths[mapping])
+            # A broken mount is an error, not permission to walk the host parent.
+            try:
+                if not stat.S_ISDIR(root.stat().st_mode):
+                    raise NotADirectoryError(mapping.container_path)
+            except OSError:
+                logger.warning("Could not search virtual mount %s", mapping.container_path, exc_info=True)
+                raise
+            mounts.append((child, root))
+        if mounts is not None:
+            # As with list_dir, an existing host file is not a virtual directory.
+            try:
+                mode = Path(path).stat().st_mode
+            except FileNotFoundError:
+                pass
+            else:
+                if not stat.S_ISDIR(mode):
+                    raise NotADirectoryError(path)
+        return mounts
+
     def glob(self, path: str, pattern: str, *, include_dirs: bool = False, max_results: int = 200) -> tuple[list[str], bool]:
-        resolved_path = Path(self._resolve_path(path))
         try:
+            mounts = self._virtual_search_mounts(path)
+            if mounts is not None:
+                results = []
+                for child, root in mounts:
+                    virtual_dir = f"{path.rstrip('/')}/{child}"
+                    if include_dirs and path_matches(pattern, child):
+                        results.append(virtual_dir)
+                    if len(results) <= max_results:
+                        # One lookahead match proves whether the combined view
+                        # exceeds the cap, without collecting a cap per mount.
+                        matches, _ = find_glob_matches(root, pattern, include_dirs=include_dirs, max_results=max_results - len(results) + 1, relative_prefix=child)
+                        results.extend(f"{virtual_dir}/{Path(match).relative_to(root).as_posix()}" for match in matches)
+                    if len(results) > max_results:
+                        return results[:max_results], True
+                return results, False
+            resolved_path = Path(self._resolve_path(path))
             matches, truncated = find_glob_matches(resolved_path, pattern, include_dirs=include_dirs, max_results=max_results)
         except OSError as e:
             if e.filename is None:
@@ -1230,8 +1397,25 @@ class LocalSandbox(Sandbox):
         case_sensitive: bool = False,
         max_results: int = 100,
     ) -> tuple[list[GrepMatch], bool]:
-        resolved_path = Path(self._resolve_path(path))
         try:
+            mounts = self._virtual_search_mounts(path)
+            if mounts is not None:
+                results = []
+                for child, root in mounts:
+                    matches, _ = find_grep_matches(
+                        root,
+                        pattern,
+                        glob_pattern=glob,
+                        literal=literal,
+                        case_sensitive=case_sensitive,
+                        max_results=max_results - len(results) + 1,
+                        relative_prefix=child,
+                    )
+                    results.extend(GrepMatch(path=f"{path.rstrip('/')}/{child}/{Path(match.path).relative_to(root).as_posix()}", line_number=match.line_number, line=match.line) for match in matches)
+                    if len(results) > max_results:
+                        return results[:max_results], True
+                return results, False
+            resolved_path = Path(self._resolve_path(path))
             matches, truncated = find_grep_matches(
                 resolved_path,
                 pattern,

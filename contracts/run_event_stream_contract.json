@@ -107,6 +107,28 @@
       }
     },
     {
+      "event_type": "run.terminal",
+      "category": "trace",
+      "producer": "run_agent() finalization, after final commit ACK and Journal drain, before Evidence Receipt; RecoveryTerminalPublisher after a successful atomic takeover claim",
+      "identity": ["thread_id", "run_id", "event_type"],
+      "content_schema": {
+        "type": "object",
+        "required": ["status"],
+        "properties": {"status": {"enum": ["success", "error", "interrupted", "timeout"]}},
+        "additionalProperties": false
+      },
+      "metadata_schema": {
+        "type": "object",
+        "required": ["protocol_version", "recovered"],
+        "properties": {
+          "protocol_version": {"type": "integer", "const": 1},
+          "recovered": {"type": "boolean"}
+        },
+        "additionalProperties": true
+      },
+      "notes": "Authoritative terminal business outcome, confirmed as a run-scoped singleton. Owner Workers emit recovered=false; confirmed recovery takeover emits recovered=true only when creating a missing terminal, guarded by the current Run lifecycle inside the event-store mutation fence. An existing matching event retains its original recovered marker. This does not redefine root-invocation run.end, prove complete producer coverage, or guarantee publication after every terminal commit. Historical sealed records need not contain this additive event."
+    },
+    {
       "event_type": "run.error",
       "category": "error",
       "producer": "RunJournal.on_chain_error()",

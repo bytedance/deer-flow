@@ -18,6 +18,17 @@ if TYPE_CHECKING:
     from .cases import Case
 
 
+def _same_value(actual, expected):
+    """Keep Python value equality, but distinguish booleans from numbers."""
+    if isinstance(actual, bool) != isinstance(expected, bool):
+        return False
+    if isinstance(actual, dict) and isinstance(expected, dict):
+        return actual.keys() == expected.keys() and all(_same_value(actual[key], expected[key]) for key in actual)
+    if isinstance(actual, list) and isinstance(expected, list):
+        return len(actual) == len(expected) and all(_same_value(left, right) for left, right in zip(actual, expected))
+    return actual == expected
+
+
 def grade_python(payload):
     """Run only pure Python over synthetic values, inside a timeout subprocess."""
     code = payload["code"]
@@ -81,10 +92,11 @@ def grade_python(payload):
             original = copy.deepcopy(args)
             try:
                 actual = fn(*args)
-                ok = "raises" not in check and actual == check.get("want") and args == original
-                results.append({"check": number, "passed": ok, "actual": actual, "mutated_input": args != original})
+                unchanged = _same_value(args, original)
+                ok = "raises" not in check and _same_value(actual, check.get("want")) and unchanged
+                results.append({"check": number, "passed": ok, "actual": actual, "mutated_input": not unchanged})
             except Exception as exc:
-                results.append({"check": number, "passed": type(exc).__name__ == check.get("raises") and args == original, "exception": type(exc).__name__})
+                results.append({"check": number, "passed": type(exc).__name__ == check.get("raises") and _same_value(args, original), "exception": type(exc).__name__})
         return {"valid": True, "checks": results}
     except Exception as exc:
         return {"valid": False, "error": f"{type(exc).__name__}: {exc}", "checks": []}
@@ -101,7 +113,7 @@ def score(case: Case, content: str | None, *, public=False, timeout_seconds=3):
             valid = set(value) == set(case.expected)
             if public:
                 return {"valid": valid, "checks": [{"check": "JSON shape", "passed": valid}]}
-            checks = [{"check": name, "passed": value.get(name) == target and isinstance(value.get(name), bool) == isinstance(target, bool)} for name, target in case.expected.items()]
+            checks = [{"check": name, "passed": _same_value(value.get(name), target)} for name, target in case.expected.items()]
             return {"valid": valid, "checks": checks}
         except Exception as exc:
             return {"valid": False, "checks": [], "error": type(exc).__name__}

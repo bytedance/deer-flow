@@ -145,9 +145,16 @@ configured default. `max_recursion_limit` (default `1000`) caps both sources to
 limit runaway LLM cost. Both settings are read per run, so changes apply to the
 next request without a Gateway restart.
 
-These settings apply to Gateway API runs. IM channel runs and embedded
-`DeerFlowClient` runs retain their own defaults and can be overridden through
-their channel/client-specific configuration or per-call options.
+A run that reaches its limit ends with status `error` and
+`stop_reason: recursion_capped`. Its error message lists up to five outputs it
+created but did not present and asks the user to send a message to continue.
+An active goal stands down without an evaluator call and stays active.
+
+These settings also apply to IM channel runs. A `recursion_limit` in an IM
+channel's `session.config` (for all channels, one channel or one user) takes
+precedence. The GitHub channel instead uses `250`, or a higher
+`session.config` value, unless the agent sets `github.recursion_limit`.
+Embedded `DeerFlowClient` runs retain their own defaults and per-call options.
 
 ### Models
 
@@ -335,6 +342,26 @@ Plan from the model name. Plans/regions without a preset can use the custom
 OpenAI-compatible option if their documented protocol is compatible; native
 protocols need a verified backend preset or operator YAML configuration.
 
+The `moonshot-cn` preset recognizes the exact IDs `kimi-k3.1-pro` and
+`kimi-k3.1-pro-highspeed`. Both require thinking, preserve reasoning history,
+and accept top-level `reasoning_effort` values `low`, `high` and `max`, with
+`max` as the default. The existing reasoning contract keeps thinking enabled
+when a caller requests it off. Unsupported effort values use the default;
+these models do not declare aliases for the generic effort vocabulary.
+
+For these two models at the official `https://api.moonshot.cn/v1` endpoint,
+`PatchedChatDeepSeek` omits `thinking` and the fixed sampling parameters
+`temperature`, `top_p`, `n`, `presence_penalty` and `frequency_penalty` from
+the final request, including values supplied through `extra_body`. Moonshot
+uses its fixed values (respectively `1.0`, `0.95`, `1`, `0`, `0`). This rule
+also applies to explicit YAML profiles using that adapter and endpoint;
+Kimi K2.5, unknown model IDs and custom endpoints retain their existing behavior.
+Image capability covers base64/data-URL images and provider file IDs, not
+public image URLs; DeerFlow's image middleware uses base64. This declaration
+does not add video UI support. See the official
+[K3.1 quickstart](https://platform.kimi.com/docs/guide/kimi-k3-1-pro-quickstart)
+and [model parameter reference](https://platform.kimi.com/docs/api/models-overview).
+
 Endpoint/auth sources used for these presets include the official
 [OpenAI SDK](https://github.com/openai/openai-python/blob/main/src/openai/_client.py),
 [Anthropic SDK](https://github.com/anthropics/anthropic-sdk-python/blob/main/src/anthropic/_client.py),
@@ -453,7 +480,8 @@ backslash. The existing Python-literal fallback also parses the original value.
 
 Non-JSON raw-string parameters retain the gateway's multiline compatibility:
 literal `\n` outside fenced code becomes a real newline, and surrounding
-whitespace is trimmed. Escapes inside fenced code remain unchanged. This keeps
+whitespace is trimmed. Escapes inside matching triple-backtick or triple-tilde
+fences remain unchanged; an unclosed fence preserves the rest of the reply. This keeps
 multi-line file content and commands working. Raw strings cannot distinguish an
 intended literal `\n` from a gateway-escaped newline; structured JSON parameters
 avoid that ambiguity. Numeric conversion failures and unsafe Python-literal
@@ -760,6 +788,7 @@ Notes:
 - Set `multi_instance: true` (or export `DEER_FLOW_MULTI_INSTANCE=1`, which lets deploy tooling such as a Helm chart set it from its replica count) on every instance that shares one database. Startup then enforces the same prerequisites as `GATEWAY_WORKERS > 1`: `database.backend: postgres`, `run_events.backend: db`, `run_ownership.heartbeat_enabled: true`, and a Redis stream bridge (`stream_bridge.type: redis` or `DEER_FLOW_STREAM_BRIDGE_REDIS_URL`). It refuses an explicit `sandbox.ownership.type: memory`, process-local browser tools, and `scheduler.enabled: true` without `scheduler.multi_instance: true`.
 - `DEER_FLOW_MULTI_INSTANCE` treats blank, `0`, `false`, `no` and `off` as "not declared"; any other value declares a multi-instance deployment, so a typo fails closed.
 - `GET /health/ready` pings the Redis stream bridge on every probe and answers 503 (`stream_bridge: unreachable`) while Redis is down, so the orchestrator drains that instance instead of routing it runs it cannot publish or stream; the memory bridge reports `not_configured`. When `sandbox.provisioner_url` is set, the body also carries the provisioner's `/health` verdict (`provisioner: ok|unreachable`), which never changes the status code because every instance shares one provisioner. That probe follows the sandbox clients' proxy policy: loopback, private, link-local and cluster-local provisioner addresses bypass `HTTP_PROXY`, external hosts keep the environment's proxy settings.
+- `stream_bridge.legacy_end_scan_enabled` defaults to `true` for Redis: when the tail is not END, END publication scans all retained entries, including a normal run's first END. Cost grows with the retained entry count and total payload bytes inside atomic Lua, blocking other Redis clients; `queue_maxsize` bounds entries, not bytes. Stop every old writer and expire or remove every legacy replay buffer before setting this to `false` on all Gateways and restarting them. With `stream_ttl_seconds: 0`, remove those buffers explicitly. Disabled mode detects END only at the tail, so both data and END checks have constant cost relative to retained history; it cannot deduplicate an old mid-stream END. No performance ceiling is implied by the default entry cap.
 - `stream_bridge.producer_lease_recovery_enabled` is a restart-required activation gate for recovering a terminal Redis stream whose producer died before publishing END. Keep it `false` during the binary rollout: upgraded writers already publish producer markers, while old writers do not. After every old Gateway has stopped and its runs have drained, set it to `true` on every instance and restart them together. Enabling it while an old worker may still finalize a run can make a new consumer mistake that untracked legacy producer for completed history.
 - The declaration also drives the `agent_storage.backend: file` divergence warning, the inbound webhook dedupe warning, the `auth.local.throttle_storage: memory` warning, and the WeChat QR-login guard, which otherwise only look at the worker count.
 - Login lockouts are shared through the database: `auth.local.throttle_storage` (startup-only) defaults to `auto`, which keeps the per-IP failed-login counters for `POST /api/v1/auth/login/local` in the `login_throttle` table whenever `database.backend` is `sqlite` or `postgres`, so every instance enforces one `max_login_attempts` limit per client IP and a lockout on one instance holds on all of them. `memory` keeps the historical per-process counter (N instances give an attacker N × `max_login_attempts` guesses; a declared multi-instance deployment logs a warning), and `db` forces the table (it falls back to memory with a warning when the database backend is `memory`, and refuses to start when the configured database's engine is unavailable; `auto` falls back with a warning in that case). `max_login_attempts` and `lockout_seconds` stay live-read.
@@ -803,7 +832,7 @@ These still need a manual pass:
 - cancel a run on B from A: it takes effect within about one heartbeat (~10 s; a lower `run_ownership.lease_seconds` makes the boundary easier to observe);
 - change an MCP filesystem server's args on A: B's local-bash allowlist follows;
 - edit a skill on A: B's system-prompt skills section changes within 30 s;
-- with `DEERFLOW_MI_KEEP_CHANNELS=1` and test bots configured: only one Gateway connects each platform (`GET /api/channels/` reports the same `leader` on both, Telegram logs no `409`, Discord answers once), `stop <leader> --kill` hands each provider to the other Gateway within `lease_seconds + grace_seconds`, and a plain `stop <leader>` hands them over on the other Gateway's next tick.
+- with `DEERFLOW_MI_KEEP_CHANNELS=1` and test bots configured: only one Gateway connects each platform (`GET /api/channels/` reports the same `leader` on both, Telegram logs no `409`, Discord answers once), `stop <leader> --kill` hands each provider to the other Gateway within `lease_seconds + grace_seconds` plus one renewal interval (50 s with the defaults), a plain `stop <leader>` hands them over on the other Gateway's next tick, and credentials saved or a disconnect made with `POST` / `DELETE /api/channels/{provider}/runtime-config` on the non-holder reach the holder within one renewal interval.
 
 ### IM channel leader lease (`channels.leader_lease`)
 
@@ -1012,6 +1041,31 @@ retry budget when retries are enabled; the earlier of that deadline and
 only queue wait is bounded by admission, and the existing HTTP timeout semantics
 still apply.
 
+#### Jina crawl diagnostics
+
+Set `log_level: debug` in root `config.yaml` and restart the Gateway to enable
+`deerflow.community.jina_ai.jina_client` completion summaries. INFO emits no new
+summary. Each logical crawl emits one `Jina crawl completed` message containing:
+
+- `outcome`: `success`, `error`, or `cancelled`.
+- `reason`: `success`, `empty_response`, `response_limit`, `invalid_configuration`,
+  `nonretryable_http`, `attempt_exhaustion`, `retry_after_unfit`,
+  `budget_exhaustion`, `request_failure`, or `cancellation`.
+- `attempts`: calls started at HTTPX's POST/stream API, including failed connections;
+  zero for rejected settings. This does not prove remote delivery.
+- `elapsed_seconds`: monotonic duration through completion/cleanup.
+- `backoff_seconds`: measured time awaiting retry sleep, including a partially
+  cancelled wait, rather than the planned delay. Neither duration estimates
+  provider latency or cost.
+
+Fields remain in the message in plain and enhanced JSON logging. Existing
+`logging.enhance` trace filtering supplies the inherited request trace ID when
+enabled; no new ID is created. Concurrent crawls keep independent counters but
+may share a request trace. Summaries contain no URL, credentials, response body,
+headers, or exception text. Existing error logs and return values are unchanged.
+Emission is best effort if a logging handler fails. These provider-local records
+explain internal retry decisions; they do not replace tracing or tool results.
+
 #### Jina response byte budget
 
 On the same Jina `web_fetch` tool entry, optionally set `max_response_bytes: 1048576`
@@ -1125,6 +1179,34 @@ existing validation of returned image URLs or web source filters. The endpoint
 is resolved once before transport so it can remain constant across retry attempts.
 Override debug diagnostics show the effective endpoint without URL credentials,
 query or fragment; result-URL guards do not restrict the operator's API host.
+
+#### Exa endpoints
+
+To use an Exa-compatible provider for the Exa `web_search` and `web_fetch`
+tools, set `EXA_BASE_URL` to its base URL (without `/search` or `/contents`)
+and `EXA_API_KEY` to that provider's key. Each tool entry can instead set its
+own `base_url`; a non-blank string there takes precedence over `EXA_BASE_URL`.
+When neither is set, the SDK default `https://api.exa.ai` is used.
+
+```yaml
+tools:
+  - name: web_search
+    group: web
+    use: deerflow.community.exa.tools:web_search_tool
+    base_url: https://exa-compatible.example
+    api_key: $EXA_COMPATIBLE_API_KEY
+```
+
+Overrides must be absolute `http://` or `https://` URLs with a host and valid
+port, without a query string or fragment. Surrounding whitespace and trailing
+slashes are removed. An invalid override returns a configuration error that
+does not echo the configured value and does not fall back to another host. The
+key is sent to the configured host in the `x-api-key` header.
+
+The endpoint fetches pages for `web_fetch` in its own network, so `web_fetch`
+screens a configured base URL like the other delegated fetch backends: a host
+that resolves to a loopback, private or unverifiable address is refused unless
+the tool entry sets `network_isolation_confirmed: true`.
 
 #### Serper source filters
 
@@ -1589,7 +1671,9 @@ sandbox:
       read_only: false
 ```
 
-When you configure `sandbox.mounts`, DeerFlow exposes those `container_path` values in the agent prompt so the agent can discover and operate on mounted directories directly instead of assuming everything must live under `/mnt/user-data`.
+When you configure `sandbox.mounts`, DeerFlow exposes those `container_path` values in the agent prompt so the agent can discover and operate on mounted directories directly instead of assuming everything must live under `/mnt/user-data`. See [Skills and sandbox paths](#skills-and-sandbox-paths) for Windows, WSL, and Docker path examples.
+
+Trailing slashes in `container_path` values are normalized when the config is loaded (`/mnt/reports/` behaves like `/mnt/reports`) — this applies to both `sandbox.mounts[].container_path` and `skills.container_path` — and the container root `/` or an empty value is rejected; mount a specific directory instead.
 
 #### Sandbox network policy
 
@@ -1792,12 +1876,79 @@ Configure the skills directory for specialized workflows:
 
 ```yaml
 skills:
-  # Host path (optional, default: ../skills)
+  # Gateway-visible source root (optional; see resolution order below)
   path: /custom/path/to/skills
 
-  # Container mount path (default: /mnt/skills)
+  # Agent-facing POSIX path (default: /mnt/skills, including on Windows)
   container_path: /mnt/skills
 ```
+
+#### Skills and sandbox paths
+
+Choose paths from the filesystem of the process that reads them:
+
+| Setting | Meaning |
+| --- | --- |
+| `skills.path` | Source directory read by the Gateway, containing `public/` and any legacy `custom/` skills. It is not the path the agent uses. |
+| `skills.container_path` | Agent-facing skills root, normally `/mnt/skills`. DeerFlow prepares the enabled skill views beneath this root; do not add a second `sandbox.mounts` entry for skills. |
+| `sandbox.mounts[].host_path` | Existing absolute source directory. With `LocalSandboxProvider`, it must be visible to the Gateway process. With local AIO Docker, it must be available to the Docker daemon creating the sandbox. |
+| `sandbox.mounts[].container_path` | Absolute POSIX path used by agent tools, such as `/mnt/shared`, on every host OS. Local mode maps it to the source; AIO Docker bind-mounts the source there. |
+
+Skills source resolution is: explicit `skills.path`, then `DEER_FLOW_SKILLS_PATH`,
+then `<project-root>/skills`. The project root is `DEER_FLOW_PROJECT_ROOT` when
+set, otherwise the Gateway process's working directory. Relative skill source
+paths use that root, **not the directory containing `config.yaml`**. If the default
+directory is absent, a source checkout also tries its repository `skills/`
+directory. Use an absolute path to remove ambiguity; `~` is not expanded in
+these path fields. Changing `skills.path` does not relocate per-user custom
+skills, which live under `DEER_FLOW_HOME/users/<user-id>/skills/custom/`.
+
+For a Gateway running directly on the machine with `LocalSandboxProvider`,
+adapt the two source paths in this example to your platform:
+
+```yaml
+skills:
+  path: /home/alice/deer-flow/skills
+  container_path: /mnt/skills
+sandbox:
+  use: deerflow.sandbox.local:LocalSandboxProvider
+  mounts:
+    - host_path: /home/alice/data
+      container_path: /mnt/shared
+      read_only: true
+```
+
+| Gateway environment | Example `skills.path` | Example `sandbox.mounts[].host_path` |
+| --- | --- | --- |
+| Linux | `/home/alice/deer-flow/skills` | `/home/alice/data` |
+| macOS | `/Users/alice/deer-flow/skills` | `/Users/alice/data` |
+| Native Windows Python (including when launched from Git Bash) | `'D:/deer-flow/skills'` | `'D:/data'` |
+| Linux Python inside WSL, using files on Windows drive D | `/mnt/d/deer-flow/skills` | `/mnt/d/data` |
+
+Keep both `container_path` values unchanged. For example, an agent reads
+`/mnt/shared/report.csv`; native Windows resolves that to `D:/data/report.csv`,
+while WSL resolves it to `/mnt/d/data/report.csv`. WSL-native files can instead
+use `/home/alice/...`. Native Windows paths can use forward slashes as above,
+or single-quoted backslashes (`'D:\data'`). Plain, unquoted YAML scalars also keep
+backslashes literal; only double-quoted scalars interpret backslash escapes.
+These are path examples; the [local development prerequisites](../../README.md#option-2-local-development)
+still apply, including the documented WSL limitations of the startup scripts.
+
+**Gateway in Docker:** both bundled Compose files mount the repository's
+`skills/` at `/app/skills` and set `DEER_FLOW_PROJECT_ROOT=/app`. Leave
+`skills.path` unset, or use `/app/skills`. To use another host skills directory,
+replace that Gateway volume's source and keep its container destination consistent
+with `skills.path`; a host path such as `D:/deer-flow/skills` is not a path inside
+the Linux Gateway container.
+
+For local-sandbox custom directories, use the two-step [Gateway bind mount
+example](#sandbox) above: Docker host directory → Gateway-visible `host_path` →
+agent-facing `container_path`. In AIO Docker-outside-of-Docker mode, custom mounts
+go directly from the Docker host to the sandbox: on a Linux Docker host,
+`host_path: /srv/data` and `container_path: /mnt/shared` expose `/srv/data` there,
+even if the Gateway sees the same directory at `/app/data`. Do not substitute
+`/app/data` unless it is also the intended source on the Docker host. These local
+mount examples do not configure Kubernetes PVCs or remote sandbox storage.
 
 For the AIO provider (including the Kubernetes provisioner) and E2B,
 `skills.container_path` is captured when the provider starts and must be one
@@ -1809,7 +1960,7 @@ same root. E2B also records the root in remote metadata and refuses to adopt a
 VM created for another root.
 
 **How Skills Work**:
-- Skills are stored in `deer-flow/skills/{public,custom}/`
+- Public and legacy skills use the configured source root; user-installed custom skills use the per-user runtime directory above
 - Each skill has a `SKILL.md` file with metadata
 - Skills are automatically discovered and loaded
 - Available in both local and Docker sandbox via path mapping
@@ -1879,6 +2030,8 @@ models:
 - `BRAVE_SEARCH_API_KEY` - Brave Search API key for `web_search` and `image_search`
 - `SERPER_API_KEY` - Serper (Google Search/Images API) key for `web_search` and `image_search`
 - `SERPER_BASE_URL` - Optional operator-controlled Serper-compatible base URL for both tools; each tool's `base_url` takes precedence. The provider key is sent to the configured host in `X-API-KEY`, never a query parameter. See [Serper endpoints](#serper-endpoints).
+- `EXA_API_KEY` - [Exa](https://exa.ai) key for `web_search` and `web_fetch`
+- `EXA_BASE_URL` - Optional operator-controlled Exa-compatible base URL for both Exa tools; each tool's `base_url` takes precedence. See [Exa endpoints](#exa-endpoints).
 - `SERPLY_API_KEY` - [Serply](https://serply.io) key for `web_search` (Google Search, plus Google News and Google Scholar via `vertical`)
 - `GROUNDROUTE_API_KEY` - GroundRoute meta-search API key for `web_search` and `web_fetch` (routes across Serper, Brave, Exa, Tavily, Firecrawl, Perplexity with gain-share pricing)
 - `SOFYA_API_KEY` - [Sofya](https://sofya.co) key for `web_search` and `web_fetch`

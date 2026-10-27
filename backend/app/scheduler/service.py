@@ -454,6 +454,15 @@ class ScheduledTaskService:
                 error=_LEASE_RECOVERY_ERROR,
                 now=now,
             )
+            try:
+                finalized = await self._task_repo.reconcile_terminal_runs(now=now)
+                if finalized:
+                    logger.info("Finalized %d scheduled occurrence(s) from terminal durable runs", finalized)
+            except Exception:
+                # The pass already isolates per-occurrence failures; a remaining
+                # failure (e.g. the candidate query) must not skip admission or
+                # queue draining for this poll.
+                logger.exception("Failed to reconcile terminal scheduled runs")
         await self._expire_waiting_runs(now=now)
         await self._drain_queue(now=now)
         # Admission and execution capacity are separate. Due occurrences are
@@ -636,6 +645,10 @@ class ScheduledTaskService:
             "task_id": task["id"],
             "thread_id": execution_thread_id,
             "trigger": trigger,
+            # Freeze the admitted occurrence time in the synthetic row: the
+            # provenance below must be identical if this launch is retried at a
+            # later now, or start_run's idempotency key sees a different request.
+            "scheduled_for": now,
         }
         return await self._attempt_queued_run(task, queued, now=now)
 
@@ -854,8 +867,10 @@ class ScheduledTaskService:
         one the run row shows once the launch is accounted.
         """
         trigger = queued["trigger"]
-        scheduled_for = _as_utc(queued.get("scheduled_for")) if trigger == "scheduled" else None
-        scheduled_for = scheduled_for or now
+        # Use the occurrence's admitted time for every trigger. A manual trial
+        # retried by the queue drain must reproduce the first request's origin;
+        # falling back to the retry clock changes start_run's idempotent input.
+        scheduled_for = _as_utc(queued.get("scheduled_for")) or now
         run_number = None
         number_lookup = getattr(self._task_run_repo, "run_number", None)
         if trigger == "scheduled" and callable(number_lookup):

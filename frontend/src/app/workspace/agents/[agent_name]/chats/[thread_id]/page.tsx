@@ -67,6 +67,7 @@ import { isHiddenFromUIMessage } from "@/core/messages/utils";
 import { modelTaskInput } from "@/core/models/control";
 import { useModels } from "@/core/models/hooks";
 import { useModelControl } from "@/core/models/use-model-control";
+import { notificationBody } from "@/core/notification/body";
 import { useNotification } from "@/core/notification/hooks";
 import { useThreadScheduledTaskEvents } from "@/core/scheduled-tasks/events";
 import { useLocalSettings, useThreadSettings } from "@/core/settings";
@@ -221,18 +222,12 @@ export default function AgentChatPage() {
       // it is open: it has been read.
       markThreadRead();
       if (document.hidden || !document.hasFocus()) {
-        let body = "Conversation finished";
         const lastMessage = state.messages[state.messages.length - 1];
-        if (lastMessage) {
-          const textContent = textOfMessage(lastMessage);
-          if (textContent) {
-            body =
-              textContent.length > 200
-                ? textContent.substring(0, 200) + "..."
-                : textContent;
-          }
-        }
-        showNotification(state.title, { body });
+        showNotification(state.title, {
+          body: notificationBody(
+            lastMessage ? textOfMessage(lastMessage) : null,
+          ),
+        });
       }
     },
   });

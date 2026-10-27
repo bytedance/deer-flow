@@ -149,108 +149,163 @@ class JinaClient:
         request_admission: dict | None = None,
     ) -> str:
         """Fetch with optional bounded retries; cancellation always propagates."""
-        global _api_key_warned
-        headers = {
-            "Content-Type": "application/json",
-            "X-Return-Format": return_format,
-            "X-Timeout": str(timeout),
-        }
-        if os.getenv("JINA_API_KEY"):
-            headers["Authorization"] = f"Bearer {os.getenv('JINA_API_KEY')}"
-        elif not _api_key_warned:
-            _api_key_warned = True
-            logger.warning("Jina API key is not set. Provide your own key to access a higher rate limit. See https://jina.ai/reader for more information.")
-        data = {"url": url}
-        deadline = None
+        diagnostic = logger.isEnabledFor(logging.DEBUG)
+        started = time.monotonic() if diagnostic else 0.0
+        attempts = 0
+        backoff_seconds = 0.0
+        outcome, reason = "error", "request_failure"
+        pending_return = False
         try:
-            if max_response_bytes is not None and (isinstance(max_response_bytes, bool) or not isinstance(max_response_bytes, int) or max_response_bytes <= 0):
-                raise ValueError("max_response_bytes must be a positive integer or null")
-            if isinstance(max_retries, bool) or not isinstance(max_retries, int) or max_retries < 0:
-                raise ValueError("max_retries must be a non-negative integer")
-            if isinstance(retry_budget_seconds, bool) or not isinstance(retry_budget_seconds, (int, float)) or not math.isfinite(retry_budget_seconds) or retry_budget_seconds <= 0:
-                raise ValueError("retry_budget_seconds must be a finite positive number")
+            global _api_key_warned
+            headers = {
+                "Content-Type": "application/json",
+                "X-Return-Format": return_format,
+                "X-Timeout": str(timeout),
+            }
+            if os.getenv("JINA_API_KEY"):
+                headers["Authorization"] = f"Bearer {os.getenv('JINA_API_KEY')}"
+            elif not _api_key_warned:
+                _api_key_warned = True
+                logger.warning("Jina API key is not set. Provide your own key to access a higher rate limit. See https://jina.ai/reader for more information.")
+            data = {"url": url}
+            deadline = None
+            try:
+                reason = "invalid_configuration"
+                if max_response_bytes is not None and (isinstance(max_response_bytes, bool) or not isinstance(max_response_bytes, int) or max_response_bytes <= 0):
+                    raise ValueError("max_response_bytes must be a positive integer or null")
+                if isinstance(max_retries, bool) or not isinstance(max_retries, int) or max_retries < 0:
+                    raise ValueError("max_retries must be a non-negative integer")
+                if isinstance(retry_budget_seconds, bool) or not isinstance(retry_budget_seconds, (int, float)) or not math.isfinite(retry_budget_seconds) or retry_budget_seconds <= 0:
+                    raise ValueError("retry_budget_seconds must be a finite positive number")
 
-            admission = get_admission(request_admission)
+                admission = get_admission(request_admission)
+                reason = "request_failure"
 
-            # HTTPX timeouts are per network phase. Without admission, the outer
-            # deadline covers requests, waits, and cleanup. With admission,
-            # cleanup may outlast the retry budget; cancellation propagates after close.
-            deadline = asyncio.get_running_loop().time() + retry_budget_seconds if max_retries else None
-            async with _retry_budget_timeout_at(None if admission else deadline):
-                client_kwargs: dict[str, object] = {"trust_env": trust_env, "follow_redirects": True}
-                if proxy:
-                    client_kwargs["proxy"] = proxy
-                async with _admission_client(client_kwargs) if admission else httpx.AsyncClient(**client_kwargs) as client:
-                    delay = 0.5
-                    for attempt in range(max_retries + 1):
-                        remaining = deadline - asyncio.get_running_loop().time() if deadline is not None else None
-                        if remaining is not None and remaining <= 0:
-                            raise _RetryBudgetExhausted
-                        server_floor = None
-                        try:
-                            async with admission.attempt(remaining) if admission else nullcontext() as lease:
-                                # Admission consumes the original logical budget. Start the
-                                # network timer only after acquisition so queue expiry stays local.
-                                async with _retry_budget_timeout_at(deadline if admission else None):
-                                    if lease is not None:
-                                        lease.check_deadline()
-                                    remaining = deadline - asyncio.get_running_loop().time() if deadline is not None else None
-                                    if remaining is not None and remaining <= 0:
-                                        raise _RetryBudgetExhausted
-                                    request_timeout = min(timeout, remaining) if remaining is not None else timeout
-                                    if max_response_bytes is None and admission is None:
-                                        response = await client.post("https://r.jina.ai/", headers=headers, json=data, timeout=request_timeout)
-                                        response_text = response.text
-                                    else:
-                                        async with client.stream("POST", "https://r.jina.ai/", headers=headers, json=data, timeout=request_timeout) as response:
-                                            content = bytearray()
-                                            # Count decoded bytes before retaining a chunk; HTTPX
-                                            # decompressor allocations remain outside the cap.
-                                            async for chunk in response.aiter_bytes():
-                                                if max_response_bytes is not None and len(content) + len(chunk) > max_response_bytes:
-                                                    return f"Error: Jina API response exceeds max_response_bytes ({max_response_bytes})"
-                                                content.extend(chunk)
-                                            response_text = content.decode(response.encoding or "utf-8", errors="replace")
-                        except (httpx.ConnectError, httpx.ConnectTimeout):
-                            if attempt == max_retries:
-                                raise
-                        else:
-                            if response.status_code == 200:
-                                if response_text and response_text.strip():
-                                    return response_text
-                                error_message = "Jina API returned empty response"
-                                logger.error(error_message)
-                                return f"Error: {error_message}"
-                            if response.status_code in {429, 503} and attempt < max_retries:
-                                server_floor = _retry_after(response.headers.get("Retry-After"))
-                            retryable = response.status_code in {502, 503, 504} or (response.status_code == 429 and server_floor is not None)
-                            if not retryable or attempt == max_retries:
-                                error_message = f"Jina API returned status {response.status_code}: {response_text}"
-                                logger.error(error_message)
-                                return f"Error: {error_message}"
+                # HTTPX timeouts are per network phase. Without admission, the outer
+                # deadline covers requests, waits, and cleanup. With admission,
+                # cleanup may outlast the retry budget; cancellation propagates after close.
+                deadline = asyncio.get_running_loop().time() + retry_budget_seconds if max_retries else None
+                async with _retry_budget_timeout_at(None if admission else deadline):
+                    client_kwargs: dict[str, object] = {"trust_env": trust_env, "follow_redirects": True}
+                    if proxy:
+                        client_kwargs["proxy"] = proxy
+                    async with _admission_client(client_kwargs) if admission else httpx.AsyncClient(**client_kwargs) as client:
+                        delay = 0.5
+                        for attempt in range(max_retries + 1):
+                            remaining = deadline - asyncio.get_running_loop().time() if deadline is not None else None
+                            if remaining is not None and remaining <= 0:
+                                raise _RetryBudgetExhausted
+                            server_floor = None
+                            try:
+                                async with admission.attempt(remaining) if admission else nullcontext() as lease:
+                                    # Admission consumes the original logical budget. Start the
+                                    # network timer only after acquisition so queue expiry stays local.
+                                    async with _retry_budget_timeout_at(deadline if admission else None):
+                                        if lease is not None:
+                                            lease.check_deadline()
+                                        remaining = deadline - asyncio.get_running_loop().time() if deadline is not None else None
+                                        if remaining is not None and remaining <= 0:
+                                            raise _RetryBudgetExhausted
+                                        request_timeout = min(timeout, remaining) if remaining is not None else timeout
+                                        if max_response_bytes is None and admission is None:
+                                            attempts += 1
+                                            response = await client.post("https://r.jina.ai/", headers=headers, json=data, timeout=request_timeout)
+                                            response_text = response.text
+                                        else:
+                                            attempts += 1
+                                            async with client.stream("POST", "https://r.jina.ai/", headers=headers, json=data, timeout=request_timeout) as response:
+                                                content = bytearray()
+                                                # Count decoded bytes before retaining a chunk; HTTPX
+                                                # decompressor allocations remain outside the cap.
+                                                async for chunk in response.aiter_bytes():
+                                                    if max_response_bytes is not None and len(content) + len(chunk) > max_response_bytes:
+                                                        reason = "response_limit"
+                                                        pending_return = True
+                                                        return f"Error: Jina API response exceeds max_response_bytes ({max_response_bytes})"
+                                                    content.extend(chunk)
+                                                response_text = content.decode(response.encoding or "utf-8", errors="replace")
+                            except (httpx.ConnectError, httpx.ConnectTimeout):
+                                if attempt == max_retries:
+                                    reason = "attempt_exhaustion"
+                                    raise
+                            else:
+                                if response.status_code == 200:
+                                    if response_text and response_text.strip():
+                                        outcome, reason = "success", "success"
+                                        pending_return = True
+                                        return response_text
+                                    reason = "empty_response"
+                                    error_message = "Jina API returned empty response"
+                                    logger.error(error_message)
+                                    pending_return = True
+                                    return f"Error: {error_message}"
+                                if response.status_code in {429, 503} and attempt < max_retries:
+                                    server_floor = _retry_after(response.headers.get("Retry-After"))
+                                retryable = response.status_code in {502, 503, 504} or (response.status_code == 429 and server_floor is not None)
+                                if not retryable or attempt == max_retries:
+                                    reason = "attempt_exhaustion" if retryable or (response.status_code == 429 and attempt == max_retries and attempt > 0) else "nonretryable_http"
+                                    error_message = f"Jina API returned status {response.status_code}: {response_text}"
+                                    logger.error(error_message)
+                                    pending_return = True
+                                    return f"Error: {error_message}"
 
-                        # Only allowlisted failures reach the non-blocking wait.
-                        remaining = deadline - asyncio.get_running_loop().time()
-                        if server_floor is not None and server_floor >= remaining:
-                            return f"Error: Jina API returned status {response.status_code}: {response_text}"
-                        if remaining <= 0:
-                            raise _RetryBudgetExhausted
-                        wait = min(delay, remaining) * random.uniform(0.5, 1.0)
-                        if server_floor is not None:
-                            wait = max(wait, server_floor)
-                            if wait >= remaining:
+                            # Only allowlisted failures reach the non-blocking wait.
+                            remaining = deadline - asyncio.get_running_loop().time()
+                            if server_floor is not None and server_floor >= remaining:
+                                reason = "retry_after_unfit"
+                                pending_return = True
                                 return f"Error: Jina API returned status {response.status_code}: {response_text}"
-                        async with _retry_budget_timeout_at(deadline if admission else None):
-                            await asyncio.sleep(wait)
-                        delay = min(delay * 2, 4.0)
-        except JinaAdmissionError as e:
-            error_message = f"Local Jina request admission rejected: {e}"
-            logger.warning(error_message)
-            return f"Error: {error_message}"
-        except Exception as e:
-            if isinstance(e, _RetryBudgetExhausted):
-                error_message = "Request to Jina API failed: retry time budget exhausted"
-            else:
-                error_message = f"Request to Jina API failed: {type(e).__name__}: {e}"
-            logger.warning(error_message)
-            return f"Error: {error_message}"
+                            if remaining <= 0:
+                                raise _RetryBudgetExhausted
+                            wait = min(delay, remaining) * random.uniform(0.5, 1.0)
+                            if server_floor is not None:
+                                wait = max(wait, server_floor)
+                                if wait >= remaining:
+                                    reason = "retry_after_unfit"
+                                    pending_return = True
+                                    return f"Error: Jina API returned status {response.status_code}: {response_text}"
+                            async with _retry_budget_timeout_at(deadline if admission else None):
+                                wait_started = time.monotonic() if diagnostic else 0.0
+                                try:
+                                    await asyncio.sleep(wait)
+                                finally:
+                                    if diagnostic:
+                                        backoff_seconds += time.monotonic() - wait_started
+                            delay = min(delay * 2, 4.0)
+            except JinaAdmissionError as e:
+                if pending_return:
+                    outcome, reason = "error", "request_failure"
+                error_message = f"Local Jina request admission rejected: {e}"
+                logger.warning(error_message)
+                return f"Error: {error_message}"
+            except Exception as e:
+                # Cleanup can override a pending success or Error return.
+                if pending_return:
+                    outcome, reason = "error", "request_failure"
+                if isinstance(e, _RetryBudgetExhausted):
+                    reason = "budget_exhaustion"
+                    error_message = "Request to Jina API failed: retry time budget exhausted"
+                else:
+                    error_message = f"Request to Jina API failed: {type(e).__name__}: {e}"
+                logger.warning(error_message)
+                return f"Error: {error_message}"
+        except asyncio.CancelledError:
+            outcome, reason = "cancelled", "cancellation"
+            raise
+        finally:
+            if diagnostic:
+                # Keep fields in the message: both plain and enhanced JSON
+                # formatters retain it. Existing filters supply ambient trace context.
+                try:
+                    logger.debug(
+                        "Jina crawl completed outcome=%s reason=%s attempts=%d elapsed_seconds=%.6f backoff_seconds=%.6f",
+                        outcome,
+                        reason,
+                        attempts,
+                        time.monotonic() - started,
+                        backoff_seconds,
+                    )
+                except (Exception, asyncio.CancelledError):
+                    # Only diagnostic emission is best effort; never mask a result
+                    # or the original cancellation with a broken logging handler.
+                    pass

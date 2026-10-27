@@ -10,21 +10,21 @@ environment keys; reject arbitrary commands and manifest-policy bypasses. Keep
 credentials out of tool schemas and preserve admin checks, masked atomic edits,
 and MCP cache reloads.
 
-Memory shutdown resolves hot-reloaded config/backend, flushes, then closes as
-one `await_drained` operation. Resolve config inside the best-effort handler and
-off-loop so malformed edits cannot abort teardown. Cancellation waits for owned
-workers; `close()` must be quick or internally bounded because the host sets no
-timeout. Budget it, the flush timeout, and other hooks in the pod grace period.
-Likewise drain extension `stop_services()` across cancellation before later
-resources unwind; each service `stop()` has a 30-second `asyncio.timeout`.
+Memory shutdown resolves hot-reloaded config/backend, flushes and closes in one
+`await_drained` operation. Resolve config off-loop inside the best-effort handler
+so malformed edits cannot abort teardown. Cancellation waits for owned workers.
+The host sets no close timeout: `close()` must be quick or internally bounded;
+budget it, flush timeout and other hooks within pod grace. Drain extension
+`stop_services()` across cancellation before later resources unwind; each
+service `stop()` has a 30-second `asyncio.timeout`.
 
 Routers with persistent writes drain through
 `app.gateway.persistent_writes.run_drained_write`.
 
-Gateway lifespan closes the MCP session pool after `langgraph_runtime` exits:
-its run drain and extension-service teardown can still make MCP calls during
-earlier shutdown hooks. Keep the pool close bounded and failure-isolated, but
-do not move it ahead of those session producers.
+`lifespan` first holds `hold_sandbox_shutdown_ownership()`. After
+`langgraph_runtime` drains runs and extensions, close MCP (bounded, isolated),
+then drain `shutdown_sandbox_provider()` off-loop in `finally`, even on
+cancel. Never allocate for cleanup; log failures, stay retryable.
 
 Retention holds durable thread admission and the checkpoint lock before
 checkpoint reads. Inspect root head/parent and leaf writes only; protect selectors,
@@ -43,13 +43,12 @@ locations and keeps `merge_run_context_overrides` clear. Admission and
 `/api/features` use `conversation_references_enabled()` as the sole configured
 predicate.
 
-FastAPI listens on port 8001. `GET /health` is liveness; `GET /health/ready`
-concurrently probes the ORM engine, the checkpointer/Store and the stream
-bridge backend (`StreamBridge.ping()`) under one deadline and per-kind gates,
-from startup snapshots. Unreachable or unresolved gating backends return 503;
-`memory` reports `not_configured`; the provisioner `/health` verdict is
-report-only. See `health.py`. `GATEWAY_ENABLE_DOCS=false` disables `/docs`,
-`/redoc`, and `/openapi.json`.
+FastAPI listens on 8001. `GET /health` is liveness; `GET /health/ready` concurrently
+probes startup snapshots of ORM, checkpointer/Store and stream bridge
+(`StreamBridge.ping()`) under one deadline and per-kind gates. Unreachable or
+unresolved gating backends return 503; `memory` reports `not_configured`;
+provisioner `/health` is report-only. See `health.py`. `GATEWAY_ENABLE_DOCS=false`
+disables `/docs`, `/redoc` and `/openapi.json`.
 
 `build_run_config()` resolves the default LangGraph super-step budget from the
 hot-reloaded top-level `recursion_limit` setting. A valid request-level value
@@ -58,7 +57,12 @@ takes precedence; invalid values fall back to that default, and
 
 Durable MCP notifications use internal Agent runs. Keep their trusted delivery instruction outside the user-input boundary, and frame serialized remote events as untrusted before model invocation. Strict thread existence/ownership admission dead-letters events whose task outlives its deleted chat instead of recreating the thread. `start_run` marks run-manager admission conflicts with `BusyThreadConflict`; the notification launcher retries only that typed 409 and treats other 409 responses as permanent.
 
-CORS is same-origin by default when requests enter through nginx on port 2026. Split-origin or port-forwarded browser clients must opt in with `GATEWAY_CORS_ORIGINS` (exact origins); Gateway `CORSMiddleware` and `CSRFMiddleware` both read that variable so browser CORS and auth-origin checks stay aligned. Those clients also need `CORS_EXPOSED_HEADERS` (`csrf_middleware.py`): run-creating routes return the run's id in `Content-Location`, which is not CORS-safelisted, so JS cannot read it unless it is exposed — and the LangGraph SDK resolves run metadata from that header alone, so withholding it breaks `useStream`'s `onCreated` and thread-gated actions.
+CORS defaults to same-origin behind nginx on 2026. Split-origin and port-forwarded
+browser clients must set exact `GATEWAY_CORS_ORIGINS`, shared by `CORSMiddleware`
+and `CSRFMiddleware`. Expose `Content-Location` through `CORS_EXPOSED_HEADERS`
+(`csrf_middleware.py`): run-creating routes put the run ID there, and the LangGraph
+SDK uses only that header for run metadata. Without exposure, JS cannot read it,
+breaking `useStream.onCreated` and thread-gated actions.
 
 Browser sessions belong to `app.gateway.auth.session_cookie`. Login's `remember_me`
 flag never stores passwords. `SessionCookiePolicy` persists `HttpOnly access_token`
@@ -69,6 +73,7 @@ and OIDC callbacks. A small `HttpOnly` preference cookie preserves the choice.
 Logout clears auth cookies and suppresses CSRF re-issue.
 
 OIDC redirects retain existing endpoint query bytes (RFC 6749 section 3.1).
+Malformed IdP bodies raise `OIDCError` (502/`sso_failed`).
 `tests/test_oidc_auth.py` pins query, state-cookie, nonce and PKCE agreement.
 
 Personal Access Tokens (`app.gateway.auth.pat`, `Authorization: Bearer dfp_...`) run as their owning user: an invalid Bearer is a hard 401 with no cookie fallback, which keeps `CSRFMiddleware`'s Bearer skip safe (origin checks still run). Scopes narrow within the allowlisted threads/runs/projects routes (including `POST /api/threads/{id}/move`); every other authenticated route 403s PAT callers (admin included). PAT management and `/change-password` require session auth; only SHA-256 digests are stored (`0017`).
@@ -138,12 +143,11 @@ owner-scoped assistant version selection remains enabled.
 | **GitHub Webhooks** (`/api/webhooks/github`) | `POST /` - receive GitHub App / repo webhook deliveries. Verifies `X-Hub-Signature-256` against `GITHUB_WEBHOOK_SECRET`; exempt from auth + CSRF because authenticity is enforced by HMAC. The route is fail-closed: mounted only when `GITHUB_WEBHOOK_SECRET` is set, or when explicit dev opt-in `DEER_FLOW_ALLOW_UNVERIFIED_GITHUB_WEBHOOKS=1` is set. Recognized events include `ping`, `issues`, `issue_comment`, `pull_request`, `pull_request_review`, and `pull_request_review_comment`; unknown events return 200 with `handled=false`. Fan-out runtime failures return 503, keeping the delivery recorded as failed for manual/API/scripted redelivery (GitHub does not automatically retry any failed delivery, 5xx included); permanent/non-retryable conditions such as `channels.github.enabled: false`, unknown events, malformed payloads, or unavailable channel service return 200 with a skipped/handled response. |
 | **GitHub Event-Driven Agents** | Custom agents can declare a `github:` block in their `config.yaml` to bind to repos and event triggers. Webhook fan-out publishes one `InboundMessage` per matching binding to the channel bus; `GitHubChannel` routes those messages through `ChannelManager`. The response `dispatch` summarizes matched/fired/skipped agents. |
 
-Edit-replay and messages-input clarification may replace checkpoint knowledge
-scope with a validated client snapshot; regenerate and `Command` resume always
-recover checkpoint scope from the originating genuine user turn, skipping
-server-generated hidden context, and ignore client values. Scope admission
-treats `input.messages: null` as an empty message collection so
-conversation-reference runs without a prompt remain valid.
+Edit replay and messages-input clarification may replace knowledge scope with a
+validated client snapshot. Regenerate, null-input and `Command` resumes recover
+scope from the genuine source user turn, skip hidden server context, and ignore
+client scope. Treat `input.messages: null` as empty to allow promptless
+conversation-reference runs.
 
 Thread identifiers use the shared `deerflow.utils.thread_id` contract
 `^[A-Za-z0-9_-]{1,64}$`. Caller-provided opaque IDs remain supported; UUIDs
@@ -211,7 +215,7 @@ or `deployment.multi_instance: true`.
 - `DELETE /api/threads/{id}` holds a durable `delete` reservation for the whole cleanup and removes thread filesystem data (off-loop, drained on cancel), checkpoints, owner-scoped historical runs, run events, feedback and thread metadata best-effort. Historical-run cleanup removes only `operation_kind="run"` rows, so internal thread-operation rows — including the reservation protecting that request — stay durable until `RunManager.reserve_thread_operation()` exits. This cleans persisted rows; preventing an already-admitted write from re-creating state for a deleted thread is a separate thread-incarnation contract, not part of this cleanup.
 - Creator SSE and `/wait` apply `on_disconnect` only to confirmed request disconnect or cancellation; bridge failures propagate without cancelling the run. `/wait` consumes bridge END; errors return SDK `__error__`, never stale state.
 - Memory and Redis `StreamBridge` implementations retain only `stream_bridge.queue_maxsize` data events. A syntactically valid `Last-Event-ID` older than the retained watermark, or a live subscriber that falls behind it, yields `StreamGap` before any partial replay. `sse_consumer` maps that control item to an id-less SSE `gap` payload (`stream_replay_gap`) and intentionally leaves the run active; internal `/wait` consumers resume from its latest retained ID because they only need terminal completion. Redis checks bounds plus the non-blocking read in one transaction, using blocking `XREAD` only as a wake-up before repeating the atomic snapshot. For a no-cursor subscriber that established a wait on an empty stream, the first wake response remains provisional until that next snapshot verifies its tail is still retained; this closes the pre-first-delivery trimming window without changing malformed-cursor live tailing. The correctness tradeoff is one three-command snapshot pipeline per poll plus the blocking wake round trip while idle. Malformed cursor behavior remains backend-specific. Memory treats a syntactically numeric cursor below its watermark conservatively as a gap even when the evicted timestamp can no longer be verified; unknown ids at or above the watermark retain the legacy replay-from-earliest policy.
-- Redis `StreamBridge` keys use a rolling retained-buffer TTL (`stream_bridge.stream_ttl_seconds`, refreshed on `publish()` / `publish_end()`) as a leak safety net, not as a run timeout. Startup and lease-driven periodic orphan recovery share one Gateway stream-terminalization path: after `RunManager` durably marks a run `error` with `stop_reason=orphan_recovered`, Gateway publishes `END_SENTINEL` and schedules stream cleanup. The periodic store scan, per-row status writes, and Gateway callback run as one supervised single-flight task, so a slow pass is skipped at the next interval instead of piling up or pausing the sole lease-renewal loop. Store retries have bounded attempts/backoff; an individual operation still relies on the database driver/pool timeout. `RunManager.shutdown()` gives active user runs priority within its shared deadline, then drains or cancels orphan recovery. Gateway tracks delayed recovered-stream cleanups and converts unfinished delays to immediate deletes before closing the bridge; the Redis TTL remains the outage safety net. Only startup recovery, before the runtime yields to requests, projects the latest affected thread to `error`; periodic recovery deliberately avoids that non-atomic projection because `ThreadMetaStore` has no `latest_run_id` conditional-update contract. Store-only SSE and `/wait` consumers wait for the bridge's real END marker after an ordinary durable terminal status, because status persistence can precede tail events. Terminal `orphan_recovered` and `scheduled_task_orphan_recovered` rows permit heartbeat fallback because their producer is gone; ordinary terminal rows still await END. Malformed `Last-Event-ID` reconnect values live-tail new Redis events rather than replaying the retained buffer. Keep cross-component recovery orchestration in Gateway through the generic `RunManager.on_orphans_recovered` callback; do not introduce a harness-to-app dependency. Callback failure warnings include every recovered `run_id` so operators can identify rows whose Gateway-side terminalization needs inspection.
+- Redis `StreamBridge` keys use a rolling retained-buffer TTL (`stream_bridge.stream_ttl_seconds`, refreshed on data and first-END writes) as a leak safety net, not as a run timeout. Startup and lease-driven periodic orphan recovery share one Gateway stream-terminalization path: after `RunManager` durably marks a run `error` with `stop_reason=orphan_recovered`, Gateway publishes `END_SENTINEL` and schedules stream cleanup. The periodic store scan, per-row status writes, and Gateway callback run as one supervised single-flight task, so a slow pass is skipped at the next interval instead of piling up or pausing the sole lease-renewal loop. Store retries have bounded attempts/backoff; an individual operation still relies on the database driver/pool timeout. `RunManager.shutdown()` gives active user runs priority within its shared deadline, then drains or cancels orphan recovery. Gateway tracks delayed recovered-stream cleanups and converts unfinished delays to immediate deletes before closing the bridge; the Redis TTL remains the outage safety net. Only startup recovery, before the runtime yields to requests, projects the latest affected thread to `error`; periodic recovery deliberately avoids that non-atomic projection because `ThreadMetaStore` has no `latest_run_id` conditional-update contract. Store-only SSE and `/wait` consumers wait for the bridge's real END marker after an ordinary durable terminal status, because status persistence can precede tail events. Terminal `orphan_recovered` and `scheduled_task_orphan_recovered` rows permit heartbeat fallback because their producer is gone; ordinary terminal rows still await END. Malformed `Last-Event-ID` reconnect values live-tail new Redis events rather than replaying the retained buffer. Keep cross-component recovery orchestration in Gateway through the generic `RunManager.on_orphans_recovered` callback; do not introduce a harness-to-app dependency. Callback failure warnings include every recovered `run_id` so operators can identify rows whose Gateway-side terminalization needs inspection.
 - Thread-scoped create, stream and wait share an optional owner/thread-scoped `Idempotency-Key` (internal callers: owner-only, cross-thread reuse 409); never pass the raw external key to `RunManager`'s process-wide index. Stores resolve an existing key before `interrupt`/`rollback`, so a retry reuses rather than interrupts its run. Reuse requires matching input, assistant and conversation references; keyed resume stores a versioned strict typed-JSON SHA-256 (`true`, `1` and `1.0` differ) in the private `runs.idempotency_request_json` column, never public `kwargs`; ordinary input needs no extra identity. New readers accept the exact old-writer resume identity shape from `kwargs`, every response strips it; identity-less legacy resume fails closed. Validate strict resume JSON with or without a key; persist the identity only for keyed resume admission. Missing headers stay non-idempotent; stateless `/api/runs/*` is outside this contract (it creates a thread before admission).
 - For a rolling upgrade, route every keyed resume submission/retry on create/stream/wait only to upgraded workers; otherwise pause that traffic or replace old workers first. Old workers ignore the private identity and can reuse `approve` for `deny` with null input. Old-reader schema compatibility does not protect admission. Upgraded workers reject identity-less legacy resumes with 409. Rollout details: `README.md`, `backend/docs/API.md`.
 - Reused `/wait` returns durable status/error, never the latest thread checkpoint; `task is None` is not completion, and store-backed fields must refresh after waiting. Capture reuse before awaiting because the cached record's `idempotency_reused` flag is sticky. A creating `/runs/stream` retry whose terminal stream is gone opts into `gap`/`stream_replay_gap` via `emit_gap_on_missing_stream`, while observer joins and default/stateless consumers emit `end`; never infer this from disconnect policy or the sticky flag. A reused running `store_only` record on a process-local bridge returns 409 without `Retry-After`.

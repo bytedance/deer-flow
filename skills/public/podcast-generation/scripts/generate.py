@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import random
+import sys
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -380,5 +381,6 @@ if __name__ == "__main__":
         print(result)
     except Exception as e:
         import traceback
-        print(f"Error generating podcast: {e}")
+        print(f"Error generating podcast: {e}", file=sys.stderr)
         traceback.print_exc()
+        sys.exit(1)
