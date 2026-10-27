@@ -20,9 +20,11 @@ from deerflow_extension_api.state import ExtensionData
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from deerflow_extension_api.assembly import AgentAssemblyObserver
     from deerflow_extension_api.compaction import ContextCompactionObserver
+    from deerflow_extension_api.completed_run_evidence import CompletedRunEvidenceReader
     from deerflow_extension_api.model_invocation import ModelInvoker
     from deerflow_extension_api.placement import AgentBuildContext, MiddlewarePlacement
     from deerflow_extension_api.run_evidence import RunEvidenceReader
+    from deerflow_extension_api.skill_mutations import SkillMutationService
 
 F = TypeVar("F", bound=Callable[..., Any])
 
@@ -169,6 +171,8 @@ class ExtensionRuntimeDeps:
     session_factory: Any | None = None
     run_evidence_reader: RunEvidenceReader | None = None
     model_invoker: ModelInvoker | None = None
+    completed_run_evidence: CompletedRunEvidenceReader | None = None
+    skill_mutations: SkillMutationService | None = None
 
 
 class ExtensionService(Protocol):
@@ -194,6 +198,16 @@ class ExtensionRegistry(Protocol):
 
     def plugin(self, contribution: PluginContribution) -> bool:
         """Return True when accepted; False means this host lacks plugin UI support."""
+        return False
+
+    def knowledge_provider(self, name: str, provider: Any) -> bool:
+        """Register a read-only ``deerflow.knowledge.RetrievalProvider``.
+
+        The host validates its KnowledgeCapabilities and optional catalog,
+        documents and contextual search implementations. The value stays Any
+        here to keep extension-api independent of the harness and Pydantic.
+        False means the host does not support this contribution.
+        """
         return False
 
     def middlewares(self, contributor: MiddlewareContributor) -> None:

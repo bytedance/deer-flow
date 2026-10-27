@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
+from math import isfinite
 from typing import Any, ClassVar, Literal
 
 from pydantic import PrivateAttr
@@ -50,17 +52,60 @@ def _build_filters(
     return {"AND": parts}
 
 
+def _record_error(record: dict[str, Any], message: str) -> Mem0APIError:
+    """Identify a bad record without echoing field values or arbitrary IDs."""
+    record_id = record.get("id")
+    # IDs arrive from the remote service too. Keep diagnostics bounded and
+    # single-line; do not stringify containers or truncate into a different ID.
+    if not isinstance(record_id, str) or re.fullmatch(r"[A-Za-z0-9_-]{1,128}", record_id) is None:
+        record_id = "<unavailable>"
+    return Mem0APIError(f"{message} (record id={record_id})")
+
+
+def _deduplicate_context_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep first occurrences, reporting unusable remote IDs as read failures."""
+    seen: set[Any] = set()
+    unique: list[dict[str, Any]] = []
+    for record in records:
+        record_id = record.get("id")
+        try:
+            if record_id in seen:
+                continue
+            seen.add(record_id)
+        except TypeError:
+            raise _record_error(record, "mem0 memory field id must be a scalar") from None
+        unique.append(record)
+    return unique
+
+
 def _to_fact(record: dict[str, Any]) -> dict[str, Any]:
     """Map a mem0 record to the backend-neutral fact shape consumed by the
     host (agents/memory/tools.py): id/content/category/confidence/createdAt/
     source. mem0's relevance score doubles as confidence."""
-    categories = record.get("categories") or []
-    metadata = record.get("metadata") or {}
+    categories = record.get("categories")
+    if categories is None:
+        categories = []
+    if not isinstance(categories, list) or any(not isinstance(category, str) for category in categories):
+        raise _record_error(record, "mem0 memory field categories must be a list of strings")
+    metadata = record.get("metadata")
+    if metadata is None:
+        metadata = {}
+    if not isinstance(metadata, dict):
+        raise _record_error(record, "mem0 memory field metadata must be an object")
+    score = record.get("score")
+    try:
+        confidence = float(0.0 if score is None or score == "" else score)
+    except (TypeError, ValueError, OverflowError):
+        # Remote field values can contain private data; do not echo the value
+        # or retain the conversion exception in the user-visible error chain.
+        raise _record_error(record, "mem0 memory field score must be a finite number") from None
+    if not isfinite(confidence):
+        raise _record_error(record, "mem0 memory field score must be a finite number")
     return {
         "id": str(record.get("id", "")),
         "content": str(record.get("memory", "")),
         "category": str(categories[0]) if categories else "context",
-        "confidence": float(record.get("score") or 0.0),
+        "confidence": confidence,
         "createdAt": str(record.get("created_at", "")),
         "source": str(metadata.get("source", "")),
     }
@@ -201,22 +246,19 @@ class Mem0Manager(MemoryManager):
         top_k = self._config.top_k
         records = self._read_or_fallback(
             [],
-            lambda: self._client.list_memories(
-                filters=filters,
-                page_size=min(top_k, 200),
-                max_items=top_k,
+            lambda: _deduplicate_context_records(
+                self._client.list_memories(
+                    filters=filters,
+                    page_size=min(top_k, 200),
+                    max_items=top_k,
+                )
             ),
         )
         budget = self._config.max_injection_chars
-        seen: set[str] = set()
         lines: list[str] = []
         used = 0
         shortest_line: int | None = None
         for record in records:
-            rid = record.get("id")
-            if rid in seen:
-                continue
-            seen.add(rid)
             text = str(record.get("memory") or "").strip()
             if not text:
                 continue
@@ -276,16 +318,18 @@ class Mem0Manager(MemoryManager):
         if category:
             parts = filters["AND"] if "AND" in filters else [filters]
             filters = {"AND": [*parts, {"categories": {"contains": category}}]}
-        results = self._read_or_fallback(
+        return self._read_or_fallback(
             [],
-            lambda: self._client.search_memories(
-                query=query,
-                filters=filters,
-                top_k=top_k,
-                threshold=self._config.score_threshold,
-            ),
+            lambda: [
+                _to_fact(record)
+                for record in self._client.search_memories(
+                    query=query,
+                    filters=filters,
+                    top_k=top_k,
+                    threshold=self._config.score_threshold,
+                )
+            ],
         )
-        return [_to_fact(r) for r in results]
 
     async def asearch(
         self,
@@ -315,8 +359,10 @@ class Mem0Manager(MemoryManager):
         filters = _build_filters(user_id=user_id, agent_name=agent_name)
         if filters is None:
             return {"facts": []}
-        records = self._read_or_fallback([], lambda: self._client.list_memories(filters=filters))
-        return {"facts": [_to_fact(r) for r in records]}
+        return self._read_or_fallback(
+            {"facts": []},
+            lambda: {"facts": [_to_fact(record) for record in self._client.list_memories(filters=filters)]},
+        )
 
     def export_memory(
         self,

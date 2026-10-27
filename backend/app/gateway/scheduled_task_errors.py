@@ -34,6 +34,7 @@ SCHEDULER_UI_ERROR_CODES: frozenset[str] = frozenset(
         "invalid_goal",
         "goal_requires_fresh_thread",
         "invalid_stop_condition",
+        "invalid_notification_group",
         "invalid_max_runs",
         "end_at_in_past",
         "end_at_before_first_run",

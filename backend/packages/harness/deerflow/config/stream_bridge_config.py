@@ -54,6 +54,18 @@ class StreamBridgeConfig(BaseModel):
             "even if cleanup never runs. Set to 0 to disable. Only applies to the redis bridge."
         ),
     )
+    legacy_end_scan_enabled: bool = Field(
+        default=True,
+        description=(
+            "Scan retained Redis history when END is not the tail, including first END publication. "
+            "Disable only after all old writers stop and all legacy replay buffers expire or are removed. "
+            "Disabling makes END detection tail-only. Restart every Gateway after changing; Redis only."
+        ),
+    )
+    producer_lease_recovery_enabled: bool = Field(
+        default=False,
+        description=("Allow terminal Redis consumers to recover a missing END from an expired producer lease. Enable only after every Gateway writer has been upgraded and pre-upgrade runs have drained."),
+    )
     recovered_stream_cleanup_delay_seconds: float = Field(
         default=60.0,
         ge=0,

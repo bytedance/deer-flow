@@ -16,6 +16,7 @@ import { ConversationEmptyState } from "@/components/ai-elements/conversation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { resolveArtifactURL } from "@/core/artifacts/utils";
+import { useI18n } from "@/core/i18n/hooks";
 import { isIMEComposing } from "@/lib/ime";
 import { cn } from "@/lib/utils";
 
@@ -31,6 +32,7 @@ export function BrowserViewPanel({
   threadId: string;
   className?: string;
 }) {
+  const { t } = useI18n();
   const browserView = useMaybeBrowserView();
   const frame = browserView?.latestFrame ?? null;
   const imageUrl = frame
@@ -57,12 +59,8 @@ export function BrowserViewPanel({
     },
     [],
   );
-  const { status, frameUrl, liveUrl, sendInput } = useBrowserStream(
-    threadId,
-    live,
-    streamSeedUrl,
-    handleNavRejected,
-  );
+  const { status, closedReason, frameUrl, liveUrl, sendInput } =
+    useBrowserStream(threadId, live, streamSeedUrl, handleNavRejected);
   const panelRef = useRef<HTMLDivElement | null>(null);
   const surfaceRef = useRef<HTMLImageElement | null>(null);
   const stageRef = useRef<HTMLDivElement | null>(null);
@@ -240,6 +238,12 @@ export function BrowserViewPanel({
     }
   };
 
+  const liveFailureMessage =
+    live && closedReason
+      ? closedReason === "handshake_timeout"
+        ? t.browserStream.handshakeTimeout
+        : t.browserStream.connectionFailed
+      : null;
   const liveActive = live && status === "open";
   const liveConnecting = live && status === "connecting";
   const displayUrl = live
@@ -328,6 +332,8 @@ export function BrowserViewPanel({
           key: event.key,
           metaKey: event.metaKey,
           ctrlKey: event.ctrlKey,
+          shiftKey: event.shiftKey,
+          altKey: event.altKey,
         });
         if (!input) {
           return;
@@ -405,7 +411,11 @@ export function BrowserViewPanel({
           title={live ? "Stop live control" : "Take live control"}
         >
           <RadioIcon className="size-3.5" />
-          {live ? (status === "open" ? "Live" : "…") : "Live"}
+          {live && status !== "open"
+            ? status === "closed"
+              ? t.browserStream.disconnected
+              : t.browserStream.connecting
+            : "Live"}
         </Button>
         <Button
           size="icon-sm"
@@ -420,6 +430,14 @@ export function BrowserViewPanel({
         </Button>
       </header>
       <main className="relative flex min-h-0 grow flex-col overflow-hidden bg-neutral-950">
+        {liveFailureMessage && (
+          <p
+            role="status"
+            className="bg-background shrink-0 border-b px-3 py-2 text-xs"
+          >
+            {liveFailureMessage}
+          </p>
+        )}
         <div
           ref={stageRef}
           className="relative min-h-0 grow bg-neutral-900"
@@ -441,12 +459,18 @@ export function BrowserViewPanel({
               className="absolute inset-0 m-auto h-fit"
               icon={<MonitorIcon />}
               title={
-                live ? "Connecting to live browser…" : "No browser activity yet"
+                liveFailureMessage
+                  ? t.browserStream.disconnected
+                  : live
+                    ? "Connecting to live browser…"
+                    : "No browser activity yet"
               }
               description={
-                live
-                  ? "Waiting for the first live frame."
-                  : "Enter a URL above or let the agent browse — the live view will appear here."
+                liveFailureMessage
+                  ? ""
+                  : live
+                    ? "Waiting for the first live frame."
+                    : "Enter a URL above or let the agent browse — the live view will appear here."
               }
             />
           )}

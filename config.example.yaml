@@ -20,7 +20,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 59
+config_version: 63
 
 # Optional operator-owned literal prompt extensions (see CONFIGURATION.md):
 # lead_prompt_overlay:
@@ -157,6 +157,8 @@ models:
   # Example: Volcengine (Doubao) model
   # - name: doubao-seed-1.8
   #   display_name: Doubao-Seed-1.8
+  #   aliases: [doubao, seed 1.8]  # Optional names for selecting this model in chat
+  #   # Model-name aliases differ from reasoning.effort.aliases (effort values).
   #   use: deerflow.models.patched_deepseek:PatchedChatDeepSeek
   #   model: doubao-seed-1-8-251228
   #   api_base: https://ark.cn-beijing.volces.com/api/v3
@@ -394,29 +396,20 @@ models:
   # for example on Docker Desktop:
   #   base_url: http://host.docker.internal:8080/v1
 
-  # Example: Anthropic Claude model (with extended thinking)
-  # supports_thinking: true is required — without it, DeerFlow silently falls
-  # back to non-thinking mode even when the UI thinking toggle is on.
-  # budget_tokens is required by the Anthropic API when thinking.type=enabled
-  # (no server default; min 1024; must be less than max_tokens).
-  # - name: claude-sonnet-4
-  #   display_name: Claude Sonnet 4
+  # Example: Anthropic Claude model (thinks by default)
+  # Claude Sonnet 5.5 rejects extended thinking (budget_tokens), thinking
+  # type disabled, temperature, top_p and top_k, so leave them out.
+  # max_tokens covers both thinking and the answer.
+  # - name: claude-sonnet-5-5
+  #   display_name: Claude Sonnet 5.5
   #   use: langchain_anthropic:ChatAnthropic
-  #   model: claude-sonnet-4-20250514
+  #   model: claude-sonnet-5-5
   #   api_key: $ANTHROPIC_API_KEY
   #   default_request_timeout: 600.0
   #   max_retries: 2
-  #   max_tokens: 16000         # Per-call output cap
+  #   max_tokens: 16000         # Per-call output cap (thinking + answer)
   #   context_window: 200000    # Total prompt + completion capacity
   #   supports_vision: true
-  #   supports_thinking: true
-  #   when_thinking_enabled:
-  #     thinking:
-  #       type: enabled
-  #       budget_tokens: 4096   # required; min 1024; must be < max_tokens
-  #   when_thinking_disabled:
-  #     thinking:
-  #       type: disabled
 
   # Example: Google Gemini model (native SDK, no thinking support)
   # - name: gemini-2.5-pro
@@ -886,6 +879,19 @@ tools:
   #   group: knowledge
   #   use: deerflow.community.ragflow.tools:list_knowledge_bases_tool
 
+  # Jsonify dataset rows (read-only). Jsonify pipelines run on a schedule,
+  # repair themselves when a source changes, and publish the result as a
+  # dataset. Each dataset has a serve URL (Integrations > REST API in Jsonify)
+  # that returns its latest rows as JSON. The URL is the credential: keep it in
+  # an env var, never in the prompt. Name each dataset; the model picks by name.
+  # - name: jsonify_dataset_rows
+  #   group: data
+  #   use: deerflow.community.jsonify.tools:dataset_rows_tool
+  #   datasets:
+  #     llm_api_pricing: $JSONIFY_LLM_PRICING_URL  # https://factory.jsonify.com/api/serve/<id>
+  #   max_rows: 100   # Cap per call; the model's limit is clamped to this
+  #   timeout: 30
+
   # LightRAG knowledge retrieval (read-only). Alternative provider for the same
   # knowledge_search tool; uncomment this entry instead of the RAGFlow one —
   # duplicate names keep the first entry, so configure exactly one. Requires
@@ -1011,6 +1017,7 @@ tools:
   #   search_type: auto  # Options: auto, neural, keyword
   #   contents_max_characters: 1000
   #   # api_key: $EXA_API_KEY
+  #   # base_url: https://api.exa.ai  # Exa-compatible endpoint; overrides EXA_BASE_URL
 
   # Web search tool (uses Firecrawl. Cloud requires FIRECRAWL_API_KEY; self-host may need no key.)
   # - name: web_search
@@ -1216,6 +1223,7 @@ tools:
   #   group: web
   #   use: deerflow.community.exa.tools:web_fetch_tool
   #   # api_key: $EXA_API_KEY
+  #   # base_url: https://api.exa.ai  # Exa-compatible endpoint; overrides EXA_BASE_URL
 
   # Web fetch tool (uses Jina AI reader)
   - name: web_fetch
@@ -1405,10 +1413,10 @@ tool_search:
 #
 # The same middleware also elides the `content` argument of successful
 # write_file calls from model-bound requests once the same path was read or
-# modified again later (issue #5328): the file on disk is then the source of
-# truth, and the read-before-write gate forces a read_file before the next
-# modification anyway, so the historical copy only costs context. Stored
-# history, receipts, and the run journal keep the original arguments.
+# modified again later (issue #5328). This optimization is opt-in because a
+# later superseding action rewrites an earlier model-request prefix, reducing
+# provider prompt-cache reuse (#7319). Stored history, receipts, and the run
+# journal keep the original arguments when it is enabled.
 
 tool_output:
   enabled: true
@@ -1427,10 +1435,11 @@ tool_output:
   # tool_overrides:
   #   web_search: 8000
   #   bash: 20000
-  # Replace a successful write_file call's `content` with a short placeholder
-  # pointing at read_file once a later successful read_file / write_file /
-  # str_replace of the same path exists. Only the model-bound request changes.
-  elide_superseded_writes: true
+  # Opt in to replacing a successful write_file call's `content` with a short
+  # placeholder pointing at read_file once a later successful read_file /
+  # write_file / str_replace of the same path exists. Only the model-bound
+  # request changes, but doing so rewrites an earlier prompt prefix.
+  elide_superseded_writes: false
   # Only elide content at least this many characters long (a character count,
   # not tokens: CJK text costs ~3-4x more per character than ASCII). 0 elides
   # every non-empty content.
@@ -1630,6 +1639,12 @@ projects:
   # Caller-side wait limit in seconds for one summary model call (range:
   # 5-300); abandons the wait, not the remote work.
   summary_timeout_seconds: 60
+  # Shelf search budgets (search_project_documents), in decoded CHARACTERS
+  # not bytes (CJK differs 3x). Per-document cap and whole-shelf total; the
+  # total must be >= the per-document cap, otherwise both reset to defaults.
+  # Read per call — edits apply without a restart.
+  search_max_chars_per_document: 1000000
+  search_max_total_chars: 8000000
 
 # ============================================================================
 # Provider Safety Termination Configuration
@@ -1703,12 +1718,22 @@ sandbox:
   # not a secure isolation boundary for shell access. Enable only for fully
   # trusted, single-user local workflows.
   allow_host_bash: false
+  # For AioSandboxProvider only: overlap likely sandbox work with the first
+  # model call. It is disabled by default and ignored by other providers.
+  prewarm: false
+  # Bound pending/ready-unused speculation per provider instance, per process.
+  # A full budget skips prewarming; foreground tools still acquire normally.
+  # This is not a total container or deployment-wide capacity limit.
+  prewarm_max_concurrent: 1
   # Optional: Mount additional host directories into the sandbox.
-  # Each mount maps a host path to a virtual container path accessible by the agent.
+  # host_path: existing absolute source path; container_path: agent-facing /mnt/... path.
+  # Native Windows source example: 'D:/data'; WSL source example: /mnt/d/data.
+  # Keep container_path POSIX-style on every OS (for example, /mnt/my-project).
   # Note: with LocalSandboxProvider under `make up` (docker-compose), host_path is
   # checked from inside the deer-flow-gateway container — you must also bind-mount
   # the same directory into services.gateway.volumes in docker/docker-compose.yaml
-  # for this mount to take effect (see issue #3244).
+  # for this mount to take effect. AIO Docker mounts instead use Docker-host paths.
+  # Platform examples: backend/docs/CONFIGURATION.md#skills-and-sandbox-paths
   # mounts:
   #   - host_path: /home/user/my-project    # Absolute path; see note above for Docker mode
   #     container_path: /mnt/my-project     # Virtual path inside the sandbox
@@ -1728,9 +1753,9 @@ sandbox:
   # semver line (1.9.3+, recommended 1.11.0) enforce it server-side through
   # `hard_timeout`; the frozen legacy `all-in-one-sandbox:latest` image only
   # gets the bounded host-side request. `bash_command_timeout` is used by
-  # providers that explicitly wire this setting (currently LocalSandbox,
-  # AioSandbox, and OpenSandbox). Other providers retain their provider-specific
-  # command defaults unless a caller supplies an explicit timeout. For providers
+  # providers that expose a per-command timeout (LocalSandbox, AioSandbox,
+  # OpenSandbox, E2B, BoxLite, and Tenki). Providers without per-command timeout
+  # support retain their provider-specific command defaults. For providers
   # that enforce this deadline server- or process-side, blocking foreground
   # commands are terminated at the configured deadline. Long-lived processes
   # should be started in the background with output redirected; unredirected
@@ -2123,13 +2148,17 @@ verification:
 # Configure skills directory for specialized agent workflows
 
 skills:
-  # Path to skills directory on the host (relative to project root or absolute)
-  # Default: skills under the project root
+  # Skills source root read by the Gateway (contains public/ and legacy custom/).
+  # Absolute, or relative to DEER_FLOW_PROJECT_ROOT (process cwd when unset).
+  # Default: skills under that root, with a source-checkout fallback to repo skills/.
   # Override with DEER_FLOW_SKILLS_PATH when this field is omitted.
+  # In Docker, use a Gateway-visible path, such as the bundled /app/skills mount.
+  # Native Windows: 'D:/deer-flow/skills'; WSL: /mnt/d/deer-flow/skills.
+  # See backend/docs/CONFIGURATION.md#skills-and-sandbox-paths for mappings.
   # Uncomment to customize:
   # path: /absolute/path/to/custom/skills
 
-  # Path where skills are mounted in the sandbox container
+  # Agent-facing POSIX path; keep /mnt/skills even when the Gateway runs on Windows.
   # This is used by the agent to access skills in both local and Docker sandbox
   # AIO/provisioner and E2B modes require a canonical absolute non-root path
   # that does not overlap reserved platform mounts. Providers snapshot this
@@ -2886,8 +2915,10 @@ mcp_tasks:
 # DEER_FLOW_MULTI_INSTANCE=1, which deploy tooling such as a Helm chart can
 # set from its replica count) startup requires database.backend: postgres, run_events.backend: db,
 # run_ownership.heartbeat_enabled: true and a Redis stream bridge, and refuses
-# an explicit sandbox.ownership.type: memory, process-local browser tools, and
-# scheduler.enabled: true without scheduler.multi_instance: true.
+# an explicit sandbox.ownership.type: memory, process-local browser tools,
+# scheduler.enabled: true without scheduler.multi_instance: true, and
+# channels.leader_lease.enabled: false while an IM channel other than GitHub
+# is enabled (see the IM Channels section below).
 # Restart required; apply the same value to every instance.
 deployment:
   multi_instance: false
@@ -2951,6 +2982,18 @@ run_ownership:
 #   stream_ttl_seconds: 86400    # rolling TTL for retained stream buffers.
 #                                # Refreshed on each publish/publish_end; set 0
 #                                # to disable. This is not a run timeout.
+#   legacy_end_scan_enabled: true  # restart-required Redis compatibility scan.
+#                                # First END scans all retained payloads while true.
+#                                # Set false only after all old writers stop and
+#                                # every legacy buffer expires or is removed.
+#                                # With TTL disabled, remove old buffers explicitly.
+#                                # Restart all Gateways together; false uses only
+#                                # the tail for O(1) END detection.
+#   producer_lease_recovery_enabled: false  # restart-required activation gate.
+#                                # First roll this binary to every Gateway and
+#                                # drain pre-upgrade runs; then enable on every
+#                                # instance together. Never enable during a
+#                                # mixed-version rollout.
 #   recovered_stream_cleanup_delay_seconds: 60  # seconds to wait after
 #                                # publishing END for a recovered orphan run
 #                                # before deleting the stream key (max: 86400).
@@ -2989,8 +3032,10 @@ run_ownership:
 #   # Security: keep this enabled unless you intentionally want legacy open-bot behavior.
 #   # Disabling it lets unbound external IM users create DeerFlow threads/runs.
 #   require_bound_identity: true
-#   # Language of scheduled-task IM notices (en-US or zh-CN) for owners without
-#   # a web UI language preference (e.g. auth disabled). Restart-required.
+#   # Language (en-US or zh-CN) of DeerFlow's own IM texts: scheduled-task
+#   # notices and the /connect and /goal replies. Used for owners without a web
+#   # UI language preference (e.g. auth disabled) and for replies with no known
+#   # owner (an invalid connect code). Restart-required.
 #   notification_locale: en-US
 #
 #   telegram:
@@ -3044,6 +3089,27 @@ run_ownership:
 #   # outer shutdown timeout remains the process-level bound for incomplete cleanup.
 #   shutdown_grace_period_seconds: 3
 #   #
+#   # Leader lease: with more than one Gateway instance, only one instance may
+#   # hold a provider's platform connection (Telegram rejects a second poller
+#   # with 409, Discord answers every message twice). Each provider gets a row
+#   # in the shared channel_leases table, held by one instance and renewed on a
+#   # heartbeat; only the holder connects (GitHub webhooks stay on every
+#   # instance). A crashed holder is replaced within lease_seconds +
+#   # grace_seconds plus one renewal interval, a cleanly stopped one on the
+#   # next heartbeat. Credentials saved or a disconnect made from the web UI
+#   # on any instance reach the holder within one renewal interval. The
+#   # leader_lease block itself is restart-required.
+#   leader_lease:
+#     # auto (default): on whenever the Gateway sees a multi-process signal
+#     # (GATEWAY_WORKERS / WEB_CONCURRENCY > 1, deployment.multi_instance: true
+#     # or DEER_FLOW_MULTI_INSTANCE=1), off on a single instance. true: always
+#     # on (needs database.backend sqlite or postgres). false: never -- a
+#     # multi-process deployment with an IM channel other than GitHub enabled
+#     # then refuses to start.
+#     enabled: auto
+#     lease_seconds: 30   # validity of a held lease; renewed every lease_seconds // 3
+#     grace_seconds: 10   # extra time before a peer may take an expired lease
+#   #
 #   # Docker Compose note:
 #   # If channels run inside the gateway container, use container DNS names instead
 #   # of localhost, for example:
@@ -3054,8 +3120,6 @@ run_ownership:
 #   # Optional: default mobile/session settings for all IM channels
 #   session:
 #     assistant_id: lead_agent  # or a custom agent name; custom agents route via lead_agent + agent_name
-#     config:
-#       recursion_limit: 100
 #     context:
 #       thinking_enabled: true
 #       is_plan_mode: false
@@ -3067,7 +3131,7 @@ run_ownership:
 #     enabled: false
 #     app_id: $QQ_APP_ID
 #     client_secret: $QQ_CLIENT_SECRET
-#     allowed_users: []  # QQ OpenIDs, not numeric QQ account numbers; empty allows all
+#     allowed_users: []  # QQ OpenIDs, not numeric QQ account numbers; empty allows all; a single ID is one entry; unparseable non-empty lists fail closed
 #     sandbox: false    # REST sandbox host only; console sandbox membership is separate
 #
 #   feishu:
@@ -3086,7 +3150,7 @@ run_ownership:
 #     enabled: false
 #     bot_token: $SLACK_BOT_TOKEN     # xoxb-...
 #     app_token: $SLACK_APP_TOKEN     # xapp-... (Socket Mode)
-#     allowed_users: []               # empty = allow all; can also be a single Slack user ID string, e.g. U123456, but list form is recommended
+#     allowed_users: []               # Slack user IDs, e.g. U123456; empty or blank allows all; a single ID is one entry; non-empty lists with no valid ID fail closed
 #
 #   telegram:
 #     enabled: false
@@ -3158,7 +3222,7 @@ run_ownership:
 #     enabled: false
 #     client_id: $DINGTALK_CLIENT_ID
 #     client_secret: $DINGTALK_CLIENT_SECRET
-#     allowed_users: []               # empty = allow all
+#     allowed_users: []               # staff IDs (senderStaffId); empty or blank allows all; quote IDs with leading zeros; non-empty lists with no valid ID fail closed
 #     card_template_id: ""            # Optional: AI Card template ID for streaming updates
 #
 #   # Discord joins as a bot; requires the `discord` dependency extra
@@ -3185,11 +3249,13 @@ run_ownership:
 #     enabled: false
 #     relay_url: wss://buzz.example.com
 #     private_key: $BUZZ_PRIVATE_KEY        # hex or nsec1…
-#     allowed_users: []                     # pubkeys (hex or npub) allowed to trigger runs.
+#     allowed_users: []                     # pubkeys (hex or npub) allowed to trigger runs:
+#                                           # one pubkey (hex or npub) or a YAML list.
 #                                           # DENY-BY-DEFAULT (unlike other channels): empty
 #                                           # means nobody, and DeerFlow logs a startup warning.
 #     require_mention: true                 # @mention needed in channels
-#     mention_free_channels: []             # channel UUIDs that respond to every message
+#     mention_free_channels: []             # Channel UUIDs that respond to every message:
+#                                           # one UUID (quoted or unquoted) or a YAML list.
 
 # ============================================================================
 # Guardrails Configuration
@@ -3258,6 +3324,24 @@ run_ownership:
 #       #           timeout / deadline_seconds / max_attempts / retry_backoff /
 #       #           max_state_chars / cache_size / cache_ttl_seconds /
 #       #           instructions / criteria
+
+# --- Option 4b: the same risk gate over OpenAI Decisions -------------------
+#   Same provider semantics, another endpoint: one `predicate` question about the
+#   call to POST /v1/decisions, denied when its probability reaches `threshold`.
+#   Nothing in the gate is re-decided -- the strict-JSON local preflight, the
+#   character-count limit, the cache and fail_closed are the Option 4 ones, and
+#   every other Option 4 setting below applies here unchanged.
+# guardrails:
+#   enabled: true
+#   fail_closed: true
+#   provider:
+#     use: deerflow.guardrails.openai_decisions:OpenAIDecisionsGuardrailProvider
+#     config:
+#       model: <name the decision model this deployment uses>   # required: this
+#           # backend ships no default model, so batches cannot go to a model nobody chose
+#       api_key_env: OPENAI_API_KEY        # default; base_url defaults to https://api.openai.com
+#       threshold: 0.5
+#       tools: ["bash"]
 
 # ============================================================================
 # TypeSafe (Jev) Client Defaults (optional)
@@ -3559,6 +3643,19 @@ authorization:
 #     package: deerflow-extension-example # Python distribution managed by uv
 #     use: deerflow_extension_example:install
 #     enabled: true                       # false skips import and registration
+#     # Optional, restart-required host grants. Omit for legacy behavior.
+#     # Requires durable database + run_events.backend: db for automatic updates.
+#     # Only enable on one POSIX host with local disk and ALL writers upgraded.
+#     # SQLite additionally requires exactly one Gateway process.
+#     # host_access:
+#     #   evidence:
+#     #     owners: ["exact-user-id"]
+#     #   skill_mutations:
+#     #     owners: ["exact-user-id"]     # subset of evidence.owners
+#     #     operations: [stage, check, commit, revert]
+#     #     trigger_agents: [lead_agent]  # canonical agent name, not display name
+#     #     target_skills: [example-skill]
+#     #     topology: single_host_local   # operator assertion; excludes NFS/CSI
 #     required: false                     # true makes load failure abort Gateway startup
 #                                         # (install --required opts in)
 #     host_access:                        # optional host-owned grants (restart required)

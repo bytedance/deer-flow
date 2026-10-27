@@ -4,7 +4,7 @@ A terminal-native UI over the embedded harness, exposed as the `deerflow` consol
 
 **Module layout** (all layers except `app.py` and `widgets/` are pure / Textual-free and unit-tested directly):
 - `cli.py` — `plan_launch()` (pure launch-mode decision) + headless `--print` / `--json` + `main()` entry point. Headless modes exit `1` when the final AI message carries `deerflow_error_fallback` (provider failures arrive as flagged messages, not exceptions). `_RunOutcome` and `chat()` share `_AIMessageAccumulator`: deltas accumulate per message id and the last content-bearing AI id supplies the text; metadata-only events preserve that id. Fallback writers must supply text or flag an id whose text was already emitted. Keep the client import lazy so help and launch planning do not load the agent graph. TTY → TUI, else headless help. `--tui-transparent` / `DEER_FLOW_TUI_TRANSPARENT` opt into terminal-default backgrounds without changing the solid-theme default. Uses an **absolute** `from deerflow.tui.app import run_tui` so the `app.py` module name doesn't trip `test_harness_boundary.py` (which records relative import module names verbatim).
-- `view_state.py` — `ViewState` + `reduce(state, action)`, the testable heart. Rows: user / assistant / tool / system. Title captured from `values` events.
+- `view_state.py` — `ViewState` + `reduce(state, action)`, the testable heart. Rows: user / assistant / tool / system. Title captured from `values` events. Assistant deltas append verbatim: the client sends only incremental text per id, so a delta that repeats or extends the row (`ha` + `ha`, a closing `**`) is new text, not a re-send.
 - `runtime.py` — `translate(StreamEvent) -> [Action]` (pure) + `stream_actions()` which brackets a run with `RunStarted`/`RunEnded` and turns model errors into an `AssistantError` row.
 - `message_format.py` / `command_registry.py` / `input_history.py` / `render.py` / `theme.py` — pure helpers (tool summaries, slash registry + `resolve()`, ↑/↓ history, Rich renderers). The command registry must exclude every shared `RESERVED_SLASH_SKILL_NAMES` entry that the agent runtime rejects from both its picker and resolver; the `context` skill is the exception for ordinary task text, while the exact composer-only `/context compact` alias remains unavailable as a skill activation.
 - `app.py` — Textual `App`. Runs `DeerFlowClient.stream()` (sync) on a worker thread and marshals actions to the UI thread via `call_from_thread`. Slash palette with `/goal` management + model/thread modal pickers; routes idle display-only `/clear` through `ClearRows` without replacing the active thread, and blocks state-resetting local commands like `/new` and `/clear` with the standard "Still working" message during an active run; priority key bindings gated by `check_action` so they never steal keys from overlays or the composer. Application-level PageUp/PageDown bindings scroll the transcript while preserving composer focus; streaming follows output only while the transcript remains at the bottom.
@@ -12,6 +12,19 @@ A terminal-native UI over the embedded harness, exposed as the `deerflow` consol
 - `session.py` / `persistence.py` — builds the client + checkpointer and the `ThreadMetaWriter`. The thread picker and `--resume <title>` read `DeerFlowClient.list_threads()`, where `limit` counts threads (newest created first); `--continue` passes `sort_by="updated_at"` to resume the most recently active thread.
 
 **Web UI visibility**: the Web UI lists threads from the `threads_meta` SQL table (user-scoped), not the checkpointer. `persistence.py` writes a `threads_meta` row under the default user (`"default"`) into the same DB the Gateway reads — via the harness-only `deerflow.persistence.engine.init_engine_from_config()` — so TUI sessions appear in the Web UI sidebar **without** running the Gateway. Best-effort: a no-op on the `memory` backend. All DB work runs on one long-lived background event loop (a SQLAlchemy async engine is bound to its creating loop).
+
+`resolve()` splits the slash token from its arguments on Unicode whitespace,
+including tabs, newlines and nonbreaking spaces, without collapsing whitespace
+inside the arguments. The name must remain attached to `/`; skill submissions
+retain internal line breaks and indentation. The palette uses the same whitespace
+boundary: a pasted separator closes it so Enter submits instead of completing
+the command. The Tab key still completes the highlighted palette item. Keep
+reserved-command checks and paste-to-submit regression coverage.
+
+A persistence bridge timeout requests cancellation of its still-pending coroutine.
+This is cooperative cancellation, not rollback of a committed write or ordering
+of normally completed title writes. Preserve coroutine-originated errors and
+keep the background loop usable for subsequent writes.
 
 Thread switching must reject active runs both before resolving/opening a picker
 and when applying the picker callback, which may outlive the idle state in which
@@ -35,9 +48,13 @@ order completed title writes, roll back a write already in progress, or force
 stop synchronous backend work.
 An interrupted worker keeps streaming until its next event, so a long tool step
 still checkpoints. Until that worker returns (`_Run.started`/`stopped`, set by the
-worker itself; Textual reports a cancelled thread worker finished at once), reject
-sends on its thread: whichever run checkpoints last would drop the other turn.
-Other threads stay usable; a worker cancelled before it started holds nothing.
+worker itself), reject sends on its thread: whichever run checkpoints last would
+drop the other turn. Other threads stay usable; a worker cancelled before it
+started holds nothing.
+Run workers are daemon threads, not Textual thread workers: asyncio's default
+executor is joined by `App.run()` and again at interpreter exit, so quitting hung
+until the step ended. Quit waits for running workers with a notice and refuses
+sends; a second quit request exits at once and drops the unfinished step.
 
 `InputHistory.down()` returns `None` when history navigation is inactive; the
 app must then leave the composer untouched, including its cursor and undo state.

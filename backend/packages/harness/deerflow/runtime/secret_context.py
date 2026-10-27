@@ -29,10 +29,11 @@ SECRETS_CONTEXT_KEY = "secrets"
 # tool. Both reserved keys are stripped from trace payloads (see tracing redactor).
 ACTIVE_SECRETS_CONTEXT_KEY = "__active_skill_secrets"
 
-# Reserved sub-key holding the active skill tool-policy decision for one model
-# step. The decision includes a middleware-instance owner token that prevents a
-# caller from forging an allow-all decision in its mergeable run context, so the
-# entire value must be stripped from every observable serialization surface.
+# Reserved HISTORICAL sub-key that once held the active skill tool-policy
+# decision for one model step. The policy was removed, but the key stays
+# reserved so existing payloads containing it remain redacted (see tracing
+# redactor); its value must stay stripped from every observable
+# serialization surface.
 SKILL_TOOL_POLICY_DECISION_CONTEXT_KEY = "__skill_tool_policy_decision"
 
 LEGACY_AUTH_TOKEN_METADATA_KEY = "auth_token"
@@ -228,6 +229,11 @@ def redact_config_secrets(config: Any) -> Any:
     server-issued and ignored as an input, so echoing a caller-supplied one
     back would only manufacture disagreement with the ``X-Trace-Id`` header,
     the logs, and the run record's own stamped metadata.
+
+    ``client`` is also omitted from both context carriers. These advisory
+    hints belong only to the current run, including when a caller supplies
+    them through ``config.context``. Read-side callers apply the same rule
+    to older records without modifying their stored contents.
     """
     if not isinstance(config, dict):
         return config
@@ -237,7 +243,12 @@ def redact_config_secrets(config: Any) -> Any:
     if isinstance(context, dict):
         scrubbed_context = redact_secret_context_keys(context)
         scrubbed_context.pop(DEERFLOW_TRACE_METADATA_KEY, None)
+        scrubbed_context.pop("client", None)
         redacted["context"] = scrubbed_context
+
+    configurable = config.get("configurable")
+    if isinstance(configurable, dict) and "client" in configurable:
+        redacted["configurable"] = {key: value for key, value in configurable.items() if key != "client"}
 
     metadata = config.get("metadata")
     if isinstance(metadata, dict):

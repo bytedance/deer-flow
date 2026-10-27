@@ -72,19 +72,34 @@ def wait_for_sandbox_ready(
     Returns:
         True if sandbox is ready, False otherwise.
     """
-    start_time = time.time()
+    # Measure the readiness budget on the monotonic clock and honor it the way
+    # the async twin does. ``timeout`` is an elapsed-time budget, so a backward
+    # wall-clock step (NTP correction, VM resume, manual change) must not stretch
+    # the wait — which on the acquisition path would pin the thread far past
+    # ``timeout`` — and a forward jump must not cut it short and destroy a sandbox
+    # that was about to become ready. Clamp both the per-probe request timeout and
+    # the inter-probe sleep to the remaining budget (``min(5.0, remaining)`` /
+    # ``min(1.0, remaining)``) so a single slow probe plus its backoff cannot
+    # overshoot ``timeout``, mirroring ``wait_for_sandbox_ready_async``.
+    deadline = time.monotonic() + timeout
     with requests.Session() as session:
         session.trust_env = sandbox_http_trust_env(sandbox_url)
         if headers:
             session.headers.update(headers)
-        while time.time() - start_time < timeout:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
             try:
-                response = session.get(f"{sandbox_url}/v1/sandbox", timeout=5)
+                response = session.get(f"{sandbox_url}/v1/sandbox", timeout=min(5.0, remaining))
                 if response.status_code == 200:
                     return True
             except requests.exceptions.RequestException:
                 pass
-            time.sleep(1)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(1.0, remaining))
     return False
 
 

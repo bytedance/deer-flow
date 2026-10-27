@@ -2,17 +2,19 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import logging
 import socket
 import uuid
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
-from fastapi import HTTPException
 from sqlalchemy import select
 
-from app.channels.capabilities import supports_proactive_notifications
+from app.channels.capabilities import supports_proactive_group_notifications, supports_proactive_notifications
+from app.channels.notification_groups import is_notification_group
 from app.scheduler.notification_text import NOTIFICATION_LOCALES
 from deerflow.persistence.channel_connections.model import ChannelConnectionRow
 from deerflow.persistence.run.model import RunRow
@@ -22,10 +24,12 @@ from deerflow.persistence.scheduled_task_runs.finalization import LIFECYCLE_EVEN
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
 from deerflow.persistence.scheduled_task_runs.sql import run_number_expression
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
+from deerflow.persistence.user.im_notifications import ImNotificationPreferencesRepository
 from deerflow.persistence.user.model import UserPreferenceRow
 from deerflow.runtime import ConflictError, RunRecord
+from deerflow.runtime.run_origin import origin_kind_of
 from deerflow.scheduler.host_notes import RUN_ERROR_DELETED_WHILE_QUEUED, RUN_ERROR_INTERRUPTED, RUN_ERROR_LEASE_LOST, RUN_ERROR_PAUSED_WHILE_QUEUED, RUN_ERROR_QUEUE_TIMEOUT, RUN_ERROR_RESTARTED
-from deerflow.scheduler.schedules import next_run_at
+from deerflow.scheduler.schedules import next_run_at, should_advance_schedule_cursor
 from deerflow.scheduler.stop_rule import launch_prompt
 from deerflow.trace_context import ensure_trace_context
 from deerflow.utils.thread_id import validate_thread_id
@@ -217,6 +221,7 @@ class ScheduledTaskService:
         connection_repo=None,
         notification_repo=None,
         own_stop_available: bool | None = None,
+        resolve_human_input_request: Callable[[RunRecord], Any] | None = None,
     ) -> None:
         self._task_repo = task_repo
         self._task_run_repo = task_run_repo
@@ -237,6 +242,7 @@ class ScheduledTaskService:
         # sends. Either being None sends no IM notices.
         self._connection_repo = connection_repo
         self._notification_repo = notification_repo
+        self._resolve_human_input_request = resolve_human_input_request
         # Whether scheduled runs get stop_scheduled_task (scheduler.tool_enabled).
         # Decides how a launch phrases the user's stop rule (stop_rule.launch_prompt).
         # None (production) reads the live config at each launch, the same source
@@ -357,21 +363,59 @@ class ScheduledTaskService:
             for binding in await session.scalars(select(ChannelConnectionRow).where(ChannelConnectionRow.owner_user_id == task.user_id, ChannelConnectionRow.status == "connected"))
             if binding.provider and binding.external_account_id and supports_proactive_notifications(binding.provider)
         ]
-        if not bindings:
+        group_connection_id = getattr(task, "notification_group_connection_id", None)
+        if not bindings and not group_connection_id:
             return
+        # Serialize with opt-out only when there is a potential recipient.
+        preferences = await ImNotificationPreferencesRepository.get_in_session(session, task.user_id, lock_owner=True)
+        bindings = [
+            binding
+            for binding in bindings
+            if preferences.get(binding.provider, False)
+            # QQ group member OpenIDs are not the C2C recipient namespace.
+            and (binding.provider != "qq" or ((binding.metadata_json or {}).get("chat_type") == "c2c" and (binding.workspace_id or "").endswith(":c2c")))
+        ]
         payload = _notice_payload(task, occurrence, event, reason, locale=await self._owner_locale(session, task.user_id))
         task_run_id = occurrence.id if occurrence is not None else _idle_notice_key(task.id, lifecycle_anchor(task, occurrence, now=now))
-        for binding in bindings:
+        recipients = [(binding.provider, binding.external_account_id, payload) for binding in bindings]
+        if group_connection_id:
+            group_row = await session.scalar(select(ChannelConnectionRow).where(ChannelConnectionRow.id == group_connection_id))
+            if group_row is None:
+                # Normal disconnects soft-revoke ChannelConnectionRow (status="revoked"),
+                # keeping group_row.provider intact. If the row was hard-deleted after a
+                # prior delivery, recover its provider from the outbox history before
+                # falling back to legacy "feishu".
+                from deerflow.persistence.notification_deliveries.model import NotificationDeliveryRow
+
+                prior_provider = await session.scalar(
+                    select(NotificationDeliveryRow.provider)
+                    .where(
+                        NotificationDeliveryRow.owner_user_id == task.user_id,
+                        NotificationDeliveryRow.target == group_connection_id,
+                    )
+                    .order_by(NotificationDeliveryRow.created_at.desc())
+                    .limit(1)
+                )
+                group_provider: str | None = prior_provider if isinstance(prior_provider, str) and supports_proactive_group_notifications(prior_provider) else "feishu"
+            elif group_row.owner_user_id == task.user_id and isinstance(group_row.provider, str) and supports_proactive_group_notifications(group_row.provider):
+                group_provider = group_row.provider
+            else:
+                group_provider = None
+            if group_provider and preferences.get(group_provider, False):
+                # Keep the selected binding identity even if it was removed: the
+                # worker records an explicit failed delivery after its owner check.
+                recipients.append((group_provider, group_connection_id, {**payload, "target_type": "group"}))
+        for provider, target, notice_payload in recipients:
             await self._notification_repo.enqueue_in_session(
                 session,
                 task_id=task.id,
                 task_run_id=task_run_id,
                 run_id=occurrence.run_id if occurrence is not None else None,
                 event=event,
-                provider=binding.provider,
-                target=binding.external_account_id,
+                provider=provider,
+                target=target,
                 owner_user_id=task.user_id,
-                payload=payload,
+                payload=notice_payload,
             )
 
     @staticmethod
@@ -410,6 +454,15 @@ class ScheduledTaskService:
                 error=_LEASE_RECOVERY_ERROR,
                 now=now,
             )
+            try:
+                finalized = await self._task_repo.reconcile_terminal_runs(now=now)
+                if finalized:
+                    logger.info("Finalized %d scheduled occurrence(s) from terminal durable runs", finalized)
+            except Exception:
+                # The pass already isolates per-occurrence failures; a remaining
+                # failure (e.g. the candidate query) must not skip admission or
+                # queue draining for this poll.
+                logger.exception("Failed to reconcile terminal scheduled runs")
         await self._expire_waiting_runs(now=now)
         await self._drain_queue(now=now)
         # Admission and execution capacity are separate. Due occurrences are
@@ -428,7 +481,19 @@ class ScheduledTaskService:
     def _is_overlap_conflict(exc: Exception) -> bool:
         if isinstance(exc, ConflictError):
             return True
-        return isinstance(exc, HTTPException) and exc.status_code == 409
+        # ``start_run`` converts a run-manager admission conflict into this
+        # typed HTTP 409. Other 409s (idempotency-key mismatch, thread or
+        # assistant drift) are permanent launch failures; retrying them would
+        # keep the occurrence queued until the queue timeout.
+        #
+        # Keep the import local to avoid changing the scheduler module's
+        # load-time import graph. The scheduler is wired by the Gateway, where
+        # ``app.gateway.services`` is already loaded, so this lookup is
+        # guaranteed; do not make it optional without moving the
+        # classification to a dependency that is always importable here.
+        from app.gateway.services import BusyThreadConflict
+
+        return isinstance(exc, BusyThreadConflict)
 
     @staticmethod
     def _task_status_for_failure(task: dict[str, Any], *, trigger: str) -> str:
@@ -459,6 +524,28 @@ class ScheduledTaskService:
             return "paused"
         return "enabled"
 
+    @staticmethod
+    def _next_run_at_after_launch(
+        task: dict[str, Any],
+        *,
+        trigger: str,
+        now: datetime,
+    ) -> datetime | str | None:
+        """Keep a recurring task's cadence when a manual trial launches.
+
+        A manual run is an extra trial and must not consume the task's next
+        scheduled occurrence. One-time tasks retain their existing boundary
+        semantics, so only recurring manual launches keep the stored value.
+        """
+        if not should_advance_schedule_cursor(task["schedule_type"], trigger=trigger):
+            return task.get("next_run_at")
+        return next_run_at(
+            task["schedule_type"],
+            task["schedule_spec"],
+            task["timezone"],
+            now=now,
+        )
+
     async def dispatch_task(
         self,
         task: dict[str, Any],
@@ -487,12 +574,7 @@ class ScheduledTaskService:
             await self._task_repo.update_after_launch(
                 task["id"],
                 status=task_status,
-                next_run_at=next_run_at(
-                    task["schedule_type"],
-                    task["schedule_spec"],
-                    task["timezone"],
-                    now=now,
-                ),
+                next_run_at=self._next_run_at_after_launch(task, trigger=trigger, now=now),
                 last_run_at=now,
                 last_run_id=None,
                 last_thread_id=execution_thread_id,
@@ -563,6 +645,10 @@ class ScheduledTaskService:
             "task_id": task["id"],
             "thread_id": execution_thread_id,
             "trigger": trigger,
+            # Freeze the admitted occurrence time in the synthetic row: the
+            # provenance below must be identical if this launch is retried at a
+            # later now, or start_run's idempotency key sees a different request.
+            "scheduled_for": now,
         }
         return await self._attempt_queued_run(task, queued, now=now)
 
@@ -650,12 +736,7 @@ class ScheduledTaskService:
             launch_succeeded = True
             launched_run_id = result["run_id"]
             launched_thread_id = result["thread_id"]
-            next_at = next_run_at(
-                task["schedule_type"],
-                task["schedule_spec"],
-                task["timezone"],
-                now=now,
-            )
+            next_at = self._next_run_at_after_launch(task, trigger=trigger, now=now)
             task_status = self._task_status_for_launch(task, trigger=trigger, next_at=next_at)
             await self._record_launched_run(
                 task_run_id=task_run_id,
@@ -693,12 +774,7 @@ class ScheduledTaskService:
                 )
                 return self._queued_result(task_run_id, execution_thread_id, error=str(exc))
 
-            next_at = next_run_at(
-                task["schedule_type"],
-                task["schedule_spec"],
-                task["timezone"],
-                now=now,
-            )
+            next_at = self._next_run_at_after_launch(task, trigger=trigger, now=now)
 
             if launch_succeeded:
                 # _launch_run succeeded, so a run is live even though
@@ -791,8 +867,10 @@ class ScheduledTaskService:
         one the run row shows once the launch is accounted.
         """
         trigger = queued["trigger"]
-        scheduled_for = _as_utc(queued.get("scheduled_for")) if trigger == "scheduled" else None
-        scheduled_for = scheduled_for or now
+        # Use the occurrence's admitted time for every trigger. A manual trial
+        # retried by the queue drain must reproduce the first request's origin;
+        # falling back to the retry clock changes start_run's idempotent input.
+        scheduled_for = _as_utc(queued.get("scheduled_for")) or now
         run_number = None
         number_lookup = getattr(self._task_run_repo, "run_number", None)
         if trigger == "scheduled" and callable(number_lookup):
@@ -935,10 +1013,15 @@ class ScheduledTaskService:
         )
 
     async def handle_run_completion(self, record: RunRecord) -> None:
+        if getattr(record, "terminal_status_persisted", True) is False:
+            return
         metadata = record.metadata or {}
         task_id = metadata.get("scheduled_task_id")
         task_run_id = metadata.get("scheduled_task_run_id")
         user_id = record.user_id
+        if not isinstance(task_id, str) and not isinstance(task_run_id, str):
+            await self._handle_ordinary_run_completion(record)
+            return
         if not isinstance(task_id, str) or not isinstance(task_run_id, str) or not user_id:
             return
 
@@ -981,6 +1064,182 @@ class ScheduledTaskService:
             finished_at=datetime.now(UTC),
             **completion_kwargs,
         )
+
+    async def _handle_ordinary_run_completion(self, record: RunRecord) -> None:
+        if self._notification_repo is None or self._connection_repo is None:
+            return
+        if getattr(record, "terminal_status_persisted", True) is False:
+            return
+        user_id = record.user_id
+        if not isinstance(user_id, str) or not user_id.strip():
+            return
+        operation_kind = str(getattr(record, "operation_kind", "run"))
+        if operation_kind != "run":
+            return
+        metadata = record.metadata if isinstance(record.metadata, Mapping) else {}
+        if origin_kind_of(metadata) in {"im_channel", "github", "schedule"} or metadata.get("channel_source") or metadata.get("im_channel"):
+            return
+        abort_event = getattr(record, "abort_event", None)
+        if (abort_event is not None and abort_event.is_set()) or record.status.value == "interrupted":
+            return
+
+        human_input = getattr(record, "human_input_request", None)
+        if human_input is None and self._resolve_human_input_request is not None:
+            try:
+                resolved = self._resolve_human_input_request(record)
+                if inspect.isawaitable(resolved):
+                    resolved = await resolved
+                human_input = resolved
+            except Exception:
+                logger.warning("Could not inspect human input request for run %s", record.run_id, exc_info=True)
+                human_input = None
+        if not isinstance(human_input, Mapping) or human_input.get("kind") not in {None, "human_input_request"}:
+            human_input = None
+
+        if record.status.value == "success" and human_input is not None:
+            event = "human_input_requested"
+            source_kind = "human_input_request"
+            request_id = str(human_input.get("request_id") or human_input.get("tool_call_id") or record.run_id).strip() or record.run_id
+            source_key = f"{record.thread_id}:{request_id}"[:128]
+            question = str(human_input.get("question") or "").strip() or None
+        elif record.status.value == "success":
+            verdict = getattr(record, "goal_verdict", None)
+            if isinstance(verdict, Mapping) and verdict.get("satisfied") is not True:
+                return
+            event = "run_completed"
+            source_kind = "run"
+            source_key = record.run_id
+            request_id = None
+            question = None
+        elif record.status.value in {"error", "timeout"}:
+            event = "run_failed"
+            source_kind = "run"
+            source_key = record.run_id
+            request_id = None
+            question = None
+        else:
+            return
+
+        session_factory = getattr(self._notification_repo, "session_factory", None)
+        if session_factory is None:
+            return
+        group_connection_id = metadata.get("notification_group_connection_id")
+        if not isinstance(group_connection_id, str) or not group_connection_id.strip():
+            group_connection_id = None
+        else:
+            group_connection_id = group_connection_id.strip()
+
+        async with session_factory() as session:
+            # Cheap read-only pre-gate: runtime notices are opt-in (default False),
+            # so runs for users who have not enabled this event exit without
+            # scanning bindings, querying thread metadata, or taking write locks.
+            unlocked_preferences = await ImNotificationPreferencesRepository.get_in_session(
+                session,
+                user_id,
+                lock_owner=False,
+                include_events=True,
+            )
+            if not unlocked_preferences.get(event, False):
+                return
+            persisted_run = await session.get(RunRow, record.run_id)
+            if persisted_run is not None and persisted_run.status != record.status.value:
+                return
+            candidate_bindings = [
+                (binding.provider, binding.external_account_id)
+                for binding in await session.scalars(
+                    select(ChannelConnectionRow).where(
+                        ChannelConnectionRow.owner_user_id == user_id,
+                        ChannelConnectionRow.status == "connected",
+                    )
+                )
+                if binding.provider
+                and binding.external_account_id
+                and supports_proactive_notifications(binding.provider)
+                and (binding.provider != "qq" or ((binding.metadata_json or {}).get("chat_type") == "c2c" and (binding.workspace_id or "").endswith(":c2c")))
+            ]
+            candidate_group_provider: str | None = None
+            if group_connection_id:
+                group_row = await session.scalar(select(ChannelConnectionRow).where(ChannelConnectionRow.id == group_connection_id))
+                if (
+                    group_row is not None
+                    and group_row.owner_user_id == user_id
+                    and isinstance(group_row.provider, str)
+                    and supports_proactive_group_notifications(group_row.provider)
+                    and is_notification_group(
+                        provider=group_row.provider,
+                        status=group_row.status,
+                        workspace_id=group_row.workspace_id,
+                        metadata=group_row.metadata_json,
+                    )
+                ):
+                    candidate_group_provider = group_row.provider
+            if not candidate_bindings and candidate_group_provider is None:
+                return
+
+            thread_title = None
+            try:
+                thread_title = await session.scalar(
+                    select(ThreadMetaRow.display_name).where(
+                        ThreadMetaRow.thread_id == record.thread_id,
+                        ThreadMetaRow.user_id == user_id,
+                    )
+                )
+            except Exception:
+                thread_title = None
+            if not isinstance(thread_title, str) or not thread_title.strip():
+                raw_title = metadata.get("title") or getattr(record, "first_human_message", None)
+                thread_title = raw_title.strip() if isinstance(raw_title, str) and raw_title.strip() else None
+            else:
+                thread_title = thread_title.strip()
+            locale = await self._owner_locale(session, user_id)
+
+        run_status = "success" if record.status.value == "success" else "failed"
+        payload: dict[str, Any] = {
+            "payload_version": NOTIFICATION_PAYLOAD_VERSION,
+            "source_kind": source_kind,
+            "thread_id": record.thread_id,
+            "task_title": thread_title,
+            "locale": locale,
+            "run_status": run_status,
+        }
+        if event == "human_input_requested":
+            payload["request_id"] = request_id
+            if question:
+                payload["question"] = question
+        elif event == "run_completed":
+            verdict = getattr(record, "goal_verdict", None)
+            if isinstance(verdict, Mapping) and verdict.get("satisfied") is True:
+                payload["relied_on_assumption"] = verdict.get("relied_on_assumption") is True
+            last_ai = getattr(record, "last_ai_message", None)
+            if isinstance(last_ai, str) and last_ai.strip():
+                payload["result_summary"] = last_ai
+
+        async with session_factory() as session, session.begin():
+            preferences = await ImNotificationPreferencesRepository.get_in_session(
+                session,
+                user_id,
+                lock_owner=True,
+                include_events=True,
+            )
+            if not preferences.get(event, False):
+                return
+            recipients = [(provider, target, payload) for provider, target in candidate_bindings if preferences.get(provider, False)]
+            if group_connection_id and candidate_group_provider and preferences.get(candidate_group_provider, False):
+                recipients.append((candidate_group_provider, group_connection_id, {**payload, "target_type": "group"}))
+            for provider, target, notice_payload in recipients:
+                await self._notification_repo.enqueue_in_session(
+                    session,
+                    source_kind=source_kind,
+                    source_key=source_key,
+                    task_id=None,
+                    task_run_id=None,
+                    run_id=record.run_id,
+                    event=event,
+                    provider=provider,
+                    target=target,
+                    owner_user_id=user_id,
+                    payload=notice_payload,
+                )
 
     async def start(self) -> None:
         if self._task is not None:

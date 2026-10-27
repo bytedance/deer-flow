@@ -158,13 +158,19 @@ def build_multi_instance_config(
             sandbox["container_prefix"] = sandbox_container_prefix
             notes.append(f"set sandbox.container_prefix: {sandbox_container_prefix} (was {previous_prefix!r}) so the harness never adopts or reaps other sandbox containers")
 
-    channels = config.get("channels")
-    if not keep_channels and isinstance(channels, dict):
-        disabled = sorted(name for name, value in channels.items() if isinstance(value, dict) and value.get("enabled"))
-        for name in disabled:
-            channels[name]["enabled"] = False
-        if disabled:
-            notes.append(f"disabled IM channels {', '.join(disabled)}: both Gateways would connect the same bot (set DEERFLOW_MI_KEEP_CHANNELS=1 to keep them)")
+    if not keep_channels:
+        # UI-connectable providers can start transports after credentials arrive,
+        # so disable them as well as the static YAML providers. ``leader_lease``
+        # and the scalar connection settings are not providers.
+        for section_name in ("channels", "channel_connections"):
+            channels = config.get(section_name)
+            if not isinstance(channels, dict):
+                continue
+            disabled = sorted(name for name, value in channels.items() if name != "leader_lease" and isinstance(value, dict) and value.get("enabled"))
+            for name in disabled:
+                channels[name]["enabled"] = False
+            if disabled:
+                notes.append(f"disabled IM channels under {section_name}: {', '.join(disabled)}: the harness keeps your bots offline unless asked (set DEERFLOW_MI_KEEP_CHANNELS=1 to keep them; the leader lease then gives each bot to one Gateway)")
 
     memory = _section(config, "memory")
     manager_class = memory.get("manager_class")
@@ -691,7 +697,7 @@ MANUAL_CHECKS = (
     "cancel a run on B from A: takes effect within about one heartbeat (~10s)",
     "change an MCP filesystem server's args on A: B's local-bash allowlist follows",
     "edit a skill on A: B's system-prompt skills section changes within 30s",
-    "IM channel gates (one leader per platform, failover, runtime-config): once channel leader election lands",
+    "IM channel gates (one leader per platform, failover, runtime-config): `up` with `DEERFLOW_MI_KEEP_CHANNELS=1` and test bots, then follow the channel item in that section",
 )
 
 
@@ -734,17 +740,17 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     render = sub.add_parser("render-config", help="write the multi-instance config.yaml")
     render.add_argument("--base", required=True, type=Path)
-    render.add_argument("--out", required=True, type=Path)
+    render.add_argument("--out", required=True, type=Path, help="output file path (not a directory)")
     render.add_argument("--database-url", required=True)
     render.add_argument("--redis-url", required=True)
     render.add_argument("--state-dir", required=True, type=Path)
     render.add_argument("--keep-channels", action="store_true")
 
     secrets_cmd = sub.add_parser("secrets", help="create the shared secrets file if missing")
-    secrets_cmd.add_argument("--out", required=True, type=Path)
+    secrets_cmd.add_argument("--out", required=True, type=Path, help="output file path (not a directory)")
 
     nginx = sub.add_parser("nginx-conf", help="write the round-robin nginx config")
-    nginx.add_argument("--out", required=True, type=Path)
+    nginx.add_argument("--out", required=True, type=Path, help="output file path (not a directory)")
     nginx.add_argument("--state-dir", required=True, type=Path)
     nginx.add_argument("--listen-port", required=True, type=int)
     nginx.add_argument("--gateway-port", required=True, type=int, action="append")
@@ -758,6 +764,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     check.add_argument("--timeout", type=float, default=15.0)
 
     args = parser.parse_args(argv)
+
+    out = getattr(args, "out", None)
+    if out is not None:
+        # Both shapes reach the writers as a raw OSError (EISDIR/ENOTDIR) after doing work.
+        if out.is_dir():
+            parser.error(f"--out must be a file path, not a directory: {out}")
+        for ancestor in out.parents:
+            if ancestor.exists():
+                if not ancestor.is_dir():
+                    parser.error(f"--out parent must be a directory: {ancestor}")
+                break
 
     if args.command == "render-config":
         for note in render_config(args.base, args.out, database_url=args.database_url, redis_url=args.redis_url, state_dir=args.state_dir, keep_channels=args.keep_channels):

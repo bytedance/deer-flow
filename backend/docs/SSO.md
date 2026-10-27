@@ -137,11 +137,22 @@ providers:
     issuer: "https://provider.example.com"
     client_id: "..."
     client_secret: $SECRET
-    authorization_endpoint: "https://provider.example.com/oauth2/authorize"
+    authorization_endpoint: "https://provider.example.com/oauth2/authorize?prompt=login"
     token_endpoint: "https://provider.example.com/oauth2/token"
     userinfo_endpoint: "https://provider.example.com/oauth2/userinfo"
     jwks_uri: "https://provider.example.com/oauth2/jwks"
 ```
+
+Authorization endpoints may include provider query parameters, such as
+`prompt=login` in the example above. DeerFlow preserves existing encoded query
+values, blank values and repeated parameters when appending the login request
+parameters. This applies to both discovered endpoints and configured overrides.
+
+Do not include DeerFlow-generated parameters (`response_type`, `client_id`,
+`redirect_uri`, `scope`, `state`, `nonce`, `code_challenge` or
+`code_challenge_method`) in the endpoint query. Appending does not replace
+existing keys, and the identity provider decides how duplicate parameters are
+resolved.
 
 ## Local Keycloak Example
 
@@ -259,6 +270,17 @@ The backend also rejects password change requests for OAuth users:
 | `GET /api/v1/auth/providers` | Returns list of enabled SSO providers (safe metadata only) |
 | `GET /api/v1/auth/oauth/{provider}` | Initiates SSO login, redirects to the OIDC provider |
 | `GET /api/v1/auth/callback/{provider}` | OIDC callback — exchanges code, creates session, redirects to frontend |
+
+### Provider failures
+
+An unreachable provider, an HTTP error, and a response body that is not the
+expected JSON object (for example a `200` maintenance page) all fail the same
+way. `GET /api/v1/auth/oauth/{provider}` answers `502`, and the callback
+redirects to `/login?error=sso_failed`. A discovery document without a usable
+authorization, token or JWKS endpoint counts as failed unless the provider
+config overrides that endpoint, and it is not cached. A malformed UserInfo body
+is skipped like a failed UserInfo request: the login continues with the ID
+token claims. The cause stays in the Gateway log.
 
 ## Frontend Callback Flow
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import errno
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -320,6 +322,37 @@ class TestLoadAgentSoul:
 
             cfg = AgentConfig(name="code-reviewer")
             soul = load_agent_soul(cfg.name)
+
+        assert soul == expected_soul
+
+    def test_strips_a_leading_bom_from_named_agent_soul(self, tmp_path):
+        """A SOUL.md saved by a Windows editor keeps a UTF-8 BOM.
+
+        ``str.strip()`` does not remove U+FEFF, so without normalization the mark
+        becomes the first character of the text injected into the lead agent's
+        ``<soul>`` block. SOUL.md is edited outside DeerFlow (Notepad, PowerShell
+        5.1), which is exactly where a BOM comes from.
+        """
+        expected_soul = "You are a specialized code review expert."
+        _write_agent(tmp_path, "code-reviewer", {"name": "code-reviewer"}, soul="\ufeff" + expected_soul)
+
+        with patch("deerflow.config.agents_config.get_paths", return_value=_make_paths(tmp_path)):
+            from deerflow.config.agents_config import AgentConfig, load_agent_soul
+
+            cfg = AgentConfig(name="code-reviewer")
+            soul = load_agent_soul(cfg.name)
+
+        assert soul == expected_soul
+
+    def test_strips_a_leading_bom_from_the_default_agent_soul(self, tmp_path):
+        """The default agent reads ``{base_dir}/SOUL.md`` directly — a second read site."""
+        expected_soul = "You are the default agent."
+        (tmp_path / "SOUL.md").write_text("\ufeff" + expected_soul, encoding="utf-8")
+
+        with patch("deerflow.config.agents_config.get_paths", return_value=_make_paths(tmp_path)):
+            from deerflow.config.agents_config import load_agent_soul
+
+            soul = load_agent_soul(None)
 
         assert soul == expected_soul
 
@@ -1098,6 +1131,94 @@ class TestUserProfileAPI:
         response = agent_client.put("/api/user-profile", json={"content": ""})
         assert response.status_code == 200
         assert response.json()["content"] is None
+
+
+class TestAgentsAPIErrorDetail:
+    """Unexpected-failure responses must not echo the exception text.
+
+    Agent config parse errors and filesystem ``OSError``s name absolute host
+    paths under ``users/<user_id>/``; they belong in the server log only.
+    """
+
+    def _user_dir(self, tmp_path: Path) -> Path:
+        return tmp_path / "users" / "test-user-autouse"
+
+    def _break_agent_config(self, agent_client, tmp_path: Path) -> Path:
+        assert agent_client.post("/api/agents", json={"name": "broken", "soul": "x"}).status_code == 201
+        config_file = self._user_dir(tmp_path) / "agents" / "broken" / "config.yaml"
+        config_file.write_text("name: broken\n  bad: [\n", encoding="utf-8")
+        return config_file
+
+    def test_get_agent_with_unparsable_config_returns_fixed_500(self, agent_client, tmp_path, caplog):
+        config_file = self._break_agent_config(agent_client, tmp_path)
+
+        response = agent_client.get("/api/agents/broken")
+
+        assert response.status_code == 500
+        assert response.json() == {"detail": "Failed to get agent"}
+        assert str(config_file) in caplog.text
+
+    def test_update_agent_with_unparsable_config_returns_fixed_500(self, agent_client, tmp_path, caplog):
+        config_file = self._break_agent_config(agent_client, tmp_path)
+
+        response = agent_client.put("/api/agents/broken", json={"description": "new"})
+
+        assert response.status_code == 500
+        assert response.json() == {"detail": "Failed to update agent"}
+        assert str(config_file) in caplog.text
+
+    def test_list_agents_os_error_returns_fixed_500(self, agent_client, tmp_path, caplog):
+        agents_root = self._user_dir(tmp_path) / "agents"
+        agents_root.parent.mkdir(parents=True)
+        agents_root.write_text("not a directory", encoding="utf-8")
+
+        response = agent_client.get("/api/agents")
+
+        assert response.status_code == 500
+        assert response.json() == {"detail": "Failed to list agents"}
+        assert str(agents_root) in caplog.text
+
+    def test_create_agent_os_error_returns_fixed_500(self, agent_client, tmp_path, caplog):
+        agents_root = self._user_dir(tmp_path) / "agents"
+        agents_root.parent.mkdir(parents=True)
+        agents_root.write_text("not a directory", encoding="utf-8")
+
+        response = agent_client.post("/api/agents", json={"name": "fresh", "soul": "x"})
+
+        assert response.status_code == 500
+        assert response.json() == {"detail": "Failed to create agent"}
+        assert str(agents_root) in caplog.text
+
+    def test_delete_agent_os_error_returns_fixed_500(self, agent_client, tmp_path, caplog):
+        from deerflow.persistence.agents.file import FileAgentStore
+
+        assert agent_client.post("/api/agents", json={"name": "locked", "soul": "x"}).status_code == 201
+        agent_dir = self._user_dir(tmp_path) / "agents" / "locked"
+        denied = PermissionError(errno.EACCES, os.strerror(errno.EACCES), str(agent_dir))
+
+        with patch.object(FileAgentStore, "delete", side_effect=denied):
+            response = agent_client.delete("/api/agents/locked")
+
+        assert response.status_code == 500
+        assert response.json() == {"detail": "Failed to delete agent"}
+        assert str(agent_dir) in caplog.text
+
+    @pytest.mark.parametrize(
+        ("method", "kwargs", "detail"),
+        [
+            ("get", {}, "Failed to read user profile"),
+            ("put", {"json": {"content": "hi"}}, "Failed to update user profile"),
+        ],
+    )
+    def test_user_profile_os_error_returns_fixed_500(self, agent_client, tmp_path, caplog, method, kwargs, detail):
+        user_md = self._user_dir(tmp_path) / "USER.md"
+        user_md.mkdir(parents=True)
+
+        response = getattr(agent_client, method)("/api/user-profile", **kwargs)
+
+        assert response.status_code == 500
+        assert response.json() == {"detail": detail}
+        assert str(user_md) in caplog.text
 
 
 class TestAgentsApiDisabled:

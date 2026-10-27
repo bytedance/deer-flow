@@ -1,0 +1,10 @@
+{
+  "affected_base_commit": "1fd266e0c03e1d998918990727de43769136e7f6",
+  "before_worker_sha256": "379041b126140d91223230e5bd200e713ac746d5d18927db668a3656b5257b64",
+  "after_worker_sha256": "c6dec31e2c30281cd736d70086065d702756c87659f115328d3c993e424275ed",
+  "reproduction_module_sha256": "3b392029b31ea4eced3cf734dc692355ee66b70cbe01eb084818c5fc5206ee8d",
+  "python": "3.12.13",
+  "platform": "macOS arm64",
+  "provider_requests": 0,
+  "method": "One deterministic repetition fixture executed once before and once after the worker change; not a real-model task-success benchmark."
+}

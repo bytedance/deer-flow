@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Aggregate JSONL benchmark results into summary tables.
+"""Aggregate bench_provider JSONL results into summary tables.
+
+Prewarm cases and resource samples use separate formats and are not summarized.
 
 Usage::
 
@@ -12,23 +14,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import statistics
 import sys
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
 
-def _p(arr: list[float], pct: float) -> float:
-    if not arr:
-        return 0.0
-    s = sorted(arr)
-    if len(s) == 1:
-        return s[0]
-    rank = (len(s) - 1) * (pct / 100)
-    lower = int(rank)
-    upper = min(lower + 1, len(s) - 1)
-    weight = rank - lower
-    return s[lower] * (1 - weight) + s[upper] * weight
+def _p(arr: list[float], pct: int) -> float:
+    if len(arr) < 2:
+        return arr[0] if arr else 0.0
+    return statistics.quantiles(arr, n=100, method="inclusive")[pct - 1]
 
 
 def _load_jsonl(paths: list[Path]) -> list[dict[str, Any]]:
@@ -59,7 +55,7 @@ def _summarize(rows: list[dict[str, Any]], group_by: list[str]) -> list[dict[str
         groups[_group_key(r, group_by)].append(r)
 
     summary: list[dict[str, Any]] = []
-    for key, group in sorted(groups.items()):
+    for key, group in sorted(groups.items(), key=lambda item: repr(item[0])):
         ok = [r for r in group if r.get("success")]
         a = [r["acquire_ms"] for r in ok]
         ru = [r.get("run_ms", 0) for r in ok]
@@ -97,6 +93,12 @@ _COLUMNS = [
     "scenario",
     "workload",
     "concurrency",
+    "users",
+    "no_warmpool",
+    "replicas",
+    "idle_timeout",
+    "health_check_skip_seconds",
+    "image",
     "count",
     "ok",
     "errors",
@@ -116,10 +118,11 @@ _COLUMNS = [
 
 
 def _print_table(rows: list[dict[str, Any]], fmt: str = "plain") -> None:
+    columns = list(dict.fromkeys(_COLUMNS + [key for row in rows for key in row if key not in _COLUMNS]))
     if fmt == "csv":
         import csv as _csv
 
-        w = _csv.DictWriter(sys.stdout, fieldnames=_COLUMNS, extrasaction="ignore")
+        w = _csv.DictWriter(sys.stdout, fieldnames=columns)
         w.writeheader()
         w.writerows(rows)
         return
@@ -129,7 +132,7 @@ def _print_table(rows: list[dict[str, Any]], fmt: str = "plain") -> None:
         print("(no data)")
         return
 
-    headers = [c for c in _COLUMNS if any(r.get(c) is not None for r in rows)]
+    headers = [column for column in columns if any(row.get(column) is not None for row in rows)]
     col_widths = {h: len(h) for h in headers}
     for r in rows:
         for h in headers:
@@ -147,12 +150,12 @@ def _print_table(rows: list[dict[str, Any]], fmt: str = "plain") -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(description="Aggregate JSONL benchmark results")
+    p = argparse.ArgumentParser(description="Aggregate bench_provider.py JSONL results (not prewarm cases or resource samples)")
     p.add_argument("inputs", nargs="+", help="JSONL file(s) from sandbox/bench_provider.py")
     p.add_argument(
         "--group",
-        default="provider,scenario,workload,concurrency",
-        help="Comma-separated grouping dimensions (default: provider,scenario,workload,concurrency)",
+        default="provider,scenario,workload,concurrency,users,no_warmpool,replicas,idle_timeout,health_check_skip_seconds,image",
+        help="Comma-separated grouping dimensions (default includes provider configuration and user count)",
     )
     p.add_argument(
         "--csv",
@@ -176,6 +179,19 @@ def main(argv: list[str] | None = None) -> int:
         print("No valid JSONL rows found.", file=sys.stderr)
         return 1
 
+    provider_rows = [row for row in rows if isinstance(row, dict) and row.get("record_type") is None and "success" in row]
+    if len(provider_rows) != len(rows):
+        print(f"Ignored {len(rows) - len(provider_rows)} non-provider record(s); summarize.py reports provider results only.", file=sys.stderr)
+    rows = provider_rows
+    if not rows:
+        print("No bench_provider.py result rows found. Prewarm and resource JSONL use separate formats.", file=sys.stderr)
+        return 1
+    for index, row in enumerate(rows, start=1):
+        missing = [field for field in ("acquire_ms", "total_ms") if field not in row]
+        if row.get("success") and missing:
+            print(f"Provider result {index} is missing timing fields: {', '.join(missing)}.", file=sys.stderr)
+            return 1
+
     group_by = [g.strip() for g in args.group.split(",") if g.strip()]
     summary = _summarize(rows, group_by)
 
@@ -186,7 +202,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         _print_table(summary, fmt="plain")
 
-    return 0
+    return int(any(not row.get("success") for row in rows))
 
 
 if __name__ == "__main__":

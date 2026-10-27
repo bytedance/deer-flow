@@ -63,7 +63,7 @@ GET /api/threads/{thread_id}/runs/{run_id}/events?event_types=subagent.step&task
 | 键                            | 说明                                                    |
 | ----------------------------- | ------------------------------------------------------- |
 | `subagent_status`             | 五个终态之一                                            |
-| `subagent_stop_reason`        | `token_capped` / `turn_capped` / `loop_capped`，可缺省  |
+| `subagent_stop_reason`        | `token_capped` / `turn_capped` / `loop_capped` / `model_length_capped`，可缺省 |
 | `subagent_error`              | 非 `completed` 时的错误文本，最多 2,000 字符            |
 | `subagent_result_brief`       | `completed` 时的结果摘要，最多 2,000 字符               |
 | `subagent_result_sha256`      | 完整结果的 SHA-256                                      |
@@ -112,9 +112,12 @@ GET /api/threads/{thread_id}/token-usage?include_active=false
 | `POST /{batch_id}/resume`                 | 恢复                                                                  |
 | `POST /{batch_id}/cancel`                 | 取消；worker 未运行时返回 503                                         |
 | `POST /{batch_id}/items/{item_id}/retry`  | 重试单个条目，只接受 `failed` 状态，否则 409                          |
+| `GET /{batch_id}/items/{position}`        | 读取一个按所有者/线程授权的报告和已捕获证据快照                  |
 | `GET /{batch_id}/results.jsonl`           | 以 NDJSON 流式导出全部条目，含完整结果与验收结论                      |
 
 批次状态：`queued`、`running`、`paused` 为活跃，`completed`、`failed`、`cancelled` 为终态。条目状态：`pending` 为等待中，不计入活跃；`queued`、`leased`、`running` 为活跃，`succeeded`、`failed`、`cancelled` 为终态。批次结束时，若有失败条目且没有任何成功条目，批次记为 `failed`，否则为 `completed`。
+
+选中条目接口是浏览器审阅契约。`position` 是提交时固定的条目位置，响应包含已保存的报告、执行/验收字段，以及本次运行捕获并持久化的有界 `evidence` 快照。它不会返回原始 prompt 或执行规格，不会重新请求 provider；worker 停止时仍可读取。工作区批处理面板按需打开详情，普通条目轮询仍只返回预览。
 
 ## 扩展观察点
 

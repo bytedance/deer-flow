@@ -210,3 +210,44 @@ def test_base_precheck_false_positives_do_not_override_page_url(head):
 
     html = _article('<a href="../next">Next</a>', head=head)
     assert '<a href="https://example.com/next">Next</a>' in _resolve_html_urls(html, PAGE_URL)
+
+
+def test_falls_back_when_extraction_returns_unextracted_document(monkeypatch):
+    """When Readability.js returns the raw document instead of the extracted
+    article (e.g. on Windows), the resolved HTML's <body> content is used so
+    that <a> destinations survive."""
+    import deerflow.utils.readability as R
+
+    monkeypatch.setattr(
+        R,
+        "simple_json_from_html_string",
+        lambda html, use_readability=True: {"title": "Guide", "content": html},
+    )
+    article = R.ReadabilityExtractor().extract_article(_article('<a href="../next">Next</a> <a href="/reference">Reference</a>'), url=PAGE_URL)
+    md = article.to_markdown()
+    assert "[Next](https://example.com/next)" in md
+    assert "[Reference](https://example.com/reference)" in md
+
+
+def test_link_free_article_with_link_bearing_chrome_does_not_fall_back(monkeypatch):
+    """A legitimately link-free article whose page chrome has links must NOT
+    trigger the unextracted-document fallback — Readability correctly strips
+    the chrome, and the article body genuinely has no links."""
+    import deerflow.utils.readability as R
+
+    prose = "Long enough prose for the readability extractor to retain this as content. "
+    html = f'<html><head><title>Guide</title></head><body><nav><a href="/home">Home</a> <a href="/about">About</a></nav><article><p>{prose * 4}</p></article></body></html>'
+    url = PAGE_URL
+
+    extracted_content = f"<div><p>{prose * 4}</p></div>"
+
+    def fake_extract(html, use_readability=True):
+        return {"title": "Guide", "content": extracted_content}
+
+    monkeypatch.setattr(R, "simple_json_from_html_string", fake_extract)
+    article = R.ReadabilityExtractor().extract_article(html, url=url)
+    md = article.to_markdown()
+    assert article.html_content == extracted_content
+    assert "Long enough prose" in md
+    assert "[Home](https://example.com/home)" not in md
+    assert "[About](https://example.com/about)" not in md

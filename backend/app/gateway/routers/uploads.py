@@ -5,6 +5,7 @@ import os
 import stat
 import tempfile
 from collections.abc import AsyncIterator
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
@@ -190,7 +191,8 @@ def _cleanup_uploaded_paths(paths: list[os.PathLike[str] | str]) -> None:
         except FileNotFoundError:
             pass
         except Exception:
-            logger.warning("Failed to clean up upload path after rejected request: %s", path, exc_info=True)
+            with suppress(Exception):
+                logger.warning("Failed to clean up upload path after rejected request: %s", path, exc_info=True)
 
 
 def _pure_destination(uploads_dir: os.PathLike[str] | str, display_filename: str) -> Path:
@@ -320,7 +322,8 @@ def _remove_staged_file(staged_path: os.PathLike[str] | str) -> None:
     except FileNotFoundError:
         pass
     except OSError:
-        logger.warning("Failed to remove staged upload file: %s", staged_path, exc_info=True)
+        with suppress(Exception):
+            logger.warning("Failed to remove staged upload file: %s", staged_path, exc_info=True)
 
 
 def _write_upload_chunk(upload_temp: _UploadTempFile, chunk: bytes) -> None:
@@ -330,6 +333,9 @@ def _write_upload_chunk(upload_temp: _UploadTempFile, chunk: bytes) -> None:
 def _abort_upload_temp(upload_temp: _UploadTempFile) -> None:
     try:
         upload_temp.handle.close()
+    except Exception:
+        with suppress(Exception):
+            logger.warning("Failed to close staged upload file: %s", upload_temp.temp_path, exc_info=True)
     finally:
         # Best-effort, not ``os.unlink``: an abandoned duplication worker can
         # still hold this inode open (Windows refuses to remove it then), and
@@ -435,11 +441,22 @@ async def upload_files(
             raise HTTPException(status_code=400, detail=str(e))
         for file in files:
             if not file.filename:
+                # Starlette builds an UploadFile even for a part with an empty
+                # filename; dropping it silently kept `success: true` over an
+                # empty `files` + `skipped_files`, bypassing the #7122 gate
+                # exactly like the unsafe-name arm below (#7160).
+                logger.warning("Skipping upload part without a filename")
+                skipped_files.append("(unnamed file)")
                 continue
             try:
                 file_info = await service.ingest_chunks(_stream_upload_file(file), display_name=file.filename)
-            except UnsafeFilenameError:
-                logger.warning(f"Skipping file with unsafe filename: {file.filename!r}")
+            except UnsafeFilenameError as exc:
+                # The rejected name must reach the caller: leaving it out of
+                # skipped_files kept `success: true` over an empty `files`
+                # list, which let the chat send proceed without the
+                # attachment the user asked for (#7160).
+                logger.warning("Skipping upload with unsafe filename %r: %s", file.filename, exc)
+                skipped_files.append(file.filename)
                 continue
             except UnsafeUploadDestinationError as e:
                 logger.warning("Skipping upload with unsafe destination %s: %s", file.filename, e)
@@ -451,7 +468,7 @@ async def upload_files(
             except Exception as e:
                 logger.error(f"Failed to upload {file.filename}: {e}")
                 await service.cleanup_written()
-                raise HTTPException(status_code=500, detail=f"Failed to upload {file.filename}: {str(e)}")
+                raise HTTPException(status_code=500, detail=f"Failed to upload {file.filename}.")
             uploaded_files.append(file_info)
 
         await service.finalize()
@@ -461,7 +478,11 @@ async def upload_files(
             message += f"; skipped {len(skipped_files)} unsafe file(s)"
 
         return UploadResponse(
-            success=not skipped_files,
+            # ``success`` means "at least one file was stored": an all-rejected
+            # batch must be a failure so the #7122 frontend gate blocks the
+            # send, while a mixed batch still succeeds and reports the dropped
+            # names through ``skipped_files`` (#7160).
+            success=bool(uploaded_files),
             files=uploaded_files,
             message=message,
             skipped_files=skipped_files,
@@ -507,4 +528,4 @@ async def delete_uploaded_file(thread_id: ThreadId, filename: str, request: Requ
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Failed to delete {filename}: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to delete {filename}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to delete {filename}.")
