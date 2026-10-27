@@ -145,9 +145,16 @@ configured default. `max_recursion_limit` (default `1000`) caps both sources to
 limit runaway LLM cost. Both settings are read per run, so changes apply to the
 next request without a Gateway restart.
 
-These settings apply to Gateway API runs. IM channel runs and embedded
-`DeerFlowClient` runs retain their own defaults and can be overridden through
-their channel/client-specific configuration or per-call options.
+A run that reaches its limit ends with status `error` and
+`stop_reason: recursion_capped`. Its error message lists up to five outputs it
+created but did not present and asks the user to send a message to continue.
+An active goal stands down without an evaluator call and stays active.
+
+These settings also apply to IM channel runs. A `recursion_limit` in an IM
+channel's `session.config` (for all channels, one channel or one user) takes
+precedence. The GitHub channel instead uses `250`, or a higher
+`session.config` value, unless the agent sets `github.recursion_limit`.
+Embedded `DeerFlowClient` runs retain their own defaults and per-call options.
 
 ### Models
 
@@ -761,6 +768,7 @@ Notes:
 - Set `multi_instance: true` (or export `DEER_FLOW_MULTI_INSTANCE=1`, which lets deploy tooling such as a Helm chart set it from its replica count) on every instance that shares one database. Startup then enforces the same prerequisites as `GATEWAY_WORKERS > 1`: `database.backend: postgres`, `run_events.backend: db`, `run_ownership.heartbeat_enabled: true`, and a Redis stream bridge (`stream_bridge.type: redis` or `DEER_FLOW_STREAM_BRIDGE_REDIS_URL`). It refuses an explicit `sandbox.ownership.type: memory`, process-local browser tools, and `scheduler.enabled: true` without `scheduler.multi_instance: true`.
 - `DEER_FLOW_MULTI_INSTANCE` treats blank, `0`, `false`, `no` and `off` as "not declared"; any other value declares a multi-instance deployment, so a typo fails closed.
 - `GET /health/ready` pings the Redis stream bridge on every probe and answers 503 (`stream_bridge: unreachable`) while Redis is down, so the orchestrator drains that instance instead of routing it runs it cannot publish or stream; the memory bridge reports `not_configured`. When `sandbox.provisioner_url` is set, the body also carries the provisioner's `/health` verdict (`provisioner: ok|unreachable`), which never changes the status code because every instance shares one provisioner. That probe follows the sandbox clients' proxy policy: loopback, private, link-local and cluster-local provisioner addresses bypass `HTTP_PROXY`, external hosts keep the environment's proxy settings.
+- `stream_bridge.legacy_end_scan_enabled` defaults to `true` for Redis: when the tail is not END, END publication scans all retained entries, including a normal run's first END. Cost grows with the retained entry count and total payload bytes inside atomic Lua, blocking other Redis clients; `queue_maxsize` bounds entries, not bytes. Stop every old writer and expire or remove every legacy replay buffer before setting this to `false` on all Gateways and restarting them. With `stream_ttl_seconds: 0`, remove those buffers explicitly. Disabled mode detects END only at the tail, so both data and END checks have constant cost relative to retained history; it cannot deduplicate an old mid-stream END. No performance ceiling is implied by the default entry cap.
 - `stream_bridge.producer_lease_recovery_enabled` is a restart-required activation gate for recovering a terminal Redis stream whose producer died before publishing END. Keep it `false` during the binary rollout: upgraded writers already publish producer markers, while old writers do not. After every old Gateway has stopped and its runs have drained, set it to `true` on every instance and restart them together. Enabling it while an old worker may still finalize a run can make a new consumer mistake that untracked legacy producer for completed history.
 - The declaration also drives the `agent_storage.backend: file` divergence warning, the inbound webhook dedupe warning, the `auth.local.throttle_storage: memory` warning, and the WeChat QR-login guard, which otherwise only look at the worker count.
 - Login lockouts are shared through the database: `auth.local.throttle_storage` (startup-only) defaults to `auto`, which keeps the per-IP failed-login counters for `POST /api/v1/auth/login/local` in the `login_throttle` table whenever `database.backend` is `sqlite` or `postgres`, so every instance enforces one `max_login_attempts` limit per client IP and a lockout on one instance holds on all of them. `memory` keeps the historical per-process counter (N instances give an attacker N × `max_login_attempts` guesses; a declared multi-instance deployment logs a warning), and `db` forces the table (it falls back to memory with a warning when the database backend is `memory`, and refuses to start when the configured database's engine is unavailable; `auto` falls back with a warning in that case). `max_login_attempts` and `lockout_seconds` stay live-read.
@@ -1012,6 +1020,31 @@ retry budget when retries are enabled; the earlier of that deadline and
 `max_wait_seconds` applies and is checked again at dispatch. With retries disabled,
 only queue wait is bounded by admission, and the existing HTTP timeout semantics
 still apply.
+
+#### Jina crawl diagnostics
+
+Set `log_level: debug` in root `config.yaml` and restart the Gateway to enable
+`deerflow.community.jina_ai.jina_client` completion summaries. INFO emits no new
+summary. Each logical crawl emits one `Jina crawl completed` message containing:
+
+- `outcome`: `success`, `error`, or `cancelled`.
+- `reason`: `success`, `empty_response`, `response_limit`, `invalid_configuration`,
+  `nonretryable_http`, `attempt_exhaustion`, `retry_after_unfit`,
+  `budget_exhaustion`, `request_failure`, or `cancellation`.
+- `attempts`: calls started at HTTPX's POST/stream API, including failed connections;
+  zero for rejected settings. This does not prove remote delivery.
+- `elapsed_seconds`: monotonic duration through completion/cleanup.
+- `backoff_seconds`: measured time awaiting retry sleep, including a partially
+  cancelled wait, rather than the planned delay. Neither duration estimates
+  provider latency or cost.
+
+Fields remain in the message in plain and enhanced JSON logging. Existing
+`logging.enhance` trace filtering supplies the inherited request trace ID when
+enabled; no new ID is created. Concurrent crawls keep independent counters but
+may share a request trace. Summaries contain no URL, credentials, response body,
+headers, or exception text. Existing error logs and return values are unchanged.
+Emission is best effort if a logging handler fails. These provider-local records
+explain internal retry decisions; they do not replace tracing or tool results.
 
 #### Jina response byte budget
 

@@ -190,7 +190,7 @@ class SafetyFinishReasonMiddleware(AgentMiddleware[AgentState]):
         message: AIMessage,
         termination: SafetyTermination,
     ) -> AIMessage:
-        tool_calls = message.tool_calls or []
+        tool_calls = [*(message.tool_calls or []), *(message.invalid_tool_calls or [])]
         suppressed_names = [tc.get("name") or "unknown" for tc in tool_calls]
         template = _USER_FACING_MESSAGE if tool_calls else _USER_FACING_EMPTY_MESSAGE
         explanation = template.format(
@@ -206,7 +206,10 @@ class SafetyFinishReasonMiddleware(AgentMiddleware[AgentState]):
         # It only rewrites finish_reason when the old value was "tool_calls",
         # which is not our case — content_filter / refusal / SAFETY stay put
         # so downstream SSE / converters keep seeing the real provider reason.
-        cleared = clone_ai_message_with_tool_calls(message, [], content=new_content)
+        # Invalid calls must also be suppressed: the shared helper otherwise
+        # retains their native content blocks for dangling-call recovery.
+        source = message.model_copy(update={"invalid_tool_calls": []})
+        cleared = clone_ai_message_with_tool_calls(source, [], content=new_content)
 
         # Re-clone additional_kwargs so we don't accidentally mutate the
         # dict returned by clone_ai_message_with_tool_calls (which already
@@ -373,7 +376,7 @@ class SafetyFinishReasonMiddleware(AgentMiddleware[AgentState]):
         #      'assistant' must not be empty", #4393), which poisons the whole
         #      thread until a new chat is started. Backfill an explanation so
         #      the persisted message is non-empty.
-        tool_calls = list(last.tool_calls or [])
+        tool_calls = [*(last.tool_calls or []), *(last.invalid_tool_calls or [])]
         # Keep local falsey-content normalization as a defensive guard; the
         # shared helper also handles None from validation-skipping rewrites.
         # The trailing strip() makes whitespace-only content blank as well.

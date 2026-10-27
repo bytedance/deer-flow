@@ -4,17 +4,15 @@ from __future__ import annotations
 
 import threading
 from collections import OrderedDict
+from copy import deepcopy
 from typing import Any
 
 from deerflow.runtime.checkpoint_cache.base import CheckpointCacheStats, thread_key_stem
 
 
 def _copy_entry(entry: dict[str, Any]) -> dict[str, Any]:
-    """Copy-on-read/write: fresh writes list; seed shared (never mutated in place)."""
-    copied: dict[str, Any] = {"writes": list(entry["writes"])}
-    if "seed" in entry:
-        copied["seed"] = entry["seed"]
-    return copied
+    """Own nested write payloads and snapshot seeds on both sides of the cache."""
+    return deepcopy(entry)
 
 
 class MemoryCheckpointHistoryCache:
@@ -42,15 +40,18 @@ class MemoryCheckpointHistoryCache:
                     continue
                 self._data.move_to_end(key)
                 self._hits += 1
-                found[key] = _copy_entry(entry)
-            return found
+                found[key] = entry
+        # Entries are privately owned and never changed after publication. Copy
+        # outside the registry lock: user payloads can implement __deepcopy__.
+        return {key: _copy_entry(entry) for key, entry in found.items()}
 
     def set_many(self, entries: dict[str, dict[str, Any]]) -> None:
+        if not self.enabled:
+            return
+        copied = {key: _copy_entry(entry) for key, entry in entries.items()}
         with self._lock:
-            if not self.enabled:
-                return
-            for key, entry in entries.items():
-                self._data[key] = _copy_entry(entry)
+            for key, entry in copied.items():
+                self._data[key] = entry
                 self._data.move_to_end(key)
                 while len(self._data) > self._max_entries:
                     self._data.popitem(last=False)

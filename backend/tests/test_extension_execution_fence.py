@@ -60,6 +60,11 @@ async def test_postgres_takeover_fences_admission_after_lock_wait():
     import os
     import uuid
 
+    dsn = os.getenv("DEERFLOW_TEST_WORKFLOW_POSTGRES")
+    if not dsn:
+        pytest.skip("Requires dedicated PostgreSQL")
+
+    # The default install does not need optional drivers without this opt-in.
     import psycopg
     from psycopg import sql
     from sqlalchemy import update
@@ -69,9 +74,6 @@ async def test_postgres_takeover_fences_admission_after_lock_wait():
     from deerflow.persistence.run.model import RunChangeClockRow, RunRow
     from deerflow.runtime.runs.manager import ConflictError
 
-    dsn = os.getenv("DEERFLOW_TEST_WORKFLOW_POSTGRES")
-    if not dsn:
-        pytest.skip("Requires dedicated PostgreSQL")
     schema = "fence_test_" + uuid.uuid4().hex
     with psycopg.connect(dsn, autocommit=True) as db:
         db.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))

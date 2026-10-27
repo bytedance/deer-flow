@@ -62,8 +62,9 @@ patches preserve each other's changes, and same-field writes are last-commit-win
 Storage requires SQLite or PostgreSQL (`503` when unavailable). Browser
 notification permission remains device-local and is not changed by this API.
 `locale` is the web UI language; the web app writes it after sign-in and on
-every language switch, and scheduled-task IM notices are written in it (without
-it they use `channel_connections.notification_locale`).
+every language switch, and scheduled-task IM notices and the IM `/connect` and
+`/goal` replies are written in it (without it they use
+`channel_connections.notification_locale`).
 
 ### Personal Access Tokens
 
@@ -380,9 +381,15 @@ or configured value to a server ceiling (`max_recursion_limit` in `config.yaml`,
 default `1000`) so a single run cannot execute unbounded graph steps (runaway
 LLM cost / DoS); invalid or non-positive request values fall back to the
 configured default. Both top-level fields are read per run, so edits apply to
-the next request without restarting the Gateway. This top-level setting applies
-to Gateway API runs only; IM channel and embedded `DeerFlowClient` runs retain
-their own defaults and override paths.
+the next request without restarting the Gateway. IM channel runs get the same
+default unless a channel `session.config` sets `recursion_limit` (GitHub channel
+runs have their own floor; see
+[CONFIGURATION.md](CONFIGURATION.md#recursion-limits)); embedded
+`DeerFlowClient` runs retain their own defaults and override paths. A run that
+reaches the limit ends with status `error` and `stop_reason: "recursion_capped"`;
+its stream `error` event and the `/wait` error envelope use the name
+`GraphRecursionError`, and the message lists up to five outputs the run created
+but did not present.
 
 **Configurable Options:**
 - `model_name` (string): Override the default model
@@ -390,6 +397,16 @@ their own defaults and override paths.
 - `is_plan_mode` (boolean): Enable TodoList middleware for task tracking
 
 **Client Context:**
+
+Top-level `context.locale` accepts `en-US` or `zh-CN` as the current run's
+preferred response and automatic DeerMem-writing language. Explicit user
+language requests take precedence. Unsupported values are ignored. The value
+is runtime-only and is not a checkpoint `configurable` default; legacy
+`config.context.locale` is also validated, with an explicit null/invalid
+top-level value clearing it. Omitting a locale retains language inference.
+Scheduled runs and MCP task notification runs currently omit this preference;
+the owner's saved locale localizes scheduled IM notices only, not those runs'
+replies or memory writes.
 
 A custom client can describe what it can display under top-level
 `context.client`, so the agent and its skills can choose an output shape that

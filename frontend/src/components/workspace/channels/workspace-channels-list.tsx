@@ -34,6 +34,7 @@ import { cn } from "@/lib/utils";
 
 import { useWorkspaceSidebarExpanded } from "../workspace-sidebar-frame";
 
+import { ChannelBindingCodeDialog } from "./channel-binding-code-dialog";
 import { ChannelProviderIcon } from "./channel-provider-icon";
 import { ChannelRuntimeConfigDialog } from "./channel-runtime-config-dialog";
 import { ChannelScheduledUpdates } from "./channel-scheduled-updates";
@@ -64,6 +65,8 @@ export function WorkspaceChannelsList() {
   const [setupProvider, setSetupProvider] = useState<ChannelProvider | null>(
     null,
   );
+  const [bindingProvider, setBindingProvider] =
+    useState<ChannelProvider | null>(null);
   const visibleProviders = providers.filter((provider) => provider.enabled);
 
   const startConnect = (
@@ -74,6 +77,12 @@ export function WorkspaceChannelsList() {
       closeConnectWindow(preparedWindow ?? null);
       setSetupStep(provider.configured ? "binding" : "setup");
       setSetupProvider(provider);
+      return;
+    }
+    // The command stays in a dialog with copy and expiry, not a passing toast.
+    if (provider.auth_mode === "binding_code") {
+      closeConnectWindow(preparedWindow ?? null);
+      setBindingProvider(provider);
       return;
     }
     const connectWindow =
@@ -236,6 +245,15 @@ export function WorkspaceChannelsList() {
                 error instanceof Error ? error.message : t.channels.unavailable,
               );
             });
+        }}
+      />
+      <ChannelBindingCodeDialog
+        provider={bindingProvider}
+        open={bindingProvider !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setBindingProvider(null);
+          }
         }}
       />
     </SidebarGroup>

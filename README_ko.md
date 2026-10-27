@@ -378,7 +378,7 @@ Docker 빌드는 기본적으로 업스트림 `uv` 레지스트리를 사용합�
 
 백엔드 프로세스는 다음 설정 접근 시 `config.yaml` 변경 사항을 자동으로 반영하므로, 개발 중 모델 메타데이터를 업데이트할 때 수동으로 재시작할 필요가 없습니다.
 
-Gateway 실행(run)은 API 요청이 값을 지정하지 않은 경우 최상위 `recursion_limit` 값(`config.yaml`에 설정)을 사용합니다. 기본값은 `100`이며, 유효한 요청별 값이 우선하고 `max_recursion_limit`(기본값 `1000`)이 두 값 모두의 상한이 됩니다. 변경 사항은 Gateway를 재시작하지 않아도 다음 실행부터 적용됩니다. 이 최상위 설정은 Gateway API 실행에 적용되며, IM 채널 실행과 임베디드 `DeerFlowClient` 실행은 각자의 기본값과 호출별 재정의 경로를 그대로 유지합니다.
+Gateway 실행(run)은 API 요청이 값을 지정하지 않은 경우 최상위 `recursion_limit` 값(`config.yaml`에 설정)을 사용합니다. 기본값은 `100`이며, 유효한 요청별 값이 우선하고 `max_recursion_limit`(기본값 `1000`)이 두 값 모두의 상한이 됩니다. 변경 사항은 Gateway를 재시작하지 않아도 다음 실행부터 적용됩니다. 이 최상위 설정은 Gateway API 실행과 IM 채널 실행에 적용됩니다. IM 채널의 `session.config`에 지정한 `recursion_limit`이 우선하며, GitHub 채널 실행은 자체 하한을 유지합니다. 임베디드 `DeerFlowClient` 실행은 각자의 기본값과 호출별 재정의 경로를 그대로 유지합니다.
 체크포인트 저장소 설정인 `database.checkpoint_channel_mode`와 `database.checkpoint_delta.snapshot_frequency`(기본값 `10`)는 예외입니다. 두 설정 모두 프로세스가 처음 에이전트를 빌드할 때(`DeerFlowClient`를 통한 경우 포함) 고정되므로, 안전하게 변경하려면 프로세스를 재시작해야 합니다.
 
 선택 사항인 `database.checkpoint_cache` 섹션(delta 채널 모드 전용)은 구체화된 체크포인트 이력을 캐시합니다. `type`은 `memory`(기본값) 또는 `redis`이며, `max_entries: 0`으로 설정하면 캐시가 비활성화됩니다. `redis` 백엔드는 Gateway/비동기 경로 전용이며, 동기 TUI/임베디드 경로는 `memory`만 지원합니다. 이 캐시는 성능만을 위한 것으로 비활성화해도 결과가 동일합니다. 따라서 고정되는 일이 없으며, 하나의 체크포인트 데이터베이스를 공유하는 워커들이 서로 다른 캐시 설정으로 실행되어도 안전합니다. Redis 스레드 정리는 설정된 `key_prefix`를 glob 메타문자까지 포함해 리터럴 텍스트로 취급하므로, 삭제는 해당 네임스페이스와 스레드 안에서만 이루어집니다.
@@ -706,8 +706,6 @@ channels:
   # Optional: global session defaults for all mobile channels
   session:
     assistant_id: lead_agent  # or a custom agent name; custom agents are routed via lead_agent + agent_name
-    config:
-      recursion_limit: 100
     context:
       thinking_enabled: true
       is_plan_mode: false

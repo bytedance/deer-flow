@@ -262,7 +262,10 @@ class FileAgentStore(AgentStore):
 
 
 def _stage_temp(target: Path, text: str, staged: list[Path]) -> Path:
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=target.parent, suffix=".tmp", delete=False) as f:
+    # newline="" keeps the operator's/agent's bytes: the default text write
+    # translates LF into os.linesep, so SOUL.md and config.yaml landed with
+    # CRLF on Windows while every reader saw LF.
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", newline="", dir=target.parent, suffix=".tmp", delete=False) as f:
         # Register the path before writing: a failing ``write`` must still reach
         # the caller's cleanup, or the staged file leaks with no attempt and no log.
         path = Path(f.name)
