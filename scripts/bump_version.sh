@@ -63,8 +63,8 @@ pyproject, package, chart, version = sys.argv[1:5]
 # backend/pyproject.toml — version = "..."
 with open(pyproject) as f:
     src = f.read()
-new = re.sub(r'(?m)^version\s*=\s*".*?"', f'version = "{version}"', src, count=1)
-if new == src:
+new, matches = re.subn(r'(?m)^version\s*=\s*".*?"', f'version = "{version}"', src, count=1)
+if not matches:
     sys.exit(f"error: no top-level 'version' field in {pyproject}")
 with open(pyproject, "w") as f:
     f.write(new)
@@ -72,13 +72,13 @@ with open(pyproject, "w") as f:
 # frontend/package.json — "version": "..." (preserve indentation; minimal diff)
 with open(package) as f:
     src = f.read()
-new = re.sub(
+new, matches = re.subn(
     r'(?m)^(\s*)"version"\s*:\s*".*?"',
     lambda m: f'{m.group(1)}"version": "{version}"',
     src,
     count=1,
 )
-if new == src:
+if not matches:
     sys.exit(f'error: no top-level "version" field in {package}')
 with open(package, "w") as f:
     f.write(new)
@@ -86,9 +86,9 @@ with open(package, "w") as f:
 # deploy/helm/deer-flow/Chart.yaml — version: X.Y.Z and appVersion: "X.Y.Z"
 with open(chart) as f:
     src = f.read()
-new = re.sub(r'(?m)^version:\s*\S+', f'version: {version}', src, count=1)
-new = re.sub(r'(?m)^appVersion:\s*".*?"', f'appVersion: "{version}"', new, count=1)
-if new == src:
+new, version_matches = re.subn(r'(?m)^version:\s*\S+', f'version: {version}', src, count=1)
+new, app_matches = re.subn(r'(?m)^appVersion:\s*".*?"', f'appVersion: "{version}"', new, count=1)
+if not version_matches or not app_matches:
     sys.exit(f"error: could not find version/appVersion in {chart}")
 with open(chart, "w") as f:
     f.write(new)
