@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import threading
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -67,9 +68,10 @@ def _loop_thread() -> int:
 
 async def test_capability_gate_reads_config_off_the_loop(monkeypatch: pytest.MonkeyPatch) -> None:
     recorder = _Recorder()
-    monkeypatch.setattr(browser_router, "get_app_config", recorder, raising=False)
-    # The gate imports get_app_config lazily inside the function body, so the
-    # patch has to land on the module it imports from.
+    # _browser_tools_enabled rebinds get_app_config from deerflow.config at call
+    # time (``from deerflow.config import get_app_config`` inside the function),
+    # so the patch has to land on that module; a browser_router attribute would
+    # be read by nothing.
     import deerflow.config as config_module
 
     monkeypatch.setattr(config_module, "get_app_config", recorder)
@@ -103,3 +105,45 @@ async def test_the_gate_swallows_config_failures_without_leaving_the_worker(monk
 
     assert recorder.calls == 1
     assert recorder.threads[0] != _loop_thread(), "even a failing read must run in a worker"
+
+
+class _StopAfterToolConfig(Exception):
+    """Raised by the manager stub the socket calls right after the tool-config read."""
+
+
+async def test_browser_stream_reads_tool_config_off_the_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The live socket's second config read is the one this module documents.
+
+    ``browser_stream`` resolves ``get_tool_config("browser_navigate")`` after the
+    capability gate, for the session's headless/viewport/cdp_url settings. It
+    pays the same per-call stat + hash, so it must run in a worker too — and
+    unlike the gate it is not covered by any other anchor.
+    """
+    recorder = _Recorder()
+    import deerflow.config as config_module
+
+    monkeypatch.setattr(config_module, "get_app_config", recorder)
+    # Fake the gate's verdict: playwright is absent in CI venvs, so the real
+    # capability check would short-circuit before the read under test.
+    monkeypatch.setattr(browser_router, "_browser_tools_enabled_async", AsyncMock(return_value=True))
+    monkeypatch.setattr(browser_router, "_browser_thread_owned_by", AsyncMock(return_value=True))
+    monkeypatch.setattr(browser_router, "_negotiate_browser_frame_format", AsyncMock(return_value=False))
+    monkeypatch.setattr(browser_router, "set_current_user", lambda user: None)
+    monkeypatch.setattr(browser_router, "_authenticate_ws", AsyncMock(return_value=MagicMock(id="u1")))
+    # Every guard between the handshake and the read under test.
+    monkeypatch.setattr(browser_router, "_ws_origin_allowed", lambda websocket: True)
+    monkeypatch.setattr(browser_router, "resolve_route_permissions", AsyncMock(return_value={browser_router.Permissions.THREADS_WRITE}))
+
+    websocket = MagicMock()
+    websocket.app.state.thread_store = MagicMock()
+
+    # The manager lookup follows the read under test; stop there.
+    fake_manager = MagicMock()
+    fake_manager.acquire_session = MagicMock(side_effect=_StopAfterToolConfig())
+    monkeypatch.setattr(browser_router, "get_browser_session_manager", lambda: fake_manager, raising=False)
+
+    with pytest.raises(Exception):
+        await browser_router.browser_stream(websocket, "thread-1")
+
+    assert recorder.calls >= 1, "the socket must read the tool config"
+    assert recorder.threads[0] != _loop_thread(), "the tool-config read must run in a worker, not on the loop"
