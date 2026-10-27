@@ -396,29 +396,20 @@ models:
   # for example on Docker Desktop:
   #   base_url: http://host.docker.internal:8080/v1
 
-  # Example: Anthropic Claude model (with extended thinking)
-  # supports_thinking: true is required — without it, DeerFlow silently falls
-  # back to non-thinking mode even when the UI thinking toggle is on.
-  # budget_tokens is required by the Anthropic API when thinking.type=enabled
-  # (no server default; min 1024; must be less than max_tokens).
-  # - name: claude-sonnet-4
-  #   display_name: Claude Sonnet 4
+  # Example: Anthropic Claude model (thinks by default)
+  # Claude Sonnet 5.5 rejects extended thinking (budget_tokens), thinking
+  # type disabled, temperature, top_p and top_k, so leave them out.
+  # max_tokens covers both thinking and the answer.
+  # - name: claude-sonnet-5-5
+  #   display_name: Claude Sonnet 5.5
   #   use: langchain_anthropic:ChatAnthropic
-  #   model: claude-sonnet-4-20250514
+  #   model: claude-sonnet-5-5
   #   api_key: $ANTHROPIC_API_KEY
   #   default_request_timeout: 600.0
   #   max_retries: 2
-  #   max_tokens: 16000         # Per-call output cap
+  #   max_tokens: 16000         # Per-call output cap (thinking + answer)
   #   context_window: 200000    # Total prompt + completion capacity
   #   supports_vision: true
-  #   supports_thinking: true
-  #   when_thinking_enabled:
-  #     thinking:
-  #       type: enabled
-  #       budget_tokens: 4096   # required; min 1024; must be < max_tokens
-  #   when_thinking_disabled:
-  #     thinking:
-  #       type: disabled
 
   # Example: Google Gemini model (native SDK, no thinking support)
   # - name: gemini-2.5-pro

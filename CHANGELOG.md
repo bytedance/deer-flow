@@ -1428,6 +1428,13 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
   stalling other runs, requests and streams meanwhile. They now read the
   config once per call in a worker, as image search already did. ([#7580])
 
+- **wizard:** The setup wizard's Anthropic default model is now
+  `claude-sonnet-5-5` instead of the retired `claude-sonnet-4-20250514`, which
+  the Claude API no longer accepts. For that model the wizard leaves out the
+  extended-thinking (`budget_tokens`) and thinking-disabled templates it
+  rejects. The Anthropic examples in `config.example.yaml` and the
+  configuration docs follow the same model.([#7585])
+
 - **auth:** The public auth routes (`/register`, `/setup-status`,
   `/providers`, `/oauth/{provider}` and `/callback/{provider}`) no longer read
   `config.yaml` and `extensions_config.json` on the event loop. Each request
@@ -13177,5 +13184,6 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7560]: https://github.com/bytedance/deer-flow/pull/7560
 [#7576]: https://github.com/bytedance/deer-flow/pull/7576
 [#7580]: https://github.com/bytedance/deer-flow/pull/7580
+[#7585]: https://github.com/bytedance/deer-flow/pull/7585
 [#7588]: https://github.com/bytedance/deer-flow/pull/7588
 [#7591]: https://github.com/bytedance/deer-flow/pull/7591
