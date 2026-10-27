@@ -1116,6 +1116,10 @@
 
 ### 修复
 
+- **TUI：** `/threads` 和 `/model` 选择器现在按原样显示线程标题和模型名称。此前标签
+  会被当作 Textual 标记解析，标题如 `Fix [/bold] in parser` 会在打开选择器时以
+  `MarkupError` 使 TUI 退出，标题中的 `[a]` 也会消失。([#7631])
+
 - **网页抓取：** 缓存 Readability.js 不可用的探测结果，并在 Node 抽取器首次出现
   进程启动失败后停止重试。没有可用 Node/npm 工具链的安装环境会在后续抓取中直接使用
   现有且保留链接的 Python 回退，不再重复执行失败的子进程探测；单篇文档导致的非零退出
@@ -10543,3 +10547,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7593]: https://github.com/bytedance/deer-flow/pull/7593
 [#7594]: https://github.com/bytedance/deer-flow/pull/7594
 [#7606]: https://github.com/bytedance/deer-flow/pull/7606
+[#7631]: https://github.com/bytedance/deer-flow/pull/7631

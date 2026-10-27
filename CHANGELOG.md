@@ -1402,6 +1402,11 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
 
 ### Fixed
 
+- **tui:** The `/threads` and `/model` pickers show thread titles and model
+  names exactly as written. Labels were parsed as Textual markup, so a title
+  such as `Fix [/bold] in parser` exited the TUI with `MarkupError` whenever the
+  picker opened, and `[a]` vanished from a title. ([#7631])
+
 - **web fetch:** Cache unavailable Readability.js probes and stop retrying the
   Node extractor after a process-launch failure. Installations without a
   working Node/npm toolchain now use the existing link-preserving Python
@@ -13221,3 +13226,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7593]: https://github.com/bytedance/deer-flow/pull/7593
 [#7594]: https://github.com/bytedance/deer-flow/pull/7594
 [#7606]: https://github.com/bytedance/deer-flow/pull/7606
+[#7631]: https://github.com/bytedance/deer-flow/pull/7631
