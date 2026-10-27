@@ -80,6 +80,66 @@ same database; it cannot dispatch through its actions or middleware.
 A new authenticated native mention can also reconnect its team. Existing queued
 jobs then continue under that caller's current delegated capability.
 
+## Maintain team public state
+
+Members can maintain stage objectives, plans, findings, open questions and
+delivery requirements independently of recent messages. Active entries are
+included in `read_team_context` and every newly prepared task or result receipt.
+The original team goal remains unchanged. The team page displays current and
+archived entries with their kind, revision, latest author and source conversation;
+it updates without clearing task drafts.
+
+Three member-only tools manage this state:
+
+- `publish_team_state` takes `team_id`, `request_id`, `kind`, `title` and `content`.
+  Kinds are `objective`, `plan`, `finding`, `question`, and `requirement`. A stable
+  publication ID deduplicates retries from the same member conversation. Reusing
+  it with different original content is rejected; retrying after an update returns
+  the current entry without undoing the update.
+- `read_team_state` takes `team_id`, with optional `entry_id`, `kind`, literal
+  case-insensitive `query` and boolean `include_archived`. It returns all matching
+  current entries and the team-state revision; no paging is needed for this
+  bounded collection. Reads require no run-control capability or reconnect.
+- `update_team_state` takes `team_id`, `entry_id`, `expected_revision`, `title`,
+  `content` and `status` (`active` or `archived`). Any current member may update
+  an entry. Updates compare the entry revision inside the SQLite transaction.
+  A conflict returns `updated=false`, `conflict=true` and the current entry;
+  the caller must reconcile it before trying again. An identical retry of the
+  latest successful update returns success without incrementing the revision.
+  Older retries after another edit return a conflict. Entry kind and creator
+  are immutable; latest author, time and source are stamped by the service.
+
+For example, publish:
+
+```json
+{"team_id":"...","request_id":"cost-plan","kind":"plan","title":"Cost review","content":"Research gathers quotes; Review checks operating costs."}
+```
+
+Then use the returned `entry.id` and `entry.revision` to update:
+
+```json
+{"team_id":"...","entry_id":"...","expected_revision":1,"title":"Cost review","content":"Include annual operating costs.","status":"active"}
+```
+
+State retains the latest version of at most 20 entries, including archived
+entries, with a combined 16,000-byte UTF-8 JSON projection budget. Titles accept
+80 characters/160 UTF-8 bytes and content 1,000 characters/2,000 bytes. Shorten or
+reuse existing entries when approaching these bounds. Archiving removes an entry
+from automatic context but keeps it queryable; it is not deletion and does not
+free its storage slot. Entry revisions detect concurrent replacement; this is
+not an edit-history archive or an automatic summarizer/verification service.
+Writes also enforce the complete 24,000-byte shared-context budget; unusually
+large goals or rosters can leave less than 16,000 bytes for active state.
+
+Entries are member-authored task data with creator and latest-editor attribution.
+The source identifies the editor's member conversation and, when available, its
+current admitted team task. It does not attest that a finding was verified.
+No member can supply another author or a host capability in a publication.
+State persists across restart and shared-history rotation. Legacy teams start
+with empty state without a database migration. Pending jobs keep their frozen
+input for idempotent retries; they do not silently acquire later state edits.
+Members can explicitly query current state during a run.
+
 ## Find earlier team evidence
 
 Members have three read-only tools in addition to the short `read_team_context`:
@@ -176,9 +236,10 @@ own teams. Sharing a host conversation does **not** share its team's private dat
   the normal response validation. Native mention labels
   fall back to the member name when the combined team/member label exceeds the
   host's 120 UTF-16-unit limit; selection still routes by team/member IDs.
-  Shared context contains
-  at most eight recent messages within a 24 KiB JSON budget, plus the goal and
-  roster. Final answers are capped at 6,000 UTF-8 bytes with a truncation notice.
+  Shared context contains the goal, roster, active public state and at most eight
+  recent messages, with a combined 24,000-byte UTF-8 JSON budget. Older recent
+  messages are omitted first to preserve public state. Final answers are capped
+  at 6,000 UTF-8 bytes with a truncation notice.
   Team storage retains the most recent 100 shared messages. Each new job also
   keeps its bounded result independently, so context rotation does not erase its
   activity card. Older installations fall back to retained messages; an unavailable
@@ -223,6 +284,11 @@ History tests cover filtered cursor pagination under new arrivals, expired ancho
 output byte budgets with escaping and Unicode, old answers after record rotation
 and restart, legacy unavailable/truncation states, owner/member isolation, and
 real ToolNode retrieval followed by another peer handoff.
+Public-state tests cover member-only publication/queries/updates, concurrent
+revision conflicts, replay-safe writes, source attribution, archival, legacy reads,
+restart/history rotation, rollback at count/escaped-JSON limits, bounded combined
+context and actual tool dispatch. Browser checks also exercise live state updates,
+editor attribution, stale revisions and plain-text rendering of untrusted content.
 Host-run transport is controlled for deterministic tests.
 Clarification tests execute the host's real tool and middleware in an Agent graph,
 including repeated questions, peer/mention/result-receipt paths, lost response
