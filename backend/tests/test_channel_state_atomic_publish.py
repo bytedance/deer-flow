@@ -96,3 +96,53 @@ def test_wechat_failed_staged_write_keeps_the_previous_cursor(tmp_path, monkeypa
 
     assert json.loads(target.read_text(encoding="utf-8")) == {"get_updates_buf": "kept"}
     assert _no_sidecar(target)
+
+
+def _fail_staged_write_and_cleanup(monkeypatch):
+    """Fail the staged write, and fail discarding the staged sibling too."""
+
+    def failing_fsync(_fd):
+        raise OSError("disk full")
+
+    real_unlink = Path.unlink
+
+    def failing_unlink(self, *args, **kwargs):
+        if self.name.startswith(".") and self.name.endswith(".tmp"):
+            raise PermissionError("staging is still open")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr("deerflow.utils.atomic_write.os.fsync", failing_fsync)
+    monkeypatch.setattr(Path, "unlink", failing_unlink)
+
+
+def test_discord_failed_cleanup_still_reports_and_keeps_the_outcome(tmp_path, monkeypatch, caplog):
+    """A discard that fails must not escape, and both failures stay visible."""
+    channel = _discord(tmp_path)
+    target = tmp_path / "state" / "discord-threads.json"
+    target.parent.mkdir(parents=True)
+    target.write_text('{"kept": true}', encoding="utf-8")
+    _fail_staged_write_and_cleanup(monkeypatch)
+    caplog.clear()
+
+    with caplog.at_level("WARNING"):
+        channel._persist_thread_mappings()
+
+    assert target.read_text(encoding="utf-8") == '{"kept": true}'
+    assert "failed to persist thread mappings" in caplog.text
+    assert "Failed to remove temporary output file" in caplog.text
+
+
+def test_wechat_failed_cleanup_still_reports_and_keeps_the_outcome(tmp_path, monkeypatch, caplog):
+    channel = _wechat(tmp_path)
+    target = tmp_path / "state" / "wechat-cursor.json"
+    target.parent.mkdir(parents=True)
+    target.write_text('{"get_updates_buf": "kept"}', encoding="utf-8")
+    _fail_staged_write_and_cleanup(monkeypatch)
+    caplog.clear()
+
+    with caplog.at_level("WARNING"):
+        channel._save_state()
+
+    assert target.read_text(encoding="utf-8") == '{"get_updates_buf": "kept"}'
+    assert "failed to persist cursor state" in caplog.text
+    assert "Failed to remove temporary output file" in caplog.text
