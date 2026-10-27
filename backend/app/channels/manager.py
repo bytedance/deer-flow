@@ -567,6 +567,28 @@ def _is_admitted_run_conflict(exc: BaseException | None) -> bool:
     return isinstance(exc, ConflictError) and any(detail in str(exc) for detail in _ADMITTED_RUN_CONFLICT_DETAILS)
 
 
+# The Gateway names a run that stopped at its step limit after LangGraph's
+# GraphRecursionError, in its stream error frame and its /wait error. The
+# message says the run stopped and lists the outputs it never presented.
+_STEP_LIMIT_ERROR_NAME = "GraphRecursionError"
+
+
+def _step_limit_text(error: Any) -> str | None:
+    """The message of a step-limit stream error frame or ``/wait`` error, else ``None``.
+
+    The SDK raises a ``/wait`` error envelope as ``Exception("<name>: <message>")``.
+    """
+    if isinstance(error, BaseException):
+        name, _, message = str(error).partition(": ")
+    elif isinstance(error, dict):
+        name, message = error.get("name"), error.get("message")
+    else:
+        return None
+    if name != _STEP_LIMIT_ERROR_NAME or not isinstance(message, str) or not message.strip():
+        return None
+    return message.strip()
+
+
 def _is_run_status_result(result: Any) -> bool:
     """A ``/wait`` response carrying run status instead of thread state.
 
@@ -3414,6 +3436,13 @@ class ChannelManager:
                 await self._release_inbound_dedupe_key(msg)
                 await self._send_error(msg, THREAD_BUSY_MESSAGE)
                 return
+            if step_limit_text := _step_limit_text(exc):
+                logger.warning("[Manager] run stopped at its step limit: thread_id=%s", thread_id)
+                await self._send_error(msg, step_limit_text)
+                # The run ended, as after a terminal error frame: release the key
+                # only after the reply, so a redelivery cannot overtake it.
+                await self._release_inbound_dedupe_key(msg)
+                return
             if recovery := await self._stale_pin_recovery(msg, exc, expected_pin=expected_pin, thread_id=thread_id):
                 await self._release_inbound_dedupe_key(msg)
                 await self._send_error(msg, recovery.text)
@@ -3508,6 +3537,7 @@ class ChannelManager:
         last_published_len = 0
         last_publish_at = 0.0
         stream_error: BaseException | None = None
+        step_limit_text: str | None = None
         replay_gap = False
         pin_recovery_text: str | None = None
         pinned_model_value = run_context.get("model_name")
@@ -3551,6 +3581,7 @@ class ChannelManager:
                     # The v1 SDK yields backend errors as frames, not exceptions.
                     # Keep draining the stream and use the existing failure path.
                     stream_error = _RunFailedFrame("Agent run failed.")
+                    step_limit_text = _step_limit_text(error_data)
                 elif event == "gap":
                     # A reused run whose events are no longer replayable.
                     replay_gap = True
@@ -3616,6 +3647,10 @@ class ChannelManager:
             # matches the upload bucket and we avoid re-running _safe_user_id_for_run
             # (and its possible filesystem touch) on the streaming-error path.
             response_text, attachments = _prepare_artifact_delivery(thread_id, response_text, artifacts, user_id=storage_user_id)
+            if step_limit_text:
+                # The last text is mid-task narration: say the run stopped, in
+                # place of the generic failure, so the user knows to continue.
+                response_text = f"{response_text}\n\n{step_limit_text}" if response_text else step_limit_text
 
             if not response_text:
                 if attachments:

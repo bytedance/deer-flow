@@ -145,6 +145,11 @@ configured default. `max_recursion_limit` (default `1000`) caps both sources to
 limit runaway LLM cost. Both settings are read per run, so changes apply to the
 next request without a Gateway restart.
 
+A run that reaches its limit ends with status `error` and
+`stop_reason: recursion_capped`. Its error message lists up to five outputs it
+created but did not present and asks the user to send a message to continue.
+An active goal stands down without an evaluator call and stays active.
+
 These settings also apply to IM channel runs. A `recursion_limit` in an IM
 channel's `session.config` (for all channels, one channel or one user) takes
 precedence. The GitHub channel instead uses `250`, or a higher
