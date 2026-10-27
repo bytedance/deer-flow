@@ -1106,6 +1106,10 @@
 
 ### 变更
 
+- **工具输出：** 被后续操作取代的 `write_file` 载荷省略现在改为显式启用。该优化仍可
+  使用，但默认会保持发送给模型的历史只追加，避免后续文件操作使 provider 的提示词缓存
+  前缀失效。([#7319](https://github.com/bytedance/deer-flow/issues/7319))
+
 - **技能：** 将 `allowed-tools` 作为不强制执行的兼容性元数据。激活技能不再隐藏或
   阻止智能体配置与宿主授权已经允许的工具，即使该声明为空也是如此。保留解析、校验、
   导出、技能激活权限，以及现有的密钥和用户隔离边界。([#6935])
@@ -1116,6 +1120,19 @@
   重新保存该回复的全部别名（每个分块约五次 `set_thread_id`：每次都是在存储锁下完整重写
   `store.json`，或一次数据库 upsert），而实际只有 `updated_at` 变化。现在非最终分块对每个
   别名每次回复只写一次，写入失败会在下一个分块重试，最终消息仍会写入全部别名。([#7593])
+  
+- **运行时：** 循环检测警告现在会让 agent 在作答前，先交付已经写入
+  `/mnt/user-data/outputs` 的文件，被警告的运行不会再因为做好的文件没交付而判为失败。
+  运行达到 `recursion_limit` 时，现在以 `stop_reason: recursion_capped` 结束，并给出
+  一条说明，列出已生成但未交付的文件，而不是 LangGraph 的原始报错。进行中的目标会直接
+  停止续跑（不调用评估模型）并保持活跃；`/wait` 把这个错误命名为
+  `GraphRecursionError`；IM 渠道也会回复这条说明，而不是笼统的错误提示。([#7588])
+  
+- **渠道：** 连接 Slack、Discord、飞书、钉钉、企业微信、Buzz 或 QQ 时，现在会打开
+  一个对话框，持续显示 `/connect` 命令，并提供复制按钮、过期时间和绑定状态，不再只是
+  一闪而过的提示。机器人对 `/connect` 和 `/goal` 的回复会跟随用户在网页端选择的语言
+  （否则使用 `channel_connections.notification_locale`）；IM 中的 `/goal` 也会像网页端
+  目标栏一样，说明目标是否在进行、为什么停止或已经达成。([#7591])
 
 - **社区工具：** 异步社区工具（Jina、Crawl4AI、Browserless、Tavily、SearXNG、Firecrawl、
   InfoQuest、RAGFlow、LightRAG、Jsonify 和浏览器自动化工具）不再在事件循环上读取 `config.yaml`
@@ -10505,4 +10522,6 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7580]: https://github.com/bytedance/deer-flow/pull/7580
 [#7576]: https://github.com/bytedance/deer-flow/pull/7576
 [#7580]: https://github.com/bytedance/deer-flow/pull/7580
+[#7588]: https://github.com/bytedance/deer-flow/pull/7588
+[#7591]: https://github.com/bytedance/deer-flow/pull/7591
 [#7593]: https://github.com/bytedance/deer-flow/pull/7593

@@ -1854,11 +1854,11 @@ class FeishuChannel(Channel):
 
         state = await self._connection_repo.consume_oauth_state(provider="feishu", state=code)
         if state is None:
-            await self._reply_card(message_id, "Feishu connection code is invalid or expired.")
+            await self._reply_card(message_id, await self._connect_reply_text("invalid_code"))
             return True
 
         if not user_id or not chat_id:
-            await self._reply_card(message_id, "Feishu connection could not be completed from this message.")
+            await self._reply_card(message_id, await self._connect_reply_text("incomplete", owner_user_id=state["owner_user_id"]))
             return True
 
         await self._connection_repo.upsert_connection(
@@ -1874,7 +1874,7 @@ class FeishuChannel(Channel):
             },
             status="connected",
         )
-        await self._reply_card(message_id, "Feishu connected to DeerFlow.")
+        await self._reply_card(message_id, await self._connect_reply_text("connected", owner_user_id=state["owner_user_id"]))
         return True
 
     def _parse_message_event(self, event) -> _ParsedMessage | None:

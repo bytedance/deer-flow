@@ -51,6 +51,8 @@ cleanup, preserve healthy controls in refusal cases, and retain Journal/Seal
 compatibility coverage. Protocol: [Run outcome](../docs/RUN_EVENT_STREAM.md#authoritative-run-outcome).
 `test_goal_loop_stop_probe.py` runs the standalone Goal-loop reproduction through the native graph, loop middleware, worker and checkpoints. Only model responses are scripted; do not replace the Goal decision or simulate the stop-reason write.
 
+`test_run_recursion_capped.py` drives a real graph through the worker until LangGraph raises `GraphRecursionError`. Only model responses are scripted; do not raise the error or write the stop reason by hand.
+
 InfoQuest fetch log assertions install the real `UrlRedactionFilter` on the
 capture handler with fixture-scoped cleanup. Expect scheme/host context with
 redacted paths, so isolated runs and full-suite logging configuration agree;

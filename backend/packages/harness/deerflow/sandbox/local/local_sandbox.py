@@ -21,7 +21,7 @@ from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.sandbox.download import DEFAULT_DOWNLOAD_LIMIT, download_limit
 from deerflow.sandbox.env_policy import build_sandbox_env
 from deerflow.sandbox.local.list_dir import list_dir
-from deerflow.sandbox.path_patterns import replace_output_path_matches
+from deerflow.sandbox.path_patterns import PATH_START_BOUNDARY, replace_output_path_matches
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
 from deerflow.sandbox.search import GrepMatch, find_glob_matches, find_grep_matches, path_matches
 from deerflow.utils.atomic_write import publish_bytes_atomically
@@ -498,7 +498,7 @@ class LocalSandbox(Sandbox):
         # substitution resumes after a match, so a tail that ran through a
         # ":"-joined list ($PATH, $PYTHONPATH) swallowed every later entry and
         # left those container paths unresolved.
-        patterns = [re.escape(m.container_path) + r"(?=/|$|[\s\"';&|<>()])(?:/[^\s\"';&|<>():]*)?" for m in mappings]
+        patterns = [PATH_START_BOUNDARY + re.escape(m.container_path) + r"(?=/|$|[\s\"';&|<>()])(?:/[^\s\"';&|<>():]*)?" for m in mappings]
         return re.compile("|".join(f"({p})" for p in patterns))
 
     @cached_property
@@ -511,7 +511,7 @@ class LocalSandbox(Sandbox):
         # write_file content regularly stores PATH-style exports, and a tail
         # that ran through the ":" left the later list entries virtual in the
         # host file (read_file masked them back, so the corruption was hidden).
-        patterns = [re.escape(m.container_path) + r"(?=/|$|[^\w./-])(?:/[^\s\"';&|<>():]*)?" for m in mappings]
+        patterns = [PATH_START_BOUNDARY + re.escape(m.container_path) + r"(?=/|$|[^\w./-])(?:/[^\s\"';&|<>():]*)?" for m in mappings]
         return re.compile("|".join(f"({p})" for p in patterns))
 
     @cached_property
