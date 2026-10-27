@@ -2833,6 +2833,8 @@ An explicit zero per-tool override disables externalization while preserving
 any positive global fallback limit.
 Structured JSON tool results follow these budgets, including results mixed with
 media; externalization keeps the full JSON available through a file reference.
+Superseded `write_file` payload elision is opt-in because enabling it rewrites
+earlier model-request prefixes when later file actions supersede a write.
 MindIE renders JSON tool results as escaped text, with configured tool exemptions
 preserved. Enabled PII redaction scans nested JSON keys and values before rendering.
 Mounted sandboxes running under another UID need read access through the shared

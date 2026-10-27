@@ -1389,6 +1389,11 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
 
 ### Changed
 
+- **tool output:** Superseded `write_file` payload elision is now opt-in. The
+  optimization remains available, but the default keeps model-bound history
+  append-only so later file actions do not invalidate provider prompt-cache
+  prefixes. ([#7319](https://github.com/bytedance/deer-flow/issues/7319))
+
 - **skills:** Treat `allowed-tools` as non-enforced compatibility metadata.
   Activating a skill no longer hides or blocks tools that Agent configuration
   and host authorization already permit, including when the declaration is
