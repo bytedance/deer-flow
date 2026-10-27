@@ -60,6 +60,18 @@ def _browser_tools_enabled() -> bool:
     return False
 
 
+async def _browser_tools_enabled_async() -> bool:
+    """The config gate for request handlers, read off the event loop.
+
+    ``_browser_tools_enabled`` calls ``get_app_config()``, which stats and
+    re-hashes ``config.yaml`` and ``extensions_config.json`` on every call and
+    reparses them after an edit. The live-view WebSocket runs this check on
+    every connect and the navigate route on every request, so the read belongs
+    in a worker — the same seam #7557 fixed for route authorization.
+    """
+    return await asyncio.to_thread(_browser_tools_enabled)
+
+
 async def _browser_thread_owned_by(thread_store, thread_id: str, user_id: str) -> bool:
     """Require an explicit owner for browser control's high-trust surface.
 
@@ -85,7 +97,7 @@ async def navigate_browser(thread_id: ThreadId, body: BrowserNavigateRequest, re
     if thread_store is None or not await _browser_thread_owned_by(thread_store, thread_id, user_id):
         raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
 
-    if not _browser_tools_enabled():
+    if not await _browser_tools_enabled_async():
         raise HTTPException(status_code=404, detail="Browser automation is not enabled")
 
     try:
@@ -260,7 +272,7 @@ async def browser_stream(websocket: WebSocket, thread_id: ThreadId) -> None:
         await websocket.close(code=4404)
         return
 
-    if not _browser_tools_enabled():
+    if not await _browser_tools_enabled_async():
         await websocket.close(code=4404)
         return
 
@@ -310,7 +322,9 @@ async def browser_stream(websocket: WebSocket, thread_id: ThreadId) -> None:
     # the user's real Chrome when configured.
     from deerflow.config import get_app_config
 
-    tool_cfg = get_app_config().get_tool_config("browser_navigate")
+    # Same per-call stat + hash as the capability gate above: resolve the tool
+    # config in a worker so a connect does not pay it on the loop.
+    tool_cfg = await asyncio.to_thread(lambda: get_app_config().get_tool_config("browser_navigate"))
     extra = (tool_cfg.model_extra or {}) if tool_cfg is not None else {}
 
     def _cfg_int(key: str, default: int) -> int:
