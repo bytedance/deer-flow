@@ -106,6 +106,7 @@ def test_committed_manifest_matches_schema_and_strict_parser() -> None:
     assert parsed.waivers[1].preapproved_file_sha256s == (
         "sha256:ea2521ba41c8fd16b2900758c890bb6c6d2b4b01da10b4a860facb8587ed0bde",
         "sha256:f86a5c9a3339ae90ffd59635201d09f2c8019dc35b72e517228d31d6b3e1912c",
+        "sha256:bd7bc409540265f91eac3f2c82e104b6db0e0aeb12b3aa7ef4d79116cff8791b",
     )
 
 
