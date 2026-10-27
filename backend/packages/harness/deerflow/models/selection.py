@@ -23,6 +23,23 @@ _PATTERNS = (
     (None, r"^(?:please\s+)?use\s+(.+?)\s+to\s+"),
 )
 
+# A determiner opens a description ("a regression model", "the attached model"),
+# not a configured model name; the module resolves direct names only.
+_DESCRIPTION_OPENERS = re.compile(r"^(?:an?|the|this|that|these|those|my|our|your|his|her|its|their)\b", re.IGNORECASE)
+
+
+def _may_name_a_model(query: str) -> bool:
+    """Tell an unmatched model name apart from an ordinary noun phrase.
+
+    Unknown versioned or explicitly named models must not fall through to a
+    misleading model reply, but a description of a method is task text.
+    """
+    if re.search(r"\bv\d|模型", query, re.IGNORECASE):
+        return True
+    if not re.search(r"\bmodel\b", query, re.IGNORECASE):
+        return False
+    return _DESCRIPTION_OPENERS.match(query) is None
+
 
 def _tokens(value: str) -> list[str]:
     # Keep decimal versions intact: 4.1 must not accidentally match 4.10.
@@ -73,7 +90,7 @@ def resolve_model_control(text: str, models: list[Any], *, model_name: str | Non
         candidates = [model for model in models if _matches(query, model)]
     # "Use Python to ..." is an ordinary task. Unknown versioned or explicitly
     # named models, however, must not fall through to a misleading model reply.
-    if not candidates and model_name is None and not re.search(r"\bv\d|模型|\bmodel\b", query, re.IGNORECASE):
+    if not candidates and model_name is None and not _may_name_a_model(query):
         return result
     offset = len(text) - len(text.lstrip()) + match.end()
     if match.groupdict().get("action") in {"处理", "计算", "回答", "分析", "生成", "写", "做"}:

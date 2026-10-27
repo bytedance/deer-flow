@@ -84,6 +84,33 @@ def test_ordinary_tasks_quotes_and_conditional_text_are_not_controls(text):
     assert resolve_model_control(text, [DS, OPUS])["status"] == "none"
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Use a regression model to analyze these sales figures",
+        "Use a data model to design the database schema",
+        "Use the attached model to forecast next month's revenue",
+    ],
+)
+def test_descriptions_of_a_model_are_task_text(text):
+    result = resolve_model_control(text, [DS, OPUS])
+    assert result["status"] == "none"
+    assert result["query"] == ""
+    assert result["task_offset"] == 0
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Use Gemini model to analyze these sales figures",
+        "Use model chat-default to analyze these sales figures",
+        "Use gpt-5 v2 model to analyze these sales figures",
+    ],
+)
+def test_unmatched_model_names_still_ask_for_a_configured_name(text):
+    assert resolve_model_control(text, [DS, OPUS])["status"] == "unavailable"
+
+
 def test_name_without_scope_requires_a_scope_choice():
     result = resolve_model_control("用 ds flash 帮我算一下", [DS, OPUS])
     assert result["status"] == "ambiguous"
