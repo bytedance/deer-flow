@@ -69,6 +69,37 @@ def test_extensionless_document_without_shebang_is_stored_verbatim(tmp_path):
     assert (tmp_path / "outputs" / "README").read_text(encoding="utf-8") == content
 
 
+def _applies(path: str, content: str = "# Run notes\nThe table is at /mnt/user-data/outputs/results.csv\n") -> bool:
+    """Classify a package-relative path directly: ``write_file`` only ever passes an absolute one, and the shared ``scripts/`` rule keys on a relative head."""
+    from deerflow.sandbox.local.local_sandbox import _content_path_translation_applies
+
+    return _content_path_translation_applies(path, content, append=False, resolved_path="/nonexistent")
+
+
+@pytest.mark.parametrize("path", ["scripts/README.md", "Scripts/README.md", "scripts/notes.txt", "scripts/config.yaml", "Scripts/config.yaml"], ids=["markdown", "capitalised-directory", "text", "yaml", "capitalised-yaml"])
+def test_document_inside_a_scripts_directory_is_stored_verbatim(path):
+    """#7618: the directory a file lives in does not make it executable, so its content is never rewritten."""
+    assert _applies(path) is False
+
+
+@pytest.mark.parametrize("path", ["scripts/run.sh", "scripts/plot.py", "scripts/report.awk", "scripts/collect"], ids=["shell", "python", "interpreter-suffix", "extensionless-member"])
+def test_scripts_member_programs_still_translate(path):
+    """#1935/#7618: a ``scripts/`` member that a host interpreter opens keeps host-resolvable paths."""
+    assert _applies(path) is True
+
+
+def test_an_extensionless_scripts_member_is_classified_by_the_shared_rule():
+    """The retained asymmetry: a shebang settles any spelling, while the ``scripts/`` member rule stays the package rule's case-sensitive one.
+
+    Only an extensionless member without a shebang can see the difference, and
+    that spelling belongs to ``deerflow.skills.package_files`` (the installer and
+    SkillScan read it too), so this predicate does not fork it here.
+    """
+    assert _applies("scripts/collect") is True
+    assert _applies("Scripts/collect", "#!/bin/bash\ncat /mnt/user-data/outputs/results.csv\n") is True
+    assert _applies("Scripts/collect") is False
+
+
 def test_append_keeps_document_paths_virtual(tmp_path):
     sandbox = _sandbox(tmp_path)
     sandbox.write_file("/mnt/user-data/outputs/README.md", "# Run notes\n")
