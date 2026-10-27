@@ -1116,6 +1116,11 @@
 
 ### 修复
 
+- **渠道：** 飞书流式回复不再在每个分块上重写相同的线程绑定。此前每次向运行中卡片发送消息都会
+  重新保存该回复的全部别名（每个分块约五次 `set_thread_id`：每次都是在存储锁下完整重写
+  `store.json`，或一次数据库 upsert），而实际只有 `updated_at` 变化。现在非最终分块对每个
+  别名每次回复只写一次，写入失败会在下一个分块重试，最终消息仍会写入全部别名。([#7593])
+  
 - **运行时：** 循环检测警告现在会让 agent 在作答前，先交付已经写入
   `/mnt/user-data/outputs` 的文件，被警告的运行不会再因为做好的文件没交付而判为失败。
   运行达到 `recursion_limit` 时，现在以 `stop_reason: recursion_capped` 结束，并给出
@@ -10519,3 +10524,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7580]: https://github.com/bytedance/deer-flow/pull/7580
 [#7588]: https://github.com/bytedance/deer-flow/pull/7588
 [#7591]: https://github.com/bytedance/deer-flow/pull/7591
+[#7593]: https://github.com/bytedance/deer-flow/pull/7593

@@ -1402,6 +1402,14 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
 
 ### Fixed
 
+- **channels:** A streamed Feishu reply no longer rewrites the same thread
+  bindings on every chunk. Each outbound to the running card stored all of
+  the reply's aliases again (about five `set_thread_id` writes per chunk: a
+  full `store.json` rewrite under the store lock each, or a database upsert),
+  although nothing but `updated_at` changed. Non-final chunks now store each
+  alias once per reply, a failed write is retried on the next chunk, and the
+  final outbound still writes them all. ([#7593])
+  
 - **runtime:** Loop-detection warnings now ask the agent to present the files
   it already created in `/mnt/user-data/outputs` before its final answer, so a
   warned run no longer fails its delivery check with finished files left
@@ -13187,3 +13195,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7585]: https://github.com/bytedance/deer-flow/pull/7585
 [#7588]: https://github.com/bytedance/deer-flow/pull/7588
 [#7591]: https://github.com/bytedance/deer-flow/pull/7591
+[#7593]: https://github.com/bytedance/deer-flow/pull/7593
