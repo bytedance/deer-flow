@@ -7797,28 +7797,24 @@ class TestHandleChatWithArtifacts:
             manager._client = mock_client
 
             outbound_received = []
-            outbound_queue = asyncio.Queue()
-            bus.subscribe_outbound(outbound_queue.put)
+            bus.subscribe_outbound(lambda msg: outbound_received.append(msg))
             await manager.start()
 
-            try:
-                # Complete the first turn before submitting the follow-up.
-                # Concurrent artifact IO does not guarantee reply order.
-                for text in ["make report", "add chart"]:
-                    msg = InboundMessage(
-                        channel_name="test",
-                        chat_id="c1",
-                        user_id="u1",
-                        text=text,
-                        topic_id="topic-dup",
-                    )
-                    await bus.publish_inbound(msg)
-                    outbound_received.append(await asyncio.wait_for(outbound_queue.get(), timeout=5.0))
-            finally:
-                await manager.stop()
+            # Send two messages with the same topic_id (same thread)
+            for text in ["make report", "add chart"]:
+                msg = InboundMessage(
+                    channel_name="test",
+                    chat_id="c1",
+                    user_id="u1",
+                    text=text,
+                    topic_id="topic-dup",
+                )
+                await bus.publish_inbound(msg)
+
+            await _wait_for(lambda: len(outbound_received) >= 2)
+            await manager.stop()
 
             assert len(outbound_received) == 2
-            assert outbound_queue.empty()
 
             # Turn 1: should include report.md
             assert "report.md" in outbound_received[0].text
