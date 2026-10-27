@@ -71,3 +71,6 @@ config.yaml.bak
 
 # Monocle agent-observability trace output (local file exporter)
 .monocle/
+
+# Local knowledge graph output
+graphify-out/
