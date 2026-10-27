@@ -1,5 +1,7 @@
 ### Subagent System (`packages/harness/deerflow/subagents/`)
 
+Drain cleanup; preserve terminal outcomes on cancel.
+
 Accumulate validated ToolMessage knowledge across values frames in
 `SubagentResult.knowledge_sources`: at most 100 sources, deduplicated by evidence ID.
 Publish before terminal state; retain through compaction. Ordinary `task` forwards
@@ -23,11 +25,13 @@ Durable batch specs store overlays as JSON and restore them before execution.
 `read_batch_item` projects only report/state/acceptance fields after owner and current-thread checks. Positions are immutable submission order; no status filtering. The bounded tool hashes that projection for continuation, detecting completion/retry/cancel changes. It does not persist snapshots, schedule work or expose execution specs; HTTP bulk export stays independent.
 
 Batch evidence uses nullable `result_artifact` (migration 0033), persisted with
-successful results under the same lease fence. Only full-result exports expose
-bounded, cited RAG snapshots; compact `list_items` defers them. Cancelled,
-failed and stale attempts cannot publish evidence; retry clears it. Cover the
-formatter/step capture -> worker -> reopened SQLite -> authorized export chain
-in `tests/test_batch_rag_evidence.py`; no provider fetch or preview UI is added.
+successful results under the same lease fence. Full-result exports and selected
+browser item reads expose bounded, cited RAG snapshots; compact `list_items`
+defers them. Browser reads recheck owner/thread, whitelist fields and bound legacy
+IDs/text without provider fetches or a running worker. Count read-time size/source
+limit omissions without changing stored evidence. Cancelled, failed and stale
+attempts cannot publish evidence; retry clears it. Cover the formatter/step capture
+-> worker -> reopened SQLite -> authorized export chain in `tests/test_batch_rag_evidence.py`.
 Explicitly enabled nested tasks propagate report-bound omission IDs; filter and
 deduplicate at each forwarding boundary before publishing the durable count.
 
@@ -46,7 +50,10 @@ citation references, and opaque base64/URL/image sources.
 
 **Interrupted usage**: After stream cleanup, publish the collector's final
 snapshot on cancellation/timeout; callbacks can precede values chunks.
-`execute_async()` owns terminalization; `SubagentResult` guards first write.
+Cancellation terminalizes before task-stop notification and still propagates;
+Sync `execute()` shares the worker's result and publishes FAILED before timeout
+cancellation; `execute_async()` publishes TIMED_OUT. First terminal write wins.
+Stream cleanup precedes notification; late cancellation cannot replace a timeout.
 Parent journals deduplicate by `source_run_id`; batch writes need a live lease.
 
 **Durable batch acceptance**: Normalize optional `batch_task` criteria before

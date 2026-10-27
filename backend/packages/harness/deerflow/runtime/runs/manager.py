@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 
 from sqlalchemy.exc import IntegrityError as SAIntegrityError
 
+from deerflow.runtime.events.terminal import RecoveryTerminalPublisher
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, get_current_user, resolve_user_id
 from deerflow.utils.time import is_lease_expired
 from deerflow.utils.time import now_iso as _now_iso
@@ -342,6 +343,7 @@ class RunManager:
         worker_id: str | None = None,
         run_ownership_config: RunOwnershipConfig | None = None,
         event_store: RunEventStore | None = None,
+        recovery_terminal_publisher: RecoveryTerminalPublisher | None = None,
         on_orphans_recovered: OrphanRecoveryCallback | None = None,
     ) -> None:
         self._runs: dict[str, RunRecord] = {}
@@ -356,6 +358,9 @@ class RunManager:
         self._worker_id = worker_id or _generate_worker_id()
         self._run_ownership_config = run_ownership_config
         self._event_store = event_store
+        self._recovery_terminal_publisher = recovery_terminal_publisher
+        if self._recovery_terminal_publisher is None and event_store is not None and store is not None:
+            self._recovery_terminal_publisher = RecoveryTerminalPublisher(event_store, store)
         self._on_orphans_recovered = on_orphans_recovered
         self._heartbeat_task: asyncio.Task | None = None
         self._heartbeat_stop: asyncio.Event | None = None
@@ -1500,27 +1505,6 @@ class RunManager:
         await self._fence_unconfirmed_terminal(record)
         return None
 
-    async def _ensure_delivery_receipt(self, record: RunRecord) -> bool:
-        """Idempotently persist a zero-delivery receipt during recovery."""
-        if self._event_store is None:
-            return True
-        try:
-            await self._event_store.put_if_absent(
-                thread_id=record.thread_id,
-                run_id=record.run_id,
-                event_type="run.delivery",
-                category="outputs",
-                content={"presented": 0, "paths": [], "by_tool": {}},
-            )
-            return True
-        except Exception:
-            logger.warning(
-                "Failed to backfill delivery receipt for recovered run %s; preserving its terminal status",
-                record.run_id,
-                exc_info=True,
-            )
-            return False
-
     async def set_finalizing(self, run_id: str, finalizing: bool) -> None:
         """Mark whether a run is performing post-cancel cleanup."""
         async with self._lock:
@@ -1894,6 +1878,16 @@ class RunManager:
             return CancelOutcome.unknown
 
         if taken:
+            if self._recovery_terminal_publisher is not None:
+                target = self._recovery_terminal_publisher.authorize_takeover(
+                    claimed=taken,
+                    thread_id=row["thread_id"],
+                    run_id=run_id,
+                    user_id=row.get("user_id"),
+                    operation_kind=row.get("operation_kind", "run"),
+                )
+                if target is not None:
+                    await self._recovery_terminal_publisher.publish(target)
             logger.warning("Run %s taken over by worker %s (action=%s)", run_id, self._worker_id, action)
             return CancelOutcome.taken_over
 
@@ -2459,12 +2453,17 @@ class RunManager:
             record.stop_reason = stop_reason
             record.updated_at = now
             if record.operation_kind == ThreadOperationKind.run:
-                # The atomic takeover above must win before writing a zero-delivery
-                # receipt; otherwise a stale scan could race a heartbeat renewal and
-                # permanently overwrite a live run's later detailed receipt. The
-                # receipt remains best-effort, matching normal terminal delivery
-                # when its event store is unavailable.
-                await self._ensure_delivery_receipt(record)
+                publisher = self._recovery_terminal_publisher
+                if publisher is not None:
+                    target = publisher.authorize_takeover(
+                        claimed=claimed,
+                        thread_id=record.thread_id,
+                        run_id=record.run_id,
+                        user_id=record.user_id,
+                        operation_kind=record.operation_kind.value,
+                    )
+                    if target is not None:
+                        await publisher.publish(target)
                 recovered.append(record)
 
         if recovered:

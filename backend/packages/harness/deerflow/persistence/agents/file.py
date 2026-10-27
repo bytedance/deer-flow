@@ -246,12 +246,10 @@ class FileAgentStore(AgentStore):
         try:
             if config is not None:
                 config_text = yaml.dump(config, default_flow_style=False, allow_unicode=True, sort_keys=False)
-                config_tmp = _stage_temp(agent_dir / "config.yaml", config_text)
-                staged.append(config_tmp)
+                config_tmp = _stage_temp(agent_dir / "config.yaml", config_text, staged)
                 pending.append((config_tmp, agent_dir / "config.yaml"))
             if soul is not None:
-                soul_tmp = _stage_temp(agent_dir / SOUL_FILENAME, soul)
-                staged.append(soul_tmp)
+                soul_tmp = _stage_temp(agent_dir / SOUL_FILENAME, soul, staged)
                 pending.append((soul_tmp, agent_dir / SOUL_FILENAME))
             for tmp, target in pending:
                 tmp.replace(target)
@@ -263,7 +261,14 @@ class FileAgentStore(AgentStore):
                 cleanup_failed_atomic_write(tmp)
 
 
-def _stage_temp(target: Path, text: str) -> Path:
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=target.parent, suffix=".tmp", delete=False) as f:
+def _stage_temp(target: Path, text: str, staged: list[Path]) -> Path:
+    # newline="" keeps the operator's/agent's bytes: the default text write
+    # translates LF into os.linesep, so SOUL.md and config.yaml landed with
+    # CRLF on Windows while every reader saw LF.
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", newline="", dir=target.parent, suffix=".tmp", delete=False) as f:
+        # Register the path before writing: a failing ``write`` must still reach
+        # the caller's cleanup, or the staged file leaks with no attempt and no log.
+        path = Path(f.name)
+        staged.append(path)
         f.write(text)
-        return Path(f.name)
+        return path

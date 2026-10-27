@@ -428,7 +428,7 @@ async def test_browser_tools_acquire_sessions_with_pinned_egress(tmp_path):
         patch.object(browser_tools, "_resolve_host_addresses", return_value=[ipaddress.ip_address("93.184.215.14")]),
     ):
         await browser_tools.navigate_and_capture(thread_id="thread-1", url="https://example.com/", outputs_path=tmp_path)
-        browser_tools._resolve_session(SimpleNamespace(context={"thread_id": "thread-1"}, state={}), "browser_navigate")
+        browser_tools._resolve_session(SimpleNamespace(context={"thread_id": "thread-1"}, state={}), {})
 
     assert manager.acquire_session.call_args.kwargs["egress_resolver"] is browser_tools.resolve_browser_egress
     assert manager.get_session.call_args.kwargs["egress_resolver"] is browser_tools.resolve_browser_egress
