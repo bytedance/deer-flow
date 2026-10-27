@@ -1115,6 +1115,12 @@
 - **渠道：** 展示文件的 IM 回复不再在事件循环上解析这些文件。此前两条回复路径（`runs.wait`
   和流式）都会对每个产物内联解析虚拟路径（`realpath`）、解析输出根目录并用 `stat` 检查文件，
   在网络存储上会让其他渠道和请求停顿。现在这些工作在工作线程中进行。([#7594])
+  
+- **渠道：** 连接 Slack、Discord、飞书、钉钉、企业微信、Buzz 或 QQ 时，现在会打开
+  一个对话框，持续显示 `/connect` 命令，并提供复制按钮、过期时间和绑定状态，不再只是
+  一闪而过的提示。机器人对 `/connect` 和 `/goal` 的回复会跟随用户在网页端选择的语言
+  （否则使用 `channel_connections.notification_locale`）；IM 中的 `/goal` 也会像网页端
+  目标栏一样，说明目标是否在进行、为什么停止或已经达成。([#7591])
 
 - **社区工具：** 异步社区工具（Jina、Crawl4AI、Browserless、Tavily、SearXNG、Firecrawl、
   InfoQuest、RAGFlow、LightRAG、Jsonify 和浏览器自动化工具）不再在事件循环上读取 `config.yaml`
@@ -10503,4 +10509,5 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7560]: https://github.com/bytedance/deer-flow/pull/7560
 [#7576]: https://github.com/bytedance/deer-flow/pull/7576
 [#7580]: https://github.com/bytedance/deer-flow/pull/7580
+[#7591]: https://github.com/bytedance/deer-flow/pull/7591
 [#7594]: https://github.com/bytedance/deer-flow/pull/7594

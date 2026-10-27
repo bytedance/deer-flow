@@ -3040,8 +3040,10 @@ run_ownership:
 #   # Security: keep this enabled unless you intentionally want legacy open-bot behavior.
 #   # Disabling it lets unbound external IM users create DeerFlow threads/runs.
 #   require_bound_identity: true
-#   # Language of scheduled-task IM notices (en-US or zh-CN) for owners without
-#   # a web UI language preference (e.g. auth disabled). Restart-required.
+#   # Language (en-US or zh-CN) of DeerFlow's own IM texts: scheduled-task
+#   # notices and the /connect and /goal replies. Used for owners without a web
+#   # UI language preference (e.g. auth disabled) and for replies with no known
+#   # owner (an invalid connect code). Restart-required.
 #   notification_locale: en-US
 #
 #   telegram:
