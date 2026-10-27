@@ -1017,7 +1017,7 @@ class DingTalkChannel(Channel):
                 conversation_type,
                 sender_staff_id,
                 conversation_id,
-                "DingTalk connection code is invalid or expired.",
+                await self._connect_reply_text("invalid_code"),
             )
             return True
 
@@ -1026,7 +1026,7 @@ class DingTalkChannel(Channel):
                 conversation_type,
                 sender_staff_id,
                 conversation_id,
-                "DingTalk connection could not be completed from this message.",
+                await self._connect_reply_text("incomplete", owner_user_id=state["owner_user_id"]),
             )
             return True
 
@@ -1046,7 +1046,7 @@ class DingTalkChannel(Channel):
             conversation_type,
             sender_staff_id,
             conversation_id,
-            "DingTalk connected to DeerFlow.",
+            await self._connect_reply_text("connected", owner_user_id=state["owner_user_id"]),
         )
         return True
 

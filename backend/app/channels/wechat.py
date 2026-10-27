@@ -805,7 +805,7 @@ class WechatChannel(Channel):
         connect_code = self._pending_connect_code(text)
         if connect_code:
             if raw_message.get("group_id"):
-                await self._send_connection_reply(chat_id, context_token, "Please send the connection code in a private chat with the bot.")
+                await self._send_connection_reply(chat_id, context_token, await self._connect_reply_text("private_chat_only"))
                 return
             handled = await self._bind_connection_from_connect_code(
                 chat_id=chat_id,
@@ -871,11 +871,11 @@ class WechatChannel(Channel):
 
         state = await self._connection_repo.consume_oauth_state(provider="wechat", state=code)
         if state is None:
-            await self._send_connection_reply(chat_id, context_token, "WeChat connection code is invalid or expired.")
+            await self._send_connection_reply(chat_id, context_token, await self._connect_reply_text("invalid_code"))
             return True
 
         if not chat_id:
-            await self._send_connection_reply(chat_id, context_token, "WeChat connection could not be completed from this message.")
+            await self._send_connection_reply(chat_id, context_token, await self._connect_reply_text("incomplete", owner_user_id=state["owner_user_id"]))
             return True
 
         connection = await self._connection_repo.upsert_connection(
@@ -886,7 +886,7 @@ class WechatChannel(Channel):
             status="connected",
         )
         await self._remember_notification_context(connection_id=connection["id"], owner_user_id=state["owner_user_id"], chat_id=chat_id, context_token=context_token)
-        await self._send_connection_reply(chat_id, context_token, "WeChat connected to DeerFlow.")
+        await self._send_connection_reply(chat_id, context_token, await self._connect_reply_text("connected", owner_user_id=state["owner_user_id"]))
         return True
 
     async def _send_connection_reply(self, chat_id: str, context_token: str, text: str) -> None:

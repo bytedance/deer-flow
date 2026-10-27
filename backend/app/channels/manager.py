@@ -32,6 +32,7 @@ from app.channels.capabilities import CHANNEL_CAPABILITIES
 from app.channels.commands import KNOWN_CHANNEL_COMMANDS
 from app.channels.connection_identity import lookup_thread_id
 from app.channels.dedupe_store import InboundDedupeStore, MemoryInboundDedupeStore
+from app.channels.goal_status import goal_reply_text, goal_status_text, is_active_goal_state
 from app.channels.message_bus import (
     HUMAN_INPUT_REQUEST_METADATA_KEY,
     HUMAN_INPUT_RESPONSE_METADATA_KEY,
@@ -44,6 +45,7 @@ from app.channels.message_bus import (
     ResolvedAttachment,
     cleanup_inbound_files,
 )
+from app.channels.reply_locale import ReplyLocaleResolver
 from app.channels.run_policy import CHANNEL_RUN_POLICY, ChannelRunPolicy
 from app.channels.store import ChannelStore
 from app.gateway.csrf_middleware import CSRF_COOKIE_NAME, CSRF_HEADER_NAME, generate_csrf_token
@@ -1588,6 +1590,7 @@ class ChannelManager:
         require_bound_identity: bool = False,
         inbound_dedupe_store: InboundDedupeStore | None = None,
         get_stream_bridge: Callable[[], StreamBridge | None] | None = None,
+        reply_locale: ReplyLocaleResolver | None = None,
     ) -> None:
         if isinstance(max_concurrency, bool) or not isinstance(max_concurrency, int) or max_concurrency <= 0:
             raise ValueError("max_concurrency must be a positive integer")
@@ -1604,6 +1607,9 @@ class ChannelManager:
         self._channel_sessions = dict(channel_sessions or {})
         self._connection_repo = connection_repo
         self._require_bound_identity = require_bound_identity
+        # Language of the /goal replies; ChannelService passes the owner-aware
+        # resolver, and a directly built manager replies in en-US.
+        self._reply_locale = reply_locale or ReplyLocaleResolver()
         # Zero-arg accessor for the FastAPI app's StreamBridge singleton,
         # threaded in from app.py's lifespan via start_channel_service() ->
         # ChannelService.__init__ (mirrors how ScheduledTaskService gets a
@@ -4031,30 +4037,66 @@ class ChannelManager:
             response.raise_for_status()
             return response.json() or {}
 
+    async def _goal_reply(self, msg: InboundMessage, key: str) -> str:
+        """A fixed ``/goal`` reply in the owner's language."""
+        return goal_reply_text(key, await self._reply_locale.locale_for(_effective_owner_user_id(msg)))
+
+    async def _goal_status_reply(self, msg: InboundMessage, thread_id: str | None, *, headers: dict[str, str]) -> str:
+        """``/goal`` with no argument: the goal's state, why it stopped, or that it was met."""
+        locale = await self._reply_locale.locale_for(_effective_owner_user_id(msg))
+        if not thread_id:
+            return goal_reply_text("none", locale)
+        try:
+            goal = (await self._goal_request("get", thread_id, headers=headers)).get("goal")
+            active = is_active_goal_state(goal)
+            # A met goal is cleared; its goal_outcome record stays in the thread
+            # state until the next goal change.
+            outcome = None if active else await self._goal_outcome(msg, thread_id)
+        except Exception:
+            logger.exception("Failed to fetch goal from gateway")
+            return goal_reply_text("fetch_failed", locale)
+        running = active and await self._thread_run_in_flight(msg, thread_id)
+        return goal_status_text(goal, outcome, running=running, locale=locale)
+
+    async def _thread_run_in_flight(self, msg: InboundMessage, thread_id: str) -> bool:
+        """Whether the thread's newest run is pending or running; False when unreadable."""
+        try:
+            page = await self._fetch_gateway_json(f"/api/threads/{quote(thread_id, safe='')}/runs/page?limit=1", msg=msg)
+        except Exception:
+            logger.warning("[Manager] failed to read the newest run for /goal: thread_id=%s", thread_id, exc_info=True)
+            return False
+        runs = page.get("data") if isinstance(page, Mapping) else None
+        newest = runs[0] if isinstance(runs, list) and runs else None
+        return isinstance(newest, Mapping) and newest.get("status") in ("pending", "running")
+
+    async def _goal_outcome(self, msg: InboundMessage, thread_id: str) -> Any:
+        """The thread's ``goal_outcome`` (its latest met goal), or None. Raises when unreadable."""
+        try:
+            state = await self._fetch_gateway_json(f"/api/threads/{quote(thread_id, safe='')}/state", msg=msg)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return None  # no checkpoint yet, so no goal was ever met here
+            raise
+        values = state.get("values") if isinstance(state, Mapping) else None
+        return values.get("goal_outcome") if isinstance(values, Mapping) else None
+
     async def _handle_goal_command(self, msg: InboundMessage, args: str) -> str | None:
         command = parse_goal_command(args)
         thread_id = await self._lookup_thread_id(msg)
         headers = _owner_headers(msg) or create_internal_auth_headers()
 
         if command.kind == "status":
-            if not thread_id:
-                return "No active goal."
-            try:
-                goal = (await self._goal_request("get", thread_id, headers=headers)).get("goal")
-            except Exception:
-                logger.exception("Failed to fetch goal from gateway")
-                return "Failed to fetch goal information."
-            return f"Goal: {goal.get('objective')}" if goal else "No active goal."
+            return await self._goal_status_reply(msg, thread_id, headers=headers)
 
         if command.kind == "clear":
             if not thread_id:
-                return "Goal cleared."
+                return await self._goal_reply(msg, "cleared")
             try:
                 await self._goal_request("delete", thread_id, headers=headers)
             except Exception:
                 logger.exception("Failed to clear goal through gateway")
-                return "Failed to clear goal."
-            return "Goal cleared."
+                return await self._goal_reply(msg, "clear_failed")
+            return await self._goal_reply(msg, "cleared")
 
         if not thread_id:
             thread_id, _ = await self._create_first_thread(self._get_client(), msg)
@@ -4063,7 +4105,7 @@ class ChannelManager:
             await self._goal_request("put", thread_id, headers=headers, json={"objective": command.objective})
         except Exception:
             logger.exception("Failed to set goal through gateway")
-            return "Failed to set goal."
+            return await self._goal_reply(msg, "set_failed")
 
         from dataclasses import replace as _dc_replace
 

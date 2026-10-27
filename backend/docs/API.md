@@ -62,8 +62,9 @@ patches preserve each other's changes, and same-field writes are last-commit-win
 Storage requires SQLite or PostgreSQL (`503` when unavailable). Browser
 notification permission remains device-local and is not changed by this API.
 `locale` is the web UI language; the web app writes it after sign-in and on
-every language switch, and scheduled-task IM notices are written in it (without
-it they use `channel_connections.notification_locale`).
+every language switch, and scheduled-task IM notices and the IM `/connect` and
+`/goal` replies are written in it (without it they use
+`channel_connections.notification_locale`).
 
 ### Personal Access Tokens
 
