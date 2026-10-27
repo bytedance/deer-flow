@@ -1116,6 +1116,10 @@
 
 ### 修复
 
+- **渠道：** 展示文件的 IM 回复不再在事件循环上解析这些文件。此前两条回复路径（`runs.wait`
+  和流式）都会对每个产物内联解析虚拟路径（`realpath`）、解析输出根目录并用 `stat` 检查文件，
+  在网络存储上会让其他渠道和请求停顿。现在这些工作在工作线程中进行。([#7594])
+  
 - **渠道：** 飞书流式回复不再在每个分块上重写相同的线程绑定。此前每次向运行中卡片发送消息都会
   重新保存该回复的全部别名（每个分块约五次 `set_thread_id`：每次都是在存储锁下完整重写
   `store.json`，或一次数据库 upsert），而实际只有 `updated_at` 变化。现在非最终分块对每个
@@ -10519,9 +10523,9 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7530]: https://github.com/bytedance/deer-flow/pull/7530
 [#7557]: https://github.com/bytedance/deer-flow/pull/7557
 [#7560]: https://github.com/bytedance/deer-flow/pull/7560
-[#7580]: https://github.com/bytedance/deer-flow/pull/7580
 [#7576]: https://github.com/bytedance/deer-flow/pull/7576
 [#7580]: https://github.com/bytedance/deer-flow/pull/7580
 [#7588]: https://github.com/bytedance/deer-flow/pull/7588
 [#7591]: https://github.com/bytedance/deer-flow/pull/7591
 [#7593]: https://github.com/bytedance/deer-flow/pull/7593
+[#7594]: https://github.com/bytedance/deer-flow/pull/7594
