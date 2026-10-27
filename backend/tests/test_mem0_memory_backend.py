@@ -238,7 +238,7 @@ class TestMem0Client:
         def handler(request: httpx.Request) -> httpx.Response:
             raise httpx.ConnectError("boom")
 
-        with pytest.raises(Mem0APIError, match="boom"):
+        with pytest.raises(Mem0APIError, match="ConnectError"):
             _client(handler).ping()
 
     def test_malformed_json_raises_api_error(self) -> None:

@@ -64,7 +64,7 @@ def test_malformed_recall_honors_read_policy(monkeypatch: pytest.MonkeyPatch, po
                 _read(manager, operation)
             assert isinstance(caught.value.__cause__, Mem0APIError)
             if isinstance(payload, bytes):
-                assert isinstance(caught.value.__cause__.__cause__, UnicodeDecodeError)
+                assert caught.value.__cause__.__cause__ is None
         else:
             assert _read(manager, operation) == _empty(operation)
 
@@ -88,7 +88,7 @@ def test_async_recall_honors_read_policy(monkeypatch: pytest.MonkeyPatch, policy
                 asyncio.run(coroutine)
             assert isinstance(caught.value.__cause__, Mem0APIError)
             if b"\xff" in body:
-                assert isinstance(caught.value.__cause__.__cause__, UnicodeDecodeError)
+                assert caught.value.__cause__.__cause__ is None
         else:
             assert asyncio.run(coroutine) == _empty(operation)
 
@@ -111,7 +111,7 @@ def test_malformed_later_page_does_not_return_partial_memories(monkeypatch: pyte
                 manager.get_memory(user_id="u1")
             assert isinstance(caught.value.__cause__, Mem0APIError)
             if b"\xff" in body:
-                assert isinstance(caught.value.__cause__.__cause__, UnicodeDecodeError)
+                assert caught.value.__cause__.__cause__ is None
         else:
             assert manager.get_memory(user_id="u1") == {"facts": []}
     assert pages == [1, 2]
@@ -146,7 +146,7 @@ def test_shared_request_normalizes_invalid_write_and_probe_responses(operation: 
         with pytest.raises(Mem0APIError) as caught:
             _client_operation(client, operation)
     if b"\xff" in body:
-        assert isinstance(caught.value.__cause__, UnicodeDecodeError)
+        assert caught.value.__cause__ is None
 
 
 @pytest.mark.parametrize("operation", ["add", "clear_memory"])
@@ -169,7 +169,7 @@ def test_invalid_encoding_honors_write_policy(monkeypatch: pytest.MonkeyPatch, c
             with pytest.raises(MemoryManagerError) as caught:
                 write()
             assert isinstance(caught.value.__cause__, Mem0APIError)
-            assert isinstance(caught.value.__cause__.__cause__, UnicodeDecodeError)
+            assert caught.value.__cause__.__cause__ is None
         else:
             assert write() == (None if operation == "add" else {"facts": []})
             assert "dropping update" in caplog.text
@@ -196,7 +196,7 @@ def test_invalid_encoding_probe_honors_startup_policy(monkeypatch: pytest.Monkey
         if startup_policy == "fail_fast":
             with pytest.raises(Mem0APIError) as caught:
                 mem0_manager.Mem0Manager.from_config(config)
-            assert isinstance(caught.value.__cause__, UnicodeDecodeError)
+            assert caught.value.__cause__ is None
             assert len(requests) == 1
             assert json.loads(requests[0].content) == {"filters": {"user_id": "__deerflow_startup_check__"}}
         else:
@@ -236,7 +236,8 @@ def test_deep_json_honors_read_policy(monkeypatch: pytest.MonkeyPatch, policy: s
             with pytest.raises(MemoryReadError) as caught:
                 read()
             assert isinstance(caught.value.__cause__, Mem0APIError)
-            assert isinstance(caught.value.__cause__.__cause__, RecursionError)
+            assert caught.value.__cause__.__cause__ is None
+            assert "RecursionError" in str(caught.value)
         else:
             assert read() == _empty(operation)
 
@@ -257,18 +258,20 @@ def test_deep_json_later_page_rejects_partial_memories(monkeypatch: pytest.Monke
             with pytest.raises(MemoryReadError) as caught:
                 manager.get_memory(user_id="u1")
             assert isinstance(caught.value.__cause__, Mem0APIError)
-            assert isinstance(caught.value.__cause__.__cause__, RecursionError)
+            assert caught.value.__cause__.__cause__ is None
+            assert "RecursionError" in str(caught.value)
         else:
             assert manager.get_memory(user_id="u1") == {"facts": []}
     assert pages == [1, 2]
 
 
 @pytest.mark.parametrize("operation", ["add", "delete", "ping"])
-def test_deep_json_shared_request_preserves_cause(operation: str) -> None:
+def test_deep_json_shared_request_preserves_type_without_cause(operation: str) -> None:
     with closing(Mem0Client(base_url="https://mem0.invalid", api_key="synthetic-key", transport=httpx.MockTransport(lambda request: httpx.Response(200, content=_deep_json_body())))) as client:
         with pytest.raises(Mem0APIError) as caught:
             _client_operation(client, operation)
-    assert isinstance(caught.value.__cause__, RecursionError)
+    assert caught.value.__cause__ is None
+    assert "RecursionError" in str(caught.value)
 
 
 @pytest.mark.parametrize("operation", ["add", "clear_memory"])
@@ -291,7 +294,8 @@ def test_deep_json_honors_write_policy(monkeypatch: pytest.MonkeyPatch, caplog: 
             with pytest.raises(MemoryManagerError) as caught:
                 write()
             assert isinstance(caught.value.__cause__, Mem0APIError)
-            assert isinstance(caught.value.__cause__.__cause__, RecursionError)
+            assert caught.value.__cause__.__cause__ is None
+            assert "RecursionError" in str(caught.value)
         else:
             assert write() == (None if operation == "add" else {"facts": []})
             assert "dropping update" in caplog.text
@@ -317,7 +321,8 @@ def test_deep_json_probe_honors_startup_policy(monkeypatch: pytest.MonkeyPatch, 
         if startup_policy == "fail_fast":
             with pytest.raises(Mem0APIError) as caught:
                 mem0_manager.Mem0Manager.from_config(config)
-            assert isinstance(caught.value.__cause__, RecursionError)
+            assert caught.value.__cause__ is None
+            assert "RecursionError" in str(caught.value)
             assert len(requests) == 1
         else:
             with closing(mem0_manager.Mem0Manager.from_config(config)):
@@ -401,7 +406,8 @@ def test_listing_response_errors_identify_page_without_content(monkeypatch: pyte
                 manager.get_memory(user_id="u1")
             assert isinstance(caught.value.__cause__, Mem0APIError)
             if cause_type is not None:
-                assert isinstance(caught.value.__cause__.__cause__, cause_type)
+                assert caught.value.__cause__.__cause__ is None
+                assert cause_type.__name__ in str(caught.value)
             message = str(caught.value)
         else:
             assert manager.get_memory(user_id="u1") == {"facts": []}
