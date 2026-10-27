@@ -1,0 +1,67 @@
+name: 💡 Feature request
+description: Propose a new capability or an improvement to an existing one.
+title: "[feat] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the suggestion. For non-trivial features, please open a
+        [Discussion](https://github.com/bytedance/deer-flow/discussions/categories/ideas)
+        first to align on scope before writing code.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Before you start
+      options:
+        - label: I searched [existing issues](https://github.com/bytedance/deer-flow/issues?q=is%3Aissue) and this is not a duplicate.
+          required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / motivation
+      description: What problem does this solve? What is painful today, or what does it unblock?
+      placeholder: "I'm always frustrated when ..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: Describe the change from a user's / caller's perspective.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: areas
+    attributes:
+      label: Affected area(s)
+      description: Which part of DeerFlow would this touch? Select all that apply.
+      multiple: true
+      options:
+        - Frontend (UI / Next.js)
+        - Backend API (gateway / endpoints / SSE)
+        - Agents / LangGraph (graph, prompts, langgraph.json)
+        - Sandbox / Docker
+        - Skills
+        - MCP
+        - Config / setup
+        - Docs
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other approaches you weighed and why you discarded them.
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context
+      description: Mockups, links, related issues, or anything else that helps.

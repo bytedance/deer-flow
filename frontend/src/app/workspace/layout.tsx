@@ -1,35 +1,64 @@
-import { cookies } from "next/headers";
-import { Toaster } from "sonner";
+import "katex/dist/katex.min.css";
+import "streamdown/styles.css";
 
-import { QueryClientProvider } from "@/components/query-client-provider";
-import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
-import { CommandPalette } from "@/components/workspace/command-palette";
-import { WorkspaceSidebar } from "@/components/workspace/workspace-sidebar";
+import { redirect } from "next/navigation";
 
-function parseSidebarOpenCookie(
-  value: string | undefined,
-): boolean | undefined {
-  if (value === "true") return true;
-  if (value === "false") return false;
-  return undefined;
-}
+import { GatewayOfflineFallback } from "@/components/workspace/gateway-offline-fallback";
+import { WorkspaceLoginRedirect } from "@/components/workspace/workspace-login-redirect";
+import { AuthProvider } from "@/core/auth/AuthProvider";
+import { getServerSideUser } from "@/core/auth/server";
+import { ACCOUNT_DISABLED_LOGIN_URL, assertNever } from "@/core/auth/types";
+import { I18nProvider } from "@/core/i18n/context";
+import { detectLocaleServer } from "@/core/i18n/server";
+
+import { WorkspaceContent } from "./workspace-content";
+
+export const dynamic = "force-dynamic";
 
 export default async function WorkspaceLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
-  const cookieStore = await cookies();
-  const initialSidebarOpen = parseSidebarOpenCookie(
-    cookieStore.get("sidebar_state")?.value,
-  );
+  const locale = await detectLocaleServer();
+  const result = await getServerSideUser();
 
-  return (
-    <QueryClientProvider>
-      <SidebarProvider className="h-screen" defaultOpen={initialSidebarOpen}>
-        <WorkspaceSidebar />
-        <SidebarInset className="min-w-0">{children}</SidebarInset>
-      </SidebarProvider>
-      <CommandPalette />
-      <Toaster position="top-center" />
-    </QueryClientProvider>
-  );
+  let content: React.ReactNode;
+
+  switch (result.tag) {
+    case "authenticated":
+      content = (
+        <AuthProvider initialUser={result.user}>
+          <WorkspaceContent>{children}</WorkspaceContent>
+        </AuthProvider>
+      );
+      break;
+    case "needs_setup":
+      redirect("/setup");
+    case "system_setup_required":
+      redirect("/setup");
+    case "unauthenticated":
+      // Not redirect(): a layout cannot read the request URL, so the browser
+      // carries the page it is on into `next`.
+      content = <WorkspaceLoginRedirect />;
+      break;
+    case "account_disabled":
+      // The login page renders the disabled-account reason from the error
+      // param instead of a plain sign-in form the user cannot complete.
+      redirect(ACCOUNT_DISABLED_LOGIN_URL);
+    case "gateway_unavailable":
+      // GatewayOfflineFallback supplies the AuthProvider; WorkspaceContent
+      // already mounts the banner inside its sidebar layout, so renderBanner
+      // stays false here to avoid double-mounting.
+      content = (
+        <GatewayOfflineFallback>
+          <WorkspaceContent gatewayUnavailable>{children}</WorkspaceContent>
+        </GatewayOfflineFallback>
+      );
+      break;
+    case "config_error":
+      throw new Error(result.message);
+    default:
+      assertNever(result);
+  }
+
+  return <I18nProvider initialLocale={locale}>{content}</I18nProvider>;
 }

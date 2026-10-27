@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://deerflow.dev/contracts/skill_review/review_report.v1.schema.json",
+  "title": "DeerFlow Skill Review Report v1",
+  "type": "object",
+  "required": ["schema_version", "subject", "review", "readiness", "assurance", "dimensions", "issues", "evidence", "recommended_actions"],
+  "properties": {
+    "schema_version": { "const": "deerflow.skill-review.report.v1" },
+    "subject": {
+      "type": "object",
+      "required": ["display_ref", "package_digest"],
+      "properties": {
+        "display_ref": { "type": ["string", "null"] },
+        "package_digest": { "type": "string" }
+      }
+    },
+    "review": {
+      "type": "object",
+      "required": ["scope", "profile", "facts_schema_version", "reviewer_model", "completed_at"],
+      "properties": {
+        "scope": { "type": "array", "items": { "type": "string" } },
+        "profile": { "type": "string" },
+        "facts_schema_version": { "type": "string" },
+        "reviewer_model": { "type": "string" },
+        "completed_at": { "type": "string" }
+      }
+    },
+    "readiness": { "enum": ["blocked", "revise", "publish_candidate"] },
+    "assurance": { "enum": ["static_only", "trigger_checked", "behavior_verified", "regression_verified"] },
+    "dimensions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "status", "summary"],
+        "properties": {
+          "id": { "type": "string" },
+          "status": { "enum": ["pass", "concern", "blocker", "not_assessed"] },
+          "summary": { "type": "string" }
+        },
+        "additionalProperties": true
+      }
+    },
+    "issues": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "severity", "confidence", "path", "line", "problem", "impact", "remediation"],
+        "properties": {
+          "id": { "type": "string" },
+          "severity": { "enum": ["blocker", "major", "minor"] },
+          "confidence": { "enum": ["high", "medium", "low"] },
+          "path": { "type": ["string", "null"] },
+          "line": { "type": ["integer", "null"] },
+          "problem": { "type": "string" },
+          "impact": { "type": "string" },
+          "remediation": { "type": "string" },
+          "suggested_replacement": { "type": ["string", "null"] }
+        },
+        "additionalProperties": true
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "required": ["facts_complete", "runtime_runs", "baseline", "retained_artifacts", "limitations"],
+      "properties": {
+        "facts_complete": { "type": "boolean" },
+        "runtime_runs": { "type": "array" },
+        "baseline": {},
+        "retained_artifacts": { "type": "array" },
+        "limitations": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "recommended_actions": { "type": "array", "items": { "type": "string" } }
+  },
+  "additionalProperties": true
+}

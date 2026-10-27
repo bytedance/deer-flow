@@ -6,6 +6,133 @@ export interface Translations {
     localName: string;
   };
 
+  extensions: {
+    title: string;
+    navigation: string;
+    search: string;
+    loading: string;
+    pageLoading: string;
+    unavailable: string;
+    retry: string;
+    reload: string;
+    reloadAll: string;
+    all: string;
+    notInstalled: string;
+    enabledManaged: string;
+    disabledManaged: string;
+    deploymentHint: string;
+    moduleUnavailable: string;
+    noResults: string;
+    catalogEntry: string;
+    catalogHint: string;
+    installationGuide: string;
+    catalog: Record<
+      | "workflows"
+      | "reportSections"
+      | "agentTeams"
+      | "bookmarks"
+      | "context"
+      | "classify"
+      | "screening"
+      | "retrieval"
+      | "knowledge"
+      | "knowledgeManagement"
+      | "knowledgePlatform"
+      | "weknora"
+      | "lightrag"
+      | "example",
+      { title: string; description: string }
+    >;
+    pageUnavailable: string;
+    pageUnavailableHint: string;
+    viewAll: string;
+    viewFailed: string;
+    actionFailed: string;
+    view: (name: string) => string;
+    open: (name: string) => string;
+  };
+
+  capabilities: {
+    toolsAndIntegrations: string;
+    icon: {
+      title: string;
+      upload: string;
+      change: string;
+      reset: string;
+      hint: string;
+      singleServer: string;
+      errors: { type: string; size: string; invalid: string };
+    };
+    directory: {
+      categories: {
+        office: string;
+        knowledge: string;
+        research: string;
+        business: string;
+        development: string;
+        custom: string;
+      };
+      hints: {
+        office: string;
+        knowledge: string;
+        research: string;
+        business: string;
+        development: string;
+        custom: string;
+      };
+      connected: string;
+      native: string;
+      guide: string;
+      candidate: string;
+      view: string;
+      allCategories: string;
+      source: string;
+      setup: string;
+      notice: string;
+      configured: string;
+      nativeHint: string;
+      guideHint: string;
+      unknownStatus: string;
+      notConnected: string;
+    };
+    integrationSkills: string;
+    sharedSkills: string;
+    title: string;
+    description: string;
+    plugins: string;
+    skills: string;
+    searchPlugins: string;
+    searchSkills: string;
+    allPlugins: string;
+    installed: string;
+    enabled: string;
+    disabled: string;
+    configure: string;
+    details: string;
+    addPlugin: string;
+    builtin: string;
+    community: string;
+    custom: string;
+    allSkills: string;
+    availablePlugins: string;
+    availableSkills: string;
+    pluginHint: string;
+    skillHint: string;
+    noResults: string;
+    larkName: string;
+    larkDescription: string;
+    larkTag: string;
+    connect: string;
+    notInstalled: string;
+    mcpDescription: string;
+    mcpLabel: string;
+    pluginSettings: string;
+    communityTitle: string;
+    communityDescription: string;
+    skillEnabled: string;
+    manage: string;
+  };
+
   // Common
   common: {
     home: string;
@@ -13,11 +140,14 @@ export interface Translations {
     delete: string;
     edit: string;
     rename: string;
+    renameFailed: string;
     share: string;
     openInNewWindow: string;
     close: string;
     more: string;
     search: string;
+    loadMore: string;
+    showingOf: (loaded: number, total: number) => string;
     download: string;
     thinking: string;
     artifacts: string;
@@ -25,6 +155,7 @@ export interface Translations {
     custom: string;
     notAvailableInDemoMode: string;
     loading: string;
+    error: string;
     version: string;
     lastUpdated: string;
     code: string;
@@ -38,11 +169,57 @@ export interface Translations {
     exportAsMarkdown: string;
     exportAsJSON: string;
     exportSuccess: string;
+    exportFailed: string;
+    regenerate: string;
+    editAndRerun: string;
+    updateAndRerun: string;
+    editRerunWarning: string;
+    branch: string;
+    showArtifacts: string;
+    browser: string;
+    showBrowser: string;
+  };
+
+  browserStream: {
+    connecting: string;
+    disconnected: string;
+    handshakeTimeout: string;
+    connectionFailed: string;
+  };
+
+  skillUsage: {
+    used: string;
+    title: string;
+    name: string;
+    description: string;
+    builtIn: string;
+    custom: string;
+    integration: string;
+    legacy: string;
+    copy: string;
+    partial: string;
+  };
+
+  runDuration: {
+    reasoning: string;
+    working: string;
+    completedIn: (duration: string) => string;
+    description: string;
+    lessThanSecond: string;
+    hours: (value: number) => string;
+    minutes: (value: number) => string;
+    seconds: (value: number) => string;
+    separator: string;
   };
 
   home: {
     docs: string;
     blog: string;
+    searchDocs: string;
+    searchDocsLabel: string;
+    searchNoResults: string;
+    searchLoadFailed: string;
+    searchLoading: string;
   };
 
   // Welcome
@@ -61,11 +238,152 @@ export interface Translations {
     linkCopied: string;
   };
 
+  artifactEditing: {
+    unsaved: string;
+    saving: string;
+    saved: string;
+    exit: string;
+    discard: string;
+    discardChanges: string;
+    conflict: string;
+    conflictShort: string;
+    runInProgress: string;
+    saveFailed: string;
+  };
+
+  artifactPreview: {
+    loadingPreview: string;
+    resourcesUnavailable: string;
+    limited: (previewSize: string, totalSize?: string) => string;
+    loadFullFile: string;
+    loadingFullFile: string;
+    previewFailed: string;
+    viewSource: string;
+    missingTarget: string;
+  };
+
+  artifactTable: {
+    title: string;
+    header: string;
+    column: (index: number) => string;
+    total: (count: number) => string;
+    sample: (count: number) => string;
+    range: (start: number, end: number, limited: boolean) => string;
+    columnsLimited: string;
+    uneven: string;
+    empty: string;
+    incomplete: string;
+    failed: string;
+    retry: string;
+    previous: string;
+    next: string;
+    cell: (row: number, column: number) => string;
+    cellValue: string;
+    missing: string;
+    savedVersion: string;
+  };
+
+  artifactArchive: {
+    downloadCurrent: (count: number) => string;
+    currentVersionNotice: string;
+    downloadFailed: string;
+  };
+
+  modelPicker: {
+    title: string;
+    favorites: string;
+    otherModels: string;
+    noModels: string;
+    favoriteModel: (displayName: string, name: string) => string;
+    sessionOnly: string;
+  };
+
+  // Citations
+  citations: {
+    viewKnowledgeSource: (title: string) => string;
+    sourcePages: (pages: string) => string;
+    retrievedExcerpt: string;
+    excerptTruncated: string;
+    sourceUnavailable: string;
+    knowledgeSourcesSummary: (count: number) => string;
+    sourcesSummary: (count: number) => string;
+    citeCount: (count: number) => string;
+    copyReference: (title: string) => string;
+    copiedReference: (title: string) => string;
+  };
+
+  // Workspace Changes
+  workspaceChanges: {
+    title: string;
+    editedTitle: (count: number) => string;
+    badge: (count: number, additions: number, deletions: number) => string;
+    viewChanges: string;
+    created: string;
+    modified: string;
+    deleted: string;
+    openFile: string;
+    loading: string;
+    noChanges: string;
+    diffUnavailable: string;
+    binaryUnavailable: string;
+    largeUnavailable: string;
+    sensitiveUnavailable: string;
+    truncatedUnavailable: string;
+    symlinkUnavailable: string;
+    truncatedSummary: string;
+  };
+
   // Input Box
   inputBox: {
+    mentionPicker: string;
+    mentionSearch: string;
+    mentionSkills: string;
+    mentionFiles: string;
+    mentionExtensions: string;
+    mentionExtensionsLimit: string;
+    mentionConversations: string;
+    mentionUpload: string;
+    mentionEmpty: string;
+    mentionLoadMore: string;
+    mentionLoading: string;
+    mentionFailed: string;
+    mentionRetry: string;
+    mentionAttaching: string;
+    mentionAttachFailed: string;
+    mentionMultipleSkills: string;
+    mentionNoProject: string;
+    mentionUnavailable: string;
+    mentionClose: string;
+
     placeholder: string;
+    disclaimer: string;
     createSkillPrompt: string;
     addAttachments: string;
+    referenceConversations: string;
+    referenceConversationsSearch: string;
+    referenceConversationsEmpty: string;
+    referenceConversationsLimit: (max: number) => string;
+    referenceConversationsRemove: (title: string) => string;
+    referencedConversations: string;
+    removeProjectAttachment: string;
+    inputPolish: string;
+    inputPolishing: string;
+    inputPolishNoChanges: string;
+    inputPolishFailed: string;
+    inputPolishUndo: string;
+    inputPolishCancel: string;
+    voiceInputStartLabel: string;
+    voiceInputStopLabel: string;
+    voiceInputStart: string;
+    voiceInputStop: string;
+    voiceInputListening: string;
+    voiceInputUnsupported: string;
+    voiceInputPermissionDenied: string;
+    voiceInputMicrophoneUnavailable: string;
+    voiceInputUnsupportedLanguage: string;
+    voiceInputNetworkError: string;
+    voiceInputNoSpeech: string;
+    voiceInputFailed: string;
     mode: string;
     flashMode: string;
     flashModeDescription: string;
@@ -84,7 +402,10 @@ export interface Translations {
     reasoningEffortMediumDescription: string;
     reasoningEffortHigh: string;
     reasoningEffortHighDescription: string;
-    searchModels: string;
+    reasoningEffortXhigh: string;
+    reasoningEffortXhighDescription: string;
+    reasoningEffortMax: string;
+    reasoningEffortMaxDescription: string;
     surpriseMe: string;
     surpriseMePrompt: string;
     followupLoading: string;
@@ -92,6 +413,62 @@ export interface Translations {
     followupConfirmDescription: string;
     followupConfirmAppend: string;
     followupConfirmReplace: string;
+    suggestionPlaceholderRequired: string;
+    goalCommandDescription: string;
+    compactCommandDescription: string;
+    goalLabel: string;
+    goalContinuing: string;
+    goalContinuationTooltip: string;
+    goalSet: string;
+    goalCleared: string;
+    goalNone: string;
+    goalActive: string;
+    goalFailed: string;
+    goalTooLong: string;
+    goalLengthCounter: string;
+    goalBar: {
+      regionLabel: string;
+      inProgress: string;
+      stopped: string;
+      waitingForYou: string;
+      waiting: string;
+      paused: string;
+      autoContinuedOnce: string;
+      autoContinuedMany: string;
+      details: string;
+      hideDetails: string;
+      noteLabel: string;
+      codeLabel: string;
+      assumptionTooltip: string;
+      announce: string;
+      editLocked: string;
+      busy: string;
+      next: {
+        limit: string;
+        autoOff: string;
+        noProgress: string;
+        tokenCapped: string;
+        loopCapped: string;
+        recursionCapped: string;
+        missingEvidence: string;
+        runFailed: string;
+        needsInputCard: string;
+        needsInputReply: string;
+        external: string;
+        unchecked: string;
+        unknown: string;
+        paused: string;
+      };
+      /** Why a check failed, without the "Couldn't check the goal" of its chip. */
+      uncheckedReasons: {
+        evaluatorFailed: string;
+        noDurableEndOfTurn: string;
+        threadChanged: string;
+      };
+    };
+    compactSuccess: string;
+    compactSkipped: string;
+    compactFailed: string;
     suggestions: {
       suggestion: string;
       prompt: string;
@@ -107,6 +484,9 @@ export interface Translations {
           type: "separator";
         }
     )[];
+    pleaseWaitStreaming: string;
+    stopStreamingUnavailable: string;
+    startTurnUnavailable: string;
   };
 
   // Sidebar
@@ -116,6 +496,647 @@ export interface Translations {
     chats: string;
     demoChats: string;
     agents: string;
+    scheduledTasks: string;
+    agentsDisabledTooltip: string;
+    channels: string;
+  };
+  // Sidebar projects section
+  projects: {
+    title: string;
+    newProject: string;
+    namePlaceholder: string;
+    moveToProject: string;
+    moveToProjectHint: string;
+    removeFromProject: string;
+    archive: string;
+    restore: string;
+    deleteProject: string;
+    deleteProjectConfirm: string;
+    archived: string;
+    empty: string;
+    newChat: string;
+    // Runtime states and actions
+    create: string;
+    createFailed: string;
+    moveFailed: string;
+    archiveFailed: string;
+    restoreFailed: string;
+    deleteFailed: string;
+    switchToGrouped: string;
+    switchToFlat: string;
+    // Project page
+    threads: string;
+    threadsLoadFailed: string;
+    untitled: string;
+    settings: string;
+    notFound: string;
+    projectUnavailable: string;
+    // Project page — Documents / Instructions tabs (Phase 2)
+    documents: string;
+    documentsEmptyTitle: string;
+    documentsEmptyHint: string;
+    instructions: string;
+    instructionsPlaceholder: string;
+    instructionsByteCount: (used: number, max: number) => string;
+    instructionsTooLong: (max: number) => string;
+    instructionsSaved: string;
+    instructionsSaveFailed: string;
+    // Project page — Documents tab shelf (Phase 2 Slice E)
+    documentsShelf: string;
+    documentsShelfHint: string;
+    uploadDocuments: string;
+    uploadingDocuments: string;
+    uploadDocumentFailed: string;
+    documentFromThread: (threadName: string, kind: string) => string;
+    documentKindUpload: string;
+    documentKindOutput: string;
+    attachToThread: string;
+    attachDialogTitle: string;
+    attachDialogHint: string;
+    attachNoThreads: string;
+    attachFailed: string;
+    attachedToThread: (name: string) => string;
+    moveDocumentToTrash: string;
+    moveDocumentToTrashTitle: string;
+    moveDocumentToTrashConfirm: (name: string, days: number) => string;
+    deleteDocumentFailed: string;
+    contentMissing: string;
+    previewUnsupported: string;
+    archivedDocumentsBanner: string;
+    conversationFiles: string;
+    conversationFilesEmpty: string;
+    threadFilesTruncated: (count: number) => string;
+    threadFilesBrowseInThread: string;
+    saveToProject: string;
+    saveToProjectFailed: string;
+    savedToProject: (name: string) => string;
+    shelfNameLabel: string;
+    viewTrash: string;
+    documentsLoadFailed: string;
+    threadFilesLoadFailed: string;
+    interimMemoryNotice: string;
+  };
+
+  // Trash view (Projects Phase 2)
+  trash: {
+    title: string;
+    empty: string;
+    loadFailed: string;
+    retry: string;
+    originProject: (projectName: string) => string;
+    unknownProject: string;
+    retentionLeft: (days: number) => string;
+    restore: string;
+    restoreFailed: string;
+    restoredToast: (name: string) => string;
+    restoreMergedToast: (name: string) => string;
+    restoreConflict: string;
+    restorePickProjectTitle: string;
+    restorePickProjectHint: string;
+    deletePermanently: string;
+    deletePermanentlyTitle: string;
+    deletePermanentlyConfirm: (name: string) => string;
+    purgeFailed: string;
+    emptyTrash: string;
+    emptyTrashTitle: string;
+    emptyTrashConfirm: (count: number) => string;
+    emptyTrashFailed: string;
+  };
+
+  // Knowledge scope for custom-agent chat
+  knowledge: {
+    scope: {
+      title: string;
+      description: string;
+      buttonAll: string;
+      buttonDisabled: string;
+      buttonDatasets: (datasets: number) => string;
+      buttonDatasetsAndDocuments: (
+        datasets: number,
+        documents: number,
+      ) => string;
+      allDatasets: string;
+      selectedDatasets: string;
+      disabled: string;
+      allDocuments: string;
+      selectedDocuments: string;
+      searchDatasets: string;
+      searchDocuments: string;
+      selectedCount: (count: number) => string;
+      files: string;
+      notSearchable: string;
+      loadFailed: string;
+      selectionInvalid: string;
+      previous: string;
+      next: string;
+      agentUnavailable: string;
+      apply: string;
+      historyAll: string;
+      historyDisabled: string;
+      historySelected: (datasets: number, documents: number) => string;
+    };
+  };
+
+  // Thread-scoped MCP background tasks
+  backgroundTasks: {
+    label: string;
+    title: string;
+    description: string;
+    active: string;
+    recent: string;
+    empty: string;
+    emptyHint: string;
+    loadFailed: string;
+    retry: string;
+    cancel: string;
+    cancelling: string;
+    cancelFailed: string;
+    cancellationRetrying: (attempt: number) => string;
+    notificationRetrying: (attempt: number) => string;
+    notificationStopped: string;
+    trackingDegraded: string;
+    viewDetails: string;
+    hideDetails: string;
+    detailsFailed: string;
+    result: string;
+    resultArtifact: string;
+    inputRequired: string;
+    inputUnavailable: string;
+    lastPollError: string;
+    created: (time: string) => string;
+    updated: (time: string) => string;
+    status: {
+      submitted: string;
+      working: string;
+      inputRequired: string;
+      completed: string;
+      failed: string;
+      cancelled: string;
+    };
+  };
+
+  subagentBatches: {
+    label: string;
+    title: string;
+    description: string;
+    workerUnavailable: string;
+    empty: string;
+    emptyHint: string;
+    loadFailed: string;
+    active: string;
+    recent: string;
+    pause: string;
+    resume: string;
+    cancel: string;
+    retryItem: string;
+    exportResults: string;
+    viewResult: string;
+    resultTitle: string;
+    resultDescription: string;
+    report: string;
+    evidence: string;
+    noEvidence: string;
+    acceptance: string;
+    noReport: string;
+    loadResultFailed: string;
+    truncated: string;
+    omittedEvidence: (count: number) => string;
+    pagesLabel: string;
+    viewItems: string;
+    hideItems: string;
+    itemsFailed: string;
+    progress: (completed: number, total: number) => string;
+    limits: (live: number, running: number) => string;
+    status: {
+      queued: string;
+      running: string;
+      paused: string;
+      completed: string;
+      failed: string;
+      cancelled: string;
+    };
+  };
+
+  // Scheduled tasks
+  scheduledTasks: {
+    scheduleType: { cron: string; once: string; interval: string };
+    preset: {
+      label: string;
+      hourly: string;
+      daily: string;
+      weekly: string;
+      monthly: string;
+      custom: string;
+    };
+    fields: {
+      minute: string;
+      time: string;
+      weekday: string;
+      dayOfMonth: string;
+      cron: string;
+      cronPlaceholder: string;
+      runAt: string;
+      invalidRunAt: string;
+      timezone: string;
+      intervalAmount: string;
+      intervalUnit: string;
+      intervalUnitSeconds: string;
+      intervalUnitMinutes: string;
+      intervalUnitHours: string;
+      intervalMinHint: string;
+    };
+    weekdays: {
+      mon: string;
+      tue: string;
+      wed: string;
+      thu: string;
+      fri: string;
+      sat: string;
+      sun: string;
+    };
+    preview: string;
+    cronHelp: string;
+    create: {
+      agent: string;
+      leadAgent: string;
+    };
+    search: { clear: string; noResults: string };
+    page: {
+      description: string;
+      descriptionNoChat: string;
+      newTask: string;
+      tabs: { all: string; active: string; paused: string; finished: string };
+      tabsLabel: string;
+      search: string;
+      emptyTitle: string;
+      emptyBody: string;
+      emptyBodyNoChat: string;
+      threadFilter: string;
+      showAll: string;
+      schedulerOffTitle: string;
+      schedulerOffBody: string;
+      createBlocked: string;
+      unavailableTitle: string;
+      unavailableBody: string;
+      selectHint: string;
+      tabCount: string;
+      loading: string;
+      taskNotInChat: string;
+    };
+    time: {
+      today: string;
+      tomorrow: string;
+      yesterday: string;
+      yourTime: string;
+    };
+    /** Same as `time`, for use mid-sentence (lowercase in English). */
+    timeInline: {
+      today: string;
+      tomorrow: string;
+      yesterday: string;
+      yourTime: string;
+    };
+    list: {
+      next: string;
+      pausedByAgentOn: string;
+      autoPausedLine: string;
+      finishedLimit: string;
+      finishedEnd: string;
+      runningNow: string;
+    };
+    detail: {
+      agent: string;
+      runsCount: string;
+      runsCountOne: string;
+      noRuns: string;
+      loadFailed: string;
+      runs: string;
+      stopsWhen: string;
+      does: string;
+      goal: string;
+      notes: string;
+      history: string;
+      next: string;
+      firstRun: string;
+      notWhilePaused: string;
+      ifResumed: string;
+      noMoreRuns: string;
+      showAll: string;
+      showLess: string;
+      createdInChat: string;
+      openChat: string;
+      contextFresh: string;
+      contextReuse: string;
+      copyTaskId: string;
+      copied: string;
+      moreActions: string;
+      agentLine: string;
+    };
+    stop: {
+      pausesItself: string;
+      reached: string;
+      noRule: string;
+      afterRuns: string;
+      atTime: string;
+      capRuns: string;
+      capRunsUsed: string;
+      capEnd: string;
+      capBoth: string;
+      trialsDontCount: string;
+      autoPauseRule: string;
+      goalTooltip: string;
+    };
+    notice: {
+      pausedByAgentTitle: string;
+      pausedByAgentBody: string;
+      seeThatRun: string;
+      autoPausedTitle: string;
+      autoPausedBody: string;
+      editGoal: string;
+      openLatestRun: string;
+      resumeAnyway: string;
+      limitTitle: string;
+      limitBodyRuns: string;
+      limitBodyEnd: string;
+      endTitle: string;
+      extendLimit: string;
+      onceFinished: string;
+      onceFailed: string;
+    };
+    renew: {
+      title: string;
+      bodyRuns: string;
+      bodyEnd: string;
+      removeCap: string;
+      removeCapBlocked: string;
+      submit: string;
+    };
+    notificationGroup: {
+      savedUnavailable: string;
+      clearSaved: string;
+      bind: string;
+      bindWecom: string;
+      bindQq: string;
+      name: string;
+      nameHint: string;
+      refresh: string;
+      bindInstructions: string;
+      generating: string;
+      bindFailed: string;
+      command: string;
+      expiresAt: string;
+      copy: string;
+      copied: string;
+      copyFailed: string;
+      newCode: string;
+      close: string;
+      label: string;
+      detailLabel: string;
+      none: string;
+      personalHint: string;
+      emptyHint: string;
+      loading: string;
+      unavailable: string;
+      unavailableHint: string;
+      unnamed: string;
+      unnamedHint: string;
+      loadFailed: string;
+    };
+    form: {
+      createTitle: string;
+      editTitle: string;
+      title: string;
+      instructions: string;
+      instructionsHint: string;
+      stopCondition: string;
+      stopConditionHint: string;
+      goal: string;
+      goalHint: string;
+      goalNeedsFresh: string;
+      maxRuns: string;
+      maxRunsHint: string;
+      endAt: string;
+      invalidEndAt: string;
+      labelWithZone: string;
+      contextLabel: string;
+      clear: string;
+      frequentNeedsCap: string;
+      schedule: string;
+      agent: string;
+      advanced: string;
+      contextFresh: string;
+      contextReuse: string;
+      chatId: string;
+      reuseNoticeTitle: string;
+      reuseNoticeDescription: string;
+      create: string;
+      save: string;
+      required: string;
+      endAtPassed: string;
+      copySuffix: string;
+    };
+    actions: {
+      edit: string;
+      pause: string;
+      resume: string;
+      runNow: string;
+      duplicate: string;
+      delete: string;
+      openTask: string;
+      openChat: string;
+      busyRunning: string;
+      busyQueued: string;
+      busyQueuedPaused: string;
+      alreadyQueued: string;
+      deleteTitle: string;
+      deleteBody: string;
+    };
+    feedback: {
+      created: string;
+      saved: string;
+      paused: string;
+      resumed: string;
+      resumedNoTime: string;
+      deleted: string;
+      trialStarted: string;
+      trialQueued: string;
+      alreadyQueued: string;
+    };
+    errors: {
+      create: string;
+      update: string;
+      pause: string;
+      resume: string;
+      trigger: string;
+      delete: string;
+      withReason: string;
+    };
+    status: {
+      enabled: string;
+      paused: string;
+      running: string;
+      completed: string;
+      failed: string;
+      cancelled: string;
+      pausedByAgent: string;
+      autoPaused: string;
+      deleted: string;
+    };
+    history: {
+      navigation: string;
+      newer: string;
+      older: string;
+      latest: string;
+      page: string;
+      paused: string;
+      loading: string;
+      loadFailed: string;
+      retry: string;
+      runNumber: string;
+      tokens: string;
+      continuations: string;
+      details: string;
+      listLabel: string;
+      /** A queued run waiting for an execution slot. */
+      waitingForSlot: string;
+    };
+    runTrigger: { scheduled: string; manual: string };
+    runStatus: {
+      queued: string;
+      launching: string;
+      running: string;
+      success: string;
+      unmet: string;
+      failed: string;
+      skipped: string;
+      interrupted: string;
+    };
+    goal: {
+      met: string;
+      stopRequested: string;
+      assumptionBadge: string;
+      assumptionTooltip: string;
+      unchecked: string;
+      reasons: {
+        missingEvidence: string;
+        needsUserInput: string;
+        externalWait: string;
+        runFailed: string;
+        goalNotMetYet: string;
+        maxContinuations: string;
+        noProgress: string;
+        tokenCapped: string;
+        loopCapped: string;
+        recursionCapped: string;
+        evaluatorFailed: string;
+        noDurableEndOfTurn: string;
+        threadChanged: string;
+        noVerdict: string;
+      };
+    };
+    runErrors: {
+      restarted: string;
+      leaseLost: string;
+      queueTimeout: string;
+      pausedWhileQueued: string;
+      deletedWhileQueued: string;
+      endReached: string;
+      interrupted: string;
+      launchFailed: string;
+      failed: string;
+    };
+    apiErrors: {
+      generic: string;
+      invalidRequest: string;
+      invalidSchedule: string;
+      invalidScheduleType: string;
+      invalidTimezone: string;
+      intervalTooShort: string;
+      intervalTooLong: string;
+      onceInPast: string;
+      onceTooSoon: string;
+      onceTimePassed: string;
+      invalidContextMode: string;
+      reuseThreadRequiresThread: string;
+      threadNotFound: string;
+      invalidAssistant: string;
+      unknownAssistant: string;
+      invalidGoal: string;
+      goalRequiresFreshThread: string;
+      invalidStopCondition: string;
+      invalidNotificationGroup: string;
+      invalidMaxRuns: string;
+      endAtInPast: string;
+      endAtBeforeFirstRun: string;
+      frequentRequiresLimit: string;
+      maxRunsNotAboveUsed: string;
+      limitsExhaustedRuns: string;
+      limitsExhaustedEnd: string;
+      taskNotFound: string;
+      taskRunning: string;
+      runQueued: string;
+      taskChanged: string;
+      taskFinished: string;
+      taskQuotaExceeded: string;
+      schedulerNotRunning: string;
+      schedulerUnavailable: string;
+      triggerFailed: string;
+      permissionDenied: string;
+    };
+    /** One line in the originating chat per lifecycle event ("{title}" is rendered bold). */
+    events: {
+      stoppedWithCondition: string;
+      stopped: string;
+      autoPaused: string;
+      finishedRuns: string;
+      finishedOneRun: string;
+      finishedEnd: string;
+      /** A finish whose reason this client does not know. */
+      finished: string;
+      onceDone: string;
+      onceFailed: string;
+      /** `aria-label` of the line. */
+      label: string;
+      suffixLastFailed: string;
+      suffixLastUnmet: string;
+      suffixLastInterrupted: string;
+      /** Shown in place of a missing task title. */
+      untitledTask: string;
+    };
+    card: {
+      runs: string;
+      stopsWhen: string;
+      results: string;
+      resultsFresh: string;
+      resultsReuse: string;
+      footer: string;
+      deleted: string;
+      trialStarted: string;
+      schedulerOff: string;
+      refreshFailed: string;
+      label: string;
+    };
+    runThread: {
+      scheduledRun: string;
+      trialRun: string;
+      runNumber: string;
+      instructions: string;
+      stopsWhen: string;
+      notes: string;
+      openTask: string;
+    };
+    header: {
+      countLabel: string;
+      countLabelOne: string;
+      runTask: string;
+    };
+    recipes: {
+      label: string;
+      trending: { title: string; desc: string; prompt: string };
+      news: { title: string; desc: string; prompt: string };
+      issues: { title: string; desc: string; prompt: string };
+      weekly: { title: string; desc: string; prompt: string };
+    };
   };
 
   // Agents
@@ -123,8 +1144,18 @@ export interface Translations {
     title: string;
     description: string;
     newAgent: string;
+    importAgent: string;
+    importTitle: string;
+    importDescription: string;
+    importName: string;
+    importInvalidFile: string;
+    importSuccess: string;
+    exportAgent: string;
+    exportSuccess: string;
     emptyTitle: string;
     emptyDescription: string;
+    featureDisabledTitle: string;
+    featureDisabledDescription: string;
     chat: string;
     delete: string;
     deleteConfirm: string;
@@ -140,17 +1171,53 @@ export interface Translations {
     nameStepAlreadyExistsError: string;
     nameStepNetworkError: string;
     nameStepCheckError: string;
+    nameStepCheckErrorWithDetail: string;
+    nameStepApiDisabledError: string;
     nameStepBootstrapMessage: string;
     save: string;
     saving: string;
     saveRequested: string;
     saveHint: string;
     saveCommandMessage: string;
+    agentSaveFailed: string;
     agentCreatedPendingRefresh: string;
     more: string;
     agentCreated: string;
     startChatting: string;
     backToGallery: string;
+    settings: string;
+    settingsTitle: string;
+    settingsDisplayName: string;
+    settingsDisplayNameTooLong: string;
+    settingsDisplayNameHint: string;
+    settingsToolGroups: string;
+    settingsToolGroupsHint: string;
+    settingsToolGroupsAll: string;
+    settingsToolGroupsLoadFailed: string;
+    settingsToolGroupUnavailable: string;
+    settingsDescription: string;
+    settingsKnowledge: string;
+    settingsKnowledgeHint: string;
+    settingsKnowledgeReset: string;
+    settingsKnowledgeSaveToolAccess: string;
+    settingsModel: string;
+    settingsModelDefault: string;
+    settingsModelSwitchNeedsCatalog: string;
+    settingsReasoningUnsupported: string;
+    settingsThinkingRequiredHint: string;
+    settingsReasoningUnsupportedHint: string;
+    settingsTemperature: string;
+    settingsTemperatureHint: string;
+    settingsMaxTokens: string;
+    settingsMaxTokensPlaceholder: string;
+    settingsThinking: string;
+    settingsThinkingOn: string;
+    settingsThinkingOff: string;
+    settingsReasoningEffort: string;
+    settingsInherit: string;
+    settingsSaved: string;
+    settingsInvalidTemperature: string;
+    settingsInvalidMaxTokens: string;
   };
 
   // Breadcrumb
@@ -168,17 +1235,210 @@ export interface Translations {
     reportIssue: string;
     contactUs: string;
     about: string;
+    logout: string;
+    gatewayUnavailable: string;
+    gatewayUnavailableRetrying: string;
+    modelLoadFailed: string;
+    modelLoadRetry: string;
+    modelLoadRetrying: string;
   };
 
   // Conversation
   conversation: {
     noMessages: string;
     startConversation: string;
+    branchCreated: string;
+    branchFailed: string;
+    streamReplayGap: string;
+    outlineLabel: string;
+    outlineAttachmentFallback: string;
   };
 
   // Chats
   chats: {
+    deleteChat: string;
+    deleteConfirm: (title: string) => string;
+    deleteFailed: string;
+    noActiveChats: string;
+    activeChats: string;
+    archivedChats: string;
+    archiveChat: string;
+    restoreChat: string;
+    archiveSuccess: string;
+    restoreSuccess: string;
+    archiveFailed: string;
+    archiveDescription: string;
+    undoArchive: string;
+    noArchivedChats: string;
+    noMatchingChats: string;
+    loadChatsFailed: string;
+    retryLoadChats: string;
     searchChats: string;
+    branchLabel: (title: string, parentTitle: string) => string;
+    loadMoreToSearch: string;
+    loadingMore: string;
+    loadOlderChats: string;
+    pinChat: string;
+    unpinChat: string;
+    pinChatFailed: string;
+  };
+
+  // Thread origin and unread markers (sidebar and chats list)
+  threads: {
+    /** sr-only text and tooltip of the unread dot. */
+    unread: string;
+    /** Row `aria-label` of an unread thread: "{title}, unread". */
+    unreadLabel: string;
+    /**
+     * The same with the origin marker's label first, so the row name keeps
+     * it: "{origin}, {title}, unread".
+     */
+    unreadLabelWithOrigin: string;
+    origin: {
+      schedule: string;
+      /** "From {provider}" for an IM channel thread; `provider` is already localized. */
+      fromProvider: (provider: string) => string;
+      github: string;
+      extension: string;
+      /** Localized IM provider names, keyed by provider id. */
+      providers: {
+        buzz: string;
+        dingtalk: string;
+        discord: string;
+        feishu: string;
+        github: string;
+        qq: string;
+        slack: string;
+        telegram: string;
+        wechat: string;
+        wecom: string;
+      };
+    };
+  };
+
+  // Sidecar
+  sidecar: {
+    title: string;
+    open: string;
+    close: string;
+    delete: string;
+    deleteConfirm: string;
+    deleteSuccess: string;
+    deleteFailed: string;
+    addToConversation: string;
+    askInSideChat: string;
+    reference: string;
+    selectedTextFragment: string;
+    selectedTextFragments: string;
+    clearReferences: string;
+    emptyTitle: string;
+    emptyDescription: string;
+    placeholder: string;
+    send: string;
+    sendFailed: string;
+    noContext: string;
+    continuing: string;
+    selectionCrossesMessages: string;
+  };
+
+  // Channels
+  channels: {
+    title: string;
+    connect: string;
+    modify: string;
+    reconnect: string;
+    disconnect: string;
+    connected: string;
+    notConnected: string;
+    pending: string;
+    revoked: string;
+    disabled: string;
+    unconfigured: string;
+    unavailable: string;
+    unavailableShort: string;
+    setupTitle: (name: string) => string;
+    setupEditTitle: (name: string) => string;
+    setupDescription: string;
+    wechatQr: {
+      restart: string;
+      restartHint: string;
+      restartKeepCommand: string;
+      autoSave: string;
+      verifyTitle: string;
+      verifyDescription: string;
+      verifyLabel: string;
+      verifySubmit: string;
+      verifying: string;
+      network: string;
+      invalid_response: string;
+      verification_rejected: string;
+      verification_blocked: string;
+      already_bound: string;
+      saved: string;
+      savedDescription: string;
+      bindTitle: string;
+      bindDescription: string;
+      bindWaiting: string;
+      bindLoading: string;
+      bindFailed: string;
+      bindExpired: string;
+      bindRetry: string;
+      copyCommand: string;
+      copied: string;
+      copyFailed: string;
+      connectedTitle: string;
+      connectedDescription: string;
+      done: string;
+
+      methodLabel: string;
+      tokenTitle: string;
+      tokenDescription: string;
+      tokenPlaceholder: string;
+      tokenHint: string;
+      privacy: string;
+      waiting: string;
+      scannedTitle: string;
+      expiredTitle: string;
+      failedTitle: string;
+      login: string;
+      manual: string;
+      description: string;
+      loading: string;
+      imageTitle: string;
+      scan: string;
+      scanned: string;
+      expired: string;
+      failed: string;
+      confirmed: string;
+      retry: string;
+    };
+    /** The `/connect <code>` dialog for apps linked by messaging their bot. */
+    bindingCode: {
+      description: (provider: string) => string;
+      loading: string;
+      copy: string;
+      copied: string;
+      copyFailed: string;
+      expiresAt: (time: string) => string;
+      waiting: (provider: string) => string;
+      connected: (provider: string) => string;
+      done: string;
+      expired: string;
+      newCode: string;
+      failed: string;
+      tooManyCodes: string;
+      retry: string;
+    };
+    saveAndConnect: string;
+    saveChanges: string;
+    descriptions: Record<string, string>;
+    connectedAs: (name: string) => string;
+    /** Whether scheduled-task updates reach this app (one muted line on the provider card). */
+    scheduledUpdates: {
+      supported: string;
+      supportedAfterConnect: string;
+      unsupported: string;
+    };
   };
 
   // Page titles (document title)
@@ -191,6 +1451,18 @@ export interface Translations {
 
   // Tool calls
   toolCalls: {
+    details: string;
+    failed: string;
+    scheduleTaskPending: string;
+    stopScheduledTaskPending: string;
+    toolName: string;
+    callId: string;
+    input: string;
+    result: string;
+    error: string;
+    noResult: string;
+    emptyResult: string;
+    truncated: string;
     moreSteps: (count: number) => string;
     lessSteps: string;
     executeCommand: string;
@@ -209,12 +1481,54 @@ export interface Translations {
     clickToViewContent: string;
     writeTodos: string;
     skillInstallTooltip: string;
+    browserNavigate: (url: string) => string;
+    browserNavigateGeneric: string;
+    browserClick: string;
+    browserType: string;
+    browserSnapshot: string;
+    browserGetText: string;
+    browserBack: string;
+    browserScreenshot: string;
+    browserClose: string;
+    scheduleTaskCreate: string;
+    scheduleTaskUpdate: string;
+    scheduleTaskList: string;
+    scheduleTaskPause: string;
+    scheduleTaskResume: string;
+    scheduleTaskDelete: string;
+    scheduleTaskNote: string;
+    scheduleTaskTrial: string;
+    scheduleTaskGeneric: string;
+    scheduleTaskFailed: string;
+    stopScheduledTask: string;
+  };
+
+  humanInput: {
+    answered: string;
+    pending: string;
+    readOnly: string;
+    otherLabel: string;
+    otherPlaceholder: string;
+    submit: string;
+    emptyError: string;
+    requiredError: string;
+    requiredA11yLabel: string;
+    selectPlaceholder: string;
+    answeredValue: (value: string) => string;
   };
 
   // Uploads
   uploads: {
     uploading: string;
     uploadingFiles: string;
+    limitsHint: (
+      maxFiles: number,
+      maxFileSize: string,
+      maxTotalSize: string,
+    ) => string;
+    filesTooLarge: (files: string, maxFileSize: string) => string;
+    tooManyFiles: (count: number, maxFiles: number) => string;
+    totalSizeTooLarge: (count: number, maxTotalSize: string) => string;
   };
 
   // Subtasks
@@ -233,8 +1547,37 @@ export interface Translations {
     input: string;
     output: string;
     total: string;
+    view: string;
     unavailable: string;
     unavailableShort: string;
+    collecting: string;
+    note: string;
+    presets: {
+      off: string;
+      summary: string;
+      perTurn: string;
+      debug: string;
+    };
+    presetDescriptions: {
+      off: string;
+      summary: string;
+      perTurn: string;
+      debug: string;
+    };
+    finalAnswer: string;
+    stepTotal: string;
+    sharedAttribution: string;
+    subagent: (description: string) => string;
+    startTodo: (content: string) => string;
+    completeTodo: (content: string) => string;
+    updateTodo: (content: string) => string;
+    removeTodo: (content: string) => string;
+  };
+
+  contextUsage: {
+    label: string;
+    title: string;
+    badgeAriaLabel: (percentage: string) => string;
   };
 
   // Shortcuts
@@ -252,11 +1595,80 @@ export interface Translations {
   settings: {
     title: string;
     description: string;
+    models: {
+      title: string;
+      description: string;
+      adminOnly: string;
+      add: string;
+      loading: string;
+      failed: string;
+      reload: string;
+      empty: string;
+      yaml: string;
+      enabled: string;
+      disabled: string;
+      conflict: string;
+      edit: string;
+      enable: string;
+      disable: string;
+      formDescription: string;
+      provider: string;
+      name: string;
+      displayName: string;
+      endpoint: string;
+      modelId: string;
+      keepKey: string;
+      optionalKey: string;
+      clearKey: string;
+      contextWindow: string;
+      maxTokens: string;
+      vision: string;
+      cancel: string;
+      test: string;
+      working: string;
+      save: string;
+      saved: string;
+      success: string;
+      tool_call_missing: string;
+      connection_failed: string;
+      customProvider: string;
+      apiKey: string;
+      advanced: string;
+      providerDefault: string;
+      requiredKey: string;
+      providerChanged: string;
+      missing_api_key: string;
+      authentication_failed: string;
+      response_limit: string;
+      revisionConflict: string;
+      keyOrCapabilities: string;
+      invalidModel: string;
+    };
+    users: {
+      title: string;
+      description: string;
+      adminOnly: string;
+      loading: string;
+      failed: string;
+      reload: string;
+      empty: string;
+      email: string;
+      role: string;
+      status: string;
+      active: string;
+      disabled: string;
+      disable: string;
+      enable: string;
+      updateFailed: string;
+    };
     sections: {
+      models: string;
+      users: string;
+      account: string;
       appearance: string;
+      channels: string;
       memory: string;
-      tools: string;
-      skills: string;
+      subagents: string;
       notification: string;
       about: string;
     };
@@ -310,6 +1722,7 @@ export interface Translations {
         work: string;
         personal: string;
         topOfMind: string;
+        cognitiveStyle: string;
         historyBackground: string;
         recentMonths: string;
         earlierContext: string;
@@ -328,6 +1741,7 @@ export interface Translations {
           };
           content: string;
           source: string;
+          unknown: string;
           createdAt: string;
           view: string;
         };
@@ -346,16 +1760,235 @@ export interface Translations {
       languageDescription: string;
     };
     tools: {
+      adminRequired: string;
+      empty: string;
+      addServer: string;
+      addServerDescription: string;
+      addServerPlaceholder: string;
+      serverDefinitionLabel: string;
+      definitionEmpty: string;
+      definitionInvalidJson: string;
+      definitionRootNotObject: string;
+      definitionNoServers: string;
+      definitionServerNotObject: string;
+      editServer: string;
+      editServerDescription: string;
+      editSingleServer: string;
+      editServerNameMismatch: string;
+      serverAlreadyExists: string;
+      removeServer: string;
+      removeServerDescription: string;
+      unnamedServer: string;
+    };
+    subagents: {
       title: string;
       description: string;
+      executionNote: string;
+      adminNote: string;
+      create: string;
+      empty: string;
+      sourceBuiltin: string;
+      sourceConfig: string;
+      sourceManaged: string;
+      conflict: string;
+      overridden: string;
+      createTitle: string;
+      editTitle: string;
+      name: string;
+      nameHint: string;
+      displayName: string;
+      descriptionLabel: string;
+      systemPrompt: string;
+      model: string;
+      inheritModel: string;
+      tools: string;
+      skills: string;
+      listModeAll: string;
+      listModeNone: string;
+      listModeSelected: string;
+      listNamesPlaceholder: string;
+      maxTurns: string;
+      timeout: string;
+      created: string;
+      saved: string;
+      deleted: string;
+      deleteConfirm: string;
+      bindingTitle: string;
+      bindingDescription: string;
+      allAllowed: string;
+      noneAllowed: string;
+      selectedAllowed: string;
+      missing: string;
+    };
+    channels: {
+      title: string;
+      description: string;
+      disabled: string;
+    };
+    integrations: {
+      title: string;
+      description: string;
+      refresh: string;
+      install: string;
+      reinstall: string;
+      installing: string;
+      ready: string;
+      pending: string;
+      available: string;
+      unavailable: string;
+      connected: string;
+      loadFailed: string;
+      adminRequired: string;
+      lark: {
+        title: string;
+        description: string;
+        skillPack: string;
+        gatewayCli: string;
+        auth: string;
+        sandboxRuntime: string;
+        sandboxRuntimeInitContainer: string;
+        sandboxRuntimeBroker: string;
+        sandboxRuntimeGatewayDownload: string;
+        sandboxRuntimeNotReady: string;
+        notInstalled: string;
+        skillsInstalled: (installed: number, expected: number) => string;
+        installedVersion: (version: string) => string;
+        updateAvailable: (version: string) => string;
+        runtimeVersionMismatch: string;
+        authNotConfigured: string;
+        authConfigured: string;
+        authConfiguredFor: (user: string) => string;
+        connect: string;
+        authStarting: string;
+        checkingConnection: string;
+        connectedAction: string;
+        requestPermissions: string;
+        alreadyConnected: string;
+        changeAppButton: string;
+        changeAppTitle: string;
+        changeAppDescription: string;
+        changeAppIdLabel: string;
+        changeAppSecretLabel: string;
+        changeAppAuthResetNote: string;
+        changeAppSubmit: string;
+        changeAppReRegister: string;
+        changeAppSwitched: string;
+        brandFeishu: string;
+        brandLark: string;
+        connectionStarted: string;
+        connectionReady: string;
+        authStarted: string;
+        authorizationStillPending: string;
+        permissionTitle: string;
+        permissionDescription: string;
+        authDomains: Record<
+          | "approval"
+          | "apps"
+          | "attendance"
+          | "base"
+          | "calendar"
+          | "contact"
+          | "docs"
+          | "drive"
+          | "event"
+          | "im"
+          | "mail"
+          | "markdown"
+          | "mindnotes"
+          | "minutes"
+          | "note"
+          | "okr"
+          | "sheets"
+          | "slides"
+          | "task"
+          | "vc"
+          | "wiki"
+          | "all",
+          { label: string; description: string }
+        >;
+        customScopeLabel: string;
+        customScopePlaceholder: string;
+        customScopeDescription: string;
+        openConnectionLinkTitle: string;
+        openConnectionLinkDescription: string;
+        openAuthLinkTitle: string;
+        openAuthLinkDescription: string;
+        waitingAuthTitle: string;
+        waitingAuthDescription: string;
+        openAuthLink: string;
+        copyAuthLink: string;
+        completeAuth: string;
+        continueAuth: string;
+        preparingAuthorization: string;
+        completingAuth: string;
+        authExpiresIn: (seconds: number) => string;
+        installingTitle: string;
+        installingDescription: string;
+        installNextTitle: string;
+        installNextDescription: string;
+        cliNextTitle: string;
+        cliNextDescription: string;
+        configuredTitle: string;
+        configuredDescription: string;
+        connectedTitle: string;
+        connectedDescription: string;
+        authNextTitle: string;
+        authNextDescription: string;
+      };
     };
     skills: {
-      title: string;
-      description: string;
+      diagnosticsTitle: string;
+      diagnosticsScope: string;
+      diagnosticsInvalid: string;
+      diagnosticsQuote: string;
+      diagnosticsRefresh: string;
+      diagnosticsRefreshing: string;
+      diagnosticsFailed: string;
+      diagnosticsReloadFailed: string;
+      exportPrevious: string;
+      exportNotices: Record<string, string>;
+      exportSkill: string;
+      exportTitle: string;
+      exportDescription: string;
+      exportLoading: string;
+      exportFiles: string;
+      exportDirectories: string;
+      exportSize: string;
+      exportContents: string;
+      exportMore: string;
+      exportRequirements: string;
+      exportCompatibility: string;
+      exportTools: string;
+      exportSecrets: string;
+      exportOptional: string;
+      exportRequired: string;
+      exportUndeclared: string;
+      exportNone: string;
+      exportScope: string;
+      exportWarnings: string;
+      exportWarningDescription: string;
+      exportBlocked: string;
+      exportDownload: string;
+      exportDownloading: string;
+      exportHandedOff: string;
+      exportChanged: string;
+      exportRefresh: string;
+      exportFailed: string;
+      exportBusy: string;
+      exportTimeout: string;
+      exportLimit: string;
+      exportNotFound: string;
       createSkill: string;
       emptyTitle: string;
       emptyDescription: string;
       emptyButton: string;
+      adminRequired: string;
+      installAdminRequired: string;
+      installFromFile: string;
+      installingArchive: string;
+      invalidArchive: string;
+      archiveTooLarge: string;
+      installFailed: string;
     };
     notification: {
       title: string;
@@ -367,10 +2000,95 @@ export interface Translations {
       testBody: string;
       notSupported: string;
       disableNotification: string;
+      channels: {
+        title: string;
+        description: string;
+        providers: {
+          feishu: string;
+          wecom: string;
+          wechat: string;
+          qq: string;
+        };
+        toggleLabel: (provider: string) => string;
+        eventsTitle: string;
+        eventsDescription: string;
+        events: {
+          run_completed: string;
+          run_failed: string;
+          human_input_requested: string;
+        };
+        eventToggleLabel: (event: string) => string;
+        loading: string;
+        saving: string;
+        loadFailed: string;
+        saveFailed: string;
+        unavailable: string;
+        empty: string;
+        retry: string;
+      };
+    };
+    account: {
+      profileTitle: string;
+      email: string;
+      role: string;
+      changePasswordTitle: string;
+      changePasswordDescription: string;
+      ssoProvider: string;
+      ssoPasswordDescription: string;
+      ssoPasswordMessage: string;
+      currentPassword: string;
+      newPassword: string;
+      confirmNewPassword: string;
+      passwordMismatch: string;
+      passwordTooShort: string;
+      passwordChangedSuccess: string;
+      networkError: string;
+      updating: string;
+      updatePassword: string;
+      signOut: string;
     };
     acknowledge: {
       emptyTitle: string;
       emptyDescription: string;
+    };
+  };
+
+  // Login / Auth
+  login: {
+    signInTitle: string;
+    createAccountTitle: string;
+    email: string;
+    emailPlaceholder: string;
+    password: string;
+    passwordPlaceholder: string;
+    rememberMe: string;
+    rememberMeDescription: string;
+    pleaseWait: string;
+    signIn: string;
+    createAccount: string;
+    createAdminAccount: string;
+    adminSetupRequiredTitle: string;
+    adminSetupRequiredDescription: string;
+    orContinueWith: string;
+    ssoHint: string;
+    continueWith: (provider: string) => string;
+    noAccountSignUp: string;
+    haveAccountSignIn: string;
+    backToHome: string;
+    networkError: string;
+    serviceUnavailableTitle: string;
+    serviceUnavailableDescription: string;
+    retry: string;
+    authFailed: string;
+    errors: {
+      sso_failed: string;
+      sso_cancelled: string;
+      sso_account_exists: string;
+      sso_not_allowed: string;
+      account_disabled: string;
+      invalid_email: string;
+      password_too_short: string;
+      registration_password_too_short: string;
     };
   };
 }

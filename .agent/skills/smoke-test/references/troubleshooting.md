@@ -254,7 +254,6 @@ Processes exit quickly after running `make dev-daemon`.
 **Solutions**:
 1. Check log files:
    ```bash
-   tail -f logs/langgraph.log
    tail -f logs/gateway.log
    tail -f logs/frontend.log
    tail -f logs/nginx.log
@@ -367,24 +366,7 @@ Errors appear in `gateway.log`.
    uv sync
    ```
 
-4. Confirm that the LangGraph service is running normally (if not in gateway mode)
-
----
-
-### Issue: LangGraph Fails to Start
-
-**Symptoms**:
-Errors appear in `langgraph.log`.
-
-**Solutions**:
-1. Check LangGraph logs:
-   ```bash
-   tail -f logs/langgraph.log
-   ```
-
-2. Check config.yaml
-3. Check whether Python dependencies are complete
-4. Confirm that port 2024 is not occupied
+4. Confirm that the Gateway process is running normally.
 
 ---
 
@@ -519,7 +501,7 @@ Accessing `/health` returns an error or times out.
 
 2. Confirm that config.yaml exists and has valid formatting
 3. Check whether Python dependencies are complete
-4. Confirm that the LangGraph service is running normally
+4. Confirm that the Gateway process is running normally.
 
 **Solutions** (Docker mode):
 1. Check gateway container logs:
@@ -529,7 +511,7 @@ Accessing `/health` returns an error or times out.
 
 2. Confirm that config.yaml is mounted correctly
 3. Check whether Python dependencies are complete
-4. Confirm that the LangGraph service is running normally
+4. Confirm that the Gateway process is running normally.
 
 ---
 
@@ -539,7 +521,7 @@ Accessing `/health` returns an error or times out.
 
 #### View All Service Processes
 ```bash
-ps aux | grep -E "(langgraph|uvicorn|next|nginx)" | grep -v grep
+ps aux | grep -E "(uvicorn|next|nginx)" | grep -v grep
 ```
 
 #### View Service Logs
@@ -548,7 +530,6 @@ ps aux | grep -E "(langgraph|uvicorn|next|nginx)" | grep -v grep
 tail -f logs/*.log
 
 # View specific service logs
-tail -f logs/langgraph.log
 tail -f logs/gateway.log
 tail -f logs/frontend.log
 tail -f logs/nginx.log

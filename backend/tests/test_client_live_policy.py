@@ -1,0 +1,323 @@
+"""Regression tests for the explicit opt-in policy of live client tests."""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+BACKEND_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = BACKEND_ROOT.parent
+LIVE_TEST_PATH = BACKEND_ROOT / "tests" / "test_client_live.py"
+LIVE_OPT_IN = "DEER_FLOW_RUN_LIVE_TESTS"
+REPRESENTATIVE_LIVE_NODE_IDS = (
+    "::TestLiveBasicChat::test_chat_returns_nonempty_string",
+    "::TestLiveStreaming::test_stream_yields_messages_tuple_and_end",
+)
+
+
+# A Python child on Windows cannot boot from a scrubbed environment: without
+# SystemRoot, `import asyncio` dies with WinError 10106 (winsock provider init),
+# and tempfile cannot resolve a usable directory without TEMP/TMP/USERPROFILE.
+# These base system variables carry no credentials, so passing them through
+# keeps the isolation contract (no API keys, no real .env) intact while letting
+# the child start at all. POSIX behavior is unchanged.
+_WINDOWS_BASE_ENV_VARS = (
+    "SystemRoot",
+    "windir",
+    "COMSPEC",
+    "PATHEXT",
+    "TEMP",
+    "TMP",
+    "USERPROFILE",
+)
+
+
+def _child_pytest_env(*, opt_in: bool, ci: bool) -> dict[str, str]:
+    """Build the minimal pytest child env without inheriting the real one."""
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONIOENCODING": "utf-8",
+        "PYTHONUTF8": "1",
+        "PYTHONPATH": os.pathsep.join(
+            [
+                str(BACKEND_ROOT),
+                str(BACKEND_ROOT / "packages" / "harness"),
+            ]
+        ),
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+    }
+    if opt_in:
+        env[LIVE_OPT_IN] = "1"
+    if ci:
+        env["CI"] = "1"
+    if os.name == "nt":
+        env.update({name: os.environ[name] for name in _WINDOWS_BASE_ENV_VARS if name in os.environ})
+    return env
+
+
+def _collect_live_tests(
+    tmp_path: Path,
+    *,
+    config_exists: bool,
+    opt_in: bool,
+    ci: bool,
+) -> subprocess.CompletedProcess[str]:
+    """Collect a temporary copy without inheriting credentials or a real .env."""
+    temp_repo = tmp_path / "repo"
+    temp_tests = temp_repo / "backend" / "tests"
+    temp_tests.mkdir(parents=True)
+    (temp_tests / "test_client_live.py").write_text(
+        LIVE_TEST_PATH.read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    if config_exists:
+        (temp_repo / "config.yaml").write_text("models: []\n", encoding="utf-8")
+
+    env = _child_pytest_env(opt_in=opt_in, ci=ci)
+
+    return subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-c",
+            str(BACKEND_ROOT / "pyproject.toml"),
+            "--collect-only",
+            "-q",
+            "-rs",
+            "-p",
+            "no:cacheprovider",
+            str(temp_tests / "test_client_live.py"),
+        ],
+        cwd=temp_repo / "backend",
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def _assert_collection_skipped(result: subprocess.CompletedProcess[str], reason: str) -> None:
+    output = result.stdout + result.stderr
+    assert result.returncode in {0, pytest.ExitCode.NO_TESTS_COLLECTED}, output
+    assert reason in output
+    assert "no tests collected" in output
+    assert all(node_id not in output for node_id in REPRESENTATIVE_LIVE_NODE_IDS)
+
+
+def _dry_run_make_target(target: str, *extra: str) -> str:
+    result = subprocess.run(
+        ["make", "-n", target, *extra],
+        cwd=BACKEND_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    return output
+
+
+def test_config_alone_does_not_enable_live_collection(tmp_path: Path) -> None:
+    result = _collect_live_tests(tmp_path, config_exists=True, opt_in=False, ci=False)
+
+    _assert_collection_skipped(result, f"Set {LIVE_OPT_IN}=1")
+
+
+def test_explicit_opt_in_collects_live_tests(tmp_path: Path) -> None:
+    result = _collect_live_tests(tmp_path, config_exists=True, opt_in=True, ci=False)
+
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    assert all(node_id in output for node_id in REPRESENTATIVE_LIVE_NODE_IDS)
+
+
+def test_ci_blocks_live_collection_even_with_opt_in(tmp_path: Path) -> None:
+    result = _collect_live_tests(tmp_path, config_exists=True, opt_in=True, ci=True)
+
+    _assert_collection_skipped(result, "Live tests skipped in CI")
+
+
+def test_opt_in_without_config_reports_missing_config(tmp_path: Path) -> None:
+    result = _collect_live_tests(tmp_path, config_exists=False, opt_in=True, ci=False)
+
+    _assert_collection_skipped(result, "No config.yaml found")
+
+
+_BASE_ENV_KEYS = frozenset(
+    {
+        "PATH",
+        "PYTHONDONTWRITEBYTECODE",
+        "PYTHONIOENCODING",
+        "PYTHONUTF8",
+        "PYTHONPATH",
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD",
+    }
+)
+
+
+# Representative values for the Windows base variables. The contract test
+# below seeds them so its assertions do not depend on which optional
+# variables the host happens to export: a host without TEMP/TMP still lets
+# CPython fall back to %USERPROFILE%\AppData\Local\Temp, so an unseeded
+# assertion would fail on valid host configurations.
+_SEEDED_WINDOWS_BASE_ENV = {
+    "SystemRoot": r"C:\Windows",
+    "windir": r"C:\Windows",
+    "COMSPEC": r"C:\Windows\System32\cmd.exe",
+    "PATHEXT": ".COM;.EXE;.BAT;.CMD",
+    "TEMP": r"C:\Windows\Temp",
+    "TMP": r"C:\Windows\Temp",
+    "USERPROFILE": r"C:\Users\runneradmin",
+}
+
+
+def test_child_env_stays_isolated_but_bootable_on_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The scrubbed child env must not starve the Windows interpreter.
+
+    A child spawned with only the pytest-relevant variables fails on Windows
+    during `import asyncio` (WinError 10106, missing SystemRoot) and cannot
+    resolve a temp directory, so the live-policy tests below spuriously fail.
+    """
+    if os.name == "nt":
+        for name, value in _SEEDED_WINDOWS_BASE_ENV.items():
+            monkeypatch.setenv(name, value)
+
+    env = _child_pytest_env(opt_in=True, ci=True)
+
+    extra = set(env) - _BASE_ENV_KEYS - {LIVE_OPT_IN, "CI"}
+    if os.name == "nt":
+        # Exactly the base system variables pass through — never credentials.
+        # The seeded set covers the bootability-critical names: SystemRoot for
+        # winsock init, TEMP/TMP/USERPROFILE for tempfile resolution.
+        assert extra == set(_WINDOWS_BASE_ENV_VARS)
+    else:
+        assert not extra
+
+
+def test_make_targets_keep_default_tests_offline_and_support_live_opt_in() -> None:
+    default_command = _dry_run_make_target("test")
+    live_command = _dry_run_make_target("test-live")
+
+    assert 'pytest -m "not live"' in default_command
+    assert "--ignore=tests/blocking_io" in default_command
+    assert "tests/" in default_command
+    assert LIVE_OPT_IN not in default_command
+
+    assert f"{LIVE_OPT_IN}=1" in live_command
+    assert "pytest -m live" in live_command
+    assert "tests/" in live_command
+    assert "tests/test_client_live.py" not in live_command
+
+
+def test_live_marker_is_registered() -> None:
+    pyproject = (BACKEND_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+
+    assert '"live: tests that call real external APIs and require explicit opt-in"' in pyproject
+
+
+def test_documentation_matches_live_test_commands() -> None:
+    contributor_docs = (REPO_ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
+    backend_agent_docs = (BACKEND_ROOT / "AGENTS.md").read_text(encoding="utf-8")
+
+    for docs in (contributor_docs, backend_agent_docs):
+        assert "make test-live" in docs
+        assert LIVE_OPT_IN in docs
+        assert "API" in docs
+
+
+def test_default_ci_workflow_does_not_opt_in_to_live_tests() -> None:
+    workflow = (REPO_ROOT / ".github" / "workflows" / "backend-unit-tests.yml").read_text(encoding="utf-8")
+
+    # Assert the exact sharded caller, not the substring `make test` (which
+    # `make test-shard` also contains). Otherwise a regression that re-points the
+    # workflow at live tests could slip through as a vacuous substring check.
+    assert "make test-shard" in workflow
+    assert LIVE_OPT_IN not in workflow
+
+
+def test_ci_unit_test_workflow_runs_duration_aware_shards() -> None:
+    workflow = (REPO_ROOT / ".github" / "workflows" / "backend-unit-tests.yml").read_text(encoding="utf-8")
+
+    assert "shard: [1, 2, 3, 4]" in workflow
+    assert "make test-shard SPLITS=4" in workflow
+    assert "GROUP=${{ matrix.shard }}" in workflow
+
+    # The sharded command must select the offline suite and balance the shards by
+    # real wall-clock cost (duration-aware), not fall back to an even split.
+    command = _dry_run_make_target("test-shard", "SPLITS=4", "GROUP=2")
+
+    assert "--splits 4" in command
+    assert "--group 2" in command
+    assert 'pytest -m "not live"' in command
+    assert "--ignore=tests/blocking_io" in command
+    assert "--splitting-algorithm least_duration" in command
+    assert "--durations-path=.test_durations" in command
+
+    # The repo must ship a duration baseline. Without it pytest-split silently
+    # degrades to an even (count-based) split, so this is a fail-closed contract.
+    assert (BACKEND_ROOT / ".test_durations").exists()
+
+    # The full-suite entry point stays offline-only.
+    full_command = _dry_run_make_target("test")
+    assert 'pytest -m "not live"' in full_command
+    assert "--ignore=tests/blocking_io" in full_command
+    assert LIVE_OPT_IN not in full_command
+
+
+def test_duration_baseline_target_replaces_stale_entries() -> None:
+    command = _dry_run_make_target("test-shard-durations")
+
+    assert "--store-durations" in command
+    assert "--clean-durations" in command
+    assert "--durations-path=.test_durations" in command
+
+
+def test_blocking_io_ci_workflow_owns_dedicated_suite() -> None:
+    command = _dry_run_make_target("test-blocking-io")
+    workflow = (REPO_ROOT / ".github" / "workflows" / "backend-blocking-io-tests.yml").read_text(encoding="utf-8")
+
+    assert "pytest tests/blocking_io" in command
+    assert "make test-blocking-io" in workflow
+
+
+def test_windows_workflow_collects_all_five_policy_checks() -> None:
+    """Execute CI's selection so missing cases or accidental make tests fail."""
+    import shlex
+
+    import yaml
+
+    workflow = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "backend-windows-live-policy.yml").read_text(encoding="utf-8"))
+    job = workflow["jobs"]["windows-live-policy"]
+    assert job["runs-on"] == "windows-latest"
+    assert workflow["permissions"] == {"contents": "read"}
+    assert job["defaults"]["run"]["working-directory"] == "backend"
+    assert not job.get("services")
+    step = next(step for step in job["steps"] if "python -m pytest" in step.get("run", ""))
+    command = shlex.split(step["run"])
+    assert command[:5] == ["uv", "run", "python", "-m", "pytest"]
+
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", *command[5:], "--collect-only", "-p", "no:cacheprovider"],
+        cwd=BACKEND_ROOT,
+        env=_child_pytest_env(opt_in=False, ci=True),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    collected = {line.strip() for line in output.splitlines() if line.startswith("tests/test_client_live_policy.py::")}
+    assert collected == {
+        "tests/test_client_live_policy.py::test_child_env_stays_isolated_but_bootable_on_windows",
+        "tests/test_client_live_policy.py::test_config_alone_does_not_enable_live_collection",
+        "tests/test_client_live_policy.py::test_explicit_opt_in_collects_live_tests",
+        "tests/test_client_live_policy.py::test_ci_blocks_live_collection_even_with_opt_in",
+        "tests/test_client_live_policy.py::test_opt_in_without_config_reports_missing_config",
+    }, output

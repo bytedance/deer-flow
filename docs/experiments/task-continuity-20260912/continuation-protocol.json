@@ -1,0 +1,11 @@
+{
+  "version": "task-budget-continuation-v1",
+  "authorization": "User requested that useful progress not be stopped by a tight budget; completed cases must not be rerun.",
+  "selection": "All 24 primary and 12 known-goal cases, all four arms: continue only runs stopped by the original context or step limit. Retain every other result unchanged.",
+  "old_limits": {"model_steps": 8, "cumulative_context_proxy_tokens": 48000},
+  "new_limits": {"model_steps": 24, "cumulative_context_proxy_tokens": 192000},
+  "loop_guard": "Once past the original prefix, stop after four consecutive previously-seen actions with identical arguments/result/artifact, or on the fourth failed validation since the last new history-search/read result. Changing guesses without obtaining evidence does not reset failed-validation stagnation. A successful validation always completes first.",
+  "unchanged": "History, summary, notes, retrieval ranking, retrieval call quotas, per-call generation length, tool schemas, model and deterministic acceptance criteria.",
+  "replay": "Reconstruct the prior conversation from exact cached model responses. Every original model call must be cached; a missing prefix aborts instead of rerunning. Verify prefix tool events are identical. Only calls beyond the original stopping point invoke the live model.",
+  "reporting": "Keep original results/workspaces intact. Store continued artifacts separately and report before/after, added calls, and operational errors. This is a user-requested post-hoc budget extension, not the original preregistered score."
+}

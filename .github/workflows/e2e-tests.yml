@@ -2,14 +2,32 @@ name: E2E Tests
 
 on:
   push:
-    branches: [ 'main' ]
+    branches: [ 'main', '*-dev' ]
     paths:
       - 'frontend/**'
+      - 'backend/app/gateway/routers/plugins.py'
+      - 'backend/extension_test_fixtures/bookmark_plugin_gateway.py'
+      - 'backend/extension_test_fixtures/browser_asset_gateway.py'
+      - 'backend/packages/extension-api/**'
+      - 'backend/packages/harness/deerflow/extensions/**'
+      - 'backend/packages/harness/deerflow/config/plugin_settings.py'
+      - 'backend/pyproject.toml'
+      - 'backend/uv.lock'
+      - 'examples/deerflow-extension-bookmarks/**'
       - '.github/workflows/e2e-tests.yml'
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - 'frontend/**'
+      - 'backend/app/gateway/routers/plugins.py'
+      - 'backend/extension_test_fixtures/bookmark_plugin_gateway.py'
+      - 'backend/extension_test_fixtures/browser_asset_gateway.py'
+      - 'backend/packages/extension-api/**'
+      - 'backend/packages/harness/deerflow/extensions/**'
+      - 'backend/packages/harness/deerflow/config/plugin_settings.py'
+      - 'backend/pyproject.toml'
+      - 'backend/uv.lock'
+      - 'examples/deerflow-extension-bookmarks/**'
       - '.github/workflows/e2e-tests.yml'
 
 concurrency:
@@ -23,16 +41,36 @@ jobs:
   e2e-tests:
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
 
     steps:
       - name: Checkout
         uses: actions/checkout@v6
 
+      # The bookmark browser test starts the real Python action/router fixture.
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          # Keep aligned with backend/Dockerfile and other backend workflows.
+          version: "0.11.1"
+
+      - name: Install backend dependencies (bookmark plugin gateway)
+        working-directory: backend
+        run: uv sync --locked
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: '24'
 
       - name: Enable Corepack
         run: corepack enable
@@ -50,14 +88,32 @@ jobs:
 
       - name: Run E2E tests
         working-directory: frontend
-        run: pnpm exec playwright test
+        run: >-
+          pnpm exec playwright test
+          --shard=${{ matrix.shard }}/4
+          --workers=1
+          --reporter=github,html
+          --output=test-results/e2e
         env:
           SKIP_ENV_VALIDATION: '1'
+          PLAYWRIGHT_HTML_OUTPUT_DIR: playwright-report/e2e
+
+      - name: Run auth recovery E2E tests
+        # Keep auth coverage unsharded and run it even if the first shard fails.
+        if: ${{ !cancelled() && matrix.shard == 1 }}
+        working-directory: frontend
+        run: >-
+          pnpm exec playwright test -c playwright.auth.config.ts
+          --reporter=github,html
+          --output=test-results/auth
+        env:
+          SKIP_ENV_VALIDATION: '1'
+          PLAYWRIGHT_HTML_OUTPUT_DIR: playwright-report/auth
 
       - name: Upload Playwright report
         uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}
         with:
-          name: playwright-report
+          name: playwright-report-${{ matrix.shard }}
           path: frontend/playwright-report/
           retention-days: 7

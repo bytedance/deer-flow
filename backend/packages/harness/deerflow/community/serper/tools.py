@@ -1,0 +1,519 @@
+"""
+Web and image search tools powered by Serper (Google Search API).
+
+Serper provides real-time Google Search and Google Images results via a JSON
+API. An API key is required. Sign up at https://serper.dev to get one.
+"""
+
+import json
+import logging
+import math
+import os
+import random
+import re
+import time
+from collections.abc import Mapping
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
+from ipaddress import IPv4Address, ip_address
+from urllib.parse import urlparse
+
+import httpx
+from langchain.tools import tool
+
+from deerflow.community.search_max_results import coerce_max_results
+from deerflow.community.search_time_range import SearchTimeRange
+from deerflow.community.url_safety import safe_public_result_url as _safe_public_url
+from deerflow.config import get_app_config
+
+logger = logging.getLogger(__name__)
+
+_SERPER_SEARCH_ENDPOINT = "https://google.serper.dev/search"
+_SERPER_IMAGES_ENDPOINT = "https://google.serper.dev/images"
+_SERPER_MAX_RESULTS = 10
+_SERPER_TBS_BY_TIME_RANGE: dict[SearchTimeRange, str] = {
+    "day": "qdr:d",
+    "week": "qdr:w",
+    "month": "qdr:m",
+    "year": "qdr:y",
+}
+_api_key_warned: set[str] = set()
+
+
+def _get_api_key(tool_name: str, *, extras: Mapping[str, object] | None = None) -> str | None:
+    """Resolve a key using captured tool settings, then the environment."""
+    if extras is None:
+        config = get_app_config().get_tool_config(tool_name)
+        extras = config.model_extra if config is not None else {}
+    api_key = extras.get("api_key")
+    if isinstance(api_key, str) and api_key.strip():
+        return api_key.strip()
+    env_key = os.getenv("SERPER_API_KEY")
+    if isinstance(env_key, str) and env_key.strip():
+        return env_key.strip()
+    return None
+
+
+def _count_for_request(value: object) -> int:
+    """Coerce ``max_results`` via the shared owner, then mirror Serper's clamp.
+
+    ``deerflow.community.search_max_results.coerce_max_results`` owns what
+    "invalid" means (booleans, non-integral floats and ``OverflowError`` all
+    fall back to the default); the 10-result cap stays here because clamping
+    policy is deliberately per-provider.
+    """
+    return min(
+        coerce_max_results(value, provider="Serper", logger=logger),
+        _SERPER_MAX_RESULTS,
+    )
+
+
+def _missing_key_error(query: str, tool_name: str) -> str:
+    if tool_name not in _api_key_warned:
+        _api_key_warned.add(tool_name)
+        logger.warning("Serper API key is not set for '%s'. Set SERPER_API_KEY in your environment or provide api_key in config.yaml. Sign up at https://serper.dev", tool_name)
+    return json.dumps(
+        {"error": "SERPER_API_KEY is not configured", "query": query},
+        ensure_ascii=False,
+    )
+
+
+def _unexpected_format_error(query: str) -> str:
+    return json.dumps(
+        {"error": "Serper returned an unexpected response format", "query": query},
+        ensure_ascii=False,
+    )
+
+
+def _response_items(data: dict, field: str, query: str) -> tuple[list[dict] | None, str | None]:
+    items = data.get(field)
+    # Treat a missing or null field as "no results" (some APIs return
+    # ``{"organic": null}`` to signal that) rather than a malformed payload.
+    if items is None:
+        return [], None
+    if not isinstance(items, list):
+        logger.error("Serper returned unexpected '%s' payload type: %s", field, type(items).__name__)
+        return None, _unexpected_format_error(query)
+    usable = [item for item in items if isinstance(item, dict)]
+    if items and not usable:
+        # Same containment rule as groundroute/tavily: a populated container
+        # holding nothing usable is malformed, not an empty search. Reporting
+        # "No results found" tells the agent the query matched nothing.
+        logger.error("Serper returned '%s' with no usable result objects", field)
+        return None, _unexpected_format_error(query)
+    return usable, None
+
+
+def _clean_query(query: str) -> str:
+    """Normalize a raw query into the value actually sent to Serper."""
+    query = query.strip()
+    if len(query) > 500:
+        query = query[:500]
+    return query
+
+
+def _normalize_domain(value: object) -> str:
+    """Accept DNS domains only, using Python's IDNA codec consistently."""
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise ValueError("expected a domain string")
+    domain = value.removesuffix(".").lower()
+    try:
+        domain = domain.encode("idna").decode("ascii")
+        # Validate existing A-labels too (the encoder otherwise passes them through).
+        domain.encode("ascii").decode("idna")
+    except UnicodeError as exc:
+        raise ValueError("invalid IDNA domain") from exc
+    labels = domain.split(".")
+    if len(domain) > 253 or len(labels) < 2 or any(not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label) for label in labels):
+        raise ValueError("expected a DNS domain without scheme, port, path or operators")
+    try:
+        ip_address(domain)
+    except ValueError:
+        if _decode_ipv4(domain) is None:
+            return domain
+    raise ValueError("IP literals are not domains")
+
+
+def _domain_list(extra: dict, name: str) -> list[str]:
+    values = extra.get(name, [])
+    if not isinstance(values, list) or len(values) > 10:
+        raise ValueError(f"{name} must be a list of at most 10 domains")
+    try:
+        return list(dict.fromkeys(_normalize_domain(value) for value in values))
+    except ValueError as exc:
+        raise ValueError(f"Invalid {name}: {exc}") from exc
+
+
+def _domain_query(query: str, include: list[str], exclude: list[str]) -> str:
+    if not include and not exclude:
+        return query
+    parts = [f"({query})"]
+    if include:
+        parts.append("(" + " OR ".join(f"site:{domain}" for domain in include) + ")")
+    parts.extend(f"-site:{domain}" for domain in exclude)
+    scoped = " ".join(parts)
+    if len(scoped) > 500:
+        raise ValueError("Serper query with domain filters exceeds 500 characters; shorten the query or domain lists")
+    return scoped
+
+
+def _matches_domain_scope(value: object, include: list[str], exclude: list[str]) -> bool:
+    # This is source selection, not DNS resolution or a fetch permission check.
+    if not isinstance(value, str) or any(ord(char) <= 32 or ord(char) == 127 for char in value) or "\\" in value:
+        return False
+    try:
+        parsed = urlparse(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.username is not None or parsed.password is not None:
+            return False
+        _ = parsed.port  # Reject malformed/out-of-range ports.
+        host = _normalize_domain(parsed.hostname)
+    except ValueError:
+        return False
+
+    def matches(domains: list[str]) -> bool:
+        return any(host == domain or host.endswith("." + domain) for domain in domains)
+
+    return not matches(exclude) and (not include or matches(include))
+
+
+def _decode_ipv4(host: str) -> IPv4Address | None:
+    """Decode obfuscated IPv4 literals that ``ip_address`` rejects.
+
+    Mirrors the permissive ``inet_aton`` parsing many HTTP clients use, so that
+    integer (``2130706433``), hex (``0x7f000001``) and octal (``0177.0.0.1``)
+    encodings of an address are recognized. Returns an ``IPv4Address`` when the
+    host decodes to one, otherwise ``None`` (e.g. real domains like
+    ``cafe.com`` fail to decode and are left for the caller to treat as a host).
+    """
+    parts = host.split(".")
+    if not 1 <= len(parts) <= 4:
+        return None
+
+    values: list[int] = []
+    for part in parts:
+        if not part:
+            return None
+        try:
+            if part.startswith(("0x", "0X")):
+                values.append(int(part, 16))
+            elif part.startswith("0") and len(part) > 1:
+                values.append(int(part, 8))
+            else:
+                values.append(int(part, 10))
+        except ValueError:
+            return None
+
+    *leading, last = values
+    for value in leading:
+        if not 0 <= value <= 0xFF:
+            return None
+    max_last = (1 << (8 * (4 - len(leading)))) - 1
+    if not 0 <= last <= max_last:
+        return None
+
+    result = 0
+    for value in leading:
+        result = (result << 8) | value
+    result = (result << (8 * (4 - len(leading)))) | last
+    return ip_address(result)
+
+
+def _is_url_present(value: object) -> bool:
+    """Return ``True`` when *value* is a non-empty URL string.
+
+    Used to distinguish a field that was *absent* (eligible for cross-field
+    fallback) from one that was *present but filtered* by the SSRF guard (which
+    must stay empty rather than collapse onto its counterpart).
+    """
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _retry_options(config) -> dict:
+    extra = config.model_extra if config is not None else {}
+    return {name: extra[name] for name in ("max_retries", "retry_budget_seconds") if name in extra}
+
+
+_DAY = r"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)"
+_MONTH = r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)"
+_CLOCK = r"[0-9]{2}:[0-9]{2}:[0-9]{2}"
+_HTTP_DATE = re.compile(
+    rf"(?:{_DAY}, [0-9]{{2}} {_MONTH} [0-9]{{4}} {_CLOCK} GMT"
+    rf"|(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday), [0-9]{{2}}-{_MONTH}-[0-9]{{2}} {_CLOCK} GMT"
+    rf"|{_DAY} {_MONTH} (?:[0-9]{{2}}| [0-9]) {_CLOCK} [0-9]{{4}})"
+)
+
+
+def _retry_after(response: httpx.Response) -> float | None:
+    """Return a server floor, or None for an invalid HTTP Retry-After value."""
+    value = response.headers.get("Retry-After")
+    if value is None:
+        return None
+    value = value.strip(" \t")
+    if value and value.isascii() and value.isdecimal():
+        digits = value.lstrip("0") or "0"
+        # Bound integer conversion work. Infinity is a valid, unfit floor, not
+        # a parsing failure that could cause an early fallback retry.
+        if len(digits) > 309:
+            return math.inf
+        seconds = int(digits)
+        try:
+            floor = float(seconds)
+        except OverflowError:
+            return math.inf
+        return math.nextafter(floor, math.inf) if floor < seconds else floor
+    if not _HTTP_DATE.fullmatch(value):
+        return None
+    try:
+        date = parsedate_to_datetime(value).replace(tzinfo=UTC)
+        now = time.time()
+        if "-" in value:
+            # RFC 850 two-digit years: choose the most recent matching year
+            # no more than 50 years in the future (RFC 9110 section 5.6.7).
+            current = datetime.fromtimestamp(now, UTC)
+            year = (current.year + 50) // 100 * 100 + date.year % 100
+            if (year, date.month, date.day, date.hour, date.minute, date.second) > (current.year + 50, current.month, current.day, current.hour, current.minute, current.second):
+                year -= 100
+            date = date.replace(year=year)
+        return max(0.0, date.timestamp() - now)
+    except (ValueError, OverflowError):
+        return None
+
+
+def _serper_post(
+    endpoint: str,
+    api_key: str,
+    query: str,
+    max_results: int,
+    *,
+    time_range: SearchTimeRange | None = None,
+    base_url: object | None = None,
+    max_retries: int = 0,
+    retry_budget_seconds: float = 30,
+) -> tuple[dict | None, str | None]:
+    """Send a POST request to a Serper endpoint.
+
+    Retries share a scheduling deadline, not a hard synchronous I/O deadline.
+    HTTPX timeouts remain per phase; an active request cannot be cancelled here.
+
+    ``query`` is expected to already be normalized via :func:`_clean_query`.
+    A non-blank string ``base_url`` overrides ``SERPER_BASE_URL``; other raw
+    tool-config values fall back to the environment and then the default endpoint.
+    Overrides must be absolute HTTP(S) URLs with a host and no query or fragment.
+    The API key is sent only via ``X-API-KEY`` to the resolved endpoint.
+
+    Returns a ``(data, error_json)`` tuple: on success ``data`` is the parsed
+    JSON response and ``error_json`` is ``None``; on failure ``data`` is ``None``
+    and ``error_json`` is a serialized structured error ready to return.
+    """
+    headers = {
+        "X-API-KEY": api_key,
+        "Content-Type": "application/json",
+    }
+    payload = {"q": query, "num": max_results}
+    if time_range is not None:
+        payload["tbs"] = _SERPER_TBS_BY_TIME_RANGE[time_range]
+
+    try:
+        if isinstance(max_retries, bool) or not isinstance(max_retries, int) or not 0 <= max_retries <= 3:
+            raise ValueError("max_retries must be an integer between 0 and 3")
+        if isinstance(retry_budget_seconds, bool) or not isinstance(retry_budget_seconds, (int, float)) or not 0 < retry_budget_seconds <= 300 or not math.isfinite(retry_budget_seconds):
+            raise ValueError("retry_budget_seconds must be a finite number greater than 0 and at most 300")
+        deadline = time.monotonic() + retry_budget_seconds
+        # Resolve once before transport setup so retries can reuse this endpoint.
+        if not isinstance(base_url, str) or not base_url.strip():
+            base_url = os.getenv("SERPER_BASE_URL") or ""
+        base_url = base_url.strip()
+        if base_url:
+            try:
+                parsed_base = urlparse(base_url)
+                valid_base = parsed_base.scheme in {"http", "https"} and bool(parsed_base.netloc and parsed_base.hostname) and "?" not in base_url and "#" not in base_url
+                # Accessing port also rejects invalid and out-of-range ports.
+                parsed_base.port
+            except ValueError:
+                valid_base = False
+            if not valid_base:
+                raise ValueError("Invalid Serper base_url/SERPER_BASE_URL: use an absolute HTTP(S) URL with a host, a valid port, and no query or fragment")
+            endpoint = base_url.rstrip("/") + "/" + endpoint.rsplit("/", 1)[-1]
+            parsed_endpoint = urlparse(endpoint)
+            logger.debug(
+                "Serper endpoint from base_url/SERPER_BASE_URL: %s://%s%s",
+                parsed_endpoint.scheme,
+                parsed_endpoint.netloc.rsplit("@", 1)[-1],
+                parsed_endpoint.path,
+            )
+        with httpx.Client(timeout=30) as client:
+            for attempt in range(max_retries + 1):
+                try:
+                    response = client.post(endpoint, headers=headers, json=payload)
+                    response.raise_for_status()
+                    break
+                except (httpx.ConnectError, httpx.ConnectTimeout, httpx.HTTPStatusError) as exc:
+                    if attempt >= max_retries:
+                        raise
+                    hint = None
+                    if isinstance(exc, httpx.HTTPStatusError):
+                        status = exc.response.status_code
+                        if status in (429, 503):
+                            hint = _retry_after(exc.response)
+                        if status not in (502, 503, 504) and not (status == 429 and hint is not None):
+                            raise
+                    # Equal jitter retains exponential pacing even for Retry-After: 0.
+                    backoff = min(0.5 * 2**attempt, 2.0)
+                    delay = max(random.uniform(backoff / 2, backoff), hint or 0.0)
+                    if delay >= deadline - time.monotonic():
+                        logger.warning("Serper retry time budget exhausted before backoff after %d attempt(s)", attempt + 1)
+                        raise
+                    time.sleep(delay)
+                    if time.monotonic() >= deadline:
+                        logger.warning("Serper retry time budget exhausted after backoff after %d attempt(s)", attempt + 1)
+                        raise
+        data = response.json()
+        if not isinstance(data, dict):
+            logger.error("Serper returned an unexpected payload type: %s", type(data).__name__)
+            return None, _unexpected_format_error(query)
+        return data, None
+    except httpx.HTTPStatusError as e:
+        resp_text = (e.response.text or "")[:500]
+        logger.error("Serper API returned HTTP %s: %s", e.response.status_code, resp_text)
+        return None, json.dumps(
+            {"error": f"Serper API error: HTTP {e.response.status_code}", "query": query},
+            ensure_ascii=False,
+        )
+    except Exception as e:
+        logger.error("Serper request failed: %s: %s", type(e).__name__, str(e)[:500])
+        return None, json.dumps({"error": str(e)[:500], "query": query}, ensure_ascii=False)
+
+
+@tool("web_search", parse_docstring=True)
+def web_search_tool(query: str, max_results: int = 5, time_range: SearchTimeRange | None = None) -> str:
+    """Search the web for information using Google Search via Serper.
+
+    Args:
+        query: Search keywords describing what you want to find. Be specific for better results.
+        max_results: Maximum number of search results to return. Default is 5, capped at 10.
+        time_range: Optional relative publication/update window. Use only when the request requires recent results.
+    """
+    config = get_app_config().get_tool_config("web_search")
+    if config is not None and "max_results" in config.model_extra:
+        max_results = config.model_extra.get("max_results", max_results)
+    max_results = _count_for_request(max_results)
+    query = _clean_query(query)
+
+    try:
+        extra = config.model_extra if config is not None else {}
+        include = _domain_list(extra, "include_domains")
+        exclude = _domain_list(extra, "exclude_domains")
+        search_query = _domain_query(query, include, exclude)
+    except ValueError as exc:
+        logger.error("Invalid Serper domain filters: %s", exc)
+        return json.dumps({"error": str(exc), "query": query}, ensure_ascii=False)
+
+    api_key = _get_api_key("web_search", extras=extra)
+    if not api_key:
+        return _missing_key_error(query, "web_search")
+
+    base_url = extra.get("base_url")
+    data, error_json = _serper_post(_SERPER_SEARCH_ENDPOINT, api_key, search_query, max_results, time_range=time_range, base_url=base_url, **_retry_options(config))
+    if error_json is not None:
+        error = json.loads(error_json)
+        error["query"] = query
+        return json.dumps(error, ensure_ascii=False)
+
+    organic, error_json = _response_items(data, "organic", query)
+    if error_json is not None:
+        return error_json
+    if not organic and not (include or exclude):
+        return json.dumps({"error": "No results found", "query": query}, ensure_ascii=False)
+
+    if include or exclude:
+        organic = [result for result in organic if _matches_domain_scope(result.get("link"), include, exclude)]
+
+    # Search result links go through _safe_public_url like image URLs, so a
+    # loopback or metadata-service address never reaches the model as a
+    # citation, even though this tool does not fetch it (#7036).
+    normalized_results = [
+        {
+            "title": r.get("title", ""),
+            "url": _safe_public_url(r.get("link")),
+            "content": r.get("snippet", ""),
+        }
+        for r in organic[:max_results]
+    ]
+
+    output = {
+        "query": query,
+        "total_results": len(normalized_results),
+        "results": normalized_results,
+    }
+    return json.dumps(output, indent=2, ensure_ascii=False)
+
+
+@tool("image_search", parse_docstring=True)
+def image_search_tool(query: str, max_results: int = 5) -> str:
+    """Search for images online using Google Images via Serper. Use this tool BEFORE image generation to find reference images for characters, portraits, objects, scenes, or any content requiring visual accuracy.
+
+    The returned image URLs can be used as reference images in image generation to significantly improve quality.
+
+    Args:
+        query: Search keywords describing the images you want to find. Be specific for better results (e.g., "Japanese woman street photography 1990s" instead of just "woman").
+        max_results: Maximum number of images to return. Default is 5, capped at 10.
+    """
+    config = get_app_config().get_tool_config("image_search")
+    if config is not None and "max_results" in config.model_extra:
+        max_results = config.model_extra.get("max_results", max_results)
+    max_results = _count_for_request(max_results)
+    query = _clean_query(query)
+
+    extra = config.model_extra if config is not None else {}
+    api_key = _get_api_key("image_search", extras=extra)
+    if not api_key:
+        return _missing_key_error(query, "image_search")
+
+    base_url = extra.get("base_url")
+    data, error_json = _serper_post(_SERPER_IMAGES_ENDPOINT, api_key, query, max_results, base_url=base_url, **_retry_options(config))
+    if error_json is not None:
+        return error_json
+
+    images, error_json = _response_items(data, "images", query)
+    if error_json is not None:
+        return error_json
+    if not images:
+        return json.dumps({"error": "No images found", "query": query}, ensure_ascii=False)
+
+    normalized_results = []
+    for r in images:
+        raw_image = r.get("imageUrl")
+        raw_thumb = r.get("thumbnailUrl")
+        # Evaluate the (non-trivial) SSRF guard once per field instead of twice.
+        safe_image = _safe_public_url(raw_image)
+        safe_thumb = _safe_public_url(raw_thumb)
+        # Cross-fall back only when the other field was *absent*. A field that
+        # was present but failed the SSRF filter is left empty rather than
+        # collapsed onto its counterpart, so a dropped high-res URL never
+        # silently masquerades as the preview (and vice versa), preserving the
+        # high-res/preview contract callers rely on.
+        image_url = safe_image or (safe_thumb if not _is_url_present(raw_image) else "")
+        thumbnail_url = safe_thumb or (safe_image if not _is_url_present(raw_thumb) else "")
+        if not image_url and not thumbnail_url:
+            continue
+        normalized_results.append(
+            {
+                "title": r.get("title", ""),
+                "image_url": image_url,
+                "thumbnail_url": thumbnail_url,
+                "source_url": _safe_public_url(r.get("link")),
+            }
+        )
+        if len(normalized_results) >= max_results:
+            break
+
+    if not normalized_results:
+        return json.dumps({"error": "No safe image URLs found", "query": query}, ensure_ascii=False)
+
+    output = {
+        "query": query,
+        "total_results": len(normalized_results),
+        "results": normalized_results,
+        "usage_hint": "Use the 'image_url' values as reference images in image generation. Download them first if needed.",
+    }
+    return json.dumps(output, indent=2, ensure_ascii=False)

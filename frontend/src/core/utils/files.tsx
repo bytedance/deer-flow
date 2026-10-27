@@ -12,6 +12,7 @@ const extensionMap: Record<string, string> = {
   // Text
   txt: "text",
   csv: "csv",
+  tsv: "tsv",
   log: "text",
   conf: "text",
   config: "text",
@@ -108,7 +109,8 @@ const extensionMap: Record<string, string> = {
   lua: "lua",
   r: "r",
   matlab: "matlab",
-  julia: "jl",
+  julia: "julia",
+  jl: "julia",
   elm: "elm",
   haskell: "haskell",
   hs: "haskell",
@@ -143,12 +145,35 @@ const extensionMap: Record<string, string> = {
   v: "v",
 };
 
+const browserPreviewExtensions = new Set([
+  "pdf",
+  "apng",
+  "avif",
+  "bmp",
+  "gif",
+  "ico",
+  "jpg",
+  "jpeg",
+  "png",
+  "webp",
+  "mp3",
+  "wav",
+  "ogg",
+  "aac",
+  "m4a",
+  "flac",
+  "mp4",
+  "mov",
+  "m4v",
+  "webm",
+]);
+
 export function getFileName(filepath: string) {
   return filepath.split("/").pop()!;
 }
 
 export function getFileExtension(filepath: string) {
-  return filepath.split(".").pop()!.toLocaleLowerCase();
+  return getFileName(filepath).split(".").pop()!.toLocaleLowerCase();
 }
 
 export function checkCodeFile(
@@ -157,7 +182,7 @@ export function checkCodeFile(
   | { isCodeFile: true; language: string }
   | { isCodeFile: false; language: null } {
   const extension = getFileExtension(filepath);
-  const isCodeFile = extension in extensionMap;
+  const isCodeFile = Object.hasOwn(extensionMap, extension);
   if (isCodeFile) {
     return {
       isCodeFile: true,
@@ -168,6 +193,10 @@ export function checkCodeFile(
     isCodeFile: false,
     language: null,
   };
+}
+
+export function canBrowserPreviewFile(filepath: string) {
+  return browserPreviewExtensions.has(getFileExtension(filepath));
 }
 
 export function getFileExtensionDisplayName(filepath: string) {
@@ -206,6 +235,8 @@ export function getFileIcon(filepath: string, className?: string) {
     case "jpg":
     case "jpeg":
     case "png":
+    case "apng":
+    case "avif":
     case "gif":
     case "bmp":
     case "tiff":
@@ -226,6 +257,7 @@ export function getFileIcon(filepath: string, className?: string) {
     case "mp4":
     case "mov":
     case "m4v":
+    case "webm":
       return <FilePlayIcon className={className} />;
     default:
       if (isCodeFile) {

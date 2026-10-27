@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import sys
+import threading
 from types import ModuleType
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from deerflow.utils.file_conversion import (
-    _ASYNC_THRESHOLD_BYTES,
     _MIN_CHARS_PER_PAGE,
     MAX_OUTLINE_ENTRIES,
     _do_convert,
@@ -239,65 +242,59 @@ class TestGetPdfConverter:
 
 
 class TestConvertFileToMarkdown:
-    def test_small_file_runs_synchronously(self, tmp_path):
-        """Small files (< 1 MB) are converted in the event loop thread."""
-        pdf = tmp_path / "small.pdf"
-        pdf.write_bytes(b"%PDF-1.4 " + b"x" * 100)  # well under 1 MB
+    @pytest.mark.parametrize("file_size", [100, 1024 * 1024, 1024 * 1024 + 1], ids=["small", "former-threshold", "large"])
+    def test_conversion_runs_off_loop_for_every_file_size(self, tmp_path, file_size):
+        """Compressed byte size cannot bound a document's parsing time."""
+        source = tmp_path / "report.xlsx"
+        source.write_bytes(b"x" * file_size)
+        loop_thread = threading.get_ident()
+        worker_threads = []
+        request_context = contextvars.ContextVar("conversion_request_context")
+        token = request_context.set("upload-request")
 
-        with (
-            patch("deerflow.utils.file_conversion._get_pdf_converter", return_value="auto"),
-            patch(
-                "deerflow.utils.file_conversion._do_convert",
-                return_value="# Small PDF",
-            ) as mock_convert,
-            patch("asyncio.to_thread") as mock_thread,
-        ):
-            md_path = _run(convert_file_to_markdown(pdf))
+        def convert(path, converter):
+            worker_threads.append(threading.get_ident())
+            assert path == source
+            assert converter == "auto"
+            assert request_context.get() == "upload-request"
+            return "# Converted document"
 
-        # asyncio.to_thread must NOT have been called
-        mock_thread.assert_not_called()
-        mock_convert.assert_called_once()
-        assert md_path == pdf.with_suffix(".md")
-        assert md_path.read_text() == "# Small PDF"
+        try:
+            with (
+                patch("deerflow.utils.file_conversion._get_pdf_converter", return_value="auto"),
+                patch("deerflow.utils.file_conversion._do_convert", side_effect=convert),
+            ):
+                md_path = _run(convert_file_to_markdown(source))
+        finally:
+            request_context.reset(token)
 
-    def test_large_file_offloaded_to_thread(self, tmp_path):
-        """Large files (> 1 MB) are offloaded via asyncio.to_thread."""
-        pdf = tmp_path / "large.pdf"
-        # Write slightly more than the threshold
-        pdf.write_bytes(b"%PDF-1.4 " + b"x" * (_ASYNC_THRESHOLD_BYTES + 1))
-
-        async def fake_to_thread(fn, *args, **kwargs):
-            return fn(*args, **kwargs)
-
-        with (
-            patch("deerflow.utils.file_conversion._get_pdf_converter", return_value="auto"),
-            patch(
-                "deerflow.utils.file_conversion._do_convert",
-                return_value="# Large PDF",
-            ),
-            patch("asyncio.to_thread", side_effect=fake_to_thread) as mock_thread,
-        ):
-            md_path = _run(convert_file_to_markdown(pdf))
-
-        mock_thread.assert_called_once()
-        assert md_path == pdf.with_suffix(".md")
-        assert md_path.read_text() == "# Large PDF"
+        assert len(worker_threads) == 1
+        assert worker_threads[0] != loop_thread, "document parsing occupied the calling event-loop thread"
+        assert md_path == source.with_suffix(".md")
+        assert md_path.read_text(encoding="utf-8") == "# Converted document"
 
     def test_returns_none_on_conversion_error(self, tmp_path):
         """If conversion raises, return None without propagating the exception."""
         pdf = tmp_path / "broken.pdf"
         pdf.write_bytes(b"%PDF-1.4 fake")
 
+        worker_threads = []
+        loop_thread = threading.get_ident()
+
+        def fail_conversion(*_args):
+            worker_threads.append(threading.get_ident())
+            raise RuntimeError("conversion failed")
+
         with (
             patch("deerflow.utils.file_conversion._get_pdf_converter", return_value="auto"),
-            patch(
-                "deerflow.utils.file_conversion._do_convert",
-                side_effect=RuntimeError("conversion failed"),
-            ),
+            patch("deerflow.utils.file_conversion._do_convert", side_effect=fail_conversion),
         ):
             result = _run(convert_file_to_markdown(pdf))
 
         assert result is None
+        assert len(worker_threads) == 1
+        assert worker_threads[0] != loop_thread
+        assert not pdf.with_suffix(".md").exists()
 
     def test_writes_utf8_markdown_file(self, tmp_path):
         """Generated .md file is written with UTF-8 encoding."""
@@ -422,6 +419,15 @@ class TestExtractOutline:
         assert len(outline) == 5
         assert not any(e.get("truncated") for e in outline)
 
+    def test_no_truncation_sentinel_at_exact_limit(self, tmp_path):
+        """A document with exactly MAX_OUTLINE_ENTRIES headings is not truncated."""
+        lines = [f"# Heading {i}" for i in range(MAX_OUTLINE_ENTRIES)]
+        md = tmp_path / "exact.md"
+        md.write_text("\n".join(lines), encoding="utf-8")
+        outline = extract_outline(md)
+        assert len(outline) == MAX_OUTLINE_ENTRIES
+        assert not any(e.get("truncated") for e in outline)
+
     def test_blank_lines_and_whitespace_ignored(self, tmp_path):
         """Blank lines between headings do not produce empty entries."""
         md = tmp_path / "spaced.md"
@@ -476,3 +482,102 @@ class TestExtractOutline:
         assert len(outline) == 1
         # Title must be clean — no ** ** artefacts
         assert outline[0]["title"] == "UNITED STATES SECURITIES AND EXCHANGE COMMISSION"
+
+
+# ---------------------------------------------------------------------------
+# Off-loop stat/write-back: cancellation drain and executor re-entrancy
+# (review follow-ups on the uploads conversion PR)
+# ---------------------------------------------------------------------------
+
+
+def test_cancelled_conversion_drains_write_and_removes_partial(tmp_path, monkeypatch):
+    """Cancel must not abandon the in-flight write, and must clean the partial file.
+
+    ``run_file_io`` awaits ``run_in_executor``, so a plain await would unwind
+    while the worker is still writing; the drained write delivers the
+    cancellation only after the worker settled, and the handler then removes
+    the partial output so repeated cancelled conversions cannot leave large
+    hidden staging files behind.
+    """
+    import threading
+    from pathlib import Path
+
+    started = threading.Event()
+    cancel_issued = threading.Event()
+    release = threading.Event()
+    done = threading.Event()
+    real_write_text = Path.write_text
+
+    def _blocking_write_text(self, data, encoding=None):
+        started.set()
+        release.wait(timeout=10)
+        result = real_write_text(self, data, encoding=encoding)
+        done.set()
+        return result
+
+    # Seed the source BEFORE installing the patch, so the setup write is not
+    # captured by _blocking_write_text (which would pre-set started/done).
+    src = tmp_path / "doc.txt"
+    out = tmp_path / "doc.md"
+    src.write_text("hello")
+
+    # Isolate write cancellation from parser imports and conversion latency.
+    monkeypatch.setattr("deerflow.utils.file_conversion._do_convert", lambda _path, _converter: "hello")
+    monkeypatch.setattr(Path, "write_text", _blocking_write_text)
+
+    async def _scenario():
+        task = asyncio.create_task(convert_file_to_markdown(src, output_path=out))
+        assert await asyncio.to_thread(started.wait, 10), "the write worker never started"
+        task.cancel()
+        # Release the worker only after the cancel is in flight, so the
+        # ordering (cancel first, then the write settles) is forced and the
+        # assertion below cannot pass by racing the releaser.
+        cancel_issued.set()
+        try:
+            await task
+        except asyncio.CancelledError:
+            # The drain invariant: the cancellation is delivered only after
+            # the in-flight write settled. A plain run_file_io await cancels
+            # immediately and leaves the worker running.
+            return done.is_set()
+        return "not-cancelled"
+
+    releaser = threading.Thread(target=lambda: (started.wait(10), cancel_issued.wait(10), release.set()), daemon=True)
+    releaser.start()
+    try:
+        settled = asyncio.run(_scenario())
+    finally:
+        release.set()
+        releaser.join(10)
+
+    assert settled is True, "cancellation was delivered before the in-flight write drained"
+    assert done.wait(timeout=10), "the write worker never settled"
+    assert not out.exists(), "partial output left behind after a cancelled conversion"
+
+
+def test_conversion_inside_file_io_worker_runs_nested_offload_inline(tmp_path, monkeypatch):
+    """A conversion started inside a file-IO worker must not re-enter the pool.
+
+    Project-document conversion runs its worker body through ``run_file_io``
+    and that body calls ``asyncio.run(convert_file_to_markdown(...))``, whose
+    own stat/write offloads used to submit to the same bounded executor —
+    deadlocking once every worker is busy (deterministically with a single
+    configured worker). ``run_file_io`` now runs nested calls inline in the
+    worker thread; this pins that behavior by thread identity.
+    """
+    import threading
+
+    from deerflow.utils import file_io
+
+    observed: dict[str, object] = {}
+
+    def _nested() -> str:
+        observed["nested_thread"] = threading.current_thread()
+        return "ok"
+
+    def _worker_body() -> str:
+        observed["worker_thread"] = threading.current_thread()
+        return asyncio.run(file_io.run_file_io(_nested))
+
+    assert asyncio.run(file_io.run_file_io(_worker_body)) == "ok"
+    assert observed["nested_thread"] is observed["worker_thread"], "nested run_file_io from inside a file-io worker must run inline; submitting to the same bounded executor can deadlock conversion"

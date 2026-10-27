@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 💬 Questions & usage help
+    url: https://github.com/bytedance/deer-flow/discussions/categories/q-a
+    about: "How do I use X? Why does Y behave like that? Ask in Discussions — it gets answered faster and stays searchable."
+  - name: 💡 Ideas & proposals
+    url: https://github.com/bytedance/deer-flow/discussions/categories/ideas
+    about: Have a half-formed idea? Float it in Discussions before opening a formal feature request.
+  - name: 🔒 Report a security vulnerability
+    url: https://github.com/bytedance/deer-flow/security/policy
+    about: Do not open a public issue for security problems. Follow the security policy instead.

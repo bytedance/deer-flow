@@ -1,0 +1,151 @@
+import {
+  ACCOUNT_DISABLED_LOGIN_URL,
+  buildLoginUrl,
+  currentReturnPath,
+  parseAuthError,
+} from "@/core/auth/types";
+import { isStaticWebsiteOnly } from "@/core/static-mode";
+
+import { UnauthorizedError } from "./errors";
+import { staticApiResponse } from "./static-response";
+
+/** HTTP methods that the gateway's CSRFMiddleware checks. */
+export type StateChangingMethod = "POST" | "PUT" | "DELETE" | "PATCH";
+
+export const STATE_CHANGING_METHODS: ReadonlySet<StateChangingMethod> = new Set(
+  ["POST", "PUT", "DELETE", "PATCH"],
+);
+
+/** Mirror of the gateway's ``should_check_csrf`` decision. */
+export function isStateChangingMethod(method: string): boolean {
+  return (STATE_CHANGING_METHODS as ReadonlySet<string>).has(
+    method.toUpperCase(),
+  );
+}
+
+const CSRF_COOKIE_PREFIX = "csrf_token=";
+
+/**
+ * Read the ``csrf_token`` cookie set by the gateway at login.
+ *
+ * SSR-safe: returns ``null`` when ``document`` is undefined so the same
+ * helper can be imported from server components without a guard.
+ *
+ * Uses `String.split` instead of a regex to side-step ESLint's
+ * `prefer-regexp-exec` rule and the cookie value's reliable `; `
+ * separator (set by the gateway, not the browser, so format is stable).
+ */
+export function readCsrfCookie(): string | null {
+  if (typeof document === "undefined") return null;
+  for (const pair of document.cookie.split("; ")) {
+    if (pair.startsWith(CSRF_COOKIE_PREFIX)) {
+      const value = pair.slice(CSRF_COOKIE_PREFIX.length);
+      try {
+        return decodeURIComponent(value);
+      } catch {
+        // Cookies are shared by every app on the same host. A value set or
+        // truncated outside the gateway (or a stray `%` escape) is still a
+        // string, and throwing here would break every API call — fall back
+        // to the raw value, as `getLocaleFromCookie` does.
+        return value;
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Fetch with credentials and automatic CSRF protection.
+ *
+ * Two centralized contracts every API call needs:
+ *
+ * 1. ``credentials: "include"`` so the HttpOnly access_token cookie
+ *    accompanies cross-origin SSR-routed requests.
+ * 2. ``X-CSRF-Token`` header on state-changing methods (POST/PUT/
+ *    DELETE/PATCH), echoed from the ``csrf_token`` cookie. The gateway's
+ *    CSRFMiddleware enforces Double Submit Cookie comparison and returns
+ *    403 if the header is missing — silently breaking every call site
+ *    that uses raw ``fetch()`` instead of this wrapper.
+ *
+ * Auto-redirects to ``/login`` on 401. Caller-supplied headers are
+ * preserved; the helper only ADDS the CSRF header when it isn't already
+ * present, so explicit overrides win.
+ */
+export async function fetch(
+  input: RequestInfo | string,
+  init?: RequestInit,
+): Promise<Response> {
+  const request = typeof input === "string" ? undefined : input;
+  const url = typeof input === "string" ? input : input.url;
+  const method = init?.method ?? request?.method ?? "GET";
+  let headers = init?.headers ?? request?.headers;
+
+  // Static demos have no Gateway. Resolve REST calls before credentials,
+  // CSRF, or redirects; demo assets and explicit mock routes still use HTTP.
+  if (isStaticWebsiteOnly()) {
+    const response = await staticApiResponse(url, {
+      ...init,
+      method,
+      headers,
+      signal: init?.signal === undefined ? request?.signal : init.signal,
+    });
+    if (response) return response;
+  }
+
+  // Inject CSRF for state-changing methods. GET/HEAD/OPTIONS/TRACE skip
+  // it to mirror the gateway's ``should_check_csrf`` logic exactly.
+  if (isStateChangingMethod(method)) {
+    const token = readCsrfCookie();
+    if (token) {
+      // Fresh Headers instance so we don't mutate caller-supplied objects.
+      const merged = new Headers(headers);
+      if (!merged.has("X-CSRF-Token")) {
+        merged.set("X-CSRF-Token", token);
+      }
+      headers = merged;
+    }
+  }
+
+  const res = await globalThis.fetch(input, {
+    ...init,
+    headers,
+    credentials: "include",
+  });
+
+  if (res.status === 401) {
+    // An operator-disabled account (#4063 gap 3) gets a distinct code on the
+    // session surface; it cannot sign back in, so skip the `next` round-trip
+    // and land on a login page that states the reason.
+    // Body-consumption contract: the JSON body is consumed for the code and
+    // must never be read again below this line — every branch exits by
+    // throwing UnauthorizedError, so a future fall-through (e.g. telemetry)
+    // must not re-read `res`.
+    const code = await res
+      .json()
+      .then((data) => parseAuthError(data).code)
+      .catch(() => null);
+    if (code === "account_disabled") {
+      window.location.href = ACCOUNT_DISABLED_LOGIN_URL;
+      throw new UnauthorizedError();
+    }
+    window.location.href = buildLoginUrl(currentReturnPath());
+    throw new UnauthorizedError();
+  }
+
+  return res;
+}
+
+/**
+ * Build headers for CSRF-protected requests.
+ *
+ * **Prefer :func:`fetchWithAuth`** for new code — it injects the header
+ * automatically on state-changing methods. This helper exists for legacy
+ * call sites that need to compose headers manually (e.g. inside
+ * `next/server` route handlers that build their own ``Headers`` object).
+ *
+ * Per RFC-001: Double Submit Cookie pattern.
+ */
+export function getCsrfHeaders(): HeadersInit {
+  const token = readCsrfCookie();
+  return token ? { "X-CSRF-Token": token } : {};
+}

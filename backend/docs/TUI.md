@@ -1,0 +1,188 @@
+# DeerFlow Terminal Workbench (TUI)
+
+`deerflow` is a terminal-native workbench for the DeerFlow harness. It runs
+**embedded** over `DeerFlowClient` — no Gateway, frontend, nginx, or Docker
+services required — while honoring the same `config.yaml`, checkpointer, skills,
+memory, MCP, and sandbox settings as the rest of DeerFlow.
+
+![DeerFlow TUI](../../docs/tui/tui-preview.svg)
+
+## Install & run
+
+The TUI ships as an optional extra so the core harness install stays lean:
+
+```bash
+uv pip install 'deerflow-harness[tui]'    # or: pip install textual
+```
+
+Launch modes:
+
+| Command | Behavior |
+|---|---|
+| `deerflow` | Launch the TUI when stdin/stdout are TTYs |
+| `deerflow --tui` | Force the TUI (clear diagnostic if `textual` is missing) |
+| `deerflow --tui-transparent` | Use the terminal's default background when launching the TUI |
+| `deerflow --cli` | Force headless/classic mode for one invocation |
+| `deerflow chat` | Same TUI conversation surface |
+| `deerflow --continue` | Resume the most recent thread |
+| `deerflow --resume THREAD` | Resume a thread by id |
+| `deerflow --print "question"` | Headless one-shot answer to stdout; on failure a concise stderr line and exit 1 |
+| `deerflow --json "question"` | Headless newline-delimited `StreamEvent`s; on failure one terminal `{"type": "error"}` record and exit 1 |
+| `deerflow --recursion-limit 250 --print "question"` | Set the headless agent-loop super-step limit |
+| `echo "q" \| deerflow --print` | Read the message from stdin |
+| `DEER_FLOW_TUI=1 deerflow` | Force the TUI via environment |
+| `DEER_FLOW_TUI_TRANSPARENT=1 deerflow` | Persist terminal-background rendering via environment |
+
+`--print` and `--json` keep every word of an unquoted message, and words before
+a bare flag (`deerflow summarize this repo --print`) are the message, as with
+`--cli`. A message given on the command line wins over piped stdin. Words on
+both sides of the flag are rejected with exit 2, since their order cannot be
+recovered. `--print` and `--json` cannot be combined; pick one output mode.
+
+If no TTY is available and no headless flag is given, `deerflow` prints guidance
+instead of hanging.
+
+Provider failures (for example an expired credential) usually do not raise: the
+LLM error middleware turns them into a final AI message flagged
+`deerflow_error_fallback`. Headless runs treat that as a failure too — `--print`
+still writes the fallback text to stdout, then prints
+`Error: LLM request failed (error_type=…, error_reason=…)` to stderr; `--json`
+appends the same terminal `{"type": "error"}` record. Both exit `1`.
+
+Transparent rendering is opt-in; the solid DeerFlow palette remains the default.
+The transparent mode uses Textual's `ansi_default` background for the main
+screen, header, transcript, status, palette, composer, and modal surfaces while
+keeping truecolor foregrounds and selection highlights. Combine
+`--tui-transparent` with `--tui` when the UI also needs to be forced without a
+detected TTY.
+
+Headless runs use a recursion limit of `100` by default. Pass a positive
+`--recursion-limit` when a longer agent loop is expected. This is a LangGraph
+super-step budget, so it can include model and tool-execution steps rather than
+mapping one-to-one to conversational turns. The `max_recursion_limit` setting
+is a Gateway safety ceiling for client-supplied values; it is not the default
+for trusted embedded CLI runs.
+
+## Surface
+
+- **Header** — model, thread, project root, skill/tool counts.
+- **Transcript** — user prompts, assistant answers, and compact tool cards
+  (`⚙ Read path ✓`) with dimmed result previews. Finalized assistant messages
+  render as Markdown (headings, bold, lists, code, links); the actively-streaming
+  message stays plain text to avoid reflow jumpiness and snaps to Markdown when
+  it completes. Transcript re-renders are coalesced (~16 fps) so streaming stays
+  smooth on long threads.
+- **Status line** — run state + animated spinner, model, thread title, token
+  usage, and an `esc interrupt` hint while a run is active.
+- **Composer** — rounded multiline input box. `/` opens the command palette.
+  Pasted code, stack traces, and multi-paragraph prompts retain their line
+  breaks and indentation; `Enter` sends the complete document.
+
+### Keys
+
+| Key | Action |
+|---|---|
+| `Enter` | Send message / accept palette selection |
+| `/` | Open the slash-command palette |
+| `↑` / `↓` | Palette navigation; otherwise move inside multiline input, then use history at the first/last row (wrapped rows included) |
+| `PageUp` / `PageDown` | Scroll the transcript without moving focus from the composer |
+| `Tab` | Complete the highlighted command (adds a trailing space) |
+| `Esc` | Close the palette / overlay |
+| `Ctrl+C` | Interrupt the active run, or quit when idle (again to skip waiting for an interrupted step) |
+| `Ctrl+L` | Redraw · `Ctrl+U` clear composer |
+
+At the last input row, `↓` preserves the current draft unless you are browsing
+history. After `↑` recalls history, `↓` moves forward and restores the saved
+draft when it passes the newest entry.
+
+At the first input row, `↑` leaves the draft, cursor, and undo history untouched
+when no input history is available.
+Recalling an entry or saved draft identical to the current input also preserves
+the cursor and undo history.
+
+Transcript updates follow new output while the view is at the bottom. After you
+scroll upward, streaming refreshes preserve the reading position until you
+return to the bottom with `PageDown`.
+
+### Slash commands
+
+`/help` `/new` `/clear` `/goal` `/resume` `/threads` (`/switch`) `/model` `/skills` `/tools`
+`/mcp` `/memory` `/uploads` `/usage` `/config` `/quit`, plus
+`/<skill-name> task` to activate any enabled skill for the current turn (same
+semantics as elsewhere in DeerFlow). `/model` and `/threads` open modal pickers.
+
+`/clear` removes the current transcript rows from the terminal display only; it keeps the active thread and persisted conversation intact. During an active run, `/new` and `/clear` ask you to wait for the run to finish instead of resetting in-flight display state.
+
+`/resume <id-or-title>` switches conversations, while `/resume` without an argument
+opens the thread picker. During an active run, `/resume`, `/threads`, and `/switch`
+ask you to wait instead of switching away from in-flight output. An invalid
+`/resume` reference displays an error and leaves the current conversation intact.
+After an interrupt, late stream actions from the previous run are discarded when
+they reach the UI, even if the next prompt uses the same conversation. Its final
+usage, title, and completion event cannot replace those of the new run.
+An interrupted run cannot be stopped mid-step, so a tool call already in progress
+(a long shell command, for example) finishes first. Until it does, sending to the
+same conversation shows a notice instead of starting a second run there — two runs
+on one thread would overwrite each other's history. Send again once it finishes,
+or use `/new` or `/resume` to continue in another conversation meanwhile.
+Quitting (`Ctrl+C` or `/quit`) also waits for that step, or for a finished run
+still saving its title, with a notice; the TUI closes as soon as it is done.
+Press `Ctrl+C` again to quit at once; the unfinished step is then not saved.
+If a run cannot start, the TUI reports an error and returns to idle so you can retry.
+
+Use `/goal <condition>` to set the active thread goal, `/goal` to show it, and
+`/goal clear` to clear it.
+
+## Architecture
+
+The TUI is a UI shell over the existing embedded harness — it does **not** fork
+agent behavior.
+
+```
+cli.py          launch-mode planning (pure) + headless print/json + entry point
+session.py      builds DeerFlowClient (+ checkpointer) and the persistence writer
+runtime.py      StreamEvent  ->  reducer actions  (pure translate + threaded driver)
+view_state.py   ViewState + reduce(state, action)  (pure, the testable heart)
+message_format  compact tool summaries / truncation (pure)
+command_registry slash-command registry + resolve (pure)
+input_history   bounded ↑/↓ history (pure)
+render.py       Rich renderers for header / transcript / status / palette (pure)
+theme.py        palette + symbols
+app.py          Textual App: composes widgets, drives runs on a worker thread,
+                marshals actions back to the UI thread, renders ViewState
+widgets/        Textual widgets (the multiline composer)
+persistence.py  writes threads_meta so sessions appear in the Web UI (below)
+```
+
+`DeerFlowClient.stream()` is a **synchronous** generator, so the app runs it on a
+Textual worker *thread* and marshals each yielded action back to the UI thread
+via `call_from_thread`. The pure layers (everything except `app.py` and `widgets/`)
+have no Textual dependency and are unit-tested directly with synthetic `StreamEvent`s.
+
+## Web UI visibility (shared persistence)
+
+The Web UI lists conversations from the `threads_meta` SQL table (filtered by
+`user_id`), **not** from the checkpointer. An embedded run only writes the
+checkpointer, so a TUI thread would otherwise be invisible in the sidebar.
+
+`persistence.py` closes that gap: on the first turn of a thread it writes a
+`threads_meta` row — owned by the local default user (`"default"`) — into the
+**same** database the Gateway reads, and syncs the generated title afterward.
+This requires only the shared `threads_meta` store (built via
+`deerflow.persistence.engine.init_engine_from_config`), **not** the Gateway
+process. When the database backend is `memory` (no SQL store) the writer
+degrades to a silent no-op and the TUI still works.
+
+All DB work runs on one long-lived background event loop, because a SQLAlchemy
+async engine is bound to the loop that created it.
+
+## Tests
+
+Pure layers are TDD'd in `backend/tests/test_tui_*.py`; the Textual app, slash
+palette, and modal overlays are exercised through Textual's pilot harness with a
+fake in-process session (no live model). `test_tui_persistence.py` proves the
+`threads_meta` write/read round-trip.
+
+```bash
+cd backend && PYTHONPATH=. uv run pytest tests/ -k tui -q
+```

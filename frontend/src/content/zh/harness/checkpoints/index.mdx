@@ -1,0 +1,84 @@
+---
+title: 检查点与增量通道
+description: DeerFlow 如何持久化线程状态，以及 database.checkpoint_channel_mode 如何在整份消息检查点与 LangGraph DeltaChannel 增量检查点之间取舍。含概念、存储形态与本手册阅读路线。
+asIndexPage: true
+---
+
+import { Callout } from "nextra/components";
+
+# 检查点与增量通道
+
+<Callout type="info" emoji="🗃️">
+  检查点是一个线程在某一步的持久化状态。`database.checkpoint_channel_mode` 决定其中消息通道的存储方式：
+  `full` 把完整消息列表写进每一份检查点；`delta` 不把列表放进逐步检查点，而是追加每步的写入，
+  在读需要时重建列表。默认值是 `full`。
+</Callout>
+
+DeerFlow 的每次运行都会在每一步之后把线程状态写成检查点：消息列表、目标、沙箱句柄、持久上下文，以及中间件贡献的各类通道。在长任务里消息列表占据绝大部分体积，因此它在磁盘上的表示方式，决定了 N 轮之后这个存储到底保留了多少：`full` 模式保留的量是平方级，`delta` 模式则按快照节奏把这一平方项缩小，而不是把它消掉。本手册讲这两种表示、切换它们的开关，以及每种选择的运维代价。
+
+## 如何阅读本手册
+
+| 读者       | 从这里开始                                                                                                                                                                                                                                                                                                                        |
+| ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 聊天用户   | 本页、[快速上手](/docs/harness/checkpoints/quick-start)、[通道模式](/docs/harness/checkpoints/modes)                                                                                                                                                                                                                               |
+| 运维人员   | [快速上手](/docs/harness/checkpoints/quick-start)、[快照节奏](/docs/harness/checkpoints/cadence)、[历史缓存](/docs/harness/checkpoints/history-cache)、[运维检查点](/docs/harness/checkpoints/operations)、[可观测性](/docs/harness/checkpoints/observability)、[故障排查](/docs/harness/checkpoints/troubleshooting)                     |
+| 集成开发者 | [通道模式](/docs/harness/checkpoints/modes)、[恢复与回滚](/docs/harness/checkpoints/resume-and-rollback)、[参考附录](/docs/harness/checkpoints/reference)                                                                                                                                                                          |
+
+## 概念
+
+- **检查点（checkpoint）**：一个线程在某一步的通道取值，加上 LangGraph 附加的元数据——检查点 id、父链接、待处理写入、计数器。读取、恢复、分叉都从检查点出发。
+- **通道（channel）**：线程状态 schema 中的一个字段，有自己的值类型和更新规则。编译后的图带有一张 channel table，决定每个通道如何存储与归并。模式只改变 `messages` 这一个通道。
+- **归并器（reducer）**：把传入的写入折叠进通道取值的函数。增量模式的消息归并器是 `merge_message_writes`，以线性时间实现 `add_messages` 的语义。
+
+## 为什么需要增量
+
+`full` 模式下每份检查点都携带完整的通道取值，因此每一步都要重新序列化整个消息列表，而这些检查点都会被保留下来：总存储随轮次按 O(N²) 增长。
+
+`delta` 模式下消息列表是 LangGraph 的 `DeltaChannel`。非快照检查点的 `channel_values` 里不含消息取值，每步的更新以写入的形式追加，读取时通过归并器重放祖先写入来重建列表。这让大多数检查点不再序列化整份列表——但它**没有消除平方项**：每 `snapshot_frequency` 次写入都会落一份 `_DeltaSnapshot`，里面存的是**当时整份**消息列表，而这些快照和别的检查点一样会被保留。
+
+设 K 为 `snapshot_frequency`。容量规划依赖的两个量并不相同：
+
+| 量               | `full`                                           | `delta`                                                                                          |
+| ---------------- | ------------------------------------------------ | ------------------------------------------------------------------------------------------------ |
+| 单步边际成本     | 把整份列表重新序列化进又一份会被保留的检查点     | 追加该步的写入；另外每 K 次写入还会落一份整份快照                                                  |
+| N 轮后保留的总量 | O(N²)                                            | O(N²/K + N)                                                                                      |
+
+也就是说，delta 是把平方项按 K 大致缩小（默认 `10`），而不是删掉它。快照越少，残余越小，读也越慢——物化要从最近一份快照开始重放（见[快照节奏](/docs/harness/checkpoints/cadence)）。DeerFlow 目前没有任何机制清理这些快照，因此容量应按**保留总量**估算，而不是按单步写入成本（见[运维检查点](/docs/harness/checkpoints/operations)）。
+
+|                  | `full`                                           | `delta`                                                                                          |
+| ---------------- | ------------------------------------------------ | ------------------------------------------------------------------------------------------------ |
+| 检查点载荷       | 完整 `channel_values`，含整份消息列表            | 非快照步骤不含消息大对象；每 `snapshot_frequency` 次写入出现一个哨兵 `_DeltaSnapshot` 大对象      |
+| 单步更新         | 折叠进下一份检查点的载荷                         | 以逐步写入的形式存储                                                                             |
+| 读取路径         | 直接使用已存储的取值                             | 由最近一份已存快照加重放的写入重建                                                               |
+| N 轮后保留的总量 | O(N²)                                            | O(N²/K + N)，K 为 `snapshot_frequency`                                                           |
+
+模式是**进程级、需要重启的选择**。每个进程在第一次编译图之前解析一次，之后不能改变；共享同一个检查点数据库的所有进程必须使用同一个值。[快速上手](/docs/harness/checkpoints/quick-start)讲切换，[快照节奏](/docs/harness/checkpoints/cadence)讲第二个被冻结的开关——快照节奏。
+
+## 术语
+
+| 术语                          | 含义                                                                                                                                          |
+| ----------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| 检查点（checkpoint）          | 一个线程在某一步持久化的通道取值，加上 LangGraph 的检查点元数据。                                                                             |
+| 通道（channel）               | 线程状态 schema 中的一个字段，有自己的值类型和更新规则。                                                                                       |
+| 归并器（reducer）             | 把写入折叠进通道取值的函数。                                                                                                                   |
+| 增量通道（`DeltaChannel`）    | LangGraph 的归并器通道，检查点中不保存完整取值，而是通过重放祖先写入来重建。                                                                  |
+| 哨兵（sentinel）              | 增量通道在 `channel_values` 中占位存放的标记；已存的 `_DeltaSnapshot` 会终止该通道的祖先遍历。                                                |
+| 种子（seed）                  | 最近的、`channel_values` 中有取值的祖先上存储的值，重建从它出发。                                                                             |
+| 写入（writes）                | 存在独立表中的逐步通道更新。增量模式下它们是承重的重放状态，不是垃圾数据。                                                                     |
+| 物化（materialize）           | 由种子加重放的写入重建通道取值。                                                                                                               |
+| 节奏（`snapshot_frequency`）  | 经过多少次逐步写入之后落一份完整消息快照。                                                                                                     |
+| 祖先链（ancestor chain）      | 检查点的父链。增量检查点的历史是其已封闭祖先链的纯函数。                                                                                       |
+| 分叉（fork）                  | 同一检查点的第二个子节点。增量模式无法正确分叉，恢复会改为在当前 head 上线性化。                                                              |
+| 线性化（linearization）       | 把"从较旧检查点恢复"改写为在当前 head 上的一次替换式写入。                                                                                     |
+| 回滚（rollback）              | 一次被取消的运行之后，把 head 恢复到运行前的状态。                                                                                             |
+| 上下文压缩（compaction）      | 用摘要替换消息列表，通过 `Overwrite` 写入，使替换能穿过追加式归并器。                                                                          |
+| 保留 / 裁剪（retention / prune） | 删除检查点行。增量模式下，重建所依赖的 writes 行必须保留。                                                                                  |
+| 缓存（cache）                 | 增量模式专用的历史缓存，缓存已物化的通道历史。                                                                                                 |
+| 冻结（frozen）                | 在第一次构建图之前每个进程解析一次；之后出现不同取值就是错误，改动需要重启。                                                                   |
+| 网关 / 内嵌（Gateway / embedded） | 异步的 Gateway 路径，对比同步的 TUI 或进程内 `DeerFlowClient` 路径。                                                                       |
+
+<Cards num={3}>
+  <Cards.Card title="快速上手" href="/docs/harness/checkpoints/quick-start" />
+  <Cards.Card title="通道模式" href="/docs/harness/checkpoints/modes" />
+  <Cards.Card title="快照节奏" href="/docs/harness/checkpoints/cadence" />
+</Cards>

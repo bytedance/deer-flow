@@ -12,6 +12,16 @@ from typing import Any
 
 import yaml
 
+CHANNEL_CONNECTION_PROVIDERS: tuple[str, ...] = (
+    "telegram",
+    "slack",
+    "discord",
+    "feishu",
+    "dingtalk",
+    "wechat",
+    "wecom",
+)
+
 
 def _project_root() -> Path:
     return Path(__file__).resolve().parents[2]
@@ -143,12 +153,24 @@ def _make_model_config_name(model_name: str) -> str:
 
     Replaces path separators and dots with hyphens so the result is a clean
     YAML-friendly identifier (e.g. "google/gemini-2.5-pro" → "gemini-2-5-pro",
-    "gpt-5.4" → "gpt-5-4", "deepseek-chat" → "deepseek-chat").
+    "gpt-5.4" → "gpt-5-4", "deepseek-v4-pro" → "deepseek-v4-pro").
     """
     # Take only the last path component for namespaced models (e.g. "org/model-name")
     base = model_name.split("/")[-1]
     # Replace dots with hyphens so "gpt-5.4" → "gpt-5-4"
     return base.replace(".", "-")
+
+
+def _build_channel_connections_config(enabled_providers: list[str]) -> dict[str, Any]:
+    selected = set(enabled_providers)
+    unknown = selected.difference(CHANNEL_CONNECTION_PROVIDERS)
+    if unknown:
+        raise ValueError(f"Unknown channel connection provider(s): {', '.join(sorted(unknown))}")
+
+    return {
+        "enabled": bool(selected),
+        **{provider: {"enabled": provider in selected} for provider in CHANNEL_CONNECTION_PROVIDERS},
+    }
 
 
 def build_minimal_config(
@@ -170,6 +192,7 @@ def build_minimal_config(
     allow_host_bash: bool = False,
     include_bash_tool: bool = False,
     include_write_tools: bool = True,
+    channel_connection_providers: list[str] | None = None,
     config_version: int = 5,
     base_config: dict[str, Any] | None = None,
 ) -> str:
@@ -219,6 +242,8 @@ def build_minimal_config(
     else:
         sandbox_config.pop("allow_host_bash", None)
     data["sandbox"] = sandbox_config
+    if channel_connection_providers is not None:
+        data["channel_connections"] = _build_channel_connections_config(channel_connection_providers)
 
     header = (
         f"# DeerFlow Configuration\n"
@@ -250,6 +275,7 @@ def write_config_yaml(
     allow_host_bash: bool = False,
     include_bash_tool: bool = False,
     include_write_tools: bool = True,
+    channel_connection_providers: list[str] | None = None,
 ) -> None:
     """Write (or overwrite) config.yaml with a minimal working configuration."""
     # Read config_version from config.example.yaml if present
@@ -284,6 +310,7 @@ def write_config_yaml(
         allow_host_bash=allow_host_bash,
         include_bash_tool=include_bash_tool,
         include_write_tools=include_write_tools,
+        channel_connection_providers=channel_connection_providers,
         config_version=config_version,
         base_config=example_defaults,
     )

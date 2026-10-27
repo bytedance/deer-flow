@@ -1,0 +1,198 @@
+### Atomic Byte Publication
+
+`atomic_write.publish_bytes_atomically` owns browser screenshot and Browserless
+capture/fetch publication. It writes and fsyncs a hidden exclusive sibling before
+`os.replace`, cleaning it on failure. New files use `0666` filtered by the host
+umask; replacements preserve existing permission bits before publication. Never
+read the process umask by changing it in this threaded runtime. Behavioral tests
+for both tool imports live in `tests/test_browser_outputs_atomic.py`.
+`cleanup_failed_atomic_write` shares best-effort cleanup across this publisher,
+`skills/projection.py`'s private manifest writer, project document staging,
+extension snapshot rollback (including removal of a file that did not exist),
+the managed plugins-block rewrite, custom-skill file writes, per-user
+skill-state writes, Gateway upload staging, and the Gateway skill-archive
+upload copy and its post-install discard. The upload route discards that
+archive before closing the multipart form and suppresses close errors.
+Use it on publication failure or after deciding to discard an owned
+temporary; pass a raw descriptor only until `fdopen` succeeds, or an explicitly
+transferred duplicate descriptor owned by the cleanup caller. Shelf discards
+must preserve both a rejected project's 404 and a dedup hit's 200 response.
+Callers retain their own serialization, permissions and publication policy.
+Shelf `stage_document_bytes` drains preparation, writes, close and failure
+cleanup before propagating cancellation. Retain the opened handle across its
+handoff, but leave waiting for incoming chunks cancellable; regressions in
+`tests/test_project_document_staging_cancellation.py` cover both shelf entry points.
+Local Linux/macOS text revisions opt into a short `temporary_prefix` and
+`preserve_metadata_from` (a caller-owned descriptor). Staging starts at `0600`;
+`file_revision_metadata` transfers ownership, mode, ACLs and xattrs before data.
+macOS uses native descriptor ACL APIs and `fcopyfile(COPYFILE_XATTR)`; Linux uses
+descriptor xattrs, including its access ACL, removing inherited extras. Errors
+abort; never ignore metadata permission failures. Refuse set-id bits, macOS file
+flags and content-bound privilege attributes rather than reattach stale privileges to new
+content. Other publisher callers retain their existing mode-only contract.
+Do not restore old timestamps on a content revision, including an empty save.
+Source-descriptor close failures are best-effort warnings, not save failures;
+guard diagnostics so the publication result or original interruption survives.
+Failure cleanup must preserve the original publication exception, including
+interruptions. Descriptor close and sibling unlink are separate best-effort
+operations: a close failure must not prevent the unlink attempt.
+Attempt warning logs for cleanup `OSError`s with the temporary path and exception
+details. Guard logging-handler exceptions so diagnostics neither replace the
+publication exception (including interruptions) nor skip remaining cleanup.
+Both tools take collision names from `output_names.output_name_candidates`
+(name, `-1`..`-1000`, five timestamps); claim each atomically, never pre-check.
+
+### Model Retry Hints
+
+`retry_after.py::bounded_retry_after_ms` shares the 24-hour provider-hint ceiling
+between LLM middleware (numeric/date hints) and Claude backoff. Non-finite or
+over-limit delays return `None` for local backoff; finite negatives clamp to zero.
+Validate before integer truncation and preserve valid hints above the jitter cap.
+
+### Port Allocation Bounds
+
+`network.py::PortAllocator.allocate` caps its exclusive search endpoint at
+65536. A valid start near 65535 must report exhaustion with `RuntimeError`
+when all remaining ports are reserved or occupied, without probing invalid
+TCP ports. Keep the last valid port allocatable and preserve `max_range`.
+Regression coverage lives in `tests/test_port_allocator_bounds.py`.
+
+### Goal Objective Validation
+
+`goal_objective.py` owns the dependency-free normalized 4000-character objective
+validation shared by runtime and scheduled-task capability/repository admission.
+`runtime.goal` re-exports the helper for compatibility. Validation does not replace
+the saved original text; blank or over-limit text is rejected before persistence.
+
+### Message Text Extraction
+
+`message_content_to_text` takes raw message content and treats `None` as empty
+text so downstream empty-result, error-detail, and archive-skip fallbacks work.
+Keep its other conversions unchanged, including newline-separated list blocks
+and literal strings such as `"None"`. Do not replace it with `message_to_text`,
+which takes a whole message and uses different list/mapping semantics.
+Regression coverage lives in `tests/test_utils_messages.py`,
+`tests/test_subagent_executor.py`, and `tests/test_task_continuity.py`.
+
+`llm_text.py::extract_response_text` ignores content blocks with non-string
+`type` values, including lists and mappings, while retaining adjacent text and
+output-text blocks. Tests cover extraction and the one-shot input-polish path
+with real LangChain messages in `tests/test_utils_llm_text.py` and
+`tests/test_input_polish_router.py`.
+
+`llm_text.py::strip_think_blocks` scans opening and closing tags forward so
+repeated unclosed `<think>` prefixes in model output do not rescan the same
+suffix. Keep its case-insensitive tag handling, optional whitespace before
+the closing `>`, and the `truncate_unclosed` behavior. Regression coverage
+lives in `tests/test_utils_llm_text.py`.
+
+Opening reasoning tags require whitespace, `>`, or `/>` after the exact `think`
+name; punctuated names such as `<think-tank>`, `<think:note>`, and `<think/other>`
+are ordinary content. The shared prefix regex owns this boundary rule; do not
+duplicate it in a manual re-check. Self-closing `<think/>` and `<think />` tags
+are empty reasoning blocks: remove the tag without consuming subsequent text.
+Both cleanup functions find opening delimiters outside quoted attributes; a
+quoted `>` cannot terminate the tag or hide an answer after a self-closing tag.
+Keep exact unfinished `<think` prefixes hidden in leading summaries. Coverage:
+`tests/test_think_tag_boundaries.py`.
+
+Display summaries use `strip_leading_think_blocks` before limiting text;
+`test_run_journal_visible_summary.py` preserves literal tags in the answer.
+
+### Agent / Tool Assembly Off-Load
+
+One-shot input-polish, follow-up-suggestion, and project-file-summary helpers
+build providers through `run_assembly` before awaiting inference. Provider
+construction can read local credentials; keep it off the event loop and the
+default executor while preserving request context. Cancellation during
+construction must not start inference. This contract covers callers of
+`oneshot_llm.py`; standalone skill-moderation and goal-evaluator constructors
+are separate sites and are not covered by this offload.
+Coverage: `tests/blocking_io/test_oneshot_llm_offloop.py`.
+
+`start_run` also resolves the factory through `run_assembly` before admission:
+cold imports cannot occupy the loop or its default pool, and import errors
+cannot admit a run. `tests/blocking_io/test_agent_factory_resolve_offloop.py`
+pins offload, executor isolation, request context, and failure ordering.
+
+Tool and agent assembly re-enters `get_available_tools()` and may block on MCP discovery, so the four async assembly entry points — `run_agent`'s `agent_factory` call, `task_tool`, durable batch `_execute_item`, and `abuild_checkpoint_state_accessor` — dispatch through `deerflow.utils.assembly_io.run_assembly`, a dedicated ContextVar-preserving bounded executor (`DEER_FLOW_ASSEMBLY_WORKERS`, default 8) rather than the loop's default executor; a hung MCP server therefore parks an assembly worker instead of queueing unrelated default-executor work, and the pool logs a warning when pending assemblies exceed the worker count. `tests/blocking_io/test_tool_assembly_offloop.py` pins all four offloads plus the ContextVar propagation.
+
+### Uploaded Document Summaries
+
+Outlines skip root-level HTML comment blocks (`<!--` with up to three leading
+spaces through the first `-->` line). Comment contents cannot open code fences;
+comment markers inside fenced code cannot open comment blocks. Keep line numbers
+and limits unchanged. Coverage: `tests/test_file_outline_html_comments.py`.
+
+`file_outline.py` reads outlines and fallback previews as `utf-8-sig` so an
+optional leading UTF-8 BOM cannot hide a first-line heading or code fence, or
+occupy a preview line. Preserve physical line numbers, embedded U+FEFF
+characters, and the original file bytes.
+
+All outline heading styles skip root-level indented code (four leading spaces
+or a tab after up to three spaces), including PDF-style single and split bold
+headings. Keep legitimate bold headings with up to three spaces and the shared
+conversion-companion path working. Regression coverage lives in
+`tests/test_file_outline_indented_bold.py`.
+
+Split-bold headings reject numeric/punctuation/currency-only blocks after the
+section number, including parentheses, signs, leading whitespace, and `$€£¥`.
+Apply the check to the second through fourth blocks; preserve the four-block
+limit, punctuated titles containing text, and non-ASCII titles. Coverage lives
+in `tests/test_file_outline_split_bold.py`.
+
+### Active Content MIME Types
+
+`text_detection.py::_is_active_content_mime_type` is the shared download-safety
+boundary for artifacts and project documents. Keep platform aliases such as
+Windows' `image/svg` aligned with their standard active type (`image/svg+xml`),
+and preserve the generic `+xml` rule.
+
+### Conversion Worker Ownership
+
+`convert_file_to_markdown` offloads parsing for every source size: compressed
+Office files can require seconds of work below 1 MiB. It drains conversion workers
+across caller cancellation before returning control to source-file cleanup. Keep conversion
+inside `await_drained`, including when the worker fails or cancellation repeats;
+upload ingestion owns a temporary source that it removes in `finally`. Coverage
+lives in `tests/test_file_conversion_cancellation.py`.
+
+### Host Path Portability
+
+`host_paths.extended_length_path()` provides lexical Windows filesystem
+spelling (absolute `\\?\` drive paths or `\\?\UNC\` shares); it is a no-op
+on POSIX. It does not replace symlink resolution or confinement checks and
+must not be used for persisted relative paths or Docker mount sources.
+Existing extended (`\\?\`) and device (`\\.\`, including named pipes)
+namespaces pass through unchanged before normalization.
+
+`host_paths.py` rejects Windows device names for host-visible creation paths on
+every platform, including the `COM`/`LPT` aliases with superscript ¹, ² and ³.
+The console aliases `CONIN$` and `CONOUT$` are reserved too; match them
+case-insensitively before the first dot, without rejecting longer ordinary
+names such as `CONIN$notes.txt`.
+Device-name comparison ignores ASCII spaces before the first dot, so
+`NUL .txt` and `COM1  .log` remain reserved. Trim the comparison stem only,
+not the supplied filename; ordinary names such as `report .txt` and
+non-ASCII whitespace remain unchanged.
+Do not normalize arbitrary Unicode digits into device numbers: names such as
+`COM⁴.txt` and `COM¹notes.txt` are ordinary portable names. Read/removal callers
+retain their existing portability exemptions.
+
+### Advisory File Lock Retries
+
+`file_lock.retry_until_locked` owns contention-only acquisition retries for the
+Windows Lark, extension-manager and channel runtime-config locks and bounded
+skill-projection reads.
+Retry only EACCES/EAGAIN/EDEADLK; other errors propagate without sleeping.
+Keep per-caller policies: Lark has a 15-minute Windows file-lock deadline,
+extension management and channel runtime config wait indefinitely, and skill
+export retains its existing deadline, 0.02-second cadence and cancellation
+check. Clocks and sleeps are injectable; tests must not patch the shared stdlib
+time module.
+The channel caller wraps its injected sleep to warn once after 50 contention
+retries; the helper remains responsible for error classification and cadence.
+
+`parse_retry_after_date_ms(raw, now=...)` owns HTTP-date parsing for Claude, Codex
+and LLM error middleware. Interpret timezone-less asctime as UTC and apply the
+shared delay bound. Callers retain numeric/header precedence and local backoff.

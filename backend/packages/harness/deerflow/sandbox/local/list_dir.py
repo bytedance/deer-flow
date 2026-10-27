@@ -14,32 +14,57 @@ def list_dir(path: str, max_depth: int = 2) -> list[str]:
 
     Returns:
         A list of absolute paths for files and directories,
-        excluding items matching IGNORE_PATTERNS.
+        excluding items matching IGNORE_PATTERNS. An existing empty
+        directory returns an empty list.
+
+    Raises:
+        FileNotFoundError: If ``path`` does not exist or is not a directory.
+        PermissionError: If a directory cannot be listed because of access
+            permissions. Callers must not treat this as an empty listing.
     """
     result: list[str] = []
     root_path = Path(path).resolve()
 
     if not root_path.is_dir():
-        return result
+        raise FileNotFoundError(path)
+
+    def _is_within_root(candidate: Path) -> bool:
+        try:
+            candidate.relative_to(root_path)
+            return True
+        except ValueError:
+            return False
 
     def _traverse(current_path: Path, current_depth: int) -> None:
         """Recursively traverse directories up to max_depth."""
         if current_depth > max_depth:
             return
 
-        try:
-            for item in current_path.iterdir():
-                if should_ignore_name(item.name):
+        for item in current_path.iterdir():
+            if should_ignore_name(item.name):
+                continue
+
+            if item.is_symlink():
+                try:
+                    item_resolved = item.resolve()
+                    if not _is_within_root(item_resolved):
+                        continue
+                except OSError:
                     continue
+                post_fix = "/" if item_resolved.is_dir() else ""
+                result.append(str(item_resolved) + post_fix)
+                continue
 
-                post_fix = "/" if item.is_dir() else ""
-                result.append(str(item.resolve()) + post_fix)
+            item_resolved = item.resolve()
+            if not _is_within_root(item_resolved):
+                continue
 
-                # Recurse into subdirectories if not at max depth
-                if item.is_dir() and current_depth < max_depth:
-                    _traverse(item, current_depth + 1)
-        except PermissionError:
-            pass
+            post_fix = "/" if item.is_dir() else ""
+            result.append(str(item_resolved) + post_fix)
+
+            # Recurse into subdirectories if not at max depth
+            if item.is_dir() and current_depth < max_depth:
+                _traverse(item, current_depth + 1)
 
     _traverse(root_path, 1)
 

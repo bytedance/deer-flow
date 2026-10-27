@@ -1,0 +1,85 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "deer-flow.fullname" . }}-nginx
+  namespace: {{ include "deer-flow.namespace" . }}
+  labels:
+    {{- include "deer-flow.labels" . | nindent 4 }}
+    app.kubernetes.io/component: nginx
+spec:
+  replicas: {{ .Values.nginx.replicas }}
+  selector:
+    matchLabels:
+      {{- include "deer-flow.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: nginx
+  template:
+    metadata:
+      labels:
+        {{- include "deer-flow.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: nginx
+      annotations:
+        # Roll pods when the nginx ConfigMap changes (subPath mount).
+        checksum/nginx: {{ include "deer-flow.nginxChecksum" . }}
+    spec:
+      securityContext:
+        # Non-root: nginx:alpine ships a `nginx` user (uid 101). /etc/nginx and
+        # /var/cache/nginx are root-owned, so the command writes the rendered
+        # config to /tmp and we mount an emptyDir on the cache dir (below).
+        runAsNonRoot: true
+        runAsUser: 101
+        runAsGroup: 101
+        fsGroup: 101
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: nginx
+          image: {{ include "deer-flow.nginxImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - name: http
+              containerPort: 2026
+          # Strip the IPv6 listen line when IPv6 is unavailable (mirrors compose).
+          # Writes the config to /tmp (1777, writable by uid 101) instead of
+          # /etc/nginx (root-owned), then loads it with `nginx -c`.
+          command: ["sh", "-c"]
+          args:
+            - >-
+              cp /etc/nginx/nginx.conf.template /tmp/nginx.conf &&
+              test -e /proc/net/if_inet6 || sed -i '/^[[:space:]]*listen[[:space:]]\+\[::\]:2026[[:space:]]/d' /tmp/nginx.conf &&
+              nginx -c /tmp/nginx.conf -g 'daemon off;'
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /nginx-health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          {{- with .Values.nginx.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: nginx-config
+              mountPath: /etc/nginx/nginx.conf.template
+              subPath: nginx.conf
+              readOnly: true
+            # nginx creates client_body/proxy temp dirs under /var/cache/nginx
+            # at startup; the dir is root-owned, so mount an emptyDir (writable
+            # by fsGroup 101). The pid already lives at /tmp/nginx.pid (config).
+            - name: nginx-cache
+              mountPath: /var/cache/nginx
+      volumes:
+        - name: nginx-config
+          configMap:
+            name: {{ include "deer-flow.fullname" . }}-nginx
+        - name: nginx-cache
+          emptyDir: {}

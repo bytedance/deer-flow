@@ -1,0 +1,434 @@
+"""One-time migration: move legacy thread dirs, memory, agents, skills, and the global USER.md profile into per-user layout.
+
+Usage (from the repository root):
+    uv run --no-sync --project backend python backend/scripts/migrate_user_isolation.py [--dry-run] [--user-id USER_ID]
+
+Use the installed backend environment and the Gateway's exported runtime
+selectors; relative paths remain anchored to the caller's directory.
+
+Thread owners come from the ``threads_meta`` table of the Gateway's configured
+database (``database`` in config.yaml). If legacy threads exist but that
+table cannot be read, the script stops before moving anything; pass
+``--allow-missing-thread-owners`` only for installs that never recorded owners.
+
+The script is idempotent — re-running it after a successful migration is a no-op.
+"""
+
+import argparse
+import logging
+import shutil
+import sys
+from pathlib import Path
+
+from deerflow.config.app_config import get_app_config
+from deerflow.config.database_config import DatabaseConfig
+from deerflow.config.paths import Paths, get_paths
+
+logger = logging.getLogger(__name__)
+
+
+def migrate_thread_dirs(
+    paths: Paths,
+    thread_owner_map: dict[str, str],
+    *,
+    dry_run: bool = False,
+) -> list[dict]:
+    """Move legacy thread directories into per-user layout.
+
+    Args:
+        paths: Paths instance.
+        thread_owner_map: Mapping of thread_id -> user_id from threads_meta table.
+        dry_run: If True, only log what would happen.
+
+    Returns:
+        List of migration report entries.
+    """
+    report: list[dict] = []
+    legacy_threads = paths.base_dir / "threads"
+    if not legacy_threads.exists():
+        logger.info("No legacy threads directory found — nothing to migrate.")
+        return report
+
+    for thread_dir in sorted(legacy_threads.iterdir()):
+        if not thread_dir.is_dir():
+            continue
+        thread_id = thread_dir.name
+        user_id = thread_owner_map.get(thread_id, "default")
+        dest = paths.base_dir / "users" / user_id / "threads" / thread_id
+
+        entry = {"thread_id": thread_id, "user_id": user_id, "action": ""}
+
+        if dest.exists():
+            conflicts_dir = paths.base_dir / "migration-conflicts" / thread_id
+            entry["action"] = f"conflict -> {conflicts_dir}"
+            if not dry_run:
+                conflicts_dir.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(thread_dir), str(conflicts_dir))
+            logger.warning("Conflict for thread %s: moved to %s", thread_id, conflicts_dir)
+        else:
+            entry["action"] = f"moved -> {dest}"
+            if not dry_run:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(thread_dir), str(dest))
+            logger.info("Migrated thread %s -> user %s", thread_id, user_id)
+
+        report.append(entry)
+
+    # Clean up empty legacy threads dir
+    if not dry_run and legacy_threads.exists() and not any(legacy_threads.iterdir()):
+        legacy_threads.rmdir()
+
+    return report
+
+
+def migrate_agents(
+    paths: Paths,
+    user_id: str = "default",
+    *,
+    dry_run: bool = False,
+) -> list[dict]:
+    """Move legacy custom-agent directories into per-user layout.
+
+    Legacy layout:  ``{base_dir}/agents/{name}/``
+    Per-user layout: ``{base_dir}/users/{user_id}/agents/{name}/``
+
+    Pre-existing per-user agents take precedence: if a destination already
+    exists for an agent name, the legacy copy is moved to
+    ``{base_dir}/migration-conflicts/agents/{name}/`` for manual review.
+
+    Args:
+        paths: Paths instance.
+        user_id: Target user to receive the legacy agents (defaults to
+            ``"default"``, matching ``DEFAULT_USER_ID`` for no-auth setups).
+        dry_run: If True, only log what would happen.
+
+    Returns:
+        List of migration report entries, one per legacy agent directory found.
+    """
+    report: list[dict] = []
+    legacy_agents = paths.agents_dir
+    if not legacy_agents.exists():
+        logger.info("No legacy agents directory found — nothing to migrate.")
+        return report
+
+    for agent_dir in sorted(legacy_agents.iterdir()):
+        if not agent_dir.is_dir():
+            continue
+        agent_name = agent_dir.name
+        dest = paths.user_agent_dir(user_id, agent_name)
+
+        entry = {"agent": agent_name, "user_id": user_id, "action": ""}
+
+        if dest.exists():
+            conflicts_dir = paths.base_dir / "migration-conflicts" / "agents" / agent_name
+            entry["action"] = f"conflict -> {conflicts_dir}"
+            if not dry_run:
+                conflicts_dir.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(agent_dir), str(conflicts_dir))
+            logger.warning("Conflict for agent %s: moved legacy copy to %s", agent_name, conflicts_dir)
+        else:
+            entry["action"] = f"moved -> {dest}"
+            if not dry_run:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(agent_dir), str(dest))
+            logger.info("Migrated agent %s -> user %s", agent_name, user_id)
+
+        report.append(entry)
+
+    # Clean up empty legacy agents dir
+    if not dry_run and legacy_agents.exists() and not any(legacy_agents.iterdir()):
+        legacy_agents.rmdir()
+
+    return report
+
+
+def migrate_skills(
+    paths: Paths,
+    user_id: str = "default",
+    *,
+    dry_run: bool = False,
+) -> list[dict]:
+    """Move legacy global custom skills into per-user layout.
+
+    Legacy layout:  ``{base_dir}/skills/custom/{name}/``
+    Per-user layout: ``{base_dir}/users/{user_id}/skills/custom/{name}/``
+
+    Pre-existing per-user custom skills take precedence: if a destination
+    already exists for a skill name, the legacy copy is moved to
+    ``{base_dir}/migration-conflicts/skills/{name}/`` for manual review.
+
+    Args:
+        paths: Paths instance.
+        user_id: Target user to receive the legacy custom skills (defaults to
+            ``"default"``, matching ``DEFAULT_USER_ID`` for no-auth setups).
+        dry_run: If True, only log what would happen.
+
+    Returns:
+        List of migration report entries, one per legacy custom skill directory found.
+    """
+    report: list[dict] = []
+    legacy_custom = paths.base_dir / "skills" / "custom"
+    if not legacy_custom.exists():
+        logger.info("No legacy skills/custom directory found — nothing to migrate.")
+        return report
+
+    dest_root = paths.user_custom_skills_dir(user_id)
+
+    # Migrate .history directory first (skill operation logs)
+    legacy_history = legacy_custom / ".history"
+    if legacy_history.exists() and legacy_history.is_dir():
+        dest_history = dest_root / ".history"
+        if dest_history.exists():
+            conflicts_history = paths.base_dir / "migration-conflicts" / "skills" / ".history"
+            logger.warning("Conflict for .history: moved legacy to %s", conflicts_history)
+            if not dry_run:
+                conflicts_history.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(legacy_history), str(conflicts_history))
+        else:
+            logger.info("Migrating .history -> %s", dest_history)
+            if not dry_run:
+                dest_root.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(legacy_history), str(dest_history))
+
+    for skill_dir in sorted(legacy_custom.iterdir()):
+        if not skill_dir.is_dir():
+            continue
+        # Skip internal directories (.history is managed per-user now)
+        if skill_dir.name.startswith("."):
+            continue
+        skill_name = skill_dir.name
+        dest = dest_root / skill_name
+
+        entry = {"skill": skill_name, "user_id": user_id, "action": ""}
+
+        if dest.exists():
+            conflicts_dir = paths.base_dir / "migration-conflicts" / "skills" / skill_name
+            entry["action"] = f"conflict -> {conflicts_dir}"
+            if not dry_run:
+                conflicts_dir.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(skill_dir), str(conflicts_dir))
+            logger.warning("Conflict for skill %s: moved legacy copy to %s", skill_name, conflicts_dir)
+        else:
+            entry["action"] = f"moved -> {dest}"
+            if not dry_run:
+                dest_root.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(skill_dir), str(dest))
+            logger.info("Migrated skill %s -> user %s", skill_name, user_id)
+
+        report.append(entry)
+
+    # Clean up empty legacy custom dir (keep skills/ parent — public/ is still in use)
+    if not dry_run and legacy_custom.exists() and not any(legacy_custom.iterdir()):
+        legacy_custom.rmdir()
+
+    return report
+
+
+def migrate_memory(
+    paths: Paths,
+    user_id: str = "default",
+    *,
+    dry_run: bool = False,
+) -> None:
+    """Move legacy global memory.json into per-user layout.
+
+    Args:
+        paths: Paths instance.
+        user_id: Target user to receive the legacy memory.
+        dry_run: If True, only log.
+    """
+    legacy_mem = paths.base_dir / "memory.json"
+    if not legacy_mem.exists():
+        logger.info("No legacy memory.json found — nothing to migrate.")
+        return
+
+    dest = paths.user_memory_file(user_id)
+    if dest.exists():
+        legacy_backup = paths.base_dir / "memory.legacy.json"
+        logger.warning("Destination %s exists; renaming legacy to %s", dest, legacy_backup)
+        if not dry_run:
+            legacy_mem.rename(legacy_backup)
+        return
+
+    logger.info("Migrating memory.json -> %s", dest)
+    if not dry_run:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(legacy_mem), str(dest))
+
+
+def migrate_user_profile(
+    paths: Paths,
+    user_id: str = "default",
+    *,
+    dry_run: bool = False,
+) -> None:
+    """Move the legacy global USER.md profile into per-user layout.
+
+    The profile became per-user (``{base_dir}/users/{user_id}/USER.md``) so
+    one user's prompt context can never leak into another's; without this
+    migration an existing single-user or auth-disabled installation would
+    see ``content: null`` after upgrading and later strand the old file
+    next to a newly created per-user one.
+
+    Args:
+        paths: Paths instance.
+        user_id: Target user to receive the legacy profile.
+        dry_run: If True, only log.
+    """
+    legacy_profile = paths.base_dir / "USER.md"
+    if not legacy_profile.exists():
+        logger.info("No legacy USER.md found — nothing to migrate.")
+        return
+
+    dest = paths.user_md_file(user_id)
+    if dest.exists():
+        legacy_backup = paths.base_dir / "USER.legacy.md"
+        logger.warning("Destination %s exists; renaming legacy to %s", dest, legacy_backup)
+        if not dry_run:
+            legacy_profile.rename(legacy_backup)
+        return
+
+    logger.info("Migrating USER.md -> %s", dest)
+    if not dry_run:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(legacy_profile), str(dest))
+
+
+class OwnerMapUnavailable(RuntimeError):
+    """The configured database cannot say who owns the legacy threads."""
+
+
+def _has_legacy_thread_dirs(paths: Paths) -> bool:
+    legacy_threads = paths.base_dir / "threads"
+    return legacy_threads.is_dir() and any(entry.is_dir() for entry in legacy_threads.iterdir())
+
+
+def _build_owner_map_from_db(database: DatabaseConfig) -> dict[str, str]:
+    """Query the Gateway database's threads_meta table for thread_id -> user_id.
+
+    Uses a synchronous engine on the same database the Gateway uses
+    (``app_sync_sqlalchemy_url``) to avoid async dependencies.
+
+    Raises:
+        OwnerMapUnavailable: no database to read, or threads_meta cannot be queried.
+    """
+    if database.backend not in ("sqlite", "postgres"):
+        raise OwnerMapUnavailable(f"database.backend is {database.backend!r}, which does not persist thread owners")
+    # Connecting would create an empty SQLite file, hiding a wrong path.
+    if database.backend == "sqlite" and not Path(database.sqlite_path).is_file():
+        raise OwnerMapUnavailable(f"no SQLite database at {database.sqlite_path}")
+
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.exc import SQLAlchemyError
+
+    try:
+        engine = create_engine(database.app_sync_sqlalchemy_url)
+    except ImportError as e:
+        raise OwnerMapUnavailable(f"database driver is not installed ({e})") from e
+    except SQLAlchemyError as e:
+        # e.g. an empty postgres_url when $DATABASE_URL is unset.
+        raise OwnerMapUnavailable(f"cannot open the configured database ({e.__class__.__name__}: {e})") from e
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(text("SELECT thread_id, user_id FROM threads_meta WHERE user_id IS NOT NULL")).all()
+    except SQLAlchemyError as e:
+        raise OwnerMapUnavailable(f"failed to query threads_meta ({e.__class__.__name__}: {getattr(e, 'orig', None) or e})") from e
+    finally:
+        engine.dispose()
+    return {thread_id: user_id for thread_id, user_id in rows}
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Migrate DeerFlow data to per-user layout")
+    parser.add_argument("--dry-run", action="store_true", help="Log actions without making changes")
+    parser.add_argument(
+        "--user-id",
+        default="default",
+        metavar="USER_ID",
+        help=(
+            "User ID to claim un-owned legacy data (global memory.json, USER.md profile, and legacy custom agents). Defaults to 'default'. In multi-user installs, set this to the operator account that should inherit those legacy artifacts."
+        ),
+    )
+    parser.add_argument(
+        "--allow-missing-thread-owners",
+        action="store_true",
+        help=(
+            "Proceed when the configured database cannot provide thread owners (no database file, a 'memory' backend, or an unreadable threads_meta table); "
+            "every legacy thread is then assigned to 'default'. Only for installs that never recorded thread owners."
+        ),
+    )
+    args = parser.parse_args()
+
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+
+    paths = get_paths()
+    logger.info("Base directory: %s", paths.base_dir)
+    logger.info("Dry run: %s", args.dry_run)
+    logger.info("Claiming un-owned legacy data for user_id=%s", args.user_id)
+
+    owner_map: dict[str, str] = {}
+    if _has_legacy_thread_dirs(paths):
+        try:
+            owner_map = _build_owner_map_from_db(get_app_config().database)
+        except OwnerMapUnavailable as e:
+            if not args.allow_missing_thread_owners:
+                logger.error(
+                    "Cannot read thread owners: %s. Run from the Gateway's working directory with its runtime selectors and config, or pass --allow-missing-thread-owners if this install never recorded thread owners. Nothing was migrated.",
+                    e,
+                )
+                return 1
+            logger.warning("Cannot read thread owners: %s. Assigning every legacy thread to 'default' (--allow-missing-thread-owners).", e)
+        logger.info("Found %d thread ownership records in DB", len(owner_map))
+
+    report = migrate_thread_dirs(paths, owner_map, dry_run=args.dry_run)
+    migrate_memory(paths, user_id=args.user_id, dry_run=args.dry_run)
+    migrate_user_profile(paths, user_id=args.user_id, dry_run=args.dry_run)
+    agent_report = migrate_agents(paths, user_id=args.user_id, dry_run=args.dry_run)
+    skill_report = migrate_skills(paths, user_id=args.user_id, dry_run=args.dry_run)
+
+    if report:
+        logger.info("Thread migration report:")
+        for entry in report:
+            logger.info("  thread=%s user=%s action=%s", entry["thread_id"], entry["user_id"], entry["action"])
+    else:
+        logger.info("No threads to migrate.")
+
+    if agent_report:
+        logger.info("Agent migration report:")
+        for entry in agent_report:
+            logger.info("  agent=%s user=%s action=%s", entry["agent"], entry["user_id"], entry["action"])
+    else:
+        logger.info("No agents to migrate.")
+
+    if skill_report:
+        logger.info("Skill migration report:")
+        for entry in skill_report:
+            logger.info("  skill=%s user=%s action=%s", entry["skill"], entry["user_id"], entry["action"])
+    else:
+        logger.info("No skills to migrate.")
+
+    unowned = [e for e in report if e["user_id"] == "default"]
+    if unowned:
+        logger.warning("%d thread(s) had no owner and were assigned to 'default':", len(unowned))
+        for e in unowned:
+            logger.warning("  %s", e["thread_id"])
+
+    if agent_report:
+        logger.warning(
+            "%d legacy agent(s) were assigned to '%s'. If those agents belonged to other users, move them manually under {base_dir}/users/<user_id>/agents/.",
+            len(agent_report),
+            args.user_id,
+        )
+
+    if skill_report:
+        logger.warning(
+            "%d legacy custom skill(s) were assigned to '%s'. If those skills belonged to other users, move them manually under {base_dir}/users/<user_id>/skills/custom/.",
+            len(skill_report),
+            args.user_id,
+        )
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

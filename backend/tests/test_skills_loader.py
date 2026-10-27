@@ -1,8 +1,13 @@
 """Tests for recursive skills loading."""
 
 from pathlib import Path
+from types import SimpleNamespace
 
-from deerflow.skills.loader import get_skills_root_path, load_skills
+import pytest
+
+from deerflow.config.skills_config import SkillsConfig
+from deerflow.skills.storage import get_or_new_skill_storage
+from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
 
 
 def _write_skill(skill_dir: Path, name: str, description: str) -> None:
@@ -12,11 +17,26 @@ def _write_skill(skill_dir: Path, name: str, description: str) -> None:
     (skill_dir / "SKILL.md").write_text(content, encoding="utf-8")
 
 
-def test_get_skills_root_path_points_to_project_root_skills():
-    """get_skills_root_path() should point to deer-flow/skills (sibling of backend/), not backend/packages/skills."""
-    path = get_skills_root_path()
-    assert path.name == "skills", f"Expected 'skills', got '{path.name}'"
-    assert (path.parent / "backend").is_dir(), f"Expected skills path's parent to be project root containing 'backend/', but got {path}"
+def test_get_skills_root_path_points_to_current_project_skills(tmp_path: Path, monkeypatch):
+    """get_skills_root_path() should point to the caller project skills directory."""
+    monkeypatch.delenv("DEER_FLOW_SKILLS_PATH", raising=False)
+    monkeypatch.delenv("DEER_FLOW_PROJECT_ROOT", raising=False)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "skills").mkdir()
+
+    app_config = SimpleNamespace(skills=SkillsConfig())
+    path = get_or_new_skill_storage(app_config=app_config).get_skills_root_path()
+    assert path == tmp_path / "skills"
+
+
+def test_get_skills_root_path_honors_env_override(tmp_path: Path, monkeypatch):
+    """DEER_FLOW_SKILLS_PATH should override the caller project skills directory."""
+    skills_root = tmp_path / "team-skills"
+    monkeypatch.setenv("DEER_FLOW_SKILLS_PATH", str(skills_root))
+
+    app_config = SimpleNamespace(skills=SkillsConfig())
+    path = get_or_new_skill_storage(app_config=app_config).get_skills_root_path()
+    assert path == skills_root
 
 
 def test_load_skills_discovers_nested_skills_and_sets_container_paths(tmp_path: Path):
@@ -27,7 +47,7 @@ def test_load_skills_discovers_nested_skills_and_sets_container_paths(tmp_path: 
     _write_skill(skills_root / "public" / "parent" / "child-skill", "child-skill", "Child skill")
     _write_skill(skills_root / "custom" / "team" / "helper", "team-helper", "Team helper")
 
-    skills = load_skills(skills_path=skills_root, use_config=False, enabled_only=False)
+    skills = get_or_new_skill_storage(skills_path=skills_root).load_skills(enabled_only=False)
     by_name = {skill.name: skill for skill in skills}
 
     assert {"root-skill", "child-skill", "team-helper"} <= set(by_name)
@@ -46,6 +66,63 @@ def test_load_skills_discovers_nested_skills_and_sets_container_paths(tmp_path: 
     assert team_skill.get_container_file_path() == "/mnt/skills/custom/team/helper/SKILL.md"
 
 
+def test_local_storage_accepts_external_custom_skill_directory_symlink(tmp_path: Path):
+    skills_root = tmp_path / "skills"
+    external_file = tmp_path / "external-skills" / "external-skill" / "SKILL.md"
+    external_file.parent.mkdir(parents=True)
+    external_file.write_text("---\nname: external-skill\ndescription: An external skill\n---\n", encoding="utf-8")
+
+    linked_dir = skills_root / "custom" / "external-skill"
+    linked_file = linked_dir / "SKILL.md"
+    linked_dir.parent.mkdir(parents=True)
+    try:
+        linked_dir.symlink_to(external_file.parent, target_is_directory=True)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 1314:
+            pytest.skip("Windows symlink creation requires SeCreateSymbolicLinkPrivilege")
+        raise
+
+    storage = LocalSkillStorage(host_path=str(skills_root))
+
+    assert storage.validate_skill_file_path(linked_file) == external_file
+
+
+def test_load_skills_discovers_parenthesized_portable_allowed_tools(tmp_path: Path):
+    skills_root = tmp_path / "skills"
+    skill_dir = skills_root / "custom" / "tavily-cli"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: tavily-cli\ndescription: Tavily CLI\nallowed-tools: Bash(tvly *)\n---\n\n# Tavily CLI\n",
+        encoding="utf-8",
+    )
+
+    skills = get_or_new_skill_storage(skills_path=skills_root).load_skills(enabled_only=False)
+
+    skill = next(skill for skill in skills if skill.name == "tavily-cli")
+    assert skill.allowed_tools == ("Bash(tvly *)",)
+
+
+def test_load_skills_stops_at_skill_package_boundary(tmp_path: Path):
+    """SKILL.md files inside an existing skill package are support data, not skills."""
+    skills_root = tmp_path / "skills"
+
+    _write_skill(skills_root / "public" / "reviewer", "reviewer", "Reviews skills")
+    _write_skill(
+        skills_root / "public" / "reviewer" / "evals" / "fixtures" / "injection",
+        "injection-example",
+        "Calibration fixture",
+    )
+    _write_skill(
+        skills_root / "public" / "reviewer" / "examples" / "helper",
+        "nested-example",
+        "Nested package example",
+    )
+
+    skills = get_or_new_skill_storage(skills_path=skills_root).load_skills(enabled_only=False)
+
+    assert {skill.name for skill in skills} == {"reviewer"}
+
+
 def test_load_skills_skips_hidden_directories(tmp_path: Path):
     """Hidden directories should be excluded from recursive discovery."""
     skills_root = tmp_path / "skills"
@@ -57,7 +134,7 @@ def test_load_skills_skips_hidden_directories(tmp_path: Path):
         "Hidden skill",
     )
 
-    skills = load_skills(skills_path=skills_root, use_config=False, enabled_only=False)
+    skills = get_or_new_skill_storage(skills_path=skills_root).load_skills(enabled_only=False)
     names = {skill.name for skill in skills}
 
     assert "ok-skill" in names
@@ -69,7 +146,7 @@ def test_load_skills_prefers_custom_over_public_with_same_name(tmp_path: Path):
     _write_skill(skills_root / "public" / "shared-skill", "shared-skill", "Public version")
     _write_skill(skills_root / "custom" / "shared-skill", "shared-skill", "Custom version")
 
-    skills = load_skills(skills_path=skills_root, use_config=False, enabled_only=False)
+    skills = get_or_new_skill_storage(skills_path=skills_root).load_skills(enabled_only=False)
     shared = next(skill for skill in skills if skill.name == "shared-skill")
 
     assert shared.category == "custom"

@@ -1,0 +1,274 @@
+### Data Flow
+
+Scope local-turn ordering to `displayThreadId ?? threadId`, the displayed
+conversation identity. Confirming a new chat changes the SDK `threadId` from
+undefined to its existing display ID; preserve the human anchor across that
+transition and clear it only on a displayed-conversation switch or the existing
+failure/replay-gap paths. Draft and confirmation regressions live in
+`tests/unit/core/threads/local-turn-order.dom.test.tsx`.
+
+Answer details use `workspace/message-details` descriptors; skill run scoping
+is documented in `docs/skill-usage-ui.md`.
+
+Encode raw paths preserving literal percent escapes. Decode Markdown once;
+match image names to raw paths.
+Sanitize URLs; key Streamdown by file/thread/mock context and scroll key.
+Detect file types by basename, including Dockerfile/Makefile.
+Language maps use own properties; `constructor`/`__proto__` keep fallback.
+HTML bases skip DOM without base text; inert templates ignore comments/scripts
+and templates. `preview-base.dom.test.ts` (happy-dom); RCDATA needs
+browser checks; other helpers use node.
+HTML assets: credential GET, no 401 navigation; current-thread only, no redirects,
+bound bytes/count/CSS depth/time/expansion; keep doctype, rewrite SVG style.
+Keep opaque sandbox/data URLs; external refs stay browser-loaded.
+Abort stale work; revoke URLs; gate content/URL/scroll.
+Tests: `html-assets.dom.test.ts`, `artifact-file-preview.dom.test.tsx`,
+`tests/e2e/artifact-preview.spec.ts`.
+
+1. Optional composer helpers such as `core/input-polish` can rewrite the local draft before submission, and `core/voice-input` can transcribe browser microphone input into that same local draft; confirmed user input then flows to thread hooks (`core/threads/hooks.ts`) → LangGraph SDK streaming. Voice transcript joining separates every adjacent pair of trimmed word segments, preserves CJK joins and provider whitespace, and attaches leading punctuation/percent signs while retaining spaces after sentence punctuation. Regression cases live in `tests/unit/core/voice-input/speech-recognition.test.ts`.
+2. Stream events update thread state (messages, artifacts, todos, goal). The main thread stream uses the LangGraph SDK's `throttle: true` mode so updates received in the same macrotask coalesce before React is notified; do not replace it with a numeric delay without validating the SDK's trailing-debounce behavior on a continuous stream.
+   File-tool artifact auto-open work must run in an effect with timer cleanup; never schedule timers while rendering streamed `write_file` or `str_replace` updates.
+   `ThreadState.artifacts` remains the authoritative artifact list. The artifacts provider persists only thread-scoped panel UI state (`open`, selected path, and a refresh bootstrap cache) in session storage; an initial empty stream value must not overwrite that restored state before history finishes loading.
+   Formal artifact content is refreshed once when the run finishes; transient `write-file:` previews remain message-driven.
+   UTF-8 outputs under `/mnt/user-data/outputs` are editable while idle. Root drafts survive SPA/home/showcase routes and unknown auth; confirmed account change/logout clears them. Owner/generation fences reject stale updates. Auth binds through a stable setter context, outside the typing state subscription. Drafts preview in Markdown/HTML and warn on unload off-route. SHA-256 conflicts preserve edits. Layout, draft-context and editor DOM tests cover this.
+   Regular artifact text loads request at most the first 1 MiB through an HTTP
+   byte range. A truncated preview must stay lightweight and expose an explicit
+   full-file action; do not mount CodeMirror for that artifact until the user
+   requests and receives the complete content. Truncated responses must never
+   establish or replace an editing baseline, including when discarding a draft:
+   their ETag can match the full response. Editing and saving require complete
+   content; retain existing drafts across partial reloads. The Gateway retains
+   range ownership and returns 206/416 through `FileResponse`. Keep Exit editing
+   available while editing even if a reload is loading, truncated, or fails;
+   exiting retains the draft and is disabled only during a pending save.
+3. `useThreadHistory` loads persisted conversation pages from `GET /api/threads/{id}/messages/page`, preserving the backend's thread-global event `seq`; rendering overlays checkpoint/live copies at their matching canonical identities (a summarized checkpoint may contain a protected early input plus a recent tail). Context-compaction rescue diffs every retained visible identity rather than slicing at the first anchor, and keeps a run-scoped ledger of committed visible messages so replacement updates and repeated rolling checkpoint windows cannot erase an already displayed step. A checkpoint/transient prefix whose canonical position is still behind an unloaded cursor page is woven in before the first shared anchor, not discarded: both the checkpoint and seq-sorted history place it earlier, so that position is known even when the pages between are not. Position authority is seq-first and lives in `core/threads/message-order.ts` (re-exported through `hooks.ts`): every normalized identity tracks latest visible content and trusted position separately; a valid `deerflow_seq` (positive safe integer, earliest value wins per identity, hidden control copies contribute a position only when no visible copy carries one) joins an ascending skeleton that outranks identity-anchor weaving, which remains the fallback for no-seq segments whose internal order is preserved. Live-only and rescued messages with trusted seq also serve as anchors for adjacent no-seq segments. A trailing segment follows its last live-only positioned anchor within the loaded window; after a shared anchor or a rescued prefix before the window, it stays at the tail. Optimistic messages remain last; the transient bridge inserts positioned rows before weaving so the insertion cannot reverse previously displayed steps. Rescued sequence anchors preserve preceding captured steps even before React has rendered them; only a leading prefix anchored to loaded history requires previously rendered ordering to cross an unloaded cursor gap. Content replacement never drops the known seq, `run_id`, or `turn_duration`, and the compaction transient bridge plus rendered ledger share the same position priority. `deerflow_seq` is server-owned display metadata and is never written back into a checkpoint. It must never be appended to the tail (#4065) — the tail is provably wrong — but suppressing it entirely is how a user's own question vanished from a long thread once the first 50-row history page no longer reached back to it (#4666). A collapsed unloaded gap is recoverable by paging; a dropped message is not. Weaving alone restores the message but not its exact position — after compaction the live window carries too few anchors — so both sides now carry the backend's thread-global `additional_kwargs.deerflow_seq`: `buildVisibleHistoryMessages` copies each row's `seq`, and the Gateway stamps it onto `values` frame messages it has already persisted. A live message whose seq is below the loaded window's lower bound is placed ahead of everything on screen instead of before the nearest anchor, which is what puts a compaction-rescued first user turn back at the head rather than mid-transcript. That split happens _before_ the anchor walk, not inside it: a compacted checkpoint can share no identity at all with the loaded page — it keeps only the current run's recent tail, while the page on screen was fetched turns earlier — and the anchor walk then never runs at all, which is precisely when a rescued turn most needs its seq. Doing the split inside the walk left that case appending the message after the whole window (#4666), the one arrangement #4065 proved wrong. A message without a seq (still streaming, so not in the feed yet) keeps the weaving path — the tail is already its correct position. Optimistic messages are then added without timestamp re-sorting. History invalidation preserves already-loaded pages so their established ordering positions are not discarded. Dynamic context re-keys each submitted user message from the client-generated `local-human-*` identity `X` to the visible server echo `X__user`; UI identity matching normalizes that reserved suffix only for human messages so the optimistic input and checkpoint replacement remain one visible turn. At dispatch, a local-turn anchor snapshots the checkpoint identity baseline, canonical history identities and maximum trusted seq, and any pre-existing transient-bridge identities. Render repair uses `confirmedHistoryIdentities` plus `preSubmitMaxSeq` to restore baseline or history-confirmed messages above that exact human anchor, while moving only speculative non-baseline AI/tool steps behind it; `currentTurnRunIds` keeps already-persisted steps of the active turn below their human. Keep the anchor scoped to its originating thread through finish, stop, and stream error because the SDK's settled frame can retain transient event order; replace it on the next local submit and clear it on thread switch or replay-gap recovery.
+4. Stop actions call the LangGraph SDK stream stop path; `core/threads/hooks.ts` invalidates current-thread, thread-history, token-usage, and sidebar/search caches immediately and schedules one follow-up refetch because SDK stop may finish via abort + fire-and-forget cancel before backend title finalization commits
+5. TanStack Query manages server state. `UserPreferencesBoundary` preserves
+   workspace SSR and initializes the account cache before browser paint; only
+   subsequent account switches gate consumers until the new cache is active. Four allowlisted
+   settings sync through `/api/v1/auth/preferences`; confirmed caches are
+   account-scoped in localStorage and pending patches are account-scoped in
+   tab-local sessionStorage. A stopped account cannot apply late responses, and
+   each request carries its expected user ID to fence shared-cookie switches.
+   Storage events refresh from the server without echo-writing unchanged data;
+   failed reads and writes retry with capped backoff and focus/online wakeups.
+   Legacy unscoped settings are never automatically uploaded. Display settings
+   and thread model overrides remain local. Shared local-only fields still merge
+   across tabs on storage changes/removal/clear, preserving account preferences.
+   Explicit InputBox selections pass only fields changed by the action, so a
+   mode/effort edit cannot upload an unrelated thread model override.
+   InputBox marks automatic model/mode
+   resolution separately from user choices on both normal and Custom Agent chat
+   pages; `resolveThreadContext` must neither
+   enqueue account writes nor create a fallback thread override that masks a
+   later server preference. The
+   Capability Center > My plugins MCP switch calls the targeted `PATCH /api/mcp/personal/config`
+   mutation, disables switches until that mutation's success refetch completes,
+   displays the backend error `detail` through a toast, and invalidates
+   `["mcpConfig"]` only after success.
+   Personal server management uses targeted `POST /api/mcp/personal/config/servers`,
+   `PUT /api/mcp/personal/config/server`, and bodyless
+   `DELETE /api/mcp/personal/config/servers/{server_name}` mutations. The deployment
+   `/api/mcp/config` endpoints remain admin-only and are used by the Platform provided editor. Delete names are
+   percent-encoded, including legacy empty and slash-containing names; every
+   successful mutation invalidates `["mcpConfig"]` only after the response.
+   Current-chat MCP background tasks use `core/background-tasks`: the header
+   trigger is hidden for new/mock/static-demo threads and unless `/api/features`
+   reports the startup-scoped `mcp_tasks` capability; the list query is disabled
+   while that capability is unavailable, so default-disabled and memory-backend
+   deployments never poll an endpoint that cannot serve tasks. It lists at most
+   20 local task records, refreshes every 3 seconds while any task is active
+   (15 seconds otherwise), fetches bounded task details only while a user expands
+   a card, and cancels through the thread-scoped local-ID endpoint. The expanded view
+   shows result/preview, artifact metadata, input requests, and the latest poll,
+   notification-delivery, or cancellation error without exposing the persisted remote handle. A
+   persisted cancel request remains "Cancelling…" only while the task status is
+   still active; if remote cancellation keeps failing, the active card remains
+   expandable and shows the attempt count plus the latest bounded error while
+   the backend continues retrying. Notification delivery failures expose their
+   bounded error and attempt count; retryable failures use backend backoff,
+   while a permanent rejection or exhausted five-attempt budget is shown as
+   stopped rather than implying that retries will continue.
+   `core/subagent-batches` / `ThreadSubagentBatches` own durable native batches.
+   `/api/features` separates SQL availability from startup worker state.
+   Show the trigger on default/Custom Agent chats with a running worker, or
+   read-only with durable history; hide otherwise. Bound persisted progress
+   percentages. Use fixed item-preview pages and load-more; full results need
+   JSONL export. Gate pause/resume/cancel and failed-item retries on the worker.
+   Never infer batches from prompts or put full results in chat state.
+   Review citations use only the selected persisted snapshot. Poll open details
+   until their own response is terminal, regardless of compact-list status;
+   stop on close. Compact attempt/status/update changes invalidate cached details
+   so external retries refresh open dialogs; never fetch closed details.
+   Show omitted counts even without sources; localize page labels.
+   Real-hook/HTTP tests: `thread-subagent-batch-review.dom.test.tsx`.
+   Capability Center > Plugins > Lark uses a local generation only to suppress stale React
+   callbacks; server-issued Lark flow generations must be passed through every
+   config/auth completion and across switch-or-register to authorization chains
+   so backend cross-tab ordering remains authoritative.
+   Settings > Subagents reads one catalog for built-in, config, and managed
+   definitions. Only administrators see managed-definition mutation controls;
+   Custom Agent settings consume the same query and preserve stale selected names
+   as removable "missing" entries instead of silently widening the allowlist.
+   The Agents gallery imports and exports versioned JSON packages through
+   `core/agents`; it may prefill an import name from untrusted JSON, but only the
+   Gateway validates or persists the package. A 409 is an explicit rename
+   prompt/error, never permission to overwrite the existing Agent.
+   Import errors join FastAPI 422 validation messages into readable text while
+   preserving string conflict details; unusable error bodies use a status fallback.
+   New-Agent saves require the latest `setup_agent` success and read-back.
+   ToolMessage/`deerflow_tool_meta.status` errors or exhausted retries restore Save.
+6. Components subscribe to thread state and render updates
+
+AI message grouping uses `extractContentFromMessage()` to identify visible answer content. A non-empty content array may contain only Anthropic thinking blocks; keep it in `assistant:processing` until answer content arrives. Cover both streamed snapshots in `tests/unit/core/messages/utils.test.ts`.
+
+Inline `<think>` extraction scans code and reasoning openers in source order. Code tags stay in answer/copy data, including unfinished streaming spans. Blank lines, headings, thematic breaks, interrupting lists and fences end inline spans; ATX spans also end at the heading's newline. Fenced/indented code stays protected; indentation cannot interrupt a paragraph. Fences opened after list markers scan to a matching closer or the end of the list item, with tab-aware container indentation; their closers must not open a new top-level fence. Outside inline code, a backslash escapes one backtick, not the whole run. Real reasoning closes independently of Markdown inside it. Preserve the content-keyed cache and no-tag fast path.
+
+Project moves in `core/threads/hooks.ts` cancel all per-thread metadata query
+variants after the write succeeds, merge only `deerflow_project_id`, then
+invalidate/refetch that metadata prefix. This fences delayed pre-move reads and
+restarts initial reads that have no cached snapshot. Search and project-thread
+lists are invalidated on settlement. Keep the delayed-read regression in
+`tests/unit/core/threads/move-thread.dom.test.tsx` for moves and removal.
+
+The chat header's context-window control is intentionally persistent: while `context_usage` is unavailable, `ContextUsageBadge` renders a gauge placeholder rather than unmounting; once data arrives, the same position shows the percentage. `useThreadTokenUsage` retains placeholder data only when the response `thread_id` still matches the active route, so same-thread refetches do not flicker and cross-thread navigation never displays the previous chat's usage.
+
+Settings skill uploads reject archives larger than 100 MiB before starting the
+request and disable the hidden file input while an install is pending. The API
+client preserves structured SkillScan findings on `SkillRequestError`, and the
+settings page renders a compact file/rule/line summary so security rejections
+remain actionable; a proxy-generated 413 is mapped to the localized size error.
+
+Run duration is run-scoped UI metadata even though the compatibility field `additional_kwargs.turn_duration` is repeated on historical AI messages. `core/messages/run-duration.ts` folds those copies into one display owned by the run's last visible message group. `MessageList` owns the temporary client-side duration for a just-completed live turn until authoritative history arrives. The duration is total run wall-clock time, not per-message reasoning time. At that anchor, a completed reasoning disclosure uses the duration as its visible label with a divider underneath and a visually hidden localized reasoning cue for its accessible name. This applies to assistant bubbles, processing groups, and subagent groups. `getMessageGroupReasoningMessage` shares the processing renderer’s trailing-reasoning selection so reasoning before the final tool cannot consume the duration of a disclosure that is not rendered. Groups without a matching rendered reasoning disclosure use a standalone duration header above their content. Historical reasoning without duration retains its generic label. Never repeat the duration on every AI message.
+
+`MessageReasoning` controls its disclosure state: completed mounts start collapsed, live streams open and close once after completion, and history expansion stays under user control. Keep this lifecycle in the workspace wrapper rather than editing generated AI elements. Duration-target selection is lazy for mounted, completed groups with a duration and cached by stable group identity; streaming updates must not re-convert unchanged historical processing/subagent groups. Changed groups must invalidate that cache.
+
+The workspace-change card follows the same rule: it is resolved from `(threadId, runId)` alone, so every AI message of a run would render an identical copy. A run ends in more than one terminal assistant bubble whenever the model emits answer text that never gains a tool call, so `core/messages/workspace-change-anchor.ts` picks the run's last assistant bubble and `MessageListItem` renders the badge only for that anchor (#4555). Any future run-scoped display belongs in the same place — do not hang one off every message. The two anchor helpers deliberately differ in which group types they accept as a run's last position, because an anchor is only useful where the display is actually rendered: run duration is emitted by `MessageList` around every group, so it accepts any type, while the workspace-change card comes from `MessageListItem` and so restricts to `assistant`. Keep a new helper's candidate set matched to its own render site rather than unifying them.
+
+Composer drafts are tab-scoped browser state. `core/threads/composer-draft.ts` stores text with inline reference tokens and conversation metadata in `sessionStorage`, keyed by user, agent, and logical conversation scope. New-chat pages pass the stable scope `"new"` because their runtime `threadId` is a fresh UUID on every reload; established conversations use their real thread ID. New drafts write `skillName: null`; `InputBox` waits for the enabled agent skill scope before converting an older draft selection into an inline `@` reference, and degrades a missing/disabled skill back to editable slash text. The stored draft clears through `SendMessageOptions.onSent`, which fires only once the send is dispatched: after the in-flight guard and any attachment upload, so a failed upload keeps the draft, quotes, conversation references and staged project files for a retry. If the composer moved to another conversation or unmounted meanwhile, `onSent` leaves live state alone and retires only the stored draft and staged files that send carried, keeping a later draft or attachment. Attachments, sidecar quotes, voice state, and polish undo state are not persisted.
+
+Conversation references (`read_conversation`, opt-in on the backend) are attached from the composer. `ReferenceConversationsButton` (`components/workspace/conversation-references/`) renders only while `/api/features` reports `conversation_references.enabled`, opens a picker over the same `useThreads()` list the sidebar uses (the current thread excluded, capped at `max_references`), and shows removable chips in the composer header. On submit the thread IDs ride `InputBoxSubmitOptions.conversationReferences` → `SendMessageOptions.conversationReferences` → run `context.conversation_references`, which the Gateway consumes at admission; the LangGraph SDK drops unknown top-level body fields, so the top-level request field is not reachable from the web UI. `core/conversation-references` also writes display-only `additional_kwargs.conversation_references` (`{thread_id, title, agent_name?}`) on the visible human message so `message-list-item.tsx` can render read-only chips linking to the source — through `pathOfThread`, so custom-agent sources route to `/workspace/agents/{agent}/chats/{id}`; that metadata grants nothing. References are per message: they are not persisted with the draft, clear on send or thread switch, and regenerate/edit of a turn runs without them unless attached again.
+
+Auth UI note: the login page's "keep me signed in" option submits only `remember_me` to the Gateway and may persist only the email address through `core/auth/remember-login.ts`. Passwords and tokens must never be stored in frontend storage; the `HttpOnly access_token` and readable `csrf_token` cookies remain Gateway-owned.
+
+The web `/` picker lists only `/goal` and `/compact`; skills are selected through the inline `@` picker. `/goal` and `/compact` are built-in composer commands, not skill activations. `src/components/workspace/input-box.tsx` intercepts `/goal`, `/goal clear`, and `/goal <condition>` before normal chat submission, calling Gateway `GET/PUT/DELETE /api/threads/{thread_id}/goal`. Setting `/goal <condition>` also submits the condition text as the next user task so the agent starts running immediately; status and clear do not start a run. On a project-scoped new chat (`/workspace/chats/new?project=…`), the chat page's project pre-create runs before the goal PUT via the composer's `onPrepareThread` callback: the goal endpoint materializes a missing thread row itself, and an unassigned row would make the later idempotent thread create return it without assigning the project. Goal and compact requests are tied to the current `threadId` with an `AbortController`, so switching threads or unmounting the composer aborts in-flight requests and stale responses cannot update the new thread's composer state. Both chat pages render `GoalStatus` above the composer from `goal`, `goal_outcome` and messages via `useActiveGoal` (e2e: `goal-status.spec.ts`); a `/goal` result stays local until a `goal` value or that goal's met record arrives. `/compact` calls `POST /api/threads/{thread_id}/compact` to summarize older active context while leaving the full visible chat history intact; it is skipped on new/empty threads and blocked server-side while a run is in flight. Thread rename uses the same serialized state-write route; the rename dialog stays open and surfaces the server error when an active run returns 409.
+
+Composer `runs:create` gating belongs in `InputBox.handleSubmit` after command classification and before dispatch. Reject message and goal-set actions before `onPrepareThread`, goal persistence, success feedback, or draft clearing. Goal status/clear and compact do not start runs; preserve their endpoint-specific gates. Regression coverage lives in `input-box-send-gating.dom.test.tsx`.
+
+The `/` skill list stays reachable after a skill is selected: typing `/` in the editable text beside the chip reopens it, and picking an entry swaps the chip rather than adding a second one, because the wire format carries exactly one leading `/skill`. That list offers skills only while a chip is selected — a builtin command owns the whole composer line, so `/goal` behind a selected skill would submit as chat text instead of running the command. The trigger itself is unchanged: a slash only opens the list at the start of the input (`getLeadingSlashSkillQuery`), pinned by `tests/e2e/chat.spec.ts`.
+
+Human input requests are a structured message protocol layered on normal chat history. The backend writes request payloads to `ToolMessage.artifact.human_input`, `src/core/messages/human-input.ts` owns the runtime validators/types, and `src/components/workspace/messages/human-input-card.tsx` renders the reusable card. The protocol is versioned on the request side only: v1 covers `free_text` / `choice_with_other`, and v2 adds `form` (typed fields — text/textarea/number/select/multi_select/checkbox/date — with required-field validation in the card). Replies deliberately stay on the v1 response protocol: the form card submits a `response_kind: "text"` reply whose value is the human-readable summary plus one JSON block keyed by stable field names (`buildHumanInputFormSubmissionValue` — the readable part alone is ambiguous because labels/values may contain the separators), so the model can reconstruct the submitted mapping without a structured response kind. The validators reject unknown versions/modes (and field names colliding with JS `Object.prototype` members) so future protocol bumps degrade to the plain-text ToolMessage fallback rather than rendering a broken card. Form values are read through own-property access only (`readHumanInputFormValue`); select fields stay controlled from their empty-string placeholder state through selection; checkbox fields are native `<input type="checkbox">` controls seeded to an explicit `false` (`buildInitialHumanInputFormValues`) so an untouched checkbox submits as "no" while a `required` checkbox keeps must-agree semantics (no HTML `required` attribute — native constraint validation would intercept the custom submit path), and form controls carry label/`htmlFor`, `aria-required` plus a visually-hidden localized "required" marker, and `aria-invalid`/error associations whose error node stays mounted while any field is still invalid. Composer-bypass closure: `deriveHumanInputThreadState` treats a visible plain human message as answering the latest unanswered request opened before it (only the latest — nothing guarantees a single outstanding request across runs, and closing all would silently swallow older decisions; an older request left open simply becomes the active card again). This lets current users bypass a structured form through the normal composer and preserves compatibility with old v1-only frontends that degrade a v2 request to plain text. `MessageList` owns answered/latest/pending state for visible cards, but derives answered responses from raw `thread.messages` because replies are hidden; pending cards clear when the hidden reply appears, when dispatch is dropped, or when a new `thread.error` reports an async stream failure. Page-level card submit callbacks must send a normal human message and put `hide_from_ui: true` plus the response payload in the fourth `sendMessage(..., options)` argument as `options.additionalKwargs`; the third argument remains run context such as `{ agent_name }`. Composer entry points remain enabled while a human-input request is open; a normal visible message intentionally bypasses the card and starts the next run without structured response metadata.
+
+Tool-calling AI messages can contain user-visible text as well as `tool_calls`. `core/messages/utils.ts` keeps these turns in an `assistant:processing` group, and `components/workspace/messages/message-group.tsx` must render the visible text as a processing step instead of treating the message as only tool metadata. This preserves provider text such as error explanations or "trying another approach" notes during tool-heavy runs.
+While the current turn is still loading, a content-only AI message after the latest visible human input also stays in that processing group until the turn settles: a provider may append tool-call chunks to the same message later, and classifying it as a final assistant bubble too early makes the text jump into the steps panel. `MessageGroup` therefore renders processing text even before the first tool call arrives.
+The same rule applies after an earlier tool call: a later content-only AI message remains visible after the current last tool-call step while streaming, because that message may itself gain another tool call before the turn settles.
+Because the same message is rendered by two different components over its lifetime, reasoning must sit above the answer text in both. `MessageListItem` paints the settled bubble's `<Reasoning>` disclosure above its content, so `MessageGroup` puts the trailing reasoning disclosure above the assistant text that follows it and `convertToSteps` emits a message's reasoning step before its content step — otherwise the two swap places the instant the turn settles (#4576). Assistant text emitted _before_ that reasoning keeps its earlier position; only the answer the reasoning produced moves below it.
+
+Edit-and-rerun is deliberately latest-turn-only. `core/messages/utils.ts::getLatestEditableTurn()` exposes a human turn only when the transcript is idle and the most recent visible turn ends in a terminal assistant message. `core/threads/hooks.ts::editAndRegenerateMessage()` calls `POST /api/threads/{id}/runs/edit-regenerate/prepare`, submits the returned replacement message/checkpoint/metadata through the same LangGraph stream path as regenerate, optimistically hides the superseded message ids, and clears the optimistic replacement once the persisted replacement arrives.
+
+`MessageGroup` builds its tool-result and browser-preview lookups once per processing group before converting messages to steps. The lookup preserves the first non-empty result and first screenshot-bearing browser view for each tool-call ID, matching the streamed-message display semantics without repeatedly scanning the full group for every tool call.
+
+Use `core/messages/tool-error.ts` for tool/Debug failures; never classify text or partial results. Scheduler completion needs an object response. Keep details Debug-only via `MessageGroup`. `tool-call-details.tsx` mounts payload previews only while expanded; `core/messages/tool-detail-preview.ts` caps text output at 12,000 characters, visits at most 12,000 values, and limits nesting to six levels. Count escapes, punctuation, indentation, closing delimiters and truncation markers within the budget; never slice structured JSON mid-token. Generic calls keep the original ToolMessage content/status. Text is displayed verbatim (or as a bounded prefix), never passed through JSON.parse: reparsing can round numeric IDs, discard duplicate keys, and alter quoted strings. Format objects/arrays on expansion; retain specialized result conversion. An empty received payload is distinct from a missing message, and neither implies a running/completed state. Copy actions use the shared clipboard fallback, copy the displayed preview, and reset feedback after two seconds. Truncated containers include an inline ellipsis unless an object has already emitted a real ellipsis key; in that case, only the external truncation notice is guaranteed. Arrays stop after a child collapses because the text budget is exhausted, avoiding repeated trailing markers while preserving literal ellipsis elements. Cycle, accessor, and depth-limit markers do not suppress later siblings. Truncated string prefixes preserve complete UTF-16 surrogate pairs. Object traversal stops before a key exceeds the remaining text budget; never shorten property names, since shortened keys can collide with real data. Renderer routing and result conversion share `getToolCallKind`. Disclosure accessible names include the tool name and call ID.
+
+Array previews coalesce consecutive generated markers only at the end into one omitted-suffix notice. The serializer tracks marker provenance and complete entry boundaries; it must not deduplicate literal ellipsis values or shift the indices of later real elements. A cycle/accessor/depth-limit tail can therefore share one notice while the same markers in the middle retain their positions.
+
+### Key Patterns
+
+REST `core/api/fetcher.ts`: preserve Request; CSRF uses effective method/headers.
+
+Conversation exports read every persisted message page through
+`fetchThreadExportMessages` (200 rows/page). Run `mergeMessages` after history
+deduplication to restore earliest trusted positions for identities repeated across runs.
+Never export only the loaded UI window or compacted checkpoint. Fail the whole
+export on a page error or non-advancing cursor; demos keep their fixture path.
+
+- **Server Components by default**, `"use client"` only for interactive components
+- **Static root boundary** — `src/app/layout.tsx` must not read cookies or import
+  chat-only KaTeX/Streamdown styles. Auth and workspace layouts own the cookie-derived
+  locale provider; docs derive locale from their route, and blog owns its preference
+  cookie. Public server routes load one dictionary at a time through
+  `core/i18n/translations.ts`; the interactive auth/workspace client provider owns both
+  formatter-bearing dictionaries because functions cannot cross the RSC boundary.
+  Keep public `/` static and keep rich-content CSS on the routes that render it.
+- **Thread hooks** (`useThreadStream`, `useSubmitThread`, `useThreads`) are the primary API interface
+- **Thread routes** — construct Web UI chat paths through `core/threads/utils.ts::pathOfThread()`, which percent-encodes both custom agent names and thread IDs before inserting them into route segments
+- **LangGraph client** is a singleton obtained via `getAPIClient()` in `core/api/`
+- **Run creation retries** are disabled only for the initial `POST /runs/stream` in `core/api/api-client.ts`, because an ambiguous failure can otherwise create duplicate runs. Automatic SSE recovery keeps the SDK's normal HTTP retry budget for `GET` requests to the server-provided `Location`, including transient 5xx responses, and forwards `Last-Event-ID`. Reads and explicit SSE joins keep their normal retry behavior. Regression tests cover both a failed creation POST and POST success → stream interruption → GET 504 → GET success.
+- **Run stream options** are sanitized by `core/api/stream-mode.ts`: the Gateway-supported set is `values`, `messages-tuple`, `updates`, `debug`, `tasks`, `checkpoints`, and `custom`; any request containing an unsupported mode throws before HTTP instead of being partially forwarded or silently defaulting to `values`. `streamResumable` is retained by thread hooks only for SDK-side reconnect bookkeeping but stripped before the HTTP request because the Gateway does not accept that request option; actual replay uses the SSE `Last-Event-ID` cursor. The main chat client's initial and rejoined streams are forced to incremental `messages-tuple`, `updates`, and `custom` modes so SDK lazy tracking cannot add repeated full-state `values` snapshots; explicitly requested non-snapshot modes such as `debug`, `tasks`, and `checkpoints` are preserved. `values` remains supported outside this chat wrapper for explicit state inspection and by the replay-gap durable-state reload below. The backend file-tool chunk batcher is keyed to `messages-tuple`, not `values`, so omitting snapshots must not regress `write_file` / `str_replace` streaming into one SSE frame per model token. `core/threads/stream-state.ts` folds the user-visible non-message fields from `updates` with the matching DeerFlow reducer semantics, including `tool_artifacts` capture/consumption updates (same-handle replacement preserves order, retention directives trim the oldest entries, and the absolute ceiling is 1000) and rejects irrelevant frames before calling the SDK mutator, while the SDK's `messages-tuple` manager remains the sole owner of live message chunk assembly and deduplication. Keep this boundary aligned with the backend request schema; `messages` and `events` are not supported and must not be forwarded.
+- **Active-run recovery** in `core/threads/hooks.ts` discovers pending/running runs when a reopened chat has no tab-local reconnect pointer. Remember SDK-completed run IDs for the mounted hook, including submitted and natively reconnected runs: stale or delayed runs reads must not rejoin a completed run and interrupt follow-up suggestions. Keep recovery retries bounded and continue allowing a different active run to reconnect. The SDK's same-tab reconnect keeps its pointer on error and never retries, so a failed reconnect (not a failed submit) releases the pointer and recovery takes over with its own bounded retries.
+- **SSE replay gaps** (`core/api/api-client.ts`) wrap initial/joined streams as a lazy
+  async iterable: the SDK ignores unknown events. An id-less `gap` clears stale
+  reconnect metadata, emits a `stream_replay_gap` custom event, reloads durable values,
+  then rejoins after the server-provided retained tail (without a cursor for an empty
+  buffer). Allow five recovery rejoins after the original stream (six calls total).
+  `core/threads/hooks.ts` clears optimistic/transient/subtask state, invalidates durable
+  history caches and shows the localized warning; never finish normally on a gap or
+  cancel the running backend run. Merge submitted initial-stream input or saved
+  joined-stream input into each recovered values frame: the first checkpoint may not
+  yet contain the human message.
+  Restore the tab-local run pointer only if empty or still owned by this run, never
+  over another run's pointer after a durable-state read. A foreign pointer can cost
+  an extra lookup/rejoin on reload; add no server probe. The hooks' same-named
+  `rememberReconnectRun` remains unconditional: active-run rejoin claims ownership.
+- **Streaming Markdown rendering** is owned by `core/streamdown`: Streamdown's `animated` / `isAnimating` API handles incremental word animation, while the shared `streamdownRenderingPlugins` config registers the named code-highlighting and Mermaid plugins required by Streamdown 2.5. Keep wrappers and derived configs wired to that shared object; do not reintroduce a rehype plugin that wraps every word, because reparsing a growing block remounts old words and replays their animation.
+- Citation links in message and artifact Markdown must derive their `citation:` label from the full `ReactNode` children tree, since Streamdown may provide element or array children during streaming rather than a plain string.
+- Web-search steps accept either a provider result array or a Webz-style `{ query, returned_results, results }` envelope. Unwrap only in the web-search renderer; skip entries without string titles/URLs, preserve other tool payloads and apply the same link allowlist to both formats. UI regressions pin source titles/links and browser reloads, including malformed neighboring entries.
+- Tool-step links in `message-group.tsx` (`web_fetch` args, `web_search` / `image_search` result URLs) are model- or provider-controlled, so they pass the markdown `isSafeHref` allowlist; every surface renders a rejected href through the shared `UnsafeLink` marker.
+- **Environment validation** uses `@t3-oss/env-nextjs` with Zod schemas (`src/env.js`). Skip with `SKIP_ENV_VALIDATION=1`
+- **Subtask step history and runtime metadata** (`core/tasks/`) — cards interleave subagent reasoning and tool steps (#3779). Task `description` is optional progress text; `MessageList` titles use the required `prompt`, then a localized generic label, so valid calls never show a blank title. `Subtask.steps[]` appends live `task_running` events via `mergeSteps`. On historical-card expansion, `fetchSubtaskSteps` backfills task-scoped events (GET `/runs/{runId}/events?event_types=subagent.step&task_id=…&after_seq=…`) until a short page or a non-advancing full page; run-wide limits must not truncate the timeline. `task_started` carries the effective `model_name`; `task_running` carries a cumulative usage snapshot after each completed LLM call. `core/tasks/lifecycle.ts` normalizes these additive events, and `computeNextSubtask` keeps the largest cumulative total so replayed or late SSE frames cannot double-count or roll the folded card backward. Terminal ToolMessage metadata (`subagent_model_name` / `subagent_token_usage`) restores the same values from normal history after reload; no per-card event fetch is needed. `core/tasks/steps.ts` is the pure step model: `messageToStep` (live), `eventsToSteps` (reload), `mergeSteps` (dedup by `message_index`), and `stepsForDisplay` (what the card renders — keeps tool steps + AI steps with text, drops the trailing final-answer AI step when completed since it's shown as `result`). `core/tasks/context.tsx`'s `useUpdateSubtask` applies updates against a `tasksRef` mirroring the latest state (not a closure snapshot), so a late-resolving `fetchSubtaskSteps` backfill merges into current state instead of clobbering SSE steps or sibling subtasks that arrived meanwhile. The owning `run_id` is carried onto history content messages in `buildVisibleHistoryMessages` so the card can resolve the events endpoint.
+- Structured subtask status parsing in `core/tasks/subtask-result.ts` accepts only
+  own keys of the status mapping. Prototype names such as `constructor`,
+  `toString`, and `__proto__` use the same `in_progress` fallback as other unknown
+  statuses; structured metadata prevents falling back to legacy result text.
+- **Subtask render synchronization** (`core/tasks/subtask-render.ts`) — `MessageList` derives message-backed task snapshots in `useMemo` and publishes them to task context from an effect, never during render. Current message arguments own the card title and prompt; live task state retains lifecycle and runtime metadata until a terminal message snapshot supplies status/result/error. Cards receive the same snapshot as a render fallback so effect timing cannot leave streamed arguments stale.
+
+### Interaction Ownership
+
+Model picker, chat entry pages, branch tree, and browser-control ownership are
+detailed in `frontend/docs/conversation-ui-ownership.md`.
+
+- `core/threads/hooks.ts` owns uploads/sends. Both optimistic and submitted humans use `buildHumanMessageAdditionalKwargs` to retain quote/reference metadata and staged project files.
+- `core/uploads/api.ts` rejects `success: false` before send or composer clear. Keep the existing retry path; accepted files are not rolled back.
+- `src/components/workspace/chats/chat-box.tsx` owns the desktop right-panel layout, and **all three** right panels (artifacts, sidecar, browser) share one `ResizablePanelGroup` — do not fork a non-resizable branch per panel kind, which is how the artifacts divider silently lost its drag handle (#4465). Open/close is `collapse()` / `resize()` on the side panel's imperative handle, not conditional rendering, so the width can animate. Three constraints hold that together: the size transition is applied from the group as `[&>[data-panel]]:transition-[flex-grow]` because the sized flex item is the library's own `[data-panel]` element rather than the child `className` lands on; it is applied only while an open/close is in flight, so a drag is not interpolated frame by frame; and during the animation the panel content is held at its final width in `cqw` and clipped, because a reflowing message list re-runs its scroll-to-bottom (pinned by `tests/e2e/sidecar-chat.spec.ts`'s no-animated-scroll test) and a re-wrapping composer changes which responsive labels it shows. Because the panel is `collapsible`, the library can also collapse it to `0%` on its own when a drag crosses `minSize`, without going through the state that owns it. `onResize` records the last positive size while the pointer moves, but the owning `sidecar` / `browserView` / `artifactsOpen` state must only mirror a final `0%` layout from `onLayoutChanged`, after pointer release; closing on the first `0%` resize frame breaks a continuous drag that reaches the edge and then reverses before release.
+
+`ask_clarification` ToolMessages delimit runs despite hidden human replies; skill
+usage splits after the clarification group. Keep the tool call in its processing
+group and render accompanying text outside the execution panel, including mixed
+tool calls. `findCurrentTurnStartIndex` owns full and incremental grouping:
+split incremental prefix/tail only at human boundaries, then stabilize
+clarification references from full grouping.
+
+### Knowledge source citations
+
+`KnowledgeSourcesProvider` scopes source records to the current message list.
+Only versioned native `knowledge_search`/`task` tool artifacts supply evidence;
+AI/human text and metadata cannot create a source. `CitationLink` resolves
+`#knowledge-…` citations through that context and renders unavailable text when
+there is no matching record. `KnowledgeSourcesPanel` lists only sources cited
+outside code/images. Dialog excerpts render as plain text, never HTML or nested
+Markdown. Source records retain retrieval-time evidence, not live documents.
+Resolve knowledge destinations before testing the label in message and artifact
+link renderers: Sources lists use ordinary titles without a `citation:` prefix.
+
+Custom Agents save edited `knowledge_scope` defaults; removing knowledge access
+clears them atomically. `knowledgeScopeToSelection` keeps IDs, using IDs for
+missing labels. Catalog needs saved/draft access and exact-Agent capabilities.
+`catalog` + `dataset_filter` enable bases; `documents` + `document_filter` files.
+Pending/failed capabilities block queries and unsupported Apply; keep old file
+filters. Chats seed defaults; local overrides survive new-thread replacement and
+reset per conversation. Gateway supplies defaults and enforces scope.
+
+MCP hooks and the editor default to personal scope. Mutation-option builders require an explicit scope. MCP control accessible names include the localized ownership section, so same-named shared and personal connections remain distinct without region context. Query keys include scope and authenticated user ID; remount each editor when that ID changes. Platform provided uses the deployment editor only for administrators outside static mode, restoring add, edit, toggle and delete through the existing admin-only MCP API. Ordinary users see shared entries read-only. My plugins contains personal configuration templates, Lark account authorization and the personal MCP editor; a deployment installation must not mark a personal template configured.
+
+Plugin mention providers extend the existing composer picker via
+`core/extensions/use-mentions.ts`. Keep provider queries bounded and fenced by
+viewer, thread, query, and installed snapshot.
+Provider and page-surface IDs must be strings before slug validation; JavaScript
+coercion is not validation. A settled snapshot with no enabled, viewer-visible
+mention providers returns an empty result immediately without a search timer.
+Settled results may remain visible during query/retry refreshes only within the
+same viewer, thread, locale and installed snapshot; stale responses stay fenced.
+Inline plugin references serialize into human-message
+`additional_kwargs.extension_mentions`; these IDs and labels
+are untrusted input, never a routing or permission grant. Built-in mentions must
+remain usable when a provider fails or times out.

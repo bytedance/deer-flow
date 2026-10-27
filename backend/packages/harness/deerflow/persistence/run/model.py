@@ -1,0 +1,121 @@
+"""ORM model for run metadata."""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from uuid import uuid4
+
+from sqlalchemy import JSON, BigInteger, DateTime, Index, Integer, String, Text, UniqueConstraint, text
+from sqlalchemy.orm import Mapped, mapped_column
+
+from deerflow.persistence.base import Base
+
+
+class RunRow(Base):
+    __tablename__ = "runs"
+
+    run_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    thread_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    assistant_id: Mapped[str | None] = mapped_column(String(128))
+    user_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(20), default="pending")
+    # "pending" | "running" | "success" | "error" | "timeout" | "interrupted"
+    operation_kind: Mapped[str] = mapped_column(String(32), nullable=False, default="run", server_default=text("'run'"))
+    idempotency_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    idempotency_request_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+    model_name: Mapped[str | None] = mapped_column(String(128))
+    multitask_strategy: Mapped[str] = mapped_column(String(20), default="reject")
+    metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    kwargs_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    error: Mapped[str | None] = mapped_column(Text)
+    stop_reason: Mapped[str | None] = mapped_column(String(50))
+    # Final evaluator outcome, written atomically with terminal run status.
+    goal_verdict: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+    # Convenience fields (for listing pages without querying RunEventStore)
+    message_count: Mapped[int] = mapped_column(default=0)
+    first_human_message: Mapped[str | None] = mapped_column(Text)
+    last_ai_message: Mapped[str | None] = mapped_column(Text)
+
+    # Token usage (accumulated in-memory by RunJournal, written on run completion)
+    total_input_tokens: Mapped[int] = mapped_column(default=0)
+    total_output_tokens: Mapped[int] = mapped_column(default=0)
+    total_tokens: Mapped[int] = mapped_column(default=0)
+    llm_call_count: Mapped[int] = mapped_column(default=0)
+    lead_agent_tokens: Mapped[int] = mapped_column(default=0)
+    subagent_tokens: Mapped[int] = mapped_column(default=0)
+    middleware_tokens: Mapped[int] = mapped_column(default=0)
+    token_usage_by_model: Mapped[dict] = mapped_column(JSON, default=dict, server_default=text("'{}'"))
+
+    # Follow-up association
+    follow_up_to_run_id: Mapped[str | None] = mapped_column(String(64))
+
+    # Multi-worker run ownership
+    owner_worker_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # A non-owning worker records cancellation here; the owner consumes it
+    # while renewing its lease. The first action wins.
+    cancel_action: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    cancel_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC))
+    change_seq: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default=text("0"))
+    evidence_origin: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    evidence_agent_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    evidence_seal_state: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    evidence_seal_error: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    evidence_revision: Mapped[str | None] = mapped_column(String(64), nullable=True, default=lambda: uuid4().hex)
+    evidence_upper_seq: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    evidence_event_count: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    evidence_retention_revision: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default=text("0"))
+    # Server-owned origin kind of the run (``deerflow_origin``: schedule,
+    # im_channel, github, extension, mcp_notification). NULL means an
+    # interactive or legacy run; legacy rows are never backfilled.
+    origin_kind: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+    __table_args__ = (
+        Index("ix_runs_thread_status", "thread_id", "status"),
+        Index("ix_runs_lease", "lease_expires_at"),
+        Index("uq_runs_idempotency_key", "idempotency_key", unique=True),
+        Index("ix_runs_change_seq", "change_seq", "run_id"),
+        Index("ix_runs_user_change_seq", "user_id", "change_seq", "run_id"),
+        # Per-thread change clock: unread checks seek a thread's newest change.
+        Index("ix_runs_thread_change_seq", "thread_id", "change_seq"),
+        # Cross-process atomicity guarantee: at most one pending/running run per
+        # thread. Must live in ORM ``__table_args__`` (not just the migration)
+        # because the empty-DB bootstrap path runs ``create_all`` + ``stamp head``
+        # and never executes the migration that also defines this index.
+        Index(
+            "uq_runs_thread_active",
+            "thread_id",
+            unique=True,
+            sqlite_where=text("status IN ('pending', 'running')"),
+            postgresql_where=text("status IN ('pending', 'running')"),
+        ),
+    )
+
+
+class RunChangeClockRow(Base):
+    """Singleton counter allocating backend-owned changed-run positions."""
+
+    __tablename__ = "run_change_clock"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    value: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default=text("0"))
+
+
+class CompletedRunSnapshotRow(Base):
+    """Small durable boundaries only; never a copy of event contents."""
+
+    __tablename__ = "completed_run_snapshots"
+
+    snapshot_ref: Mapped[str] = mapped_column(String(64), primary_key=True)
+    run_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    scope_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    evidence_revision: Mapped[str] = mapped_column(String(64), nullable=False)
+    retention_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    snapshot_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+
+    __table_args__ = (UniqueConstraint("run_id", "scope_digest", "evidence_revision", "retention_revision", name="uq_completed_run_snapshot_revision"),)

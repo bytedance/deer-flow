@@ -19,12 +19,13 @@ def _is_interactive() -> bool:
 
 
 def main() -> int:
+    # Unsupported status symbols must not abort setup after writing config.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(errors="replace")
+
     try:
         if not _is_interactive():
-            print(
-                "Non-interactive environment detected.\n"
-                "Please edit config.yaml and .env directly, or run 'make setup' in a terminal."
-            )
+            print("Non-interactive environment detected.\nPlease edit config.yaml and .env directly, or run 'make setup' in a terminal.")
             return 1
 
         from wizard.ui import (
@@ -58,7 +59,7 @@ def main() -> int:
                 return 0
             print()
 
-        total_steps = 4
+        total_steps = 5
 
         from wizard.steps.llm import run_llm_step
 
@@ -76,6 +77,10 @@ def main() -> int:
 
         execution = run_execution_step(f"Step 3/{total_steps}")
 
+        from wizard.steps.channels import run_channels_step
+
+        channels = run_channels_step(f"Step 4/{total_steps}")
+
         print_header(f"Step {total_steps}/{total_steps} · Writing configuration")
 
         write_config_yaml(
@@ -85,7 +90,7 @@ def main() -> int:
             display_name=f"{llm.provider.display_name} / {llm.model_name}",
             api_key_field=llm.provider.api_key_field,
             env_var=llm.provider.env_var,
-            extra_model_config=llm.provider.extra_config or None,
+            extra_model_config=llm.provider.extra_config_for(llm.model_name) or None,
             base_url=llm.base_url,
             search_use=search_provider.use if search_provider else None,
             search_tool_name=search_provider.tool_name if search_provider else "web_search",
@@ -97,6 +102,7 @@ def main() -> int:
             allow_host_bash=execution.allow_host_bash,
             include_bash_tool=execution.include_bash_tool,
             include_write_tools=execution.include_write_tools,
+            channel_connection_providers=channels.enabled_providers,
         )
         print_success(f"Config written to: {config_path.relative_to(project_root)}")
 
@@ -104,6 +110,7 @@ def main() -> int:
             env_example = project_root / ".env.example"
             if env_example.exists():
                 import shutil
+
                 shutil.copyfile(env_example, env_path)
 
         env_pairs: dict[str, str] = {}
@@ -122,6 +129,7 @@ def main() -> int:
         frontend_env_example = project_root / "frontend" / ".env.example"
         if not frontend_env.exists() and frontend_env_example.exists():
             import shutil
+
             shutil.copyfile(frontend_env_example, frontend_env)
             print_success("frontend/.env created from example")
 
@@ -148,6 +156,10 @@ def main() -> int:
             print(f"  {green('✓')} File write: enabled")
         else:
             print(f"  {'—':>3} File write: disabled")
+        if channels.enabled_providers:
+            print(f"  {green('✓')} IM channels: {', '.join(channels.enabled_providers)}")
+        else:
+            print(f"  {'—':>3} IM channels: disabled")
         print()
         print("Next steps:")
         print(f"  {cyan('make install')}    # Install dependencies (first time only)")

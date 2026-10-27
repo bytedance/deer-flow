@@ -1,0 +1,2264 @@
+import type { Message } from "@langchain/langgraph-sdk";
+import { describe, expect, test } from "@rstest/core";
+
+import {
+  areStreamMetadataSnapshotsEqual,
+  extractContentFromMessage,
+  extractTextFromMessage,
+  extractReasoningContentFromMessage,
+  getBranchableAssistantGroupIds,
+  getLatestEditableTurn,
+  getMessageCopyData,
+  getAssistantTurnCopyData,
+  getAssistantTurnUsageMessages,
+  getMessageGroups,
+  getStreamMetadataSnapshot,
+  getStreamingMessageLookup,
+  hasContent,
+  hasReasoning,
+  isAssistantMessageGroupStreaming,
+  isHiddenFromUIMessage,
+  parseUploadedFiles,
+  SCHEDULED_ORIGIN_KEY,
+  scheduledOriginOf,
+  stripInternalMarkers,
+  stripUploadedFilesTag,
+} from "@/core/messages/utils";
+
+import {
+  loadScheduledThread,
+  SCHEDULED_GOAL_NOTES_CONTRACT,
+  withOrdinaryHumanTurn,
+} from "../../helpers/scheduled-fixtures";
+
+function aiMessage(content: string): Message {
+  return {
+    id: "ai-1",
+    type: "ai",
+    content,
+  } as Message;
+}
+
+test("aggregates token usage messages once per assistant turn", () => {
+  const messages = [
+    {
+      id: "human-1",
+      type: "human",
+      content: "Plan a trip",
+    },
+    {
+      id: "ai-1",
+      type: "ai",
+      content: "",
+      tool_calls: [{ id: "tool-1", name: "web_search", args: {} }],
+      usage_metadata: { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
+    },
+    {
+      id: "tool-1-result",
+      type: "tool",
+      name: "web_search",
+      tool_call_id: "tool-1",
+      content: "[]",
+    },
+    {
+      id: "ai-2",
+      type: "ai",
+      content: "Here is the itinerary",
+      usage_metadata: { input_tokens: 2, output_tokens: 8, total_tokens: 10 },
+    },
+    {
+      id: "human-2",
+      type: "human",
+      content: "Make it shorter",
+    },
+    {
+      id: "ai-3",
+      type: "ai",
+      content: "Short version",
+      usage_metadata: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+    },
+  ] as Message[];
+
+  const groups = getMessageGroups(messages);
+  const usageMessagesByGroupIndex = getAssistantTurnUsageMessages(groups);
+
+  expect(groups.map((group) => group.type)).toEqual([
+    "human",
+    "assistant:processing",
+    "assistant",
+    "human",
+    "assistant",
+  ]);
+
+  expect(
+    usageMessagesByGroupIndex.map(
+      (groupMessages) => groupMessages?.map((message) => message.id) ?? null,
+    ),
+  ).toEqual([null, null, ["ai-1", "ai-2"], null, ["ai-3"]]);
+});
+
+describe("branchable assistant groups", () => {
+  const messages = [
+    { id: "human-1", type: "human", content: "First question" },
+    { id: "ai-history", type: "ai", content: "Historical final answer" },
+    { id: "human-2", type: "human", content: "Complex question" },
+    { id: "ai-intermediate", type: "ai", content: "Intermediate answer" },
+    {
+      id: "ai-tool",
+      type: "ai",
+      content: "",
+      tool_calls: [{ id: "tool-1", name: "write_todos", args: {} }],
+    },
+    {
+      id: "tool-result",
+      type: "tool",
+      name: "write_todos",
+      tool_call_id: "tool-1",
+      content: "Todos updated",
+    },
+    { id: "ai-final", type: "ai", content: "Final answer" },
+  ] as Message[];
+
+  test("keeps historical turns branchable and selects only the final AI group in the current completed turn", () => {
+    const groups = getMessageGroups(messages);
+
+    expect([...getBranchableAssistantGroupIds(groups, false)]).toEqual([
+      "ai-history",
+      "ai-final",
+    ]);
+  });
+
+  test("does not expose the current turn while it is still loading", () => {
+    const groups = getMessageGroups(messages);
+
+    expect([...getBranchableAssistantGroupIds(groups, true)]).toEqual([
+      "ai-history",
+    ]);
+  });
+
+  test("does not expose a completed turn that ends in processing", () => {
+    const groups = getMessageGroups(messages.slice(0, -1));
+
+    expect([...getBranchableAssistantGroupIds(groups, false)]).toEqual([
+      "ai-history",
+    ]);
+  });
+});
+
+describe("latest editable user turn", () => {
+  test("returns the latest completed human turn", () => {
+    const messages = [
+      { id: "human-1", type: "human", content: "First question" },
+      { id: "ai-history", type: "ai", content: "Historical answer" },
+      { id: "human-2", type: "human", content: "Use tools" },
+      {
+        id: "ai-tool",
+        type: "ai",
+        content: "",
+        tool_calls: [{ id: "tool-1", name: "web_search", args: {} }],
+      },
+      {
+        id: "tool-result",
+        type: "tool",
+        name: "web_search",
+        tool_call_id: "tool-1",
+        content: "result",
+      },
+      { id: "ai-final", type: "ai", content: "Final answer" },
+    ] as Message[];
+
+    const turn = getLatestEditableTurn(getMessageGroups(messages), false);
+
+    expect(turn?.humanMessage.id).toBe("human-2");
+  });
+
+  test("returns null while the current turn is loading", () => {
+    const messages = [
+      { id: "human-1", type: "human", content: "Question" },
+      { id: "ai-1", type: "ai", content: "Answer" },
+    ] as Message[];
+
+    expect(getLatestEditableTurn(getMessageGroups(messages), true)).toBeNull();
+  });
+
+  test("returns null when the latest turn has no final assistant text", () => {
+    const messages = [
+      { id: "human-1", type: "human", content: "Question" },
+      {
+        id: "ai-tool",
+        type: "ai",
+        content: "",
+        tool_calls: [{ id: "tool-1", name: "web_search", args: {} }],
+      },
+      {
+        id: "tool-result",
+        type: "tool",
+        name: "web_search",
+        tool_call_id: "tool-1",
+        content: "result",
+      },
+    ] as Message[];
+
+    expect(getLatestEditableTurn(getMessageGroups(messages), false)).toBeNull();
+  });
+
+  test("returns null when the latest assistant text still has tool calls", () => {
+    const messages = [
+      { id: "human-1", type: "human", content: "Question" },
+      {
+        id: "ai-tool",
+        type: "ai",
+        content: "Let me search first.",
+        tool_calls: [{ id: "tool-1", name: "web_search", args: {} }],
+      },
+    ] as Message[];
+
+    expect(getLatestEditableTurn(getMessageGroups(messages), false)).toBeNull();
+  });
+
+  test("returns null when a later human turn is incomplete", () => {
+    const messages = [
+      { id: "human-1", type: "human", content: "First question" },
+      { id: "ai-1", type: "ai", content: "First answer" },
+      { id: "human-2", type: "human", content: "Follow up" },
+    ] as Message[];
+
+    expect(getLatestEditableTurn(getMessageGroups(messages), false)).toBeNull();
+  });
+});
+
+test("reasoning + content (no tool calls) yields a single assistant bubble, not a duplicate processing group", () => {
+  // Regression for #3868: in thinking/pro/ultra modes the final assistant
+  // message carries both reasoning_content and answer text. It must surface its
+  // reasoning exactly once — inside the assistant bubble's <Reasoning>
+  // collapsible. Routing the same message into a processing group as well makes
+  // the ChainOfThought panel above the bubble paint the identical reasoning a
+  // second time.
+  const messages = [
+    { id: "human-1", type: "human", content: "Why is the sky blue?" },
+    {
+      id: "ai-1",
+      type: "ai",
+      content: "Rayleigh scattering makes the sky blue.",
+      additional_kwargs: { reasoning_content: "Recall Rayleigh scattering." },
+    },
+  ] as Message[];
+
+  const groups = getMessageGroups(messages);
+
+  expect(groups.map((group) => group.type)).toEqual(["human", "assistant"]);
+
+  // The reasoning-bearing message lands in exactly one group, so turn-usage
+  // aggregation never double-counts it (see #2770).
+  const turnUsage = getAssistantTurnUsageMessages(groups);
+  expect(turnUsage.at(-1)?.map((message) => message.id)).toEqual(["ai-1"]);
+});
+
+test("keeps unresolved streaming text in the processing group when tool calls arrive later", () => {
+  const textOnlyMessages = [
+    { id: "human-1", type: "human", content: "Create a presentation" },
+    {
+      id: "ai-1",
+      type: "ai",
+      content: "I will inspect the source material first.",
+    },
+  ] as Message[];
+
+  const textOnlyGroups = getMessageGroups(textOnlyMessages, {
+    isCurrentTurnLoading: true,
+  });
+  expect(textOnlyGroups.map((group) => group.type)).toEqual([
+    "human",
+    "assistant:processing",
+  ]);
+
+  const withToolCall = [
+    textOnlyMessages[0],
+    {
+      ...textOnlyMessages[1],
+      tool_calls: [
+        { id: "call-1", name: "read_file", args: { path: "slides.md" } },
+      ],
+    },
+  ] as Message[];
+  const toolCallGroups = getMessageGroups(withToolCall, {
+    isCurrentTurnLoading: true,
+  });
+  expect(toolCallGroups.map((group) => group.type)).toEqual([
+    "human",
+    "assistant:processing",
+  ]);
+  expect(toolCallGroups[1]?.id).toBe(textOnlyGroups[1]?.id);
+
+  expect(getMessageGroups(textOnlyMessages).map((group) => group.type)).toEqual(
+    ["human", "assistant"],
+  );
+});
+
+test("keeps streaming reasoning and answer text out of the processing group", () => {
+  const messages = [
+    { id: "human-1", type: "human", content: "Explain the result" },
+    {
+      id: "ai-1",
+      type: "ai",
+      content: "The final answer is ready.",
+      additional_kwargs: {
+        reasoning_content: "I checked the available evidence.",
+      },
+    },
+  ] as Message[];
+
+  const groups = getMessageGroups(messages, { isCurrentTurnLoading: true });
+
+  expect(groups.map((group) => group.type)).toEqual(["human", "assistant"]);
+});
+
+test("moves a reasoning-bearing message into processing when it gains tool calls", () => {
+  const messages = [
+    { id: "human-1", type: "human", content: "Explain the result" },
+    {
+      id: "ai-1",
+      type: "ai",
+      content: "I will verify that with a source.",
+      additional_kwargs: {
+        reasoning_content: "I should verify the answer before replying.",
+      },
+    },
+  ] as Message[];
+
+  expect(
+    getMessageGroups(messages, { isCurrentTurnLoading: true }).map(
+      (group) => group.type,
+    ),
+  ).toEqual(["human", "assistant"]);
+
+  messages[1] = {
+    ...messages[1],
+    tool_calls: [{ id: "call-1", name: "web_search", args: {} }],
+  } as Message;
+
+  const groups = getMessageGroups(messages, { isCurrentTurnLoading: true });
+
+  expect(groups.map((group) => group.type)).toEqual([
+    "human",
+    "assistant:processing",
+  ]);
+  expect(groups[1]?.messages.map((message) => message.id)).toEqual(["ai-1"]);
+});
+
+test("keeps content with empty reasoning metadata in the processing group while streaming", () => {
+  const messages = [
+    { id: "human-1", type: "human", content: "Explain the result" },
+    {
+      id: "ai-1",
+      type: "ai",
+      content: "I will check the result first.",
+      additional_kwargs: { reasoning_content: "" },
+    },
+  ] as Message[];
+
+  const groups = getMessageGroups(messages, { isCurrentTurnLoading: true });
+
+  expect(groups.map((group) => group.type)).toEqual([
+    "human",
+    "assistant:processing",
+  ]);
+});
+
+test("keeps streaming reasoning-only messages in the processing group", () => {
+  const messages = [
+    { id: "human-1", type: "human", content: "Explain the result" },
+    {
+      id: "ai-1",
+      type: "ai",
+      content: "",
+      additional_kwargs: {
+        reasoning_content: "I am still checking the available evidence.",
+      },
+    },
+  ] as Message[];
+
+  const groups = getMessageGroups(messages, { isCurrentTurnLoading: true });
+
+  expect(groups.map((group) => group.type)).toEqual([
+    "human",
+    "assistant:processing",
+  ]);
+  expect(groups[1]?.messages.map((message) => message.id)).toEqual(["ai-1"]);
+});
+
+test.each([
+  { answerBlocks: [] },
+  { answerBlocks: [{ type: "text", text: "   " }] },
+])(
+  "keeps Anthropic thinking blocks in processing until answer text arrives: %j",
+  ({ answerBlocks }) => {
+    const messages = [
+      { id: "human-1", type: "human", content: "Explain the result" },
+      {
+        id: "ai-1",
+        type: "ai",
+        content: [
+          { type: "thinking", thinking: "Still checking." },
+          ...answerBlocks,
+        ],
+      },
+    ] as Message[];
+
+    const groups = getMessageGroups(messages, { isCurrentTurnLoading: true });
+
+    expect(groups.map((group) => group.type)).toEqual([
+      "human",
+      "assistant:processing",
+    ]);
+    expect(groups[1]?.messages.map((message) => message.id)).toEqual(["ai-1"]);
+
+    messages[1] = {
+      id: "ai-1",
+      type: "ai",
+      content: [
+        { type: "thinking", thinking: "Still checking." },
+        { type: "text", text: "The answer is ready." },
+      ],
+    } as Message;
+
+    const answeredGroups = getMessageGroups(messages, {
+      isCurrentTurnLoading: true,
+    });
+    expect(answeredGroups.map((group) => group.type)).toEqual([
+      "human",
+      "assistant",
+    ]);
+    expect(answeredGroups[1]?.messages.map((message) => message.id)).toEqual([
+      "ai-1",
+    ]);
+  },
+);
+
+test("keeps post-tool streaming text in the processing group until the turn settles", () => {
+  const messages = [
+    { id: "human-1", type: "human", content: "Inspect and summarize" },
+    {
+      id: "ai-1",
+      type: "ai",
+      content: "I will inspect the current implementation.",
+      tool_calls: [
+        { id: "call-1", name: "read_file", args: { path: "source.ts" } },
+      ],
+    },
+    {
+      id: "tool-1",
+      type: "tool",
+      name: "read_file",
+      tool_call_id: "call-1",
+      content: "file contents",
+    },
+    {
+      id: "ai-2",
+      type: "ai",
+      content: "Here is the final streamed answer.",
+    },
+  ] as Message[];
+
+  const loadingGroups = getMessageGroups(messages, {
+    isCurrentTurnLoading: true,
+  });
+  expect(loadingGroups.map((group) => group.type)).toEqual([
+    "human",
+    "assistant:processing",
+  ]);
+  expect(loadingGroups[1]?.messages.map((message) => message.id)).toEqual([
+    "ai-1",
+    "tool-1",
+    "ai-2",
+  ]);
+
+  expect(getMessageGroups(messages).map((group) => group.type)).toEqual([
+    "human",
+    "assistant:processing",
+    "assistant",
+  ]);
+});
+
+test("keeps tool-call reasoning in the processing group while the final answer's reasoning rides its own bubble", () => {
+  // Companion to #3868: only the message that also becomes an assistant bubble
+  // (content, no tool calls) is pulled out of the processing group. Reasoning
+  // attached to an intermediate tool-calling step still belongs above, with its
+  // tool steps.
+  const messages = [
+    { id: "human-1", type: "human", content: "Search and summarize" },
+    {
+      id: "ai-1",
+      type: "ai",
+      content: "",
+      additional_kwargs: { reasoning_content: "I should search first." },
+      tool_calls: [{ id: "tool-1", name: "web_search", args: { query: "x" } }],
+    },
+    {
+      id: "tool-1-result",
+      type: "tool",
+      name: "web_search",
+      tool_call_id: "tool-1",
+      content: "[]",
+    },
+    {
+      id: "ai-2",
+      type: "ai",
+      content: "Here is the summary.",
+      additional_kwargs: { reasoning_content: "Synthesize the findings." },
+    },
+  ] as Message[];
+
+  const groups = getMessageGroups(messages);
+
+  expect(groups.map((group) => group.type)).toEqual([
+    "human",
+    "assistant:processing",
+    "assistant",
+  ]);
+  expect(groups[1]?.messages.map((message) => message.id)).toEqual([
+    "ai-1",
+    "tool-1-result",
+  ]);
+  expect(groups[2]?.messages.map((message) => message.id)).toEqual(["ai-2"]);
+});
+
+describe("inline <think> tag splitting", () => {
+  test.each([
+    "- ```sh\n  echo hi\n  ```",
+    "+ ~~~xml\n  <think>literal</think>\n  ~~~",
+    "* ```xml\n  <think>literal</think>\n  ```",
+    "1. ```xml\n   <think>literal</think>\n   ```",
+    "10) ```xml\n    <think>literal</think>\n    ```",
+    "- - ```xml\n    <think>literal</think>\n    ```",
+    "  - ```xml\n    <think>literal</think>\n    ```",
+    "-\t```xml\n\t<think>literal</think>\n\t```",
+    "- ````xml\n  ```\n  <think>literal</think>\n  `````",
+    "- ~~~xml\n  ```\n  <think>literal</think>\n  ~~~",
+    "- ```xml\r\n  <think>literal</think>\r\n  ```",
+  ])("extracts reasoning after a list-contained fence: %j", (code) => {
+    const prefix = `${code}\n\n`;
+    const message = aiMessage(`${prefix}<think>real</think>Answer.`);
+    const expected = `${prefix}Answer.`.trim();
+    expect(extractContentFromMessage(message)).toBe(expected);
+    expect(extractReasoningContentFromMessage(message)).toBe("real");
+    expect(getMessageCopyData(message)).toBe(expected);
+    expect(getAssistantTurnCopyData([message])).toBe(expected);
+  });
+
+  test.each([
+    "- ~~~xml\n  <think>literal",
+    "10. ```xml\n    <think>literal",
+    "- ```xml\n  first\n\n  <think>literal",
+  ])("preserves an unfinished list fence while streaming: %j", (code) => {
+    const message = aiMessage(code);
+    expect(extractContentFromMessage(message)).toBe(code);
+    expect(extractReasoningContentFromMessage(message)).toBeNull();
+    expect(getMessageCopyData(message)).toBe(code);
+    expect(getAssistantTurnCopyData([message])).toBe(code);
+  });
+
+  test("ends an unclosed list fence when its list item ends", () => {
+    const prefix = "- ~~~xml\n  <think>literal</think>\n\n";
+    const message = aiMessage(`${prefix}<think>real</think>Answer.`);
+    expect(extractContentFromMessage(message)).toBe(`${prefix}Answer.`);
+    expect(extractReasoningContentFromMessage(message)).toBe("real");
+    expect(getMessageCopyData(message)).toBe(`${prefix}Answer.`);
+    expect(getAssistantTurnCopyData([message])).toBe(`${prefix}Answer.`);
+  });
+
+  test("does not turn a list-contained inline span into a fence", () => {
+    const code = "- ```prefix <think>literal</think>```";
+    const message = aiMessage(`${code}\n\n<think>real</think>Answer.`);
+    expect(extractContentFromMessage(message)).toBe(`${code}\n\nAnswer.`);
+    expect(extractReasoningContentFromMessage(message)).toBe("real");
+  });
+
+  test.each([
+    [
+      "fenced pair",
+      "Example:\n```xml\n<think>sample</think>\n```\nExplanation.",
+    ],
+    ["fenced opener", "Example:\n```xml\n<think>\n```\nExplanation."],
+    ["tilde fence", "~~~xml\n<think>sample</think>\n~~~"],
+    ["unfinished fence", "```xml\n<think>sample"],
+    ["longer fence", "````xml\n```\n<think>sample</think>\n````"],
+    ["different fence marker", "~~~xml\n```\n<think>sample</think>\n~~~"],
+    ["indented code", "    <think>sample</think>"],
+    ["inline prefix", "Use `prefix <think>sample</think>` literally."],
+    ["multiple backticks", "Use ``prefix ` <think>sample</think>`` literally."],
+    ["unfinished inline code", "Use `prefix <think>sample"],
+  ])("preserves literal tags in %s", (_name, content) => {
+    const message = aiMessage(content);
+    expect(extractContentFromMessage(message)).toBe(content.trim());
+    expect(extractReasoningContentFromMessage(message)).toBeNull();
+    expect(getMessageCopyData(message)).toBe(content.trim());
+    expect(getAssistantTurnCopyData([message])).toBe(content.trim());
+  });
+
+  test.each(["    ", "\t"])(
+    "closes multiline inline code on an indented continuation: %j",
+    (indent) => {
+      const code = `Use \`first line\n${indent}second line\` literally.`;
+      const message = aiMessage(
+        `${code}\n<think>real reasoning</think>Answer.`,
+      );
+      expect(extractContentFromMessage(message)).toBe(`${code}\nAnswer.`);
+      expect(extractReasoningContentFromMessage(message)).toBe(
+        "real reasoning",
+      );
+      expect(getMessageCopyData(message)).toBe(`${code}\nAnswer.`);
+      expect(getAssistantTurnCopyData([message])).toBe(`${code}\nAnswer.`);
+    },
+  );
+
+  test.each(["\n\n", "\n  \n", "\r\n\t\r\n"])(
+    "ends an unfinished inline span at a paragraph boundary: %j",
+    (separator) => {
+      const prefix = `Run \`this command${separator}`;
+      const message = aiMessage(
+        `${prefix}<think>real reasoning</think>Answer.`,
+      );
+      expect(extractContentFromMessage(message)).toBe(`${prefix}Answer.`);
+      expect(extractReasoningContentFromMessage(message)).toBe(
+        "real reasoning",
+      );
+      expect(getMessageCopyData(message)).toBe(`${prefix}Answer.`);
+    },
+  );
+
+  test.each(["    ", "\t"])(
+    "extracts reasoning on an indented paragraph continuation: %j",
+    (indent) => {
+      const prefix = `Note this:\n${indent}`;
+      const message = aiMessage(
+        `${prefix}<think>real reasoning</think>\nAnswer.`,
+      );
+      expect(extractContentFromMessage(message)).toBe(`${prefix}\nAnswer.`);
+      expect(extractReasoningContentFromMessage(message)).toBe(
+        "real reasoning",
+      );
+      expect(getMessageCopyData(message)).toBe(`${prefix}\nAnswer.`);
+    },
+  );
+
+  test.each([
+    "# Result\n",
+    "   ###### Result\n",
+    "- Result\n",
+    "+ Result\n",
+    "* Result\n",
+    "1. Result\n",
+    "1) Result\n",
+    "---\n",
+    "===\n",
+    "- \n",
+    "* * *\n",
+    "___\n",
+    "```sh\necho hi\n```\n",
+    "~~~sh\necho hi\n~~~\n",
+  ])("ends an unfinished inline span at a block boundary: %j", (block) => {
+    const prefix = `Run \`this command\n${block}`;
+    const message = aiMessage(`${prefix}<think>real reasoning</think>Answer.`);
+    expect(extractContentFromMessage(message)).toBe(`${prefix}Answer.`);
+    expect(extractReasoningContentFromMessage(message)).toBe("real reasoning");
+    expect(getMessageCopyData(message)).toBe(`${prefix}Answer.`);
+    expect(getAssistantTurnCopyData([message])).toBe(`${prefix}Answer.`);
+  });
+
+  test.each(["*", "_", "-"])(
+    "handles a long thematic-break near-match without backtracking: %s",
+    (marker) => {
+      const prefix = `${marker.repeat(3)}${" ".repeat(40_000)}x\n`;
+      const message = aiMessage(`${prefix}<think>real</think>Answer.`);
+      // Time the first extraction, not a content-cache hit. The old overlapping
+      // whitespace repetitions take seconds; leave ample headroom for slow CI.
+      const start = performance.now();
+      const answer = extractContentFromMessage(message);
+      const elapsed = performance.now() - start;
+      expect(answer).toBe(`${prefix}Answer.`);
+      expect(extractReasoningContentFromMessage(message)).toBe("real");
+      expect(elapsed).toBeLessThan(500);
+    },
+  );
+
+  test.each(["* * *", "_ _ _", "- - -", "---", "==="])(
+    "keeps trailing spaces and tabs valid on a block boundary: %s",
+    (line) => {
+      const prefix = `Run \`unfinished\n${line}${" \t".repeat(100)}\r\n`;
+      const message = aiMessage(`${prefix}<think>real</think>Answer.`);
+      expect(extractContentFromMessage(message)).toBe(`${prefix}Answer.`);
+      expect(extractReasoningContentFromMessage(message)).toBe("real");
+    },
+  );
+
+  test.each([
+    "#not-a-heading",
+    "####### Not a heading",
+    "2. Cannot interrupt a paragraph",
+    "+ ",
+    "ordinary continuation",
+  ])("keeps an inline span across a non-boundary: %j", (line) => {
+    const code = `Use \`first line\n${line}\n<think>sample</think>\` literally.`;
+    const message = aiMessage(`${code} <think>real</think>Answer.`);
+    expect(extractContentFromMessage(message)).toBe(`${code} Answer.`);
+    expect(extractReasoningContentFromMessage(message)).toBe("real");
+    expect(getMessageCopyData(message)).toBe(`${code} Answer.`);
+  });
+
+  test.each(["# Heading `unfinished", "# Heading `closed`"])(
+    "does not carry a heading's inline state into the following paragraph: %s",
+    (heading) => {
+      const message = aiMessage(`${heading}\n<think>real</think>Answer.`);
+      expect(extractContentFromMessage(message)).toBe(`${heading}\nAnswer.`);
+      expect(extractReasoningContentFromMessage(message)).toBe("real");
+    },
+  );
+
+  test.each([
+    "Run `unfinished\n```xml\n# Heading\n- List\n<think>sample</think>\n```",
+    "Run `unfinished\n# Use `<think>sample</think>` literally",
+    "Run `unfinished\n- Use `<think>sample</think>` literally",
+  ])("preserves literal tags in the new block: %s", (code) => {
+    const message = aiMessage(`${code}\n<think>real</think>Answer.`);
+    expect(extractContentFromMessage(message)).toBe(`${code}\nAnswer.`);
+    expect(extractReasoningContentFromMessage(message)).toBe("real");
+    expect(getMessageCopyData(message)).toBe(`${code}\nAnswer.`);
+  });
+
+  test.each([
+    "Use \\``<think>sample</think>` literally.",
+    "Use \\```<think>sample</think>`` literally.",
+    "Use \\\\``<think>sample</think>`` literally.",
+    "Use `<think>sample</think>\\` literally.",
+  ])("escapes only one backtick outside an inline span: %s", (code) => {
+    const message = aiMessage(`${code} <think>real</think>Answer.`);
+    expect(extractContentFromMessage(message)).toBe(`${code} Answer.`);
+    expect(extractReasoningContentFromMessage(message)).toBe("real");
+    expect(getMessageCopyData(message)).toBe(`${code} Answer.`);
+    expect(getAssistantTurnCopyData([message])).toBe(`${code} Answer.`);
+  });
+
+  test.each([
+    "    first line\n    <think>sample</think>",
+    "Intro.\n\n    first line\n\n    <think>sample</think>",
+    "```\nfirst line\n\n<think>sample</think>\n```",
+  ])("preserves code blocks across lines and blank lines: %s", (code) => {
+    const message = aiMessage(
+      `${code}\n\n<think>real reasoning</think>Answer.`,
+    );
+    expect(extractContentFromMessage(message)).toBe(
+      `${code}\n\nAnswer.`.trim(),
+    );
+    expect(extractReasoningContentFromMessage(message)).toBe("real reasoning");
+    expect(getMessageCopyData(message)).toBe(`${code}\n\nAnswer.`.trim());
+  });
+
+  test("finds real streaming reasoning after a literal inline opener", () => {
+    const message = aiMessage("Use `<think>` literally. <think>real reasoning");
+    expect(extractContentFromMessage(message)).toBe("Use `<think>` literally.");
+    expect(extractReasoningContentFromMessage(message)).toBe("real reasoning");
+  });
+
+  test("keeps code between real closed and streaming reasoning blocks", () => {
+    const code = "```xml\n<think>sample</think>\n```";
+    const message = aiMessage(`<think>first</think>\n${code}\n<think>second`);
+    expect(extractContentFromMessage(message)).toBe(code);
+    expect(extractReasoningContentFromMessage(message)).toBe("first\n\nsecond");
+  });
+
+  test("does not let an unfinished code fence inside reasoning hide the answer", () => {
+    const message = aiMessage(
+      "<think>Consider:\n```python\nprint(1)</think>Answer.",
+    );
+    expect(extractContentFromMessage(message)).toBe("Answer.");
+    expect(extractReasoningContentFromMessage(message)).toBe(
+      "Consider:\n```python\nprint(1)",
+    );
+  });
+
+  test("does not close a fence on a marker followed by non-whitespace", () => {
+    const message = aiMessage(
+      "```xml\n```not-a-close\n<think>sample</think>\n```\n<think>real</think>Answer.",
+    );
+    expect(extractContentFromMessage(message)).toBe(
+      "```xml\n```not-a-close\n<think>sample</think>\n```\nAnswer.",
+    );
+    expect(extractReasoningContentFromMessage(message)).toBe("real");
+  });
+
+  test("escaped backticks do not turn real reasoning into literal code", () => {
+    const message = aiMessage("Escaped \\` marker. <think>real</think>Answer.");
+    expect(extractContentFromMessage(message)).toBe(
+      "Escaped \\` marker. Answer.",
+    );
+    expect(extractReasoningContentFromMessage(message)).toBe("real");
+  });
+
+  test.each([
+    "```prefix <think>sample</think>```",
+    // A bare triple-backtick run at line start would begin a fenced block.
+    "Use ```prefix\n<think>sample</think>\ntail ```",
+  ])(
+    "recognizes multi-backtick inline code before real reasoning: %s",
+    (code) => {
+      const message = aiMessage(`${code} <think>real</think>Answer.`);
+      expect(extractContentFromMessage(message)).toBe(`${code} Answer.`);
+      expect(extractReasoningContentFromMessage(message)).toBe("real");
+    },
+  );
+
+  test("strips a fully closed <think> block from AI content", () => {
+    const message = aiMessage("<think>internal reasoning</think>final answer");
+    expect(extractContentFromMessage(message)).toBe("final answer");
+    expect(extractReasoningContentFromMessage(message)).toBe(
+      "internal reasoning",
+    );
+  });
+
+  test("strips multiple closed <think> blocks and joins their reasoning", () => {
+    const message = aiMessage(
+      "<think>step one</think>between<think>step two</think>after",
+    );
+    expect(extractContentFromMessage(message)).toBe("betweenafter");
+    expect(extractReasoningContentFromMessage(message)).toBe(
+      "step one\n\nstep two",
+    );
+  });
+
+  test("during streaming, an unclosed <think> tag does not leak its tail into content", () => {
+    // Simulates accumulated content mid-stream, before </think> arrives.
+    const message = aiMessage(
+      "<think>I need to analyze the user's question step by",
+    );
+    expect(extractContentFromMessage(message)).toBe("");
+    expect(extractContentFromMessage(message)).not.toContain("<think>");
+    expect(extractReasoningContentFromMessage(message)).toBe(
+      "I need to analyze the user's question step by",
+    );
+  });
+
+  test("preamble before an unclosed <think> stays in content", () => {
+    const message = aiMessage(
+      "Here is part of the answer.<think>but wait, let me reconsider",
+    );
+    expect(extractContentFromMessage(message)).toBe(
+      "Here is part of the answer.",
+    );
+    expect(extractReasoningContentFromMessage(message)).toBe(
+      "but wait, let me reconsider",
+    );
+  });
+
+  test("closed <think> followed by a trailing unclosed <think> merges both into reasoning", () => {
+    const message = aiMessage(
+      "<think>first step</think>partial answer<think>second step still streaming",
+    );
+    expect(extractContentFromMessage(message)).toBe("partial answer");
+    expect(extractReasoningContentFromMessage(message)).toBe(
+      "first step\n\nsecond step still streaming",
+    );
+  });
+
+  test("hasReasoning recognises an unclosed <think> tag mid-stream", () => {
+    expect(hasReasoning(aiMessage("<think>thinking in progress"))).toBe(true);
+  });
+
+  test("hasContent excludes an unclosed <think> tail when no preamble exists", () => {
+    expect(hasContent(aiMessage("<think>thinking in progress"))).toBe(false);
+  });
+
+  test("hasContent stays true when preamble precedes an unclosed <think>", () => {
+    expect(hasContent(aiMessage("preamble<think>still thinking"))).toBe(true);
+  });
+
+  test("a lone <think> open tag with no body yields no reasoning and no content", () => {
+    const message = aiMessage("<think>");
+    expect(extractContentFromMessage(message)).toBe("");
+    expect(extractReasoningContentFromMessage(message)).toBeNull();
+    expect(hasReasoning(message)).toBe(false);
+  });
+
+  test("a literal <think> inside markdown inline code is not treated as reasoning", () => {
+    const message = aiMessage(
+      "Use `<think>` markers to delimit reasoning sections.",
+    );
+    expect(extractContentFromMessage(message)).toBe(
+      "Use `<think>` markers to delimit reasoning sections.",
+    );
+    expect(extractReasoningContentFromMessage(message)).toBeNull();
+    expect(hasReasoning(message)).toBe(false);
+  });
+
+  test("a closed <think> pair inside markdown inline code stays in content", () => {
+    // The model talking about the tag literally, e.g. when explaining prompt
+    // engineering. Hollowing the code span out into the reasoning panel
+    // corrupts the visible answer.
+    const message = aiMessage(
+      "Wrap your reasoning in `<think>your reasoning</think>` before answering.",
+    );
+    expect(extractContentFromMessage(message)).toBe(
+      "Wrap your reasoning in `<think>your reasoning</think>` before answering.",
+    );
+    expect(extractReasoningContentFromMessage(message)).toBeNull();
+    expect(hasReasoning(message)).toBe(false);
+  });
+
+  test("a closed <think> pair outside code is still stripped when another sits in inline code", () => {
+    const message = aiMessage(
+      "<think>real reasoning</think>Use `<think>text</think>` markers.",
+    );
+    expect(extractContentFromMessage(message)).toBe(
+      "Use `<think>text</think>` markers.",
+    );
+    expect(extractReasoningContentFromMessage(message)).toBe("real reasoning");
+  });
+
+  test("a backtick-prefixed <think> mid-stream is not split into reasoning", () => {
+    // Simulates the moment the model has emitted the opening backtick and
+    // `<think>` for a literal documentation reference, before the closing
+    // backtick arrives. The pre-fix behaviour would have permanently
+    // truncated the content here.
+    const message = aiMessage("Documentation: `<think>");
+    expect(extractContentFromMessage(message)).toBe("Documentation: `<think>");
+    expect(extractReasoningContentFromMessage(message)).toBeNull();
+  });
+
+  test("re-splits when the same message object gets new content", () => {
+    // Streaming replaces `content` on the accumulating message, so a split
+    // cached against the message object must be keyed by the content it was
+    // derived from.
+    const message = aiMessage("<think>first</think>one");
+
+    expect(extractContentFromMessage(message)).toBe("one");
+    expect(extractReasoningContentFromMessage(message)).toBe("first");
+
+    (message as { content: string }).content = "<think>second</think>two";
+
+    expect(extractContentFromMessage(message)).toBe("two");
+    expect(extractReasoningContentFromMessage(message)).toBe("second");
+    expect(hasReasoning(message)).toBe(true);
+  });
+});
+
+describe("isHiddenFromUIMessage", () => {
+  function contentReadCounter(
+    message: Omit<Message, "content">,
+    content: string,
+  ) {
+    const counter = { reads: 0 };
+    const probe = {
+      ...message,
+      get content() {
+        counter.reads++;
+        return content;
+      },
+    } as unknown as Message;
+    return { probe, counter };
+  }
+
+  test("does not read AI content to decide visibility", () => {
+    // Only the human branch consults the text, but this predicate runs over
+    // every message on every stream chunk (grouping, dedup, human-input
+    // state), so reading AI content here costs a full content scan per
+    // message per chunk.
+    const { probe, counter } = contentReadCounter(
+      { id: "ai-visible", type: "ai" } as Message,
+      "<think>long reasoning</think>a long streamed answer",
+    );
+
+    expect(isHiddenFromUIMessage(probe)).toBe(false);
+    expect(counter.reads).toBe(0);
+  });
+
+  test("does not read content when a control message name already hides it", () => {
+    const { probe, counter } = contentReadCounter(
+      { id: "summary-1", type: "ai", name: "summary" } as Message,
+      "compressed context",
+    );
+
+    expect(isHiddenFromUIMessage(probe)).toBe(true);
+    expect(counter.reads).toBe(0);
+  });
+
+  test("still hides a human message that is only slash skill activation", () => {
+    const message = {
+      id: "slash-activation",
+      type: "human",
+      content:
+        "<slash_skill_activation>\n<skill_content># SKILL.md</skill_content>\n</slash_skill_activation>",
+    } as Message;
+
+    expect(isHiddenFromUIMessage(message)).toBe(true);
+  });
+
+  test("keeps a human message that carries real text alongside the activation", () => {
+    const message = {
+      id: "slash-activation-with-task",
+      type: "human",
+      content:
+        "<slash_skill_activation>\n<skill_content># SKILL.md</skill_content>\n</slash_skill_activation>\nreal user task",
+    } as Message;
+
+    expect(isHiddenFromUIMessage(message)).toBe(false);
+  });
+
+  test("hides any message flagged with hide_from_ui", () => {
+    const message = {
+      id: "hidden-1",
+      type: "human",
+      content: "internal reply",
+      additional_kwargs: { hide_from_ui: true },
+    } as Message;
+
+    expect(isHiddenFromUIMessage(message)).toBe(true);
+  });
+});
+
+describe("human message internal context stripping", () => {
+  test("strips legacy uploaded_files context from copy data", () => {
+    // Display-only backward compatibility (#4212): pre-#4174 history still
+    // carries <uploaded_files> blocks, which copy data must strip rather
+    // than leak as raw XML with server-side paths.
+    const message = {
+      id: "human-with-legacy-upload",
+      type: "human",
+      content:
+        "<uploaded_files>\nThe following files were uploaded in this message:\n\n- paper.pdf (1.0 MB)\n  Path: /mnt/user-data/uploads/paper.pdf\n</uploaded_files>\n\nSummarize this paper",
+    } as Message;
+
+    expect(getMessageCopyData(message)).toBe("Summarize this paper");
+  });
+
+  test("strips current_uploads context from copy data", () => {
+    // Mirrors the block UploadsMiddleware emits since #4174, including the
+    // trailing usage-guidance lines.
+    const message = {
+      id: "human-with-current-uploads",
+      type: "human",
+      content:
+        "<current_uploads>\nThe following files were uploaded in this message:\n\n- paper.docx (177.6 KB)\n  Path: /mnt/user-data/uploads/paper.docx\n\nTo work with these files:\n- Use `grep` to search for keywords\n  (e.g. `grep(pattern='revenue', path='/mnt/user-data/uploads/')`).\n</current_uploads>\n\nMake a slide deck from this",
+    } as Message;
+
+    expect(getMessageCopyData(message)).toBe("Make a slide deck from this");
+  });
+
+  test("parses uploaded files from a current_uploads block", () => {
+    const content =
+      "<current_uploads>\nThe following files were uploaded in this message:\n\n- paper.docx (177.6 KB)\n  Path: /mnt/user-data/uploads/paper.docx\n  Document outline (use `read_file` with line ranges to read sections):\n    L1: Introduction\n- data.xlsx (12.0 KB)\n  Path: /mnt/user-data/uploads/data.xlsx\n</current_uploads>\n\nSummarize";
+
+    // size is bytes (FileInMessage contract): the block's "177.6 KB" /
+    // "12.0 KB" are converted back from the human-readable form the backend
+    // emits, so formatBytes re-renders them at the original magnitude.
+    expect(parseUploadedFiles(content)).toEqual([
+      {
+        filename: "paper.docx",
+        size: Math.round(177.6 * 1024), // 181862
+        path: "/mnt/user-data/uploads/paper.docx",
+      },
+      {
+        filename: "data.xlsx",
+        size: 12 * 1024, // 12288
+        path: "/mnt/user-data/uploads/data.xlsx",
+      },
+    ]);
+  });
+
+  test("parses uploaded filenames that contain parentheses", () => {
+    // Browsers name duplicate downloads "photo (1).png"; the backend emits the
+    // filename verbatim, so the parser must not stop the name at the first "(".
+    const content =
+      "<current_uploads>\nThe following files were uploaded in this message:\n\n- photo (1).png (12.3 KB)\n  Path: /mnt/user-data/uploads/photo (1).png\n- report (final) (2).docx (1.5 MB)\n  Path: /mnt/user-data/uploads/report (final) (2).docx\n- normal.pdf (3.0 KB)\n  Path: /mnt/user-data/uploads/normal.pdf\n</current_uploads>\n\nSummarize";
+
+    expect(parseUploadedFiles(content)).toEqual([
+      {
+        filename: "photo (1).png",
+        size: Math.round(12.3 * 1024),
+        path: "/mnt/user-data/uploads/photo (1).png",
+      },
+      {
+        filename: "report (final) (2).docx",
+        size: Math.round(1.5 * 1024 * 1024),
+        path: "/mnt/user-data/uploads/report (final) (2).docx",
+      },
+      {
+        filename: "normal.pdf",
+        size: 3 * 1024,
+        path: "/mnt/user-data/uploads/normal.pdf",
+      },
+    ]);
+  });
+
+  test("stripInternalMarkers removes current_uploads blocks on export", () => {
+    const content =
+      "<current_uploads>\n- paper.docx (177.6 KB)\n  Path: /mnt/user-data/uploads/paper.docx\n</current_uploads>\n\nExport me";
+
+    expect(stripInternalMarkers(content)).toBe("Export me");
+  });
+
+  test("stripInternalMarkers removes attributed project context blocks on export", () => {
+    const content =
+      '<project name="Roadmap">\nsecret instructions\n</project>\n\nExport me';
+
+    expect(stripInternalMarkers(content)).toBe("Export me");
+  });
+
+  test("stripInternalMarkers removes documents blocks on export", () => {
+    const content =
+      '<documents count="2" shown="2">\n- id=abc | q3.pdf (2.1 MB, modified 2026-09-10)\n</documents>\n\nExport me';
+
+    expect(stripInternalMarkers(content)).toBe("Export me");
+  });
+
+  test("stripInternalMarkers preserves fenced code that uses marker tag names", () => {
+    const content = [
+      "Here is my pom:",
+      "```xml",
+      "<project>",
+      "  <artifactId>demo</artifactId>",
+      "</project>",
+      "```",
+      "Export me",
+    ].join("\n");
+
+    expect(stripInternalMarkers(content)).toBe(content);
+  });
+
+  test("stripInternalMarkers preserves tilde-fenced and indented code spans", () => {
+    const tilde = ["~~~", '<documents count="1">', "</documents>", "~~~"].join(
+      "\n",
+    );
+    expect(stripInternalMarkers(tilde)).toBe(tilde);
+
+    // The leading text keeps ``trim()`` from eating the code's indentation.
+    const indented = [
+      "Pasted snippet:",
+      "",
+      "    <project>",
+      "    </project>",
+    ].join("\n");
+    expect(stripInternalMarkers(indented)).toBe(indented);
+  });
+
+  test("stripInternalMarkers keeps a fence open across a line with an info string", () => {
+    // CommonMark: a closing fence cannot carry an info string, so "```python"
+    // is content of the outer fence. Treating it as the closer exposes the
+    // following block and the export silently deletes real user content.
+    const content = [
+      "Fence tutorial:",
+      "```",
+      "```python",
+      '<project name="x">keep me</project>',
+      "```",
+      "```",
+      "Export me",
+    ].join("\n");
+
+    expect(stripInternalMarkers(content)).toBe(content);
+  });
+
+  test("stripInternalMarkers still removes an injected block whose content contains a fence", () => {
+    const content = [
+      "<memory>",
+      "```",
+      "not a real fence owner",
+      "```",
+      "</memory>",
+      "Export me",
+    ].join("\n");
+
+    expect(stripInternalMarkers(content)).toBe("Export me");
+  });
+
+  test("strips slash skill activation context from display content", () => {
+    const content =
+      "<slash_skill_activation>\n<skill_content># Secret SKILL.md</skill_content>\n</slash_skill_activation>\nreal user task";
+
+    expect(stripUploadedFilesTag(content)).toBe("real user task");
+  });
+
+  test("hides leaked slash skill activation messages with no user text", () => {
+    const messages = [
+      {
+        id: "slash-activation",
+        type: "human",
+        content:
+          "<slash_skill_activation>\n<skill_content># Secret SKILL.md</skill_content>\n</slash_skill_activation>",
+      },
+      {
+        id: "ai-1",
+        type: "ai",
+        content: "Public answer",
+      },
+    ] as Message[];
+
+    const groups = getMessageGroups(messages);
+
+    expect(groups.map((group) => group.type)).toEqual(["assistant"]);
+    expect(
+      groups.flatMap((group) => group.messages).map((message) => message.id),
+    ).toEqual(["ai-1"]);
+  });
+});
+
+test("hides internal todo reminder messages from message groups", () => {
+  const messages = [
+    {
+      id: "human-1",
+      type: "human",
+      content: "Audit the middleware",
+    },
+    {
+      id: "todo-reminder-1",
+      type: "human",
+      name: "todo_completion_reminder",
+      content: "<system_reminder>finish todos</system_reminder>",
+    },
+    {
+      id: "todo-reminder-2",
+      type: "human",
+      name: "todo_reminder",
+      content: "<system_reminder>remember todos</system_reminder>",
+    },
+    {
+      id: "ai-1",
+      type: "ai",
+      content: "Done",
+    },
+  ] as Message[];
+
+  const groups = getMessageGroups(messages);
+
+  expect(groups.map((group) => group.type)).toEqual(["human", "assistant"]);
+  expect(
+    groups.flatMap((group) => group.messages).map((message) => message.id),
+  ).toEqual(["human-1", "ai-1"]);
+});
+
+test("hides assistant copy data while that turn is streaming", () => {
+  const messages = [
+    {
+      id: "ai-1",
+      type: "ai",
+      content: "Partial answer",
+    },
+  ] as Message[];
+
+  expect(getAssistantTurnCopyData(messages)).toBe("Partial answer");
+  expect(getAssistantTurnCopyData(messages, { isStreaming: true })).toBeNull();
+});
+
+test("falls back to reasoning for a reasoning-only assistant turn's copy data", () => {
+  // A turn can end with reasoning but no answer text (e.g. stopped during
+  // thinking). getMessageCopyData already copies the reasoning in that case;
+  // the turn-level copy button must not disappear instead.
+  const messages = [
+    {
+      id: "ai-1",
+      type: "ai",
+      content: "",
+      additional_kwargs: { reasoning_content: "the actual reasoning" },
+    },
+  ] as Message[];
+
+  expect(getAssistantTurnCopyData(messages)).toBe("the actual reasoning");
+});
+
+test("settled copy data is derived once per messages array reference (#5094)", () => {
+  // Settled group arrays keep their identity across streaming chunks, and the
+  // copy button re-renders per chunk. Reading `content` through a getter
+  // proves the second settled call is served from the array-reference cache
+  // instead of re-running the O(turn bytes) extraction.
+  let contentReads = 0;
+  const message = {
+    id: "ai-1",
+    type: "ai",
+    get content() {
+      contentReads += 1;
+      return "Final answer";
+    },
+  } as unknown as Message;
+  const messages = [message];
+
+  expect(getAssistantTurnCopyData(messages)).toBe("Final answer");
+  const readsAfterFirstCall = contentReads;
+  expect(readsAfterFirstCall).toBeGreaterThan(0);
+
+  expect(getAssistantTurnCopyData(messages)).toBe("Final answer");
+  expect(contentReads).toBe(readsAfterFirstCall);
+});
+
+test("copy-data cache does not leak across array references", () => {
+  const first = [
+    { id: "ai-1", type: "ai", content: "first answer" },
+  ] as Message[];
+  const second = [
+    { id: "ai-2", type: "ai", content: "second answer" },
+  ] as Message[];
+
+  expect(getAssistantTurnCopyData(first)).toBe("first answer");
+  expect(getAssistantTurnCopyData(second)).toBe("second answer");
+  // The streaming short-circuit stays ahead of the cache.
+  expect(getAssistantTurnCopyData(second, { isStreaming: true })).toBeNull();
+  expect(getAssistantTurnCopyData(second)).toBe("second answer");
+});
+
+test("null copy data is not cached for a reference", () => {
+  // A turn with no copyable AI text must keep recomputing (and stay null)
+  // rather than a cached null hiding a later value — the same array can be
+  // re-used once messages are appended to a rebuilt group.
+  const messages = [
+    { id: "human-1", type: "human", content: "hi" },
+  ] as Message[];
+
+  expect(getAssistantTurnCopyData(messages)).toBeNull();
+  expect(getAssistantTurnCopyData(messages)).toBeNull();
+});
+
+test("marks the latest assistant message as streaming", () => {
+  const messages = [
+    {
+      id: "human-1",
+      type: "human",
+      content: "Hello",
+    },
+    {
+      id: "ai-1",
+      type: "ai",
+      content: "Still generating",
+    },
+  ] as Message[];
+  const groups = getMessageGroups(messages);
+  const assistantGroupIndex = groups.findIndex(
+    (group) => group.type === "assistant",
+  );
+
+  expect(
+    isAssistantMessageGroupStreaming(
+      groups[assistantGroupIndex]?.messages ?? [],
+      getStreamingMessageLookup(messages, true, () => ({
+        streamMetadata: { langgraph_node: "agent" },
+      })),
+    ),
+  ).toBe(true);
+  expect(
+    isAssistantMessageGroupStreaming(
+      groups[assistantGroupIndex]?.messages ?? [],
+      getStreamingMessageLookup(messages, false, () => ({
+        streamMetadata: { langgraph_node: "agent" },
+      })),
+    ),
+  ).toBe(false);
+});
+
+test("compares stream metadata snapshots by keys and metadata identity", () => {
+  const identifiedMessage = {
+    id: "ai-1",
+    type: "ai",
+    content: "Completed answer",
+  } as Message;
+  const anonymousMessage = {
+    type: "ai",
+    content: "Anonymous answer",
+  } as Message;
+  const identifiedMetadata = { langgraph_node: "agent" };
+  const anonymousMetadata = { langgraph_node: "agent" };
+  const messages = [identifiedMessage, anonymousMessage];
+  const snapshot = getStreamMetadataSnapshot(messages, (message) => ({
+    streamMetadata:
+      message === identifiedMessage ? identifiedMetadata : anonymousMetadata,
+  }));
+  const equivalentSnapshot = getStreamMetadataSnapshot(messages, (message) => ({
+    streamMetadata:
+      message === identifiedMessage ? identifiedMetadata : anonymousMetadata,
+  }));
+  const changedSnapshot = getStreamMetadataSnapshot(messages, (message) => ({
+    streamMetadata:
+      message === identifiedMessage
+        ? { ...identifiedMetadata }
+        : anonymousMetadata,
+  }));
+  const missingSnapshot = getStreamMetadataSnapshot(
+    [identifiedMessage],
+    () => ({ streamMetadata: identifiedMetadata }),
+  );
+
+  expect(areStreamMetadataSnapshotsEqual(snapshot, equivalentSnapshot)).toBe(
+    true,
+  );
+  expect(areStreamMetadataSnapshotsEqual(snapshot, changedSnapshot)).toBe(
+    false,
+  );
+  expect(areStreamMetadataSnapshotsEqual(snapshot, missingSnapshot)).toBe(
+    false,
+  );
+});
+
+test("ignores stream metadata retained from a completed turn", () => {
+  const completedMetadata = { langgraph_node: "agent", langgraph_step: 1 };
+  const activeMetadata = { langgraph_node: "agent", langgraph_step: 2 };
+  const completedMessages = [
+    {
+      id: "human-1",
+      type: "human",
+      content: "Hello",
+    },
+    {
+      id: "ai-1",
+      type: "ai",
+      content: "Completed answer",
+    },
+  ] as Message[];
+  const settledMetadata = getStreamMetadataSnapshot(
+    completedMessages,
+    (message) =>
+      message.id === "ai-1" ? { streamMetadata: completedMetadata } : undefined,
+  );
+  const messages = [
+    ...completedMessages,
+    {
+      id: "human-2",
+      type: "human",
+      content: "Continue",
+    },
+    {
+      id: "ai-2",
+      type: "ai",
+      content: "Still generating",
+    },
+  ] as Message[];
+  const groups = getMessageGroups(messages).filter(
+    (group) => group.type === "assistant",
+  );
+  const streamingMessages = getStreamingMessageLookup(
+    messages,
+    true,
+    (message) => {
+      if (message.id === "ai-1") {
+        return { streamMetadata: completedMetadata };
+      }
+      if (message.id === "ai-2") {
+        return { streamMetadata: activeMetadata };
+      }
+      return undefined;
+    },
+    settledMetadata,
+  );
+
+  expect(
+    isAssistantMessageGroupStreaming(
+      groups[0]?.messages ?? [],
+      streamingMessages,
+    ),
+  ).toBe(false);
+  expect(
+    isAssistantMessageGroupStreaming(
+      groups[1]?.messages ?? [],
+      streamingMessages,
+    ),
+  ).toBe(true);
+});
+
+test("treats updated metadata for the same message id as active", () => {
+  const message = {
+    id: "ai-1",
+    type: "ai",
+    content: "Partial answer",
+  } as Message;
+  const completedMetadata = { langgraph_node: "agent", langgraph_step: 1 };
+  const activeMetadata = { langgraph_node: "agent", langgraph_step: 2 };
+  const settledMetadata = getStreamMetadataSnapshot([message], () => ({
+    streamMetadata: completedMetadata,
+  }));
+
+  expect(
+    isAssistantMessageGroupStreaming(
+      [message],
+      getStreamingMessageLookup(
+        [message],
+        true,
+        () => ({ streamMetadata: activeMetadata }),
+        settledMetadata,
+      ),
+    ),
+  ).toBe(true);
+});
+
+test("keeps previous assistant copyable while waiting for a new visible answer", () => {
+  const messages = [
+    {
+      id: "human-1",
+      type: "human",
+      content: "Hello",
+    },
+    {
+      id: "ai-1",
+      type: "ai",
+      content: "Completed answer",
+    },
+    {
+      id: "opt-human-1",
+      type: "human",
+      content: "Continue",
+    },
+  ] as Message[];
+  const groups = getMessageGroups(messages);
+  const assistantGroupIndex = groups.findIndex(
+    (group) => group.type === "assistant",
+  );
+
+  expect(
+    isAssistantMessageGroupStreaming(
+      groups[assistantGroupIndex]?.messages ?? [],
+      getStreamingMessageLookup(messages, true),
+    ),
+  ).toBe(false);
+});
+
+test("keeps previous assistant copyable while a hidden send is starting", () => {
+  const messages = [
+    {
+      id: "human-1",
+      type: "human",
+      content: "Hello",
+    },
+    {
+      id: "ai-1",
+      type: "ai",
+      content: "Completed answer",
+    },
+  ] as Message[];
+  const groups = getMessageGroups(messages);
+  const assistantGroupIndex = groups.findIndex(
+    (group) => group.type === "assistant",
+  );
+
+  expect(
+    isAssistantMessageGroupStreaming(
+      groups[assistantGroupIndex]?.messages ?? [],
+      getStreamingMessageLookup(messages, true),
+    ),
+  ).toBe(false);
+});
+
+test("keeps previous assistant copyable after a hidden send is appended", () => {
+  const messages = [
+    {
+      id: "human-1",
+      type: "human",
+      content: "Hello",
+    },
+    {
+      id: "ai-1",
+      type: "ai",
+      content: "Completed answer",
+    },
+    {
+      id: "human-hidden",
+      type: "human",
+      content: "Save this agent",
+      additional_kwargs: { hide_from_ui: true },
+    },
+  ] as Message[];
+  const groups = getMessageGroups(messages);
+  const assistantGroupIndex = groups.findIndex(
+    (group) => group.type === "assistant",
+  );
+
+  expect(
+    isAssistantMessageGroupStreaming(
+      groups[assistantGroupIndex]?.messages ?? [],
+      getStreamingMessageLookup(messages, true),
+    ),
+  ).toBe(false);
+});
+
+test("uses stream metadata to identify an assistant before optimistic input", () => {
+  const messages = [
+    {
+      id: "human-1",
+      type: "human",
+      content: "Hello",
+    },
+    {
+      id: "ai-1",
+      type: "ai",
+      content: "Completed answer",
+    },
+    {
+      id: "ai-2",
+      type: "ai",
+      content: "Still generating",
+    },
+    {
+      id: "opt-human-1",
+      type: "human",
+      content: "Continue",
+    },
+  ] as Message[];
+  const assistantGroups = getMessageGroups(messages).filter(
+    (group) => group.type === "assistant",
+  );
+  const groups = getMessageGroups(messages);
+  const assistantGroupIndexes = groups
+    .map((group, index) => (group.type === "assistant" ? index : -1))
+    .filter((index) => index >= 0);
+
+  expect(
+    isAssistantMessageGroupStreaming(
+      groups[assistantGroupIndexes[0] ?? -1]?.messages ?? [],
+      getStreamingMessageLookup(messages, true, (message) =>
+        message.id === "ai-2"
+          ? { streamMetadata: { langgraph_node: "agent" } }
+          : undefined,
+      ),
+    ),
+  ).toBe(false);
+  expect(
+    isAssistantMessageGroupStreaming(
+      groups[assistantGroupIndexes[1] ?? -1]?.messages ?? [],
+      getStreamingMessageLookup(messages, true, (message) =>
+        message.id === "ai-2"
+          ? { streamMetadata: { langgraph_node: "agent" } }
+          : undefined,
+      ),
+    ),
+  ).toBe(true);
+  expect(assistantGroups.map((group) => group.id)).toEqual(["ai-1", "ai-2"]);
+});
+
+test("does not mark a completed assistant group streaming from a later processing group", () => {
+  const messages = [
+    {
+      id: "human-1",
+      type: "human",
+      content: "Hello",
+    },
+    {
+      id: "ai-1",
+      type: "ai",
+      content: "Visible answer",
+    },
+    {
+      id: "ai-2",
+      type: "ai",
+      content: "",
+      tool_calls: [{ id: "tool-1", name: "web_search", args: {} }],
+    },
+  ] as Message[];
+  const groups = getMessageGroups(messages);
+  const assistantGroupIndex = groups.findIndex(
+    (group) => group.type === "assistant",
+  );
+
+  expect(groups.map((group) => group.type)).toEqual([
+    "human",
+    "assistant",
+    "assistant:processing",
+  ]);
+  expect(
+    isAssistantMessageGroupStreaming(
+      groups[assistantGroupIndex]?.messages ?? [],
+      getStreamingMessageLookup(messages, true, (message) =>
+        message.id === "ai-2"
+          ? { streamMetadata: { langgraph_node: "agent" } }
+          : undefined,
+      ),
+    ),
+  ).toBe(false);
+});
+
+test("keeps streaming assistant hidden when a hidden control message follows it", () => {
+  const messages = [
+    {
+      id: "human-1",
+      type: "human",
+      content: "Hello",
+    },
+    {
+      id: "ai-1",
+      type: "ai",
+      content: "Still generating",
+    },
+    {
+      id: "human-hidden",
+      type: "human",
+      content: "Save this agent",
+      additional_kwargs: { hide_from_ui: true },
+    },
+  ] as Message[];
+  const groups = getMessageGroups(messages);
+  const assistantGroupIndex = groups.findIndex(
+    (group) => group.type === "assistant",
+  );
+
+  expect(
+    isAssistantMessageGroupStreaming(
+      groups[assistantGroupIndex]?.messages ?? [],
+      getStreamingMessageLookup(messages, true, (message) =>
+        message.id === "ai-1"
+          ? { streamMetadata: { langgraph_node: "agent" } }
+          : undefined,
+      ),
+    ),
+  ).toBe(true);
+});
+
+describe("multi-part content with bare-string continuations", () => {
+  // Gemini streams the first content block as a {type:"text"} object carrying
+  // the thinking signature, then emits continuation deltas as plain strings.
+  // LangChain's Python merge_content preserves these as bare-string elements,
+  // so the finalized message content is [{type:"text", ...}, "...rest..."].
+  const geminiMessage = {
+    id: "ai-1",
+    type: "ai",
+    content: [
+      {
+        type: "text",
+        text: "First block carrying the signature.",
+        extras: { signature: "abc123" },
+        index: 0,
+      },
+      "Continuation streamed as a bare string.",
+    ],
+  } as unknown as Message;
+
+  test("extractContentFromMessage includes the bare-string parts", () => {
+    expect(extractContentFromMessage(geminiMessage)).toBe(
+      "First block carrying the signature.\nContinuation streamed as a bare string.",
+    );
+  });
+
+  test("extractTextFromMessage includes the bare-string parts", () => {
+    expect(extractTextFromMessage(geminiMessage)).toBe(
+      "First block carrying the signature.\nContinuation streamed as a bare string.",
+    );
+  });
+});
+
+describe("orphan tool messages", () => {
+  // LangGraph stream-mode "messages-tuple" can emit tool-result events out of order or
+  // replayed from subagent state (e.g. bash subagent under LocalSandboxProvider with
+  // allow_host_bash). When that happens, the tool message arrives after a terminal
+  // assistant/human group, so getMessageGroups' lastOpenGroup() returns null.
+  //
+  // The previous behaviour was console.error + drop, which silently hid the tool
+  // result from the UI. The fix falls back to attaching the orphan tool to the most
+  // recent group so the user can still see what the agent did.
+
+  test("attaches orphan tool message to the most recent group instead of dropping it", () => {
+    const messages = [
+      { id: "h-1", type: "human", content: "Run something" },
+      {
+        id: "ai-1",
+        type: "ai",
+        content: "ok",
+        tool_calls: [{ id: "call-1", name: "bash", args: {} }],
+      },
+      {
+        id: "t-1",
+        type: "tool",
+        name: "bash",
+        tool_call_id: "call-1",
+        content: "output-1",
+      },
+      { id: "ai-2", type: "ai", content: "Done." }, // terminal assistant group
+      // Orphan tool: arrives after a terminal group, no preceding processing group
+      {
+        id: "t-2",
+        type: "tool",
+        name: "bash",
+        tool_call_id: "call-2",
+        content: "output-2",
+      },
+    ] as Message[];
+
+    const groups = getMessageGroups(messages);
+
+    // Expect groups: human, assistant:processing (ai-1 + t-1), assistant (ai-2), and
+    // t-2 should be attached to the last group (assistant), not dropped.
+    const types = groups.map((g) => g.type);
+    expect(types).toEqual(["human", "assistant:processing", "assistant"]);
+
+    // t-2 must be retrievable from one of the groups — must NOT be silently dropped
+    const allMessages = groups.flatMap((g) => g.messages);
+    const t2 = allMessages.find((m) => m.id === "t-2");
+    expect(t2).toBeDefined();
+    expect(t2?.type).toBe("tool");
+  });
+
+  test("opens a processing group for a leading orphan tool message", () => {
+    // History pagination cuts by event seq, not turn boundaries, so the first
+    // loaded page can begin mid-turn with tool results whose AI tool-call
+    // message sits on an unloaded older page (#4399). They must stay visible
+    // in a processing group, not be dropped with a console error per render.
+    const messages = [
+      {
+        id: "t-lead-1",
+        type: "tool",
+        name: "bash",
+        tool_call_id: "call-old-1",
+        content: "output from unloaded turn",
+      },
+      {
+        id: "t-lead-2",
+        type: "tool",
+        name: "bash",
+        tool_call_id: "call-old-2",
+        content: "second output",
+      },
+      { id: "ai-1", type: "ai", content: "Done." },
+    ] as Message[];
+
+    const groups = getMessageGroups(messages);
+
+    expect(groups.map((g) => g.type)).toEqual([
+      "assistant:processing",
+      "assistant",
+    ]);
+    // Both leading orphans cluster into the same processing group.
+    expect(groups[0]?.messages.map((m) => m.id)).toEqual([
+      "t-lead-1",
+      "t-lead-2",
+    ]);
+  });
+
+  test("leading orphan absorbs the following real AI turn into one processing group", () => {
+    // A leading orphan followed by a real tool-call turn must accumulate into
+    // a single processing group via the assistant:processing branch, not
+    // strand the orphan as a separate empty group beside the real turn.
+    const messages = [
+      {
+        id: "t-lead",
+        type: "tool",
+        name: "bash",
+        tool_call_id: "call-old",
+        content: "output from unloaded turn",
+      },
+      {
+        id: "ai-1",
+        type: "ai",
+        content: "running",
+        tool_calls: [{ id: "call-1", name: "bash", args: {} }],
+      },
+      {
+        id: "t-1",
+        type: "tool",
+        name: "bash",
+        tool_call_id: "call-1",
+        content: "output-1",
+      },
+    ] as Message[];
+
+    const groups = getMessageGroups(messages);
+
+    // One processing group holds the orphan, the AI turn, and its tool result.
+    expect(groups.map((g) => g.type)).toEqual(["assistant:processing"]);
+    expect(groups[0]?.messages.map((m) => m.id)).toEqual([
+      "t-lead",
+      "ai-1",
+      "t-1",
+    ]);
+  });
+
+  test("tool message preceded only by hidden messages gets a group", () => {
+    // messages is non-empty, but every earlier message is hidden from the UI —
+    // groups is still empty when the tool message arrives.
+    const messages = [
+      {
+        id: "hidden-1",
+        type: "human",
+        content:
+          "<slash_skill_activation>\n<skill_content># SKILL.md</skill_content>\n</slash_skill_activation>",
+      },
+      {
+        id: "t-1",
+        type: "tool",
+        name: "bash",
+        tool_call_id: "call-1",
+        content: "output",
+      },
+    ] as Message[];
+
+    const groups = getMessageGroups(messages);
+
+    expect(groups.map((g) => g.type)).toEqual(["assistant:processing"]);
+    expect(groups[0]?.messages.map((m) => m.id)).toEqual(["t-1"]);
+  });
+
+  test("replayed tool with same tool_call_id is not lost (duplicate stream events)", () => {
+    // LangGraph subagent state restoration can replay tool-result events. The
+    // frontend log shows the same tool_call_id arriving twice. Both occurrences
+    // should be visible in the UI, not just the first.
+    const messages = [
+      { id: "h-1", type: "human", content: "q" },
+      {
+        id: "ai-1",
+        type: "ai",
+        content: "",
+        tool_calls: [{ id: "call-x", name: "bash", args: {} }],
+      },
+      {
+        id: "t-1a",
+        type: "tool",
+        name: "bash",
+        tool_call_id: "call-x",
+        content: "first delivery",
+      },
+      // Terminal assistant group ends the turn and closes the processing group.
+      // Without this interleave the replayed t-1b would still take the
+      // unchanged happy path; with it, t-1b arrives when lastOpenGroup()
+      // returns null and must take the new fallback branch to be visible.
+      { id: "ai-2", type: "ai", content: "Done." },
+      // Replayed tool-result for the original tool_call — must reach the new
+      // else-if (groups.length > 0) branch instead of being dropped.
+      {
+        id: "t-1b",
+        type: "tool",
+        name: "bash",
+        tool_call_id: "call-x",
+        content: "first delivery",
+      },
+    ] as Message[];
+
+    const groups = getMessageGroups(messages);
+    const allMessages = groups.flatMap((g) => g.messages);
+
+    // Strict assertion: the replayed tool message must be reachable from a
+    // group (i.e. attached via the new fallback). Before the fix this was
+    // silently dropped by console.error.
+    const t1b = allMessages.find((m) => m.id === "t-1b");
+    expect(t1b).toBeDefined();
+    expect(t1b?.type).toBe("tool");
+  });
+});
+
+describe("clarification run boundaries", () => {
+  const beforeReply = [
+    { id: "human", type: "human", content: "Plan the deployment" },
+    { id: "plan", type: "ai", content: "The completed deployment plan." },
+    {
+      id: "ask",
+      type: "ai",
+      content: "",
+      tool_calls: [{ id: "call", name: "ask_clarification", args: {} }],
+    },
+    {
+      id: "request",
+      type: "tool",
+      name: "ask_clarification",
+      tool_call_id: "call",
+      content: "Which environment?",
+    },
+  ] as Message[];
+
+  test("keeps completed text outside processing when the request arrives and during hidden-reply continuation", () => {
+    const reply = {
+      id: "reply",
+      type: "human",
+      content: "staging",
+      additional_kwargs: { hide_from_ui: true },
+    } as Message;
+    const continuation = {
+      id: "next",
+      type: "ai",
+      content: "Deploying now.",
+    } as Message;
+    for (const messages of [
+      beforeReply,
+      [...beforeReply, reply, continuation],
+    ]) {
+      const groups = getMessageGroups(messages, { isCurrentTurnLoading: true });
+      expect(groups.find((group) => group.id === "plan")?.type).toBe(
+        "assistant",
+      );
+      expect(groups.filter((group) => group.type === "human")).toHaveLength(1);
+    }
+    const groups = getMessageGroups([...beforeReply, reply, continuation], {
+      isCurrentTurnLoading: true,
+    });
+    expect(groups.find((group) => group.id === "next")?.type).toBe(
+      "assistant:processing",
+    );
+    expect(
+      getMessageGroups([...beforeReply, reply, continuation]).find(
+        (group) => group.id === "next",
+      )?.type,
+    ).toBe("assistant");
+  });
+
+  test("recognizes a clarification boundary without a loaded visible human message", () => {
+    const groups = getMessageGroups(beforeReply.slice(1), {
+      isCurrentTurnLoading: true,
+    });
+    expect(groups[0]?.type).toBe("assistant");
+  });
+});
+
+describe("scheduled task cards and run prompts", () => {
+  const taskView = (id: string, title = "Release checklist") => ({
+    id,
+    title,
+    status: "enabled",
+    schedule_type: "cron",
+    schedule_spec: { cron: "0 9 * * 1-5" },
+    timezone: "Asia/Shanghai",
+  });
+  const call = (id: string, args: Record<string, unknown>) =>
+    ({
+      id: `ai-${id}`,
+      type: "ai",
+      content: "",
+      tool_calls: [{ id, name: "schedule_task", args }],
+    }) as Message;
+  const result = (id: string, payload: unknown) =>
+    ({
+      id: `tool-${id}`,
+      type: "tool",
+      name: "schedule_task",
+      tool_call_id: id,
+      content: typeof payload === "string" ? payload : JSON.stringify(payload),
+    }) as Message;
+  const human = { id: "human", type: "human", content: "Every weekday at 9" };
+  const reply = { id: "reply", type: "ai", content: "Done." };
+
+  test.each(["create", "update", "trial"])(
+    "a %s result yields a card group after its processing group",
+    (action) => {
+      const groups = getMessageGroups([
+        human,
+        call("c1", { action }),
+        result("c1", { action, display: "card", task: taskView("task-1") }),
+        reply,
+      ] as Message[]);
+      expect(groups.map((group) => group.type)).toEqual([
+        "human",
+        "assistant:processing",
+        "assistant:scheduled-task",
+        "assistant",
+      ]);
+      // The step stays in its processing group for the tool label.
+      expect(groups[1]?.messages.map((message) => message.id)).toContain(
+        "tool-c1",
+      );
+      const card = groups[2];
+      expect(
+        card?.type === "assistant:scheduled-task" &&
+          card.scheduleResult.task.id,
+      ).toBe("task-1");
+    },
+  );
+
+  test.each([
+    ["a list", { action: "list", display: "card", tasks: [] }],
+    [
+      "an error",
+      {
+        error: "Ask the user which timezone to use.",
+        code: "timezone_required",
+      },
+    ],
+    ["unparsable text", "Scheduled task task-1 created"],
+  ])("%s yields no card", (_name, payload) => {
+    const groups = getMessageGroups([
+      human,
+      call("c1", { action: "list" }),
+      result("c1", payload),
+      reply,
+    ] as Message[]);
+    expect(groups.map((group) => group.type)).not.toContain(
+      "assistant:scheduled-task",
+    );
+  });
+
+  test("two results for the same task in one turn keep only the last card", () => {
+    const groups = getMessageGroups([
+      human,
+      call("c1", { action: "create" }),
+      result("c1", {
+        action: "create",
+        display: "card",
+        task: taskView("task-1", "First"),
+      }),
+      call("c2", { action: "update" }),
+      result("c2", {
+        action: "update",
+        display: "card",
+        task: taskView("task-1", "Renamed"),
+      }),
+      call("c3", { action: "create" }),
+      result("c3", {
+        action: "create",
+        display: "card",
+        task: taskView("task-2", "Other"),
+      }),
+      reply,
+    ] as Message[]);
+    const cards = groups.flatMap((group) =>
+      group.type === "assistant:scheduled-task" ? [group.scheduleResult] : [],
+    );
+    expect(cards.map((card) => [card.task.id, card.task.title])).toEqual([
+      ["task-1", "Renamed"],
+      ["task-2", "Other"],
+    ]);
+  });
+
+  test("cards in different turns are kept", () => {
+    const groups = getMessageGroups([
+      human,
+      call("c1", { action: "create" }),
+      result("c1", { action: "create", display: "card", task: taskView("t") }),
+      reply,
+      { id: "human-2", type: "human", content: "Run it now" },
+      call("c2", { action: "trial" }),
+      result("c2", { action: "trial", display: "card", task: taskView("t") }),
+      { id: "reply-2", type: "ai", content: "Started." },
+    ] as Message[]);
+    expect(
+      groups.filter((group) => group.type === "assistant:scheduled-task"),
+    ).toHaveLength(2);
+  });
+
+  test("a sibling tool result after a card joins the processing group", () => {
+    const groups = getMessageGroups([
+      human,
+      {
+        id: "ai-both",
+        type: "ai",
+        content: "",
+        tool_calls: [
+          { id: "c1", name: "schedule_task", args: { action: "create" } },
+          { id: "c2", name: "web_search", args: { query: "x" } },
+        ],
+      },
+      result("c1", { action: "create", display: "card", task: taskView("t") }),
+      {
+        id: "tool-c2",
+        type: "tool",
+        name: "web_search",
+        tool_call_id: "c2",
+        content: "[]",
+      },
+      reply,
+    ] as Message[]);
+    expect(groups[1]?.messages.map((message) => message.id)).toEqual([
+      "ai-both",
+      "tool-c1",
+      "tool-c2",
+    ]);
+    expect(groups[2]?.messages.map((message) => message.id)).toEqual([
+      "tool-c1",
+    ]);
+  });
+
+  test("a scheduled launch stays a human group with its origin and is not editable", () => {
+    const fixture = loadScheduledThread("minute-run");
+    const groups = getMessageGroups(fixture.messages);
+    const humans = groups.filter((group) => group.type === "human");
+    expect(humans).toHaveLength(1);
+    const origin = humans[0]?.type === "human" && humans[0].scheduledOrigin;
+    expect(origin).toMatchObject({
+      task_title: "发布清单未完成项提醒",
+      run_number: 2,
+      trigger: "scheduled",
+      stop_condition: "清单中所有条目都已完成（没有未勾选项）",
+    });
+    expect(getLatestEditableTurn(groups, false)).toBeNull();
+    // The same thread with an ordinary user message is editable.
+    expect(
+      getLatestEditableTurn(
+        getMessageGroups(withOrdinaryHumanTurn(fixture.messages)),
+        false,
+      )?.humanMessage.id,
+    ).toBe(humans[0]?.id);
+  });
+
+  test("scheduledOriginOf ignores ordinary and malformed messages", () => {
+    expect(scheduledOriginOf(human as Message)).toBeNull();
+    expect(
+      scheduledOriginOf({
+        ...human,
+        additional_kwargs: { [SCHEDULED_ORIGIN_KEY]: "task-1" },
+      } as Message),
+    ).toBeNull();
+    expect(
+      scheduledOriginOf({
+        ...reply,
+        additional_kwargs: { [SCHEDULED_ORIGIN_KEY]: { task_id: "t" } },
+      } as Message),
+    ).toBeNull();
+    expect(
+      scheduledOriginOf({
+        ...human,
+        additional_kwargs: {
+          [SCHEDULED_ORIGIN_KEY]: { task_id: "t", standing_notes: ["a", 1] },
+        },
+      } as Message),
+    ).toMatchObject({
+      task_id: "t",
+      trigger: "scheduled",
+      run_number: null,
+      stop_condition: null,
+      standing_notes: ["a"],
+    });
+  });
+
+  test("SCHEDULED_ORIGIN_KEY matches the backend contract", () => {
+    expect(SCHEDULED_ORIGIN_KEY).toBe(
+      SCHEDULED_GOAL_NOTES_CONTRACT.scheduled_origin_key,
+    );
+  });
+
+  test("a run thread's turn usage and branching match an ordinary turn", () => {
+    const fixture = loadScheduledThread("minute-run");
+    const scheduled = getMessageGroups(fixture.messages);
+    const ordinary = getMessageGroups(withOrdinaryHumanTurn(fixture.messages));
+    expect(scheduled.map((group) => group.type)).toEqual(
+      ordinary.map((group) => group.type),
+    );
+    const usageIds = (groups: typeof scheduled) =>
+      getAssistantTurnUsageMessages(groups).map((messages) =>
+        messages?.map((message) => message.id),
+      );
+    expect(usageIds(scheduled)).toEqual(usageIds(ordinary));
+    expect([...getBranchableAssistantGroupIds(scheduled, false)]).toEqual([
+      ...getBranchableAssistantGroupIds(ordinary, false),
+    ]);
+  });
+
+  test("a card group does not split the turn's usage or hide its final answer", () => {
+    // Live: create (after a read_file), trial, edit, pause and resume.
+    const fixture = loadScheduledThread("weekday-chat");
+    const groups = getMessageGroups(fixture.messages);
+    const turn = [
+      "human",
+      "assistant:processing",
+      "assistant:scheduled-task",
+      "assistant",
+    ];
+    expect(groups.map((group) => group.type)).toEqual(
+      Array.from({ length: 5 }, () => turn).flat(),
+    );
+    const usage = getAssistantTurnUsageMessages(groups);
+    expect(usage[2]).toBeNull();
+    // The create turn: the read_file call, the schedule_task call, the reply.
+    expect(usage[3]?.map((message) => message.id)).toEqual([
+      "lc_run--01a11061-400e-7982-8069-f72fa84b8751",
+      "lc_run--01a11061-4b2d-7c70-9d7a-22394f32b6c9",
+      "lc_run--01a11062-4f24-70a3-a118-57c8024d40bd",
+    ]);
+    // Every turn's final answer stays branchable, one per turn.
+    const replies = fixture.messages
+      .filter(
+        (message) =>
+          message.type === "ai" &&
+          !(message as { tool_calls?: unknown[] }).tool_calls?.length,
+      )
+      .map((message) => message.id);
+    expect(replies).toHaveLength(5);
+    expect([...getBranchableAssistantGroupIds(groups, false)]).toEqual(replies);
+    expect(getLatestEditableTurn(groups, false)?.humanMessage.id).toBe(
+      "local-human-5735ca25-a414-4b81-b042-4bf61c8eeaa8",
+    );
+  });
+});

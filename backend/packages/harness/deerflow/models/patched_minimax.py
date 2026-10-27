@@ -1,9 +1,11 @@
 """Patched ChatOpenAI adapter for MiniMax reasoning output.
 
 MiniMax's OpenAI-compatible chat completions API can return structured
-``reasoning_details`` when ``extra_body.reasoning_split=true`` is enabled.
-``langchain_openai.ChatOpenAI`` currently ignores that field, so DeerFlow's
-frontend never receives reasoning content in the shape it expects.
+``reasoning_details`` when ``extra_body.reasoning_split=true`` is enabled, or
+the official ``reasoning_content`` string in its response and stream delta.
+``langchain_openai.ChatOpenAI`` currently ignores those provider-specific
+fields, so DeerFlow's frontend never receives reasoning content in the shape
+it expects.
 
 This adapter preserves ``reasoning_split`` in the request payload and maps the
 provider-specific reasoning field into ``additional_kwargs.reasoning_content``,
@@ -29,22 +31,31 @@ _THINK_TAG_RE = re.compile(r"<think>\s*(.*?)\s*</think>", re.DOTALL)
 
 
 def _extract_reasoning_text(
-    reasoning_details: Any,
+    reasoning: Any,
     *,
     strip_parts: bool = True,
 ) -> str | None:
-    if not isinstance(reasoning_details, list):
+    if isinstance(reasoning, str):
+        if strip_parts:
+            value = reasoning.strip()
+            return value if value else None
+        return reasoning if reasoning else None
+
+    if not isinstance(reasoning, list):
         return None
 
     parts: list[str] = []
-    for item in reasoning_details:
+    for item in reasoning:
         if not isinstance(item, Mapping):
             continue
         text = item.get("text")
         if isinstance(text, str):
-            normalized = text.strip() if strip_parts else text
-            if normalized.strip():
-                parts.append(normalized)
+            if strip_parts:
+                normalized = text.strip()
+                if normalized:
+                    parts.append(normalized)
+            elif text != "":
+                parts.append(text)
 
     return "\n\n".join(parts) if parts else None
 
@@ -106,6 +117,11 @@ class PatchedChatMiniMax(ChatOpenAI):
         **kwargs: Any,
     ) -> dict:
         payload = super()._get_request_payload(input_, stop=stop, **kwargs)
+        # MiniMax's documented OpenAI-compatible API takes max_tokens. Stock
+        # ChatOpenAI renames it to OpenAI's newer max_completion_tokens, which
+        # would lose the output bound on both probes and ordinary chat calls.
+        if "max_completion_tokens" in payload:
+            payload["max_tokens"] = payload.pop("max_completion_tokens")
         extra_body = payload.get("extra_body")
         if isinstance(extra_body, dict):
             payload["extra_body"] = {
@@ -114,7 +130,26 @@ class PatchedChatMiniMax(ChatOpenAI):
             }
         else:
             payload["extra_body"] = {"reasoning_split": True}
+        self._strip_user_message_names(payload)
         return payload
+
+    @staticmethod
+    def _strip_user_message_names(payload: dict) -> None:
+        """Drop the per-message ``name`` field from user-role messages.
+
+        DeerFlow middlewares tag user messages with internal provenance names
+        (``user-input``, ``summary``, ``loop_warning``, ...). ``langchain_openai``
+        serializes those into the OpenAI-compatible request, but MiniMax requires
+        every user-role ``name`` to be identical and otherwise rejects the request
+        with ``invalid params, user name must be consistent (2013)``. MiniMax does
+        not use the per-message author name, so strip it.
+        """
+        messages = payload.get("messages")
+        if not isinstance(messages, list):
+            return
+        for message in messages:
+            if isinstance(message, dict) and message.get("role") == "user":
+                message.pop("name", None)
 
     def _convert_chunk_to_generation_chunk(
         self,
@@ -160,14 +195,21 @@ class PatchedChatMiniMax(ChatOpenAI):
         if logprobs:
             generation_info["logprobs"] = logprobs
 
-        reasoning = _extract_reasoning_text(
+        reasoning_details = _extract_reasoning_text(
             delta.get("reasoning_details"),
             strip_parts=False,
         )
+        reasoning_content = _extract_reasoning_text(
+            delta.get("reasoning_content"),
+            strip_parts=False,
+        )
+        reasoning = reasoning_details
+        if reasoning is None or (isinstance(delta.get("reasoning_details"), list) and not reasoning.strip() and reasoning_content is not None):
+            reasoning = reasoning_content
         if isinstance(message_chunk, AIMessageChunk):
             if usage_metadata:
                 message_chunk.usage_metadata = usage_metadata
-            if reasoning:
+            if reasoning is not None:
                 message_chunk = _with_reasoning_content(
                     message_chunk,
                     reasoning,
@@ -202,7 +244,12 @@ class PatchedChatMiniMax(ChatOpenAI):
 
                 choice_message = choice.get("message", {}) if isinstance(choice, Mapping) else {}
                 split_reasoning = _extract_reasoning_text(choice_message.get("reasoning_details"))
-                merged_reasoning = _merge_reasoning(split_reasoning, inline_reasoning)
+                direct_reasoning = _extract_reasoning_text(choice_message.get("reasoning_content"))
+                merged_reasoning = _merge_reasoning(
+                    split_reasoning,
+                    direct_reasoning,
+                    inline_reasoning,
+                )
 
                 updated_message = message
                 if cleaned_content is not None and cleaned_content != message.content:

@@ -1,0 +1,639 @@
+from __future__ import annotations
+
+import asyncio
+import logging
+import socket
+import uuid
+from concurrent.futures import Future
+from datetime import UTC, datetime
+from typing import Any
+
+from deerflow.community.ragflow.sources import durable_source_artifact
+from deerflow.config.app_config import AppConfig, get_app_config
+from deerflow.config.subagent_batches_config import SubagentBatchesConfig
+from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
+from deerflow.extensions import LoadedExtensions, get_loaded_extensions
+from deerflow.mcp_scope import THREAD_INCARNATION_CONTEXT_KEY
+from deerflow.subagents.batch_acceptance import check_batch_acceptance
+from deerflow.subagents.batch_lease import BatchItemLease
+from deerflow.subagents.batch_runtime import BatchSubmitRequest
+from deerflow.subagents.capacity import SubagentExecutionCapacity
+from deerflow.subagents.config import SubagentConfig, resolve_subagent_model_name
+from deerflow.subagents.executor import (
+    SubagentExecutor,
+    SubagentStatus,
+    cleanup_background_task,
+    force_cleanup_background_task,
+    get_background_task_result,
+    request_cancel_background_task,
+    run_on_isolated_subagent_loop,
+)
+from deerflow.utils.assembly_io import run_assembly
+
+logger = logging.getLogger(__name__)
+
+_BROWSER_EVIDENCE_FIELDS = (
+    "id",
+    "provider",
+    "dataset_id",
+    "document_id",
+    "chunk_id",
+    "dataset_name",
+    "document_name",
+    "text",
+)
+
+
+def _browser_evidence_snapshot(artifact: object) -> dict[str, Any] | None:
+    """Project one persisted evidence artifact into the browser contract.
+
+    Durable batch artifacts are already bounded at write time, but this
+    projection also protects older or manually repaired rows from exposing
+    arbitrary JSON fields such as provider credentials or execution metadata.
+    """
+    if not isinstance(artifact, dict):
+        return None
+    payload = artifact.get("knowledge_sources")
+    if not isinstance(payload, dict) or payload.get("version") != 1:
+        return None
+    raw_sources = payload.get("sources")
+    if not isinstance(raw_sources, list):
+        return None
+    sources: list[dict[str, Any]] = []
+    read_omissions = max(0, len(raw_sources) - 100)
+    for source in raw_sources[:100]:
+        if not isinstance(source, dict) or source.get("provider") != "ragflow":
+            continue
+        if not all(isinstance(source.get(field), str) for field in _BROWSER_EVIDENCE_FIELDS):
+            continue
+        if any(len(source[field]) > 512 for field in ("dataset_name", "document_name")):
+            read_omissions += 1
+            continue
+        if any(len(source[field]) > 256 for field in ("id", "dataset_id", "document_id", "chunk_id")):
+            read_omissions += 1
+            continue
+        # Keep legacy or manually repaired rows bounded at read time too;
+        # write-time limits do not protect this endpoint from old oversized text.
+        if len(source["text"]) > 16_000:
+            read_omissions += 1
+            continue
+        record = {field: source[field] for field in _BROWSER_EVIDENCE_FIELDS}
+        pages = source.get("pages")
+        record["pages"] = sorted({page for page in pages[:100] if isinstance(page, int) and not isinstance(page, bool) and 1 <= page <= 1_000_000}) if isinstance(pages, list) else []
+        record["truncated"] = source.get("truncated") is True
+        sources.append(record)
+    omitted_count = payload.get("omitted_count", 0)
+    if not isinstance(omitted_count, int) or isinstance(omitted_count, bool) or omitted_count < 0:
+        omitted_count = 0
+    return {"version": 1, "sources": sources, "omitted_count": omitted_count + read_omissions}
+
+
+# Strong references to scheduled registry releases: an event loop keeps only
+# weak references to its tasks.
+_pending_releases: set[Future[None]] = set()
+
+# Terminal outcomes must not keep durable attempts leased forever when resource
+# teardown hangs. The execution supervisor still owns those resources afterwards.
+_TERMINAL_CLEANUP_GRACE_SECONDS = 60.0
+
+
+def _usage(records: list[dict[str, Any]] | None) -> dict[str, int] | None:
+    if not records:
+        return None
+    return {
+        "input_tokens": sum(int(row.get("input_tokens") or 0) for row in records),
+        "output_tokens": sum(int(row.get("output_tokens") or 0) for row in records),
+        "total_tokens": sum(int(row.get("total_tokens") or 0) for row in records),
+    }
+
+
+async def _release_when_terminal(execution_id: str, *, poll_seconds: float, max_wait_seconds: float) -> None:
+    """Remove an abandoned execution's registry entry once it stops."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + max_wait_seconds
+    while (result := get_background_task_result(execution_id)) is not None:
+        if result.status.is_terminal:
+            cleanup_background_task(execution_id)
+            return
+        if loop.time() >= deadline:
+            # Cancellation is cooperative, so a run can ignore it. The worker
+            # held the only copy of this id and the lease has moved on.
+            logger.warning("Abandoned batch execution %s still %s after %.0fs; removing it from the registry", execution_id, result.status.value, max_wait_seconds)
+            force_cleanup_background_task(execution_id)
+            return
+        await asyncio.sleep(poll_seconds)
+
+
+def _log_release_failure(pending: Future[None], *, execution_id: str) -> None:
+    # Unlike an asyncio task, a concurrent future never reports an exception
+    # nobody retrieved, so a failed release would leak its entry silently.
+    if pending.cancelled():
+        return
+    exc = pending.exception()
+    if exc is not None:
+        logger.error("Registry release failed for batch execution %s", execution_id, exc_info=exc)
+
+
+class SubagentBatchService:
+    """Lease, execute, and recover durable native-subagent batch items."""
+
+    # Also used by focused shutdown tests constructing an instance via __new__.
+    _stopping: bool = False
+    _stop_drains: int = 0
+    _stop_cleanup_task: asyncio.Task[None] | None = None
+
+    def __init__(
+        self,
+        *,
+        repository,
+        config: SubagentBatchesConfig,
+        runtime_config: SubagentRuntimeConfig,
+        app_config: AppConfig | None = None,
+        execution_capacity: SubagentExecutionCapacity | None = None,
+        extensions: LoadedExtensions | None = None,
+    ) -> None:
+        self._repository = repository
+        self._config = config
+        self._runtime_config = runtime_config
+        self._app_config = app_config
+        self._execution_capacity = execution_capacity
+        # One worker owns one generation, including recovered durable items.
+        # Never persist this Python object in the serializable execution_spec.
+        self._extensions = extensions if extensions is not None else get_loaded_extensions()
+        self._lease_owner = f"{socket.gethostname()}:{uuid.uuid4().hex}"
+        self._stop = asyncio.Event()
+        self._poller: asyncio.Task[None] | None = None
+        self._stopping = False
+        self._stop_drains = 0
+        self._stop_cleanup_task: asyncio.Task[None] | None = None
+        self._executions: dict[str, asyncio.Task[None]] = {}
+        self._execution_ids: dict[str, str] = {}
+        self._item_batches: dict[str, str] = {}
+
+    async def start(self) -> None:
+        if self._stopping:
+            raise RuntimeError("cannot start subagent batch poller before stop completes")
+        cleanup_task = getattr(self, "_stop_cleanup_task", None)
+        if cleanup_task is not None:
+            cleanup_task.result()
+            self._stop_cleanup_task = None
+        if self._poller is not None:
+            return
+        self._stop.clear()
+        self._poller = asyncio.create_task(self._run(), name="subagent-batch-poller")
+
+    async def stop(self) -> None:
+        cleanup_task = getattr(self, "_stop_cleanup_task", None)
+        if cleanup_task is None:
+            # Fence start() before taking the owned-work snapshot. All stop
+            # callers then join this one cleanup generation instead of issuing
+            # competing cancellations and clearing one another's state.
+            self._stopping = True
+            self._stop.set()
+            poller = self._poller
+
+            # Issue every owned-work cancellation before the first await. The
+            # Gateway wraps this stop hook in a deadline; if poller teardown is
+            # slow, cancellation of this caller must not prevent native/item
+            # cancellation from being requested.
+            execution_ids = list(self._execution_ids.values())
+            for execution_id in execution_ids:
+                request_cancel_background_task(execution_id)
+            tasks = list(self._executions.values())
+
+            if poller is not None:
+                poller.cancel()
+            for task in tasks:
+                task.cancel()
+
+            self._stop_drains = 1
+            cleanup_task = asyncio.create_task(
+                self._drain_stop(poller, tasks),
+                name="subagent-batch-stop-cleanup",
+            )
+            self._stop_cleanup_task = cleanup_task
+
+        await asyncio.shield(cleanup_task)
+
+    async def _drain_stop(
+        self,
+        poller: asyncio.Task[None] | None,
+        tasks: list[asyncio.Task[None]],
+    ) -> None:
+        if poller is not None:
+            await asyncio.gather(poller, return_exceptions=True)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._executions.clear()
+        self._execution_ids.clear()
+        self._item_batches.clear()
+        if self._poller is poller:
+            self._poller = None
+        self._stop_drains = 0
+        self._stopping = False
+
+    async def _run(self) -> None:
+        while not self._stop.is_set():
+            try:
+                await self.run_once(now=datetime.now(UTC))
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Subagent batch scheduler pass failed")
+            try:
+                await asyncio.wait_for(
+                    self._stop.wait(),
+                    timeout=self._config.poll_interval_seconds,
+                )
+            except TimeoutError:
+                pass
+
+    async def run_once(self, *, now: datetime) -> None:
+        available = max(0, self._runtime_config.max_running - len(self._executions))
+        if available <= 0:
+            return
+        # A process identity is not a fence for a later claim by that process.
+        claim_owner = f"{self._lease_owner[:80]}:{uuid.uuid4().hex}"
+        items = await self._repository.claim_items(
+            now=now,
+            lease_owner=claim_owner,
+            lease_seconds=self._config.lease_seconds,
+            limit=available,
+            exclude_item_ids=tuple(self._executions),
+        )
+        for item in items:
+            item_id = item["id"]
+            if item_id in self._executions:
+                continue
+            task = asyncio.create_task(
+                self._execute_item(item, lease_owner=claim_owner),
+                name=f"subagent-batch-item-{item_id}",
+            )
+            self._executions[item_id] = task
+            task.add_done_callback(
+                lambda _task, current_id=item_id: self._executions.pop(
+                    current_id,
+                    None,
+                )
+            )
+
+    async def submit(self, request: BatchSubmitRequest) -> dict[str, Any]:
+        total = len(request.items)
+        if total < 1 or total > self._config.max_items_per_batch:
+            raise ValueError(f"Batch item count must be between 1 and {self._config.max_items_per_batch}")
+        # `or` would read an explicit 0 as "unset", substitute the configured
+        # default, and hide the caller's value from the range guards below --
+        # a negative already fails there, so 0 was the asymmetric case.
+        max_live = self._config.default_max_live_items if request.max_live_items is None else request.max_live_items
+        max_running = self._config.default_max_running_items if request.max_running_items is None else request.max_running_items
+        if not 1 <= max_live <= self._config.max_live_items_per_batch:
+            raise ValueError(f"max_live_items must be between 1 and {self._config.max_live_items_per_batch}")
+        if not 1 <= max_running <= self._config.max_running_items_per_batch:
+            raise ValueError(f"max_running_items must be between 1 and {self._config.max_running_items_per_batch}")
+        if max_running > max_live:
+            raise ValueError("max_running_items must not exceed max_live_items")
+        return await self._repository.create_batch(
+            batch_id=f"subagent-batch-{uuid.uuid4().hex}",
+            user_id=request.user_id,
+            thread_id=request.thread_id,
+            run_id=request.run_id,
+            tool_call_id=request.tool_call_id,
+            submission_key=request.submission_key,
+            title=request.title,
+            subagent_type=request.subagent_type,
+            items=request.items,
+            max_live_items=max_live,
+            max_running_items=max_running,
+            max_attempts=self._config.max_attempts,
+            execution_spec=request.execution_spec,
+        )
+
+    async def get_batch(
+        self,
+        *,
+        batch_id: str,
+        user_id: str,
+    ) -> dict[str, Any] | None:
+        return await self._repository.get_batch(batch_id, user_id=user_id)
+
+    async def read_batch_item(self, *, batch_id: str, user_id: str, thread_id: str, position: int) -> dict[str, Any] | None:
+        """Read one current-thread result; never expose worker execution context."""
+        batch = await self._repository.get_batch(batch_id, user_id=user_id)
+        if batch is None or batch["thread_id"] != thread_id:
+            return None
+        items = await self._repository.list_items(batch_id, user_id=user_id, offset=position, limit=1, include_result=True)
+        if not items:
+            return None
+        fields = ("id", "item_key", "position", "status", "attempt", "result", "result_truncated", "error", "stop_reason", "acceptance_criteria", "acceptance_verdict")
+        return {key: items[0].get(key) for key in fields}
+
+    async def read_browser_batch_item(
+        self,
+        *,
+        batch_id: str,
+        user_id: str,
+        thread_id: str,
+        position: int,
+    ) -> dict[str, Any] | None:
+        """Read a fixed, owner-scoped projection for browser result review.
+
+        This path intentionally reads the stored report and evidence snapshot
+        only. It never invokes a provider, exposes the original prompt or
+        execution specification, or depends on the batch worker being alive.
+        """
+        if position < 0:
+            return None
+        batch = await self._repository.get_batch(batch_id, user_id=user_id)
+        if batch is None or batch["thread_id"] != thread_id:
+            return None
+        items = await self._repository.list_items(
+            batch_id,
+            user_id=user_id,
+            offset=position,
+            limit=1,
+            include_result=True,
+        )
+        if not items or items[0].get("position") != position:
+            return None
+        item = items[0]
+        return {
+            "id": item.get("id"),
+            "item_key": item.get("item_key"),
+            "position": item.get("position"),
+            "status": item.get("status"),
+            "attempt": item.get("attempt"),
+            "model_name": item.get("model_name"),
+            "report": item.get("result"),
+            "report_truncated": item.get("result_truncated") is True,
+            "error": item.get("error"),
+            "stop_reason": item.get("stop_reason"),
+            "acceptance_criteria": item.get("acceptance_criteria"),
+            "acceptance_verdict": item.get("acceptance_verdict"),
+            "evidence": _browser_evidence_snapshot(item.get("result_artifact")),
+            "started_at": item.get("started_at"),
+            "completed_at": item.get("completed_at"),
+            "updated_at": item.get("updated_at"),
+        }
+
+    async def cancel_batch(
+        self,
+        *,
+        batch_id: str,
+        user_id: str,
+    ) -> dict[str, Any] | None:
+        batch = await self._repository.cancel_batch(batch_id, user_id=user_id)
+        if batch is None:
+            return None
+        for item_id, execution_id in list(self._execution_ids.items()):
+            if self._item_batches.get(item_id) == batch_id:
+                request_cancel_background_task(execution_id)
+        # Normal ids are not prefixed; the renew loop observes the durable
+        # cancellation within lease_seconds/3. Keeping cancellation durable is
+        # what lets another worker own the HTTP control request safely.
+        return batch
+
+    async def _execute_item(self, item: dict[str, Any], *, lease_owner: str) -> None:
+        async with BatchItemLease(self._repository, item_id=item["id"], owner=lease_owner, seconds=self._config.lease_seconds) as lease:
+            if lease.valid:
+                await self._execute_leased_item(item, lease)
+
+    async def _execute_leased_item(self, item: dict[str, Any], lease: BatchItemLease) -> None:
+        item_id = item["id"]
+        execution_id: str | None = None
+        try:
+            batch = item["batch"]
+            self._item_batches[item_id] = batch["id"]
+            spec = batch["execution_spec"]
+            config_data = spec["subagent_config"]
+            if "prompt_overlay" in config_data:
+                from deerflow.config.prompt_overlay import PromptOverlay
+
+                config_data = {**config_data, "prompt_overlay": PromptOverlay.model_validate(config_data["prompt_overlay"])}
+            config = SubagentConfig(**config_data)
+            app_config = self._app_config or get_app_config()
+            from deerflow.tools import get_available_tools
+
+            effective_model = resolve_subagent_model_name(
+                config,
+                spec.get("parent_model"),
+                app_config=app_config,
+            )
+            # Assemble off-loop: tool assembly may block on MCP cache
+            # initialization, which must not stall the calling event loop (issue #5172).
+            tools = await run_assembly(
+                get_available_tools,
+                groups=spec.get("tool_groups"),
+                mcp_plugins=spec.get("mcp_plugins"),
+                model_name=effective_model,
+                subagent_enabled=False,
+                include_upload_tool=False,
+                app_config=app_config,
+                extensions=self._extensions,
+            )
+            # Revalidate durable state before launching: cancel_batch may have
+            # terminalized this item (or its lease may have been lost) while
+            # assembly blocked in the worker thread — the poll loop's checks
+            # only start after execute_async(), so launching without this
+            # check would run work the user already cancelled.
+            if not await lease.renew():
+                logger.info(
+                    "Durable batch item %s cancelled or lease lost during tool assembly; skipping launch",
+                    item_id,
+                )
+                return
+            executor_kwargs = {}
+            if THREAD_INCARNATION_CONTEXT_KEY in spec:
+                executor_kwargs[THREAD_INCARNATION_CONTEXT_KEY] = spec[THREAD_INCARNATION_CONTEXT_KEY]
+            executor = SubagentExecutor(
+                config=config,
+                tools=tools,
+                app_config=app_config,
+                parent_model=spec.get("parent_model"),
+                thread_id=batch["thread_id"],
+                user_id=batch["user_id"],
+                user_role=spec.get("user_role"),
+                oauth_provider=spec.get("oauth_provider"),
+                oauth_id=spec.get("oauth_id"),
+                run_id=batch.get("run_id"),
+                channel_user_id=spec.get("channel_user_id"),
+                is_internal=spec.get("is_internal") is True,
+                authz_attributes=spec.get("authz_attributes"),
+                knowledge_scope=spec.get("knowledge_scope"),
+                execution_capacity=self._execution_capacity,
+                extensions=self._extensions,
+                acceptance_criteria=item.get("acceptance_criteria"),
+                **executor_kwargs,
+            )
+            prompt = f"Durable batch item key: {item['item_key']}\nThis item may be retried after a worker crash. Keep side effects idempotent and use the item key as the idempotency identity.\n\n{item['prompt']}"
+            execution_id = executor.execute_async(prompt, task_id=item_id)
+            self._execution_ids[item_id] = execution_id
+            marked_running = False
+            status_poll_every = min(self._config.poll_interval_seconds, max(1.0, self._config.lease_seconds / 3))
+            cleanup_deadline: float | None = None
+            loop = asyncio.get_running_loop()
+            while True:
+                result = get_background_task_result(execution_id)
+                if result is None:
+                    raise RuntimeError("Native subagent execution disappeared")
+                if result.status is SubagentStatus.RUNNING and not marked_running:
+                    marked_running = await self._repository.mark_item_running(
+                        item_id,
+                        lease_owner=lease.owner,
+                        now=datetime.now(UTC),
+                    )
+                    if not marked_running:
+                        request_cancel_background_task(execution_id)
+                status_wait = status_poll_every
+                execution_done = getattr(result, "execution_done_event", None)
+                if result.status.is_terminal:
+                    if execution_done is None or execution_done.is_set():
+                        break
+                    if cleanup_deadline is None:
+                        cleanup_deadline = loop.time() + _TERMINAL_CLEANUP_GRACE_SECONDS
+                    remaining = cleanup_deadline - loop.time()
+                    if remaining <= 0:
+                        logger.warning(
+                            "Batch execution %s cleanup exceeded %.0fs; finalizing its published %s outcome while resource cleanup remains supervised",
+                            execution_id,
+                            _TERMINAL_CLEANUP_GRACE_SECONDS,
+                            result.status.value,
+                        )
+                        break
+                    status_wait = min(status_wait, remaining)
+                if not lease.valid:
+                    request_cancel_background_task(execution_id)
+                try:
+                    await asyncio.wait_for(self._stop.wait(), timeout=status_wait)
+                    if self._stop.is_set():
+                        raise asyncio.CancelledError
+                except TimeoutError:
+                    pass
+
+            if not lease.valid:
+                return
+            raw_result = result.result or ""
+            if getattr(result, "admission_failure", False):
+                await self._repository.requeue_item_after_admission_failure(
+                    item_id,
+                    lease_owner=lease.owner,
+                    error=result.error,
+                    now=datetime.now(UTC),
+                )
+                return
+            truncated = len(raw_result) > self._config.max_result_chars
+            stored_result = raw_result[: self._config.max_result_chars] if raw_result else None
+            preview = raw_result[: self._config.result_preview_max_chars] if raw_result else None
+            result_artifact = durable_source_artifact(
+                getattr(result, "ai_messages", None) or [],
+                stored_result or "",
+                max_chars=self._config.max_result_chars,
+            )
+            acceptance_verdict = None
+            if result.status is SubagentStatus.COMPLETED and item.get("acceptance_criteria"):
+                try:
+                    valid, acceptance_verdict = await self._check_acceptance_with_lease(item, result, app_config, lease)
+                    if not valid:
+                        return
+                except Exception:
+                    # Advisory like ordinary task acceptance: an unavailable
+                    # checker must not discard useful work or trigger a retry.
+                    logger.warning("Batch acceptance check failed; result remains unchecked (item_id=%s)", item_id, exc_info=True)
+            await self._repository.finalize_item(
+                item_id,
+                lease_owner=lease.owner,
+                succeeded=result.status is SubagentStatus.COMPLETED,
+                result=stored_result,
+                result_preview=preview,
+                result_truncated=truncated,
+                error=result.error,
+                stop_reason=result.stop_reason,
+                token_usage=_usage(result.token_usage_records),
+                model_name=effective_model,
+                completed_at=datetime.now(UTC),
+                acceptance_verdict=acceptance_verdict,
+                result_artifact=result_artifact,
+            )
+        except asyncio.CancelledError:
+            # Do not finalize on process shutdown. The durable lease expires and
+            # another worker reclaims the same stable item key.
+            raise
+        except Exception as exc:
+            logger.exception(
+                "Durable subagent batch item failed (item_id=%s)",
+                item_id,
+            )
+            await self._repository.finalize_item(
+                item_id,
+                lease_owner=lease.owner,
+                succeeded=False,
+                result=None,
+                result_preview=None,
+                result_truncated=False,
+                error=str(exc)[:4_000],
+                stop_reason=None,
+                token_usage=None,
+                model_name=None,
+                completed_at=datetime.now(UTC),
+            )
+        finally:
+            self._execution_ids.pop(item_id, None)
+            self._item_batches.pop(item_id, None)
+            if execution_id is not None:
+                self._release_execution(execution_id)
+
+    def _release_execution(self, execution_id: str) -> None:
+        """Remove a finished execution, or cancel one nothing supervises now.
+
+        Cancellation and polling errors leave this worker while the subagent is
+        still running, and the registry only removes terminal entries, so the
+        removal waits on the subagent loop for the run to stop. Waiting past
+        the lease is pointless: another worker has reclaimed the item by then.
+        """
+        result = get_background_task_result(execution_id)
+        if result is None:
+            return
+        if result.status.is_terminal:
+            cleanup_background_task(execution_id)
+            return
+        request_cancel_background_task(execution_id)
+        release = _release_when_terminal(
+            execution_id,
+            poll_seconds=self._config.poll_interval_seconds,
+            max_wait_seconds=self._config.lease_seconds,
+        )
+        try:
+            pending = run_on_isolated_subagent_loop(release)
+        except Exception:
+            release.close()
+            logger.warning("Could not schedule registry release for batch execution %s", execution_id, exc_info=True)
+            return
+        _pending_releases.add(pending)
+        pending.add_done_callback(_pending_releases.discard)
+        pending.add_done_callback(lambda done: _log_release_failure(done, execution_id=execution_id))
+
+    async def _check_acceptance_with_lease(self, item, result, app_config, lease: BatchItemLease):
+        """Keep a completed execution leased until its advisory check drains."""
+
+        if not await lease.renew():
+            return False, None
+        check = asyncio.create_task(
+            check_batch_acceptance(
+                item["acceptance_criteria"],
+                batch=item["batch"],
+                app_config=app_config,
+                bash_executions=getattr(result, "bash_executions", None),
+            )
+        )
+        try:
+            while True:
+                done, _ = await asyncio.wait({check}, timeout=max(1.0, self._config.lease_seconds / 3))
+                if done:
+                    return lease.valid, check.result()
+                if not lease.valid:
+                    return False, None
+        finally:
+            if not check.done():
+                check.cancel()
+            # The checklist's sandbox offload drains before releasing its
+            # holder, even when shutdown or a lost lease cancels this task.
+            await asyncio.gather(check, return_exceptions=True)

@@ -1,3 +1,105 @@
+---
+title: Create Your First Harness
+description: This tutorial shows you how to use the DeerFlow Harness programmatically — importing and using DeerFlow directly in your Python code rather than through the web interface.
+---
+
+import { Callout, Steps } from "nextra/components";
+
 # Create Your First Harness
 
-TBD
+This tutorial shows you how to use the DeerFlow Harness programmatically — importing and using DeerFlow directly in your Python code rather than through the web interface.
+
+## Prerequisites
+
+- Python 3.12+
+- `uv` installed
+- DeerFlow repository cloned
+
+## Install
+
+```bash
+cd deer-flow/backend
+uv sync
+```
+
+## Create configuration
+
+Create a minimal `config.yaml`:
+
+```yaml
+config_version: 6
+
+models:
+  - name: gpt-4o
+    use: langchain_openai:ChatOpenAI
+    model: gpt-4o
+    api_key: $OPENAI_API_KEY
+
+sandbox:
+  use: deerflow.sandbox.local:LocalSandboxProvider
+
+tools:
+  - use: deerflow.community.ddg_search.tools:web_search_tool
+  - use: deerflow.sandbox.tools:read_file_tool
+  - use: deerflow.sandbox.tools:write_file_tool
+```
+
+## Write the code
+
+<Steps>
+
+### Create a Python file
+
+Create `my_agent.py` in the `backend/` directory:
+
+```python
+import os
+from deerflow.client import DeerFlowClient
+
+os.environ["OPENAI_API_KEY"] = "sk-..."
+
+# The client loads config.yaml itself. To select a specific file,
+# set DEER_FLOW_CONFIG_PATH before constructing the client.
+client = DeerFlowClient()
+
+for event in client.stream(
+    message="Write a Python fibonacci function with a docstring",
+    thread_id="my-first-thread",
+    model_name="gpt-4o",
+):
+    print(event)
+```
+
+### Run it
+
+```bash
+cd backend
+uv run python my_agent.py
+```
+
+</Steps>
+
+## What the events look like
+
+`stream()` yields `StreamEvent` dataclasses, not dicts. Read them through
+`event.type` and `event.data`. There are exactly four types —
+`"values"`, `"messages-tuple"`, `"custom"` and `"end"`:
+
+```python
+StreamEvent(type="messages-tuple", data={"type": "ai", "content": "def fibonacci...", "id": "m1"})
+StreamEvent(type="values",         data={"title": "Python Fibonacci Function", "messages": [...], "artifacts": [...], "summary_text": None})
+StreamEvent(type="end",            data={"usage": {"input_tokens": 1180, "output_tokens": 412, "total_tokens": 1592}})
+```
+
+```python
+for event in client.stream(message="...", thread_id="my-first-thread"):
+    if event.type == "messages-tuple":
+        print(event.data.get("content", ""), end="")
+    elif event.type == "end":
+        print("\ndone:", event.data.get("usage"))
+```
+
+## Next steps
+
+- [Use Tools and Skills](/docs/tutorials/use-tools-and-skills)
+- [Harness Quick Start](/docs/harness/quick-start)

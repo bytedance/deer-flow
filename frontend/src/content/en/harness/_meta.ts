@@ -10,6 +10,12 @@ const meta: MetaRecord = {
   "design-principles": {
     title: "Design Principles",
   },
+  "lead-agent": {
+    title: "Lead Agent",
+  },
+  middlewares: {
+    title: "Middlewares",
+  },
   configuration: {
     title: "Configuration",
   },
@@ -24,6 +30,18 @@ const meta: MetaRecord = {
   },
   sandbox: {
     title: "Sandbox",
+  },
+  subagents: {
+    title: "Subagents",
+  },
+  checkpoints: {
+    title: "Checkpoints",
+  },
+  mcp: {
+    title: "MCP Integration",
+  },
+  extensions: {
+    title: "Extensions",
   },
   customization: {
     title: "Customization",

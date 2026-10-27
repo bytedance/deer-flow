@@ -1,0 +1,209 @@
+### Schema Migrations (`packages/harness/deerflow/persistence/migrations/`)
+
+DeerFlow's application tables (`runs`, `threads_meta`, `feedback`, `users`, `run_events`, plus the `channel_*` tables) are owned by alembic via a **hybrid bootstrap** strategy. LangGraph's checkpointer tables (`checkpoints`, `checkpoint_blobs`, `checkpoint_writes`, `checkpoint_migrations`) live in the same database but are owned by LangGraph and excluded from alembic's view via `migrations/_env_filters.py::include_object`.
+
+**Convention**: every ORM model change (new column, new table, new index) MUST ship as an alembic revision under `migrations/versions/`. The Gateway runs `alembic upgrade head` automatically on startup; routine production upgrades do not require manual Alembic commands. The audited offline recovery below is an exception for the out-of-tree incarnation revision. A new revision must always chain onto the current head — never insert one ahead of an already-shipped revision (re-parenting it): alembic only walks forward from a database's stamped revision, so every database already stamped at or past the insertion point treats the inserted revision as an applied ancestor and never executes it. Inserting `0023_run_change_seq` ahead of the shipped `0023_user_preferences` stranded those databases without the run-change clock schema until `0025_repair_run_change_seq` re-applied it (#5516).
+
+**Hybrid bootstrap** (`persistence/bootstrap.py::bootstrap_schema`, invoked from `persistence/engine.py::init_engine`):
+
+| DB state                                  | Action                                  |
+|-------------------------------------------|-----------------------------------------|
+| empty (no DeerFlow tables)                | `create_all` + `alembic stamp head`     |
+| legacy (DeerFlow tables, no `alembic_version`) | `create_all` (baseline tables only, backfill) + `alembic stamp 0001_baseline` + `upgrade head` |
+| versioned (one locally known `alembic_version` row) | `alembic upgrade head`          |
+| `0019_thread_incarnations` with all current ORM tables/columns | warn and skip migration |
+| `0019_thread_incarnations` missing local tables/columns | refuse startup; offline recovery required |
+| unknown revision, empty version table, or multiple version rows | fail closed and refuse to start |
+
+The legacy branch handles pre-alembic databases that already have at least one DeerFlow-owned table. `create_all` runs first because stamping at `0001_baseline` makes alembic skip the baseline's own `create_table` DDL on the subsequent upgrade — so any baseline table introduced into `Base.metadata` after the user's DB was first provisioned (e.g. the `channel_*` tables from PR #1930 for users upgrading across multiple releases) would otherwise never be created, and the first request hitting that table would 500 with `no such table`. The backfill is **restricted to `_BASELINE_TABLE_NAMES`** so it does not also create tables that future revisions introduce — those revisions' own `op.create_table` would otherwise fail with `relation already exists`. A guard test pins `_BASELINE_TABLE_NAMES` against `0001_baseline.upgrade()`'s actual output, so editing 0001 to add or remove a table forces a matching update to the constant. Column-level shape (pre-#3658 vs post-#3658 vs manual-ALTER for `token_usage_by_model`) is answered by each `versions/*.py` revision via the idempotent helpers in `migrations/_helpers.py` (`safe_add_column` / `safe_drop_column`) which no-op when the change is already present and `logger.warning` on shape drift (both sides rendered through the connection's dialect, so model-shaped columns stay quiet). **Adding a new ORM column / table only requires a new revision file — no edit to `bootstrap.py` is needed** *unless* the new revision adds a new baseline table (rare; only happens when a new model is part of the baseline rather than introduced by its own revision).
+
+The empty-DB path keeps using `create_all` because `Base.metadata` is the only authoritative schema source — `create_all` renders both SQLite (JSON, type affinity) and Postgres (JSONB, partial indexes) correctly without anyone having to keep a hand-written baseline in lockstep. `0001_baseline.upgrade()` is therefore almost never executed in practice; it exists as a stamp target + chain root.
+
+**Rolling forward compatibility**: the local chain is
+`0018_oauth_identity_pg_partial` → `0019_projects` →
+`0020_threads_meta_project_id` → `0021_batch_acceptance` →
+`0019_thread_incarnations` → `0022_scheduled_occurrence_seq` →
+`0023_run_change_seq` → `0023_user_preferences` →
+`0024_project_documents` → `0025_repair_run_change_seq` →
+`0026_mcp_task_lease_tokens` → `0027_notification_deliveries` →
+`0028_parked_attempts` → `0029_scheduler_agent_tasks` →
+`0030_notification_claim_tokens` → `0031_scheduled_streak_boundary` →
+`0032_activity_and_task_events` → `0033_batch_result_artifact` → `0034_run_event_seq_watermark` →
+`0035_login_throttle` → `0036_run_idempotency_request` →
+`0037_project_document_summaries` → `0038_channel_thread_bindings` →
+`0039_user_disabled` → `0040_scheduled_group_notice` →
+`0041_im_notice_preferences` → `0042_channel_leases` →
+`0043_runtime_im_notices` → `0044_channel_runtime_configs` →
+`0045_completed_run_evidence` → `0046_skill_mutations` → `0047_mcp_oauth_tokens` → `0048_extension_execution_leases` (current head). The preference
+revision adds a separate owner/key table with a cascading users foreign key and
+does not alter users; the project-documents revision adds a new owner-scoped
+shelf table, and the MCP lease-token revision adds two nullable token columns to
+`mcp_tasks`. The batch-result revision adds a nullable JSON evidence snapshot
+to `subagent_batch_items`, without changing existing report text or backfilling
+historical evidence. The run-idempotency revision adds a nullable private JSON
+request identity to `runs`; old Gateways ignore the column, so resume digests
+never enter public `kwargs_json`. Both revisions leave the bootstrap
+forward-compat floor unchanged.
+The incarnation revision deliberately retains the exact id audited by the
+rollback-floor binary; Alembic orders revisions by `down_revision`, not by the
+numeric prefix.
+
+The deployed `0020_threads_meta_project_id` rollback-floor binary knows none of
+`0021_batch_acceptance`, `0019_thread_incarnations`,
+`0022_scheduled_occurrence_seq`, or `0023_run_change_seq`. It treats only the incarnation revision as
+forward-compatible, after reflection confirms every
+table and column in its own ORM schema. The intervening acceptance columns and
+the incarnation columns are nullable and have no server default, so old
+repositories may omit them. Tests must prove old reads and writes across both
+additive revisions; do not model the rollback binary with `0021` in its local
+revision set.
+
+The same incarnation revision id existed briefly as an out-of-tree child of
+0018. Current and future binaries that know the reused
+`0019_thread_incarnations` id validate a fixed table/column snapshot of the
+canonical in-tree 0019 schema whenever they see that stamp. The original
+0018-plus-incarnation shape is rejected because it lacks Projects and
+batch-acceptance schema; matching the revision string alone is not proof of the
+new ancestry. The fixed floor is deliberately not derived from `Base.metadata`:
+a future binary may add mapped columns after 0019 and must validate this floor
+before Alembic adds them. A binary that knows 0019 upgrades normally after the
+check.
+
+Tests that model the rollback binary by removing `0021_batch_acceptance` and
+`0019_thread_incarnations` from the mocked local revision set exercise the
+unknown-revision branch of the current implementation. They therefore use the
+new fixed canonical-0019 floor; they do not execute the ORM-derived check from
+the published 0020 binary. Reflection checks presence only; each migration
+preflight owns type, nullability, and default compatibility.
+
+Any other unknown revision, an empty version table, or multiple version rows
+fails closed. Do not broaden the allowlist without proving that the rollback
+repositories can read, insert, and update through the newer schema. The
+exception is reviewed only for the additive `0021` JSON columns plus nullable
+VARCHAR(32) `threads_meta.incarnation` and `mcp_tasks.thread_incarnation`
+columns, all without non-NULL defaults, constraints, or data backfills. The
+incarnation migration and tests cross-pin its revision id and DDL shape;
+changing either requires a fresh old-repository compatibility audit. SQLite's
+stale-upgrade recovery remains available only to a rollback binary whose
+migration tree owns neither post-`0020` revision. A current binary owns both,
+so migration failures remain fatal.
+
+For an existing database with the original 0018-plus-incarnation shape, use the
+[audited offline recovery procedure](../../../../../../docs/database-forward-revision-recovery.md).
+Bootstrap never re-stamps an unknown revision automatically. After stopping all
+writers, backing up, and verifying the exact additive schema, the operator may
+purge-stamp the known 0018 parent and apply the Projects, acceptance, and
+incarnation migrations through the current head;
+the extra nullable columns and their data remain intact. A regression exercises
+that procedure from the original schema and verifies repository reads/inserts
+and preservation of incarnation data.
+
+**Concurrency safety**: Postgres serialises concurrent Gateway instances with a session-level advisory lock, acquired by polling `pg_try_advisory_lock` so the app engine's `command_timeout` never cuts the wait short. SQLite uses a per-engine `asyncio.Lock` for same-process startup and is best-effort across processes via SQLite's file-level write lock + `PRAGMA busy_timeout`; multi-instance deployments should use Postgres. Column revisions in `versions/` additionally use idempotent helpers (`_helpers.py::safe_add_column`, `safe_drop_column`) so repeated post-baseline changes and retries are no-ops when the change is already present.
+
+**Authoring a new revision**:
+```bash
+cd backend && make migrate-rev MSG="add foo column to runs"
+```
+This invokes `alembic revision --autogenerate` against the live ORM models. Review the generated file under `migrations/versions/` and switch raw `op.add_column` / `op.drop_column` calls to the idempotent helpers from `_helpers.py` before committing. There is no `make migrate` / `make migrate-stamp` target on purpose — routine upgrades execute at Gateway startup; the documented offline recovery is reserved for the audited out-of-tree schema.
+
+**Extension-owned tables.** An extension that persists data owns its schema
+end to end and must not register models against `deerflow.persistence.base.Base`
+— doing so makes the host's empty-DB `create_all` create the extension's tables
+on installs that never enabled it. The convention is:
+
+- one `MetaData` instance private to the extension;
+- every table sharing one prefix, declared via the `plugins:` record's
+  `ExtensionSpec.table_prefix` field, so `alembic revision --autogenerate`
+  ignores them instead of reflecting them, finding them absent from
+  `Base.metadata`, and proposing `drop_table`. Registration happens in two
+  places on purpose, because two different processes read the filter:
+  `extensions/loader.py::load_extensions` covers the Gateway, and
+  `register_configured_extension_table_prefixes()` — called from
+  `migrations/env.py` — covers the alembic process, which never starts a
+  Gateway and would otherwise see an empty prefix set exactly where
+  `include_object` consumes it. The alembic side reads the declaration out of
+  `config.yaml` and never imports extension code: a migration process must not
+  execute third-party code. The Gateway side registers unconditionally, even
+  for a disabled or later-failing spec, because the tables it names may
+  already exist in the database from a previous run. Because those two readers
+  cannot both be right about an empty prefix — the Gateway's truthiness test
+  reads it as "no prefix", a literal reader as one matching every table —
+  `ExtensionSpec.table_prefix` carries `min_length=1`, and the alembic-side
+  reader (which parses raw YAML, so pydantic never runs there) skips anything
+  that model would reject rather than raising: an operator does not expect to
+  hear about a malformed `config.yaml` from alembic, and Gateway startup runs
+  that same module through `bootstrap_schema`;
+
+  Scope, because it is narrower than it first appears: **`make migrate-rev` is
+  already safe without this.** `scripts/_autogen_revision.py` builds a
+  throwaway SQLite from the migration chain and diffs against that, so no
+  extension table — and no LangGraph table — is ever reflected. The exposed
+  path is running `alembic revision --autogenerate` directly from the
+  migrations directory, where `alembic.ini` points `sqlalchemy.url` at a real
+  `./data/deerflow.db`. That is the same path `LANGGRAPH_OWNED_TABLES` covers,
+  which is why that exclusion exists even though the throwaway-DB script
+  landed in the same commit;
+- an independent alembic chain with its own
+  `version_table="<prefix>alembic_version"`, run from `ExtensionService.start()`
+  against `ExtensionRuntimeDeps.session_factory`'s bind — which is sequenced
+  after the host's own bootstrap by construction, since services start once
+  persistence is ready;
+- a Postgres advisory lock around that upgrade, mirroring `bootstrap_schema`,
+  so concurrent Gateway instances serialise.
+
+**Where things live**:
+- `migrations/env.py` — alembic env, delegates filter to `_env_filters.py`, sets `render_as_batch=True` for SQLite ALTER support
+- `migrations/_env_filters.py::include_object` — drops LangGraph checkpointer tables and any registered extension-owned tables (`EXTENSION_TABLE_PREFIXES`) from alembic's view
+- `migrations/_env_filters.py::register_configured_extension_table_prefixes` — populates that set inside the alembic process, reading `plugins[*].table_prefix` from `config.yaml` and never importing extension code; called at import from `migrations/env.py`, because `load_extensions()` only ever runs in the Gateway
+- `migrations/_helpers.py` — `safe_add_column` / `safe_drop_column`
+- `migrations/versions/0001_baseline.py` — chain root, matches the schema `create_all` produces from `Base.metadata`
+- `migrations/versions/0002_runs_token_usage.py` — fixes issue #3682
+- `migrations/versions/0004_run_ownership.py` — `runs` multi-worker ownership + the `uq_runs_thread_active` partial unique index, with a `_dedupe_active_runs_per_thread()` pre-step so `CREATE UNIQUE INDEX` cannot fail on a field DB that already has duplicate active rows per thread
+- `migrations/versions/0007_scheduled_run_active_index.py` — the `uq_scheduled_task_run_active` partial unique index (at most one queued/running `scheduled_task_runs` row per `task_id`), with a `_dedupe_active_scheduled_runs_per_task()` pre-step (keeps the newest active row per task, supersedes the rest to `interrupted` with an explanatory `error` + `finished_at`) mirroring 0004; chains after `0006_agents`
+- `migrations/versions/0008_thread_operation_kind.py` — adds `runs.operation_kind` for durable non-run thread reservations; chains after `0007_scheduled_run_active_index`
+- `migrations/versions/0010_run_cancel_request.py` — adds the nullable `runs.cancel_action` / `cancel_requested_at` handoff used by non-owning workers; chains after `0009_webhook_dedupe`
+- `migrations/versions/0011_mcp_tasks.py` — creates the durable long-running MCP task table and its user/server/remote uniqueness constraint
+- `migrations/versions/0012_mcp_task_results.py` — adds bounded result preview/truncation/artifact fields for ordinary task drivers
+- `migrations/versions/0013_mcp_task_notifications.py` — adds durable Agent-run notification snapshots, delivery leases, idempotency fields, and the separate bounded-retry attempt counter
+- `migrations/versions/0014_managed_subagents.py` — creates the deployment-level managed Subagent catalog table
+- `migrations/versions/0015_scheduled_task_enqueue.py` — interrupts legacy transient queued rows, adds durable scheduled-run launch leases and attempt counts, expands the one-active-occurrence index to `queued`/`launching`/`running`, and migrates the overlap policy from `skip` to `enqueue`; chains after `0014_managed_subagents`
+- `migrations/versions/0016_subagent_batches.py` — creates durable native-subagent batch and item tables, including owner/submission idempotency, item identity, lease/recovery state, and result fields
+- `migrations/versions/0017_personal_access_tokens.py` — creates the personal access token table for programmatic API access; chains after `0016_subagent_batches`
+- `migrations/versions/0018_oauth_identity_pg_partial.py` — converts `idx_users_oauth_identity` to a partial index on Postgres (`postgresql_where`), matching what `UserRow.__table_args__` already builds via `create_all`; `0001_baseline` never applied the predicate on Postgres, so every `alembic upgrade head`-provisioned deployment carried a full index until this revision. Postgres-only, idempotent (checks `pg_index.indpred` directly), no-op on SQLite (already partial via `sqlite_where`) and on a DB where the index doesn't exist yet. Originally generated as 0017 and renumbered to 0018 after 0017_personal_access_tokens merged first and kept that slot
+- `migrations/versions/0019_projects.py` — creates the `projects` table (id/user_id/name/instructions/presentation/status + timestamps) for the Projects Phase-1 organization feature; chains after `0018_oauth_identity_pg_partial`
+- `migrations/versions/0020_threads_meta_project_id.py` — adds nullable `threads_meta.project_id` plus `ix_threads_meta_project_id` (no FK by design: project delete clears membership first, and the reserved `deerflow_project_id` metadata key stays in sync); chains after `0019_projects`
+- `migrations/versions/0021_batch_acceptance.py` — adds nullable per-item acceptance criteria and verdict JSON columns after `0020_threads_meta_project_id`; legacy rows remain unchecked
+- `migrations/versions/0019_thread_incarnations.py` — chains after `0021_batch_acceptance` while retaining the exact revision id audited by the rollback-floor binary. Adds nullable `threads_meta.incarnation` / `mcp_tasks.thread_incarnation` columns. New thread rows get a random 32-character incarnation. Memory mutations serialize per thread; an overwrite inherits the existing incarnation, while a delete/recreate gets a new one. SQLite MCP task INSERTs copy the owner-or-shared incarnation with a scalar subquery in the same statement. PostgreSQL task creation holds `FOR SHARE`, which conflicts with both current `FOR UPDATE` mutations and an older writer's plain owner update (`FOR NO KEY UPDATE`). Missing or differently owned threads store NULL, old writers may omit both columns, and current API/task serialization hides them. The migration preflights both tables before DDL and its SQLite downgrade cleans only safe remnants from its own interrupted batch-copy attempt
+- `migrations/versions/0022_scheduled_occurrence_seq.py` — adds the per-task `last_occurrence_seq` high-water mark, nullable occurrence `occurrence_seq` and `launch_accounted`, and a unique `(task_id, occurrence_seq)` index. New occurrences allocate their sequence under the existing parent lock; launch accounting is recorded atomically with the count so an older recovered occurrence cannot be counted twice. Legacy child columns remain NULL without guessed ordering or accounting backfill. All three fields are internal and omitted from repository responses. Both once-task recovery paths lock the parent, defer while any occurrence row is active (sequenced or not), and otherwise project only from the highest sequence (`can_project`), the same rule as the launch, completion, and queue-failure writes. Chains after `0019_thread_incarnations`.
+- `migrations/versions/0023_run_change_seq.py` — adds `runs.change_seq`, its global singleton allocation clock, and owner-aware cursor indexes. Legacy rows remain at zero and page by run id; lifecycle, cancellation, and model-name mutations allocate monotonically increasing positions in their own transaction. Atomic replacement uses one position for every affected row. Progress snapshots and lease heartbeats do not advance the clock. `0023_user_preferences` follows this revision. Its migration test verifies membership in the single-head chain and the expected predecessor rather than pinning the latest head, so later migrations can extend the chain.
+- `migrations/versions/0024_project_documents.py` — creates the `project_documents` shelf table (id/project_id/user_id/name/stored_relpath/sha256/size_bytes, nullable promotion provenance and trash fields, timestamps) with indexes on project_id, user_id, sha256 and trashed_at; no DB-level foreign key on project_id by design (project delete trashes the shelf inside its own transaction). New table, so the bootstrap forward-compat floor is unchanged; chains after `0023_user_preferences` (renumbered from 0023 after the rebase)
+- `migrations/versions/0025_repair_run_change_seq.py` — heals databases that skipped `0023_run_change_seq` because it was inserted ahead of the already-shipped `0023_user_preferences` (#5516): re-applies the guarded `run_change_clock` table, `runs.change_seq` column, and cursor indexes on upgrade; no-ops on healthy shapes; chains after `0024_project_documents`. Its downgrade is intentionally a no-op: the repaired objects belong to ancestor `0023_run_change_seq`, remain required at 0024, and must retain their existing change positions. Only the original 0023 downgrade removes them. `tests/test_run_change_repair_history.py` reconstructs both pre-insertion published descendants and verifies historical upgrade, unchanged healthy positions, and usable run-store writes after downgrade and re-upgrade
+- `migrations/versions/0026_mcp_task_lease_tokens.py` — chains after `0025_repair_run_change_seq` and adds nullable `mcp_tasks.lease_token` / `notification_lease_token` columns so every poll, cancel, and notification mutation can be fenced to the exact claim generation
+- `migrations/versions/0027_notification_deliveries.py` — creates the scheduled-task IM notification outbox (`notification_deliveries`) with idempotency on `(task_run_id, event, provider, target)`; chains after `0026_mcp_task_lease_tokens`. Consumed by `ScheduledTaskService` enqueue + `NotificationDeliveryWorker` (issue #4254); no HTTP read surface yet
+- `migrations/versions/0028_parked_attempts.py` — adds `notification_deliveries.parked_attempts` so channel-down parking is capped; backfills with a temporary `server_default="0"` then drops it so the durable schema matches `create_all` (ORM Python-side `default=0` only). Chains after `0027_notification_deliveries`
+- `migrations/versions/0031_scheduled_streak_boundary.py` — adds nullable `scheduled_tasks.unmet_streak_after_seq` (occurrences at or below it never count toward the three-miss automatic pause; moved by goal/prompt/stop-condition/note edits, internal and never serialized) and nullable `scheduled_tasks.stop_condition` (the user's normalized "stop when …" rule, appended to the run message only at launch). Two nullable columns, so the bootstrap forward-compat floor is unchanged; chains after `0030_notification_claim_tokens`. Test: `tests/test_migration_0031_scheduled_streak_boundary.py`
+- `migrations/versions/0032_activity_and_task_events.py` — all schema of the scheduled-signals change in one revision: nullable `runs.origin_kind` (server-owned run origin; never backfilled, so legacy runs stay NULL, the "interactive or unknown" value) plus `ix_runs_thread_change_seq`, the per-user `thread_read_markers` (`(user_id, thread_id)` key, `seen_change_seq`) and `thread_read_versions` (`user_id` key, `version`) tables, and `scheduled_task_events` (lifecycle rows for the originating chat, unique on `(task_id, anchor, event)` as `uq_scheduled_task_event`, indexed on `(thread_id, created_at)` and `user_id`). `_helpers.py` guards only columns, so the revision guards every table and index on its own with a fresh inspector in both directions: a partially applied upgrade completes on the next start and an interrupted downgrade can run again. `RunRow` declares the index and column, and both new models are registered in `persistence/models`, because the empty-DB bootstrap uses `create_all` + `stamp head`. New tables and a nullable column, so the bootstrap forward-compat floor is unchanged; chains after `0031_scheduled_streak_boundary`. The `runs` index is built without `CONCURRENTLY` (a brief write block on large Postgres tables) and the SQLite downgrade rebuilds `runs`. Test: `tests/test_migration_0032_activity_and_task_events.py`
+- `migrations/versions/0035_login_throttle.py` — creates `login_throttle` (`ip` PK, `fail_count`, nullable epoch `locked_at`, nullable `lock_duration_seconds`, `updated_at` + `ix_login_throttle_updated_at` for the sweep's stale-counter predicate), the shared failed-login counter behind `POST /api/v1/auth/login/local` selected by `auth.local.throttle_storage` (`persistence/login_throttle/`: `SqlLoginThrottleStore` increments and starts the lock in one dialect-native upsert, applies check decisions with compare-and-set predicates in a separate write transaction, and sweeps served locks plus 24h-idle counters in bounded batches — the sweep's `DELETE` repeats the expiry predicate on its target, not only `ip IN (SELECT … LIMIT n)`, because PostgreSQL READ COMMITTED re-evaluates only the statement's own WHERE on a row it waited for and would otherwise delete a lock a concurrent `check` just extended). Table create/drop is guarded with a fresh inspector in both directions. New table, so the bootstrap forward-compat floor is unchanged; chains after `0034_run_event_seq_watermark`. Test: `tests/test_migration_0035_login_throttle.py`
+- `migrations/versions/0036_run_idempotency_request.py` — adds nullable `runs.idempotency_request_json` for versioned keyed-resume identities. The field is private persistence state, never part of `kwargs_json` or a run response; this keeps new-writer/old-reader rolling upgrades from exposing resume digests or synthetic input. Legacy rows remain NULL; new readers accept only the exact old-writer identity shape from `kwargs`, while truly identity-less resume fails closed. The bootstrap forward-compat floor is unchanged. Chains after `0035_login_throttle`. Test: `tests/test_migration_0036_run_idempotency_request.py`
+- `migrations/versions/0037_project_document_summaries.py` — adds nullable `project_documents.summary` (best-effort LLM one-line description, off by default; no backfill, so legacy rows stay NULL and the bootstrap forward-compat floor is unchanged); chains after `0036_run_idempotency_request`. Test: `tests/test_migration_0037_project_document_summaries.py`
+- `migrations/versions/0038_channel_thread_bindings.py` — creates `channel_thread_bindings` (`key` PK = the legacy `channel_name:chat_id[:topic_id]` string, parsed `channel_name`/`chat_id`/nullable `topic_id`, `thread_id`, `user_id` (`""` when unknown, never NULL), epoch `Double` `created_at`/`updated_at` + `ix_channel_thread_bindings_channel_chat`), the shared successor of the per-process `channels/store.json` that `ChannelManager` used for unbound IM conversations (`persistence/channel_thread_bindings/`: `SqlChannelThreadBindingRepository` upserts with a dialect-native `ON CONFLICT (key) DO UPDATE` that keeps `created_at`, deletes a chat's base + topic rows by key prefix with `startswith(autoescape=True)`, and imports with batched `ON CONFLICT DO NOTHING` so two replicas importing the same file concurrently neither duplicate nor clobber a row; `app/channels/store.py::SqlChannelStore.import_legacy_json` runs that once from `ChannelService.start()` and renames the file to `store.json.migrated`). The shape is 1:1 with the JSON entries so the import is lossless; `split_binding_key` parses legacy keys on the first two colons exactly as the old `list_entries()` did (lookups always match the full `key`). Table create/drop and the index are guarded with a fresh inspector in both directions. New table, so the bootstrap forward-compat floor is unchanged; chains after `0037_project_document_summaries`. Test: `tests/test_migration_0038_channel_thread_bindings.py`
+- `migrations/versions/0042_channel_leases.py` — creates `channel_leases` (`provider` PK, `owner_id`, fencing `epoch` BIGINT, database-clock epoch `Double` `lease_expires_at`/`updated_at`, `transport_running`), the per-provider IM leader lease behind `channels.leader_lease` (`persistence/channel_leases/`: acquire is one dialect-native upsert whose `DO UPDATE ... WHERE lease_expires_at + grace < now OR owner_id = :me` bumps the epoch; renew extends only a live lease at the holder's epoch; release sets the expiry to 0; every `now` is the database clock, never an instance's). Table create/drop is guarded with a fresh inspector in both directions. New table, so the bootstrap forward-compat floor is unchanged; chains after `0041_im_notice_preferences`. Test: `tests/test_migration_0042_channel_leases.py`
+- `migrations/versions/0044_channel_runtime_configs.py` — creates `channel_runtime_configs` (`provider` PK, nullable `config_ciphertext`, `disconnected`, `version` BIGINT, `updated_at`), the shared successor of `channels/runtime-config.json`. `persistence/channel_runtime_configs/` is a sync repository on `app_sync_sqlalchemy_url` (callers run in threads): `save` upserts and bumps `version`, `insert_missing` uses `ON CONFLICT DO NOTHING`. `app/channels/runtime_config_store.py` encrypts the JSON block with `DEER_FLOW_CREDENTIALS_KEY`; a disconnect has NULL ciphertext. Rows are never deleted. Table-guarded both ways; no data moved (the Gateway imports the JSON file). Test: `tests/test_migration_0044_channel_runtime_configs.py`
+- `persistence/bootstrap.py` — `bootstrap_schema(engine, backend=...)`, the three-branch provisioning decision, locked revision validation, and the narrow 0019 forward-compatibility exception
+- `extensions/loader.py::load_extensions` — registers each spec's `table_prefix` with `register_extension_table_prefix()`
+- Tests: `tests/test_persistence_bootstrap.py` (branches), `tests/test_persistence_bootstrap_concurrency.py` (concurrency), `tests/test_persistence_bootstrap_regression.py` (issue #3682), `tests/test_persistence_migrations_env.py` (filter, including extension-owned tables), `tests/test_extension_loader.py::TestTablePrefixRegistration` (spec-to-filter wiring), `tests/blocking_io/test_persistence_bootstrap.py` (asyncio.to_thread anchor), `tests/test_migration_0004_run_ownership_dedupe.py` + `tests/test_migration_0007_scheduled_run_active_dedupe.py` (dedupe-before-unique-index pre-steps), `tests/test_migration_0025_repair_run_change_seq.py` (issue #5516 skipped-revision heal)
+
+`0041_im_notice_preferences` adds the owner/provider proactive-notification
+boolean table without a users FK (local synthetic IM owners are supported).
+Upgrade/drop are table-guarded; fresh bootstrap registers the ORM model.
+It follows 0040 without reparenting history, has no backfill and leaves the
+forward-compatibility floor unchanged. Downgrade removes the saved choices;
+reenabling a provider never reopens notifications canceled before downgrade.
+Tests: `test_migration_0041_im_notice_preferences.py`.
+
+- `0045_completed_run_evidence` adds nullable evidence sealing fields and completed-run snapshots after `0044_channel_runtime_configs`.
+- `0046_skill_mutations` adds durable owner enrollment, asset revisions, proposals, publication operations and scan leases.
+- `0047_mcp_oauth_tokens` creates the table-guarded `mcp_oauth_tokens` (PK `scope`, `owner_user_id` (`''` for deployment), `server_key`; encrypted token columns, chain and request fingerprints, `version`, refresh lease) with no backfill. The single-head pin lives in `tests/test_migration_0047_mcp_oauth_tokens.py`.
+
+- `0048_extension_execution_leases` adds generic extension execution fences after
+  the shipped OAuth revision; test upgrade/downgrade in `test_extension_execution_fence.py`.

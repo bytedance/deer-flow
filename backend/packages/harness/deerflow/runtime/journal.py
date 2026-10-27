@@ -1,0 +1,1977 @@
+"""Run event capture via LangChain callbacks.
+
+RunJournal sits between LangChain's callback mechanism and the pluggable
+RunEventStore. It standardizes callback data into RunEvent records and
+handles token usage accumulation.
+
+Key design decisions:
+- on_llm_new_token is NOT implemented -- only complete messages via on_llm_end
+- on_chat_model_start reconciles consumed middleware tool results and captures the
+  first user-visible prompt as llm.human.input. It extracts the first human message
+  for run.input because it is more reliable than on_chain_start (fires on every
+  node) — messages here are fully structured.
+- on_chain_start with parent_run_id=None emits a run.start trace marking root invocation.
+- on_llm_end emits llm.ai.response in checkpoint-aligned AIMessage.model_dump() format
+- Token usage accumulated in memory, written to RunRow on run completion
+- Caller identification via tags injection (lead_agent / subagent:{name} / middleware:{name})
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import threading
+import time
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
+from copy import deepcopy
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from functools import partial
+from typing import Any, cast
+from uuid import UUID
+
+from langchain_core.callbacks import BaseCallbackHandler
+from langchain_core.messages import AIMessage, AnyMessage, BaseMessage, HumanMessage, ToolMessage, messages_from_dict
+from langgraph.types import Command
+
+from deerflow.agents.human_input import read_human_input_response
+from deerflow.agents.middlewares.skill_usage import MAX_SKILL_SNAPSHOT_CHARS, SKILL_USAGES_KEY
+from deerflow.runtime.events.catalog import (
+    LLM_AI_RESPONSE_EVENT,
+    LLM_ERROR_EVENT,
+    LLM_HUMAN_INPUT_EVENT,
+    LLM_TOOL_RESULT_EVENT,
+    MEMORY_CONTEXT_EVENT,
+    MIDDLEWARE_EVENT_PATTERN,
+    RUN_END_EVENT,
+    RUN_ERROR_EVENT,
+    RUN_START_EVENT,
+)
+from deerflow.runtime.events.store.base import RunEventStore, RunEventStoreNotCommittedError
+from deerflow.runtime.user_context import AUTO, _AutoSentinel
+from deerflow.utils.llm_text import strip_leading_think_blocks
+from deerflow.utils.messages import message_to_text, restore_original_human_message
+
+logger = logging.getLogger(__name__)
+
+_LEGACY_SUMMARY_MESSAGE_NAME = "summary"
+# A cancelled owned write may not stop a store that ignores cancellation.
+# The wrapper waits this long for the inner call to end before returning, so
+# lease-loss close cannot hang forever on an uncooperative backend. This is a
+# bound on waiting, not proof the underlying I/O stopped.
+_WRITE_SETTLE_TIMEOUT_SECONDS = 5.0
+_PERSISTED_HIDDEN_HUMAN_INPUT_RESPONSE_SOURCES = frozenset({"ask_clarification", "sandbox_network"})
+_MAX_RUN_SKILL_SNAPSHOTS = 64
+
+
+def _content_chars(content: Any) -> int:
+    """Characters in the string leaves and mapping keys of ``content``.
+
+    Walks the structure without serializing it, so cost scales with the number of
+    nodes rather than the byte size (base64 image payloads are counted by ``len``).
+    """
+    total = 0
+    stack = [content]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, str):
+            total += len(item)
+        elif isinstance(item, Mapping):
+            for key, value in item.items():
+                total += len(key) if isinstance(key, str) else 0
+                stack.append(value)
+        elif isinstance(item, (list, tuple)):
+            stack.extend(item)
+    return total
+
+
+def _rendered_request_size(messages: Sequence[Sequence[BaseMessage]], invocation_params: Any) -> dict[str, Any]:
+    """Measure the request as rendered at ``on_chat_model_start`` (read-only).
+
+    Sizes are characters of string content (see ``_content_chars``), not serialized
+    bytes. Token counts for the rendered request are not available without an extra
+    model/tokenizer call, so ``input_tokens`` from the provider's usage metadata
+    (recorded at ``on_llm_end``) is the token figure. ``request_tools_chars`` is
+    ``None`` when the callback carries no bound-tool schema.
+    """
+    message_chars = 0
+    message_count = 0
+    for batch in messages:
+        for message in batch:
+            message_count += 1
+            message_chars += _content_chars(getattr(message, "content", ""))
+            tool_calls = getattr(message, "tool_calls", None)
+            if tool_calls:
+                message_chars += _content_chars(tool_calls)
+    tools = invocation_params.get("tools") if isinstance(invocation_params, Mapping) else None
+    tools_chars = _content_chars(tools) if tools else None
+    return {
+        "request_chars": message_chars + (tools_chars or 0),
+        "request_message_chars": message_chars,
+        "request_tools_chars": tools_chars,
+        "request_message_count": message_count,
+    }
+
+
+def _llm_caller_category(caller: str, *, error_fallback: bool) -> str:
+    if error_fallback:
+        return "fallback"
+    if caller.startswith("middleware:"):
+        return "middleware"
+    if caller.startswith("subagent:"):
+        return "subagent"
+    if caller == "lead_agent":
+        return "lead_agent"
+    return "other"
+
+
+def _first_str(mapping: Any, *keys: str) -> str | None:
+    if not isinstance(mapping, Mapping):
+        return None
+    for key in keys:
+        value = mapping.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+@dataclass
+class _PendingLlmResponse:
+    llm_run_id: str
+    events: list[dict]
+    message_count: int
+    last_ai_message: str | None
+
+
+def _should_persist_human_input_message(message: BaseMessage) -> bool:
+    if not isinstance(message, HumanMessage):
+        return False
+    if message.name == _LEGACY_SUMMARY_MESSAGE_NAME:
+        return False
+    if message.additional_kwargs.get("hide_from_ui") is not True:
+        return True
+    response = read_human_input_response(message.additional_kwargs)
+    return response is not None and response["source"] in _PERSISTED_HIDDEN_HUMAN_INPUT_RESPONSE_SOURCES
+
+
+def _coerce_seed_message(message: Any) -> Any:
+    """Return ``message`` as a ``BaseMessage``, deserializing dict form if needed.
+
+    ``_checkpoint_messages`` (threads.py) returns whatever the snapshot holds,
+    and its sibling branch-matching helpers all handle a message being either a
+    ``BaseMessage`` or a ``model_dump()``-shaped dict (serde differences across
+    checkpoint backends/modes). The seed path must handle both too — otherwise a
+    dict-backed checkpoint seeds nothing and the branch silently reports
+    ``skipped_empty`` while history exists. Unparseable dicts fall through
+    unchanged and are dropped by the ``isinstance(BaseMessage)`` guard.
+    """
+    if isinstance(message, BaseMessage):
+        return message
+    if isinstance(message, Mapping):
+        msg_type = message.get("type")
+        if isinstance(msg_type, str) and msg_type:
+            try:
+                return messages_from_dict([{"type": msg_type, "data": dict(message)}])[0]
+            except Exception:
+                logger.warning("branch seed: could not deserialize checkpoint message dict (type=%s)", msg_type)
+    return message
+
+
+def _build_history_seed_events(
+    messages: Sequence[Any],
+    *,
+    thread_id: str,
+    run_id_prefix: str,
+    seed_metadata: Mapping[str, Any],
+) -> list[dict]:
+    """Serialize checkpoint messages into run-event rows.
+
+    Rows are grouped into one synthetic run per checkpoint turn
+    (``{run_id_prefix}-{n}``), a new turn starting at every persisted human
+    message — the same boundary a real run has, since a run begins with a
+    human input (including the allowlisted hidden ``ask_clarification``
+    reply, which resumes as its own run). ``run_id`` is a *turn* identity to
+    the feed's consumers, not merely a provenance tag: regenerating the last
+    inherited answer resolves that row's ``run_id`` as the superseded source
+    (``_find_target_run_id``) and ``GET /messages/page`` then drops **every**
+    row carrying it. One shared id for the whole seed therefore deleted the
+    complete inherited history on the branch's first regenerate (#4458); one
+    id per turn confines the drop to the turn actually regenerated.
+
+    Mirrors RunJournal's message-event contract so seeded rows are
+    indistinguishable from journaled ones except by the supplied seed metadata:
+    same event types, ``category="message"``, ``content=message.model_dump()``,
+    the human-input persistence rule
+    (``_should_persist_human_input_message``), the original-user-text
+    restoration, and the same treatment of ``hide_from_ui`` AI/tool rows —
+    RunJournal persists them (``on_llm_end`` / ``_persist_tool_result_message``
+    do not filter) and the frontend hides them client-side, so the seed writes
+    them too rather than dropping them.
+
+    The one deliberate divergence, because a checkpoint message carries no run
+    scope: AI rows omit RunJournal's run-scoped enrichment (``usage`` /
+    ``latency_ms`` / ``llm_call_index``), and ``caller`` is stamped
+    ``lead_agent`` rather than the message's original caller (unrecoverable
+    here). Neither is observable today — no consumer indexes those metadata
+    keys, and per-message ``caller`` drives no attribution (the ``by_caller``
+    usage panel is run-scoped, not fed from the message feed).
+    """
+    events: list[dict] = []
+    created_at = datetime.now(UTC).isoformat()
+    # Messages ahead of the first human turn (none in practice) stay in turn 0.
+    turn_index = 0
+    for raw_message in messages:
+        message = _coerce_seed_message(raw_message)
+        if not isinstance(message, BaseMessage):
+            continue
+        if isinstance(message, HumanMessage):
+            if not _should_persist_human_input_message(message):
+                continue
+            turn_index += 1
+            event_type = "llm.human.input"
+            content = restore_original_human_message(message).model_dump()
+            metadata: dict[str, Any] = {"caller": "lead_agent", **seed_metadata}
+        elif isinstance(message, AIMessage):
+            event_type = "llm.ai.response"
+            content = message.model_dump()
+            metadata = {"caller": "lead_agent", **seed_metadata}
+        elif isinstance(message, ToolMessage):
+            event_type = "llm.tool.result"
+            content = message.model_dump()
+            metadata = dict(seed_metadata)
+        else:
+            # System / remove / summary artifacts never enter the thread feed.
+            continue
+        events.append(
+            {
+                "thread_id": thread_id,
+                "run_id": f"{run_id_prefix}-{turn_index}",
+                "event_type": event_type,
+                "category": "message",
+                "content": content,
+                "metadata": metadata,
+                "created_at": created_at,
+            }
+        )
+    return events
+
+
+def build_branch_history_seed_events(
+    messages: Sequence[Any],
+    *,
+    thread_id: str,
+    run_id_prefix: str,
+    parent_thread_id: str,
+) -> list[dict]:
+    """Serialize inherited branch history into the branch's empty event feed."""
+    return _build_history_seed_events(
+        messages,
+        thread_id=thread_id,
+        run_id_prefix=run_id_prefix,
+        seed_metadata={
+            "branch_seed": True,
+            "branch_parent_thread_id": parent_thread_id,
+        },
+    )
+
+
+def build_checkpoint_history_seed_events(
+    messages: Sequence[Any],
+    *,
+    thread_id: str,
+    run_id_prefix: str,
+) -> list[dict]:
+    """Serialize legacy checkpoint history for a thread's empty event feed.
+
+    Reuse the branch seed's message normalization and per-turn synthetic run
+    grouping, but stamp migration-specific metadata so these rows are not
+    misidentified as history inherited from another thread.
+    """
+    return _build_history_seed_events(
+        messages,
+        thread_id=thread_id,
+        run_id_prefix=run_id_prefix,
+        seed_metadata={"checkpoint_history_seed": True},
+    )
+
+
+class RunJournal(BaseCallbackHandler):
+    """LangChain callback handler that captures events to RunEventStore."""
+
+    # Subagents may execute on a persistent event loop in another thread. This
+    # handler owns loop-local tasks and a store/pool created for the parent run,
+    # so the isolated-loop context copier must not inherit it. LangGraph's own
+    # stream callbacks remain inheritable and keep child token frames flowing.
+    deerflow_loop_bound = True
+
+    # Every callback only updates in-memory run state or schedules async IO.
+    # Keeping callbacks on the run's event-loop thread serializes mutations
+    # from parallel tool calls and prevents cancelled executor callbacks from
+    # racing terminal delivery recording and flush.
+    run_inline = True
+
+    def __init__(
+        self,
+        run_id: str,
+        thread_id: str,
+        event_store: RunEventStore,
+        *,
+        track_token_usage: bool = True,
+        flush_threshold: int = 20,
+        progress_reporter: Callable[[dict], Awaitable[None]] | None = None,
+        progress_flush_interval: float = 5.0,
+        user_id: str | None | _AutoSentinel = AUTO,
+    ):
+        super().__init__()
+        from deerflow.runtime.events.store.db import DbRunEventStore
+
+        self.run_id = run_id
+        self.thread_id = thread_id
+        self._evidence_owner_id = user_id if isinstance(event_store, DbRunEventStore) else AUTO
+        self._store: RunEventStore | None = event_store
+        self._closed = False
+        self._accepting_evidence = True
+        self._producer_lock = threading.Lock()
+        self._pending_producer_callbacks = 0
+        self._track_tokens = track_token_usage
+        self._flush_threshold = flush_threshold
+        self._progress_reporter = progress_reporter
+        self._progress_flush_interval = progress_flush_interval
+        try:
+            self._owner_loop: asyncio.AbstractEventLoop | None = asyncio.get_running_loop()
+        except RuntimeError:
+            self._owner_loop = None
+
+        # Write buffer
+        self._buffer: list[dict] = []
+        self._pending_llm_response: _PendingLlmResponse | None = None
+        # Journal-owned in-flight writes: task -> original batch. A live drain
+        # classifies and re-raises; the done callback only handles a write that
+        # settles with no drain waiting (so its exception is never unretrieved).
+        self._owned_writes: dict[asyncio.Task[None], list[dict]] = {}
+        self._draining_tasks: set[asyncio.Task[None]] = set()
+        # Serialises explicit persistence operations (flush and
+        # close(flush=True)) for this journal instance. close(flush=False) never
+        # queues on it.
+        self._operation_lock = asyncio.Lock()
+        # Set by close(flush=False) before its first await. It revokes write
+        # ownership so no flush/callback may start or revive a write.
+        self._abandoned = False
+        # Inner store tasks that outlived a bounded writer teardown (a backend
+        # that ignored cancellation). Held strongly until they settle so their
+        # late result is retrieved and logged rather than dropped. This is not a
+        # termination guarantee: it only keeps settlement responsibility.
+        self._abandoned_store_tasks: dict[asyncio.Task[None], int] = {}
+        # Progress persistence is best-effort, but a cancellation-resistant
+        # reporter must not block lease-loss close. Keep any task that outlives
+        # bounded teardown strongly referenced until its result is retrieved.
+        self._abandoned_progress_tasks: set[asyncio.Task[None]] = set()
+        # Batches whose outcome is UNKNOWN (a generic store failure) must never
+        # be replayed: the store may have committed before losing its ACK.
+        # Keeping them here also fences every successor write for this run.
+        self._quarantined_batches: list[tuple[list[dict], BaseException]] = []
+        self._pending_progress_task: asyncio.Task[None] | None = None
+        self._pending_progress_delayed = False
+        self._progress_dirty = False
+        self._last_progress_flush = 0.0
+
+        # Token accumulators
+        self._total_input_tokens = 0
+        self._total_output_tokens = 0
+        self._total_tokens = 0
+        self._llm_call_count = 0
+
+        # Caller-bucketed token accumulators
+        self._lead_agent_tokens = 0
+        self._subagent_tokens = 0
+        self._middleware_tokens = 0
+
+        # Per-model token accumulator
+        self._tokens_by_model: dict[str, dict[str, int]] = {}
+
+        # Dedup: LangChain may fire on_llm_end multiple times for the same run_id
+        self._counted_llm_run_ids: set[str] = set()
+        self._counted_external_source_ids: set[str] = set()
+        self._counted_message_llm_run_ids: set[str] = set()
+        self._llm_response_callers: dict[str, str] = {}
+        self._memory_context_recorded = False
+        self._tool_promotion_claim_lock = threading.Lock()
+        self._claimed_tool_promotions: set[str] = set()
+        # Only lead producers receive this journal in runtime.context. Keep
+        # display snapshots separate from tool/secret authorization state.
+        self._skill_usage_lock = threading.Lock()
+        self._skill_usages: dict[str, dict[str, Any]] = {}
+
+        # Convenience fields
+        self._last_ai_msg: str | None = None
+        self._first_human_msg: str | None = None
+        self._first_human_message_captured = False
+        self._msg_count = 0
+        self._had_llm_error_fallback = False
+        self._llm_error_fallback_message: str | None = None
+
+        # Latency tracking
+        self._llm_start_times: dict[str, float] = {}  # langchain run_id -> start time
+        # P0 telemetry: per-call request measurement captured at start, merged into
+        # the llm.ai.response / llm.error metadata at end. Observation only.
+        self._llm_start_telemetry: dict[str, dict[str, Any]] = {}
+
+        # LLM request/response tracking
+        self._llm_call_index = 0
+        self._seen_llm_starts: set[str] = set()  # langchain run_ids that fired on_chat_model_start
+        self._current_run_tool_call_names: dict[str, str] = {}
+        self._active_tool_names: dict[str, str] = {}
+        self._persisted_ai_message_identities: set[str] = set()
+        self._persisted_tool_message_identities: set[str] = set()
+
+        # Bumped once per successful event-store write. A reader that cached a
+        # "the feed does not hold this message" answer compares this between
+        # reads to learn whether retrying could produce a different one,
+        # without polling the store (#4696 review).
+        self._feed_generation = 0
+
+        # Artifact-production tracking for the terminal run.delivery event
+        # (#4272 slice 1). Deduped by (path, tool_name); insertion order kept.
+        self._produced_artifacts: list[tuple[str, str | None]] = []
+        self._produced_artifact_keys: set[tuple[str, str | None]] = set()
+
+    # -- Lifecycle callbacks --
+
+    @staticmethod
+    def _message_text(message: BaseMessage) -> str:
+        """Extract displayable text from a message's mixed content shape."""
+        return message_to_text(message, text_attribute_fallback=True)
+
+    def _message_summary_text(self, message: BaseMessage, *, caller: str | None = None) -> str | None:
+        """Return the bounded user-facing AI summary text for one message."""
+        is_ai_message = isinstance(message, AIMessage) or getattr(message, "type", None) == "ai"
+        if not is_ai_message or (caller is not None and caller != "lead_agent"):
+            return None
+        text = strip_leading_think_blocks(self._message_text(message))
+        return text[:2000] if text else None
+
+    def _record_message_summary(self, message: BaseMessage, *, caller: str | None = None) -> None:
+        """Update run-level convenience fields for persisted run rows."""
+        self._msg_count += 1
+
+        # ``last_ai_message`` should represent the lead agent's user-facing
+        # answer. Middleware/subagent model calls and empty tool-call-only
+        # AI messages must not overwrite the last useful assistant text.
+        summary_text = self._message_summary_text(message, caller=caller)
+        if summary_text is not None:
+            self._last_ai_msg = summary_text
+
+    def on_chain_start(
+        self,
+        serialized: dict[str, Any],
+        inputs: dict[str, Any],
+        *,
+        run_id: UUID,
+        parent_run_id: UUID | None = None,
+        tags: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        caller = self._identify_caller(tags)
+        if parent_run_id is None:
+            # Root graph invocation — emit a single trace event for the run start.
+            chain_name = (serialized or {}).get("name", "unknown")
+            self._put(
+                event_type=RUN_START_EVENT.event_type,
+                category=RUN_START_EVENT.category,
+                content={"chain": chain_name},
+                metadata={"caller": caller, **(metadata or {})},
+            )
+
+    def on_chain_end(
+        self,
+        outputs: Any,
+        *,
+        run_id: UUID,
+        parent_run_id: UUID | None = None,
+        **kwargs: Any,
+    ) -> None:
+        # Nested chain ends fire for internal graph nodes; only the root chain
+        # represents the user-visible run lifecycle.
+        if parent_run_id is not None:
+            return
+        self._reconcile_final_tool_messages(outputs)
+        self._put(
+            event_type=RUN_END_EVENT.event_type,
+            category=RUN_END_EVENT.category,
+            content=outputs,
+            metadata={"status": "success"},
+        )
+        self._flush_sync()
+
+    def on_chain_error(self, error: BaseException, *, run_id: UUID, **kwargs: Any) -> None:
+        self._put(
+            event_type=RUN_ERROR_EVENT.event_type,
+            category=RUN_ERROR_EVENT.category,
+            content=str(error),
+            metadata={"error_type": type(error).__name__},
+        )
+        self._flush_sync()
+
+    # -- LLM callbacks --
+
+    def on_chat_model_start(
+        self,
+        serialized: dict,
+        messages: list[list[BaseMessage]],
+        *,
+        run_id: UUID,
+        tags: list[str] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        """Capture consumed tool results and the first user-visible prompt.
+
+        This is also the canonical place to extract the first human message:
+        messages are fully structured here, it fires only on real LLM calls,
+        and the content is never compressed by checkpoint trimming.
+        """
+        rid = str(run_id)
+        self._llm_start_times[rid] = time.monotonic()
+        self._llm_call_index += 1
+        self._seen_llm_starts.add(rid)
+        self._capture_start_telemetry(rid, serialized, messages, kwargs)
+
+        logger.debug(
+            "on_chat_model_start %s: tags=%s num_batches=%d message_counts=%s",
+            run_id,
+            tags,
+            len(messages),
+            [len(batch) for batch in messages],
+        )
+
+        # Capture the first user message sent to the lead agent in this run.
+        caller = self._identify_caller(tags)
+        if caller == "lead_agent":
+            for batch in messages:
+                self._reconcile_consumed_tool_messages(batch)
+        if caller == "lead_agent" and not self._first_human_message_captured and messages:
+            for batch in reversed(messages):
+                for m in reversed(batch):
+                    if _should_persist_human_input_message(m):
+                        persisted_message = restore_original_human_message(m)
+                        self.set_first_human_message(self._message_text(persisted_message))
+                        self._put(
+                            event_type=LLM_HUMAN_INPUT_EVENT.event_type,
+                            category=LLM_HUMAN_INPUT_EVENT.category,
+                            content=persisted_message.model_dump(),
+                            metadata={"caller": caller},
+                        )
+                        self._record_message_summary(persisted_message, caller=caller)
+                        break
+                if self._first_human_message_captured:
+                    break
+
+    def on_llm_start(self, serialized: dict, prompts: list[str], *, run_id: UUID, parent_run_id: UUID | None = None, tags: list[str] | None = None, metadata: dict[str, Any] | None = None, **kwargs: Any) -> None:
+        # Fallback: on_chat_model_start is preferred. This just tracks latency.
+        self._llm_start_times[str(run_id)] = time.monotonic()
+
+    def on_llm_end(
+        self,
+        response: Any,
+        *,
+        run_id: UUID,
+        parent_run_id: UUID | None = None,
+        tags: list[str] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        if self._closed or not self._accepting_evidence:
+            return
+
+        messages: list[AnyMessage] = []
+        response_events: list[dict] = []
+        should_schedule_progress = False
+        rid = str(run_id)
+        callback_caller = self._identify_caller(tags)
+        is_canonical_callback = rid not in self._counted_message_llm_run_ids
+        caller = self._llm_response_callers.get(rid, callback_caller)
+        logger.debug("on_llm_end %s: tags=%s", run_id, tags)
+        for generation in response.generations:
+            for gen in generation:
+                if hasattr(gen, "message"):
+                    messages.append(gen.message)
+                else:
+                    logger.warning(f"on_llm_end {run_id}: generation has no message attribute: {gen}")
+
+        for message in messages:
+            if is_canonical_callback:
+                self._remember_current_run_tool_calls(message, caller=caller)
+
+            # Latency
+            start = self._llm_start_times.pop(rid, None)
+            latency_ms = int((time.monotonic() - start) * 1000) if start else None
+
+            # Token usage from message
+            usage = getattr(message, "usage_metadata", None)
+            # Providers may mutate and reuse the same response object after the
+            # callback returns, including nested token-detail mappings.
+            usage_dict = deepcopy(dict(usage)) if usage else {}
+            additional_kwargs = getattr(message, "additional_kwargs", None) or {}
+            if is_canonical_callback and isinstance(additional_kwargs, dict) and additional_kwargs.get("deerflow_error_fallback"):
+                self._had_llm_error_fallback = True
+                detail = additional_kwargs.get("error_detail")
+                reason = additional_kwargs.get("error_reason")
+                fallback_text = self._message_text(message).strip()
+                if isinstance(detail, str) and detail.strip():
+                    self._llm_error_fallback_message = detail.strip()
+                elif isinstance(reason, str) and reason.strip():
+                    self._llm_error_fallback_message = reason.strip()
+                elif fallback_text:
+                    self._llm_error_fallback_message = fallback_text[:2000]
+
+            # Resolve call index
+            call_index = self._llm_call_index
+            if rid not in self._seen_llm_starts:
+                # Fallback: on_chat_model_start was not called
+                self._llm_call_index += 1
+                call_index = self._llm_call_index
+                self._seen_llm_starts.add(rid)
+
+            content = message.model_dump()
+            if is_canonical_callback and caller == "lead_agent" and isinstance(message, AIMessage) and not message.tool_calls:
+                with self._skill_usage_lock:
+                    skill_usages = deepcopy(list(self._skill_usages.values()))
+                if skill_usages:
+                    content["additional_kwargs"] = {**content.get("additional_kwargs", {}), SKILL_USAGES_KEY: skill_usages}
+
+            response_events.append(
+                self._make_event(
+                    event_type=LLM_AI_RESPONSE_EVENT.event_type,
+                    category=LLM_AI_RESPONSE_EVENT.category,
+                    content=content,
+                    metadata={
+                        "caller": caller,
+                        "usage": usage_dict,
+                        "latency_ms": latency_ms,
+                        "llm_call_index": call_index,
+                        **self._end_telemetry(rid, message, usage_dict, caller, parent_run_id),
+                    },
+                )
+            )
+
+            # Token accumulation (dedup by langchain run_id to avoid double-counting
+            # when the callback fires more than once for the same response)
+            if self._track_tokens:
+                input_tk = usage_dict.get("input_tokens", 0) or 0
+                output_tk = usage_dict.get("output_tokens", 0) or 0
+                total_tk = usage_dict.get("total_tokens", 0) or 0
+                if total_tk == 0:
+                    total_tk = input_tk + output_tk
+                if total_tk > 0 and rid not in self._counted_llm_run_ids:
+                    self._counted_llm_run_ids.add(rid)
+                    self._total_input_tokens += input_tk
+                    self._total_output_tokens += output_tk
+                    self._total_tokens += total_tk
+                    self._llm_call_count += 1
+
+                    if caller.startswith("subagent:"):
+                        self._subagent_tokens += total_tk
+                    elif caller.startswith("middleware:"):
+                        self._middleware_tokens += total_tk
+                    else:
+                        self._lead_agent_tokens += total_tk
+
+                    # Per-model bucket
+                    response_metadata = getattr(message, "response_metadata", None) or {}
+                    per_call_model: str | None = None
+                    if isinstance(response_metadata, Mapping):
+                        per_call_model = response_metadata.get("model_name") or response_metadata.get("model")
+                    self._record_model_usage(per_call_model, input_tk, output_tk, total_tk, self._extract_cache_read(usage_dict))
+
+                    should_schedule_progress = True
+
+        self._llm_start_telemetry.pop(rid, None)
+
+        if messages:
+            self._queue_llm_response_events(
+                str(run_id),
+                response_events,
+                messages,
+                caller=caller,
+            )
+            if is_canonical_callback:
+                self._persisted_ai_message_identities.update(identity for message in messages if self._is_ai_message(message) and (identity := self._message_identity(message)) is not None)
+
+        if should_schedule_progress:
+            self._schedule_progress_flush()
+
+    def on_llm_error(self, error: BaseException, *, run_id: UUID, **kwargs: Any) -> None:
+        rid = str(run_id)
+        self._llm_start_times.pop(rid, None)
+        error_metadata = self._error_telemetry(rid, error, kwargs.get("tags"), kwargs.get("parent_run_id"))
+        self._put(
+            event_type=LLM_ERROR_EVENT.event_type,
+            category=LLM_ERROR_EVENT.category,
+            content=str(error),
+            metadata=error_metadata or None,
+        )
+
+    # -- P0 per-call telemetry (observation only; every helper fails soft) --
+
+    def _capture_start_telemetry(self, rid: str, serialized: Any, messages: list[list[BaseMessage]], kwargs: dict[str, Any]) -> None:
+        try:
+            start_metadata = kwargs.get("metadata")
+            telemetry = _rendered_request_size(messages, kwargs.get("invocation_params"))
+            telemetry["request_started_at"] = datetime.now(UTC).isoformat()
+            telemetry["provider"] = _first_str(start_metadata, "ls_provider")
+            telemetry["requested_model"] = _first_str(start_metadata, "ls_model_name")
+            if telemetry["provider"] is None and isinstance(serialized, Mapping):
+                serialized_id = serialized.get("id")
+                if isinstance(serialized_id, list) and serialized_id:
+                    telemetry["provider"] = str(serialized_id[-1])
+            self._llm_start_telemetry[rid] = telemetry
+        except Exception:
+            logger.warning("LLM start telemetry capture failed for %s", rid, exc_info=True)
+
+    def _end_telemetry(self, rid: str, message: Any, usage: Mapping[str, Any], caller: str, parent_run_id: UUID | None) -> dict[str, Any]:
+        try:
+            start = self._llm_start_telemetry.get(rid) or {}
+            response_metadata = getattr(message, "response_metadata", None) or {}
+            additional_kwargs = getattr(message, "additional_kwargs", None) or {}
+            error_fallback = isinstance(additional_kwargs, Mapping) and bool(additional_kwargs.get("deerflow_error_fallback"))
+            return {
+                "langchain_run_id": rid,
+                "langchain_parent_run_id": str(parent_run_id) if parent_run_id else None,
+                "caller_category": _llm_caller_category(caller, error_fallback=error_fallback),
+                "provider": start.get("provider"),
+                "model": _first_str(response_metadata, "model_name", "model") or start.get("requested_model"),
+                "stop_reason": _first_str(response_metadata, "stop_reason", "finish_reason", "finishReason"),
+                "status": "fallback" if error_fallback else "ok",
+                "input_tokens": usage.get("input_tokens"),
+                "output_tokens": usage.get("output_tokens"),
+                "total_tokens": usage.get("total_tokens"),
+                **{k: v for k, v in start.items() if k.startswith("request_")},
+            }
+        except Exception:
+            logger.warning("LLM end telemetry build failed for %s", rid, exc_info=True)
+            return {}
+
+    def _error_telemetry(self, rid: str, error: BaseException, tags: list[str] | None, parent_run_id: UUID | None) -> dict[str, Any]:
+        try:
+            start = self._llm_start_telemetry.pop(rid, None) or {}
+            return {
+                "langchain_run_id": rid,
+                "langchain_parent_run_id": str(parent_run_id) if parent_run_id else None,
+                "caller_category": _llm_caller_category(self._identify_caller(tags), error_fallback=False),
+                "caller": self._identify_caller(tags),
+                "provider": start.get("provider"),
+                "model": start.get("requested_model"),
+                "status": "error",
+                "stop_reason": None,
+                "error_type": type(error).__name__,
+                **{k: v for k, v in start.items() if k.startswith("request_")},
+            }
+        except Exception:
+            logger.warning("LLM error telemetry build failed for %s", rid, exc_info=True)
+            return {}
+
+    def on_tool_start(self, serialized, input_str, *, run_id, parent_run_id=None, tags=None, metadata=None, inputs=None, **kwargs):
+        """Cache the executing tool name for artifact attribution."""
+        tool_run_id = str(run_id)
+        tool_name = serialized.get("name") if isinstance(serialized, Mapping) else None
+        if isinstance(tool_name, str) and tool_name:
+            self._active_tool_names[tool_run_id] = tool_name
+        logger.debug("Tool start for node %s, tool_run_id=%s, tags=%s", run_id, tool_run_id, tags)
+
+    def on_tool_end(self, output, *, run_id, parent_run_id=None, **kwargs):
+        """Handle tool end event, append message and clear node data"""
+        active_tool_name = self._active_tool_names.pop(str(run_id), None)
+        try:
+            if isinstance(output, ToolMessage):
+                msg = cast(ToolMessage, output)
+                self._persist_tool_result_message(msg)
+            elif isinstance(output, Command):
+                cmd = cast(Command, output)
+                messages = cmd.update.get("messages", [])
+                # A non-empty ``artifacts`` update is only produced on the
+                # success path (e.g. present_files returns an error ToolMessage
+                # without touching state when validation fails), so its
+                # presence is the artifact-production signal (#4272 slice 1).
+                artifacts = cmd.update.get("artifacts")
+                artifact_tool_names: set[str] = set()
+                for message in messages:
+                    if isinstance(message, BaseMessage):
+                        self._persist_tool_result_message(message)
+                        if artifacts and isinstance(message, ToolMessage):
+                            tool_call_id = getattr(message, "tool_call_id", None)
+                            if isinstance(tool_call_id, str):
+                                tool_name = self._current_run_tool_call_names.get(tool_call_id)
+                                if tool_name:
+                                    artifact_tool_names.add(tool_name)
+                    else:
+                        logger.warning(f"on_tool_end {run_id}: command update message is not BaseMessage: {type(message)}")
+                if artifacts:
+                    artifact_tool_name = active_tool_name
+                    if artifact_tool_name is None and len(artifact_tool_names) == 1:
+                        artifact_tool_name = next(iter(artifact_tool_names))
+                    self._record_produced_artifacts(artifacts, artifact_tool_name)
+            else:
+                logger.warning(f"on_tool_end {run_id}: output is not ToolMessage: {type(output)}")
+        finally:
+            logger.debug("Tool end for node %s", run_id)
+
+    # -- Internal methods --
+
+    def record_skill_usage(self, usage: Mapping[str, Any]) -> None:
+        """Capture first-load display evidence from a successful lead producer.
+
+        Tool wrappers run after ``on_tool_end`` serialized the raw response;
+        slash producers register before invoking their model handler. The next
+        terminal lead response carries these snapshots in the history feed so
+        pagination and checkpoint compaction do not lose the menu's evidence.
+        No event-store or other loop-bound work happens on this producer path.
+        """
+        with self._skill_usage_lock:
+            if self._closed:
+                return
+            path = usage.get("path")
+            content = usage.get("content")
+            if not isinstance(path, str) or not path or not isinstance(content, str):
+                return
+            if path in self._skill_usages or len(self._skill_usages) >= _MAX_RUN_SKILL_SNAPSHOTS:
+                return
+            snapshot = deepcopy(dict(usage))
+            if len(content) > MAX_SKILL_SNAPSHOT_CHARS:
+                snapshot["content"] = content[:MAX_SKILL_SNAPSHOT_CHARS]
+                snapshot["partial"] = True
+            self._skill_usages[path] = snapshot
+
+    @staticmethod
+    def _message_identity(message: BaseMessage) -> str | None:
+        tool_call_id = getattr(message, "tool_call_id", None)
+        if isinstance(tool_call_id, str) and tool_call_id:
+            return f"tool:{tool_call_id}"
+        message_id = getattr(message, "id", None)
+        if isinstance(message_id, str) and message_id:
+            return f"message:{message_id}"
+        return None
+
+    @staticmethod
+    def _tool_call_value(tool_call: Any, key: str) -> Any:
+        if isinstance(tool_call, Mapping):
+            return tool_call.get(key)
+        return getattr(tool_call, key, None)
+
+    @staticmethod
+    def _is_ai_message(message: Any) -> bool:
+        return isinstance(message, AIMessage) or getattr(message, "type", None) == "ai"
+
+    def _has_current_run_tool_call(self, message: Any) -> bool:
+        if not self._is_ai_message(message):
+            return False
+        for tool_call in getattr(message, "tool_calls", None) or []:
+            tool_call_id = self._tool_call_value(tool_call, "id")
+            if isinstance(tool_call_id, str) and tool_call_id in self._current_run_tool_call_names:
+                return True
+        return False
+
+    def _remember_current_run_tool_calls(self, message: AnyMessage, *, caller: str) -> None:
+        if caller != "lead_agent":
+            return
+        if not self._is_ai_message(message):
+            return
+        tool_calls = getattr(message, "tool_calls", None) or []
+        if not isinstance(tool_calls, list):
+            return
+        for tool_call in tool_calls:
+            tool_call_id = self._tool_call_value(tool_call, "id")
+            if not isinstance(tool_call_id, str) or not tool_call_id:
+                continue
+            name = self._tool_call_value(tool_call, "name")
+            self._current_run_tool_call_names[tool_call_id] = str(name or "")
+
+    def _persist_tool_result_message(self, message: BaseMessage) -> None:
+        self._put(
+            event_type=LLM_TOOL_RESULT_EVENT.event_type,
+            category=LLM_TOOL_RESULT_EVENT.category,
+            content=message.model_dump(),
+        )
+        identity = self._message_identity(message)
+        if identity:
+            self._persisted_tool_message_identities.add(identity)
+        self._record_message_summary(message)
+
+    def record_interrupted_ai_responses(self, messages: Iterable[AIMessage]) -> int:
+        """Persist visible streamed text that never reached ``on_llm_end``.
+
+        The worker calls this only after its agent stream has closed and the run
+        has resolved to ``interrupted``. Completed callback responses win the
+        cancellation race by message identity, and repeated finalization is a
+        no-op. These feed events intentionally do not enter checkpoint state.
+        """
+        recorded = 0
+        for message in messages:
+            if self._closed or message.additional_kwargs.get("hide_from_ui") is True:
+                continue
+            identity = self._message_identity(message)
+            if identity is None or identity in self._persisted_ai_message_identities:
+                continue
+            if not self._message_text(message).strip():
+                continue
+            self._put(
+                event_type=LLM_AI_RESPONSE_EVENT.event_type,
+                category=LLM_AI_RESPONSE_EVENT.category,
+                content=message.model_dump(),
+                metadata={
+                    "caller": "lead_agent",
+                    "interrupted": True,
+                    "latency_ms": None,
+                    "llm_call_index": max(1, self._llm_call_index),
+                    "partial": True,
+                    "usage": {},
+                },
+            )
+            self._persisted_ai_message_identities.add(identity)
+            self._record_message_summary(message, caller="lead_agent")
+            recorded += 1
+        return recorded
+
+    def _final_output_messages(self, outputs: Any) -> list[Any]:
+        if isinstance(outputs, Mapping):
+            messages = outputs.get("messages", [])
+            return messages if isinstance(messages, list) else []
+        return []
+
+    def _should_reconcile_tool_message(self, message: ToolMessage) -> bool:
+        """Whether a final-output ToolMessage still needs persisting.
+
+        A middleware can answer a tool call itself and short-circuit execution,
+        so LangChain never emits ``on_tool_end`` and the result never reaches
+        the event store. The user saw that result during the run, and it
+        disappeared on reload (#4666). Any such result is reconciled here; the
+        scope is bounded by three independent conditions rather than a tool-name
+        allowlist: it must be user-visible, the call must belong to this run's
+        lead agent (``_remember_current_run_tool_calls`` records lead-agent
+        calls only, so subagent results stay in their own step feed), and it
+        must not already be persisted.
+        """
+        if message.additional_kwargs.get("hide_from_ui") is True:
+            return False
+        tool_call_id = getattr(message, "tool_call_id", None)
+        if not isinstance(tool_call_id, str) or not tool_call_id:
+            return False
+        # The call must belong to this run: a retained ToolMessage from an
+        # earlier run is already persisted under its own run and must not be
+        # re-attributed here.
+        if self._current_run_tool_call_names.get(tool_call_id) is None:
+            return False
+        identity = self._message_identity(message)
+        return identity is not None and identity not in self._persisted_tool_message_identities
+
+    def _reconcile_tool_messages(self, messages: Iterable[Any]) -> None:
+        for message in messages:
+            if not isinstance(message, ToolMessage):
+                continue
+            if self._should_reconcile_tool_message(message):
+                self._persist_tool_result_message(message)
+
+    def _reconcile_consumed_tool_messages(self, messages: Iterable[Any]) -> None:
+        """Reconcile results after the latest current-run tool call."""
+        suffix = self._current_run_tool_call_suffix(messages)
+        if suffix is not None:
+            self._reconcile_tool_messages(suffix)
+
+    def _current_run_tool_call_suffix(self, messages: Iterable[Any]) -> list[Any] | None:
+        """Return messages after the latest current-run AI tool-call boundary."""
+        batch = list(messages)
+        boundary = None
+        has_ai_message = False
+        for index, message in enumerate(batch):
+            if not self._is_ai_message(message):
+                continue
+            has_ai_message = True
+            if self._has_current_run_tool_call(message):
+                boundary = index
+        if boundary is not None:
+            return batch[boundary + 1 :]
+        # Some callback fixtures provide only the tool result. Preserve that
+        # fallback, but never scan a history containing AI messages without a
+        # current-run boundary.
+        return batch if not has_ai_message else None
+
+    def _reconcile_final_tool_messages(self, outputs: Any) -> None:
+        suffix = self._current_run_tool_call_suffix(self._final_output_messages(outputs))
+        if suffix is not None:
+            self._reconcile_tool_messages(suffix)
+
+    def _make_event(self, *, event_type: str, category: str, content: str | dict = "", metadata: dict | None = None) -> dict:
+        return {
+            "thread_id": self.thread_id,
+            "run_id": self.run_id,
+            **({"user_id": self._evidence_owner_id} if self._evidence_owner_id is not AUTO else {}),
+            "event_type": event_type,
+            "category": category,
+            "content": content,
+            "metadata": metadata or {},
+            "created_at": datetime.now(UTC).isoformat(),
+        }
+
+    def _commit_pending_llm_response(self) -> None:
+        pending = self._pending_llm_response
+        if pending is None:
+            return
+        self._pending_llm_response = None
+        self._buffer.extend(pending.events)
+        self._msg_count += pending.message_count
+        if pending.last_ai_message is not None:
+            self._last_ai_msg = pending.last_ai_message
+
+    def _snapshot_message_summary(self, messages: Sequence[AnyMessage], *, caller: str) -> tuple[int, str | None]:
+        """Freeze summary fields before a provider can mutate replayed messages."""
+        last_ai_message: str | None = None
+        for message in messages:
+            summary_text = self._message_summary_text(message, caller=caller)
+            if summary_text is not None:
+                last_ai_message = summary_text
+        return len(messages), last_ai_message
+
+    @staticmethod
+    def _has_positive_usage(events: list[dict]) -> bool:
+        for event in events:
+            usage = event["metadata"].get("usage")
+            if not isinstance(usage, Mapping):
+                continue
+            for key in ("input_tokens", "output_tokens", "total_tokens"):
+                try:
+                    if int(usage.get(key) or 0) > 0:
+                        return True
+                except (TypeError, ValueError):
+                    continue
+        return False
+
+    @staticmethod
+    def _merge_response_event_usage(canonical_events: list[dict], replay_events: list[dict]) -> None:
+        """Enrich canonical generation events with only replayed usage fields."""
+        for canonical, replay in zip(canonical_events, replay_events, strict=False):
+            replay_metadata = replay.get("metadata")
+            if isinstance(replay_metadata, Mapping):
+                replay_usage = replay_metadata.get("usage")
+                if isinstance(replay_usage, Mapping):
+                    canonical_metadata = canonical["metadata"]
+                    canonical_metadata["usage"] = deepcopy(dict(replay_usage))
+                    for key in ("input_tokens", "output_tokens", "total_tokens"):
+                        canonical_metadata[key] = canonical_metadata["usage"].get(key)
+
+            canonical_content = canonical.get("content")
+            replay_content = replay.get("content")
+            if isinstance(canonical_content, dict) and isinstance(replay_content, Mapping) and "usage_metadata" in replay_content:
+                replay_content_usage = replay_content.get("usage_metadata")
+                canonical_content["usage_metadata"] = deepcopy(dict(replay_content_usage)) if isinstance(replay_content_usage, Mapping) else replay_content_usage
+
+    def _flush_if_threshold_reached(self) -> None:
+        pending_count = len(self._pending_llm_response.events) if self._pending_llm_response is not None else 0
+        if len(self._buffer) + pending_count >= self._flush_threshold:
+            self._flush_sync()
+
+    def _queue_llm_response_events(
+        self,
+        llm_run_id: str,
+        events: list[dict],
+        messages: list[AnyMessage],
+        *,
+        caller: str,
+    ) -> None:
+        """Queue one logical response and merge usage into its canonical callback."""
+        if self._closed or not self._accepting_evidence:
+            return
+
+        has_usage = self._has_positive_usage(events)
+        pending = self._pending_llm_response
+        if pending is not None and pending.llm_run_id == llm_run_id:
+            if has_usage:
+                # The first callback's generation set, immutable summary,
+                # caller, and non-usage payload are canonical. A provider's
+                # immediate replay may enrich only corresponding usage fields.
+                self._merge_response_event_usage(pending.events, events)
+                self._commit_pending_llm_response()
+                self._flush_if_threshold_reached()
+            return
+        if llm_run_id in self._counted_message_llm_run_ids:
+            return
+
+        # A different event is the ordering boundary for an earlier no-usage
+        # callback. Commit it before accepting this response.
+        self._commit_pending_llm_response()
+        self._flush_if_threshold_reached()
+
+        message_count, last_ai_message = self._snapshot_message_summary(messages, caller=caller)
+        pending_response = _PendingLlmResponse(
+            llm_run_id=llm_run_id,
+            events=events,
+            message_count=message_count,
+            last_ai_message=last_ai_message,
+        )
+        self._counted_message_llm_run_ids.add(llm_run_id)
+        self._llm_response_callers[llm_run_id] = caller
+        self._pending_llm_response = pending_response
+        if has_usage:
+            self._commit_pending_llm_response()
+        self._flush_if_threshold_reached()
+        # Some providers immediately re-fire on_llm_end with usage filled in.
+        # Defer an incomplete copy until the next event or flush.
+
+    def _put(self, *, event_type: str, category: str, content: str | dict = "", metadata: dict | None = None, _admitted: bool = False) -> None:
+        if self._closed or (not self._accepting_evidence and not _admitted):
+            return
+        self._commit_pending_llm_response()
+        self._buffer.append(self._make_event(event_type=event_type, category=category, content=content, metadata=metadata))
+        if len(self._buffer) >= self._flush_threshold:
+            self._flush_sync()
+
+    def _flush_sync(self) -> None:
+        """Best-effort flush of buffer to RunEventStore.
+
+        BaseCallbackHandler methods are synchronous.  If an event loop is
+        running we schedule an async ``put_batch``; otherwise the events
+        stay in the buffer and are flushed later by the async ``flush()``
+        call in the worker's ``finally`` block.
+        """
+        self._commit_pending_llm_response()
+        if not self._buffer:
+            return
+        # Skip while another owned write is in flight, a normal persistence
+        # operation holds the operation lock, a batch is quarantined, or the
+        # journal has been force-closed. This keeps the batch in the buffer
+        # instead of starting an overlapping write.
+        if self._owned_writes or self._operation_lock.locked() or self._quarantined_batches or self._abandoned:
+            return
+        batch = self._buffer.copy()
+        self._buffer.clear()
+        task = self._start_write(batch)
+        if task is None:
+            self._buffer = batch + self._buffer
+
+    def _start_write(self, batch: list[dict]) -> asyncio.Task[None] | None:
+        """Create a journal-owned write task, or None when no loop is running.
+
+        The caller must have already removed ``batch`` from ``_buffer``.
+        """
+        if self._abandoned:
+            return None
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return None
+        task: asyncio.Task[None] = loop.create_task(self._write_batch(batch))
+        self._owned_writes[task] = batch
+        task.add_done_callback(self._reap_settled_write)
+        return task
+
+    async def _write_batch(self, batch: list[dict]) -> None:
+        """Run one owned ``put_batch`` isolated from caller cancellation.
+
+        A dedicated inner task performs the store call; the outer owned task
+        only bookkeeps it. Cancelling a waiter never cancels the store task, and
+        the store result is classified by the drain or the reap callback.
+        """
+        store = self._store
+        if store is None:
+            return
+        store_task: asyncio.Task[None] = asyncio.ensure_future(store.put_batch(batch))
+        try:
+            await asyncio.shield(store_task)
+        except asyncio.CancelledError:
+            # The waiter (or an explicit lease-loss close) abandoned durability.
+            # Ask the inner store task to stop, but bound the wait: Task.cancelled()
+            # only reflects the Python task, not whether the underlying I/O stopped,
+            # and a backend may swallow cancellation. We never claim the I/O was
+            # force-terminated; when the store outlives the bound we hand it to an
+            # explicit supervisor so its late result is still observed.
+            store_task.cancel()
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(store_task),
+                    timeout=_WRITE_SETTLE_TIMEOUT_SECONDS,
+                )
+            except (TimeoutError, asyncio.CancelledError):
+                pass
+            except Exception as exc:
+                logger.warning(
+                    "Journal store write for run %s failed while the writer was being torn down (%s: %s)",
+                    self.run_id,
+                    type(exc).__name__,
+                    exc,
+                )
+            if not store_task.done():
+                self._supervise_abandoned_store_task(store_task, len(batch))
+            raise
+
+    def _supervise_abandoned_store_task(self, store_task: asyncio.Task, batch_size: int) -> None:
+        """Hold and settle an inner store task that outlived writer teardown.
+
+        The task is kept strongly referenced until it settles, so it is neither
+        garbage-collected nor silently dropped, and its eventual result is
+        retrieved and logged. Bounded teardown is not a claim that the
+        underlying I/O has stopped.
+        """
+        self._abandoned_store_tasks[store_task] = batch_size
+        store_task.add_done_callback(self._on_abandoned_store_task_settled)
+
+    def _on_abandoned_store_task_settled(self, store_task: asyncio.Task) -> None:
+        batch_size = self._abandoned_store_tasks.pop(store_task, 0)
+        if store_task.cancelled():
+            return
+        exc = store_task.exception()
+        if exc is not None:
+            logger.warning(
+                "Journal store write for run %s failed after the writer was abandoned (%d event(s), %s: %s)",
+                self.run_id,
+                batch_size,
+                type(exc).__name__,
+                exc,
+            )
+        else:
+            # Observability only: a late successful return is reported but does
+            # NOT clear quarantine, replay events, release successor writes, or
+            # make close(flush=False) report durability. "completed successfully"
+            # describes put_batch() returning, not an independent commit proof.
+            logger.warning(
+                "Journal store write for run %s completed successfully after writer abandonment (%d event(s)); quarantine policy remains unchanged",
+                self.run_id,
+                batch_size,
+            )
+
+    def _supervise_abandoned_progress_task(self, task: asyncio.Task[None]) -> None:
+        """Retain a progress task that outlived bounded journal teardown."""
+        if task in self._abandoned_progress_tasks:
+            return
+        self._abandoned_progress_tasks.add(task)
+        task.add_done_callback(self._on_abandoned_progress_task_settled)
+
+    def _observe_progress_task_failure(self, task: asyncio.Task[None], *, after_abandonment: bool) -> None:
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is None:
+            return
+        logger.warning(
+            "RunJournal progress reporter for run %s failed %s (%s: %s)",
+            self.run_id,
+            "after journal abandonment" if after_abandonment else "during journal teardown",
+            type(exc).__name__,
+            exc,
+        )
+
+    def _on_abandoned_progress_task_settled(self, task: asyncio.Task[None]) -> None:
+        self._abandoned_progress_tasks.discard(task)
+        if task.cancelled():
+            return
+        if task.exception() is not None:
+            self._observe_progress_task_failure(task, after_abandonment=True)
+            return
+        logger.warning(
+            "RunJournal progress reporter for run %s settled after journal abandonment",
+            self.run_id,
+        )
+
+    async def _settle_cancelled_progress_task(self, task: asyncio.Task[None]) -> None:
+        """Bound teardown of a progress task already cancelled by force-close."""
+        try:
+            done, _pending = await asyncio.wait(
+                {task},
+                timeout=_WRITE_SETTLE_TIMEOUT_SECONDS,
+            )
+        except asyncio.CancelledError:
+            if task.done():
+                self._observe_progress_task_failure(task, after_abandonment=False)
+            else:
+                self._supervise_abandoned_progress_task(task)
+            raise
+        if task not in done:
+            self._supervise_abandoned_progress_task(task)
+            return
+        self._observe_progress_task_failure(task, after_abandonment=False)
+
+    async def _drain_pending_writes(self) -> None:
+        """Settle every journal-owned write before any successor may start.
+
+        Each owned task is awaited through ``asyncio.shield`` so a cancelled
+        caller detaches the waiter, never the durable write. Classification uses
+        the ``(task, batch)`` snapshot taken here, so a concurrent force close
+        clearing the registry can never turn a real outcome into a silent
+        success.
+        """
+        if not self._owned_writes:
+            return
+        pending = list(self._owned_writes.items())
+        tasks = [task for task, _batch in pending]
+        self._draining_tasks.update(tasks)
+        try:
+            result = await asyncio.gather(
+                *(asyncio.shield(task) for task in tasks),
+                return_exceptions=True,
+            )
+        except asyncio.CancelledError:
+            self._draining_tasks.difference_update(tasks)
+            raise
+        failures: list[BaseException] = []
+        first_not_committed: BaseException | None = None
+        for (task, batch), outcome in zip(pending, result):
+            self._draining_tasks.discard(task)
+            self._owned_writes.pop(task, None)
+            if self._abandoned:
+                # Ownership was revoked by a force close: never re-buffer,
+                # quarantine, or count a successor. Report non-success instead.
+                failures.append(RuntimeError(f"RunJournal for run {self.run_id} was force-closed during flush"))
+                continue
+            if isinstance(outcome, asyncio.CancelledError):
+                if task.done():
+                    self._quarantined_batches.append((batch, RuntimeError("journal write outcome is unknown after cancellation")))
+                    failures.append(outcome)
+                else:
+                    # The caller's cancellation is still propagating; put the
+                    # task back so the done callback settles it later.
+                    self._owned_writes[task] = batch
+            elif isinstance(outcome, RunEventStoreNotCommittedError):
+                self._buffer = batch + self._buffer
+                if first_not_committed is None:
+                    first_not_committed = outcome
+            elif isinstance(outcome, BaseException):
+                self._quarantined_batches.append((batch, outcome))
+                failures.append(outcome)
+            else:
+                self._feed_generation += 1
+        if failures:
+            raise failures[0]
+        if first_not_committed is not None:
+            raise first_not_committed
+
+    def _reap_settled_write(self, task: asyncio.Task) -> None:
+        """Settle a write whose task finished with no drain waiting on it.
+
+        This runs on every completion but is a no-op for the normal drained
+        path (the drain removes the task first). It exists so a write that
+        settles after the caller detached does not leave an unretrieved task
+        exception or an unquarantined result.
+        """
+        if task in self._draining_tasks:
+            return
+        try:
+            batch = self._owned_writes.pop(task, None)
+            if batch is None:
+                return
+            if task.cancelled():
+                self._quarantined_batches.append((batch, RuntimeError("journal write outcome is unknown after cancellation")))
+                logger.warning(
+                    "Journal write for run %s was cancelled before its outcome was known (%d event(s)); quarantined and not retried",
+                    self.run_id,
+                    len(batch),
+                )
+                return
+            exc = task.exception()
+            if exc is None:
+                self._feed_generation += 1
+            elif isinstance(exc, RunEventStoreNotCommittedError):
+                if self._abandoned:
+                    logger.warning(
+                        "Journal write for run %s came back not-committed after a force close (%d event(s)); not re-buffered",
+                        self.run_id,
+                        len(batch),
+                    )
+                    return
+                self._buffer = batch + self._buffer
+                logger.warning(
+                    "Journal write for run %s came back not-committed (%d event(s), %s: %s); re-buffered for a later flush",
+                    self.run_id,
+                    len(batch),
+                    type(exc).__name__,
+                    exc,
+                )
+            else:
+                self._quarantined_batches.append((batch, exc))
+                logger.warning(
+                    "Journal write for run %s has an unknown outcome (%d event(s), %s: %s); quarantined and not retried",
+                    self.run_id,
+                    len(batch),
+                    type(exc).__name__,
+                    exc,
+                )
+        except Exception:
+            logger.exception("Failed to reap a settled journal write for run %s", self.run_id)
+
+    def _identify_caller(self, tags: list[str] | None) -> str:
+        _tags = tags or []
+        for tag in _tags:
+            if isinstance(tag, str) and (tag.startswith("subagent:") or tag.startswith("middleware:") or tag == "lead_agent"):
+                return tag
+        # Default to lead_agent: the main agent graph does not inject
+        # callback tags, while subagents and middleware explicitly tag
+        # themselves.
+        return "lead_agent"
+
+    def _record_model_usage(
+        self,
+        model_name: str | None,
+        input_tokens: int,
+        output_tokens: int,
+        total_tokens: int,
+        cache_read_tokens: int = 0,
+    ) -> None:
+        """Add a single LLM call's token usage to the per-model accumulator.
+
+        Missing / empty ``model_name`` collapses into a shared ``"unknown"``
+        bucket so the breakdown stays usable when a provider doesn't surface
+        ``response_metadata.model_name``.
+
+        ``cache_read_tokens`` (prompt-cache hits, from
+        ``usage_metadata.input_token_details.cache_read``) is stored as a
+        sparse bucket key — only written when non-zero — so buckets from
+        providers without cache reporting keep their historical shape.
+        """
+        if total_tokens <= 0:
+            return
+        bucket = self._tokens_by_model.setdefault(
+            model_name or "unknown",
+            {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+        )
+        bucket["input_tokens"] += int(input_tokens or 0)
+        bucket["output_tokens"] += int(output_tokens or 0)
+        bucket["total_tokens"] += int(total_tokens)
+        if cache_read_tokens > 0:
+            bucket["cache_read_tokens"] = bucket.get("cache_read_tokens", 0) + int(cache_read_tokens)
+
+    @staticmethod
+    def _extract_cache_read(usage_dict: dict) -> int:
+        """Prompt-cache-hit input tokens from LangChain's normalized usage."""
+        details = usage_dict.get("input_token_details") or {}
+        if not isinstance(details, Mapping):
+            return 0
+        try:
+            return max(int(details.get("cache_read") or 0), 0)
+        except (TypeError, ValueError):
+            return 0
+
+    # -- Public methods (called by worker) --
+
+    def record_external_llm_usage_records(
+        self,
+        records: list[dict[str, int | str | None]],
+    ) -> None:
+        """Record token usage from external sources (e.g., subagents).
+
+        Each record should contain:
+            source_run_id: Unique identifier to prevent double-counting
+            caller: Caller tag (e.g. "subagent:general-purpose")
+            model_name: Real per-call model name (str or None; falls back to
+                ``"unknown"`` bucket when missing)
+            input_tokens: Input token count
+            output_tokens: Output token count
+            total_tokens: Total token count (computed from input+output if 0/missing)
+            cache_read_tokens: Optional prompt-cache-hit input tokens
+            count_call: Optional 1 to count this distinct external invocation
+            usage_missing: Optional 1 when token totals cannot fully price it
+        """
+        if not self._track_tokens:
+            return
+        for record in records:
+            source_id = str(record.get("source_run_id", ""))
+            if not source_id:
+                continue
+            if source_id in self._counted_external_source_ids:
+                continue
+            count_call = record.get("count_call") == 1
+            usage_missing = record.get("usage_missing") == 1
+
+            total_tk = record.get("total_tokens", 0) or 0
+            if total_tk <= 0:
+                input_tk = record.get("input_tokens", 0) or 0
+                output_tk = record.get("output_tokens", 0) or 0
+                total_tk = input_tk + output_tk
+            if total_tk <= 0:
+                if not count_call and not usage_missing:
+                    continue
+
+            input_tk = record.get("input_tokens", 0) or 0
+            output_tk = record.get("output_tokens", 0) or 0
+
+            self._counted_external_source_ids.add(source_id)
+            if count_call:
+                self._llm_call_count += 1
+            if usage_missing:
+                bucket = self._tokens_by_model.setdefault(record.get("model_name") or "unknown", {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
+                bucket["missing_usage_calls"] = bucket.get("missing_usage_calls", 0) + 1
+            self._total_input_tokens += input_tk
+            self._total_output_tokens += output_tk
+            self._total_tokens += total_tk
+
+            caller = str(record.get("caller", ""))
+            if caller.startswith("subagent:"):
+                self._subagent_tokens += total_tk
+            elif caller.startswith("middleware:"):
+                self._middleware_tokens += total_tk
+            else:
+                self._lead_agent_tokens += total_tk
+
+            cache_read_tk = record.get("cache_read_tokens", 0) or 0
+            self._record_model_usage(record.get("model_name"), input_tk, output_tk, total_tk, int(cache_read_tk))
+
+            self._schedule_progress_flush()
+
+    def set_first_human_message(self, content: str) -> None:
+        """Record the first human message for convenience fields."""
+        # Media-only input is still captured even when it has no display text.
+        self._first_human_message_captured = True
+        self._first_human_msg = content[:2000] if content else None
+
+    def record_middleware(self, tag: str, *, name: str, hook: str, action: str, changes: dict) -> None:
+        """Record a middleware state-change event.
+
+        Called by middleware implementations when they perform a meaningful
+        state change (e.g., title generation, summarization, HITL approval).
+        Pure-observation middleware should not call this.
+
+        Args:
+            tag: Short identifier for the middleware (e.g., "title", "summarize",
+                 "guardrail"). Used to form event_type="middleware:{tag}" and
+                 limited by the persisted event-type column width.
+            name: Full middleware class name.
+            hook: Lifecycle hook that triggered the action (e.g., "after_model").
+            action: Specific action performed (e.g., "generate_title").
+            changes: Dict describing the state changes made.
+        """
+        event_type = MIDDLEWARE_EVENT_PATTERN.event_type(tag)
+        owner_loop = self._owner_loop
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+        if owner_loop is not None and running_loop is not owner_loop:
+            if owner_loop.is_closed() or not owner_loop.is_running():
+                logger.warning("Dropping cross-thread middleware event after run loop shutdown")
+                return
+            with self._producer_lock:
+                if not self._accepting_evidence:
+                    return
+                self._pending_producer_callbacks += 1
+                try:
+                    owner_loop.call_soon_threadsafe(
+                        partial(
+                            self._record_admitted_middleware,
+                            event_type=event_type,
+                            category=MIDDLEWARE_EVENT_PATTERN.category,
+                            content={"name": name, "hook": hook, "action": action, "changes": dict(changes)},
+                        )
+                    )
+                except RuntimeError:
+                    self._pending_producer_callbacks -= 1
+                    logger.warning("Dropping cross-thread middleware event after run loop shutdown")
+            return
+
+        self._put(
+            event_type=event_type,
+            category=MIDDLEWARE_EVENT_PATTERN.category,
+            content={"name": name, "hook": hook, "action": action, "changes": changes},
+        )
+
+    def _record_admitted_middleware(self, **kwargs) -> None:
+        try:
+            self._put(**kwargs, _admitted=True)
+        finally:
+            with self._producer_lock:
+                self._pending_producer_callbacks -= 1
+
+    def claim_tool_promotions(self, tool_names: Iterable[str]) -> list[str]:
+        """Atomically claim names not yet reported by this run's lead agent."""
+        candidates = sorted(set(tool_names))
+        with self._tool_promotion_claim_lock:
+            claimed = [name for name in candidates if name not in self._claimed_tool_promotions]
+            self._claimed_tool_promotions.update(claimed)
+        return claimed
+
+    def record_memory_context(
+        self,
+        *,
+        content_sha256: str | None,
+        project_context_revision: str | None = None,
+        project_shelf_revision: str | None = None,
+    ) -> None:
+        """Record the effective hidden context fingerprints for this run.
+
+        ``content_sha256`` is the SHA-256 identity of the selected persisted
+        ``__memory`` message, or ``None`` when no such message exists (e.g. a
+        project-only run). ``project_context_revision`` /
+        ``project_shelf_revision`` are sha256 fingerprints of the rendered
+        ``<project>`` / ``<documents>`` text actually supplied to the model,
+        or ``None`` when no such block was delivered. The full blocks already
+        live in checkpoint state or contain user data, so the event stores
+        only identities: a fingerprint can verify a candidate text but cannot
+        reconstruct it. Operators consume them through the existing run-events
+        debug API to compare the effective context used by different runs
+        without copying that content. Readers accept older payloads that lack
+        the project fields.
+        """
+        if self._memory_context_recorded:
+            return
+        self._put(
+            event_type=MEMORY_CONTEXT_EVENT.event_type,
+            category=MEMORY_CONTEXT_EVENT.category,
+            content={
+                "content_sha256": content_sha256,
+                "project_context_revision": project_context_revision,
+                "project_shelf_revision": project_shelf_revision,
+            },
+        )
+        self._memory_context_recorded = True
+
+    def _record_produced_artifacts(self, artifacts: Any, tool_name: str | None) -> None:
+        """Accumulate produced artifact paths, deduped by (path, tool_name)."""
+        if not isinstance(artifacts, list):
+            return
+        for path in artifacts:
+            if not isinstance(path, str) or not path:
+                continue
+            key = (path, tool_name)
+            if key not in self._produced_artifact_keys:
+                self._produced_artifact_keys.add(key)
+                self._produced_artifacts.append(key)
+
+    def get_delivery_content(self) -> dict[str, Any]:
+        """Return the terminal delivery fact accumulated for this run.
+
+        This is a fact record, not a verdict: runs that produced no artifacts
+        emit ``presented: 0``.
+        """
+        by_tool: dict[str, list[str]] = {}
+        paths: list[str] = []
+        for path, tool_name in self._produced_artifacts:
+            paths.append(path)
+            if tool_name:
+                by_tool.setdefault(tool_name, []).append(path)
+        return {"presented": len(paths), "paths": paths, "by_tool": by_tool}
+
+    def record_delivery(self) -> None:
+        """Buffer the terminal ``run.delivery`` event for this run (#4272 slice 1).
+
+        Kept for direct journal users. The worker uses the event store's
+        idempotent singleton write so crash recovery can safely backfill it.
+        """
+        self._put(
+            event_type="run.delivery",
+            category="outputs",
+            content=self.get_delivery_content(),
+        )
+
+    async def flush(self) -> None:
+        """Force flush remaining buffer. Called in worker's finally block."""
+        if self._abandoned:
+            raise RuntimeError(f"RunJournal for run {self.run_id} was force-closed; flush cannot report success")
+        if self._closed:
+            return
+        async with self._operation_lock:
+            if self._abandoned:
+                raise RuntimeError(f"RunJournal for run {self.run_id} was force-closed; flush cannot report success")
+            if self._closed:
+                return
+            await self._flush_locked()
+
+    async def _flush_locked(self) -> None:
+        """Drain the buffer to quiescence while the operation lock is held.
+
+        Callers MUST hold ``self._operation_lock``. It deliberately does not
+        re-acquire the lock, so ``close(flush=True)`` can run flush and detach as
+        one indivisible protected operation. Returns only when every accepted
+        event has settled and nothing is quarantined; raises otherwise.
+        """
+        if self._abandoned:
+            raise RuntimeError(f"RunJournal for run {self.run_id} was force-closed; flush cannot report success")
+        # Events recorded from worker threads reach this loop through
+        # call_soon_threadsafe (see record_middleware). Since Python 3.13 an
+        # awaited run_in_executor()/to_thread() may complete without yielding to
+        # the loop when the worker finished before its future was chained, so
+        # such callbacks can still be queued when the flush starts. Yield once
+        # so they land in the buffer instead of being dropped after detach. This
+        # lives here so close(flush=True), which calls this directly under the
+        # operation lock, gets the same guarantee.
+        await asyncio.sleep(0)
+        if self._abandoned:
+            raise RuntimeError(f"RunJournal for run {self.run_id} was force-closed; flush cannot report success")
+        if self._quarantined_batches:
+            _batch, error = self._quarantined_batches[0]
+            raise RuntimeError(f"RunJournal flush refused: {len(_batch)} event(s) for run {self.run_id} have an unknown durable outcome") from error
+        self._commit_pending_llm_response()
+        try:
+            await self._drain_pending_writes()
+        except asyncio.CancelledError:
+            # A caller cancelled a flush that already started a durable write.
+            # Let the journal-owned write settle before propagating the
+            # cancellation so the batch can never be lost between the task and
+            # the buffer. Do NOT call uncancel(): we are propagating the
+            # cancellation, not suppressing it, and touching the task's cancel
+            # count would corrupt the caller's cancellation accounting.
+            try:
+                await self._drain_pending_writes()
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.warning(
+                    "Journal write failed while flushing after cancellation for run %s",
+                    self.run_id,
+                    exc_info=True,
+                )
+            raise
+        while self._pending_progress_task is not None:
+            pending_progress_task = self._pending_progress_task
+            if pending_progress_task.done():
+                if self._pending_progress_task is pending_progress_task:
+                    self._pending_progress_task = None
+                break
+            if self._pending_progress_delayed:
+                pending_progress_task.cancel()
+                await asyncio.gather(pending_progress_task, return_exceptions=True)
+                if self._pending_progress_task is pending_progress_task:
+                    self._pending_progress_task = None
+                self._progress_dirty = False
+                self._pending_progress_delayed = False
+                break
+            await asyncio.gather(pending_progress_task, return_exceptions=True)
+            if self._pending_progress_task is pending_progress_task:
+                self._pending_progress_task = None
+
+        # Only batches already accepted before this flush are attempted; a
+        # NOT_COMMITTED batch re-buffered by the drain waits for a later explicit
+        # flush instead of being retried in a tight loop. A force close revokes
+        # ownership, so no further batch may start.
+        while self._buffer:
+            if self._abandoned or self._quarantined_batches:
+                break
+            batch = self._buffer[: self._flush_threshold]
+            del self._buffer[: self._flush_threshold]
+            if self._store is None or self._abandoned:
+                self._buffer = batch + self._buffer
+                break
+            task = self._start_write(batch)
+            if task is None:
+                # No running loop (or write ownership was revoked): keep the batch.
+                self._buffer = batch + self._buffer
+                break
+            await self._drain_pending_writes()
+
+        if self._abandoned:
+            raise RuntimeError(f"RunJournal for run {self.run_id} was force-closed during flush")
+        if self._quarantined_batches:
+            _batch, error = self._quarantined_batches[0]
+            raise RuntimeError(f"RunJournal flush refused: {len(_batch)} event(s) for run {self.run_id} have an unknown durable outcome") from error
+
+    async def _stop_evidence_producers(self) -> None:
+        with self._producer_lock:
+            self._accepting_evidence = False
+        while self._pending_producer_callbacks:
+            await asyncio.sleep(0)
+
+    async def _drain_evidence(self) -> None:
+        """Freeze and drain while the caller holds the operation lock."""
+        if self._closed:
+            return
+        await self._stop_evidence_producers()
+        await self._flush_locked()
+
+    async def finish_evidence(self, *, before_receipt: Callable[[], Awaitable[None]] | None = None):
+        """Stop declared producers and drain accepted work before capturing bounds.
+
+        This is independent of terminal business status and does not detach the
+        journal. Proven uncommitted writes remain available for explicit retry;
+        unknown outcomes stay quarantined and never yield a durable receipt.
+        The worker's optional terminal confirmation runs after drain and before
+        bounds capture, under the same lock as flush and normal close.
+        Unsupported stores return no durable receipt.
+        """
+        async with self._operation_lock:
+            if self._abandoned:
+                raise RuntimeError(f"RunJournal for run {self.run_id} was force-closed; cannot finish evidence")
+            if self._closed:
+                return None
+            await self._drain_evidence()
+            if before_receipt is not None:
+                await before_receipt()
+            if self._abandoned:
+                raise RuntimeError(f"RunJournal for run {self.run_id} was force-closed; cannot capture evidence bounds")
+            from deerflow.runtime.events.store.db import DbRunEventStore
+
+            if isinstance(self._store, DbRunEventStore):
+                receipt = await self._store.evidence_receipt(self.thread_id, self.run_id)
+                if self._abandoned:
+                    raise RuntimeError(f"RunJournal for run {self.run_id} was force-closed during evidence bounds capture")
+                return receipt
+            return None
+
+    def _detach_runtime_dependencies(self) -> None:
+        """Drop every external or potentially cyclic run-scoped reference."""
+        self._closed = True
+        self._accepting_evidence = False
+        with self._skill_usage_lock:
+            self._skill_usages.clear()
+        self._store = None
+        self._progress_reporter = None
+        self._buffer.clear()
+        self._pending_llm_response = None
+        self._owned_writes = {}
+        self._draining_tasks = set()
+        # Intentionally NOT cleared: abandoned store/progress tasks stay strongly
+        # referenced by their supervisor collections until they settle.
+        self._pending_progress_task = None
+        self._pending_progress_delayed = False
+        self._progress_dirty = False
+        self._tokens_by_model.clear()
+        self._counted_llm_run_ids.clear()
+        self._counted_external_source_ids.clear()
+        self._counted_message_llm_run_ids.clear()
+        self._llm_response_callers.clear()
+        self._llm_start_times.clear()
+        self._seen_llm_starts.clear()
+        self._current_run_tool_call_names.clear()
+        self._persisted_ai_message_identities.clear()
+        self._persisted_tool_message_identities.clear()
+        self._produced_artifacts.clear()
+        self._produced_artifact_keys.clear()
+        self._last_ai_msg = None
+        self._first_human_msg = None
+        self._llm_error_fallback_message = None
+
+    async def close(self, *, flush: bool = True) -> None:
+        """Release run-scoped references, optionally flushing buffered events."""
+        if flush:
+            # A normal close is one protected operation: it serialises with every
+            # other flush / close(True) and detaches only after the whole buffer
+            # has settled, so no concurrent waiter can observe a
+            # settled-but-detached journal or start a successor batch that nobody
+            # drains.
+            if self._abandoned:
+                raise RuntimeError(f"RunJournal for run {self.run_id} was force-closed; close cannot report success")
+            async with self._operation_lock:
+                # ABORT is checked before the closed flag: a force close sets
+                # both, so a normal close that queued behind the lock must fail
+                # rather than observe `_closed` and report a false success.
+                if self._abandoned:
+                    raise RuntimeError(f"RunJournal for run {self.run_id} was force-closed; close cannot report success")
+                if self._closed:
+                    return
+                await self._stop_evidence_producers()
+                await self._flush_locked()
+                self._detach_runtime_dependencies()
+            return
+
+        # Force / lease-loss close. It must NOT queue behind a possibly-stuck
+        # normal operation, so it does not take the operation lock. It marks
+        # ABORT before its first await, then cancels and reaps every owned write
+        # (bounded, with late-result supervision) before detaching.
+        # Terminal-state monotonicity: a journal that already closed durably must
+        # not be re-marked ABORT (which would flip flush() from a no-op to an
+        # error). A force close still preempts an in-flight normal close, where
+        # `_closed` is not yet set.
+        if self._closed:
+            return
+        self._abandoned = True
+        self._closed = True
+        self._store = None
+        self._progress_reporter = None
+        try:
+            pending_owned = tuple(self._owned_writes)
+            for task in pending_owned:
+                task.cancel()
+            pending_progress_task = self._pending_progress_task
+            cleanup_tasks = list(pending_owned)
+            if pending_progress_task is not None:
+                # Revoke both write classes before the first await. Progress
+                # teardown must not queue behind an unrelated event write.
+                pending_progress_task.cancel()
+                cleanup_tasks.append(
+                    asyncio.create_task(
+                        self._settle_cancelled_progress_task(pending_progress_task),
+                        name=f"run-journal-progress-teardown-{self.run_id}",
+                    )
+                )
+            if cleanup_tasks:
+                await asyncio.gather(*cleanup_tasks, return_exceptions=True)
+        finally:
+            self._detach_runtime_dependencies()
+
+    def _schedule_progress_flush(self) -> None:
+        """Best-effort throttled progress snapshot for active run visibility."""
+        if self._progress_reporter is None:
+            return
+        now = time.monotonic()
+        elapsed = now - self._last_progress_flush
+        if elapsed < self._progress_flush_interval:
+            self._progress_dirty = True
+            self._schedule_delayed_progress_flush(self._progress_flush_interval - elapsed)
+            return
+        if self._pending_progress_task is not None and not self._pending_progress_task.done():
+            self._progress_dirty = True
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._progress_dirty = False
+        self._pending_progress_task = loop.create_task(self._flush_progress_async(snapshot=self.get_completion_data()))
+
+    def _schedule_delayed_progress_flush(self, delay: float) -> None:
+        if self._pending_progress_task is not None and not self._pending_progress_task.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        delay = max(0.0, delay)
+        self._pending_progress_delayed = delay > 0
+        self._pending_progress_task = loop.create_task(self._flush_progress_async(delay=delay))
+
+    async def _flush_progress_async(self, *, snapshot: dict | None = None, delay: float = 0.0) -> None:
+        if self._progress_reporter is None:
+            return
+        if delay > 0:
+            self._pending_progress_delayed = True
+            await asyncio.sleep(delay)
+            self._pending_progress_delayed = False
+        dirty_before_write = self._progress_dirty
+        self._progress_dirty = False
+        snapshot_to_write = snapshot or self.get_completion_data()
+        try:
+            await self._progress_reporter(snapshot_to_write)
+            self._last_progress_flush = time.monotonic()
+        except Exception:
+            logger.warning("Failed to persist progress snapshot for run %s", self.run_id, exc_info=True)
+        if dirty_before_write or self._progress_dirty:
+            self._progress_dirty = False
+            self._pending_progress_task = None
+            self._schedule_delayed_progress_flush(self._progress_flush_interval)
+
+    def get_completion_data(self) -> dict:
+        """Return accumulated token and message data for run completion."""
+        return {
+            "total_input_tokens": self._total_input_tokens,
+            "total_output_tokens": self._total_output_tokens,
+            "total_tokens": self._total_tokens,
+            "llm_call_count": self._llm_call_count,
+            "lead_agent_tokens": self._lead_agent_tokens,
+            "subagent_tokens": self._subagent_tokens,
+            "middleware_tokens": self._middleware_tokens,
+            "token_usage_by_model": {model: dict(usage) for model, usage in self._tokens_by_model.items()},
+            "message_count": self._msg_count,
+            "last_ai_message": self._last_ai_msg,
+            "first_human_message": self._first_human_msg,
+        }
+
+    @property
+    def feed_generation(self) -> int:
+        """Monotonic count of successful writes to the thread feed.
+
+        Buffered events are not in the feed yet, so a lookup for a message this
+        run just produced legitimately misses. This counter is what tells such
+        a reader that its cached miss is worth re-asking — it changes exactly
+        when the feed gained rows, and never while the buffer is merely
+        filling. A failed write leaves it alone: nothing became readable.
+        """
+        return self._feed_generation
+
+    @property
+    def had_llm_error_fallback(self) -> bool:
+        return self._had_llm_error_fallback
+
+    @property
+    def llm_error_fallback_message(self) -> str | None:
+        return self._llm_error_fallback_message

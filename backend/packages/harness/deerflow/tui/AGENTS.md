@@ -1,0 +1,69 @@
+### Terminal Workbench / TUI (`packages/harness/deerflow/tui/`)
+
+A terminal-native UI over the embedded harness, exposed as the `deerflow` console script (`[project.scripts]` in `packages/harness/pyproject.toml`). It is a UI shell over `DeerFlowClient` and does **not** fork agent behavior. `textual` is an optional dependency (`deerflow-harness[tui]`; also in the backend dev group); the console script degrades to headless help when it is absent. Full guide: [docs/TUI.md](../../../../docs/TUI.md).
+
+**Module layout** (all layers except `app.py` and `widgets/` are pure / Textual-free and unit-tested directly):
+- `cli.py` — `plan_launch()` (pure launch-mode decision) + headless `--print` / `--json` + `main()` entry point. Headless modes exit `1` when the final AI message carries `deerflow_error_fallback` (provider failures arrive as flagged messages, not exceptions). `_RunOutcome` and `chat()` share `_AIMessageAccumulator`: deltas accumulate per message id and the last content-bearing AI id supplies the text; metadata-only events preserve that id. Fallback writers must supply text or flag an id whose text was already emitted. Keep the client import lazy so help and launch planning do not load the agent graph. TTY → TUI, else headless help. `--tui-transparent` / `DEER_FLOW_TUI_TRANSPARENT` opt into terminal-default backgrounds without changing the solid-theme default. Uses an **absolute** `from deerflow.tui.app import run_tui` so the `app.py` module name doesn't trip `test_harness_boundary.py` (which records relative import module names verbatim).
+- `view_state.py` — `ViewState` + `reduce(state, action)`, the testable heart. Rows: user / assistant / tool / system. Title captured from `values` events. Assistant deltas append verbatim: the client sends only incremental text per id, so a delta that repeats or extends the row (`ha` + `ha`, a closing `**`) is new text, not a re-send.
+- `runtime.py` — `translate(StreamEvent) -> [Action]` (pure) + `stream_actions()` which brackets a run with `RunStarted`/`RunEnded` and turns model errors into an `AssistantError` row.
+- `message_format.py` / `command_registry.py` / `input_history.py` / `render.py` / `theme.py` — pure helpers (tool summaries, slash registry + `resolve()`, ↑/↓ history, Rich renderers). The command registry must exclude every shared `RESERVED_SLASH_SKILL_NAMES` entry that the agent runtime rejects from both its picker and resolver; the `context` skill is the exception for ordinary task text, while the exact composer-only `/context compact` alias remains unavailable as a skill activation.
+- `app.py` — Textual `App`. Runs `DeerFlowClient.stream()` (sync) on a worker thread and marshals actions to the UI thread via `call_from_thread`. Slash palette with `/goal` management + model/thread modal pickers; routes idle display-only `/clear` through `ClearRows` without replacing the active thread, and blocks state-resetting local commands like `/new` and `/clear` with the standard "Still working" message during an active run; priority key bindings gated by `check_action` so they never steal keys from overlays or the composer. Application-level PageUp/PageDown bindings scroll the transcript while preserving composer focus; streaming follows output only while the transcript remains at the bottom.
+- `widgets/composer.py` — the composer, a Textual `TextArea`: bracketed multiline pastes retain their line breaks and indentation, `Enter` submits the whole document unchanged (only an all-whitespace document counts as empty), and Up/Down move inside it before falling back to input history at the first/last visual row (soft-wrapped rows count, so a long wrapped prompt is navigable).
+- `session.py` / `persistence.py` — builds the client + checkpointer and the `ThreadMetaWriter`. The thread picker and `--resume <title>` read `DeerFlowClient.list_threads()`, where `limit` counts threads (newest created first); `--continue` passes `sort_by="updated_at"` to resume the most recently active thread.
+
+**Web UI visibility**: the Web UI lists threads from the `threads_meta` SQL table (user-scoped), not the checkpointer. `persistence.py` writes a `threads_meta` row under the default user (`"default"`) into the same DB the Gateway reads — via the harness-only `deerflow.persistence.engine.init_engine_from_config()` — so TUI sessions appear in the Web UI sidebar **without** running the Gateway. Best-effort: a no-op on the `memory` backend. All DB work runs on one long-lived background event loop (a SQLAlchemy async engine is bound to its creating loop).
+
+`resolve()` splits the slash token from its arguments on Unicode whitespace,
+including tabs, newlines and nonbreaking spaces, without collapsing whitespace
+inside the arguments. The name must remain attached to `/`; skill submissions
+retain internal line breaks and indentation. The palette uses the same whitespace
+boundary: a pasted separator closes it so Enter submits instead of completing
+the command. The Tab key still completes the highlighted palette item. Keep
+reserved-command checks and paste-to-submit regression coverage.
+
+A persistence bridge timeout requests cancellation of its still-pending coroutine.
+This is cooperative cancellation, not rollback of a committed write or ordering
+of normally completed title writes. Preserve coroutine-originated errors and
+keep the background loop usable for subsequent writes.
+
+Thread switching must reject active runs both before resolving/opening a picker
+and when applying the picker callback, which may outlive the idle state in which
+it opened. Keep the current thread and transcript unchanged when rejecting a
+switch. Report invalid resume references as error rows without relaxing the
+canonical thread-id validation or terminating the app.
+Reserve the run identity and busy state when accepting input, before its worker
+starts. Each run owns its cancellation flag; a later send must not reset it.
+If worker creation fails, cancel and clear that reserved run, restore idle state,
+and show a retryable error. Do not cancel a previously completed run's title write.
+`_send_to_agent` returns False whenever it does not start a run (busy, a stopping
+interrupted run, worker start failure); the submit handler and the launch message
+then restore the text as history recorded it via `_restore_draft`, which keeps the
+palette closed until that draft is edited. Local slash commands still clear it.
+Worker callbacks check both run identity and thread id on UI delivery, rejecting
+cancelled, completed, or superseded runs before updating the reducer. Keep the
+completed run's state available for its worker's title persistence check. An
+uncancelled, normally completed run still writes its title to its original
+thread after the UI moves on; keep that write off the UI thread. This does not
+order completed title writes, roll back a write already in progress, or force
+stop synchronous backend work.
+An interrupted worker keeps streaming until its next event, so a long tool step
+still checkpoints. Until that worker returns (`_Run.started`/`stopped`, set by the
+worker itself), reject sends on its thread: whichever run checkpoints last would
+drop the other turn. Other threads stay usable; a worker cancelled before it
+started holds nothing.
+Run workers are daemon threads, not Textual thread workers: asyncio's default
+executor is joined by `App.run()` and again at interpreter exit, so quitting hung
+until the step ended. Quit waits for running workers with a notice and refuses
+sends; a second quit request exits at once and drops the unfinished step.
+
+`InputHistory.down()` returns `None` when history navigation is inactive; the
+app must then leave the composer untouched, including its cursor and undo state.
+`InputHistory.up()` returns `None` when history is empty, and `down()` returns
+`None` when history navigation is inactive; the app must then leave the composer
+untouched, including its cursor and undo state.
+An empty string is a valid saved draft and must still be restored after history.
+History navigation may advance its index without changing the input text. When
+the recalled value equals the composer value, skip loading the document so its
+cursor and undo state survive.
+
+**Tests**: `tests/test_tui_*.py` — pure layers via plain pytest, the app/palette/overlays via Textual's pilot harness with a fake in-process session, and `test_tui_persistence.py` for the `threads_meta` round-trip.

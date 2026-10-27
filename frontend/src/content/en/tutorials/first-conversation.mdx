@@ -1,3 +1,67 @@
+---
+title: First Conversation
+description: This tutorial walks you through your first complete agent conversation in DeerFlow — from launching the app to getting meaningful work done with the agent.
+---
+
+import { Callout, Steps } from "nextra/components";
+
 # First Conversation
 
-TBD
+This tutorial walks you through your first complete agent conversation in DeerFlow — from launching the app to getting meaningful work done with the agent.
+
+## Prerequisites
+
+- DeerFlow app is running (see [Quick Start](/docs/application/quick-start))
+- At least one model is configured in `config.yaml`
+
+## Steps
+
+<Steps>
+
+### Open the workspace
+
+Open [http://localhost:2026](http://localhost:2026) in your browser. You will see the conversation workspace.
+
+### Send your first message
+
+Type a question in the input box, for example:
+
+```
+Research the top 3 most popular open-source LLM frameworks in 2024 and compare their strengths and weaknesses.
+```
+
+Press Enter to send.
+
+### Watch the agent work
+
+You will see the agent start working:
+
+- Expand the **thinking steps** to see which tools it is calling
+- Watch search results stream in
+- Wait for the final report to be generated
+
+### Interact with the result
+
+Once the report is generated, you can:
+
+- Ask for more detail on a specific section
+- Ask to export the report as a file (the agent will use the `present_files` tool)
+- Ask to create a chart based on the research findings
+
+</Steps>
+
+## What just happened
+
+The agent used the DeerFlow Harness to:
+
+1. Receive your message and add it to the thread state
+2. Run the middleware chain (memory injection, title generation)
+3. Call the LLM, which decided to search the web
+4. Execute web search tool calls
+5. Synthesize results into a structured response
+6. Update the thread state with any artifacts produced
+
+## Next steps
+
+- [Use Tools and Skills](/docs/tutorials/use-tools-and-skills)
+- [Workspace Usage](/docs/application/workspace-usage)

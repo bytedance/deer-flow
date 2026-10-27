@@ -29,6 +29,55 @@ Then after the skill is done (but again, the order is flexible), you can also ru
 
 Cool? Cool.
 
+---
+
+## DeerFlow Environment (⚠️ READ THIS FIRST)
+
+If you are running inside a **DeerFlow** sandboxed agent environment (you have access to the `skill_manage` tool), you MUST follow these rules for all skill file operations. These override the generic file-writing and packaging instructions below.
+
+### Why this matters
+
+In DeerFlow, the sandbox filesystem is isolated. Files written with `write_file` land in `/mnt/user-data/outputs/`, which is a **per-thread output directory** — new chats cannot see files there. Skills must be persisted through the dedicated `skill_manage` tool so they are stored in the per-user skill directory and immediately visible to all future chats.
+
+### Use `skill_manage` for all skill file operations
+
+| Operation | skill_manage action | Example |
+|-----------|---------------------|---------|
+| Create a new skill | `action="create"` | `skill_manage(action="create", name="my-skill", content="---\nname: my-skill\n---\n...")` |
+| Replace entire SKILL.md | `action="edit"` | `skill_manage(action="edit", name="my-skill", content="updated SKILL.md")` |
+| Partial edit (find & replace) | `action="patch"` | `skill_manage(action="patch", name="my-skill", find="old text", replace="new text")` |
+| Delete a skill | `action="delete"` | `skill_manage(action="delete", name="my-skill")` |
+| Add a supporting file | `action="write_file"` | `skill_manage(action="write_file", name="my-skill", path="scripts/helper.py", content="...")` |
+| Remove a supporting file | `action="remove_file"` | `skill_manage(action="remove_file", name="my-skill", path="scripts/helper.py")` |
+
+### Key rules
+
+1. **NEVER use sandbox `write_file` to create or modify skill files** (SKILL.md, scripts/, references/, assets/). These would land in `/mnt/user-data/outputs/` and be invisible to future chats. Always use `skill_manage` instead.
+
+2. **Skip the `package_skill.py` step**. In DeerFlow, `skill_manage` already persists the skill to the correct per-user directory. No `.skill` packaging or manual install is needed. The skill is immediately available in all new chats.
+
+3. **Skip the `present_files` step for skills**. Skills are NOT deliverables — they are persisted via `skill_manage` and auto-loaded by the skill system. Only use `present_files` for non-skill outputs (eval reports, benchmarks, etc.).
+
+4. **Eval workspace files are OK in sandbox**. Test prompts, benchmark data, eval viewer HTML, grading results, etc. are NOT skill files — you can write these to `/mnt/user-data/outputs/` or `/mnt/user-data/workspace/` using sandbox `write_file` as usual.
+
+5. **To read an existing skill's SKILL.md**, use `read_file("/mnt/skills/custom/<name>/SKILL.md")` in the sandbox (it maps to the per-user skill directory).
+
+6. **Updating an existing skill**: use `skill_manage(action="edit")` or `skill_manage(action="patch")`. Do NOT copy to `/tmp/` first — `skill_manage` handles the per-user storage directly.
+
+### Workflow in DeerFlow
+
+The core loop is the same, but the persistence mechanism changes:
+
+1. Capture intent → interview → draft SKILL.md content
+2. **Call `skill_manage(action="create", name=<name>, content=<SKILL.md>)`** to persist the skill
+3. Run test cases (eval workspace files use sandbox `write_file`)
+4. Evaluate results, gather feedback
+5. **Call `skill_manage(action="edit")` or `skill_manage(action="patch")`** to improve the skill
+6. Repeat until satisfied
+7. **Done — no packaging needed.** The skill is already persisted and visible to all future chats.
+
+---
+
 ## Communicating with the user
 
 The skill creator is liable to be used by people across a wide range of familiarity with coding jargon. If you haven't heard (and how could you, it's only very recently that it started), there's a trend now where the power of Claude is inspiring plumbers to open up their terminals, parents and grandparents to google "how to install npm". On the other hand, the bulk of users are probably fairly computer-literate.
@@ -392,6 +441,8 @@ Use the model ID from your system prompt (the one powering the current session) 
 While it runs, periodically tail the output to give the user updates on which iteration it's on and what the scores look like.
 
 This handles the full optimization loop automatically. It splits the eval set into 60% train and 40% held-out test, evaluates the current description (running each query 3 times to get a reliable trigger rate), then calls Claude to propose improvements based on what failed. It re-evaluates each new description on both train and test, iterating up to 5 times. When it's done, it opens an HTML report in the browser showing the results per iteration and returns JSON with `best_description` — selected by test score rather than train score to avoid overfitting.
+
+Description optimization requires PyYAML (also used by the package validator). Name and description fields are parsed as YAML strings, including escaped quotes, comments and block scalars. Invalid metadata stops the evaluator, optimizer or description-improvement command with an `Error:` on stderr and exit status 1.
 
 ### How skill triggering works
 
