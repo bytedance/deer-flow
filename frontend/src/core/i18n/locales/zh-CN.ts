@@ -1550,7 +1550,8 @@ export const zhCN: Translations = {
     unconfigured: "未配置",
     unavailable: "当前无法使用渠道连接。",
     unavailableShort: "不可用",
-    setupTitle: (name: string) => `连接 ${name}`,
+    setupTitle: (name: string) =>
+      /^[A-Za-z0-9]/.test(name) ? `连接 ${name}` : `连接${name}`,
     setupEditTitle: (name: string) => `修改 ${name}`,
     wechatQr: {
       restart: "重新扫码",
@@ -1606,6 +1607,34 @@ export const zhCN: Translations = {
       scannedTitle: "已扫码",
       expiredTitle: "二维码已过期",
       failedTitle: "连接未完成",
+    },
+    // A Latin name keeps the usual spaces ("发给 Slack 机器人"); a Chinese one
+    // does not ("发给飞书机器人").
+    bindingCode: {
+      description: (provider: string) =>
+        /^[A-Za-z0-9]/.test(provider)
+          ? `把下面这条命令发给 ${provider} 机器人，即可绑定到你的 DeerFlow 账号。`
+          : `把下面这条命令发给${provider}机器人，即可绑定到你的 DeerFlow 账号。`,
+      loading: "正在生成绑定码…",
+      copy: "复制命令",
+      copied: "已复制",
+      copyFailed: "复制失败，请选中上方命令手动复制。",
+      expiresAt: (time: string) => `${time} 过期`,
+      waiting: (provider: string) =>
+        /^[A-Za-z0-9]/.test(provider)
+          ? `正在等待 ${provider} 中的绑定消息…`
+          : `正在等待${provider}中的绑定消息…`,
+      connected: (provider: string) =>
+        /^[A-Za-z0-9]/.test(provider)
+          ? `${provider} 已连接`
+          : `${provider}已连接`,
+      done: "完成",
+      expired: "绑定码已过期。",
+      newCode: "重新生成绑定码",
+      failed: "无法生成绑定码。",
+      tooManyCodes:
+        "未使用的绑定码太多。请先用已有的绑定码，或等它们过期（约 10 分钟）后再试。",
+      retry: "重试",
     },
     setupDescription:
       "填写当前服务进程需要的配置值。这些内容不会写入 config.yaml。",
