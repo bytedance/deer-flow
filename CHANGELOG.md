@@ -1402,6 +1402,12 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
 
 ### Fixed
 
+- **web fetch:** Cache unavailable Readability.js probes and stop retrying the
+  Node extractor after a process-launch failure. Installations without a
+  working Node/npm toolchain now use the existing link-preserving Python
+  fallback on later fetches without repeating the failed subprocess probe;
+  document-specific non-zero exits still retry Node on later pages. ([#5973])
+  
 - **scripts:** `make dev` and `make start` no longer run the checkout `.env`
   as a shell script. `serve.sh` sourced it, so `$$` became the shell's PID,
   backticks and `$(...)` ran commands, and an unquoted value with a space ran
@@ -12602,6 +12608,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5965]: https://github.com/bytedance/deer-flow/pull/5965
 [#5966]: https://github.com/bytedance/deer-flow/pull/5966
 [#5968]: https://github.com/bytedance/deer-flow/pull/5968
+[#5973]: https://github.com/bytedance/deer-flow/issues/5973
 [#5977]: https://github.com/bytedance/deer-flow/pull/5977
 [#5978]: https://github.com/bytedance/deer-flow/pull/5978
 [#5980]: https://github.com/bytedance/deer-flow/pull/5980

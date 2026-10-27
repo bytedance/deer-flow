@@ -2041,6 +2041,13 @@ Extra requests may consume quota or incur cost. See
 
 When using Tavily for `web_fetch`, extracted pages without a title use their URL
 as the heading; their content remains available to the agent.
+For providers that use the shared Readability extractor, Readability.js is
+optional. DeerFlow caches an unavailable Node.js toolchain or failed process
+launch and uses the existing Python fallback for later fetches instead of
+repeatedly starting a missing toolchain. A non-zero extraction exit falls back
+only for that document, because malformed or oversized input can fail while
+the toolchain remains healthy. The fallback keeps resolved article links in
+the returned Markdown.
 Chat tool-step titles accept leading blank lines and up to three spaces before
 a page's first H1 heading. Indented code, including mixed spaces and tabs, is
 not used as a title; the tool step falls back to the URL.
