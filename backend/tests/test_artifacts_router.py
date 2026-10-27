@@ -109,39 +109,21 @@ def test_get_artifact_reads_shared_viewed_image_blob_when_local_path_is_missing(
 
     monkeypatch.setattr("deerflow.storage.get_blob_store_if_enabled", lambda: SharedStore())
 
-    response = asyncio.run(
-        call_unwrapped(
-            artifacts_router.get_artifact,
-            "thread-1",
-            virtual_path.lstrip("/"),
-            _make_request(),
-        )
-    )
+    app = make_authed_test_app()
+    app.include_router(artifacts_router.router)
+    url = f"/api/threads/thread-1/artifacts/{virtual_path.lstrip('/')}"
+    with TestClient(app) as client:
+        response = client.get(url)
 
     assert response.status_code == 200
-    assert response.body == image_bytes
-    assert response.media_type == "image/png"
+    assert response.content == image_bytes
+    assert response.headers["content-type"] == "image/png"
     assert response.headers["ETag"] == f'"{digest}"'
 
-    range_request = Request(
-        {
-            "type": "http",
-            "method": "GET",
-            "path": "/",
-            "headers": [(b"range", b"bytes=1-3"), (b"if-range", f'"{digest}"'.encode())],
-            "query_string": b"",
-        }
-    )
-    ranged = asyncio.run(
-        call_unwrapped(
-            artifacts_router.get_artifact,
-            "thread-1",
-            virtual_path.lstrip("/"),
-            range_request,
-        )
-    )
+    with TestClient(app) as client:
+        ranged = client.get(url, headers={"Range": "bytes=1-3", "If-Range": f'"{digest}"'})
     assert ranged.status_code == 206
-    assert ranged.body == image_bytes[1:4]
+    assert ranged.content == image_bytes[1:4]
     assert ranged.headers["Content-Range"] == f"bytes 1-3/{len(image_bytes)}"
 
 
@@ -188,15 +170,97 @@ def test_get_artifact_rejects_checkpoint_image_blob_metadata_mismatch(tmp_path, 
 
     monkeypatch.setattr("deerflow.storage.get_blob_store_if_enabled", lambda: MustNotReadStore())
 
-    with pytest.raises(HTTPException, match="Artifact not found"):
-        asyncio.run(
-            call_unwrapped(
-                artifacts_router.get_artifact,
-                "thread-1",
-                virtual_path.lstrip("/"),
-                _make_request(),
-            )
-        )
+    app = make_authed_test_app()
+    app.include_router(artifacts_router.router)
+    with TestClient(app) as client:
+        response = client.get(f"/api/threads/thread-1/artifacts/{virtual_path.lstrip('/')}")
+    assert response.status_code == 404
+    assert "Artifact not found" in response.json()["detail"]
+
+
+@pytest.mark.parametrize(
+    ("record_state", "internal", "owner_header", "expected_status"),
+    [
+        ("owned", False, None, 200),
+        ("foreign", False, None, 404),
+        ("deleted", False, None, 404),
+        ("missing", False, None, 404),
+        ("deleted", True, "owner", 404),
+        ("foreign", True, "owner", 200),
+        ("foreign", False, "owner", 404),
+        ("shared", False, None, 200),
+    ],
+)
+def test_shared_image_blob_requires_existing_thread_access(tmp_path, monkeypatch, record_state, internal, owner_header, expected_status):
+    from langgraph.store.memory import InMemoryStore
+
+    from app.gateway import services
+    from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
+    from deerflow.storage import BlobRef
+
+    image_bytes = b"\x89PNG\r\n\x1a\nprivate image"
+    virtual_path = "/mnt/user-data/outputs/private.png"
+    ref = BlobRef(sha256=hashlib.sha256(image_bytes).hexdigest(), size=len(image_bytes), kind="viewed-image", content_type="image/png")
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+    if record_state != "missing":
+        owner = "reader" if record_state == "owned" else None if record_state == "shared" else "owner"
+        asyncio.run(thread_store.create("thread-1", user_id=owner))
+        if record_state == "deleted":
+            # Checkpoint cleanup can fail independently of metadata deletion.
+            asyncio.run(thread_store.delete("thread-1", user_id=owner))
+
+    metadata_reads, blob_reads = [], []
+
+    class Accessor:
+        async def aget(self, _config):
+            metadata_reads.append(True)
+            return SimpleNamespace(values={"viewed_images": {virtual_path: {"mime_type": "image/png", "size": len(image_bytes), "sha256": ref.sha256, "blob_ref": ref.model_dump(mode="json")}}})
+
+    async def build_accessor(_request, *, thread_id):
+        assert thread_id == "thread-1"
+        return Accessor(), {"configurable": {"thread_id": thread_id}}
+
+    class SharedStore:
+        def get_bytes(self, requested_ref):
+            blob_reads.append(requested_ref)
+            return image_bytes
+
+    monkeypatch.setattr(services, "build_thread_checkpoint_state_accessor", build_accessor)
+    monkeypatch.setattr("deerflow.storage.get_blob_store_if_enabled", lambda: SharedStore())
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda *_args, **_kwargs: tmp_path / "absent.png")
+    user = SimpleNamespace(id="reader", system_role=INTERNAL_SYSTEM_ROLE if internal else "user")
+    app = make_authed_test_app(user_factory=lambda: user)
+    app.state.thread_store = thread_store
+    app.include_router(artifacts_router.router)
+    headers = {INTERNAL_OWNER_USER_ID_HEADER_NAME: owner_header} if owner_header else {}
+    with TestClient(app) as client:
+        response = client.get(f"/api/threads/thread-1/artifacts/{virtual_path.lstrip('/')}", headers=headers)
+
+    assert response.status_code == expected_status
+    if expected_status == 200:
+        assert response.content == image_bytes
+        assert blob_reads == [ref]
+        assert metadata_reads == [True]
+    else:
+        assert not metadata_reads
+        assert not blob_reads
+
+
+def test_local_artifact_keeps_legacy_missing_thread_access(tmp_path, monkeypatch):
+    from langgraph.store.memory import InMemoryStore
+
+    from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
+
+    local_file = tmp_path / "legacy.txt"
+    local_file.write_text("legacy local artifact", encoding="utf-8")
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda *_args, **_kwargs: local_file)
+    app = make_authed_test_app()
+    app.state.thread_store = MemoryThreadMetaStore(InMemoryStore())
+    app.include_router(artifacts_router.router)
+    with TestClient(app) as client:
+        response = client.get("/api/threads/legacy-thread/artifacts/mnt/user-data/outputs/legacy.txt")
+    assert response.status_code == 200
+    assert response.text == "legacy local artifact"
 
 
 @asynccontextmanager

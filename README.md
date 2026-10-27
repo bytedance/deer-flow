@@ -489,6 +489,10 @@ Custom blob storage backends accept `blob_storage.backend: module.Class` or
 The selected class must implement `BlobStore`; backend options go under
 `blob_storage.backend_config`. See [blob storage](backend/docs/blob-storage.md).
 
+Viewed-image artifact URLs can use shared blobs when the serving Gateway lacks
+the local file. This fallback requires an existing thread record accessible to
+the caller; deleting that record revokes access even if checkpoint cleanup fails.
+
 ### Running the Application
 
 #### Deployment Sizing
