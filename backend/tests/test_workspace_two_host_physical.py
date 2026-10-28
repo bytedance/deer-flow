@@ -105,7 +105,13 @@ async def _controller():
         native_server_name="ecs",
     )
     context = WorkspaceContext(workspace_id=workspace_id, actor_user_id=owner, membership_version=1, policy_version=1)
-    upload_dir = jobs.publication.paths.sandbox_uploads_dir(THREAD_ID, user_id=owner)
+    from deerflow.authz.workspace import reset_current_workspace, set_current_workspace
+
+    selected = set_current_workspace(context)
+    try:
+        upload_dir = jobs.publication.paths.sandbox_uploads_dir(THREAD_ID, user_id=owner)
+    finally:
+        reset_current_workspace(selected)
     upload_dir.mkdir(parents=True, exist_ok=True)
     (upload_dir / "program.txt").write_bytes(b"two host owned dependency report")
     args = {
