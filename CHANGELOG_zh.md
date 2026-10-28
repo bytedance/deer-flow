@@ -1116,6 +1116,12 @@
 
 ### 修复
 
+- **基准测试：** 在构造任何提供方之前，先拒绝负数与 NaN 的沙箱空闲超时值，并对
+  BoxLite/AIO 健康检查的跳过窗口应用同样的校验。有效的零、正数与正无穷值保持既有
+  行为；OpenSandbox 继续拒绝非零的跳过窗口；AIO 基准输出现在会记录被接受的值，
+  且不暗示其提供方会消费这些值。空闲回收场景会在预配沙箱之前拒绝无穷大，因为它
+  必须睡过所配置的超时时间。([#7651])
+
 - **TUI：** `/threads` 和 `/model` 选择器现在按原样显示线程标题和模型名称。此前标签
   会被当作 Textual 标记解析，标题如 `Fix [/bold] in parser` 会在打开选择器时以
   `MarkupError` 使 TUI 退出，标题中的 `[a]` 也会消失。([#7631])
@@ -1165,6 +1171,11 @@
   和 `extensions_config.json`。每次调用最多会把这两个文件检查三次（各做一次 `stat`
   和完整的 sha256），编辑后还会在循环上重新解析 `config.yaml`，期间其他运行、请求和
   流式输出都会停顿。现在它们与图片搜索一样，每次调用只在工作线程中读取一次配置。([#7580])
+
+- **向导：** 安装向导的 Anthropic 默认模型现在是 `claude-sonnet-5-5`，取代已退役、
+  Claude API 不再接受的 `claude-sonnet-4-20250514`。针对该模型，向导会省略它拒绝的
+  扩展思考（`budget_tokens`）模板与禁用思考模板。`config.example.yaml` 与配置文档中
+  的 Anthropic 示例也改用同一模型。([#7585])
 
 - **鉴权：** 公开的认证路由（`/register`、`/setup-status`、`/providers`、
   `/oauth/{provider}` 和 `/callback/{provider}`）不再在事件循环上读取 `config.yaml` 和
