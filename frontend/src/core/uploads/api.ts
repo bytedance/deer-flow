@@ -145,7 +145,18 @@ export async function uploadFiles(
     throw new Error(await readErrorDetail(response, "Upload failed"));
   }
 
-  return response.json();
+  const result = (await response.json()) as UploadResponse;
+  if (result.success === false) {
+    // A gateway or proxy may omit `message`; treat it like an empty one
+    // instead of throwing a TypeError while handling the failure.
+    const message =
+      typeof result.message === "string" ? result.message.trim() : "";
+    throw new Error(
+      message ? `Upload incomplete: ${message}` : "Upload failed",
+    );
+  }
+
+  return result;
 }
 
 /**

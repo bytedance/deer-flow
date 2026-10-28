@@ -68,7 +68,7 @@ from deerflow.sandbox.acquire_serialization import AcquireSerializer
 from deerflow.sandbox.exceptions import SandboxCapacityExceededError
 from deerflow.sandbox.identity import derive_sandbox_scope_token
 from deerflow.sandbox.sandbox import Sandbox
-from deerflow.sandbox.sandbox_provider import SandboxProvider
+from deerflow.sandbox.sandbox_provider import SandboxProvider, host_owns_sandbox_shutdown
 
 from ..aio_sandbox.ownership import (
     OwnershipBackendError,
@@ -584,7 +584,10 @@ class E2BSandboxProvider(SandboxProvider):
                 signal.signal(signum, signal.SIG_DFL)
                 signal.raise_signal(signum)
 
-        for sig_name in ("SIGTERM", "SIGINT", "SIGHUP"):
+        # A host that owns shutdown (the Gateway lifespan) drains runs before
+        # tearing sandboxes down; SIGHUP keeps the fallback uvicorn lacks.
+        sig_names = ("SIGHUP",) if host_owns_sandbox_shutdown() else ("SIGTERM", "SIGINT", "SIGHUP")
+        for sig_name in sig_names:
             sig = getattr(signal, sig_name, None)
             if sig is None:
                 continue
@@ -671,6 +674,9 @@ class E2BSandboxProvider(SandboxProvider):
                 self._sandboxes.pop(sid, None)
                 self._thread_sandboxes.pop(key, None)
             self._forget_mount_result(sid)
+            # The lease renewer would otherwise keep re-claiming this lease
+            # until shutdown: no later path sees the ID again.
+            self._release_ownership(sid)
             try:
                 sandbox.close()
             except Exception:
@@ -745,6 +751,8 @@ class E2BSandboxProvider(SandboxProvider):
                 target_id,
             )
             self._forget_mount_result(target_id)
+            # The warm entry's lease would outlive it; see the in-process reuse path.
+            self._release_ownership(target_id)
             self._complete_transition_remote_op(target_id, remote_destroyed=True)
             return None
 
@@ -1662,9 +1670,9 @@ class E2BSandboxProvider(SandboxProvider):
         idle_timeout = float(self._config["idle_timeout"])
         if idle_timeout <= 0:
             return
-        now_wall = time.time()
+        now_monotonic = time.monotonic()
         with self._lock:
-            expired = [(sandbox_id, entry) for sandbox_id, entry in self._warm_pool.items() if now_wall - entry[1] >= idle_timeout]
+            expired = [(sandbox_id, entry) for sandbox_id, entry in self._warm_pool.items() if now_monotonic - entry[1] >= idle_timeout]
         for sandbox_id, entry in expired:
             with self._sandbox_lifecycle(sandbox_id):
                 with self._lock:
@@ -2994,7 +3002,7 @@ class E2BSandboxProvider(SandboxProvider):
             with self._lock:
                 should_kill = self._shutdown_called
                 if not should_kill:
-                    self._warm_pool[sandbox_id] = (seed or "", time.time())
+                    self._warm_pool[sandbox_id] = (seed or "", time.monotonic())
                     self._warm_pool.move_to_end(sandbox_id)
                     self._end_transition_locked()
                     transition_slot_held = False

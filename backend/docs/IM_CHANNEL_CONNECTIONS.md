@@ -23,6 +23,12 @@ The selection is written to the new Gateway thread's channel metadata and, for a
 Because selecting an agent always creates a new thread instead of mutating the current one, an existing conversation keeps its original runtime, prompt, skills, and checkpoint lineage.
 `/agent use lead_agent` starts a new conversation with the default agent.
 
+### Goal status (`/goal`)
+
+`/goal <condition>` sets a goal on the chat's conversation and starts a run with the condition as the task; `/goal clear` clears it. `/goal` alone reports what the web goal bar shows: the goal, `In progress.` while a run is pending or running, and once auto-continue has stood down, why (for example `Stopped: the continuation limit was reached.` or `Waiting for you: it needs your input.`). A met goal is cleared and recorded in the thread state, so `/goal` answers `Goal met: <goal>` until the next goal change. Reasons come only from host-written codes; the goal checker's notes and provider errors are never sent.
+
+DeerFlow's own replies here and to `/connect` use the binding owner's web UI language (the `locale` user preference), else `channel_connections.notification_locale` (`en-US` by default). A reply with no known owner, such as one to an invalid or expired code, uses the configured default. Agent replies are not translated.
+
 Connect codes are deliberately **bind-time defenses**, not chat-time defenses. After binding, ordinary `allowed_users` continue to gate regular messages exactly as before.
 
 ## Connect-code Flow
@@ -37,22 +43,22 @@ sequenceDiagram
     participant Store as SQL store<br/>channel_oauth_states
     participant Worker as Provider worker<br/>(Telegram/Slack/...)
     participant Repo as ChannelConnection repo<br/>(upsert_connection)
+    participant Chat as IM chat
 
     Browser->>Gateway: POST /api/channels/{provider}/connect
     Gateway->>Store: insert code (token_urlsafe(16), TTL=600s, single-use)
     Gateway-->>Browser: code + (Telegram: deep-link URL)
 
-    Note over Browser,Worker: User sends /connect <code> (or /start <code>) to the provider bot
-
+    Chat->>Worker: /connect <code> (Telegram: /start <code>)
     Worker->>Store: consume_oauth_state(code)
     alt valid + unexpired
         Store-->>Worker: ok (state consumed once)
         Worker->>Repo: upsert_connection(provider, external_account_id, workspace_id, owner_user_id)
         Repo-->>Worker: connection row (active)
-        Worker-->>Browser: success reply (via channel callback)
+        Worker-->>Chat: "connected" reply in the code owner's web UI language
     else invalid / expired / used
         Store-->>Worker: reject
-        Worker-->>Browser: rejected (no reply in chat)
+        Worker-->>Chat: "invalid or expired" reply in channel_connections.notification_locale
     end
 
     Note over Repo: Partial unique index uq_channel_connection_active_identity<br/>revokes prior owner's active row for the same identity
@@ -182,6 +188,14 @@ graph TB
 ```
 
 For the special GitHub case (`fire_and_forget=True` channel policy), the manager calls `runs.create()` and returns once the run is `pending` — no outbound reply, because GitHub agents post via the `gh` CLI from inside their sandbox. See [GITHUB_AGENTS.md](GITHUB_AGENTS.md) for the full GitHub flow.
+
+## Attachment delivery feedback
+
+The shared channel outbound path sends text before uploading attachments. Channels inheriting the default, unsupported `send_file` implementation explain the limitation in that first reply instead of attempting uploads. Supported channels continue trying the other attachments after an individual failure, then send one combined notice listing only unsent files. Successful uploads need no additional confirmation.
+
+The notice stays in the original conversation, preserves connection/owner routing, and carries no attachments or clarification-card payload. Built-in IM outbounds do not currently populate `metadata.locale`, so their notices choose Chinese or English from the first non-empty response line. This path does not read user language preferences; an explicitly supplied locale still overrides the heuristic. Files stay in the original DeerFlow conversation for download. If the platform no longer accepts the notice, the upload failures and notice failure remain in the logs; no proactive notification, regeneration, or new upload retry is started.
+
+WeCom reuses this shared processing, sends failure notices as text replies on the original inbound frame after the final stream, and retains its frame/stream cleanup after delivery. Provider-specific upload protocols, reply windows, and send ordering are unchanged.
 
 ## Owner-scoped File Storage
 
@@ -373,6 +387,8 @@ Upgrade note: existing auth-enabled deployments that already have `channel_conne
 
 ## Connect Flow
 
+Every worker answers the bind message in the chat: `<Provider> connected to DeerFlow.` on success, otherwise that the code (Telegram: the link) is invalid or expired, or that the bind could not be completed from that message. Replies use the code owner's web UI language once the code is consumed, else `channel_connections.notification_locale` ([reply language](#goal-status-goal)).
+
 Telegram:
 
 - The frontend creates a short one-time code.
@@ -447,6 +463,70 @@ Neither can make anything be *acted on*. The `allowed_users` allowlist and per-e
 **Deny-by-default allowlist:** unlike other providers (where an empty `allowed_users` means "allow everyone"), `channels.buzz.allowed_users` is deliberately deny-by-default — an empty list means *nobody* can trigger a run, and DeerFlow logs a startup warning saying so. Add each member pubkey (hex or `npub1…`) that should be able to reach the agent. Individual drops are logged at DEBUG level.
 
 **Bound identity:** once a pubkey completes `/connect`, its inbound messages resolve to that connection and run under the bound DeerFlow user (memory, files, and artifacts land in that user's buckets). Bindings are scoped to the relay host, so the same pubkey on a different relay is a different identity and must bind separately.
+
+### Feishu / Lark TLS troubleshooting
+
+If Gateway startup succeeds but the Lark SDK keeps logging
+`connect failed, err: [SSL: CERTIFICATE_VERIFY_FAILED] ... self-signed certificate in certificate chain`,
+the channel worker has started but its connection has not passed TLS verification.
+Changing the App ID, App Secret, or event permissions does not repair a certificate
+trust failure. A browser that can reach Feishu does not prove that the Gateway's
+Python environment trusts the same CA certificates.
+
+The SDK first obtains a connection URL over HTTPS using Requests, then opens a
+WebSocket using Python's default SSL context. Check both trust sources in the
+**same environment and process configuration as the Gateway**. From the repository
+root, after installing backend dependencies:
+
+```bash
+uv run --no-sync --project backend python -c "import ssl; print(ssl.get_default_verify_paths()); print(ssl.create_default_context().cert_store_stats())"
+uv run --no-sync --project backend python -c "import requests; print(requests.certs.where()); print(requests.Session().merge_environment_settings('https://open.feishu.cn', {}, None, None, None)['verify'])"
+```
+
+These commands inspect trust configuration without sending app credentials or
+connecting to Feishu. They do not establish that the remote certificate chain
+is valid. Run them inside the Gateway container when using Docker; host Python
+and the container can have different trust stores.
+
+If a corporate proxy or security product inspects TLS, ask its administrator for
+the approved root/intermediate CA certificates in PEM format and verify their
+provenance. Use a CA bundle that retains the public roots needed by other Gateway
+connections and includes those approved certificates. If no TLS inspection is
+expected, investigate the presented certificate chain and repair the Python or
+container CA installation before adding any certificate to trust.
+
+Set **both** variables to the absolute path of that bundle in the Gateway's
+environment, for example in the root `.env`:
+
+```dotenv
+SSL_CERT_FILE=/absolute/path/to/approved-ca-bundle.pem
+REQUESTS_CA_BUNDLE=/absolute/path/to/approved-ca-bundle.pem
+```
+
+`SSL_CERT_FILE` selects the default OpenSSL CA file for the WebSocket connection
+(and clients such as HTTPX); `REQUESTS_CA_BUNDLE` selects the Requests CA bundle
+for connection discovery and synchronous API calls. Setting only the Requests
+variable can leave the WebSocket handshake failing. The diagnostic commands above
+do not load `.env` themselves: export these variables in the diagnostic shell as
+well, using your shell's environment-variable syntax.
+
+For Docker, mount the bundle read-only into the `gateway` service and use its
+**container path** in both variables. A host path in `.env` is not automatically
+mounted. Recreate the Gateway container after changing its environment or mounts;
+for local development, restart the Gateway process. These variables configure
+trust for the whole Gateway, so use an operator-approved bundle.
+
+Do not disable certificate or hostname verification (`verify=False`,
+`CERT_NONE`, or an unverified SSL context) to make the bot connect. Confirm recovery
+by checking that the certificate errors stop and that the bot receives and replies
+to a test message; the earlier "channel started" log alone is not a handshake or
+message-delivery check. If the error persists, compare the CA issuer and trust
+configuration for both the configured Feishu/Lark API domain and the WebSocket
+host. When sharing diagnostics, omit app secrets, tokens, and connection-URL query
+parameters.
+
+References: [Python SSL trust paths](https://docs.python.org/3.12/library/ssl.html#ssl.get_default_verify_paths),
+[Requests CA bundles](https://requests.readthedocs.io/en/latest/user/advanced/#ssl-cert-verification).
 
 ### Feishu scheduled-task notifications
 
@@ -617,25 +697,34 @@ Incoming messages that resolve to a connection carry `connection_id`, `owner_use
 
 Runtime provider credentials are deployment-level bot secrets, not user-owned
 connection credentials. They can come from `channels.*` in `config.yaml` or
-from the browser runtime setup flow, which persists them through
-`ChannelRuntimeConfigStore` so local/private deployments can configure bots
-without editing YAML. The runtime store is a local plaintext JSON fallback with
-owner-only file permissions (`0600`); use it only where the DeerFlow data
-directory is already trusted as secret storage. Every Gateway worker keeps its own copy
-of the file; a save or disconnect rereads it under an advisory sidecar lock
-(`.runtime-config.json.lock`) and changes only that provider, so workers sharing
-`DEER_FLOW_HOME` do not overwrite each other's bots. Reads still serve the copy
-the worker last loaded or wrote. WeChat QR login auth state
-follows the same local-runtime model and may persist a QR-derived bot token in
-the channel state directory.
+from the browser runtime setup flow (`POST` / `DELETE
+/api/channels/{provider}/runtime-config`, admin only), so local/private
+deployments can configure bots without editing YAML. With a `sqlite` or
+`postgres` database the flow stores one row per provider in
+`channel_runtime_configs`: the provider's config block encrypted with
+`DEER_FLOW_CREDENTIALS_KEY`, a plaintext disconnect flag (a disconnect keeps
+suppressing the provider's `config.yaml` block, key or no key), and a
+`version` bumped on every save. Every request re-reads the table, so all
+Gateway instances serve the same providers. Without a usable key, saving
+credentials answers `503` rather than storing plaintext, and rows the key
+cannot decrypt read as not configured. The first start after the upgrade
+imports an existing `{DEER_FLOW_HOME}/channels/runtime-config.json` (a
+provider already in the table keeps its row) and then deletes the plaintext
+file, so a downgrade to a build without the table must re-enter UI-configured
+bots. With `database.backend: memory` that file (mode `0600`, saves under an
+advisory sidecar lock) remains the store; use it only where the DeerFlow data
+directory is already trusted as secret storage. WeChat QR login auth state
+follows the local-runtime model and may persist a QR-derived bot token in the
+channel state directory.
 
 With several Gateway instances, `channels.leader_lease` gives each provider's
 platform connection to one instance: the holder of the provider's row in
 `channel_leases`. Bindings, connect codes and conversations are shared SQL
 state, so the connect flow works on any instance; `GET /api/channels/` names
-each provider's `leader`. Runtime credentials saved on an instance that does
-not hold the provider apply on the holder only when it next starts the
-channel. Channel runs are created with `on_disconnect: continue`, so a run
+each provider's `leader`. Runtime credentials saved, or a disconnect made, on
+any instance reach the holder within one lease renewal interval: it compares
+each provider's `version` in `channel_runtime_configs` on every tick and
+restarts, starts or stops its transport when the config changed. Channel runs are created with `on_disconnect: continue`, so a run
 keeps executing when the request that created it dies with its instance (a
 leader hand-off, a rolling restart, a crash): its thread state is persisted
 and the answer stays readable in the web UI, while the IM reply itself is
@@ -646,6 +735,43 @@ redelivery of the same message on the new holder is dropped instead of
 executing the turn twice; a request the Gateway rejected, or a failure before
 the request was sent, still releases the key for a retry. See
 [IM channel leader lease](CONFIGURATION.md#im-channel-leader-lease-channelsleader_lease).
+
+### Duplicate and late deliveries
+
+The inbound dedupe key is `(channel, workspace, chat, message id)`; with a
+PostgreSQL database every instance shares it for 10 minutes, and it fails open
+on a database error. Discord keys a message by its guild (`dm` for a direct
+message, which used to get no key at all) and by the channel it was posted in,
+so two instances that route a reply in a thread differently still see one
+message. A Discord session on every instance receives every message, so the
+adapter claims that key before it creates a Discord thread for the message:
+only the instance that wins the claim creates one. A claimed message that is
+never processed (a failed or cancelled hand-off, a shutdown that discards it
+from the queue) gives the key back, so a peer can still take it.
+
+Past the dedupe window, after a restart, or while the dedupe store is down, a
+redelivery still reaches the run request. Every run request for a message
+with a dedupe key carries an `Idempotency-Key` derived from it, and the human
+message id is derived from the same key, so the Gateway returns the run it
+admitted for the first delivery instead of starting another one (on a
+`memory` database, only while that Gateway process still holds the run). The
+Gateway scopes these internal keys by owner rather than by thread, so a
+redelivery that arrives after `/new` rebound the conversation to a fresh thread
+gets a 409 for the admitted run, answered with the same note, instead of
+running again there. The
+redelivery then attaches to that run: a streaming channel replays its events,
+or, once they are gone, the manager reads this message's turn from the thread
+state; a `runs.wait` channel reads that turn as well, and a run that is still
+in progress is answered with a short "already being processed" note. A
+redelivered message is not run again even when its first run failed; a new
+message is. Messages without a dedupe key (no stable message id or workspace)
+are not covered.
+
+The first message of a new conversation binds it to a thread with an
+insert-if-absent claim on `channel_conversations` (connected users) or
+`channel_thread_bindings` (unbound chats). An instance that created a thread
+but lost the claim adopts the winner's thread and deletes its own, empty one;
+`/new` still rebinds the conversation to a fresh thread.
 
 ## Security Notes
 
@@ -660,9 +786,10 @@ the request was sent, still releases the key for a retry. See
   credential material cannot be decrypted — a lost or changed key — DeerFlow
   treats it as unavailable instead of using corrupt secrets. A declared
   multi-instance deployment with channel connections enabled must set the key.
-- The local plaintext runtime credential fallback is documented above; prefer
-  deployment-managed environment/config secrets for non-local deployments until
-  a dedicated secret backend is configured.
+- Runtime bot credentials entered in the browser are encrypted with the same
+  key in `channel_runtime_configs`. Only `database.backend: memory` keeps the
+  plaintext JSON fallback documented above; prefer deployment-managed
+  environment/config secrets there.
 - `allowed_users` is **not** a bind-time defense. Because connect codes are processed before the allowlist (see Connect Flow), anyone who possesses a valid code can consume it — not only allowlisted users. Bind security therefore rests entirely on the code's confidentiality: it is 128-bit random, expires after 10 minutes, is single-use, and is shown only in the initiating user's browser (never echoed back to chat). Treat connect codes like one-time passwords and do not forward them.
 - An external identity — `(provider, external account, workspace/team/guild)` — has at most one active owner. The most recent successful bind wins: connecting an identity that another DeerFlow user already holds transfers ownership and revokes the previous owner's binding (and its stored credentials). This is enforced at the database layer, so two users racing to bind the same identity cannot both end up connected.
 - Provider bot tokens remain in `channels.*` and are never returned to the browser.

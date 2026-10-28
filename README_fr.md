@@ -231,7 +231,7 @@ make docker-init    # Pull sandbox image (only once or when image updates)
 make docker-start   # Start services (auto-detects sandbox mode from config.yaml)
 ```
 
-`make docker-start` ne lance `provisioner` que si `config.yaml` utilise le mode provisioner (`sandbox.use: deerflow.community.aio_sandbox:AioSandboxProvider` avec `provisioner_url`).
+`make docker-start` ne lance `provisioner` que si `config.yaml` utilise le mode provisioner (`sandbox.use: deerflow.community.aio_sandbox:AioSandboxProvider` avec `provisioner_url`). Les utilisateurs qui lancent Compose directement peuvent ajouter `--profile provisioner` à la commande dev pour le même mode ; la stack par défaut ne nécessite pas Kubernetes.
 Les processus backend récupèrent automatiquement les changements dans `config.yaml` au prochain accès à la configuration, donc les mises à jour de métadonnées des modèles ne nécessitent pas de redémarrage manuel en développement.
 
 > [!TIP]
@@ -328,8 +328,6 @@ channels:
   # Optional: global session defaults for all mobile channels
   session:
     assistant_id: lead_agent
-    config:
-      recursion_limit: 100
     context:
       thinking_enabled: true
       is_plan_mode: false

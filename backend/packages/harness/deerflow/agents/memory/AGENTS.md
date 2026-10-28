@@ -1,5 +1,16 @@
 ### Memory System
 
+`locale.py::with_memory_locale` captures a supported run `context.locale` on
+queued message copies only, after PII redaction, for normal/async/emergency
+writes. Stamp every message so filtering and watermark slicing retain the
+preference; strip inbound/stale `deerflow_ui_locale` metadata when no supported
+run locale exists. Never change checkpoint messages or memory backend APIs.
+Bundled DeerMem reads this optional metadata into its human data message,
+keeping system text static and the portable backend free of host imports.
+Language influences new prose, not JSON keys or bulk translation of stored facts.
+`test_ui_language_preference.py` pins DeerMem's locale keys and display names
+to the host allowlist without importing host code into the portable backend.
+
 DeerMem `prompt_prepend`/`prompt_append` wrap the first system message from
 `memory_update` after formatting, without touching its human data message or
 cached templates. This is the live summary/fact extraction path; do not wire
@@ -13,6 +24,8 @@ This directory owns memory capture, storage, retrieval, prompt injection, and mo
 - `manager.py` defines the backend-neutral `MemoryManager` contract.
 - `agents/middlewares/memory_middleware.py` queues filtered conversations for passive capture.
 - `summarization_hook.py` connects memory work to the summarization lifecycle.
+  Async compaction runs it in a worker: `add_nowait` is sync HTTP for mem0,
+  Honcho and OpenViking (`tests/blocking_io/test_summarization_memory_flush.py`).
 - `tools.py` provides `memory_search`, `memory_get`, `memory_add`, `memory_update`, and `memory_delete`.
 - `backends/deermem/` contains the default local backend.
 - `backends/mem0/`, `backends/openviking/`, and `backends/honcho/` contain optional adapters.
@@ -21,95 +34,13 @@ This directory owns memory capture, storage, retrieval, prompt injection, and mo
 `user_id=None` selects only the legacy no-user root.
 `agent_name=None` selects all agent buckets in that user scope.
 It does not interrupt a context after `_process_queue` removes it from `_items`.
-Dropped pending snapshots still advance the conversation watermark so a later turn cannot restore them.
-That advance is monotonic per `(thread_id, user_id, agent_name)`: each snapshot carries the
-call-arrival sequence it was assigned before it ever competed for the queue lock (not the
-sequence it would get by lock-acquisition order), and a watermark write with a lower sequence
-than what is already recorded is refused rather than rewinding it. This covers a delayed
-in-flight extraction that finishes after a newer snapshot for the same key was already queued
-and cancelled.
-`clear_memory` snapshots matching pending contexts before the durable write and
-consumes that snapshot only after the commit succeeds. The consume, queue
-cancel, and exclusion promote run in the same locked publish as the generation
-bump -- before sidecar metadata cleanup -- and `peek_clear_generation` takes
-that publish lock for the whole write, not only the post-commit callback. A
-concurrent same-scope `add` / `add_nowait` therefore cannot observe the new
-generation while exclusions are still empty, even if file storage's JSON peek
-does not take the write lock. An admit that already has an arrival sequence
-but has not finished that peek is registered as in-flight; the locked publish
-consumes those snapshots too, so waiting on the publish lock cannot turn a
-pre-clear feed into a new-generation job on a thread that had no exclusion
-coverage. A debounce
-worker may dequeue and fail the LLM while storage is still in flight; that
-failure does not record watermark or clear-exclusions until a newer generation
-exists, so post-clear `cancel_by_agent` would miss the already-dequeued job.
-Consuming the start-of-clear snapshot closes that window. A failed clear (lock
-timeout, exhausted retries) must leave the feed retryable: it must not consume
-the snapshot, empty the debounce queue, advance the watermark, or write
-clear-exclusions. In-flight extraction during a successful clear is still dropped
-by the durable generation fence.
-The sequence counter and the watermark are both process-local, in-memory state on one
-`MemoryUpdateQueue`/`MemoryUpdater` pair -- they do not span Gateway workers. A turn sitting only
-in one worker's debounce queue (not yet flushed, cancelled, or fenced anywhere) is invisible to
-a clear that lands on a different worker; that turn's pre-clear content can still be re-fed and
-persisted once the conversation is next resent in full, because no process ever recorded that it
-should be excluded. Only the durable clear-generation fence below is cross-worker. Closing this
-queue-level gap needs the debounce queue itself to become shared/durable, a cancel broadcast to
-active workers, or per-thread sticky routing -- none of which this fix attempts.
+Dropped snapshots advance the watermark per `(thread_id, user_id, agent_name)` with the pre-lock sequence; a lower sequence cannot rewind it.
+`clear_memory` consumes pending contexts only after commit, in the locked publish that bumps the generation, before sidecar cleanup. A failed clear must not consume, empty the queue, advance the watermark, or write exclusions.
+Sequence, exclusions, and the watermark cache are process-local. Identity is also in `watermarks.json`. Only this fence is cross-worker.
 Broader cancellation must iterate known user scopes.
-A durable clear generation in `memory.json` fences that in-flight window and other Gateway workers.
-The queue captures the generation at enqueue, before the process-local queue lock.
-A later clear bumps the generation in the same locked commit as the wipe.
-User-wide `clear_all` raises that generation before per-agent wipes so an
-in-flight writer cannot rebase onto an emptied agent.
-Extraction drops before the LLM call, and again at commit, when a newer clear exists.
-A generation-fenced drop still advances the conversation watermark and the clear-exclusion
-coverage set. If the LLM call times out, raises, or returns illegal JSON after a newer clear
-landed, the failed feed is still consumed when the captured generation is stale; ordinary
-retryable failures are not consumed.
-Same-key queue merges refuse an incoming snapshot whose call-arrival sequence is older than
-the queued item, even when both peeks share a generation: otherwise a delayed shorter feed
-can overwrite a newer snapshot before the watermark ever sees it.
-The extraction watermark and the clear-exclusion coverage set are distinct. Emergency
-(summarization) flushes set `bypass_watermark` so they can re-feed a subset about to be
-removed without regressing extraction progress; they still drop any message whose
-identity is in the clear-exclusion set. That set is the whole cleared prefix -- every
-identity from a cancelled snapshot or from extracted coverage -- not only the tail
-message. Coverage is merged by union and never shrinks: a later emergency subset
-cannot replace a wider prefix, and call-arrival sequence does not decide which
-identities stay. Emergency flushes still publish extracted coverage without
-advancing the extraction watermark, so a later `clear_memory` can promote
-emergency-only threads. `promote_clear_exclusions` scans published coverage, not
-only keys that already have a watermark. `clear_memory` unions matching extracted
-coverage into that set so a later `add_nowait` cannot restore already-extracted,
-then-cleared turns. A persist that finishes, then sees a newer clear, also
-registers exclusion on that completion path: promote only copies coverage that is
-already published, so a clear that lands between persist and publish cannot be the
-only writer of the exclusion set. A failed re-read does not exclude that feed.
-Each captured generation keeps its own pending note: a later failure adds
-another note and does not replace an older one. A successful read settles
-only the notes that generation can answer. A note from an older generation
-is excluded, a note that is not stale is dropped, and a note captured at a
-newer generation stays pending. Until a note is excluded the feed stays
-retryable, including for an emergency flush. Pending notes share
-`watermark_max_keys` with the other per-thread caches: over the cap, the
-least-recently-used thread's notes are dropped. If a
-summarization flush carries only an older prefix that does not include the previous
-tail, those prefix identities are still dropped; messages that are not in the set
-remain eligible. Clear exclusion only drops messages with an id. A message
-without an id falls back to a `(type, content)` identity, which also matches a
-fresh post-clear turn with the same text, so it is never dropped: a user who
-repeats a cleared preference can store it again. Known gap: resending an
-id-less pre-clear conversation after a clear can re-extract it. Graph state
-assigns ids to every message, so `MemoryMiddleware` and the summarization flush
-always carry them; only direct callers that build id-less messages hit this
-gap. The generation fence still drops in-flight id-less work.
-DeerMem's `aadd` / `aadd_nowait` offload enqueue (including the uncached manifest peek) with
-`asyncio.to_thread`. The lead summarization path fires `memory_flush_hook.as_async`
-(`amemory_flush_hook`) from `acompact_state`. That async hook also offloads
-`get_memory_manager()` (backend scan + construction) with `asyncio.to_thread`,
-matching `MemoryMiddleware.aafter_agent()`, so a cold start cannot `os.stat` on
-the Gateway event loop.
+Peek before the queue lock and bump in the same commit as the wipe. `clear_all` bumps the user generation first. Drop before the LLM and at commit on a newer clear, and still advance the watermark. Refuse an older call-arrival sequence.
+Only messages with an id are dropped; id-less identity is `(content, type, sha256(text))`, so a repeat is kept.
+A newer clear consumes every older same-key emergency snapshot. A failed consume stays queued and excludes its ids from later same-generation flushes. An older flush is refused and its signals merge in.
 
 Focused updater tests live in `backend/tests/test_memory_updater.py`.
 Backend-specific tests use `backend/tests/test_<backend>_memory_backend.py`.
@@ -172,51 +103,32 @@ fact-only import payload supplies empty summary defaults.
 
 `memory.mode: middleware` is the default passive mode.
 `MemoryMiddleware` queues filtered user and final assistant messages.
-It captures `user_id` and the scope clear-generation fence when it enqueues work.
-Both survive the background timer boundary.
-The fence peek is a cheap counter read and runs before the queue lock.
-File storage reads JSON counters only, not fact files.
-Custom `storage_class` providers must override `peek_clear_generation` with an equally cheap read; `create_storage` rejects a provider that leaves the base peek in place.
-Same-key merges keep the earlier token unless a newer clear is already visible.
-A visible newer clear consumes the pre-clear snapshot and starts a fresh fence.
-Emergency (bypass) merges follow the same rule: a pending pre-clear flush is
-consumed, and the replacement messages keep the generation they captured, so
-post-clear turns are not dropped on the stale fence.
-If that consume fails, the queued messages and fence stay in place and the
-incoming messages are queued beside them under the generation they captured.
-A later flush excludes only the stale snapshot; the new snapshot keeps its
-own fence. Later same-key adds merge into that newer snapshot. The failed
-add still unions its signals onto both.
-The new snapshot also drops every message id carried by the stale one and
-keeps filtering those ids on later same-key merges
-(`ConversationContext.excluded_message_ids`). The stale drop runs through the
-same `mark_feed_consumed` path that just failed, and a full-conversation feed
-still carries the cleared turns, so the new snapshot must not depend on that
-drop. The filter lives only on queued work: a turn queued after both
-snapshots are processed relies on the updater's clear-exclusion set.
-An incoming peek older than the queued context cannot inherit the newer token.
-That refused add still unions its signals onto the queued snapshot.
-If consuming the refused snapshot fails, the queued fence stays as-is.
-Same-generation merges also keep the already-queued snapshot when the incoming
-call-arrival sequence is older; they union signals and do not consume the
-incoming feed as a clear.
+It captures `user_id` when it enqueues work.
+This identity survives the background timer boundary.
 
 DeerMem debounces each `(thread_id, user_id, agent_name)` independently using
 monotonic deadlines. Same-key coalescing preserves the first pending arrival
-only while the clear generation is unchanged.
+while the clear generation is unchanged.
 `backend_config.max_wait_seconds` (default 300) caps debounce deferral even
-under continuous updates. A newer clear starts a fresh window for the
-post-clear messages, whether the pre-clear snapshot was consumed or left
-queued beside them. A refused older enqueue leaves the queued deadline
-unchanged. One timer wakes for the earliest deadline and one consumer
+under continuous updates. One timer wakes for the earliest deadline and one consumer
 processes eligible items serially. Other conversations cannot reset that
 deadline. Consumer backlog and LLM latency can still delay completion.
 Early wakeups rearm with a 50 ms minimum; arrivals during extraction wait for
-the finishing worker to rearm. Emergency snapshots are immediately eligible;
+the finishing worker to rearm. Emergency snapshots are immediately eligible
+and remain separate in arrival order, including within the same conversation
+key: successive compactions can remove disjoint message partitions. Only normal
+cumulative updates coalesce; neither kind replaces the other.
+Emergency snapshots bypass `queue_max_depth`. Warn at 32 pending snapshots for
+one `(thread_id, user_id, agent_name)` key and each doubling, without logging
+message contents. Count only pending emergency items; drain, cancellation, and
+clear reset the threshold naturally. Retention remains unbounded and process-local.
+Regression coverage: `tests/test_memory_emergency_backlog.py`.
 `flush`, `flush_nowait`, and `flush_sync` make all pending items eligible.
-Becoming eligible does not skip the generation captured at enqueue.
 Tests in `tests/test_memory_queue_deadlines.py` use a fake monotonic clock and
 timer to exercise scheduling without timing-sensitive sleeps.
+`tests/test_memory_emergency_snapshots.py` covers overlapping compactions through
+the real memory hook, updater, and canonical storage, plus scoped cancellation
+and drain behavior.
 
 DeerMem and mem0 exclude assistant tool-call intent in every representation:
 `tool_calls`, `invalid_tool_calls`, and provider-raw `tool_calls`/`function_call`.
@@ -259,7 +171,11 @@ fence is accepted from Markdown. Decode the value before checking its closing
 fence so embedded backticks and later fenced notes stay lossless. Parser and
 storage regressions belong in `tests/test_memory_storage.py`; configure a data
 root directory, not the existing manifest file. Legacy v1 reads still migrate
-and advance the revision. Unparseable summary text is quarantined before rebuild.
+and advance the revision. Invalid UTF-8 bytes and unparseable summary text are
+quarantined before rebuild. Summary read `OSError`s raise `MemoryStorageCorruption`
+and preserve the file; `save()` returns false until access recovers.
+Summary and canonical fact reads strip a leading UTF-8 BOM; writes use UTF-8.
+Fact BOM regressions use public save/reload and preserve content and scope.
 
 `FileMemoryStorage` owns canonical storage and the retrieval adapter.
 Do not reach into its private adapter state from higher layers.
@@ -276,22 +192,9 @@ Writes use a user lock, shared revision, fact revisions, and a recovery journal.
 Point operations can rebase only when all original fact preconditions still hold.
 Snapshot operations must reload and recompute after a manifest conflict.
 Use the typed conflict classes instead of matching exception text.
-A clear bumps `clearGeneration` / `agentClearGenerations` in the same locked commit as the wipe.
-The updater holds its per-user publish lock across that write and
-`after_commit_locked`, then releases it before sidecar metadata cleanup.
-User-wide `clear_all` uses the same split: when storage accepts
-`after_commit_locked`, the updater releases the publish lock in that callback
-so retrieval notifications and per-agent metadata I/O cannot pin same-user
-`add` / `add_nowait` peeks.
-User-wide `clear_all` raises the user generation before per-agent wipes.
-`apply_changes` and `clear_all` must honor `expected_clear_generation` atomically.
-Custom `storage_class` providers must override `capabilities()` to advertise `clear-generation`, and `peek_clear_generation` so enqueue does not load fact files.
-`create_storage` rejects providers that only pass those values through `**scope` or that leave the base peek in place.
-Snapshot-derived writes never rebase extracted facts onto an emptied document.
+Snapshot writes never rebase extracted facts onto an emptied document.
 
-The weak lock cache must not retain inactive user scopes.
-The clear-publish lock cache is the same pattern: a guard-protected
-`WeakValueDictionary` so unused per-user locks can be collected.
+The weak lock cache and per-user clear-publish locks must not retain inactive scopes.
 Cache validation uses the manifest metadata and persisted revision.
 Unlocked `load()`/`reload()` compute that signature before reading the document.
 Unlocked fact scans skip entries deleted after listing; present unreadable entries are corruption.
@@ -391,6 +294,7 @@ Extraction labels proposals with `scope`, `durability`, and `authority`.
 Automatic writes accept only user-scoped, durable, descriptive facts.
 Summary prose must be user-scoped and descriptive.
 Missing labels reject that item without stopping unrelated updates.
+An out-of-range `confidence` (including a model-emitted percentage) is rejected per item with a warning that names the raw value, and is never rescaled: a silent scale rewrite would change the confidence-threshold semantics. Storage's own `[0, 1]` validation must not fail the batch, because a failed batch keeps the extraction watermark and repeats the same paid call. A batch that also proposes `factsToRemove` still fails closed when any new fact is dropped, because removal `replacementFactIndex` values refer to newFacts positions.
 
 Contradiction removals include `id`, `scope`, `reason`, and optional `replacementFactIndex`.
 Task-scoped and project-scoped removals fail closed.
@@ -401,12 +305,7 @@ Custom prompt directories must include the same classification fields.
 Old templates cause extraction writes to fail closed.
 The rejection counter and high-rejection warning expose this condition.
 
-The enqueue token is the commit fence.
-Direct `update_memory` callers without a queue token fence from the pre-LLM snapshot.
-A generation-fenced drop still advances the conversation watermark and the
-clear-exclusion coverage set. The next turn must not replay the same pre-clear
-messages against the newer generation, including emergency (bypass) flushes.
-Manual `create_memory_fact` retries a concurrent clear: it re-reads the fence each attempt and stores the new fact on the emptied document instead of raising `MemoryClearGenerationConflict`.
+`create_memory_fact` re-reads the fence and stores on the emptied document instead of raising `MemoryClearGenerationConflict`.
 
 #### Capacity and review
 
@@ -422,10 +321,12 @@ It does not require a separate signal-to-fact match.
 Search increments access heat only for facts it returns.
 Prompt injection and `get_context()` do not increment access heat.
 
-Usage and audit sidecars live below the agent `.metadata/` directory.
+Usage, audit, and per-thread extraction watermark sidecars live below the
+agent `.metadata/` directory.
 They must not change canonical Markdown timestamps or revisions.
 Write audits only after canonical persistence succeeds.
 User delete and clear operations must remove matching sidecar data.
+Updates feed after the furthest of the LRU and persisted watermark (best-effort IO).
 
 Staleness review reuses the regular updater call.
 It can keep, remove, or extend eligible aged facts.
@@ -441,6 +342,26 @@ Use the newest source creation time for the merged fact.
 Use the earliest source review deadline for its next review.
 
 #### Remote backends
+
+Mem0 search and management convert facts inside the read-policy boundary.
+Context injection also deduplicates inside that boundary; unhashable record IDs
+raise a value-redacted `Mem0APIError` (`tests/test_mem0_context_record_ids.py`).
+Invalid score/categories/metadata fields omit field values from `Mem0APIError`s.
+Diagnostics carry only bounded opaque record IDs, otherwise `<unavailable>`;
+missing/null defaults stay compatible and local programming errors propagate.
+
+Mem0 normalizes JSON syntax, Unicode decoding, and parser recursion failures
+to Mem0APIError.
+It validates object response envelopes and lists of object records in the
+HTTP client before returning recall data. Invalid structures raise Mem0APIError,
+so existing read policies apply to search, injection, management and export.
+Validate every page; a malformed later page must not publish a partial listing.
+Missing results and valid empty lists retain the existing empty-read behavior.
+Decoding and structure errors identify the endpoint and list page without memory
+contents; structure errors also identify the invalid container or record type.
+Preserve decoding causes. Catch RecursionError only at JSON parsing; local
+programming errors must still propagate.
+Regressions use offline HTTP transports in `tests/test_mem0_response_policy.py`.
 
 Strict reads use the backend-neutral `MemoryReadError`.
 Backends declare their policy through `read_failures_are_fatal_for_config()`.
@@ -473,6 +394,16 @@ Honcho is a remote HTTP adapter for user-model memory.
 It creates one workspace per resolved `user_id`.
 A missing user fails closed to no memory.
 Its async methods offload synchronous HTTP work with `asyncio.to_thread`.
+Honcho's `from_config` consumes the `should_keep_hidden_message` host hook.
+Its write path drops hidden human messages unless that hook accepts them;
+the host default keeps valid user clarification answers and rejects framework context.
+Without a callable hook, standalone construction drops all hidden human messages.
+If the hook raises an `Exception`, skip only that hidden message and continue the batch.
+Log a generic warning without message metadata, content or exception text.
+Keep this boundary around the hook; do not change HTTP write errors or catch `BaseException`.
+Keep the filter inside `add` so sync, async and pre-compaction writes share it;
+`tests/test_honcho_hidden_messages.py` checks the real HTTP payloads, middleware and host factory;
+`tests/blocking_io/test_honcho_memory_backend.py` keeps the filter hook off the event loop.
 The default read failure policy logs and returns no results.
 `failure_policy.read: fail_closed` rethrows recall failures.
 
@@ -506,8 +437,8 @@ Keep these cross-component constraints in sync:
 - The pod grace period must include retrieval wait, flush time, and shutdown margin.
 - `retrieval_adapter` selects FTS5, a custom factory, or the empty fallback.
 - Eviction weights must total `1.0`.
-- `watermark_max_keys: 0` makes the conversation watermark cache unbounded.
-- A dropped watermark can re-extract one batch on the next turn.
+- `watermark_max_keys` caps the watermark LRU and each `watermarks.json`; `0` is unbounded.
+- A watermark missing from both can re-extract one batch on the next turn.
 - Custom `storage_class` providers must advertise `clear-generation`, override `peek_clear_generation`, and bump the fence atomically on clear.
 
 #### Write-side near-duplicate fact gate (opt-in)
@@ -659,11 +590,8 @@ off must load rather than fail the reload and leave the previous judge running.
   (L3 / L5 / L7 / L8) even when the round's request failed.
 - **Only `enforce` + `skip` changes persistence:** it drops the extraction call
   and **advances the watermark**, consuming the batch as "nothing durable here",
-  and emits a `prescreen` record with the digest. The consume publishes every
-  message identity, the same way a successful extraction does, then re-checks
-  the clear generation. A clear that lands during judging still excludes the
-  whole batch, so a later prefix-only summarization flush cannot restore those
-  turns. `shadow` records and extracts as usual; the watermark advance on
+  and emits a `prescreen` record with the digest. A clear during judging still
+  excludes that batch. `shadow` records and extracts as usual; the watermark advance on
   extraction success is unchanged.
 - Batches excluded from judging, in this order: no judge injected (L1),
   `bypass_watermark` (emergency flush), the shutdown drain (`judge=False`),

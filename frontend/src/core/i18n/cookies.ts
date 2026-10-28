@@ -15,9 +15,21 @@ export function getLocaleFromCookie(): string | null {
 
   const cookies = document.cookie.split(";");
   for (const cookie of cookies) {
-    const [name, value] = cookie.trim().split("=");
-    if (name === LOCALE_COOKIE_NAME) {
-      return decodeURIComponent(value ?? "");
+    // Split on the first "=" only: a cookie value may contain "=" itself.
+    const separator = cookie.indexOf("=");
+    if (separator < 0) {
+      continue;
+    }
+    if (cookie.slice(0, separator).trim() !== LOCALE_COOKIE_NAME) {
+      continue;
+    }
+    const value = cookie.slice(separator + 1).trim();
+    try {
+      return decodeURIComponent(value);
+    } catch {
+      // A malformed value must not crash locale bootstrap; hand the raw
+      // value to normalizeLocale, which falls back to the default locale.
+      return value;
     }
   }
   return null;

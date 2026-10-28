@@ -23,10 +23,11 @@ class FakeStatus(Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    TIMED_OUT = "timed_out"
 
     @property
     def is_terminal(self) -> bool:
-        return self in {FakeStatus.COMPLETED, FakeStatus.FAILED, FakeStatus.CANCELLED}
+        return self in {FakeStatus.COMPLETED, FakeStatus.FAILED, FakeStatus.CANCELLED, FakeStatus.TIMED_OUT}
 
 
 def _request(**overrides) -> BatchSubmitRequest:
@@ -57,6 +58,169 @@ def _request(**overrides) -> BatchSubmitRequest:
     }
     values.update(overrides)
     return BatchSubmitRequest(**values)
+
+
+@pytest.mark.asyncio
+async def test_read_browser_batch_item_projects_report_and_captured_evidence() -> None:
+    repository = SimpleNamespace(
+        get_batch=AsyncMock(return_value={"id": "batch-1", "thread_id": "thread-1"}),
+        list_items=AsyncMock(
+            return_value=[
+                {
+                    "id": "item-1",
+                    "item_key": "record-1",
+                    "position": 0,
+                    "status": "succeeded",
+                    "attempt": 1,
+                    "model_name": "model-a",
+                    "result": "A report",
+                    "result_truncated": False,
+                    "error": None,
+                    "stop_reason": None,
+                    "acceptance_criteria": ["file:answer.md exists"],
+                    "acceptance_verdict": {"status": "passed"},
+                    "result_artifact": {
+                        "knowledge_sources": {
+                            "version": 1,
+                            "sources": [
+                                {
+                                    "id": "a" * 32 + "-1",
+                                    "provider": "ragflow",
+                                    "dataset_id": "dataset-1",
+                                    "document_id": "document-1",
+                                    "chunk_id": "chunk-1",
+                                    "dataset_name": "Private KB",
+                                    "document_name": "report.md",
+                                    "text": "Captured excerpt",
+                                    "pages": [2, True, 0, 3],
+                                    "truncated": True,
+                                    "secret": "must not escape",
+                                },
+                                {"provider": "other", "text": "drop me"},
+                            ],
+                            "omitted_count": 1,
+                        }
+                    },
+                    "started_at": "2026-10-17T00:00:00Z",
+                    "completed_at": "2026-10-17T00:01:00Z",
+                    "updated_at": "2026-10-17T00:01:00Z",
+                }
+            ]
+        ),
+    )
+    service = SubagentBatchService(
+        repository=repository,
+        config=SubagentBatchesConfig(),
+        runtime_config=SubagentRuntimeConfig(),
+    )
+
+    detail = await service.read_browser_batch_item(
+        batch_id="batch-1",
+        user_id="user-1",
+        thread_id="thread-1",
+        position=0,
+    )
+
+    assert detail["report"] == "A report"
+    assert detail["acceptance_verdict"] == {"status": "passed"}
+    assert detail["evidence"] == {
+        "version": 1,
+        "sources": [
+            {
+                "id": "a" * 32 + "-1",
+                "provider": "ragflow",
+                "dataset_id": "dataset-1",
+                "document_id": "document-1",
+                "chunk_id": "chunk-1",
+                "dataset_name": "Private KB",
+                "document_name": "report.md",
+                "text": "Captured excerpt",
+                "pages": [2, 3],
+                "truncated": True,
+            }
+        ],
+        "omitted_count": 1,
+    }
+    assert "secret" not in detail["evidence"]["sources"][0]
+    repository.list_items.assert_awaited_once_with(
+        "batch-1",
+        user_id="user-1",
+        offset=0,
+        limit=1,
+        include_result=True,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field,limit", [("id", 256), ("dataset_id", 256), ("document_id", 256), ("chunk_id", 256), ("dataset_name", 512), ("document_name", 512), ("text", 16_000)])
+@pytest.mark.parametrize("oversized", [False, True])
+async def test_browser_evidence_bounds_legacy_rows(field, limit, oversized):
+    source = {
+        "id": "a" * 32 + "-1",
+        "provider": "ragflow",
+        "dataset_id": "dataset-1",
+        "document_id": "document-1",
+        "chunk_id": "chunk-1",
+        "dataset_name": "Private KB",
+        "document_name": "report.md",
+        "text": "Captured excerpt",
+        "pages": [2],
+        "truncated": False,
+    }
+    source[field] = "x" * (limit + int(oversized))
+    repository = SimpleNamespace(
+        get_batch=AsyncMock(return_value={"id": "batch-1", "thread_id": "thread-1"}),
+        list_items=AsyncMock(
+            return_value=[
+                {
+                    "position": 0,
+                    "result": "Stored report",
+                    "prompt": "Private prompt",
+                    "execution_spec": {"api_key": "private-key"},
+                    "result_artifact": {"knowledge_sources": {"version": 1, "sources": [source], "omitted_count": 2}},
+                }
+            ]
+        ),
+    )
+    service = SubagentBatchService(repository=repository, config=SubagentBatchesConfig(), runtime_config=SubagentRuntimeConfig())
+    detail = await service.read_browser_batch_item(batch_id="batch-1", user_id="user-1", thread_id="thread-1", position=0)
+    assert detail["report"] == "Stored report"
+    assert detail["evidence"]["sources"] == ([] if oversized else [source])
+    assert detail["evidence"]["omitted_count"] == 2 + int(oversized)
+    assert "prompt" not in detail
+    assert "execution_spec" not in detail
+
+
+def test_browser_evidence_counts_valid_captured_excerpt_filtered_at_read():
+    from langchain_core.messages import ToolMessage
+
+    from deerflow.community.ragflow.formatting import format_retrieval_sources
+    from deerflow.community.ragflow.sources import durable_source_artifact
+    from deerflow.subagents.step_events import capture_step_message
+
+    content, artifact = format_retrieval_sources(
+        {"chunks": [{"id": "chunk", "dataset_id": "kb", "document_id": "doc", "content": "x" * 17_000}]},
+        dataset_names_by_id={"kb": "Knowledge base"},
+        max_chars_per_chunk=20_000,
+        max_total_chars=30_000,
+    )
+    captured = []
+    capture_step_message(ToolMessage(content=content, artifact=artifact, name="knowledge_search", tool_call_id="search", id="message"), captured, set())
+    source_id = artifact["knowledge_sources"]["sources"][0]["id"]
+    persisted = durable_source_artifact(captured, f"Claim [citation:1](#knowledge-{source_id})", max_chars=100_000)
+    assert len(persisted["knowledge_sources"]["sources"][0]["text"]) == 17_000
+    assert persisted["knowledge_sources"]["omitted_count"] == 0
+    assert service_module._browser_evidence_snapshot(persisted) == {"version": 1, "sources": [], "omitted_count": 1}
+
+
+@pytest.mark.parametrize("persisted_omissions", [0, 3])
+def test_browser_evidence_source_cap_preserves_omissions(persisted_omissions):
+    source = {"id": "a" * 32 + "-1", "provider": "ragflow", "dataset_id": "kb", "document_id": "doc", "chunk_id": "chunk", "dataset_name": "KB", "document_name": "Manual", "text": "Excerpt", "pages": [], "truncated": False}
+    artifact = {"knowledge_sources": {"version": 1, "sources": [source] * 103, "omitted_count": persisted_omissions}}
+    projected = service_module._browser_evidence_snapshot(artifact)
+    assert len(projected["sources"]) == 100
+    assert projected["omitted_count"] == persisted_omissions + 3
+    assert artifact["knowledge_sources"]["omitted_count"] == persisted_omissions
 
 
 @pytest.mark.asyncio
@@ -399,6 +563,42 @@ async def _wait_until(predicate, *, timeout: float = 2.0) -> None:
             await asyncio.sleep(0.01)
 
     await asyncio.wait_for(poll(), timeout=timeout)
+
+
+@pytest.mark.asyncio
+async def test_terminal_item_waits_for_execution_cleanup_before_finalizing(monkeypatch) -> None:
+    registry = _Registry()
+    terminal_published = asyncio.Event()
+
+    async def mark_item_running():
+        result = registry.results["execution-1"]
+        result.status = FakeStatus.COMPLETED
+        result.result = "done"
+        terminal_published.set()
+        return True
+
+    service, finalized = _running_item_service(
+        monkeypatch,
+        registry,
+        mark_item_running=mark_item_running,
+    )
+    execution_done = asyncio.Event()
+    registry.results["execution-1"].execution_done_event = execution_done
+
+    await service.run_once(now=service_module.datetime.now(service_module.UTC))
+    await asyncio.wait_for(terminal_published.wait(), timeout=1)
+    await asyncio.sleep(0.15)
+    assert finalized.kwargs is None
+
+    execution_done.set()
+    await asyncio.wait_for(
+        asyncio.gather(*list(service._executions.values())),
+        timeout=1,
+    )
+
+    assert finalized.kwargs is not None
+    assert finalized.kwargs["succeeded"] is True
+    assert finalized.kwargs["result"] == "done"
 
 
 @pytest.mark.asyncio
@@ -977,3 +1177,40 @@ async def test_release_logs_a_failure_on_the_subagent_loop(monkeypatch, caplog) 
     failures = [record for record in caplog.records if "execution-1" in record.getMessage()]
     assert len(failures) == 1 and failures[0].levelno == logging.ERROR
     assert str(failures[0].exc_info[1]) == "registry lock poisoned"
+
+
+@pytest.mark.asyncio
+async def test_terminal_item_cleanup_fence_budget_does_not_renew_forever(monkeypatch, caplog) -> None:
+    registry = _Registry()
+    execution_done = asyncio.Event()
+    cleanup_requests = []
+
+    async def mark_item_running():
+        result = registry.results["execution-1"]
+        result.status = FakeStatus.TIMED_OUT
+        result.error = "Execution timed out"
+        return True
+
+    service, finalized = _running_item_service(monkeypatch, registry, mark_item_running=mark_item_running)
+    registry.results["execution-1"].execution_done_event = execution_done
+    monkeypatch.setattr(service_module, "_TERMINAL_CLEANUP_GRACE_SECONDS", 0.0, raising=False)
+    # Like the real registry, retain the result while resource teardown is live.
+    monkeypatch.setattr(service_module, "cleanup_background_task", cleanup_requests.append)
+    await service.run_once(now=service_module.datetime.now(service_module.UTC))
+    workers = list(service._executions.values())
+    try:
+        with caplog.at_level(logging.WARNING, logger=service_module.__name__):
+            await asyncio.wait_for(asyncio.gather(*workers), timeout=0.5)
+        assert finalized.kwargs is not None
+        assert finalized.kwargs["succeeded"] is False
+        assert finalized.kwargs["error"] == "Execution timed out"
+        assert not execution_done.is_set()
+        assert registry.get("execution-1") is not None
+        assert cleanup_requests == ["execution-1"]
+        assert registry.forced == []
+        assert "cleanup" in caplog.text.lower()
+        assert not service._execution_ids
+    finally:
+        execution_done.set()
+        await asyncio.gather(*workers, return_exceptions=True)
+        registry.cleanup("execution-1")

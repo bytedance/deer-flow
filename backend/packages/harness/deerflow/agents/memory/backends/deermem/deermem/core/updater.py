@@ -5,6 +5,7 @@ import atexit
 import concurrent.futures
 import copy
 import enum
+import hashlib
 import html
 import inspect
 import json
@@ -194,6 +195,22 @@ def _removal_scope_gate_reason(removal: dict[str, Any]) -> str | None:
     return None
 
 
+def _log_dropped_confidence(raw: object) -> None:
+    """Make a systematic out-of-range confidence visible without logging content."""
+    logger.warning(
+        "Dropping an extracted fact with out-of-range confidence %s; expected 0.0-1.0. A model emitting a percentage scale would lose every extracted fact.",
+        repr(raw)[:80],
+    )
+
+
+def _log_defaulted_consolidation_confidence(raw: object) -> None:
+    """Make a systematically out-of-range consolidation confidence visible."""
+    logger.warning(
+        "Defaulting a consolidation with out-of-range confidence %s to 0.9; expected 0.0-1.0. A model emitting a percentage scale would lose the confidence signal.",
+        repr(raw)[:80],
+    )
+
+
 def _normalize_memory_update_fact(fact: Any) -> dict[str, Any] | None:
     """Normalize a single fact entry from a model-produced memory update."""
     if not isinstance(fact, dict):
@@ -218,14 +235,29 @@ def _normalize_memory_update_fact(fact: Any) -> dict[str, Any] | None:
             return None
         try:
             raw_confidence = float(raw_confidence)
-        except ValueError:
+        except (OverflowError, ValueError):
             return None
-    elif isinstance(raw_confidence, (int, float)):
+    elif isinstance(raw_confidence, int):
+        # Range-check before float(): an unbounded JSON integer such as 10**400
+        # raises OverflowError in float() and would fail the whole batch.
+        if not 0 <= raw_confidence <= 1:
+            _log_dropped_confidence(raw_confidence)
+            return None
         raw_confidence = float(raw_confidence)
+    elif isinstance(raw_confidence, float):
+        pass
     else:
         return None
 
-    if not math.isfinite(raw_confidence):
+    if not math.isfinite(raw_confidence) or not 0.0 <= raw_confidence <= 1.0:
+        # Out-of-range confidence (for example a model emitting 95 or 1.5) is
+        # malformed like every other shape above: drop this item instead of
+        # letting the storage layer reject the whole update. A rejected batch
+        # never advances the extraction watermark, so the same paid call would
+        # otherwise repeat on every turn. Values are dropped, never rescaled:
+        # silently rewriting the scale would change the confidence-threshold
+        # semantics, and the warning makes a percentage-scale model visible.
+        _log_dropped_confidence(raw_confidence)
         return None
 
     normalized_fact = {
@@ -359,7 +391,10 @@ def _normalize_memory_update_data(update_data: dict[str, Any]) -> dict[str, Any]
             # apply path never silently writes a zero-delta extension.
             raw_extend = entry.get("extend_by_days")
             if isinstance(raw_extend, (int, float)) and not isinstance(raw_extend, bool):
-                extend_by = int(raw_extend)
+                # int() raises on a non-finite float (a JSON number such as 1e400 parses
+                # to inf), which would fail the whole batch; drop it like any other
+                # unusable value. An int is kept as-is, including values beyond float range.
+                extend_by = int(raw_extend) if isinstance(raw_extend, int) or math.isfinite(raw_extend) else 0
                 if extend_by > 0:
                     reason = entry.get("reason", "")
                     normalized_stale_extensions.append(
@@ -398,8 +433,16 @@ def _normalize_memory_update_data(update_data: dict[str, Any]) -> dict[str, Any]
             if isinstance(_raw_conf, bool) or not isinstance(_raw_conf, (int, float)):
                 _norm_conf = 0.9
             else:
-                _f = float(_raw_conf)
-                _norm_conf = _f if math.isfinite(_f) else 0.9
+                # float() raises on an unbounded JSON integer such as 10**400, which
+                # would fail the whole batch; fall back like any other invalid value.
+                try:
+                    _f = float(_raw_conf)
+                except OverflowError:
+                    _f = math.inf
+                if not math.isfinite(_f):
+                    _log_defaulted_consolidation_confidence(_raw_conf)
+                    _f = 0.9
+                _norm_conf = _f
             _raw_cat = consolidated.get("category")
             _norm_cat = _raw_cat.strip() if isinstance(_raw_cat, str) and _raw_cat.strip() else "context"
             normalized_consolidation.append(
@@ -846,10 +889,12 @@ def _message_identity(msg: Any) -> tuple[str, ...] | None:
     valid when summarization removes the conversation front (an index watermark
     would point at the wrong message after a front removal, silently skipping
     un-extracted turns). Prefers the langgraph message ``id`` (unique, robust to
-    duplicate content); falls back to ``(type, content)`` when no id is set
-    (e.g. plain ``HumanMessage(content=...)`` in tests). Returns ``None`` for a
-    message with neither id nor extractable text -- the caller then feeds the
-    full list, which is safe over-extraction and never loss.
+    duplicate content); falls back to ``(type, sha256(content))`` when no id is
+    set (e.g. plain ``HumanMessage(content=...)`` in tests) -- a digest because
+    the identity is also persisted to the watermark sidecar, which must not hold
+    conversation text. Returns ``None`` for a message with neither id nor
+    extractable text -- the caller then feeds the full list, which is safe
+    over-extraction and never loss.
     """
     mid = getattr(msg, "id", None)
     if isinstance(mid, str) and mid:
@@ -858,7 +903,19 @@ def _message_identity(msg: Any) -> tuple[str, ...] | None:
     if not text:
         return None
     msg_type = getattr(msg, "type", "") or ""
-    return ("content", msg_type, text)
+    return ("content", msg_type, hashlib.sha256(text.encode("utf-8")).hexdigest())
+
+
+# DeerMem is portable; the host test pins this map to its UI allowlist.
+_MEMORY_UI_LANGUAGES = {"en-US": "English", "zh-CN": "Simplified Chinese"}
+
+
+def _memory_language_preference(messages: list[Any]) -> str:
+    for message in reversed(messages):
+        locale = (getattr(message, "additional_kwargs", {}) or {}).get("deerflow_ui_locale")
+        if isinstance(locale, str) and locale in _MEMORY_UI_LANGUAGES:
+            return f"Preferred memory language: {_MEMORY_UI_LANGUAGES[locale]} ({locale})"
+    return ""
 
 
 def _message_identities(messages: list[Any]) -> frozenset[tuple[str, ...]]:
@@ -910,10 +967,12 @@ class MemoryUpdater:
         self._prompts_dir = prompts_dir
         self._callbacks = callbacks
         # Watermark: last-extracted message identity per (thread_id, user_id,
-        # agent_name), held in memory so a restart re-extracts one batch. The
-        # cache is a bounded LRU (config.watermark_max_keys) so a long-lived
-        # gateway handling many threads cannot grow it without limit; a dropped
-        # key re-extracts one batch on that thread's next turn.
+        # agent_name). This process caches it in a bounded LRU
+        # (config.watermark_max_keys) so a long-lived gateway handling many
+        # threads cannot grow it without limit, and writes it through to the
+        # storage's per-agent sidecar so a restart or a peer replica sharing the
+        # storage root continues from it. A key missing from both re-extracts
+        # one batch on that thread's next turn.
         #
         # Each entry pairs the identity with the ``sequence`` (queue arrival
         # order, see ``ConversationContext.sequence``) that produced it, so a
@@ -1638,6 +1697,13 @@ class MemoryUpdater:
             "consolidation_section": consolidation_section,
         }
         prompt = load_prompt_messages("memory_update", variables, agent_name=agent_name, prompts_dir=self._prompts_dir)
+        language_preference = _memory_language_preference(messages)
+        if language_preference:
+            # Per-run preference is data, not part of the cached system text.
+            for index, message in enumerate(prompt):
+                if message.type == "human":
+                    prompt[index] = message.model_copy(update={"content": f"{language_preference}\n\n{message.content}"})
+                    break
         if config.prompt_prepend or config.prompt_append:
             # Extend trusted instructions only, after formatting the original
             # template. Conversation/memory data stays in its human message.
@@ -2026,12 +2092,18 @@ class MemoryUpdater:
             return
         identities = _message_identities(messages)
         identity = _message_identity(messages[-1])
+        wrote = False
         with self._watermark_lock:
             if exclude_cleared and identities:
                 self._union_exclusion_locked(watermark_key, identities, sequence)
             if not bypass_watermark:
-                self._store_identity_locked(self._watermarks, watermark_key, identity, sequence)
+                wrote = self._store_identity_locked(self._watermarks, watermark_key, identity, sequence)
             self._union_coverage_locked(watermark_key, identities)
+        # A clear consume runs while that clear still holds the user file lock,
+        # and the clear deletes the sidecar afterward. Writing it here would
+        # wait on the same lock. Extraction commits persist after the lock drops.
+        if wrote and not exclude_cleared:
+            self._store_persisted_watermark(watermark_key, identity)
 
     def _watermark_set(
         self,
@@ -2041,15 +2113,15 @@ class MemoryUpdater:
         sequence: int | None = None,
     ) -> None:
         """Store ``value`` for ``key``, evicting the least-recently-used entry
-        when the bounded LRU cache exceeds ``config.watermark_max_keys``.
+        when the bounded LRU cache exceeds ``config.watermark_max_keys``, and
+        write a real identity through to the storage sidecar.
 
         Production watermark writes go through ``_store_identity_locked``
         (called from ``_mark_feed_consumed`` under ``_watermark_lock``). This
         method is a test-seeding seam that wraps the same locked store.
 
-        A dropped key is safe: the next turn for that thread finds no watermark
-        and re-extracts one batch (the documented restart behavior). ``0`` =
-        unbounded (no eviction).
+        A key missing from both the LRU and the sidecar re-extracts one batch.
+        ``0`` = unbounded (no eviction).
 
         ``sequence`` orders calls that raced across threads (queue arrival
         order; see ``ConversationContext.sequence``). If the stored entry
@@ -2076,9 +2148,11 @@ class MemoryUpdater:
         individually correct.
         """
         with self._watermark_lock:
-            self._store_identity_locked(self._watermarks, key, value, sequence)
+            wrote = self._store_identity_locked(self._watermarks, key, value, sequence)
             if value is not None:
                 self._union_coverage_locked(key, frozenset((value,)))
+        if wrote:
+            self._store_persisted_watermark(key, value)
 
     def _store_identity_locked(
         self,
@@ -2086,7 +2160,7 @@ class MemoryUpdater:
         key: tuple[str | None, str | None, str | None],
         value: tuple[str, ...] | None,
         sequence: int | None,
-    ) -> None:
+    ) -> bool:
         """Write ``(sequence, value)`` into ``store``. Caller holds ``_watermark_lock``.
 
         If ``store`` already holds a higher ``sequence`` for ``key``, this is a
@@ -2101,7 +2175,7 @@ class MemoryUpdater:
                 sequence,
                 existing[0],
             )
-            return
+            return False
         store[key] = (sequence, value)
         store.move_to_end(key)
         cap = self._config.watermark_max_keys
@@ -2109,6 +2183,8 @@ class MemoryUpdater:
             evicted_key, _ = store.popitem(last=False)
             if store is self._watermarks:
                 self._extracted_coverages.pop(evicted_key, None)
+
+        return True
 
     def _union_coverage_locked(
         self,
@@ -2177,6 +2253,59 @@ class MemoryUpdater:
             self._clear_exclusions.move_to_end(key)
             return self._clear_exclusions[key][1]
 
+    @staticmethod
+    def _persisted_watermark_scope(key: tuple[str | None, str | None, str | None]) -> tuple[str, str | None, str] | None:
+        """Return ``(thread_id, user_id, agent_name)`` when ``key`` can be
+        persisted; the sidecar is per agent and keyed by thread id."""
+        thread_id, user_id, agent_name = key
+        if not isinstance(thread_id, str) or not thread_id or agent_name is None:
+            return None
+        return thread_id, user_id, agent_name
+
+    def _load_persisted_watermark(self, key: tuple[str | None, str | None, str | None]) -> tuple[str, ...] | None:
+        """Read ``key``'s watermark from the storage sidecar.
+
+        ``None`` when the storage keeps none or the read fails: the sidecar is
+        best-effort, so the in-process cache then decides alone.
+        """
+        scope = self._persisted_watermark_scope(key)
+        getter = getattr(self._storage, "get_extraction_watermark", None)
+        if scope is None or getter is None:
+            return None
+        thread_id, user_id, agent_name = scope
+        try:
+            value = getter(thread_id, agent_name=agent_name, user_id=user_id)
+        except Exception:
+            logger.warning("Failed to read the persisted memory watermark (thread=%s)", thread_id, exc_info=True)
+            return None
+        if isinstance(value, list | tuple) and value and all(isinstance(part, str) for part in value):
+            return tuple(value)
+        return None
+
+    def _store_persisted_watermark(
+        self,
+        key: tuple[str | None, str | None, str | None],
+        value: tuple[str, ...] | None,
+    ) -> None:
+        """Write ``key``'s watermark to the storage sidecar, best-effort.
+
+        A ``None`` identity (the last message has neither id nor text) is not
+        written: the persisted entry, possibly advanced by a peer, still marks
+        an extracted prefix, and the furthest-of-both read keeps using it.
+        A failure is logged and leaves the in-process cache authoritative for
+        this process; the extraction it follows has already been persisted, so
+        it must not turn into a failed update.
+        """
+        scope = self._persisted_watermark_scope(key)
+        setter = getattr(self._storage, "set_extraction_watermark", None)
+        if value is None or scope is None or setter is None:
+            return
+        thread_id, user_id, agent_name = scope
+        try:
+            setter(thread_id, list(value), agent_name=agent_name, user_id=user_id)
+        except Exception:
+            logger.warning("Failed to persist the memory watermark (thread=%s)", thread_id, exc_info=True)
+
     def _feed_after_watermark(
         self,
         watermark_key: tuple[str | None, str | None, str | None],
@@ -2185,14 +2314,25 @@ class MemoryUpdater:
         """Return the slice of ``messages`` not yet extracted.
 
         The watermark stores the identity of the last-extracted message (see
-        :func:`_message_identity`). If that message is still present, everything
-        *after* it is fed; if it is absent (front removed by summarization, or
-        the first-ever extraction for this key) the full list is fed. Re-feeding
-        is safe over-extraction -- it never skips a turn, which is the only
-        failure direction that would lose facts.
+        :func:`_message_identity`). Two copies are consulted: this process's LRU
+        entry and the storage sidecar (written by this process, an earlier one,
+        or a peer replica sharing the storage root). Each marks a prefix that
+        was already extracted, so the feed starts after whichever is found
+        furthest along ``messages``; a stale copy therefore costs nothing. If
+        neither is present (front removed by summarization, or the first-ever
+        extraction for this key) the full list is fed. Re-feeding is safe
+        over-extraction -- it never skips a turn, which is the only failure
+        direction that would lose facts.
         """
-        last_id = self._watermark_get(watermark_key)
-        return self._slice_after_identity(last_id, messages)
+        candidates = {self._watermark_get(watermark_key), self._load_persisted_watermark(watermark_key)} - {None}
+        if not candidates:
+            return messages
+        identities = [_message_identity(msg) for msg in messages]
+        start = 0
+        for last_id in candidates:
+            if last_id in identities:
+                start = max(start, identities.index(last_id) + 1)
+        return messages[start:]
 
     def _feed_after_clear_exclusion(
         self,
@@ -2214,15 +2354,6 @@ class MemoryUpdater:
         """
         excluded = self._clear_exclusion_get(watermark_key)
         return self._drop_excluded_identities(excluded, messages)
-
-    @staticmethod
-    def _slice_after_identity(last_id: tuple[str, ...] | None, messages: list[Any]) -> list[Any]:
-        if last_id is None:
-            return messages
-        for i, msg in enumerate(messages):
-            if _message_identity(msg) == last_id:
-                return messages[i + 1 :]
-        return messages
 
     @staticmethod
     def _drop_excluded_identities(
@@ -2500,15 +2631,17 @@ class MemoryUpdater:
         Watermark: the middleware passes the full conversation each turn, so
         without skipping already-extracted turns every update re-feeds old
         messages. The watermark stores the identity of the last-extracted
-        message (content/id based, in-memory only) so it stays correct when
-        summarization removes the conversation front; a restart loses it and
-        re-extracts one batch. ``bypass_watermark`` is set by the emergency
-        (summarization) flush path: the subset it carries is a one-shot
-        "extract before removal" snapshot, so it does not read or advance the
-        conversation watermark (advancing it from the subset's own length would
-        regress the watermark and skip un-extracted tail turns on the next
-        normal feed). It still honors the clear-exclusion coverage set so a
-        later summarization flush cannot restore turns a clear already consumed.
+        message (content/id based, cached in-process and persisted per agent
+        by the storage) so it stays correct when summarization removes the
+        conversation front and survives a restart or a move to a peer replica
+        (see :meth:`_feed_after_watermark`). ``bypass_watermark`` is set by the
+        emergency (summarization) flush path: the subset it carries is a one-shot
+        "extract before removal" snapshot, so it is fed in full and does not
+        read or advance the conversation watermark (advancing it from the
+        subset's own length would regress the watermark and skip un-extracted
+        tail turns on the next normal feed). It still honors the clear-exclusion
+        coverage set so a later summarization flush cannot restore turns a clear
+        already consumed.
         """
         metrics: dict[str, Any] = {}
         response: Any = None

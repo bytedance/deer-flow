@@ -21,8 +21,10 @@ from deerflow.persistence.scheduled_tasks.model import (
     ScheduledTaskRow,
     ScheduledTaskRunStatus,
 )
+from deerflow.runtime.events.terminal import RecoveryTerminalPublisher, RecoveryTerminalTarget
 from deerflow.scheduler.host_notes import RUN_ERROR_END_REACHED
 from deerflow.scheduler.schedules import next_run_at as compute_next_run_at
+from deerflow.scheduler.schedules import should_advance_schedule_cursor
 from deerflow.utils.time import coerce_iso
 
 EXECUTING_RUN_STATUSES: tuple[str, ...] = ("launching", "running")
@@ -152,9 +154,11 @@ class ScheduledTaskRunRepository:
         session_factory: async_sessionmaker[AsyncSession],
         *,
         run_repository: RunRepository | None = None,
+        recovery_terminal_publisher: RecoveryTerminalPublisher | None = None,
     ) -> None:
         self._sf = session_factory
         self._run_repository = run_repository or RunRepository(session_factory)
+        self._recovery_terminal_publisher = recovery_terminal_publisher
         self._finalization_observer: FinalizationObserver | None = None
 
     def set_finalization_observer(self, callback: FinalizationObserver | None) -> None:
@@ -211,12 +215,15 @@ class ScheduledTaskRunRepository:
         task.last_run_at = launched_at
         task.last_run_id = candidate.run_id
         task.last_thread_id = row.thread_id
-        task.next_run_at = compute_next_run_at(
-            task.schedule_type,
-            task.schedule_spec,
-            task.timezone,
-            now=launched_at,
-        )
+        # A manual recurring run is an extra trial. Keep the task's existing
+        # cadence while repairing launch bookkeeping after a crash.
+        if should_advance_schedule_cursor(task.schedule_type, trigger=row.trigger):
+            task.next_run_at = compute_next_run_at(
+                task.schedule_type,
+                task.schedule_spec,
+                task.timezone,
+                now=launched_at,
+            )
         task.lease_owner = None
         task.lease_expires_at = None
         task.updated_at = datetime.now(UTC)
@@ -876,6 +883,13 @@ class ScheduledTaskRunRepository:
                 row = await session.get(ScheduledTaskRunRow, row_id, with_for_update=True)
                 if row is None or row.status != "launching":
                     continue
+                # The scan only identifies candidates. While waiting for the
+                # parent lock, the old launch can requeue and a manual trigger
+                # can claim this same occurrence again, even under the same
+                # lease owner. Revalidate expiry under the write lock before
+                # clearing any claim or reconciling its underlying run.
+                if _lease_is_alive(row.lease_expires_at, now=now, grace_seconds=0):
+                    continue
                 candidate = await self._find_underlying_run(session, row, task)
                 row.lease_owner = None
                 row.lease_expires_at = None
@@ -1018,6 +1032,27 @@ class ScheduledTaskRunRepository:
         underlying run, or a queued row whose parent task still has a dispatch
         lease, belongs to another process and must survive this startup.
         """
+        recovery_targets: list[RecoveryTerminalTarget] = []
+        try:
+            return await self._reconcile_active_runs(
+                error=error,
+                now=now,
+                lease_grace_seconds=lease_grace_seconds,
+                recovery_targets=recovery_targets,
+            )
+        finally:
+            if self._recovery_terminal_publisher is not None:
+                for target in recovery_targets:
+                    await self._recovery_terminal_publisher.publish(target)
+
+    async def _reconcile_active_runs(
+        self,
+        *,
+        error: str,
+        now: datetime,
+        lease_grace_seconds: int,
+        recovery_targets: list[RecoveryTerminalTarget],
+    ) -> int:
         async with self._sf() as session:
             result = await session.execute(
                 select(
@@ -1080,6 +1115,16 @@ class ScheduledTaskRunRepository:
                         error=error,
                         stop_reason="scheduled_task_orphan_recovered",
                     )
+                    if claimed and self._recovery_terminal_publisher is not None:
+                        target = self._recovery_terminal_publisher.authorize_takeover(
+                            claimed=claimed,
+                            thread_id=candidate.thread_id,
+                            run_id=candidate.run_id,
+                            user_id=candidate.user_id,
+                            operation_kind=candidate.operation_kind,
+                        )
+                        if target is not None:
+                            recovery_targets.append(target)
                     if not claimed:
                         refreshed = await self._run_repository.get(candidate.run_id, user_id=None)
                         if refreshed is not None and refreshed.get("status") in {"pending", "running"}:

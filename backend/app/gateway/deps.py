@@ -296,15 +296,25 @@ def credentials_key_consumers(config: AppConfig) -> list[str]:
     """Return the enabled features that store data under ``DEER_FLOW_CREDENTIALS_KEY``.
 
     Each entry is the setting that enabled the feature, as refusal text spells
-    it. The Gateway loads the key only when this list is non-empty, and the
-    multi-instance gate below refuses a missing key only for these features, so
-    a deployment that stores no credentials keeps booting without one.
+    it. The Gateway loads the key at startup only when this list is non-empty,
+    and the multi-instance gate below refuses a missing key only for these
+    features, so a deployment that stores no credentials keeps booting without
+    one. Personal MCP OAuth connections are saved at runtime, so they cannot be
+    listed here; their store loads the key on first use.
     """
     consumers: list[str] = []
     connections = getattr(config, "channel_connections", None)
     if connections is not None and getattr(connections, "enabled", False):
-        # ChannelConnectionRepository encrypts per-connection credentials.
+        # ChannelConnectionRepository encrypts per-connection credentials, and
+        # the runtime config store the bot credentials entered in the web UI.
         consumers.append("channel_connections.enabled=true")
+    extensions = getattr(config, "extensions", None)
+    if extensions is not None:
+        # deerflow.mcp.oauth_store keeps rotating refresh tokens in the database.
+        for name, server in extensions.get_enabled_mcp_servers().items():
+            oauth = server.oauth
+            if oauth is not None and oauth.enabled and oauth.grant_type == "refresh_token":
+                consumers.append(f"mcpServers.{name}.oauth.enabled=true")
     return consumers
 
 
@@ -488,6 +498,18 @@ async def _drain_inflight_runs(run_manager: RunManager) -> None:
         logger.exception("Failed to drain in-flight runs during shutdown")
 
 
+async def _retry_recovered_run_stream_end(
+    bridge: StreamBridge,
+    run_id: str,
+    *,
+    retry_delay: float,
+    cleanup_delay: float,
+) -> None:
+    await asyncio.sleep(max(0.0, retry_delay))
+    await bridge.publish_end(run_id)
+    await bridge.cleanup(run_id, delay=cleanup_delay)
+
+
 async def _publish_recovered_run_stream_end(
     bridge: StreamBridge,
     recovered_runs: list[RunRecord],
@@ -497,12 +519,57 @@ async def _publish_recovered_run_stream_end(
 ) -> list[tuple[str, asyncio.Task[None]]]:
     """Terminate retained streams for runs recovered as orphaned."""
     cleanup_tasks: list[tuple[str, asyncio.Task[None]]] = []
+
+    def schedule_retry(record: RunRecord) -> bool:
+        retry_delay = getattr(
+            bridge,
+            "producer_lease_retry_delay_seconds",
+            None,
+        )
+        if not isinstance(retry_delay, (int, float)) or isinstance(retry_delay, bool) or retry_delay < 0:
+            return False
+        task = asyncio.create_task(
+            _retry_recovered_run_stream_end(
+                bridge,
+                record.run_id,
+                retry_delay=float(retry_delay),
+                cleanup_delay=cleanup_delay,
+            )
+        )
+        task.add_done_callback(
+            lambda task, run_id=record.run_id: _log_recovered_stream_cleanup_result(
+                task,
+                run_id,
+            )
+        )
+        cleanup_tasks.append((record.run_id, task))
+        if on_cleanup_scheduled is not None:
+            on_cleanup_scheduled(record.run_id, task)
+        return True
+
     for record in recovered_runs:
         stream_exists = getattr(bridge, "stream_exists", None)
         if stream_exists is not None:
             try:
                 if not await stream_exists(record.run_id):
                     logger.debug("Skipping recovered stream end for %s: stream already expired", record.run_id)
+                    cleanup_expired_producer = getattr(
+                        bridge,
+                        "cleanup_expired_producer",
+                        None,
+                    )
+                    if callable(cleanup_expired_producer):
+                        try:
+                            cleaned = bool(await cleanup_expired_producer(record.run_id))
+                        except Exception:
+                            logger.warning(
+                                "Failed to clean expired stream producer marker for %s",
+                                record.run_id,
+                                exc_info=True,
+                            )
+                            cleaned = False
+                        if not cleaned:
+                            schedule_retry(record)
                     continue
             except Exception:
                 logger.debug("Failed to check recovered stream existence for %s", record.run_id, exc_info=True)
@@ -514,6 +581,7 @@ async def _publish_recovered_run_stream_end(
                 record.run_id,
                 exc_info=True,
             )
+            schedule_retry(record)
             continue
         task = asyncio.create_task(bridge.cleanup(record.run_id, delay=cleanup_delay))
         task.add_done_callback(lambda task, run_id=record.run_id: _log_recovered_stream_cleanup_result(task, run_id))
@@ -830,6 +898,9 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         run_events_config = getattr(config, "run_events", None)
         app.state.run_events_config = run_events_config
         app.state.run_event_store = make_run_event_store(run_events_config)
+        from deerflow.runtime.events.terminal import RecoveryTerminalPublisher
+
+        app.state.recovery_terminal_publisher = RecoveryTerminalPublisher(app.state.run_event_store, app.state.run_store)
 
         from deerflow.extensions.run_evidence import StoreRunEvidenceReader, StoreRunEvidenceReaderFactory
 
@@ -853,6 +924,14 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         from deerflow.extensions.gateway import start_services, stop_services
 
         extensions = getattr(app.state, "extensions", EMPTY_EXTENSIONS)
+        from deerflow.extensions.host_capabilities import HostCapabilities
+
+        host_capabilities = HostCapabilities(config, app.state.run_store, app.state.run_event_store)
+        app.state.skill_mutation_host = host_capabilities
+        # Own partial startup and cancellation before acquiring any locks or
+        # worker resources. LIFO shutdown stops plugins before host recovery.
+        stack.push_async_callback(host_capabilities.close)
+        await host_capabilities.start()
         attempted_services: list[tuple[str, Any]] = []
 
         async def stop_extension_services() -> None:
@@ -874,6 +953,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
                 config,
                 sf,
                 run_evidence_reader=app.state.run_evidence_reader,
+                host_capabilities=host_capabilities.bindings,
                 attempted_services=attempted_services,
             )
         )
@@ -897,10 +977,12 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             app.state.scheduled_task_repo = ScheduledTaskRepository(
                 sf,
                 run_repository=app.state.run_store,
+                recovery_terminal_publisher=app.state.recovery_terminal_publisher,
             )
             app.state.scheduled_task_run_repo = ScheduledTaskRunRepository(
                 sf,
                 run_repository=app.state.run_store,
+                recovery_terminal_publisher=app.state.recovery_terminal_publisher,
             )
             app.state.scheduled_task_event_repo = ScheduledTaskEventRepository(sf)
             # Per-user unread state and the activity feed's read clock.
@@ -943,6 +1025,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             store=app.state.run_store,
             run_ownership_config=run_ownership_config,
             event_store=app.state.run_event_store,
+            recovery_terminal_publisher=app.state.recovery_terminal_publisher,
             on_orphans_recovered=terminalize_recovered_runs,
         )
         # Startup recovery: mark inflight runs whose lease has expired as error.
@@ -1117,6 +1200,53 @@ def get_subagent_batch_service(request: Request):
     return val
 
 
+def _run_admission_hook(*, checkpointer: Any):
+    """Prune metadata leaves inside the run's durable admission fence."""
+
+    async def handle(record: Any, config: dict[str, Any]) -> None:
+        try:
+            from app.gateway.checkpoint_retention import enforce_completed_run_retention
+
+            await enforce_completed_run_retention(
+                checkpointer=checkpointer,
+                thread_id=record.thread_id,
+                protect_checkpoint_ids=_selected_checkpoint_ids(config),
+            )
+        except Exception:
+            logger.warning(
+                "Checkpoint retention failed for thread %s before run %s (non-fatal)",
+                record.thread_id,
+                record.run_id,
+                exc_info=True,
+            )
+
+    return handle
+
+
+def _selected_checkpoint_ids(config: dict[str, Any]) -> frozenset[str]:
+    """Collect checkpoint selectors already validated for an admitted run."""
+    configurable = config.get("configurable", {})
+    selected: set[str] = set()
+    checkpoint_id = configurable.get("checkpoint_id")
+    if isinstance(checkpoint_id, str) and checkpoint_id:
+        selected.add(checkpoint_id)
+    checkpoint_map = configurable.get("checkpoint_map")
+    if isinstance(checkpoint_map, dict):
+        selected.update(value for value in checkpoint_map.values() if isinstance(value, str) and value)
+    return frozenset(selected)
+
+
+def _run_completion_hook(*, scheduled_task_service: Any | None):
+    """Notify the scheduler after ordinary run finalization."""
+
+    async def handle(record: Any) -> None:
+
+        if scheduled_task_service is not None:
+            await scheduled_task_service.handle_run_completion(record)
+
+    return handle
+
+
 def get_run_context(request: Request) -> RunContext:
     """Build a :class:`RunContext` from ``app.state`` singletons.
 
@@ -1130,9 +1260,11 @@ def get_run_context(request: Request) -> RunContext:
     host = getattr(request.app.state, "agent_runs_host", None)
     # Internal/channel and PAT runs deliberately receive no retained delegation.
     agent_runs = host.bind(request) if host is not None else None
+    checkpointer = get_checkpointer(request)
+    scheduled_task_service = getattr(request.app.state, "scheduled_task_service", None)
     return RunContext(
         agent_runs=agent_runs,
-        checkpointer=get_checkpointer(request),
+        checkpointer=checkpointer,
         store=get_store(request),
         event_store=get_run_event_store(request),
         run_events_config=getattr(request.app.state, "run_events_config", None),
@@ -1142,7 +1274,10 @@ def get_run_context(request: Request) -> RunContext:
         mcp_task_repo=getattr(request.app.state, "mcp_task_repo", None),
         app_config=get_config(),
         extensions=getattr(request.app.state, "extensions", None),
-        on_run_completed=getattr(request.app.state, "scheduled_task_service", None).handle_run_completion if getattr(request.app.state, "scheduled_task_service", None) is not None else None,
+        on_run_admitted=_run_admission_hook(checkpointer=checkpointer),
+        on_run_completed=_run_completion_hook(
+            scheduled_task_service=scheduled_task_service,
+        ),
     )
 
 

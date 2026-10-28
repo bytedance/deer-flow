@@ -213,7 +213,8 @@ class AgentConfig(BaseModel):
     model: str | None = None
     tool_groups: list[str] | None = None
     # skills controls which skills are discoverable and may be activated by the
-    # agent. It does not activate their allowed-tools policies at construction:
+    # agent. allowed-tools is compatibility metadata only and never restricts
+    # tools:
     # - None (or omitted): load all enabled skills (default fallback behavior)
     # - [] (explicit empty list): disable all skills
     # - ["skill1", "skill2"]: load only the specified skills
@@ -271,11 +272,11 @@ MANAGED_AGENT_CONFIG_FIELDS: frozenset[str] = frozenset(
 )
 
 
-def preserve_non_managed_fields(existing_cfg: AgentConfig) -> dict[str, object]:
+def preserve_non_managed_fields(existing_cfg: AgentConfig, *, new_tool_groups: list[str] | None = None) -> dict[str, object]:
     """Return every top-level field on ``existing_cfg`` not in :data:`MANAGED_AGENT_CONFIG_FIELDS`.
 
     Used by the two surfaces that rewrite a custom agent's ``config.yaml``
-    (the ``update_agent`` harness tool and the HTTP ``PATCH /api/agents/{name}``
+    (the ``update_agent`` harness tool and the HTTP ``PUT /api/agents/{name}``
     route) to carry forward any hand-authored field — currently ``github``,
     and any field added to :class:`AgentConfig` in the future — that the
     update API does not expose as an argument. Without this, operators who
@@ -286,8 +287,16 @@ def preserve_non_managed_fields(existing_cfg: AgentConfig) -> dict[str, object]:
     ``exclude_unset=True`` is recursive in Pydantic v2, so a sub-field the
     user did not write (and that defaulted to a Pydantic default) is not
     materialized into the dict — the file round-trips visually intact.
+
+    When ``new_tool_groups`` changes access to exclude knowledge, clear the
+    inherited knowledge default. Explicit update fields still take precedence
+    when callers merge this result with ``setdefault``. Omitted/None groups
+    never remove access, and unchanged groups do not migrate legacy configs.
     """
-    return existing_cfg.model_dump(exclude_unset=True, exclude=MANAGED_AGENT_CONFIG_FIELDS)
+    preserved = existing_cfg.model_dump(exclude_unset=True, exclude=MANAGED_AGENT_CONFIG_FIELDS)
+    if new_tool_groups is not None and new_tool_groups != existing_cfg.tool_groups and "knowledge" not in new_tool_groups and existing_cfg.knowledge_scope is not None:
+        preserved["knowledge_scope"] = None
+    return preserved
 
 
 def resolve_agent_dir(name: str, *, user_id: str | None = None) -> Path:
@@ -369,7 +378,11 @@ def load_agent_soul(agent_name: str | None, *, user_id: str | None = None) -> st
         soul_path = get_paths().base_dir / SOUL_FILENAME
         if not soul_path.exists():
             return None
-        content = soul_path.read_text(encoding="utf-8").strip()
+        # ``utf-8-sig`` drops the BOM a Windows editor (Notepad, PowerShell 5.1)
+        # prepends. ``str.strip()`` does not remove U+FEFF, so reading this as
+        # plain ``utf-8`` would make the mark the first character of the text
+        # injected into the lead agent's system prompt.
+        content = soul_path.read_text(encoding="utf-8-sig").strip()
         return content or None
     from deerflow.persistence.agents import get_agent_store
 

@@ -6,6 +6,8 @@ import asyncio
 from typing import Any
 
 from deerflow.agents.memory import get_memory_manager
+from deerflow.agents.memory.locale import with_memory_locale
+from deerflow.agents.memory.manager import MemoryManager
 from deerflow.agents.middlewares.memory_middleware import redact_queued_messages
 from deerflow.agents.middlewares.summarization_middleware import SummarizationEvent
 from deerflow.config.memory_config import get_memory_config
@@ -36,7 +38,7 @@ def memory_flush_hook(event: SummarizationEvent, pii_redaction_config: PiiRedact
     manager, user_id = gated
     manager.add_nowait(
         event.thread_id,
-        redact_queued_messages(list(event.messages_to_summarize), pii_redaction_config),
+        with_memory_locale(redact_queued_messages(list(event.messages_to_summarize), pii_redaction_config), getattr(event.runtime, "context", None)),
         agent_name=event.agent_name,
         user_id=user_id,
     )
@@ -49,14 +51,32 @@ async def amemory_flush_hook(event: SummarizationEvent, pii_redaction_config: Pi
     the same way ``MemoryMiddleware.aafter_agent`` does, then enqueue through
     the manager's async boundary. The queued payload is redacted with the same
     ``pii_redaction_config`` as the sync hook.
+
+    DeerMem overrides ``aadd_nowait`` and already moves its enqueue off the
+    event loop. Backends that inherit the base method (mem0, Honcho,
+    OpenViking) run the sync writer on the awaiting thread, so those writes
+    are moved to a worker thread here.
     """
     gated = await asyncio.to_thread(_flush_gate, event)
     if gated is None:
         return
     manager, user_id = gated
+    messages = with_memory_locale(
+        redact_queued_messages(list(event.messages_to_summarize), pii_redaction_config),
+        getattr(event.runtime, "context", None),
+    )
+    if getattr(type(manager), "aadd_nowait", None) is MemoryManager.aadd_nowait:
+        await asyncio.to_thread(
+            manager.add_nowait,
+            event.thread_id,
+            messages,
+            agent_name=event.agent_name,
+            user_id=user_id,
+        )
+        return
     await manager.aadd_nowait(
         event.thread_id,
-        redact_queued_messages(list(event.messages_to_summarize), pii_redaction_config),
+        messages,
         agent_name=event.agent_name,
         user_id=user_id,
     )

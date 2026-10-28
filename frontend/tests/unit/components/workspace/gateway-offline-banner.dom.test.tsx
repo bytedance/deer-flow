@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, rs } from "@rstest/core";
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -8,7 +9,8 @@ import {
 } from "@testing-library/react";
 
 import { GatewayOfflineBanner } from "@/components/workspace/gateway-offline-banner";
-import { AuthProvider } from "@/core/auth/AuthProvider";
+import { AuthProvider, useAuth } from "@/core/auth/AuthProvider";
+import type { User } from "@/core/auth/types";
 
 // AuthProvider pulls useRouter/usePathname from next/navigation. Hand it a
 // no-op router so logout()'s `router.push("/")` stays inert under happy-dom
@@ -128,4 +130,75 @@ describe("GatewayOfflineBanner logout recovery (#3001)", () => {
     // POST-only endpoint returns 405 and fails to clear the session.
     expect(logoutCall.method).not.toBe("GET");
   });
+});
+
+it.each(["switch account", "logout", "unmount"] as const)(
+  "ignores a probe body that finishes after %s",
+  async (action) => {
+    const userA: User = {
+      id: "account-a",
+      email: "a@example.com",
+      system_role: "user",
+      needs_setup: false,
+    };
+    const userB = { ...userA, id: "account-b" };
+    let auth!: ReturnType<typeof useAuth>;
+    let resolve!: (user: User) => void;
+    const body = new Promise<User>((done) => (resolve = done));
+    const response = Response.json(userA);
+    const json = rs.fn(() => body);
+    response.json = json;
+    rs.spyOn(globalThis, "fetch").mockImplementation(async (input) =>
+      input === "/api/v1/auth/logout"
+        ? new Response(null, { status: 204 })
+        : response,
+    );
+    function AuthProbe() {
+      auth = useAuth();
+      return <output>{auth.user?.id ?? "no user"}</output>;
+    }
+    function Recovery({ showBanner = true }: { showBanner?: boolean }) {
+      return (
+        <AuthProvider initialUser={null} initialAuthUnknown>
+          <AuthProbe />
+          {showBanner && <GatewayOfflineBanner gatewayUnavailable />}
+        </AuthProvider>
+      );
+    }
+    const view = render(<Recovery />);
+    await waitFor(() => expect(json).toHaveBeenCalledOnce());
+    await act(async () => {
+      if (action === "switch account") auth.applyUser(userB);
+      else if (action === "logout") await auth.logout();
+      else view.rerender(<Recovery showBanner={false} />);
+    });
+    await act(async () => resolve(userA));
+
+    expect(auth.user).toEqual(action === "switch account" ? userB : null);
+    expect(screen.queryByText(userA.id)).toBeNull();
+  },
+);
+
+it("applies the active recovery probe without a second auth request", async () => {
+  const user: User = {
+    id: "recovered-account",
+    email: "recovered@example.com",
+    system_role: "user",
+    needs_setup: false,
+  };
+  const fetch = rs
+    .spyOn(globalThis, "fetch")
+    .mockResolvedValue(Response.json(user));
+  function AuthProbe() {
+    return <output>{useAuth().user?.id}</output>;
+  }
+  render(
+    <AuthProvider initialUser={null} initialAuthUnknown>
+      <AuthProbe />
+      <GatewayOfflineBanner gatewayUnavailable />
+    </AuthProvider>,
+  );
+
+  expect(await screen.findByText(user.id)).toBeTruthy();
+  expect(fetch).toHaveBeenCalledOnce();
 });

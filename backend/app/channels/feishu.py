@@ -186,6 +186,9 @@ class FeishuChannel(Channel):
         self._background_tasks: set[asyncio.Task] = set()
         self._running_card_ids: dict[str, str] = {}
         self._running_card_tasks: dict[str, asyncio.Task] = {}
+        # Thread aliases (chat_id, thread_id, topic_id, user_id) already written
+        # for each in-flight reply, keyed by source message id.
+        self._remembered_thread_aliases: dict[str, set[tuple[str, str, str, str]]] = {}
         self._pending_clarifications: dict[tuple[str, str], list[dict[str, Any]]] = {}
         # Interactive clarification cards (button answers). Off by default: the
         # feature needs a one-time console subscription to card.action.trigger.
@@ -258,6 +261,18 @@ class FeishuChannel(Channel):
     @property
     def supports_streaming(self) -> bool:
         return True
+
+    def on_thread_replaced(self, old_thread_id: str) -> None:
+        """Retire pending interactive cards for a thread replaced by ``/new``."""
+        if not self._card_interaction_enabled:
+            return
+        discarded = self._card_registry.discard_thread(old_thread_id)
+        if discarded:
+            logger.info(
+                "[Feishu] retired %d pending card(s) for replaced thread: thread_id=%s",
+                discarded,
+                old_thread_id,
+            )
 
     @property
     def is_running(self) -> bool:
@@ -1099,6 +1114,7 @@ class FeishuChannel(Channel):
 
             if msg.is_final:
                 self._running_card_ids.pop(source_message_id, None)
+                self._remembered_thread_aliases.pop(source_message_id, None)
                 await self._add_reaction(source_message_id, "DONE")
             return
 
@@ -1107,6 +1123,14 @@ class FeishuChannel(Channel):
     # -- internal ----------------------------------------------------------
 
     async def _remember_thread_mapping(self, msg: OutboundMessage, *topic_ids: str | None) -> None:
+        """Map the reply's message, card and topic ids to its DeerFlow thread.
+
+        Every streamed chunk of a reply carries the same aliases, and each write
+        is a full ``store.json`` rewrite or a database upsert, so a non-final
+        chunk only writes the aliases this reply has not stored yet. The final
+        outbound writes all of them again, leaving the store as it was when every
+        chunk wrote them.
+        """
         store = self.config.get("channel_store")
         if store is None or not msg.thread_id:
             return
@@ -1122,12 +1146,18 @@ class FeishuChannel(Channel):
         if isinstance(raw_user_id, str):
             user_id = raw_user_id
 
+        source_message_id = self._non_empty_str(msg.thread_ts)
+        remembered = self._remembered_thread_aliases.setdefault(source_message_id, set()) if source_message_id and not msg.is_final else set()
+
         seen: set[str] = set()
         for topic_id in [*topic_ids, *metadata_topic_ids]:
             topic_id = self._non_empty_str(topic_id)
             if not topic_id or topic_id in seen:
                 continue
             seen.add(topic_id)
+            alias = (msg.chat_id, msg.thread_id, topic_id, user_id)
+            if alias in remembered:
+                continue
             try:
                 await store.set_thread_id(
                     self.name,
@@ -1137,7 +1167,10 @@ class FeishuChannel(Channel):
                     user_id=user_id,
                 )
             except Exception:
+                # Not remembered, so the next chunk retries it.
                 logger.exception("[Feishu] failed to remember thread mapping for topic_id=%s", topic_id)
+            else:
+                remembered.add(alias)
 
     def _run_store_call(self, make_coroutine: Callable[[], Coroutine[Any, Any, _T]], *, name: str, msg_id: Any) -> _T:
         """Run an async ``channel_store`` call from the synchronous lark callback.
@@ -1821,11 +1854,11 @@ class FeishuChannel(Channel):
 
         state = await self._connection_repo.consume_oauth_state(provider="feishu", state=code)
         if state is None:
-            await self._reply_card(message_id, "Feishu connection code is invalid or expired.")
+            await self._reply_card(message_id, await self._connect_reply_text("invalid_code"))
             return True
 
         if not user_id or not chat_id:
-            await self._reply_card(message_id, "Feishu connection could not be completed from this message.")
+            await self._reply_card(message_id, await self._connect_reply_text("incomplete", owner_user_id=state["owner_user_id"]))
             return True
 
         await self._connection_repo.upsert_connection(
@@ -1841,7 +1874,7 @@ class FeishuChannel(Channel):
             },
             status="connected",
         )
-        await self._reply_card(message_id, "Feishu connected to DeerFlow.")
+        await self._reply_card(message_id, await self._connect_reply_text("connected", owner_user_id=state["owner_user_id"]))
         return True
 
     def _parse_message_event(self, event) -> _ParsedMessage | None:

@@ -1,9 +1,10 @@
 import asyncio
+import json
 import logging
 import tempfile
 import threading
 from collections.abc import AsyncGenerator, Callable, Coroutine, Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any, BinaryIO, Literal
 
@@ -53,6 +54,7 @@ from deerflow.skills.security_static_scanner import (
 )
 from deerflow.skills.storage import SkillStorage, get_or_new_user_skill_storage
 from deerflow.skills.types import SKILL_MD_FILE, SkillCategory
+from deerflow.utils.atomic_write import cleanup_failed_atomic_write
 from deerflow.utils.file_io import await_drained
 from deerflow.utils.thread_id import ThreadId
 
@@ -270,7 +272,10 @@ async def _scan_static_skill_markdown_or_raise(skill_name: str, content: str, *,
         with tempfile.TemporaryDirectory() as tmp:
             skill_dir = Path(tmp) / skill_name
             skill_dir.mkdir(parents=True)
-            (skill_dir / SKILL_MD_FILE).write_text(content, encoding="utf-8")
+            # The static scan must see the bytes the caller submitted: on
+            # Windows a default text write stores CRLF, so the scan would judge
+            # text that never reaches the skill file.
+            (skill_dir / SKILL_MD_FILE).write_text(content, encoding="utf-8", newline="")
             return enforce_static_scan(skill_dir, skill_name=skill_name, app_config=app_config)
 
     try:
@@ -346,7 +351,11 @@ def _load_user_skills(config: AppConfig) -> list[Skill]:
 
 
 def _copy_uploaded_skill_archive(source: BinaryIO) -> Path:
-    """Copy an uploaded archive to a bounded temporary file off the event loop."""
+    """Copy an uploaded archive to a bounded temporary file off the event loop.
+
+    A size-limit or read failure is the error the caller sees. Removing the
+    partial temporary is best-effort and must not replace that error.
+    """
     destination: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(prefix="deerflow-skill-", suffix=".skill", delete=False) as target:
@@ -360,7 +369,7 @@ def _copy_uploaded_skill_archive(source: BinaryIO) -> Path:
         return destination
     except Exception:
         if destination is not None:
-            destination.unlink(missing_ok=True)
+            cleanup_failed_atomic_write(destination)
         raise
 
 
@@ -507,7 +516,7 @@ async def list_skills(request: Request, config: AppConfig = Depends(get_config))
         skills = await asyncio.to_thread(_load_user_skills, config)
     except Exception as e:
         logger.error(f"Failed to load skills: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to load skills: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to load skills.") from e
 
     visible_skills = await _filter_visible_skills(request, config, skills)
 
@@ -577,10 +586,13 @@ async def upload_and_install_skill(
     except MultiPartException as e:
         raise HTTPException(status_code=400, detail=e.message) from e
     finally:
-        if form is not None:
-            await form.close()
+        # Discard before close. SpooledTemporaryFile.close can raise while
+        # flushing, which would mask the install outcome and skip the discard.
         if temporary_path is not None:
-            await asyncio.to_thread(temporary_path.unlink, missing_ok=True)
+            await asyncio.to_thread(cleanup_failed_atomic_write, temporary_path)
+        if form is not None:
+            with suppress(Exception):
+                await form.close()
 
 
 @router.post(
@@ -654,7 +666,7 @@ async def list_custom_skills(request: Request, config: AppConfig = Depends(get_c
         return SkillsListResponse(skills=[_skill_to_response(skill) for skill in visible_skills])
     except Exception as e:
         logger.error("Failed to list custom skills: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to list custom skills: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to list custom skills.") from e
 
 
 @router.get("/skills/diagnostics/custom", response_model=SkillDiagnosticsResponse, summary="List Owned Custom Skill YAML Errors")
@@ -817,6 +829,9 @@ async def delete_custom_skill(skill_name: str, request: Request, config: AppConf
     await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
     try:
         skill_name = skill_name.replace("\r\n", "").replace("\n", "")
+        # Reject a malformed name (400 below) before the drained tail: failing
+        # there first takes the owner's mutation lock and logs a caller error.
+        SkillStorage.validate_skill_name(skill_name)
         # A cold user-scoped storage resolves the project root and builds
         # absolute paths on construction: blocking filesystem IO.
         storage = await asyncio.to_thread(_get_user_skill_storage, config)
@@ -863,6 +878,15 @@ async def get_custom_skill_history(skill_name: str, request: Request, config: Ap
     await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
     try:
         skill_name = skill_name.replace("\r\n", "").replace("\n", "")
+        # A malformed name is a client error (400, as delete and rollback
+        # answer). Validate it here rather than with a handler-wide
+        # ``except ValueError``: a corrupt history file raises
+        # ``json.JSONDecodeError`` or ``UnicodeDecodeError``, both ValueErrors,
+        # and must stay a 500.
+        try:
+            SkillStorage.validate_skill_name(skill_name)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
 
         def _read_history() -> list[dict] | None:
             # Worker thread: storage construction, the existence probes, and the
@@ -910,12 +934,12 @@ async def rollback_custom_skill(skill_name: str, body: SkillRollbackRequest, req
         await asyncio.to_thread(storage.validate_skill_markdown_content, skill_name, target_content)
         static_findings = await _scan_static_skill_markdown_or_raise(skill_name, target_content, app_config=config)
         scan = await scan_skill_content(target_content, executable=False, location=f"{skill_name}/{SKILL_MD_FILE}", app_config=config, static_findings=static_findings)
+        from deerflow.skills.mutations.guard import read_optional_text
 
         def _read_current_content() -> str | None:
-            # Worker thread: the post-scan read of the file being replaced is
-            # blocking filesystem IO (#5747), same rule as the history read.
-            skill_file = storage.get_custom_skill_file(skill_name)
-            return skill_file.read_text(encoding="utf-8") if skill_file.exists() else None
+            # Called off-loop, inside the mutation critical section for writes.
+            # Preserve managed-owner readiness and projection-lock admission.
+            return read_optional_text(storage, storage.get_custom_skill_file(skill_name))
 
         if scan.decision == "block":
             # The blocked path overwrites nothing, so the entry is purely
@@ -972,6 +996,12 @@ async def rollback_custom_skill(skill_name: str, body: SkillRollbackRequest, req
         raise HTTPException(status_code=400, detail="history_index is out of range")
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        # A corrupt (malformed JSON or non-UTF-8) history file is a server
+        # fault, not a bad request; both are ValueErrors, so they must be
+        # caught before the 400 mapping below.
+        logger.error("Failed to roll back custom skill %s: %s", skill_name, e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to roll back custom skill: {str(e)}")
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -1008,7 +1038,7 @@ async def get_skill(skill_name: str, request: Request, config: AppConfig = Depen
         raise
     except Exception as e:
         logger.error(f"Failed to get skill {skill_name}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to get skill: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to get skill.") from e
 
 
 def _write_extensions_skill_state(
@@ -1021,12 +1051,12 @@ def _write_extensions_skill_state(
     """Read-modify-write a skill's enabled state in the shared extensions_config.json.
 
     Blocking filesystem IO: always call this via ``asyncio.to_thread``. It takes
-    the public projection lock before the process-local and cross-process
-    extensions config locks. The first keeps the enabled-only view synchronized
-    across workers; the latter two prevent this router and the MCP router from
-    interleaving writes to the shared file. All locks are held by the worker, so
-    request cancellation cannot release them while the write or projection
-    rebuild is still running.
+    the same-name mutation fence before the public projection, process-local,
+    and cross-process extensions config locks. The projection lock keeps the
+    enabled-only view synchronized across workers; the latter two prevent this
+    router and the MCP router from interleaving writes to the shared file. All
+    locks are held by the worker, so request cancellation cannot release them
+    while the write or projection rebuild is still running.
     """
     from contextlib import nullcontext
 
@@ -1037,10 +1067,12 @@ def _write_extensions_skill_state(
     projection_update = skill_projection_mutation(storage, "public", remove_names=removal_names) if rebuild_public_projection and isinstance(storage, LocalSkillStorage) else nullcontext()
     config_path = ExtensionsConfig.resolve_config_path()
     if config_path is None:
-        config_path = Path.cwd().parent / "extensions_config.json"
+        config_path = ExtensionsConfig.default_config_path()
         logger.info(f"No existing extensions config found. Creating new config at: {config_path}")
 
-    with projection_update:
+    from deerflow.skills.mutations.guard import managed_global_state_write
+
+    with managed_global_state_write(storage, skill_name), projection_update:
         with extensions_config_write_lock, extensions_config_file_lock(config_path):
             # The projection lock is cross-process, but the singleton cache is
             # not. Existing files are therefore re-read under the lock, raw, so

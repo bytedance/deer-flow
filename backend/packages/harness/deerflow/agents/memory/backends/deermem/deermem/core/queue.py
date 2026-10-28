@@ -1,20 +1,23 @@
 """Memory update queue with debounce mechanism.
 
-The queue collects conversation contexts and processes them after a
-per-key debounce period; multiple contexts for the same
+The queue collects normal conversation contexts and processes them after a
+per-key debounce period; multiple normal contexts for the same
 ``(thread_id, user_id, agent_name)`` key are coalesced into one update. A
 monotonic deadline caps debounce deferral at ``max_wait_seconds`` from the
 first pending arrival. One timer wakes for the earliest deadline; the single
-consumer processes only eligible items unless explicitly flushed.
+consumer processes only eligible items unless explicitly flushed. Emergency
+pre-compaction snapshots stay separate and are immediately eligible.
 
 The queue is a process-local in-memory list plus a debounce
 :class:`~threading.Timer`. Items still pending at process exit are lost
 (best-effort :meth:`MemoryUpdateQueue.flush_sync` drain softens this for
-graceful shutdown). Memory updates are best-effort: a failed or lost update is
-re-fed on the next conversation turn (the middleware passes the full
+graceful shutdown). Memory updates are best-effort: a failed or lost normal update
+is re-fed on the next conversation turn (the middleware passes the full
 conversation each cycle, and the updater's watermark does not advance on
 failure), so an in-memory queue covers the realistic graceful-deploy case
-without a persistence layer.
+without a persistence layer. Emergency snapshots cannot rely on that retry
+because compaction removes their messages; they are still in-memory only and
+can be lost on process exit or extraction failure.
 """
 
 from __future__ import annotations
@@ -33,6 +36,8 @@ if TYPE_CHECKING:
     from .updater import MemoryUpdater
 
 logger = logging.getLogger(__name__)
+
+_EMERGENCY_BACKLOG_WARNING_DEPTH = 32
 
 
 class QueueFull(Exception):
@@ -78,9 +83,9 @@ class ConversationContext:
     signals: frozenset[str] = field(default_factory=frozenset)
     # Emergency (summarization) flushes bypass the updater's index watermark:
     # the subset they carry is a one-shot "extract before removal" snapshot whose
-    # own length would otherwise regress the conversation watermark. Such contexts
-    # also coexist with (do not replace) a pending normal update for the same key
-    # so a flush cannot drop a pending normal update's un-extracted tail. See
+    # own length would otherwise regress the conversation watermark. Each stays
+    # separate from other emergency snapshots and a pending normal update for the
+    # same key, so no compacted partition or un-extracted normal tail is replaced. See
     # ``_enqueue_locked``'s match-key + backpressure handling.
     bypass_watermark: bool = False
     # Scope clear-generation captured when this conversation became pending
@@ -367,20 +372,33 @@ class MemoryUpdateQueue:
         advanced past it.
         """
         key = queue_key(thread_id, user_id, agent_name)
-        # Emergency (bypass) and normal updates coexist: the match key includes
-        # ``bypass_watermark`` so a summarization flush (bypass=True) never
-        # replaces a pending normal update for the same (thread, user, agent) --
-        # replacing it would drop the normal update's un-extracted tail, which
-        # the next turn may not re-feed if the user stops. Both are processed
-        # independently instead.
-        existing = self._coalesce_target(key, bypass_watermark)
+        # Normal updates coalesce, including a failed clear-refresh that keeps
+        # the pre-clear snapshot queued beside the newer fence. Same-generation
+        # emergency snapshots stay separate: each compaction slice can be
+        # disjoint, so a later one must not replace an earlier one or a pending
+        # normal update. A newer clear is the exception. Every older emergency
+        # snapshot for this key is consumed so the incoming messages keep the
+        # generation they captured. A flush older than a snapshot already
+        # queued for this key is refused instead.
+        if bypass_watermark:
+            same_key = [candidate for candidate in self._items if queue_key(candidate.thread_id, candidate.user_id, candidate.agent_name) == key]
+            newer = [candidate for candidate in same_key if candidate.clear_generation is not None and is_stale_clear_generation(captured_clear_generation, candidate.clear_generation)]
+            if newer:
+                existing = max(newer, key=lambda candidate: candidate.sequence)
+                stale_emergencies: list[ConversationContext] = []
+            else:
+                existing = None
+                stale_emergencies = [candidate for candidate in same_key if candidate.bypass_watermark and candidate.clear_generation is not None and is_stale_clear_generation(candidate.clear_generation, captured_clear_generation)]
+        else:
+            existing = self._coalesce_target(key, False)
+            stale_emergencies = []
         # Backpressure: once depth reaches the cap, reject NEW non-signal normal
-        # items. Same-key updates merge (do not grow depth), except a failed
-        # refresh consume, which keeps the old snapshot and appends the new one.
-        # Signal-bearing items and emergency (bypass) flushes are always
-        # admitted. Signals capture important memories, and the emergency path
-        # captures messages about to be removed by summarization -- neither can
-        # be re-fed next turn, so shedding them under load would lose data
+        # items. Same-key normal updates merge (do not grow depth), except a
+        # failed refresh consume, which keeps the old snapshot and appends the
+        # new one. Signal-bearing items and emergency (bypass) flushes are
+        # always admitted. Signals capture important memories, and the emergency
+        # path captures messages about to be removed by summarization -- neither
+        # can be re-fed next turn, so shedding them under load would lose data
         # rather than merely defer it.
         max_depth = self._config.queue_max_depth
         if max_depth > 0 and not bypass_watermark and not signals and existing is None and len(self._items) >= max_depth:
@@ -408,7 +426,22 @@ class MemoryUpdateQueue:
         # full-conversation feed still carries the cleared turns: keeping
         # their ids would re-extract them under the new generation.
         detach_from_stale = False
-        if existing is None:
+        excluded_message_ids: frozenset[str] = frozenset()
+        if stale_emergencies:
+            # A newer clear meets every older emergency snapshot, not only the
+            # latest. A failed consume stays queued, and every such snapshot's
+            # message ids are excluded from this flush and from later
+            # same-generation emergency flushes that still see it.
+            enqueued_clear_generation = captured_clear_generation
+            for stale in stale_emergencies:
+                merged_signals = merged_signals | stale.signals
+                excluded_message_ids |= stale.excluded_message_ids
+                if self._consume_pre_clear_feed(stale):
+                    self._items = [item for item in self._items if item is not stale]
+                else:
+                    stale.signals = stale.signals | signals
+                    excluded_message_ids |= {message_id for message in stale.messages if (message_id := _message_id(message)) is not None}
+        elif existing is None:
             enqueued_clear_generation = captured_clear_generation
         elif existing.clear_generation is not None and is_stale_clear_generation(captured_clear_generation, existing.clear_generation):
             incoming = ConversationContext(
@@ -435,16 +468,18 @@ class MemoryUpdateQueue:
             return existing
         elif existing.clear_generation is None:
             enqueued_clear_generation = existing.clear_generation
+            excluded_message_ids = existing.excluded_message_ids
         elif is_stale_clear_generation(existing.clear_generation, captured_clear_generation):
             if not self._consume_pre_clear_feed(existing):
                 existing.signals = merged_signals
                 detach_from_stale = True
             enqueued_clear_generation = captured_clear_generation
+            excluded_message_ids = existing.excluded_message_ids
+            if detach_from_stale:
+                excluded_message_ids |= {message_id for message in existing.messages if (message_id := _message_id(message)) is not None}
         else:
             enqueued_clear_generation = existing.clear_generation
-        excluded_message_ids = existing.excluded_message_ids if existing is not None else frozenset()
-        if detach_from_stale:
-            excluded_message_ids |= {message_id for message in existing.messages if (message_id := _message_id(message)) is not None}
+            excluded_message_ids = existing.excluded_message_ids
         if excluded_message_ids:
             messages = [message for message in messages if _message_id(message) not in excluded_message_ids]
         now = time.monotonic()
@@ -485,6 +520,19 @@ class MemoryUpdateQueue:
         elif existing is not None:
             self._items = [c for c in self._items if c is not existing]
         self._items.append(context)
+        if bypass_watermark and len(self._items) >= _EMERGENCY_BACKLOG_WARNING_DEPTH:
+            emergency_depth = sum(c.bypass_watermark and queue_key(c.thread_id, c.user_id, c.agent_name) == key for c in self._items)
+            # Warn at 32, 64, 128, ... pending snapshots for this key. Deriving
+            # the depth from pending items naturally resets after drain/cancel,
+            # without retaining per-key warning state or warning on every arrival.
+            if emergency_depth >= _EMERGENCY_BACKLOG_WARNING_DEPTH and emergency_depth & (emergency_depth - 1) == 0:
+                logger.warning(
+                    "Memory extraction backlog: %d pending emergency snapshots for thread %r (user_id=%r, agent_name=%r); retaining all snapshots in memory. Check extraction latency; pending snapshots can be lost on process exit.",
+                    emergency_depth,
+                    thread_id,
+                    user_id,
+                    agent_name,
+                )
         return context
 
     def _coalesce_target(

@@ -603,6 +603,103 @@ def test_queue_coalesce_keeps_emergency_snapshot_when_pre_clear_consume_fails() 
     assert second_call.kwargs["bypass_watermark"] is True
 
 
+def test_newer_clear_consumes_every_older_emergency_snapshot() -> None:
+    """A newer emergency flush must not leave an earlier pre-clear snapshot queued."""
+    mock_updater = MagicMock()
+    mock_updater.peek_clear_generation.side_effect = [(0, 0), (0, 0), (1, 0)]
+    queue = MemoryUpdateQueue(DeerMemConfig(), mock_updater)
+    with patch.object(queue, "_schedule_timer"):
+        queue.add_nowait(thread_id="thread-1", messages=["first"], agent_name="researcher", user_id="alice")
+        queue.add_nowait(thread_id="thread-1", messages=["second"], agent_name="researcher", user_id="alice")
+        queue.add_nowait(thread_id="thread-1", messages=["third"], agent_name="researcher", user_id="alice")
+
+    assert queue.pending_count == 1
+    assert queue._items[0].messages == ["third"]
+    assert queue._items[0].clear_generation == (1, 0)
+    assert [call.args[0] for call in mock_updater.mark_feed_consumed.call_args_list] == [["first"], ["second"]]
+
+
+def test_failed_clear_consume_excludes_every_older_emergency_snapshot() -> None:
+    """A failed consume keeps each old snapshot and blacklists all of their ids."""
+    mock_updater = MagicMock()
+    mock_updater.peek_clear_generation.side_effect = [(0, 0), (0, 0), (1, 0)]
+    mock_updater.mark_feed_consumed.side_effect = RuntimeError("watermark unavailable")
+    queue = MemoryUpdateQueue(DeerMemConfig(), mock_updater)
+    first = [HumanMessage(content="first", id="a1"), AIMessage(content="first", id="a2")]
+    second = [HumanMessage(content="second", id="b1"), AIMessage(content="second", id="b2")]
+    third = [*first, *second, HumanMessage(content="third", id="c1")]
+    with patch.object(queue, "_schedule_timer"):
+        queue.add_nowait(thread_id="thread-1", messages=first, agent_name="researcher", user_id="alice")
+        queue.add_nowait(thread_id="thread-1", messages=second, agent_name="researcher", user_id="alice")
+        queue.add_nowait(thread_id="thread-1", messages=third, agent_name="researcher", user_id="alice")
+
+    assert queue.pending_count == 3
+    assert queue._items[0].messages == first
+    assert queue._items[1].messages == second
+    assert [message.id for message in queue._items[2].messages] == ["c1"]
+    assert queue._items[2].excluded_message_ids == frozenset({"a1", "a2", "b1", "b2"})
+    assert queue._items[2].clear_generation == (1, 0)
+
+
+def test_later_same_generation_emergency_inherits_failed_clear_exclusions() -> None:
+    """The next disjoint emergency flush still filters ids from a consume that failed."""
+    mock_updater = MagicMock()
+    mock_updater.peek_clear_generation.side_effect = [(0, 0), (1, 0), (1, 0)]
+    mock_updater.mark_feed_consumed.side_effect = RuntimeError("watermark unavailable")
+    queue = MemoryUpdateQueue(DeerMemConfig(), mock_updater)
+    old = [HumanMessage(content="old", id="m1"), AIMessage(content="old", id="m2")]
+    first_new = [*old, HumanMessage(content="kept", id="m3")]
+    second_new = [*old, HumanMessage(content="kept", id="m3"), HumanMessage(content="later", id="m4")]
+    with patch.object(queue, "_schedule_timer"):
+        queue.add_nowait(thread_id="thread-1", messages=old, agent_name="researcher", user_id="alice")
+        queue.add_nowait(thread_id="thread-1", messages=first_new, agent_name="researcher", user_id="alice")
+        queue.add_nowait(thread_id="thread-1", messages=second_new, agent_name="researcher", user_id="alice")
+
+    assert queue.pending_count == 3
+    assert queue._items[0].clear_generation == (0, 0)
+    assert [message.id for message in queue._items[1].messages] == ["m3"]
+    assert queue._items[1].excluded_message_ids == frozenset({"m1", "m2"})
+    assert [message.id for message in queue._items[2].messages] == ["m3", "m4"]
+    assert queue._items[2].excluded_message_ids == frozenset({"m1", "m2"})
+    assert queue._items[1].clear_generation == queue._items[2].clear_generation == (1, 0)
+
+
+def test_late_emergency_snapshot_older_than_queued_clear_is_refused() -> None:
+    """A pre-clear flush that arrives after a newer snapshot must not line up behind it."""
+    mock_updater = MagicMock()
+    mock_updater.peek_clear_generation.side_effect = [(1, 0), (0, 0)]
+    mock_updater.mark_feed_consumed.side_effect = RuntimeError("watermark unavailable")
+    queue = MemoryUpdateQueue(DeerMemConfig(), mock_updater)
+    with patch.object(queue, "_schedule_timer"):
+        queue.add_nowait(
+            thread_id="thread-1",
+            messages=["post-clear"],
+            agent_name="researcher",
+            user_id="alice",
+            signals=frozenset({"preference"}),
+        )
+        queue.add_nowait(
+            thread_id="thread-1",
+            messages=["pre-clear"],
+            agent_name="researcher",
+            user_id="alice",
+            signals=frozenset({"correction"}),
+        )
+
+    assert queue.pending_count == 1
+    assert queue._items[0].messages == ["post-clear"]
+    assert queue._items[0].clear_generation == (1, 0)
+    assert queue._items[0].signals == frozenset({"preference", "correction"})
+    mock_updater.mark_feed_consumed.assert_called_once_with(
+        ["pre-clear"],
+        thread_id="thread-1",
+        user_id="alice",
+        agent_name="researcher",
+        bypass_watermark=True,
+        sequence=2,
+    )
+
+
 def test_queue_coalesce_after_failed_refresh_merges_into_fresh_snapshot() -> None:
     """A later add merges into the post-clear snapshot and leaves the stale one queued."""
     mock_updater = MagicMock()

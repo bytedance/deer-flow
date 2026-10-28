@@ -35,6 +35,8 @@ const STOP_ICONS: Record<GoalStopKey, LucideIcon> = {
   autoOff: CircleStopIcon,
   noProgress: CircleStopIcon,
   tokenCapped: GaugeIcon,
+  loopCapped: CircleStopIcon,
+  recursionCapped: CircleStopIcon,
   missingEvidence: CircleStopIcon,
   runFailed: TriangleAlertIcon,
   needsInputCard: MessageCircleQuestionIcon,

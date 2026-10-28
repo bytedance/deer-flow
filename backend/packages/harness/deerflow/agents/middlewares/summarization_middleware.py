@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import html
 import logging
@@ -85,7 +86,11 @@ class ContextCompactionResult:
 
 @runtime_checkable
 class BeforeSummarizationHook(Protocol):
-    """Hook invoked before summarization removes messages from state."""
+    """Hook invoked before summarization removes messages from state.
+
+    Hooks are synchronous and may block. The async compaction path runs them
+    in a worker thread, so a hook must not assume it runs on the event loop.
+    """
 
     def __call__(self, event: SummarizationEvent) -> None: ...
 
@@ -1051,6 +1056,15 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         preserved_messages: list[AnyMessage],
         runtime: Runtime,
     ) -> None:
+        """Async counterpart of :meth:`_fire_hooks`.
+
+        A hook with ``as_async`` (DeerMem's memory flush) is awaited here:
+        that path already offloads its blocking work. Every other hook runs
+        in a worker thread. mem0, Honcho and OpenViking write over sync HTTP,
+        so calling them inline would stall the event loop for the whole
+        request. ``asyncio.to_thread`` copies the context, so those hooks
+        still see the run's LangGraph config and user context.
+        """
         if not self._before_summarization_hooks:
             return
 
@@ -1061,7 +1075,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
                 if callable(async_hook):
                     await async_hook(event)
                 else:
-                    hook(event)
+                    await asyncio.to_thread(hook, event)
             except Exception:
                 hook_name = getattr(hook, "__name__", None) or type(hook).__name__
                 logger.exception("before_summarization hook %s failed", hook_name)

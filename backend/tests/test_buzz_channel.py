@@ -46,7 +46,7 @@ def _channel(**overrides) -> BuzzChannel:
 def test_registered_in_framework_registries():
     assert _CHANNEL_REGISTRY["buzz"] == "app.channels.buzz:BuzzChannel"
     assert _CHANNEL_CREDENTIAL_KEYS["buzz"] == ["private_key"]
-    assert CHANNEL_CAPABILITIES["buzz"] == {"supports_streaming": True, "proactive_notifications": False}
+    assert CHANNEL_CAPABILITIES["buzz"] == {"supports_streaming": True, "proactive_notifications": False, "proactive_group_notifications": False}
     policy = CHANNEL_RUN_POLICY["buzz"]
     assert policy.serialize_thread_runs is True and policy.requires_bound_identity is False
 
@@ -690,6 +690,26 @@ def test_connect_repo_error_sends_error_reply_and_does_not_crash():
     _dispatch(ch, _event(sk=SK_NEWCOMER, content="/connect tok-1", mentions=()))
     (event,) = _events_of(transport)
     assert event["content"] == "Buzz connection could not be completed from this message."
+
+
+@pytest.mark.parametrize(
+    ("repo_kwargs", "expected"),
+    [
+        ({"states": {"tok-1": "owner-zh"}}, "Buzz 已连接到 DeerFlow。"),
+        ({}, "Buzz 绑定码无效或已过期。"),
+        ({"raise_on_consume": True}, "无法通过这条消息完成 Buzz 绑定。"),
+    ],
+)
+def test_connect_replies_use_the_configured_language(repo_kwargs, expected):
+    # No user_preferences store here, so every reply uses channel_connections.notification_locale.
+    from app.channels.reply_locale import ReplyLocaleResolver
+
+    ch, _ = _started(connection_repo=FakeConnectionRepo(**repo_kwargs), reply_locale=ReplyLocaleResolver(default_locale="zh-CN"))
+    transport = FakeTransport()
+    ch._transport = transport
+    _dispatch(ch, _event(sk=SK_NEWCOMER, content="/connect tok-1", mentions=()))
+    (event,) = _events_of(transport)
+    assert event["content"] == expected
 
 
 def test_connect_success_survives_a_failed_confirmation_send(caplog):
