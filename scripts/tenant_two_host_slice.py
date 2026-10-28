@@ -144,24 +144,49 @@ for db in tenant_native tenant_executor; do docker exec {PHASE}-pg psql -U postg
     native_url = base + "/tenant_native"
     executor_url = base + "/tenant_executor"
 
-    print("[controller] migrations")
+    print("[controller] migrations and native seeding")
     must(CONTROLLER, f"""set -eu
 docker run --rm --pull=never --network host -v {CROOT}/{PHASE}/source.tar.gz:/run/source.tar.gz:ro --entrypoint /bin/sh {NATIVE_IMAGE} -c '
 set -eu; rm -rf /tmp/source; mkdir /tmp/source; tar xzf /run/source.tar.gz -C /tmp/source
 cd /tmp/source/backend
 export PYTHONPATH=/tmp/source/backend:/tmp/source/backend/packages/harness:/tmp/source/backend/packages/extension-api:/tmp/source/backend/packages/ecs-executor
 /app/backend/.venv/bin/python - <<PY
+import asyncio
 import sqlalchemy as sa
-from alembic import command
-from alembic.config import Config
-from pathlib import Path
-import deerflow.persistence as p
-native = Config(); native.set_main_option("script_location", str(Path(p.__file__).parent / "migrations"))
-e = sa.create_engine("{native_url}"); command.upgrade(native, "head"); e.dispose()
-import ecs_executor.schema as s
-ex = Config(); ex.set_main_option("script_location", str(Path(s.__file__).parent / "migrations"))
-e2 = sa.create_engine("{executor_url}"); command.upgrade(ex, "head"); e2.dispose()
-print("MIGRATED")
+from sqlalchemy.ext.asyncio import create_async_engine
+from deerflow.persistence import bootstrap
+from deerflow.persistence.run.model import RunRow
+from deerflow.persistence.thread_meta.model import ThreadMetaRow
+from deerflow.persistence.user.model import UserRow
+from deerflow.persistence.workspaces.model import WorkspaceMembershipRow, WorkspaceRow
+
+OWNER = "{OWNER}"
+WORKSPACE = "11111111-2222-4333-8333-222222222222"
+THREAD = "two-host-slice-one-thread"
+RUN = "11111111-1111-4111-8111-111111111111"
+CONTEXT = {{"workspace_id": WORKSPACE, "actor_user_id": OWNER, "membership_version": 1, "policy_version": 1}}
+
+async def migrate_native():
+    engine = create_async_engine("{native_url}")
+    try:
+        await bootstrap.bootstrap_schema(engine, backend="postgres")
+    finally:
+        await engine.dispose()
+
+asyncio.run(migrate_native())
+native = sa.create_engine("{native_url}")
+with native.begin() as conn:
+    conn.execute(sa.insert(UserRow).values(id=OWNER, email="two-host-owner@example.invalid"))
+    conn.execute(sa.insert(ThreadMetaRow).values(thread_id=THREAD, user_id=OWNER, incarnation="two-host-epoch"))
+    conn.execute(sa.insert(RunRow).values(run_id=RUN, thread_id=THREAD, user_id=OWNER, status="working", workspace_id=WORKSPACE, workspace_context_json=CONTEXT))
+    conn.execute(sa.insert(WorkspaceRow).values(id=WORKSPACE, kind="personal", name="two-host", personal_user_id=OWNER))
+    conn.execute(sa.insert(WorkspaceMembershipRow).values(workspace_id=WORKSPACE, user_id=OWNER, role="owner", status="active", version=1))
+native.dispose()
+from ecs_executor.schema import upgrade_schema
+executor = sa.create_engine("{executor_url}")
+upgrade_schema(executor)
+executor.dispose()
+print("MIGRATED_AND_SEEDED")
 PY'
 """, what="migrations")
 
