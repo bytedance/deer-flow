@@ -1116,12 +1116,10 @@
 
 ### 修复
 
-- **基准测试：** 在创建任何 provider 之前拒绝负数或 NaN 的沙箱空闲超时，并对
-  BoxLite/AIO 健康检查跳过窗口执行相同校验。合法的零值、正数和正无穷仍保持原有行为，
-  OpenSandbox 继续拒绝非零跳过窗口；AIO 基准测试输出会记录已接受的值，但不表示其 provider
-  会消费该参数。由于空闲回收场景必须等待超过所配置的超时，它会在创建资源前拒绝正无穷。
-  ([#7646])
-
+- **TUI：** `/threads` 和 `/model` 选择器现在按原样显示线程标题和模型名称。此前标签
+  会被当作 Textual 标记解析，标题如 `Fix [/bold] in parser` 会在打开选择器时以
+  `MarkupError` 使 TUI 退出，标题中的 `[a]` 也会消失。([#7631])
+  
 - **渠道：** 钉钉 AI 卡片不再在 Gateway 事件循环上获取 access token。此前创建卡片和流式更新卡片
   都会调用 dingtalk-stream 的同步 `get_access_token()`，它用 `requests` 发请求且没有超时，因此
   首张卡片以及之后每次 SDK token 刷新（约每两小时一次）都会在整个请求期间阻塞所有渠道、请求和
@@ -10556,4 +10554,5 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7594]: https://github.com/bytedance/deer-flow/pull/7594
 [#7597]: https://github.com/bytedance/deer-flow/pull/7597
 [#7606]: https://github.com/bytedance/deer-flow/pull/7606
-[#7646]: https://github.com/bytedance/deer-flow/issues/7646
+[#7631]: https://github.com/bytedance/deer-flow/pull/7631
+[#7651]: https://github.com/bytedance/deer-flow/pull/7651
