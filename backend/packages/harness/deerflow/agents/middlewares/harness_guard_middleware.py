@@ -11,6 +11,7 @@ Implements Route C / RFC-003:
 from __future__ import annotations
 
 import ast
+import asyncio
 import json
 import logging
 import re
@@ -27,7 +28,11 @@ from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
 from deerflow.agents.middlewares._bounded_dict import BoundedDict
-from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY, normalize_tool_result
+from deerflow.agents.middlewares.tool_result_meta import (
+    TOOL_META_KEY,
+    _command_messages,
+    normalize_tool_result,
+)
 from deerflow.config.harness_guard_config import HarnessGuardConfig
 from deerflow.sandbox.tools import read_current_file_content
 
@@ -53,6 +58,10 @@ def classify_tool_error(content: str) -> ErrorSignature | None:
     """Analyze tool output content for classic failure patterns and produce targeted hints."""
     if not content or not isinstance(content, str):
         return None
+
+    # Defensive bound: scan recent tail (where tracebacks terminate) to prevent excessive latency
+    if len(content) > 50000:
+        content = content[-50000:]
 
     # 1. ModuleNotFoundError / ImportError
     match_import_from = re.search(
@@ -161,6 +170,8 @@ def verify_content_syntax(file_path: str, content: str) -> str | None:
             ast.parse(content, filename=file_path)
         except SyntaxError as e:
             return f"Python syntax error at line {e.lineno}, col {e.offset}: {e.msg}"
+        except ValueError as e:
+            return f"Python source code error: {e}"
 
     elif file_path.endswith(".json"):
         try:
@@ -320,15 +331,12 @@ class HarnessGuardMiddleware(AgentMiddleware):
 
         return None
 
-    def _post_process_result(
+    def _post_process_tool_message(
         self,
         request: ToolCallRequest,
-        result: ToolMessage | Command,
-    ) -> ToolMessage | Command:
+        result: ToolMessage,
+    ) -> ToolMessage:
         """Analyze tool result, classify error signatures, inject hints, and detect loops."""
-        if not isinstance(result, ToolMessage):
-            return result
-
         tool_name = str(request.tool_call.get("name") or result.name or "unknown")
         raw_text = _extract_text_content(result.content)
         is_error = result.status == "error"
@@ -407,6 +415,23 @@ class HarnessGuardMiddleware(AgentMiddleware):
 
         return result
 
+    def _post_process_result(
+        self,
+        request: ToolCallRequest,
+        result: ToolMessage | Command,
+    ) -> ToolMessage | Command:
+        """Handle ToolMessage directly or inspect Command.update messages."""
+        if isinstance(result, ToolMessage):
+            return self._post_process_tool_message(request, result)
+        if isinstance(result, Command):
+            messages = _command_messages(result)
+            if messages:
+                tool_call_id = request.tool_call.get("id")
+                for msg in messages:
+                    if isinstance(msg, ToolMessage) and (not tool_call_id or msg.tool_call_id == tool_call_id):
+                        self._post_process_tool_message(request, msg)
+        return result
+
     @override
     def wrap_tool_call(
         self,
@@ -432,7 +457,7 @@ class HarnessGuardMiddleware(AgentMiddleware):
         if not self.config.enabled:
             return await handler(request)
 
-        blocked = self._check_write_syntax_block(request)
+        blocked = await asyncio.to_thread(self._check_write_syntax_block, request)
         if blocked is not None:
             return blocked
 

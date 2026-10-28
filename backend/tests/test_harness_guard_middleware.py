@@ -129,6 +129,11 @@ class TestSyntaxVerification:
         assert err is not None
         assert "JSON" in err
 
+    def test_syntax_with_null_bytes(self):
+        err = verify_content_syntax("evil.py", "print('hello')\x00")
+        assert err is not None
+        assert "error" in err.lower()
+
     def test_untracked_extension(self):
         content = "arbitrary text content"
         assert verify_content_syntax("notes.txt", content) is None
@@ -383,3 +388,34 @@ class TestHarnessGuardMiddleware:
         res = await middleware.awrap_tool_call(req, async_handler)
         assert "[HARNESS GUARD]" in res.content
         assert "Command 'run_bad.sh' was not found" in res.content
+
+    def test_command_result_processing(self):
+        from langgraph.types import Command
+
+        middleware = HarnessGuardMiddleware(HarnessGuardConfig())
+        req = _make_request("subagent_task", {"subtask": "fetch data"}, tool_call_id="call-sub")
+
+        inner_msg = ToolMessage(
+            content="ModuleNotFoundError: No module named 'polars'",
+            tool_call_id="call-sub",
+            name="subagent_task",
+            status="error",
+        )
+        cmd = Command(update={"messages": [inner_msg]})
+
+        res = middleware.wrap_tool_call(req, lambda r: cmd)
+        assert isinstance(res, Command)
+        assert "[HARNESS GUARD]" in inner_msg.content
+        assert "pip install polars" in inner_msg.content
+
+    def test_huge_output_error_classification(self):
+        middleware = HarnessGuardMiddleware(HarnessGuardConfig())
+        req = _make_request("bash", {"command": "big_log.sh"})
+
+        huge_content = "Normal log line\n" * 5000 + "ModuleNotFoundError: No module named 'torch_geometric'"
+        res = middleware.wrap_tool_call(
+            req,
+            lambda r: ToolMessage(content=huge_content, tool_call_id=r.tool_call["id"], name="bash", status="error"),
+        )
+        assert "[HARNESS GUARD]" in res.content
+        assert "pip install torch_geometric" in res.content
