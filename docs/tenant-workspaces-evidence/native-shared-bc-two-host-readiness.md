@@ -36,3 +36,11 @@ C1 真实 AIO 工具写入原空间文件，B 的受限容器消费已冻结输�
 本次收到的明确批准绑定 #18 的源码 `e2150fa9…6400` 和流水线 `d18c78a3…777e`；该次构建已成功完成，不重复运行。2026-10-19 再次只读查询：lastBuild=18/SUCCESS，building=false，专属队列为空。
 
 下一条撤权测试的产品代码未改，源码 `73d729db…b4d`、流水线 `95bf4803…fe8f` 已冻结但尚未上传或启动；仍等待此前对该具体新包的单独确认。详见 [待授权记录](native-shared-bc-revocation-pending-approval.json)。两机方案目前仅准备审计，不算已实施或已通过。
+
+## 2026-10-28 本地准备清点（未触云端）
+
+- 旧 `20261019-48` 冻结包三个 `/private/tmp` 工件已被系统清理丢失，且 `git archive --format=tar.gz` 嵌入即时 mtime 不可复现，旧字节永久无法恢复。step39 已按可复现程序重新冻结为 `20261028-49`（base 树 `c6e9b9e88` + 同三个测试/CI 文件，两次独立重建逐字节一致；归档 `5e7d8463…f84e`、流水线 `5f7bbe1a…0522`、重写提交脚本 `37d6ccff…4f71`）。仍未上传未授权；收据与任务备注已同步，见 [待授权记录](native-shared-bc-revocation-pending-approval.json)。本机各默认 SSH 密钥（id_rsa/id_ed25519/id_ed25519_compute）经只读 BatchMode 探测均未被 106.14.210.163 授权；执行需可用身份或操作员亲自运行冻结脚本。
+- 旧脚本钉死清点：`ecs_native_shanghai_bootstrap.py`、`*_bc_transport.py`、`*_bc_main.py` 全部硬编码废弃布局——`/data/jenkins-agent/deerflow/native-task6b-56636cebddc6` 与 `/srv/deerflow-native-task6b/56636cebddc6` 目录、`private/820d7a3429d9/resident` 私有 resident 布局、`deer-native-820d7a3429d9-controller_control` 网络、`/srv/deerflow-native-test` DEER_FLOW_HOME 与固定 env 文件挂载。均不可在新 0041/e0003 测试库上直接执行；仅沿用其严格主机校验与按完整 ID 精确清理方式。新两机运行必须定义本 phase 专属的目录、网络与 `org.deerflow.tenant.owned` 标签。
+- 当前迁移 head 已核对：native `0041_scheduler_workspace_identity`、executor `e0003_execution_identity`，与本审计"新建 0041/e0003 测试数据库"一致；runtime 兼容检查接受的已知 head 为 0040/0041。
+- 镜像钉死一致性：physical 流水线钉死的 native CI 镜像 `sha256:4f269f6b…f3f01` 与 Postgres `sha256:721873c3…8ea` 与 #18 等历史证据记录一致。两项云端只读核实命令已备好，待 SSH 可用即查：两镜像在主机上 `docker image inspect` 是否存在且 ID 未漂移；controller 所需 Redis 固定镜像的确立（旧脚本未见独立 Redis 镜像钉死，两机方案新增 controller Redis 依赖时须先固定镜像并记录）。
+- 内存预算核算依赖主机真实 `MemTotal`（只读 `/proc/meminfo`），本地无法代算。已确认预算常量：常驻 AIO 1500m/2048MiB、C 动态 500m/1024MiB、B 500m/128MiB；待获取 MemTotal 后按“真实 MemTotal − OS/fixture 预留 − 同时运行 cgroup 上限”核算，不照搬 #18 的虚拟 8GiB Node。
