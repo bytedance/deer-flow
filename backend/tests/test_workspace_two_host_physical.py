@@ -103,7 +103,7 @@ async def _controller():
         metadata_database_url=native_url,
         workspace_required=True,
         native_server_name="ecs",
-        staged_ttl_seconds=1,
+        staged_ttl_seconds=60,
     )
     context = WorkspaceContext(workspace_id=workspace_id, actor_user_id=owner, membership_version=1, policy_version=1)
     from deerflow.authz.workspace import reset_current_workspace, set_current_workspace
@@ -135,6 +135,11 @@ async def _controller():
     )
     submitted = jobs.submit(owner, token, args)
     job_id = submitted["task_id"]
+    from ecs_executor.scope import mint_management_scope
+
+    status_token = mint_management_scope(secret=secret, audience="B", user_id=owner, task_id=job_id, operation="status", workspace_context=context)
+    activated = jobs.status(owner, status_token, {"task_id": job_id})
+    assert activated["status"] in {"running", "queued"}, activated
 
     app = create_app(
         jobs,
