@@ -290,11 +290,11 @@ def _native_assembly(saver, *, worker_id):
     from deerflow.persistence.mcp_tasks.sql import McpTaskRepository
     from deerflow.persistence.projects import ProjectDocumentRepository, ProjectRepository
     from deerflow.persistence.run.sql import RunRepository
-    from deerflow.persistence.run_event.sql import DbRunEventStore
+    from deerflow.runtime.events.store.db import DbRunEventStore
     from deerflow.persistence.scheduled_task_events.sql import ScheduledTaskEventRepository
     from deerflow.persistence.scheduled_task_runs.sql import ScheduledTaskRunRepository
     from deerflow.persistence.scheduled_tasks.sql import ScheduledTaskRepository
-    from deerflow.persistence.thread_meta.sql import ThreadMetaRepository
+    from deerflow.persistence.thread_meta import ThreadMetaRepository
 
     engine = create_async_engine(os.environ["TENANT_TWO_HOST_NATIVE_ASYNC_URL"])
     sf = async_sessionmaker(engine, expire_on_commit=False)
