@@ -1,6 +1,7 @@
 """Memory API router for retrieving and managing global memory data."""
 
 import asyncio
+import re
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Request
@@ -234,6 +235,27 @@ class FactPatchRequest(BaseModel):
     confidence: float | None = Field(default=None, ge=0.0, le=1.0, description="Confidence score (0-1)")
 
 
+_MASKED_VALUE = "***"
+# Anchored at the end of the key: DeerMem knobs such as ``token_counting`` and
+# ``guaranteed_token_budget`` are not secrets, and ``api_key_env`` names an
+# environment variable rather than holding the key.
+_SECRET_CONFIG_KEY_RE = re.compile(r"(^|_)(api_key|apikey|access_key|secret_key|private_key|secret|token|password|passwd|credential|credentials|authorization|bearer)$")
+
+
+def _is_secret_config_key(key: str) -> bool:
+    snake = re.sub(r"[^a-z0-9]+", "_", re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", key).lower()).strip("_")
+    return bool(_SECRET_CONFIG_KEY_RE.search(snake))
+
+
+def _mask_secret_config_values(value: Any) -> Any:
+    """Mask credential-named values at any depth; unset ones stay visible as unset."""
+    if isinstance(value, dict):
+        return {key: _MASKED_VALUE if _is_secret_config_key(str(key)) and nested not in (None, "") else _mask_secret_config_values(nested) for key, nested in value.items()}
+    if isinstance(value, list):
+        return [_mask_secret_config_values(item) for item in value]
+    return value
+
+
 class MemoryConfigResponse(BaseModel):
     """Response model for memory configuration."""
 
@@ -242,7 +264,13 @@ class MemoryConfigResponse(BaseModel):
     injection_enabled: bool = Field(..., description="Whether memory is injected into the system prompt (call-site gate).")
     shutdown_flush_timeout_seconds: float = Field(..., description="Hard budget (s) to drain pending memory updates on Gateway graceful shutdown; must fit inside the pod's K8s terminationGracePeriodSeconds.")
     manager_class: str = Field(..., description="Active memory backend selector (backend name or dotted path).")
-    backend_config: dict = Field(..., description="Backend-private config (self-interpreted by the backend).")
+    backend_config: dict = Field(..., description="Backend-private config (self-interpreted by the backend); credential values such as api_key are masked as ***.")
+
+    @field_validator("backend_config")
+    @classmethod
+    def _mask_backend_secrets(cls, value: dict) -> dict:
+        """Config loading already resolved ``$VAR`` references, so keys would be plaintext."""
+        return _mask_secret_config_values(value)
 
 
 class MemoryStatusResponse(BaseModel):
