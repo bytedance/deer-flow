@@ -125,3 +125,70 @@ async def test_picker_escape_cancels_without_change():
         await pilot.press("escape")
         await _settle(pilot, lambda: not isinstance(app.screen, SelectScreen))
     assert app._model_override is None
+
+
+# Square brackets are Textual content markup when a widget receives a plain
+# str. Thread titles come from the user's first message and model names from
+# config, so the pickers must show them as written.
+_BRACKETED_THREADS = [
+    {"thread_id": "thread-cccccccc", "title": "Fix [/bold] in parser"},
+    {"thread_id": "thread-dddddddd", "title": "Index [a] then [b]"},
+]
+_BRACKETED_MODELS = [{"name": "beta", "display_name": "Qwen [beta]"}, {"name": "italic", "display_name": "x [/i] y"}]
+
+
+class _BracketedClient(_FakeClient):
+    def list_models(self):
+        return {"models": _BRACKETED_MODELS}
+
+    def list_threads(self, limit=10):
+        return {"thread_list": _BRACKETED_THREADS}
+
+
+class _BracketedSession(_FakeSession):
+    def __init__(self):
+        self.client = _BracketedClient()
+
+
+def _picker_lines(app) -> list[str]:
+    options = app.screen.query_one("#dialog-list")
+    return [strip.text.strip() for strip in options.render_lines(options.region.reset_offset)[: options.option_count]]
+
+
+@pytest.mark.asyncio
+async def test_thread_switcher_shows_bracketed_titles_as_written():
+    app = DeerFlowTUI(_BracketedSession(), LaunchPlan(mode="tui"))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.query_one("#composer").value = "/threads"
+        await pilot.press("enter")
+        assert await _settle(pilot, lambda: isinstance(app.screen, SelectScreen))
+        assert _picker_lines(app) == ["Fix [/bold] in parser   ·   thread-c", "Index [a] then [b]   ·   thread-d"]
+        await pilot.press("down", "enter")
+        await _settle(pilot, lambda: app._conv_thread_id == "thread-dddddddd")
+    assert app._conv_thread_id == "thread-dddddddd"
+
+
+@pytest.mark.asyncio
+async def test_model_picker_shows_bracketed_names_as_written():
+    app = DeerFlowTUI(_BracketedSession(), LaunchPlan(mode="tui"))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.query_one("#composer").value = "/model"
+        await pilot.press("enter")
+        assert await _settle(pilot, lambda: isinstance(app.screen, SelectScreen))
+        assert _picker_lines(app) == ["Qwen [beta]", "x [/i] y"]
+        await pilot.press("down", "enter")
+        await _settle(pilot, lambda: app._model_override is not None)
+    assert app._model_override == "italic"
+
+
+@pytest.mark.asyncio
+async def test_select_screen_title_is_shown_as_written():
+    app = DeerFlowTUI(_FakeSession(), LaunchPlan(mode="tui"))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.push_screen(SelectScreen("Pick [/b] one", [("only", "Only")]))
+        assert await _settle(pilot, lambda: isinstance(app.screen, SelectScreen))
+        title = app.screen.query_one("#dialog-title")
+        assert title.render_line(0).text.strip() == "Pick [/b] one"

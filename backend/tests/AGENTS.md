@@ -31,6 +31,12 @@ event waiters during teardown.
 benchmark module's clock binding. Keep asyncio's clock real, initialize
 `Trace.started` from the controlled clock, and advance ticks at event gates.
 
+`test_bench_opensandbox.py` owns provider-independent sandbox benchmark CLI
+validation. Invalid timing values must be rejected through real `main()` before
+fail-loud factories run; accepted controls must preserve factory inputs and JSONL
+dimensions. Keep live providers stubbed and OpenSandbox's unsupported-option
+checks distinct from shared timing validation.
+
 `test_doctor_script.py` runs a copied doctor from a temporary checkout with an
 empty-model config. Drop inherited `DEER_FLOW_*`, `PYTHONPATH` and `PYTHONHOME`
 from child processes; cover help, invalid flags, normal reporting and an
