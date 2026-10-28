@@ -294,7 +294,10 @@ docker run -d --pull=never --name {PHASE}-redis --label org.deerflow.tenant.owne
     print("[controller] slice-two migrations and seeding")
     must(CONTROLLER, f"""set -eu
 cat > /tmp/.two-host-migrate.py
-docker run --rm --pull=never --network host -e NATIVE_ASYNC='{native_async_url}' -e NATIVE_SYNC='{native_url}' -e EXECUTOR_SYNC='{executor_url}' -v /tmp/.two-host-migrate.py:/run/migrate.py:ro -v {CROOT}/{PHASE}/source.tar.gz:/run/source.tar.gz:ro --entrypoint /bin/sh {NATIVE_IMAGE} -c '
+docker run --rm --pull=never --network host \\
+  -e NATIVE_ASYNC='{native_async_url}' -e NATIVE_SYNC='{native_url}' -e EXECUTOR_SYNC='{executor_url}' \\
+  -v /tmp/.two-host-migrate.py:/run/migrate.py:ro -v {CROOT}/{PHASE}/source.tar.gz:/run/source.tar.gz:ro \\
+  --entrypoint /bin/sh {NATIVE_IMAGE} -c '
 set -eu; rm -rf /tmp/source; mkdir /tmp/source; tar xzf /run/source.tar.gz -C /tmp/source
 cd /tmp/source/backend
 export PYTHONPATH=/tmp/source/backend:/tmp/source/backend/packages/harness:/tmp/source/backend/packages/extension-api:/tmp/source/backend/packages/ecs-executor
@@ -370,6 +373,7 @@ docker run --rm --pull=never --name {PHASE}-worker --label org.deerflow.tenant.o
 
 _SLICE_TWO_MIGRATE = """
 import asyncio
+import os
 from datetime import UTC, datetime
 
 import sqlalchemy as sa
@@ -392,8 +396,8 @@ async def migrate_native(engine_url):
         await engine.dispose()
 
 
-asyncio.run(migrate_native(NATIVE_ASYNC))
-native = sa.create_engine(NATIVE_SYNC)
+asyncio.run(migrate_native(os.environ["NATIVE_ASYNC"]))
+native = sa.create_engine(os.environ["NATIVE_SYNC"])
 with native.begin() as conn:
     conn.execute(sa.insert(UserRow).values(id=OWNER, email="two-host-owner@example.invalid", account_status="active", email_verified_at=datetime.now(UTC)))
     conn.execute(sa.insert(ThreadMetaRow).values(thread_id="two-host-slice-two-thread", user_id=OWNER, incarnation="two-host-epoch", workspace_id=WORKSPACE))
@@ -402,7 +406,7 @@ with native.begin() as conn:
 native.dispose()
 from ecs_executor.schema import upgrade_schema
 
-executor = sa.create_engine(EXECUTOR_SYNC)
+executor = sa.create_engine(os.environ["EXECUTOR_SYNC"])
 upgrade_schema(executor)
 executor.dispose()
 print("SLICE_TWO_MIGRATED")
