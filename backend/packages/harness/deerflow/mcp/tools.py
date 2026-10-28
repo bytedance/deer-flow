@@ -683,9 +683,10 @@ def _make_session_pool_tool(
     effective_domain = binding.domain if binding is not None else ownership_domain
 
     async def call_with_persistent_session(
-        runtime: Runtime | None = None,
+        _deerflow_runtime: Runtime | None = None,
         **arguments: Any,
     ) -> Any:
+        runtime = _deerflow_runtime
         thread_id = _extract_thread_id(runtime)
         user_id = resolve_runtime_user_id(runtime)
         # Scope the pooled session by user *and* thread. Filesystem isolation is
@@ -877,9 +878,10 @@ def _make_background_submit_tool(
     background_contract = f"Submitted as durable background task {task_name!r}; returns a DeerFlow task ID immediately and status polling is handled automatically."
 
     async def submit_in_background(
-        runtime: Runtime | None = None,
+        _deerflow_runtime: Runtime | None = None,
         **arguments: Any,
     ) -> dict[str, Any]:
+        runtime = _deerflow_runtime
         submitter = get_mcp_task_submitter()
         thread_id = _extract_thread_id(runtime)
         user_id = resolve_runtime_user_id(runtime)
