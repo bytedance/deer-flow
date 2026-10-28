@@ -174,10 +174,22 @@ export const VirtualMessageList = forwardRef<
     ],
   );
 
+  // Streamed text gives `groups` a new identity on every chunk; the active row
+  // only needs re-evaluating when the row set changes, not per token.
+  const firstGroupId = groups[0]?.id;
+  const lastGroupId = groups.at(-1)?.id;
+  // The outline callback is recreated per streamed chunk by the consumer's
+  // `chapters` memo chain. Keep the listener effect keyed on whether the
+  // outline is enabled, and read the latest callback through this ref.
+  const outlineEnabled = Boolean(onActiveGroupChange);
+  const onActiveGroupChangeRef = useRef(onActiveGroupChange);
+  useEffect(() => {
+    onActiveGroupChangeRef.current = onActiveGroupChange;
+  });
   useEffect(() => {
     const viewport = scrollRef.current;
     const list = listRef.current;
-    if (!viewport || !list || !onActiveGroupChange) {
+    if (!viewport || !list || !outlineEnabled) {
       return;
     }
 
@@ -205,7 +217,7 @@ export const VirtualMessageList = forwardRef<
         groupIndex !== previousActiveGroupRef.current
       ) {
         previousActiveGroupRef.current = groupIndex;
-        onActiveGroupChange(groupIndex);
+        onActiveGroupChangeRef.current?.(groupIndex);
       }
     };
     const scheduleUpdate = () => {
@@ -221,10 +233,12 @@ export const VirtualMessageList = forwardRef<
       }
     };
   }, [
+    firstGroupId,
     firstVirtualIndex,
-    groups,
+    groups.length,
+    lastGroupId,
     lastVirtualIndex,
-    onActiveGroupChange,
+    outlineEnabled,
     scrollRef,
   ]);
 
