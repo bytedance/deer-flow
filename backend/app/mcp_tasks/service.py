@@ -1689,11 +1689,41 @@ class McpTaskService:
             _CANCELLATION_DRAIN_TIMEOUT_SECONDS,
         )
 
+    async def _drain_compensation_tasks(self, *, deadline: float) -> None:
+        """Drain service-owned compensation work before Gateway dependencies close."""
+        loop = asyncio.get_running_loop()
+        while self._compensation_tasks:
+            tasks = tuple(self._compensation_tasks)
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            done, _ = await asyncio.wait(
+                tasks,
+                timeout=remaining,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if not done:
+                break
+            # Run completion callbacks before taking the next snapshot. A
+            # handoff may finish one task while registering another.
+            await asyncio.sleep(0)
+
+        pending_count = sum(not task.done() for task in self._compensation_tasks)
+        if pending_count:
+            logger.warning(
+                "Timed out after %.1f seconds waiting for %d MCP compensation task(s); cleanup continues in the background",
+                _CANCELLATION_DRAIN_TIMEOUT_SECONDS,
+                pending_count,
+            )
+
     async def stop(self) -> None:
+        loop = asyncio.get_running_loop()
         task = self._task
         if task is None:
+            await self._drain_compensation_tasks(
+                deadline=loop.time() + _CANCELLATION_DRAIN_TIMEOUT_SECONDS,
+            )
             return
-        loop = asyncio.get_running_loop()
         if self._stopping_task is not task:
             self._stopping_task = task
             self._stop_deadline = loop.time() + _CANCELLATION_DRAIN_TIMEOUT_SECONDS
@@ -1710,9 +1740,18 @@ class McpTaskService:
         except asyncio.CancelledError:
             if not await wait_for_task_until(task, deadline=deadline):
                 self._log_stop_timeout(task)
+            else:
+                try:
+                    await self._drain_compensation_tasks(deadline=deadline)
+                except asyncio.CancelledError:
+                    # Preserve the caller's cancellation while keeping the
+                    # service-owned tasks alive for their own completion path.
+                    pass
             raise
         if task not in done:
             self._log_stop_timeout(task)
+            return
+        await self._drain_compensation_tasks(deadline=deadline)
 
     async def _run_loop(self) -> None:
         while not self._stop.is_set():

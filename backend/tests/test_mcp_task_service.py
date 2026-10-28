@@ -4845,3 +4845,68 @@ async def test_background_compensation_failure_is_consumed(monkeypatch, caplog):
     assert len(failures) == 1
     assert any("release remained unavailable" in failure.getMessage() for failure in failures)
     assert not service._compensation_tasks
+
+
+@pytest.mark.asyncio
+async def test_stop_drains_service_owned_compensation_tasks(monkeypatch):
+    monkeypatch.setattr(service_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.5)
+    service = McpTaskService(
+        repository=FakeRepository(),
+        drivers=McpTaskDriverRegistry(),
+        poll_interval_seconds=60,
+        lease_seconds=120,
+        max_concurrent_polls=3,
+    )
+    release_started = asyncio.Event()
+    release_gate = asyncio.Event()
+
+    async def release_claim():
+        release_started.set()
+        await release_gate.wait()
+
+    compensation = asyncio.create_task(release_claim(), name="test-mcp-compensation")
+    service._track_compensation_task(compensation, action="release poll claim", task_id="task-1")
+    await release_started.wait()
+    await service.start()
+    stopping = asyncio.create_task(service.stop())
+    try:
+        await asyncio.sleep(0.01)
+        assert not stopping.done(), "stop must drain service-owned compensation work"
+    finally:
+        release_gate.set()
+        await asyncio.wait_for(stopping, timeout=1)
+
+    await _wait_for_compensation_tasks_to_clear(service)
+    assert not service._compensation_tasks
+
+
+@pytest.mark.asyncio
+async def test_stop_bounds_drain_of_service_owned_compensation_tasks(monkeypatch, caplog):
+    monkeypatch.setattr(service_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.05)
+    service = McpTaskService(
+        repository=FakeRepository(),
+        drivers=McpTaskDriverRegistry(),
+        poll_interval_seconds=60,
+        lease_seconds=120,
+        max_concurrent_polls=3,
+    )
+    release_started = asyncio.Event()
+    release_gate = asyncio.Event()
+
+    async def release_claim():
+        release_started.set()
+        await release_gate.wait()
+
+    compensation = asyncio.create_task(release_claim(), name="test-mcp-stuck-compensation")
+    service._track_compensation_task(compensation, action="release poll claim", task_id="task-1")
+    await release_started.wait()
+    await service.start()
+    try:
+        with caplog.at_level(logging.WARNING):
+            await asyncio.wait_for(service.stop(), timeout=0.5)
+        assert "MCP compensation task(s)" in caplog.text
+        assert compensation in service._compensation_tasks
+    finally:
+        release_gate.set()
+        await asyncio.wait_for(compensation, timeout=1)
+        await _wait_for_compensation_tasks_to_clear(service)
