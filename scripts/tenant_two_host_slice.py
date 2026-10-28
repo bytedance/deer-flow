@@ -103,8 +103,21 @@ PYTEST_ENV_COMMON = (
 )
 
 
+def clean_phase(host: str) -> None:
+    """Remove only this phase's own labeled containers/networks and its dir."""
+    must(host, f"""set -eu
+for c in $(docker ps -aq --filter label=org.deerflow.tenant.owned={PHASE}); do
+  docker rm -fv $c >/dev/null
+done
+for n in $(docker network ls --filter label=org.deerflow.tenant.owned={PHASE} --format '{{{{.Name}}}}'); do
+  docker network rm $n >/dev/null 2>&1 || true
+done
+rm -rf {CROOT}/{PHASE}
+""", what="phase cleanup")
+
+
 def prepare(host: str, digest: str) -> None:
-    must(host, f"set -eu; test ! -e {CROOT}/{PHASE} || {{ echo PHASE_EXISTS; exit 3; }}; docker ps -a --format '{{{{.Names}}}}' | grep -q {PHASE} && {{ echo CONTAINER_EXISTS; exit 4; }} || true", what="phase hygiene")
+    clean_phase(host)
     must(host, f"mkdir -p {CROOT}/{PHASE}/{{pool,workspace,evidence,source}} && chmod 700 {CROOT}/{PHASE}", what="phase dirs")
     scp_to(host, f"/private/tmp/{PHASE}-source.tar.gz", f"{CROOT}/{PHASE}/source.tar.gz")
     got = must(host, f"sha256sum {CROOT}/{PHASE}/source.tar.gz | cut -d' ' -f1")
@@ -113,7 +126,7 @@ def prepare(host: str, digest: str) -> None:
 
 
 def main() -> None:
-    digest = freeze_archive(f"/private/tmp/{PHASE}-source.tar.gz")
+    digest = freeze_archive(f"/private/tmp/{PHASE}-source.tar")
     print(f"[freeze] archive sha256 {digest}")
     prepare(CONTROLLER, digest)
     prepare(WORKER, digest)
