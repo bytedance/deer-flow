@@ -27,7 +27,7 @@ PORT = 8021
 NATIVE_IMAGE = "deerflow-native:production-repaired-contract-c6af94a95ae7"
 PG_IMAGE = "sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea"
 B_IMAGE = "sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc"  # alpine:3.20 small profile
-OWNER = "two-host-owner"
+OWNER = "33333333-3333-4333-8333-333333333333"
 
 
 def ssh(host: str, script: str, stdin_text: str = "") -> subprocess.CompletedProcess:
@@ -384,7 +384,7 @@ from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.persistence.user.model import UserRow
 from deerflow.persistence.workspaces.model import WorkspaceMembershipRow, WorkspaceRow
 
-OWNER = "two-host-owner"
+OWNER = "33333333-3333-4333-8333-333333333333"
 WORKSPACE = "11111111-2222-4333-8333-222222222222"
 
 
