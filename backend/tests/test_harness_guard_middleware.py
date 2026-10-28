@@ -157,6 +157,18 @@ class TestHarnessGuardMiddleware:
         assert TOOL_META_KEY in res.additional_kwargs
         assert res.additional_kwargs[TOOL_META_KEY]["status"] == "error"
 
+    def test_write_verify_skips_when_block_on_syntax_error_false(self):
+        """When block_on_syntax_error is False, pre-execution verification is skipped without parsing."""
+        middleware = HarnessGuardMiddleware(HarnessGuardConfig(write_verify_syntax=True, block_on_syntax_error=False))
+        req = _make_request("write_file", {"path": "main.py", "content": "def bad_syntax(:"})
+
+        def dummy_handler(r):
+            return ToolMessage(content="File written", tool_call_id=r.tool_call["id"], name="write_file")
+
+        res = middleware.wrap_tool_call(req, dummy_handler)
+        assert res.content == "File written"
+        assert res.status != "error"
+
     def test_write_verify_skips_append_chunks(self):
         """Append writes of middle chunks must not be blocked as invalid syntax."""
         middleware = HarnessGuardMiddleware(HarnessGuardConfig(block_on_syntax_error=True))

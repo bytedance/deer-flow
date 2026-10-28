@@ -261,7 +261,7 @@ class HarnessGuardMiddleware(AgentMiddleware):
 
     def _check_write_syntax_block(self, request: ToolCallRequest) -> ToolMessage | None:
         """Perform pre-execution syntax validation on write operations."""
-        if not self.config.write_verify_syntax:
+        if not self.config.write_verify_syntax or not self.config.block_on_syntax_error:
             return None
 
         tool_name = str(request.tool_call.get("name") or "")

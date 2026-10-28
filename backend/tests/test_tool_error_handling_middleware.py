@@ -201,6 +201,7 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
             "deerflow.agents.middlewares.input_sanitization_middleware",
             InputSanitizationMiddleware=FakeInputSanitizationMiddleware,
             neutralize_untrusted_tags=lambda value: value,
+            frame_untrusted_text=lambda value: value,
         ),
     )
 
@@ -221,6 +222,7 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     # (tool_artifacts enabled by default, #4676).
     # + 1 ModelContentCompatibilityMiddleware (unconditional read-time
     # sanitizer between DurableContext and the date/coalescer tail).
+    # + 1 HarnessGuardMiddleware (RFC-003, enabled by default).
     from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
     from deerflow.agents.middlewares.dynamic_context_middleware import SubagentDateContextMiddleware
     from deerflow.agents.middlewares.knowledge_scope_middleware import KnowledgeScopeMiddleware
@@ -231,7 +233,7 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
     from deerflow.agents.middlewares.tool_receipt_middleware import ToolReceiptMiddleware
 
-    assert len(middlewares) == 22
+    assert len(middlewares) == 23
     assert isinstance(middlewares[0], FakeMiddleware)  # InputSanitizationMiddleware stub
     assert isinstance(middlewares[1], KnowledgeScopeMiddleware)
     assert isinstance(middlewares[2], ToolOutputBudgetMiddleware)
