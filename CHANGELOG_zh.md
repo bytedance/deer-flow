@@ -1116,6 +1116,11 @@
 
 ### 修复
 
+- **智能体：** `PUT /api/agents/{name}` 传入 `"description": null` 时现在会把描述重置为
+  空。此前会把 null 原样保存，而智能体配置不接受该值，导致之后每次加载都失败：更新本身、
+  GET 和修复性更新都返回 500，文件后端会把它从智能体列表中漏掉，数据库后端会让该用户的
+  整个列表失败，与它的对话也会失败。已以 null 描述保存的智能体现在可以重新加载。([#7638])
+
 - **渠道：** 钉钉 AI 卡片不再在 Gateway 事件循环上获取 access token。此前创建卡片和流式更新卡片
   都会调用 dingtalk-stream 的同步 `get_access_token()`，它用 `requests` 发请求且没有超时，因此
   首张卡片以及之后每次 SDK token 刷新（约每两小时一次）都会在整个请求期间阻塞所有渠道、请求和
@@ -10550,3 +10555,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7594]: https://github.com/bytedance/deer-flow/pull/7594
 [#7597]: https://github.com/bytedance/deer-flow/pull/7597
 [#7606]: https://github.com/bytedance/deer-flow/pull/7606
+[#7638]: https://github.com/bytedance/deer-flow/pull/7638

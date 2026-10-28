@@ -1402,6 +1402,13 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
 
 ### Fixed
 
+- **agents:** `PUT /api/agents/{name}` with `"description": null` now resets the
+  description to empty. It used to store the null, which the agent config
+  rejects, so the agent then failed every load: the update, GET and repair
+  updates returned 500, the file backend dropped it from the agent list, the
+  database backend failed the owner's whole list, and chats with it failed.
+  Agents already stored with a null description load again. ([#7638])
+
 - **channels:** DingTalk AI cards no longer fetch an access token on the
   Gateway event loop. Card creation and card streaming went through
   dingtalk-stream's synchronous `get_access_token()`, which posts with
@@ -13231,3 +13238,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7594]: https://github.com/bytedance/deer-flow/pull/7594
 [#7597]: https://github.com/bytedance/deer-flow/pull/7597
 [#7606]: https://github.com/bytedance/deer-flow/pull/7606
+[#7638]: https://github.com/bytedance/deer-flow/pull/7638
