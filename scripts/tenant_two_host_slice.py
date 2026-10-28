@@ -90,17 +90,22 @@ def freeze_archive(destination: str) -> str:
     return subprocess.run(["shasum", "-a", "256", out + ".gz"], capture_output=True, text=True).stdout.split()[0]
 
 
-PYTEST_ENV_COMMON = (
-    "ECS_EXECUTOR_SCOPE_PHYSICAL_TEST=1 "
-    f"TEST_SCOPE_EXECUTION_IMAGE={B_IMAGE} "
-    "TENANT_TWO_HOST_OWNER=" + OWNER + " "
-    "TENANT_TWO_HOST_WORKSPACE_ID=11111111-2222-4333-8333-222222222222 "
-    "TENANT_TWO_HOST_WORKER_CREDENTIAL=two-host-worker-node-credential "
-    f"TENANT_TWO_HOST_ARTIFACT_ROOT={CROOT}/{PHASE}/pool "
-    f"TENANT_TWO_HOST_WORKSPACE_ROOT={CROOT}/{PHASE}/workspace "
-    "PYTHONPATH=/tmp/source/backend:/tmp/source/backend/packages/harness:/tmp/source/backend/packages/extension-api:/tmp/source/backend/packages/ecs-executor "
-    "DEER_FLOW_HOME=/tmp/tenant-home"
-)
+COMMON_ENV = {
+    "ECS_EXECUTOR_SCOPE_PHYSICAL_TEST": "1",
+    "TEST_SCOPE_EXECUTION_IMAGE": B_IMAGE,
+    "TENANT_TWO_HOST_OWNER": OWNER,
+    "TENANT_TWO_HOST_WORKSPACE_ID": "11111111-2222-4333-8333-222222222222",
+    "TENANT_TWO_HOST_WORKER_CREDENTIAL": "two-host-worker-node-credential",
+    "TENANT_TWO_HOST_ARTIFACT_ROOT": f"{CROOT}/{PHASE}/pool",
+    "TENANT_TWO_HOST_WORKSPACE_ROOT": f"{CROOT}/{PHASE}/workspace",
+    "PYTHONPATH": "/tmp/source/backend:/tmp/source/backend/packages/harness:/tmp/source/backend/packages/extension-api:/tmp/source/backend/packages/ecs-executor",
+    "DEER_FLOW_HOME": "/tmp/tenant-home",
+}
+
+
+def env_flags(env: dict) -> str:
+    return " \
+  ".join(f"-e {key}={value}" for key, value in env.items())
 
 
 def clean_phase(host: str) -> None:
@@ -198,7 +203,7 @@ nohup docker run --rm --pull=never --name {PHASE}-controller --label org.deerflo
   -e TENANT_TWO_HOST_ROLE=controller -e TENANT_TWO_HOST_PORT={PORT} \\
   -e TEST_EXECUTOR_POSTGRES_URL='{executor_url}' \\
   -e TENANT_TWO_HOST_NATIVE_URL='{native_url}' \\
-  -e {PYTEST_ENV_COMMON} \\
+  {env_flags(COMMON_ENV)} \\
   -e TEST_SCOPE_EVIDENCE='{CROOT}/{PHASE}/evidence/controller.json' \\
   -v {CROOT}/{PHASE}/source.tar.gz:/run/source.tar.gz:ro -v {CROOT}/{PHASE}:/run/phase \\
   --entrypoint /bin/sh {NATIVE_IMAGE} -c 'mkdir -p /tmp/source && tar xzf /run/source.tar.gz -C /tmp/source && cd /tmp/source/backend \
@@ -227,7 +232,7 @@ docker run --rm --pull=never --name {PHASE}-worker --label org.deerflow.tenant.o
   -e TENANT_TWO_HOST_ROLE=worker \\
   -e TENANT_TWO_HOST_URL=http://{CONTROLLER_PRIVATE}:{PORT} \\
   -e TENANT_TWO_HOST_NATIVE_URL='{native_url}' \\
-  -e {PYTEST_ENV_COMMON} \
+  {env_flags(COMMON_ENV)} \
   -e TEST_SCOPE_EVIDENCE=/run/phase/evidence/worker.json \
   -e TEST_SCOPE_OWNED_MANIFEST=/run/phase/evidence/owned.json \
   -e DEER_FLOW_HOME=/tmp/tenant-home \
