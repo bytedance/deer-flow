@@ -534,6 +534,21 @@ async def _native_worker():
 
         host = NativeWorkerHost(worker_app, config={"artifact_root": str(pool_root), "node_id": "worker", "credential_env": "TENANT_TWO_HOST_NATIVE_NODE_SECRET", "executor_url": os.environ["TENANT_TWO_HOST_NATIVE_EXECUTOR_URL"]})
         worker_app.state.native_run_admission_host = host
+        import socket
+        from urllib.parse import urlparse
+
+        parsed = urlparse(os.environ["TENANT_TWO_HOST_NATIVE_EXECUTOR_URL"])
+        for attempt in range(60):
+            try:
+                with socket.create_connection((parsed.hostname, parsed.port), timeout=3):
+                    evidence["tcp_precheck"] = f"{parsed.hostname}:{parsed.port} ok on attempt {attempt}"
+                    break
+            except OSError as exc:
+                if attempt == 59:
+                    evidence["tcp_precheck"] = f"{parsed.hostname}:{parsed.port} failed: {exc}"
+            await asyncio.sleep(1.0)
+        evidence_path.parent.mkdir(parents=True, exist_ok=True)
+        evidence_path.write_text(json.dumps(evidence, indent=2))
         await host.start()
         try:
             deadline = time.monotonic() + 300
