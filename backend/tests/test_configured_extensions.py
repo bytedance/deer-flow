@@ -63,7 +63,7 @@ def test_raw_dict_entry_passes_constructor_kwargs():
 
 def test_malformed_raw_dict_fails_at_load():
     with pytest.raises(ValidationError):
-        load_configured_extension_middlewares(_config({"class": f"{__name__}:RecordingMiddleware", "apply_to": "lead"}))
+        load_configured_extension_middlewares(_config({"class": f"{__name__}:RecordingMiddleware", "unexpected": "lead"}))
 
 
 def test_empty_kwargs_matches_zero_arg_constructor():
@@ -106,7 +106,7 @@ def test_extensions_config_parses_class_and_kwargs():
 
 def test_extensions_config_rejects_unknown_entry_fields():
     with pytest.raises(ValidationError):
-        ExtensionsConfig.model_validate({"middlewares": [{"class": "pkg:Middleware", "apply_to": "lead"}]})
+        ExtensionsConfig.model_validate({"middlewares": [{"class": "pkg:Middleware", "unexpected": "lead"}]})
 
 
 def test_extensions_config_rejects_blank_class_path():
@@ -154,7 +154,7 @@ def test_raw_file_round_trips_kwargs_entries(tmp_path, monkeypatch):
     raw = {
         "middlewares": [
             "pkg:Plain",
-            {"class": "pkg:WithArgs", "kwargs": {"max_tool_calls": 5, "token": "$DEERFLOW_TEST_MIDDLEWARE_TOKEN"}},
+            {"class": "pkg:WithArgs", "kwargs": {"max_tool_calls": 5, "token": "$DEERFLOW_TEST_MIDDLEWARE_TOKEN"}, "apply_to": "lead"},
         ]
     }
     config_path.write_text(json.dumps(raw), encoding="utf-8")
@@ -172,4 +172,5 @@ def test_raw_file_round_trips_kwargs_entries(tmp_path, monkeypatch):
     assert dumped["middlewares"][1]["class"] == "pkg:WithArgs"
     assert dumped["middlewares"][1]["kwargs"] == {"max_tool_calls": 5, "token": "$DEERFLOW_TEST_MIDDLEWARE_TOKEN"}
     assert restored.middlewares[1].class_path == "pkg:WithArgs"
+    assert restored.middlewares[1].apply_to == "lead"
     assert restored.middlewares[1].kwargs == {"max_tool_calls": 5, "token": "test-secret"}

@@ -30,6 +30,12 @@ stay `in_progress`. Never infer status from reply text.
 
 Assembly order: `tool_error_handling_middleware.py::_build_runtime_middlewares` (exposed as `build_lead_runtime_middlewares`), then `../lead_agent/agent.py::build_middlewares`. Optional entries require their config/runtime condition.
 
+Config-declared middleware uses `configured_extensions.py`; the lead and subagent
+builders pass their own explicit `scope`. Optional `apply_to: both | lead | subagent`
+defaults to both, including legacy strings. Filter before reflection/construction;
+preserve selected entry order and create fresh instances per build. This fixed-slot
+selector does not alter packaged extensions' `AgentScope` or placement contract.
+
 **Message provenance.** Injected/rewritten messages use
 `deerflow_extension_api.provenance.provenance_kwargs()`: server-owned
 `deerflow_content_kind`, `deerflow_producer_kind`, optional entity ID, even
