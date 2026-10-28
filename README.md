@@ -3617,6 +3617,10 @@ documents with the `list_project_documents` and `read_project_document` tools.
 Document character counts use a bounded, thread-safe cache; concurrent reads
 do not serialize full file scans behind its cache lock.
 
+Shelf conversion cleanup failures are logged without replacing the read result
+or its original error. Cancelled reads wait for their staging cleanup to finish;
+files that cannot be removed remain eligible for the existing retention sweep.
+
 ### Archive read semantics
 
 Archiving a project freezes writes but keeps reads. Threads in an archived

@@ -37,6 +37,10 @@ Shelf `stage_document_bytes` drains preparation, writes, close and failure
 cleanup before propagating cancellation. Retain the opened handle across its
 handoff, but leave waiting for incoming chunks cancellable; regressions in
 `tests/test_project_document_staging_cancellation.py` cover both shelf entry points.
+Shelf conversion also drains its final staging discard before releasing
+single-flight ownership. Cleanup failures warn without replacing the conversion
+result, original error or cancellation; the retention sweep owns later retries.
+Coverage lives in `tests/test_project_document_tools.py::TestConversionCleanup`.
 Local Linux/macOS text revisions opt into a short `temporary_prefix` and
 `preserve_metadata_from` (a caller-owned descriptor). Staging starts at `0600`;
 `file_revision_metadata` transfers ownership, mode, ACLs and xattrs before data.
