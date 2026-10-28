@@ -542,6 +542,8 @@ export const zhCN: Translations = {
           "已达到 token 预算。发送消息即可继续，新的运行会重新计算预算。",
         loopCapped:
           "重复工具调用触发了安全停止。调整要求后发送新消息即可重试，目标会保留。",
+        recursionCapped:
+          "运行达到了步数上限，未能完成。发送新消息即可继续，目标会保留。",
         missingEvidence:
           "目标检查：缺少依据。可以让它展示结果或说明卡在哪里；如果目标已不适用，用 /goal clear 清除目标。",
         runFailed:
@@ -1187,6 +1189,7 @@ export const zhCN: Translations = {
         noProgress: "连续多轮没有进展",
         tokenCapped: "已达到 token 预算",
         loopCapped: "重复工具调用触发了安全停止",
+        recursionCapped: "运行达到了步数上限",
         evaluatorFailed: "未能检查目标，这次运行本身可能没问题",
         noDurableEndOfTurn: "未能检查目标：没有保存最终回复",
         threadChanged: "未能检查目标：检查期间对话发生了变化",
@@ -1550,7 +1553,8 @@ export const zhCN: Translations = {
     unconfigured: "未配置",
     unavailable: "当前无法使用渠道连接。",
     unavailableShort: "不可用",
-    setupTitle: (name: string) => `连接 ${name}`,
+    setupTitle: (name: string) =>
+      /^[A-Za-z0-9]/.test(name) ? `连接 ${name}` : `连接${name}`,
     setupEditTitle: (name: string) => `修改 ${name}`,
     wechatQr: {
       restart: "重新扫码",
@@ -1606,6 +1610,34 @@ export const zhCN: Translations = {
       scannedTitle: "已扫码",
       expiredTitle: "二维码已过期",
       failedTitle: "连接未完成",
+    },
+    // A Latin name keeps the usual spaces ("发给 Slack 机器人"); a Chinese one
+    // does not ("发给飞书机器人").
+    bindingCode: {
+      description: (provider: string) =>
+        /^[A-Za-z0-9]/.test(provider)
+          ? `把下面这条命令发给 ${provider} 机器人，即可绑定到你的 DeerFlow 账号。`
+          : `把下面这条命令发给${provider}机器人，即可绑定到你的 DeerFlow 账号。`,
+      loading: "正在生成绑定码…",
+      copy: "复制命令",
+      copied: "已复制",
+      copyFailed: "复制失败，请选中上方命令手动复制。",
+      expiresAt: (time: string) => `${time} 过期`,
+      waiting: (provider: string) =>
+        /^[A-Za-z0-9]/.test(provider)
+          ? `正在等待 ${provider} 中的绑定消息…`
+          : `正在等待${provider}中的绑定消息…`,
+      connected: (provider: string) =>
+        /^[A-Za-z0-9]/.test(provider)
+          ? `${provider} 已连接`
+          : `${provider}已连接`,
+      done: "完成",
+      expired: "绑定码已过期。",
+      newCode: "重新生成绑定码",
+      failed: "无法生成绑定码。",
+      tooManyCodes:
+        "未使用的绑定码太多。请先用已有的绑定码，或等它们过期（约 10 分钟）后再试。",
+      retry: "重试",
     },
     setupDescription:
       "填写当前服务进程需要的配置值。这些内容不会写入 config.yaml。",
@@ -1958,7 +1990,7 @@ export const zhCN: Translations = {
       lightDescription: "更明亮的配色，适合日间使用。",
       darkDescription: "更暗的配色，减少眩光方便专注。",
       languageTitle: "语言",
-      languageDescription: "在不同语言之间切换。",
+      languageDescription: "选择界面语言及回复时优先使用的语言。",
     },
     tools: {
       adminRequired: "需要管理员权限才能管理 MCP 工具。",

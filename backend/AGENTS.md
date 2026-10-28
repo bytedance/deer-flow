@@ -46,9 +46,9 @@ vars; `summarize` and pytest are offline. See its README for the protocol.
 Benchmarks in `scripts/benchmark/` must be standalone and reproducible. Import
 production functions; never duplicate them or introduce an alternative runtime.
 
-OpenSandbox benchmarks reuse the production lifecycle with scoped config overrides.
-Export only non-secret dimensions; final cleanup failures must fail both the runner
-and JSONL summary. See the sandbox benchmark README for supported options and tests.
+Sandbox benchmarks reuse production lifecycle. Reject negative/NaN timing values
+before provider creation, export no secrets, and fail on final cleanup errors.
+See the sandbox benchmark README for supported options and tests.
 
 - Pin every external dataset by immutable revision and SHA-256. Callers provide
   the local dataset path; evaluation commands must not silently download data.
@@ -186,10 +186,17 @@ float filters accept integer or real JSON numbers through `json_value_matches`.
 
 Gate server-owned run context on both client feeds (`body.context` and
 `body.config`): `merge_run_context_overrides` admits it only for `internal=True`,
-while `strip_internal_context_keys` scrubs both destinations. Treat
+while `strip_internal_context_keys` scrubs both destinations. A validated
+`context.locale` (`en-US` / `zh-CN`) is a runtime-only language preference for
+replies and memory writes; it never persists into checkpoint `configurable`,
+and an explicit invalid/null top-level value clears a legacy preference. Treat
 `disable_clarification` like `non_interactive`. Before run/state writes,
 `_normalize_input_messages` rejects canonical external system/developer roles;
 only `AUTH_SOURCE_INTERNAL` run input may retain them.
+
+`contracts/ui_locales.v1.json` pins the UI/Gateway locale allowlists in tests;
+DeerMem's portable map stays separate. Scheduled/MCP notification runs omit
+locale; persisted owner locale is used for scheduled IM notices only.
 
 `start_run` assigns IDs to ID-less messages before recording input or invoking
 the graph; keyed retries keep those IDs stable, while the pre-stamp input

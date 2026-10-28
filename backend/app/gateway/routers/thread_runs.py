@@ -130,7 +130,7 @@ def _scope_http_run_idempotency_key(request: Request, thread_id: str, key: str |
 
 
 async def _refresh_store_backed_run(run_mgr: Any, record: Any) -> Any:
-    """Overlay durable status/error onto a hydrated store-only record."""
+    """Overlay durable status/error/stop reason onto a hydrated store-only record."""
     if not getattr(record, "store_only", False):
         return record
     store = getattr(run_mgr, "_store", None)
@@ -154,6 +154,8 @@ async def _refresh_store_backed_run(run_mgr: Any, record: Any) -> Any:
             pass
     if "error" in row:
         record.error = row.get("error")
+    if "stop_reason" in row:
+        record.stop_reason = row.get("stop_reason")
     return record
 
 

@@ -328,8 +328,6 @@ channels:
   # Optional: global session defaults for all mobile channels
   session:
     assistant_id: lead_agent
-    config:
-      recursion_limit: 100
     context:
       thinking_enabled: true
       is_plan_mode: false

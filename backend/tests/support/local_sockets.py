@@ -8,7 +8,8 @@ Both run on the calling test's event loop and only ever bind ``127.0.0.1:0``.
   i.e. once the client actually released the TCP connection.
 - ``LocalHttpServer`` answers every request with a fixed status and JSON body,
   or (``stall=True``) accepts the connection and never responds. Each request
-  body is recorded so tests can assert on what the SDK sent.
+  body is recorded so tests can assert on what the SDK sent, and ``calls``
+  keeps each request's method, path and headers (names lowercased).
 """
 
 from __future__ import annotations
@@ -96,6 +97,7 @@ class LocalHttpServer:
         self.body = body if body is not None else {}
         self.stall = stall
         self.requests: list[dict[str, Any]] = []
+        self.calls: list[tuple[str, str, dict[str, str]]] = []
         self.accepted = asyncio.Event()
         self.closed = asyncio.Event()
         self.port = 0
@@ -123,6 +125,10 @@ class LocalHttpServer:
             head = await reader.readuntil(b"\r\n\r\n")
             length = int(_header(head, "Content-Length") or 0)
             raw = await reader.readexactly(length) if length else b""
+            request_line, *header_lines = head.decode("latin-1").split("\r\n")
+            method, path, _ = request_line.split(" ", 2)
+            headers = {name.strip().lower(): value.strip() for name, sep, value in (line.partition(":") for line in header_lines) if sep}
+            self.calls.append((method, path, headers))
             try:
                 self.requests.append(json.loads(raw) if raw else {})
             except ValueError:

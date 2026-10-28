@@ -85,6 +85,7 @@ async def make_stream_bridge(app_config: AppConfig | None = None) -> AsyncIterat
             heartbeat_interval=config.heartbeat_interval_seconds,
             max_connections=config.max_connections,
             stream_ttl_seconds=config.stream_ttl_seconds,
+            legacy_end_scan_enabled=config.legacy_end_scan_enabled,
             producer_lease_recovery_enabled=getattr(
                 config,
                 "producer_lease_recovery_enabled",

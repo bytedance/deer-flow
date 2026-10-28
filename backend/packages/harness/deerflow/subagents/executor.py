@@ -62,6 +62,7 @@ from deerflow.tracing import (
     inject_langfuse_metadata,
 )
 from deerflow.utils.bash_exit import BASH_TOOL_NAMES, bash_exit_status
+from deerflow.utils.file_io import await_drained
 from deerflow.utils.messages import message_content_to_text
 
 if TYPE_CHECKING:
@@ -2068,6 +2069,18 @@ class SubagentExecutor:
                         tool_receipts=terminal_receipts(),
                     )
 
+        except asyncio.CancelledError:
+            # The outer background wrapper observes cancellation only after this
+            # function's task-stop hook. Publish it here so observers see ABORTED;
+            # a previously published hard timeout still wins the terminal race.
+            result.try_set_terminal(
+                SubagentStatus.CANCELLED,
+                error="Cancelled by user",
+                token_usage_records=collector.snapshot_records() if collector is not None else None,
+                tool_receipts=terminal_receipts(),
+            )
+            raise
+
         except Exception as e:
             logger.exception(f"[trace={self.trace_id}] Subagent {self.config.name} async execution failed")
             result.try_set_terminal(
@@ -2078,44 +2091,47 @@ class SubagentExecutor:
             )
 
         finally:
-            # Cancellation (including wait_for's execution timeout) bypasses
-            # the terminal branches above. A completed model response can be
-            # in the collector before its graph node publishes a values chunk.
-            # Stream teardown has drained at this point; publish its final
-            # usage before the outer wrapper chooses CANCELLED or TIMED_OUT.
+            # A completed model response can be in the collector before its
+            # graph node publishes a values chunk. Publish final usage after
+            # stream teardown, including cancellation and hard-timeout cleanup.
             if collector is not None:
                 result.update_token_usage_records(collector.snapshot_records())
-            if execution_context is not None:
-                try:
-                    from deerflow.sandbox.lease import release_sandbox_execution_lease_async
 
-                    await release_sandbox_execution_lease_async(execution_context)
-                except Exception:
-                    logger.warning(
-                        "[trace=%s] Failed to release sandbox execution lease for subagent %s",
-                        self.trace_id,
-                        self.config.name,
-                        exc_info=True,
-                    )
-            if task_info is not None and task_store is not None:
-                try:
-                    await notify_task_stop(
-                        loaded_extensions,
-                        task_store,
-                        task_info,
-                        subagent_task_outcome(
-                            cancelled=result.status is SubagentStatus.CANCELLED,
-                            succeeded=result.status is SubagentStatus.COMPLETED,
-                        ),
-                        timeout=_EXTENSION_TASK_NOTIFY_TIMEOUT_SECONDS,
-                    )
-                except Exception:
-                    logger.warning(
-                        "[trace=%s] Extension task-stop notification failed for subagent %s (non-fatal)",
-                        self.trace_id,
-                        self.config.name,
-                        exc_info=True,
-                    )
+            async def cleanup_execution() -> None:
+                if execution_context is not None:
+                    try:
+                        from deerflow.sandbox.lease import release_sandbox_execution_lease_async
+
+                        await release_sandbox_execution_lease_async(execution_context)
+                    except Exception:
+                        logger.warning(
+                            "[trace=%s] Failed to release sandbox execution lease for subagent %s",
+                            self.trace_id,
+                            self.config.name,
+                            exc_info=True,
+                        )
+                if task_info is not None and task_store is not None:
+                    try:
+                        await notify_task_stop(
+                            loaded_extensions,
+                            task_store,
+                            task_info,
+                            subagent_task_outcome(
+                                cancelled=result.status is SubagentStatus.CANCELLED,
+                                succeeded=result.status is SubagentStatus.COMPLETED,
+                            ),
+                            timeout=_EXTENSION_TASK_NOTIFY_TIMEOUT_SECONDS,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "[trace=%s] Extension task-stop notification failed for subagent %s (non-fatal)",
+                            self.trace_id,
+                            self.config.name,
+                            exc_info=True,
+                        )
+
+            # Keep capacity and execution-done ownership until the whole tail settles.
+            await await_drained(cleanup_execution())
 
         return result
 
@@ -2128,6 +2144,8 @@ class SubagentExecutor:
         long-lived isolated loop. Reusing that loop keeps shared async clients
         from being tied to a short-lived loop that gets closed per execution.
         """
+        if result_holder is None:
+            result_holder = SubagentResult(task_id=str(uuid.uuid4())[:8], trace_id=self.trace_id, status=SubagentStatus.PENDING)
         future: Future[SubagentResult] | None = None
         parent_context = _copy_isolated_subagent_context()
         try:
@@ -2136,9 +2154,11 @@ class SubagentExecutor:
                 lambda: self._aexecute(task, result_holder),
             )
             return future.result(timeout=self.config.timeout_seconds)
-        except FuturesTimeoutError:
-            if result_holder is not None:
-                result_holder.cancel_event.set()
+        except FuturesTimeoutError as exc:
+            # Publish the synchronous API's failure before cancellation can
+            # reach task-stop observers or win the terminal-state race.
+            result_holder.try_set_terminal(SubagentStatus.FAILED, error=str(exc))
+            result_holder.cancel_event.set()
             if future is not None:
                 future.cancel()
             raise
@@ -2169,19 +2189,19 @@ class SubagentExecutor:
         Returns:
             SubagentResult with the execution result.
         """
+        # Share one holder with the worker even when the caller did not supply
+        # one, so a timeout and its cleanup report the same terminal outcome.
+        result = result_holder
+        if result is None:
+            result = SubagentResult(
+                task_id=str(uuid.uuid4())[:8],
+                trace_id=self.trace_id,
+                status=SubagentStatus.PENDING,
+            )
         try:
-            return self._execute_in_isolated_loop(task, result_holder)
+            return self._execute_in_isolated_loop(task, result)
         except Exception as e:
             logger.exception(f"[trace={self.trace_id}] Subagent {self.config.name} execution failed")
-            # Create a result with error if we don't have one
-            if result_holder is not None:
-                result = result_holder
-            else:
-                result = SubagentResult(
-                    task_id=str(uuid.uuid4())[:8],
-                    trace_id=self.trace_id,
-                    status=SubagentStatus.RUNNING,
-                )
             result.try_set_terminal(SubagentStatus.FAILED, error=str(e))
             return result
 
