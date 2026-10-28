@@ -266,7 +266,7 @@ docker run --rm --pull=never --name {PHASE}-worker --label org.deerflow.tenant.o
 
 
 
-REDIS_IMAGE = "sha256:858f009f97097b5293759754e98d5b6c9ab6f95b3f59833bc24a1a0e9cba20e6e"
+REDIS_IMAGE = "sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499"
 NATIVE_SECRET = "two-host-native-node-secret-32-bytes-fixed"
 INTERNAL_TOKEN = "two-host-internal-auth-token"
 
