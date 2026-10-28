@@ -23,7 +23,7 @@ import {
 } from "@/components/ui/tooltip";
 import { useAgentsApiEnabled } from "@/core/agents";
 import { useAuth } from "@/core/auth/AuthProvider";
-import { hasPermission } from "@/core/auth/permissions";
+import { hasPermission, PERMISSIONS } from "@/core/auth/permissions";
 import { useI18n } from "@/core/i18n/hooks";
 import { isStaticWebsiteOnly } from "@/core/static-mode";
 
@@ -33,7 +33,9 @@ export function WorkspaceNavChatList() {
   const { enabled: agentsEnabled } = useAgentsApiEnabled();
   const { user } = useAuth();
   const usageEnabled =
-    !!user && hasPermission(user, "runs:read") && !isStaticWebsiteOnly();
+    !!user &&
+    hasPermission(user, PERMISSIONS.RUNS_READ) &&
+    !isStaticWebsiteOnly();
   return (
     <SidebarGroup className="pt-1">
       <SidebarMenu>

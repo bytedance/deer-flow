@@ -27,7 +27,6 @@ export function UsageRuns({
     error: text.error,
     timeout: text.timeout,
     interrupted: text.interrupted,
-    cancelled: text.cancelled,
   };
   const cell = "px-4 py-3 text-right whitespace-nowrap tabular-nums";
   return (

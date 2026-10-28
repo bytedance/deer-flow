@@ -6,7 +6,7 @@ import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { useAuth } from "@/core/auth/AuthProvider";
-import { hasPermission } from "@/core/auth/permissions";
+import { hasPermission, PERMISSIONS } from "@/core/auth/permissions";
 import { useI18n } from "@/core/i18n/hooks";
 import { isStaticWebsiteOnly } from "@/core/static-mode";
 import { useUsage, useUsageRuns } from "@/core/usage/hooks";
@@ -24,7 +24,7 @@ export function UsageDashboard() {
   const [page, setPage] = useState(0);
   const [status, setStatus] = useState<UsageRunFilter>("all");
   const timezoneOffsetMinutes = -new Date().getTimezoneOffset();
-  const allowed = !!user && hasPermission(user, "runs:read");
+  const allowed = !!user && hasPermission(user, PERMISSIONS.RUNS_READ);
   const staticMode = isStaticWebsiteOnly();
   const usage = useUsage(
     user?.id,

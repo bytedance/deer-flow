@@ -19,6 +19,7 @@ export function UsageOverview({
   const peak = Math.max(1, ...usage.days.map((day) => day.total_tokens));
   const input = usage.days.reduce((sum, day) => sum + day.input_tokens, 0);
   const output = usage.days.reduce((sum, day) => sum + day.output_tokens, 0);
+  const hasRuns = usage.total_runs > 0;
   return (
     <div className="space-y-6">
       <div className="grid gap-4 sm:grid-cols-2">
@@ -44,7 +45,7 @@ export function UsageOverview({
           </p>
         </CardHeader>
         <CardContent className="space-y-5">
-          {usage.total_runs === 0 ? (
+          {!hasRuns ? (
             <p className="text-muted-foreground py-8 text-center text-sm">
               {text.noUsage}
             </p>
@@ -69,7 +70,7 @@ export function UsageOverview({
               ))}
             </div>
           )}
-          {usage.days.length > 0 && (
+          {hasRuns && usage.days.length > 0 && (
             <div
               className="text-muted-foreground flex justify-between text-xs"
               aria-hidden="true"
@@ -83,46 +84,48 @@ export function UsageOverview({
               </span>
             </div>
           )}
-          <details>
-            <summary className="cursor-pointer text-sm font-medium">
-              {text.dailyDetails}
-            </summary>
-            <div className="mt-3 overflow-x-auto">
-              <table className="w-full text-sm" aria-label={text.daily}>
-                <thead>
-                  <tr className="text-muted-foreground border-b">
-                    <th scope="col" className="px-4 py-3 text-left">
-                      {text.date}
-                    </th>
-                    <th scope="col" className={cell}>
-                      {text.inputTokens}
-                    </th>
-                    <th scope="col" className={cell}>
-                      {text.outputTokens}
-                    </th>
-                    <th scope="col" className={cell}>
-                      {text.runs}
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {usage.days.map((day) => (
-                    <tr key={day.date} className="border-b last:border-0">
-                      <th
-                        scope="row"
-                        className="px-4 py-3 text-left font-normal whitespace-nowrap"
-                      >
-                        {formatUsageDate(day.date, locale)}
+          {hasRuns && (
+            <details>
+              <summary className="cursor-pointer text-sm font-medium">
+                {text.dailyDetails}
+              </summary>
+              <div className="mt-3 overflow-x-auto">
+                <table className="w-full text-sm" aria-label={text.daily}>
+                  <thead>
+                    <tr className="text-muted-foreground border-b">
+                      <th scope="col" className="px-4 py-3 text-left">
+                        {text.date}
                       </th>
-                      <td className={cell}>{count(day.input_tokens)}</td>
-                      <td className={cell}>{count(day.output_tokens)}</td>
-                      <td className={cell}>{count(day.runs)}</td>
+                      <th scope="col" className={cell}>
+                        {text.inputTokens}
+                      </th>
+                      <th scope="col" className={cell}>
+                        {text.outputTokens}
+                      </th>
+                      <th scope="col" className={cell}>
+                        {text.runs}
+                      </th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </details>
+                  </thead>
+                  <tbody>
+                    {usage.days.map((day) => (
+                      <tr key={day.date} className="border-b last:border-0">
+                        <th
+                          scope="row"
+                          className="px-4 py-3 text-left font-normal whitespace-nowrap"
+                        >
+                          {formatUsageDate(day.date, locale)}
+                        </th>
+                        <td className={cell}>{count(day.input_tokens)}</td>
+                        <td className={cell}>{count(day.output_tokens)}</td>
+                        <td className={cell}>{count(day.runs)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </details>
+          )}
         </CardContent>
       </Card>
 

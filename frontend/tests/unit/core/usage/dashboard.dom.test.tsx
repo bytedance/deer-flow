@@ -28,6 +28,7 @@ rs.mock("@/core/static-mode", () => ({
 import { UsageDashboard } from "@/components/workspace/usage/usage-dashboard";
 import { GatewayApiError } from "@/core/api/errors";
 import { I18nProvider } from "@/core/i18n/context";
+import { formatUsageDate } from "@/core/usage/format";
 
 const clients: QueryClient[] = [];
 const usage = {
@@ -100,6 +101,50 @@ test("does not issue requests without runs:read", () => {
   expect(screen.getByText(/You do not have permission/)).toBeTruthy();
   expect(mocks.usage).not.toHaveBeenCalled();
   expect(mocks.runs).not.toHaveBeenCalled();
+});
+
+test("empty periods hide the daily date axis and zero-filled details", async () => {
+  mocks.usage.mockResolvedValue({
+    ...usage,
+    total_runs: 0,
+    total_tokens: 0,
+    by_model: {},
+    days: usage.days.map((day) => ({
+      ...day,
+      total_tokens: 0,
+      input_tokens: 0,
+      output_tokens: 0,
+      runs: 0,
+    })),
+  });
+  renderDashboard();
+  await screen.findByText("No usage recorded in this period.");
+  expect(screen.getByTestId("usage-total-tokens").textContent).toBe("0");
+  expect(screen.queryByText("View daily details")).toBeNull();
+  expect(screen.queryByRole("table", { name: "Daily token usage" })).toBeNull();
+  expect(
+    screen.queryAllByText(formatUsageDate(usage.days[0]!.date, "en-US")),
+  ).toHaveLength(0);
+});
+
+test("runs with zero reported tokens still expose daily details", async () => {
+  mocks.usage.mockResolvedValue({
+    ...usage,
+    total_tokens: 0,
+    days: usage.days.map((day) => ({
+      ...day,
+      total_tokens: 0,
+      input_tokens: 0,
+      output_tokens: 0,
+    })),
+  });
+  renderDashboard();
+  await screen.findByText("View daily details");
+  expect(screen.getByTestId("usage-total-runs").textContent).toBe("1");
+  expect(screen.queryByText("No usage recorded in this period.")).toBeNull();
+  expect(
+    screen.getByRole("table", { name: "Daily token usage", hidden: true }),
+  ).toBeTruthy();
 });
 
 test("accepts upstream cost fields while presenting run tokens", async () => {
