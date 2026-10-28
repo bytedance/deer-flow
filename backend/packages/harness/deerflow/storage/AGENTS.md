@@ -27,7 +27,19 @@ bytes as `kind="viewed-image"`, checkpoints the JSON-safe ref beside
 tool call rather than claiming cross-instance durability. `ViewImageMiddleware` accepts a
 ref only when its kind, digest, size and content type agree with the separately
 recorded image metadata; reads are blob-first and retain the existing
-sandbox/host compatibility path as fallback after any store failure.
+sandbox/host compatibility path as fallback after any store failure. The
+thread artifact GET route also resolves the checkpoint-bound image ref when the
+reader Gateway cannot find the local file; it confines this fallback to the
+authorized thread and exact virtual path and verifies the bytes before serving.
+The blob fallback reuses `require_permission` with `require_existing=True`
+before the off-loop store probe, including trusted internal owners. A disabled
+store skips accessor construction/checkpoint reads; reuse the returned store
+for the blob read. Unexpected failures warn with only the exception type and
+still fall back to 404. Local-file reads keep legacy missing-row access.
+MIME detection runs off-loop even on a cold
+reader. Regression coverage uses the decorated artifact route with a real
+thread store and the strict blocking-I/O suite with an uninitialized MIME DB.
+Other artifact and IM-channel reads still use their existing local-path flow.
 
 `ToolOutputBudgetMiddleware` is a migrated producer for host-externalized
 results. It persists exact UTF-8 bytes as `kind="tool-output"`, checkpoints a

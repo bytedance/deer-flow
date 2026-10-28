@@ -749,9 +749,69 @@ function mount(root, context) {
     };
     const liveBar = node("div", "", { className: "live-bar" });
     liveBar.append(syncStatus);
+    const publicState = node("details", "", { className: "public-state" });
+    const publicStateSummary = node("summary");
+    const publicStateList = node("div", "", { className: "public-state-list" });
+    publicState.append(publicStateSummary, publicStateList);
+    let publicRevision = null;
+    let hadPublicEntries = false;
+    function paintPublicState() {
+      const state = team.public_state ?? { revision: 0, entries: [] };
+      if (state.revision === publicRevision) return;
+      publicRevision = state.revision;
+      publicStateSummary.textContent = t(
+        `Team public state · ${state.entries.filter((entry) => entry.status === "active").length} active`,
+        `团队公共状态 · ${state.entries.filter((entry) => entry.status === "active").length} 项有效条目`,
+      );
+      publicStateList.replaceChildren();
+      if (!state.entries.length)
+        publicStateList.append(
+          node(
+            "p",
+            t(
+              "Ask a member to publish the current plan, findings or open questions here.",
+              "可以让成员在这里发布当前计划、发现或待解决问题。",
+            ),
+            { className: "hint" },
+          ),
+        );
+      const kinds = {
+        objective: t("Stage objective", "阶段目标"),
+        plan: t("Plan", "计划"),
+        finding: t("Finding", "发现"),
+        question: t("Open question", "问题"),
+        requirement: t("Requirement", "交付要求"),
+      };
+      for (const entry of state.entries) {
+        const card = node("article", "", { className: "public-state-entry" });
+        const author =
+          team.members.find((member) => member.id === entry.updated_by)?.name ??
+          entry.updated_by;
+        card.append(
+          node("strong", entry.title),
+          node(
+            "p",
+            `${kinds[entry.kind] ?? entry.kind} · v${entry.revision} · ${author} · ${entry.status === "archived" ? t("Archived", "已归档") : t("Active", "有效")}`,
+            { className: "hint" },
+          ),
+          node("p", entry.content, { className: "public-state-content" }),
+        );
+        if (entry.source?.thread_id)
+          card.append(
+            button(
+              t("Open source conversation", "打开来源会话"),
+              async () => context.openConversation?.(entry.source.thread_id),
+              "text-button",
+            ),
+          );
+        publicStateList.append(card);
+      }
+      if (!hadPublicEntries && state.entries.length) publicState.open = true;
+      hadPublicEntries = state.entries.length > 0;
+    }
     chat.append(feed, liveBar, composer);
     body.append(members, chat);
-    workspace.append(header, body);
+    workspace.append(header, publicState, body);
     content.replaceChildren(workspace);
     const cards = new Map();
     function dateLabel(value) {
@@ -923,6 +983,7 @@ function mount(root, context) {
       }
     }
     function paintActivity() {
+      paintPublicState();
       const nearBottom =
         feed.scrollHeight - feed.scrollTop - feed.clientHeight < 60;
       const oldSize = cards.size;

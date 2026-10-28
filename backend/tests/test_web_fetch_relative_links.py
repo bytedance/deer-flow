@@ -99,6 +99,9 @@ def test_python_extraction_fallback_preserves_article_text(monkeypatch):
         return original(html, use_readability=False)
 
     monkeypatch.setattr(readability, "simple_json_from_html_string", extract)
+    monkeypatch.setattr(readability, "_readabilipy_have_node", lambda: True)
+    monkeypatch.setattr(readability, "_readability_js_launch_failed", False)
+    monkeypatch.setattr(readability, "_readability_js_available_cached", None)
     article = ReadabilityExtractor().extract_article(_article('<a href="../next">Next</a>'), url=PAGE_URL)
     # The existing Python fallback strips link markup; preserve its text contract.
     assert "Next" in article.to_markdown()

@@ -1777,6 +1777,7 @@ class DeerFlowClient:
         """
         validate_thread_id(thread_id)
         from deerflow.uploads.companions import invalidate_overwritten_upload, register_companion
+        from deerflow.utils.atomic_write import cleanup_failed_atomic_write
         from deerflow.utils.file_conversion import CONVERTIBLE_EXTENSIONS, convert_file_to_markdown
 
         # Validate all files upfront to avoid partial uploads.
@@ -1824,7 +1825,7 @@ class DeerFlowClient:
                     conversion_source = None
                     if src_path.suffix.lower() in CONVERTIBLE_EXTENSIONS:
                         if conversion_sources is None:
-                            conversion_sources = tempfile.TemporaryDirectory(prefix="deerflow-upload-source-")
+                            conversion_sources = tempfile.TemporaryDirectory(prefix="deerflow-upload-source-", ignore_cleanup_errors=True)
                         conversion_source = Path(conversion_sources.name) / dest_name
                     if dest_name in existing_names:
                         if conversion_source is not None:
@@ -1836,7 +1837,9 @@ class DeerFlowClient:
                         dest_name = dest.name
                 except UnsafeUploadPathError:
                     if conversion_source is not None:
-                        conversion_source.unlink(missing_ok=True)
+                        # Skipping one unsafe file must survive a failed discard,
+                        # or a locked temp turns the skip into a batch failure.
+                        cleanup_failed_atomic_write(conversion_source)
                     logger.warning("Skipping upload with unsafe destination: %s", dest_name)
                     skipped_files.append(dest_name)
                     continue
@@ -1905,12 +1908,16 @@ class DeerFlowClient:
                         seen_names.discard(unique_md_name)
 
                 if conversion_source is not None:
-                    conversion_source.unlink(missing_ok=True)
+                    # The upload already succeeded; a capture we cannot discard
+                    # must not replace that result or drop the later files.
+                    cleanup_failed_atomic_write(conversion_source)
                 uploaded_files.append(info)
         finally:
             if conversion_pool is not None:
                 conversion_pool.shutdown(wait=True)
             if conversion_sources is not None:
+                # ignore_cleanup_errors keeps a locked capture from turning a
+                # decided batch outcome into a cleanup error.
                 conversion_sources.cleanup()
 
         message = f"Successfully uploaded {len(uploaded_files)} file(s)"

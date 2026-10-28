@@ -35,7 +35,7 @@ import { Callout } from "nextra/components";
 | 在配置里直接给所有 Agent 加一个 `AgentMiddleware` 类       | `config.yaml` 的 `extensions.middlewares`，见[自定义与扩展](/docs/harness/customization) |
 | 交付一个带版本的包，用来观察运行、保存状态、运行服务或提供路由 | **扩展包**（本手册）                                                          |
 
-两条中间件路径容易混淆。`extensions.middlewares` 把一个类插到固定位置，不附带任何契约；扩展包的中间件声明语义化的[放置位置](/docs/harness/extensions/middleware#放置位置)，运行在隔离故障的包装器里，并且可以和下面其他贡献类型一起发布。
+两条中间件路径容易混淆。`extensions.middlewares` 把一个类插到固定位置，不附带任何契约；扩展包的中间件声明语义化的[放置位置](/docs/harness/extensions/middleware#placements)，运行在隔离故障的包装器里，并且可以和下面其他贡献类型一起发布。
 
 ## 扩展能贡献什么
 
@@ -84,7 +84,7 @@ plugins:
 扩展是观察性的，所以一个坏掉的扩展只会退化成一条日志，而不会搞坏一次运行：
 
 - 抛出异常的贡献会被跳过，Gateway 记录一条归属到其入口点的错误（`Extension <use>: ...`）。
-- 贡献的中间件运行在隔离包装器里，包装器绝不会重复一次模型调用或工具副作用。见[故障隔离](/docs/harness/extensions/middleware#故障隔离)。
+- 贡献的中间件运行在隔离包装器里，包装器绝不会重复一次模型调用或工具副作用。见[故障隔离](/docs/harness/extensions/middleware#failure-isolation)。
 - 任务生命周期通知共享一个有上限的时间预算；观察者逐个通知，一个观察者失败不会跳过后面的观察者。
 
 唯一的例外是 `required: true`，它把任何加载失败都变成启动中止。只在缺了这个扩展部署就是错的情况下使用它，因为从这种失败中恢复需要有 shell 权限去改配置文件。
