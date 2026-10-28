@@ -135,8 +135,32 @@ async def _controller():
     )
     submitted = jobs.submit(owner, token, args)
     job_id = submitted["task_id"]
+    # The already-verified MCP submission layer creates this task row; slice 1
+    # stands it in so activation exercises the real task-authority SQL.
+    from dataclasses import asdict
+
+    import sqlalchemy as sa
     from ecs_executor.scope import mint_management_scope
 
+    from deerflow.persistence.mcp_tasks.model import McpTaskRow
+
+    with jobs.publication.engine.begin() as connection:
+        connection.execute(
+            sa.insert(McpTaskRow).values(
+                id="two-host-slice-task",
+                user_id=owner,
+                thread_id=THREAD_ID,
+                thread_incarnation="two-host-epoch",
+                run_id=RUN_ID,
+                server_name="ecs",
+                driver_name="ordinary",
+                remote_task_id=job_id,
+                task_name="execution",
+                status="working",
+                workspace_id=workspace_id,
+                workspace_context_json=asdict(context),
+            )
+        )
     status_token = mint_management_scope(secret=secret, audience="B", user_id=owner, task_id=job_id, operation="status", workspace_context=context)
     activated = jobs.status(owner, status_token, {"task_id": job_id})
     assert activated["status"] in {"running", "queued"}, activated
