@@ -555,7 +555,7 @@ def _convert_call_tool_result(
         elif isinstance(item, ImageContent):
             lc_content.append(create_image_block(base64=item.data, mime_type=item.mimeType))
         elif isinstance(item, AudioContent):
-            raise NotImplementedError("AudioContent conversion to LangChain content blocks is not yet supported.")
+            raise NotImplementedError(f"AudioContent conversion to LangChain content blocks is not yet supported. Received audio with mime type: {item.mimeType}")
         elif isinstance(item, ResourceLink):
             mime = item.mimeType or None
             url = _resolve_link_url(str(item.uri))

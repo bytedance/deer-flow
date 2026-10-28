@@ -41,6 +41,7 @@ def test_audio_conversion_fails_without_stringifying_payload(audio_content, is_e
     with pytest.raises(NotImplementedError, match="AudioContent.*not.*supported") as exc:
         _convert_call_tool_result(CallToolResult(content=content, isError=is_error))
 
+    assert f"Received audio with mime type: {audio_content.mimeType}" in str(exc.value)
     assert audio_content.data not in str(exc.value)
 
 
@@ -109,6 +110,7 @@ async def test_audio_tool_reports_error_without_payload_in_agent_messages(transp
     assert result.status == "error"
     assert "AudioContent" in result.content
     assert "not yet supported" in result.content
+    assert f"Received audio with mime type: {audio_content.mimeType}" in result.content
     assert len(model_inputs) == 2
     assert any(isinstance(message, ToolMessage) and message.status == "error" for message in model_inputs[-1])
     for message in [*state["messages"], *model_inputs[-1]]:
