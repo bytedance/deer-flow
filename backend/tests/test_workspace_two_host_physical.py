@@ -103,6 +103,7 @@ async def _controller():
         metadata_database_url=native_url,
         workspace_required=True,
         native_server_name="ecs",
+        staged_ttl_seconds=1,
     )
     context = WorkspaceContext(workspace_id=workspace_id, actor_user_id=owner, membership_version=1, policy_version=1)
     from deerflow.authz.workspace import reset_current_workspace, set_current_workspace
@@ -190,8 +191,14 @@ async def _worker():
     jobs = SimpleNamespace(store=store, artifact_root=root, publication=publication, workspace_required=True, execution_authority=store.execution_authority)
     docker = Docker()
     try:
-        await asyncio.to_thread(store.expire_staged)
-        claimed = await asyncio.to_thread(store.claim_queued)
+        claimed = None
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            await asyncio.to_thread(store.expire_staged)
+            claimed = await asyncio.to_thread(store.claim_queued)
+            if claimed is not None:
+                break
+            await asyncio.sleep(1.0)
         assert claimed is not None, "no queued scoped B reached the real two-host pool RPC"
         assert claimed["kind"] == "B" and claimed.get("workspace_id") is not None
         manifest.write_text(json.dumps([{"id": claimed["id"], "spec_digest": claimed["spec_digest"]}]))
