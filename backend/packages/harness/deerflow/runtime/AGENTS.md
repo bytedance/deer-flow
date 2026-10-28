@@ -210,6 +210,15 @@ owner, but `AUTO` resolves to the internal user's `make_safe_user_id` form, so
 Gateway thread/run reads (including run-row lookups) must pass
 `_run_scope_user_id()` explicitly.
 
+**In-memory RunEvent snapshot ownership** (`runtime/events/store/memory.py`):
+The thread- and run-keyed indexes deliberately share their internal event dicts,
+but caller-owned `content` and `metadata` must be copied at admission, and
+public put/read results must be detached snapshots. Otherwise mutating a write
+receipt or a paged read silently rewrites later RunEvent replay and every shared
+message projection. The cross-backend contract lives on `RunEventStore` in
+`runtime/events/store/base.py`; regression coverage is
+`tests/test_memory_run_event_snapshot_isolation.py`.
+
 **Event-store mutation fence** (`runtime/events/store/`): every thread mutation —
 `put`, `put_batch`, `put_if_absent`, `delete_by_thread`, `delete_by_run` — shares
 one serialization domain: the per-thread `asyncio` lock, plus (on PostgreSQL) the
