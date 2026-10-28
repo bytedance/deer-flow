@@ -535,7 +535,10 @@ def _exercise_scheduled_b_physical(native_engine, executor_engine, tmp_path, mon
                     operation_id = stops[0].operation_id
                     parents = (await session.scalars(sa.select(WorkspaceOperationOutboxRow).where(WorkspaceOperationOutboxRow.kind == "workspace_revoke"))).all()
                     parent_baseline = deepcopy({row.operation_id: row.payload for row in parents})
-                    assert len(parents) == 2 and all(row.state == "pending" for row in parents)
+                    # transfer_owner bumps both memberships (old owner demotion plus
+                    # successor promotion) and each bump enqueues one version-keyed
+                    # revoke; remove_member then adds the removed owner's own row.
+                    assert len(parents) == 3 and all(row.state == "pending" for row in parents)
                 assert not b_store.get(remote_id).get("cancel_requested"), "Membership SQL performed external STOP IO"
                 now = datetime.now(UTC)
                 await service.run_once(now=now)
