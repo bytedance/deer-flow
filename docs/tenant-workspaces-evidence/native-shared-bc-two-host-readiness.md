@@ -44,3 +44,14 @@ C1 真实 AIO 工具写入原空间文件，B 的受限容器消费已冻结输�
 - 当前迁移 head 已核对：native `0041_scheduler_workspace_identity`、executor `e0003_execution_identity`，与本审计"新建 0041/e0003 测试数据库"一致；runtime 兼容检查接受的已知 head 为 0040/0041。
 - 镜像钉死一致性：physical 流水线钉死的 native CI 镜像 `sha256:4f269f6b…f3f01` 与 Postgres `sha256:721873c3…8ea` 与 #18 等历史证据记录一致。两项云端只读核实命令已备好，待 SSH 可用即查：两镜像在主机上 `docker image inspect` 是否存在且 ID 未漂移；controller 所需 Redis 固定镜像的确立（旧脚本未见独立 Redis 镜像钉死，两机方案新增 controller Redis 依赖时须先固定镜像并记录）。
 - 内存预算核算依赖主机真实 `MemTotal`（只读 `/proc/meminfo`），本地无法代算。已确认预算常量：常驻 AIO 1500m/2048MiB、C 动态 500m/1024MiB、B 500m/128MiB；待获取 MemTotal 后按“真实 MemTotal − OS/fixture 预留 − 同时运行 cgroup 上限”核算，不照搬 #18 的虚拟 8GiB Node。
+
+## 2026-10-28 两机只读核对结果（controller 139.196.30.22 / worker 47.117.5.254）
+
+用户提供了两台测试机地址后完成的全部只读核对；未部署、未启容器（除依赖探测的无网络临时容器）、未改任何配置。
+
+- **连通与角色**：两台均以 root + 操作员密钥 SSH 可达。同 VPC：controller `192.168.0.190`、worker `192.168.0.189`，私网双向 TCP/ping 直通（RTT 0.3–1.2ms）；公网互访 22 端口被安全组拦截（本机白名单可入）。两机业务流量走 VPC 内网直连 TCP——验收口径为“VPC 内网直连”，不是公网 TLS，也不再需要原设想的 SSH 隧道转发。
+- **硬件与运行时**：controller 2 vCPU / MemTotal 7,341MiB（空闲 available 6,897MiB）/ 系统盘空余 51G；worker 2 vCPU / MemTotal 3,542MiB（空闲 available 3,026MiB，系统+Docker 基线约 516MiB）/ 空余 46G。两台 Docker 29.8.2、宿主 Python 3.12.3（旧证据“宿主无 Python 环境”已过时）。两台当前均无运行中容器；`/srv/deerflow-native-releases|task6b|test` 旧目录在两台均存在，不触碰。
+- **镜像核对**：两台均有 `deerflow-native:production-repaired-contract-c6af94a95ae7`（e84bc2845f89）、`publication-bdd2931a1a6f-core`（a216a2cc51b2，#38 worker CLI 用过）、`05e260329244-core`、`browser-mcr` 系列；worker 另有 `all-in-one-sandbox`（6328d7fd2f0f，13.1GB，即 C 沙箱 AIO 镜像）。controller 另有 `postgres:16-alpine`（721873c34ceb，与 physical CI 钉死 ID 完全一致）和 `redis:7-alpine`（858f009f9709）——原“controller PG/Redis 固定镜像未验证”事项关闭；Redis 固定 ID 记录为 858f009f9709。CI 镜像 4f269f6b… 不在两机上，两机源码运行方案不需要它。
+- **镜像依赖对当前源码可用性**：两台各以 `--network none` 无挂载临时容器探测 `production-repaired-contract-c6af94a95ae7` 的 Python 环境，8 个关键包（sqlalchemy 2.0.49、httpx 0.28.1、psycopg 3.3.3、redis 7.4.0、pydantic 2.13.3、langgraph 1.2.9、fastapi 0.136.1、uvicorn 0.46.0）与源码 `backend/uv.lock` 锁定版本逐一相同。原“所选 native 镜像对当前源码所需依赖的可用性尚未验证”事项对该镜像关闭。
+- **内存预算核算（决定性结论）**：worker（执行池主机）峰值并发 = AIO 常驻 2048 + C 动态 1024 = 3072MiB cgroup，加 NativeWorkerHost 宿主进程约 200–400MiB，峰值约 3272–3472MiB；对照 worker 空闲 available 仅 3026MiB、距 MemTotal 3542MiB 余量 70–270MiB——**缺口约 250–450MiB，判定不满足，高 OOM 风险**。CPU 峰值 AIO 1500m + C 500m = 2000m 恰好占满 2 vCPU，零裕量（可压缩节流，但无余量）。controller（PG ≤1GiB + Redis ~128MiB + Scheduler/Gateway/MCP ~1–2GiB）对 7341MiB 充裕。
+- **待用户决策**：按“不缩小 C/AIO 配额掩盖不足”的纪律，worker 现配不满足两机主流程预算。可选：worker 升配至 8GiB 级（推荐，与 #18 实际 8GiB 预算一致）；或角色对调把执行池放 controller（内存够但 2 vCPU 需同时承担调度+网关+池，CPU 挤压严重，且偏离设计，不推荐）；缩小预算常量违反纪律不做。升配后本审计其余各项均已就绪，可进入独立组件 app factory 与 0041/e0003 测试库实施。
