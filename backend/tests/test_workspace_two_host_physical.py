@@ -347,7 +347,7 @@ async def _native_controller():
     from app.gateway import deps, services
     from app.gateway.native_admission import make_native_snapshot
     from app.gateway.run_models import RunCreateRequest
-    from app.gateway.runs.worker import RunContext
+    from deerflow.runtime import RunContext
     from deerflow.agents.thread_state import ThreadState
     from deerflow.runtime import goal as goal_runtime
     from deerflow.runtime.user_context import reset_current_user, set_current_user
