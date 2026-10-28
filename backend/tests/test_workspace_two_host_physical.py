@@ -406,6 +406,9 @@ async def _native_controller():
         deps._cached_local_provider = LocalAuthProvider(assembly.users)
         principal = await deps.get_local_provider().get_user(owner)
         principal_token = set_current_user(principal)
+        from deerflow.authz.workspace import reset_current_workspace, set_current_workspace
+
+        workspace_token = set_current_workspace(context)
         try:
             builder = StateGraph(ThreadState, context_schema=dict)
 
@@ -471,6 +474,7 @@ async def _native_controller():
                 server.should_exit = True
                 await asyncio.gather(serve, return_exceptions=True)
         finally:
+            reset_current_workspace(workspace_token)
             reset_current_user(principal_token)
             services.get_run_context = original_get_run_context
             deps._cached_repo, deps._cached_local_provider = original_repo, original_provider
