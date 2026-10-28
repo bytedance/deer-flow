@@ -1402,6 +1402,12 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
 
 ### Fixed
 
+- **benchmarks:** Reject negative and NaN sandbox idle-timeout values before
+  constructing any provider, and apply the same validation to BoxLite/AIO
+  health-check skip windows. Valid zero, positive, and positive-infinity values
+  retain their existing behavior, OpenSandbox keeps rejecting nonzero skip
+  windows, and AIO benchmark output now records accepted values. ([#7646])
+
 - **channels:** DingTalk AI cards no longer fetch an access token on the
   Gateway event loop. Card creation and card streaming went through
   dingtalk-stream's synchronous `get_access_token()`, which posts with
@@ -13231,3 +13237,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7594]: https://github.com/bytedance/deer-flow/pull/7594
 [#7597]: https://github.com/bytedance/deer-flow/pull/7597
 [#7606]: https://github.com/bytedance/deer-flow/pull/7606
+[#7646]: https://github.com/bytedance/deer-flow/issues/7646
