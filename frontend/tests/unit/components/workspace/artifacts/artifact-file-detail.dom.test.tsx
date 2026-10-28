@@ -167,3 +167,12 @@ describe("ArtifactFileDetail browser-preview iframe", () => {
     );
   });
 });
+
+describe("ArtifactFileDetail malformed write-file URLs", () => {
+  it.each(["write-file:%E0%A4%A", "write-file://["])(
+    "renders the raw value without throwing: %s",
+    (filepath) => {
+      expect(() => renderDetail(filepath)).not.toThrow();
+    },
+  );
+});

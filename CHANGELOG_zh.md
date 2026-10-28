@@ -1116,6 +1116,17 @@
 
 ### 修复
 
+- **渠道：** 钉钉 AI 卡片不再在 Gateway 事件循环上获取 access token。此前创建卡片和流式更新卡片
+  都会调用 dingtalk-stream 的同步 `get_access_token()`，它用 `requests` 发请求且没有超时，因此
+  首张卡片以及之后每次 SDK token 刷新（约每两小时一次）都会在整个请求期间阻塞所有渠道、请求和
+  流；钉钉无响应时会一直阻塞。现在卡片调用使用渠道自身带超时的 token，流式更新时 token 获取失败
+  会回退为 Markdown 回复，而不是丢弃这次更新。([#7597])
+
+- **网页抓取：** 缓存 Readability.js 不可用的探测结果，并在 Node 抽取器首次出现
+  进程启动失败后停止重试。没有可用 Node/npm 工具链的安装环境会在后续抓取中直接使用
+  现有且保留链接的 Python 回退，不再重复执行失败的子进程探测；单篇文档导致的非零退出
+  仍会在后续页面重试 Node。([#5973])
+  
 - **脚本：** `make dev` 和 `make start` 不再把检出目录的 `.env` 当作 shell 脚本执行。此前
   `serve.sh` 用 `source` 读取它，`$$` 会变成 shell 的 PID，反引号和 `$(...)` 会执行命令，未加引号
   且含空格的值会把第二个词当作命令运行，启动脚本以退出码 127 中止。这些值还会覆盖 Gateway
@@ -9926,6 +9937,7 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#5965]: https://github.com/bytedance/deer-flow/pull/5965
 [#5966]: https://github.com/bytedance/deer-flow/pull/5966
 [#5968]: https://github.com/bytedance/deer-flow/pull/5968
+[#5973]: https://github.com/bytedance/deer-flow/issues/5973
 [#5977]: https://github.com/bytedance/deer-flow/pull/5977
 [#5978]: https://github.com/bytedance/deer-flow/pull/5978
 [#5980]: https://github.com/bytedance/deer-flow/pull/5980
@@ -10536,4 +10548,5 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7591]: https://github.com/bytedance/deer-flow/pull/7591
 [#7593]: https://github.com/bytedance/deer-flow/pull/7593
 [#7594]: https://github.com/bytedance/deer-flow/pull/7594
+[#7597]: https://github.com/bytedance/deer-flow/pull/7597
 [#7606]: https://github.com/bytedance/deer-flow/pull/7606

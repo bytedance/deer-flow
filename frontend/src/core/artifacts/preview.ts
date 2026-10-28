@@ -68,7 +68,7 @@ function findToolResult(
   return undefined;
 }
 
-function parseWriteFileArtifact(filepath: string) {
+export function parseWriteFileArtifact(filepath: string) {
   if (!isWriteFileArtifact(filepath)) {
     return undefined;
   }

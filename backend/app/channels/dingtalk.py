@@ -1251,7 +1251,9 @@ class DingTalkChannel(Channel):
             return None
 
         try:
-            replier = AICardReplier(self._dingtalk_client, chatbot_message)
+            token_client = _CardTokenClient(self._dingtalk_client.credential)
+            token_client.access_token = await self._get_access_token()
+            replier = AICardReplier(token_client, chatbot_message)
             card_instance_id = await replier.async_create_and_deliver_card(
                 card_template_id=self._card_template_id,
                 card_data={"content": initial_text},
@@ -1278,6 +1280,7 @@ class DingTalkChannel(Channel):
         if not replier:
             raise RuntimeError(f"No AICardReplier found for track ID {out_track_id}")
 
+        replier.dingtalk_client.access_token = await self._get_access_token()
         await replier.async_streaming(
             card_instance_id=out_track_id,
             content_key="content",
@@ -1313,6 +1316,26 @@ class DingTalkChannel(Channel):
         except (httpx.HTTPError, OSError):
             logger.exception("[DingTalk] failed to upload media: %s", file_path)
             return None
+
+
+class _CardTokenClient:
+    """The client ``AICardReplier`` sees: it serves the channel's access token.
+
+    The replier's async methods call ``dingtalk_client.get_access_token()``
+    inline, and dingtalk-stream's version refreshes through ``requests.post``
+    with no timeout, so on the Gateway loop every refresh (about every two
+    hours) blocked the loop for the whole request, indefinitely if DingTalk
+    stalled. The channel sets ``access_token`` from its own bounded
+    ``_get_access_token()`` before every replier call, so the replier never
+    fetches a token itself.
+    """
+
+    def __init__(self, credential: Any) -> None:
+        self.credential = credential
+        self.access_token = ""
+
+    def get_access_token(self) -> str:
+        return self.access_token
 
 
 class _DingTalkMessageHandler:
