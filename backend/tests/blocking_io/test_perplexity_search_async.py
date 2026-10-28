@@ -43,6 +43,7 @@ def _patch_transport(monkeypatch, request_threads: list[int], clients: list[str]
             AsyncClient=async_client,
             Client=sync_client,
             HTTPStatusError=httpx.HTTPStatusError,
+            HTTPError=httpx.HTTPError,
         ),
     )
 

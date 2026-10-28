@@ -10,7 +10,8 @@ Configuration (``config.yaml`` ``tools:`` entry, all optional except the key):
 - ``max_results``: default result count when the agent omits it (default 5,
   clamped to 1-20 by the API).
 - ``search_type``: ``web`` (default) or ``fast``.
-- ``search_domain_filter``: up to 20 domains; prefix with ``-`` to exclude.
+- ``search_domain_filter``: up to 20 domains, either all included or all
+  excluded (prefix every entry with ``-`` to exclude); one mode per request.
 
 Uses only ``httpx`` (already a core dependency). Each request carries
 ``X-Pplx-Integration: deer-flow`` and a ``User-Agent`` naming DeerFlow so the
@@ -51,6 +52,18 @@ _STATUS_HINTS = {
     422: "request rejected by the Perplexity Search API validation",
     429: "rate limit reached",
 }
+_INVALID_KEY_FORMAT_MESSAGE = "invalid PERPLEXITY_API_KEY format"
+
+
+def _is_valid_api_key(api_key: str) -> bool:
+    """Accept only printable, non-space ASCII.
+
+    A key with an embedded control character (for example a stray newline or
+    NUL from a config file) would make the HTTP layer raise an error whose
+    text echoes the whole ``Authorization`` header. Rejecting it up front keeps
+    the key out of logs and tool output.
+    """
+    return bool(api_key) and all(0x21 <= ord(ch) <= 0x7E for ch in api_key)
 
 
 @cache
@@ -162,6 +175,9 @@ async def web_search_tool(query: str, max_results: int | None = None, time_range
             {"error": "Perplexity API key is missing; configure api_key or PERPLEXITY_API_KEY", "query": query},
             ensure_ascii=False,
         )
+    if not _is_valid_api_key(api_key):
+        logger.error("Perplexity search aborted: %s", _INVALID_KEY_FORMAT_MESSAGE)
+        return json.dumps({"error": f"Perplexity Search API error: {_INVALID_KEY_FORMAT_MESSAGE}", "query": query}, ensure_ascii=False)
     # Honor the caller-supplied max_results; fall back to config only when omitted.
     if max_results is None:
         max_results = configured_max_results
@@ -170,16 +186,25 @@ async def web_search_tool(query: str, max_results: int | None = None, time_range
     try:
         data = await _search(api_key, query, count, search_type, domain_filter, time_range)
     except httpx.HTTPStatusError as e:
+        # Log the status only. Response bodies can echo request details and
+        # are not needed to act on any of these failures.
         status = e.response.status_code
-        logger.error("Perplexity Search API returned HTTP %s: %s", status, e.response.text)
         hint = _STATUS_HINTS.get(status)
         message = f"Perplexity Search API error: HTTP {status}"
         if hint:
             message = f"{message} ({hint})"
+        logger.error("%s", message)
+        return json.dumps({"error": message, "query": query}, ensure_ascii=False)
+    except httpx.HTTPError as e:
+        # Transport and protocol errors (LocalProtocolError is an httpx.HTTPError)
+        # can embed the full Authorization header in str(e); report the class only.
+        message = f"Perplexity Search API request failed: {type(e).__name__}"
+        logger.error("%s", message)
         return json.dumps({"error": message, "query": query}, ensure_ascii=False)
     except Exception as e:
-        logger.error("Perplexity search failed: %s: %s", type(e).__name__, e)
-        return json.dumps({"error": str(e), "query": query}, ensure_ascii=False)
+        message = f"Perplexity search failed: {type(e).__name__}"
+        logger.error("%s", message)
+        return json.dumps({"error": message, "query": query}, ensure_ascii=False)
 
     if not isinstance(data, dict):
         logger.error("Perplexity returned an unexpected payload type: %s", type(data).__name__)

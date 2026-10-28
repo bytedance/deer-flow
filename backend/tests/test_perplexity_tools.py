@@ -199,10 +199,16 @@ class TestRequestShape:
         assert "search_recency_filter" not in body
         assert "search_domain_filter" not in body
 
-    async def test_configured_search_type_and_domain_filter_are_sent(self):
+    @pytest.mark.parametrize(
+        "domains",
+        [["ex.com", "docs.ex.org"], ["-spam.com", "-ads.example"]],
+        ids=["inclusion-only", "exclusion-only"],
+    )
+    async def test_configured_search_type_and_domain_filter_are_sent(self, domains):
+        """The API takes one mode per request: all included or all excluded domains."""
         with patch("deerflow.community.perplexity.tools.get_app_config") as mock:
             tool_config = MagicMock()
-            tool_config.model_extra = {"api_key": "k", "search_type": "fast", "search_domain_filter": ["ex.com", "-spam.com"]}
+            tool_config.model_extra = {"api_key": "k", "search_type": "fast", "search_domain_filter": domains}
             mock.return_value.get_tool_config.return_value = tool_config
             patcher, mock_client_cls = _patch_post(_make_response(_payload()))
             try:
@@ -214,7 +220,7 @@ class TestRequestShape:
                 patcher.stop()
 
         assert body["search_type"] == "fast"
-        assert body["search_domain_filter"] == ["ex.com", "-spam.com"]
+        assert body["search_domain_filter"] == domains
 
 
 class TestWebSearchTool:
@@ -393,9 +399,9 @@ class TestWebSearchTool:
         if hint:
             assert hint in parsed["error"]
 
-    async def test_network_exception_returns_error_json(self, mock_config_with_key):
+    async def test_network_exception_reports_class_name_only(self, mock_config_with_key):
         patcher, mock_client_cls = _patch_post(MagicMock())
-        mock_client_cls.return_value.__aenter__.return_value.post.side_effect = Exception("timeout")
+        mock_client_cls.return_value.__aenter__.return_value.post.side_effect = httpx.ConnectTimeout("timed out after 30s")
         try:
             from deerflow.community.perplexity.tools import web_search_tool
 
@@ -403,7 +409,149 @@ class TestWebSearchTool:
         finally:
             patcher.stop()
 
-        assert parsed["error"] == "timeout"
+        assert parsed["error"] == "Perplexity Search API request failed: ConnectTimeout"
+        assert "30s" not in parsed["error"]
+
+    async def test_unexpected_exception_reports_class_name_only(self, mock_config_with_key):
+        patcher, mock_client_cls = _patch_post(MagicMock())
+        mock_client_cls.return_value.__aenter__.return_value.post.side_effect = RuntimeError("Bearer leaked-secret")
+        try:
+            from deerflow.community.perplexity.tools import web_search_tool
+
+            parsed = json.loads(await web_search_tool.ainvoke({"query": "test"}))
+        finally:
+            patcher.stop()
+
+        assert parsed["error"] == "Perplexity search failed: RuntimeError"
+        assert "leaked-secret" not in parsed["error"]
+
+
+_SECRET = "sk-sentinel-SECRET-9f8e7d"
+
+
+class _CaptureHandler(logging.Handler):
+    """Collect fully formatted log output from the module logger."""
+
+    def __init__(self):
+        super().__init__(level=logging.DEBUG)
+        self.lines: list[str] = []
+
+    def emit(self, record):
+        self.lines.append(self.format(record))
+
+
+@pytest.fixture
+def module_log():
+    module_logger = logging.getLogger("deerflow.community.perplexity.tools")
+    handler = _CaptureHandler()
+    previous_level = module_logger.level
+    module_logger.addHandler(handler)
+    module_logger.setLevel(logging.DEBUG)
+    try:
+        yield handler
+    finally:
+        module_logger.removeHandler(handler)
+        module_logger.setLevel(previous_level)
+
+
+class TestNoKeyOrBodyDisclosure:
+    """Neither the key nor upstream response bodies may reach tool output or logs."""
+
+    @pytest.mark.parametrize(
+        "bad_key",
+        [f"{_SECRET}\nX-Injected: 1", f"{_SECRET}\x00tail", f"{_SECRET}\rtail", f"{_SECRET} tail"],
+        ids=["embedded-newline", "embedded-nul", "embedded-cr", "embedded-space"],
+    )
+    async def test_config_key_with_control_characters_is_rejected_before_any_request(self, bad_key, module_log):
+        with patch("deerflow.community.perplexity.tools.get_app_config") as mock:
+            tool_config = MagicMock()
+            tool_config.model_extra = {"api_key": bad_key}
+            mock.return_value.get_tool_config.return_value = tool_config
+            patcher, mock_client_cls = _patch_post(_make_response(_payload()))
+            try:
+                from deerflow.community.perplexity.tools import web_search_tool
+
+                raw = await web_search_tool.ainvoke({"query": "test"})
+            finally:
+                patcher.stop()
+
+        parsed = json.loads(raw)
+        assert parsed == {"error": "Perplexity Search API error: invalid PERPLEXITY_API_KEY format", "query": "test"}
+        assert not mock_client_cls.called
+        assert _SECRET not in raw
+        logged = "\n".join(module_log.lines)
+        assert logged, "the rejection must be logged"
+        assert _SECRET not in logged
+        assert "Bearer" not in logged
+
+    async def test_env_key_with_embedded_newline_is_rejected(self, mock_config_no_key, module_log):
+        with patch.dict("os.environ", {"PERPLEXITY_API_KEY": f"{_SECRET}\nX-Injected: 1"}, clear=True):
+            patcher, mock_client_cls = _patch_post(_make_response(_payload()))
+            try:
+                from deerflow.community.perplexity.tools import web_search_tool
+
+                raw = await web_search_tool.ainvoke({"query": "test"})
+            finally:
+                patcher.stop()
+
+        assert json.loads(raw)["error"] == "Perplexity Search API error: invalid PERPLEXITY_API_KEY format"
+        assert not mock_client_cls.called
+        assert _SECRET not in raw
+        assert _SECRET not in "\n".join(module_log.lines)
+
+    async def test_trailing_whitespace_on_key_is_still_stripped_and_accepted(self, mock_config_no_key):
+        with patch.dict("os.environ", {"PERPLEXITY_API_KEY": f"  {_SECRET}\n"}, clear=True):
+            patcher, mock_client_cls = _patch_post(_make_response(_payload()))
+            try:
+                from deerflow.community.perplexity.tools import web_search_tool
+
+                await web_search_tool.ainvoke({"query": "test"})
+                call = _post_call(mock_client_cls)
+            finally:
+                patcher.stop()
+
+        assert call.kwargs["headers"]["Authorization"] == f"Bearer {_SECRET}"
+
+    async def test_local_protocol_error_text_never_reaches_output_or_logs(self, mock_config_with_key, module_log):
+        """Defense in depth: even if the transport rejects a header, its message stays internal."""
+        patcher, mock_client_cls = _patch_post(MagicMock())
+        mock_client_cls.return_value.__aenter__.return_value.post.side_effect = httpx.LocalProtocolError(f"Illegal header value b'Bearer {_SECRET}\\n'")
+        try:
+            from deerflow.community.perplexity.tools import web_search_tool
+
+            raw = await web_search_tool.ainvoke({"query": "test"})
+        finally:
+            patcher.stop()
+
+        assert json.loads(raw)["error"] == "Perplexity Search API request failed: LocalProtocolError"
+        assert _SECRET not in raw
+        logged = "\n".join(module_log.lines)
+        assert "LocalProtocolError" in logged
+        assert _SECRET not in logged
+        assert "Bearer" not in logged
+
+    @pytest.mark.parametrize("status", [422, 500])
+    async def test_http_error_body_never_reaches_output_or_logs(self, status, mock_config_with_key, module_log):
+        body_sentinel = f"UPSTREAM-BODY-{_SECRET}"
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.side_effect = httpx.HTTPStatusError(
+            body_sentinel,
+            request=MagicMock(),
+            response=MagicMock(status_code=status, text=body_sentinel),
+        )
+        patcher, _ = _patch_post(mock_resp)
+        try:
+            from deerflow.community.perplexity.tools import web_search_tool
+
+            raw = await web_search_tool.ainvoke({"query": "test"})
+        finally:
+            patcher.stop()
+
+        assert f"HTTP {status}" in json.loads(raw)["error"]
+        assert body_sentinel not in raw
+        logged = "\n".join(module_log.lines)
+        assert f"HTTP {status}" in logged
+        assert body_sentinel not in logged
 
 
 @pytest.mark.parametrize(
