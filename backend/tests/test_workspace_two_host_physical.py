@@ -296,6 +296,8 @@ def _native_assembly(saver, *, worker_id):
     from deerflow.persistence.thread_meta import ThreadMetaRepository
     from deerflow.runtime.events.store.db import DbRunEventStore
 
+    import deerflow.persistence.models  # noqa: F401  (resolves the scheduled-package import cycle)
+
     engine = create_async_engine(os.environ["TENANT_TWO_HOST_NATIVE_ASYNC_URL"])
     sf = async_sessionmaker(engine, expire_on_commit=False)
     threads = ThreadMetaRepository(sf, workspace_required=True)
