@@ -20,8 +20,8 @@ def _age(path: Path) -> None:
     old = time.time() - 2 * 24 * 60 * 60
     if os.name == "nt":
         # Windows raises NotImplementedError for utime(..., follow_symlinks=...)
-        # regardless of os.supports_follow_symlinks; staged files are regular
-        # files, so following the link is fine there.
+        # (no utimensat/lutimes support); staged files are regular files, so
+        # following the link is fine there.
         os.utime(path, (old, old))
     else:
         os.utime(path, (old, old), follow_symlinks=False)
