@@ -1,6 +1,6 @@
 """Unit tests for HarnessGuardMiddleware (RFC-003, Route C Phase 1)."""
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from langchain_core.messages import ToolMessage
@@ -12,12 +12,27 @@ from deerflow.agents.middlewares.harness_guard_middleware import (
     classify_tool_error,
     verify_content_syntax,
 )
+from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY
 from deerflow.config.harness_guard_config import HarnessGuardConfig
 
 
-def _make_request(name: str, args: dict, tool_call_id: str = "call-1", thread_id: str = "t-1"):
+def _make_request(
+    name: str,
+    args: dict,
+    tool_call_id: str = "call-1",
+    thread_id: str | None = "t-1",
+    run_id: str | None = "r-1",
+):
     runtime = MagicMock()
-    runtime.context = {"thread_id": thread_id}
+    if thread_id is not None or run_id is not None:
+        ctx: dict[str, str] = {}
+        if thread_id is not None:
+            ctx["thread_id"] = thread_id
+        if run_id is not None:
+            ctx["run_id"] = run_id
+        runtime.context = ctx
+    else:
+        runtime.context = None
     return ToolCallRequest(
         tool_call={"name": name, "args": args, "id": tool_call_id},
         tool=None,
@@ -133,6 +148,67 @@ class TestHarnessGuardMiddleware:
         assert "WRITE BLOCKED" in res.content
         assert HARNESS_GUARD_KEY in res.additional_kwargs
         assert res.additional_kwargs[HARNESS_GUARD_KEY]["blocked"] is True
+        # Verify normalized tool metadata is stamped
+        assert TOOL_META_KEY in res.additional_kwargs
+        assert res.additional_kwargs[TOOL_META_KEY]["status"] == "error"
+
+    def test_write_verify_skips_append_chunks(self):
+        """Append writes of middle chunks must not be blocked as invalid syntax."""
+        middleware = HarnessGuardMiddleware(HarnessGuardConfig(block_on_syntax_error=True))
+        # This snippet has unexpected indent if standalone, but is valid in an append chunk
+        req = _make_request(
+            "write_file",
+            {"path": "big.py", "content": "    total = a + b\n    return total\n", "append": True},
+        )
+
+        def dummy_handler(r):
+            return ToolMessage(content="Appended successfully", tool_call_id=r.tool_call["id"], name="write_file")
+
+        res = middleware.wrap_tool_call(req, dummy_handler)
+        assert res.status != "error"
+        assert res.content == "Appended successfully"
+
+    def test_str_replace_syntax_validation(self):
+        """str_replace on .py that introduces broken syntax is blocked."""
+        middleware = HarnessGuardMiddleware(HarnessGuardConfig(block_on_syntax_error=True))
+        req = _make_request(
+            "str_replace",
+            {"path": "module.py", "old_str": "return 42", "new_str": "return ("},
+        )
+
+        def dummy_handler(r):
+            return ToolMessage(content="Replaced", tool_call_id=r.tool_call["id"], name="str_replace")
+
+        with patch(
+            "deerflow.agents.middlewares.harness_guard_middleware.read_current_file_content",
+            return_value="def foo():\n    return 42\n",
+        ):
+            res = middleware.wrap_tool_call(req, dummy_handler)
+
+        assert isinstance(res, ToolMessage)
+        assert res.status == "error"
+        assert "WRITE BLOCKED" in res.content
+        assert TOOL_META_KEY in res.additional_kwargs
+
+    def test_str_replace_valid_passes(self):
+        """str_replace on .py that produces valid syntax passes cleanly."""
+        middleware = HarnessGuardMiddleware(HarnessGuardConfig(block_on_syntax_error=True))
+        req = _make_request(
+            "str_replace",
+            {"path": "module.py", "old_str": "return 42", "new_str": "return 100"},
+        )
+
+        def dummy_handler(r):
+            return ToolMessage(content="Replaced successfully", tool_call_id=r.tool_call["id"], name="str_replace")
+
+        with patch(
+            "deerflow.agents.middlewares.harness_guard_middleware.read_current_file_content",
+            return_value="def foo():\n    return 42\n",
+        ):
+            res = middleware.wrap_tool_call(req, dummy_handler)
+
+        assert res.status != "error"
+        assert res.content == "Replaced successfully"
 
     def test_write_verify_passes_valid_python(self):
         middleware = HarnessGuardMiddleware(HarnessGuardConfig(block_on_syntax_error=True))
@@ -144,6 +220,62 @@ class TestHarnessGuardMiddleware:
         res = middleware.wrap_tool_call(req, dummy_handler)
         assert res.status != "error"
         assert res.content == "File written successfully"
+
+    def test_multimodal_list_content_preserved(self):
+        """When ToolMessage content is a list of blocks, hints are appended as text blocks rather than stringifying."""
+        middleware = HarnessGuardMiddleware(HarnessGuardConfig())
+        req = _make_request("bash", {"command": "fetch_plot.sh"})
+
+        image_block = {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgo"}}
+        text_block = {"type": "text", "text": "Traceback:\nModuleNotFoundError: No module named 'matplotlib'"}
+
+        def handler(r):
+            return ToolMessage(
+                content=[text_block, image_block],
+                tool_call_id=r.tool_call["id"],
+                name="bash",
+                status="error",
+            )
+
+        res = middleware.wrap_tool_call(req, handler)
+        assert isinstance(res.content, list)
+        assert len(res.content) == 3
+        assert res.content[0] == text_block
+        assert res.content[1] == image_block
+        assert res.content[2]["type"] == "text"
+        assert "[HARNESS GUARD]" in res.content[2]["text"]
+        assert "pip install matplotlib" in res.content[2]["text"]
+
+    def test_cross_thread_isolation_no_poisoning(self):
+        """Context-less requests from different runtimes do not share history deque."""
+        middleware = HarnessGuardMiddleware(HarnessGuardConfig(max_repeated_error_signatures=2))
+
+        # Runtime A experiences an error
+        req_a = _make_request("bash", {"command": "cmd_a"}, thread_id=None, run_id=None)
+        res_a = middleware.wrap_tool_call(
+            req_a,
+            lambda r: ToolMessage(
+                content="ModuleNotFoundError: No module named 'isolated_pkg'",
+                tool_call_id=r.tool_call["id"],
+                name="bash",
+                status="error",
+            ),
+        )
+        assert "CRITICAL REPETITION" not in res_a.content
+
+        # Runtime B experiences the same error in its first call
+        req_b = _make_request("bash", {"command": "cmd_b"}, thread_id=None, run_id=None)
+        res_b = middleware.wrap_tool_call(
+            req_b,
+            lambda r: ToolMessage(
+                content="ModuleNotFoundError: No module named 'isolated_pkg'",
+                tool_call_id=r.tool_call["id"],
+                name="bash",
+                status="error",
+            ),
+        )
+        # Because Runtime A and Runtime B are distinct, B must NOT see A's history
+        assert "CRITICAL REPETITION" not in res_b.content
 
     def test_targeted_hint_injection_on_error(self):
         middleware = HarnessGuardMiddleware(HarnessGuardConfig())
@@ -188,17 +320,49 @@ class TestHarnessGuardMiddleware:
         middleware = HarnessGuardMiddleware(HarnessGuardConfig(detect_alternating_loops=True))
 
         # Simulate A -> B -> A -> B loop where both tools fail
-        req_a1 = _make_request("bash", {"command": "cat output.txt"}, thread_id="t-osc")
-        _ = middleware.wrap_tool_call(req_a1, lambda r: ToolMessage(content="cat: output.txt: No such file or directory", tool_call_id=r.tool_call["id"], name="bash", status="error"))
+        req_a1 = _make_request("bash", {"command": "cat output.txt"}, thread_id="t-osc", run_id="r-osc")
+        _ = middleware.wrap_tool_call(
+            req_a1,
+            lambda r: ToolMessage(
+                content="cat: output.txt: No such file or directory",
+                tool_call_id=r.tool_call["id"],
+                name="bash",
+                status="error",
+            ),
+        )
 
-        req_b1 = _make_request("read_file", {"path": "output.txt"}, thread_id="t-osc")
-        _ = middleware.wrap_tool_call(req_b1, lambda r: ToolMessage(content="FileNotFoundError: [Errno 2] No such file or directory: 'output.txt'", tool_call_id=r.tool_call["id"], name="read_file", status="error"))
+        req_b1 = _make_request("read_file", {"path": "output.txt"}, thread_id="t-osc", run_id="r-osc")
+        _ = middleware.wrap_tool_call(
+            req_b1,
+            lambda r: ToolMessage(
+                content="FileNotFoundError: [Errno 2] No such file or directory: 'output.txt'",
+                tool_call_id=r.tool_call["id"],
+                name="read_file",
+                status="error",
+            ),
+        )
 
-        req_a2 = _make_request("bash", {"command": "cat ./output.txt"}, thread_id="t-osc")
-        _ = middleware.wrap_tool_call(req_a2, lambda r: ToolMessage(content="cat: ./output.txt: No such file or directory", tool_call_id=r.tool_call["id"], name="bash", status="error"))
+        req_a2 = _make_request("bash", {"command": "cat ./output.txt"}, thread_id="t-osc", run_id="r-osc")
+        _ = middleware.wrap_tool_call(
+            req_a2,
+            lambda r: ToolMessage(
+                content="cat: ./output.txt: No such file or directory",
+                tool_call_id=r.tool_call["id"],
+                name="bash",
+                status="error",
+            ),
+        )
 
-        req_b2 = _make_request("read_file", {"path": "./output.txt"}, thread_id="t-osc")
-        res_b2 = middleware.wrap_tool_call(req_b2, lambda r: ToolMessage(content="FileNotFoundError: [Errno 2] No such file or directory: './output.txt'", tool_call_id=r.tool_call["id"], name="read_file", status="error"))
+        req_b2 = _make_request("read_file", {"path": "./output.txt"}, thread_id="t-osc", run_id="r-osc")
+        res_b2 = middleware.wrap_tool_call(
+            req_b2,
+            lambda r: ToolMessage(
+                content="FileNotFoundError: [Errno 2] No such file or directory: './output.txt'",
+                tool_call_id=r.tool_call["id"],
+                name="read_file",
+                status="error",
+            ),
+        )
 
         assert "OSCILLATION DETECTED" in res_b2.content
         assert "between 'bash' and 'read_file'" in res_b2.content

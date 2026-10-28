@@ -1,9 +1,11 @@
 """HarnessGuard tool-loop interceptor middleware.
 
 Implements Route C / RFC-003:
-1. Write-Verify Gate: Pre-execution syntax validation on .py (ast.parse) and .json writes.
+1. Write-Verify Gate: Pre-execution syntax validation on .py (ast.parse) and .json writes
+   for write_file (non-append) and str_replace (spliced verification).
 2. Error Signature Classifier: Detects classic failure patterns and injects actionable Targeted Hints.
-3. Anti-Doom-Loop: Detects consecutive identical error signatures and A -> B -> A -> B alternating failure loops.
+3. Anti-Doom-Loop: Detects consecutive identical error signatures and A -> B -> A -> B alternating failure loops,
+   scoped cleanly by (thread_id, run_id) with bounded LRU tracking.
 """
 
 from __future__ import annotations
@@ -13,22 +15,28 @@ import json
 import logging
 import re
 import threading
-from collections import deque
+import uuid
+from collections import OrderedDict, deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import override
+from typing import Any, override
 
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import ToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
+from deerflow.agents.middlewares._bounded_dict import BoundedDict
+from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY, normalize_tool_result
 from deerflow.config.harness_guard_config import HarnessGuardConfig
+from deerflow.sandbox.tools import read_current_file_content
 
 logger = logging.getLogger(__name__)
 
 HARNESS_GUARD_KEY = "deerflow_harness_guard"
-_WRITE_TOOLS = frozenset({"write_file", "create_file", "edit_file", "str_replace"})
+_WRITE_TOOLS = frozenset({"write_file", "str_replace"})
+
+type _ScopeKey = tuple[str, str | None]
 
 
 @dataclass(frozen=True)
@@ -163,6 +171,21 @@ def verify_content_syntax(file_path: str, content: str) -> str | None:
     return None
 
 
+def _extract_text_content(content: Any) -> str:
+    """Extract plain text from string or structured content block list."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        texts: list[str] = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                texts.append(str(block.get("text") or ""))
+            elif isinstance(block, str):
+                texts.append(block)
+        return "\n".join(texts)
+    return str(content) if content is not None else ""
+
+
 @dataclass
 class _ToolRecord:
     tool_name: str
@@ -176,23 +199,54 @@ class HarnessGuardMiddleware(AgentMiddleware):
     def __init__(self, config: HarnessGuardConfig | None = None) -> None:
         self.config = config if config is not None else HarnessGuardConfig()
         self._lock = threading.Lock()
-        # History map: scope_key -> deque of _ToolRecord
-        self._history: dict[str, deque[_ToolRecord]] = {}
+        self._fallback_run_ids: OrderedDict[int, tuple[object, str]] = OrderedDict()
+        self._max_fallback_run_ids = max(1, self.config.max_tracked_scopes * 2)
+        # Bounded LRU history: _ScopeKey -> deque of _ToolRecord
+        self._history: BoundedDict[_ScopeKey, deque[_ToolRecord]] = BoundedDict(maxsize=self.config.max_tracked_scopes)
 
-    def _get_history(self, scope_key: str) -> deque[_ToolRecord]:
+    def _get_history(self, scope_key: _ScopeKey) -> deque[_ToolRecord]:
         with self._lock:
             if scope_key not in self._history:
                 self._history[scope_key] = deque(maxlen=self.config.max_loop_history)
             return self._history[scope_key]
 
-    @staticmethod
-    def _scope_key(request: ToolCallRequest) -> str:
-        context = getattr(request.runtime, "context", None)
-        if isinstance(context, dict):
-            thread_id = context.get("thread_id")
+    def _get_thread_id(self, runtime: Any) -> str:
+        ctx = getattr(runtime, "context", None)
+        if isinstance(ctx, dict):
+            thread_id = ctx.get("thread_id")
             if isinstance(thread_id, str) and thread_id:
                 return thread_id
-        return "global"
+        return "default"
+
+    def _get_run_id(self, runtime: Any) -> str | None:
+        ctx = getattr(runtime, "context", None)
+        if isinstance(ctx, dict) and "run_id" in ctx:
+            return ctx["run_id"]
+
+        execution_info = getattr(runtime, "execution_info", None)
+        execution_run_id = getattr(execution_info, "run_id", None)
+        if execution_run_id is not None:
+            return str(execution_run_id)
+
+        # Standalone context-less run: anchor to Runtime.control
+        control = getattr(runtime, "control", None)
+        anchor = control if control is not None else runtime
+        anchor_id = id(anchor)
+        with self._lock:
+            existing = self._fallback_run_ids.get(anchor_id)
+            if existing is not None and existing[0] is anchor:
+                self._fallback_run_ids.move_to_end(anchor_id)
+                return existing[1]
+
+            fallback_run_id = f"__invocation__:{uuid.uuid4().hex}"
+            self._fallback_run_ids[anchor_id] = (anchor, fallback_run_id)
+            self._fallback_run_ids.move_to_end(anchor_id)
+            while len(self._fallback_run_ids) > self._max_fallback_run_ids:
+                self._fallback_run_ids.popitem(last=False)
+            return fallback_run_id
+
+    def _scope_key(self, request: ToolCallRequest) -> _ScopeKey:
+        return self._get_thread_id(request.runtime), self._get_run_id(request.runtime)
 
     def _check_write_syntax_block(self, request: ToolCallRequest) -> ToolMessage | None:
         """Perform pre-execution syntax validation on write operations."""
@@ -208,11 +262,36 @@ class HarnessGuardMiddleware(AgentMiddleware):
             return None
 
         file_path = args.get("path") or args.get("file_path") or args.get("filename")
-        content = args.get("content") or args.get("text")
-        if not isinstance(file_path, str) or not isinstance(content, str):
+        if not isinstance(file_path, str) or not file_path:
             return None
 
-        err = verify_content_syntax(file_path, content)
+        err: str | None = None
+
+        if tool_name == "write_file":
+            # Skip validation for append writes: append chunks are often not standalone-parseable
+            if bool(args.get("append", False)):
+                return None
+
+            content = args.get("content") or args.get("text")
+            if not isinstance(content, str):
+                return None
+
+            err = verify_content_syntax(file_path, content)
+
+        elif tool_name == "str_replace":
+            old_str = args.get("old_str")
+            new_str = args.get("new_str")
+            if isinstance(old_str, str) and isinstance(new_str, str) and (file_path.endswith(".py") or file_path.endswith(".json")):
+                try:
+                    current = read_current_file_content(request.runtime, file_path)
+                    if old_str in current:
+                        replace_all = bool(args.get("replace_all", False))
+                        spliced = current.replace(old_str, new_str) if replace_all else current.replace(old_str, new_str, 1)
+                        err = verify_content_syntax(file_path, spliced)
+                except Exception:
+                    # Fail open on sandbox read errors and let str_replace handle execution
+                    err = None
+
         if err and self.config.block_on_syntax_error:
             tool_call_id = str(request.tool_call.get("id") or "missing-id")
             logger.warning("HarnessGuard blocked syntax-invalid write to %s: %s", file_path, err)
@@ -221,14 +300,23 @@ class HarnessGuardMiddleware(AgentMiddleware):
                 tool_call_id=tool_call_id,
                 name=tool_name,
                 status="error",
+                additional_kwargs={
+                    HARNESS_GUARD_KEY: {
+                        "blocked": True,
+                        "reason": "syntax_error",
+                        "detail": err,
+                        "path": file_path,
+                    },
+                    TOOL_META_KEY: {
+                        "status": "error",
+                        "error_type": "SyntaxError",
+                        "recoverable_by_model": True,
+                        "recommended_next_action": "correct_syntax_and_retry",
+                        "source": "harness_guard",
+                    },
+                },
             )
-            msg.additional_kwargs[HARNESS_GUARD_KEY] = {
-                "blocked": True,
-                "reason": "syntax_error",
-                "detail": err,
-                "path": file_path,
-            }
-            return msg
+            return normalize_tool_result(msg)
 
         return None
 
@@ -242,12 +330,12 @@ class HarnessGuardMiddleware(AgentMiddleware):
             return result
 
         tool_name = str(request.tool_call.get("name") or result.name or "unknown")
-        raw_content = result.content if isinstance(result.content, str) else str(result.content)
+        raw_text = _extract_text_content(result.content)
         is_error = result.status == "error"
 
         error_sig: ErrorSignature | None = None
         if self.config.targeted_hints_enabled:
-            error_sig = classify_tool_error(raw_content)
+            error_sig = classify_tool_error(raw_text)
 
         if error_sig is not None:
             is_error = True
@@ -278,14 +366,13 @@ class HarnessGuardMiddleware(AgentMiddleware):
             # Check alternating oscillation pattern (A -> B -> A -> B)
             if self.config.detect_alternating_loops and len(history) >= 3:
                 h = list(history)
-                # h[-3], h[-2], h[-1] and current call
                 r0, r1, r2, r3 = h[-3], h[-2], h[-1], record
                 if r0.tool_name == r2.tool_name and r1.tool_name == r3.tool_name and r0.tool_name != r1.tool_name and sum(1 for r in (r0, r1, r2, r3) if r.is_error) >= 3:
                     oscillation_warning = f"[HARNESS GUARD: OSCILLATION DETECTED] Alternating failing tool loop detected between '{r0.tool_name}' and '{r1.tool_name}'. Pause and re-evaluate your strategy."
 
             history.append(record)
 
-        # Inject hints into ToolMessage content
+        # Inject hints into ToolMessage content while preserving structured content blocks
         injected_parts: list[str] = []
         if error_sig:
             injected_parts.append(error_sig.targeted_hint)
@@ -295,8 +382,18 @@ class HarnessGuardMiddleware(AgentMiddleware):
             injected_parts.append(oscillation_warning)
 
         if injected_parts:
-            separator = "\n\n" if raw_content else ""
-            result.content = f"{raw_content}{separator}{chr(10).join(injected_parts)}"
+            hint_block_text = "\n\n" + "\n".join(injected_parts)
+            if isinstance(result.content, list):
+                # Multimodal or content blocks: append hint as a new text block
+                new_blocks = list(result.content)
+                new_blocks.append({"type": "text", "text": hint_block_text})
+                result.content = new_blocks
+            elif isinstance(result.content, str):
+                separator = "\n\n" if result.content else ""
+                result.content = f"{result.content}{separator}{chr(10).join(injected_parts)}"
+            else:
+                result.content = f"{result.content}{hint_block_text}"
+
             if HARNESS_GUARD_KEY not in result.additional_kwargs:
                 result.additional_kwargs[HARNESS_GUARD_KEY] = {}
             result.additional_kwargs[HARNESS_GUARD_KEY].update(

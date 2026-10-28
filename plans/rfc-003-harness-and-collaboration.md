@@ -41,7 +41,23 @@
 
 ---
 
-## 2. 架构设计与三大核心支柱 (Architecture & The Three Pillars)
+## 1.4 Extension-First 评估与 Core 归属合理性论证 (Extension-First Evaluation)
+
+依据 `AGENTS.md` 的规范：
+> "Stay in core for bug fixes and for changes to the agent loop, memory, context compaction, or authentication."
+
+1. **核心 Agent Loop 与执行边界干预**：
+   `HarnessGuardMiddleware` 作为工具执行栈中紧随 `ReadBeforeWriteMiddleware` 的第二道安全防线，在写盘前直接拦截 `.py`/`.json` 语法错误并向 `ToolMessage` 挂载原生的 `deerflow_tool_meta`（通过 `normalize_tool_result`）。它直接参与了智能体在沙箱中写文件与自愈纠错的基础闭环，属于对 **Agent Loop** 和工具执行层的关键可靠性加固。
+2. **与现有 LoopDetectionMiddleware 的正交分工与协作**：
+   - `LoopDetectionMiddleware`：关注 `(tool_name, args)` 的输入签名哈希，检测盲目重复调用并在超限时强行剥除 `tool_calls`（硬终止）。
+   - `HarnessGuardMiddleware`：聚焦于**错误内容分类与自愈引导**（软干预）。识别 `ModuleNotFoundError` 等具体报错签名并动态注入确定性的修复指令，并在写盘前做 AST/JSON 静态预检。
+   - 二者共享 `(thread_id, run_id)` 作用域隔离与 `BoundedDict` 内存容量边界，彼此正交互补。
+3. **PR 范围收敛与拆分声明**：
+   为保持 PR #7624 的单一职责（Focused Scope），原本拟作为辅助模块的 `DynamicSkillRouter` 遵循仓库的范围卫生规范，已完全剥离，将作为独立的技能加载扩展 PR 单独提交。
+
+---
+
+## 2. 架构设计与核心支柱 (Architecture & Design)
 
 针对上述三大痛点，路线 C 引入三大互补的系统级治理模块：
 

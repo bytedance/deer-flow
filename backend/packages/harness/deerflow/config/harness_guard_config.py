@@ -39,3 +39,8 @@ class HarnessGuardConfig(BaseModel):
         ge=5,
         description="Sliding window size of recent tool calls tracked for loop and pattern detection",
     )
+    max_tracked_scopes: int = Field(
+        default=1000,
+        ge=10,
+        description="Maximum number of tracked thread/run scopes retained in the bounded LRU history cache",
+    )
