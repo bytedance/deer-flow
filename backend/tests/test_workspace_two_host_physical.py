@@ -290,11 +290,11 @@ def _native_assembly(saver, *, worker_id):
     from deerflow.persistence.mcp_tasks.sql import McpTaskRepository
     from deerflow.persistence.projects import ProjectDocumentRepository, ProjectRepository
     from deerflow.persistence.run.sql import RunRepository
-    from deerflow.runtime.events.store.db import DbRunEventStore
     from deerflow.persistence.scheduled_task_events.sql import ScheduledTaskEventRepository
     from deerflow.persistence.scheduled_task_runs.sql import ScheduledTaskRunRepository
     from deerflow.persistence.scheduled_tasks.sql import ScheduledTaskRepository
     from deerflow.persistence.thread_meta import ThreadMetaRepository
+    from deerflow.runtime.events.store.db import DbRunEventStore
 
     engine = create_async_engine(os.environ["TENANT_TWO_HOST_NATIVE_ASYNC_URL"])
     sf = async_sessionmaker(engine, expire_on_commit=False)
@@ -347,8 +347,8 @@ async def _native_controller():
     from app.gateway import deps, services
     from app.gateway.native_admission import make_native_snapshot
     from app.gateway.run_models import RunCreateRequest
-    from deerflow.runtime import RunContext
     from deerflow.agents.thread_state import ThreadState
+    from deerflow.runtime import RunContext
     from deerflow.runtime import goal as goal_runtime
     from deerflow.runtime.user_context import reset_current_user, set_current_user
 
