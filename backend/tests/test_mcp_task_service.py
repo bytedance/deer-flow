@@ -4920,6 +4920,7 @@ async def test_stop_bounds_drain_of_service_owned_compensation_tasks(monkeypatch
         await asyncio.wait_for(compensation, timeout=1)
         await _wait_for_compensation_tasks_to_clear(service)
 
+
 @pytest.mark.asyncio
 async def test_stop_preserves_cancellation_while_draining_compensation_tasks(monkeypatch):
     monkeypatch.setattr(service_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.5)
