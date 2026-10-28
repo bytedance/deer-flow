@@ -1968,7 +1968,10 @@ def _apply_cwd_prefix(command: str, thread_data: ThreadDataState | None, *, shel
         available, otherwise the original command unchanged.
     """
     if thread_data and (workspace := thread_data.get("workspace_path")):
-        if shell is not None and LocalSandbox._is_powershell(shell):
+        # Resolve the shell here when the caller does not know it, so existing
+        # callers (and their test doubles) keep the two-argument shape.
+        resolved = shell or (LocalSandbox._get_shell() if _is_windows() else None)
+        if resolved is not None and LocalSandbox._is_powershell(resolved):
             return f"cd {shlex.quote(workspace)}; {command}"
         return f"cd {shlex.quote(workspace)} && {command}"
     return command
@@ -2887,7 +2890,7 @@ def bash_tool(runtime: Runtime, command: str, description: str = "") -> str:
             thread_data = get_thread_data(runtime)
             validate_local_bash_command_paths(command, thread_data)
             command = replace_virtual_paths_in_command(command, thread_data)
-            command = _apply_cwd_prefix(command, thread_data, shell=LocalSandbox._get_shell() if _is_windows() else None)
+            command = _apply_cwd_prefix(command, thread_data)
             # POSIX-only: the Windows local sandbox may execute via
             # PowerShell/cmd.exe where `export` is not valid syntax, so the id
             # is published through the subprocess environment instead —
