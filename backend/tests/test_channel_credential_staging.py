@@ -18,7 +18,14 @@ from app.channels.wechat import WechatChannel
 
 def _age(path: Path) -> None:
     old = time.time() - 2 * 24 * 60 * 60
-    os.utime(path, (old, old), follow_symlinks=False)
+    if os.name == "nt":
+        # Windows raises NotImplementedError for follow_symlinks=False even though
+        # os.supports_follow_symlinks reports utime as supported; the staged files
+        # are regular files created by the test itself, so the flag is only
+        # meaningful off-Windows.
+        os.utime(path, (old, old))
+    else:
+        os.utime(path, (old, old), follow_symlinks=False)
 
 
 def _load(kind: str, target: Path):
