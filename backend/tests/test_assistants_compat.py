@@ -60,6 +60,7 @@ def test_search_preserves_default_and_positive_offset(monkeypatch: pytest.Monkey
     assert offset_response.status_code == 200
     assert [assistant["assistant_id"] for assistant in offset_response.json()] == ["researcher"]
 
+
 def _make_metadata_app(monkeypatch: pytest.MonkeyPatch) -> FastAPI:
     app = FastAPI()
     app.include_router(assistants_compat.router)
