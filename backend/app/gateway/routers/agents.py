@@ -601,7 +601,9 @@ async def update_agent(name: str, body: AgentUpdateRequest, request: Request) ->
         if config_changed:
             updated = {
                 "name": agent_cfg.name,
-                "description": body.description if "description" in fields_set else agent_cfg.description,
+                # Explicit null resets to the AgentConfig default; storing None
+                # would make every later load of this agent fail validation.
+                "description": (body.description or "") if "description" in fields_set else agent_cfg.description,
             }
             if "display_name" in fields_set:
                 updated["display_name"] = body.display_name or None
