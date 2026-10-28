@@ -34,6 +34,22 @@ logger = logging.getLogger(__name__)
 
 _DISCORD_MAX_MESSAGE_LEN = 2000
 
+
+def _utf16_prefix_length(text: str, limit: int) -> tuple[int, bool]:
+    """Return the longest prefix of *text* within *limit* UTF-16 code units.
+
+    Discord measures message content in UTF-16 code units (its clients use
+    JavaScript string length), so a non-BMP character costs two units. The
+    second value reports whether anything was left out.
+    """
+    units = 0
+    for index, char in enumerate(text):
+        units += 2 if ord(char) > 0xFFFF else 1
+        if units > limit:
+            return index, True
+    return len(text), False
+
+
 # Bound for outbound work scheduled onto the Discord client's event loop.
 # Discord API calls normally return in well under a second; anything still
 # pending after this is a dead or wedged client, not a slow response.
@@ -1321,14 +1337,15 @@ class DiscordChannel(Channel):
 
         chunks: list[str] = []
         remaining = text
-        while len(remaining) > _DISCORD_MAX_MESSAGE_LEN:
-            split_at = remaining.rfind("\n", 0, _DISCORD_MAX_MESSAGE_LEN)
-            if split_at <= 0:
-                split_at = _DISCORD_MAX_MESSAGE_LEN
-            else:
+        while True:
+            split_at, over_limit = _utf16_prefix_length(remaining, _DISCORD_MAX_MESSAGE_LEN)
+            if not over_limit:
+                break
+            newline = remaining.rfind("\n", 0, split_at)
+            if newline > 0:
                 # Keep the delimiter on this chunk's tail so consecutive
                 # Discord messages reconstruct the original text exactly.
-                split_at += 1
+                split_at = newline + 1
             chunks.append(remaining[:split_at])
             remaining = remaining[split_at:]
 
