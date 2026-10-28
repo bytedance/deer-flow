@@ -1,16 +1,16 @@
 # AGENTS.md
 
-DeerFlow frontend guidance source of truth; `CLAUDE.md` imports `@AGENTS.md`.
+Frontend guidance; `CLAUDE.md` imports `@AGENTS.md`.
 
 ## Project Overview
 
-DeerFlow's Next.js 16 frontend provides thread-based AI conversations with streaming responses, artifacts, skills, and tools through a LangGraph backend.
+Next.js 16 frontend for LangGraph conversations, streaming, artifacts, skills and tools.
 
 **Stack**: Next.js 16, React 19, TypeScript 5.8, Tailwind CSS 4, pnpm 10.26.2. Requires Node.js 22+ and pnpm 10.26.2+.
 
-Core dependencies: `@langchain/langgraph-sdk` ^1.5.3 for orchestration/streaming,
-`@langchain/core` ^1.1.15, and `@tanstack/react-query` ^5.90.17 for server state.
-Registry UI: Shadcn, MagicUI, React Bits, Vercel AI SDK (see Code Style).
+Dependencies: `@langchain/langgraph-sdk` ^1.5.3, `@langchain/core` ^1.1.15,
+`@tanstack/react-query` ^5.90.17. Registry UI: Shadcn, MagicUI, React Bits,
+Vercel AI SDK (see Code Style).
 
 `pnpm-workspace.yaml` pins vulnerable `@xmldom/xmldom` 0.9.x to patched
 0.9.12 (GHSA-965w-775f-mr7g) and Nextra 4.6.1's Zod dependencies to 4.3.6
@@ -22,28 +22,32 @@ docs builds after changes.
 
 Run from `frontend/`; host pnpm calls use `../scripts/pnpm.py`.
 
-- `pnpm dev`: Webpack development server; `pnpm build` / `pnpm start`: production build/server.
-- `pnpm check`: ESLint + TypeScript (required before committing); `pnpm lint` / `pnpm typecheck`: individual checks; `pnpm lint:fix`: ESLint fixes.
+- `pnpm dev`: development; `pnpm build` / `pnpm start`: production build/server.
+- Before committing: `pnpm check` (ESLint + TypeScript). Separately: `pnpm lint` / `pnpm typecheck`; ESLint fixes: `pnpm lint:fix`.
 - `pnpm format` / `pnpm format:write`: Prettier check/write.
 - `pnpm test`: Rstest unit tests; `pnpm test:e2e`: Playwright Chromium E2E tests.
 
 Unit tests under `tests/unit/` mirror `src/`; import source via `@/`.
 
-Webpack is the default development bundler. Use `DEER_FLOW_DEV_BUNDLER=turbo` with `pnpm dev` to opt in to Turbopack when diagnosing a local Next.js bundler issue.
+Webpack is the default; use `DEER_FLOW_DEV_BUNDLER=turbo pnpm dev` to diagnose with Turbopack.
 
-On Windows `pnpm dev` binds `127.0.0.1` by default because Hyper-V/winnat excluded port ranges can reject Next's default `0.0.0.0` bind with `EACCES` (#2870). Pass `pnpm dev -- --hostname 0.0.0.0` to listen on a LAN interface instead.
+Windows dev binds `127.0.0.1` to avoid Hyper-V/winnat `EACCES` (#2870).
+For LAN access: `pnpm dev -- --hostname 0.0.0.0`.
 
-`rstest.config.ts`: **node** runs `*.test.*` pure logic; **happy-dom** runs
-`*.dom.test.*` components/hooks via `@testing-library/react` render/renderHook.
-DOM costs ~3x: keep the split. Effect ordering, unmount cleanup and store
-re-renders need DOM tests with real React.
+`rstest.config.ts`: **node** for `*.test.*` logic; **happy-dom** for `*.dom.test.*`
+components/hooks via `@testing-library/react` render/renderHook. Keep the split
+(DOM costs ~3x). Test effect ordering, unmount cleanup and store re-renders with real React/DOM.
 
-Content/state suites may mock decorative `FlipDisplay` with
-`tests/unit/helpers/flip-display.tsx`, preserving children, classes and keyed
-remounts. Happy DOM 21's animation cancellation rejects `finished`; keep rejection
-reporting enabled. Real Motion behavior belongs in Playwright.
+Content/state suites may use `tests/unit/helpers/flip-display.tsx` to mock
+decorative `FlipDisplay`; preserve children, classes and keyed remounts.
+Happy DOM 21 animation cancellation rejects `finished`; keep rejection reporting
+enabled. Test real Motion in Playwright.
 
-E2E tests live under `tests/e2e/` and use Playwright with Chromium. They mock all backend APIs via `page.route()` network interception and test real page interactions (navigation, chat input, streaming responses). Config: `playwright.config.ts`. The real-backend auth contract in `tests/e2e-real-backend/auth-disabled-contract.spec.ts` and `backend/tests/test_auth_me_permissions.py` pin the complete route-permission list; update both when adding registered permissions (including `projects:read/write/delete`).
+Playwright Chromium E2E: `tests/e2e/`, configured by `playwright.config.ts`.
+Mock backend APIs with `page.route()`; exercise real navigation, chat input and streaming.
+When registering permissions (including `projects:read/write/delete`), update both
+`tests/e2e-real-backend/auth-disabled-contract.spec.ts` and
+`backend/tests/test_auth_me_permissions.py`, which pin the complete route-permission list.
 
 CI runs four E2E shards; only shard 1 runs auth recovery. Suite reports stay separate.
 
