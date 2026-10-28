@@ -157,6 +157,8 @@ cd /tmp/source/backend
 export PYTHONPATH=/tmp/source/backend:/tmp/source/backend/packages/harness:/tmp/source/backend/packages/extension-api:/tmp/source/backend/packages/ecs-executor
 /app/backend/.venv/bin/python - <<PY
 import asyncio
+from datetime import UTC, datetime
+
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import create_async_engine
 from deerflow.persistence import bootstrap
@@ -181,9 +183,11 @@ async def migrate_native():
 asyncio.run(migrate_native())
 native = sa.create_engine("{native_url}")
 with native.begin() as conn:
-    conn.execute(sa.insert(UserRow).values(id=OWNER, email="two-host-owner@example.invalid"))
+    conn.execute(sa.insert(UserRow).values(id=OWNER, email="two-host-owner@example.invalid", account_status="active", email_verified_at=datetime.now(UTC)))
     conn.execute(sa.insert(ThreadMetaRow).values(thread_id=THREAD, user_id=OWNER, incarnation="two-host-epoch", workspace_id=WORKSPACE))
-    conn.execute(sa.insert(RunRow).values(run_id=RUN, thread_id=THREAD, user_id=OWNER, status="running", operation_kind="run", thread_incarnation="two-host-epoch", owner_worker_id="two-host-central", workspace_id=WORKSPACE, workspace_context_json=CONTEXT))
+    conn.execute(sa.insert(RunRow).values(run_id=RUN, thread_id=THREAD, user_id=OWNER, status="running", operation_kind="run",
+                               thread_incarnation="two-host-epoch", owner_worker_id="two-host-central",
+                               workspace_id=WORKSPACE, workspace_context_json=CONTEXT))
     conn.execute(sa.insert(WorkspaceRow).values(id=WORKSPACE, kind="personal", name="two-host", personal_user_id=OWNER))
     conn.execute(sa.insert(WorkspaceMembershipRow).values(workspace_id=WORKSPACE, user_id=OWNER, role="owner", status="active", version=1))
 native.dispose()
