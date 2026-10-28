@@ -1,48 +1,24 @@
 {
-  "state": "pending_explicit_payload_approval",
-  "uploaded": false,
-  "submitted": false,
-  "phase": "m4-native-shared-bc-revocation-20261028-50",
-  "base_head": "c6e9b9e8855f573aa15ecee20cfde55ebca33e5d",
-  "merged_tree": "8445db48d6afe514bc9ffcd0c064b05eb7eb2a64",
-  "freeze_commit": "debef258bfcfc798422160e5a0c4439577d76a05",
-  "archive": "/private/tmp/m4-native-shared-bc-revocation-20261028-50-source.tar.gz",
-  "sha256": "865d10b3faef7b88e089fe71c9eb56f4cf5dc12cf26dfbb0921d213ed3895245",
-  "pipeline": "/private/tmp/Jenkinsfile.m4-native-shared-bc-revocation-20261028-50",
-  "pipeline_sha256": "7ed1ba058f75350b8de91564634b7b146876beef010bd16df193096fb2b97713",
-  "submit_script": "/private/tmp/submit-native-shared-bc-revocation-v3.py",
-  "submit_script_sha256": "a552dfc69670aa5f9f82898affb1343b025be70887c5279c86988f81b217b1db",
-  "regular_files": 4069,
-  "reproducibility": "Same pinned-date commit-tree + gzip -n -9 procedure as -49; verified byte-identical across two independent rebuilds on 2026-10-28.",
-  "payload_change_from_49": "Exactly one test assertion: revoke_and_stop parent count 2 -> 3 with an explanatory comment (worktree commit 727c4b882). Product code unchanged from c6e9b9e88.",
-  "destination": "User-owned Shanghai Jenkins 106.14.210.163:/data/jenkins-agent/deerflow/tenant-execution-m4-physical",
-  "job": "deerflow-tenant-execution-m4-physical",
-  "suite": "shared-pool-revocation",
-  "test_node": "tests/test_workspace_execution_physical.py::test_scoped_shared_pool_revocation_stops_original_b_without_continuation[postgres]",
-  "purpose": "GREEN rerun of the single real shared-pool B withdrawal/STOP story after the -49 RED; no new product diff or physical matrix.",
-  "product_diff": false,
-  "files": {
-    "backend/tests/test_workspace_native_dependencies.py": "63675fbfa4d78943703ab4db2e5f081812417c96f457744f205b9975ba200325",
-    "backend/tests/test_workspace_execution_physical.py": "8a3d74e5f44e6a6e0249f9e639dcdd8762d460a7f5a14df97ea58741dfdab6bc",
-    "scripts/render_tenant_physical_pipeline.py": "807a2d634be465a775ad340ca33e2dc549109da865d608482cf73c8af9713742"
-  },
-  "guard": "Pinned archive/pipeline/submit-script SHA256 verified before any remote action; dedicated-job idle/empty-queue check; O_EXCL-style staging with server-side hash verify and chown 999:987/0600; original job config backed up server-side before the definition-only change; Jenkins admin credential read from /root/.jenkins-admin-password only into server-side curl processes (never leaves the server); no other project, container, image or directory touched.",
-  "awaiting_human_approval": true,
-  "runtime_result": "not_run",
-  "executed_predecessor": {
-    "phase": "m4-native-shared-bc-revocation-20261028-49",
-    "approved_by_user": "explicit 2026-10-28 approval binding archive 5e7d8463…f84e and pipeline 5f7bbe1a…0522 for one build",
-    "uploaded": true,
-    "job_definition_updated": true,
-    "job_config_backup": "/root/job-config-backups/deerflow-tenant-execution-m4-physical-20261028-203356.xml",
-    "build": 19,
-    "result": "FAILURE",
-    "classification": "RED: genuine first runtime execution of the prepared withdrawal story",
-    "failure": "tests/test_workspace_execution_physical.py:538 assert len(parents) == 2 observed 3 pending workspace_revoke rows",
-    "diagnosis": "transfer_owner (backend/packages/harness/deerflow/persistence/workspaces/sql.py:234-235) deliberately bumps BOTH memberships — old owner demotion and successor promotion — and each version bump enqueues one version-keyed workspace_revoke; remove_member adds the removed owner's own row, totalling 3. The prepared test modelled only the two old-owner rows. Product behaviour is coherent; the test expectation was incomplete.",
-    "fix": "One-line assertion 2 -> 3 plus explanatory comment; worktree commit 727c4b882; no product change.",
-    "evidence_artifacts": "/private/tmp/m4-native-shared-bc-revocation-20261028-49-artifacts/ (log, physical-19/owned.json with real B container a8fadebb9ff9… captured, cleanup.json confirming exact absence, evidence.json, db volumes)",
-    "fixture_cleanup": "Real B container deerflow-exec-ed9e2f668b1547dda3e8c5e86b8bf433 (exact id a8fadebb9ff9cd5458ea5c4214e6e86a8de8fd5c8654d047efbf0e9baf9aa904) removed and confirmed absent despite the failing assertion; fixture db volumes recorded.",
-    "ruff": "Not reached: the pytest step failed before the ruff stage in the same pipeline command."
-  }
+  "state": "consumed",
+  "note": "Both frozen payloads were explicitly approved by the user on 2026-10-28 and executed exactly once each. Full results live in docs/tenant-workspaces-evidence/native-shared-bc-revocation-20.json (GREEN #20 with its RED #19 predecessor). No further pending approval for this suite.",
+  "executions": [
+    {
+      "phase": "m4-native-shared-bc-revocation-20261028-49",
+      "archive_sha256": "5e7d8463060ca4b9f714c5e22e0a2990c26aa44d3f1e14e46f06057264ebf84e",
+      "pipeline_sha256": "5f7bbe1ab8819a8418638732c7aa0bf7745b7cb8b4de061edffd86d9d38d0522",
+      "build": 19,
+      "result": "FAILURE (RED)",
+      "job_config_backup": "/root/job-config-backups/deerflow-tenant-execution-m4-physical-20261028-203356.xml"
+    },
+    {
+      "phase": "m4-native-shared-bc-revocation-20261028-50",
+      "archive_sha256": "865d10b3faef7b88e089fe71c9eb56f4cf5dc12cf26dfbb0921d213ed3895245",
+      "pipeline_sha256": "7ed1ba058f75350b8de91564634b7b146876beef010bd16df193096fb2b97713",
+      "build": 20,
+      "result": "SUCCESS (GREEN)",
+      "duration_ms": 48140,
+      "job_config_backup": "/root/job-config-backups/deerflow-tenant-execution-m4-physical-20261028-204115.xml",
+      "evidence": "docs/tenant-workspaces-evidence/native-shared-bc-revocation-20.json"
+    }
+  ]
 }

@@ -1,0 +1,58 @@
+{
+  "phase": "m4-native-shared-bc-revocation-20261028-50",
+  "job": "deerflow-tenant-execution-m4-physical",
+  "number": 20,
+  "result": "SUCCESS",
+  "building": false,
+  "duration": 48140,
+  "source_sha256": "865d10b3faef7b88e089fe71c9eb56f4cf5dc12cf26dfbb0921d213ed3895245",
+  "pipeline_sha256": "7ed1ba058f75350b8de91564634b7b146876beef010bd16df193096fb2b97713",
+  "base_head": "c6e9b9e8855f573aa15ecee20cfde55ebca33e5d",
+  "artifacts_dir": "/private/tmp/m4-native-shared-bc-revocation-20261028-50-artifacts",
+  "job_config_backup": "/root/job-config-backups/deerflow-tenant-execution-m4-physical-20261028-204115.xml",
+  "classification": "GREEN single real shared-pool B membership withdrawal/STOP: durable mcp_stop outbox persisted before worker confirmation, revoked worker authority denied, control poll/get payload-only, exact real B container STOP with signed physical_absence receipt, shared capacity released to zero, native MCP cancelled with no result/publication/notification/C2, repeat control idempotent, native/C snapshots unchanged",
+  "tests": "1 passed in 24.76s",
+  "ruff": "All checks passed; 7 files already formatted",
+  "red_predecessor": {
+    "number": 19,
+    "phase": "m4-native-shared-bc-revocation-20261028-49",
+    "result": "FAILURE",
+    "reason": "assert len(parents) == 2 observed 3 pending workspace_revoke rows",
+    "diagnosis": "transfer_owner bumps both memberships (old-owner demotion plus successor promotion), each bump enqueues one version-keyed workspace_revoke; remove_member adds the removed owner's row. Product behaviour coherent; test expectation incomplete.",
+    "fix_commit": "727c4b882",
+    "evidence_dir": "/private/tmp/m4-native-shared-bc-revocation-20261028-49-artifacts"
+  },
+  "story_markers": {
+    "committed_and_queued": true,
+    "b_shared_pool_reserved": true,
+    "created_with_restricted_profile": true,
+    "private_output_written_before_revoke": true,
+    "revocation_control_pending_before_stop": true,
+    "revoked_worker_authority_denied": true,
+    "revoked_control_payload_only": true,
+    "normal_stop_exact_id_absent": true,
+    "revoked_shared_pool_released": true,
+    "native_mcp_cancelled_without_result": true,
+    "no_continuation_or_publication": true,
+    "repeat_control_idempotent": true
+  },
+  "b_job": {
+    "id": "7bbc324170b943d5be1f2784dea7241c",
+    "spec_digest": "1b85749b34373f2f0563e2f9e55dc0e7d9ff71c3f5971f51ee12e74336b7736c",
+    "container_id": "b7db107f7c3973a1d36c2b250aff857d33c46faecbd4a306add37acfa4041edc",
+    "database": "tenant_executor_3a53a4a225dc469da089b212fdadb049"
+  },
+  "cleanup": [
+    {
+      "name": "deerflow-exec-7bbc324170b943d5be1f2784dea7241c",
+      "exact_id": "b7db107f7c3973a1d36c2b250aff857d33c46faecbd4a306add37acfa4041edc",
+      "absent": true
+    }
+  ],
+  "boundaries": "Single Jenkins host, ASGI transport, deterministic C graph; normal-path physical STOP proven (finally_removed false because the normal stop already removed the exact container). Does not establish every withdrawal/unknown/restart branch, two-host TCP, real C sandbox/AIO physical, CLI/restart recovery, or complete M0-M11. Tenant activation remains false.",
+  "files": {
+    "backend/tests/test_workspace_native_dependencies.py": "63675fbfa4d78943703ab4db2e5f081812417c96f457744f205b9975ba200325",
+    "backend/tests/test_workspace_execution_physical.py": "8a3d74e5f44e6a6e0249f9e639dcdd8762d460a7f5a14df97ea58741dfdab6bc",
+    "scripts/render_tenant_physical_pipeline.py": "807a2d634be465a775ad340ca33e2dc549109da865d608482cf73c8af9713742"
+  }
+}

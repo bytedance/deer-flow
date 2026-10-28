@@ -14026,5 +14026,32 @@
     ],
     "required": "Runtime gate compatibility verified by #127. Separate stopped-writer migration receipt work remains open.",
     "migration_receipts": "Native backfill/export and executor tenant import also pin 0040; do not blindly change these stopped-writer receipt contracts. Their 0041 inventory/restore proof remains M1/M10 work."
+  },
+  "native_shared_pool_revocation": {
+    "status": "runtime_verified_single_story",
+    "work_package": "M4 step39",
+    "red": {
+      "build": 19,
+      "phase": "m4-native-shared-bc-revocation-20261028-49",
+      "result": "FAILURE",
+      "reason": "assert len(parents) == 2 observed 3 pending workspace_revoke rows",
+      "diagnosis": "transfer_owner bumps both memberships; each version bump enqueues one version-keyed revoke; remove_member adds the removed owner's row. Product coherent; test expectation incomplete.",
+      "fix_commit": "727c4b882"
+    },
+    "green": {
+      "build": 20,
+      "phase": "m4-native-shared-bc-revocation-20261028-50",
+      "result": "SUCCESS",
+      "duration_ms": 48140,
+      "tests": "1 passed in 24.76s",
+      "ruff": "All checks passed; 7 files already formatted",
+      "archive_sha256": "865d10b3faef7b88e089fe71c9eb56f4cf5dc12cf26dfbb0921d213ed3895245",
+      "pipeline_sha256": "7ed1ba058f75350b8de91564634b7b146876beef010bd16df193096fb2b97713",
+      "base_head": "c6e9b9e88"
+    },
+    "evidence": "docs/tenant-workspaces-evidence/native-shared-bc-revocation-20.json",
+    "runtime": "Shanghai Jenkins single host; fixed final-ci-tools-52ce and pinned PostgreSQL images; ASGI transport; deterministic C graph; no deployment, model calls or tenant activation",
+    "story": "Real shared-pool B wrote private output before withdrawal; durable mcp_stop persisted first and stayed pending while B ran; revoked worker authority denied; poll/get payload-only; exact container STOP with signed physical_absence receipt; capacity released to zero; native MCP cancelled with no result/publication/notification/C2; repeat idempotent; native/C snapshots unchanged; exact cleanup receipt.",
+    "remaining": "Other withdrawal/unknown/restart branches, two-host TCP/PostgreSQL checkpoint/real C sandbox AIO, CLI/restart recovery, parent revoke domains, and complete M0-M11 remain open. Tenant activation false."
   }
 }
