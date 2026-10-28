@@ -128,7 +128,6 @@ async def test_browser_stream_reads_tool_config_off_the_loop(monkeypatch: pytest
     monkeypatch.setattr(browser_router, "_browser_tools_enabled_async", AsyncMock(return_value=True))
     monkeypatch.setattr(browser_router, "_browser_thread_owned_by", AsyncMock(return_value=True))
     monkeypatch.setattr(browser_router, "_negotiate_browser_frame_format", AsyncMock(return_value=False))
-    monkeypatch.setattr(browser_router, "set_current_user", lambda user: None)
     monkeypatch.setattr(browser_router, "_authenticate_ws", AsyncMock(return_value=MagicMock(id="u1")))
     # Every guard between the handshake and the read under test.
     monkeypatch.setattr(browser_router, "_ws_origin_allowed", lambda websocket: True)
@@ -136,14 +135,32 @@ async def test_browser_stream_reads_tool_config_off_the_loop(monkeypatch: pytest
 
     websocket = MagicMock()
     websocket.app.state.thread_store = MagicMock()
+    # The socket's failure path awaits close(); a bare MagicMock is not awaitable.
+    websocket.close = AsyncMock()
+    websocket.send_text = AsyncMock()
 
-    # The manager lookup follows the read under test; stop there.
+    # The manager lookup follows the read under test; stop there. browser_stream
+    # binds get_browser_session_manager with a function-local import, so the
+    # patch has to land on deerflow.community.browser_automation — a
+    # browser_router attribute would be read by nothing.
+    import deerflow.community.browser_automation as browser_automation
+
     fake_manager = MagicMock()
     fake_manager.acquire_session = MagicMock(side_effect=_StopAfterToolConfig())
-    monkeypatch.setattr(browser_router, "get_browser_session_manager", lambda: fake_manager, raising=False)
+    monkeypatch.setattr(browser_automation, "get_browser_session_manager", lambda: fake_manager)
 
-    with pytest.raises(Exception):
-        await browser_router.browser_stream(websocket, "thread-1")
+    await browser_router.browser_stream(websocket, "thread-1")
 
+    # The stub has to fire: otherwise the test runs past the seam it names, hits
+    # the real manager, and would still pass on a broad escape. The socket's own
+    # `except Exception` turns the stub's error into close(4501), so the visible
+    # evidence is the call plus that close.
+    assert fake_manager.acquire_session.call_count == 1
+    websocket.close.assert_awaited_once_with(code=4501)
+    # The real factory caches a process-global singleton and builds Playwright
+    # state; the stub must keep it from ever running.
+    from deerflow.community.browser_automation import session as browser_session
+
+    assert browser_session._manager is None
     assert recorder.calls >= 1, "the socket must read the tool config"
     assert recorder.threads[0] != _loop_thread(), "the tool-config read must run in a worker, not on the loop"
