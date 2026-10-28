@@ -13,6 +13,13 @@ errors preserve cache fallbacks and valid neighbors, including Redis outages/pur
 Escape literal stems for SCAN; recheck byte/string keys before UNLINK. Preserve
 namespace/thread bounds, cursor iteration and outage/TTL fallback.
 
+### Run Admission
+
+Run admission and assembly publication serialize per thread across Store I/O.
+Keep registry locks short; heartbeat snapshots must not queue on an
+admission gate. Preserve same-thread publication visibility, including reads of
+preallocated run IDs. Details: [admission isolation](../../../../docs/runtime-guidance-details.md#deferred-terminal-commits-and-lease-ownership).
+
 ### Stream Bridge Heartbeats
 
 Observed Redis streams removed during replay yield `StreamGap` with empty bounds; initially empty streams still wait. After this gap, `/wait` refreshes store-only status and completes only for a terminal run with no retained stream.
