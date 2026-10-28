@@ -135,6 +135,12 @@ class TestCycleDetection:
         # A single repeated name is Layer 2's job, not a cycle.
         assert detect(["a"] * 12, 2, 4, 6) is None
 
+    def test_cycle_key_matches_rotations(self):
+        key = LoopDetectionMiddleware._cycle_key
+        assert key("a→b") == key("b→a")
+        assert key("a→b→c") == key("b→c→a") == key("c→a→b")
+        assert key("a→b→c") != key("a→c→b")
+
     def test_default_budgets_match_tool_frequency_defaults(self):
         mw = LoopDetectionMiddleware()
         assert (mw.cycle_warn_calls, mw.cycle_hard_calls) == (mw.tool_freq_warn, mw.tool_freq_hard_limit)
@@ -172,7 +178,12 @@ class TestCycleDetection:
 
         result = mw._apply(_make_state(tool_calls=[_named_call(sequence[-1], len(sequence))]), runtime)
         assert result is None
-        assert "LOOP DETECTED" in mw._pending_warnings[_pending_key()][0]
+        warning = mw._pending_warnings[_pending_key()][0]
+        assert "LOOP DETECTED" in warning
+        # The cycle warning names the alternation instead of reusing the
+        # identical-call-set text.
+        assert "web_search→web_fetch" in warning
+        assert "repeating the same tool calls" not in warning
 
     def test_cycle_warning_queued_once(self):
         mw = LoopDetectionMiddleware(cycle_warn_calls=6, cycle_hard_calls=20)

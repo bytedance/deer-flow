@@ -259,6 +259,8 @@ _WARNING_MSG = "[LOOP DETECTED] You are repeating the same tool calls. Stop repe
 
 _TOOL_FREQ_WARNING_MSG = "[LOOP DETECTED] You have called {tool_name} {count} times without producing a final answer. Stop calling {tool_name} and wrap up now. " + _WRAP_UP_INSTRUCTIONS
 
+_TOOL_CYCLE_WARNING_MSG = "[LOOP DETECTED] Your last {count} tool calls repeat the cycle {cycle} without producing a final answer. Stop alternating between these tools and wrap up now. " + _WRAP_UP_INSTRUCTIONS
+
 _HARD_STOP_MSG = "[FORCED STOP] Repeated tool calls exceeded the safety limit. Producing final answer with results collected so far."
 
 _TOOL_FREQ_HARD_STOP_MSG = "[FORCED STOP] Tool {tool_name} called {count} times — exceeded the per-tool safety limit. Producing final answer with results collected so far."
@@ -614,6 +616,13 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
                 return "→".join(cycle)
         return None
 
+    @staticmethod
+    def _cycle_key(cycle: str) -> str:
+        """Return one name for a cycle and all its rotations, so ``a→b`` and
+        ``b→a`` (the same loop seen one call later) warn once."""
+        names = cycle.split("→")
+        return min("→".join(names[i:] + names[:i]) for i in range(len(names)))
+
     def _track_and_check(
         self,
         state: AgentState,
@@ -801,9 +810,9 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             if warn_cycle is None:
                 # The tail no longer repeats a cycle; let a later one warn again.
                 self._cycle_warned.pop(scope_key, None)
-            elif warning is None and warn_cycle not in self._cycle_warned.get(scope_key, set()):
+            elif warning is None and self._cycle_key(warn_cycle) not in self._cycle_warned.get(scope_key, set()):
                 warning = _LoopDecision(
-                    message=_WARNING_MSG,
+                    message=_TOOL_CYCLE_WARNING_MSG.format(count=self.cycle_warn_calls, cycle=warn_cycle),
                     action="warn",
                     detection_layer="tool_cycle",
                     tool_names=tuple(warn_cycle.split("→")),
@@ -825,7 +834,7 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
                         },
                     )
                 elif warning.detection_layer == "tool_cycle":
-                    self._cycle_warned[scope_key].add("→".join(warning.tool_names))
+                    self._cycle_warned[scope_key].add(self._cycle_key("→".join(warning.tool_names)))
                     logger.warning(
                         "Tool-name cycle detected — injecting warning",
                         extra={
