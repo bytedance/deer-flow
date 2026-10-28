@@ -193,6 +193,7 @@ class MemoryStreamBridge(StreamBridge):
             if entry is END_SENTINEL:
                 yield END_SENTINEL
                 return
+            # Consumers identify sentinels with `is`; never deep-copy them.
             yield deepcopy(entry) if isinstance(entry, StreamEvent) and entry is not HEARTBEAT_SENTINEL else entry
             if should_stop:
                 return
