@@ -322,15 +322,22 @@ class TelegramChannel(Channel):
         key = self._stream_key(msg.chat_id, msg.thread_ts)
 
         if not msg.is_final:
+            previous = self._stream_messages.get(key)
+            previous_id = previous["message_id"] if previous else None
             await self._send_stream_update(chat_id, key, msg.text, reply_to=self._parse_message_id(msg.thread_ts))
+            state = self._stream_messages.get(key)
+            if state is not None and state["message_id"] != previous_id:
+                await self._record_bot_message_thread(msg, state["message_id"])
             return
 
         state = self._stream_messages.pop(key, None)
         if state is not None:
             if self._can_send_rich(msg.text) and await self._edit_rich_message(chat_id, state["message_id"], msg.text):
                 self._last_bot_message[msg.chat_id] = state["message_id"]
+                await self._record_bot_message_thread(msg, state["message_id"])
                 return
-            await self._finalize_stream_message(chat_id, msg.chat_id, state, msg.text)
+            for delivered_id in await self._finalize_stream_message(chat_id, msg.chat_id, state, msg.text):
+                await self._record_bot_message_thread(msg, delivered_id)
             return
 
         if self._can_send_rich(msg.text):
@@ -340,10 +347,52 @@ class TelegramChannel(Channel):
                 logger.warning("[Telegram] Rich Message send failed in chat=%s; falling back to plain text: %s", chat_id, exc)
                 message_id = None
             if message_id is not None:
+                await self._record_bot_message_thread(msg, message_id)
                 return
 
         for chunk in self._split_message(msg.text):
-            await self._send_new_message(chat_id, msg.chat_id, chunk, _max_retries=_max_retries)
+            sent_id = await self._send_new_message(chat_id, msg.chat_id, chunk, _max_retries=_max_retries)
+            if sent_id is not None:
+                await self._record_bot_message_thread(msg, sent_id)
+
+    async def _record_bot_message_thread(self, msg: OutboundMessage, message_id: int | None) -> None:
+        """Bind a delivered bot message id to the DeerFlow thread that produced it.
+
+        In a group, a reply addresses the message it replies to, so when a user
+        replies to a bot answer, ``_on_text`` looks up the bot message id as the
+        topic. The delivery path previously never recorded that association, so
+        the manager created a new thread and the follow-up lost its context
+        (deer-flow#7653). Recording it here — in the same store/repo the
+        manager resolves with — makes the reply continue the original thread.
+
+        Best-effort: delivery has already succeeded by the time this runs, so
+        a store failure is logged and never raised.
+        """
+        if not message_id or not msg.thread_id:
+            return
+        try:
+            if msg.connection_id and msg.owner_user_id and self._connection_repo is not None:
+                await self._connection_repo.set_thread_id(
+                    connection_id=msg.connection_id,
+                    owner_user_id=msg.owner_user_id,
+                    provider="telegram",
+                    external_conversation_id=msg.chat_id,
+                    external_topic_id=str(message_id),
+                    thread_id=msg.thread_id,
+                )
+                return
+            store = self.config.get("channel_store")
+            if store is None:
+                return
+            await store.set_thread_id(
+                "telegram",
+                msg.chat_id,
+                msg.thread_id,
+                topic_id=str(message_id),
+                user_id=msg.owner_user_id or "",
+            )
+        except Exception:
+            logger.warning("[Telegram] failed to record thread binding for bot message=%s", message_id)
 
     async def _send_stream_update(self, chat_id: int, key: str, text: str, reply_to: int | None = None) -> None:
         """Edit the in-flight streamed message with accumulated text.
@@ -409,24 +458,35 @@ class TelegramChannel(Channel):
         state["last_edit_at"] = _monotonic()
         state["last_text"] = display
 
-    async def _finalize_stream_message(self, chat_id: int, chat_key: str, state: dict[str, Any], text: str) -> None:
-        """Apply the final text: edit the streamed message, splitting overflow into follow-ups."""
+    async def _finalize_stream_message(self, chat_id: int, chat_key: str, state: dict[str, Any], text: str) -> list[int]:
+        """Apply the final text: edit the streamed message, splitting overflow into follow-ups.
+
+        Returns the Telegram message ids delivered for this final text, so the
+        caller can record their thread binding (see ``_record_bot_message_thread``).
+        """
         bot = self._application.bot
         chunks = self._split_message(text or "")
 
+        delivered: list[int] = []
         edited = True
         if chunks[0] != state["last_text"]:
             edited = await self._edit_final_chunk(bot, chat_id, state["message_id"], chunks[0])
 
         if edited:
             self._last_bot_message[chat_key] = state["message_id"]
+            delivered.append(state["message_id"])
         else:
             # Edit could not be applied (e.g. message deleted) — deliver the
             # first chunk as a fresh message with the standard retry policy.
-            await self._send_new_message(chat_id, chat_key, chunks[0])
+            first_id = await self._send_new_message(chat_id, chat_key, chunks[0])
+            if first_id is not None:
+                delivered.append(first_id)
 
         for chunk in chunks[1:]:
-            await self._send_new_message(chat_id, chat_key, chunk)
+            chunk_id = await self._send_new_message(chat_id, chat_key, chunk)
+            if chunk_id is not None:
+                delivered.append(chunk_id)
+        return delivered
 
     async def _edit_final_chunk(self, bot, chat_id: int, message_id: int, text: str) -> bool:
         """Edit with one rate-limit retry. Returns False if the edit could not be applied."""
@@ -561,6 +621,7 @@ class TelegramChannel(Channel):
                 sent = await bot.send_document(**kwargs)
 
             self._last_bot_message[msg.chat_id] = sent.message_id
+            await self._record_bot_message_thread(msg, sent.message_id)
             logger.info("[Telegram] file sent: %s to chat=%s", attachment.filename, msg.chat_id)
             return True
         except Exception:
