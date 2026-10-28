@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import codeop
 import json
 import logging
 import re
@@ -34,7 +35,7 @@ from deerflow.agents.middlewares.tool_result_meta import (
     normalize_tool_result,
 )
 from deerflow.config.harness_guard_config import HarnessGuardConfig
-from deerflow.sandbox.tools import read_current_file_content
+from deerflow.sandbox.tools import _match_line_endings, read_current_file_content
 
 logger = logging.getLogger(__name__)
 
@@ -160,7 +161,35 @@ def classify_tool_error(content: str) -> ErrorSignature | None:
     return None
 
 
-def verify_content_syntax(file_path: str, content: str) -> str | None:
+def _is_incomplete_json(content: str) -> bool:
+    """Return True if content appears to be an incomplete JSON fragment (e.g. initial chunk in append flow)."""
+    s = content.rstrip()
+    if not s:
+        return True
+    try:
+        json.loads(s)
+        return False
+    except json.JSONDecodeError as e:
+        # Check if error is at end of input (premature EOF awaiting subsequent chunks)
+        remaining = s[e.pos :].strip()
+        if not remaining:
+            return True
+        for closer in ["]", "}", '"]', '"}', "\n]"]:
+            try:
+                json.loads(s + closer)
+                return True
+            except Exception:
+                pass
+            if s.endswith(","):
+                try:
+                    json.loads(s[:-1] + closer)
+                    return True
+                except Exception:
+                    pass
+        return False
+
+
+def verify_content_syntax(file_path: str, content: str, *, allow_incomplete: bool = False) -> str | None:
     """Validate content syntax for known formats. Returns error message if invalid."""
     if not file_path or not content:
         return None
@@ -169,6 +198,14 @@ def verify_content_syntax(file_path: str, content: str) -> str | None:
         try:
             ast.parse(content, filename=file_path)
         except SyntaxError as e:
+            # Preserve append-in-chunks flow: incomplete fragment waiting for more input is not blocked
+            if allow_incomplete:
+                try:
+                    code_to_check = content if content.endswith("\n") else content + "\n"
+                    if codeop.compile_command(code_to_check, symbol="exec") is None:
+                        return None
+                except Exception:
+                    pass
             return f"Python syntax error at line {e.lineno}, col {e.offset}: {e.msg}"
         except ValueError as e:
             return f"Python source code error: {e}"
@@ -177,6 +214,9 @@ def verify_content_syntax(file_path: str, content: str) -> str | None:
         try:
             json.loads(content)
         except Exception as e:
+            # Preserve append-in-chunks flow: incomplete JSON prefix is not blocked
+            if allow_incomplete and _is_incomplete_json(content):
+                return None
             return f"Invalid JSON format: {e}"
 
     return None
@@ -287,7 +327,7 @@ class HarnessGuardMiddleware(AgentMiddleware):
             if not isinstance(content, str):
                 return None
 
-            err = verify_content_syntax(file_path, content)
+            err = verify_content_syntax(file_path, content, allow_incomplete=True)
 
         elif tool_name == "str_replace":
             old_str = args.get("old_str")
@@ -295,10 +335,11 @@ class HarnessGuardMiddleware(AgentMiddleware):
             if isinstance(old_str, str) and isinstance(new_str, str) and (file_path.endswith(".py") or file_path.endswith(".json")):
                 try:
                     current = read_current_file_content(request.runtime, file_path)
+                    old_str, new_str = _match_line_endings(current, old_str, new_str)
                     if old_str in current:
                         replace_all = bool(args.get("replace_all", False))
                         spliced = current.replace(old_str, new_str) if replace_all else current.replace(old_str, new_str, 1)
-                        err = verify_content_syntax(file_path, spliced)
+                        err = verify_content_syntax(file_path, spliced, allow_incomplete=False)
                 except Exception:
                     # Fail open on sandbox read errors and let str_replace handle execution
                     err = None
@@ -339,14 +380,12 @@ class HarnessGuardMiddleware(AgentMiddleware):
         """Analyze tool result, classify error signatures, inject hints, and detect loops."""
         tool_name = str(request.tool_call.get("name") or result.name or "unknown")
         raw_text = _extract_text_content(result.content)
-        is_error = result.status == "error"
+        tool_meta = result.additional_kwargs.get(TOOL_META_KEY) if hasattr(result, "additional_kwargs") and isinstance(result.additional_kwargs, dict) else None
+        is_error = getattr(result, "status", "success") == "error" or (isinstance(tool_meta, dict) and tool_meta.get("status") == "error")
 
         error_sig: ErrorSignature | None = None
-        if self.config.targeted_hints_enabled:
+        if is_error and self.config.targeted_hints_enabled:
             error_sig = classify_tool_error(raw_text)
-
-        if error_sig is not None:
-            is_error = True
 
         # Update sliding history
         scope = self._scope_key(request)

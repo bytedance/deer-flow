@@ -238,6 +238,85 @@ class TestHarnessGuardMiddleware:
         assert res.status != "error"
         assert res.content == "File written successfully"
 
+    def test_write_verify_preserves_first_chunk_of_append_in_chunks_python(self):
+        """First chunk of append-in-chunks Python write (incomplete syntax) is not false-blocked."""
+        middleware = HarnessGuardMiddleware(HarnessGuardConfig(block_on_syntax_error=True))
+        req1 = _make_request("write_file", {"path": "func.py", "content": "def calculate():\n", "append": False})
+
+        def dummy_handler(r):
+            return ToolMessage(content="OK", tool_call_id=r.tool_call["id"], name="write_file")
+
+        res1 = middleware.wrap_tool_call(req1, dummy_handler)
+        assert res1.status != "error"
+        assert res1.content == "OK"
+
+        req2 = _make_request("write_file", {"path": "func.py", "content": "def bad_syntax(:\n", "append": False})
+        res2 = middleware.wrap_tool_call(req2, dummy_handler)
+        assert res2.status == "error"
+        assert "WRITE BLOCKED" in res2.content
+
+    def test_write_verify_preserves_first_chunk_of_append_in_chunks_json(self):
+        """First chunk of append-in-chunks JSON array/object (incomplete syntax) is not false-blocked."""
+        middleware = HarnessGuardMiddleware(HarnessGuardConfig(block_on_syntax_error=True))
+        req1 = _make_request("write_file", {"path": "data.json", "content": '[\n  {"id": 1},\n', "append": False})
+
+        def dummy_handler(r):
+            return ToolMessage(content="OK", tool_call_id=r.tool_call["id"], name="write_file")
+
+        res1 = middleware.wrap_tool_call(req1, dummy_handler)
+        assert res1.status != "error"
+        assert res1.content == "OK"
+
+        req2 = _make_request("write_file", {"path": "data.json", "content": "{bad json}", "append": False})
+        res2 = middleware.wrap_tool_call(req2, dummy_handler)
+        assert res2.status == "error"
+        assert "WRITE BLOCKED" in res2.content
+
+    def test_str_replace_crlf_normalization_repro(self):
+        """CRLF file with LF old_str must be normalized before matching so syntax errors are not bypassed."""
+        middleware = HarnessGuardMiddleware(HarnessGuardConfig(block_on_syntax_error=True))
+        crlf_file = "def foo():\r\n    return 42\r\n"
+        req = _make_request(
+            "str_replace",
+            {"path": "module.py", "old_str": "    return 42\n", "new_str": "    return (\n"},
+        )
+
+        def dummy_handler(r):
+            return ToolMessage(content="Replaced", tool_call_id=r.tool_call["id"], name="str_replace")
+
+        with patch(
+            "deerflow.agents.middlewares.harness_guard_middleware.read_current_file_content",
+            return_value=crlf_file,
+        ):
+            res = middleware.wrap_tool_call(req, dummy_handler)
+
+        assert isinstance(res, ToolMessage)
+        assert res.status == "error"
+        assert "WRITE BLOCKED" in res.content
+
+    def test_successful_tool_call_with_error_text_not_misclassified(self):
+        """Successful tool call (e.g. read_file of troubleshooting guide) must not be treated as failure."""
+        middleware = HarnessGuardMiddleware(HarnessGuardConfig(targeted_hints_enabled=True))
+        req = _make_request("read_file", {"path": "troubleshooting.md"})
+        doc_content = "Example error:\nModuleNotFoundError: No module named 'numpy'\nFix with pip install numpy"
+
+        def dummy_handler(r):
+            return ToolMessage(
+                content=doc_content,
+                tool_call_id=r.tool_call["id"],
+                name="read_file",
+                status="success",
+                additional_kwargs={"deerflow_tool_meta": {"status": "success"}},
+            )
+
+        res1 = middleware.wrap_tool_call(req, dummy_handler)
+        assert "[HARNESS GUARD]" not in res1.content
+        assert res1.status == "success"
+
+        res2 = middleware.wrap_tool_call(req, dummy_handler)
+        assert "CRITICAL REPETITION" not in res2.content
+        assert res2.status == "success"
+
     def test_multimodal_list_content_preserved(self):
         """When ToolMessage content is a list of blocks, hints are appended as text blocks rather than stringifying."""
         middleware = HarnessGuardMiddleware(HarnessGuardConfig())
