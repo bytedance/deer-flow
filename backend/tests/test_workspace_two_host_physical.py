@@ -547,6 +547,18 @@ async def _native_worker():
                 if attempt == 59:
                     evidence["tcp_precheck"] = f"{parsed.hostname}:{parsed.port} failed: {exc}"
             await asyncio.sleep(1.0)
+        import httpx
+
+        for attempt in range(30):
+            try:
+                async with httpx.AsyncClient(timeout=5) as client:
+                    response = await client.post(os.environ["TENANT_TWO_HOST_NATIVE_EXECUTOR_URL"] + "/api/native-workers/worker/poll", json={}, headers={"Authorization": "Bearer probe"})
+                    evidence["httpx_precheck"] = response.status_code
+                    break
+            except Exception as exc:
+                if attempt == 29:
+                    evidence["httpx_precheck"] = f"{type(exc).__name__}: {str(exc)[:120]}"
+                await asyncio.sleep(1.0)
         evidence_path.parent.mkdir(parents=True, exist_ok=True)
         evidence_path.write_text(json.dumps(evidence, indent=2))
         await host.start()
