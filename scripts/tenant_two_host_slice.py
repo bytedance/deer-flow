@@ -209,7 +209,7 @@ nohup docker run --rm --pull=never --name {PHASE}-controller --label org.deerflo
   -e TENANT_TWO_HOST_NATIVE_URL='{native_url}' \\
   {env_flags(COMMON_ENV)} \\
   -e TEST_SCOPE_EVIDENCE='{CROOT}/{PHASE}/evidence/controller.json' \\
-  -v {CROOT}/{PHASE}/source.tar.gz:/run/source.tar.gz:ro -v {CROOT}/{PHASE}:/run/phase \\
+  -v {CROOT}/{PHASE}:{CROOT}/{PHASE} -v {CROOT}/{PHASE}/source.tar.gz:/run/source.tar.gz:ro \\
   --entrypoint /bin/sh {NATIVE_IMAGE} -c 'mkdir -p /tmp/source && tar xzf /run/source.tar.gz -C /tmp/source && cd /tmp/source/backend \
   && /app/backend/.venv/bin/python -m pytest tests/test_workspace_two_host_physical.py -q --tb=short --no-showlocals' \\
   > {CROOT}/{PHASE}/controller.log 2>&1 &
@@ -232,7 +232,7 @@ echo $! > {CROOT}/{PHASE}/controller.pid
     must(WORKER, f"""set -eu
 docker run --rm --pull=never --name {PHASE}-worker --label org.deerflow.tenant.owned={PHASE} \\
   -v /var/run/docker.sock:/var/run/docker.sock:ro -v /usr/bin/docker:/usr/bin/docker:ro \\
-  -v {CROOT}/{PHASE}:/run/phase \\
+  -v {CROOT}/{PHASE}:{CROOT}/{PHASE} \\
   -e TENANT_TWO_HOST_ROLE=worker \\
   -e TENANT_TWO_HOST_URL=http://{CONTROLLER_PRIVATE}:{PORT} \\
   -e TENANT_TWO_HOST_NATIVE_URL='{native_url}' \\
