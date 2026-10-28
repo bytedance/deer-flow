@@ -316,6 +316,17 @@ def test_invalid_health_check_skip_fails_before_provider_creation(monkeypatch, p
         bench.main(["--provider", provider, f"--health-check-skip-seconds={value}"])
 
 
+@pytest.mark.parametrize("provider", ["opensandbox", "boxlite", "aio-docker"])
+def test_idle_timeout_scenario_rejects_infinite_timeout_before_provider_creation(monkeypatch, provider):
+    def unexpected_provider(*args, **kwargs):
+        pytest.fail("an infinite idle_timeout scenario must be rejected before provisioning")
+
+    monkeypatch.setitem(bench.PROVIDER_FACTORIES, provider, unexpected_provider)
+
+    with pytest.raises(SystemExit, match="finite positive idle timeout"):
+        bench.main(["--provider", provider, "--scenario", "idle_timeout", "--idle-timeout=inf"])
+
+
 @pytest.mark.parametrize("provider", ["boxlite", "aio-docker"])
 @pytest.mark.parametrize("option", ["--idle-timeout", "--health-check-skip-seconds"])
 @pytest.mark.parametrize("value", [None, "0", "2.5", "inf"])

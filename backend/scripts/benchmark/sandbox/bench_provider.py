@@ -765,8 +765,8 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("fault injection requires warm_same_thread, concurrency=1 and an enabled warm pool")
     if args.fault_inject is not None and not 0 <= args.fault_inject < args.iterations:
         raise SystemExit("fault injection iteration must be inside the measured batch")
-    if args.scenario == "idle_timeout" and (args.concurrency != 1 or args.idle_timeout <= 0):
-        raise SystemExit("idle_timeout requires concurrency=1 and a positive idle timeout")
+    if args.scenario == "idle_timeout" and (args.concurrency != 1 or not math.isfinite(args.idle_timeout) or args.idle_timeout <= 0):
+        raise SystemExit("idle_timeout requires concurrency=1 and a finite positive idle timeout")
     if args.workload == "state_reuse" and (args.scenario != "warm_same_thread" or args.concurrency != 1):
         raise SystemExit("state_reuse requires --scenario warm_same_thread --concurrency 1")
     args.run_id = args.run_id or uuid.uuid4().hex[:12]

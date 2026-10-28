@@ -80,13 +80,15 @@ CLI defaults (3 and 600). All providers reject negative and NaN
 negative and NaN `--health-check-skip-seconds`; zero, positive finite values,
 and positive infinity remain accepted. OpenSandbox still rejects every nonzero
 health-check skip value as unsupported. Zero idle timeout disables idle reaping,
-except that the `idle_timeout` scenario requires a positive value. `--image`
-overrides YAML only when supplied.
+except that the `idle_timeout` scenario requires a finite positive value because
+it sleeps past the timeout. `--image` overrides YAML only when supplied.
 Connection settings, including HTTPS and `use_server_proxy`, are retained. The
 exported configuration dimensions contain only image, replicas, idle timeout,
-and the supported health-check skip window; credentials, endpoint and
-environment are not copied into result rows. Record non-secret SDK, server and
-deployment versions separately for reproducibility.
+and the health-check skip window; credentials, endpoint and environment are not
+copied into result rows. BoxLite consumes the skip window during warm reclaim;
+AIO accepts and records it for comparison but does not currently alter provider
+behavior. Record non-secret SDK, server and deployment versions separately for
+reproducibility.
 
 `release_ms` includes production best-effort output synchronization. Successful
 command/release timing does not prove that every artifact was mirrored. Warm hits
