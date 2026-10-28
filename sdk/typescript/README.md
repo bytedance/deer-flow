@@ -33,15 +33,11 @@ const client = new DeerFlowClient({
 });
 
 for await (const event of client.stream("Summarize the latest roadmap updates")) {
-  if (event.event === "messages-tuple") {
-    const [message] = event.data;
+  if (event.event === "messages" || event.event === "messages-tuple") {
+    // The gateway sends [chunk, metadata] tuples under the `messages` event name.
+    const message = Array.isArray(event.data) ? event.data[0] : event.data;
     if (message.type === "ai" && typeof message.content === "string") {
       process.stdout.write(message.content);
-    }
-  } else if (event.event === "messages") {
-    // Plain stream_mode=messages (no tuple wrapper)
-    if (event.data.type === "ai" && typeof event.data.content === "string") {
-      process.stdout.write(event.data.content);
     }
   } else if (event.event === "end") {
     process.stdout.write("\n");

@@ -132,10 +132,8 @@ export class DeerFlowClient {
 
       let chunk: MessageChunk | undefined;
 
-      if (event.event === "messages-tuple" && Array.isArray(event.data)) {
-        chunk = (event.data as MessagesTupleEvent)[0];
-      } else if (event.event === "messages" && event.data && typeof event.data === "object") {
-        chunk = event.data as MessageChunk;
+      if ((event.event === "messages" || event.event === "messages-tuple") && event.data && typeof event.data === "object") {
+        chunk = Array.isArray(event.data) ? (event.data as MessagesTupleEvent)[0] : (event.data as MessageChunk);
       }
 
       if (!chunk || chunk.type !== "ai" || typeof chunk.content !== "string") {

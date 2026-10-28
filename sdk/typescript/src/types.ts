@@ -50,8 +50,11 @@ export type MessagesTupleEvent = [message: MessageChunk, metadata: Record<string
  * SSE event names emitted by DeerFlow's LangGraph gateway. The set depends on
  * the requested `stream_mode`:
  *   - `values`: full state snapshots (stream_mode=values)
- *   - `messages`: plain message chunks (stream_mode=messages)
- *   - `messages-tuple`: [chunk, metadata] tuples (stream_mode=messages-tuple, the useStream default)
+ *   - `messages`: message chunks. The gateway sends these as [chunk, metadata]
+ *     tuples under this event name when stream_mode=messages-tuple (the
+ *     useStream default) is requested; a bare chunk is also accepted
+ *   - `messages-tuple`: [chunk, metadata] tuples, for servers that echo the
+ *     requested mode name
  *   - `custom`: user-dispatched custom payloads
  *   - `metadata`: run metadata (gateway-compatible streams)
  *   - `error`: per-chunk error frames (gateway-compatible streams)
@@ -68,7 +71,7 @@ export type StreamEventName =
 
 export type StreamEvent =
   | { event: "values"; data: ValuesEvent }
-  | { event: "messages"; data: MessageChunk }
+  | { event: "messages"; data: MessagesTupleEvent | MessageChunk }
   | { event: "messages-tuple"; data: MessagesTupleEvent }
   | { event: "custom"; data: unknown }
   | { event: "metadata"; data: Record<string, unknown> }

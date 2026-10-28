@@ -48,7 +48,7 @@ describe("types", () => {
 
     const events: StreamEvent[] = [
       { event: "values", data: { messages: [] } },
-      { event: "messages", data: messagesChunk },
+      { event: "messages", data: [messagesChunk, {}] },
       { event: "messages-tuple", data: [messagesChunk, {}] },
       { event: "custom", data: { foo: "bar" } },
       { event: "metadata", data: { run_id: "r1" } },
@@ -64,7 +64,7 @@ describe("types", () => {
           expect(Array.isArray(evt.data.messages)).toBe(true);
           break;
         case "messages":
-          expect(evt.data.type).toBe("ai");
+          expect((Array.isArray(evt.data) ? evt.data[0] : evt.data).type).toBe("ai");
           break;
         case "messages-tuple":
           expect(evt.data[0]?.content).toBe("hi");
