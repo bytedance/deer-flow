@@ -1445,7 +1445,7 @@ def _write_json_file_atomic(path: Path, payload: dict[str, Any]) -> None:
         temp_path.chmod(0o600)
         os.replace(temp_path, path)
     finally:
-        temp_path.unlink(missing_ok=True)
+        cleanup_failed_atomic_write(temp_path)
 
 
 _LARK_FLOW_DEVICE_CODE_UNSET: Any = object()

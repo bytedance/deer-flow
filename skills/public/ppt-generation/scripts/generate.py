@@ -2,7 +2,7 @@ import json
 import os
 from io import BytesIO
 
-from PIL import Image
+from PIL import Image, ImageOps
 from pptx import Presentation
 from pptx.util import Inches
 
@@ -60,6 +60,7 @@ def generate_ppt(
 
         # Load and process image
         with Image.open(image_path) as img:
+            img = ImageOps.exif_transpose(img)
             image_format = "JPEG"
             if "A" in img.getbands() or "transparency" in img.info:
                 img = img.convert("RGBA")

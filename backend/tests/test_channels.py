@@ -1567,6 +1567,40 @@ class TestChannelManager:
 
         _run(go())
 
+    def test_wait_reports_a_step_limit_stop_and_releases_dedupe_key(self, tmp_path):
+        """``/wait`` returns a step-limit stop only as an error: reply with its message, not a generic failure."""
+        from app.channels.manager import ChannelManager
+
+        step_limit_text = "The run stopped at its step limit (recursion_limit=100) before finishing. Created but not presented: /mnt/user-data/outputs/report.md. Send a message to continue."
+
+        async def go():
+            bus = MessageBus()
+            manager = ChannelManager(bus=bus, store=JsonChannelStore(path=tmp_path / "store.json"))
+            outbound_received: list[OutboundMessage] = []
+
+            async def capture_outbound(msg: OutboundMessage) -> None:
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+            manager._client = _make_mock_langgraph_client()
+            # The SDK's exception for the Gateway's /wait error envelope.
+            manager._client.runs.wait = AsyncMock(side_effect=Exception(f"GraphRecursionError: {step_limit_text}"))
+            await manager.start()
+
+            def _inbound() -> InboundMessage:
+                return InboundMessage(channel_name="wechat", chat_id="wx_user_1", user_id="wx_user_1", text="write the report", metadata={"message_id": "m-1"})
+
+            await bus.publish_inbound(_inbound())
+            await _wait_for(lambda: len(outbound_received) == 1)
+            assert [m.text for m in outbound_received] == [step_limit_text]
+
+            # The run ended, so a provider redelivery may retry it.
+            await bus.publish_inbound(_inbound())
+            await _wait_for(lambda: manager._client.runs.wait.call_count == 2)
+            await manager.stop()
+
+        _run(go())
+
     def test_fire_and_forget_thread_busy_releases_dedupe_key(self, tmp_path):
         """Same invariant for a fire-and-forget channel that does not buffer follow-ups."""
         import httpx
@@ -5261,19 +5295,33 @@ class TestResolveRunParamsUserId:
         assert run_context["channel_user_id"] == "U-platform"
 
     def test_github_channel_gets_raised_recursion_limit(self):
-        """Autonomous GitHub coding runs (clone → edit → test → push → PR) need
-        more super-steps than an interactive chat turn. The default
-        ``recursion_limit`` of 100 is raised for the github channel only."""
+        """Autonomous GitHub coding runs (clone → edit → test → push → PR) get
+        a channel floor of 250 super-steps; other channels send no
+        ``recursion_limit`` and leave the budget to the Gateway."""
         manager = self._manager()
 
         gh_msg = InboundMessage(channel_name="github", chat_id="zhfeng/llm-gateway", user_id="zhfeng", text="hi")
         _, gh_config, _ = manager._resolve_run_params(gh_msg, "thread-1")
         assert gh_config["recursion_limit"] >= 250
 
-        # Interactive channels keep the default ceiling.
         slack_msg = InboundMessage(channel_name="slack", chat_id="C1", user_id="u", text="hi")
         _, slack_config, _ = manager._resolve_run_params(slack_msg, "thread-1")
-        assert slack_config["recursion_limit"] == 100
+        assert "recursion_limit" not in slack_config
+
+    def test_im_run_uses_gateway_configured_recursion_limit(self):
+        """An IM run without a session value gets the operator's top-level
+        ``recursion_limit``, like Gateway API runs, instead of a fixed 100."""
+        from app.gateway.services import build_run_config
+        from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
+
+        set_app_config(AppConfig.model_validate({"sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"}, "recursion_limit": 700}))
+        try:
+            manager = self._manager()
+            msg = InboundMessage(channel_name="telegram", chat_id="c", user_id="u", text="hi")
+            _, run_config, _ = manager._resolve_run_params(msg, "thread-1")
+            assert build_run_config("thread-1", run_config, None)["recursion_limit"] == 700
+        finally:
+            reset_app_config()
 
     def test_github_channel_recursion_limit_respects_higher_override(self):
         """An explicit higher recursion_limit in channel/user config must not be
@@ -7749,22 +7797,29 @@ class TestHandleChatWithArtifacts:
             manager._client = mock_client
 
             outbound_received = []
-            bus.subscribe_outbound(lambda msg: outbound_received.append(msg))
+            outbound_queue: asyncio.Queue[OutboundMessage] = asyncio.Queue()
+
+            async def record_outbound(msg: OutboundMessage) -> None:
+                outbound_received.append(msg)
+                await outbound_queue.put(msg)
+
+            bus.subscribe_outbound(record_outbound)
             await manager.start()
-
-            # Send two messages with the same topic_id (same thread)
-            for text in ["make report", "add chart"]:
-                msg = InboundMessage(
-                    channel_name="test",
-                    chat_id="c1",
-                    user_id="u1",
-                    text=text,
-                    topic_id="topic-dup",
-                )
-                await bus.publish_inbound(msg)
-
-            await _wait_for(lambda: len(outbound_received) >= 2)
-            await manager.stop()
+            try:
+                # Model completed turns on one thread; concurrent worker replies
+                # can arrive in either order after off-loop artifact preparation.
+                for text in ["make report", "add chart"]:
+                    msg = InboundMessage(
+                        channel_name="test",
+                        chat_id="c1",
+                        user_id="u1",
+                        text=text,
+                        topic_id="topic-dup",
+                    )
+                    await bus.publish_inbound(msg)
+                    await asyncio.wait_for(outbound_queue.get(), timeout=5.0)
+            finally:
+                await manager.stop()
 
             assert len(outbound_received) == 2
 
@@ -8308,6 +8363,104 @@ class TestFeishuChannel:
             assert json.loads(reply_request.body.content)["elements"][0]["content"] == "> What changed in the last run?\n\nthinking..."
             assert json.loads(first_patch_request.body.content)["elements"][0]["content"] == "> What changed in the last run?\n\nQueued behind another request"
             assert json.loads(final_patch_request.body.content)["elements"][0]["content"] == "> What changed in the last run?\n\nAnswer ready"
+
+        _run(go())
+
+    @staticmethod
+    def _streaming_alias_channel(tmp_path, *, fail_once: str | None = None):
+        """A Feishu channel with a running card and a store that records every alias write."""
+        from lark_oapi.api.im.v1 import (
+            CreateMessageReactionRequest,
+            CreateMessageReactionRequestBody,
+            Emoji,
+            PatchMessageRequest,
+            PatchMessageRequestBody,
+            ReplyMessageRequest,
+            ReplyMessageRequestBody,
+        )
+
+        from app.channels.feishu import FeishuChannel
+
+        class RecordingStore(JsonChannelStore):
+            def __init__(self, path):
+                super().__init__(path)
+                self.writes: list[str] = []
+                self.fail_once = fail_once
+
+            async def set_thread_id(self, channel_name, chat_id, thread_id, *, topic_id=None, user_id=""):
+                self.writes.append(topic_id)
+                if topic_id == self.fail_once:
+                    self.fail_once = None
+                    raise RuntimeError("offline store failure")
+                await super().set_thread_id(channel_name, chat_id, thread_id, topic_id=topic_id, user_id=user_id)
+
+        store = RecordingStore(tmp_path / "store.json")
+        channel = FeishuChannel(MessageBus(), config={"channel_store": store})
+        channel._api_client = MagicMock()
+        channel._ReplyMessageRequest = ReplyMessageRequest
+        channel._ReplyMessageRequestBody = ReplyMessageRequestBody
+        channel._PatchMessageRequest = PatchMessageRequest
+        channel._PatchMessageRequestBody = PatchMessageRequestBody
+        channel._CreateMessageReactionRequest = CreateMessageReactionRequest
+        channel._CreateMessageReactionRequestBody = CreateMessageReactionRequestBody
+        channel._Emoji = Emoji
+        reply_response = MagicMock()
+        reply_response.data.message_id = "om-running-card"
+        channel._api_client.im.v1.message.reply = MagicMock(return_value=reply_response)
+        channel._api_client.im.v1.message.patch = MagicMock()
+        channel._api_client.im.v1.message_reaction.create = MagicMock()
+        return channel, store
+
+    @staticmethod
+    def _streamed_chunk(text: str, *, is_final: bool) -> OutboundMessage:
+        return OutboundMessage(
+            channel_name="feishu",
+            chat_id="chat-1",
+            thread_id="thread-1",
+            text=text,
+            is_final=is_final,
+            thread_ts="om-source-msg",
+            metadata={"user_id": "ou-user", "message_id": "om-source-msg", "topic_id": "om-root", "root_id": "om-root", "parent_id": "om-parent", "thread_id": "omt-thread"},
+        )
+
+    def test_streaming_writes_each_thread_alias_once_per_reply(self, tmp_path):
+        aliases = ["om-source-msg", "om-running-card", "om-root", "om-parent", "omt-thread"]
+
+        async def go():
+            channel, store = self._streaming_alias_channel(tmp_path)
+            await channel._send_running_reply("om-source-msg")
+
+            await channel.send(self._streamed_chunk("He", is_final=False))
+            assert store.writes == aliases
+
+            for text in ("Hell", "Hello", "Hello wo"):
+                await channel.send(self._streamed_chunk(text, is_final=False))
+            assert store.writes == aliases
+            assert channel._api_client.im.v1.message.patch.call_count == 4
+
+            # An alias dropped mid-stream is restored: the final outbound writes
+            # every alias again, as each chunk used to.
+            await store.remove("feishu", "chat-1", topic_id="om-parent")
+            await channel.send(self._streamed_chunk("Hello world", is_final=True))
+            assert store.writes == aliases * 2
+            for topic_id in aliases:
+                assert await store.get_thread_id("feishu", "chat-1", topic_id=topic_id) == "thread-1"
+            assert "om-source-msg" not in channel._remembered_thread_aliases
+
+        _run(go())
+
+    def test_streaming_retries_a_failed_thread_alias_on_the_next_chunk(self, tmp_path):
+        async def go():
+            channel, store = self._streaming_alias_channel(tmp_path, fail_once="om-root")
+            await channel._send_running_reply("om-source-msg")
+
+            await channel.send(self._streamed_chunk("He", is_final=False))
+            assert await store.get_thread_id("feishu", "chat-1", topic_id="om-root") is None
+
+            store.writes.clear()
+            await channel.send(self._streamed_chunk("Hello", is_final=False))
+            assert store.writes == ["om-root"]
+            assert await store.get_thread_id("feishu", "chat-1", topic_id="om-root") == "thread-1"
 
         _run(go())
 
@@ -13410,12 +13563,22 @@ class TestHandleGoalCommand:
     """Covers the IM-channel ``/goal`` handler (get/set/clear via the Gateway)."""
 
     @staticmethod
-    def _install_mock_httpx(monkeypatch, calls, *, goal_payload=None, fail_method=None):
+    def _install_mock_httpx(monkeypatch, calls, *, goal_payload=None, fail_method=None, state_values=None, state_status=200, runs=()):
         class MockResponse:
+            def __init__(self, url):
+                self.url = url
+
             def raise_for_status(self):
-                return None
+                if self.url.endswith("/state") and state_status != 200:
+                    request = httpx.Request("GET", self.url)
+                    raise httpx.HTTPStatusError("state unavailable", request=request, response=httpx.Response(state_status, request=request))
 
             def json(self):
+                # The Gateway endpoints the status reply reads, routed by path.
+                if self.url.endswith("/state"):
+                    return {"values": dict(state_values or {})}
+                if "/runs/page" in self.url:
+                    return {"data": list(runs), "has_more": False}
                 return {"goal": goal_payload}
 
         class MockAsyncClient:
@@ -13432,7 +13595,7 @@ class TestHandleGoalCommand:
                 calls.append({"method": method, "url": url, **kwargs})
                 if fail_method == method:
                     raise RuntimeError("gateway down")
-                return MockResponse()
+                return MockResponse(url)
 
             async def get(self, url, **kwargs):
                 return await self._record("get", url, **kwargs)
@@ -13446,12 +13609,12 @@ class TestHandleGoalCommand:
         monkeypatch.setattr("app.channels.manager.httpx.AsyncClient", MockAsyncClient)
 
     @staticmethod
-    def _make_manager(monkeypatch, *, thread_id):
+    def _make_manager(monkeypatch, *, thread_id, **kwargs):
         from app.channels.manager import ChannelManager
 
         bus = MessageBus()
         store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
-        manager = ChannelManager(bus=bus, store=store, gateway_url="http://gateway:8001")
+        manager = ChannelManager(bus=bus, store=store, gateway_url="http://gateway:8001", **kwargs)
 
         async def _lookup(msg):
             return thread_id
@@ -13483,7 +13646,7 @@ class TestHandleGoalCommand:
 
     def test_status_with_active_goal_reports_objective(self, monkeypatch):
         calls = []
-        self._install_mock_httpx(monkeypatch, calls, goal_payload={"objective": "ship it"})
+        self._install_mock_httpx(monkeypatch, calls, goal_payload={"objective": "ship it", "status": "active"})
 
         async def go():
             manager = self._make_manager(monkeypatch, thread_id="t-1")
@@ -13491,6 +13654,71 @@ class TestHandleGoalCommand:
             assert reply == "Goal: ship it"
             assert calls[0]["method"] == "get"
             assert calls[0]["url"].endswith("/api/threads/t-1/goal")
+            # An active goal also asks whether a run is in flight, never for the met record.
+            assert [call["url"].removeprefix("http://gateway:8001") for call in calls[1:]] == ["/api/threads/t-1/runs/page?limit=1"]
+
+        _run(go())
+
+    # The evaluator's own words: never part of an IM reply (host codes only).
+    _EVALUATOR_NOTE = "The checker says the provider returned 401 for token sk-secret"
+
+    @pytest.mark.parametrize(
+        ("goal_fields", "run_status", "state_line"),
+        [
+            pytest.param({}, "running", "In progress.", id="in-progress"),
+            pytest.param({"last_evaluation": {"satisfied": False, "stand_down_reason": "blocked:needs_user_input"}}, "pending", "In progress.", id="in-flight-run-hides-earlier-stand-down"),
+            pytest.param({"continuation_count": 2, "last_evaluation": {"satisfied": False}}, "running", "In progress: auto-continued 2/8 times.", id="continuing"),
+            pytest.param({"continuation_count": 8, "last_evaluation": {"satisfied": False, "stand_down_reason": "max_continuations_reached"}}, "success", "Stopped: the continuation limit was reached.", id="stopped-at-limit"),
+            pytest.param({"last_evaluation": {"satisfied": False, "stand_down_reason": "no_progress_detected"}}, "success", "Stopped: no progress was made between turns.", id="stopped-no-progress"),
+            pytest.param({"max_continuations": 0, "last_evaluation": {"satisfied": False, "stand_down_reason": "max_continuations_reached"}}, "success", "Stopped: the goal is not met yet.", id="stopped-auto-continue-off"),
+            pytest.param({"last_evaluation": {"satisfied": False, "stand_down_reason": "blocked:needs_user_input"}}, "success", "Waiting for you: it needs your input.", id="waiting-for-you"),
+            pytest.param({"last_evaluation": {"satisfied": False, "stand_down_reason": "blocked:external_wait"}}, "error", "Waiting: it is waiting on something external.", id="waiting"),
+            pytest.param({"last_evaluation": {"satisfied": False, "stand_down_reason": "no_durable_end_of_turn"}}, "success", "No final reply was saved. It's checked again after your next message.", id="unchecked"),
+            pytest.param({"last_evaluation": {"satisfied": False, "stand_down_reason": "a_code_from_a_newer_server"}}, "success", "Stopped.", id="unknown-code-is-not-shown"),
+            pytest.param({"continuation_count": 3, "last_evaluation": {"satisfied": False}}, "success", "Paused: auto-continued 3/8 times; the run ended before the goal was confirmed.", id="paused"),
+            pytest.param({}, "success", None, id="set"),
+        ],
+    )
+    def test_status_reports_goal_state_like_the_web_goal_bar(self, monkeypatch, goal_fields, run_status, state_line):
+        goal = {"objective": "ship it", "status": "active", "continuation_count": 0, "max_continuations": 8, **goal_fields}
+        if "last_evaluation" in goal:
+            goal["last_evaluation"] = {**goal["last_evaluation"], "reason": self._EVALUATOR_NOTE}
+        calls = []
+        self._install_mock_httpx(monkeypatch, calls, goal_payload=goal, runs=[{"run_id": "r-1", "status": run_status}])
+
+        async def go():
+            manager = self._make_manager(monkeypatch, thread_id="t-1")
+            reply = await manager._handle_goal_command(self._msg("/goal"), "")
+            assert reply == "\n".join(["Goal: ship it"] + ([state_line] if state_line else []))
+            assert "401" not in reply and "secret" not in reply
+
+        _run(go())
+
+    @pytest.mark.parametrize(
+        ("relied_on_assumption", "expected"),
+        [(False, "Goal met: ship it"), (True, "Goal met, with an assumption: ship it")],
+    )
+    def test_status_reports_a_met_goal_from_its_outcome_record(self, monkeypatch, relied_on_assumption, expected):
+        # A met goal is cleared (GET /goal says none) and recorded as goal_outcome.
+        outcome = {
+            "status": "achieved",
+            "objective": "ship it",
+            "goal_created_at": "2026-10-26T08:00:00Z",
+            "achieved_at": "2026-10-26T08:30:00Z",
+            "continuation_count": 1,
+            "max_continuations": 8,
+            "reason": self._EVALUATOR_NOTE,
+            "relied_on_assumption": relied_on_assumption,
+            "reply_message_id": "ai-1",
+        }
+        calls = []
+        self._install_mock_httpx(monkeypatch, calls, goal_payload=None, state_values={"goal_outcome": outcome})
+
+        async def go():
+            manager = self._make_manager(monkeypatch, thread_id="t-1")
+            reply = await manager._handle_goal_command(self._msg("/goal"), "")
+            assert reply == expected
+            assert [call["url"].removeprefix("http://gateway:8001") for call in calls] == ["/api/threads/t-1/goal", "/api/threads/t-1/state"]
 
         _run(go())
 
@@ -13502,6 +13730,59 @@ class TestHandleGoalCommand:
             manager = self._make_manager(monkeypatch, thread_id="t-1")
             reply = await manager._handle_goal_command(self._msg("/goal"), "")
             assert reply == "No active goal."
+
+        _run(go())
+
+    @pytest.mark.parametrize(("state_status", "expected"), [(404, "No active goal."), (500, "Failed to fetch goal information.")])
+    def test_status_when_the_thread_state_cannot_be_read(self, monkeypatch, state_status, expected):
+        # 404: a bound thread with no checkpoint yet, so nothing was ever met there.
+        calls = []
+        self._install_mock_httpx(monkeypatch, calls, goal_payload=None, state_status=state_status)
+
+        async def go():
+            manager = self._make_manager(monkeypatch, thread_id="t-1")
+            assert await manager._handle_goal_command(self._msg("/goal"), "") == expected
+
+        _run(go())
+
+    def test_goal_replies_follow_the_owner_language(self, monkeypatch):
+        from dataclasses import replace
+
+        from app.channels.reply_locale import ReplyLocaleResolver
+
+        lookups = []
+
+        class _Preferences:  # stands in for the user_preferences table
+            def __init__(self, sessions):
+                pass
+
+            async def get(self, user_id):
+                lookups.append(user_id)
+                return {"locale": "zh-CN"} if user_id == "owner-zh" else {}
+
+        monkeypatch.setattr("app.channels.reply_locale.UserPreferencesRepository", _Preferences)
+        stopped = {"objective": "写周报", "status": "active", "continuation_count": 8, "max_continuations": 8, "last_evaluation": {"satisfied": False, "stand_down_reason": "max_continuations_reached"}}
+        outcome = {"status": "achieved", "objective": "写周报", "goal_created_at": "", "relied_on_assumption": False}
+        resolver = ReplyLocaleResolver(session_factory=object(), default_locale="en-US")
+
+        async def reply(args, owner, **mock):
+            calls = []
+            self._install_mock_httpx(monkeypatch, calls, **mock)
+            manager = self._make_manager(monkeypatch, thread_id="t-1", reply_locale=resolver)
+            msg = replace(self._msg(f"/goal {args}".strip()), owner_user_id=owner)
+            return await manager._handle_goal_command(msg, args)
+
+        async def go():
+            assert await reply("", "owner-zh", goal_payload=stopped) == "目标：写周报\n已停止：已达到继续处理的次数上限。"
+            assert await reply("", "owner-zh", goal_payload=None, state_values={"goal_outcome": outcome}) == "目标已达成：写周报"
+            assert await reply("", "owner-zh", goal_payload=None) == "当前没有目标。"
+            assert await reply("", "owner-zh", fail_method="get") == "无法获取目标信息。"
+            assert await reply("clear", "owner-zh") == "目标已清除。"
+            assert await reply("clear", "owner-zh", fail_method="delete") == "无法清除目标。"
+            assert await reply("do X", "owner-zh", fail_method="put") == "无法设置目标。"
+            # No language preference: the configured default (en-US here).
+            assert await reply("", "owner-en", goal_payload=stopped) == "Goal: 写周报\nStopped: the continuation limit was reached."
+            assert set(lookups) == {"owner-zh", "owner-en"}
 
         _run(go())
 

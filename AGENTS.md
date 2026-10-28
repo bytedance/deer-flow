@@ -44,6 +44,10 @@ redirect `make dev`'s port wait. Nginx's IPv4+IPv6 `default_server` and Gateway'
 Require explicit bind addresses for new published ports;
 `backend/tests/test_compose_default_bind_host.py` pins every service in both files.
 
+Provisioner PVC mode declares `USERDATA_PVC_NAME` once as `user-data`; extra and
+Lark broker credential mounts reuse it with their existing subPaths and read-only
+flags. Keep credential mounts broker-only and keep distinct volumes in hostPath mode.
+
 ## Repository Map
 
 ```
@@ -91,12 +95,11 @@ hard-code business logic into core. Working examples:
 AgentRuns; POSIX, one process/store; approval and session-authorized recovery; uncertain admissions need reconciliation;
 no multi-Gateway failover or hard currency budget.
 
-Knowledge management is an optional extension at
-`examples/deerflow-extension-knowledge-management/` (see its `AGENTS.md` and
-`CONTRACT.md`). It uses existing plugin/router/principal extension points;
-retrieval has no management dependency. Writes require explicit administrator
-resource/operation grants and upstream authorization. Provider-managed stages
-are not completion evidence; uncertain writes must be reconciled, not retried.
+Knowledge management/space policy: `examples/deerflow-extension-knowledge-{management,platform}/`
+(scoped `AGENTS.md`, `CONTRACT.md`). Use existing plugin/router/principal contracts;
+retrieval stays independent. Space policy intersects administrator/resource/operation
+and upstream grants, never grants chat access. SQLite holds plugin-owned space policy.
+Provider stages are not completion evidence; reconcile uncertain writes, never retry.
 
 Root runtime configs: copy `config.example.yaml` → `config.yaml` and
 `extensions_config.example.json` → `extensions_config.json` (MCP/skills).
@@ -223,11 +226,13 @@ Repo-wide conventions:
 - **Test-driven development** — features and bug fixes ship with tests. Backend tests live
   in `backend/tests/` (TDD is mandatory there; see [backend/AGENTS.md](backend/AGENTS.md));
   frontend tests live in `frontend/tests/`.
+  Skill-creator tests must preserve YAML values/body, restore bytecode settings,
+  and check invalid metadata through offline CLI subprocesses.
   Public skill script regressions live in `tests/skills/` and run in Skill Review CI
   independently of package review. Exercise dependency fallbacks with the optional
   import unavailable and mock HTTP transport to keep tests offline.
-  Video- and podcast-generation CLI failures must exit non-zero and write diagnostics to stderr;
-  keep success output on stdout and test the CLI boundary with offline transport.
+  Video, podcast, and chart-visualization CLI failures exit non-zero;
+  diagnostics on stderr, success URLs on stdout; test offline.
 - **Before pushing** — backend `make format`, frontend `pnpm check`.
   Backend CI enforces `ruff format --check`.
 - **Skill text encoding** — use explicit UTF-8 for textual skill resources.

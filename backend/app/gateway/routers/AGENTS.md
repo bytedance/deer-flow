@@ -1,5 +1,19 @@
 # Router contracts
 
+`GET /api/plugins/diagnostics` uses `require_admin_user` before reading the
+canonical runtime diagnostic snapshot. Return bounded entry-point identifiers,
+known levels and fixed summaries; raw messages stay in logs. Never clear the
+sink or expand PAT permissions.
+
+Branch metadata inherits valid `assistant_id` values verbatim. Validate with
+`custom_agent_name` and clear invalid legacy values to null in the new row;
+leave the source record unchanged.
+
+Console usage attributes legacy rows without a per-model usage map to
+`model_name`, including their recorded `total_input_tokens`. Accumulate those
+inputs with newer usage buckets for the same model; do not infer cache hits.
+Regression coverage lives in `tests/test_console_router.py`.
+
 Shared scheduled-task update validation preserves an unchanged future `once`
 instant on a live task inside `scheduler.min_once_delay_seconds`; new/changed
 instants and terminal reactivation still enforce the minimum delay.
@@ -79,3 +93,8 @@ State updates synchronize titles into thread metadata only for the root checkpoi
 namespace. Nonroot writes preserve the conversation title, branch-title sequence
 and activity timestamp. `tests/test_threads_router.py` checks metadata/search
 isolation and root title synchronization in full and delta modes.
+
+Unauthenticated auth routes (`/register`, `/setup-status`, `/providers`,
+`/oauth/{provider}`, `/callback/{provider}`, the `/login/local` throttle) read
+`get_app_config()` through `asyncio.to_thread`: each read stats and hashes the
+config files. Coverage: `tests/blocking_io/test_auth_router_config_reads.py`.

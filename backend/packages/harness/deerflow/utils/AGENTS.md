@@ -1,3 +1,18 @@
+### Readability Fallback
+
+`readability.py` caches the optional Readability.js availability probe. If the
+Node extractor is unavailable, its probe raises, or an attempted extraction
+cannot launch Node, subsequent calls in that process use readabilipy's Python
+fallback without retrying Node. A non-zero Node exit can be document-specific,
+so it falls back only for that document and later documents retry Node. If a
+future readabilipy version removes the private availability probe, log that
+once at import and attempt extraction instead of silently disabling Node. Keep
+successful Node extraction unchanged and allow unexpected parser/programming
+exceptions to propagate. The resolved-body fallback preserves article links
+when Python extraction returns the original document wrapper. Regression
+coverage lives in `tests/test_readability.py` and
+`tests/test_web_fetch_relative_links.py`.
+
 ### Atomic Byte Publication
 
 `atomic_write.publish_bytes_atomically` owns browser screenshot and Browserless
@@ -101,6 +116,15 @@ Display summaries use `strip_leading_think_blocks` before limiting text;
 
 ### Agent / Tool Assembly Off-Load
 
+One-shot input-polish, follow-up-suggestion, and project-file-summary helpers
+build providers through `run_assembly` before awaiting inference. Provider
+construction can read local credentials; keep it off the event loop and the
+default executor while preserving request context. Cancellation during
+construction must not start inference. This contract covers callers of
+`oneshot_llm.py`; standalone skill-moderation and goal-evaluator constructors
+are separate sites and are not covered by this offload.
+Coverage: `tests/blocking_io/test_oneshot_llm_offloop.py`.
+
 `start_run` also resolves the factory through `run_assembly` before admission:
 cold imports cannot occupy the loop or its default pool, and import errors
 cannot admit a run. `tests/blocking_io/test_agent_factory_resolve_offloop.py`
@@ -173,12 +197,16 @@ retain their existing portability exemptions.
 ### Advisory File Lock Retries
 
 `file_lock.retry_until_locked` owns contention-only acquisition retries for the
-Windows Lark and extension-manager locks and bounded skill-projection reads.
+Windows Lark, extension-manager and channel runtime-config locks and bounded
+skill-projection reads.
 Retry only EACCES/EAGAIN/EDEADLK; other errors propagate without sleeping.
 Keep per-caller policies: Lark has a 15-minute Windows file-lock deadline,
-extension management waits indefinitely, and skill export retains its existing
-deadline, 0.02-second cadence and cancellation check. Clocks and sleeps are
-injectable; tests must not patch the shared stdlib time module.
+extension management and channel runtime config wait indefinitely, and skill
+export retains its existing deadline, 0.02-second cadence and cancellation
+check. Clocks and sleeps are injectable; tests must not patch the shared stdlib
+time module.
+The channel caller wraps its injected sleep to warn once after 50 contention
+retries; the helper remains responsible for error classification and cadence.
 
 `parse_retry_after_date_ms(raw, now=...)` owns HTTP-date parsing for Claude, Codex
 and LLM error middleware. Interpret timezone-less asctime as UTC and apply the

@@ -12,6 +12,7 @@ from langgraph.runtime import Runtime
 
 from deerflow.agents.human_input import HUMAN_INPUT_RESPONSE_KEY
 from deerflow.agents.memory import get_memory_manager
+from deerflow.agents.memory.locale import with_memory_locale
 from deerflow.agents.middlewares.pii_redaction_middleware import _make_redactor, _redact_content, _Redactor
 from deerflow.config.memory_config import get_memory_config
 from deerflow.config.pii_redaction_config import PiiRedactionConfig
@@ -187,7 +188,7 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
         runtime_context = runtime.context if isinstance(runtime.context, dict) else {}
         trace_id = resolve_trace_id(runtime_context.get(DEERFLOW_TRACE_METADATA_KEY))
 
-        return thread_id, self._redact_queued_messages(messages), user_id, trace_id
+        return thread_id, with_memory_locale(self._redact_queued_messages(messages), runtime.context), user_id, trace_id
 
     def _redact_queued_messages(self, messages: list) -> list:
         """Redact the conversation payload queued for extraction (#3190 vector 5)."""

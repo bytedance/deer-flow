@@ -1,15 +1,21 @@
 ### Tool System (`packages/harness/deerflow/tools/`)
 
+`skill_manage_tool.py` stages candidate text with UTF-8 and `newline=""`,
+matching skill storage. Scan the exact submitted bytes for `SKILL.md` and
+supporting files, including overlays on existing trees.
+`tests/test_text_writes_keep_lf_bytes.py` emulates Windows writes and compares
+scanner input with published bytes for LF and CRLF content.
+
 Artifact capture accepts standard top-level `url`/`mime_type` content blocks and
 legacy `source.url`/`source.mime_type`. A present top-level `url` selects that
 shape, even when invalid; never mix its MIME metadata with a conflicting legacy
 source. Both shapes use the existing referenceability gate and per-result deduplication.
 
 Free-text sandbox paths retain spaces inside matching ASCII/curly quote pairs,
-backticks or backslash-escaped wrappers. Exclude wrapper escapes without stripping
-literal path backslashes. Reject Python line boundaries and tabs; bound delimiter
-searches to the same line so later refs survive. Preserve bare-token boundaries
-and structured refs. Tests: `tests/test_artifact_registry.py`.
+CJK corner brackets, backticks or backslash-escaped wrappers. Exclude wrapper
+escapes without stripping literal path backslashes. Reject Python line boundaries
+and tabs; bound delimiter searches to the same line so later refs survive.
+Preserve bare-token boundaries and structured refs. Tests: `tests/test_artifact_registry.py`.
 
 `artifact_registry.py` checks remote file suffixes against the complete parsed
 URL path without case sensitivity. Free-text URL and sandbox-path extraction

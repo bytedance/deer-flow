@@ -1,5 +1,14 @@
 # Backend Tests
 
+`test_lark_broker_image.py` stages Python files from the broker Dockerfile's
+final-stage COPY instructions. Run shim installation and the health endpoint
+under `-I -S`, adding only the staged script directory to the import path;
+repository paths or installed Harness packages would hide missing image files.
+
+When adding a scoped `AGENTS.md`, update `EXPECTED_GUIDANCE_PATHS` in
+`test_agent_guidance_check.py` in the same change. The explicit inventory pins
+guidance ownership and extends hard-budget checks to each approved guide.
+
 `test_image_result_url_safety.py` drives GroundRoute through `ainvoke` and an
 offline HTTPX transport. Patch only the provider's `httpx` reference; preserve
 the shared client and exercise real configuration resolution and URL screening.
@@ -14,7 +23,35 @@ ownership and capture cleanup. Retain the real XLSX conversion coverage.
 
 Backend tests must preserve the runtime invariants they exercise without changing production execution topology.
 
+Provider cleanup tests use concrete configuration models and event gates.
+Surface owner-task failures while awaiting lifecycle events; join owners and
+event waiters during teardown.
+
+`test_bench_sandbox_prewarm.py` controls observation timestamps through the
+benchmark module's clock binding. Keep asyncio's clock real, initialize
+`Trace.started` from the controlled clock, and advance ticks at event gates.
+
+`test_doctor_script.py` runs a copied doctor from a temporary checkout with an
+empty-model config. Drop inherited `DEER_FLOW_*`, `PYTHONPATH` and `PYTHONHOME`
+from child processes; cover help, invalid flags, normal reporting and an
+unrelated parent config that stays untouched. Keep argument parsing at the CLI
+entry point so in-process `doctor.main()` callers do not consume pytest's argv.
+
+`test_run_terminal_protocol.py` exercises authoritative `run.terminal`
+evidence through real Worker finalization and recovery takeover. Keep final
+commit authority, producer drain, singleton confirmation, and Seal boundaries
+observable. Recovery coverage must block after the committed claim, delete the
+Run/events, then prove the lifecycle guard cannot recreate terminal history;
+pin delivery-before-terminal order across all takeover entry points, and keep a
+legacy `put_if_absent` signature on the owner path. `test_terminal_event_confirmation.py`
+covers supported stores, non-replaceable one-shot recovery targets, and guarded
+singleton rejection; use `TEST_POSTGRES_URI` for independent PostgreSQL pools
+and real advisory contention. Release all storage/producer gates before bounded
+cleanup, preserve healthy controls in refusal cases, and retain Journal/Seal
+compatibility coverage. Protocol: [Run outcome](../docs/RUN_EVENT_STREAM.md#authoritative-run-outcome).
 `test_goal_loop_stop_probe.py` runs the standalone Goal-loop reproduction through the native graph, loop middleware, worker and checkpoints. Only model responses are scripted; do not replace the Goal decision or simulate the stop-reason write.
+
+`test_run_recursion_capped.py` drives a real graph through the worker until LangGraph raises `GraphRecursionError`. Only model responses are scripted; do not raise the error or write the stop reason by hand.
 
 InfoQuest fetch log assertions install the real `UrlRedactionFilter` on the
 capture handler with fixture-scoped cleanup. Expect scheme/host context with
@@ -89,6 +126,11 @@ Upload case-collision coverage uses separate HTTP requests and preserves both
 reported payloads. Observe real filename-claim inputs to pin the disk seed;
 case-insensitive hosts can otherwise mask a missing seed through link retries.
 
+Same-name upload concurrency tests synchronize the first real claim: `os.open`
+for direct writes and `os.link` for staged copies. Cover native/fallback options,
+fresh/occupied copy names, every caller's exact bytes and no staging leftovers.
+Drain workers and abort barriers on failure; do not rely on scheduling or sleeps.
+
 Channel reload cancellation regressions must assert the worker returned the
 stale snapshot before checking that newer runtime config survived. Completion
 alone cannot prove the race: loader exceptions are caught and return `None`.
@@ -135,11 +177,26 @@ path reaches the native fixture so an unresolved-host rejection cannot mask it.
 The IPv4 fixture accepts only `AF_UNSPEC` and `AF_INET`; unsupported families
 must fail rather than receive a fabricated IPv4 answer.
 
+Async community tools read their config off the loop, once per call.
+`blocking_io/test_community_tool_config_reads.py` swaps each module's
+`get_app_config` for a loader that records its thread before a real file read,
+so a read the gate stops on the loop still counts; add new async tools there.
+The gate only flags IO under `deerflow.*`/`app.*` frames, so its meta-check
+calls a tool's sync config helper.
+
 The local sandbox's UTF-8 subprocess guard inspects each text-mode call with
 `ast`, checking both `encoding` and `errors`; module-wide literal counts can
 hide unpinned calls behind unrelated settings.
 Channel JSON state coverage likewise checks each writer and Discord reader call
 within its owning class/method; unrelated encoding literals must not mask a regression.
+
+## Project trash purge
+
+Purge regressions use real original/companion files and the repository transaction.
+Inject initial and persistent unlink failures to exercise Windows retry semantics
+on every platform; assert rollback and a later successful purge. Plant real links
+with `support.symlinks.symlink_or_skip`, preserve target bytes/modes, and cover
+dangling links and removal before retry. Keep filesystem work off the event loop.
 
 ## PostgreSQL batch fixtures
 
@@ -156,6 +213,13 @@ The 0033 batch-evidence migration fixture uses the same adapter. Its connection
 contract probes execute the actual migration test setup through SQLAlchemy's
 dialect argument conversion, stopping before database acquisition; the real
 SQLite/PostgreSQL cases still exercise upgrade, downgrade and re-upgrade.
+
+## DingTalk stream tasks
+
+DingTalk stream lifecycle tests drive `_serve_stream` with a fake websocket and
+real handler tasks. Use events to pin pending-task retention, completion cleanup,
+logged failures and quiet cancellation; drain handlers and keepalive tasks even
+when an assertion fails.
 
 ## Real Compose tests
 
@@ -334,6 +398,18 @@ against DeepSeek only with `DEER_FLOW_RUN_LIVE_TESTS=1` and
 committed evidence. A passing connectivity probe does not establish full agent
 compatibility; distinguish protocol assertions from observed live behavior.
 
+## Readability fallback regressions
+
+`test_web_fetch_relative_links.py` simulates degraded extraction without requiring
+Windows. The link-free article companion must retain the extractor's exact HTML
+and exclude resolved navigation links from Markdown; checking for raw `href=`
+attributes after Markdown conversion cannot detect an unwanted fallback.
+
+The authority-tag census also scans parser regexes as raw source. Classify
+Readability's ordinary HTML body tag as a reviewed test exemption, with markup
+preservation and nested framework-tag neutralization covered in
+`test_input_sanitization_middleware.py`.
+
 ## Classification request packing
 
 Pin the Jev example's outbound byte budget against captured HTTP request bodies.
@@ -414,3 +490,20 @@ Multi-instance harness tests use `support.shell.require_script_bash()` for shell
 smoke checks. Keep config content and secret stability checks portable; isolate
 POSIX owner-only permission assertions so Windows skips only those checks.
 Nginx path expectations must include quoted-string escaping for native paths.
+
+## Launcher dotenv parsing
+
+`serve.sh` never sources root `.env`: stdlib-only `scripts/dotenv_exports.py`
+(host Python, before `uv sync`) tokenizes it like python-dotenv, keeps `.env`
+over shell exports and the `$NAME`/`${NAME:-x}`/leading-`~` expansion that
+`support_bundle.py` mirrors (keep both expanders in step), and prints
+shell-quoted exports for `eval`. `test_serve_dotenv.py` and the launcher-block
+cases in `test_support_bundle.py` run the real block; harnesses that copy
+`serve.sh` with a `.env` must copy the parser too.
+
+## Channel artifact turn sequencing
+
+`test_channels.py` models consecutive artifact-producing turns by awaiting an
+async outbound callback before sending the next inbound message. Keep the real
+worker-pool concurrency, preserve per-turn artifact assertions, and stop the
+manager in `finally` so a failure cannot leave tasks using a closed test loop.

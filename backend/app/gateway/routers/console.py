@@ -528,6 +528,7 @@ async def console_usage(
             # Legacy rows predating token_usage_by_model: fall back to the run's model.
             entry = by_model.setdefault(row.model_name, ConsoleUsageModelBreakdown())
             entry.tokens += run_tokens
+            entry.input_tokens += row.total_input_tokens or 0
             entry.runs += 1
             if run_cost is not None:
                 entry.cost = round((entry.cost or 0.0) + run_cost, 6)
