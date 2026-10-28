@@ -1411,6 +1411,28 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
   channel's own bounded token, and a token failure while streaming falls back
   to a Markdown reply instead of dropping the update. ([#7597])
 
+- **web fetch:** Cache unavailable Readability.js probes and stop retrying the
+  Node extractor after a process-launch failure. Installations without a
+  working Node/npm toolchain now use the existing link-preserving Python
+  fallback on later fetches without repeating the failed subprocess probe;
+  document-specific non-zero exits still retry Node on later pages. ([#5973])
+  
+- **scripts:** `make dev` and `make start` no longer run the checkout `.env`
+  as a shell script. `serve.sh` sourced it, so `$$` became the shell's PID,
+  backticks and `$(...)` ran commands, and an unquoted value with a space ran
+  its second word as a command and stopped the launcher with exit 127. Those
+  values also beat the Gateway's own `.env` read, so a `$$` in
+  `AUTH_JWT_SECRET` changed the secret on every launch. The launcher now
+  parses `.env` like python-dotenv, keeps its precedence over shell exports and
+  its `$NAME`, `${NAME:-default}` and leading `~` expansion, and leaves `$$`,
+  backticks and `$(...)` as written. ([#7606])
+
+- **channels:** IM replies that present files no longer resolve those files
+  on the event loop. For every artifact, both reply paths (`runs.wait` and
+  streaming) resolved the virtual path (`realpath`), resolved the outputs
+  root and checked the file with `stat` inline, stalling other channels and
+  requests on network-backed storage. They now do it in a worker. ([#7594])
+  
 - **channels:** A streamed Feishu reply no longer rewrites the same thread
   bindings on every chunk. Each outbound to the running card stored all of
   the reply's aliases again (about five `set_thread_id` writes per chunk: a
@@ -12595,6 +12617,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5965]: https://github.com/bytedance/deer-flow/pull/5965
 [#5966]: https://github.com/bytedance/deer-flow/pull/5966
 [#5968]: https://github.com/bytedance/deer-flow/pull/5968
+[#5973]: https://github.com/bytedance/deer-flow/issues/5973
 [#5977]: https://github.com/bytedance/deer-flow/pull/5977
 [#5978]: https://github.com/bytedance/deer-flow/pull/5978
 [#5980]: https://github.com/bytedance/deer-flow/pull/5980
@@ -13205,4 +13228,6 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7588]: https://github.com/bytedance/deer-flow/pull/7588
 [#7591]: https://github.com/bytedance/deer-flow/pull/7591
 [#7593]: https://github.com/bytedance/deer-flow/pull/7593
+[#7594]: https://github.com/bytedance/deer-flow/pull/7594
 [#7597]: https://github.com/bytedance/deer-flow/pull/7597
+[#7606]: https://github.com/bytedance/deer-flow/pull/7606

@@ -1416,7 +1416,11 @@ def _prepare_artifact_delivery(
     *,
     user_id: str | None = None,
 ) -> tuple[str, list[ResolvedAttachment]]:
-    """Resolve attachments and append filename fallbacks to the text response."""
+    """Resolve attachments and append filename fallbacks to the text response.
+
+    Blocking: every artifact is resolved through ``realpath`` and checked with
+    ``stat``, so the async reply paths call this through ``asyncio.to_thread``.
+    """
     attachments: list[ResolvedAttachment] = []
     if not artifacts:
         return response_text, attachments
@@ -3472,7 +3476,7 @@ class ChannelManager:
         # Reuse the storage owner cached at the top of _handle_chat so uploads and
         # artifact delivery always resolve to the same bucket, even if a future
         # channel.receive_file returns a rewritten InboundMessage.
-        response_text, attachments = _prepare_artifact_delivery(thread_id, response_text, artifacts, user_id=storage_user_id)
+        response_text, attachments = await asyncio.to_thread(_prepare_artifact_delivery, thread_id, response_text, artifacts, user_id=storage_user_id)
 
         if not response_text:
             if attachments:
@@ -3646,7 +3650,7 @@ class ChannelManager:
             # Reuse the storage owner resolved by _handle_chat so artifact delivery
             # matches the upload bucket and we avoid re-running _safe_user_id_for_run
             # (and its possible filesystem touch) on the streaming-error path.
-            response_text, attachments = _prepare_artifact_delivery(thread_id, response_text, artifacts, user_id=storage_user_id)
+            response_text, attachments = await asyncio.to_thread(_prepare_artifact_delivery, thread_id, response_text, artifacts, user_id=storage_user_id)
             if step_limit_text:
                 # The last text is mid-task narration: say the run stopped, in
                 # place of the generic failure, so the user knows to continue.

@@ -270,6 +270,14 @@ fences, including unclosed fences, in complete and streamed replies.
    Newly saved models are enabled and immediately refresh existing chat and Agent
    model selectors, without editing YAML or restarting the Gateway.
 
+   The Moonshot (China) preset recognizes `kimi-k3.1-pro` and
+   `kimi-k3.1-pro-highspeed` with required thinking, image input and native
+   `low` / `high` / `max` reasoning effort (default `max`). Thinking stays on
+   even when a caller requests it off. Requests to the official endpoint omit
+   the unsupported thinking switch and fixed sampling parameters. See the
+   [model registration reference](backend/docs/CONFIGURATION.md#models-registered-through-the-web)
+   for the image-input and parameter constraints.
+
    **Custom OpenAI-compatible** still supports existing/custom base URLs and
    unauthenticated endpoints. **Advanced settings** retains display name, token
    limits and vision overrides; unknown IDs do not receive invented capabilities.
@@ -465,6 +473,12 @@ fences, including unclosed fences, in complete and streamed replies.
    TAVILY_API_KEY=your-tavily-api-key
    ```
 
+   `make dev` and `make start` read `.env` as data, never as a shell script, so a
+   value means what the Gateway reads: `$$`, backticks and `$(...)` stay as
+   written, and an unquoted value may contain spaces. `$NAME`, `${NAME}`,
+   `${NAME:-default}` and an unquoted leading `~` still expand, and
+   single-quoted values stay literal.
+
    </details>
 
 For an explicit backend dotenv file, export `DEER_FLOW_ENV_FILE` before startup,
@@ -488,6 +502,13 @@ Custom blob storage backends accept `blob_storage.backend: module.Class` or
 `module:Class`, including a single `.py` module importable by the Gateway.
 The selected class must implement `BlobStore`; backend options go under
 `blob_storage.backend_config`. See [blob storage](backend/docs/blob-storage.md).
+
+Viewed-image artifact URLs can use shared blobs when the serving Gateway lacks
+the local file. This fallback requires an existing thread record accessible to
+the caller; deleting that record revokes access even if checkpoint cleanup fails.
+When blob storage is disabled, a missing local file returns 404 without loading
+checkpoint state. Shared-store failures also return 404 and emit a warning with
+the exception type, without backend error details.
 
 ### Running the Application
 
@@ -1719,6 +1740,8 @@ validated or converted, and provider-specific format restrictions still apply.
 
 The [music-generation skill](skills/public/music-generation/SKILL.md#output-handling) preserves existing output when the provider returns malformed, empty or unrecognized audio.
 
+The bundled skill-creator description optimizer reads YAML frontmatter consistently with skill validation, preserving quoted strings and multiline descriptions. Its scripts require PyYAML, as does the skill package validator. Invalid skill metadata is reported on stderr with a nonzero exit status rather than a traceback.
+
 Skills are loaded progressively — only when the task needs them, not all at once. This keeps the context window lean and makes DeerFlow work well even with token-sensitive models.
 
 The bundled video-generation command reports failures on stderr and exits with
@@ -2018,6 +2041,13 @@ Extra requests may consume quota or incur cost. See
 
 When using Tavily for `web_fetch`, extracted pages without a title use their URL
 as the heading; their content remains available to the agent.
+For providers that use the shared Readability extractor, Readability.js is
+optional. DeerFlow caches an unavailable Node.js toolchain or failed process
+launch and uses the existing Python fallback for later fetches instead of
+repeatedly starting a missing toolchain. A non-zero extraction exit falls back
+only for that document, because malformed or oversized input can fail while
+the toolchain remains healthy. The fallback keeps resolved article links in
+the returned Markdown.
 Chat tool-step titles accept leading blank lines and up to three spaces before
 a page's first H1 heading. Indented code, including mixed spaces and tabs, is
 not used as a title; the tool step falls back to the URL.

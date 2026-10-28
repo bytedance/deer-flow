@@ -1122,6 +1122,22 @@
   流；钉钉无响应时会一直阻塞。现在卡片调用使用渠道自身带超时的 token，流式更新时 token 获取失败
   会回退为 Markdown 回复，而不是丢弃这次更新。([#7597])
 
+- **网页抓取：** 缓存 Readability.js 不可用的探测结果，并在 Node 抽取器首次出现
+  进程启动失败后停止重试。没有可用 Node/npm 工具链的安装环境会在后续抓取中直接使用
+  现有且保留链接的 Python 回退，不再重复执行失败的子进程探测；单篇文档导致的非零退出
+  仍会在后续页面重试 Node。([#5973])
+  
+- **脚本：** `make dev` 和 `make start` 不再把检出目录的 `.env` 当作 shell 脚本执行。此前
+  `serve.sh` 用 `source` 读取它，`$$` 会变成 shell 的 PID，反引号和 `$(...)` 会执行命令，未加引号
+  且含空格的值会把第二个词当作命令运行，启动脚本以退出码 127 中止。这些值还会覆盖 Gateway
+  自己读取的 `.env`，例如 `AUTH_JWT_SECRET` 中的 `$$` 会让密钥每次启动都变化。现在启动脚本按
+  python-dotenv 的规则解析 `.env`，保留其优先于 shell 导出变量的行为以及 `$NAME`、
+  `${NAME:-default}` 和开头 `~` 的展开，`$$`、反引号和 `$(...)` 则保持原样。([#7606])
+
+- **渠道：** 展示文件的 IM 回复不再在事件循环上解析这些文件。此前两条回复路径（`runs.wait`
+  和流式）都会对每个产物内联解析虚拟路径（`realpath`）、解析输出根目录并用 `stat` 检查文件，
+  在网络存储上会让其他渠道和请求停顿。现在这些工作在工作线程中进行。([#7594])
+  
 - **渠道：** 飞书流式回复不再在每个分块上重写相同的线程绑定。此前每次向运行中卡片发送消息都会
   重新保存该回复的全部别名（每个分块约五次 `set_thread_id`：每次都是在存储锁下完整重写
   `store.json`，或一次数据库 upsert），而实际只有 `updated_at` 变化。现在非最终分块对每个
@@ -9921,6 +9937,7 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#5965]: https://github.com/bytedance/deer-flow/pull/5965
 [#5966]: https://github.com/bytedance/deer-flow/pull/5966
 [#5968]: https://github.com/bytedance/deer-flow/pull/5968
+[#5973]: https://github.com/bytedance/deer-flow/issues/5973
 [#5977]: https://github.com/bytedance/deer-flow/pull/5977
 [#5978]: https://github.com/bytedance/deer-flow/pull/5978
 [#5980]: https://github.com/bytedance/deer-flow/pull/5980
@@ -10525,10 +10542,11 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7530]: https://github.com/bytedance/deer-flow/pull/7530
 [#7557]: https://github.com/bytedance/deer-flow/pull/7557
 [#7560]: https://github.com/bytedance/deer-flow/pull/7560
-[#7580]: https://github.com/bytedance/deer-flow/pull/7580
 [#7576]: https://github.com/bytedance/deer-flow/pull/7576
 [#7580]: https://github.com/bytedance/deer-flow/pull/7580
 [#7588]: https://github.com/bytedance/deer-flow/pull/7588
 [#7591]: https://github.com/bytedance/deer-flow/pull/7591
 [#7593]: https://github.com/bytedance/deer-flow/pull/7593
+[#7594]: https://github.com/bytedance/deer-flow/pull/7594
 [#7597]: https://github.com/bytedance/deer-flow/pull/7597
+[#7606]: https://github.com/bytedance/deer-flow/pull/7606
