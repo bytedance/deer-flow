@@ -194,7 +194,7 @@ async def _controller():
         assert job["state"] == "completed", job
         assert job.get("physical_stopped") is True and not job.get("cleanup_pending")
         assert evidence["pool_unreleased_after_terminal"] == 0, "shared capacity was not released after the remote B stop"
-        assert job.get("artifact") and job["artifact"].get("uri"), "remote worker publication metadata missing"
+        assert job.get("artifact") and job.get("native_artifact_uri"), "remote worker publication metadata missing"
     finally:
         server.should_exit = True
         await asyncio.gather(serve, return_exceptions=True)
