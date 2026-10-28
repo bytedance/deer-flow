@@ -2,7 +2,7 @@
 
 Implements Route C / RFC-003:
 1. Write-Verify Gate: Pre-execution syntax validation on .py (ast.parse) and .json writes
-   for write_file (non-append) and str_replace (spliced verification).
+   for str_replace (spliced verification).
 2. Error Signature Classifier: Detects classic failure patterns and injects actionable Targeted Hints.
 3. Anti-Doom-Loop: Detects consecutive identical error signatures and A -> B -> A -> B alternating failure loops,
    scoped cleanly by (thread_id, run_id) with bounded LRU tracking.
@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import ast
 import asyncio
-import codeop
 import json
 import logging
 import re
@@ -40,7 +39,7 @@ from deerflow.sandbox.tools import _match_line_endings, read_current_file_conten
 logger = logging.getLogger(__name__)
 
 HARNESS_GUARD_KEY = "deerflow_harness_guard"
-_WRITE_TOOLS = frozenset({"write_file", "str_replace"})
+_WRITE_TOOLS = frozenset({"str_replace"})
 
 type _ScopeKey = tuple[str, str | None]
 
@@ -161,35 +160,7 @@ def classify_tool_error(content: str) -> ErrorSignature | None:
     return None
 
 
-def _is_incomplete_json(content: str) -> bool:
-    """Return True if content appears to be an incomplete JSON fragment (e.g. initial chunk in append flow)."""
-    s = content.rstrip()
-    if not s:
-        return True
-    try:
-        json.loads(s)
-        return False
-    except json.JSONDecodeError as e:
-        # Check if error is at end of input (premature EOF awaiting subsequent chunks)
-        remaining = s[e.pos :].strip()
-        if not remaining:
-            return True
-        for closer in ["]", "}", '"]', '"}', "\n]"]:
-            try:
-                json.loads(s + closer)
-                return True
-            except Exception:
-                pass
-            if s.endswith(","):
-                try:
-                    json.loads(s[:-1] + closer)
-                    return True
-                except Exception:
-                    pass
-        return False
-
-
-def verify_content_syntax(file_path: str, content: str, *, allow_incomplete: bool = False) -> str | None:
+def verify_content_syntax(file_path: str, content: str) -> str | None:
     """Validate content syntax for known formats. Returns error message if invalid."""
     if not file_path or not content:
         return None
@@ -198,14 +169,6 @@ def verify_content_syntax(file_path: str, content: str, *, allow_incomplete: boo
         try:
             ast.parse(content, filename=file_path)
         except SyntaxError as e:
-            # Preserve append-in-chunks flow: incomplete fragment waiting for more input is not blocked
-            if allow_incomplete:
-                try:
-                    code_to_check = content if content.endswith("\n") else content + "\n"
-                    if codeop.compile_command(code_to_check, symbol="exec") is None:
-                        return None
-                except Exception:
-                    pass
             return f"Python syntax error at line {e.lineno}, col {e.offset}: {e.msg}"
         except ValueError as e:
             return f"Python source code error: {e}"
@@ -214,9 +177,6 @@ def verify_content_syntax(file_path: str, content: str, *, allow_incomplete: boo
         try:
             json.loads(content)
         except Exception as e:
-            # Preserve append-in-chunks flow: incomplete JSON prefix is not blocked
-            if allow_incomplete and _is_incomplete_json(content):
-                return None
             return f"Invalid JSON format: {e}"
 
     return None
@@ -318,18 +278,7 @@ class HarnessGuardMiddleware(AgentMiddleware):
 
         err: str | None = None
 
-        if tool_name == "write_file":
-            # Skip validation for append writes: append chunks are often not standalone-parseable
-            if bool(args.get("append", False)):
-                return None
-
-            content = args.get("content") or args.get("text")
-            if not isinstance(content, str):
-                return None
-
-            err = verify_content_syntax(file_path, content, allow_incomplete=True)
-
-        elif tool_name == "str_replace":
+        if tool_name == "str_replace":
             old_str = args.get("old_str")
             new_str = args.get("new_str")
             if isinstance(old_str, str) and isinstance(new_str, str) and (file_path.endswith(".py") or file_path.endswith(".json")):
@@ -339,7 +288,7 @@ class HarnessGuardMiddleware(AgentMiddleware):
                     if old_str in current:
                         replace_all = bool(args.get("replace_all", False))
                         spliced = current.replace(old_str, new_str) if replace_all else current.replace(old_str, new_str, 1)
-                        err = verify_content_syntax(file_path, spliced, allow_incomplete=False)
+                        err = verify_content_syntax(file_path, spliced)
                 except Exception:
                     # Fail open on sandbox read errors and let str_replace handle execution
                     err = None

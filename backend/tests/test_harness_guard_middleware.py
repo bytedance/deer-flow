@@ -140,50 +140,42 @@ class TestSyntaxVerification:
 
 
 class TestHarnessGuardMiddleware:
-    def test_write_verify_blocks_invalid_python(self):
+    def test_write_file_not_syntax_gated_to_preserve_chunking(self):
+        """write_file is never syntax-gated to preserve native append and multi-chunk write flows."""
         middleware = HarnessGuardMiddleware(HarnessGuardConfig(block_on_syntax_error=True))
-        req = _make_request("write_file", {"path": "main.py", "content": "def bad_syntax(:"})
+        # Incomplete or invalid syntax in write_file must pass straight to the handler
+        req_py = _make_request("write_file", {"path": "main.py", "content": "def incomplete(:"})
+        req_json = _make_request("write_file", {"path": "data.json", "content": "{broken json"})
 
         def dummy_handler(r):
             return ToolMessage(content="File written", tool_call_id=r.tool_call["id"], name="write_file")
 
-        res = middleware.wrap_tool_call(req, dummy_handler)
-        assert isinstance(res, ToolMessage)
-        assert res.status == "error"
-        assert "WRITE BLOCKED" in res.content
-        assert HARNESS_GUARD_KEY in res.additional_kwargs
-        assert res.additional_kwargs[HARNESS_GUARD_KEY]["blocked"] is True
-        # Verify normalized tool metadata is stamped
-        assert TOOL_META_KEY in res.additional_kwargs
-        assert res.additional_kwargs[TOOL_META_KEY]["status"] == "error"
+        res_py = middleware.wrap_tool_call(req_py, dummy_handler)
+        assert res_py.content == "File written"
+        assert res_py.status != "error"
 
-    def test_write_verify_skips_when_block_on_syntax_error_false(self):
-        """When block_on_syntax_error is False, pre-execution verification is skipped without parsing."""
+        res_json = middleware.wrap_tool_call(req_json, dummy_handler)
+        assert res_json.content == "File written"
+        assert res_json.status != "error"
+
+    def test_str_replace_skips_when_block_on_syntax_error_false(self):
+        """When block_on_syntax_error is False, pre-execution verification is skipped without blocking."""
         middleware = HarnessGuardMiddleware(HarnessGuardConfig(write_verify_syntax=True, block_on_syntax_error=False))
-        req = _make_request("write_file", {"path": "main.py", "content": "def bad_syntax(:"})
-
-        def dummy_handler(r):
-            return ToolMessage(content="File written", tool_call_id=r.tool_call["id"], name="write_file")
-
-        res = middleware.wrap_tool_call(req, dummy_handler)
-        assert res.content == "File written"
-        assert res.status != "error"
-
-    def test_write_verify_skips_append_chunks(self):
-        """Append writes of middle chunks must not be blocked as invalid syntax."""
-        middleware = HarnessGuardMiddleware(HarnessGuardConfig(block_on_syntax_error=True))
-        # This snippet has unexpected indent if standalone, but is valid in an append chunk
         req = _make_request(
-            "write_file",
-            {"path": "big.py", "content": "    total = a + b\n    return total\n", "append": True},
+            "str_replace",
+            {"path": "module.py", "old_str": "return 42", "new_str": "return ("},
         )
 
         def dummy_handler(r):
-            return ToolMessage(content="Appended successfully", tool_call_id=r.tool_call["id"], name="write_file")
+            return ToolMessage(content="Replaced", tool_call_id=r.tool_call["id"], name="str_replace")
 
-        res = middleware.wrap_tool_call(req, dummy_handler)
+        with patch(
+            "deerflow.agents.middlewares.harness_guard_middleware.read_current_file_content",
+            return_value="def foo():\n    return 42\n",
+        ):
+            res = middleware.wrap_tool_call(req, dummy_handler)
+        assert res.content == "Replaced"
         assert res.status != "error"
-        assert res.content == "Appended successfully"
 
     def test_str_replace_syntax_validation(self):
         """str_replace on .py that introduces broken syntax is blocked."""
@@ -207,6 +199,28 @@ class TestHarnessGuardMiddleware:
         assert "WRITE BLOCKED" in res.content
         assert TOOL_META_KEY in res.additional_kwargs
 
+    def test_str_replace_json_syntax_validation(self):
+        """str_replace on .json that introduces broken syntax is blocked."""
+        middleware = HarnessGuardMiddleware(HarnessGuardConfig(block_on_syntax_error=True))
+        req = _make_request(
+            "str_replace",
+            {"path": "config.json", "old_str": '"port": 80', "new_str": '"port": '},
+        )
+
+        def dummy_handler(r):
+            return ToolMessage(content="Replaced", tool_call_id=r.tool_call["id"], name="str_replace")
+
+        with patch(
+            "deerflow.agents.middlewares.harness_guard_middleware.read_current_file_content",
+            return_value='{\n  "port": 80\n}\n',
+        ):
+            res = middleware.wrap_tool_call(req, dummy_handler)
+
+        assert isinstance(res, ToolMessage)
+        assert res.status == "error"
+        assert "WRITE BLOCKED" in res.content
+        assert "Invalid JSON" in res.content
+
     def test_str_replace_valid_passes(self):
         """str_replace on .py that produces valid syntax passes cleanly."""
         middleware = HarnessGuardMiddleware(HarnessGuardConfig(block_on_syntax_error=True))
@@ -226,51 +240,6 @@ class TestHarnessGuardMiddleware:
 
         assert res.status != "error"
         assert res.content == "Replaced successfully"
-
-    def test_write_verify_passes_valid_python(self):
-        middleware = HarnessGuardMiddleware(HarnessGuardConfig(block_on_syntax_error=True))
-        req = _make_request("write_file", {"path": "main.py", "content": "print('ok')"})
-
-        def dummy_handler(r):
-            return ToolMessage(content="File written successfully", tool_call_id=r.tool_call["id"], name="write_file")
-
-        res = middleware.wrap_tool_call(req, dummy_handler)
-        assert res.status != "error"
-        assert res.content == "File written successfully"
-
-    def test_write_verify_preserves_first_chunk_of_append_in_chunks_python(self):
-        """First chunk of append-in-chunks Python write (incomplete syntax) is not false-blocked."""
-        middleware = HarnessGuardMiddleware(HarnessGuardConfig(block_on_syntax_error=True))
-        req1 = _make_request("write_file", {"path": "func.py", "content": "def calculate():\n", "append": False})
-
-        def dummy_handler(r):
-            return ToolMessage(content="OK", tool_call_id=r.tool_call["id"], name="write_file")
-
-        res1 = middleware.wrap_tool_call(req1, dummy_handler)
-        assert res1.status != "error"
-        assert res1.content == "OK"
-
-        req2 = _make_request("write_file", {"path": "func.py", "content": "def bad_syntax(:\n", "append": False})
-        res2 = middleware.wrap_tool_call(req2, dummy_handler)
-        assert res2.status == "error"
-        assert "WRITE BLOCKED" in res2.content
-
-    def test_write_verify_preserves_first_chunk_of_append_in_chunks_json(self):
-        """First chunk of append-in-chunks JSON array/object (incomplete syntax) is not false-blocked."""
-        middleware = HarnessGuardMiddleware(HarnessGuardConfig(block_on_syntax_error=True))
-        req1 = _make_request("write_file", {"path": "data.json", "content": '[\n  {"id": 1},\n', "append": False})
-
-        def dummy_handler(r):
-            return ToolMessage(content="OK", tool_call_id=r.tool_call["id"], name="write_file")
-
-        res1 = middleware.wrap_tool_call(req1, dummy_handler)
-        assert res1.status != "error"
-        assert res1.content == "OK"
-
-        req2 = _make_request("write_file", {"path": "data.json", "content": "{bad json}", "append": False})
-        res2 = middleware.wrap_tool_call(req2, dummy_handler)
-        assert res2.status == "error"
-        assert "WRITE BLOCKED" in res2.content
 
     def test_str_replace_crlf_normalization_repro(self):
         """CRLF file with LF old_str must be normalized before matching so syntax errors are not bypassed."""

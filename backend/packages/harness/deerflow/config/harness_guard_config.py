@@ -15,7 +15,7 @@ class HarnessGuardConfig(BaseModel):
     )
     write_verify_syntax: bool = Field(
         default=True,
-        description="Whether to perform pre-execution syntax validation on .py (ast.parse) and .json (json.loads) writes",
+        description="Whether to perform pre-execution syntax validation on .py (ast.parse) and .json (json.loads) str_replace edits",
     )
     block_on_syntax_error: bool = Field(
         default=True,

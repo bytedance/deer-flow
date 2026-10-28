@@ -1586,11 +1586,11 @@ read_before_write:
   elide_min_chars: 2000
 
 # Pre-write syntax validation and targeted error remediation guard (RFC-003).
-# Intercepts write_file (non-append) and str_replace to validate .py (ast.parse)
-# and .json (json.loads) syntax before disk I/O, preventing syntax-corrupted code
-# writes from breaking the sandbox. Also classifies tool error outputs
-# (ModuleNotFoundError, SyntaxError, FileNotFoundError, etc.) and injects actionable
-# remediation hints directly into tool results.
+# Intercepts str_replace to validate spliced .py (ast.parse) and .json (json.loads)
+# syntax before disk I/O, preventing syntax-corrupted code writes from breaking
+# the sandbox. Also classifies tool error outputs (ModuleNotFoundError,
+# SyntaxError, FileNotFoundError, etc.) and injects actionable remediation hints
+# directly into tool results.
 harness_guard:
   enabled: true
   write_verify_syntax: true
