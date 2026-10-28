@@ -154,7 +154,7 @@ python /mnt/skills/public/systematic-literature-review/scripts/merge_extractions
   --output <evidence-directory>/verified-extractions.json
 ```
 
-The merge rejects incomplete source titles, author lists, or publication dates; unknown IDs; duplicate or missing extractions; malformed analysis; and any returned citation metadata that conflicts with the source. It fills citation metadata from `papers.json` and preserves retrieval order. If a worker or the merge fails, report the affected batch and stop before synthesis; do not silently turn a partial result into a complete survey. Read the verified file in bounded ranges for Phase 4.
+The merge rejects incomplete source titles, author lists, or publication dates; unknown IDs; duplicate or missing extractions; malformed analysis; and any returned citation metadata that conflicts with the source. Analysis text fields must be non-blank, and `key_findings` must be a non-empty list of non-blank strings. It fills citation metadata from `papers.json` and preserves retrieval order. If a worker or the merge fails, report the affected batch and stop before synthesis; do not silently turn a partial result into a complete survey. Read the verified file in bounded ranges for Phase 4.
 
 ### Phase 4: Synthesize and format
 

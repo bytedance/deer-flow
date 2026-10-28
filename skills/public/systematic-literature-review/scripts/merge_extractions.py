@@ -64,9 +64,9 @@ def merge(papers: list[dict], batches: list[list[dict]]) -> list[dict]:
             for field in ANALYSIS_FIELDS:
                 value = item.get(field)
                 if field == "key_findings":
-                    valid = isinstance(value, list) and all(isinstance(finding, str) for finding in value)
+                    valid = isinstance(value, list) and bool(value) and all(isinstance(finding, str) and finding.strip() for finding in value)
                 else:
-                    valid = isinstance(value, str)
+                    valid = isinstance(value, str) and bool(value.strip())
                 if not valid:
                     raise ValueError(f"{paper_id}: invalid or missing {field}")
             extracted[paper_id] = {**metadata, **{field: item[field] for field in ANALYSIS_FIELDS}}

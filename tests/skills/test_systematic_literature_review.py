@@ -98,6 +98,42 @@ def test_merge_rejects_untrusted_or_incomplete_worker_results(evidence_merger, b
         evidence_merger.merge([paper_record()], batches)
 
 
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        [],
+        [""],
+        [" \t\n"],
+        ["Finding from the abstract.", ""],
+        ["Finding from the abstract.", " \t\n"],
+        ["Finding from the abstract.", None],
+    ],
+)
+def test_merge_rejects_empty_or_invalid_findings(evidence_merger, invalid):
+    with pytest.raises(ValueError, match="2601.00001: invalid or missing key_findings"):
+        evidence_merger.merge([paper_record()], [[{**extraction(), "key_findings": invalid}]])
+
+
+@pytest.mark.parametrize("field", ["research_question", "methodology", "limitations"])
+@pytest.mark.parametrize("invalid", ["", " \t\n"])
+def test_merge_rejects_blank_analysis_text(evidence_merger, field, invalid):
+    with pytest.raises(ValueError, match=f"2601.00001: invalid or missing {field}"):
+        evidence_merger.merge([paper_record()], [[{**extraction(), field: invalid}]])
+
+
+def test_merge_preserves_nonblank_analysis_without_trimming(evidence_merger):
+    analysis = {
+        "research_question": "  Which evidence is available?\n",
+        "methodology": "\tAbstract-only assessment. ",
+        "key_findings": ["  First finding.\n", "\tSecond finding. "],
+        "limitations": "\nFull text was not reviewed. ",
+    }
+
+    merged = evidence_merger.merge([paper_record()], [[{**extraction(), **analysis}]])
+
+    assert {field: merged[0][field] for field in analysis} == analysis
+
+
 def test_merge_cli_rejects_unknown_ids_without_creating_output(evidence_merger, monkeypatch, tmp_path, capsys):
     papers_path, results_path, output_path = (tmp_path / name for name in ("papers.json", "result.json", "merged.json"))
     papers_path.write_text(json.dumps([paper_record()]), encoding="utf-8")

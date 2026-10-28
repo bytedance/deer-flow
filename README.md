@@ -1646,7 +1646,7 @@ orientation.
 
 The **ppt-generation** skill preserves transparent slide images when composing a presentation, including grayscale and palette PNG transparency.
 
-The **systematic-literature-review** skill saves arXiv results as evidence files and delegates their paths instead of copying paper metadata into prompts. Its extraction merge checks paper IDs and joins titles, authors, and dates from the saved results before synthesis. Before copying the report to outputs, a publication check rejects missing or unretrieved arXiv IDs. Author/title formatting and scientific claims still require review; this skill workflow does not intercept other runtime tools.
+The **systematic-literature-review** skill saves arXiv results as evidence files and delegates their paths instead of copying paper metadata into prompts. Its extraction merge checks paper IDs, rejects blank analysis text or empty findings, and joins titles, authors, and dates from the saved results before synthesis. Before copying the report to outputs, a publication check rejects missing or unretrieved arXiv IDs. Author/title formatting and scientific claims still require review; this skill workflow does not intercept other runtime tools.
 
 Administrators can see **Could not load** warnings in Capability Center > Skills
 when their own custom skill's `SKILL.md` contains invalid YAML. Warnings show the
