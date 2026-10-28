@@ -243,7 +243,13 @@ async def _worker():
                 break
             await worker.tick()
             await asyncio.sleep(0.1)
-        await worker.tick()
+        stop_deadline = time.monotonic() + 60
+        while time.monotonic() < stop_deadline:
+            await worker.tick()
+            latest = await asyncio.to_thread(store.get, claimed["id"])
+            if latest.get("physical_stopped") is True and not latest.get("cleanup_pending"):
+                break
+            await asyncio.sleep(0.5)
         evidence.update(b_terminal_state=latest["state"], physical_stopped=latest.get("physical_stopped"), cleanup_pending=latest.get("cleanup_pending"), report_over_real_tcp=True)
         evidence_path.write_text(json.dumps(evidence, indent=2))
         assert latest["state"] == "completed", latest
