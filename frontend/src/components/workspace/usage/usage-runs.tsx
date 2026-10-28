@@ -2,6 +2,7 @@ import Link from "next/link";
 
 import { Badge } from "@/components/ui/badge";
 import type { Translations } from "@/core/i18n/locales/types";
+import { pathOfThread } from "@/core/threads/utils";
 import { formatRunDuration } from "@/core/usage/format";
 import type { UsageRun } from "@/core/usage/types";
 
@@ -56,6 +57,12 @@ export function UsageRuns({
         </thead>
         <tbody>
           {runs.map((run) => {
+            // Match the Gateway's custom_agent_name normalization. The built-in
+            // lead_agent and legacy rows without an assistant use normal chats.
+            const agentName =
+              run.assistant_id && run.assistant_id !== "lead_agent"
+                ? run.assistant_id.trim().toLowerCase().replaceAll("_", "-")
+                : undefined;
             const date = run.created_at ? new Date(run.created_at) : null;
             const dateLabel =
               date && Number.isFinite(date.getTime())
@@ -71,7 +78,9 @@ export function UsageRuns({
                   className="max-w-72 min-w-40 px-4 py-3 text-left font-normal break-words"
                 >
                   <Link
-                    href={`/workspace/chats/${encodeURIComponent(run.thread_id)}`}
+                    href={pathOfThread(run.thread_id, {
+                      agent_name: agentName,
+                    })}
                     className="underline-offset-4 hover:underline"
                   >
                     {run.thread_title?.trim()

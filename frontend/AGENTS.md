@@ -83,6 +83,8 @@ timezone, status and page in query keys; consume AbortSignals and never show
 another owner's or period's placeholder totals. Gate on `runs:read` and static
 mode. Display tokens without changing optional backend pricing fields.
 See [design and reporting semantics](docs/token-usage-dashboard.md).
+Run links reuse `pathOfThread`; `lead_agent` and absent assistant IDs select
+normal chats, while custom assistant aliases follow Gateway normalization.
 
 Model controls: `core/models/use-model-control` + HumanInputCard.
 

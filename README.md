@@ -1618,6 +1618,8 @@ Open **Token usage** in the workspace sidebar (`/workspace/usage`) to review
 your recorded tokens over the last 7 or 30 days, daily input/output totals,
 cache-hit input tokens by model, and paginated run history with failure filters.
 Run history covers all dates independently of the selected chart period.
+Conversation links use each run's recorded assistant to open the default or
+matching custom-agent chat.
 Periods with no recorded runs show an empty message without a date axis or
 zero-filled daily details; runs with zero reported tokens still show details.
 

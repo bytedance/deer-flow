@@ -41,6 +41,11 @@ accounting or the first dashboard implementation.
 - `GET /api/console/runs` supplies 20 rows per page and a `has_more` sentinel.
   All/error/timeout filters reset pagination. This history is independent of the
   chart's period. Offset pagination is live, not a snapshot.
+- Run links reuse `pathOfThread` and the recorded `assistant_id`. The built-in
+  `lead_agent` and absent/empty legacy IDs open normal chats. Custom assistant
+  aliases are trimmed, lowercased and have underscores changed to hyphens,
+  matching the Gateway identity convention; they open that agent's chat route.
+  Thread IDs are encoded as opaque path segments by the shared route helper.
 - Counts are provider-reported usage recorded by DeerFlow, not provider invoices.
   The view displays no estimated prices. Existing optional `cost`, `total_cost`
   and `currency` response fields, configuration and tests remain unchanged.
