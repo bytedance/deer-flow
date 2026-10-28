@@ -4868,9 +4868,18 @@ async def test_stop_drains_service_owned_compensation_tasks(monkeypatch):
     service._track_compensation_task(compensation, action="release poll claim", task_id="task-1")
     await release_started.wait()
     await service.start()
+
+    original_drain = service._drain_compensation_tasks
+    drain_started = asyncio.Event()
+
+    async def observed_drain(*, deadline: float):
+        drain_started.set()
+        await original_drain(deadline=deadline)
+
+    monkeypatch.setattr(service, "_drain_compensation_tasks", observed_drain)
     stopping = asyncio.create_task(service.stop())
     try:
-        await asyncio.sleep(0.01)
+        await asyncio.wait_for(drain_started.wait(), timeout=1)
         assert not stopping.done(), "stop must drain service-owned compensation work"
     finally:
         release_gate.set()
