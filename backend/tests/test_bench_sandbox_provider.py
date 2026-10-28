@@ -223,7 +223,7 @@ def test_summary_preserves_all_failure_group() -> None:
     ]
 
 
-@pytest.mark.parametrize("skip_seconds", [0.0, 0.5, 7.5, float("inf")])
+@pytest.mark.parametrize("skip_seconds", [0.0, 0.5, 7.5])
 def test_boxlite_health_check_skip_seconds_is_forwarded_and_serialized(monkeypatch, tmp_path, skip_seconds):
     captured_config: dict[str, Any] = {}
 
@@ -260,18 +260,20 @@ def test_boxlite_health_check_skip_seconds_is_forwarded_and_serialized(monkeypat
     assert row["health_check_skip_seconds"] == skip_seconds
 
 
-@pytest.mark.parametrize("skip_seconds", [0.0, 0.5, 7.5, float("inf")])
-def test_aio_factory_health_check_skip_seconds_is_forwarded_and_serialized(monkeypatch, tmp_path, skip_seconds):
+@pytest.mark.parametrize("extra", [[], ["--health-check-skip-seconds=0"]], ids=["default", "explicit-zero"])
+def test_aio_factory_omits_unsupported_health_check_skip_seconds(monkeypatch, tmp_path, extra):
     import deerflow.community.aio_sandbox.aio_sandbox_provider as provider_mod
 
-    captured_config: dict[str, Any] = {}
+    real_provider = provider_mod.AioSandboxProvider
+    providers = []
 
     class _FactoryProvider(_FakeProvider):
+        _positive_float = staticmethod(real_provider._positive_float)
+
         def __init__(self) -> None:
             super().__init__()
-            sandbox_config = provider_mod.get_app_config().sandbox
-            captured_config["health_check_skip_seconds"] = sandbox_config.health_check_skip_seconds
-            self._config = {"image": "resolved/aio:latest"}
+            self._config = real_provider._load_config(self)
+            providers.append(self)
 
     monkeypatch.setattr(provider_mod, "AioSandboxProvider", _FactoryProvider)
     output_path = tmp_path / "out.jsonl"
@@ -284,17 +286,29 @@ def test_aio_factory_health_check_skip_seconds_is_forwarded_and_serialized(monke
             "1",
             "--warmup-iterations",
             "0",
-            "--health-check-skip-seconds",
-            str(skip_seconds),
+            *extra,
             "--output",
             str(output_path),
         ]
     )
 
     assert rc == 0
-    assert captured_config["health_check_skip_seconds"] == skip_seconds
+    assert "health_check_skip_seconds" not in providers[0]._config
     row = json.loads(output_path.read_text(encoding="utf-8").splitlines()[0])
-    assert row["health_check_skip_seconds"] == skip_seconds
+    assert row["health_check_skip_seconds"] is None
+    assert row["image"] == providers[0]._config["image"]
+
+
+@pytest.mark.parametrize("skip_seconds", [0.5, 7.5])
+def test_aio_nonzero_health_check_skip_seconds_fails_before_provider_creation(monkeypatch, tmp_path, skip_seconds):
+    def unexpected_provider(config):
+        pytest.fail("unsupported health-check skip seconds must be rejected before provisioning")
+
+    monkeypatch.setitem(bench.PROVIDER_FACTORIES, "aio-docker", unexpected_provider)
+    output_path = tmp_path / "out.jsonl"
+    with pytest.raises(SystemExit, match="aio-docker benchmarks do not support nonzero --health-check-skip-seconds"):
+        bench.main(["--provider", "aio-docker", f"--health-check-skip-seconds={skip_seconds}", "--output", str(output_path)])
+    assert not output_path.exists()
 
 
 def test_boxlite_factory_restores_module_state(monkeypatch):

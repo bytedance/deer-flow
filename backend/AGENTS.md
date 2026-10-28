@@ -43,17 +43,15 @@ Image result URL policy: [image search guide](packages/harness/deerflow/communit
 `scripts/benchmark/context_snapshot/`: explicit `run-live` needs provider env
 vars; `summarize` and pytest are offline. See its README for the protocol.
 
-Benchmarks in `scripts/benchmark/` must be standalone and reproducible. Import
-production functions; never duplicate them or introduce an alternative runtime.
+Benchmarks in `scripts/benchmark/` must be standalone, reproducible and reuse
+production code without a separate runtime.
+OpenSandbox uses scoped config overrides; export only non-secret dimensions and
+fail the runner and JSONL summary on cleanup errors. Require finite, nonnegative
+CLI idle/skip times before provisioning. Health-check skip is BoxLite-only: reject
+nonzero values for AIO/OpenSandbox and omit it from AIO snapshots. See the sandbox README.
 
-OpenSandbox benchmarks reuse the production lifecycle with scoped config overrides.
-Export only non-secret dimensions; final cleanup failures must fail both the runner
-and JSONL summary. See the sandbox benchmark README for supported options and tests.
-Validate CLI idle timeout and health-check skip seconds before provider creation;
-reject negative and NaN values while preserving zero's documented semantics.
-
-- Pin every external dataset by immutable revision and SHA-256. Callers provide
-  the local dataset path; evaluation commands must not silently download data.
+- Pin datasets by immutable revision and SHA-256; require caller-provided local
+  paths. Never silently download datasets.
 - Never commit upstream dataset text, credentials, complete provider requests,
   or response headers. Committed manifests may contain stable IDs and source
   locators. Synthetic cases must identify themselves as synthetic.

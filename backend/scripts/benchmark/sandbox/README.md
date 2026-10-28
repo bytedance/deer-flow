@@ -75,10 +75,13 @@ Python and POSIX utilities required by the selected workload and output sync.
 The normal warm-up creates and destroys a separate remote before measurement.
 
 CLI `--replicas` and `--idle-timeout` override their YAML values, including their
-CLI defaults (3 and 600). All providers reject negative or NaN `--idle-timeout`
-and `--health-check-skip-seconds` values before provider creation. Zero disables
-the health-check skip window. Zero disables idle reaping, except that the
-`idle_timeout` scenario requires a positive value. `--image` overrides YAML only
+CLI defaults (3 and 600). All providers require finite, nonnegative `--idle-timeout`
+and `--health-check-skip-seconds` values before provider creation, rejecting NaN
+and both infinities. The health-check skip window is BoxLite-only: AIO Docker and
+OpenSandbox reject nonzero values, and their result rows record `null` for this
+unsupported dimension. Zero disables BoxLite's health-check skip window.
+Zero disables idle reaping, except that the `idle_timeout` scenario requires a
+positive value. `--image` overrides YAML only
 when supplied. Connection settings, including HTTPS and `use_server_proxy`, are retained. The exported
 configuration dimensions contain only image, replicas and idle timeout; credentials,
 endpoint and environment are not copied into result rows. Record non-secret SDK,
@@ -89,7 +92,7 @@ command/release timing does not prove that every artifact was mirrored. Warm hit
 come from the actual provider reclaim path, including its health probe. The replica
 limit is a soft cap, not global admission control. `--fault-inject` and nonzero
 `--health-check-skip-seconds` are rejected before provisioning: OpenSandbox does not
-implement the existing BoxLite/AIO fault and health-skip adapters.
+implement the fault-injection adapter or BoxLite's health-check skip window.
 
 The benchmark retains production lifecycle behavior but records reported cleanup
 failures instead of accepting them as success. A final cleanup failure exits nonzero

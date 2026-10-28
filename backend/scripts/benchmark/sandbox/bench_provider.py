@@ -50,6 +50,7 @@ import argparse
 import importlib
 import importlib.metadata
 import json
+import math
 import os
 import re
 import statistics
@@ -241,7 +242,6 @@ def _make_aio_provider(config: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
         "container_prefix": config.get("container_prefix"),
         "replicas": config.get("replicas", 3),
         "idle_timeout": config.get("idle_timeout", 600),
-        "health_check_skip_seconds": config.get("health_check_skip_seconds", 0.0),
         "mounts": config.get("mounts", []),
         "environment": config.get("environment", {}),
         "provisioner_url": config.get("provisioner_url", ""),
@@ -718,13 +718,13 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--idle-timeout",
         type=float,
         default=600,
-        help="sandbox.idle_timeout in seconds (default: 600)",
+        help="sandbox.idle_timeout in finite, nonnegative seconds; 0 disables reaping (default: 600)",
     )
     p.add_argument(
         "--health-check-skip-seconds",
         type=float,
         default=0.0,
-        help="sandbox.health_check_skip_seconds in seconds (default: 0.0)",
+        help="BoxLite-only health-check skip window in finite, nonnegative seconds; 0 always checks (default: 0.0)",
     )
     p.add_argument(
         "--image",
@@ -752,14 +752,16 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
-    if not args.health_check_skip_seconds >= 0:
-        raise SystemExit("health-check skip seconds must be nonnegative")
+    if not math.isfinite(args.health_check_skip_seconds) or args.health_check_skip_seconds < 0:
+        raise SystemExit("health-check skip seconds must be finite and nonnegative")
     if args.provider == "opensandbox" and (args.fault_inject is not None or args.health_check_skip_seconds != 0):
         raise SystemExit("opensandbox benchmarks do not support --fault-inject or nonzero --health-check-skip-seconds")
+    if args.provider == "aio-docker" and args.health_check_skip_seconds != 0:
+        raise SystemExit("aio-docker benchmarks do not support nonzero --health-check-skip-seconds")
     if min(args.concurrency, args.users, args.replicas) < 1 or min(args.iterations, args.warmup_iterations) < 0:
         raise SystemExit("concurrency, users and replicas must be positive; iteration counts must be nonnegative")
-    if not args.idle_timeout >= 0:
-        raise SystemExit("idle timeout must be nonnegative")
+    if not math.isfinite(args.idle_timeout) or args.idle_timeout < 0:
+        raise SystemExit("idle timeout must be finite and nonnegative")
     if args.fault_inject is not None and (args.concurrency != 1 or args.no_warmpool or args.scenario != "warm_same_thread"):
         raise SystemExit("fault injection requires warm_same_thread, concurrency=1 and an enabled warm pool")
     if args.fault_inject is not None and not 0 <= args.fault_inject < args.iterations:
