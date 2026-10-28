@@ -1085,6 +1085,19 @@ tools:
   #   max_results: 5                  # Clamped to 1-100 by You.com
   #   # api_key: $YDC_API_KEY         # Omit to use the keyless free tier
 
+  # Web search tool (uses the Perplexity Search API, requires PERPLEXITY_API_KEY)
+  # Returns ranked web results with title, url and snippet from Perplexity's
+  # index. Get a key at https://www.perplexity.ai/account/api/keys
+  # Note: set PERPLEXITY_API_KEY in your environment before starting the app.
+  # Avoid putting literal API keys in config.yaml; use the $VAR form instead.
+  # - name: web_search
+  #   group: web
+  #   use: deerflow.community.perplexity.tools:web_search_tool
+  #   max_results: 5                  # Clamped to 1-20 by the Perplexity Search API
+  #   # search_type: web              # web (default) or fast
+  #   # search_domain_filter: ["example.com", "-excluded.com"]  # up to 20 entries; "-" excludes
+  #   # api_key: $PERPLEXITY_API_KEY  # Optional explicit env-var reference
+
   # Web fetch tool (uses Browserless - headless Chrome, self-hosted or cloud)
   # Browserless renders pages with a real headless Chrome, ideal for JavaScript-heavy
   # sites and SPAs. Deploy your own: https://github.com/browserless/browserless

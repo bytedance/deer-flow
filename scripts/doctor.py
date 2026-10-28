@@ -702,6 +702,7 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
                 "tencent_wsa": "TENCENTCLOUD_WSA_APIKEY",
                 "webz": "WEBZ_API_KEY",
                 "groundroute": "GROUNDROUTE_API_KEY",
+                "perplexity": "PERPLEXITY_API_KEY",
             },
             "web_fetch": {
                 "infoquest": "INFOQUEST_API_KEY",

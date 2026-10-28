@@ -742,6 +742,14 @@ SEARCH_PROVIDERS: list[SearchProvider] = [
         env_var="SPECSTREAM_API_KEY",
         extra_config={"max_results": 5},
     ),
+    SearchProvider(
+        name="perplexity",
+        display_name="Perplexity Search API",
+        description="Ranked web results from Perplexity's index, API key required",
+        use="deerflow.community.perplexity.tools:web_search_tool",
+        env_var="PERPLEXITY_API_KEY",
+        extra_config={"max_results": 5},
+    ),
 ]
 
 WEB_FETCH_PROVIDERS: list[WebProvider] = [
