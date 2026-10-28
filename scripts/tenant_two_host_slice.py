@@ -293,11 +293,13 @@ docker run -d --pull=never --name {PHASE}-redis --label org.deerflow.tenant.owne
     redis_url = f"redis://{CONTROLLER_PRIVATE}:6390/0"
     print("[controller] slice-two migrations and seeding")
     must(CONTROLLER, f"""set -eu
-docker run --rm --pull=never --network host -v {CROOT}/{PHASE}/source.tar.gz:/run/source.tar.gz:ro --entrypoint /bin/sh {NATIVE_IMAGE} -c '
+cat > /tmp/.two-host-migrate.py
+docker run --rm --pull=never --network host -e NATIVE_ASYNC='{native_async_url}' -e NATIVE_SYNC='{native_url}' -e EXECUTOR_SYNC='{executor_url}' -v /tmp/.two-host-migrate.py:/run/migrate.py:ro -v {CROOT}/{PHASE}/source.tar.gz:/run/source.tar.gz:ro --entrypoint /bin/sh {NATIVE_IMAGE} -c '
 set -eu; rm -rf /tmp/source; mkdir /tmp/source; tar xzf /run/source.tar.gz -C /tmp/source
 cd /tmp/source/backend
 export PYTHONPATH=/tmp/source/backend:/tmp/source/backend/packages/harness:/tmp/source/backend/packages/extension-api:/tmp/source/backend/packages/ecs-executor
-/app/backend/.venv/bin/python /run/migrate.py'; rm -f /tmp/.two-host-migrate.py
+/app/backend/.venv/bin/python /run/migrate.py'
+rm -f /tmp/.two-host-migrate.py
 """, what="slice-two migrations", stdin_text=_SLICE_TWO_MIGRATE)
     common = dict(COMMON_ENV)
     common.update(
