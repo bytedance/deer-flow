@@ -325,7 +325,7 @@ def _native_assembly(saver, *, worker_id):
 def _shared_saver():
     from deerflow.runtime.checkpointer.async_provider import _async_checkpointer_from_database
 
-    config = SimpleNamespace(backend="postgres", connection_string=os.environ["TENANT_TWO_HOST_NATIVE_ASYNC_URL"], postgres_schema=None)
+    config = SimpleNamespace(backend="postgres", postgres_url=os.environ["TENANT_TWO_HOST_NATIVE_ASYNC_URL"], postgres_schema=None)
     return _async_checkpointer_from_database(config)
 
 
