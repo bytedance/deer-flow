@@ -550,6 +550,18 @@ async def _native_worker():
         evidence_path.parent.mkdir(parents=True, exist_ok=True)
         evidence_path.write_text(json.dumps(evidence, indent=2))
         await host.start()
+        socket_trace = []
+
+        async def watch_socket():
+            while True:
+                try:
+                    with socket.create_connection((parsed.hostname, parsed.port), timeout=3):
+                        socket_trace.append("ok")
+                except OSError as exc:
+                    socket_trace.append(type(exc).__name__)
+                await asyncio.sleep(10)
+
+        watcher = asyncio.create_task(watch_socket())
         try:
             deadline = time.monotonic() + 300
             executed = list(getattr(host, "executions", {}))
@@ -559,7 +571,9 @@ async def _native_worker():
                 if executed:
                     break
                 await asyncio.sleep(1.0)
-            assert executed, "worker never claimed a native envelope over real TCP"
+            evidence["socket_trace"] = socket_trace[-12:]
+            evidence_path.write_text(json.dumps(evidence, indent=2))
+            assert executed, f"worker never claimed a native envelope over real TCP; socket trace {socket_trace[-12:]}"
             job_id = executed[0]
             evidence.update(claimed_native_over_tcp=True, native_job_id=job_id)
             evidence_path.write_text(json.dumps(evidence, indent=2))
@@ -574,5 +588,6 @@ async def _native_worker():
             evidence["native_run_settled_over_tcp"] = True
             evidence_path.write_text(json.dumps(evidence, indent=2))
         finally:
+            watcher.cancel()
             await host.stop()
             services.resolve_agent_factory = original_factory
