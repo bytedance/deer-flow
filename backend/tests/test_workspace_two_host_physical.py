@@ -285,6 +285,12 @@ def _native_assembly(saver, *, worker_id):
     """Shared controller/worker app assembly over the two-host databases."""
     import importlib
 
+    # The scheduled packages only import cleanly tasks-before-runs, and any
+    # earlier deerflow import (events store, repositories) touches the models
+    # aggregate that pulls runs first. Import order here is load-bearing.
+    _tasks_sql = importlib.import_module("deerflow.persistence.scheduled_tasks.sql")
+    _runs_sql = importlib.import_module("deerflow.persistence.scheduled_task_runs.sql")
+
     from fastapi import FastAPI
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -295,11 +301,6 @@ def _native_assembly(saver, *, worker_id):
     from deerflow.persistence.scheduled_task_events.sql import ScheduledTaskEventRepository
     from deerflow.persistence.thread_meta import ThreadMetaRepository
     from deerflow.runtime.events.store.db import DbRunEventStore
-
-    # The scheduled packages only import cleanly tasks-before-runs; ruff isort
-    # would otherwise reorder plain imports back into the cyclic order.
-    _tasks_sql = importlib.import_module("deerflow.persistence.scheduled_tasks.sql")
-    _runs_sql = importlib.import_module("deerflow.persistence.scheduled_task_runs.sql")
 
     engine = create_async_engine(os.environ["TENANT_TWO_HOST_NATIVE_ASYNC_URL"])
     sf = async_sessionmaker(engine, expire_on_commit=False)
