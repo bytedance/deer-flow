@@ -237,8 +237,8 @@ docker run --rm --pull=never --name {PHASE}-worker --label org.deerflow.tenant.o
   -e TENANT_TWO_HOST_URL=http://{CONTROLLER_PRIVATE}:{PORT} \\
   -e TENANT_TWO_HOST_NATIVE_URL='{native_url}' \\
   {env_flags(COMMON_ENV)} \
-  -e TEST_SCOPE_EVIDENCE=/run/phase/evidence/worker.json \
-  -e TEST_SCOPE_OWNED_MANIFEST=/run/phase/evidence/owned.json \
+  -e TEST_SCOPE_EVIDENCE={CROOT}/{PHASE}/evidence/worker.json \
+  -e TEST_SCOPE_OWNED_MANIFEST={CROOT}/{PHASE}/evidence/owned.json \
   -e DEER_FLOW_HOME=/tmp/tenant-home \
   -v {CROOT}/{PHASE}/source.tar.gz:/run/source.tar.gz:ro \
   --entrypoint /bin/sh {NATIVE_IMAGE} -c 'mkdir -p /tmp/source && tar xzf /run/source.tar.gz -C /tmp/source && cd /tmp/source/backend \
