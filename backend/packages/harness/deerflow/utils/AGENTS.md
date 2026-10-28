@@ -1,3 +1,18 @@
+### Readability Fallback
+
+`readability.py` caches the optional Readability.js availability probe. If the
+Node extractor is unavailable, its probe raises, or an attempted extraction
+cannot launch Node, subsequent calls in that process use readabilipy's Python
+fallback without retrying Node. A non-zero Node exit can be document-specific,
+so it falls back only for that document and later documents retry Node. If a
+future readabilipy version removes the private availability probe, log that
+once at import and attempt extraction instead of silently disabling Node. Keep
+successful Node extraction unchanged and allow unexpected parser/programming
+exceptions to propagate. The resolved-body fallback preserves article links
+when Python extraction returns the original document wrapper. Regression
+coverage lives in `tests/test_readability.py` and
+`tests/test_web_fetch_relative_links.py`.
+
 ### Atomic Byte Publication
 
 `atomic_write.publish_bytes_atomically` owns browser screenshot and Browserless
