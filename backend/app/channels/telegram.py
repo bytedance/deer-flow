@@ -323,14 +323,26 @@ class TelegramChannel(Channel):
 
         if not msg.is_final:
             await self._send_stream_update(chat_id, key, msg.text, reply_to=self._parse_message_id(msg.thread_ts))
+            state = self._stream_messages.get(key)
+            if state is not None:
+                # Non-final chunks re-run for every published update while the
+                # placeholder id stays the same (and each id a fallback swap
+                # introduces is new). Bind each id once per reply; the final
+                # outbound rewrites all aliases — the per-reply rule the
+                # channels AGENTS documents for Feishu's aliases too.
+                bound = state.setdefault("bound_alias_ids", set())
+                if state["message_id"] not in bound:
+                    await self._remember_thread_aliases(msg, [state["message_id"]])
+                    bound.add(state["message_id"])
             return
 
         state = self._stream_messages.pop(key, None)
         if state is not None:
+            await self._remember_thread_aliases(msg, [state["message_id"]])
             if self._can_send_rich(msg.text) and await self._edit_rich_message(chat_id, state["message_id"], msg.text):
                 self._last_bot_message[msg.chat_id] = state["message_id"]
                 return
-            await self._finalize_stream_message(chat_id, msg.chat_id, state, msg.text)
+            await self._finalize_stream_message(chat_id, msg.chat_id, state, msg.text, alias_msg=msg)
             return
 
         if self._can_send_rich(msg.text):
@@ -340,10 +352,61 @@ class TelegramChannel(Channel):
                 logger.warning("[Telegram] Rich Message send failed in chat=%s; falling back to plain text: %s", chat_id, exc)
                 message_id = None
             if message_id is not None:
+                await self._remember_thread_aliases(msg, [message_id])
                 return
 
+        sent_ids: list[int | None] = []
         for chunk in self._split_message(msg.text):
-            await self._send_new_message(chat_id, msg.chat_id, chunk, _max_retries=_max_retries)
+            sent_ids.append(await self._send_new_message(chat_id, msg.chat_id, chunk, _max_retries=_max_retries))
+        await self._remember_thread_aliases(msg, sent_ids)
+
+    async def _remember_thread_aliases(self, msg: OutboundMessage, message_ids: list[int | None]) -> None:
+        """Bind delivered bot message ids as reply topics of the producing thread.
+
+        A group reply keys the follow-up by the replied-to message id, and a
+        reply to the bot's answer must continue the conversation that produced
+        it (#7653). Binding every delivered id as an alias topic of the same
+        thread lets the ordinary topic lookup resolve it — in the connection
+        repository for user-owned connections and the shared store otherwise,
+        mirroring ``ChannelManager._store_thread_id``. Private chats key one
+        thread per chat without topics, so aliases there would only grow the
+        store.
+        """
+        if not msg.thread_id:
+            return
+        try:
+            chat_id = int(msg.chat_id)
+        except (TypeError, ValueError):
+            return
+        if chat_id >= 0:
+            return
+        raw_user_id = msg.metadata.get("user_id")
+        user_id = raw_user_id if isinstance(raw_user_id, str) else ""
+        seen: set[str] = set()
+        for message_id in message_ids:
+            if message_id is None:
+                continue
+            topic_id = str(message_id)
+            if topic_id in seen:
+                continue
+            seen.add(topic_id)
+            try:
+                if msg.connection_id and msg.owner_user_id and self._connection_repo is not None:
+                    await self._connection_repo.set_thread_id(
+                        connection_id=msg.connection_id,
+                        owner_user_id=msg.owner_user_id,
+                        provider=self.name,
+                        external_conversation_id=msg.chat_id,
+                        external_topic_id=topic_id,
+                        thread_id=msg.thread_id,
+                    )
+                else:
+                    store = self.config.get("channel_store")
+                    if store is None:
+                        return
+                    await store.set_thread_id(self.name, msg.chat_id, msg.thread_id, topic_id=topic_id, user_id=user_id)
+            except Exception:
+                logger.exception("[Telegram] failed to remember bot-message thread alias topic_id=%s", topic_id)
 
     async def _send_stream_update(self, chat_id: int, key: str, text: str, reply_to: int | None = None) -> None:
         """Edit the in-flight streamed message with accumulated text.
@@ -409,10 +472,11 @@ class TelegramChannel(Channel):
         state["last_edit_at"] = _monotonic()
         state["last_text"] = display
 
-    async def _finalize_stream_message(self, chat_id: int, chat_key: str, state: dict[str, Any], text: str) -> None:
+    async def _finalize_stream_message(self, chat_id: int, chat_key: str, state: dict[str, Any], text: str, *, alias_msg: OutboundMessage | None = None) -> None:
         """Apply the final text: edit the streamed message, splitting overflow into follow-ups."""
         bot = self._application.bot
         chunks = self._split_message(text or "")
+        fresh_ids: list[int | None] = []
 
         edited = True
         if chunks[0] != state["last_text"]:
@@ -423,10 +487,12 @@ class TelegramChannel(Channel):
         else:
             # Edit could not be applied (e.g. message deleted) — deliver the
             # first chunk as a fresh message with the standard retry policy.
-            await self._send_new_message(chat_id, chat_key, chunks[0])
+            fresh_ids.append(await self._send_new_message(chat_id, chat_key, chunks[0]))
 
         for chunk in chunks[1:]:
-            await self._send_new_message(chat_id, chat_key, chunk)
+            fresh_ids.append(await self._send_new_message(chat_id, chat_key, chunk))
+        if alias_msg is not None and fresh_ids:
+            await self._remember_thread_aliases(alias_msg, fresh_ids)
 
     async def _edit_final_chunk(self, bot, chat_id: int, message_id: int, text: str) -> bool:
         """Edit with one rate-limit retry. Returns False if the edit could not be applied."""
@@ -561,6 +627,7 @@ class TelegramChannel(Channel):
                 sent = await bot.send_document(**kwargs)
 
             self._last_bot_message[msg.chat_id] = sent.message_id
+            await self._remember_thread_aliases(msg, [sent.message_id])
             logger.info("[Telegram] file sent: %s to chat=%s", attachment.filename, msg.chat_id)
             return True
         except Exception:
