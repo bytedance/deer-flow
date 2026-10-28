@@ -4919,3 +4919,49 @@ async def test_stop_bounds_drain_of_service_owned_compensation_tasks(monkeypatch
         release_gate.set()
         await asyncio.wait_for(compensation, timeout=1)
         await _wait_for_compensation_tasks_to_clear(service)
+
+@pytest.mark.asyncio
+async def test_stop_preserves_cancellation_while_draining_compensation_tasks(monkeypatch):
+    monkeypatch.setattr(service_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.5)
+    service = McpTaskService(
+        repository=FakeRepository(),
+        drivers=McpTaskDriverRegistry(),
+        poll_interval_seconds=60,
+        lease_seconds=120,
+        max_concurrent_polls=3,
+    )
+    release_started = asyncio.Event()
+    release_gate = asyncio.Event()
+
+    async def release_claim():
+        release_started.set()
+        await release_gate.wait()
+
+    compensation = asyncio.create_task(release_claim(), name="test-mcp-cancelled-drain")
+    service._track_compensation_task(compensation, action="release poll claim", task_id="task-1")
+    await release_started.wait()
+    await service.start()
+
+    original_drain = service._drain_compensation_tasks
+    drain_started = asyncio.Event()
+
+    async def observed_drain(*, deadline: float):
+        drain_started.set()
+        await original_drain(deadline=deadline)
+
+    monkeypatch.setattr(service, "_drain_compensation_tasks", observed_drain)
+    stopping = asyncio.create_task(service.stop())
+    try:
+        await asyncio.wait_for(drain_started.wait(), timeout=1)
+        stopping.cancel()
+        await asyncio.sleep(0)
+        assert not stopping.done(), "stop must keep draining after caller cancellation"
+        release_gate.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(stopping, timeout=1)
+    finally:
+        release_gate.set()
+        if not stopping.done():
+            stopping.cancel()
+        await _wait_for_compensation_tasks_to_clear(service)
+

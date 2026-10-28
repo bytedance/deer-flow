@@ -1716,11 +1716,25 @@ class McpTaskService:
                 pending_count,
             )
 
+    async def _drain_compensation_tasks_preserving_cancellation(self, *, deadline: float) -> None:
+        """Finish the bounded drain before propagating caller cancellation."""
+        drain_task = asyncio.create_task(
+            self._drain_compensation_tasks(deadline=deadline),
+            name="deerflow-mcp-compensation-drain",
+        )
+        try:
+            await asyncio.shield(drain_task)
+        except asyncio.CancelledError:
+            await wait_for_task_until(drain_task, deadline=deadline)
+            if drain_task.done():
+                drain_task.result()
+            raise
+
     async def stop(self) -> None:
         loop = asyncio.get_running_loop()
         task = self._task
         if task is None:
-            await self._drain_compensation_tasks(
+            await self._drain_compensation_tasks_preserving_cancellation(
                 deadline=loop.time() + _CANCELLATION_DRAIN_TIMEOUT_SECONDS,
             )
             return
@@ -1741,17 +1755,12 @@ class McpTaskService:
             if not await wait_for_task_until(task, deadline=deadline):
                 self._log_stop_timeout(task)
             else:
-                try:
-                    await self._drain_compensation_tasks(deadline=deadline)
-                except asyncio.CancelledError:
-                    # Preserve the caller's cancellation while keeping the
-                    # service-owned tasks alive for their own completion path.
-                    pass
+                await self._drain_compensation_tasks_preserving_cancellation(deadline=deadline)
             raise
         if task not in done:
             self._log_stop_timeout(task)
             return
-        await self._drain_compensation_tasks(deadline=deadline)
+        await self._drain_compensation_tasks_preserving_cancellation(deadline=deadline)
 
     async def _run_loop(self) -> None:
         while not self._stop.is_set():
