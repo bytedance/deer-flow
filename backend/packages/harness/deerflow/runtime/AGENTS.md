@@ -236,6 +236,12 @@ Check all owners and categories; surviving rows retain the allocation floor.
 
 **Changed-run discovery:** Use the durable `(change_seq, run_id)` cursor and repeat history audits after admission. Details: `backend/docs/runtime-guidance-details.md`.
 
+**Memory run snapshots:** `MemoryRunStore.put` replaces existing rows like SQL.
+On a thread change, remove prior index membership only after snapshot construction
+succeeds; prune empty buckets and retain same-thread retry order. Indexed queries
+and thread cleanup follow the current row's thread. Coverage:
+`tests/test_memory_run_store_replacement_index.py` (native Manager + real SQLite).
+
 **Terminal run cleanup:** Close streams, journals, and graph references even on cancellation. Details: `backend/docs/runtime-guidance-details.md`.
 
 Clear both the terminal worker's journal and message-sequence stamper references;
