@@ -268,7 +268,7 @@ tools:
     # search_domain_filter: ["example.com", "example.org"]
     # search_domain_filter: ["-excluded.com"]
 ```
-通过 [Perplexity Search API](https://docs.perplexity.ai/docs/search/quickstart) 返回带标题、URL 和摘要的排序网页结果。需要 Perplexity API Key。`max_results` 上限为 20。`search_type: fast` 以部分排序深度换取更低延迟。`search_domain_filter` 最多接受 20 个域名，且每次请求只能使用一种模式：要么全部为包含的域名，要么全部为排除的域名（每个域名前加 `-`）。Agent 的 `time_range` 参数会映射为 API 的时效性过滤。
+通过 [Perplexity Search API](https://docs.perplexity.ai/docs/search/quickstart) 返回带标题、URL 和摘要的排序网页结果。需要 Perplexity API Key。`max_results` 上限为 20。`search_type: fast` 使用低延迟的网页搜索。`search_domain_filter` 最多接受 20 个域名，且每次请求只能使用一种模式：要么全部为包含的域名，要么全部为排除的域名（每个域名前加 `-`）。Agent 的 `time_range` 参数会映射为 API 的时效性过滤。
 
 无需额外依赖。
 

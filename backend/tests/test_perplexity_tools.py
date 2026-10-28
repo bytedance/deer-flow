@@ -2,6 +2,8 @@
 
 import json
 import logging
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from threading import Thread
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -586,3 +588,81 @@ def test_package_exports_web_search_tool():
     from deerflow.community.perplexity.tools import web_search_tool as direct_web_search_tool
 
     assert web_search_tool is direct_web_search_tool
+
+
+class _EchoingHandler(BaseHTTPRequestHandler):
+    """Loopback stand-in for api.perplexity.ai that echoes the key in error bodies."""
+
+    status = 200
+
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        type(self).received += 1
+        if self.status == 200:
+            body = {"results": [{"title": "ok", "url": "https://example.com", "snippet": "ok"}]}
+        else:
+            body = {"detail": f"rejected; echoed Authorization: Bearer {_SECRET}"}
+        encoded = json.dumps(body).encode()
+        self.send_response(self.status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(encoded)))
+        self.end_headers()
+        self.wfile.write(encoded)
+
+    def log_message(self, *args):
+        pass
+
+
+@pytest.fixture
+def loopback_endpoint():
+    """Real httpx transport against a loopback server; nothing in httpx is mocked."""
+    _EchoingHandler.received = 0
+    _EchoingHandler.status = 200
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _EchoingHandler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    endpoint = f"http://127.0.0.1:{server.server_port}/search"
+    with patch("deerflow.community.perplexity.tools._PERPLEXITY_SEARCH_ENDPOINT", endpoint):
+        yield _EchoingHandler
+    server.shutdown()
+    server.server_close()
+    thread.join()
+
+
+class TestRealTransportDisclosure:
+    """Same assertions as above, but through the real httpx/h11 stack."""
+
+    @pytest.mark.parametrize("bad_key", [f"{_SECRET}\ninvalid", f"{_SECRET}\x00invalid"], ids=["newline", "nul"])
+    async def test_control_character_key_never_reaches_the_wire_or_logs(self, bad_key, loopback_endpoint, module_log):
+        with patch("deerflow.community.perplexity.tools.get_app_config") as mock:
+            tool_config = MagicMock()
+            tool_config.model_extra = {"api_key": bad_key}
+            mock.return_value.get_tool_config.return_value = tool_config
+            with patch.dict("os.environ", {"NO_PROXY": "127.0.0.1"}):
+                from deerflow.community.perplexity.tools import web_search_tool
+
+                raw = await web_search_tool.ainvoke({"query": "probe"})
+
+        assert json.loads(raw)["error"] == "Perplexity Search API error: invalid PERPLEXITY_API_KEY format"
+        assert loopback_endpoint.received == 0
+        assert _SECRET not in raw
+        assert _SECRET not in "\n".join(module_log.lines)
+
+    @pytest.mark.parametrize("status", [422, 500])
+    async def test_error_body_echoing_the_key_stays_out_of_output_and_logs(self, status, loopback_endpoint, module_log):
+        loopback_endpoint.status = status
+        with patch("deerflow.community.perplexity.tools.get_app_config") as mock:
+            tool_config = MagicMock()
+            tool_config.model_extra = {"api_key": _SECRET}
+            mock.return_value.get_tool_config.return_value = tool_config
+            with patch.dict("os.environ", {"NO_PROXY": "127.0.0.1"}):
+                from deerflow.community.perplexity.tools import web_search_tool
+
+                raw = await web_search_tool.ainvoke({"query": "probe"})
+
+        assert f"HTTP {status}" in json.loads(raw)["error"]
+        assert loopback_endpoint.received == 1
+        assert _SECRET not in raw
+        logged = "\n".join(module_log.lines)
+        assert f"HTTP {status}" in logged
+        assert _SECRET not in logged
