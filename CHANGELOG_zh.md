@@ -1116,6 +1116,12 @@
 
 ### 修复
 
+- **记忆：** `GET /api/memory/config` 与 `/api/memory/status` 现在会把 `backend_config`
+  中的凭据值（`api_key`、token、密码、`Authorization` 请求头，任意层级）遮蔽为 `***`。
+  此前它们按加载结果原样返回配置，而 `$VAR` 引用此时已被解析，因此 DeerMem 提取模型的密钥
+  或 Honcho 的 `api_key` 会以明文返回给所有拥有 `memory:read` 的调用方；在默认关闭授权时，
+  这就是所有已登录用户。非机密配置项、`api_key_env` 变量名和未设置的值保持不变。([#7665])
+
 - **TUI：** `/threads` 和 `/model` 选择器现在按原样显示线程标题和模型名称。此前标签
   会被当作 Textual 标记解析，标题如 `Fix [/bold] in parser` 会在打开选择器时以
   `MarkupError` 使 TUI 退出，标题中的 `[a]` 也会消失。([#7631])
@@ -10556,3 +10562,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7606]: https://github.com/bytedance/deer-flow/pull/7606
 [#7631]: https://github.com/bytedance/deer-flow/pull/7631
 [#7651]: https://github.com/bytedance/deer-flow/pull/7651
+[#7665]: https://github.com/bytedance/deer-flow/pull/7665

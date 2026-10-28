@@ -1402,6 +1402,15 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
 
 ### Fixed
 
+- **memory:** `GET /api/memory/config` and `/api/memory/status` now mask
+  credential values in `backend_config` (`api_key`, tokens, passwords,
+  `Authorization` headers, at any depth) as `***`. They returned the config as
+  loaded, with `$VAR` references already resolved, so a DeerMem extraction
+  model key or a Honcho `api_key` reached every caller with `memory:read` in
+  plaintext, which with authorization disabled (the default) is every
+  signed-in user. Non-secret knobs, `api_key_env` names and unset values are
+  unchanged. ([#7665])
+
 - **benchmarks:** Reject negative and NaN sandbox idle-timeout values before
   constructing any provider, and apply the same validation to BoxLite/AIO
   health-check skip windows. Valid zero, positive, and positive-infinity values
@@ -13246,3 +13255,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7606]: https://github.com/bytedance/deer-flow/pull/7606
 [#7631]: https://github.com/bytedance/deer-flow/pull/7631
 [#7651]: https://github.com/bytedance/deer-flow/pull/7651
+[#7665]: https://github.com/bytedance/deer-flow/pull/7665
