@@ -458,7 +458,14 @@ async def _native_controller():
                 deadline = time.monotonic() + 30
                 while not server.started and time.monotonic() < deadline:
                     await asyncio.sleep(0.1)
-                assert server.started
+                assert server.started, f"serve task died: {serve.exception() if serve.done() else 'running'}"
+                import httpx
+
+                async with httpx.AsyncClient() as probe_client:
+                    probe = await probe_client.post(f"http://127.0.0.1:{NATIVE_PORT}/api/native-workers/worker/poll", json={}, timeout=5)
+                    evidence["self_probe_status"] = probe.status_code
+                    evidence_path.write_text(json.dumps(evidence, indent=2))
+                    assert probe.status_code == 403, f"self probe unexpected: {probe.status_code} (serve exception: {serve.exception() if serve.done() else None})"
                 deadline = time.monotonic() + 300
                 row = await assembly.run_store.get(source.run_id, user_id=owner)
                 while row.get("status") not in {"success", "error", "interrupted", "cancelled"} and time.monotonic() < deadline:
@@ -472,7 +479,11 @@ async def _native_controller():
                 assert checkpoints >= 1, "no cross-process checkpoint landed in the shared database"
             finally:
                 server.should_exit = True
-                await asyncio.gather(serve, return_exceptions=True)
+                results = await asyncio.gather(serve, return_exceptions=True)
+                for result in results:
+                    if isinstance(result, BaseException):
+                        evidence["serve_exception"] = repr(result)
+                        evidence_path.write_text(json.dumps(evidence, indent=2))
         finally:
             reset_current_workspace(workspace_token)
             reset_current_user(principal_token)
