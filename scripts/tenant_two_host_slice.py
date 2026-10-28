@@ -131,6 +131,9 @@ def prepare(host: str, digest: str) -> None:
 
 
 def main() -> None:
+    if os.environ.get("TENANT_TWO_HOST_SLICE") == "2":
+        run_slice_two()
+        return
     digest = freeze_archive(f"/private/tmp/{PHASE}-source.tar")
     print(f"[freeze] archive sha256 {digest}")
     prepare(CONTROLLER, digest)
@@ -185,6 +188,7 @@ native = sa.create_engine("{native_url}")
 with native.begin() as conn:
     conn.execute(sa.insert(UserRow).values(id=OWNER, email="two-host-owner@example.invalid", account_status="active", email_verified_at=datetime.now(UTC)))
     conn.execute(sa.insert(ThreadMetaRow).values(thread_id=THREAD, user_id=OWNER, incarnation="two-host-epoch", workspace_id=WORKSPACE))
+    conn.execute(sa.insert(ThreadMetaRow).values(thread_id="two-host-slice-two-thread", user_id=OWNER, incarnation="two-host-epoch", workspace_id=WORKSPACE))
     conn.execute(sa.insert(RunRow).values(run_id=RUN, thread_id=THREAD, user_id=OWNER, status="running", operation_kind="run",
                                thread_incarnation="two-host-epoch", owner_worker_id="two-host-central",
                                workspace_id=WORKSPACE, workspace_context_json=CONTEXT))
@@ -258,6 +262,149 @@ docker run --rm --pull=never --name {PHASE}-worker --label org.deerflow.tenant.o
         for remote in (f"{CROOT}/{PHASE}/controller.log", f"{CROOT}/{PHASE}/worker.log", f"{CROOT}/{PHASE}/evidence/controller.json", f"{CROOT}/{PHASE}/evidence/worker.json", f"{CROOT}/{PHASE}/evidence/owned.json"):
             scp_from(host, remote, f"/private/tmp/{PHASE}-artifacts/")
     print(f"[done] artifacts in /private/tmp/{PHASE}-artifacts (digest {digest})")
+
+
+
+
+REDIS_IMAGE = "sha256:858f009f97097b5293759754e98d5b6c9ab6f95b3f59833bc24a1a0e9cba20e6e"
+NATIVE_SECRET = "two-host-native-node-secret-32-bytes-fixed"
+INTERNAL_TOKEN = "two-host-internal-auth-token"
+
+
+def run_slice_two() -> None:
+    digest = freeze_archive(f"/private/tmp/{PHASE}-source.tar")
+    print(f"[freeze] archive sha256 {digest}")
+    prepare(CONTROLLER, digest)
+    prepare(WORKER, digest)
+    must(CONTROLLER, f"""set -eu
+docker rm -fv {PHASE}-pg {PHASE}-redis >/dev/null 2>&1 || true
+docker run -d --pull=never --name {PHASE}-pg --label org.deerflow.tenant.owned={PHASE} \
+  -p {CONTROLLER_PRIVATE}:55432:5432 -e POSTGRES_PASSWORD=two-host-only -e POSTGRES_DB=tenant \
+  --cpus 1 --memory 1g {PG_IMAGE} >/dev/null
+for i in $(seq 1 30); do docker exec {PHASE}-pg pg_isready -U postgres >/dev/null 2>&1 && break; sleep 1; done
+for db in tenant_native tenant_executor; do docker exec {PHASE}-pg psql -U postgres -c "CREATE DATABASE $db"; done
+docker run -d --pull=never --name {PHASE}-redis --label org.deerflow.tenant.owned={PHASE} \
+  -p {CONTROLLER_PRIVATE}:6390:6379 {REDIS_IMAGE} >/dev/null
+""", what="controller pg+redis")
+    base = f"postgresql+psycopg://postgres:two-host-only@{CONTROLLER_PRIVATE}:55432"
+    native_url = base + "/tenant_native"
+    executor_url = base + "/tenant_executor"
+    native_async_url = f"postgresql+asyncpg://postgres:two-host-only@{CONTROLLER_PRIVATE}:55432/tenant_native"
+    redis_url = f"redis://{CONTROLLER_PRIVATE}:6390/0"
+    print("[controller] slice-two migrations and seeding")
+    must(CONTROLLER, f"""set -eu
+docker run --rm --pull=never --network host -v {CROOT}/{PHASE}/source.tar.gz:/run/source.tar.gz:ro --entrypoint /bin/sh {NATIVE_IMAGE} -c '
+set -eu; rm -rf /tmp/source; mkdir /tmp/source; tar xzf /run/source.tar.gz -C /tmp/source
+cd /tmp/source/backend
+export PYTHONPATH=/tmp/source/backend:/tmp/source/backend/packages/harness:/tmp/source/backend/packages/extension-api:/tmp/source/backend/packages/ecs-executor
+/app/backend/.venv/bin/python /run/migrate.py'; rm -f /tmp/.two-host-migrate.py
+""", what="slice-two migrations", stdin_text=_SLICE_TWO_MIGRATE)
+    common = dict(COMMON_ENV)
+    common.update(
+        {
+            "TENANT_TWO_HOST_NATIVE_URL": native_url,
+            "TENANT_TWO_HOST_NATIVE_ASYNC_URL": native_async_url,
+            "TENANT_TWO_HOST_REDIS_URL": redis_url,
+            "TENANT_TWO_HOST_WORKER_CREDENTIAL": NATIVE_SECRET,
+            "DEER_FLOW_INTERNAL_AUTH_TOKEN": INTERNAL_TOKEN,
+            "TEST_EXECUTOR_POSTGRES_URL": executor_url,
+        }
+    )
+    print("[controller] start native-controller pytest (background)")
+    must(CONTROLLER, f"""set -eu
+nohup docker run --rm --pull=never --name {PHASE}-controller --label org.deerflow.tenant.owned={PHASE} \
+  --network host \
+  -e TENANT_TWO_HOST_ROLE=native-controller -e TENANT_TWO_HOST_NATIVE_PORT={PORT + 1} \
+  -v {CROOT}/{PHASE}:{CROOT}/{PHASE} -v {CROOT}/{PHASE}/source.tar.gz:/run/source.tar.gz:ro \
+  {env_flags(common)} \
+  -e TEST_SCOPE_EVIDENCE='{CROOT}/{PHASE}/evidence/native-controller.json' \
+  --entrypoint /bin/sh {NATIVE_IMAGE} -c 'mkdir -p /tmp/source && tar xzf /run/source.tar.gz -C /tmp/source && cd /tmp/source/backend \
+  && /app/backend/.venv/bin/python -m pytest tests/test_workspace_two_host_physical.py -q --tb=short --no-showlocals' \
+  > {CROOT}/{PHASE}/controller.log 2>&1 &
+echo $! > {CROOT}/{PHASE}/controller.pid
+""", what="native-controller start")
+    print("[controller] wait for pool mount id, sync to worker")
+    deadline = time.time() + 120
+    mount = ""
+    while time.time() < deadline:
+        mount = must(CONTROLLER, f"cat {CROOT}/{PHASE}/pool/pool-mount-id 2>/dev/null || true").strip()
+        if mount:
+            break
+        time.sleep(2)
+    if not mount:
+        sys.exit("native controller never created the pool mount id")
+    must(WORKER, f"mkdir -p {CROOT}/{PHASE}/pool && printf '%s' '{mount}' > {CROOT}/{PHASE}/pool/pool-mount-id", what="worker mount sync")
+    worker_env = dict(common)
+    worker_env.update(
+        {
+            "TENANT_TWO_HOST_ROLE": "native-worker",
+            "TENANT_TWO_HOST_NATIVE_EXECUTOR_URL": f"http://{CONTROLLER_PRIVATE}:{PORT + 1}",
+            "TENANT_TWO_HOST_NATIVE_NODE_SECRET": NATIVE_SECRET,
+            "TEST_SCOPE_EVIDENCE": f"{CROOT}/{PHASE}/evidence/native-worker.json",
+        }
+    )
+    print("[worker] run native-worker pytest")
+    must(WORKER, f"""set -eu
+docker run --rm --pull=never --name {PHASE}-worker --label org.deerflow.tenant.owned={PHASE} \
+  --network host \
+  -v {CROOT}/{PHASE}:{CROOT}/{PHASE} -v {CROOT}/{PHASE}/source.tar.gz:/run/source.tar.gz:ro \
+  {env_flags(worker_env)} \
+  --entrypoint /bin/sh {NATIVE_IMAGE} -c 'mkdir -p /tmp/source && tar xzf /run/source.tar.gz -C /tmp/source && cd /tmp/source/backend \
+  && /app/backend/.venv/bin/python -m pytest tests/test_workspace_two_host_physical.py -q --tb=short --no-showlocals'
+""", what="native-worker pytest")
+    print("[controller] wait for native-controller pytest to finish")
+    deadline = time.time() + 300
+    while time.time() < deadline:
+        running = must(CONTROLLER, f"docker ps --format '{{{{.Names}}}}' | grep -x {PHASE}-controller || true").strip()
+        if not running:
+            break
+        time.sleep(5)
+    print(must(CONTROLLER, f"tail -30 {CROOT}/{PHASE}/controller.log"))
+    for host in (CONTROLLER, WORKER):
+        for remote in (f"{CROOT}/{PHASE}/controller.log", f"{CROOT}/{PHASE}/evidence/native-controller.json", f"{CROOT}/{PHASE}/evidence/native-worker.json"):
+            scp_from(host, remote, f"/private/tmp/{PHASE}-artifacts/")
+    print(f"[done] slice 2 artifacts in /private/tmp/{PHASE}-artifacts (digest {digest})")
+
+
+_SLICE_TWO_MIGRATE = """
+import asyncio
+from datetime import UTC, datetime
+
+import sqlalchemy as sa
+from sqlalchemy.ext.asyncio import create_async_engine
+
+from deerflow.persistence import bootstrap
+from deerflow.persistence.thread_meta.model import ThreadMetaRow
+from deerflow.persistence.user.model import UserRow
+from deerflow.persistence.workspaces.model import WorkspaceMembershipRow, WorkspaceRow
+
+OWNER = "two-host-owner"
+WORKSPACE = "11111111-2222-4333-8333-222222222222"
+
+
+async def migrate_native(engine_url):
+    engine = create_async_engine(engine_url)
+    try:
+        await bootstrap.bootstrap_schema(engine, backend="postgres")
+    finally:
+        await engine.dispose()
+
+
+asyncio.run(migrate_native(NATIVE_ASYNC))
+native = sa.create_engine(NATIVE_SYNC)
+with native.begin() as conn:
+    conn.execute(sa.insert(UserRow).values(id=OWNER, email="two-host-owner@example.invalid", account_status="active", email_verified_at=datetime.now(UTC)))
+    conn.execute(sa.insert(ThreadMetaRow).values(thread_id="two-host-slice-two-thread", user_id=OWNER, incarnation="two-host-epoch", workspace_id=WORKSPACE))
+    conn.execute(sa.insert(WorkspaceRow).values(id=WORKSPACE, kind="personal", name="two-host", personal_user_id=OWNER))
+    conn.execute(sa.insert(WorkspaceMembershipRow).values(workspace_id=WORKSPACE, user_id=OWNER, role="owner", status="active", version=1))
+native.dispose()
+from ecs_executor.schema import upgrade_schema
+
+executor = sa.create_engine(EXECUTOR_SYNC)
+upgrade_schema(executor)
+executor.dispose()
+print("SLICE_TWO_MIGRATED")
+"""
 
 
 if __name__ == "__main__":
