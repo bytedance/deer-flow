@@ -15,14 +15,15 @@ import weakref
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import delete, func, or_, select, text, update
+from sqlalchemy import and_, delete, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.models.run_event import RunEventRow, RunEventThreadSeqRow
 from deerflow.persistence.run.model import CompletedRunSnapshotRow, RunRow
 from deerflow.persistence.run.sql import RunRepository
+from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.runtime.events.message_identity import message_identity
-from deerflow.runtime.events.producer import RunEventProducerRejected, current_producer
+from deerflow.runtime.events.producer import HistorySeedAuthority, RunEventProducerRejected, current_producer
 from deerflow.runtime.events.store.base import RunEventLifecycleRejected, RunEventStore, SessionAwareRunEventLifecycleGuard
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, get_current_user, resolve_user_id
 from deerflow.utils.time import coerce_iso
@@ -226,6 +227,9 @@ class DbRunEventStore(RunEventStore):
             if self._producer_fencing == "strict":
                 raise RunEventProducerRejected("Run event write requires host producer authority")
             return
+        if isinstance(authority, HistorySeedAuthority):
+            await self._admit_history_seed(session, events, authority)
+            return
         for event in events:
             if (event["thread_id"], event["run_id"], event.get("user_id", authority.user_id)) != (authority.thread_id, authority.run_id, authority.user_id):
                 raise RunEventProducerRejected("Event batch must match one admitted Run and owner")
@@ -248,6 +252,29 @@ class DbRunEventStore(RunEventStore):
                 raise RunEventProducerRejected("Takeover publisher no longer matches the committed Run")
         elif authority.source != "audit":
             raise RunEventProducerRejected("Unsupported host event authority")
+        if session.get_bind().dialect.name == "postgresql":
+            await session.execute(text("SELECT set_config('deerflow.event_authority', :authority, true)"), {"authority": json.dumps(authority.to_storage())})
+
+    async def _admit_history_seed(self, session: AsyncSession, events: list[dict], authority: HistorySeedAuthority) -> None:
+        if not all(authority.allows(event) for event in events):
+            raise RunEventProducerRejected("History seed batch is outside the host grant")
+        await self._acquire_thread_mutation_fence(session, authority.thread_id)
+        reservation = await session.scalar(select(RunRow).where(RunRow.run_id == authority.reservation_id).with_for_update().execution_options(populate_existing=True))
+        thread = await session.scalar(select(ThreadMetaRow).where(ThreadMetaRow.thread_id == authority.thread_id).with_for_update().execution_options(populate_existing=True))
+        if (
+            reservation is None
+            or thread is None
+            or (reservation.thread_id, reservation.user_id, reservation.run_incarnation, reservation.producer_epoch, reservation.owner_worker_id, reservation.evidence_retention_revision)
+            != (authority.thread_id, authority.user_id, authority.reservation_incarnation, authority.producer_epoch, authority.owner_worker_id, authority.retention_revision)
+            or (reservation.operation_kind, reservation.status, reservation.producer_state) != ("checkpoint_write", "pending", "open")
+            or (thread.incarnation, thread.user_id) != (authority.thread_incarnation, authority.thread_user_id)
+            or (thread.user_id is not None and thread.user_id != authority.user_id)
+        ):
+            raise RunEventProducerRejected("History seed reservation or thread was revoked or replaced")
+        # Evaluate after every row-lock wait. NULL is the existing single-worker
+        # reservation contract; leased reservations never receive expiry grace.
+        if reservation.lease_expires_at is not None and not await session.scalar(select(RunRepository._live_lease_predicate(session)).where(RunRow.run_id == authority.reservation_id)):
+            raise RunEventProducerRejected("History seed reservation lease expired")
         if session.get_bind().dialect.name == "postgresql":
             await session.execute(text("SELECT set_config('deerflow.event_authority', :authority, true)"), {"authority": json.dumps(authority.to_storage())})
 
@@ -467,7 +494,9 @@ class DbRunEventStore(RunEventStore):
         if user_id is not None:
             conditions.append(RunRow.user_id == user_id)
         if run_id is not None:
-            conditions.append(RunRow.run_id == run_id)
+            # Synthetic turns have no RunRow. Revoke outstanding history grants
+            # on any per-run deletion so they cannot reinsert the deleted turn.
+            conditions.append(or_(RunRow.run_id == run_id, and_(RunRow.operation_kind == "checkpoint_write", RunRow.status.in_(("pending", "running")))))
         await session.execute(
             update(RunRow)
             .where(*conditions)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, replace
@@ -31,10 +32,69 @@ class RunEventAuthority:
         return asdict(self)
 
 
-_authority: ContextVar[RunEventAuthority | None] = ContextVar("deerflow_event_authority", default=None)
+@dataclass(frozen=True)
+class HistorySeedAuthority:
+    """Host grant tied to a durable checkpoint-write reservation, not a Run."""
+
+    thread_id: str
+    user_id: str | None
+    thread_incarnation: str | None
+    thread_user_id: str | None
+    reservation_id: str
+    reservation_incarnation: str
+    producer_epoch: str
+    owner_worker_id: str
+    retention_revision: int
+    seed_kind: Literal["checkpoint", "branch"]
+    source: Literal["history_seed"] = "history_seed"
+
+    def to_storage(self) -> dict:
+        return asdict(self)
+
+    def allows(self, event: dict) -> bool:
+        prefix = f"{self.seed_kind}-seed-{self.thread_id}-"
+        return (
+            self.seed_kind in ("checkpoint", "branch")
+            and event["thread_id"] == self.thread_id
+            and event.get("user_id", self.user_id) == self.user_id
+            and re.fullmatch(re.escape(prefix) + r"[1-9][0-9]*", event["run_id"]) is not None
+            and event.get("category") == "message"
+            and event["event_type"] in ("llm.human.input", "llm.ai.response", "llm.tool.result")
+        )
 
 
-def current_producer() -> RunEventAuthority | None:
+def history_seed_authority(reservation, thread: dict, *, seed_kind: Literal["checkpoint", "branch"]) -> HistorySeedAuthority:
+    """Use only the host's committed reservation and captured thread identity."""
+    if (
+        seed_kind not in ("checkpoint", "branch")
+        or getattr(reservation, "operation_kind", None) != "checkpoint_write"
+        or getattr(reservation, "store_only", False)
+        or not getattr(reservation, "run_incarnation", None)
+        or not getattr(reservation, "producer_epoch", None)
+        or not getattr(reservation, "owner_worker_id", None)
+        or thread.get("thread_id") != reservation.thread_id
+        or "incarnation" not in thread
+        or (thread.get("user_id") is not None and thread["user_id"] != reservation.user_id)
+    ):
+        raise RunEventProducerRejected("History seeding requires a host reservation and matching thread owner")
+    return HistorySeedAuthority(
+        thread_id=reservation.thread_id,
+        user_id=reservation.user_id,
+        thread_incarnation=thread["incarnation"],
+        thread_user_id=thread.get("user_id"),
+        reservation_id=reservation.run_id,
+        reservation_incarnation=reservation.run_incarnation,
+        producer_epoch=reservation.producer_epoch,
+        owner_worker_id=reservation.owner_worker_id,
+        retention_revision=reservation.evidence_retention_revision,
+        seed_kind=seed_kind,
+    )
+
+
+_authority: ContextVar[RunEventAuthority | HistorySeedAuthority | None] = ContextVar("deerflow_event_authority", default=None)
+
+
+def current_producer() -> RunEventAuthority | HistorySeedAuthority | None:
     return _authority.get()
 
 
@@ -66,7 +126,7 @@ def run_producer_context(function):
 
 
 @contextmanager
-def producer_scope(authority: RunEventAuthority | None):
+def producer_scope(authority: RunEventAuthority | HistorySeedAuthority | None):
     token = _authority.set(authority)
     try:
         yield

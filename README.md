@@ -153,6 +153,10 @@ producer writes validate the persisted Run incarnation, producer epoch and state
 even with `run_events.producer_fencing: "off"`. Stale Journal flushes after
 takeover or deletion may therefore be rejected in the default configuration.
 On PostgreSQL, these writes hold the Thread Fence and RunRow lock through commit.
+Checkpoint and branch history imports use a separate host grant bound to a
+durable thread-operation reservation and the captured thread identity. Strict
+mode permits these imports without treating synthetic turn IDs as admitted Runs;
+deletion, reservation revocation or lease expiry invalidates their grant.
 
 On PostgreSQL, `run_events.producer_fencing: "strict"` additionally enables
 database-level authorization checks against raw SQL and unaware legacy writers

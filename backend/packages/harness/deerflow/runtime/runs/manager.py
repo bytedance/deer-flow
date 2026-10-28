@@ -2330,7 +2330,7 @@ class RunManager:
         *,
         kind: ThreadOperationKind,
         user_id: str | None = None,
-    ) -> AsyncIterator[None]:
+    ) -> AsyncIterator[RunRecord]:
         """Hold exclusive durable admission for a non-run thread operation.
 
         The reservation is a short-lived pending row, so the same durable
@@ -2356,7 +2356,7 @@ class RunManager:
                     lease_lost = record.abort_event.is_set()
             if lease_lost:
                 raise asyncio.CancelledError()
-            yield
+            yield record
         except asyncio.CancelledError:
             if record.abort_event.is_set():
                 raise ConflictError(f"Thread {thread_id} reservation lease was lost") from None

@@ -20,7 +20,7 @@ def install_event_guard(connection) -> None:
         text(f"""
 CREATE OR REPLACE FUNCTION {quoted}.run_event_producer_guard() RETURNS trigger
 LANGUAGE plpgsql VOLATILE SET search_path TO {quoted}, pg_catalog AS $guard$
-DECLARE r record; a jsonb; strict_mode boolean;
+DECLARE r record; t record; a jsonb; strict_mode boolean; seed_prefix text;
 BEGIN
     SELECT strict INTO strict_mode FROM run_producer_policy WHERE id=1;
     IF NOT coalesce(strict_mode, false) THEN
@@ -38,12 +38,41 @@ BEGIN
         RETURN NEW;
     END IF;
     PERFORM pg_advisory_xact_lock(hashtext(NEW.thread_id)::bigint);
-    SELECT * INTO r FROM runs WHERE run_id=NEW.run_id FOR UPDATE;
+    a := nullif(current_setting('deerflow.event_authority', true), '')::jsonb;
+    IF a->>'source'='history_seed' THEN
+        SELECT * INTO r FROM runs WHERE run_id=a->>'reservation_id' FOR UPDATE;
+        SELECT * INTO t FROM threads_meta WHERE thread_id=NEW.thread_id FOR UPDATE;
+    ELSE
+        SELECT * INTO r FROM runs WHERE run_id=NEW.run_id FOR UPDATE;
+    END IF;
     -- Cutover takes only this final lock, never a Clock/Thread/Run lock.
     PERFORM pg_advisory_xact_lock_shared(hashtext('deerflow.event_fence/' || current_schema())::bigint);
     SELECT strict INTO strict_mode FROM run_producer_policy WHERE id=1;
     IF NOT coalesce(strict_mode, false) THEN RETURN NEW; END IF;
-    a := nullif(current_setting('deerflow.event_authority', true), '')::jsonb;
+    IF a->>'source'='history_seed' THEN
+        seed_prefix := (a->>'seed_kind') || '-seed-' || NEW.thread_id || '-';
+        IF r.run_id IS NULL OR t.thread_id IS NULL
+           OR r.operation_kind <> 'checkpoint_write' OR r.status <> 'pending' OR r.producer_state IS DISTINCT FROM 'open'
+           OR r.thread_id IS DISTINCT FROM NEW.thread_id
+           OR r.user_id IS DISTINCT FROM NEW.user_id
+           OR a->>'thread_id' IS DISTINCT FROM NEW.thread_id
+           OR a->>'user_id' IS DISTINCT FROM NEW.user_id
+           OR r.run_incarnation IS NULL OR a->>'reservation_incarnation' IS DISTINCT FROM r.run_incarnation
+           OR r.producer_epoch IS NULL OR a->>'producer_epoch' IS DISTINCT FROM r.producer_epoch
+           OR r.owner_worker_id IS NULL OR a->>'owner_worker_id' IS DISTINCT FROM r.owner_worker_id
+           OR (a->>'retention_revision')::bigint IS DISTINCT FROM r.evidence_retention_revision
+           OR NOT (a ? 'thread_incarnation') OR a->>'thread_incarnation' IS DISTINCT FROM t.incarnation
+           OR NOT (a ? 'thread_user_id') OR a->>'thread_user_id' IS DISTINCT FROM t.user_id
+           OR (t.user_id IS NOT NULL AND t.user_id IS DISTINCT FROM NEW.user_id)
+           OR (r.lease_expires_at IS NOT NULL AND r.lease_expires_at <= clock_timestamp())
+           OR a->>'seed_kind' IS NULL OR a->>'seed_kind' NOT IN ('checkpoint','branch')
+           OR left(NEW.run_id, length(seed_prefix)) IS DISTINCT FROM seed_prefix
+           OR substring(NEW.run_id FROM length(seed_prefix)+1) !~ '^[1-9][0-9]*$'
+           OR NEW.category <> 'message' OR NEW.event_type NOT IN ('llm.human.input','llm.ai.response','llm.tool.result') THEN
+            RAISE EXCEPTION 'History seed authority is missing, stale or outside the host grant' USING ERRCODE='42501';
+        END IF;
+        RETURN NEW;
+    END IF;
     IF a IS NULL OR r.run_id IS NULL OR r.operation_kind <> 'run'
        OR a->>'run_id' IS DISTINCT FROM NEW.run_id
        OR a->>'thread_id' IS DISTINCT FROM NEW.thread_id

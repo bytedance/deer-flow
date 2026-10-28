@@ -9,6 +9,7 @@ DeerFlow's application tables (`runs`, `threads_meta`, `feedback`, `users`, `run
 0049 adds nullable producer identities (no backfill) and strict policy. Install
 its PostgreSQL guard in both Alembic and metadata `after_create` for fresh bootstrap.
 Activated policy forbids downgrade; dispose migration engines even on refusal.
+0050 refreshes installed guards to admit host-authorized history seeds.
 
 | DB state                                  | Action                                  |
 |-------------------------------------------|-----------------------------------------|

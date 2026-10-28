@@ -1031,7 +1031,7 @@ class RunRepository(RunStore):
         operation_kind: str = "run",
         multitask_strategy: str = "reject",
         assistant_id: str | None = None,
-        user_id: str | None = None,
+        user_id: str | None | _AutoSentinel = AUTO,
         model_name: str | None = None,
         metadata: dict[str, Any] | None = None,
         kwargs: dict[str, Any] | None = None,
@@ -1058,7 +1058,7 @@ class RunRepository(RunStore):
         """
         from deerflow.runtime.runs.manager import ConflictError
 
-        resolved_user_id = resolve_user_id(user_id or AUTO, method_name="RunRepository.create_thread_operation_atomic")
+        resolved_user_id = resolve_user_id(user_id, method_name="RunRepository.create_thread_operation_atomic")
         now = datetime.now(UTC)
         created = datetime.fromisoformat(created_at) if created_at else now
         lease_dt = datetime.fromisoformat(lease_expires_at) if lease_expires_at else None
