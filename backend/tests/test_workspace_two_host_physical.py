@@ -283,6 +283,8 @@ def _workspace_context():
 
 def _native_assembly(saver, *, worker_id):
     """Shared controller/worker app assembly over the two-host databases."""
+    import importlib
+
     from fastapi import FastAPI
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -291,12 +293,13 @@ def _native_assembly(saver, *, worker_id):
     from deerflow.persistence.projects import ProjectDocumentRepository, ProjectRepository
     from deerflow.persistence.run.sql import RunRepository
     from deerflow.persistence.scheduled_task_events.sql import ScheduledTaskEventRepository
-    from deerflow.persistence.scheduled_task_runs.sql import ScheduledTaskRunRepository
-    from deerflow.persistence.scheduled_tasks.sql import ScheduledTaskRepository
     from deerflow.persistence.thread_meta import ThreadMetaRepository
     from deerflow.runtime.events.store.db import DbRunEventStore
 
-    from app.gateway import services  # noqa: F401  (production import order resolves the cycle)
+    # The scheduled packages only import cleanly tasks-before-runs; ruff isort
+    # would otherwise reorder plain imports back into the cyclic order.
+    _tasks_sql = importlib.import_module("deerflow.persistence.scheduled_tasks.sql")
+    _runs_sql = importlib.import_module("deerflow.persistence.scheduled_task_runs.sql")
 
     engine = create_async_engine(os.environ["TENANT_TWO_HOST_NATIVE_ASYNC_URL"])
     sf = async_sessionmaker(engine, expire_on_commit=False)
@@ -318,8 +321,8 @@ def _native_assembly(saver, *, worker_id):
     app.state.run_event_store = events
     app.state.project_repo = ProjectRepository(sf, workspace_required=True)
     app.state.project_document_repo = ProjectDocumentRepository(sf, workspace_required=True)
-    app.state.scheduled_task_repo = ScheduledTaskRepository(sf, run_repository=run_store, workspace_required=True)
-    app.state.scheduled_task_run_repo = ScheduledTaskRunRepository(sf, run_repository=run_store, workspace_required=True)
+    app.state.scheduled_task_repo = _tasks_sql.ScheduledTaskRepository(sf, run_repository=run_store, workspace_required=True)
+    app.state.scheduled_task_run_repo = _runs_sql.ScheduledTaskRunRepository(sf, run_repository=run_store, workspace_required=True)
     app.state.scheduled_task_event_repo = ScheduledTaskEventRepository(sf, workspace_required=True)
     return SimpleNamespace(app=app, engine=engine, sf=sf, threads=threads, run_store=run_store, task_repo=task_repo, manager=manager, events=events, users=SQLiteUserRepository(sf))
 
