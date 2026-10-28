@@ -1389,6 +1389,11 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
 
 ### Changed
 
+- **tool output:** Superseded `write_file` payload elision is now opt-in. The
+  optimization remains available, but the default keeps model-bound history
+  append-only so later file actions do not invalidate provider prompt-cache
+  prefixes. ([#7319](https://github.com/bytedance/deer-flow/issues/7319))
+
 - **skills:** Treat `allowed-tools` as non-enforced compatibility metadata.
   Activating a skill no longer hides or blocks tools that Agent configuration
   and host authorization already permit, including when the declaration is
@@ -1396,6 +1401,96 @@ As of 2026-10-21, the milestone includes **829 merged pull requests**.
   existing secret and user isolation boundaries are retained. ([#6935])
 
 ### Fixed
+
+- **channels:** DingTalk AI cards no longer fetch an access token on the
+  Gateway event loop. Card creation and card streaming went through
+  dingtalk-stream's synchronous `get_access_token()`, which posts with
+  `requests` and no timeout, so the first card and every SDK token refresh
+  (about every two hours) stalled every channel, request and stream for the
+  whole request, indefinitely if DingTalk stalled. Card calls now use the
+  channel's own bounded token, and a token failure while streaming falls back
+  to a Markdown reply instead of dropping the update. ([#7597])
+
+- **web fetch:** Cache unavailable Readability.js probes and stop retrying the
+  Node extractor after a process-launch failure. Installations without a
+  working Node/npm toolchain now use the existing link-preserving Python
+  fallback on later fetches without repeating the failed subprocess probe;
+  document-specific non-zero exits still retry Node on later pages. ([#5973])
+  
+- **scripts:** `make dev` and `make start` no longer run the checkout `.env`
+  as a shell script. `serve.sh` sourced it, so `$$` became the shell's PID,
+  backticks and `$(...)` ran commands, and an unquoted value with a space ran
+  its second word as a command and stopped the launcher with exit 127. Those
+  values also beat the Gateway's own `.env` read, so a `$$` in
+  `AUTH_JWT_SECRET` changed the secret on every launch. The launcher now
+  parses `.env` like python-dotenv, keeps its precedence over shell exports and
+  its `$NAME`, `${NAME:-default}` and leading `~` expansion, and leaves `$$`,
+  backticks and `$(...)` as written. ([#7606])
+
+- **channels:** IM replies that present files no longer resolve those files
+  on the event loop. For every artifact, both reply paths (`runs.wait` and
+  streaming) resolved the virtual path (`realpath`), resolved the outputs
+  root and checked the file with `stat` inline, stalling other channels and
+  requests on network-backed storage. They now do it in a worker. ([#7594])
+  
+- **channels:** A streamed Feishu reply no longer rewrites the same thread
+  bindings on every chunk. Each outbound to the running card stored all of
+  the reply's aliases again (about five `set_thread_id` writes per chunk: a
+  full `store.json` rewrite under the store lock each, or a database upsert),
+  although nothing but `updated_at` changed. Non-final chunks now store each
+  alias once per reply, a failed write is retried on the next chunk, and the
+  final outbound still writes them all. ([#7593])
+  
+- **runtime:** Loop-detection warnings now ask the agent to present the files
+  it already created in `/mnt/user-data/outputs` before its final answer, so a
+  warned run no longer fails its delivery check with finished files left
+  undelivered. A run that reaches `recursion_limit` now ends with
+  `stop_reason: recursion_capped` and a plain message that lists the outputs it
+  created but did not present, instead of LangGraph's raw error. An active goal
+  stands down without an evaluator call and stays active, `/wait` names the
+  error `GraphRecursionError`, and IM channels reply with the message instead
+  of a generic failure. ([#7588])
+  
+- **channels:** Connecting Slack, Discord, Feishu, DingTalk, WeCom, Buzz or QQ
+  now opens a dialog that keeps the `/connect` command on screen with a copy
+  button, its expiry time and the binding status, instead of a toast that
+  disappears. The bots' `/connect` and `/goal` replies follow the owner's web UI
+  language (else `channel_connections.notification_locale`), and `/goal` in IM
+  reports whether the goal is in progress, why it stopped, or that it was met,
+  as the web goal bar does. ([#7591])
+
+- **community:** Async community tools (Jina, Crawl4AI, Browserless, Tavily,
+  SearXNG, Firecrawl, InfoQuest, RAGFlow, LightRAG, Jsonify and the browser
+  automation tools) no longer read `config.yaml` and `extensions_config.json` on the
+  event loop. Each call checked both files (a `stat` and a full sha256 of
+  each) up to three times, and reparsed `config.yaml` there after an edit,
+  stalling other runs, requests and streams meanwhile. They now read the
+  config once per call in a worker, as image search already did. ([#7580])
+
+- **wizard:** The setup wizard's Anthropic default model is now
+  `claude-sonnet-5-5` instead of the retired `claude-sonnet-4-20250514`, which
+  the Claude API no longer accepts. For that model the wizard leaves out the
+  extended-thinking (`budget_tokens`) and thinking-disabled templates it
+  rejects. The Anthropic examples in `config.example.yaml` and the
+  configuration docs follow the same model.([#7585])
+
+- **auth:** The public auth routes (`/register`, `/setup-status`,
+  `/providers`, `/oauth/{provider}` and `/callback/{provider}`) no longer read
+  `config.yaml` and `extensions_config.json` on the event loop. Each request
+  checked both files (a `stat` and a full sha256 of each), and reparsed
+  `config.yaml` there after an edit, stalling other requests and streams
+  meanwhile. The read now runs in a worker, as `/login/local` already did.
+  ([#7576])
+  
+- **sandbox:** Stopping the Gateway no longer destroys AIO or E2B sandboxes
+  before in-flight runs drain. When the first sandbox use built the provider on
+  the event-loop thread, the provider's own SIGTERM/SIGINT handler destroyed
+  every sandbox synchronously as the signal arrived: the event loop froze for
+  the whole teardown and running tool calls lost their sandbox. The Gateway now
+  owns sandbox shutdown and closes the provider after the run drain and MCP
+  teardown; embedded clients and scripts keep the signal fallback, and SIGHUP
+  still cleans up. AIO acquire now refuses once shutdown has begun, as E2B
+  already did. ([#7560])
 
 - **frontend:** SSO sign-ins now return to the page that asked for them, such
   as a shared chat link, instead of always opening the default workspace. The
@@ -12522,6 +12617,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5965]: https://github.com/bytedance/deer-flow/pull/5965
 [#5966]: https://github.com/bytedance/deer-flow/pull/5966
 [#5968]: https://github.com/bytedance/deer-flow/pull/5968
+[#5973]: https://github.com/bytedance/deer-flow/issues/5973
 [#5977]: https://github.com/bytedance/deer-flow/pull/5977
 [#5978]: https://github.com/bytedance/deer-flow/pull/5978
 [#5980]: https://github.com/bytedance/deer-flow/pull/5980
@@ -13125,3 +13221,13 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7521]: https://github.com/bytedance/deer-flow/pull/7521
 [#7530]: https://github.com/bytedance/deer-flow/pull/7530
 [#7557]: https://github.com/bytedance/deer-flow/pull/7557
+[#7560]: https://github.com/bytedance/deer-flow/pull/7560
+[#7576]: https://github.com/bytedance/deer-flow/pull/7576
+[#7580]: https://github.com/bytedance/deer-flow/pull/7580
+[#7585]: https://github.com/bytedance/deer-flow/pull/7585
+[#7588]: https://github.com/bytedance/deer-flow/pull/7588
+[#7591]: https://github.com/bytedance/deer-flow/pull/7591
+[#7593]: https://github.com/bytedance/deer-flow/pull/7593
+[#7594]: https://github.com/bytedance/deer-flow/pull/7594
+[#7597]: https://github.com/bytedance/deer-flow/pull/7597
+[#7606]: https://github.com/bytedance/deer-flow/pull/7606

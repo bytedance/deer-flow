@@ -191,7 +191,14 @@ At shutdown the Gateway stops accepting new fire-and-forget observations, such a
 
 ## Diagnostics
 
-A diagnostic is a problem attributed to one extension. Every diagnostic is written to the Gateway log with the entry point as its prefix. Load failures, middleware construction and isolation failures, router mount rejections, and service start and stop failures are also collected in a live list on `app.state.extension_diagnostics`, which keeps the most recent **1000** entries. There is no HTTP endpoint for it, so operators read the Gateway log.
+A diagnostic is a problem attributed to one extension. Every diagnostic is written to the Gateway log with the entry point as its prefix. Load failures, middleware construction and isolation failures, router mount rejections, and service start and stop failures are also collected in a live list on `app.state.extension_diagnostics`, which keeps the most recent **1000** entries.
+
+Administrators can read that list through `GET /api/plugins/diagnostics`. It returns
+entry-point identifiers, levels, and fixed safe summaries; unrecognized source
+strings are redacted. Raw messages, configuration, paths, and tracebacks stay in
+the Gateway log. The response is not cached and reading it does not clear the list.
+It covers the current Gateway process only. Ordinary users and PAT credentials,
+including administrator PATs, cannot use this endpoint.
 
 Failures of task-lifecycle hooks and observers are logged but not added to that list.
 

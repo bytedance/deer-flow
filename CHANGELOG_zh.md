@@ -1106,11 +1106,74 @@
 
 ### 变更
 
+- **工具输出：** 被后续操作取代的 `write_file` 载荷省略现在改为显式启用。该优化仍可
+  使用，但默认会保持发送给模型的历史只追加，避免后续文件操作使 provider 的提示词缓存
+  前缀失效。([#7319](https://github.com/bytedance/deer-flow/issues/7319))
+
 - **技能：** 将 `allowed-tools` 作为不强制执行的兼容性元数据。激活技能不再隐藏或
   阻止智能体配置与宿主授权已经允许的工具，即使该声明为空也是如此。保留解析、校验、
   导出、技能激活权限，以及现有的密钥和用户隔离边界。([#6935])
 
 ### 修复
+
+- **渠道：** 钉钉 AI 卡片不再在 Gateway 事件循环上获取 access token。此前创建卡片和流式更新卡片
+  都会调用 dingtalk-stream 的同步 `get_access_token()`，它用 `requests` 发请求且没有超时，因此
+  首张卡片以及之后每次 SDK token 刷新（约每两小时一次）都会在整个请求期间阻塞所有渠道、请求和
+  流；钉钉无响应时会一直阻塞。现在卡片调用使用渠道自身带超时的 token，流式更新时 token 获取失败
+  会回退为 Markdown 回复，而不是丢弃这次更新。([#7597])
+
+- **网页抓取：** 缓存 Readability.js 不可用的探测结果，并在 Node 抽取器首次出现
+  进程启动失败后停止重试。没有可用 Node/npm 工具链的安装环境会在后续抓取中直接使用
+  现有且保留链接的 Python 回退，不再重复执行失败的子进程探测；单篇文档导致的非零退出
+  仍会在后续页面重试 Node。([#5973])
+  
+- **脚本：** `make dev` 和 `make start` 不再把检出目录的 `.env` 当作 shell 脚本执行。此前
+  `serve.sh` 用 `source` 读取它，`$$` 会变成 shell 的 PID，反引号和 `$(...)` 会执行命令，未加引号
+  且含空格的值会把第二个词当作命令运行，启动脚本以退出码 127 中止。这些值还会覆盖 Gateway
+  自己读取的 `.env`，例如 `AUTH_JWT_SECRET` 中的 `$$` 会让密钥每次启动都变化。现在启动脚本按
+  python-dotenv 的规则解析 `.env`，保留其优先于 shell 导出变量的行为以及 `$NAME`、
+  `${NAME:-default}` 和开头 `~` 的展开，`$$`、反引号和 `$(...)` 则保持原样。([#7606])
+
+- **渠道：** 展示文件的 IM 回复不再在事件循环上解析这些文件。此前两条回复路径（`runs.wait`
+  和流式）都会对每个产物内联解析虚拟路径（`realpath`）、解析输出根目录并用 `stat` 检查文件，
+  在网络存储上会让其他渠道和请求停顿。现在这些工作在工作线程中进行。([#7594])
+  
+- **渠道：** 飞书流式回复不再在每个分块上重写相同的线程绑定。此前每次向运行中卡片发送消息都会
+  重新保存该回复的全部别名（每个分块约五次 `set_thread_id`：每次都是在存储锁下完整重写
+  `store.json`，或一次数据库 upsert），而实际只有 `updated_at` 变化。现在非最终分块对每个
+  别名每次回复只写一次，写入失败会在下一个分块重试，最终消息仍会写入全部别名。([#7593])
+  
+- **运行时：** 循环检测警告现在会让 agent 在作答前，先交付已经写入
+  `/mnt/user-data/outputs` 的文件，被警告的运行不会再因为做好的文件没交付而判为失败。
+  运行达到 `recursion_limit` 时，现在以 `stop_reason: recursion_capped` 结束，并给出
+  一条说明，列出已生成但未交付的文件，而不是 LangGraph 的原始报错。进行中的目标会直接
+  停止续跑（不调用评估模型）并保持活跃；`/wait` 把这个错误命名为
+  `GraphRecursionError`；IM 渠道也会回复这条说明，而不是笼统的错误提示。([#7588])
+  
+- **渠道：** 连接 Slack、Discord、飞书、钉钉、企业微信、Buzz 或 QQ 时，现在会打开
+  一个对话框，持续显示 `/connect` 命令，并提供复制按钮、过期时间和绑定状态，不再只是
+  一闪而过的提示。机器人对 `/connect` 和 `/goal` 的回复会跟随用户在网页端选择的语言
+  （否则使用 `channel_connections.notification_locale`）；IM 中的 `/goal` 也会像网页端
+  目标栏一样，说明目标是否在进行、为什么停止或已经达成。([#7591])
+
+- **社区工具：** 异步社区工具（Jina、Crawl4AI、Browserless、Tavily、SearXNG、Firecrawl、
+  InfoQuest、RAGFlow、LightRAG、Jsonify 和浏览器自动化工具）不再在事件循环上读取 `config.yaml`
+  和 `extensions_config.json`。每次调用最多会把这两个文件检查三次（各做一次 `stat`
+  和完整的 sha256），编辑后还会在循环上重新解析 `config.yaml`，期间其他运行、请求和
+  流式输出都会停顿。现在它们与图片搜索一样，每次调用只在工作线程中读取一次配置。([#7580])
+
+- **鉴权：** 公开的认证路由（`/register`、`/setup-status`、`/providers`、
+  `/oauth/{provider}` 和 `/callback/{provider}`）不再在事件循环上读取 `config.yaml` 和
+  `extensions_config.json`。每个请求都会检查这两个文件（各做一次 `stat` 和完整的
+  sha256），编辑后还会在循环上重新解析 `config.yaml`，期间其他请求和流式输出都会
+  停顿。现在这次读取与 `/login/local` 一样在工作线程中执行。([#7576])
+  
+- **沙箱：** 停止 Gateway 时，AIO 和 E2B 沙箱不再在进行中的运行收尾之前被销毁。此前
+  如果第一次使用沙箱时在事件循环线程上构造了提供方，提供方自己的 SIGTERM/SIGINT
+  处理器会在信号到达时同步销毁所有沙箱：整个销毁期间事件循环冻结，正在执行的工具
+  调用失去沙箱。现在由 Gateway 负责沙箱关闭，在运行收尾和 MCP 关闭之后再关闭提供方；
+  嵌入式客户端和脚本保留信号兜底，SIGHUP 仍会清理。AIO 的 acquire 在关闭开始后会
+  拒绝请求，与 E2B 一致。([#7560])
 
 - **前端：** SSO 登录后现在会回到发起登录的页面（例如分享的对话链接），不再总是打开
   默认工作区。此前登录相关页面会把所有已登录的请求都跳转到 `/workspace`，导致
@@ -9874,6 +9937,7 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#5965]: https://github.com/bytedance/deer-flow/pull/5965
 [#5966]: https://github.com/bytedance/deer-flow/pull/5966
 [#5968]: https://github.com/bytedance/deer-flow/pull/5968
+[#5973]: https://github.com/bytedance/deer-flow/issues/5973
 [#5977]: https://github.com/bytedance/deer-flow/pull/5977
 [#5978]: https://github.com/bytedance/deer-flow/pull/5978
 [#5980]: https://github.com/bytedance/deer-flow/pull/5980
@@ -10477,3 +10541,12 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7521]: https://github.com/bytedance/deer-flow/pull/7521
 [#7530]: https://github.com/bytedance/deer-flow/pull/7530
 [#7557]: https://github.com/bytedance/deer-flow/pull/7557
+[#7560]: https://github.com/bytedance/deer-flow/pull/7560
+[#7576]: https://github.com/bytedance/deer-flow/pull/7576
+[#7580]: https://github.com/bytedance/deer-flow/pull/7580
+[#7588]: https://github.com/bytedance/deer-flow/pull/7588
+[#7591]: https://github.com/bytedance/deer-flow/pull/7591
+[#7593]: https://github.com/bytedance/deer-flow/pull/7593
+[#7594]: https://github.com/bytedance/deer-flow/pull/7594
+[#7597]: https://github.com/bytedance/deer-flow/pull/7597
+[#7606]: https://github.com/bytedance/deer-flow/pull/7606

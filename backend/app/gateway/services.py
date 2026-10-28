@@ -1971,11 +1971,19 @@ async def _recover_run_knowledge_scope(
     *,
     thread_id: str,
     target_message_id: str | None,
+    checkpoint_id: str | None = None,
+    checkpoint_ns: str = "",
 ) -> object | None:
-    """Resolve one replay/resume scope from the authoritative latest checkpoint."""
+    """Recover the source turn's scope from the selected checkpoint or head."""
+    checkpoint_kwargs: dict[str, Any] = {}
+    if checkpoint_id is not None:
+        checkpoint_kwargs["checkpoint_id"] = checkpoint_id
+    if checkpoint_ns:
+        checkpoint_kwargs["checkpoint_ns"] = checkpoint_ns
     accessor, config = await build_thread_checkpoint_state_accessor(
         request,
         thread_id=thread_id,
+        **checkpoint_kwargs,
     )
     try:
         snapshot = await accessor.aget(config)
@@ -2252,7 +2260,8 @@ async def start_run(
         if command and command.get("resume") is not None:
             graph_input = Command(resume=command["resume"])
         else:
-            graph_input = normalized_input
+            # LangGraph continues pending work with None; {} starts new input.
+            graph_input = normalized_input if body.input is not None else None
         # Keep the idempotency identity in the caller's pre-stamp shape. A
         # keyed retry can then reuse a run even though its stored run input has
         # Gateway-issued IDs, and old id-less run records remain comparable.
@@ -2307,7 +2316,7 @@ async def start_run(
         scope_graph_input = graph_input if isinstance(graph_input, dict) else {"messages": []}
         current_human_message = _current_human_message(graph_input)
         current_message_has_scope = current_human_message is not None and KNOWLEDGE_SCOPE_KEY in current_human_message.additional_kwargs
-        replay_requires_scope_recovery = isinstance(graph_input, Command) or (isinstance(target_message_id, str) and bool(target_message_id) and (replay_kind != "edit" or not current_message_has_scope))
+        replay_requires_scope_recovery = graph_input is None or isinstance(graph_input, Command) or (isinstance(target_message_id, str) and bool(target_message_id) and (replay_kind != "edit" or not current_message_has_scope))
         is_human_input_response = current_human_message is not None and "human_input_response" in current_human_message.additional_kwargs
         # Clarification and edit-replay messages may intentionally replace the
         # source scope. If either client omits its current selector snapshot,
@@ -2315,11 +2324,16 @@ async def start_run(
         # run to every operator-approved dataset. Other replay paths always use
         # server recovery regardless of client input.
         is_scope_recovery = replay_requires_scope_recovery or (is_human_input_response and not current_message_has_scope)
+        recovery_checkpoint: dict[str, Any] = {}
+        if graph_input is None:
+            configurable = config.get("configurable") or {}
+            recovery_checkpoint = {key: configurable[key] for key in ("checkpoint_id", "checkpoint_ns") if configurable.get(key)}
         recovery_scope = (
             await _recover_run_knowledge_scope(
                 request,
                 thread_id=thread_id,
                 target_message_id=(target_message_id if isinstance(target_message_id, str) else None),
+                **recovery_checkpoint,
             )
             if is_scope_recovery
             else None
@@ -3062,7 +3076,11 @@ def serialize_wait_run_status(record: RunRecord) -> dict[str, Any]:
     """Return durable status and the error envelope recognized by the SDK."""
     result: dict[str, Any] = {"status": record.status.value, "error": record.error}
     if record.status == RunStatus.error:
-        result["__error__"] = {"error": "RunError", "message": record.error or "Run failed."}
+        # A run stopped at its step limit keeps the error name of its stream
+        # error frame, so callers such as IM channels can show its message
+        # instead of a generic failure.
+        name = "GraphRecursionError" if getattr(record, "stop_reason", None) == "recursion_capped" else "RunError"
+        result["__error__"] = {"error": name, "message": record.error or "Run failed."}
     return result
 
 

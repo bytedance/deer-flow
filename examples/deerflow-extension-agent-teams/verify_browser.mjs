@@ -139,6 +139,67 @@ try {
     window.teamContext.callBackend("list", {}).then((r) => r.teams[0]),
   );
   const [research, review] = team.members;
+  async function stateCall(operation, input, source = research.thread_id) {
+    const response = await page.request.post(
+      `${apiBase.origin}/preview/state`,
+      {
+        data: {
+          operation,
+          input: { team_id: team.id, ...input },
+          source_thread: source,
+        },
+      },
+    );
+    assert.equal(response.status(), 200);
+    return response.json();
+  }
+  const state = await stateCall("publish", {
+    request_id: "browser-state",
+    kind: "plan",
+    title: "Deployment cost review",
+    content:
+      "Gather quotes, then check operating costs. <script>throw Error('unsafe')</script>",
+  });
+  const statePanel = page.locator(".public-state");
+  await expect(
+    statePanel.getByText("Deployment cost review", { exact: true }),
+  ).toBeVisible({ timeout: 12000 });
+  await expect(statePanel.locator("script")).toHaveCount(0);
+  await expect(statePanel).toContainText("v1 · Research");
+  await expect(composer).toHaveValue(
+    "Keep this unfinished draft while the result arrives.",
+  );
+  await stateCall(
+    "update",
+    {
+      entry_id: state.entry.id,
+      expected_revision: 1,
+      title: "Deployment cost review",
+      content: "Include annual operating costs in the final report.",
+      status: "active",
+    },
+    review.thread_id,
+  );
+  await expect(statePanel).toContainText("v2 · Review", { timeout: 12000 });
+  await expect(statePanel).toContainText(
+    "Include annual operating costs in the final report.",
+  );
+  const conflict = await stateCall("update", {
+    entry_id: state.entry.id,
+    expected_revision: 1,
+    title: "Stale replacement",
+    content: "Must not overwrite the reviewer.",
+    status: "active",
+  });
+  assert.equal(conflict.conflict, true);
+  await expect(
+    statePanel.getByText("Stale replacement", { exact: true }),
+  ).toHaveCount(0);
+  if (process.env.TEAM_STATE_SCREENSHOT)
+    await page.screenshot({
+      path: process.env.TEAM_STATE_SCREENSHOT,
+      fullPage: true,
+    });
   await page.request
     .post(`${apiBase.origin}/preview/peer-request`, {
       data: {
