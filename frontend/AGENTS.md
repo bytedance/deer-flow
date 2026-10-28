@@ -77,6 +77,13 @@ Keep IM notification preferences viewer-fenced and separate from browser alerts;
 
 ## Architecture
 
+Token usage: `app/workspace/usage` composes `components/workspace/usage` and
+`core/usage` over the existing owner-scoped console APIs. Keep owner, period,
+timezone, status and page in query keys; consume AbortSignals and never show
+another owner's or period's placeholder totals. Gate on `runs:read` and static
+mode. Display tokens without changing optional backend pricing fields.
+See [design and reporting semantics](docs/token-usage-dashboard.md).
+
 Model controls: `core/models/use-model-control` + HumanInputCard.
 
 Knowledge evidence is parsed in `core/citations/sources.ts` from version-1

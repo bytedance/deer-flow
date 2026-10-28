@@ -5,6 +5,7 @@ import {
   CalendarClock,
   MessagesSquare,
   BlocksIcon,
+  ChartColumn,
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
@@ -21,12 +22,18 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { useAgentsApiEnabled } from "@/core/agents";
+import { useAuth } from "@/core/auth/AuthProvider";
+import { hasPermission } from "@/core/auth/permissions";
 import { useI18n } from "@/core/i18n/hooks";
+import { isStaticWebsiteOnly } from "@/core/static-mode";
 
 export function WorkspaceNavChatList() {
   const { t } = useI18n();
   const pathname = usePathname();
   const { enabled: agentsEnabled } = useAgentsApiEnabled();
+  const { user } = useAuth();
+  const usageEnabled =
+    !!user && hasPermission(user, "runs:read") && !isStaticWebsiteOnly();
   return (
     <SidebarGroup className="pt-1">
       <SidebarMenu>
@@ -94,6 +101,19 @@ export function WorkspaceNavChatList() {
             </Link>
           </SidebarMenuButton>
         </SidebarMenuItem>
+        {usageEnabled && (
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              isActive={pathname.startsWith("/workspace/usage")}
+              asChild
+            >
+              <Link className="text-muted-foreground" href="/workspace/usage">
+                <ChartColumn />
+                <span>{t.usage.title}</span>
+              </Link>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+        )}
         <SidebarMenuItem>
           <SidebarMenuButton
             isActive={pathname.startsWith("/workspace/capabilities")}
