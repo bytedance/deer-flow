@@ -7797,22 +7797,29 @@ class TestHandleChatWithArtifacts:
             manager._client = mock_client
 
             outbound_received = []
-            bus.subscribe_outbound(lambda msg: outbound_received.append(msg))
+            outbound_queue: asyncio.Queue[OutboundMessage] = asyncio.Queue()
+
+            async def record_outbound(msg: OutboundMessage) -> None:
+                outbound_received.append(msg)
+                await outbound_queue.put(msg)
+
+            bus.subscribe_outbound(record_outbound)
             await manager.start()
-
-            # Send two messages with the same topic_id (same thread)
-            for text in ["make report", "add chart"]:
-                msg = InboundMessage(
-                    channel_name="test",
-                    chat_id="c1",
-                    user_id="u1",
-                    text=text,
-                    topic_id="topic-dup",
-                )
-                await bus.publish_inbound(msg)
-
-            await _wait_for(lambda: len(outbound_received) >= 2)
-            await manager.stop()
+            try:
+                # Model completed turns on one thread; concurrent worker replies
+                # can arrive in either order after off-loop artifact preparation.
+                for text in ["make report", "add chart"]:
+                    msg = InboundMessage(
+                        channel_name="test",
+                        chat_id="c1",
+                        user_id="u1",
+                        text=text,
+                        topic_id="topic-dup",
+                    )
+                    await bus.publish_inbound(msg)
+                    await asyncio.wait_for(outbound_queue.get(), timeout=5.0)
+            finally:
+                await manager.stop()
 
             assert len(outbound_received) == 2
 

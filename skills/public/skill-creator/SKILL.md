@@ -442,6 +442,8 @@ While it runs, periodically tail the output to give the user updates on which it
 
 This handles the full optimization loop automatically. It splits the eval set into 60% train and 40% held-out test, evaluates the current description (running each query 3 times to get a reliable trigger rate), then calls Claude to propose improvements based on what failed. It re-evaluates each new description on both train and test, iterating up to 5 times. When it's done, it opens an HTML report in the browser showing the results per iteration and returns JSON with `best_description` — selected by test score rather than train score to avoid overfitting.
 
+The trigger evaluator processes buffered CLI events after the child exits, including a final event without a trailing newline.
+
 Description optimization requires PyYAML (also used by the package validator). Name and description fields are parsed as YAML strings, including escaped quotes, comments and block scalars. Invalid metadata stops the evaluator, optimizer or description-improvement command with an `Error:` on stderr and exit status 1.
 
 ### How skill triggering works

@@ -490,3 +490,20 @@ Multi-instance harness tests use `support.shell.require_script_bash()` for shell
 smoke checks. Keep config content and secret stability checks portable; isolate
 POSIX owner-only permission assertions so Windows skips only those checks.
 Nginx path expectations must include quoted-string escaping for native paths.
+
+## Launcher dotenv parsing
+
+`serve.sh` never sources root `.env`: stdlib-only `scripts/dotenv_exports.py`
+(host Python, before `uv sync`) tokenizes it like python-dotenv, keeps `.env`
+over shell exports and the `$NAME`/`${NAME:-x}`/leading-`~` expansion that
+`support_bundle.py` mirrors (keep both expanders in step), and prints
+shell-quoted exports for `eval`. `test_serve_dotenv.py` and the launcher-block
+cases in `test_support_bundle.py` run the real block; harnesses that copy
+`serve.sh` with a `.env` must copy the parser too.
+
+## Channel artifact turn sequencing
+
+`test_channels.py` models consecutive artifact-producing turns by awaiting an
+async outbound callback before sending the next inbound message. Keep the real
+worker-pool concurrency, preserve per-turn artifact assertions, and stop the
+manager in `finally` so a failure cannot leave tasks using a closed test loop.

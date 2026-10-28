@@ -148,6 +148,7 @@ to a boundary (SQLite) or causing the search to fail (PostgreSQL).
 | Route | Purpose |
 |-------|---------|
 | `GET /api/models` | List available LLM models |
+| `GET /api/plugins/diagnostics` | Read redacted diagnostics for this Gateway process (admin only) |
 | `GET/PUT /api/mcp/config` | Manage MCP server configurations |
 | `POST /api/mcp/cache/reset` | Reset cached MCP tools so they reload on next use |
 | `GET /api/skills` | List skills visible to the caller |
