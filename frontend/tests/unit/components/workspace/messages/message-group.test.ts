@@ -895,8 +895,8 @@ describe("MessageGroup tool links", () => {
 
 // Provider rows are untrusted input: the default DuckDuckGo provider (and
 // Serper/InfoQuest) sends no source_url at all, and any field may be missing,
-// null or a non-string. A missing source URL is not a rejected URL — the row
-// must render unlinked rather than through the UnsafeLink marker (#6718).
+// blank, null or a non-string. A missing source URL is not a rejected URL —
+// the row must render unlinked rather than through the UnsafeLink marker (#6718).
 describe("MessageGroup image_search rows", () => {
   it("renders default-provider rows without source_url as unlinked images", () => {
     const html = renderToolCall(
@@ -914,6 +914,11 @@ describe("MessageGroup image_search rows", () => {
     );
 
     expect(html).toContain('src="https://images.example/thumb.png"');
+    expect(html).toContain('alt="Reference image"');
+    expect(html).toContain('loading="lazy"');
+    expect(html).toContain('decoding="async"');
+    expect(html).toContain('referrerPolicy="no-referrer"');
+    expect(html).toContain('data-slot="tooltip-trigger"');
     expect(unsafeMarkerCount(html)).toBe(0);
     expect(anchorCount(html)).toBe(0);
     expect(html).not.toContain("Unsafe link scheme in undefined");
@@ -999,7 +1004,62 @@ describe("MessageGroup image_search rows", () => {
 
     expect(html).not.toContain("[object Object]");
     expect(html).not.toContain("injected");
+    expect(html).toContain('alt="DeerFlow"');
+    expect(html).not.toContain('data-slot="tooltip-trigger"');
     expect(html).toContain('src="https://images.example/full.png"');
+  });
+
+  it("treats blank URL strings as missing", () => {
+    const html = renderToolCall(
+      "image_search",
+      { query: "DeerFlow" },
+      JSON.stringify({
+        results: [
+          {
+            title: "Blank thumb",
+            thumbnail_url: "",
+            image_url: "https://images.example/full.png",
+          },
+          {
+            title: "Blank source",
+            source_url: "  ",
+            thumbnail_url: "https://images.example/thumb.png",
+          },
+          {
+            title: "Blank both",
+            thumbnail_url: "",
+            image_url: "   ",
+          },
+        ],
+      }),
+    );
+
+    expect(html).toContain('src="https://images.example/full.png"');
+    expect(html).toContain('src="https://images.example/thumb.png"');
+    expect(html.match(/<img\s/g)?.length).toBe(2);
+    expect(html).not.toContain('src=""');
+    expect(unsafeMarkerCount(html)).toBe(0);
+    expect(anchorCount(html)).toBe(0);
+    expect(html).not.toContain("Unsafe link scheme");
+  });
+
+  it("omits an empty title tooltip and uses the query as alt", () => {
+    const html = renderToolCall(
+      "image_search",
+      { query: "DeerFlow" },
+      JSON.stringify({
+        results: [
+          { title: "", image_url: "https://images.example/empty.png" },
+          { image_url: "https://images.example/missing.png" },
+        ],
+      }),
+    );
+
+    expect(html).toContain('alt="DeerFlow"');
+    expect(html).not.toContain('alt=""');
+    expect(html.match(/alt="DeerFlow"/g)?.length).toBe(2);
+    expect(html).not.toContain('data-slot="tooltip-trigger"');
+    expect(html).not.toContain("Unsafe link scheme");
   });
 });
 

@@ -735,6 +735,10 @@ function getToolCallKind(name: string) {
   }
 }
 
+function nonBlankString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() !== "" ? value : undefined;
+}
+
 function ToolCall({
   id,
   messageId,
@@ -923,6 +927,7 @@ function ToolCall({
       </ChainOfThoughtStep>
     );
   } else if (kind === "image_search") {
+    const query = typeof args.query === "string" ? args.query : "";
     let label: React.ReactNode = t.toolCalls.searchForRelatedImages;
     if (typeof args.query === "string") {
       label = t.toolCalls.searchForRelatedImagesFor(args.query);
@@ -949,43 +954,43 @@ function ToolCall({
               results.map((item, index) => {
                 // Provider rows are untrusted input: the default DuckDuckGo
                 // provider (and Serper/InfoQuest) sends no source_url, and any
-                // field may be missing, null or a non-string. A missing source
-                // URL is not a rejected URL — the row renders unlinked rather
-                // than through the UnsafeLink marker; a row with no usable
-                // image URL at all is skipped entirely.
+                // field may be missing, blank, null or a non-string. A missing
+                // source URL is not a rejected URL — the row renders unlinked
+                // rather than through the UnsafeLink marker; a row with no
+                // usable image URL at all is skipped entirely.
                 if (typeof item !== "object" || item === null) {
                   return null;
                 }
-                const sourceUrl =
-                  typeof item.source_url === "string"
-                    ? item.source_url
-                    : undefined;
-                const imageUrl =
-                  typeof item.image_url === "string"
-                    ? item.image_url
-                    : undefined;
-                const thumbnailUrl =
-                  typeof item.thumbnail_url === "string"
-                    ? item.thumbnail_url
-                    : undefined;
+                const sourceUrl = nonBlankString(item.source_url);
+                const imageUrl = nonBlankString(item.image_url);
+                const thumbnailUrl = nonBlankString(item.thumbnail_url);
                 const displayUrl = thumbnailUrl ?? imageUrl;
                 if (displayUrl === undefined) {
                   return null;
                 }
-                const title = typeof item.title === "string" ? item.title : "";
+                const title = nonBlankString(item.title);
                 const thumbnail = (
                   <div className="bg-accent size-24">
                     <img
                       className="size-full object-cover"
                       src={displayUrl}
-                      alt={title}
+                      // A blank title is omitted; the query is the accessible name.
+                      // eslint-disable-next-line @typescript-eslint/prefer-nullish-coalescing
+                      alt={title || query}
                       width={100}
                       height={100}
+                      loading="lazy"
+                      decoding="async"
+                      referrerPolicy="no-referrer"
                     />
                   </div>
                 );
                 return (
-                  <Tooltip key={`${index}:${displayUrl}`} content={title}>
+                  <Tooltip
+                    key={`${index}:${displayUrl}`}
+                    // eslint-disable-next-line @typescript-eslint/prefer-nullish-coalescing
+                    content={title || undefined}
+                  >
                     {sourceUrl === undefined ? (
                       <div className="size-24 overflow-hidden rounded-lg">
                         {thumbnail}
