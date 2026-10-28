@@ -59,3 +59,56 @@ def test_search_preserves_default_and_positive_offset(monkeypatch: pytest.Monkey
     assert [assistant["assistant_id"] for assistant in default_response.json()] == ["lead_agent", "researcher", "writer"]
     assert offset_response.status_code == 200
     assert [assistant["assistant_id"] for assistant in offset_response.json()] == ["researcher"]
+
+def _make_metadata_app(monkeypatch: pytest.MonkeyPatch) -> FastAPI:
+    app = FastAPI()
+    app.include_router(assistants_compat.router)
+    assistants = [
+        assistants_compat.AssistantResponse(
+            assistant_id="lead_agent",
+            graph_id="lead_agent",
+            name="lead_agent",
+            metadata={"created_by": "system", "config": {"tags": ["built-in"]}},
+        ),
+        assistants_compat.AssistantResponse(
+            assistant_id="researcher",
+            graph_id="lead_agent",
+            name="researcher",
+            metadata={"created_by": "user", "config": {"tags": ["science"]}, "nullable": None},
+        ),
+        assistants_compat.AssistantResponse(
+            assistant_id="writer",
+            graph_id="lead_agent",
+            name="writer",
+            metadata={"created_by": "user", "config": {"tags": ["writing"]}},
+        ),
+    ]
+    monkeypatch.setattr(assistants_compat, "_list_assistants", lambda: assistants)
+    return app
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        ({"metadata": {"created_by": "user"}}, ["researcher", "writer"]),
+        ({"metadata": {"created_by": "nobody"}}, []),
+        ({"metadata": {"missing_key": "user"}}, []),
+        ({"metadata": {"created_by": "User"}}, []),
+        ({"metadata": {"nullable": None}}, ["researcher"]),
+        ({"metadata": {"missing_key": None}}, []),
+        ({"metadata": {"created_by": "user", "config": {"tags": ["science"]}}}, ["researcher"]),
+        ({"metadata": {"created_by": "user"}, "offset": 1, "limit": 1}, ["writer"]),
+        ({"metadata": {}, "offset": 1, "limit": 1}, ["researcher"]),
+        ({"metadata": {"created_by": "user"}, "name": "research", "graph_id": "lead_agent"}, ["researcher"]),
+    ],
+)
+def test_search_filters_by_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    body: dict[str, object],
+    expected: list[str],
+) -> None:
+    with TestClient(_make_metadata_app(monkeypatch)) as client:
+        response = client.post("/api/assistants/search", json=body)
+
+    assert response.status_code == 200
+    assert [assistant["assistant_id"] for assistant in response.json()] == expected
