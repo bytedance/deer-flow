@@ -563,6 +563,24 @@ async def _native_worker():
         evidence_path.write_text(json.dumps(evidence, indent=2))
         await host.start()
         socket_trace = []
+        identical_trace = []
+
+        async def watch_identical():
+            # Same construction as NativeWorkerHost.__init__ (agent_dispatch)
+            # to isolate why its own client cannot connect while plain httpx can.
+            identical = httpx.AsyncClient(
+                headers={"Authorization": "Bearer " + os.environ["TENANT_TWO_HOST_NATIVE_NODE_SECRET"], "X-DeerFlow-Internal-Token": os.environ["DEER_FLOW_INTERNAL_AUTH_TOKEN"]},
+                timeout=30,
+            )
+            while True:
+                try:
+                    response = await identical.post(
+                        os.environ["TENANT_TWO_HOST_NATIVE_EXECUTOR_URL"] + "/api/native-workers/worker/poll", json={"schema_revision": 2, "protocol": "ecs-executor-1", "worker_version": 1, "mount_id": "x", "owner": "probe"}
+                    )
+                    identical_trace.append(response.status_code)
+                except Exception as exc:
+                    identical_trace.append(type(exc).__name__)
+                await asyncio.sleep(10)
 
         async def watch_socket():
             while True:
@@ -574,6 +592,7 @@ async def _native_worker():
                 await asyncio.sleep(10)
 
         watcher = asyncio.create_task(watch_socket())
+        identical_watcher = asyncio.create_task(watch_identical())
         try:
             deadline = time.monotonic() + 300
             executed = list(getattr(host, "executions", {}))
@@ -584,6 +603,7 @@ async def _native_worker():
                     break
                 await asyncio.sleep(1.0)
             evidence["socket_trace"] = socket_trace[-12:]
+            evidence["identical_client_trace"] = identical_trace[-12:]
             evidence_path.write_text(json.dumps(evidence, indent=2))
             assert executed, f"worker never claimed a native envelope over real TCP; socket trace {socket_trace[-12:]}"
             job_id = executed[0]
@@ -601,5 +621,6 @@ async def _native_worker():
             evidence_path.write_text(json.dumps(evidence, indent=2))
         finally:
             watcher.cancel()
+            identical_watcher.cancel()
             await host.stop()
             services.resolve_agent_factory = original_factory

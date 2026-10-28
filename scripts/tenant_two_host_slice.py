@@ -311,7 +311,7 @@ rm -f /tmp/.two-host-migrate.py
             "TENANT_TWO_HOST_NATIVE_ASYNC_URL": native_async_url,
             "TENANT_TWO_HOST_REDIS_URL": redis_url,
             "TENANT_TWO_HOST_WORKER_CREDENTIAL": NATIVE_SECRET,
-            "DEER_FLOW_INTERNAL_AUTH_TOKEN": INTERNAL_TOKEN,
+            "DEER_FLOW_INTERNAL_AUTH_TOKEN": INTERNAL_TOKEN, "HTTPX_DEBUG": "1",
             "TEST_EXECUTOR_POSTGRES_URL": executor_url,
         }
     )
