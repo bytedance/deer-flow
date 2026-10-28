@@ -1,0 +1,33 @@
+{
+  "phase": "two-host-b-slice-20261028-51",
+  "date": "2026-10-28",
+  "classification": "GREEN slice 1 of the two-host main: real scoped B claimed, executed, reported and stopped across two real machines over direct VPC TCP with a shared PostgreSQL executor ledger",
+  "hosts": {
+    "controller": {"public": "139.196.30.22", "private": "192.168.0.190", "role": "PG 16 (pinned 721873c3…8ea, bound to the VPC interface only) + native 0041 & executor e0003 databases + uvicorn worker RPC on :8021"},
+    "worker": {"public": "47.117.5.254", "private": "192.168.0.189", "role": "OutboundStore over real TCP + LocalWorker with real Docker (alpine:3.20 pinned d9e853e…6bc, restricted profile)"}
+  },
+  "source": {
+    "worktree_head": "67e8b2172",
+    "archive_sha256": "afc0b9dd9e0d13a05a15ef491b62f4d95aff08b1ea7f81dfe6522e9c5e0eb5a7",
+    "freeze": "deterministic pinned-date commit-tree + gzip -n -9 of worktree HEAD (same procedure as the Jenkins freezes)"
+  },
+  "runner": "scripts/tenant_two_host_slice.py — labeled phase hygiene, deterministic freeze, bootstrap+seed, identity-mounted phase roots, per-role pytest, artifact retrieval",
+  "story": {
+    "controller_evidence": "/private/tmp/two-host-b-slice-20261028-51-artifacts/controller.json",
+    "worker_evidence": "/private/tmp/two-host-b-slice-20261028-51-artifacts/worker.json",
+    "b_job_id": "0ea841d97b514d44a64c26696af302ad",
+    "submitted_via_signed_scope": true,
+    "activated_through_task_authority": "McpTaskRow stands in for the MCP layer already physically verified by #20; status scope activation exercised the real resolve_task SQL",
+    "claimed_over_real_tcp": true,
+    "executed_in_real_docker_on_worker": true,
+    "published_with_native_artifact_uri": true,
+    "physical_stopped": true,
+    "cleanup_pending": false,
+    "pool_unreleased_after_terminal": 0,
+    "exact_container_absent": true
+  },
+  "tests": "controller 1 passed in 25.12s; worker passed earlier in the same run",
+  "red_history": "13 preparatory runs fixed: freeze path bug, labeled phase cleanup, alembic URL (switched to bootstrap_schema), seeded verified active user + live owned running Run + thread/workspace/membership rows, workspace-context upload path, identity mounts for host-path parity, staged-ttl/status-scope activation semantics, stop-report convergence retry, artifact-uri field",
+  "boundaries": "Slice 1 only: B execution path. Not covered here — shared-NAS byte-level output reads by the controller, real C1 AIO sandbox on the worker, C2 checkpoint continuation across hosts, real Scheduler launch, revocation over TCP, crash/restart recovery, M5-M11. MCP HTTP submission layer covered separately by single-host physical #20. Controller keeps its labeled phase PG container and directories for evidence; the next run's clean_phase removes exactly those labeled objects.",
+  "tenant_activation": false
+}

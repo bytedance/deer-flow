@@ -14053,5 +14053,15 @@
     "runtime": "Shanghai Jenkins single host; fixed final-ci-tools-52ce and pinned PostgreSQL images; ASGI transport; deterministic C graph; no deployment, model calls or tenant activation",
     "story": "Real shared-pool B wrote private output before withdrawal; durable mcp_stop persisted first and stayed pending while B ran; revoked worker authority denied; poll/get payload-only; exact container STOP with signed physical_absence receipt; capacity released to zero; native MCP cancelled with no result/publication/notification/C2; repeat idempotent; native/C snapshots unchanged; exact cleanup receipt.",
     "remaining": "Other withdrawal/unknown/restart branches, two-host TCP/PostgreSQL checkpoint/real C sandbox AIO, CLI/restart recovery, parent revoke domains, and complete M0-M11 remain open. Tenant activation false."
+  },
+  "two_host_b_slice": {
+    "status": "runtime_verified_slice_1",
+    "phase": "two-host-b-slice-20261028-51",
+    "evidence": "docs/tenant-workspaces-evidence/two-host-b-slice-20261028-51.json",
+    "archive_sha256": "afc0b9dd9e0d13a05a15ef491b62f4d95aff08b1ea7f81dfe6522e9c5e0eb5a7",
+    "worktree_head": "67e8b2172",
+    "runtime": "controller 139.196.30.22 + worker 47.117.5.254, direct VPC TCP 192.168.0.190:8021, shared PG executor ledger, bootstrap 0041/e0003, pinned images",
+    "story": "Signed-scope B submission activated through real task-authority SQL, claimed by the worker over real TCP, executed in a real restricted Docker container, published with native artifact uri, exact-container STOP confirmed, shared pool capacity released to zero on the controller.",
+    "remaining": "Shared-NAS byte reads, real C1 AIO on the worker, C2 checkpoint continuation, real Scheduler launch, revocation/restart over TCP, and complete M0-M11 acceptance remain open. Tenant activation false."
   }
 }
