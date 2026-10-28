@@ -31,3 +31,27 @@
 
 - 本会话未运行真实模型、未部署、未推送、未开租户入口（`_WORKSPACE_RUNTIME_INTEGRATED=False`）。
 - slice 1 不含：NAS 字节级读取、真实 C1 AIO、C2 续跑、真实 Scheduler 发射、跨机撤权/重启。
+
+
+## Slice 2 调试检查点（2026-10-28 深夜，用户要求 00:55 停止保留进度）
+
+### 已完成（slice 2 = 两机 native C 派发）
+- 测试代码：`backend/tests/test_workspace_two_host_physical.py` 新增 `native-controller`/`native-worker` 双角色；runner `scripts/tenant_two_host_slice.py` 加 `TENANT_TWO_HOST_SLICE=2` 模式（PG+Redis 容器、bootstrap+种子、恒等挂载、双端 pytest）。约 19 个提交（4e16d8d9f…b66d02771）。
+- **controller 侧已通**：`admitted_native=true`（NativeDispatchHost+install_native_dispatch+make_native_snapshot 真实路径）、uvicorn 8022 自探测 403（鉴权门正常）、goal checkpoint 落共享 PG（`shared_checkpoints=1`，AsyncPostgresSaver 跨机可见）。
+- 修复链：redis 镜像完整 ID、迁移容器 stdin→文件挂载、os.environ 读取、RunContext/DbRunEventStore/ThreadMetaRepository 导入路径、scheduled 包循环导入（必须 tasks 先于 runs，且用 importlib 显式顺序防 isort 重排）、owner 必须为 UUID + 可解析邮箱域名、create_or_reject 需包 set_current_workspace。
+
+### 当前卡点（精确隔离）
+worker 侧 `NativeWorkerHost` 轮询 300 秒全部 `ConnectError: All connection attempts failed`，但**同一进程同一时刻**：
+- 裸 socket 到 192.168.0.190:8022 → OK（socket_trace 前 ~280 秒全 ok，仅 controller 退出后 refused）
+- 普通 `httpx.AsyncClient` POST 同一 URL → **403 正常响应**（httpx_precheck 证据）
+即网络、URL、httpx/anyio 本身全部正常；**故障被隔离在 NativeWorkerHost 自建的 AsyncClient**（`agent_dispatch.py:661` 附近 `httpx.AsyncClient(headers={Authorization, X-DeerFlow-Internal-Token}, timeout=30)`）。
+
+### 下次第一步（从这里继续）
+1. 对比复现：在 worker 测试里用与 NativeWorkerHost 完全相同的构造参数（含两个 header）新建 AsyncClient 发 poll——若它失败而去掉 header 成功，则是 header/环境交互；若同样成功，则在 host.start() 之前/之后分别构造对比（怀疑 __init__ 里 fcntl.flock/事件循环时序），必要时打印 `host.client._transport` 与工作 client 的差异。
+2. 备选检查：anyio snuffio 后端检测、`HTTPX_DEBUG=1` 抓 host client 的详细错误。
+3. 修复后按原计划收敛：worker 认领→adopt_owned 跑图（共享 PG checkpoint）→controller 断言 run success；然后 C1→B→C2 串联。
+
+### 环境/证据
+- 证据：`/srv/deerflow-twohost/two-host-b-slice-20261028-51/evidence/native-{controller,worker}.json`（两机）；本地 `/private/tmp/two-host-slice2-run*.log`。
+- 00:55 定时器（automation-5bd77544）会 pkill 本地 runner 并精确清理两机 phase 标签容器/目录；PG/Redis 是 phase 标签容器，一并清理，下次运行重建。
+- 重跑命令：`TENANT_TWO_HOST_SLICE=2 python3 scripts/tenant_two_host_slice.py`。
