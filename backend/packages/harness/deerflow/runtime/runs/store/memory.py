@@ -102,6 +102,10 @@ class MemoryRunStore(RunStore):
             "cancel_action": existing.get("cancel_action") if existing else None,
             "cancel_requested_at": existing.get("cancel_requested_at") if existing else None,
         }
+        # Move membership only after the replacement snapshot was built; a
+        # failed copy must leave the prior row and its index intact.
+        if existing is not None and existing["thread_id"] != thread_id:
+            self._unindex_run(run_id, existing["thread_id"])
         self._mark_changed(self._runs[run_id])
         self._index_run(run_id, thread_id)
 
