@@ -529,6 +529,9 @@ async def _chained_worker():
             max_concurrent_polls=1,
             launch_notification=lambda **kwargs: services.launch_mcp_task_notification_run(app=worker_app, **kwargs),
         )
+        from deerflow.mcp.tasks import runtime as task_runtime
+
+        task_runtime.set_mcp_task_submitter(tasks)
         tools_registry = {
             "created": created_tasks,
             "tool": wrapped,
