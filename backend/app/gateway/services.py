@@ -164,6 +164,8 @@ _TERMINAL_RUN_STATUSES = {
 _TERMINAL_STREAM_RECOVERED = "recovered"
 _TERMINAL_STREAM_PRODUCER_EXPIRED = "producer_expired"
 
+# Includes same-thread create admission and metadata I/O; timeout rejects strict
+# starts and leaves non-strict starts without verified metadata (MCP fails closed).
 _THREAD_METADATA_SETUP_TIMEOUT_SECONDS = 5.0
 
 # Message metadata a scheduled launch puts on its prompt: the task, run and the
