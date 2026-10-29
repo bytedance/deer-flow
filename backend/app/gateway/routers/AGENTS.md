@@ -1,6 +1,6 @@
 # Router contracts
 
-Thread creation holds `goal_thread_lock` from the idempotency lookup through the
+HTTP creation holds `goal_thread_lock` from the idempotency lookup through the
 initial checkpoint write. Same-id HTTP creates must return the existing row,
 including in memory mode; retain the native memory store's overwrite contract
 and SQL duplicate-insert recovery across workers. Release on failure/cancellation

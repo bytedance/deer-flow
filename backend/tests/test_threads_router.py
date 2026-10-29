@@ -1137,8 +1137,15 @@ def test_insert_race_concurrent_trusted_claims_have_one_winner(monkeypatch) -> N
     # distinct process-local lifecycle locks. Same-Gateway serialization is
     # covered with the real stores in test_thread_create_idempotency.py.
     worker_locks = [AsyncKeyedLockTable[str](), AsyncKeyedLockTable[str]()]
-    next_worker = iter(worker_locks)
-    monkeypatch.setattr(threads, "goal_thread_lock", lambda thread_id: next(next_worker).hold(thread_id))
+    lock_calls = 0
+
+    def worker_thread_lock(thread_id):
+        nonlocal lock_calls
+        lock_calls += 1
+        assert lock_calls <= len(worker_locks), f"expected two simulated Gateway lock acquisitions, got {lock_calls}"
+        return worker_locks[lock_calls - 1].hold(thread_id)
+
+    monkeypatch.setattr(threads, "goal_thread_lock", worker_thread_lock)
 
     class _ConcurrentInsertRaceStore(MemoryThreadMetaStore):
         def __init__(self):

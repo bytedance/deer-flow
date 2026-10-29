@@ -3490,9 +3490,10 @@ Thread IDs may be supplied by callers and do not have to be UUIDs. Explicit
 IDs must contain 1–64 ASCII letters, digits, hyphens, or underscores
 (`^[A-Za-z0-9_-]{1,64}$`). DeerFlow generates a UUID only when `thread_id` is
 omitted or `None`; an explicitly supplied empty string is invalid.
-Concurrent `POST /api/threads` requests for the same ID in one Gateway preserve
-the existing thread rather than replacing its metadata or seeding another empty
-checkpoint. SQL-backed Gateways also retain duplicate-insert recovery across workers.
+Concurrent `POST /api/threads` requests and automatic run metadata creation share
+same-ID admission in one Gateway, preserving the first thread's metadata and status.
+HTTP retries also preserve its current checkpoint. SQL-backed Gateways retain
+duplicate-insert recovery across workers.
 Existing route-addressable threads created under older, looser rules remain
 readable and deletable, but cannot start new runs or create new filesystem or
 sandbox state. Legacy deletion skips local path cleanup when the ID is not

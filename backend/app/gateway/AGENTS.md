@@ -4,6 +4,11 @@ Reject external `sandbox`, `thread_data`, `viewed_images`, `goal_outcome`. Non-n
 
 Studio retains sanitized creation metadata.
 
+Thread create admission shares `goal_thread_lock` across HTTP and detached run
+metadata setup. Acquire inside `_ensure_thread_metadata`: its task does not own
+`start_run`'s caller lock. Keep task attachment await-free and cancellation/drain
+ownership intact. Tests: `test_thread_create_run_metadata_race.py`.
+
 Capability Center's `business` adapter validates bundled credentials and creates
 an MCP connection. The MCP API permits only its isolated launcher and credential
 environment keys; reject arbitrary commands and manifest-policy bypasses. Keep
