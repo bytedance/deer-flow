@@ -91,11 +91,7 @@ def test_wechat_cursor_state_publishes_utf8_lf_bytes(tmp_path: Path) -> None:
 def _method_calls(filename: str, class_name: str, method_name: str) -> list[ast.Call]:
     module = ast.parse((CHANNELS / filename).read_text(encoding="utf-8"))
     owner = next(node for node in module.body if isinstance(node, ast.ClassDef) and node.name == class_name)
-    method = next(
-        node
-        for node in owner.body
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == method_name
-    )
+    method = next(node for node in owner.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == method_name)
     return [node for node in ast.walk(method) if isinstance(node, ast.Call)]
 
 
@@ -114,11 +110,7 @@ def test_json_channel_state_writers_publish_through_the_helper(filename: str, cl
     catches it on every platform.
     """
     calls = _method_calls(filename, class_name, method_name)
-    names = [
-        call.func.attr if isinstance(call.func, ast.Attribute) else call.func.id
-        for call in calls
-        if isinstance(call.func, (ast.Attribute, ast.Name))
-    ]
+    names = [call.func.attr if isinstance(call.func, ast.Attribute) else call.func.id for call in calls if isinstance(call.func, (ast.Attribute, ast.Name))]
     assert "publish_bytes_atomically" in names, f"{filename}:{class_name}.{method_name} must publish through the helper"
 
     for call in calls:
@@ -126,6 +118,4 @@ def test_json_channel_state_writers_publish_through_the_helper(filename: str, cl
             continue
         keywords = {keyword.arg: keyword.value for keyword in call.keywords}
         encoding = keywords.get("encoding")
-        assert isinstance(encoding, ast.Constant) and encoding.value == "utf-8", (
-            f"{filename}:{call.lineno} writes text without an explicit utf-8 encoding"
-        )
+        assert isinstance(encoding, ast.Constant) and encoding.value == "utf-8", f"{filename}:{call.lineno} writes text without an explicit utf-8 encoding"
