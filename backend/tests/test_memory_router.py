@@ -713,6 +713,8 @@ def test_memory_config_routes_mask_resolved_backend_secrets(monkeypatch, route: 
                 "api_key": "$TEST_HONCHO_KEY",
                 "model": {"provider": "openai", "model": "gpt-4o-mini", "api_key": "$TEST_MEMORY_LLM_KEY", "default_headers": {"Authorization": "Bearer header-secret"}},
                 "peers": [{"name": "deerflow", "accessToken": "list-token-secret"}],
+                "api_keys": {"prod": "plural-secret"},
+                "credentials": {"client_id": "deerflow-client", "client_secret": "container-secret"},
             },
         }
     }
@@ -720,7 +722,7 @@ def test_memory_config_routes_mask_resolved_backend_secrets(monkeypatch, route: 
 
     response = _get_config_route(route, config)
 
-    for secret in ("sk-memory-llm-secret", "hk-honcho-secret", "header-secret", "list-token-secret"):
+    for secret in ("sk-memory-llm-secret", "hk-honcho-secret", "header-secret", "list-token-secret", "plural-secret", "container-secret"):
         assert secret not in response.text
     body = response.json()
     for key in config_path:
@@ -730,6 +732,9 @@ def test_memory_config_routes_mask_resolved_backend_secrets(monkeypatch, route: 
         "api_key": "***",
         "model": {"provider": "openai", "model": "gpt-4o-mini", "api_key": "***", "default_headers": {"Authorization": "***"}},
         "peers": [{"name": "deerflow", "accessToken": "***"}],
+        # A secret-named container is masked whole: its keys can be arbitrary names.
+        "api_keys": "***",
+        "credentials": "***",
     }
     assert config.backend_config["model"]["api_key"] == "sk-memory-llm-secret", "the backend itself still gets the real key"
 
