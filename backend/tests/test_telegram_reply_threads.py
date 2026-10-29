@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from itertools import count
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -122,6 +123,40 @@ async def test_stream_aliases_are_not_rewritten_and_new_keeps_its_binding(routin
     assert new_thread != thread_id
     await h.channel.send(h.outbound(first, thread_id, text="Old run finished"))
     assert await h.manager._lookup_thread_id(command) == new_thread
+
+
+@pytest.mark.parametrize("delivery", ["plain", "rich", "split", "fallback"])
+async def test_stream_binding_outage_logs_once_per_answer(routing, caplog, delivery):
+    h = routing
+    first = await h.incoming(10)
+    thread_id, _ = await h.manager._get_or_create_thread(h.client, first)
+    repository = h.repo or h.store
+    repository.claim_thread_id = AsyncMock(side_effect=RuntimeError("store unavailable"))
+
+    with caplog.at_level(logging.DEBUG, logger="app.channels.telegram"):
+        for index in range(20):
+            await h.channel.send(h.outbound(first, thread_id, text=f"Partial {index}", is_final=False))
+        if delivery == "rich":
+            h.channel.config["rich_messages"] = True
+        if delivery == "fallback":
+            h.bot.edit_message_text.side_effect = RuntimeError("edit unavailable")
+        text = "x" * 9000 if delivery == "split" else "Final answer"
+        await h.channel.send(h.outbound(first, thread_id, text=text))
+
+        failures = [record for record in caplog.records if record.name == "app.channels.telegram" and "thread mapping" in record.getMessage()]
+        assert len(failures) == repository.claim_thread_id.await_count
+        assert len(failures) >= 21, "every failed update must keep retrying the mapping"
+        assert sum(record.levelno == logging.ERROR for record in failures) == 1
+        assert failures[0].exc_info is not None
+        assert all(record.levelno == logging.DEBUG and record.exc_info is None for record in failures[1:])
+        assert len(h.sent_ids) == {"plain": 1, "rich": 1, "split": 3, "fallback": 2}[delivery]
+
+        # Finalization retires the per-answer log state. A subsequent answer
+        # must report its first outage even on the same conversation key.
+        await h.channel.send(h.outbound(first, thread_id, text="Next answer", is_final=False))
+        errors = [record for record in caplog.records if record.name == "app.channels.telegram" and "thread mapping" in record.getMessage() and record.levelno == logging.ERROR]
+        assert len(errors) == 2
+        await h.channel.send(h.outbound(first, thread_id, text="Next answer"))
 
 
 async def test_binding_failure_does_not_fail_delivery_and_stream_retries(routing, caplog):
