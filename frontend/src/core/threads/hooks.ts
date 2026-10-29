@@ -163,18 +163,29 @@ export function getToolResultStatus(
   toolName: string,
 ): ToolResultStatus {
   let latestToolCallId: string | undefined;
-  for (const message of messages) {
+  let latestToolCallIndex = -1;
+  for (const [messageIndex, message] of messages.entries()) {
     if (message.type !== "ai") {
       continue;
     }
     for (const toolCall of message.tool_calls ?? []) {
       if (toolCall.name === toolName && toolCall.id) {
         latestToolCallId = toolCall.id;
+        latestToolCallIndex = messageIndex;
       }
     }
   }
 
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
+  const nextAssistantIndex = messages.findIndex(
+    (message, index) =>
+      index > latestToolCallIndex &&
+      (message.type === "ai" || message.type === "human"),
+  );
+  const resultEnd =
+    latestToolCallIndex >= 0 && nextAssistantIndex >= 0
+      ? nextAssistantIndex
+      : messages.length;
+  for (let index = resultEnd - 1; index > latestToolCallIndex; index -= 1) {
     const message = messages[index];
     if (message?.type !== "tool") {
       continue;

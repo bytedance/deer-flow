@@ -59,8 +59,11 @@ function getTextContent(content: unknown) {
 function findToolResult(
   toolCallId: string,
   messages: ArtifactPreviewMessage[],
+  assistantIndex: number,
 ) {
-  for (const message of messages) {
+  for (let index = assistantIndex + 1; index < messages.length; index += 1) {
+    const message = messages[index]!;
+    if (message.type === "ai" || message.type === "human") break;
     if (message.type === "tool" && message.tool_call_id === toolCallId) {
       return getTextContent(message.content);
     }
@@ -99,7 +102,7 @@ export function buildWriteFileDraftContent({
   let draft = "";
   let hasDraft = false;
 
-  for (const message of messages) {
+  for (const [messageIndex, message] of messages.entries()) {
     if (message.type !== "ai") {
       continue;
     }
@@ -116,7 +119,7 @@ export function buildWriteFileDraftContent({
 
       const toolCallId = toolCall.id;
       const toolResult = toolCallId
-        ? findToolResult(toolCallId, messages)
+        ? findToolResult(toolCallId, messages, messageIndex)
         : undefined;
       const isSelected =
         toolCallId === target.toolCallId &&

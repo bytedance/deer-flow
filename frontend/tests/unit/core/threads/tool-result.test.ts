@@ -121,3 +121,43 @@ test("waits for the latest setup attempt instead of reusing an older success", (
 
   expect(getToolResultStatus(messages, "setup_agent")).toBe("pending");
 });
+
+test("another tool reusing a provider id cannot replace the setup result", () => {
+  const messages = [
+    {
+      type: "ai",
+      content: "",
+      tool_calls: [{ id: "call_0", name: "setup_agent", args: {} }],
+    },
+    { type: "tool", tool_call_id: "call_0", content: "Saved" },
+    {
+      type: "ai",
+      content: "",
+      tool_calls: [{ id: "call_0", name: "web_search", args: {} }],
+    },
+    {
+      type: "tool",
+      tool_call_id: "call_0",
+      content: "Error: failed",
+      status: "error",
+    },
+  ] as Message[];
+  expect(getToolResultStatus(messages, "setup_agent")).toBe("success");
+});
+
+test("a reused provider id cannot complete a new pending setup attempt", () => {
+  const messages = [
+    {
+      type: "ai",
+      content: "",
+      tool_calls: [{ id: "call_0", name: "setup_agent", args: {} }],
+    },
+    { type: "tool", tool_call_id: "call_0", content: "Saved" },
+    {
+      type: "ai",
+      content: "",
+      tool_calls: [{ id: "call_0", name: "setup_agent", args: {} }],
+    },
+  ] as Message[];
+  expect(getToolResultStatus(messages, "setup_agent")).toBe("pending");
+});

@@ -6,6 +6,7 @@ import {
   extractContentFromMessage,
   extractTextFromMessage,
   extractReasoningContentFromMessage,
+  findToolCallResult,
   getBranchableAssistantGroupIds,
   getLatestEditableTurn,
   getMessageCopyData,
@@ -38,6 +39,25 @@ function aiMessage(content: string): Message {
     content,
   } as Message;
 }
+
+test("tool result lookup stays within the selected assistant occurrence", () => {
+  const messages = [
+    { id: "a1", type: "ai", content: "" },
+    { id: "t1", type: "tool", tool_call_id: "call_0", content: "OK" },
+    { id: "a2", type: "ai", content: "" },
+    {
+      id: "t2",
+      type: "tool",
+      tool_call_id: "call_0",
+      content: "Error: failed",
+    },
+    { id: "a3", type: "ai", content: "" },
+  ] as Message[];
+  expect(findToolCallResult("call_0", messages, "a1")).toBe("OK");
+  expect(findToolCallResult("call_0", messages, "a2")).toBe("Error: failed");
+  expect(findToolCallResult("call_0", messages, "a3")).toBeUndefined();
+  expect(findToolCallResult("call_0", messages, "unloaded")).toBeUndefined();
+});
 
 test("aggregates token usage messages once per assistant turn", () => {
   const messages = [

@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
 from typing import Any, cast
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import AIMessage, AnyMessage, BaseMessage, HumanMessage, ToolMessage, messages_from_dict
@@ -842,9 +842,6 @@ class RunJournal(BaseCallbackHandler):
 
     @staticmethod
     def _message_identity(message: BaseMessage) -> str | None:
-        tool_call_id = getattr(message, "tool_call_id", None)
-        if isinstance(tool_call_id, str) and tool_call_id:
-            return f"tool:{tool_call_id}"
         message_id = getattr(message, "id", None)
         if isinstance(message_id, str) and message_id:
             return f"message:{message_id}"
@@ -885,6 +882,11 @@ class RunJournal(BaseCallbackHandler):
             self._current_run_tool_call_names[tool_call_id] = str(name or "")
 
     def _persist_tool_result_message(self, message: BaseMessage) -> None:
+        # Tool callbacks run before the graph reducer assigns missing ids.
+        # Assign on the returned object so the feed and checkpoint share the
+        # same result identity even when a provider reuses its tool_call_id.
+        if isinstance(message, ToolMessage) and not message.id:
+            message.id = str(uuid4())
         self._put(
             event_type=LLM_TOOL_RESULT_EVENT.event_type,
             category=LLM_TOOL_RESULT_EVENT.category,
@@ -960,7 +962,7 @@ class RunJournal(BaseCallbackHandler):
         if self._current_run_tool_call_names.get(tool_call_id) is None:
             return False
         identity = self._message_identity(message)
-        return identity is not None and identity not in self._persisted_tool_message_identities
+        return identity is None or identity not in self._persisted_tool_message_identities
 
     def _reconcile_tool_messages(self, messages: Iterable[Any]) -> None:
         for message in messages:

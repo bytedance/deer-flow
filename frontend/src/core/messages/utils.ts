@@ -1113,8 +1113,24 @@ export function hasSubagent(message: AIMessage) {
   return false;
 }
 
-export function findToolCallResult(toolCallId: string, messages: Message[]) {
-  for (const message of messages) {
+export function findToolCallResult(
+  toolCallId: string,
+  messages: Message[],
+  assistantMessageId?: string,
+) {
+  const start = assistantMessageId
+    ? messages.findIndex(
+        (message) => message.type === "ai" && message.id === assistantMessageId,
+      )
+    : -1;
+  if (assistantMessageId && start < 0) return undefined;
+  for (let index = start + 1; index < messages.length; index += 1) {
+    const message = messages[index]!;
+    if (
+      assistantMessageId &&
+      (message.type === "ai" || message.type === "human")
+    )
+      break;
     if (message.type === "tool" && message.tool_call_id === toolCallId) {
       const content = extractTextFromMessage(message);
       if (content) {

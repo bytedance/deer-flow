@@ -294,7 +294,7 @@ function MessageGroupComponent({
 
     return (
       <ToolCall
-        key={step.id}
+        key={step.occurrenceId}
         {...step}
         threadId={threadId}
         isLast={options?.isLast}
@@ -414,7 +414,7 @@ function MessageGroupComponent({
                 lastToolCallStep.messageId,
                 stepIndexByStep.get(lastToolCallStep) ?? -1,
               )}
-              <FlipDisplay uniqueKey={lastToolCallStep.id ?? ""}>
+              <FlipDisplay uniqueKey={lastToolCallStep.occurrenceId}>
                 {renderToolCall(lastToolCallStep, { isLast: true })}
               </FlipDisplay>
               {afterLastToolCallAssistantTextSteps
@@ -1210,6 +1210,7 @@ interface CoTReasoningStep extends GenericCoTStep<"reasoning"> {
 }
 
 interface CoTToolCallStep extends GenericCoTStep<"toolCall"> {
+  occurrenceId: string;
   name: string;
   args: Record<string, unknown>;
   result?: string;
@@ -1235,13 +1236,34 @@ function indexToolCallData(messages: Message[]) {
   const toolCallResults = new Map<string, string>();
   const browserViews = new Map<string, BrowserViewMeta>();
   const resultMessages = new Map<string, Extract<Message, { type: "tool" }>>();
+  const uniqueAssistantByCallId = new Map<string, number>();
+  for (const [messageIndex, message] of messages.entries()) {
+    if (message.type !== "ai") continue;
+    for (const call of message.tool_calls ?? []) {
+      if (!call.id) continue;
+      uniqueAssistantByCallId.set(
+        call.id,
+        uniqueAssistantByCallId.has(call.id) ? -1 : messageIndex,
+      );
+    }
+  }
 
-  for (const message of messages) {
+  let assistantIndex = -1;
+  for (const [messageIndex, message] of messages.entries()) {
+    if (message.type === "ai") assistantIndex = messageIndex;
+    if (message.type === "human") assistantIndex = -1;
     if (message.type !== "tool" || !message.tool_call_id) {
       continue;
     }
 
-    const toolCallId = message.tool_call_id;
+    // A unique call can accept SDK results that arrived before its AI message.
+    // Reused call ids require the preceding assistant occurrence instead.
+    const uniqueAssistant = uniqueAssistantByCallId.get(message.tool_call_id);
+    const ownerIndex =
+      uniqueAssistant !== undefined && uniqueAssistant >= 0
+        ? uniqueAssistant
+        : assistantIndex;
+    const toolCallId = `${ownerIndex}:${message.tool_call_id}`;
     if (!resultMessages.has(toolCallId))
       resultMessages.set(toolCallId, message);
     if (!toolCallResults.has(toolCallId)) {
@@ -1316,6 +1338,10 @@ function convertToSteps(
         }
         const step: CoTToolCallStep = {
           id: tool_call.id,
+          occurrenceId: JSON.stringify([
+            message.id ?? `ai-${messageIndex}`,
+            tool_call.id,
+          ]),
           messageId: message.id,
           type: "toolCall",
           name: tool_call.name,
@@ -1325,8 +1351,9 @@ function convertToSteps(
         };
         const toolCallId = tool_call.id;
         if (toolCallId) {
-          const toolCallResult = toolCallResults.get(toolCallId);
-          step.resultMessage = resultMessages.get(toolCallId);
+          const occurrence = `${messageIndex}:${toolCallId}`;
+          const toolCallResult = toolCallResults.get(occurrence);
+          step.resultMessage = resultMessages.get(occurrence);
           // Generic details preserve received text; specialized tools retain their parsing.
           if (toolCallResult && getToolCallKind(tool_call.name) !== "generic") {
             try {
@@ -1336,7 +1363,7 @@ function convertToSteps(
               step.result = toolCallResult;
             }
           }
-          step.browserView = browserViews.get(toolCallId);
+          step.browserView = browserViews.get(occurrence);
           const artifacts = artifactsByToolCallId.get(toolCallId);
           if (artifacts) {
             step.artifacts = artifacts;

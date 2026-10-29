@@ -3246,6 +3246,10 @@ when retries are exhausted. Turn Live off and on to start a fresh retry budget.
 **Visible Tool-Run Completion**: For interactive turns, DeerFlow retries an empty post-tool final response once, then surfaces a visible error instead of reporting a silent successful run.
 
 **Run History**: Image-only user input is recorded once per run, even when the agent makes multiple model calls. Its media content remains in history without requiring a text summary.
+Web history keeps separate tool results in their original positions when a
+provider reuses a tool-call ID across turns or runs. Copies of the same result
+are matched by their message ID. Legacy results without message IDs are kept
+separately because their provider ID alone cannot identify an invocation.
 
 ### Reading a Referenced Conversation
 
