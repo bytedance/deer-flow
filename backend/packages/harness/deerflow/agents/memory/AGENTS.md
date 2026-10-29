@@ -383,6 +383,15 @@ Do not add embedded OpenViking imports, root-key access, or trusted identity hea
 Honcho is a remote HTTP adapter for user-model memory.
 It creates one workspace per resolved `user_id`.
 A missing user fails closed to no memory.
+Capture stable-ID messages incrementally using remote `deerflow_source_id`
+metadata, scoped by session and including owner/role/text in the opaque identity.
+Never deduplicate distinct source IDs by text. Consume every filtered lookup page
+before appending a batch; failed/malformed lookups must not become blind replays.
+Bound batches to Honcho's 100-message limit. Keep lookup + append under the
+process-local session lock; do not claim cross-process exactly-once delivery.
+ID-less direct callers remain append-only; legacy records lack capture identities.
+Pin cumulative graph turns, restart/compaction, failures and pagination through
+the real HTTP client in `tests/test_honcho_incremental_capture.py`.
 Its async methods offload synchronous HTTP work with `asyncio.to_thread`.
 Honcho's `from_config` consumes the `should_keep_hidden_message` host hook.
 Its write path drops hidden human messages unless that hook accepts them;
