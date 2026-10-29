@@ -234,6 +234,7 @@ keep:
 - **Type**: String or null
 - **Default**: `null` (uses LangChain's default prompt)
 - **Description**: Custom prompt template for generating summaries. The prompt should guide the model to extract the most important context.
+- **Template syntax**: The value is a Python `str.format` template with one slot, `{messages}`, which receives the history selected for summarization. Literal braces must be doubled, so a JSON-shaped prompt is written `{{"summary": "..."}}`. A template that does not render is logged and skipped: history is kept and the turn is left uncompacted, matching the behavior of any other summary failure.
 
 #### `skill_file_read_tool_names`
 - **Type**: List of strings
