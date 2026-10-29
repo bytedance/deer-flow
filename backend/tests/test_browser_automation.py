@@ -1024,7 +1024,8 @@ def test_worker_count_error_keeps_naming_the_documented_knob_when_passed_in(monk
     assert browser_multi_worker_error(3).startswith("GATEWAY_WORKERS=3 ")
 
 
-def test_resolve_session_always_reads_browser_navigate_config():
+@pytest.mark.asyncio
+async def test_resolve_session_always_reads_browser_navigate_config():
     """Launch config is deterministic regardless of which tool runs first.
 
     ``get_session`` caches per thread and ignores launch params for later
@@ -1050,7 +1051,12 @@ def test_resolve_session_always_reads_browser_navigate_config():
         def get_session(self, thread_id, **kwargs):
             captured.update(kwargs)
             captured["thread_id"] = thread_id
-            return MagicMock()
+            session = MagicMock()
+            session.snapshot = AsyncMock(side_effect=RuntimeError("stop after launch"))
+            return session
+
+        def release_session(self, thread_id, session):
+            pass
 
     with (
         patch.object(tools, "_get_tool_config", lambda name: configs.get(name, {})),
@@ -1058,7 +1064,7 @@ def test_resolve_session_always_reads_browser_navigate_config():
     ):
         # Even when a NON-navigate tool resolves the session, launch config comes
         # from browser_navigate.
-        tools._resolve_session(_runtime(), "browser_snapshot")
+        await tools.browser_snapshot_tool.coroutine(runtime=_runtime(), tool_call_id="call-1")
 
     assert captured["headless"] is False
     assert captured["timeout_ms"] == 12345
