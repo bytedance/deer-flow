@@ -24,6 +24,14 @@ pytestmark = [
     pytest.mark.skipif(os.environ.get("TENANT_TWO_HOST_ROLE") not in {"chained-controller", "chained-worker"}, reason="dedicated two-host chained opt-in required"),
 ]
 
+# The scheduled persistence packages only import cleanly tasks-before-runs;
+# pre-loading that order at module scope immunizes the whole process (the
+# scheduler service import would otherwise trigger the cycle first).
+import importlib as _importlib
+
+_importlib.import_module("deerflow.persistence.scheduled_tasks.sql")  # noqa: E402
+_importlib.import_module("deerflow.persistence.scheduled_task_runs.sql")  # noqa: E402
+
 ROLE = os.environ.get("TENANT_TWO_HOST_ROLE")
 NATIVE_PORT = int(os.environ.get("TENANT_TWO_HOST_NATIVE_PORT", "8022"))
 SCHEDULER_ID = "two-host-chained-task"
