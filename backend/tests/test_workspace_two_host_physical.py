@@ -546,6 +546,24 @@ async def _native_worker():
         )
         await original_host_client.aclose()
         evidence["host_client_swapped"] = True
+        evidence["host_config"] = {key: value for key, value in host.config.items() if key != "credential_env"}
+        original_request = host.request
+
+        async def traced_request(operation, **args):
+            entry = {"op": operation}
+            evidence.setdefault("host_requests", [])[-4:] and evidence["host_requests"].append(entry) or evidence.setdefault("host_requests", []).append(entry)
+            try:
+                inline = await host.client.post(host.config["executor_url"].rstrip("/") + "/api/native-workers/worker/poll", json={}, timeout=5)
+                entry["inline_probe"] = inline.status_code
+            except Exception as exc:
+                entry["inline_probe"] = type(exc).__name__
+            try:
+                return await original_request(operation, **args)
+            except Exception as exc:
+                entry["error"] = type(exc).__name__
+                raise
+
+        host.request = traced_request
         import socket
         from urllib.parse import urlparse
 
