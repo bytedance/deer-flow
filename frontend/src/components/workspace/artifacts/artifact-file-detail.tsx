@@ -47,6 +47,7 @@ import { useArtifactContent } from "@/core/artifacts/hooks";
 import {
   getArtifactViewState,
   getTabularDelimiter,
+  parseWriteFileArtifact,
 } from "@/core/artifacts/preview";
 import { urlOfArtifact } from "@/core/artifacts/utils";
 import {
@@ -106,13 +107,15 @@ export function ArtifactFileDetail({
   const isWriteFile = useMemo(() => {
     return filepathFromProps.startsWith("write-file:");
   }, [filepathFromProps]);
-  const filepath = useMemo(() => {
-    if (isWriteFile) {
-      const url = new URL(filepathFromProps);
-      return decodeURIComponent(url.pathname);
-    }
-    return filepathFromProps;
-  }, [filepathFromProps, isWriteFile]);
+  // `write-file:` URLs come from messages and from the panel's persisted
+  // selection, so parse them through the guarded helper instead of `new URL`
+  // + `decodeURIComponent` directly: a malformed value must degrade to the
+  // raw string, not throw during render.
+  const parsedWriteFile = useMemo(
+    () => (isWriteFile ? parseWriteFileArtifact(filepathFromProps) : undefined),
+    [filepathFromProps, isWriteFile],
+  );
+  const filepath = parsedWriteFile?.path ?? filepathFromProps;
   // Keep these local because ChatBox replaces context artifacts with thread state.
   const [openedPresentedFilepaths, setOpenedPresentedFilepaths] = useState<
     string[]
@@ -178,11 +181,7 @@ export function ArtifactFileDetail({
   const isSupportPreview =
     language === "html" || language === "markdown" || isTabular;
   const toolResult = (() => {
-    if (!isWriteFile) {
-      return undefined;
-    }
-    const url = new URL(filepathFromProps);
-    const toolCallId = url.searchParams.get("tool_call_id");
+    const toolCallId = parsedWriteFile?.toolCallId;
     if (!toolCallId) {
       return undefined;
     }

@@ -581,6 +581,8 @@ export const enUS: Translations = {
           "Token budget reached. Send a message to continue; a new run starts with a fresh budget.",
         loopCapped:
           "Repeated tool calls triggered a safety stop. Adjust the approach and send a new message to retry; your goal stays active.",
+        recursionCapped:
+          "The run reached its step limit before finishing. Send a new message to continue; your goal stays active.",
         missingEvidence:
           "Goal check: evidence missing. Ask it to show the result or explain what's missing; if the goal no longer applies, run /goal clear.",
         runFailed:
@@ -1261,6 +1263,7 @@ export const enUS: Translations = {
         noProgress: "No progress between turns",
         tokenCapped: "Token budget reached",
         loopCapped: "Repeated tool calls reached the safety limit",
+        recursionCapped: "The run reached its step limit",
         evaluatorFailed: "Couldn't check the goal; the run itself may be fine",
         noDurableEndOfTurn: "Couldn't check the goal: no final reply was saved",
         threadChanged:
@@ -1713,6 +1716,24 @@ export const enUS: Translations = {
       expiredTitle: "QR code expired",
       failedTitle: "Unable to connect",
     },
+    bindingCode: {
+      description: (provider: string) =>
+        `Send this command to the ${provider} bot to link it to your DeerFlow account.`,
+      loading: "Generating a binding code…",
+      copy: "Copy command",
+      copied: "Copied",
+      copyFailed: "Could not copy. Select and copy the command above.",
+      expiresAt: (time: string) => `Expires at ${time}`,
+      waiting: (provider: string) => `Waiting for your message in ${provider}…`,
+      connected: (provider: string) => `${provider} is connected`,
+      done: "Done",
+      expired: "This binding code has expired.",
+      newCode: "Generate a new code",
+      failed: "Could not create a binding code.",
+      tooManyCodes:
+        "Too many unused codes. Use a code you already have or wait about 10 minutes for them to expire.",
+      retry: "Try again",
+    },
     setupDescription:
       "Enter the values needed by this server process. They are not written to config.yaml.",
     saveAndConnect: "Save and connect",
@@ -2081,7 +2102,8 @@ export const enUS: Translations = {
       lightDescription: "Bright palette with higher contrast for daytime.",
       darkDescription: "Dim palette that reduces glare for focus.",
       languageTitle: "Language",
-      languageDescription: "Switch between languages.",
+      languageDescription:
+        "Choose the interface language and preferred language for replies.",
     },
     tools: {
       adminRequired: "Admin privileges are required to manage MCP tools.",

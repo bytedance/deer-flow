@@ -110,7 +110,7 @@ async def test_gateway_shutdown_timeout_does_not_cancel_batch_cleanup(
 
 
 def test_lifespan_uses_bounded_subagent_batch_shutdown() -> None:
-    source = inspect.getsource(gateway_app.lifespan)
+    source = inspect.getsource(gateway_app._gateway_lifespan)
     assert "await _shutdown_subagent_batch_service(app)" in source
 
 

@@ -2,22 +2,34 @@
 
 from types import SimpleNamespace
 
+import pytest
+
 from deerflow.agents.lead_agent import prompt as prompt_module
+from deerflow.config.agent_storage_config import AgentStorageConfig
+from deerflow.config.paths import Paths
+from deerflow.config.subagents_config import SubagentsAppConfig
+from deerflow.persistence.managed_subagents import file as managed_subagents_file
 from deerflow.subagents import registry as registry_module
 
 
-def test_get_available_subagent_names_hides_bash_when_host_bash_disabled(monkeypatch) -> None:
+@pytest.fixture
+def builtin_subagents_config(tmp_path, monkeypatch):
+    monkeypatch.setattr(managed_subagents_file, "get_paths", lambda: Paths(base_dir=tmp_path))
+    return SimpleNamespace(subagents=SubagentsAppConfig(), agent_storage=AgentStorageConfig(backend="file"))
+
+
+def test_get_available_subagent_names_hides_bash_when_host_bash_disabled(monkeypatch, builtin_subagents_config) -> None:
     monkeypatch.setattr(registry_module, "is_host_bash_allowed", lambda: False)
 
-    names = registry_module.get_available_subagent_names()
+    names = registry_module.get_available_subagent_names(app_config=builtin_subagents_config)
 
     assert names == ["general-purpose"]
 
 
-def test_get_available_subagent_names_keeps_bash_when_allowed(monkeypatch) -> None:
+def test_get_available_subagent_names_keeps_bash_when_allowed(monkeypatch, builtin_subagents_config) -> None:
     monkeypatch.setattr(registry_module, "is_host_bash_allowed", lambda: True)
 
-    names = registry_module.get_available_subagent_names()
+    names = registry_module.get_available_subagent_names(app_config=builtin_subagents_config)
 
     assert names == ["general-purpose", "bash"]
 

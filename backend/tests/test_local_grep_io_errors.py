@@ -32,6 +32,12 @@ def mounted_search(tmp_path, monkeypatch):
         sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider", mounts=[VolumeMountConfig(host_path=str(source), container_path="/mnt/mounts/data")]),
     )
     monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+    from deerflow.sandbox.tools import _get_custom_mounts
+
+    # Tests often run after app initialization has cached mounts from the host
+    # config. This sandbox uses a different config, so resolve its mount from
+    # the fixture config instead of reusing that process-wide snapshot.
+    monkeypatch.setattr(_get_custom_mounts, "_cached", None, raising=False)
     provider = LocalSandboxProvider()
     sandbox = provider.get(provider.acquire(None))
     monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda _: sandbox)
@@ -55,8 +61,12 @@ def test_grep_custom_mount_errors_use_virtual_paths(mounted_search, monkeypatch,
             raise OSError(error_number, "read failed", str(path))
         return original_open(path, mode, *args, **kwargs)
 
+    scan_errors: list[OSError] = []
+
     def fail_walk(root, *, onerror):
-        onerror(OSError(error_number, "scan failed", str(root)))
+        error = OSError(error_number, "scan failed", str(root))
+        scan_errors.append(error)
+        onerror(error)
         return iter(())
 
     if stage == "scan":
@@ -66,6 +76,8 @@ def test_grep_custom_mount_errors_use_virtual_paths(mounted_search, monkeypatch,
     expected = "/mnt/mounts/data" + ("" if stage == "scan" else "/secret.txt")
     result = invoke()
     assert result.startswith("Error:"), result
+    if stage == "scan":
+        assert scan_errors, "mounted grep must reach the injected filesystem scan error"
     assert expected in result
     assert "private-host-mount" not in result
     with pytest.raises(OSError) as caught:

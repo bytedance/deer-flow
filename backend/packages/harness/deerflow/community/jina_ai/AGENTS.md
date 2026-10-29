@@ -18,8 +18,14 @@ stream-close ordering; re-verify on upgrades. Drain stream/client close on cance
 Config: `backend/docs/CONFIGURATION.md`. Tests:
 `tests/test_jina_{client,retries,retry_after,response_limit,request_admission}.py`.
 
-The optional Run Web attempt budget is distinct from Jina concurrency
-admission. Its async HTTPX request hook reserves before each network dispatch,
-including retries and redirect hops. The counter is shared with Serper in one
-worker process; cross-process covered calls fail closed when enabled. Verify
-with `tests/test_web_attempt_budget.py`.
+DEBUG completion summaries keep counters local, count HTTPX API attempts, and
+measure monotonic elapsed/backoff time (including cancelled waits). Classify
+branches, never error text; emit only enums/numbers in the message for existing
+formatters/trace filters. Logging failure must preserve results/cancellation.
+Offline coverage: `tests/test_jina_diagnostics.py`.
+
+The optional Run Web attempt budget is distinct from concurrency admission and
+the diagnostic HTTPX API-attempt count. Its request hook reserves each physical
+dispatch, including redirects; a local denial is `web_attempt_budget_exhausted`.
+The counter is shared with Serper in one worker; cross-process calls fail closed.
+Tests: `test_web_attempt_budget.py`, `test_web_attempt_budget_diagnostics.py`.
