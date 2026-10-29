@@ -416,7 +416,10 @@ class BrowserSession:
             # and storage. Closed contexts disappear from browser.contexts.
             if self._browser is not None and self._browser.is_connected() and self._context is not None and self._context in self._browser.contexts:
                 pages = [page for page in self._context.pages if not page.is_closed()]
-                self._set_active_page(pages[-1] if pages else await self._context.new_page())
+                page = pages[-1] if pages else await self._context.new_page()
+                if not self._connected_over_cdp:
+                    await page.bring_to_front()
+                self._set_active_page(page)
                 return self._page
 
             from playwright.async_api import async_playwright

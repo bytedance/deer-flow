@@ -620,14 +620,31 @@ def fake_playwright_api(monkeypatch):
 
 
 @pytest.mark.parametrize("surviving_tab", [True, False])
+@pytest.mark.parametrize("cdp", [False, True])
 @pytest.mark.asyncio
-async def test_ensure_page_reuses_context_after_active_tab_closes(surviving_tab, fake_playwright_api):
+async def test_ensure_page_reuses_context_after_active_tab_closes(surviving_tab, cdp, fake_playwright_api):
     """Closing an OAuth popup or the final tab must retain session storage."""
     session = BrowserSession(MagicMock(), headless=True, timeout_ms=1000, viewport={"width": 1000, "height": 500})
     closed = MagicMock()
     closed.is_closed.return_value = True
     page = MagicMock()
     page.is_closed.return_value = False
+    focused = False
+
+    async def focus_page():
+        nonlocal focused
+        assert session._page is closed
+        await asyncio.sleep(0)
+        focused = True
+
+    page.bring_to_front = AsyncMock(side_effect=focus_page)
+    original_set_active_page = session._set_active_page
+
+    def adopt_page(target):
+        assert focused is not cdp
+        original_set_active_page(target)
+
+    session._set_active_page = MagicMock(side_effect=adopt_page)
     context = MagicMock()
     context.pages = [page] if surviving_tab else []
     creation_started = asyncio.Event()
@@ -644,6 +661,7 @@ async def test_ensure_page_reuses_context_after_active_tab_closes(surviving_tab,
     browser.contexts = [context]
     browser.new_context = AsyncMock(side_effect=AssertionError("discarded the existing context"))
     session._browser = browser
+    session._connected_over_cdp = cdp
     session._context = context
     session._page = closed
     session._request_guard_bound = True
@@ -677,6 +695,11 @@ async def test_ensure_page_reuses_context_after_active_tab_closes(surviving_tab,
     assert session._page_listener_bound is True
     browser.new_context.assert_not_awaited()
     context.on.assert_not_called()
+    session._set_active_page.assert_called_once_with(page)
+    if cdp:
+        page.bring_to_front.assert_not_awaited()
+    else:
+        page.bring_to_front.assert_awaited_once_with()
 
 
 @pytest.mark.parametrize("cdp", [False, True])
