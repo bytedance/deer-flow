@@ -25,6 +25,9 @@ class SubagentConfig:
                 allowed-tools is compatibility metadata only and never restricts
                 this subagent's tools.
         model: Model to use - 'inherit' uses parent's model.
+        thinking_enabled: Whether to enable thinking/reasoning for this subagent.
+                None means use default (False).
+        reasoning_effort: Selected model's reasoning effort or None for its default.
         max_turns: Maximum agent turns — model call plus the tools it runs —
             before stopping. Built-in agents use the value set here
             (general-purpose=150, bash=60) unless the global
@@ -46,6 +49,8 @@ class SubagentConfig:
     disallowed_tools: list[str] | None = field(default_factory=lambda: ["task"])
     skills: list[str] | None = None
     model: str = "inherit"
+    thinking_enabled: bool | None = None
+    reasoning_effort: str | None = None
     max_turns: int = 50
     timeout_seconds: int = 900
     prompt_overlay: PromptOverlay = field(default_factory=PromptOverlay)
