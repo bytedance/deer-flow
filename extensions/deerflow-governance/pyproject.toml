@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "deerflow-governance"
+version = "0.1.0"
+description = "DeerFlow 生产治理插件：人工审批闸 + 合规审计账本 + 分层成本预算熔断"
+readme = "README.md"
+requires-python = ">=3.12"
+# 核心层只需要 PyYAML 读配置。langchain / langgraph / deerflow 是**运行时宿主提供**的，
+# 刻意不写进 dependencies：本包要能在没有 DeerFlow 的机器上装上并跑完单测。
+dependencies = ["PyYAML>=6.0"]
+
+[project.optional-dependencies]
+# 仅当你要真的接进 DeerFlow 时才需要；平时开发/测试不装
+host = ["langchain>=1.0", "langgraph>=0.6"]
+
+[project.scripts]
+governance = "deerflow_governance.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+# 与 DeerFlow backend 保持一致（AGENTS.md: line length 240），避免两边格式互相打架
+line-length = 240
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
