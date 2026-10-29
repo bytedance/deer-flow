@@ -157,6 +157,7 @@ Checkpoint and branch history imports use a separate host grant bound to a
 durable thread-operation reservation and the captured thread identity. Strict
 mode permits these imports without treating synthetic turn IDs as admitted Runs;
 deletion, reservation revocation or lease expiry invalidates their grant.
+Messages preceding the first human input retain their existing synthetic turn 0.
 
 On PostgreSQL, `run_events.producer_fencing: "strict"` additionally enables
 database-level authorization checks against raw SQL and unaware legacy writers
@@ -173,9 +174,9 @@ all restarted Gateways must use the same cutover ID. This does not recover missi
 terminal events. To activate:
 
 1. Deploy this version everywhere with `run_events.producer_fencing: "off"`.
-   Let migration 0049 and recovery of previously active Runs complete, then drain
-   admissions and completion hooks. A terminal Run status alone does not prove
-   its producer has drained.
+   Complete migrations 0049 and 0050 and recover previously active Runs, then
+   drain admissions and completion hooks. A terminal Run status alone does not
+   prove its producer has drained.
 2. Stop every Gateway, Worker and other database client, including checkpointer
    pools and monitoring clients, and keep them stopped during activation.
 3. From the repository root, using the installed backend environment, run:
@@ -198,6 +199,11 @@ or unsupported stores fail startup. This release requires controlled downtime;
 it does not support a mixed-version rolling cutover. A crashed producer may stay
 open until explicitly closed or revoked by authorized takeover/deletion; no
 producer-expiry or terminal-reconciliation job is introduced.
+
+Scheduled-task orphan recovery carries the captured Run incarnation and retention
+revision when publishing delivery and terminal evidence, including in strict mode.
+Unconfirmed publication is logged separately from the committed takeover; it does
+not undo the recovered Run or queue a new publication attempt.
 
 Operators can extend lead-agent, subagent, and DeerMem extraction prompts with
 literal prepend/append configuration without editing source templates. See

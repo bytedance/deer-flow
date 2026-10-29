@@ -57,7 +57,7 @@ class HistorySeedAuthority:
             self.seed_kind in ("checkpoint", "branch")
             and event["thread_id"] == self.thread_id
             and event.get("user_id", self.user_id) == self.user_id
-            and re.fullmatch(re.escape(prefix) + r"[1-9][0-9]*", event["run_id"]) is not None
+            and re.fullmatch(re.escape(prefix) + r"(?:0|[1-9][0-9]*)", event["run_id"]) is not None
             and event.get("category") == "message"
             and event["event_type"] in ("llm.human.input", "llm.ai.response", "llm.tool.result")
         )

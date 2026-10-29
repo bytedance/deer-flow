@@ -9,7 +9,7 @@ from uuid import uuid4
 
 import pytest
 import pytest_asyncio
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from sqlalchemy import select, text, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -23,7 +23,7 @@ from deerflow.persistence.thread_meta.sql import ThreadMetaRepository
 from deerflow.runtime import RunManager
 from deerflow.runtime.events import producer
 from deerflow.runtime.events.store.db import DbRunEventStore
-from deerflow.runtime.journal import build_checkpoint_history_seed_events
+from deerflow.runtime.journal import build_branch_history_seed_events, build_checkpoint_history_seed_events
 from deerflow.runtime.runs.schemas import ThreadOperationKind
 
 
@@ -60,6 +60,30 @@ def history():
     return build_checkpoint_history_seed_events(
         [HumanMessage(id="h1", content="one"), AIMessage(id="a1", content="answer"), HumanMessage(id="h2", content="two"), AIMessage(id="a2", content="answer two")], thread_id="thread", run_id_prefix="checkpoint-seed-thread"
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("seed_kind", ["checkpoint", "branch"])
+@pytest.mark.parametrize("mode", ["off", "strict"])
+async def test_seed_preserves_messages_before_first_human_turn(seed_db, seed_kind, mode):
+    db = seed_db
+    async with db.sf() as session, session.begin():
+        await session.execute(update(RunProducerPolicyRow).where(RunProducerPolicyRow.id == 1).values(strict=mode == "strict"))
+    events = DbRunEventStore(db.sf, producer_fencing=mode)
+    builder = build_checkpoint_history_seed_events if seed_kind == "checkpoint" else build_branch_history_seed_events
+    batch = builder(
+        [AIMessage(id="a0", content="inherited"), ToolMessage(id="t0", content="result", tool_call_id="call"), HumanMessage(id="h1", content="next"), AIMessage(id="a1", content="answer")],
+        thread_id="thread",
+        run_id_prefix=f"{seed_kind}-seed-thread",
+        **({"parent_thread_id": "parent"} if seed_kind == "branch" else {}),
+    )
+    async with db.manager.reserve_thread_operation("thread", kind=ThreadOperationKind.checkpoint_write, user_id="alice") as reservation:
+        authority = producer.history_seed_authority(reservation, db.thread, seed_kind=seed_kind)
+        with producer.producer_scope(authority):
+            rows = await events.put_batch(batch)
+    assert [row["run_id"] for row in rows] == [f"{seed_kind}-seed-thread-0", f"{seed_kind}-seed-thread-0", f"{seed_kind}-seed-thread-1", f"{seed_kind}-seed-thread-1"]
+    assert [row["event_type"] for row in rows] == ["llm.ai.response", "llm.tool.result", "llm.human.input", "llm.ai.response"]
+    assert [row["seq"] for row in rows] == [1, 2, 3, 4]
 
 
 @pytest.mark.asyncio
@@ -137,13 +161,14 @@ async def test_seed_grant_cannot_outlive_its_lifecycle(seed_db, change):
 
 
 @pytest.mark.asyncio
-async def test_trigger_independently_checks_seed_grant(seed_db):
+@pytest.mark.parametrize("turn", ["0", "1"])
+async def test_trigger_independently_checks_seed_grant(seed_db, turn):
     db = seed_db
     async with db.manager.reserve_thread_operation("thread", kind=ThreadOperationKind.checkpoint_write, user_id="alice") as reservation:
         authority = producer.history_seed_authority(reservation, db.thread, seed_kind="checkpoint")
         async with db.sf() as session, session.begin():
             await session.execute(text("SELECT set_config('deerflow.event_authority', :value, true)"), {"value": json.dumps(authority.to_storage())})
-            session.add(RunEventRow(thread_id="thread", run_id="checkpoint-seed-thread-1", user_id="alice", event_type="llm.human.input", category="message", seq=1))
+            session.add(RunEventRow(thread_id="thread", run_id=f"checkpoint-seed-thread-{turn}", user_id="alice", event_type="llm.human.input", category="message", seq=1))
         await db.events.delete_by_thread("thread", user_id="alice")
         with pytest.raises(DBAPIError):
             async with db.sf() as session, session.begin():

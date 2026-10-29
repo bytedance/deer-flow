@@ -67,7 +67,7 @@ BEGIN
            OR (r.lease_expires_at IS NOT NULL AND r.lease_expires_at <= clock_timestamp())
            OR a->>'seed_kind' IS NULL OR a->>'seed_kind' NOT IN ('checkpoint','branch')
            OR left(NEW.run_id, length(seed_prefix)) IS DISTINCT FROM seed_prefix
-           OR substring(NEW.run_id FROM length(seed_prefix)+1) !~ '^[1-9][0-9]*$'
+           OR substring(NEW.run_id FROM length(seed_prefix)+1) !~ '^(0|[1-9][0-9]*)$'
            OR NEW.category <> 'message' OR NEW.event_type NOT IN ('llm.human.input','llm.ai.response','llm.tool.result') THEN
             RAISE EXCEPTION 'History seed authority is missing, stale or outside the host grant' USING ERRCODE='42501';
         END IF;
