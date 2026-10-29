@@ -387,6 +387,8 @@ Capture stable-ID messages incrementally using remote `deerflow_source_id`
 metadata, scoped by session and including owner/role/text in the opaque identity.
 Never deduplicate distinct source IDs by text. Consume every filtered lookup page
 before appending a batch; failed/malformed lookups must not become blind replays.
+Cap each lookup at 10 pages, aborting over-budget captures without partial results;
+duplicate stored identities may span pages. Distinguish lookup/write warnings.
 Bound batches to Honcho's 100-message limit. Keep lookup + append under the
 process-local session lock; do not claim cross-process exactly-once delivery.
 ID-less direct callers remain append-only; legacy records lack capture identities.

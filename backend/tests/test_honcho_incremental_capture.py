@@ -209,19 +209,21 @@ def test_malformed_later_lookup_page_does_not_publish_partial_results(capture, m
 
 
 @pytest.mark.parametrize("lost_response", [False, True])
-def test_retry_reconciles_failed_or_committed_writes(capture, lost_response):
+def test_retry_reconciles_failed_or_committed_writes(capture, lost_response, caplog):
     create, store = capture
     messages = [HumanMessage("first", id="h1"), AIMessage("reply", id="a1"), HumanMessage("next", id="h2")]
     store.fail_write = 1
     store.lose_response = lost_response
     create().add("thread", messages[:2], user_id="alice")
+    assert "write failed for thread thread" in caplog.text
+    assert "capture lookup failed" not in caplog.text
     create().add("thread", messages, user_id="alice")
     assert store.contents() == ["first", "reply", "next"]
 
 
 def test_batched_retry_preserves_already_committed_prefix(capture):
     create, store = capture
-    store.page_size = 100
+    store.page_size = 10
     messages = [HumanMessage(f"message {n}", id=f"h{n}") for n in range(105)]
     store.fail_write = 2
     create().add("thread", messages, user_id="alice")
@@ -231,9 +233,56 @@ def test_batched_retry_preserves_already_committed_prefix(capture):
     assert [len(batch) for batch in store.batches] == [100, 5]
 
 
+@pytest.mark.parametrize("growing", [False, True], ids=["excessive-total", "growing-total"])
+def test_lookup_page_limit_aborts_capture_without_partial_results(capture, monkeypatch, caplog, growing):
+    create, store = capture
+    manager = create()
+    message = HumanMessage("private-history", id="h1")
+    manager.add("thread", [message], user_id="alice")
+    original = manager._client._post
+    requested_pages = []
+
+    def post(path, payload):
+        if "/messages/list?" not in path:
+            return original(path, payload)
+        page = int(httpx.URL(path).params["page"])
+        requested_pages.append(page)
+        # Keep the pre-fix implementation finite without providing its bound.
+        if len(requested_pages) > 10:
+            raise AssertionError("lookup exceeded the test's request budget")
+        return {"items": store.batches[0], "page": page, "pages": page + 1 if growing else 1_000_000}
+
+    monkeypatch.setattr(manager._client, "_post", post)
+    manager.add("thread", [message, HumanMessage("next", id="h2")], user_id="alice")
+    assert requested_pages == (list(range(1, 11)) if growing else [1])
+    assert store.write_count == 1
+    assert store.contents() == ["private-history"]
+    assert "capture lookup failed" in caplog.text
+    assert "page limit" in caplog.text
+    assert "private-history" not in caplog.text
+    monkeypatch.setattr(manager._client, "_post", original)
+    manager.add("thread", [message, HumanMessage("next", id="h2")], user_id="alice")
+    assert store.contents() == ["private-history", "next"]
+
+
+def test_lookup_accepts_duplicate_source_records_through_last_allowed_page(capture):
+    create, store = capture
+    manager = create()
+    message = HumanMessage("first", id="h1")
+    manager.add("thread", [message], user_id="alice")
+    records = next(iter(store.messages.values()))
+    records.extend([records[0]] * 9)
+    store.page_size = 1
+    store.lookups.clear()
+    manager.add("thread", [message, HumanMessage("next", id="h2")], user_id="alice")
+    assert [int(request.url.params["page"]) for request in store.lookups] == list(range(1, 11))
+    assert store.contents() == ["first", "next"]
+
+
 @pytest.mark.parametrize(
     "response",
     [
+        httpx.Response(403, json={"detail": "session read permission required"}),
         httpx.Response(503, json={"detail": "unavailable"}),
         httpx.Response(200, json={}),
         httpx.Response(200, json={"items": "invalid", "page": 1, "pages": 1}),
@@ -250,7 +299,9 @@ def test_lookup_failure_does_not_blindly_replay(capture, response, caplog):
     store.list_error = response
     manager.add("thread", messages + [HumanMessage("next", id="h2")], user_id="alice")
     assert store.contents() == ["private-history"]
-    assert "write failed" in caplog.text
+    assert store.write_count == 1
+    assert "capture lookup failed for thread thread" in caplog.text
+    assert "write failed" not in caplog.text
     assert "private-history" not in caplog.text
     store.list_error = None
     manager.add("thread", messages + [HumanMessage("next", id="h2")], user_id="alice")

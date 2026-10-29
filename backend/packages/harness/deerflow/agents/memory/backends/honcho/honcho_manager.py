@@ -52,11 +52,12 @@ from .config import HonchoConfig, sanitize_id
 logger = logging.getLogger(__name__)
 
 _UTC_NOW_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
-_capture_locks: weakref.WeakValueDictionary = weakref.WeakValueDictionary()
+_CaptureKey = tuple[str, str, str]
+_capture_locks: weakref.WeakValueDictionary[_CaptureKey, threading.RLock] = weakref.WeakValueDictionary()
 _capture_locks_guard = threading.Lock()
 
 
-def _capture_lock(base_url: str, workspace: str, session_id: str) -> Any:
+def _capture_lock(base_url: str, workspace: str, session_id: str) -> threading.RLock:
     # Serialize lookup + append across managers in this process without retaining
     # inactive sessions. Independent processes still need upstream admission.
     key = (base_url.rstrip("/"), workspace, session_id)
@@ -240,6 +241,7 @@ class HonchoMemoryManager(MemoryManager):
         if not outgoing:
             return
         session_id = f"df-{_stable_id(thread_id)}"
+        operation = "write"
         try:
             with _capture_lock(self._config.base_url, workspace, session_id):
                 self._client.get_or_create_peer(workspace, user_peer)
@@ -249,14 +251,16 @@ class HonchoMemoryManager(MemoryManager):
                 for offset in range(0, len(outgoing), MESSAGE_BATCH_SIZE):
                     batch = outgoing[offset : offset + MESSAGE_BATCH_SIZE]
                     source_ids = [item["metadata"][SOURCE_ID_KEY] for item in batch if "metadata" in item]
+                    operation = "capture lookup"
                     existing = self._client.existing_source_ids(workspace, session_id, source_ids) if source_ids else set()
+                    operation = "write"
                     pending = [item for item in batch if item.get("metadata", {}).get(SOURCE_ID_KEY) not in existing]
                     if pending:
                         self._client.add_messages(workspace, session_id, pending)
         except MemoryManagerError:
             raise
         except Exception as exc:
-            logger.warning("honcho memory: write failed for thread %s: %s", thread_id, exc)
+            logger.warning("honcho memory: %s failed for thread %s: %s", operation, thread_id, exc)
 
     # ── Tier 1: read ─────────────────────────────────────────────────────
     def get_context(

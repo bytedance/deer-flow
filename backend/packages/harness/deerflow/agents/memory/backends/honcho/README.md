@@ -77,15 +77,20 @@ Checkpoint history is cumulative. For messages with stable source IDs, the
 adapter stores an opaque `deerflow_source_id` in Honcho message metadata and
 checks the session's metadata-filtered `messages/list` endpoint before appending
 new messages. This requires session-read access as well as message-write access.
-Lookups and writes use batches of at most 100 messages; lookup pagination is
-fully consumed before publishing that batch.
+Lookups and writes use batches of at most 100 messages. Each lookup requests
+100 records per page and consumes at most 10 pages before publishing that batch.
+All advertised pages must be consumed; a larger page count aborts capture rather
+than using partial results. The budget allows multiple stored records per source
+identity, but exceptionally duplicate-heavy histories may exceed it.
 
 The identity includes the owner, source message ID, role, peer and normalized
 text. Distinct messages with identical text are retained; edited source messages
 are captured as new versions, not replacements of old Honcho records. Stored
 identities survive manager/process restarts and overlapping compacted history.
-An unavailable or malformed lookup aborts that capture with a warning instead
-of assuming the history is new.
+An unavailable, malformed or over-budget lookup aborts that capture with a
+`capture lookup failed` warning instead of assuming the history is new.
+This is distinct from `write failed` for setup or message-write errors; a later
+capture can retry normally once the lookup succeeds.
 
 Lookup and append are serialized per endpoint/workspace/session within one
 process, including across manager instances. This is **not exactly-once delivery**:
