@@ -734,27 +734,27 @@ def format_memory_for_injection(
         # equation collapses to the original prefix-truncation against
         # ``max_tokens``, so backward compatibility is preserved.
         facts_block = (facts_header + "\n".join(all_fact_lines)) if all_fact_lines else ""
-        facts_block_tokens = _count_tokens(facts_block, use_tiktoken=use_tiktoken)
-        separator_tokens = _count_tokens("\n\n", use_tiktoken=use_tiktoken)
-        budget_for_non_facts = max(
-            0,
-            effective_limit - facts_block_tokens - (separator_tokens if facts_block else 0),
-        )
-
         # Build the preceding (non-facts) portion from *sections* excluding
         # the trailing Facts block.
         preceding_sections = sections[:-1] if all_fact_lines else sections
         preceding = "\n\n".join(preceding_sections)
 
+        result = facts_block
         if preceding:
-            preceding_tokens = _count_tokens(preceding, use_tiktoken=use_tiktoken)
-            if preceding_tokens > budget_for_non_facts:
-                char_per_token = len(preceding) / max(preceding_tokens, 1)
-                target_chars = int(budget_for_non_facts * char_per_token * 0.95)
-                preceding = preceding[:target_chars].rstrip() + "\n..."
-            result = (preceding + "\n\n" + facts_block) if facts_block else preceding
-        else:
-            result = facts_block
+            # Average density does not bound a prefix's cost, and BPE counts
+            # need not be monotone. Count each assembled candidate and retain
+            # only fitting prefixes; this need not find the longest one.
+            low, high = 0, len(preceding)
+            while low <= high:
+                middle = (low + high) // 2
+                candidate = preceding[:middle].rstrip() + "\n..."
+                if facts_block:
+                    candidate += "\n\n" + facts_block
+                if _count_tokens(candidate, use_tiktoken=use_tiktoken) <= effective_limit:
+                    result = candidate
+                    low = middle + 1
+                else:
+                    high = middle - 1
 
     return result
 
