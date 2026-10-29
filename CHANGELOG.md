@@ -7,9 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+This section accumulates work toward the **2.3.0** milestone
+([2.3.0](https://github.com/bytedance/deer-flow/milestone/4)).
+
+## [2.2.0] — 2026-10-29
+
 This section accumulates work toward the **2.2.0** milestone
 ([2.2.0](https://github.com/bytedance/deer-flow/milestone/3)).
-As of 2026-10-28, the milestone includes **1068 merged pull requests**.
+This release closes that milestone with **1068 merged pull requests**.
 
 ### Added
 

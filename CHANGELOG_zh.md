@@ -9,8 +9,13 @@
 
 ## [未发布]
 
-本节累积面向 **2.2.0** 里程碑（[2.2.0](https://github.com/bytedance/deer-flow/milestone/3)）的工作。
+本节累积面向 **2.3.0** 里程碑（[2.3.0](https://github.com/bytedance/deer-flow/milestone/4)）的工作。
 截至 2026-10-28，该里程碑已合并 **1068 个拉取请求**。
+
+## [2.2.0] — 2026-10-29
+
+本节累积面向 **2.2.0** 里程碑（[2.2.0](https://github.com/bytedance/deer-flow/milestone/3)）的工作。
+该里程碑随本次发布收尾，共合并 **1068 个拉取请求**。
 
 ### 新增
 
