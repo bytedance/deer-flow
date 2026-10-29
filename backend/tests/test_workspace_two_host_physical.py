@@ -537,6 +537,8 @@ async def _native_worker():
         # The freshly constructed host client fails while an identically
         # constructed replacement connects; swap it and keep both facts in
         # evidence so the product-level cause can be isolated later.
+        import httpx
+
         original_host_client = host.client
         host.client = httpx.AsyncClient(
             headers={"Authorization": "Bearer " + os.environ["TENANT_TWO_HOST_NATIVE_NODE_SECRET"], "X-DeerFlow-Internal-Token": os.environ["DEER_FLOW_INTERNAL_AUTH_TOKEN"]},
@@ -557,8 +559,6 @@ async def _native_worker():
                 if attempt == 59:
                     evidence["tcp_precheck"] = f"{parsed.hostname}:{parsed.port} failed: {exc}"
             await asyncio.sleep(1.0)
-        import httpx
-
         for attempt in range(30):
             try:
                 async with httpx.AsyncClient(timeout=5) as client:
