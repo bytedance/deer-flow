@@ -138,7 +138,7 @@ def _graph_builder(saver, tools_registry):
             completed = await task_repo.get(created[0]["id"], user_id=owner, thread_id=created[0]["thread_id"], thread_incarnation=created[0]["thread_incarnation"])
         finally:
             reset_current_workspace(selected)
-        if completed["status"] != TaskStatus.COMPLETED.value:
+        if completed is None or completed["status"] != TaskStatus.COMPLETED.value:
             return {"messages": [AIMessage(content="Waiting for the real Docker report")], "title": "Owned dependency report"}
         publication = tools_registry["publication"]
         report = (publication / completed["remote_task_id"] / "files" / "report.md").read_text()
@@ -541,7 +541,8 @@ async def _chained_worker():
 
         async def capture_real_submission(**kwargs):
             created = await actual_submit(**kwargs)
-            created_tasks.append({"id": created["id"], "remote_task_id": created.get("remote_task_id"), "thread_id": created.get("thread_id"), "thread_incarnation": created.get("thread_incarnation")})
+            request = kwargs.get("request")
+            created_tasks.append({"id": created["id"], "remote_task_id": created.get("remote_task_id"), "thread_id": getattr(request, "thread_id", None), "thread_incarnation": getattr(request, "thread_incarnation", None)})
             evidence["b_task_submitted_over_mcp_http"] = True
             evidence_path.write_text(json.dumps(evidence, indent=2))
             return created
@@ -605,7 +606,8 @@ async def _chained_worker():
                         task = await assembly["task_repo"].get(created_tasks[0]["id"], user_id=owner, thread_id=created_tasks[0]["thread_id"], thread_incarnation=created_tasks[0]["thread_incarnation"])
                     finally:
                         reset_current_workspace(selected)
-                    evidence["b_task_status"] = task["status"]
+                    if task is not None:
+                        evidence["b_task_status"] = task["status"]
                     evidence_path.write_text(json.dumps(evidence, indent=2))
                 if not host.executions and created_tasks and evidence.get("b_task_status") == "completed":
                     import sqlalchemy as sa
