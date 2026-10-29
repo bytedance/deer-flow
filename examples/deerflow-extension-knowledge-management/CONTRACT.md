@@ -31,4 +31,4 @@ content. These diagnostics do not provide durable admission or processing Trace.
 
 ## Compatibility
 
-No changes are made to `knowledge_scope`, retrieval tools, source artifacts, frontend citation models or stored messages. Offline fixtures in `backend/tests/test_knowledge_management_extension.py` demonstrate shared dataset identity and citation replay with the existing WeKnora read-only provider. Synthetic fixture transitions are not live processing evidence.
+No changes are made to `knowledge_scope`, retrieval tools, source artifacts, frontend citation models or stored messages. Offline fixtures in `backend/tests/test_knowledge/test_knowledge_management_extension.py` demonstrate shared dataset identity and citation replay with the existing WeKnora read-only provider. Synthetic fixture transitions are not live processing evidence.

@@ -18,7 +18,7 @@ computed calls/strings and unresolved values fail closed. This is not a general
 JavaScript evaluator. The read-only ``skip-validation`` control is not applied.
 
 Standard library only -- the check has to stay cheap enough to run on every PR.
-Regression coverage: backend/tests/test_label_declarations.py.
+Regression coverage: backend/tests/test_config/test_label_declarations.py.
 
 Usage:
     python scripts/check_label_declarations.py

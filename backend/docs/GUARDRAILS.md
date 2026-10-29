@@ -538,7 +538,7 @@ Only the deny half needs RBAC now: the provider's `allowed_tools` carries the al
 
 ```bash
 cd backend
-uv run python -m pytest tests/test_typesafe_guardrail_provider.py tests/blocking_io/test_typesafe_guardrail_provider.py -v
+uv run python -m pytest tests/test_typesafe/test_typesafe_guardrail_provider.py tests/blocking_io/test_typesafe_guardrail_provider.py -v
 make dev   # then ask the agent to delete the disposable file with bash
 ```
 
@@ -554,7 +554,7 @@ Check the denial message the agent receives and the `middleware:guardrail` journ
 | Refusal | not a response shape | `{"type": "refusal"}` — a per-question outcome, so the gate still denies for want of a verdict |
 | `model` | defaults to `jev-latest` | **required**: no default model is shipped, so a deployment cannot send tool text to a model nobody named |
 
-`use:` is the only wiring — `guardrails.provider.config` keeps accepting the same fields, and there is no new config schema. The memory pre-screen and signal classification have siblings in the same shape (`deerflow.agents.memory.prescreen.openai_decisions:OpenAIDecisionsMemoryPrescreen`, `deerflow.agents.memory.signals.openai_decisions:OpenAIDecisionsSignalClassifier`); their thresholds, modes, cache buckets and `request_failed` reporting are the coordinator's and unchanged, and a `sharing_key` difference keeps a Decisions side from ever being combined into a Jev request. Offline suite: `tests/test_openai_decisions.py`.
+`use:` is the only wiring — `guardrails.provider.config` keeps accepting the same fields, and there is no new config schema. The memory pre-screen and signal classification have siblings in the same shape (`deerflow.agents.memory.prescreen.openai_decisions:OpenAIDecisionsMemoryPrescreen`, `deerflow.agents.memory.signals.openai_decisions:OpenAIDecisionsSignalClassifier`); their thresholds, modes, cache buckets and `request_failed` reporting are the coordinator's and unchanged, and a `sharing_key` difference keeps a Decisions side from ever being combined into a Jev request. Offline suite: `tests/test_mcp/test_openai_decisions.py`.
 
 The endpoint path participates in the sharing key and public policy identity, so
 `combine: auto` keeps Jev and Decisions requests separate even when their gateway
@@ -670,20 +670,20 @@ guardrails:
 
 ```bash
 cd backend
-uv run python -m pytest tests/test_guardrail_middleware.py -v
-uv run python -m pytest tests/test_typesafe_guardrail_provider.py -v
-uv run python -m pytest tests/test_typesafe_client.py tests/test_typesafe_config.py -v
+uv run python -m pytest tests/test_agents/test_guardrail_middleware.py -v
+uv run python -m pytest tests/test_typesafe/test_typesafe_guardrail_provider.py -v
+uv run python -m pytest tests/test_typesafe/test_typesafe_client.py tests/test_typesafe/test_typesafe_config.py -v
 uv run python -m pytest tests/blocking_io/test_typesafe_guardrail_provider.py -v
 ```
 
-`tests/test_guardrail_middleware.py` -- 25 tests covering:
+`tests/test_agents/test_guardrail_middleware.py` -- 25 tests covering:
 - AllowlistProvider: allow, deny, both allowlist+denylist, async
 - GuardrailMiddleware: allow passthrough, deny with OAP codes, fail-closed, fail-open, passport forwarding, empty reasons fallback, empty tool name, protocol isinstance check
 - Async paths: awrap_tool_call for allow, deny, fail-closed, fail-open
 - GraphBubbleUp: LangGraph control signals propagate through (not caught)
 - Config: defaults, from_dict, singleton load/reset
 
-`tests/test_typesafe_guardrail_provider.py` -- the TypeSafe provider over `httpx.MockTransport`:
+`tests/test_typesafe/test_typesafe_guardrail_provider.py` -- the TypeSafe provider over `httpx.MockTransport`:
 - Threshold boundary, request shape and state digest
 - Local denials with zero requests: over-limit arguments, unserialisable arguments, unprobed tools, allowed_tools refusals (`[]` refuses everything; a refusal outranks the probe scope and state validation)
 - Allowed tools still reaching the risk gate, and allowed_tools refusals surviving `fail_closed: false`
@@ -696,7 +696,7 @@ uv run python -m pytest tests/blocking_io/test_typesafe_guardrail_provider.py -v
 `tests/blocking_io/test_typesafe_guardrail_provider.py` -- anchor that drives `aevaluate` against a real loopback HTTP
 server, with a meta-check proving the sync path on the loop trips the Blockbuster gate.
 
-`tests/test_typesafe_client.py` / `tests/test_typesafe_config.py` -- the shared client the provider is now built on:
+`tests/test_typesafe/test_typesafe_client.py` / `tests/test_typesafe/test_typesafe_config.py` -- the shared client the provider is now built on:
 - Per-question partial success: a valid answer survives an invalid or missing one, each failure category is reported
   separately, an answer for a question that was never asked is ignored, and a missing *envelope* still fails the whole request
 - The gate's own question-level failure still surfaces as `TypeSafeGuardrailError` / `invalid_response`
@@ -739,10 +739,10 @@ packages/harness/deerflow/agents/middlewares/
     tool_error_handling_middleware.py  # Registers GuardrailMiddleware in chain
 
 config.example.yaml          # Four provider options + the top-level `typesafe:` defaults
-tests/test_guardrail_middleware.py  # 25 tests
-tests/test_typesafe_guardrail_provider.py  # TypeSafe provider + middleware integration
-tests/test_typesafe_client.py  # Shared client: partial success, wire size
-tests/test_typesafe_config.py  # Precedence, mode off, the two identities
+tests/test_agents/test_guardrail_middleware.py  # 25 tests
+tests/test_typesafe/test_typesafe_guardrail_provider.py  # TypeSafe provider + middleware integration
+tests/test_typesafe/test_typesafe_client.py  # Shared client: partial success, wire size
+tests/test_typesafe/test_typesafe_config.py  # Precedence, mode off, the two identities
 tests/blocking_io/test_typesafe_guardrail_provider.py  # Async path must stay off the loop
 docs/GUARDRAILS.md           # This file
 ```

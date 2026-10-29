@@ -11,7 +11,7 @@
 ### Task 1: Add failing tracing config tests
 
 **Files:**
-- Modify: `backend/tests/test_tracing_config.py`
+- Modify: `backend/tests/test_tracing/test_tracing_config.py`
 
 **Step 1: Write the failing tests**
 
@@ -23,7 +23,7 @@ Add tests covering:
 
 **Step 2: Run tests to verify they fail**
 
-Run: `cd backend && uv run pytest tests/test_tracing_config.py -q`
+Run: `cd backend && uv run pytest tests/test_tracing/test_tracing_config.py -q`
 Expected: FAIL because tracing config only supports LangSmith today.
 
 **Step 3: Write minimal implementation**
@@ -32,14 +32,14 @@ Update tracing config code to represent multiple providers and expose helper fun
 
 **Step 4: Run tests to verify they pass**
 
-Run: `cd backend && uv run pytest tests/test_tracing_config.py -q`
+Run: `cd backend && uv run pytest tests/test_tracing/test_tracing_config.py -q`
 Expected: PASS
 
 ### Task 2: Add failing callback factory and model attachment tests
 
 **Files:**
-- Modify: `backend/tests/test_model_factory.py`
-- Create: `backend/tests/test_tracing_factory.py`
+- Modify: `backend/tests/test_models/test_model_factory.py`
+- Create: `backend/tests/test_tracing/test_tracing_factory.py`
 
 **Step 1: Write the failing tests**
 
@@ -52,7 +52,7 @@ Add tests covering:
 
 **Step 2: Run tests to verify they fail**
 
-Run: `cd backend && uv run pytest tests/test_model_factory.py tests/test_tracing_factory.py -q`
+Run: `cd backend && uv run pytest tests/test_models/test_model_factory.py tests/test_tracing/test_tracing_factory.py -q`
 Expected: FAIL because there is no provider factory and model creation only attaches LangSmith.
 
 **Step 3: Write minimal implementation**
@@ -61,7 +61,7 @@ Create tracing callback factory module and update model factory to use it.
 
 **Step 4: Run tests to verify they pass**
 
-Run: `cd backend && uv run pytest tests/test_model_factory.py tests/test_tracing_factory.py -q`
+Run: `cd backend && uv run pytest tests/test_models/test_model_factory.py tests/test_tracing/test_tracing_factory.py -q`
 Expected: PASS
 
 ### Task 3: Wire dependency and docs
@@ -84,7 +84,7 @@ Document:
 
 **Step 3: Run targeted verification**
 
-Run: `cd backend && uv run pytest tests/test_tracing_config.py tests/test_model_factory.py tests/test_tracing_factory.py -q`
+Run: `cd backend && uv run pytest tests/test_tracing/test_tracing_config.py tests/test_models/test_model_factory.py tests/test_tracing/test_tracing_factory.py -q`
 Expected: PASS
 
 ### Task 4: Run broader regression checks
@@ -94,7 +94,7 @@ Expected: PASS
 
 **Step 1: Run relevant suite**
 
-Run: `cd backend && uv run pytest tests/test_tracing_config.py tests/test_model_factory.py tests/test_tracing_factory.py -q`
+Run: `cd backend && uv run pytest tests/test_tracing/test_tracing_config.py tests/test_models/test_model_factory.py tests/test_tracing/test_tracing_factory.py -q`
 
 **Step 2: Run lint if needed**
 

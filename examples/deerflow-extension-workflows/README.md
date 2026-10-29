@@ -319,7 +319,7 @@ its own pinned runtime dependency. No provider keys are required for these check
 
 ```sh
 cd backend
-uv run pytest tests/test_workflow_plugin.py -q
+uv run pytest tests/test_extensions/test_workflow_plugin.py -q
 make test
 make test-blocking-io
 make format
@@ -469,7 +469,7 @@ and PostgreSQL dependencies and this example's `quickjs` dependency installed:
 
 ```sh
 DEERFLOW_WORKFLOW_ACCEPTANCE=1 backend/.venv/bin/python -m pytest \
-  backend/tests/test_workflow_gateway_acceptance.py -v --tb=short
+  backend/tests/test_extensions/test_workflow_gateway_acceptance.py -v --tb=short
 ```
 
 Docker must be running (OrbStack works); set `DEERFLOW_TEST_DOCKER` when the CLI

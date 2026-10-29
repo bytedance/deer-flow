@@ -231,5 +231,5 @@ stop the disposable Gateway before leaving it unattended.
 Offline validation:
 
 ```bash
-uv run --no-sync pytest tests/test_bench_scheduled_tasks.py -q
+uv run --no-sync pytest tests/test_runtime/test_bench_scheduled_tasks.py -q
 ```

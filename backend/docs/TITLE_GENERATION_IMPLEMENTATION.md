@@ -56,7 +56,7 @@ title:
 
 ### 4. 测试
 
-#### [`tests/test_title_generation.py`](../tests/test_title_generation.py) (新建)
+#### [`tests/test_agents/test_title_generation.py`](../tests/test_agents/test_title_generation.py) (新建)
 - ✅ 配置类测试
 - ✅ Middleware 初始化测试
 - ✅ TODO: 集成测试（需要 mock Runtime）
@@ -158,7 +158,7 @@ const title = state.values.title || "New Conversation";
 
 ```bash
 # 运行测试
-pytest tests/test_title_generation.py -v
+pytest tests/test_agents/test_title_generation.py -v
 
 # 运行所有测试
 pytest

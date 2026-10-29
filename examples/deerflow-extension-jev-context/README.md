@@ -129,7 +129,7 @@ are not money saved; providers' actual usage/cache counters are the evidence.
 From `backend/`:
 
 ```sh
-uv run pytest tests/test_jev_context_extension.py
+uv run pytest tests/test_extensions/test_jev_context_extension.py
 ```
 
 Coverage includes sync/async host isolation, checkpoint persistence, per-thread

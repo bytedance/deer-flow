@@ -85,7 +85,7 @@ is_internal / attributes
 新增：
 
 ```text
-backend/tests/test_authorization_principal.py
+backend/tests/test_authz/test_authorization_principal.py
 ```
 
 覆盖：
@@ -157,7 +157,7 @@ def build_principal_from_context(
 修改：
 
 ```text
-backend/tests/test_gateway_services.py
+backend/tests/test_gateway/test_gateway_services.py
 ```
 
 必须复用真实配置装配顺序：
@@ -233,7 +233,7 @@ runtime_context["is_internal"] = auth_source == AUTH_SOURCE_INTERNAL
 修改：
 
 ```text
-backend/tests/test_task_tool_core_logic.py
+backend/tests/test_tools/test_task_tool_core_logic.py
 ```
 
 复用现有 `test_task_tool_forwards_channel_user_id_to_executor` 的 DummyExecutor 模式，覆盖：
@@ -275,7 +275,7 @@ else:
 修改：
 
 ```text
-backend/tests/test_subagent_executor.py
+backend/tests/test_subagents/test_subagent_executor.py
 ```
 
 复用现有 channel identity context 测试模式，覆盖：
@@ -328,8 +328,8 @@ context["authz_attributes"] = dict(self.authz_attributes)
 修改：
 
 ```text
-backend/tests/test_authorization_provider.py
-backend/tests/test_guardrail_middleware.py
+backend/tests/test_authz/test_authorization_provider.py
+backend/tests/test_agents/test_guardrail_middleware.py
 ```
 
 覆盖：
@@ -416,7 +416,7 @@ docs/plans/2026-07-10-pluggable-authorization-implementation-notes.md
 
 ```text
 backend/packages/harness/deerflow/authz/principal.py
-backend/tests/test_authorization_principal.py
+backend/tests/test_authz/test_authorization_principal.py
 docs/plans/2026-07-10-pluggable-authorization-implementation-notes.md
 docs/plans/2026-07-15-authz-phase1a-implementation-plan.md
 docs/plans/2026-07-15-authz-phase1a1-trusted-principal-implementation-plan.md
@@ -435,12 +435,12 @@ backend/app/gateway/services.py
 backend/packages/harness/deerflow/tools/builtins/task_tool.py
 backend/packages/harness/deerflow/subagents/executor.py
 backend/packages/harness/deerflow/sandbox/tools.py
-backend/tests/test_authorization_provider.py
-backend/tests/test_channel_user_id_env.py
-backend/tests/test_guardrail_middleware.py
-backend/tests/test_task_tool_core_logic.py
-backend/tests/test_subagent_executor.py
-backend/tests/test_gateway_services.py
+backend/tests/test_authz/test_authorization_provider.py
+backend/tests/test_channels/test_channel_user_id_env.py
+backend/tests/test_agents/test_guardrail_middleware.py
+backend/tests/test_tools/test_task_tool_core_logic.py
+backend/tests/test_subagents/test_subagent_executor.py
+backend/tests/test_gateway/test_gateway_services.py
 docs/plans/2026-07-10-pluggable-authorization-rfc.md
 ```
 
@@ -472,19 +472,19 @@ backend/packages/harness/deerflow/client.py
 ```powershell
 cd backend
 
-uv run pytest tests/test_authorization_principal.py -q
-uv run pytest tests/test_gateway_services.py -q
-uv run pytest tests/test_task_tool_core_logic.py -q
-uv run pytest tests/test_subagent_executor.py -q
-uv run pytest tests/test_authorization_provider.py -q
-uv run pytest tests/test_guardrail_middleware.py -q
-uv run pytest tests/test_channel_user_id_env.py -q
+uv run pytest tests/test_authz/test_authorization_principal.py -q
+uv run pytest tests/test_gateway/test_gateway_services.py -q
+uv run pytest tests/test_tools/test_task_tool_core_logic.py -q
+uv run pytest tests/test_subagents/test_subagent_executor.py -q
+uv run pytest tests/test_authz/test_authorization_provider.py -q
+uv run pytest tests/test_agents/test_guardrail_middleware.py -q
+uv run pytest tests/test_channels/test_channel_user_id_env.py -q
 
-uv run pytest tests/test_authorization_principal.py tests/test_gateway_services.py tests/test_channel_user_id_env.py tests/test_task_tool_core_logic.py tests/test_subagent_executor.py tests/test_authorization_provider.py tests/test_guardrail_middleware.py -q
-uv run pytest tests/test_harness_boundary.py -q
+uv run pytest tests/test_authz/test_authorization_principal.py tests/test_gateway/test_gateway_services.py tests/test_channels/test_channel_user_id_env.py tests/test_tools/test_task_tool_core_logic.py tests/test_subagents/test_subagent_executor.py tests/test_authz/test_authorization_provider.py tests/test_agents/test_guardrail_middleware.py -q
+uv run pytest tests/test_infrastructure/test_harness_boundary.py -q
 
-uv run ruff check packages/harness/deerflow/authz packages/harness/deerflow/guardrails packages/harness/deerflow/tools/builtins/task_tool.py packages/harness/deerflow/subagents/executor.py packages/harness/deerflow/sandbox/tools.py app/gateway/services.py tests/test_authorization_principal.py tests/test_authorization_provider.py tests/test_channel_user_id_env.py tests/test_task_tool_core_logic.py tests/test_subagent_executor.py tests/test_gateway_services.py
-uv run ruff format --check packages/harness/deerflow/authz packages/harness/deerflow/guardrails packages/harness/deerflow/tools/builtins/task_tool.py packages/harness/deerflow/subagents/executor.py packages/harness/deerflow/sandbox/tools.py app/gateway/services.py tests/test_authorization_principal.py tests/test_authorization_provider.py tests/test_channel_user_id_env.py tests/test_task_tool_core_logic.py tests/test_subagent_executor.py tests/test_gateway_services.py
+uv run ruff check packages/harness/deerflow/authz packages/harness/deerflow/guardrails packages/harness/deerflow/tools/builtins/task_tool.py packages/harness/deerflow/subagents/executor.py packages/harness/deerflow/sandbox/tools.py app/gateway/services.py tests/test_authz/test_authorization_principal.py tests/test_authz/test_authorization_provider.py tests/test_channels/test_channel_user_id_env.py tests/test_tools/test_task_tool_core_logic.py tests/test_subagents/test_subagent_executor.py tests/test_gateway/test_gateway_services.py
+uv run ruff format --check packages/harness/deerflow/authz packages/harness/deerflow/guardrails packages/harness/deerflow/tools/builtins/task_tool.py packages/harness/deerflow/subagents/executor.py packages/harness/deerflow/sandbox/tools.py app/gateway/services.py tests/test_authz/test_authorization_principal.py tests/test_authz/test_authorization_provider.py tests/test_channels/test_channel_user_id_env.py tests/test_tools/test_task_tool_core_logic.py tests/test_subagents/test_subagent_executor.py tests/test_gateway/test_gateway_services.py
 ```
 
 提交前运行：

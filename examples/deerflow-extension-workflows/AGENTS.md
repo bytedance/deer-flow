@@ -41,7 +41,7 @@ evidence per child run; never expose raw credentials. File checkpoints bind
 append-only captured bytes and SHA-256; preview and approved consumption read
 that exact version. Never claim hard currency limits or freeze external state. Do not serialize capability handles.
 
-Tests live in backend/tests/test_workflow_plugin.py. Run the backend offline and
+Tests live in backend/tests/test_extensions/test_workflow_plugin.py. Run the backend offline and
 blocking-I/O targets plus verify_browser.mjs. The browser fixture is loopback-only
 and synthetic; it must never become a deployed authentication bypass.
 
@@ -66,7 +66,7 @@ Unknown child reservations retain cluster capacity. Takeover requires a fresh
 session and matching runtime/config; there is no unattended authority reattachment.
 Keep the SQLite flock default. Cluster tests use DEERFLOW_TEST_WORKFLOW_POSTGRES
 and disposable schemas, including real process kill and a host row-lock race.
-Recovery tests: backend/tests/test_workflow_recovery.py, including real process kill.
+Recovery tests: backend/tests/test_extensions/test_workflow_recovery.py, including real process kill.
 
 AgentRuns.configuration_revision(durable=True) uses a purpose-separated HMAC
 under the persisted host signing secret for restart comparison. Default revisions
@@ -74,7 +74,7 @@ remain process-local. Rotation invalidates comparisons; no raw config or secret 
 returned. Recovery callers must bind a fresh authenticated session capability;
 never serialize handles or reconstruct authority from a stored user ID alone.
 
-Deployed acceptance: `backend/tests/test_workflow_gateway_acceptance.py` opts in
+Deployed acceptance: `backend/tests/test_extensions/test_workflow_gateway_acceptance.py` opts in
 with DEERFLOW_WORKFLOW_ACCEPTANCE=1 and disposable Docker PostgreSQL/Redis/nginx.
 The support/workflow_gateway.py entrypoint is test-only: deterministic model and
 barriers around real operations, never a deployed auth/admission bypass. Use real

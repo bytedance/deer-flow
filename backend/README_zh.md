@@ -455,7 +455,7 @@ make test-blocking-io
 make test-live
 ```
 
-实时测试套件需要有效的根目录 `config.yaml` 和 API 凭据。它可能产生 API 费用，或创建本地沙箱、产物和文件，因此不属于默认测试流程或 CI。直接通过 pytest 运行 `tests/test_client_live.py` 时，也需要设置 `DEER_FLOW_RUN_LIVE_TESTS=1`。
+实时测试套件需要有效的根目录 `config.yaml` 和 API 凭据。它可能产生 API 费用，或创建本地沙箱、产物和文件，因此不属于默认测试流程或 CI。直接通过 pytest 运行 `tests/test_gateway/test_client_live.py` 时，也需要设置 `DEER_FLOW_RUN_LIVE_TESTS=1`。
 
 `make detect-blocking-io` 会静态扫描后端业务代码，寻找可能在后端事件循环上运行且不受测试覆盖范围限制的阻塞式 IO。它会输出便于人工审查的简明摘要，并把完整的 JSON 结果写入仓库根目录的 `.deer-flow/blocking-io-findings.json`，无论该目标是在仓库根目录还是 `backend/` 目录中调用。JSON 结果同时包含宽泛的 IO 分类和面向审查的字段，例如 `priority`、`location`、`blocking_call`、`event_loop_exposure`、`reason` 和 `code`。`priority` 只是根据操作类型生成的确定性审查顺序，并不能证明存在缺陷。对于同一文件中通过裸名称调用的函数，扫描器按函数名解析，因此当一个文件中存在同名辅助函数时，可能会保守地高估异步可达性。
 

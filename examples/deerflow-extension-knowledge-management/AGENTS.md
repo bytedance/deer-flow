@@ -22,12 +22,12 @@ parent-child mode as authoritative and ignores zero integer overrides. Reject
 an unrepresentable zero overlap. Empty reparse options preserve the stored policy. Keep arbitrary credential,
 model and parser configuration out of request bodies.
 
-Tests belong in backend/tests/test_knowledge_management_extension.py and
+Tests belong in backend/tests/test_knowledge/test_knowledge_management_extension.py and
 backend/tests/blocking_io/test_knowledge_management_extension.py. Use mock
 transport for offline tests and actual HTTPX SSL initialization for blocking-I/O
 coverage. Keep simulated and real validation explicitly separate.
 
-Live acceptance lives in backend/tests/test_knowledge_management_extension_live.py.
+Live acceptance lives in backend/tests/test_knowledge/test_knowledge_management_extension_live.py.
 Require both DEER_FLOW_RUN_LIVE_TESTS and KNOWLEDGE_MANAGEMENT_ALLOW_WRITES;
 use a dedicated synthetic base and caller-supplied session/CSRF credentials.
 Preserve native IDs for uncertain-write reconciliation; no automatic write retry

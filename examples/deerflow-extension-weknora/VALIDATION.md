@@ -64,7 +64,7 @@ Secrets and local resource IDs are kept outside the repository.
 | Restricted API key reads the second base | HTTP 403 |
 | Read-only API key attempts a synthetic draft write | HTTP 403; no document created |
 
-The live pytest is `backend/tests/test_weknora_extension_live.py`; it supplies a
+The live pytest is `backend/tests/test_knowledge/test_weknora_extension_live.py`; it supplies a
 deterministic tool call and requires an already indexed document. This tests
 real retrieval and tool/artifact integration, **not generative answer quality**.
 The separate boundary probes used the two synthetic documents described above.

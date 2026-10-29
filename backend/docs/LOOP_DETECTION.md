@@ -34,5 +34,5 @@ model tool-call order remains selected for compatibility; later calls are
 still counted and can warn in a later batch. A frequency warning whose burst
 decays within the batch must not leave a stale suppression mark.
 
-`backend/tests/test_loop_detection_middleware.py` covers mixed-tool batches,
+`backend/tests/test_agents/test_loop_detection_middleware.py` covers mixed-tool batches,
 window decay, overrides, and sync/async compiled-graph execution.

@@ -298,7 +298,7 @@ fences, including unclosed fences, in complete and streamed replies.
    and run from `backend/`:
 
    ```bash
-   DEER_FLOW_RUN_LIVE_TESTS=1 uv run --no-sync pytest tests/test_managed_deepseek_live.py -q
+   DEER_FLOW_RUN_LIVE_TESTS=1 uv run --no-sync pytest tests/test_models/test_managed_deepseek_live.py -q
    ```
 
    These opt-in tests send short requests to DeepSeek and may incur charges;
@@ -2778,7 +2778,7 @@ While durable batch tools are available, a later owner turn can explicitly inspe
 
 The complete escaped response also fits within 10,000 characters and the bound host's positive `tool_output` externalization/fallback limits, so normal budgeting preserves continuation JSON. Smaller limits can shorten a window; `budget_too_small` means the operator must raise the budget instead of retrying a zero-length page. Limits too small even for that error envelope cannot provide a usable structured response. Explicit SDK graphs with a custom output-budget middleware should supply the same `AppConfig` through `SubagentRuntime`; default graphs use default reader limits.
 
-Offline acceptance: `cd backend && PYTHONPATH=. uv run --locked pytest tests/test_batch_result_reader.py -k 'real_submission_worker or sdk_factory_graph' -q`. This exercises real submission, deterministic worker completion, database reopen and registered graph consumption; external model execution is replaced by a fake model/executor.
+Offline acceptance: `cd backend && PYTHONPATH=. uv run --locked pytest tests/test_runtime/test_batch_result_reader.py -k 'real_submission_worker or sdk_factory_graph' -q`. This exercises real submission, deterministic worker completion, database reopen and registered graph consumption; external model execution is replaced by a fake model/executor.
 
 Durable knowledge-research results also export nullable `result_artifact.knowledge_sources` snapshots. Each retained source pairs a citation ID in the stored report with the exact excerpt captured by `knowledge_search` or a delegated `task`, plus its RAGFlow dataset/document/chunk locator and pages. The existing authenticated `GET /api/threads/{thread_id}/subagent-batches/{batch_id}/results.jsonl` remains the entry point: find a report's `#knowledge-<id>` link in that row's `sources` by `id` to inspect the evidence after a Gateway restart or provider change. Compact item queries do not include these snapshots; clickable citations are available in the selected result dialog, not batch previews.
 

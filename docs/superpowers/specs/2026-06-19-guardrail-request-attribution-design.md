@@ -23,8 +23,8 @@ DeerFlow 已通过 `GuardrailMiddleware` + 可插拔 `GuardrailProvider` 实现�
 - `app/gateway/services.py`：`inject_authenticated_user_context()` 注入更多 authenticated user context。
 - `guardrails/provider.py`：`GuardrailRequest` 新增 optional 字段。
 - `guardrails/middleware.py`：从 `ToolCallRequest.runtime.context` 读取字段。
-- `tests/test_setup_agent_e2e_user_isolation.py`：验证 Gateway 注入到 runtime context。
-- `tests/test_guardrail_middleware.py`：验证 runtime context 进入 `GuardrailRequest`。
+- `tests/test_agents/test_setup_agent_e2e_user_isolation.py`：验证 Gateway 注入到 runtime context。
+- `tests/test_agents/test_guardrail_middleware.py`：验证 runtime context 进入 `GuardrailRequest`。
 - `backend/docs/GUARDRAILS.md`：更新 custom provider 示例。
 
 ## 设计
@@ -121,8 +121,8 @@ role_tool_key = f"{request.user_role or ''}:{request.tool_name}"
 ```bash
 cd backend
 PYTHONPATH=. uv run pytest \
-  tests/test_guardrail_middleware.py::TestGuardrailRequestAttribution \
-  tests/test_setup_agent_e2e_user_isolation.py::TestConfigAssembly -v
+  tests/test_agents/test_guardrail_middleware.py::TestGuardrailRequestAttribution \
+  tests/test_agents/test_setup_agent_e2e_user_isolation.py::TestConfigAssembly -v
 ```
 
 ## 未涉及

@@ -222,15 +222,15 @@ default such as `max` can be persisted.
 
 ## Validation contract
 
-- `backend/tests/test_reasoning_contract.py` — normalization, validation
+- `backend/tests/test_models/test_reasoning_contract.py` — normalization, validation
   failures, request resolution for optional / required / unsupported /
   restricted-effort models, API projection.
-- `backend/tests/test_model_factory.py` — required-thinking models never
+- `backend/tests/test_models/test_model_factory.py` — required-thinking models never
   receive a disable payload, restricted effort mapping, dialect synthesis,
   history serialization, legacy behavior unchanged.
-- `backend/tests/test_models_authorization.py` and `test_client.py` — API
+- `backend/tests/test_models/test_models_authorization.py` and `test_client.py` — API
   projection shape.
-- `backend/tests/test_setup_wizard.py` — Z.AI profile uses the contract.
+- `backend/tests/test_gateway/test_setup_wizard.py` — Z.AI profile uses the contract.
 - `frontend/tests/unit/core/models/reasoning.test.ts` — mode resolution,
   effort options, alias mapping, legacy fallback.
 

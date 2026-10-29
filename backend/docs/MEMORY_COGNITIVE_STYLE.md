@@ -65,7 +65,7 @@ When extending the global summary JSON (`user.*` / `history.*`) or the per-agent
 | 3. Types & API models | `frontend/src/core/memory/types.ts`, `backend/app/gateway/routers/memory.py` (`UserContext` / `HistoryContext`) |
 | 4. Updater prompt | `core/prompts/memory_update.chat.yaml` and `core/prompts/fact_extraction.yaml`; add injection rendering in `core/prompt.py::format_memory_for_injection()`. Fact categories must also be added to `storage.py::CORE_CATEGORIES` |
 | 5. Settings UI & i18n | `memory-settings-page.tsx`, `en-US.ts` / `zh-CN.ts` |
-| 6. Tests | Backend: legacy sections and facts in `tests/test_memory_storage.py` / `tests/test_memory_normalize.py` / `tests/test_deermem_self_contained.py`. Frontend: import and API-read behavior in `tests/unit/core/memory/` |
+| 6. Tests | Backend: legacy sections and facts in `tests/test_knowledge/test_memory_storage.py` / `tests/test_knowledge/test_memory_normalize.py` / `tests/test_knowledge/test_deermem_self_contained.py`. Frontend: import and API-read behavior in `tests/unit/core/memory/` |
 | 7. Import path | Keep the stable export envelope strict (`version`, `lastUpdated`, object `user`/`history`, array `facts`), then normalize additive fields inside that valid envelope |
 
 **Avoid:** normalizing only sections while leaving legacy fact metadata unchecked, or making one unrecoverable fact fail the entire background API read. User-initiated imports remain strict for facts without usable content; API reads drop only those unrecoverable entries.
@@ -74,8 +74,8 @@ When extending the global summary JSON (`user.*` / `history.*`) or the per-agent
 
 ```bash
 cd backend
-PYTHONPATH=. uv run pytest -q tests/test_memory_storage.py tests/test_memory_prompt_injection.py tests/test_memory_normalize.py tests/test_deermem_self_contained.py
-PYTHONPATH=. uv run pytest tests/test_memory_router.py -v
+PYTHONPATH=. uv run pytest -q tests/test_knowledge/test_memory_storage.py tests/test_knowledge/test_memory_prompt_injection.py tests/test_knowledge/test_memory_normalize.py tests/test_knowledge/test_deermem_self_contained.py
+PYTHONPATH=. uv run pytest tests/test_knowledge/test_memory_router.py -v
 
 cd ../frontend
 pnpm test tests/unit/core/memory

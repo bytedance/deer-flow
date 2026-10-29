@@ -184,17 +184,45 @@ uv run pytest
 
 ### Writing Tests
 
-Place tests in the `tests/` directory mirroring the source structure:
+Place tests in the `tests/` directory, mirroring the stable source ownership
+domain rather than a short-lived issue or task name. Harness tests use the
+`test_<deerflow module>/` folder; Gateway and channel tests use the matching
+application-domain folder. Cross-cutting deployment and repository-script checks
+belong in `test_infrastructure/`.
 
 ```
 tests/
-├── test_models/
+├── test_agents/            # packages/harness/deerflow/agents/
+├── test_authz/             # packages/harness/deerflow/authz/
+├── test_community/         # packages/harness/deerflow/community/
+├── test_config/            # packages/harness/deerflow/config/
+├── test_extensions/        # Extension contracts and lifecycle wiring
+├── test_gateway/           # app/gateway/
+├── test_channels/          # app/channels/
+├── test_mcp/               # packages/harness/deerflow/mcp/ and app/mcp_tasks/
+├── test_models/            # packages/harness/deerflow/models/
 │   └── test_factory.py
-├── test_sandbox/
+├── test_persistence/       # packages/harness/deerflow/persistence/
+├── test_runtime/           # packages/harness/deerflow/runtime/
+├── test_sandbox/           # packages/harness/deerflow/sandbox/
 │   └── test_local.py
-└── test_gateway/
-    └── test_models_router.py
+├── test_scheduler/         # packages/harness/deerflow/scheduler/ and app/scheduler/
+├── test_skills/            # packages/harness/deerflow/skills/
+├── test_storage/           # Storage provider and repository boundaries
+├── test_subagents/         # packages/harness/deerflow/subagents/
+├── test_tools/             # packages/harness/deerflow/tools/
+├── test_uploads/           # packages/harness/deerflow/uploads/
+├── test_utils/             # packages/harness/deerflow/utils/
+├── test_infrastructure/    # Compose, Helm, scripts, packaging, and deployment
+├── blocking_io/            # Existing strict blocking-I/O suite
+├── fixtures/               # Shared test data
+├── monocle/                # Optional Monocle tracing suite
+└── support/                # Shared test-only helpers
 ```
+
+Keep existing suite directories in place unless their ownership changes. When a
+test exercises multiple domains, place it with the domain that owns the primary
+public contract and import shared fixtures through the `tests` package.
 
 Example test:
 

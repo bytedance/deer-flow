@@ -32,7 +32,7 @@ enable memory extraction). See `deermem_manager.yaml`.
 
 ## Proof
 
-`tests/test_deermem_self_contained.py::test_portability_vendor_to_other_agent`
+`tests/test_knowledge/test_deermem_self_contained.py::test_portability_vendor_to_other_agent`
 copies `backends/deermem/` into a temp package, repoints the one ABC import to
 a minimal vendored `manager.py`, imports it, and runs an `import_memory` ->
 `get_context` round-trip -- with **zero deer-flow dependency at runtime**.

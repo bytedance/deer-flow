@@ -36,7 +36,7 @@ This directory owns memory capture, storage, retrieval, prompt injection, and mo
 It does not interrupt a context after `_process_queue` removes it from `_items`.
 Broader cancellation must iterate known user scopes.
 
-Focused updater tests live in `backend/tests/test_memory_updater.py`.
+Focused updater tests live in `backend/tests/test_knowledge/test_memory_updater.py`.
 Backend-specific tests use `backend/tests/test_<backend>_memory_backend.py`.
 
 #### Identity and isolation
@@ -115,11 +115,11 @@ Emergency snapshots bypass `queue_max_depth`. Warn at 32 pending snapshots for
 one `(thread_id, user_id, agent_name)` key and each doubling, without logging
 message contents. Count only pending emergency items; drain, cancellation, and
 clear reset the threshold naturally. Retention remains unbounded and process-local.
-Regression coverage: `tests/test_memory_emergency_backlog.py`.
+Regression coverage: `tests/test_knowledge/test_memory_emergency_backlog.py`.
 `flush`, `flush_nowait`, and `flush_sync` make all pending items eligible.
-Tests in `tests/test_memory_queue_deadlines.py` use a fake monotonic clock and
+Tests in `tests/test_knowledge/test_memory_queue_deadlines.py` use a fake monotonic clock and
 timer to exercise scheduling without timing-sensitive sleeps.
-`tests/test_memory_emergency_snapshots.py` covers overlapping compactions through
+`tests/test_knowledge/test_memory_emergency_snapshots.py` covers overlapping compactions through
 the real memory hook, updater, and canonical storage, plus scoped cancellation
 and drain behavior.
 
@@ -127,7 +127,7 @@ DeerMem and mem0 exclude assistant tool-call intent in every representation:
 `tool_calls`, `invalid_tool_calls`, and provider-raw `tool_calls`/`function_call`.
 An empty parsed call list does not make an attempted call a final response.
 Keep both portable backend filters aligned without importing host helpers;
-test the real queue/HTTP write boundary in `tests/test_memory_tool_call_intent.py`.
+test the real queue/HTTP write boundary in `tests/test_knowledge/test_memory_tool_call_intent.py`.
 
 Memory enqueue redaction also covers `invalid_tool_calls` arguments/error text
 and legacy `function_call` payloads. Keep sync, async and compaction admission
@@ -162,7 +162,7 @@ existing enabled behavior.
 reads; writes still use JSON. Only a JSON object in a closed `memory-json`
 fence is accepted from Markdown. Decode the value before checking its closing
 fence so embedded backticks and later fenced notes stay lossless. Parser and
-storage regressions belong in `tests/test_memory_storage.py`; configure a data
+storage regressions belong in `tests/test_knowledge/test_memory_storage.py`; configure a data
 root directory, not the existing manifest file. Legacy v1 reads still migrate
 and advance the revision. Invalid UTF-8 bytes and unparseable summary text are
 quarantined before rebuild. Summary read `OSError`s raise `MemoryStorageCorruption`
@@ -335,7 +335,7 @@ Use the earliest source review deadline for its next review.
 
 Mem0 search and management convert facts inside the read-policy boundary.
 Context injection also deduplicates inside that boundary; unhashable record IDs
-raise a value-redacted `Mem0APIError` (`tests/test_mem0_context_record_ids.py`).
+raise a value-redacted `Mem0APIError` (`tests/test_knowledge/test_mem0_context_record_ids.py`).
 Invalid score/categories/metadata fields omit field values from `Mem0APIError`s.
 Diagnostics carry only bounded opaque record IDs, otherwise `<unavailable>`;
 missing/null defaults stay compatible and local programming errors propagate.
@@ -351,7 +351,7 @@ Decoding and structure errors identify the endpoint and list page without memory
 contents; structure errors also identify the invalid container or record type.
 Preserve decoding causes. Catch RecursionError only at JSON parsing; local
 programming errors must still propagate.
-Regressions use offline HTTP transports in `tests/test_mem0_response_policy.py`.
+Regressions use offline HTTP transports in `tests/test_knowledge/test_mem0_response_policy.py`.
 
 Strict reads use the backend-neutral `MemoryReadError`.
 Backends declare their policy through `read_failures_are_fatal_for_config()`.
@@ -392,7 +392,7 @@ If the hook raises an `Exception`, skip only that hidden message and continue th
 Log a generic warning without message metadata, content or exception text.
 Keep this boundary around the hook; do not change HTTP write errors or catch `BaseException`.
 Keep the filter inside `add` so sync, async and pre-compaction writes share it;
-`tests/test_honcho_hidden_messages.py` checks the real HTTP payloads, middleware and host factory;
+`tests/test_channels/test_honcho_hidden_messages.py` checks the real HTTP payloads, middleware and host factory;
 `tests/blocking_io/test_honcho_memory_backend.py` keeps the filter hook off the event loop.
 The default read failure policy logs and returns no results.
 `failure_policy.read: fail_closed` rethrows recall failures.

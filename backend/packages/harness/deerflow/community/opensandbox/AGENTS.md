@@ -27,7 +27,7 @@ before transfer and before publication; preserve previous complete copies.
 Keep failed synchronization best effort, preserve prior complete copies, and
 do not remove remotely deleted files. Cover the real listing shell and release
 to Gateway artifact reader with offline transports in
-`tests/test_opensandbox_provider.py`.
+`tests/test_sandbox/test_opensandbox_provider.py`.
 Decode each NUL-framed filename separately; invalid UTF-8 records consume the
 candidate budget but must not prevent valid outputs from being mirrored.
 Portable reserved-name checks include COM/LPT superscript digits and console

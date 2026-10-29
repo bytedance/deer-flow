@@ -13,7 +13,7 @@ so contract drift turns the build red instead.
 
 ## The two layers
 
-- **Layer 1 — backend golden** (`tests/test_replay_golden.py`): replays a fixture
+- **Layer 1 — backend golden** (`tests/test_persistence/test_replay_golden.py`): replays a fixture
   through the real FastAPI gateway with `ReplayChatModel` and asserts the streamed
   SSE event sequence equals a committed golden. Fast, no browser. Guards protocol
   *shape*.
@@ -91,13 +91,13 @@ cd backend && uv run python scripts/build_fixture_from_jsonl.py \
   --out tests/fixtures/replay/<scenario>.<mode>.json --model <model>
 
 # 3. regenerate the committed golden
-DEERFLOW_WRITE_GOLDEN=1 PYTHONPATH=. uv run pytest tests/test_replay_golden.py
+DEERFLOW_WRITE_GOLDEN=1 PYTHONPATH=. uv run pytest tests/test_persistence/test_replay_golden.py
 ```
 
 ## Run (no key)
 
 ```bash
-cd backend  && PYTHONPATH=. uv run pytest tests/test_replay_golden.py          # Layer 1
+cd backend  && PYTHONPATH=. uv run pytest tests/test_persistence/test_replay_golden.py          # Layer 1
 cd frontend && pnpm exec playwright test -c playwright.real-backend.config.ts  # Layer 2
 ```
 

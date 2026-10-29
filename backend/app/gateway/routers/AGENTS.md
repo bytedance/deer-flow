@@ -12,7 +12,7 @@ leave the source record unchanged.
 Console usage attributes legacy rows without a per-model usage map to
 `model_name`, including their recorded `total_input_tokens`. Accumulate those
 inputs with newer usage buckets for the same model; do not infer cache hits.
-Regression coverage lives in `tests/test_console_router.py`.
+Regression coverage lives in `tests/test_gateway/test_console_router.py`.
 
 Shared scheduled-task update validation preserves an unchanged future `once`
 instant on a live task inside `scheduler.min_once_delay_seconds`; new/changed
@@ -87,11 +87,11 @@ Successful copies still return the uploaded bytes unchanged. The upload route's
 `finally` discards that archive through the same helper before closing the
 multipart form. Form close is suppressed, so a close, cleanup, or warning
 failure cannot turn a successful install into a 500, replace an install
-error, or skip the discard. Coverage: `tests/test_skill_archive_upload_cleanup.py`.
+error, or skip the discard. Coverage: `tests/test_skills/test_skill_archive_upload_cleanup.py`.
 
 State updates synchronize titles into thread metadata only for the root checkpoint
 namespace. Nonroot writes preserve the conversation title, branch-title sequence
-and activity timestamp. `tests/test_threads_router.py` checks metadata/search
+and activity timestamp. `tests/test_persistence/test_threads_router.py` checks metadata/search
 isolation and root title synchronization in full and delta modes.
 
 Unauthenticated auth routes (`/register`, `/setup-status`, `/providers`,

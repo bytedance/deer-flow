@@ -12,10 +12,10 @@ on:
     paths:
       - '.github/workflows/backend-windows-live-policy.yml'
       - 'backend/packages/harness/deerflow/workspace_changes/**'
-      - 'backend/tests/test_client_live_policy.py'
-      - 'backend/tests/test_client_live.py'
-      - 'backend/tests/test_scanner_text_cache_atomic.py'
-      - 'backend/tests/test_workspace_changes.py'
+      - 'backend/tests/test_gateway/test_client_live_policy.py'
+      - 'backend/tests/test_gateway/test_client_live.py'
+      - 'backend/tests/test_projects/test_scanner_text_cache_atomic.py'
+      - 'backend/tests/test_projects/test_workspace_changes.py'
       - 'backend/pyproject.toml'
       - 'backend/uv.lock'
 
@@ -60,11 +60,11 @@ jobs:
         # native Windows — ubuntu CI cannot catch it (PR #7110 review).
         run: >-
           uv run python -m pytest
-          tests/test_client_live_policy.py::test_child_env_stays_isolated_but_bootable_on_windows
-          tests/test_client_live_policy.py::test_config_alone_does_not_enable_live_collection
-          tests/test_client_live_policy.py::test_explicit_opt_in_collects_live_tests
-          tests/test_client_live_policy.py::test_ci_blocks_live_collection_even_with_opt_in
-          tests/test_client_live_policy.py::test_opt_in_without_config_reports_missing_config
-          tests/test_scanner_text_cache_atomic.py
-          tests/test_workspace_changes.py
+          tests/test_gateway/test_client_live_policy.py::test_child_env_stays_isolated_but_bootable_on_windows
+          tests/test_gateway/test_client_live_policy.py::test_config_alone_does_not_enable_live_collection
+          tests/test_gateway/test_client_live_policy.py::test_explicit_opt_in_collects_live_tests
+          tests/test_gateway/test_client_live_policy.py::test_ci_blocks_live_collection_even_with_opt_in
+          tests/test_gateway/test_client_live_policy.py::test_opt_in_without_config_reports_missing_config
+          tests/test_projects/test_scanner_text_cache_atomic.py
+          tests/test_projects/test_workspace_changes.py
           -q

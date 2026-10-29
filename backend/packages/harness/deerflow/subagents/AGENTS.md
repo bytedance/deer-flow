@@ -31,7 +31,7 @@ defers them. Browser reads recheck owner/thread, whitelist fields and bound lega
 IDs/text without provider fetches or a running worker. Count read-time size/source
 limit omissions without changing stored evidence. Cancelled, failed and stale
 attempts cannot publish evidence; retry clears it. Cover the formatter/step capture
--> worker -> reopened SQLite -> authorized export chain in `tests/test_batch_rag_evidence.py`.
+-> worker -> reopened SQLite -> authorized export chain in `tests/test_runtime/test_batch_rag_evidence.py`.
 Explicitly enabled nested tasks propagate report-bound omission IDs; filter and
 deduplicate at each forwarding boundary before publishing the durable count.
 
@@ -46,7 +46,7 @@ citation references, and opaque base64/URL/image sources.
 
 `task` preserves the host incarnation, including null/missing/invalid values; never recapture it.
 
-**Direct runtime shutdown**: `SubagentRuntime.stop()` holds its lifecycle lock through an unbounded service drain; propagate first caller cancellation, chaining service failure. Test terminal outcomes/repeated cancellation in `tests/test_subagent_runtime.py`. Batch stops shield/join one cleanup generation. An item leaving a live run cancels it; `_release_execution` drops the registry entry once terminal (forced after the lease). Restart resets its owner only after success; failed cleanup keeps startup fenced.
+**Direct runtime shutdown**: `SubagentRuntime.stop()` holds its lifecycle lock through an unbounded service drain; propagate first caller cancellation, chaining service failure. Test terminal outcomes/repeated cancellation in `tests/test_subagents/test_subagent_runtime.py`. Batch stops shield/join one cleanup generation. An item leaving a live run cancels it; `_release_execution` drops the registry entry once terminal (forced after the lease). Restart resets its owner only after success; failed cleanup keeps startup fenced.
 
 **Interrupted usage**: After stream cleanup, publish the collector's final
 snapshot on cancellation/timeout; callbacks can precede values chunks.
@@ -72,7 +72,7 @@ exclude locally active IDs from recovery. Execution requires that explicit token
 Promotion/claim writes fence item and parent status; worker writes fence owner and
 active status in SQL. Renewal reports cancellation only for explicit cancel state.
 Expiry recovery compares expiry. Keep PostgreSQL locks parent-first and polling bounded
-by lease/3. `tests/test_batch_lease_lifecycle.py` covers real SQLite interleavings,
+by lease/3. `tests/test_runtime/test_batch_lease_lifecycle.py` covers real SQLite interleavings,
 threaded initialization, peer cancellation and renewal drain.
 
 **Built-in Agents**: `general-purpose` (all tools except `task`) and `bash` (command specialist)
@@ -177,7 +177,7 @@ truncating its tail. Keep `step_events.py` pure and unit-tested.
 
 **Deferred MCP tools** (if `tool_search.enabled`): `SubagentExecutor._build_initial_state` applies the subagent name allow/deny list and assembly-time authorization before calling the shared `assemble_deferred_tools`, appends the `tool_search` tool, injects the `<available-deferred-tools>` section into the subagent's `SystemMessage`, and threads the setup to `_create_agent`, which attaches `McpRoutingMiddleware` (when PR1 routing metadata matches deferred tools) before `DeferredToolFilterMiddleware` through `build_subagent_runtime_middlewares(...)`. Skill `allowed-tools` is compatibility metadata and never removes or blocks a promoted business tool; the authorization Guardrail on the same chain still denies genuinely unauthorized tools. Subagents thus withhold full MCP schemas until promotion, same as the lead agent; each task run gets a fresh `ThreadState` so promotion is isolated per run
 **Checkpointer isolation**: Subagent graphs are compiled with `checkpointer=False` to avoid inheriting the parent run's checkpointer, since subagents are one-shot and never resume.
-**Checkpoint lineage / stream isolation**: `_aexecute` deliberately omits checkpoint-coordinate keys (`thread_id`, `checkpoint_ns`, `checkpoint_id`, `checkpoint_map`) from the child `RunnableConfig`. LangGraph must inherit those coordinates from the copied parent ContextVar so the delegated graph retains a non-root subgraph namespace; explicitly re-supplying even the same parent `thread_id` starts a new root lineage on LangGraph 1.2.6+ and can route child AI/tool frames into the parent `messages` stream. DeerFlow business components still receive the parent `thread_id` through `runtime.context`, which is the preferred lookup path for sandbox, middleware, and attribution code. Regression coverage in `tests/test_subagent_executor.py::TestSubagentCheckpointLineage` keeps the invocation-contract assertion active on every supported version and version-gates the production-shaped parent-stream test to LangGraph 1.2.6+, where the leak exists.
+**Checkpoint lineage / stream isolation**: `_aexecute` deliberately omits checkpoint-coordinate keys (`thread_id`, `checkpoint_ns`, `checkpoint_id`, `checkpoint_map`) from the child `RunnableConfig`. LangGraph must inherit those coordinates from the copied parent ContextVar so the delegated graph retains a non-root subgraph namespace; explicitly re-supplying even the same parent `thread_id` starts a new root lineage on LangGraph 1.2.6+ and can route child AI/tool frames into the parent `messages` stream. DeerFlow business components still receive the parent `thread_id` through `runtime.context`, which is the preferred lookup path for sandbox, middleware, and attribution code. Regression coverage in `tests/test_subagents/test_subagent_executor.py::TestSubagentCheckpointLineage` keeps the invocation-contract assertion active on every supported version and version-gates the production-shaped parent-stream test to LangGraph 1.2.6+, where the leak exists.
 
 **Isolated-loop callback boundary**: sync delegation from an active event loop and `execute_async()` copy the ambient ContextVars into the persistent subagent loop so checkpoint lineage, user identity, tracing context, tags, metadata, and LangGraph's namespaced message-stream handler survive. Before submission, `_copy_isolated_subagent_context()` copies the callback manager/list and removes only handlers marked `deerflow_loop_bound`; `RunJournal` carries that marker because it owns parent-loop tasks and a SQL store/pool. LangGraph merges inherited callbacks with the child run's explicit `SubagentTokenCollector`/tracing callbacks, so letting `RunJournal` cross loops causes duplicate accounting and `Future attached to a different loop` failures, while dropping the whole callback chain silently removes child token frames. Do not replace the boundary with a blank `Context`; the inherited checkpoint namespace and framework stream callback are required by the stream-isolation contract above.
 

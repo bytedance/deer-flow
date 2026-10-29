@@ -137,7 +137,7 @@ The tool converts any error string into a `ToolMessage` and does not mutate arti
 
 ### Tests
 
-Use TDD with `backend/tests/test_browserless_client.py`.
+Use TDD with `backend/tests/test_sandbox/test_browserless_client.py`.
 
 Client tests:
 - `capture_screenshot` posts to `/screenshot` with `url`, `options.fullPage`, `options.type`, `viewport`, and wait fields.
@@ -169,18 +169,18 @@ No `README.md` update is planned because this is a provider-specific opt-in comm
 ### Task 1: Write Failing Client Tests
 
 **Files:**
-- Modify: `backend/tests/test_browserless_client.py`
+- Modify: `backend/tests/test_sandbox/test_browserless_client.py`
 
 Steps:
 - Add tests for `BrowserlessClient.capture_screenshot()`.
-- Run `cd backend && uv run pytest tests/test_browserless_client.py::TestBrowserlessClient -q`.
+- Run `cd backend && uv run pytest tests/test_sandbox/test_browserless_client.py::TestBrowserlessClient -q`.
 - Expected red state: `AttributeError: 'BrowserlessClient' object has no attribute 'capture_screenshot'`.
 
 ### Task 2: Implement Browserless Screenshot Client
 
 **Files:**
 - Modify: `backend/packages/harness/deerflow/community/browserless/browserless_client.py`
-- Modify: `backend/tests/test_browserless_client.py`
+- Modify: `backend/tests/test_sandbox/test_browserless_client.py`
 
 Steps:
 - Add `BrowserlessScreenshotResult`.
@@ -191,7 +191,7 @@ Steps:
 ### Task 3: Write Failing Tool Tests
 
 **Files:**
-- Modify: `backend/tests/test_browserless_client.py`
+- Modify: `backend/tests/test_sandbox/test_browserless_client.py`
 
 Steps:
 - Add tests for `web_capture_tool`.
@@ -233,9 +233,9 @@ Steps:
 Run:
 
 ```bash
-cd backend && uv run pytest tests/test_browserless_client.py -q
-cd backend && uv run ruff check packages/harness/deerflow/community/browserless tests/test_browserless_client.py
-cd backend && uv run ruff format --check packages/harness/deerflow/community/browserless tests/test_browserless_client.py
+cd backend && uv run pytest tests/test_sandbox/test_browserless_client.py -q
+cd backend && uv run ruff check packages/harness/deerflow/community/browserless tests/test_sandbox/test_browserless_client.py
+cd backend && uv run ruff format --check packages/harness/deerflow/community/browserless tests/test_sandbox/test_browserless_client.py
 ```
 
 Manual review checklist:
