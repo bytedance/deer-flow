@@ -1,7 +1,6 @@
 """Configuration for the subagent system loaded from config.yaml."""
 
 import logging
-from typing import Literal
 
 from pydantic import BaseModel, Field, ValidationInfo, field_validator
 
@@ -111,9 +110,9 @@ class SubagentOverrideConfig(BaseModel):
         default=None,
         description="Whether to enable thinking/reasoning for this subagent (None = no override)",
     )
-    reasoning_effort: Literal["low", "medium", "high"] | None = Field(
+    reasoning_effort: str | None = Field(
         default=None,
-        description="Reasoning effort level - 'low', 'medium', or 'high' (None = no override)",
+        description="Reasoning effort accepted or mapped by the selected model (None = use its default)",
     )
     skills: list[str] | None = Field(
         default=None,
@@ -159,9 +158,9 @@ class CustomSubagentConfig(BaseModel):
         default=None,
         description="Whether to enable thinking/reasoning for this subagent (None = no override)",
     )
-    reasoning_effort: Literal["low", "medium", "high"] | None = Field(
+    reasoning_effort: str | None = Field(
         default=None,
-        description="Reasoning effort level - 'low', 'medium', or 'high' (None = no override)",
+        description="Reasoning effort accepted or mapped by the selected model (None = use its default)",
     )
     max_turns: int = Field(
         default=50,
@@ -284,28 +283,14 @@ class SubagentsAppConfig(BaseModel):
         return None
 
     def get_thinking_enabled_for(self, agent_name: str) -> bool | None:
-        """Get the thinking_enabled override for a specific agent.
-
-        Args:
-            agent_name: The name of the subagent.
-
-        Returns:
-            True/False if overridden, None otherwise (subagent uses default False).
-        """
+        """Return an explicit per-agent thinking override, including False."""
         override = self.agents.get(agent_name)
         if override is not None and override.thinking_enabled is not None:
             return override.thinking_enabled
         return None
 
     def get_reasoning_effort_for(self, agent_name: str) -> str | None:
-        """Get the reasoning_effort override for a specific agent.
-
-        Args:
-            agent_name: The name of the subagent.
-
-        Returns:
-            Reasoning effort level if overridden, None otherwise (subagent uses default None).
-        """
+        """Return the per-agent effort request; the selected model resolves it."""
         override = self.agents.get(agent_name)
         if override is not None and override.reasoning_effort is not None:
             return override.reasoning_effort

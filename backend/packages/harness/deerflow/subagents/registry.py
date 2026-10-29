@@ -99,6 +99,8 @@ def _build_managed_subagent_config(name: str, *, app_config: Any | None = None) 
             disallowed_tools=definition.disallowed_tools,
             skills=definition.skills,
             model=definition.model,
+            thinking_enabled=definition.thinking_enabled,
+            reasoning_effort=definition.reasoning_effort,
             max_turns=definition.max_turns,
             timeout_seconds=definition.timeout_seconds,
         )

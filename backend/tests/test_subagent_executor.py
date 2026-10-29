@@ -169,6 +169,8 @@ def _setup_executor_classes():
     sandbox_provider_module = importlib.import_module("deerflow.sandbox.sandbox_provider")
     sandbox_overwrite_module = importlib.import_module("deerflow.sandbox.overwrite")
     sandbox_prewarm_module = importlib.import_module("deerflow.sandbox.prewarm")
+    for module_name in ("deerflow.models.factory", "deerflow.models.openai_codex_provider", "deerflow.agents.assembly_descriptor"):
+        importlib.import_module(module_name)
 
     # Remove mocked executor if exists (from conftest.py)
     if "deerflow.subagents.executor" in sys.modules:
@@ -395,6 +397,72 @@ def msg(classes):
 class TestAgentConstruction:
     """Test _create_agent() wiring before execution starts."""
 
+    @pytest.mark.parametrize(
+        "thinking,effort,mode,expected_thinking,expected_effort",
+        [
+            (None, None, "optional", False, "lite"),
+            (True, "high", "optional", True, "deep"),
+            (False, None, "required", True, "lite"),
+            (True, None, "unsupported", False, None),
+            (True, "unknown", "optional", True, "lite"),
+            (True, "high", "legacy", True, "high"),
+        ],
+    )
+    def test_reasoning_factory_and_observer_agree(self, classes, base_config, monkeypatch, thinking, effort, mode, expected_thinking, expected_effort):
+        from deerflow.config.app_config import AppConfig
+        from deerflow.config.model_config import ModelConfig
+        from deerflow.config.sandbox_config import SandboxConfig
+        from deerflow.extensions.registry import ExtensionRegistry
+        from deerflow.subagents import executor as executor_module
+
+        factory = importlib.import_module("deerflow.models.factory")
+        profile_settings = {}
+        if mode == "legacy":
+            profile_settings = {
+                "supports_thinking": True,
+                "supports_reasoning_effort": True,
+                "when_thinking_enabled": {"extra_body": {"thinking": {"type": "enabled"}}},
+            }
+        else:
+            reasoning = {"thinking": mode, "dialect": "openai_extra_body"}
+            if mode != "unsupported":
+                reasoning["effort"] = {"values": ["lite", "deep"], "default": "lite", "aliases": {"high": "deep"}}
+            profile_settings["reasoning"] = reasoning
+        profile = ModelConfig(name="child-model", use="langchain_openai:ChatOpenAI", model="child-model", **profile_settings)
+        app_config = AppConfig(models=[profile], sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"))
+        unchanged = app_config.model_dump()
+        captured = {}
+
+        class RecordingModel:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        class Observer:
+            def on_agent_assembled(self, app_store, descriptor):
+                captured["descriptor"] = descriptor
+
+        registry = ExtensionRegistry()
+        with registry.attributed_to("reasoning-test"):
+            registry.agent_assembly_observer(Observer())
+        monkeypatch.setattr(factory, "resolve_class", lambda *args: RecordingModel)
+        monkeypatch.setattr(executor_module, "create_chat_model", factory.create_chat_model)
+        monkeypatch.setattr(executor_module, "create_agent", lambda **kwargs: SimpleNamespace(get_graph=lambda: SimpleNamespace(nodes={})))
+        monkeypatch.setitem(
+            sys.modules,
+            "deerflow.agents.middlewares.tool_error_handling_middleware",
+            _module("deerflow.agents.middlewares.tool_error_handling_middleware", build_subagent_runtime_middlewares=lambda **kwargs: []),
+        )
+        base_config.thinking_enabled = thinking
+        base_config.reasoning_effort = effort
+        executor = classes["SubagentExecutor"](config=base_config, tools=[], app_config=app_config, parent_model="child-model", extensions=registry.build())
+        asyncio.run(executor._create_agent())
+        descriptor = captured["descriptor"]
+        assert descriptor.thinking_enabled is expected_thinking
+        assert descriptor.reasoning_effort == expected_effort
+        assert captured.get("reasoning_effort") == expected_effort
+        assert captured["extra_body"]["thinking"]["type"] == ("enabled" if expected_thinking else "disabled")
+        assert app_config.model_dump() == unchanged
+
     def test_create_agent_threads_explicit_app_config_to_model_and_middlewares(
         self,
         classes,
@@ -462,6 +530,10 @@ class TestAgentConstruction:
             "thinking_enabled": False,
             "reasoning_effort": None,
             "app_config": app_config,
+            # attach_tracing=False pairs with graph-root tracing callbacks
+            # injected in _aexecute (see TestSubagentTracingWiring). Without
+            # this the subagent would emit both a model-level trace and a
+            # graph-level trace per call.
             "attach_tracing": False,
         }
         assert captured["middlewares"] == {

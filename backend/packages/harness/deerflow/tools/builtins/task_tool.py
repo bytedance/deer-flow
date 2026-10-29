@@ -927,7 +927,6 @@ async def task_tool(
     trace_id = None
     user_id = None
     deerflow_trace_id = None
-
     if runtime is not None:
         sandbox_state = runtime.state.get("sandbox")
         thread_data = runtime.state.get("thread_data")
