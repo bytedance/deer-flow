@@ -508,7 +508,7 @@ async def _chained_worker():
 
         drivers = McpTaskDriverRegistry()
         drivers.register("ordinary-tools", CapturingDriver(McpTaskToolCaller(config)))
-        from deerflow.mcp.tasks.service import McpTaskService
+        from app.mcp_tasks.service import McpTaskService
 
         tasks = McpTaskService(
             repository=assembly["task_repo"],
