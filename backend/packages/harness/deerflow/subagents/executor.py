@@ -1107,13 +1107,16 @@ class SubagentExecutor:
         app_config = self._get_resolved_app_config()
         if self.model_name is None:
             self.model_name = resolve_subagent_model_name(self.config, self.parent_model, app_config=app_config)
-        from deerflow.models.reasoning import resolve_reasoning_contract, resolve_reasoning_request
+        from deerflow.models.reasoning import ReasoningPolicyError, resolve_reasoning_contract, resolve_reasoning_request
 
         get_model_config = getattr(app_config, "get_model_config", None)
         model_config = get_model_config(self.model_name) if callable(get_model_config) else None
         if model_config is None:
             model_config = next((profile for profile in getattr(app_config, "models", []) if profile.name == self.model_name), None)
-        effective_reasoning = resolve_reasoning_request(resolve_reasoning_contract(model_config), thinking_enabled=self.thinking_enabled, reasoning_effort=self.reasoning_effort)
+        try:
+            effective_reasoning = resolve_reasoning_request(resolve_reasoning_contract(model_config), thinking_enabled=self.thinking_enabled, reasoning_effort=self.reasoning_effort)
+        except ReasoningPolicyError as exc:
+            raise ValueError(f"Model {self.model_name}: {exc}") from exc
         model = create_chat_model(
             name=self.model_name,
             thinking_enabled=effective_reasoning.thinking_enabled,

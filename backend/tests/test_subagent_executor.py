@@ -463,6 +463,28 @@ class TestAgentConstruction:
         assert captured["extra_body"]["thinking"]["type"] == ("enabled" if expected_thinking else "disabled")
         assert app_config.model_dump() == unchanged
 
+    def test_required_thinking_rejection_names_model_before_creation(self, classes, base_config, monkeypatch):
+        from deerflow.config.app_config import AppConfig
+        from deerflow.config.model_config import ModelConfig
+        from deerflow.config.sandbox_config import SandboxConfig
+        from deerflow.models.reasoning import ReasoningPolicyError
+        from deerflow.subagents import executor as executor_module
+
+        profile = ModelConfig(name="required-worker-model", use="langchain_openai:ChatOpenAI", model="test-model", reasoning={"thinking": "required", "on_disable_request": "reject"})
+        app_config = AppConfig(models=[profile], sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"))
+        model_factory = MagicMock(side_effect=AssertionError("model creation must not start"))
+        graph_factory = MagicMock(side_effect=AssertionError("graph creation must not start"))
+        monkeypatch.setattr(executor_module, "create_chat_model", model_factory)
+        monkeypatch.setattr(executor_module, "create_agent", graph_factory)
+        executor = classes["SubagentExecutor"](config=base_config, tools=[], app_config=app_config, parent_model=profile.name)
+
+        with pytest.raises(ValueError, match=f"Model {profile.name}: model requires thinking") as error:
+            asyncio.run(executor._create_agent())
+
+        assert isinstance(error.value.__cause__, ReasoningPolicyError)
+        model_factory.assert_not_called()
+        graph_factory.assert_not_called()
+
     def test_create_agent_threads_explicit_app_config_to_model_and_middlewares(
         self,
         classes,
