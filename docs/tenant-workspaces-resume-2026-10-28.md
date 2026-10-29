@@ -97,3 +97,8 @@ run20 判别数据（清理前抢救）：`identical_client_trace = [403×10, Co
 `app/mcp_tasks/service.py` `run_once`→通知分支的触发条件（notified_version/event_version、next_notify_at/lease、workspace scope）。对比依赖测试 L838-846：他们在 execute 内部轮询期间由 poller 驱动通知，且 `capture_real_submission` 后 task 的 event_version 在 B 完成时 bump。可加证据：run_once 前后读 task 的 event_version/notified_version/notification_lease 字段；在 launch_notification lambda 里 try/except 记录异常（当前异常被服务层吞掉只递增重试）。另一疑点：`services.launch_mcp_task_notification_run(app=worker_app)` 需要 worker 侧 get_run_context（已补）与 forward 路由 workspace scope。
 - 提交链注意：f-string 曾因 heredoc 丢收尾引号且 ruff 管道掩码退出码导致坏提交（run27 教训）——以后 lint 用 `set -o pipefail` 或不用管道。
 - 最新提交 ab52ea8d3；重跑 `TENANT_TWO_HOST_SLICE=3 python3 scripts/tenant_two_host_slice.py`。
+
+
+## 2026-10-29 slice 3 GREEN（合龙完成）
+
+run32 全绿：occurrence success、C1+C2 双 success run、16 条共享 checkpoint、B 真实 Docker completed、通知 delivered、精确容器无残留。最后三个修复：McpTaskService 必须传 `get_run`（否则 _run_notifications 静默 no-op）；C2 读报告用 publication.paths + workspace 作用域（朴素拼接漏了 workspace 目录树）；工具 schema 需显式接受内联 input_files。证据 `two-host-chained-slice-20261028-51.json`。两机主流程三片（B、C、合龙）全部 GREEN。下一片：真实 AIO 执行进 C1 工具 / 跨机 NAS 字节读取 / 跨机撤权与重启恢复，然后 M5。

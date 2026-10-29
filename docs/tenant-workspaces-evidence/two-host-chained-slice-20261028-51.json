@@ -1,0 +1,31 @@
+{
+  "phase": "two-host-b-slice-20261028-51 (slice 3: chained)",
+  "date": "2026-10-29",
+  "classification": "GREEN slice 3 of the two-host main: one scheduled occurrence drove C1 over native dispatch, C1 submitted a real B through the controller's MCP HTTP endpoint, the worker executed B in real Docker through the shared pool, the signed notification returned over TCP, the controller launched C2, and C2 resumed from the shared PostgreSQL checkpoint and read the real published report; the occurrence settled success with exactly two successful runs",
+  "channels": "all real VPC TCP: native dispatch (:8022 /api/native-workers), MCP streamable HTTP (:8022 /mcp), B worker RPC (install_dispatch routes); shared PostgreSQL (native 0041 + executor e0003) and Redis stream bridge",
+  "hosts": {
+    "controller": "139.196.30.22 (192.168.0.190): scheduler control service, native dispatch, MCP+B app, PG/Redis",
+    "worker": "47.117.5.254 (192.168.0.189): NativeWorkerHost loop, deterministic C graph, McpTaskService poller, OutboundStore+LocalWorker real Docker"
+  },
+  "source": {
+    "worktree_head": "2e4beb620",
+    "archive_sha256": "456063255b79a0fad6bd04e155e9f88ec8f3bc482e2cb63d5586d6c08ce7e5a1",
+    "freeze": "deterministic pinned-date commit-tree + gzip -n -9 of worktree HEAD"
+  },
+  "story": {
+    "controller_evidence": "/private/tmp/two-host-b-slice-20261028-51-artifacts/chained-controller.json",
+    "worker_evidence": "/private/tmp/two-host-b-slice-20261028-51-artifacts/chained-worker.json",
+    "occurrence_status": "success",
+    "c1_and_c2_runs": ["efe257e1…success", "c97a3679…success"],
+    "shared_checkpoints": 16,
+    "b_submitted_over_mcp_http": true,
+    "b_real_docker_completed": true,
+    "notification_status": "delivered",
+    "c2_read_published_report": true,
+    "tests": "controller 1 passed in 48.15s; worker assertions passed in the same run; exact B container absent"
+  },
+  "final_fixes": "get_run wired into McpTaskService (_run_notifications no-ops without it); C2 report read resolved through publication.paths under workspace scope (naive path join missed the workspace tree); inline input_files accepted by the submit tool schema",
+  "red_history": "32 preparatory runs; notable roots: missing config.yaml (503), SDK DNS-rebind 421 on the VPC host, fresh_thread_per_run vs fixed uploads, TaskSubmission has no task_id, task reads need thread identity + workspace scope, notification requires get_run",
+  "boundaries": "Deterministic C graph (no model calls, no AIO execution), same-host publication root for the C2 report read (cross-host NAS byte reads remain a boundary), no revocation/restart in this slice. Tenant activation false.",
+  "tenant_activation": false
+}

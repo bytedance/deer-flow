@@ -14074,5 +14074,16 @@
     "story": "NativeDispatchHost admitted one C run via make_native_snapshot; the worker's fully constructed NativeWorkerHost claimed it over real TCP, adopted through verify_native_launch_for_receiver/adopt_native_run, executed the deterministic graph against the shared-PG checkpointer, reported state, and the controller observed run success with cross-process checkpoints.",
     "root_cause": "Worker containers lacked config.yaml; deps.get_config() raised 503 inside execute(), leaving the run pending. Materializing config.example.yaml fixed it.",
     "remaining": "C1 AIO tool -> B -> C2 scheduled occurrence chaining, real Scheduler launch, cross-host revocation/restart, then M5-M11. Tenant activation false."
+  },
+  "two_host_chained_slice": {
+    "status": "runtime_verified_slice_3",
+    "phase": "two-host-b-slice-20261028-51 (slice 3)",
+    "evidence": "docs/tenant-workspaces-evidence/two-host-chained-slice-20261028-51.json",
+    "archive_sha256": "456063255b79a0fad6bd04e155e9f88ec8f3bc482e2cb63d5586d6c08ce7e5a1",
+    "worktree_head": "2e4beb620",
+    "runtime": "scheduler control service + native dispatch + MCP HTTP + B worker RPC, all real VPC TCP; shared PG checkpoints and Redis stream bridge",
+    "story": "One scheduled occurrence: C1 claimed/adopted/executed on the worker, submitted a real B through the controller's MCP HTTP endpoint, B ran in real Docker through the shared pool, the signed notification returned over TCP, the controller launched C2 which resumed from the shared-PG checkpoint, read the real published report, and the occurrence settled success with exactly two successful runs (16 shared checkpoints, notification delivered, exact B container absent).",
+    "final_fixes": "get_run wired into McpTaskService; C2 report path via publication.paths under workspace scope; inline input_files in the submit tool schema",
+    "remaining": "Real AIO execution in C1's tool, cross-host NAS byte reads, revocation/restart over TCP, real Scheduler launch entry variants, then M5-M11. Tenant activation false."
   }
 }
