@@ -211,7 +211,10 @@ def _place_staging(staging_path: Path, final_path: Path) -> None:
 
 
 def _remove_staging(staging_path: Path) -> None:
-    staging_path.unlink(missing_ok=True)
+    # Conversion already has an outcome (including cancellation). A busy or
+    # inaccessible temporary must not replace it; the retention sweep can
+    # retry the leftover after its existing age guard.
+    cleanup_failed_atomic_write(staging_path)
 
 
 def _remove_namespace(paths: Paths, *, user_id: str, relpath: str) -> None:
@@ -450,7 +453,9 @@ async def _convert_and_publish(repo: ProjectDocumentRepository, paths: Paths, *,
         # ``content_missing``, not ``binary``.
         locked = await repo.publish_under_live_lock(row["id"], project_id=row["project_id"], publish=_publish, user_id=user_id)
     finally:
-        await run_file_io(_remove_staging, staging_path)
+        # Keep single-flight ownership until cleanup's worker has settled,
+        # even if the reader is cancelled repeatedly while it is unlinking.
+        await await_drained(run_file_io(_remove_staging, staging_path))
     if locked is None:
         # Purged/trashed (or foreign) before the locked revalidation: the
         # staged output was discarded, nothing published (§6.3).

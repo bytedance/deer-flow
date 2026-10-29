@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -829,3 +830,151 @@ class TestConversionSingleFlight:
         assert await follower == (derived, None)
         assert len(calls) == 2
         assert documents_mod._inflight_conversions == {}
+
+
+class TestConversionCleanup:
+    """Discarding owned staging must preserve the conversion's outcome."""
+
+    @staticmethod
+    def _deny_staging_unlink(monkeypatch):
+        unlink = Path.unlink
+        attempted = []
+
+        def deny(path, *args, **kwargs):
+            if path.parent.name == ".staging" and path.name.startswith("convert-"):
+                attempted.append(path)
+                raise PermissionError("conversion staging is busy")
+            return unlink(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "unlink", deny)
+        return attempted
+
+    async def test_tool_keeps_binary_guidance_when_failed_conversion_cannot_be_cleaned(self, env, monkeypatch):
+        from deerflow.projects import documents as documents_mod
+
+        async def failed_convert(file_path, output_path=None):
+            output_path.write_text("partial conversion", encoding="utf-8")
+            return None
+
+        monkeypatch.setattr(documents_mod, "convert_file_to_markdown", failed_convert)
+        monkeypatch.setattr("deerflow.projects.tools._resolve_auto_convert", lambda: True)
+        row = await _shelve(env, name="report.docx", data=b"\x00docx-bytes")
+        attempted = self._deny_staging_unlink(monkeypatch)
+        result = json.loads(await _read_project_document_impl(_runtime(project_id=env.project["id"]), document_id=row["id"], offset=0, limit=100))
+        assert "binary" in result["error"]
+        assert "attach-to-thread" in result["error"]
+        assert len(attempted) == 1
+
+    @pytest.mark.parametrize("outcome", ["binary", "content_missing", "primary_error", "success"])
+    async def test_unlink_error_preserves_outcome(self, env, monkeypatch, caplog, outcome):
+        from deerflow.projects import documents as documents_mod
+
+        started, release = threading.Event(), threading.Event()
+        row = await _shelve(env, name="report.docx", data=b"\x00docx-bytes")
+        original = original_file_path(env.paths, user_id=_USER, row=row)
+        derived = converted_markdown_path(env.paths, user_id=_USER, row=row)
+
+        async def convert(file_path, output_path=None):
+            output_path.write_text("# converted", encoding="utf-8")
+            started.set()
+            assert release.wait(10)
+            return None if outcome == "binary" else output_path
+
+        primary = RuntimeError("publication transaction failed")
+
+        async def fail_publish(*args, **kwargs):
+            raise primary
+
+        monkeypatch.setattr(documents_mod, "convert_file_to_markdown", convert)
+        if outcome == "primary_error":
+            monkeypatch.setattr(env.docs, "publish_under_live_lock", fail_publish)
+        attempted = self._deny_staging_unlink(monkeypatch)
+        task = asyncio.create_task(ensure_converted_markdown(env.docs, env.paths, user_id=_USER, row=row, auto_convert=True))
+        try:
+            assert await asyncio.to_thread(started.wait, 10)
+            if outcome == "content_missing":
+                assert await env.docs.trash(row["id"], user_id=_USER)
+        finally:
+            release.set()
+        if outcome == "primary_error":
+            with pytest.raises(RuntimeError) as error:
+                await task
+            assert error.value is primary
+        elif outcome == "success":
+            assert await task == (derived, None)
+            assert derived.read_text(encoding="utf-8") == "# converted"
+        else:
+            assert await task == (None, outcome)
+            assert not derived.exists()
+        assert len(attempted) == 1
+        assert original.read_bytes() == b"\x00docx-bytes"
+        assert "conversion staging is busy" in caplog.text
+        assert documents_mod._inflight_conversions == {}
+
+    async def test_unlink_error_does_not_replace_cancellation(self, env, monkeypatch, caplog):
+        from deerflow.projects import documents as documents_mod
+
+        started, release = threading.Event(), threading.Event()
+        row = await _shelve(env, name="report.docx", data=b"\x00docx-bytes")
+
+        async def convert(file_path, output_path=None):
+            started.set()
+            assert release.wait(10)
+            output_path.write_text("# converted", encoding="utf-8")
+            return output_path
+
+        monkeypatch.setattr(documents_mod, "convert_file_to_markdown", convert)
+        attempted = self._deny_staging_unlink(monkeypatch)
+        task = asyncio.create_task(ensure_converted_markdown(env.docs, env.paths, user_id=_USER, row=row, auto_convert=True))
+        try:
+            assert await asyncio.to_thread(started.wait, 10)
+            task.cancel()
+        finally:
+            release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert len(attempted) == 1
+        assert "conversion staging is busy" in caplog.text
+        assert not converted_markdown_path(env.paths, user_id=_USER, row=row).exists()
+        assert documents_mod._inflight_conversions == {}
+
+    async def test_repeated_cancellation_drains_cleanup_before_releasing_single_flight(self, env, monkeypatch):
+        from deerflow.projects import documents as documents_mod
+
+        started, release = threading.Event(), threading.Event()
+        cleaned = threading.Event()
+        row = await _shelve(env, name="report.docx", data=b"\x00docx-bytes")
+        unlink = Path.unlink
+
+        async def convert(file_path, output_path=None):
+            output_path.write_text("partial conversion", encoding="utf-8")
+            return None
+
+        def gated_unlink(path, *args, **kwargs):
+            if path.parent.name == ".staging" and path.name.startswith("convert-"):
+                started.set()
+                assert release.wait(10)
+                result = unlink(path, *args, **kwargs)
+                cleaned.set()
+                return result
+            return unlink(path, *args, **kwargs)
+
+        monkeypatch.setattr(documents_mod, "convert_file_to_markdown", convert)
+        monkeypatch.setattr(Path, "unlink", gated_unlink)
+        key = (_USER, row["id"], row["project_id"])
+        task = asyncio.create_task(ensure_converted_markdown(env.docs, env.paths, user_id=_USER, row=row, auto_convert=True))
+        try:
+            assert await asyncio.to_thread(started.wait, 10)
+            for _ in range(2):
+                task.cancel()
+                done, _ = await asyncio.wait({task}, timeout=0.05)
+                assert not done
+                assert key in documents_mod._inflight_conversions
+                assert not cleaned.is_set()
+        finally:
+            release.set()
+            await asyncio.gather(task, return_exceptions=True)
+            assert await asyncio.to_thread(cleaned.wait, 10)
+        assert task.cancelled()
+        assert documents_mod._inflight_conversions == {}
+        assert not list(env.paths.project_documents_dir(_USER, row["project_id"]).glob(".staging/convert-*"))
