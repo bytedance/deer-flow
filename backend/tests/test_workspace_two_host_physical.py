@@ -544,7 +544,7 @@ async def _native_worker():
             headers={"Authorization": "Bearer " + os.environ["TENANT_TWO_HOST_NATIVE_NODE_SECRET"], "X-DeerFlow-Internal-Token": os.environ["DEER_FLOW_INTERNAL_AUTH_TOKEN"]},
             timeout=30,
         )
-        original_host_client.close()
+        await original_host_client.aclose()
         evidence["host_client_swapped"] = True
         import socket
         from urllib.parse import urlparse
