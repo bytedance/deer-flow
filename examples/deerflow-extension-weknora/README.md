@@ -138,7 +138,7 @@ Offline regression tests from the repository root:
 
 ```bash
 uv run --project backend --no-sync python -m pytest \
-  backend/tests/test_weknora_extension.py -q
+  backend/tests/test_knowledge/test_weknora_extension.py -q
 ```
 
 The tests cover connection isolation, filters without widening, missing/denied
@@ -158,7 +158,7 @@ WEKNORA_KNOWLEDGE_BASE_ID=your-base-id \
 WEKNORA_DOCUMENT_ID=your-indexed-document-id \
 WEKNORA_EVIDENCE_QUERY='a question matching that document' \
 uv run --project backend --no-sync python -m pytest \
-  backend/tests/test_weknora_extension_live.py -m live -q
+  backend/tests/test_knowledge/test_weknora_extension_live.py -m live -q
 ```
 
 The test expects `WEKNORA_API_KEY`, performs no upload/write operation, verifies

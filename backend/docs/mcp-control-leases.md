@@ -60,8 +60,8 @@ Run from `backend/`:
 
 ```sh
 PYTHONPATH=packages/harness:packages/extension-api:. uv run --no-sync pytest \
-  tests/test_mcp_task_lease_lifecycle.py \
-  tests/test_mcp_task_repository.py tests/test_mcp_task_service.py -q
+  tests/test_mcp/test_mcp_task_lease_lifecycle.py \
+  tests/test_mcp/test_mcp_task_repository.py tests/test_mcp/test_mcp_task_service.py -q
 ```
 
 The lifecycle matrix uses the production SQLite repository with a controlled

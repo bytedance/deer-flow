@@ -553,7 +553,7 @@ make test-live
 The live suite requires a valid root `config.yaml` and API credentials. It may
 incur API costs or create local sandboxes, artifacts, and files, so it is not
 part of default test runs or CI. Direct pytest invocation of
-`tests/test_client_live.py` also requires
+`tests/test_gateway/test_client_live.py` also requires
 `DEER_FLOW_RUN_LIVE_TESTS=1`.
 
 `make detect-blocking-io` statically scans backend business code for blocking

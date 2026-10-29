@@ -77,7 +77,7 @@ backend name == `blob_storage.backend` value:
    path (`module.Class` or `module:Class`, including single-file modules).
 4. Reject an unusable config by raising; a store that silently starts on a
    different root or backend strands previously written content.
-5. Add the backend's semantics tests to `backend/tests/test_blob_store.py`; the
+5. Add the backend's semantics tests to `backend/tests/test_uploads/test_blob_store.py`; the
    suite runs every backend-agnostic scenario against a temporary root.
 
 **Durability rules that reviewers have enforced**, worth keeping intact:
@@ -106,4 +106,4 @@ with the checkpoint retention contract (#5255), is stated in
 
 **Entry points**: `packages/harness/deerflow/storage/contract.py`,
 `storage/manager.py`, `storage/backends/local_fs/local_fs_store.py`,
-`config/blob_storage_config.py`; tests in `backend/tests/test_blob_store.py`.
+`config/blob_storage_config.py`; tests in `backend/tests/test_uploads/test_blob_store.py`.

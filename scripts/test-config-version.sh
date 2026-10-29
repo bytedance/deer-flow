@@ -12,4 +12,4 @@ unset UV_INDEX UV_EXTRA_INDEX_URL UV_INDEX_URL
 export UV_DEFAULT_INDEX=https://pypi.org/simple
 
 cd "$REPO_ROOT/backend"
-exec uv run --locked pytest -q tests/test_config_version.py "$@"
+exec uv run --locked pytest -q tests/test_config/test_config_version.py "$@"

@@ -40,7 +40,7 @@ Offline commands need no endpoint or credentials:
 ```bash
 uv run python -m scripts.benchmark.context_snapshot summarize \
   scripts/benchmark/context_snapshot/results/2026-09-12.rows.jsonl
-uv run pytest tests/test_bench_context_snapshot.py -q
+uv run pytest tests/test_runtime/test_bench_context_snapshot.py -q
 ```
 
 ## Scope and scoring

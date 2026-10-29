@@ -19,7 +19,7 @@ on:
       - "backend/tests/replay_provider.py"
       - "backend/tests/_replay_fixture.py"
       - "backend/tests/seed_runs_router.py"
-      - "backend/tests/test_replay_golden.py"
+      - "backend/tests/test_persistence/test_replay_golden.py"
       - "backend/scripts/run_replay_gateway.py"
       - ".github/workflows/replay-e2e.yml"
   pull_request:
@@ -32,7 +32,7 @@ on:
       - "backend/tests/replay_provider.py"
       - "backend/tests/_replay_fixture.py"
       - "backend/tests/seed_runs_router.py"
-      - "backend/tests/test_replay_golden.py"
+      - "backend/tests/test_persistence/test_replay_golden.py"
       - "backend/scripts/run_replay_gateway.py"
       - ".github/workflows/replay-e2e.yml"
 
@@ -58,14 +58,14 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v7
         with:
-          # Must match backend/Dockerfile's UV_IMAGE tag; pinned by backend/tests/test_ci_uv_version_pin.py
+          # Must match backend/Dockerfile's UV_IMAGE tag; pinned by backend/tests/test_infrastructure/test_ci_uv_version_pin.py
           version: "0.11.1"
       - name: Install backend dependencies
         working-directory: backend
         run: uv sync --group dev
       - name: Replay golden (backend SSE contract)
         working-directory: backend
-        run: PYTHONPATH=. uv run pytest tests/test_replay_golden.py -v
+        run: PYTHONPATH=. uv run pytest tests/test_persistence/test_replay_golden.py -v
 
   fullstack-replay-render:
     name: Layer 2 — full-stack render (no API key)
@@ -81,7 +81,7 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v7
         with:
-          # Must match backend/Dockerfile's UV_IMAGE tag; pinned by backend/tests/test_ci_uv_version_pin.py
+          # Must match backend/Dockerfile's UV_IMAGE tag; pinned by backend/tests/test_infrastructure/test_ci_uv_version_pin.py
           version: "0.11.1"
       - name: Install backend dependencies (replay gateway)
         working-directory: backend

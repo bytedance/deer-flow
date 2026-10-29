@@ -34,7 +34,7 @@ incomplete UTF-8/JSON tail cannot hide intact records or block sequence
 recovery. Existing bytes, Unicode separators inside JSON strings, and
 per-thread mutation ownership stay as they are. Batch rollback restores the
 pre-append byte size, including removal of a newly inserted separator. Tests
-live in `tests/test_jsonl_event_store_tail_recovery.py`. This does not add
+live in `tests/test_persistence/test_jsonl_event_store_tail_recovery.py`. This does not add
 multi-process support or crash-atomic batches.
 
 **Message feed seq stamping** (#4666): a checkpoint carries no position of its
@@ -152,7 +152,7 @@ asserting that no outputs were produced. Observed modifications still receive th
 ordinary verification verdict, without a skip marker. A missing snapshot or
 capture error alone does not imply this skip reason. These cases are pinned
 through real snapshot capture and `run_agent()` in
-`tests/test_run_worker_delivery.py`.
+`tests/test_persistence/test_run_worker_delivery.py`.
 
 **Extension changed-run discovery** (`runtime/runs/store/` and
 `extensions/run_evidence.py`) orders public run-record changes by the
@@ -259,8 +259,8 @@ footprint. Summarize with
 `scripts/benchmark/checkpoint/summarize_production.py` (ratios are
 `delta/full`; it also emits `snapshot_write_spike` and `cache_effect_ms`,
 the decision inputs for the production snapshot-frequency and accessor-cache
-defaults). Harness tests live in `tests/test_bench_checkpoint_production.py`
-and `tests/test_summarize_checkpoint_production.py`; timing thresholds are
+defaults). Harness tests live in `tests/test_runtime/test_bench_checkpoint_production.py`
+and `tests/test_runtime/test_summarize_checkpoint_production.py`; timing thresholds are
 not CI gates. The matrix test pins that every `(repetition, turns)` group
 contains both modes and that their execution order flips between consecutive
 groups, including across repetition boundaries.
@@ -329,7 +329,7 @@ Checkpointer storage runs in one of two channel modes, selected by `checkpoint_c
 - `runtime/checkpoint_cache/` + `runtime/checkpointer/cached_saver.py` — delta-mode checkpoint history cache; checkpoint state reads MUST go through `CheckpointStateAccessor`, and the checkpointer may be a `CachedHistorySaver` wrapper — never rely on concrete saver types
 - `runtime/checkpointer/thread_spans.py` — thread enumeration for `DeerFlowClient.list_threads`, ordered by `checkpoint_id` (goal writes keep the old `ts`). SQLite/Postgres savers (unwrapped from `CachedHistorySaver`) use the primary-key index; any other saver walks `list(None)`. Saver type selects speed, never correctness
 - `runtime/goal.py` `_call_checkpointer_method` — tries the async saver method and falls back to the sync one only on `NotImplementedError`: every saver defines the async methods, but the sync TUI/embedded `SqliteSaver`/`PostgresSaver` (also behind `CachedHistorySaver`) raise from them. Sync writes stay in `await_drained`
-- Tests: `tests/test_checkpoint_mode.py` (freeze/detect/gate), `tests/test_checkpoint_state.py` (accessor/mutation graph), `tests/test_delta_channel_checkpointers.py` (saver parity), `tests/test_threads_checkpoint_mode.py`, `tests/test_gateway_checkpoint_mode.py` (dual-mode e2e parity), `tests/test_context_compaction.py` (mutation-graph write, no scheduling), `tests/test_run_worker_rollback.py`, `tests/test_cached_history_saver.py` + `tests/test_cached_history_saver_integration.py` (history cache)
+- Tests: `tests/test_persistence/test_checkpoint_mode.py` (freeze/detect/gate), `tests/test_persistence/test_checkpoint_state.py` (accessor/mutation graph), `tests/test_persistence/test_delta_channel_checkpointers.py` (saver parity), `tests/test_persistence/test_threads_checkpoint_mode.py`, `tests/test_gateway/test_gateway_checkpoint_mode.py` (dual-mode e2e parity), `tests/test_agents/test_context_compaction.py` (mutation-graph write, no scheduling), `tests/test_persistence/test_run_worker_rollback.py`, `tests/test_persistence/test_cached_history_saver.py` + `tests/test_persistence/test_cached_history_saver_integration.py` (history cache)
 
 ## Deferred terminal commits and lease ownership
 
@@ -370,9 +370,9 @@ interrupted ACK is available, and only while that same per-run decision remains
 inside its original deadline. An in-flight admission ACK is awaited; row state is
 never reread as attribution. Peer takeover, an expired lease, a changed/final
 outcome, or a second rejection still fences. Even without an event store, defer
-rollback's error write until restoration has finished. `tests/test_stale_active_renewal.py`
+rollback's error write until restoration has finished. `tests/test_persistence/test_stale_active_renewal.py`
 covers the Manager transition (including an ACK still in flight), and
-`tests/test_atomic_admission_worker.py` covers the real Worker restoration/error
+`tests/test_persistence/test_atomic_admission_worker.py` covers the real Worker restoration/error
 tail with and without an event Store. A fenced Worker must not begin a rollback checkpoint restoration,
 including when fencing itself delivered cancellation. Admission compensation never retries an unowned write in heartbeat
 mode. A local deadline guard remains armed after fast renewal errors and after
@@ -406,4 +406,4 @@ must be bounded by its backend. Only the optional completion hook receives host
 cancellation, and its child task is drained before the terminal tail continues.
 A drain timeout leaves staged statuses and commit barriers intact without persisting `interrupted`. A finalizer that raises is
 logged with its run ID, staged status and exception while the other runs continue
-draining. Coverage: `tests/test_gateway_run_drain_shutdown.py`.
+draining. Coverage: `tests/test_gateway/test_gateway_run_drain_shutdown.py`.

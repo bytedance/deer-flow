@@ -673,7 +673,7 @@ separately in the QQ console.
 
 For an opt-in transport check, supply the two QQ credential environment
 variables, set `DEER_FLOW_RUN_LIVE_TESTS=1`, and run
-`uv run pytest -m live tests/test_qq_channel_live.py` from `backend/`.
+`uv run pytest -m live tests/test_channels/test_qq_channel_live.py` from `backend/`.
 It checks READY, two heartbeat acknowledgements and shutdown; it does not send
 chat messages or establish end-to-end agent or group-message compatibility.
 

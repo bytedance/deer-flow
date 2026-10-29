@@ -454,7 +454,7 @@ in CI. To test a preset manually, securely export `MANAGED_MODEL_TEST_API_KEY`,
 `MANAGED_MODEL_TEST_PROVIDER` and `MANAGED_MODEL_TEST_MODEL`, then run in `backend/`:
 
 ```bash
-DEER_FLOW_RUN_LIVE_TESTS=1 uv run --no-sync pytest tests/test_managed_presets_live.py -q
+DEER_FLOW_RUN_LIVE_TESTS=1 uv run --no-sync pytest tests/test_models/test_managed_presets_live.py -q
 ```
 
 These requests may incur provider charges and do not save credentials. Keep the

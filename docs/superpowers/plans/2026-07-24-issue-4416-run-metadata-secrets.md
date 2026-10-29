@@ -25,7 +25,7 @@
 ### Task 1: Central legacy metadata policy
 
 **Files:**
-- Create: `backend/tests/test_run_metadata_secret_safety.py`
+- Create: `backend/tests/test_persistence/test_run_metadata_secret_safety.py`
 - Modify: `backend/packages/harness/deerflow/runtime/secret_context.py`
 
 **Interfaces:**
@@ -81,7 +81,7 @@ Run:
 
 ```bash
 cd backend
-.venv/bin/python -m pytest tests/test_run_metadata_secret_safety.py -q
+.venv/bin/python -m pytest tests/test_persistence/test_run_metadata_secret_safety.py -q
 ```
 
 Expected: collection fails because the four new symbols do not yet exist.
@@ -124,7 +124,7 @@ Run:
 
 ```bash
 cd backend
-.venv/bin/python -m pytest tests/test_run_metadata_secret_safety.py -q
+.venv/bin/python -m pytest tests/test_persistence/test_run_metadata_secret_safety.py -q
 ```
 
 Expected: all Task 1 tests pass.
@@ -132,14 +132,14 @@ Expected: all Task 1 tests pass.
 - [ ] **Step 5: Commit the policy unit**
 
 ```bash
-git add backend/packages/harness/deerflow/runtime/secret_context.py backend/tests/test_run_metadata_secret_safety.py
+git add backend/packages/harness/deerflow/runtime/secret_context.py backend/tests/test_persistence/test_run_metadata_secret_safety.py
 git commit -m "fix(security): centralize legacy run metadata policy"
 ```
 
 ### Task 2: Unified run admission before persistence
 
 **Files:**
-- Modify: `backend/tests/test_gateway_services.py`
+- Modify: `backend/tests/test_gateway/test_gateway_services.py`
 - Modify: `backend/app/gateway/services.py`
 
 **Interfaces:**
@@ -277,8 +277,8 @@ Run:
 ```bash
 cd backend
 .venv/bin/python -m pytest \
-  tests/test_gateway_services.py::test_start_run_rejects_legacy_auth_token_before_persistence \
-  tests/test_gateway_services.py::test_start_run_preserves_ordinary_metadata \
+  tests/test_gateway/test_gateway_services.py::test_start_run_rejects_legacy_auth_token_before_persistence \
+  tests/test_gateway/test_gateway_services.py::test_start_run_preserves_ordinary_metadata \
   -q
 ```
 
@@ -330,7 +330,7 @@ Run:
 ```bash
 cd backend
 .venv/bin/python -m pytest \
-  tests/test_gateway_services.py::test_launch_scheduled_thread_run_rejects_legacy_auth_token \
+  tests/test_gateway/test_gateway_services.py::test_launch_scheduled_thread_run_rejects_legacy_auth_token \
   -q
 ```
 
@@ -339,15 +339,15 @@ Expected: PASS, proving scheduled metadata reaches the same admission policy rat
 - [ ] **Step 7: Commit the admission boundary**
 
 ```bash
-git add backend/app/gateway/services.py backend/tests/test_gateway_services.py
+git add backend/app/gateway/services.py backend/tests/test_gateway/test_gateway_services.py
 git commit -m "fix(security): reject secrets at run admission"
 ```
 
 ### Task 3: Non-mutating historical API hiding
 
 **Files:**
-- Modify: `backend/tests/test_run_metadata_secret_safety.py`
-- Modify: `backend/tests/test_run_events_endpoint.py`
+- Modify: `backend/tests/test_persistence/test_run_metadata_secret_safety.py`
+- Modify: `backend/tests/test_persistence/test_run_events_endpoint.py`
 - Modify: `backend/app/gateway/routers/thread_runs.py`
 - Modify: `backend/app/gateway/routers/threads.py`
 
@@ -407,7 +407,7 @@ Run:
 
 ```bash
 cd backend
-.venv/bin/python -m pytest tests/test_run_metadata_secret_safety.py -q
+.venv/bin/python -m pytest tests/test_persistence/test_run_metadata_secret_safety.py -q
 ```
 
 Expected: historical response objects still contain `auth_token`.
@@ -485,7 +485,7 @@ Run:
 ```bash
 cd backend
 .venv/bin/python -m pytest \
-  tests/test_run_events_endpoint.py::test_list_run_events_redacts_historical_run_start_metadata \
+  tests/test_persistence/test_run_events_endpoint.py::test_list_run_events_redacts_historical_run_start_metadata \
   -q
 ```
 
@@ -522,8 +522,8 @@ Run:
 ```bash
 cd backend
 .venv/bin/python -m pytest \
-  tests/test_run_metadata_secret_safety.py \
-  tests/test_run_events_endpoint.py \
+  tests/test_persistence/test_run_metadata_secret_safety.py \
+  tests/test_persistence/test_run_events_endpoint.py \
   -q
 ```
 
@@ -535,16 +535,16 @@ Expected: all tests pass, including existing event forwarding behavior.
 git add \
   backend/app/gateway/routers/thread_runs.py \
   backend/app/gateway/routers/threads.py \
-  backend/tests/test_run_metadata_secret_safety.py \
-  backend/tests/test_run_events_endpoint.py
+  backend/tests/test_persistence/test_run_metadata_secret_safety.py \
+  backend/tests/test_persistence/test_run_events_endpoint.py
 git commit -m "fix(security): hide legacy secrets from history APIs"
 ```
 
 ### Task 4: Supported MCP carrier and operator documentation
 
 **Files:**
-- Modify: `backend/tests/test_mcp_session_pool.py`
-- Modify: `backend/tests/test_skill_request_scoped_secrets.py`
+- Modify: `backend/tests/test_mcp/test_mcp_session_pool.py`
+- Modify: `backend/tests/test_skills/test_skill_request_scoped_secrets.py`
 - Modify: `backend/docs/MCP_SERVER.md`
 - Modify: `README.md`
 - Modify: `backend/AGENTS.md`
@@ -590,7 +590,7 @@ Run:
 ```bash
 cd backend
 .venv/bin/python -m pytest \
-  tests/test_mcp_session_pool.py::test_session_pool_interceptor_reads_request_scoped_secret \
+  tests/test_mcp/test_mcp_session_pool.py::test_session_pool_interceptor_reads_request_scoped_secret \
   -q
 ```
 
@@ -616,8 +616,8 @@ Run:
 ```bash
 cd backend
 .venv/bin/python -m pytest \
-  tests/test_mcp_session_pool.py::test_session_pool_interceptor_reads_request_scoped_secret \
-  tests/test_skill_request_scoped_secrets.py::TestLeakSurfaces::test_redact_config_secrets_strips_from_persisted_config \
+  tests/test_mcp/test_mcp_session_pool.py::test_session_pool_interceptor_reads_request_scoped_secret \
+  tests/test_skills/test_skill_request_scoped_secrets.py::TestLeakSurfaces::test_redact_config_secrets_strips_from_persisted_config \
   -q
 ```
 
@@ -676,8 +676,8 @@ Update `backend/AGENTS.md` to state:
 
 ```bash
 git add \
-  backend/tests/test_mcp_session_pool.py \
-  backend/tests/test_skill_request_scoped_secrets.py \
+  backend/tests/test_mcp/test_mcp_session_pool.py \
+  backend/tests/test_skills/test_skill_request_scoped_secrets.py \
   backend/docs/MCP_SERVER.md \
   README.md \
   backend/AGENTS.md
@@ -698,11 +698,11 @@ git commit -m "docs(security): migrate MCP credentials to secret context"
 ```bash
 cd backend
 .venv/bin/python -m pytest \
-  tests/test_run_metadata_secret_safety.py \
-  tests/test_gateway_services.py \
-  tests/test_run_events_endpoint.py \
-  tests/test_mcp_session_pool.py \
-  tests/test_skill_request_scoped_secrets.py \
+  tests/test_persistence/test_run_metadata_secret_safety.py \
+  tests/test_gateway/test_gateway_services.py \
+  tests/test_persistence/test_run_events_endpoint.py \
+  tests/test_mcp/test_mcp_session_pool.py \
+  tests/test_skills/test_skill_request_scoped_secrets.py \
   -q
 ```
 
@@ -717,21 +717,21 @@ cd backend
   app/gateway/services.py \
   app/gateway/routers/thread_runs.py \
   app/gateway/routers/threads.py \
-  tests/test_run_metadata_secret_safety.py \
-  tests/test_gateway_services.py \
-  tests/test_run_events_endpoint.py \
-  tests/test_mcp_session_pool.py \
-  tests/test_skill_request_scoped_secrets.py
+  tests/test_persistence/test_run_metadata_secret_safety.py \
+  tests/test_gateway/test_gateway_services.py \
+  tests/test_persistence/test_run_events_endpoint.py \
+  tests/test_mcp/test_mcp_session_pool.py \
+  tests/test_skills/test_skill_request_scoped_secrets.py
 .venv/bin/ruff format --check \
   packages/harness/deerflow/runtime/secret_context.py \
   app/gateway/services.py \
   app/gateway/routers/thread_runs.py \
   app/gateway/routers/threads.py \
-  tests/test_run_metadata_secret_safety.py \
-  tests/test_gateway_services.py \
-  tests/test_run_events_endpoint.py \
-  tests/test_mcp_session_pool.py \
-  tests/test_skill_request_scoped_secrets.py
+  tests/test_persistence/test_run_metadata_secret_safety.py \
+  tests/test_gateway/test_gateway_services.py \
+  tests/test_persistence/test_run_events_endpoint.py \
+  tests/test_mcp/test_mcp_session_pool.py \
+  tests/test_skills/test_skill_request_scoped_secrets.py
 ```
 
 Expected: no files require further formatting.
@@ -745,11 +745,11 @@ cd backend
   app/gateway/services.py \
   app/gateway/routers/thread_runs.py \
   app/gateway/routers/threads.py \
-  tests/test_run_metadata_secret_safety.py \
-  tests/test_gateway_services.py \
-  tests/test_run_events_endpoint.py \
-  tests/test_mcp_session_pool.py \
-  tests/test_skill_request_scoped_secrets.py
+  tests/test_persistence/test_run_metadata_secret_safety.py \
+  tests/test_gateway/test_gateway_services.py \
+  tests/test_persistence/test_run_events_endpoint.py \
+  tests/test_mcp/test_mcp_session_pool.py \
+  tests/test_skills/test_skill_request_scoped_secrets.py
 ```
 
 Expected: `All checks passed!`
@@ -783,11 +783,11 @@ git add \
   backend/app/gateway/services.py \
   backend/app/gateway/routers/thread_runs.py \
   backend/app/gateway/routers/threads.py \
-  backend/tests/test_run_metadata_secret_safety.py \
-  backend/tests/test_gateway_services.py \
-  backend/tests/test_run_events_endpoint.py \
-  backend/tests/test_mcp_session_pool.py \
-  backend/tests/test_skill_request_scoped_secrets.py
+  backend/tests/test_persistence/test_run_metadata_secret_safety.py \
+  backend/tests/test_gateway/test_gateway_services.py \
+  backend/tests/test_persistence/test_run_events_endpoint.py \
+  backend/tests/test_mcp/test_mcp_session_pool.py \
+  backend/tests/test_skills/test_skill_request_scoped_secrets.py
 git commit -m "style: format issue 4416 security fix"
 ```
 

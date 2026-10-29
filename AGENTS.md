@@ -33,7 +33,7 @@ video uncompressed at the proxy layer.
 
 Keep the dedicated `/api/threads/{thread_id}/browser/stream` WebSocket regex before
 the generic threads regex in Docker, local and Helm nginx configs. Upgrade headers
-and the 600s read timeout are pinned by `backend/tests/test_nginx_browser_websocket.py`.
+and the 600s read timeout are pinned by `backend/tests/test_infrastructure/test_nginx_browser_websocket.py`.
 Helm uses nginx's default connect/send timeouts for the in-cluster Gateway.
 
 Both Compose files publish nginx at `"${BIND_HOST:-127.0.0.1}:${PORT:-2026}:2026"`
@@ -42,7 +42,7 @@ controls Docker ingress only; local Next.js stays on `3000` so `.env` cannot
 redirect `make dev`'s port wait. Nginx's IPv4+IPv6 `default_server` and Gateway's
 `0.0.0.0:8001` bind are container-internal; only published nginx is external.
 Require explicit bind addresses for new published ports;
-`backend/tests/test_compose_default_bind_host.py` pins every service in both files.
+`backend/tests/test_infrastructure/test_compose_default_bind_host.py` pins every service in both files.
 
 Provisioner PVC mode declares `USERDATA_PVC_NAME` once as `user-data`; extra and
 Lark broker credential mounts reuse it with their existing subPaths and read-only
@@ -153,7 +153,7 @@ make docker-start / docker-stop / docker-logs   # Docker development environment
 ```
 
 Production uses image Python (`uv run --no-sync`) and `exec` for SIGTERM;
-Compose sets `init: true` (`backend/tests/test_gateway_sigterm_delivery.py`).
+Compose sets `init: true` (`backend/tests/test_gateway/test_gateway_sigterm_delivery.py`).
 `make up` waits for Gateway `/health`; failures show Compose status and Gateway logs.
 
 Docker logs/restarts resolve `DEER_FLOW_ROOT` from this checkout before Compose,
@@ -192,8 +192,8 @@ gitignored. Never commit them.
 
 ```bash
 # Backend (pytest); run one file or one test function
-cd backend && python -m pytest tests/test_compose_default_bind_host.py -q
-cd backend && python -m pytest tests/path/to/test.py::test_func -q
+cd backend && python -m pytest tests/test_infrastructure/test_compose_default_bind_host.py -q
+cd backend && python -m pytest tests/test_<domain>/test_feature.py::test_func -q
 
 # Frontend (rstest)
 cd frontend && pnpm rstest run <pattern>     # e.g. pnpm rstest run my-component

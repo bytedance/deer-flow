@@ -54,5 +54,5 @@ content; adding an artifact does not establish evidence authority.
 From an existing DeerFlow backend development environment with API 0.2.6:
 
 ```sh
-uv run pytest tests/test_retrieval_plugin_artifacts.py -q
+uv run pytest tests/test_extensions/test_retrieval_plugin_artifacts.py -q
 ```

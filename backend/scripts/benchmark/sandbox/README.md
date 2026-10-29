@@ -109,7 +109,7 @@ OpenSandbox resources; collect server-side metrics separately.
 Offline regressions use the production provider with an SDK transport double:
 
 ```sh
-uv run --no-sync pytest tests/test_bench_opensandbox.py tests/test_bench_sandbox_provider.py -q
+uv run --no-sync pytest tests/test_runtime/test_bench_opensandbox.py tests/test_runtime/test_bench_sandbox_provider.py -q
 ```
 
 They check lifecycle and reporting contracts, not live SDK/server compatibility or

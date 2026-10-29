@@ -95,7 +95,7 @@ remains unchanged. Only a successful compaction commits the removal; no-op and
 failure paths keep the original state. The following `TodoMiddleware.before_model`
 rebuilds one reminder from current todos when no `write_todos` call is still
 visible; empty todos need no reminder. Both automatic and manual compaction use
-this shared preparation path. Coverage: `tests/test_todo_compaction.py`.
+this shared preparation path. Coverage: `tests/test_agents/test_todo_compaction.py`.
 `todo_middleware.py::TODO_REMINDER_MESSAGE_NAME` owns the backend message name;
 the producer, presence check, and compaction filter share it. Its value remains
 `todo_reminder` for compatibility with the frontend's hidden-message filtering.

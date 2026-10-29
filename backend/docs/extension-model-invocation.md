@@ -150,6 +150,6 @@ Tool calls, streaming, agent execution, and conversation persistence are outside
 this capability. Jev/TypeSafe typed-decision workflows remain extension-owned;
 `model_invoker` is the chat-style path for host-configured models.
 
-The offline tests in `backend/tests/test_extension_model_invocation.py` cover the
+The offline tests in `backend/tests/test_extensions/test_extension_model_invocation.py` cover the
 classification success and failure cases, source isolation, shared admission,
 timeouts, cancellation, limits, and lifecycle revocation without real API calls.

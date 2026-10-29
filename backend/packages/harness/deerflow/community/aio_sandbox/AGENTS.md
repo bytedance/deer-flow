@@ -18,7 +18,7 @@ The broker shim forwards pipe/file input only after EOF: an idle pipe exits
 input. Window overrides must be finite positive seconds, at most 600. Broker
 INFO logs contain argc/exit/elapsed only, never argument values.
 
-Regressions: `tests/test_aio_sandbox.py`, `tests/test_lark_broker.py`.
+Regressions: `tests/test_sandbox/test_aio_sandbox.py`, `tests/test_channels/test_lark_broker.py`.
 
 ## Reuse admission
 

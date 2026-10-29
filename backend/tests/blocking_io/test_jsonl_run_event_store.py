@@ -7,7 +7,7 @@ Its ``async def`` methods perform synchronous filesystem IO (``Path.glob``,
 so any blocking IO here stalls the event loop on the hot path.
 
 #3084 added a mock-based offload assertion in
-``tests/test_jsonl_event_store_async_io.py`` that covers ``put`` only. This
+``tests/test_persistence/test_jsonl_event_store_async_io.py`` that covers ``put`` only. This
 anchor complements it by driving the **full** async surface (``put``,
 ``put_batch``, ``list_messages``, ``list_events``, ``list_messages_by_run``,
 ``get_last_visible_ai_seq_by_run``, ``count_messages``, ``delete_by_run``,

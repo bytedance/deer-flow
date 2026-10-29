@@ -164,7 +164,7 @@ lead builders and `DeerFlowClient`.
 
 ## Evidence
 
-`backend/tests/test_task_note_capacity.py` drives real `create_agent` graphs with
+`backend/tests/test_scheduler/test_task_note_capacity.py` drives real `create_agent` graphs with
 a deterministic model, the production `task_note` tool and `ThreadState`. It
 covers sync/async parallel capacity, receipts, full/delta checkpoints, reverse
 completion order, repeated keys, deletion followed by retry, and task isolation
@@ -177,7 +177,7 @@ implementation or complete DeerFlow baseline behavior. Its vector-versus-keyword
 comparison did not establish a stable net benefit, so this implementation has no
 vector dependency.
 
-`backend/tests/test_task_continuity.py` exercises source recovery after actual
+`backend/tests/test_scheduler/test_task_continuity.py` exercises source recovery after actual
 graph compaction and checkpoint resume, scope/rollback isolation, retention,
 truncation, failure behavior and tool contracts. The manual live integration check
 uses the production middleware and native tools with synthetic history:

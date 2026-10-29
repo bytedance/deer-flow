@@ -166,7 +166,7 @@ Local measurements on macOS arm64 (five captures, warm local disk): canonical
 capture plus digest took a median 4.43 ms for 4 files / 3,120 bytes and 94.03 ms
 for 256 files / 16,711,473 bytes. These are package-processing measurements, not
 model latency or a deployment throughput guarantee. Reproduce with
-`uv run pytest tests/test_skill_mutation_package_cost.py -q -s` from `backend/`.
+`uv run pytest tests/test_skills/test_skill_mutation_package_cost.py -q -s` from `backend/`.
 
 Live PostgreSQL validation on 2026-09-23 used PostgreSQL 17.11 (aarch64,
 `READ COMMITTED`), one pytest host process and two concurrent actors sharing a
@@ -181,7 +181,7 @@ for the command, environment and cleanup.
 This verifies the source-fence/deletion interleaving, not a multi-process
 PostgreSQL soak. Idempotency, recovery, scan-budget and lease behavior were
 covered by deterministic suites, not by concurrent PostgreSQL Gateway workers.
-`tests/test_skill_mutation_postgres.py` remains opt-in via
+`tests/test_skills/test_skill_mutation_postgres.py` remains opt-in via
 `DEERFLOW_TEST_POSTGRES_URL` and creates/removes its own uniquely named schema.
 Validate the intended same-host worker deployment before enabling it; SQLite
 results alone do not establish PostgreSQL lock behavior.

@@ -131,4 +131,4 @@ Current regression coverage includes:
 - token-budget-limited fact inclusion
 
 Tests:
-- `backend/tests/test_memory_prompt_injection.py`
+- `backend/tests/test_knowledge/test_memory_prompt_injection.py`

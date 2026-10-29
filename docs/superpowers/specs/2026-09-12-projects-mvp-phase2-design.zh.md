@@ -18,7 +18,7 @@ Phase 1 给了项目三样能装的东西：会话、名称和一个 `status`。
   `persistence/projects/sql.py:6-9` 的一句前瞻性注释。
 - **运行时不具备项目感知**：在 `deerflow/runtime/**` 与 `deerflow/agents/**` 下穷尽搜索 `project_id|deerflow_project_id|ProjectRow|ProjectRepository` 零命中；`runtime_ctx` 就是 `{"thread_id", "run_id"}` 加上调用方键（`runtime/runs/worker.py:542`）。run 无法知道自己属于哪个项目，因此既收不到说明，也
   拿不到文档访问。
-- 运行准入会**剥离**保留键 `deerflow_project_id`，且从不写 membership（`app/gateway/services.py:207-218`，由 `tests/test_thread_meta_repo.py:598-623` 钉住）。membership 只由 `POST /api/threads`、分支创建和 `POST /api/threads/{id}/move` 写入（`app/gateway/AGENTS.md:13-19`）。
+- 运行准入会**剥离**保留键 `deerflow_project_id`，且从不写 membership（`app/gateway/services.py:207-218`，由 `tests/test_persistence/test_thread_meta_repo.py:598-623` 钉住）。membership 只由 `POST /api/threads`、分支创建和 `POST /api/threads/{id}/move` 写入（`app/gateway/AGENTS.md:13-19`）。
 
 用户可见的后果：项目就是一个名字好听的文件夹。成员会话仍然要手工重新交代背景，"这个话题的文档"依旧无处安放——项目页的 Documents 与 Instructions 区块并不存在（`frontend/src/app/workspace/projects/[id]/page.tsx:86-93` 只渲染 header + Chats + Settings）。
 
@@ -121,7 +121,7 @@ repository 表面（所有方法都按 ContextVar 所有者过滤，`AUTO` 哨�
 - `purge(document_id, *, retention_cutoff=None, expected_trashed_at=None) -> bool` —— 在同一事务及文档行锁内完成 trashed 状态校验、文件删除、行删除与提交（§6.3/§8.3）；`False` ⇒ 404。保留期调用者传入候选记录的 trash 时间戳和截止时间，并在锁内复核两者，防止已恢复又重新入回收站的文档按旧过期时间被清除。手动 purge 校验当前 trashed 状态，不要求达到保留期。不暴露无守卫的 `delete_row` 变更接口。
 
 迁移 `0024_project_documents`（在 rebase 到 `0023_user_preferences` 之后由 `0023` 重编号；今天的链头是 `0023_user_preferences`，`migrations/AGENTS.md:22-30`）：用 `op.create_table` 建表 + 四个索引；按 `0019_projects.py:22-23` 的写法用现有 `inspector.has_table` 惯用法守卫。bootstrap 的前向兼容下限（`persistence/bootstrap.py:133-171`）**无需**改
-动：`project_documents` 是新表，旧二进制把下限当作存在性检查，绝不从 `Base.metadata` 推导它。`tests/test_persistence_forward_revision_compat.py` 中的链头 pin 必须挪到新的链头（`0024_project_documents`）。
+动：`project_documents` 是新表，旧二进制把下限当作存在性检查，绝不从 `Base.metadata` 推导它。`tests/test_persistence/test_persistence_forward_revision_compat.py` 中的链头 pin 必须挪到新的链头（`0024_project_documents`）。
 
 ### 6.2 文件系统布局
 
@@ -210,7 +210,7 @@ Phase 1 把 check-and-set 实现为“在写事务内拿下 `projects` 行锁”
 
 错误映射：每个路由对缺失/他人资源返回 404。自有 active 和 archived 项目均允许文档架列表、内容/下载、会话文件读取、run 注入及文档工具读取。上传/提升、恢复目标和单份文档移入回收站要求 active 项目；已归档项目返回 404。attach 可以从已归档源文档架读取，写入自有且可写的目标会话，不修改源文档架。项目删除保持 Phase-1 契约。资源查询失败不通过 403 暴露存在性。项目 repository 不可用（memory 后端）时，经现有 `deps.py:654` 的 `_require` 访问器返回 **503 `"Projects"`**，并扩展 `project_document_repo` 访问器；上传超限为 413（对齐 `routers/uploads.py:320-321`），校验失败为 422。
 
-PAT 默认拒绝：每条新路由都必须加入 `auth/pat.py` 的允许清单（`:59-68`）——当前规则只覆盖 `/api/projects`、`/api/projects/{id}`、`archive|restore`、`/threads` 和 `/threads/{id}/move`。漂移守卫是 `tests/test_pat_auth.py::test_pat_projects_policy_admits_exactly_the_mounted_routes`，必须用新路由扩展它。
+PAT 默认拒绝：每条新路由都必须加入 `auth/pat.py` 的允许清单（`:59-68`）——当前规则只覆盖 `/api/projects`、`/api/projects/{id}`、`archive|restore`、`/threads` 和 `/threads/{id}/move`。漂移守卫是 `tests/test_authz/test_pat_auth.py::test_pat_projects_policy_admits_exactly_the_mounted_routes`，必须用新路由扩展它。
 
 ## 运行时设计
 
@@ -422,7 +422,7 @@ RFC §5.1 说恢复"在目标目录不同时物理移动文件"。因为 `stored
 
 ### 10.7 准入不翻译保留键（Phase-1 偏差，为 Phase 2 重述）
 
-RFC §6 说首次运行准入会校验 `deerflow_project_id` 并写入 membership 列。它没有：准入剥离该键，且从不写 membership（`services.py:207-218`，由 `tests/test_thread_meta_repo.py:598-623` 钉住），客户端侧的缺口由前端预先带 `project_id` 建会话补上（`chat-page.tsx:213-230`）。因此 Phase 2 在运行开始时从
+RFC §6 说首次运行准入会校验 `deerflow_project_id` 并写入 membership 列。它没有：准入剥离该键，且从不写 membership（`services.py:207-218`，由 `tests/test_persistence/test_thread_meta_repo.py:598-623` 钉住），客户端侧的缺口由前端预先带 `project_id` 建会话补上（`chat-page.tsx:213-230`）。因此 Phase 2 在运行开始时从
 `threads_meta` 解析项目上下文（§7.1），而不是从 run metadata 解析，并且对准入键路径不加任何东西。
 
 ### 10.8 原子性使用已落地的锁惯用法

@@ -92,7 +92,7 @@ The host loads generic descriptors, supplies the sanitized visible-answer servic
 binds authenticated backend calls, and mounts/disposes the page. There is no
 bookmark-specific page, router, database table or business branch in host code.
 
-Automated coverage: `backend/tests/test_bookmark_plugin.py`,
+Automated coverage: `backend/tests/test_extensions/test_bookmark_plugin.py`,
 `frontend/tests/e2e/bookmark-plugin.spec.ts`, plus shared API and lifecycle tests.
 Browser E2E uses a real Python plugin/router and SQLite with synthetic authentication;
 its model-call fixture uses real LangGraph ToolNode dispatch with a scripted call,

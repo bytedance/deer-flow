@@ -16,6 +16,6 @@ Screening is string-only and performs no DNS lookup. Downloaders must still
 validate resolved addresses at connection time through the shared fetch policy.
 Keep fetch behavior and HTTP timeout handling unchanged.
 
-Tests: `backend/tests/test_infoquest_result_url_safety.py`,
-`backend/tests/test_image_result_url_safety.py`, and
-`backend/tests/test_infoquest_client.py` (all offline).
+Tests: `backend/tests/test_community/test_infoquest_result_url_safety.py`,
+`backend/tests/test_uploads/test_image_result_url_safety.py`, and
+`backend/tests/test_community/test_infoquest_client.py` (all offline).

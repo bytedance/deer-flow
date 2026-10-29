@@ -72,7 +72,7 @@ are not required before their migration runs.
    audited `0020_threads_meta_project_id` compatibility build.
 
 Bootstrap never performs this re-stamp itself. The regression in
-`backend/tests/test_persistence_forward_revision_compat.py` constructs the
+`backend/tests/test_persistence/test_persistence_forward_revision_compat.py` constructs the
 original schema, verifies startup rejection, and exercises the recovery while
 checking thread reads/inserts and preservation of incarnation data. The
 incarnation migration chains from `0021_batch_acceptance` and handles these

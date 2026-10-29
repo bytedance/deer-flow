@@ -34,7 +34,7 @@ synthetic resources and responses. It does not contact a real WeKnora service.
 From `backend/`, the final combined regression command passed **272 tests**:
 
 ```sh
-uv run pytest tests/test_extension_route_principal.py tests/test_extension_gateway_wiring.py tests/test_extension_registry.py tests/test_plugin_targets.py tests/test_knowledge_platform_extension.py tests/test_knowledge_management_extension.py tests/blocking_io/test_knowledge_platform_extension.py tests/blocking_io/test_knowledge_management_extension.py tests/test_agent_guidance_check.py -q --tb=short
+uv run pytest tests/test_extensions/test_extension_route_principal.py tests/test_extensions/test_extension_gateway_wiring.py tests/test_extensions/test_extension_registry.py tests/test_extensions/test_plugin_targets.py tests/test_knowledge/test_knowledge_platform_extension.py tests/test_knowledge/test_knowledge_management_extension.py tests/blocking_io/test_knowledge_platform_extension.py tests/blocking_io/test_knowledge_management_extension.py tests/test_agents/test_agent_guidance_check.py -q --tb=short
 ```
 
 This includes **32 new platform tests and one strict blocking-I/O test**. Backend

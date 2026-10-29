@@ -381,7 +381,7 @@ for stable frontend rendering."
 
 **Status:** Not a correctness fix. Re-evaluation (see spec) found that `RunJournal` already flushes on `run_end`, `run_error`, cancel, and worker `finally` paths. The only window this tuning narrows is a hard process crash or mid-run reload. Defer and decide separately; do not couple with Task 1 merge.
 
-If pursued: change `flush_threshold` default from 20 → 5 in `journal.py:42`, rerun `tests/test_run_journal.py`, commit as a separate `perf(journal): …` commit.
+If pursued: change `flush_threshold` default from 20 → 5 in `journal.py:42`, rerun `tests/test_persistence/test_run_journal.py`, commit as a separate `perf(journal): …` commit.
 
 ---
 

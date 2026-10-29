@@ -31,7 +31,7 @@
 - Create: `backend/packages/harness/deerflow/persistence/scheduled_tasks/model.py`
 - Create: `backend/packages/harness/deerflow/persistence/scheduled_task_runs/__init__.py`
 - Create: `backend/packages/harness/deerflow/persistence/scheduled_task_runs/model.py`
-- Test: `backend/tests/test_scheduled_task_models.py`
+- Test: `backend/tests/test_scheduler/test_scheduled_task_models.py`
 
 **Interfaces:**
 - Consumes: existing `AppConfig`, `Base`, and ORM registration pattern.
@@ -47,7 +47,7 @@
 
 - [ ] **Step 1: Write the failing tests**
 
-Create `backend/tests/test_scheduled_task_models.py`:
+Create `backend/tests/test_scheduler/test_scheduled_task_models.py`:
 
 ```python
 from deerflow.config.app_config import AppConfig
@@ -76,7 +76,7 @@ def test_scheduled_task_models_registered():
 Run:
 
 ```bash
-cd backend && PYTHONPATH=. uv run pytest tests/test_scheduled_task_models.py -v
+cd backend && PYTHONPATH=. uv run pytest tests/test_scheduler/test_scheduled_task_models.py -v
 ```
 
 Expected:
@@ -216,7 +216,7 @@ Append to `__all__`:
 Run:
 
 ```bash
-cd backend && PYTHONPATH=. uv run pytest tests/test_scheduled_task_models.py -v
+cd backend && PYTHONPATH=. uv run pytest tests/test_scheduler/test_scheduled_task_models.py -v
 ```
 
 Expected: PASS
@@ -231,7 +231,7 @@ git add backend/packages/harness/deerflow/config/scheduler_config.py \
   backend/packages/harness/deerflow/persistence/scheduled_tasks/model.py \
   backend/packages/harness/deerflow/persistence/scheduled_task_runs/__init__.py \
   backend/packages/harness/deerflow/persistence/scheduled_task_runs/model.py \
-  backend/tests/test_scheduled_task_models.py
+  backend/tests/test_scheduler/test_scheduled_task_models.py
 git commit -m "feat(scheduler): add scheduler config and scheduled task models"
 ```
 
@@ -245,7 +245,7 @@ git commit -m "feat(scheduler): add scheduler config and scheduled task models"
 - Create: `backend/packages/harness/deerflow/persistence/migrations/versions/0002_scheduled_tasks.py`
 - Modify: `backend/packages/harness/deerflow/persistence/scheduled_tasks/__init__.py`
 - Modify: `backend/packages/harness/deerflow/persistence/scheduled_task_runs/__init__.py`
-- Test: `backend/tests/test_scheduled_task_repository.py`
+- Test: `backend/tests/test_scheduler/test_scheduled_task_repository.py`
 
 **Interfaces:**
 - Consumes: `ScheduledTaskRow`, `ScheduledTaskRunRow`, async session factory.
@@ -256,7 +256,7 @@ git commit -m "feat(scheduler): add scheduler config and scheduled task models"
 
 - [ ] **Step 1: Write the failing tests**
 
-Create `backend/tests/test_scheduled_task_repository.py`:
+Create `backend/tests/test_scheduler/test_scheduled_task_repository.py`:
 
 ```python
 from datetime import UTC, datetime
@@ -323,7 +323,7 @@ async def test_scheduled_task_run_repository_records_history(tmp_path):
 Run:
 
 ```bash
-cd backend && PYTHONPATH=. uv run pytest tests/test_scheduled_task_repository.py -v
+cd backend && PYTHONPATH=. uv run pytest tests/test_scheduler/test_scheduled_task_repository.py -v
 ```
 
 Expected:
@@ -515,7 +515,7 @@ op.create_index("ix_scheduled_task_runs_status", "scheduled_task_runs", ["status
 Run:
 
 ```bash
-cd backend && PYTHONPATH=. uv run pytest tests/test_scheduled_task_repository.py tests/test_scheduled_task_models.py -v
+cd backend && PYTHONPATH=. uv run pytest tests/test_scheduler/test_scheduled_task_repository.py tests/test_scheduler/test_scheduled_task_models.py -v
 ```
 
 Expected: PASS
@@ -528,7 +528,7 @@ git add backend/packages/harness/deerflow/persistence/scheduled_tasks/__init__.p
   backend/packages/harness/deerflow/persistence/scheduled_task_runs/__init__.py \
   backend/packages/harness/deerflow/persistence/scheduled_task_runs/sql.py \
   backend/packages/harness/deerflow/persistence/migrations/versions/0002_scheduled_tasks.py \
-  backend/tests/test_scheduled_task_repository.py
+  backend/tests/test_scheduler/test_scheduled_task_repository.py
 git commit -m "feat(scheduler): add scheduled task repositories and migration"
 ```
 
@@ -540,7 +540,7 @@ git commit -m "feat(scheduler): add scheduled task repositories and migration"
 - Create: `backend/packages/harness/deerflow/scheduler/__init__.py`
 - Create: `backend/packages/harness/deerflow/scheduler/clock.py`
 - Create: `backend/packages/harness/deerflow/scheduler/schedules.py`
-- Test: `backend/tests/test_scheduled_task_schedules.py`
+- Test: `backend/tests/test_scheduler/test_scheduled_task_schedules.py`
 
 **Interfaces:**
 - Produces:
@@ -551,7 +551,7 @@ git commit -m "feat(scheduler): add scheduled task repositories and migration"
 
 - [ ] **Step 1: Write the failing tests**
 
-Create `backend/tests/test_scheduled_task_schedules.py`:
+Create `backend/tests/test_scheduler/test_scheduled_task_schedules.py`:
 
 ```python
 from datetime import UTC, datetime
@@ -610,7 +610,7 @@ def test_next_run_at_for_cron_uses_timezone():
 Run:
 
 ```bash
-cd backend && PYTHONPATH=. uv run pytest tests/test_scheduled_task_schedules.py -v
+cd backend && PYTHONPATH=. uv run pytest tests/test_scheduler/test_scheduled_task_schedules.py -v
 ```
 
 Expected: fail because `deerflow.scheduler.schedules` does not exist.
@@ -698,7 +698,7 @@ def utc_now() -> datetime:
 Run:
 
 ```bash
-cd backend && PYTHONPATH=. uv run pytest tests/test_scheduled_task_schedules.py -v
+cd backend && PYTHONPATH=. uv run pytest tests/test_scheduler/test_scheduled_task_schedules.py -v
 ```
 
 Expected: PASS
@@ -709,7 +709,7 @@ Expected: PASS
 git add backend/packages/harness/deerflow/scheduler/__init__.py \
   backend/packages/harness/deerflow/scheduler/clock.py \
   backend/packages/harness/deerflow/scheduler/schedules.py \
-  backend/tests/test_scheduled_task_schedules.py
+  backend/tests/test_scheduler/test_scheduled_task_schedules.py
 git commit -m "feat(scheduler): add schedule parsing and next-run computation"
 ```
 
@@ -720,7 +720,7 @@ git commit -m "feat(scheduler): add schedule parsing and next-run computation"
 **Files:**
 - Modify: `backend/packages/harness/deerflow/persistence/scheduled_tasks/sql.py`
 - Modify: `backend/packages/harness/deerflow/persistence/scheduled_task_runs/sql.py`
-- Test: `backend/tests/test_scheduled_task_claims.py`
+- Test: `backend/tests/test_scheduler/test_scheduled_task_claims.py`
 
 **Interfaces:**
 - Produces:
@@ -732,7 +732,7 @@ git commit -m "feat(scheduler): add schedule parsing and next-run computation"
 
 - [ ] **Step 1: Write the failing tests**
 
-Create `backend/tests/test_scheduled_task_claims.py`:
+Create `backend/tests/test_scheduler/test_scheduled_task_claims.py`:
 
 ```python
 from datetime import UTC, datetime, timedelta
@@ -794,7 +794,7 @@ async def test_claim_due_tasks_claims_only_due_owned_rows(tmp_path):
 Run:
 
 ```bash
-cd backend && PYTHONPATH=. uv run pytest tests/test_scheduled_task_claims.py -v
+cd backend && PYTHONPATH=. uv run pytest tests/test_scheduler/test_scheduled_task_claims.py -v
 ```
 
 Expected: fail because `claim_due_tasks` does not exist.
@@ -919,7 +919,7 @@ Update `backend/packages/harness/deerflow/persistence/scheduled_task_runs/sql.py
 Run:
 
 ```bash
-cd backend && PYTHONPATH=. uv run pytest tests/test_scheduled_task_claims.py tests/test_scheduled_task_repository.py -v
+cd backend && PYTHONPATH=. uv run pytest tests/test_scheduler/test_scheduled_task_claims.py tests/test_scheduler/test_scheduled_task_repository.py -v
 ```
 
 Expected: PASS
@@ -929,7 +929,7 @@ Expected: PASS
 ```bash
 git add backend/packages/harness/deerflow/persistence/scheduled_tasks/sql.py \
   backend/packages/harness/deerflow/persistence/scheduled_task_runs/sql.py \
-  backend/tests/test_scheduled_task_claims.py
+  backend/tests/test_scheduler/test_scheduled_task_claims.py
 git commit -m "feat(scheduler): add due-task claim and lease management"
 ```
 
@@ -942,7 +942,7 @@ git commit -m "feat(scheduler): add due-task claim and lease management"
 - Create: `backend/app/scheduler/service.py`
 - Modify: `backend/app/gateway/services.py`
 - Modify: `backend/app/gateway/deps.py`
-- Test: `backend/tests/test_scheduled_task_service.py`
+- Test: `backend/tests/test_scheduler/test_scheduled_task_service.py`
 
 **Interfaces:**
 - Produces:
@@ -952,7 +952,7 @@ git commit -m "feat(scheduler): add due-task claim and lease management"
 
 - [ ] **Step 1: Write the failing tests**
 
-Create `backend/tests/test_scheduled_task_service.py`:
+Create `backend/tests/test_scheduler/test_scheduled_task_service.py`:
 
 ```python
 from datetime import UTC, datetime, timedelta
@@ -1025,7 +1025,7 @@ async def test_service_claims_and_dispatches_due_task():
 Run:
 
 ```bash
-cd backend && PYTHONPATH=. uv run pytest tests/test_scheduled_task_service.py -v
+cd backend && PYTHONPATH=. uv run pytest tests/test_scheduler/test_scheduled_task_service.py -v
 ```
 
 Expected: fail because service module does not exist.
@@ -1211,7 +1211,7 @@ __all__ = ["ScheduledTaskService"]
 Run:
 
 ```bash
-cd backend && PYTHONPATH=. uv run pytest tests/test_scheduled_task_service.py -v
+cd backend && PYTHONPATH=. uv run pytest tests/test_scheduler/test_scheduled_task_service.py -v
 ```
 
 Expected: PASS
@@ -1222,7 +1222,7 @@ Expected: PASS
 git add backend/app/gateway/services.py \
   backend/app/scheduler/__init__.py \
   backend/app/scheduler/service.py \
-  backend/tests/test_scheduled_task_service.py
+  backend/tests/test_scheduler/test_scheduled_task_service.py
 git commit -m "feat(scheduler): add scheduled task service and shared run launcher"
 ```
 
@@ -1235,7 +1235,7 @@ git commit -m "feat(scheduler): add scheduled task service and shared run launch
 - Modify: `backend/app/gateway/routers/__init__.py`
 - Modify: `backend/app/gateway/app.py`
 - Modify: `backend/app/gateway/deps.py`
-- Test: `backend/tests/test_scheduled_task_router.py`
+- Test: `backend/tests/test_scheduler/test_scheduled_task_router.py`
 
 **Interfaces:**
 - Produces REST endpoints:
@@ -1243,7 +1243,7 @@ git commit -m "feat(scheduler): add scheduled task service and shared run launch
 
 - [ ] **Step 1: Write the failing tests**
 
-Create `backend/tests/test_scheduled_task_router.py` with a minimal FastAPI app mounting the new router and stubbing repo dependencies:
+Create `backend/tests/test_scheduler/test_scheduled_task_router.py` with a minimal FastAPI app mounting the new router and stubbing repo dependencies:
 
 ```python
 from fastapi import FastAPI
@@ -1265,7 +1265,7 @@ def test_router_registers_list_endpoint():
 Run:
 
 ```bash
-cd backend && PYTHONPATH=. uv run pytest tests/test_scheduled_task_router.py -v
+cd backend && PYTHONPATH=. uv run pytest tests/test_scheduler/test_scheduled_task_router.py -v
 ```
 
 Expected: fail because router module does not exist.
@@ -1316,7 +1316,7 @@ Mount router in `backend/app/gateway/app.py` import list and `create_app()` incl
 Run:
 
 ```bash
-cd backend && PYTHONPATH=. uv run pytest tests/test_scheduled_task_router.py -v
+cd backend && PYTHONPATH=. uv run pytest tests/test_scheduler/test_scheduled_task_router.py -v
 ```
 
 Expected: PASS
@@ -1327,7 +1327,7 @@ Expected: PASS
 git add backend/app/gateway/routers/scheduled_tasks.py \
   backend/app/gateway/routers/__init__.py \
   backend/app/gateway/app.py \
-  backend/tests/test_scheduled_task_router.py
+  backend/tests/test_scheduler/test_scheduled_task_router.py
 git commit -m "feat(scheduler): add scheduled task router skeleton"
 ```
 
@@ -1338,7 +1338,7 @@ git commit -m "feat(scheduler): add scheduled task router skeleton"
 **Files:**
 - Modify: `backend/app/gateway/routers/scheduled_tasks.py`
 - Modify: `backend/app/gateway/deps.py`
-- Test: `backend/tests/test_scheduled_task_router.py`
+- Test: `backend/tests/test_scheduler/test_scheduled_task_router.py`
 
 **Interfaces:**
 - Produces working route handlers and dependency accessors:
@@ -1348,7 +1348,7 @@ git commit -m "feat(scheduler): add scheduled task router skeleton"
 
 - [ ] **Step 1: Extend the failing tests**
 
-Append to `backend/tests/test_scheduled_task_router.py`:
+Append to `backend/tests/test_scheduler/test_scheduled_task_router.py`:
 
 ```python
 def test_router_registers_trigger_route():
@@ -1364,7 +1364,7 @@ def test_router_registers_trigger_route():
 Run:
 
 ```bash
-cd backend && PYTHONPATH=. uv run pytest tests/test_scheduled_task_router.py -v
+cd backend && PYTHONPATH=. uv run pytest tests/test_scheduler/test_scheduled_task_router.py -v
 ```
 
 Expected: fail because trigger route not implemented.
@@ -1457,7 +1457,7 @@ async def list_thread_scheduled_tasks(thread_id: str):
 Run:
 
 ```bash
-cd backend && PYTHONPATH=. uv run pytest tests/test_scheduled_task_router.py -v
+cd backend && PYTHONPATH=. uv run pytest tests/test_scheduler/test_scheduled_task_router.py -v
 ```
 
 Expected: PASS
@@ -1467,7 +1467,7 @@ Expected: PASS
 ```bash
 git add backend/app/gateway/deps.py \
   backend/app/gateway/routers/scheduled_tasks.py \
-  backend/tests/test_scheduled_task_router.py
+  backend/tests/test_scheduler/test_scheduled_task_router.py
 git commit -m "feat(scheduler): add scheduled task route surface"
 ```
 
@@ -1478,7 +1478,7 @@ git commit -m "feat(scheduler): add scheduled task route surface"
 **Files:**
 - Modify: `backend/app/gateway/deps.py`
 - Modify: `backend/app/gateway/app.py`
-- Test: `backend/tests/test_scheduled_task_lifecycle.py`
+- Test: `backend/tests/test_scheduler/test_scheduled_task_lifecycle.py`
 
 **Interfaces:**
 - Produces app state members:
@@ -1488,7 +1488,7 @@ git commit -m "feat(scheduler): add scheduled task route surface"
 
 - [ ] **Step 1: Write the failing tests**
 
-Create `backend/tests/test_scheduled_task_lifecycle.py`:
+Create `backend/tests/test_scheduler/test_scheduled_task_lifecycle.py`:
 
 ```python
 from app.gateway.app import create_app
@@ -1505,7 +1505,7 @@ def test_gateway_app_includes_scheduled_task_router():
 Run:
 
 ```bash
-cd backend && PYTHONPATH=. uv run pytest tests/test_scheduled_task_lifecycle.py -v
+cd backend && PYTHONPATH=. uv run pytest tests/test_scheduler/test_scheduled_task_lifecycle.py -v
 ```
 
 Expected: fail if route inclusion or lifecycle wiring is incomplete.
@@ -1565,7 +1565,7 @@ Before exiting lifespan shutdown:
 Run:
 
 ```bash
-cd backend && PYTHONPATH=. uv run pytest tests/test_scheduled_task_lifecycle.py tests/test_scheduled_task_router.py -v
+cd backend && PYTHONPATH=. uv run pytest tests/test_scheduler/test_scheduled_task_lifecycle.py tests/test_scheduler/test_scheduled_task_router.py -v
 ```
 
 Expected: PASS
@@ -1573,7 +1573,7 @@ Expected: PASS
 - [ ] **Step 5: Commit**
 
 ```bash
-git add backend/app/gateway/deps.py backend/app/gateway/app.py backend/tests/test_scheduled_task_lifecycle.py
+git add backend/app/gateway/deps.py backend/app/gateway/app.py backend/tests/test_scheduler/test_scheduled_task_lifecycle.py
 git commit -m "feat(scheduler): wire scheduled task repos and lifecycle"
 ```
 
@@ -1942,7 +1942,7 @@ git commit -m "feat(scheduler): add thread-level scheduled task entry point"
 - Modify: `frontend/src/core/scheduled-tasks/api.ts`
 - Modify: `frontend/src/core/scheduled-tasks/hooks.ts`
 - Modify: `frontend/src/app/workspace/scheduled-tasks/page.tsx`
-- Test: `backend/tests/test_scheduled_task_router.py`
+- Test: `backend/tests/test_scheduler/test_scheduled_task_router.py`
 - Test: `frontend/tests/unit/core/scheduled-tasks/hooks.test.ts`
 - Test: `frontend/tests/e2e/scheduled-tasks.spec.ts`
 
@@ -1968,7 +1968,7 @@ Add Playwright interactions for:
 Run:
 
 ```bash
-cd backend && PYTHONPATH=. uv run pytest tests/test_scheduled_task_router.py -v
+cd backend && PYTHONPATH=. uv run pytest tests/test_scheduler/test_scheduled_task_router.py -v
 cd frontend && pnpm test:e2e scheduled-tasks.spec.ts
 ```
 
@@ -1993,7 +1993,7 @@ Frontend:
 Run:
 
 ```bash
-cd backend && PYTHONPATH=. uv run pytest tests/test_scheduled_task_router.py tests/test_scheduled_task_service.py tests/test_scheduled_task_repository.py tests/test_scheduled_task_claims.py tests/test_scheduled_task_schedules.py -v
+cd backend && PYTHONPATH=. uv run pytest tests/test_scheduler/test_scheduled_task_router.py tests/test_scheduler/test_scheduled_task_service.py tests/test_scheduler/test_scheduled_task_repository.py tests/test_scheduler/test_scheduled_task_claims.py tests/test_scheduler/test_scheduled_task_schedules.py -v
 cd frontend && pnpm test
 cd frontend && pnpm test:e2e scheduled-tasks.spec.ts
 ```
@@ -2007,7 +2007,7 @@ git add backend/app/gateway/routers/scheduled_tasks.py \
   frontend/src/core/scheduled-tasks/api.ts \
   frontend/src/core/scheduled-tasks/hooks.ts \
   frontend/src/app/workspace/scheduled-tasks/page.tsx \
-  backend/tests/test_scheduled_task_router.py \
+  backend/tests/test_scheduler/test_scheduled_task_router.py \
   frontend/tests/unit/core/scheduled-tasks/hooks.test.ts \
   frontend/tests/e2e/scheduled-tasks.spec.ts
 git commit -m "feat(scheduler): implement scheduled task CRUD and UI actions"
@@ -2041,13 +2041,13 @@ Run:
 
 ```bash
 cd backend && PYTHONPATH=. uv run pytest \
-  tests/test_scheduled_task_models.py \
-  tests/test_scheduled_task_repository.py \
-  tests/test_scheduled_task_schedules.py \
-  tests/test_scheduled_task_claims.py \
-  tests/test_scheduled_task_service.py \
-  tests/test_scheduled_task_router.py \
-  tests/test_scheduled_task_lifecycle.py -v
+  tests/test_scheduler/test_scheduled_task_models.py \
+  tests/test_scheduler/test_scheduled_task_repository.py \
+  tests/test_scheduler/test_scheduled_task_schedules.py \
+  tests/test_scheduler/test_scheduled_task_claims.py \
+  tests/test_scheduler/test_scheduled_task_service.py \
+  tests/test_scheduler/test_scheduled_task_router.py \
+  tests/test_scheduler/test_scheduled_task_lifecycle.py -v
 ```
 
 Expected: all PASS

@@ -18,11 +18,11 @@
 - The streaming pipeline always publishes a final `is_final=True` message even on stream errors (`manager.py:1185-1224` `finally` block).
 - `_send_running_reply()` is awaited **before** the inbound message is published (`telegram.py:324-326`), so the placeholder always exists before any outbound arrives.
 - Outbound `thread_ts` equals the inbound `thread_ts`, which Telegram sets to the user message id (`telegram.py:397`). So the stream key `f"{chat_id}:{thread_ts}"` matches the placeholder registered with the user message id.
-- Existing tests to keep green: `tests/test_channels.py::TestTelegramSendRetry` (send retry semantics, `_max_retries=0` RuntimeError).
+- Existing tests to keep green: `tests/test_channels/test_channels.py::TestTelegramSendRetry` (send retry semantics, `_max_retries=0` RuntimeError).
 
 **Intentional behavior change:** command replies (e.g. `/help`) and error replies now *edit* the "Working on it..." placeholder instead of sending a second message (key matches, `is_final=True`). This is improved UX and covered by a test.
 
-Run tests from `backend/`: `PYTHONPATH=. uv run pytest tests/test_channels.py -v`
+Run tests from `backend/`: `PYTHONPATH=. uv run pytest tests/test_channels/test_channels.py -v`
 
 ---
 
@@ -31,11 +31,11 @@ Run tests from `backend/`: `PYTHONPATH=. uv run pytest tests/test_channels.py -v
 **Files:**
 - Modify: `backend/app/channels/manager.py:59` (CHANNEL_CAPABILITIES)
 - Modify: `backend/app/channels/telegram.py` (add `supports_streaming` property)
-- Test: `backend/tests/test_channels.py` (new class `TestTelegramStreaming`)
+- Test: `backend/tests/test_channels/test_channels.py` (new class `TestTelegramStreaming`)
 
 - [ ] **Step 1: Write the failing test**
 
-Append to `backend/tests/test_channels.py` (bottom of file). The file already imports `MessageBus`, `OutboundMessage`, `ChannelManager`, `pytest`, `SimpleNamespace`, `MagicMock`, `AsyncMock`, and defines `_run()`:
+Append to `backend/tests/test_channels/test_channels.py` (bottom of file). The file already imports `MessageBus`, `OutboundMessage`, `ChannelManager`, `pytest`, `SimpleNamespace`, `MagicMock`, `AsyncMock`, and defines `_run()`:
 
 ```python
 # ---------------------------------------------------------------------------
@@ -56,7 +56,7 @@ class TestTelegramStreaming:
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `PYTHONPATH=. uv run pytest tests/test_channels.py::TestTelegramStreaming::test_telegram_reports_streaming_support -v`
+Run: `PYTHONPATH=. uv run pytest tests/test_channels/test_channels.py::TestTelegramStreaming::test_telegram_reports_streaming_support -v`
 Expected: FAIL with `assert False is True` (base class property returns False).
 
 - [ ] **Step 3: Implement**
@@ -83,13 +83,13 @@ In `backend/app/channels/telegram.py`, add a property right after `__init__` (be
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `PYTHONPATH=. uv run pytest tests/test_channels.py::TestTelegramStreaming -v`
+Run: `PYTHONPATH=. uv run pytest tests/test_channels/test_channels.py::TestTelegramStreaming -v`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add backend/app/channels/manager.py backend/app/channels/telegram.py backend/tests/test_channels.py
+git add backend/app/channels/manager.py backend/app/channels/telegram.py backend/tests/test_channels/test_channels.py
 git commit -m "feat(telegram): report streaming support for telegram channel"
 ```
 
@@ -99,7 +99,7 @@ git commit -m "feat(telegram): report streaming support for telegram channel"
 
 **Files:**
 - Modify: `backend/app/channels/telegram.py` (constants, `__init__`, helpers, `_send_running_reply`)
-- Test: `backend/tests/test_channels.py` (`TestTelegramStreaming`)
+- Test: `backend/tests/test_channels/test_channels.py` (`TestTelegramStreaming`)
 
 - [ ] **Step 1: Write the failing test**
 
@@ -137,7 +137,7 @@ Add to `TestTelegramStreaming`:
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `PYTHONPATH=. uv run pytest tests/test_channels.py::TestTelegramStreaming::test_running_reply_registers_stream_placeholder -v`
+Run: `PYTHONPATH=. uv run pytest tests/test_channels/test_channels.py::TestTelegramStreaming::test_running_reply_registers_stream_placeholder -v`
 Expected: FAIL with `AttributeError: 'TelegramChannel' object has no attribute '_stream_messages'`
 
 - [ ] **Step 3: Implement**
@@ -215,13 +215,13 @@ d) Replace `_send_running_reply` (`telegram.py:183-196`) with:
 
 - [ ] **Step 4: Run tests to verify pass (including existing retry tests)**
 
-Run: `PYTHONPATH=. uv run pytest tests/test_channels.py::TestTelegramStreaming tests/test_channels.py::TestTelegramSendRetry -v`
+Run: `PYTHONPATH=. uv run pytest tests/test_channels/test_channels.py::TestTelegramStreaming tests/test_channels/test_channels.py::TestTelegramSendRetry -v`
 Expected: all PASS
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add backend/app/channels/telegram.py backend/tests/test_channels.py
+git add backend/app/channels/telegram.py backend/tests/test_channels/test_channels.py
 git commit -m "feat(telegram): register running-reply placeholder as stream target"
 ```
 
@@ -231,7 +231,7 @@ git commit -m "feat(telegram): register running-reply placeholder as stream targ
 
 **Files:**
 - Modify: `backend/app/channels/telegram.py:97-137` (`send`)
-- Test: existing `tests/test_channels.py::TestTelegramSendRetry` must stay green
+- Test: existing `tests/test_channels/test_channels.py::TestTelegramSendRetry` must stay green
 
 - [ ] **Step 1: Replace `send()` with the dispatching version + extracted helper**
 
@@ -287,7 +287,7 @@ Replace the whole `send()` method (`telegram.py:97-137`) with:
 
 - [ ] **Step 2: Run existing retry tests to verify no regression**
 
-Run: `PYTHONPATH=. uv run pytest tests/test_channels.py::TestTelegramSendRetry tests/test_channels.py::TestTelegramStreaming -v`
+Run: `PYTHONPATH=. uv run pytest tests/test_channels/test_channels.py::TestTelegramSendRetry tests/test_channels/test_channels.py::TestTelegramStreaming -v`
 Expected: all PASS (pure refactor)
 
 - [ ] **Step 3: Commit**
@@ -303,7 +303,7 @@ git commit -m "refactor(telegram): extract _send_new_message from send()"
 
 **Files:**
 - Modify: `backend/app/channels/telegram.py` (`send`, new `_send_stream_update`)
-- Test: `backend/tests/test_channels.py` (`TestTelegramStreaming`)
+- Test: `backend/tests/test_channels/test_channels.py` (`TestTelegramStreaming`)
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -441,7 +441,7 @@ Then the tests:
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `PYTHONPATH=. uv run pytest tests/test_channels.py::TestTelegramStreaming -v`
+Run: `PYTHONPATH=. uv run pytest tests/test_channels/test_channels.py::TestTelegramStreaming -v`
 Expected: the new tests FAIL (current `send()` sends new messages for every outbound; `bot.sent` counts are wrong).
 
 - [ ] **Step 3: Implement**
@@ -526,13 +526,13 @@ In `backend/app/channels/telegram.py`, replace the `send()` body and add `_send_
 
 - [ ] **Step 4: Run tests to verify pass**
 
-Run: `PYTHONPATH=. uv run pytest tests/test_channels.py::TestTelegramStreaming tests/test_channels.py::TestTelegramSendRetry -v`
+Run: `PYTHONPATH=. uv run pytest tests/test_channels/test_channels.py::TestTelegramStreaming tests/test_channels/test_channels.py::TestTelegramSendRetry -v`
 Expected: all PASS. Note `TestTelegramSendRetry` still passes because its messages default to `is_final=True` with no registered stream state.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add backend/app/channels/telegram.py backend/tests/test_channels.py
+git add backend/app/channels/telegram.py backend/tests/test_channels/test_channels.py
 git commit -m "feat(telegram): edit streamed message in place for non-final updates"
 ```
 
@@ -542,7 +542,7 @@ git commit -m "feat(telegram): edit streamed message in place for non-final upda
 
 **Files:**
 - Modify: `backend/app/channels/telegram.py` (`send`, new `_finalize_stream_message`)
-- Test: `backend/tests/test_channels.py` (`TestTelegramStreaming`)
+- Test: `backend/tests/test_channels/test_channels.py` (`TestTelegramStreaming`)
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -628,7 +628,7 @@ Add to `TestTelegramStreaming`:
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `PYTHONPATH=. uv run pytest tests/test_channels.py::TestTelegramStreaming -v`
+Run: `PYTHONPATH=. uv run pytest tests/test_channels/test_channels.py::TestTelegramStreaming -v`
 Expected: new tests FAIL (final messages currently always go through `_send_new_message`).
 
 - [ ] **Step 3: Implement**
@@ -688,18 +688,18 @@ In `backend/app/channels/telegram.py`, update `send()`'s final branch and add `_
 
 - [ ] **Step 4: Run the full channel test file**
 
-Run: `PYTHONPATH=. uv run pytest tests/test_channels.py -v`
+Run: `PYTHONPATH=. uv run pytest tests/test_channels/test_channels.py -v`
 Expected: all PASS (including Feishu/WeCom/manager tests — none of their code paths were touched).
 
 - [ ] **Step 5: Run telegram connection tests too**
 
-Run: `PYTHONPATH=. uv run pytest tests/test_telegram_channel_connections.py -v`
+Run: `PYTHONPATH=. uv run pytest tests/test_channels/test_telegram_channel_connections.py -v`
 Expected: all PASS.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add backend/app/channels/telegram.py backend/tests/test_channels.py
+git add backend/app/channels/telegram.py backend/tests/test_channels/test_channels.py
 git commit -m "feat(telegram): finalize streamed message with overflow splitting"
 ```
 

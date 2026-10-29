@@ -33,7 +33,7 @@ array with only `name`, `package`, `entry_point`, `enabled`, and `required`. Kee
 the manager's `"-"` package fallback and schema defaults/coercion. Validate the
 whole inventory before writing stdout; failures use the existing stderr/non-zero
 path. Listing must not resolve entry points, mutate files, or expose private config
-or source metadata. CLI coverage lives in `tests/test_extension_list_json.py`.
+or source metadata. CLI coverage lives in `tests/test_extensions/test_extension_list_json.py`.
 
 `ExtensionManager` owns the package/config transaction. Install runs a controlled
 `uv add --project <backend> --group extensions --no-workspace --no-sync -- <source>`, updates the dedicated
@@ -71,7 +71,7 @@ the unlink. The managed `plugins:` rewrite uses the same cleanup and records the
 temporary path before writing, so a short write still removes the hidden file.
 Restoring a file that did not exist uses the same helper, so an unlink or
 warning failure cannot replace the original operation error or skip later
-restores. Coverage: `tests/test_extension_atomic_write_cleanup.py`.
+restores. Coverage: `tests/test_extensions/test_extension_atomic_write_cleanup.py`.
 Package mutation is deferred from environment mutation: after `uv add/remove`
 updates the declaration and lock, one `uv sync --locked --all-packages` preserves the same
 config-/environment-detected optional extras as normal startup. All three uv calls pin the
@@ -157,7 +157,7 @@ truth, both compose defaults repeat it, and every `astral-sh/setup-uv` step pins
 version so CI exercises the manager against the binary production actually runs. Otherwise a
 newer uv can bump `uv.lock`'s `revision` (or make `uv lock --check` disagree with a lock
 generated elsewhere) while CI stays green, and the pinned uv in the production image then
-fails on the committed lock. `backend/tests/test_ci_uv_version_pin.py` keeps the four
+fails on the committed lock. `backend/tests/test_infrastructure/test_ci_uv_version_pin.py` keeps the four
 locations in step, which makes a uv upgrade one deliberate, reviewable change.
 Rebuild the Gateway image after changing the managed set. Every install, upgrade, enable,
 disable, remove, or config mutation also requires a Gateway restart because plugin loading
@@ -400,7 +400,7 @@ matching on", so importing the dispatcher's own implementation keeps the two in 
 construction. Do not vendor a local copy: a private import that disappears fails loudly at
 startup, while a stale copy diverges silently at a security boundary. `starlette` is
 therefore a declared, bounded direct dependency so the bump is visible in review, and
-`tests/test_gateway_request_path.py` pins the agreement independently of the mechanism.
+`tests/test_gateway/test_gateway_request_path.py` pins the agreement independently of the mechanism.
 Any preflight, conflict, or include failure rolls back the whole router without preventing
 later routers from mounting. Do not introduce a framework-bound `RouterContributor`
 contract: the public registry accepts `Sequence[Any]`

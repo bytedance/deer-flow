@@ -339,7 +339,7 @@ Phase 1 最低验证要求：
 - **兼容性：** `authorization.enabled: false` 时两条路径均为 no-op（路由返回全部模型，
   解析返回原名）。匿名请求（user=None）不触发过滤。RBAC provider 的 `_RESOURCE_POLICY_KEYS`
   已包含 `"model": "models"`，无需 schema 变更。
-- **证据：** `tests/test_models_authorization.py`（26 tests）覆盖 disabled/anonymous/
+- **证据：** `tests/test_models/test_models_authorization.py`（26 tests）覆盖 disabled/anonymous/
   RBAC allow/deny/wildcard/fail-closed/fail-open 路由场景（含 provider-resolution-error
   fail-closed/fail-open），disabled/allowed/
   graceful-fallback/all-denied-fail-closed/all-denied-fail-open/custom-provider-list-vs-use/
@@ -395,7 +395,7 @@ Phase 1 最低验证要求：
   从 config 解析全部技能名并过滤。RBAC provider 的 `_RESOURCE_POLICY_KEYS` 已包含
   `"skill": "skills"`，无需 schema 变更。对 test mock（SimpleNamespace app_config）安全：
   使用 `getattr` + `is not True` 防御。
-- **证据：** `tests/test_skills_authorization.py`（45 tests，2026-09-04 两轮扩充）覆盖 disabled/RBAC allow/deny/
+- **证据：** `tests/test_skills/test_skills_authorization.py`（45 tests，2026-09-04 两轮扩充）覆盖 disabled/RBAC allow/deny/
   wildcard/empty/provider-error-fail-closed-fail-open/internal-caller 场景，generic filter，
   候选集解析错误的 fail-closed/fail-open + 空配置无 bypass 回归，以及 Layer 2：动作级
   deny 阻断激活（lead 中间件单测 + client 装配接线 + subagent 链接线）、provider 异常
@@ -443,7 +443,7 @@ Phase 1 最低验证要求：
   （直接返回）。RBAC provider 的 `_RESOURCE_POLICY_KEYS` 已包含 `"sandbox": "sandbox"`，
   `provider.py` 已声明 `"sandbox"` 为有效 resource，无需 schema 变更。对 test mock
   （SimpleNamespace app_config）安全：使用 `getattr` + `is not True` 防御。
-- **证据：** `tests/test_sandbox_authorization.py`（23 tests）覆盖 disabled/RBAC allow/deny/
+- **证据：** `tests/test_sandbox/test_sandbox_authorization.py`（23 tests）覆盖 disabled/RBAC allow/deny/
   deny-via-bool/no-policy-unrestricted/provider-error-fail-closed-fail-open/
   internal-caller/default-role 场景，deny 错误携带 role，provider 收到正确的
   resource/action/target；`ensure_sandbox_initialized` sync+async 的 deny（不 acquire）
@@ -473,7 +473,7 @@ Phase 1 最低验证要求：
   `_resolve_authorization_inputs()` 也在线程中执行，避免每次复用 sandbox 时在 event loop
   上 stat/hash 配置文件或 import/构造自定义 provider。只有 provider 的 `aauthorize()`
   在异步调用路径上直接 await。
-- **证据：** `tests/test_sandbox_authorization.py` 新增 sync/async `read_file` 与
+- **证据：** `tests/test_sandbox/test_sandbox_authorization.py` 新增 sync/async `read_file` 与
   `write_file` 组合覆盖，断言每次调用恰好一个 provider 决策并验证 deny 不被 fail-open；
   `tests/blocking_io/test_sandbox_authorization.py` 用真实阻塞文件探针固定配置与 provider
   解析均不在 event loop 上执行。
@@ -528,7 +528,7 @@ Phase 1 最低验证要求：
   不在 `DurableContextMiddleware` gate（时序上晚于 `SkillToolPolicyMiddleware` 读 state，
   依赖 hook 顺序）；不在装配期过滤 catalog（会把 `<skill_index>` 可见性折叠进激活语义，
   且需 N 次 authorize 调用；运行期过滤每次 ≤ MAX_RESULTS 次）。
-- **证据：** `tests/test_skills_authorization.py` 45 tests（describe 动作门控 + provider
+- **证据：** `tests/test_skills/test_skills_authorization.py` 45 tests（describe 动作门控 + provider
   错误 fail-closed/open + 禁用时全量；read 盖章拒绝/放行 + `extract_skills` 无告警跳过；
   lead/subagent 链 stamping 接线；distinct-instance 工厂回归——`_load_skills` 与
   `_create_agent` 共享一个实例且仅解析一次）+ `test_authorization_enforcement.py`
@@ -570,7 +570,7 @@ Phase 1 最低验证要求：
 - **否决方案：** 不在 `DurableContextMiddleware` 渲染时复授权（消费点直接读 state，
   渲染层过滤不覆盖 policy/secret 读取）；不在条目上缓存决策（持久化条目的正确缓存
   粒度是"每次消费时重查"，与 live registry 复验同一模式）。
-- **证据：** `tests/test_skills_authorization.py` 45 tests：allow→deny-next-run 双回归
+- **证据：** `tests/test_skills/test_skills_authorization.py` 45 tests：allow→deny-next-run 双回归
   （秘密绑定断源、allowed-tools 部分拒绝不株连、全拒 fail-closed builtins）、
   `_AsyncOnlyProvider`（同步 API 恒失败、aauthorize 可用）驱动四条异步路径断言
   （激活、盖章允许/拒绝、describe、tool policy——允许场景下正确接线保留技能声明，
@@ -610,7 +610,7 @@ Phase 1 最低验证要求：
   auth-disabled 本地模式，与 `list_models` 对齐。skill 管理端点（install/edit/export/
   delete 等）保持 `require_admin_user`，不受本过滤影响。RBAC 缺 `skills` 键 = 放行，
   `allow: []` = 全拒（与 `models` 键同语义）。
-- **证据：** `tests/test_skills_listing_authorization.py` 覆盖 disabled/anonymous/RBAC
+- **证据：** `tests/test_skills/test_skills_listing_authorization.py` 覆盖 disabled/anonymous/RBAC
   allow/deny/wildcard/absent-policy、custom+public 一致过滤、provider error/unavailable/
   坏返回类型 × fail-closed/fail-open、`("skill", [...])` 契约、custom 列表绕过封闭、
   detail 404 与真实缺失逐字一致；`test_skills_router_authz.py` 与
@@ -667,12 +667,12 @@ Phase 1 最低验证要求：
   （未知 action 仍是 404，不改变存在性预言）、读取请求体之前插入一次 `plugin_action` 决策；
   deny → `403 "Plugin action not permitted for your role."`，handler 不被调用，被拒调用者
   无法占用 256 KiB 输入预算。
-- **证据：** 新增 `tests/test_plugin_targets.py`（字符集、跨 kind 同形 target、
-  management part、非法输入）、`tests/test_tool_provenance.py`（plugin tag 往返、错配 tag 被丢弃、
+- **证据：** 新增 `tests/test_extensions/test_plugin_targets.py`（字符集、跨 kind 同形 target、
+  management part、非法输入）、`tests/test_tools/test_tool_provenance.py`（plugin tag 往返、错配 tag 被丢弃、
   MCP 优先级、`deerflow_tool_source` 与模块回退标签保持）、
-  `tests/test_plugin_action_authorization.py`（allow/deny/未授权先于 body、
+  `tests/test_extensions/test_plugin_action_authorization.py`（allow/deny/未授权先于 body、
   fail_closed/fail_open、disabled no-op、未知 action 404、internal 身份）、
-  `tests/test_plugin_management_guard.py`（helper 的 fail-closed 矩阵、宿主解析器安装与
+  `tests/test_extensions/test_plugin_management_guard.py`（helper 的 fail-closed 矩阵、宿主解析器安装与
   未知 namespace、disabled 放行、loop 生命周期与只读投影前置）、
   `tests/blocking_io/test_plugin_authorization.py`（config/discovery 不在事件循环上，
   含 red→green teeth）；扩展 `test_rbac_authorization_provider.py`、`test_plugin_tools.py`、
@@ -831,7 +831,7 @@ Phase 1 最低验证要求：
   也一并改为 49（该文档由主线新增，写成时值为 47）。冲突块取主线；本 PR 的 `authorization:`
   段与 `peek_loaded_app_config()` 均在自动合并结果中保留。
 - **证据：** `scripts/check_config_version.sh` 通过（example=49 / chart=49）；
-  `backend/tests/test_config_version.py` 全绿（含用真实 `scripts/config-upgrade.sh` 跑
+  `backend/tests/test_config/test_config_version.py` 全绿（含用真实 `scripts/config-upgrade.sh` 跑
   v26 → 当前版本的升级用例，其 `expected_version` 直接读 `config.example.yaml`）。
 - **兼容性：** 仅提示语义变化，运行时行为不变。已按主线 48 升级的 `config.yaml` 会收到一次
   “outdated” 提示，可 `make config-upgrade` 合并 `authorization` 默认段——这正是版本号存在的目的。
@@ -874,7 +874,7 @@ Phase 1 最低验证要求：
   展示名与路径一致有其意义，且历史条目仍需注册表解析，改写只修新条目不修存量）；
   不在 map 里同时预计算"路径名 + 声明名"两个键（掩盖键错配而非消除，同步回落仍可能
   命中错误键）。
-- **证据：** 新增 5 个回归（`tests/test_skills_authorization.py` 45→50）：同步盖章断言
+- **证据：** 新增 5 个回归（`tests/test_skills/test_skills_authorization.py` 45→50）：同步盖章断言
   provider 目标为声明名（`sync_calls == ["vercel-deploy"]`）；RBAC allow 声明名 → 激活 /
   allow 目录名 → 拒绝（双向钉死经注册表解析）；异步盖章 `_AsyncOnlyProvider` 下
   `async_calls == ["vercel-deploy"]` 且条目盖章（同步回退会 fail-closed 出拒绝标记）；
@@ -911,7 +911,7 @@ Phase 1 最低验证要求：
 - **否决方案：** 不在失败后立即重试恢复（reviewer 给的第二选项）——多一次全量扫描
   且复杂度更高，保留失败与既有"首次加载失败"语义逐字一致；不在调用点条件跳过
   `to_thread`（choke point 单点守卫才可被单点突变钉住）。
-- **证据：** `tests/test_skills_authorization.py` 50→52：
+- **证据：** `tests/test_skills/test_skills_authorization.py` 50→52：
   `test_async_policy_preserves_prepass_registry_failure`（首读失败、次读会成功的
   flaky storage + `_AsyncOnlyProvider(denied)` + `fail_closed=False`：恰一次
   storage 调用、零 provider 调用、builtins-only——旧行为下 worker 重试成功 →
@@ -953,7 +953,7 @@ Phase 1 最低验证要求：
   堵不住"预扫描成功但两次加载不一致"的窗口；快照传递同成本下把两类窗口都关成
   构造不可能。不为空 `entry_paths` 跳过 `to_thread`（微秒级线程跳 vs 单点守卫的
   突变可钉性，取后者；P3 有意放弃并记录）。
-- **证据：** `tests/test_skills_authorization.py` 52→54：
+- **证据：** `tests/test_skills/test_skills_authorization.py` 52→54：
   `test_async_secret_binding_preserves_prepass_failure`（两技能两调用：调用 2 预扫描
   第 3 次加载失败——条目绑定归零且 slash 绑定存活；旧行为同步回退 fail-open 绑定
   被拒的 ENTRY_KEY）、`test_async_secret_binding_resolves_entries_against_prepass_snapshot`
@@ -993,7 +993,7 @@ Phase 1 最低验证要求：
   #3 slash 新鲜}×失败：#1 失败钉（既有）、#3 失败钉（本轮新增）、#2 失败
   `_resolve_activation` 未捕获存储异常直接打断 run——**PR 之前既有**、不在本
   diff，记录不搭车。④ 边界——快照 dict 跨线程只读共享，无变异点。
-- **证据：** `tests/test_skills_authorization.py` 54→56：
+- **证据：** `tests/test_skills/test_skills_authorization.py` 54→56：
   `test_slash_secret_binding_uses_post_activation_registry`（预扫描成功+窗口内
   slash 声明 OLD→NEW：注入 NEW、不注入 OLD）；`test_snapshot_entries_bind_while_
   slash_fresh_load_fails`（新鲜加载瞬时失败：slash 归零、条目仍按快照绑定）。
@@ -1163,7 +1163,7 @@ Phase 1 最低验证要求：
   `authorize()` 在同步链是正确 API）。空候选集返回空批而非 `None`：即便无候选，
   消费者的意外名字也必须按策略失败。`get_or_none` 供发布者区分"未覆盖"与 False。
   `fail_closed` 随载体携带（取自 resolved 授权上下文）。
-- **证据：** `tests/test_activation_decisions.py` 5 个类型单测（覆盖返回/miss
+- **证据：** `tests/test_config/test_activation_decisions.py` 5 个类型单测（覆盖返回/miss
   双方向 + 响亮日志断言/get_or_none/容器协议）+ 中间件级 3 测试（miss 在
   fail-open 允许且 `provider.sync_calls == []`、生产默认 fail-closed 拒绝、
   `None` 同步链仍走同步 API）。突变 M18（恢复 miss 的同步回退）必红。

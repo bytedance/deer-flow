@@ -1,7 +1,7 @@
 """Shared config + gateway-drive helpers for the record/replay e2e.
 
 Record (``scripts/record_gateway.py`` + ``scripts/build_fixture_from_jsonl.py``)
-and replay (``tests/test_replay_golden.py``)
+and replay (``tests/test_persistence/test_replay_golden.py``)
 MUST drive the gateway through an identical, prompt-affecting config — otherwise
 the system prompt differs and the recorded input hashes never match on replay.
 Centralising the config builder + drive loop here makes that identity hold by

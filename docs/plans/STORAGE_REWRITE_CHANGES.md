@@ -251,10 +251,10 @@ This gives Linux, macOS, and Windows the same behavior. A cross-layer contract t
 
 Primary coverage lives in:
 
-- `tests/test_memory_storage_markdown.py`
-- `tests/test_deermem_self_contained.py`
-- `tests/test_memory_router.py`
-- `tests/test_memory_markdown_migration_cli.py`
-- `tests/test_custom_agent.py`
+- `tests/test_knowledge/test_memory_storage_markdown.py`
+- `tests/test_knowledge/test_deermem_self_contained.py`
+- `tests/test_knowledge/test_memory_router.py`
+- `tests/test_knowledge/test_memory_markdown_migration_cli.py`
+- `tests/test_agents/test_custom_agent.py`
 
 Tests cover layout, compatibility, incremental writes, concurrency, cap enforcement, clear semantics, corruption, migration, retrieval delegation, cache invalidation, path containment, portability, Windows lock behavior, and POSIX directory sync.

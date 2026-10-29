@@ -372,7 +372,7 @@ changing the host's uv settings or the normal config upgrade command.
 
 `make test-live` calls real external APIs and may incur API costs or create
 local sandboxes, artifacts, and files. It is never run by the default backend
-test command or CI. Direct pytest invocations of `tests/test_client_live.py`
+test command or CI. Direct pytest invocations of `tests/test_gateway/test_client_live.py`
 must also set `DEER_FLOW_RUN_LIVE_TESTS=1`.
 
 ### PR Regression Checks

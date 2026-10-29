@@ -32,11 +32,11 @@
 **Files:**
 - Modify: `docker/nginx/nginx.conf`
 - Modify: `docker/nginx/nginx.local.conf`
-- Create: `backend/tests/test_nginx_compression.py`
+- Create: `backend/tests/test_infrastructure/test_nginx_compression.py`
 - Modify: `AGENTS.md`
 
 - [ ] Write a failing test that parses both configs and asserts the same compression policy: `gzip on`, `gzip_vary on`, minimum length 1024, compression level 5, and types limited to HTML default plus CSS, JavaScript, JSON, XML, and SVG. Assert `text/event-stream`, fonts, images other than SVG, audio, and video are absent.
-- [ ] Run `cd backend && uv run pytest tests/test_nginx_compression.py -q` and capture RED.
+- [ ] Run `cd backend && uv run pytest tests/test_infrastructure/test_nginx_compression.py -q` and capture RED.
 - [ ] Add the identical directives to both `http` blocks. Include `gzip_proxied any`; do not add a wildcard content type.
 - [ ] Update the service-topology note in root `AGENTS.md` to state that Nginx compresses textual responses but deliberately excludes SSE and pre-compressed media.
 - [ ] Run the focused test GREEN. If local Nginx is available, start the configured service and verify `curl --compressed -I` returns `Content-Encoding: gzip` for HTML while an SSE response is uncompressed.
@@ -79,6 +79,6 @@
 ## Final verification
 
 - [ ] Run `cd frontend && pnpm check && pnpm test`.
-- [ ] Run `cd backend && uv run pytest tests/test_nginx_compression.py -q`.
+- [ ] Run `cd backend && uv run pytest tests/test_infrastructure/test_nginx_compression.py -q`.
 - [ ] Run the static-demo production build and confirm zero unexpected-file/whole-project trace warnings.
 - [ ] Record the new route measurements in the PR description; do not loosen a budget to make the gate pass.

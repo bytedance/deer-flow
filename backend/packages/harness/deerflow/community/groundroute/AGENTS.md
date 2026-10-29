@@ -33,7 +33,7 @@ returns the `Error: ...` string. Log the malformed container's type, or that no 
 result objects remain, before returning — never the query, URL, credentials, or payload
 values.
 
-`tests/test_groundroute_response_shapes.py` exercises the real tools through an offline
+`tests/test_community/test_groundroute_response_shapes.py` exercises the real tools through an offline
 HTTPX transport with synthetic JSON bodies. Patch the provider's `httpx` reference with a
 local client factory and `HTTPStatusError`; never replace the shared `httpx.Client`.
 Cover both the unchanged global client and HTTP error handling.

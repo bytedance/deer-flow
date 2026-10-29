@@ -64,7 +64,7 @@ Telegram 通道目前完全不流式：`ChannelManager._handle_chat()` 走 `clie
 
 ## 测试
 
-新增 Telegram 流式用例（参照 `tests/test_channels.py` 中飞书流式用例的 fake-bot 模式）：
+新增 Telegram 流式用例（参照 `tests/test_channels/test_channels.py` 中飞书流式用例的 fake-bot 模式）：
 
 1. 多条 `is_final=False`：首条编辑占位消息，后续继续编辑同一 `message_id`。
 2. 1 秒内密集更新被节流丢弃；final 仍完整送达。

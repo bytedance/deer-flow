@@ -19,7 +19,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-# Same cycle-breaking parent mocks as tests/test_subagent_executor.py: the real
+# Same cycle-breaking parent mocks as tests/test_subagents/test_subagent_executor.py: the real
 # executor must be imported behind them (conftest.py keeps a mock in
 # sys.modules["deerflow.subagents.executor"] for collection).
 _MOCKED_MODULE_NAMES = [

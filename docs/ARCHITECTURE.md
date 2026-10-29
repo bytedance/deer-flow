@@ -43,10 +43,10 @@ public entry point.
 This lets standard LangGraph SDK clients talk to DeerFlow without a separate LangGraph
 server. Both compose files publish nginx as `"${BIND_HOST:-127.0.0.1}:${PORT:-2026}:2026"`
 — **loopback by default**; the Gateway's `8001` is never published. Any new published port
-must carry an explicit bind address (`backend/tests/test_compose_default_bind_host.py`
+must carry an explicit bind address (`backend/tests/test_infrastructure/test_compose_default_bind_host.py`
 pins this for every service in both compose files). Local `make dev` / `make start` follow
 the same model: the Gateway and frontend bind `127.0.0.1`, and nginx listens on loopback
-unless `BIND_HOST` is set (`backend/tests/test_local_dev_loopback_bind.py`).
+unless `BIND_HOST` is set (`backend/tests/test_infrastructure/test_local_dev_loopback_bind.py`).
 
 ---
 
@@ -61,7 +61,7 @@ The backend is two layers with a **strict one-way dependency**:
   FastAPI Gateway and IM channel integrations.
 
 **Rule**: App imports `deerflow`, but `deerflow` never imports `app`. This boundary is
-enforced in CI by `backend/tests/test_harness_boundary.py`. A thin third package,
+enforced in CI by `backend/tests/test_infrastructure/test_harness_boundary.py`. A thin third package,
 `deerflow-extension-api` (`backend/packages/extension-api/`), defines the host-independent
 extension contract that plugins implement.
 

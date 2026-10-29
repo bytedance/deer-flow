@@ -3,7 +3,7 @@
 Status: **draft** — the deletion contract for #4189 item 3. No retention or
 deletion implementation should land before this contract (or a successor
 revision of it) is accepted, and every deletion proposal must be validated
-against `backend/tests/test_checkpoint_retention_contract.py`.
+against `backend/tests/test_persistence/test_checkpoint_retention_contract.py`.
 
 ## Why a contract is needed
 

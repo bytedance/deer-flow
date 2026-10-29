@@ -138,15 +138,15 @@ diagnostics and assembly identity. Four gaps showed up along the way:
 
 ## Validation
 
-`backend/tests/test_jev_result_screening_extension.py` loads the package through
+`backend/tests/test_extensions/test_jev_result_screening_extension.py` loads the package through
 the real extension loader and host isolation wrapper. It checks install and
 configuration diagnostics, bounded requests, the task-store handover, copy
 semantics, fail-open provider errors and isolation diagnostics.
-`backend/tests/test_jev_screening_pipeline.py` runs real lead and subagent
+`backend/tests/test_extensions/test_jev_screening_pipeline.py` runs real lead and subagent
 middleware builders and LangChain graphs against a recording model, with a task
 store bound the way the Gateway worker binds it. It covers the redacted excerpt,
 error classification, budget boundaries, repeated turns and runs without a store.
-`backend/tests/test_jev_screening_policy.py` verifies that assembly fingerprints
+`backend/tests/test_extensions/test_jev_screening_policy.py` verifies that assembly fingerprints
 change with policy settings and text and stay stable across credential rotation.
 All tests use synthetic data and offline HTTP transports.
 

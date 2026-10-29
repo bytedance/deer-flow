@@ -22,4 +22,4 @@ DEBUG completion summaries keep counters local, count HTTPX API attempts, and
 measure monotonic elapsed/backoff time (including cancelled waits). Classify
 branches, never error text; emit only enums/numbers in the message for existing
 formatters/trace filters. Logging failure must preserve results/cancellation.
-Offline coverage: `tests/test_jina_diagnostics.py`.
+Offline coverage: `tests/test_community/test_jina_diagnostics.py`.

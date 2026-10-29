@@ -41,7 +41,7 @@ From `backend/`, with the repository's locked environment installed:
 
 ```bash
 uv run --locked python -m scripts.benchmark.goal_loop_stop --output /tmp/goal-loop-stop.json
-uv run --locked pytest tests/test_goal_loop_stop_probe.py tests/test_goal_worker.py -q
+uv run --locked pytest tests/test_scheduler/test_goal_loop_stop_probe.py tests/test_scheduler/test_goal_worker.py -q
 ```
 
 The reproduction creates temporary storage and no sandbox/container, shell tool,

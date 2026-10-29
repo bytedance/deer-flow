@@ -106,7 +106,7 @@ The router only consumes `contracts.ManagementProvider`. An operator can set `pr
 Run offline tests from the repository root:
 
 ```sh
-uv run --no-sync --project backend pytest backend/tests/test_knowledge_management_extension.py -q
+uv run --no-sync --project backend pytest backend/tests/test_knowledge/test_knowledge_management_extension.py -q
 uv run --no-sync --project backend pytest backend/tests/blocking_io/test_knowledge_management_extension.py -q
 ```
 
@@ -129,7 +129,7 @@ administrator. Export these variables without committing their values:
 - `WEKNORA_API_KEY`: separately scoped retrieval credential for that test base
 
 ```sh
-uv run --no-sync --project backend pytest backend/tests/test_knowledge_management_extension_live.py -m live -q -s --override-ini=addopts=
+uv run --no-sync --project backend pytest backend/tests/test_knowledge/test_knowledge_management_extension_live.py -m live -q -s --override-ini=addopts=
 ```
 
 Each run creates one uniquely marked synthetic manual document, prints its native

@@ -190,7 +190,7 @@ sequenceDiagram
 
 ```bash
 cd backend
-uv run pytest tests/test_title_middleware_core_logic.py tests/test_title_generation.py
+uv run pytest tests/test_agents/test_title_middleware_core_logic.py tests/test_agents/test_title_generation.py
 ```
 
 ## 故障排查

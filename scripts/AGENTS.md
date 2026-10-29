@@ -16,7 +16,7 @@ When home is unset and `DEER_FLOW_PROJECT_ROOT` is configured, search the launch
 legacy threads and user-scoped threads in that root. With no override, retain
 the two checkout layouts. Display an external home as `{DEER_FLOW_HOME}` rather
 than its absolute host path, and never include file contents in the manifest.
-Coverage lives in `backend/tests/test_support_bundle.py`.
+Coverage lives in `backend/tests/test_infrastructure/test_support_bundle.py`.
 This lookup follows the local launcher's root `.env`; it does not discover
 `backend/.env` or `DEER_FLOW_ENV_FILE` used by standalone Gateway launches.
 For those launches, export the effective `DEER_FLOW_HOME` when collecting a bundle
@@ -26,23 +26,23 @@ path variables and compare storage defaults with the launcher's actual shell blo
 ## Dependency and Label Checks
 
 `check_extension.py`: Gateway wheel asset validator; example CI:
-`extension-package-check.yml`. Tests: `backend/tests/test_extension_check_script.py`.
+`extension-package-check.yml`. Tests: `backend/tests/test_extensions/test_extension_check_script.py`.
 
 `check.py`: UTF-8 replacement decoding; pnpm uses
 `PYTHONIOENCODING=utf-8:backslashreplace`. Preserve `make check` Unicode/exit
-status in any locale. Tests: `backend/tests/test_check_script.py`.
+status in any locale. Tests: `backend/tests/test_infrastructure/test_check_script.py`.
 
 `doctor.py`/`setup_wizard.py`: at `main` start, retain stdout encoding with
 `errors="replace"`; guard `reconfigure` for embedded/captured streams.
-Legacy-terminal/pipe tests: `backend/tests/test_setup_script_encoding.py`.
+Legacy-terminal/pipe tests: `backend/tests/test_infrastructure/test_setup_script_encoding.py`.
 
 `sync_labels.py`: guard stdout/stderr `reconfigure` at `main` start. Retain
 TTY encodings; intentionally force UTF-8 on redirects for CI logs. Both use
 `errors="backslashreplace"`; decode `gh` output as UTF-8 with replacement.
-Tests (stub `gh`/`yaml`, ASCII stdio): `backend/tests/test_sync_labels_script.py`.
+Tests (stub `gh`/`yaml`, ASCII stdio): `backend/tests/test_infrastructure/test_sync_labels_script.py`.
 
 `check_label_declarations.py`: stdlib-only; reject unsupported expressions.
-Tests: `backend/tests/test_label_declarations.py`.
+Tests: `backend/tests/test_config/test_label_declarations.py`.
 
 ## Manual Claude OAuth Export
 
@@ -52,7 +52,7 @@ Malformed containers use the existing token-missing error without exposing their
 contents. The loader returns the full container together with the validated token;
 export actions use that token without repeating credential-shape assumptions or
 trimming its contents. Offline CLI coverage:
-`backend/tests/test_claude_keychain_export.py`.
+`backend/tests/test_models/test_claude_keychain_export.py`.
 
 ## Service Startup Contracts
 
@@ -60,7 +60,7 @@ trimming its contents. Offline CLI coverage:
 local Gateway port readiness (positive integer seconds, default 30). Reject
 invalid values before cleanup/startup except `--stop`; keep frontend/nginx waits.
 Launcher/wait-loop tests (processes, readiness and time stubbed):
-`backend/tests/test_serve_gateway_startup_timeout.py`.
+`backend/tests/test_infrastructure/test_serve_gateway_startup_timeout.py`.
 
 Both launchers call `sandbox-mode.sh` via Bash; keep it Bash/awk-only.
 Dev passes `$PROJECT_ROOT/config.yaml`; prod passes `$DEER_FLOW_CONFIG_PATH`.
@@ -68,7 +68,7 @@ For AIO, omitted/blank/empty-quoted/YAML-null URLs (including comments) select
 `aio`; preserve quoting so `"null"` and `"~"` remain nonempty strings.
 This is not a general YAML parser or URL validator; aliases, multiline values
 and environment expansion are out of scope. Offline helper and launcher tests:
-`backend/tests/test_docker_sandbox_mode_detection.py`.
+`backend/tests/test_sandbox/test_docker_sandbox_mode_detection.py`.
 
 The setup wizard offers Webz.io as a news-only `web_search` provider using
 `deerflow.community.webz.tools:web_search_tool` and `WEBZ_API_KEY`. Keep its
@@ -80,7 +80,7 @@ null uses configuration or 5. Reject boolean/fractional configured counts before
 clamping to 1–100. `returned_results` is the normalized page size, not a match total.
 Skip malformed page entries with index-only warnings; retain valid neighbors.
 Reject malformed envelopes and nonempty pages with no valid entries, logging
-no provider payloads or credentials. Contract tests live in `backend/tests/test_webz_tools.py`.
+no provider payloads or credentials. Contract tests live in `backend/tests/test_community/test_webz_tools.py`.
 
 Optional browser dependency detection reads the top-level `tools:` sequence
 without requiring `name` to be its first mapping key. Both indented and
@@ -91,7 +91,7 @@ with or without a leading BOM so the first section remains detectable.
 `detect_uv_extras.py` checks an existing `DEER_FLOW_CONFIG_PATH` first, then
 `DEER_FLOW_PROJECT_ROOT/config.yaml`, before the legacy checkout candidates.
 Keep this lookup standard-library-only; test shadowing checkout configs and
-the CLI under `python -S` in `backend/tests/test_detect_uv_extras.py`.
+the CLI under `python -S` in `backend/tests/test_infrastructure/test_detect_uv_extras.py`.
 For Discord and Buzz, detect the provider extra when either legacy
 `channels.<provider>.enabled` is true or both `channel_connections.enabled`
 and `channel_connections.<provider>.enabled` are true. Keep these gates aligned
@@ -102,7 +102,7 @@ a channel gains or loses an extra. Providers whose SDKs are core dependencies
 must not be added to this set. Nonempty `UV_EXTRAS` continues to override
 config-derived extras.
 `serve.sh`'s config-presence gate also accepts the project-root file when the
-checkout has no config. `tests/test_serve_config_presence.py` runs the full
+checkout has no config. `tests/test_infrastructure/test_serve_config_presence.py` runs the full
 launcher through dependency detection with service operations stubbed.
 `setup-sandbox.sh` also strips the leading BOM and normalizes CRLF before selecting the image;
 keep its shell filter compatible with GNU and BSD sed.
@@ -128,15 +128,15 @@ Both compose files mark `../.env` and `../frontend/.env` optional
 unreadable `.env` still fails. Do not seed them from the examples in
 `deploy.sh` as `docker.sh start` does: `.env.example` holds placeholder API
 keys the production Gateway would receive, and `make config` skips files that
-exist. Pinned by `backend/tests/test_compose_default_bind_host.py` and
-`backend/tests/test_gateway_startup.py`.
+exist. Pinned by `backend/tests/test_infrastructure/test_compose_default_bind_host.py` and
+`backend/tests/test_gateway/test_gateway_startup.py`.
 
 `docker.sh start` runs Compose from `docker/` without `--env-file`, so
 dev-compose interpolation sees only the shell. `load_proxy_env_from_dotenv`
 exports the `.env` keys interpolation needs (proxy variables and
 `AUTH_TRUSTED_PROXIES`, whose `environment:` default would otherwise replace
 the `env_file` value); shell exports still win. Pinned by
-`backend/tests/test_compose_auth_trusted_proxies.py`.
+`backend/tests/test_infrastructure/test_compose_auth_trusted_proxies.py`.
 
 `deploy.sh` never sources the repo-root `.env`; Compose reads it via
 `--env-file`, and shell exports outrank that file during interpolation (an
@@ -159,7 +159,7 @@ where `make up` replaced the operator's secret with a generated one.
 The credentials key (a Fernet key) persists as `.credentials_key`, the file the
 Gateway itself generates in that runtime home, via a noclobber (`O_EXCL`)
 create that reads a concurrent winner back.
-`backend/tests/test_deploy_dotenv_secrets.py` pins the order and the probe;
+`backend/tests/test_infrastructure/test_deploy_dotenv_secrets.py` pins the order and the probe;
 its real-Compose cases run against the installed `docker` CLI and against any
 standalone binaries listed in `DEER_FLOW_TEST_COMPOSE_BINARIES`.
 
@@ -169,7 +169,7 @@ Both failures identify the affected path and print the recursive ownership
 recovery hint for the runtime home. Existing secrets are only read, so a
 readable, read-only file is valid. `down` skips these checks and all secret
 resolution/generation so permission damage cannot prevent teardown. Coverage:
-`backend/tests/test_deploy_home_writability.py`.
+`backend/tests/test_infrastructure/test_deploy_home_writability.py`.
 
 `doctor.py` checks the config file the Gateway would load, not a fixed
 `<checkout>/config.yaml`. It mirrors how `serve.sh` hands the two
@@ -183,7 +183,7 @@ override the Gateway would reject (`DEER_FLOW_CONFIG_PATH` missing,
 `DEER_FLOW_PROJECT_ROOT` not a directory) fails `config.yaml found` with the
 Gateway's error, and the config-dependent checks skip. Any failure to import
 the harness is reported, never raised: doctor diagnoses broken environments.
-Pinned by `backend/tests/test_doctor.py::TestMainConfigResolution`.
+Pinned by `backend/tests/test_infrastructure/test_doctor.py::TestMainConfigResolution`.
 
 Doctor screens Browserless fetch/capture and Crawl4AI, Firecrawl, and fastCRW
 fetch backends with the runtime's `validate_delegated_backend_url`, before
@@ -191,13 +191,13 @@ provider success shortcuts. Keep endpoint defaults, `CRW_API_URL` precedence,
 config environment resolution, and isolation acknowledgement coercion aligned
 with those tools. `allow_private_addresses` affects targets only. Doctor reports
 refused delegation with the deployment guide; it does not verify egress policies.
-Offline coverage lives in `backend/tests/test_doctor.py`.
+Offline coverage lives in `backend/tests/test_infrastructure/test_doctor.py`.
 
 CLI credential JSON checks accept UTF-8 with or without a leading BOM, matching
 the runtime credential loader. Keep `_load_json_object` on `utf-8-sig`; malformed
 JSON and invalid encoding remain missing/invalid sources without exposing tokens.
 Public doctor/runtime agreement is pinned by
-`backend/tests/test_credential_file_encoding.py`.
+`backend/tests/test_config/test_credential_file_encoding.py`.
 
 Root `make install` runs pre-commit through uv, so uv's tool bin directory
 need not be on `PATH`.
@@ -208,13 +208,13 @@ defaults `DEER_FLOW_PROJECT_ROOT` to the checkout, as `serve.sh` does, so
 `<checkout>/config.yaml` wins over a legacy `backend/config.yaml`. A missing
 `DEER_FLOW_CONFIG_PATH` or invalid project root is an error, never a fallback.
 Only "no config anywhere" creates `<checkout>/config.yaml` from the example.
-`backend/tests/test_config_version.py::test_config_upgrade_*` pins this.
+`backend/tests/test_config/test_config_version.py::test_config_upgrade_*` pins this.
 
 ## Multi-Instance Dev Harness
 
 `dev_multi_instance.{sh,py}` must keep the rendered config passing the real
 multi-instance gate and every endpoint/data root inside its state dir
-(`backend/tests/test_dev_multi_instance_script.py`).
+(`backend/tests/test_infrastructure/test_dev_multi_instance_script.py`).
 Unless `keep_channels` is requested, disable provider flags in both `channels`
 and `channel_connections`; UI credentials can otherwise connect a bot
 later. Preserve `channels.leader_lease` and connection metadata.
@@ -247,7 +247,7 @@ stops `deer-flow-sandbox*` containers, whose thread mounts live in that tree.
 substring `name=` filter, and use the same rule for Apple Container IDs. Parse
 Apple Container JSON without interpolating the prefix into Python source; bad
 entries must not hide later valid containers. Offline stub coverage lives in
-`backend/tests/test_cleanup_containers_script.py`.
+`backend/tests/test_infrastructure/test_cleanup_containers_script.py`.
 `RUNTIME_DATA_CONTENTS` feeds both the help line and the deletion notice.
 
 Host-side pnpm calls must go through `scripts/pnpm.py`. With native Windows
@@ -311,7 +311,7 @@ and `_agenerate`/`_astream` ownership. It does not invoke tools, instantiate
 models, or call external services; import failures remain in the JSON as
 `unresolved_dynamic_boundary` records. The detector implementation and focused
 coverage live in `tests/support/detectors/thread_boundaries.py` and
-`tests/test_detect_thread_boundaries.py`.
+`tests/test_infrastructure/test_detect_thread_boundaries.py`.
 
 The `detect-blocking-io` target parses `app/`, `packages/harness/deerflow/`,
 and `scripts/` with AST. By default it reports only blocking IO candidates that
@@ -412,9 +412,9 @@ deterministic scope step before routing each candidate to a fix and/or a
 `tests/blocking_io/` runtime anchor.
 
 Regression tests related to Docker/provisioner behavior:
-- `tests/test_docker_sandbox_mode_detection.py` (mode detection from `config.yaml`)
-- `tests/test_provisioner_kubeconfig.py` (kubeconfig file/directory handling)
-- `tests/test_provisioner_request_threading.py` (keeps provisioner sandbox CRUD
+- `tests/test_sandbox/test_docker_sandbox_mode_detection.py` (mode detection from `config.yaml`)
+- `tests/test_infrastructure/test_provisioner_kubeconfig.py` (kubeconfig file/directory handling)
+- `tests/test_infrastructure/test_provisioner_request_threading.py` (keeps provisioner sandbox CRUD
   endpoints as sync FastAPI handlers so synchronous K8s client calls run in the
   Starlette worker pool instead of on the ASGI event loop)
 
@@ -461,7 +461,7 @@ Blocking-IO runtime gate (`tests/blocking_io/`):
   hard-fail.
 
 Boundary check (harness → app import firewall):
-- `tests/test_harness_boundary.py` — ensures `packages/harness/deerflow/` never imports from `app.*`
+- `tests/test_infrastructure/test_harness_boundary.py` — ensures `packages/harness/deerflow/` never imports from `app.*`
 
 Memory backend async boundary:
 - `MemoryMiddleware.aafter_agent` calls `MemoryManager.aadd`; network-backed

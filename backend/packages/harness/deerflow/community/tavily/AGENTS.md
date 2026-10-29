@@ -2,7 +2,7 @@
 
 The client helper selects credentials by tool name: search defaults to
 `web_search`, fetch passes `web_fetch`, and an omitted key uses the SDK's
-`TAVILY_API_KEY` fallback. Keep credential regressions in `backend/tests/test_tavily_tools.py`
+`TAVILY_API_KEY` fallback. Keep credential regressions in `backend/tests/test_community/test_tavily_tools.py`
 on the real helper and SDK constructor, mocking only search/extract calls.
 
 Each tool owns its per-call async client and awaits `close()` in `finally`,
@@ -14,7 +14,7 @@ the `web_search` tool config's `model_extra`, alongside `max_results` and option
 `time_range`. Preserve explicit empty lists (no restriction of that kind) and
 omit absent keys. These are deployment-only search-source settings; keep the
 model-visible signature limited to `query` and `time_range`. Offline regressions
-in `backend/tests/test_tavily_tools.py` pin SDK arguments and the tool schema.
+in `backend/tests/test_community/test_tavily_tools.py` pin SDK arguments and the tool schema.
 For non-empty `include_domains`, explicitly send `include_domains_mode="filter"`
 through the SDK's keyword arguments; inclusion must restrict sources rather than
 boost them. Omit the mode when the include list is absent or empty.
@@ -32,7 +32,7 @@ message reports "Error: Extraction failed". `web_fetch` coerces non-string
 container's name and type, or that no usable result objects remain, before
 returning — never the query, URL, credentials, or payload values.
 
-`backend/tests/test_tavily_response_shapes.py` drives the real tools and the real
+`backend/tests/test_community/test_tavily_response_shapes.py` drives the real tools and the real
 AsyncTavilyClient through an offline HTTPX MockTransport; non-object top-level
 payloads stub the client because the SDK's public wrappers reject that shape before
 the tools see it. Cover null search fields individually and together, and mixed

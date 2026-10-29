@@ -81,7 +81,7 @@ From the repository root:
 
 ```sh
 uv run --no-sync --project backend pytest \
-  backend/tests/test_knowledge_phase1_live.py -m live -q --override-ini=addopts=
+  backend/tests/test_knowledge/test_knowledge_phase1_live.py -m live -q --override-ini=addopts=
 ```
 
 Tests are read-only and require already indexed fixtures; they do not upload,

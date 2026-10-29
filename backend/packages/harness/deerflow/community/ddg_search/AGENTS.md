@@ -15,7 +15,7 @@ Keep the exception type and message in the error text: `tool_result_meta`
 classifies on it, and an outage downgraded to "No results found" reads as
 `no_results` (rewrite the query) instead of transient or config recovery.
 
-`tests/test_ddg_search_tools.py` exercises the real tool by patching
+`tests/test_community/test_ddg_search_tools.py` exercises the real tool by patching
 `sys.modules["ddgs"]` with a fake `DDGS` whose `__init__` or `text()` raises -
 never the normalizer or the tool's final output. Keep the SDK's "No results
 found." sentinel mapped back to the empty-search response.

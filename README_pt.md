@@ -171,7 +171,7 @@ Para o endpoint oficial do Gemini compatível com OpenAI, do Google, use o [perf
    Os testes de regressão da DeepSeek rodam offline junto com a suíte normal do backend. Para verificar o provedor real de forma explícita, defina `DEEPSEEK_TEST_API_KEY` no seu ambiente e rode a partir de `backend/`:
 
    ```bash
-   DEER_FLOW_RUN_LIVE_TESTS=1 uv run --no-sync pytest tests/test_managed_deepseek_live.py -q
+   DEER_FLOW_RUN_LIVE_TESTS=1 uv run --no-sync pytest tests/test_models/test_managed_deepseek_live.py -q
    ```
 
    Esses testes são opt-in, enviam requisições curtas à DeepSeek e podem gerar cobrança; eles usam estado temporário, nunca salvam credenciais no catálogo da implantação e são pulados no CI. `DEEPSEEK_TEST_MODEL` permite escolher outro ID de modelo da DeepSeek (padrão: `deepseek-flash`). Os mesmos testes podem ser rodados em revisões com e sem a correção; o resultado esperado é sempre sucesso.
