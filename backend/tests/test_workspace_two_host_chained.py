@@ -517,16 +517,8 @@ async def _chained_worker():
         created_tasks = []
         publication = WorkspacePublication(workspace_root=workspace_root, metadata_database_url=os.environ["TENANT_TWO_HOST_NATIVE_URL"], native_server_name="ecs")
 
-        class CapturingDriver(OrdinaryMcpTaskDriver):
-            async def submit(self, request):
-                result = await super().submit(request)
-                created_tasks.append({"id": result.task_id, "remote_task_id": result.remote_task_id})
-                evidence["b_task_submitted_over_mcp_http"] = True
-                evidence_path.write_text(json.dumps(evidence, indent=2))
-                return result
-
         drivers = McpTaskDriverRegistry()
-        drivers.register("ordinary-tools", CapturingDriver(McpTaskToolCaller(config)))
+        drivers.register("ordinary-tools", OrdinaryMcpTaskDriver(McpTaskToolCaller(config)))
         from app.mcp_tasks.service import McpTaskService
 
         tasks = McpTaskService(
@@ -539,6 +531,16 @@ async def _chained_worker():
         )
         from deerflow.mcp.tasks import runtime as task_runtime
 
+        actual_submit = tasks.submit
+
+        async def capture_real_submission(**kwargs):
+            created = await actual_submit(**kwargs)
+            created_tasks.append({"id": created["id"], "remote_task_id": created.get("remote_task_id")})
+            evidence["b_task_submitted_over_mcp_http"] = True
+            evidence_path.write_text(json.dumps(evidence, indent=2))
+            return created
+
+        tasks.submit = capture_real_submission
         task_runtime.set_mcp_task_submitter(tasks)
         tools_registry = {
             "created": created_tasks,
