@@ -534,6 +534,7 @@ async def _chained_worker():
             lease_seconds=120,
             max_concurrent_polls=1,
             launch_notification=lambda **kwargs: services.launch_mcp_task_notification_run(app=worker_app, **kwargs),
+            get_run=assembly["manager"].get,
         )
         from deerflow.mcp.tasks import runtime as task_runtime
 
