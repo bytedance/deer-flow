@@ -55,3 +55,10 @@ worker 侧 `NativeWorkerHost` 轮询 300 秒全部 `ConnectError: All connection
 - 证据：`/srv/deerflow-twohost/two-host-b-slice-20261028-51/evidence/native-{controller,worker}.json`（两机）；本地 `/private/tmp/two-host-slice2-run*.log`。
 - 00:55 定时器（automation-5bd77544）会 pkill 本地 runner 并精确清理两机 phase 标签容器/目录；PG/Redis 是 phase 标签容器，一并清理，下次运行重建。
 - 重跑命令：`TENANT_TWO_HOST_SLICE=2 python3 scripts/tenant_two_host_slice.py`。
+
+
+## 00:55 收尾补充（诊断闭环 + 下一修复已定）
+
+run20 判别数据（清理前抢救）：`identical_client_trace = [403×10, ConnectError×2]`、`socket_trace = [ok×10, refused×2]` —— **与 NativeWorkerHost 完全相同构造的客户端全程正常**，唯 host 自建实例失败。结合时序（mount-id 早于 uvicorn 绑定，worker 在 mount-id 出现后即启动）：host 客户端首次 poll 落在 uvicorn 起来前，首次 ConnectError 后该客户端实例未恢复。预检/复刻客户端因重试到 403 才开始，错过毒化窗口，故正常。
+
+**下一步修复（不动产品）**：runner 把 worker 启动门槛从"mount-id 出现"改为"controller 8022 端口 TCP 可达"（生产语义本如此）；若仍复现再深入 httpx 池行为。清理已执行：两机 phase 标签容器（含 pg/redis）与目录已删，本地 runner 已停。重跑：`TENANT_TWO_HOST_SLICE=2 python3 scripts/tenant_two_host_slice.py`。
