@@ -515,7 +515,7 @@ async def _chained_worker():
             os.environ["ECS_EXECUTOR_SCOPE_" + key] = value
 
         @tool
-        async def submit(request_key: str, profile: str, argv: list[str], input_refs: dict[str, dict[str, str]]) -> str:
+        async def submit(request_key: str, profile: str, argv: list[str], input_refs: dict[str, dict[str, str]], input_files: dict[str, str] | None = None) -> str:
             """Build the original research report through a durable B execution."""
             raise AssertionError("The actual ToolNode must use its native background wrapper")
 
