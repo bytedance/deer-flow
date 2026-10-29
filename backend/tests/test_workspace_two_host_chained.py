@@ -309,6 +309,16 @@ async def _chained_controller():
         )
         central_app.state.scheduled_task_service = foreground
         await foreground.start()
+        control = ScheduledTaskService(
+            task_repo=scheduler_tasks,
+            task_run_repo=central_app.state.scheduled_task_run_repo,
+            launch_run=lambda **kwargs: services.launch_scheduled_thread_run(app=central_app, **kwargs),
+            poll_interval_seconds=1,
+            lease_seconds=120,
+            max_concurrent_runs=1,
+            multi_instance=True,
+        )
+        await control.start()
         now = datetime.now(UTC)
         workspace_token = set_current_workspace(context)
         await scheduler_tasks.create(
@@ -374,6 +384,7 @@ async def _chained_controller():
         finally:
             server.should_exit = True
             await asyncio.gather(serve, return_exceptions=True)
+            await control.stop()
             await foreground.stop()
             reset_current_workspace(workspace_token)
             reset_current_user(principal_token)
