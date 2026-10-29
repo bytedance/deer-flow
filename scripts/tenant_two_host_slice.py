@@ -133,8 +133,12 @@ def prepare(host: str, digest: str) -> None:
 
 
 def main() -> None:
-    if os.environ.get("TENANT_TWO_HOST_SLICE") == "2":
+    slice_no = os.environ.get("TENANT_TWO_HOST_SLICE", "1")
+    if slice_no == "2":
         run_slice_two()
+        return
+    if slice_no == "3":
+        run_slice_three()
         return
     digest = freeze_archive(f"/private/tmp/{PHASE}-source.tar")
     print(f"[freeze] archive sha256 {digest}")
@@ -422,6 +426,119 @@ upgrade_schema(executor)
 executor.dispose()
 print("SLICE_TWO_MIGRATED")
 """
+
+
+
+
+def run_slice_three() -> None:
+    digest = freeze_archive(f"/private/tmp/{PHASE}-source.tar")
+    print(f"[freeze] archive sha256 {digest}")
+    prepare(CONTROLLER, digest)
+    prepare(WORKER, digest)
+    must(CONTROLLER, f"""set -eu
+docker rm -fv {PHASE}-pg {PHASE}-redis >/dev/null 2>&1 || true
+docker run -d --pull=never --name {PHASE}-pg --label org.deerflow.tenant.owned={PHASE} \
+  -p {CONTROLLER_PRIVATE}:55432:5432 -e POSTGRES_PASSWORD=two-host-only -e POSTGRES_DB=tenant \
+  --cpus 1 --memory 1g {PG_IMAGE} >/dev/null
+for i in $(seq 1 30); do docker exec {PHASE}-pg pg_isready -U postgres >/dev/null 2>&1 && break; sleep 1; done
+for db in tenant_native tenant_executor; do docker exec {PHASE}-pg psql -U postgres -c "CREATE DATABASE $db"; done
+docker run -d --pull=never --name {PHASE}-redis --label org.deerflow.tenant.owned={PHASE} \
+  -p {CONTROLLER_PRIVATE}:6390:6379 {REDIS_IMAGE} >/dev/null
+""", what="controller pg+redis")
+    base = f"postgresql+psycopg://postgres:two-host-only@{CONTROLLER_PRIVATE}:55432"
+    native_url = base + "/tenant_native"
+    executor_url = base + "/tenant_executor"
+    native_async_url = f"postgresql+asyncpg://postgres:two-host-only@{CONTROLLER_PRIVATE}:55432/tenant_native"
+    redis_url = f"redis://{CONTROLLER_PRIVATE}:6390/0"
+    print("[controller] slice-three migrations and seeding")
+    must(CONTROLLER, f"""set -eu
+cat > /tmp/.two-host-migrate.py
+docker run --rm --pull=never --network host \
+  -e NATIVE_ASYNC='{native_async_url}' -e NATIVE_SYNC='{native_url}' -e EXECUTOR_SYNC='{executor_url}' \
+  -v /tmp/.two-host-migrate.py:/run/migrate.py:ro -v {CROOT}/{PHASE}/source.tar.gz:/run/source.tar.gz:ro \
+  --entrypoint /bin/sh {NATIVE_IMAGE} -c '
+set -eu; rm -rf /tmp/source; mkdir /tmp/source; tar xzf /run/source.tar.gz -C /tmp/source
+cd /tmp/source/backend
+export PYTHONPATH=/tmp/source/backend:/tmp/source/backend/packages/harness:/tmp/source/backend/packages/extension-api:/tmp/source/backend/packages/ecs-executor
+/app/backend/.venv/bin/python /run/migrate.py'
+rm -f /tmp/.two-host-migrate.py
+""", what="slice-three migrations", stdin_text=_SLICE_TWO_MIGRATE)
+    common = dict(COMMON_ENV)
+    common.update(
+        {
+            "TENANT_TWO_HOST_NATIVE_URL": native_url,
+            "TENANT_TWO_HOST_NATIVE_ASYNC_URL": native_async_url,
+            "TENANT_TWO_HOST_REDIS_URL": redis_url,
+            "TENANT_TWO_HOST_WORKER_CREDENTIAL": NATIVE_SECRET,
+            "DEER_FLOW_INTERNAL_AUTH_TOKEN": INTERNAL_TOKEN,
+            "TEST_EXECUTOR_POSTGRES_URL": executor_url,
+            "HTTPX_DEBUG": "1",
+        }
+    )
+    print("[controller] start chained-controller pytest (background)")
+    must(CONTROLLER, f"""set -eu
+nohup docker run --rm --pull=never --name {PHASE}-controller --label org.deerflow.tenant.owned={PHASE} \
+  --network host \
+  -e TENANT_TWO_HOST_ROLE=chained-controller -e TENANT_TWO_HOST_NATIVE_PORT={PORT + 1} \
+  -v {CROOT}/{PHASE}:{CROOT}/{PHASE} -v {CROOT}/{PHASE}/source.tar.gz:/run/source.tar.gz:ro \
+  {env_flags(common)} \
+  -e TEST_SCOPE_EVIDENCE='{CROOT}/{PHASE}/evidence/chained-controller.json' \
+  --entrypoint /bin/sh {NATIVE_IMAGE} -c 'mkdir -p /tmp/source && tar xzf /run/source.tar.gz -C /tmp/source && cp -n /tmp/source/config.example.yaml /tmp/source/config.yaml && cd /tmp/source/backend \
+  && /app/backend/.venv/bin/python -m pytest tests/test_workspace_two_host_chained.py -q --tb=short --no-showlocals' \
+  > {CROOT}/{PHASE}/controller.log 2>&1 &
+echo $! > {CROOT}/{PHASE}/controller.pid
+""", what="chained-controller start")
+    print("[controller] wait for pool mount id, sync to worker")
+    deadline = time.time() + 120
+    mount = ""
+    while time.time() < deadline:
+        mount = must(CONTROLLER, f"cat {CROOT}/{PHASE}/pool/pool-mount-id 2>/dev/null || true").strip()
+        if mount:
+            break
+        time.sleep(2)
+    if not mount:
+        sys.exit("chained controller never created the pool mount id")
+    must(WORKER, f"mkdir -p {CROOT}/{PHASE}/pool && printf '%s' '{mount}' > {CROOT}/{PHASE}/pool/pool-mount-id", what="worker mount sync")
+    print("[controller] wait for the native RPC port to accept before starting the worker")
+    deadline = time.time() + 120
+    while time.time() < deadline:
+        probe = ssh(CONTROLLER, f"timeout 2 bash -c '</dev/tcp/127.0.0.1/{PORT + 1}' >/dev/null 2>&1 && echo OPEN || true")
+        if probe.stdout.strip() == "OPEN":
+            break
+        time.sleep(2)
+    else:
+        sys.exit("chained controller RPC port never opened")
+    worker_env = dict(common)
+    worker_env.update(
+        {
+            "TENANT_TWO_HOST_ROLE": "chained-worker",
+            "TENANT_TWO_HOST_NATIVE_EXECUTOR_URL": f"http://{CONTROLLER_PRIVATE}:{PORT + 1}",
+            "TENANT_TWO_HOST_NATIVE_NODE_SECRET": NATIVE_SECRET,
+            "TEST_SCOPE_EVIDENCE": f"{CROOT}/{PHASE}/evidence/chained-worker.json",
+        }
+    )
+    print("[worker] run chained-worker pytest (with docker socket for real B)")
+    must(WORKER, f"""set -eu
+docker run --rm --pull=never --name {PHASE}-worker --label org.deerflow.tenant.owned={PHASE} \
+  --network host \
+  -v /var/run/docker.sock:/var/run/docker.sock:ro -v /usr/bin/docker:/usr/bin/docker:ro \
+  -v {CROOT}/{PHASE}:{CROOT}/{PHASE} -v {CROOT}/{PHASE}/source.tar.gz:/run/source.tar.gz:ro \
+  {env_flags(worker_env)} \
+  --entrypoint /bin/sh {NATIVE_IMAGE} -c 'mkdir -p /tmp/source && tar xzf /run/source.tar.gz -C /tmp/source && cp -n /tmp/source/config.example.yaml /tmp/source/config.yaml && cd /tmp/source/backend \
+  && /app/backend/.venv/bin/python -m pytest tests/test_workspace_two_host_chained.py -q --tb=short --no-showlocals'
+""", what="chained-worker pytest")
+    print("[controller] wait for chained-controller pytest to finish")
+    deadline = time.time() + 600
+    while time.time() < deadline:
+        running = must(CONTROLLER, f"docker ps --format '{{{{.Names}}}}' | grep -x {PHASE}-controller || true").strip()
+        if not running:
+            break
+        time.sleep(5)
+    print(must(CONTROLLER, f"tail -40 {CROOT}/{PHASE}/controller.log"))
+    for host in (CONTROLLER, WORKER):
+        for remote in (f"{CROOT}/{PHASE}/controller.log", f"{CROOT}/{PHASE}/evidence/chained-controller.json", f"{CROOT}/{PHASE}/evidence/chained-worker.json"):
+            scp_from(host, remote, f"/private/tmp/{PHASE}-artifacts/")
+    print(f"[done] slice 3 artifacts in /private/tmp/{PHASE}-artifacts (digest {digest})")
 
 
 if __name__ == "__main__":
