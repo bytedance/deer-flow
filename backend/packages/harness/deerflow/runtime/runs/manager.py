@@ -1061,7 +1061,7 @@ class RunManager:
             try:
                 await self._persist_new_run_to_store(record)
             except Exception:
-                logger.warning("Failed to persist run %s; record was not registered", run_id, exc_info=True)
+                logger.warning("Failed to create run %s; record was not registered", run_id, exc_info=True)
                 raise
             async with self._lock:
                 self._runs[run_id] = record
