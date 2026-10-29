@@ -734,6 +734,17 @@ SEARCH_PROVIDERS: list[SearchProvider] = [
         env_var=None,
         extra_config={"max_results": 5},
     ),
+    SearchProvider(
+        name="keenable",
+        display_name="Keenable",
+        description="Own index with extracted page snippets, works without a key",
+        use="deerflow.community.keenable.tools:web_search_tool",
+        # No env_var: the provider falls back to Keenable's keyless endpoint, so
+        # the wizard should not demand a key. Operators who have one set
+        # KEENABLE_API_KEY in .env (or api_key in config.yaml) for higher limits.
+        env_var=None,
+        extra_config={"max_results": 5},
+    ),
 ]
 
 WEB_FETCH_PROVIDERS: list[WebProvider] = [

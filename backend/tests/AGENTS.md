@@ -110,6 +110,8 @@ deferred providers' validation policy.
 Include You.com in the shared-owner provider checks; it applies its 100-result
 cap after shared normalization. Pin invalid-value defaults and positive count
 bounds through the outbound request in `test_youcom_tools.py`.
+Keenable follows the same rule with a 50-result cap, pinned in
+`test_keenable_tools.py`.
 
 Mixed-version resume admission in `test_thread_run_idempotency.py` uses a real
 shared SQL repository and an old-column projection. The frozen pre-6499 helper
