@@ -182,6 +182,10 @@ def test_upload_files_deduplicates_case_variants_across_requests(tmp_path):
     assert claims == [("Report.txt", set()), ("report.txt", {"Report.txt"})]
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="a 255-byte filename exceeds the Windows MAX_PATH budget once the OS temp prefix is included",
+)
 def test_upload_files_deduplicates_max_length_filenames_without_failing_the_batch(tmp_path):
     # A 255-byte filename is the longest normalize_filename accepts. Before
     # the byte-budget truncation in claim_unique_filename, deduplicating a
