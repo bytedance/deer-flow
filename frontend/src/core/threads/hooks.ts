@@ -22,6 +22,7 @@ import { useI18n } from "../i18n/hooks";
 import type { Locale } from "../i18n/locale";
 import { getMessageRunId } from "../messages/run-duration";
 import { isErrorToolMessage } from "../messages/tool-error";
+import { indexToolResults } from "../messages/tool-result";
 import {
   extractContentFromMessage,
   hasToolCalls,
@@ -176,17 +177,11 @@ export function getToolResultStatus(
     }
   }
 
-  const nextAssistantIndex = messages.findIndex(
-    (message, index) =>
-      index > latestToolCallIndex &&
-      (message.type === "ai" || message.type === "human"),
-  );
-  const resultEnd =
-    latestToolCallIndex >= 0 && nextAssistantIndex >= 0
-      ? nextAssistantIndex
-      : messages.length;
-  for (let index = resultEnd - 1; index > latestToolCallIndex; index -= 1) {
-    const message = messages[index];
+  const results = latestToolCallId
+    ? (indexToolResults(messages).get(latestToolCallIndex) ?? [])
+    : messages;
+  for (let index = results.length - 1; index >= 0; index -= 1) {
+    const message = results[index];
     if (message?.type !== "tool") {
       continue;
     }

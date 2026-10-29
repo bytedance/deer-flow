@@ -420,6 +420,7 @@ class RunJournal(BaseCallbackHandler):
         self._llm_call_index = 0
         self._seen_llm_starts: set[str] = set()  # langchain run_ids that fired on_chat_model_start
         self._current_run_tool_call_names: dict[str, str] = {}
+        self._current_tool_result_ids: dict[str, str] = {}
         self._active_tool_names: dict[str, str] = {}
         self._persisted_ai_message_identities: set[str] = set()
         self._persisted_tool_message_identities: set[str] = set()
@@ -880,6 +881,9 @@ class RunJournal(BaseCallbackHandler):
                 continue
             name = self._tool_call_value(tool_call, "name")
             self._current_run_tool_call_names[tool_call_id] = str(name or "")
+            # A newly emitted assistant call starts a distinct occurrence,
+            # even when the provider reuses an earlier call ID in this run.
+            self._current_tool_result_ids.pop(tool_call_id, None)
 
     def _persist_tool_result_message(self, message: BaseMessage) -> None:
         # Tool callbacks run before the graph reducer assigns missing ids.
@@ -895,6 +899,8 @@ class RunJournal(BaseCallbackHandler):
         identity = self._message_identity(message)
         if identity:
             self._persisted_tool_message_identities.add(identity)
+        if isinstance(message, ToolMessage) and message.tool_call_id in self._current_run_tool_call_names and message.id:
+            self._current_tool_result_ids[message.tool_call_id] = message.id
         self._record_message_summary(message)
 
     def record_interrupted_ai_responses(self, messages: Iterable[AIMessage]) -> int:
@@ -961,6 +967,10 @@ class RunJournal(BaseCallbackHandler):
         # re-attributed here.
         if self._current_run_tool_call_names.get(tool_call_id) is None:
             return False
+        if not message.id:
+            # A copy serialized before the first capture still lacks its ID.
+            # Restore that occurrence's ID before checking for a replay.
+            message.id = self._current_tool_result_ids.get(tool_call_id)
         identity = self._message_identity(message)
         return identity is None or identity not in self._persisted_tool_message_identities
 
@@ -1825,6 +1835,7 @@ class RunJournal(BaseCallbackHandler):
         self._llm_start_times.clear()
         self._seen_llm_starts.clear()
         self._current_run_tool_call_names.clear()
+        self._current_tool_result_ids.clear()
         self._persisted_ai_message_identities.clear()
         self._persisted_tool_message_identities.clear()
         self._produced_artifacts.clear()

@@ -97,21 +97,32 @@ async def test_tool_callback_ids_match_reloaded_checkpoint(command_result, mode)
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("with_id", [False, True])
-async def test_middleware_results_with_reused_call_id_are_reconciled_once(with_id):
+@pytest.mark.parametrize("callback", [False, True])
+@pytest.mark.parametrize("same_content", [False, True])
+async def test_middleware_results_with_reused_call_id_are_reconciled_once(with_id, callback, same_content):
     store = MemoryRunEventStore()
     journal = RunJournal("run-a", "thread", store)
     try:
         for index in range(2):
             assistant = AIMessage(id=f"assistant-{index}", content="", tool_calls=[{"id": "call_0", "name": "blocked", "args": {}}])
-            journal.on_llm_end(LLMResult(generations=[[ChatGeneration(message=assistant)]]), run_id=uuid4(), tags=["lead_agent"])
-            result = ToolMessage(id=f"result-{index}" if with_id else None, content=f"blocked-{index}", tool_call_id="call_0")
+            response = LLMResult(generations=[[ChatGeneration(message=assistant)]])
+            completion_id = uuid4()
+            journal.on_llm_end(response, run_id=completion_id, tags=["lead_agent"])
+            result = ToolMessage(id=f"result-{index}" if with_id else None, content="blocked" if same_content else f"blocked-{index}", tool_call_id="call_0")
+            # Capture the wire shape before either callback can assign an ID.
+            snapshot = result.model_dump()
+            if callback:
+                journal.on_tool_end(result, run_id=uuid4())
             journal.on_chat_model_start({}, [[assistant, result]], run_id=uuid4(), tags=["lead_agent"])
-            # A serialized replay of this result is still the same occurrence.
-            replay = ToolMessage.model_validate(result.model_dump())
+            # A duplicate completion callback must not reopen the occurrence.
+            journal.on_llm_end(response, run_id=completion_id, tags=["lead_agent"])
+            replay = ToolMessage.model_validate(snapshot)
             journal.on_chat_model_start({}, [[assistant, replay]], run_id=uuid4(), tags=["lead_agent"])
+            assert replay.id == result.id
+            assert result.id
         await journal.flush()
         results = [event["content"] for event in await store.list_messages("thread") if event["content"].get("type") == "tool"]
-        assert [result["content"] for result in results] == ["blocked-0", "blocked-1"]
+        assert [result["content"] for result in results] == (["blocked", "blocked"] if same_content else ["blocked-0", "blocked-1"])
         assert len({result["id"] for result in results}) == 2
     finally:
         await journal.close()

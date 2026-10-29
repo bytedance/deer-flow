@@ -81,6 +81,15 @@ the same treatment when reconciled. Provider `tool_call_id` values may repeat
 within a run and across runs; they remain protocol correlation data, never
 thread-global result identities. Legacy results without message IDs have no
 dedupe identity or seq lookup rather than aliasing unrelated invocations.
+For a registered lead-agent call, the journal remembers the captured result ID
+until a new canonical assistant response emits that call ID again. Reconciliation
+restores the remembered ID on a copy serialized before its first capture, so
+the copy does not append another result or consume a sequence. An explicit
+message ID is preserved. A later invocation starts fresh even if its provider
+ID and output content are identical; duplicate callbacks for the same LLM run
+do not reset this bookkeeping. Callbacks without a registered lead call still
+assign distinct IDs to their returned objects. This cache is journal-local and
+is cleared on detach, not a fallback identity for historical rows.
 The web execution timeline and write-file preview resolve a provider call ID
 only inside its originating assistant-message occurrence; UI keys include that
 occurrence while outgoing protocol IDs remain unchanged.

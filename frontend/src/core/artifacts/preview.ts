@@ -1,3 +1,5 @@
+import { indexToolResults } from "../messages/tool-result";
+
 export function getTabularDelimiter(
   language: string | null,
 ): "," | "\t" | null {
@@ -59,11 +61,8 @@ function getTextContent(content: unknown) {
 function findToolResult(
   toolCallId: string,
   messages: ArtifactPreviewMessage[],
-  assistantIndex: number,
 ) {
-  for (let index = assistantIndex + 1; index < messages.length; index += 1) {
-    const message = messages[index]!;
-    if (message.type === "ai" || message.type === "human") break;
+  for (const message of messages) {
     if (message.type === "tool" && message.tool_call_id === toolCallId) {
       return getTextContent(message.content);
     }
@@ -101,6 +100,7 @@ export function buildWriteFileDraftContent({
 
   let draft = "";
   let hasDraft = false;
+  const toolResults = indexToolResults(messages);
 
   for (const [messageIndex, message] of messages.entries()) {
     if (message.type !== "ai") {
@@ -119,7 +119,7 @@ export function buildWriteFileDraftContent({
 
       const toolCallId = toolCall.id;
       const toolResult = toolCallId
-        ? findToolResult(toolCallId, messages, messageIndex)
+        ? findToolResult(toolCallId, toolResults.get(messageIndex) ?? [])
         : undefined;
       const isSelected =
         toolCallId === target.toolCallId &&

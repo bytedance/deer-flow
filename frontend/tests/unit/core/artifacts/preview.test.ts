@@ -11,6 +11,35 @@ import {
 const ARTIFACT_PATH = "/artifact-fixtures/report.html";
 const UNSUPPORTED_ARTIFACT_PATH = "/artifact-fixtures/data.csv";
 
+test.each(["OK", "Error: failed", undefined])(
+  "write drafts respect a unique call's leading result: %s",
+  (result) => {
+    const owner = {
+      type: "ai",
+      id: "owner",
+      tool_calls: [
+        {
+          id: "call_0",
+          name: "write_file",
+          args: { path: ARTIFACT_PATH, content: "draft" },
+        },
+      ],
+    };
+    const messages = [
+      ...(result === undefined
+        ? []
+        : [{ type: "tool", tool_call_id: "call_0", content: result }]),
+      owner,
+    ];
+    expect(
+      buildWriteFileDraftContent({
+        filepath: `write-file:${ARTIFACT_PATH}?message_id=owner&tool_call_id=call_0`,
+        messages,
+      }),
+    ).toBe(result === "Error: failed" ? undefined : "draft");
+  },
+);
+
 test("write drafts use their own assistant occurrence when call ids repeat", () => {
   const messages = [
     {

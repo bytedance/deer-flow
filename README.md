@@ -3250,6 +3250,8 @@ Web history keeps separate tool results in their original positions when a
 provider reuses a tool-call ID across turns or runs. Copies of the same result
 are matched by their message ID. Legacy results without message IDs are kept
 separately because their provider ID alone cannot identify an invocation.
+A result delivered before its assistant still resolves when that call is unique
+in the turn. Rebuilt results from the same current invocation keep one history entry.
 
 ### Reading a Referenced Conversation
 

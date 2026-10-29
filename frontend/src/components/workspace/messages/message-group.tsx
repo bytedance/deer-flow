@@ -36,6 +36,7 @@ import {
 } from "@/core/artifacts/utils";
 import { useI18n } from "@/core/i18n/hooks";
 import { isErrorToolMessage } from "@/core/messages/tool-error";
+import { indexToolResults } from "@/core/messages/tool-result";
 import { formatTokenCount } from "@/core/messages/usage";
 import type { TokenDebugStep } from "@/core/messages/usage-model";
 import {
@@ -1236,52 +1237,32 @@ function indexToolCallData(messages: Message[]) {
   const toolCallResults = new Map<string, string>();
   const browserViews = new Map<string, BrowserViewMeta>();
   const resultMessages = new Map<string, Extract<Message, { type: "tool" }>>();
-  const uniqueAssistantByCallId = new Map<string, number>();
-  for (const [messageIndex, message] of messages.entries()) {
-    if (message.type !== "ai") continue;
-    for (const call of message.tool_calls ?? []) {
-      if (!call.id) continue;
-      uniqueAssistantByCallId.set(
-        call.id,
-        uniqueAssistantByCallId.has(call.id) ? -1 : messageIndex,
-      );
-    }
-  }
-
-  let assistantIndex = -1;
-  for (const [messageIndex, message] of messages.entries()) {
-    if (message.type === "ai") assistantIndex = messageIndex;
-    if (message.type === "human") assistantIndex = -1;
-    if (message.type !== "tool" || !message.tool_call_id) {
-      continue;
-    }
-
-    // A unique call can accept SDK results that arrived before its AI message.
-    // Reused call ids require the preceding assistant occurrence instead.
-    const uniqueAssistant = uniqueAssistantByCallId.get(message.tool_call_id);
-    const ownerIndex =
-      uniqueAssistant !== undefined && uniqueAssistant >= 0
-        ? uniqueAssistant
-        : assistantIndex;
-    const toolCallId = `${ownerIndex}:${message.tool_call_id}`;
-    if (!resultMessages.has(toolCallId))
-      resultMessages.set(toolCallId, message);
-    if (!toolCallResults.has(toolCallId)) {
-      const result = extractTextFromMessage(message);
-      if (result) {
-        toolCallResults.set(toolCallId, result);
-        resultMessages.set(toolCallId, message);
+  for (const [ownerIndex, results] of indexToolResults(messages)) {
+    for (const message of results) {
+      if (message.type !== "tool" || !message.tool_call_id) {
+        continue;
       }
-    }
 
-    if (!browserViews.has(toolCallId)) {
-      const browserView = (
-        message.additional_kwargs as
-          | { browser_view?: BrowserViewMeta }
-          | undefined
-      )?.browser_view;
-      if (browserView && typeof browserView.screenshot === "string") {
-        browserViews.set(toolCallId, browserView);
+      const toolCallId = `${ownerIndex}:${message.tool_call_id}`;
+      if (!resultMessages.has(toolCallId))
+        resultMessages.set(toolCallId, message);
+      if (!toolCallResults.has(toolCallId)) {
+        const result = extractTextFromMessage(message);
+        if (result) {
+          toolCallResults.set(toolCallId, result);
+          resultMessages.set(toolCallId, message);
+        }
+      }
+
+      if (!browserViews.has(toolCallId)) {
+        const browserView = (
+          message.additional_kwargs as
+            | { browser_view?: BrowserViewMeta }
+            | undefined
+        )?.browser_view;
+        if (browserView && typeof browserView.screenshot === "string") {
+          browserViews.set(toolCallId, browserView);
+        }
       }
     }
   }
