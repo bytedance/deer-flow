@@ -12660,6 +12660,7 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7579]: https://github.com/bytedance/deer-flow/pull/7579
 [#7580]: https://github.com/bytedance/deer-flow/pull/7580
 [#7582]: https://github.com/bytedance/deer-flow/pull/7582
+[#7585]: https://github.com/bytedance/deer-flow/pull/7585
 [#7586]: https://github.com/bytedance/deer-flow/pull/7586
 [#7588]: https://github.com/bytedance/deer-flow/pull/7588
 [#7589]: https://github.com/bytedance/deer-flow/pull/7589
