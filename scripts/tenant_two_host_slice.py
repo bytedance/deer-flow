@@ -216,7 +216,7 @@ nohup docker run --rm --pull=never --name {PHASE}-controller --label org.deerflo
   {env_flags(COMMON_ENV)} \\
   -e TEST_SCOPE_EVIDENCE='{CROOT}/{PHASE}/evidence/controller.json' \\
   -v {CROOT}/{PHASE}:{CROOT}/{PHASE} -v {CROOT}/{PHASE}/source.tar.gz:/run/source.tar.gz:ro \\
-  --entrypoint /bin/sh {NATIVE_IMAGE} -c 'mkdir -p /tmp/source && tar xzf /run/source.tar.gz -C /tmp/source && cd /tmp/source/backend \
+  --entrypoint /bin/sh {NATIVE_IMAGE} -c 'mkdir -p /tmp/source && tar xzf /run/source.tar.gz -C /tmp/source && cp -n /tmp/source/config.example.yaml /tmp/source/config.yaml && cd /tmp/source/backend \
   && /app/backend/.venv/bin/python -m pytest tests/test_workspace_two_host_physical.py -q --tb=short --no-showlocals' \\
   > {CROOT}/{PHASE}/controller.log 2>&1 &
 echo $! > {CROOT}/{PHASE}/controller.pid
@@ -247,7 +247,7 @@ docker run --rm --pull=never --name {PHASE}-worker --label org.deerflow.tenant.o
   -e TEST_SCOPE_OWNED_MANIFEST={CROOT}/{PHASE}/evidence/owned.json \
   -e DEER_FLOW_HOME=/tmp/tenant-home \
   -v {CROOT}/{PHASE}/source.tar.gz:/run/source.tar.gz:ro \
-  --entrypoint /bin/sh {NATIVE_IMAGE} -c 'mkdir -p /tmp/source && tar xzf /run/source.tar.gz -C /tmp/source && cd /tmp/source/backend \
+  --entrypoint /bin/sh {NATIVE_IMAGE} -c 'mkdir -p /tmp/source && tar xzf /run/source.tar.gz -C /tmp/source && cp -n /tmp/source/config.example.yaml /tmp/source/config.yaml && cd /tmp/source/backend \
   && /app/backend/.venv/bin/python -m pytest tests/test_workspace_two_host_physical.py -q --tb=short --no-showlocals'
 """, what="worker pytest")
 
@@ -325,7 +325,7 @@ nohup docker run --rm --pull=never --name {PHASE}-controller --label org.deerflo
   -v {CROOT}/{PHASE}:{CROOT}/{PHASE} -v {CROOT}/{PHASE}/source.tar.gz:/run/source.tar.gz:ro \
   {env_flags(common)} \
   -e TEST_SCOPE_EVIDENCE='{CROOT}/{PHASE}/evidence/native-controller.json' \
-  --entrypoint /bin/sh {NATIVE_IMAGE} -c 'mkdir -p /tmp/source && tar xzf /run/source.tar.gz -C /tmp/source && cd /tmp/source/backend \
+  --entrypoint /bin/sh {NATIVE_IMAGE} -c 'mkdir -p /tmp/source && tar xzf /run/source.tar.gz -C /tmp/source && cp -n /tmp/source/config.example.yaml /tmp/source/config.yaml && cd /tmp/source/backend \
   && /app/backend/.venv/bin/python -m pytest tests/test_workspace_two_host_physical.py -q --tb=short --no-showlocals' \
   > {CROOT}/{PHASE}/controller.log 2>&1 &
 echo $! > {CROOT}/{PHASE}/controller.pid
@@ -365,7 +365,7 @@ docker run --rm --pull=never --name {PHASE}-worker --label org.deerflow.tenant.o
   --network host \
   -v {CROOT}/{PHASE}:{CROOT}/{PHASE} -v {CROOT}/{PHASE}/source.tar.gz:/run/source.tar.gz:ro \
   {env_flags(worker_env)} \
-  --entrypoint /bin/sh {NATIVE_IMAGE} -c 'mkdir -p /tmp/source && tar xzf /run/source.tar.gz -C /tmp/source && cd /tmp/source/backend \
+  --entrypoint /bin/sh {NATIVE_IMAGE} -c 'mkdir -p /tmp/source && tar xzf /run/source.tar.gz -C /tmp/source && cp -n /tmp/source/config.example.yaml /tmp/source/config.yaml && cd /tmp/source/backend \
   && /app/backend/.venv/bin/python -m pytest tests/test_workspace_two_host_physical.py -q --tb=short --no-showlocals'
 """, what="native-worker pytest")
     print("[controller] wait for native-controller pytest to finish")
