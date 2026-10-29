@@ -1689,6 +1689,15 @@ class McpTaskService:
             _CANCELLATION_DRAIN_TIMEOUT_SECONDS,
         )
 
+    def _log_pending_compensation_tasks(self, *, reason: str) -> None:
+        pending_count = sum(not task.done() for task in self._compensation_tasks)
+        if pending_count:
+            logger.warning(
+                "%s; %d MCP compensation task(s) remain in the background",
+                reason,
+                pending_count,
+            )
+
     async def _drain_compensation_tasks(self, *, deadline: float) -> None:
         """Drain service-owned compensation work before Gateway dependencies close."""
         loop = asyncio.get_running_loop()
@@ -1708,13 +1717,9 @@ class McpTaskService:
             # handoff may finish one task while registering another.
             await asyncio.sleep(0)
 
-        pending_count = sum(not task.done() for task in self._compensation_tasks)
-        if pending_count:
-            logger.warning(
-                "Timed out after %.1f seconds waiting for %d MCP compensation task(s); cleanup continues in the background",
-                _CANCELLATION_DRAIN_TIMEOUT_SECONDS,
-                pending_count,
-            )
+        self._log_pending_compensation_tasks(
+            reason="MCP compensation drain reached its deadline",
+        )
 
     async def _drain_compensation_tasks_preserving_cancellation(self, *, deadline: float) -> None:
         """Finish the bounded drain before propagating caller cancellation."""
@@ -1754,11 +1759,17 @@ class McpTaskService:
         except asyncio.CancelledError:
             if not await wait_for_task_until(task, deadline=deadline):
                 self._log_stop_timeout(task)
+                self._log_pending_compensation_tasks(
+                    reason="MCP task poller cleanup reached its deadline before compensation drain could start",
+                )
             else:
                 await self._drain_compensation_tasks_preserving_cancellation(deadline=deadline)
             raise
         if task not in done:
             self._log_stop_timeout(task)
+            self._log_pending_compensation_tasks(
+                reason="MCP task poller cleanup reached its deadline before compensation drain could start",
+            )
             return
         await self._drain_compensation_tasks_preserving_cancellation(deadline=deadline)
 
