@@ -1,5 +1,10 @@
 # Router contracts
 
+Trash listing resolves the live retention configuration off-loop before its
+best-effort sweep. Configuration failures skip automatic cleanup and preserve
+the listing; never substitute a default policy for an unreadable one. Resolve
+the policy before consuming the reconciliation throttle window.
+
 `GET /api/plugins/diagnostics` uses `require_admin_user` before reading the
 canonical runtime diagnostic snapshot. Return bounded entry-point identifiers,
 known levels and fixed summaries; raw messages stay in logs. Never clear the

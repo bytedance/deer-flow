@@ -3648,6 +3648,10 @@ origin project, or to a project you pick when the origin is gone or archived;
 if the target already holds an identical active file, the entries merge.
 Deleting a project moves its entire shelf to trash in the same step.
 
+If the retention configuration cannot be read, automatic cleanup is deferred
+and the trash listing remains available. Cleanup resumes with the current
+configured retention window once the configuration is readable again.
+
 Permanently deleting read-only documents also works on Windows. A file that is
 already missing does not block deletion; other filesystem errors keep the entry
 in Trash for retry. Permissions on symlink targets are preserved.
