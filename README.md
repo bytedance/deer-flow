@@ -3219,6 +3219,8 @@ Then uncomment the `group: browser` tool entries in `config.yaml` (`browser_navi
 
 Existing, non-mock Custom Agent chats expose the same Browser Live controls when browser control is available and the agent either leaves `tool_groups` unrestricted or includes the `browser` group. An explicit tool-group allowlist without `browser` keeps those controls hidden.
 
+Closing a login popup returns browser control to a surviving tab in the same session, preserving cookies and site storage. If every tab closes, the next browser action opens a tab in that same session.
+
 The workspace Browser Live client negotiates binary JPEG WebSocket frames,
 keeps only the newest pending frame per display refresh, and revokes replaced
 object URLs. Gateway control messages remain JSON, and clients that do not

@@ -68,6 +68,8 @@ encoding definition in `tools.py` so the byte encoding and `.jpg` suffix cannot
 drift. `browser_screenshot` never replaces an `outputs/` file: it hard-links
 onto the first free `-N` name.
 
+Reuse contexts on tab close.
+
 ### Embedded Client (`packages/harness/deerflow/client.py`)
 
 `DeerFlowClient` embeds the harness without HTTP/FastAPI, sharing Gateway modules, config, data directories, and response schemas.
