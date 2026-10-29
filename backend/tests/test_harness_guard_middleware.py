@@ -1,4 +1,4 @@
-"""Unit tests for HarnessGuardMiddleware (RFC-003, Route C Phase 1)."""
+"""Unit tests for HarnessGuardMiddleware."""
 
 from unittest.mock import MagicMock, patch
 
@@ -158,6 +158,25 @@ class TestHarnessGuardMiddleware:
         assert res_json.content == "File written"
         assert res_json.status != "error"
 
+    def test_str_replace_skips_when_write_verify_syntax_false_by_default(self):
+        """When write_verify_syntax is default (False), syntax verification is skipped."""
+        middleware = HarnessGuardMiddleware(HarnessGuardConfig())
+        req = _make_request(
+            "str_replace",
+            {"path": "module.py", "old_str": "return 42", "new_str": "return ("},
+        )
+
+        def dummy_handler(r):
+            return ToolMessage(content="Replaced", tool_call_id=r.tool_call["id"], name="str_replace")
+
+        with patch(
+            "deerflow.agents.middlewares.harness_guard_middleware.read_current_file_content",
+            return_value="def foo():\n    return 42\n",
+        ):
+            res = middleware.wrap_tool_call(req, dummy_handler)
+        assert res.content == "Replaced"
+        assert res.status != "error"
+
     def test_str_replace_skips_when_block_on_syntax_error_false(self):
         """When block_on_syntax_error is False, pre-execution verification is skipped without blocking."""
         middleware = HarnessGuardMiddleware(HarnessGuardConfig(write_verify_syntax=True, block_on_syntax_error=False))
@@ -179,7 +198,7 @@ class TestHarnessGuardMiddleware:
 
     def test_str_replace_syntax_validation(self):
         """str_replace on .py that introduces broken syntax is blocked."""
-        middleware = HarnessGuardMiddleware(HarnessGuardConfig(block_on_syntax_error=True))
+        middleware = HarnessGuardMiddleware(HarnessGuardConfig(write_verify_syntax=True, block_on_syntax_error=True))
         req = _make_request(
             "str_replace",
             {"path": "module.py", "old_str": "return 42", "new_str": "return ("},
@@ -201,7 +220,7 @@ class TestHarnessGuardMiddleware:
 
     def test_str_replace_json_syntax_validation(self):
         """str_replace on .json that introduces broken syntax is blocked."""
-        middleware = HarnessGuardMiddleware(HarnessGuardConfig(block_on_syntax_error=True))
+        middleware = HarnessGuardMiddleware(HarnessGuardConfig(write_verify_syntax=True, block_on_syntax_error=True))
         req = _make_request(
             "str_replace",
             {"path": "config.json", "old_str": '"port": 80', "new_str": '"port": '},
@@ -223,7 +242,7 @@ class TestHarnessGuardMiddleware:
 
     def test_str_replace_valid_passes(self):
         """str_replace on .py that produces valid syntax passes cleanly."""
-        middleware = HarnessGuardMiddleware(HarnessGuardConfig(block_on_syntax_error=True))
+        middleware = HarnessGuardMiddleware(HarnessGuardConfig(write_verify_syntax=True, block_on_syntax_error=True))
         req = _make_request(
             "str_replace",
             {"path": "module.py", "old_str": "return 42", "new_str": "return 100"},
@@ -243,7 +262,7 @@ class TestHarnessGuardMiddleware:
 
     def test_str_replace_crlf_normalization_repro(self):
         """CRLF file with LF old_str must be normalized before matching so syntax errors are not bypassed."""
-        middleware = HarnessGuardMiddleware(HarnessGuardConfig(block_on_syntax_error=True))
+        middleware = HarnessGuardMiddleware(HarnessGuardConfig(write_verify_syntax=True, block_on_syntax_error=True))
         crlf_file = "def foo():\r\n    return 42\r\n"
         req = _make_request(
             "str_replace",
@@ -262,6 +281,126 @@ class TestHarnessGuardMiddleware:
         assert isinstance(res, ToolMessage)
         assert res.status == "error"
         assert "WRITE BLOCKED" in res.content
+
+    def test_file_backed_progressive_repair_python(self, tmp_path):
+        """Start with two Python syntax errors (missing colons).
+        The first edit must reach disk while the other error remains;
+        after the second edit, the file must parse cleanly.
+        """
+        py_file = tmp_path / "calc.py"
+        initial_content = "def add(a, b)\n    return a + b\n\ndef sub(a, b)\n    return a - b\n"
+        py_file.write_text(initial_content, encoding="utf-8")
+
+        middleware = HarnessGuardMiddleware(HarnessGuardConfig(write_verify_syntax=True, block_on_syntax_error=True))
+
+        def file_handler(req: ToolCallRequest):
+            args = req.tool_call["args"]
+            content = py_file.read_text(encoding="utf-8")
+            old_str = args["old_str"]
+            new_str = args["new_str"]
+            assert old_str in content
+            py_file.write_text(content.replace(old_str, new_str, 1), encoding="utf-8")
+            return ToolMessage(content="Replaced successfully", tool_call_id=req.tool_call["id"], name="str_replace")
+
+        with patch(
+            "deerflow.agents.middlewares.harness_guard_middleware.read_current_file_content",
+            side_effect=lambda runtime, path: py_file.read_text(encoding="utf-8"),
+        ):
+            # Edit 1: Fix first function header. File still has syntax error in second function.
+            req1 = _make_request(
+                "str_replace",
+                {"path": str(py_file), "old_str": "def add(a, b)\n", "new_str": "def add(a, b):\n"},
+            )
+            res1 = middleware.wrap_tool_call(req1, file_handler)
+            assert res1.status != "error"
+            assert res1.content == "Replaced successfully"
+
+            content_after_1 = py_file.read_text(encoding="utf-8")
+            assert "def add(a, b):" in content_after_1
+            assert "def sub(a, b)\n" in content_after_1
+            assert verify_content_syntax("calc.py", content_after_1) is not None
+
+            # Edit 2: Fix second function header.
+            req2 = _make_request(
+                "str_replace",
+                {"path": str(py_file), "old_str": "def sub(a, b)\n", "new_str": "def sub(a, b):\n"},
+            )
+            res2 = middleware.wrap_tool_call(req2, file_handler)
+            assert res2.status != "error"
+            assert res2.content == "Replaced successfully"
+
+            content_after_2 = py_file.read_text(encoding="utf-8")
+            assert "def sub(a, b):" in content_after_2
+            assert verify_content_syntax("calc.py", content_after_2) is None
+
+            # Edit 3 (Negative test): Now that file is valid, introducing broken syntax is blocked!
+            req3 = _make_request(
+                "str_replace",
+                {"path": str(py_file), "old_str": "return a + b", "new_str": "return a + ("},
+            )
+            res3 = middleware.wrap_tool_call(req3, file_handler)
+            assert isinstance(res3, ToolMessage)
+            assert res3.status == "error"
+            assert "WRITE BLOCKED" in res3.content
+            assert py_file.read_text(encoding="utf-8") == content_after_2
+
+    def test_file_backed_progressive_repair_json(self, tmp_path):
+        """Start with two JSON syntax errors.
+        The first edit must reach disk while the other error remains;
+        after the second edit, the file must parse cleanly.
+        """
+        json_file = tmp_path / "data.json"
+        initial_content = '{\n  "first": ,\n  "second": \n}\n'
+        json_file.write_text(initial_content, encoding="utf-8")
+
+        middleware = HarnessGuardMiddleware(HarnessGuardConfig(write_verify_syntax=True, block_on_syntax_error=True))
+
+        def file_handler(req: ToolCallRequest):
+            args = req.tool_call["args"]
+            content = json_file.read_text(encoding="utf-8")
+            old_str = args["old_str"]
+            new_str = args["new_str"]
+            assert old_str in content
+            json_file.write_text(content.replace(old_str, new_str, 1), encoding="utf-8")
+            return ToolMessage(content="Replaced successfully", tool_call_id=req.tool_call["id"], name="str_replace")
+
+        with patch(
+            "deerflow.agents.middlewares.harness_guard_middleware.read_current_file_content",
+            side_effect=lambda runtime, path: json_file.read_text(encoding="utf-8"),
+        ):
+            # Edit 1: Fix first key
+            req1 = _make_request(
+                "str_replace",
+                {"path": str(json_file), "old_str": '"first": ,', "new_str": '"first": 1,'},
+            )
+            res1 = middleware.wrap_tool_call(req1, file_handler)
+            assert res1.status != "error"
+
+            content_after_1 = json_file.read_text(encoding="utf-8")
+            assert '"first": 1,' in content_after_1
+            assert verify_content_syntax("data.json", content_after_1) is not None
+
+            # Edit 2: Fix second key
+            req2 = _make_request(
+                "str_replace",
+                {"path": str(json_file), "old_str": '"second": ', "new_str": '"second": 2'},
+            )
+            res2 = middleware.wrap_tool_call(req2, file_handler)
+            assert res2.status != "error"
+
+            content_after_2 = json_file.read_text(encoding="utf-8")
+            assert verify_content_syntax("data.json", content_after_2) is None
+
+            # Edit 3 (Negative test): Now that JSON is valid, introducing broken syntax is blocked!
+            req3 = _make_request(
+                "str_replace",
+                {"path": str(json_file), "old_str": '"first": 1', "new_str": '"first": '},
+            )
+            res3 = middleware.wrap_tool_call(req3, file_handler)
+            assert isinstance(res3, ToolMessage)
+            assert res3.status == "error"
+            assert "WRITE BLOCKED" in res3.content
+            assert json_file.read_text(encoding="utf-8") == content_after_2
 
     def test_successful_tool_call_with_error_text_not_misclassified(self):
         """Successful tool call (e.g. read_file of troubleshooting guide) must not be treated as failure."""

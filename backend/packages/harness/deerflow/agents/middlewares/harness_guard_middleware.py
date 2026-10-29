@@ -1,8 +1,8 @@
 """HarnessGuard tool-loop interceptor middleware.
 
-Implements Route C / RFC-003:
-1. Write-Verify Gate: Pre-execution syntax validation on .py (ast.parse) and .json writes
-   for str_replace (spliced verification).
+Provides:
+1. Optional Write-Verify Gate: Pre-execution syntax validation on .py (ast.parse) and .json writes
+   for str_replace (spliced verification on valid files; opt-in).
 2. Error Signature Classifier: Detects classic failure patterns and injects actionable Targeted Hints.
 3. Anti-Doom-Loop: Detects consecutive identical error signatures and A -> B -> A -> B alternating failure loops,
    scoped cleanly by (thread_id, run_id) with bounded LRU tracking.
@@ -285,7 +285,7 @@ class HarnessGuardMiddleware(AgentMiddleware):
                 try:
                     current = read_current_file_content(request.runtime, file_path)
                     old_str, new_str = _match_line_endings(current, old_str, new_str)
-                    if old_str in current:
+                    if old_str in current and verify_content_syntax(file_path, current) is None:
                         replace_all = bool(args.get("replace_all", False))
                         spliced = current.replace(old_str, new_str) if replace_all else current.replace(old_str, new_str, 1)
                         err = verify_content_syntax(file_path, spliced)

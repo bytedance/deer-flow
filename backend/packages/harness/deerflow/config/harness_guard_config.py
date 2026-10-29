@@ -6,15 +6,15 @@ from pydantic import BaseModel, Field
 
 
 class HarnessGuardConfig(BaseModel):
-    """Configuration for system harness tool-loop interception, write-verification,
-    and anti-doom-loop mechanisms (RFC-003, Route C)."""
+    """Configuration for system harness tool-loop interception, optional write-verification,
+    and anti-doom-loop mechanisms."""
 
     enabled: bool = Field(
         default=True,
         description="Whether the HarnessGuard tool-loop interceptor middleware is enabled",
     )
     write_verify_syntax: bool = Field(
-        default=True,
+        default=False,
         description="Whether to perform pre-execution syntax validation on .py (ast.parse) and .json (json.loads) str_replace edits",
     )
     block_on_syntax_error: bool = Field(
