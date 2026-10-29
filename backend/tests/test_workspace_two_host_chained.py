@@ -391,8 +391,8 @@ async def _chained_worker():
     from ecs_executor.dispatch import OutboundStore
     from ecs_executor.publication import WorkspacePublication
     from ecs_executor.worker import Docker, LocalWorker
-    from langchain.prebuilt import ToolNode
     from langchain_core.tools import tool
+    from langgraph.prebuilt import ToolNode
 
     from app.gateway import services
     from deerflow.config.extensions_config import ExtensionsConfig
