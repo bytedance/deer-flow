@@ -114,7 +114,7 @@ def get_subagent_config(name: str, *, app_config: Any | None = None) -> Subagent
     1. Built-in subagents (general-purpose, bash)
     2. Custom subagents from config.yaml custom_agents section
     3. Enabled administrator-managed subagents
-    4. Per-agent overrides from config.yaml agents section (timeout, max_turns, model, skills)
+    4. Per-agent overrides from config.yaml agents section (timeout, max_turns, model, thinking_enabled, reasoning_effort, skills)
 
     Args:
         name: The name of the subagent.

@@ -1117,10 +1117,11 @@ class SubagentExecutor:
             effective_reasoning = resolve_reasoning_request(resolve_reasoning_contract(model_config), thinking_enabled=self.thinking_enabled, reasoning_effort=self.reasoning_effort)
         except ReasoningPolicyError as exc:
             raise ValueError(f"Model {self.model_name}: {exc}") from exc
+        # Preserve the original request for the factory's validation and logs.
         model = create_chat_model(
             name=self.model_name,
-            thinking_enabled=effective_reasoning.thinking_enabled,
-            reasoning_effort=effective_reasoning.reasoning_effort,
+            thinking_enabled=self.thinking_enabled,
+            reasoning_effort=self.reasoning_effort,
             app_config=app_config,
             attach_tracing=False,
         )

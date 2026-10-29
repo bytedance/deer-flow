@@ -398,17 +398,18 @@ class TestAgentConstruction:
     """Test _create_agent() wiring before execution starts."""
 
     @pytest.mark.parametrize(
-        "thinking,effort,mode,expected_thinking,expected_effort",
+        "thinking,effort,mode,expected_thinking,expected_effort,expected_adjustment",
         [
-            (None, None, "optional", False, "lite"),
-            (True, "high", "optional", True, "deep"),
-            (False, None, "required", True, "lite"),
-            (True, None, "unsupported", False, None),
-            (True, "unknown", "optional", True, "lite"),
-            (True, "high", "legacy", True, "high"),
+            (None, None, "optional", False, "lite", None),
+            (True, "high", "optional", True, "deep", "effort_aliased"),
+            (False, None, "required", True, "lite", "thinking_forced_on"),
+            (True, None, "unsupported", False, None, "thinking_unsupported"),
+            (True, "unknown", "optional", True, "lite", "effort_unsupported_value"),
+            (True, "high", "legacy", True, "high", None),
+            (True, None, "legacy-unsupported", False, None, None),
         ],
     )
-    def test_reasoning_factory_and_observer_agree(self, classes, base_config, monkeypatch, thinking, effort, mode, expected_thinking, expected_effort):
+    def test_reasoning_factory_and_observer_agree(self, classes, base_config, monkeypatch, caplog, thinking, effort, mode, expected_thinking, expected_effort, expected_adjustment):
         from deerflow.config.app_config import AppConfig
         from deerflow.config.model_config import ModelConfig
         from deerflow.config.sandbox_config import SandboxConfig
@@ -417,9 +418,9 @@ class TestAgentConstruction:
 
         factory = importlib.import_module("deerflow.models.factory")
         profile_settings = {}
-        if mode == "legacy":
+        if mode in {"legacy", "legacy-unsupported"}:
             profile_settings = {
-                "supports_thinking": True,
+                "supports_thinking": mode == "legacy",
                 "supports_reasoning_effort": True,
                 "when_thinking_enabled": {"extra_body": {"thinking": {"type": "enabled"}}},
             }
@@ -455,7 +456,17 @@ class TestAgentConstruction:
         base_config.thinking_enabled = thinking
         base_config.reasoning_effort = effort
         executor = classes["SubagentExecutor"](config=base_config, tools=[], app_config=app_config, parent_model="child-model", extensions=registry.build())
-        asyncio.run(executor._create_agent())
+        if mode == "legacy-unsupported":
+            with pytest.raises(ValueError, match="Model child-model does not support thinking.*supports_thinking"):
+                asyncio.run(executor._create_agent())
+            assert not captured
+            assert app_config.model_dump() == unchanged
+            return
+
+        with caplog.at_level(logging.INFO, logger=factory.__name__):
+            asyncio.run(executor._create_agent())
+        if expected_adjustment is not None:
+            assert any(record.name == factory.__name__ and expected_adjustment in record.getMessage() for record in caplog.records)
         descriptor = captured["descriptor"]
         assert descriptor.thinking_enabled is expected_thinking
         assert descriptor.reasoning_effort == expected_effort
