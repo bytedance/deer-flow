@@ -1122,6 +1122,8 @@ class ScheduledTaskRunRepository:
                             run_id=candidate.run_id,
                             user_id=candidate.user_id,
                             operation_kind=candidate.operation_kind,
+                            run_incarnation=candidate.run_incarnation,
+                            retention_revision=candidate.evidence_retention_revision,
                         )
                         if target is not None:
                             recovery_targets.append(target)
