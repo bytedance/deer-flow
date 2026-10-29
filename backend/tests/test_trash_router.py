@@ -87,8 +87,10 @@ def _isolate(tmp_path, monkeypatch):
     monkeypatch.setattr(paths_mod, "_paths", None)
     set_app_config(AppConfig(sandbox={"use": "deerflow.sandbox.local:LocalSandboxProvider"}))
     yield
-    anyio.run(close_engine)
-    reset_app_config()
+    try:
+        anyio.run(close_engine)
+    finally:
+        reset_app_config()
 
 
 def _create_project(client: TestClient, name: str = "P", **kwargs) -> dict:
@@ -199,6 +201,9 @@ class TestTrashListing:
         monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "1")
         monkeypatch.delenv("DEER_FLOW_ENV", raising=False)
         monkeypatch.delenv("ENVIRONMENT", raising=False)
+        reconciliation_time = 0.0
+        monkeypatch.setattr(trash, "time", SimpleNamespace(monotonic=lambda: reconciliation_time))
+        monkeypatch.setattr(trash, "_LAST_RECONCILIATION", {})
         reset_app_config()
         reset_extensions_config()
         try:
@@ -218,10 +223,14 @@ class TestTrashListing:
                 original = _original_path(app, row, user_id=AUTH_DISABLED_USER_ID)
                 assert client.get("/api/trash/documents").json()["total"] == 1
 
+                last_reconciliation = trash._LAST_RECONCILIATION[AUTH_DISABLED_USER_ID]
+                # Make reconciliation due again so a premature throttle stamp is observable.
+                reconciliation_time += trash._RECONCILIATION_MIN_INTERVAL_SECONDS
                 config_path.unlink()
                 listing = client.get("/api/trash/documents")
 
                 assert listing.status_code == 200
+                assert trash._LAST_RECONCILIATION[AUTH_DISABLED_USER_ID] == last_reconciliation
                 assert _get_row(app, doc["id"], user_id=AUTH_DISABLED_USER_ID) is not None
                 assert original.read_bytes() == b"still recoverable"
                 assert listing.json()["total"] == 1
@@ -229,6 +238,7 @@ class TestTrashListing:
 
                 config_path.write_text(config_text, encoding="utf-8")
                 assert client.get("/api/trash/documents").json()["total"] == 1
+                assert trash._LAST_RECONCILIATION[AUTH_DISABLED_USER_ID] == reconciliation_time
                 # A successful hot reload still applies an intentionally shorter policy.
                 config_path.write_text(config_text.replace("365", "30"), encoding="utf-8")
                 assert client.get("/api/trash/documents").json()["total"] == 0
