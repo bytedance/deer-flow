@@ -27,7 +27,7 @@ pytestmark = [
 # The scheduled persistence packages only import cleanly tasks-before-runs;
 # pre-loading that order at module scope immunizes the whole process (the
 # scheduler service import would otherwise trigger the cycle first).
-import importlib as _importlib
+import importlib as _importlib  # noqa: E402
 
 _importlib.import_module("deerflow.persistence.scheduled_tasks.sql")  # noqa: E402
 _importlib.import_module("deerflow.persistence.scheduled_task_runs.sql")  # noqa: E402
@@ -311,29 +311,28 @@ async def _chained_controller():
         await foreground.start()
         now = datetime.now(UTC)
         workspace_token = set_current_workspace(context)
-        try:
-            await scheduler_tasks.create(
-                task_id=SCHEDULER_ID,
-                user_id=owner,
-                thread_id=None,
-                origin_thread_id=ORIGIN_THREAD,
-                context_mode="fresh_thread_per_run",
-                assistant_id="lead_agent",
-                title="Two-host chained report",
-                prompt="Deliver the owned asynchronous report",
-                goal_objective="Deliver the owned asynchronous report",
-                schedule_type="once",
-                schedule_spec={"run_at": now.isoformat()},
-                timezone="UTC",
-                next_run_at=now,
-            )
-            due = await scheduler_tasks.claim_due_tasks(now=now, lease_owner=foreground._lease_owner, lease_seconds=120, limit=1)
-            assert len(due) == 1 and due[0]["id"] == SCHEDULER_ID, due
-            queued = await foreground.dispatch_task(due[0], now=now, trigger="scheduled")
-            assert queued["outcome"] == "queued", queued
-            evidence["occurrence_queued"] = True
-            evidence["occurrence_id"] = queued["task_run_id"]
-            evidence_path.write_text(json.dumps(evidence, indent=2))
+        await scheduler_tasks.create(
+            task_id=SCHEDULER_ID,
+            user_id=owner,
+            thread_id=None,
+            origin_thread_id=ORIGIN_THREAD,
+            context_mode="fresh_thread_per_run",
+            assistant_id="lead_agent",
+            title="Two-host chained report",
+            prompt="Deliver the owned asynchronous report",
+            goal_objective="Deliver the owned asynchronous report",
+            schedule_type="once",
+            schedule_spec={"run_at": now.isoformat()},
+            timezone="UTC",
+            next_run_at=now,
+        )
+        due = await scheduler_tasks.claim_due_tasks(now=now, lease_owner=foreground._lease_owner, lease_seconds=120, limit=1)
+        assert len(due) == 1 and due[0]["id"] == SCHEDULER_ID, due
+        queued = await foreground.dispatch_task(due[0], now=now, trigger="scheduled")
+        assert queued["outcome"] == "queued", queued
+        evidence["occurrence_queued"] = True
+        evidence["occurrence_id"] = queued["task_run_id"]
+        evidence_path.write_text(json.dumps(evidence, indent=2))
 
         server = uvicorn.Server(uvicorn.Config(central_app, host="0.0.0.0", port=NATIVE_PORT, log_level="warning", lifespan="on"))
         serve = asyncio.create_task(server.serve())
