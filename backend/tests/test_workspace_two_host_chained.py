@@ -131,7 +131,13 @@ def _graph_builder(saver, tools_registry):
         if not created:
             return {"messages": [AIMessage(content="Waiting for the owned asynchronous report")], "title": "Owned dependency report"}
         owner = tools_registry["owner"]
-        completed = await task_repo.get(created[0]["id"], user_id=owner, thread_id=created[0]["thread_id"], thread_incarnation=created[0]["thread_incarnation"])
+        from deerflow.authz.workspace import reset_current_workspace, set_current_workspace
+
+        selected = set_current_workspace(tools_registry["context"])
+        try:
+            completed = await task_repo.get(created[0]["id"], user_id=owner, thread_id=created[0]["thread_id"], thread_incarnation=created[0]["thread_incarnation"])
+        finally:
+            reset_current_workspace(selected)
         if completed["status"] != TaskStatus.COMPLETED.value:
             return {"messages": [AIMessage(content="Waiting for the real Docker report")], "title": "Owned dependency report"}
         publication = tools_registry["publication"]
@@ -559,6 +565,7 @@ async def _chained_worker():
             "run_store": assembly["run_store"],
             "owner": owner,
             "thread": None,
+            "context": _workspace_context(),
             "publication": workspace_root,
         }
         original_factory = services.resolve_agent_factory
@@ -591,7 +598,13 @@ async def _chained_worker():
             settled = False
             while time.monotonic() < deadline:
                 if created_tasks:
-                    task = await assembly["task_repo"].get(created_tasks[0]["id"], user_id=owner, thread_id=created_tasks[0]["thread_id"], thread_incarnation=created_tasks[0]["thread_incarnation"])
+                    from deerflow.authz.workspace import reset_current_workspace, set_current_workspace
+
+                    selected = set_current_workspace(tools_registry["context"])
+                    try:
+                        task = await assembly["task_repo"].get(created_tasks[0]["id"], user_id=owner, thread_id=created_tasks[0]["thread_id"], thread_incarnation=created_tasks[0]["thread_incarnation"])
+                    finally:
+                        reset_current_workspace(selected)
                     evidence["b_task_status"] = task["status"]
                     evidence_path.write_text(json.dumps(evidence, indent=2))
                 if not host.executions and created_tasks and evidence.get("b_task_status") == "completed":
