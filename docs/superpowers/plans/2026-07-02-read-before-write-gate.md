@@ -24,7 +24,7 @@
 
 **Files:**
 - Modify: `backend/packages/harness/deerflow/sandbox/tools.py` (read_file_tool at ~1666; place helper right above `@tool("read_file", ...)`)
-- Test: `backend/tests/test_read_before_write_middleware.py` (new file, helper test only in this task)
+- Test: `backend/tests/test_utils/test_read_before_write_middleware.py` (new file, helper test only in this task)
 
 **Interfaces:**
 - Produces: `deerflow.sandbox.tools.read_current_file_content(runtime, path: str) -> str` — full current content using `read_file`'s path-resolution rules; raises `FileNotFoundError` when missing, propagates other errors.
@@ -70,7 +70,7 @@ class TestReadCurrentFileContent:
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd backend && PYTHONPATH=. uv run pytest tests/test_read_before_write_middleware.py -v`
+Run: `cd backend && PYTHONPATH=. uv run pytest tests/test_utils/test_read_before_write_middleware.py -v`
 Expected: FAIL — `AttributeError: ... has no attribute 'read_current_file_content'`
 
 - [ ] **Step 3: Implement the helper and reuse it in `read_file_tool`**
@@ -115,13 +115,13 @@ Then replace the duplicated body at the top of `read_file_tool` (keep behavior i
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `cd backend && PYTHONPATH=. uv run pytest tests/test_read_before_write_middleware.py tests/test_sandbox_tools.py -v` (second file: existing read_file coverage if present; otherwise `uv run pytest tests -k read_file -v`)
+Run: `cd backend && PYTHONPATH=. uv run pytest tests/test_utils/test_read_before_write_middleware.py tests/test_sandbox_tools.py -v` (second file: existing read_file coverage if present; otherwise `uv run pytest tests -k read_file -v`)
 Expected: PASS
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add backend/packages/harness/deerflow/sandbox/tools.py backend/tests/test_read_before_write_middleware.py
+git add backend/packages/harness/deerflow/sandbox/tools.py backend/tests/test_utils/test_read_before_write_middleware.py
 git commit -m "refactor(sandbox): extract read_current_file_content helper (#3857)"
 ```
 
@@ -131,7 +131,7 @@ git commit -m "refactor(sandbox): extract read_current_file_content helper (#385
 
 **Files:**
 - Create: `backend/packages/harness/deerflow/agents/middlewares/read_before_write_middleware.py`
-- Test: `backend/tests/test_read_before_write_middleware.py`
+- Test: `backend/tests/test_utils/test_read_before_write_middleware.py`
 
 **Interfaces:**
 - Consumes: `read_current_file_content(runtime, path)` from Task 1.
@@ -139,7 +139,7 @@ git commit -m "refactor(sandbox): extract read_current_file_content helper (#385
 
 - [ ] **Step 1: Write failing tests**
 
-Append to `backend/tests/test_read_before_write_middleware.py`:
+Append to `backend/tests/test_utils/test_read_before_write_middleware.py`:
 
 ```python
 import hashlib
@@ -326,7 +326,7 @@ class TestWriteGate:
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cd backend && PYTHONPATH=. uv run pytest tests/test_read_before_write_middleware.py -v`
+Run: `cd backend && PYTHONPATH=. uv run pytest tests/test_utils/test_read_before_write_middleware.py -v`
 Expected: FAIL — `ModuleNotFoundError: ... read_before_write_middleware`
 
 - [ ] **Step 3: Implement the middleware (sync paths)**
@@ -514,13 +514,13 @@ class ReadBeforeWriteMiddleware(AgentMiddleware):
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `cd backend && PYTHONPATH=. uv run pytest tests/test_read_before_write_middleware.py -v`
+Run: `cd backend && PYTHONPATH=. uv run pytest tests/test_utils/test_read_before_write_middleware.py -v`
 Expected: PASS (all TestReadMarkStamping + TestWriteGate)
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add backend/packages/harness/deerflow/agents/middlewares/read_before_write_middleware.py backend/tests/test_read_before_write_middleware.py
+git add backend/packages/harness/deerflow/agents/middlewares/read_before_write_middleware.py backend/tests/test_utils/test_read_before_write_middleware.py
 git commit -m "feat(middlewares): read-before-write version gate for file tools (#3857)"
 ```
 
@@ -529,7 +529,7 @@ git commit -m "feat(middlewares): read-before-write version gate for file tools 
 ### Task 3: Async `awrap_tool_call` coverage
 
 **Files:**
-- Modify: `backend/tests/test_read_before_write_middleware.py` (implementation from Task 2 already includes `awrap_tool_call`; this task pins it)
+- Modify: `backend/tests/test_utils/test_read_before_write_middleware.py` (implementation from Task 2 already includes `awrap_tool_call`; this task pins it)
 
 **Interfaces:**
 - Consumes: `ReadBeforeWriteMiddleware` from Task 2.
@@ -580,13 +580,13 @@ class TestAsyncPaths:
 
 - [ ] **Step 2: Run tests**
 
-Run: `cd backend && PYTHONPATH=. uv run pytest tests/test_read_before_write_middleware.py -v`
+Run: `cd backend && PYTHONPATH=. uv run pytest tests/test_utils/test_read_before_write_middleware.py -v`
 Expected: PASS (Task 2 already implemented `awrap_tool_call`; if any fail, fix the middleware, not the tests)
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add backend/tests/test_read_before_write_middleware.py
+git add backend/tests/test_utils/test_read_before_write_middleware.py
 git commit -m "test(middlewares): pin async read-before-write gate paths (#3857)"
 ```
 
@@ -599,15 +599,15 @@ git commit -m "test(middlewares): pin async read-before-write gate paths (#3857)
 - Modify: `backend/packages/harness/deerflow/config/app_config.py` (imports at top; field after `loop_detection` at ~line 133)
 - Modify: `backend/packages/harness/deerflow/agents/middlewares/tool_error_handling_middleware.py:192-197` (tail layer)
 - Modify: `config.example.yaml` (bump `config_version` — 16 → 17 as landed; new section near `loop_detection:` at ~line 836)
-- Modify: `backend/tests/test_tool_error_handling_middleware.py:178-218` (chain-order pin test)
-- Test: `backend/tests/test_read_before_write_middleware.py`
+- Modify: `backend/tests/test_tools/test_tool_error_handling_middleware.py:178-218` (chain-order pin test)
+- Test: `backend/tests/test_utils/test_read_before_write_middleware.py`
 
 **Interfaces:**
 - Produces: `AppConfig.read_before_write: ReadBeforeWriteConfig` with `enabled: bool = True`; `ReadBeforeWriteMiddleware` present in `_build_runtime_middlewares` tail between `SandboxAuditMiddleware` and `ToolErrorHandlingMiddleware` when enabled.
 
 - [ ] **Step 1: Write failing tests**
 
-Append to `backend/tests/test_read_before_write_middleware.py`:
+Append to `backend/tests/test_utils/test_read_before_write_middleware.py`:
 
 ```python
 class TestChainWiring:
@@ -649,11 +649,11 @@ class TestChainWiring:
         assert ReadBeforeWriteMiddleware in [type(m) for m in middlewares]
 ```
 
-(If `_make_app_config` in `tests/test_tool_error_handling_middleware.py` builds AppConfig differently, mirror that fixture instead of the inline construction above.)
+(If `_make_app_config` in `tests/test_tools/test_tool_error_handling_middleware.py` builds AppConfig differently, mirror that fixture instead of the inline construction above.)
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cd backend && PYTHONPATH=. uv run pytest tests/test_read_before_write_middleware.py::TestChainWiring -v`
+Run: `cd backend && PYTHONPATH=. uv run pytest tests/test_utils/test_read_before_write_middleware.py::TestChainWiring -v`
 Expected: FAIL — no `read_before_write_config` module / middleware missing from chain
 
 - [ ] **Step 3: Implement config + wiring**
@@ -713,7 +713,7 @@ read_before_write:
   enabled: true
 ```
 
-`tests/test_tool_error_handling_middleware.py::test_build_lead_runtime_middlewares_chain_order_matches_agents_md` — add to imports and `expected_order` between `SandboxAuditMiddleware` and `ToolErrorHandlingMiddleware`:
+`tests/test_tools/test_tool_error_handling_middleware.py::test_build_lead_runtime_middlewares_chain_order_matches_agents_md` — add to imports and `expected_order` between `SandboxAuditMiddleware` and `ToolErrorHandlingMiddleware`:
 
 ```python
     from deerflow.agents.middlewares.read_before_write_middleware import ReadBeforeWriteMiddleware
@@ -725,13 +725,13 @@ read_before_write:
 
 - [ ] **Step 4: Run tests**
 
-Run: `cd backend && PYTHONPATH=. uv run pytest tests/test_read_before_write_middleware.py tests/test_tool_error_handling_middleware.py tests/test_app_config.py -v` (drop `test_app_config.py` if it doesn't exist)
+Run: `cd backend && PYTHONPATH=. uv run pytest tests/test_utils/test_read_before_write_middleware.py tests/test_tools/test_tool_error_handling_middleware.py tests/test_app_config.py -v` (drop `test_app_config.py` if it doesn't exist)
 Expected: PASS
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add backend/packages/harness/deerflow/config/read_before_write_config.py backend/packages/harness/deerflow/config/app_config.py backend/packages/harness/deerflow/agents/middlewares/tool_error_handling_middleware.py config.example.yaml backend/tests/test_tool_error_handling_middleware.py backend/tests/test_read_before_write_middleware.py
+git add backend/packages/harness/deerflow/config/read_before_write_config.py backend/packages/harness/deerflow/config/app_config.py backend/packages/harness/deerflow/agents/middlewares/tool_error_handling_middleware.py config.example.yaml backend/tests/test_tools/test_tool_error_handling_middleware.py backend/tests/test_utils/test_read_before_write_middleware.py
 git commit -m "feat(config): wire ReadBeforeWriteMiddleware into runtime chain, default on (#3857)"
 ```
 

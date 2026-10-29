@@ -160,7 +160,7 @@ is the place to switch to it; the Jev backend stays plugin-owned by design.
 From `backend/`:
 
 ```sh
-uv run pytest tests/test_jev_classify_extension.py
+uv run pytest tests/test_extensions/test_jev_classify_extension.py
 ```
 
 Coverage includes registration and the disabled state, the Jev request shape and

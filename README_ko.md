@@ -197,7 +197,7 @@ MindIE XML 도구 호출은 [인자 파싱 및 줄바꿈 호환성 가이드](ba
    DeepSeek 회귀 테스트는 일반 백엔드 테스트 스위트와 함께 오프라인으로 실행됩니다. 실제 프로바이더를 명시적으로 검증하려면 환경에 `DEEPSEEK_TEST_API_KEY`를 설정하고 `backend/`에서 다음을 실행하세요:
 
    ```bash
-   DEER_FLOW_RUN_LIVE_TESTS=1 uv run --no-sync pytest tests/test_managed_deepseek_live.py -q
+   DEER_FLOW_RUN_LIVE_TESTS=1 uv run --no-sync pytest tests/test_models/test_managed_deepseek_live.py -q
    ```
 
    이 옵트인 테스트는 DeepSeek에 짧은 요청을 보내므로 요금이 발생할 수 있습니다. 임시 상태를 사용하고, 자격 증명을 배포 카탈로그에 절대 저장하지 않으며, CI에서는 건너뜁니다. `DEEPSEEK_TEST_MODEL`로 다른 DeepSeek model ID를 선택적으로 지정할 수 있습니다(기본값: `deepseek-flash`). 같은 테스트를 수정 전 리비전과 수정 후 리비전에서 실행할 수 있으며, 예상 결과는 항상 성공입니다.
@@ -1384,7 +1384,7 @@ JSON 구문 검증을 요청하려면 `task` 또는 `batch_task` 항목의 `acce
 
 이스케이프된 전체 응답도 10,000자 이내이며 바인딩된 호스트의 양수 `tool_output` 외부화/폴백 제한 안에도 들어가므로, 일반적인 예산 관리에서 이어 읽기용 JSON이 보존됩니다. 제한이 더 작으면 윈도우가 짧아질 수 있습니다. `budget_too_small`은 길이가 0인 페이지를 재시도하는 대신 운영자가 예산을 늘려야 한다는 뜻입니다. 이 오류 봉투(envelope)조차 담을 수 없을 만큼 작은 제한에서는 사용할 수 있는 구조화된 응답을 제공할 수 없습니다. 커스텀 출력 예산 미들웨어를 사용하는 명시적 SDK 그래프는 같은 `AppConfig`를 `SubagentRuntime`을 통해 전달해야 하며, 기본 그래프는 기본 리더 제한을 사용합니다.
 
-오프라인 수락 검증: `cd backend && PYTHONPATH=. uv run --locked pytest tests/test_batch_result_reader.py -k 'real_submission_worker or sdk_factory_graph' -q`. 이 명령은 실제 제출, 결정적인 워커 완료, 데이터베이스 재열기, 등록된 그래프의 결과 소비를 실행하며, 외부 모델 실행은 가짜 모델/실행기로 대체됩니다.
+오프라인 수락 검증: `cd backend && PYTHONPATH=. uv run --locked pytest tests/test_runtime/test_batch_result_reader.py -k 'real_submission_worker or sdk_factory_graph' -q`. 이 명령은 실제 제출, 결정적인 워커 완료, 데이터베이스 재열기, 등록된 그래프의 결과 소비를 실행하며, 외부 모델 실행은 가짜 모델/실행기로 대체됩니다.
 
 영속 지식 리서치 결과는 null일 수 있는 `result_artifact.knowledge_sources` 스냅샷도 내보냅니다. 보존된 각 소스는 저장된 보고서의 인용 ID와 `knowledge_search` 또는 위임된 `task`가 캡처한 정확한 발췌문을 짝지으며, RAGFlow 데이터셋/문서/청크 위치 정보와 페이지도 함께 담습니다. 진입점은 기존의 인증된 `GET /api/threads/{thread_id}/subagent-batches/{batch_id}/results.jsonl`로 동일합니다. Gateway 재시작이나 프로바이더 변경 후 증거를 확인하려면, 보고서의 `#knowledge-<id>` 링크를 해당 행의 `sources`에서 `id`로 찾으세요. 간략한 항목 조회와 배치 패널에는 이 스냅샷이 포함되지 않으며, 배치 미리보기에 클릭 가능한 인용이 추가되지도 않습니다.
 

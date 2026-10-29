@@ -129,7 +129,7 @@ feat(authz): propagate trusted authorization principal context
 
 ### Step 1：先写失败测试
 
-新增 `backend/tests/test_authorization_principal.py`：
+新增 `backend/tests/test_authz/test_authorization_principal.py`：
 
 - 空 context 和部分 context。
 - 缺失、`None`、空字符串角色使用 `default_role`。
@@ -138,7 +138,7 @@ feat(authz): propagate trusted authorization principal context
 - attributes 缺失、复制、输入修改不反向影响 Principal。
 - attributes 非 Mapping 时抛 `TypeError`。
 
-扩展 `backend/tests/test_gateway_services.py`：
+扩展 `backend/tests/test_gateway/test_gateway_services.py`：
 
 - 普通请求通过 `body.config.context` 伪造 `is_internal=True`，最终为 `False`。
 - 普通请求通过 `body.config.configurable` 伪造该值，最终被清除。
@@ -230,7 +230,7 @@ is_internal / authz_attributes
 backend/packages/harness/deerflow/guardrails/provider.py
 backend/packages/harness/deerflow/guardrails/middleware.py
 backend/packages/harness/deerflow/authz/adapter.py
-backend/tests/test_authorization_provider.py
+backend/tests/test_authz/test_authorization_provider.py
 ```
 
 `GuardrailRequest` 增加向后兼容的默认字段：
@@ -271,7 +271,7 @@ feat(authz): add built-in RBAC provider and provider factory
 
 ### Step 1：先写失败测试
 
-新增 `backend/tests/test_rbac_authorization_provider.py`：
+新增 `backend/tests/test_authz/test_rbac_authorization_provider.py`：
 
 - wildcard、布尔 allow、列表 allow、空列表、allow 缺失。
 - deny 优先于所有 allow 形式。
@@ -284,7 +284,7 @@ feat(authz): add built-in RBAC provider and provider factory
 - 过滤保持 candidates 顺序和重复项，不增加输入中不存在的资源。
 - 构造后修改原配置不会改变 provider 行为。
 
-新增 `backend/tests/test_authorization_runtime.py`：
+新增 `backend/tests/test_authz/test_authorization_runtime.py`：
 
 - disabled 时直接返回 `None`，且不尝试 import 无效 class path。
 - enabled 但 provider 缺失时抛明确错误。
@@ -363,10 +363,10 @@ Helm values 和相关文档镜像。Phase 1A 不改变配置 schema，因此不 
 
 ```powershell
 cd backend
-uv run pytest tests/test_authorization_principal.py -q
-uv run pytest tests/test_authorization_provider.py tests/test_gateway_services.py -q
-uv run pytest tests/test_rbac_authorization_provider.py tests/test_authorization_runtime.py -q
-uv run pytest tests/test_harness_boundary.py -q
+uv run pytest tests/test_authz/test_authorization_principal.py -q
+uv run pytest tests/test_authz/test_authorization_provider.py tests/test_gateway/test_gateway_services.py -q
+uv run pytest tests/test_authz/test_rbac_authorization_provider.py tests/test_authz/test_authorization_runtime.py -q
+uv run pytest tests/test_infrastructure/test_harness_boundary.py -q
 uv run ruff check packages/harness/deerflow/authz app/gateway/services.py tests
 uv run ruff format --check packages/harness/deerflow/authz app/gateway/services.py tests
 ```

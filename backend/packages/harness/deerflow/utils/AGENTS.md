@@ -10,8 +10,8 @@ once at import and attempt extraction instead of silently disabling Node. Keep
 successful Node extraction unchanged and allow unexpected parser/programming
 exceptions to propagate. The resolved-body fallback preserves article links
 when Python extraction returns the original document wrapper. Regression
-coverage lives in `tests/test_readability.py` and
-`tests/test_web_fetch_relative_links.py`.
+coverage lives in `tests/test_community/test_readability.py` and
+`tests/test_community/test_web_fetch_relative_links.py`.
 
 ### Atomic Byte Publication
 
@@ -20,7 +20,7 @@ capture/fetch publication. It writes and fsyncs a hidden exclusive sibling befor
 `os.replace`, cleaning it on failure. New files use `0666` filtered by the host
 umask; replacements preserve existing permission bits before publication. Never
 read the process umask by changing it in this threaded runtime. Behavioral tests
-for both tool imports live in `tests/test_browser_outputs_atomic.py`.
+for both tool imports live in `tests/test_sandbox/test_browser_outputs_atomic.py`.
 `cleanup_failed_atomic_write` shares best-effort cleanup across this publisher,
 `skills/projection.py`'s private manifest writer, project document staging,
 extension snapshot rollback (including removal of a file that did not exist),
@@ -36,11 +36,11 @@ Callers retain their own serialization, permissions and publication policy.
 Shelf `stage_document_bytes` drains preparation, writes, close and failure
 cleanup before propagating cancellation. Retain the opened handle across its
 handoff, but leave waiting for incoming chunks cancellable; regressions in
-`tests/test_project_document_staging_cancellation.py` cover both shelf entry points.
+`tests/test_projects/test_project_document_staging_cancellation.py` cover both shelf entry points.
 Shelf conversion also drains its final staging discard before releasing
 single-flight ownership. Cleanup failures warn without replacing the conversion
 result, original error or cancellation; the retention sweep owns later retries.
-Coverage lives in `tests/test_project_document_tools.py::TestConversionCleanup`.
+Coverage lives in `tests/test_projects/test_project_document_tools.py::TestConversionCleanup`.
 Local Linux/macOS text revisions opt into a short `temporary_prefix` and
 `preserve_metadata_from` (a caller-owned descriptor). Staging starts at `0600`;
 `file_revision_metadata` transfers ownership, mode, ACLs and xattrs before data.
@@ -74,7 +74,7 @@ Validate before integer truncation and preserve valid hints above the jitter cap
 65536. A valid start near 65535 must report exhaustion with `RuntimeError`
 when all remaining ports are reserved or occupied, without probing invalid
 TCP ports. Keep the last valid port allocatable and preserve `max_range`.
-Regression coverage lives in `tests/test_port_allocator_bounds.py`.
+Regression coverage lives in `tests/test_infrastructure/test_port_allocator_bounds.py`.
 
 ### Goal Objective Validation
 
@@ -90,20 +90,20 @@ text so downstream empty-result, error-detail, and archive-skip fallbacks work.
 Keep its other conversions unchanged, including newline-separated list blocks
 and literal strings such as `"None"`. Do not replace it with `message_to_text`,
 which takes a whole message and uses different list/mapping semantics.
-Regression coverage lives in `tests/test_utils_messages.py`,
-`tests/test_subagent_executor.py`, and `tests/test_task_continuity.py`.
+Regression coverage lives in `tests/test_utils/test_utils_messages.py`,
+`tests/test_subagents/test_subagent_executor.py`, and `tests/test_scheduler/test_task_continuity.py`.
 
 `llm_text.py::extract_response_text` ignores content blocks with non-string
 `type` values, including lists and mappings, while retaining adjacent text and
 output-text blocks. Tests cover extraction and the one-shot input-polish path
-with real LangChain messages in `tests/test_utils_llm_text.py` and
-`tests/test_input_polish_router.py`.
+with real LangChain messages in `tests/test_utils/test_utils_llm_text.py` and
+`tests/test_gateway/test_input_polish_router.py`.
 
 `llm_text.py::strip_think_blocks` scans opening and closing tags forward so
 repeated unclosed `<think>` prefixes in model output do not rescan the same
 suffix. Keep its case-insensitive tag handling, optional whitespace before
 the closing `>`, and the `truncate_unclosed` behavior. Regression coverage
-lives in `tests/test_utils_llm_text.py`.
+lives in `tests/test_utils/test_utils_llm_text.py`.
 
 Opening reasoning tags require whitespace, `>`, or `/>` after the exact `think`
 name; punctuated names such as `<think-tank>`, `<think:note>`, and `<think/other>`
@@ -113,7 +113,7 @@ are empty reasoning blocks: remove the tag without consuming subsequent text.
 Both cleanup functions find opening delimiters outside quoted attributes; a
 quoted `>` cannot terminate the tag or hide an answer after a self-closing tag.
 Keep exact unfinished `<think` prefixes hidden in leading summaries. Coverage:
-`tests/test_think_tag_boundaries.py`.
+`tests/test_agents/test_think_tag_boundaries.py`.
 
 Display summaries use `strip_leading_think_blocks` before limiting text;
 `test_run_journal_visible_summary.py` preserves literal tags in the answer.
@@ -141,7 +141,7 @@ Tool and agent assembly re-enters `get_available_tools()` and may block on MCP d
 Outlines skip root-level HTML comment blocks (`<!--` with up to three leading
 spaces through the first `-->` line). Comment contents cannot open code fences;
 comment markers inside fenced code cannot open comment blocks. Keep line numbers
-and limits unchanged. Coverage: `tests/test_file_outline_html_comments.py`.
+and limits unchanged. Coverage: `tests/test_projects/test_file_outline_html_comments.py`.
 
 `file_outline.py` reads outlines and fallback previews as `utf-8-sig` so an
 optional leading UTF-8 BOM cannot hide a first-line heading or code fence, or
@@ -152,13 +152,13 @@ All outline heading styles skip root-level indented code (four leading spaces
 or a tab after up to three spaces), including PDF-style single and split bold
 headings. Keep legitimate bold headings with up to three spaces and the shared
 conversion-companion path working. Regression coverage lives in
-`tests/test_file_outline_indented_bold.py`.
+`tests/test_projects/test_file_outline_indented_bold.py`.
 
 Split-bold headings reject numeric/punctuation/currency-only blocks after the
 section number, including parentheses, signs, leading whitespace, and `$€£¥`.
 Apply the check to the second through fourth blocks; preserve the four-block
 limit, punctuated titles containing text, and non-ASCII titles. Coverage lives
-in `tests/test_file_outline_split_bold.py`.
+in `tests/test_projects/test_file_outline_split_bold.py`.
 
 ### Active Content MIME Types
 
@@ -174,7 +174,7 @@ Office files can require seconds of work below 1 MiB. It drains conversion worke
 across caller cancellation before returning control to source-file cleanup. Keep conversion
 inside `await_drained`, including when the worker fails or cancellation repeats;
 upload ingestion owns a temporary source that it removes in `finally`. Coverage
-lives in `tests/test_file_conversion_cancellation.py`.
+lives in `tests/test_projects/test_file_conversion_cancellation.py`.
 
 ### Host Path Portability
 

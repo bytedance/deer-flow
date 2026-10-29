@@ -20,7 +20,8 @@ from pathlib import Path
 
 import pytest
 from blockbuster import BlockingError
-from test_opensandbox_provider import _FakeRemote, _FakeSandboxClass, _install
+
+from tests.test_sandbox.test_opensandbox_provider import _FakeRemote, _FakeSandboxClass, _install
 
 pytestmark = pytest.mark.asyncio
 

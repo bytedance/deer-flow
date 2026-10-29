@@ -127,10 +127,10 @@ The scoped offline command, from `backend/`, was:
 
 ```bash
 uv run --no-sync pytest -m 'not live' -q --tb=short \
-  tests/test_aio_sandbox_provider.py tests/test_sandbox_orphan_reconciliation.py \
-  tests/test_sandbox_provider_lifecycle.py tests/test_sandbox_quarantine.py \
-  tests/test_sandbox_leases.py tests/test_sandbox_lease_rebind_cancellation.py \
-  tests/test_aio_sandbox_local_backend.py
+  tests/test_sandbox/test_aio_sandbox_provider.py tests/test_sandbox/test_sandbox_orphan_reconciliation.py \
+  tests/test_sandbox/test_sandbox_provider_lifecycle.py tests/test_sandbox/test_sandbox_quarantine.py \
+  tests/test_sandbox/test_sandbox_leases.py tests/test_sandbox/test_sandbox_lease_rebind_cancellation.py \
+  tests/test_sandbox/test_aio_sandbox_local_backend.py
 ```
 
 Full backend tests used the standard `make test` with Python 3.12 and Node 24 on

@@ -15,8 +15,8 @@
 | Modify | `backend/app/gateway/services.py` | 注入 authenticated user context |
 | Modify | `backend/packages/harness/deerflow/guardrails/provider.py` | `GuardrailRequest` 扩字段 |
 | Modify | `backend/packages/harness/deerflow/guardrails/middleware.py` | 从 runtime context 填充字段 |
-| Modify | `backend/tests/test_setup_agent_e2e_user_isolation.py` | 覆盖 Gateway → runtime context |
-| Modify | `backend/tests/test_guardrail_middleware.py` | 覆盖 runtime context → GuardrailRequest |
+| Modify | `backend/tests/test_agents/test_setup_agent_e2e_user_isolation.py` | 覆盖 Gateway → runtime context |
+| Modify | `backend/tests/test_agents/test_guardrail_middleware.py` | 覆盖 runtime context → GuardrailRequest |
 | Modify | `backend/docs/GUARDRAILS.md` | 更新 custom provider 示例 |
 
 ---
@@ -155,8 +155,8 @@ value: admin:bash
 ```bash
 cd backend
 PYTHONPATH=. uv run pytest \
-  tests/test_guardrail_middleware.py::TestGuardrailRequestAttribution \
-  tests/test_setup_agent_e2e_user_isolation.py::TestConfigAssembly -v
+  tests/test_agents/test_guardrail_middleware.py::TestGuardrailRequestAttribution \
+  tests/test_agents/test_setup_agent_e2e_user_isolation.py::TestConfigAssembly -v
 ```
 
 Expected:

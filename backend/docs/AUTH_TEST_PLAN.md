@@ -1808,12 +1808,12 @@ for route in app.routes:
 ```bash
 # 单元测试（168 个）
 cd backend && PYTHONPATH=. uv run pytest \
-  tests/test_auth.py \
-  tests/test_auth_config.py \
-  tests/test_auth_errors.py \
-  tests/test_auth_type_system.py \
-  tests/test_auth_middleware.py \
-  tests/test_langgraph_auth.py \
+  tests/test_authz/test_auth.py \
+  tests/test_authz/test_auth_config.py \
+  tests/test_authz/test_auth_errors.py \
+  tests/test_authz/test_auth_type_system.py \
+  tests/test_authz/test_auth_middleware.py \
+  tests/test_gateway/test_langgraph_auth.py \
   -v
 
 # 核心接口冒烟

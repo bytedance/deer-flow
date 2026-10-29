@@ -120,7 +120,7 @@ Policy evaluation resolves each ancestor once within the current snapshot, combi
 ## Verification
 
 ```sh
-uv run --no-sync --project backend pytest backend/tests/test_knowledge_platform_extension.py -q
+uv run --no-sync --project backend pytest backend/tests/test_knowledge/test_knowledge_platform_extension.py -q
 uv run --no-sync --project backend pytest backend/tests/blocking_io/test_knowledge_platform_extension.py -q
 ```
 

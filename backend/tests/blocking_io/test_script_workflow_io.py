@@ -3,8 +3,9 @@
 import os
 
 import pytest
-from test_workflow_plugin import context, done, launch
-from test_workflow_plugin import plugin as _workflow_fixture
+
+from tests.test_extensions.test_workflow_plugin import context, done, launch
+from tests.test_extensions.test_workflow_plugin import plugin as _workflow_fixture
 
 plugin = _workflow_fixture
 pytestmark = [pytest.mark.asyncio, pytest.mark.skipif(os.name != "posix", reason="POSIX workflow worker")]
@@ -22,7 +23,7 @@ async def test_workflow_lifetime_and_storage_do_not_block_loop(plugin):
 
 
 async def test_definition_and_live_checkpoint_storage_do_not_block_loop(plugin):
-    from test_workflow_plugin import waiting
+    from tests.test_extensions.test_workflow_plugin import waiting
 
     actions, runs = plugin[1], plugin[3]
     definition = await actions["save_definition"]({"name": "pause", "script": "await pause({stepId:'p'});return 42;"}, context(runs))
@@ -35,6 +36,6 @@ async def test_definition_and_live_checkpoint_storage_do_not_block_loop(plugin):
 
 
 async def test_file_capture_review_consumption_do_not_block_loop(plugin):
-    from test_workflow_plugin import test_immutable_file_review_and_downstream_consume_same_version
+    from tests.test_extensions.test_workflow_plugin import test_immutable_file_review_and_downstream_consume_same_version
 
     await test_immutable_file_review_and_downstream_consume_same_version(plugin)

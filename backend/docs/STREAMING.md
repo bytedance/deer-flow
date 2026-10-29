@@ -268,7 +268,7 @@ sequenceDiagram
 
 `streamed_usage_by_id` 保存每条消息已计入总量的 chunk 用量。完整消息到达时，各字段只计入 `max(完整用量 - chunk 累计, 0)`，再清除该累计值并标记 `counted_usage_ids`。中间件若调低完整消息的用量，不会扣回已经报告的 chunk 用量；这只限制完整消息的核算差值，chunk 内的有符号供应商修正仍按增量累加。重复的完整消息或晚到的同 id chunk 不会再次计数；没有完整快照时，已收到的 chunk 用量仍保留在总量中。没有 id 的消息无法跨模式匹配，维持逐事件计数。
 
-例如原生 Gemini 适配器把服务端累计值转换成 chunk 增量：先 `10/1/11`，再 `0/3/3`（输入/输出/总量），最终 AIMessage 为 `10/4/14`。客户端必须累加两段并避免快照重复计数，而不是在第一段后忽略该 id。纯用量 chunk 即使没有文本也要计入；适配器返回的输入 token 修正值同样按增量累加。`tests/test_client_stream_usage.py` 用真实 Gemini、vLLM 和 OpenAI 适配器及 LangGraph、仅替换 SDK 网络调用，覆盖增量用量和仅在末尾汇总用量的路径。
+例如原生 Gemini 适配器把服务端累计值转换成 chunk 增量：先 `10/1/11`，再 `0/3/3`（输入/输出/总量），最终 AIMessage 为 `10/4/14`。客户端必须累加两段并避免快照重复计数，而不是在第一段后忽略该 id。纯用量 chunk 即使没有文本也要计入；适配器返回的输入 token 修正值同样按增量累加。`tests/test_gateway/test_client_stream_usage.py` 用真实 Gemini、vLLM 和 OpenAI 适配器及 LangGraph、仅替换 SDK 网络调用，覆盖增量用量和仅在末尾汇总用量的路径。
 
 ---
 
@@ -333,7 +333,7 @@ Custom 事件还有一条独立回归边界：`get_stream_writer()` 产生的 ch
 真正的防线是**显式断言 "messages" mode 被订阅 + 用真实 chunk shape mock**：
 
 ```python
-# tests/test_client.py::test_messages_mode_emits_token_deltas
+# tests/test_gateway/test_client.py::test_messages_mode_emits_token_deltas
 agent.stream.return_value = iter([
     ("messages", (AIMessageChunk(content="Hel", id="ai-1"), {})),
     ("messages", (AIMessageChunk(content="lo ", id="ai-1"), {})),
@@ -378,4 +378,4 @@ assert "messages" in agent.stream.call_args.kwargs["stream_mode"]
 | 飞书渠道的增量卡片更新 | `app/channels/manager.py::_handle_streaming_chat` |
 | Channels 自带的 delta/cumulative 防御性累加 | `app/channels/manager.py::_merge_stream_text` |
 | Frontend useStream 支持的 mode 集合 | `frontend/src/core/api/stream-mode.ts` |
-| 核心回归测试 | `backend/tests/test_client.py::TestStream::test_messages_mode_emits_token_deltas` |
+| 核心回归测试 | `backend/tests/test_gateway/test_client.py::TestStream::test_messages_mode_emits_token_deltas` |

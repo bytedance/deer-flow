@@ -35,4 +35,4 @@ No `current_context` argument is currently available in `main`.
 
 - Implementation: `packages/harness/deerflow/agents/memory/backends/deermem/deermem/core/prompt.py`
 - Prompt assembly: `packages/harness/deerflow/agents/lead_agent/prompt.py`
-- Regression tests: `backend/tests/test_memory_prompt_injection.py`
+- Regression tests: `backend/tests/test_knowledge/test_memory_prompt_injection.py`

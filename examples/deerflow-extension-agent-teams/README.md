@@ -263,7 +263,7 @@ own teams. Sharing a host conversation does **not** share its team's private dat
 From `backend/`:
 
 ```sh
-uv run pytest tests/test_agent_teams_plugin.py tests/test_extension_agent_runs.py tests/test_plugin_tools.py -q
+uv run pytest tests/test_agents/test_agent_teams_plugin.py tests/test_extensions/test_extension_agent_runs.py tests/test_extensions/test_plugin_tools.py -q
 uv run ruff check ../examples/deerflow-extension-agent-teams
 uv run ruff format --check ../examples/deerflow-extension-agent-teams
 ```

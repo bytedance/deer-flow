@@ -180,8 +180,8 @@ Test the macOS runtime selection logic:
 ```bash
 cd backend
 uv run python -m pytest \
-  tests/test_aio_sandbox_local_backend.py::test_darwin_open_keeps_docker_to_reconcile_restricted_sandbox \
-  tests/test_aio_sandbox_local_backend.py::test_darwin_open_uses_apple_container_without_managed_docker_sandboxes \
+  tests/test_sandbox/test_aio_sandbox_local_backend.py::test_darwin_open_keeps_docker_to_reconcile_restricted_sandbox \
+  tests/test_sandbox/test_aio_sandbox_local_backend.py::test_darwin_open_uses_apple_container_without_managed_docker_sandboxes \
   -q
 ```
 

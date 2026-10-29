@@ -594,9 +594,9 @@ if (producedArtifacts.length > 0) {
 | **修改** | `backend/packages/harness/deerflow/config/app_config.py` | 注册 `tool_artifacts` 配置 |
 | **修改** | `frontend/src/core/threads/types.ts` | 新增 `ArtifactEntry` 类型 |
 | **修改** | `frontend/src/components/workspace/messages/message-group.tsx` | 渲染产物徽章 |
-| **新增** | `backend/tests/test_artifact_registry.py` | 单元测试 |
-| **新增** | `backend/tests/test_artifact_capture_middleware.py` | 中间件测试 |
-| **新增** | `backend/tests/test_artifact_resolution_middleware.py` | 解析测试 |
+| **新增** | `backend/tests/test_projects/test_artifact_registry.py` | 单元测试 |
+| **新增** | `backend/tests/test_projects/test_artifact_capture_middleware.py` | 中间件测试 |
+| **新增** | `backend/tests/test_projects/test_artifact_resolution_middleware.py` | 解析测试 |
 
 ---
 

@@ -182,9 +182,9 @@ Read paths no longer have `mkdir` side effects — non-existent directories retu
 
 | Module | Test File | Count |
 |--------|-----------|:-----:|
-| `skills.installer` | `tests/test_skills_installer.py` | 22 |
-| `uploads.manager` | `tests/test_uploads_manager.py` | 20 |
-| `client` hardening | `tests/test_client.py` (new cases) | ~40 |
-| `client` e2e | `tests/test_client_e2e.py` (new file) | ~20 |
+| `skills.installer` | `tests/test_skills/test_skills_installer.py` | 22 |
+| `uploads.manager` | `tests/test_uploads/test_uploads_manager.py` | 20 |
+| `client` hardening | `tests/test_gateway/test_client.py` (new cases) | ~40 |
+| `client` e2e | `tests/test_gateway/test_client_e2e.py` (new file) | ~20 |
 
 Coverage: unsafe zip / symlink / zip bomb / frontmatter / duplicate / extension / macOS filter / normalize / deduplicate / traversal / list / delete / agent invalidation / upload lifecycle / thread isolation / URL encoding / config pollution.

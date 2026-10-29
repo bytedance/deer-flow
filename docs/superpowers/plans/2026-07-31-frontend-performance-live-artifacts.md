@@ -32,13 +32,13 @@
 **Files:**
 - Modify: `backend/packages/harness/deerflow/community/browser_automation/session.py`
 - Modify: `backend/app/gateway/routers/browser.py`
-- Modify: `backend/tests/test_browser_automation.py`
-- Modify: `backend/tests/test_browser_router.py`
+- Modify: `backend/tests/test_sandbox/test_browser_automation.py`
+- Modify: `backend/tests/test_sandbox/test_browser_router.py`
 - Modify: `backend/AGENTS.md`
 
 - [ ] Add failing session tests asserting `_live_frame()` returns raw JPEG `bytes`, never base64 text.
 - [ ] Add router tests for `?frame_format=binary`: capability is accepted, frame events use `websocket.send_bytes`, control/status events remain JSON, and a client without the query receives the legacy `{"type":"frame","data":"..."}` JSON payload.
-- [ ] Run `cd backend && uv run pytest tests/test_browser_automation.py tests/test_browser_router.py -q` and capture RED.
+- [ ] Run `cd backend && uv run pytest tests/test_sandbox/test_browser_automation.py tests/test_sandbox/test_browser_router.py -q` and capture RED.
 - [ ] Change `frame_queue` to `asyncio.Queue[bytes]`; keep drop-oldest backpressure. Encode base64 only inside the legacy gateway send path. Reject unsupported capability values with a JSON error and close code 1008.
 - [ ] Update `backend/AGENTS.md` with the wire contract and compatibility boundary.
 - [ ] Run focused tests GREEN. Reintroduce session-layer base64 to prove the raw-byte assertion RED, restore.
@@ -63,7 +63,7 @@
 
 **Files:**
 - Modify: `backend/app/gateway/routers/artifacts.py`
-- Modify: `backend/tests/test_artifacts_router.py`
+- Modify: `backend/tests/test_gateway/test_artifacts_router.py`
 - Modify: `backend/tests/blocking_io/test_artifacts_router.py`
 
 - [ ] Add failing API tests for a UTF-8 text file: full GET remains inline with the correct media type, `Range: bytes=0-1048575` returns 206/`Content-Range`, invalid ranges return 416, and active HTML/SVG content remains forced-download.
@@ -99,7 +99,7 @@
 - Modify: `CHANGELOG.md`
 
 - [ ] Document Browser Live binary negotiation/fallback, the 1 MiB artifact preview behavior, and performance verification commands.
-- [ ] Run `cd backend && make format && make lint && uv run pytest tests/test_browser_automation.py tests/test_browser_router.py tests/test_artifacts_router.py tests/blocking_io/test_artifacts_router.py -q`.
+- [ ] Run `cd backend && make format && make lint && uv run pytest tests/test_sandbox/test_browser_automation.py tests/test_sandbox/test_browser_router.py tests/test_gateway/test_artifacts_router.py tests/blocking_io/test_artifacts_router.py -q`.
 - [ ] Run `cd frontend && pnpm check && pnpm test && pnpm test:e2e -- tests/e2e/browser-feature.spec.ts tests/e2e/artifact-preview.spec.ts`.
 - [ ] Run the full root-supported checks that are practical locally, then `cd frontend && NEXT_PUBLIC_STATIC_WEBSITE_ONLY=true pnpm build && pnpm perf:check`.
 - [ ] Use browser DevTools to verify binary websocket frames, bounded frame presentation, object URL cleanup after panel close, a 206 artifact preview, and an explicit full-load request.

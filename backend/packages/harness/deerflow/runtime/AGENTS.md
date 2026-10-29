@@ -4,7 +4,7 @@ Lock registry/LRU/stats/lifecycle without awaits, saver I/O or copy callbacks.
 Deep-copy writes/seeds on caller-thread ingest/read (async too): O(payload)
 CPU/allocation per entry, O(N²) across N growing seeds. LRU bounds entries, not
 bytes/scan cost; profile before offload. Isolation:
-`tests/test_checkpoint_cache_payload_isolation.py`.
+`tests/test_persistence/test_checkpoint_cache_payload_isolation.py`.
 
 Redis read/write records require tuple/list triples and string task/channel IDs;
 skip bad ingests, rebuild bad reads. Bind sync/async target/ancestor hits to the
@@ -35,7 +35,7 @@ retirement always receive a gap, including cursor-less terminal reattachments.
 
 Memory/Redis bridges keep startup-only `stream_bridge.heartbeat_interval_seconds`; explicit `subscribe(..., heartbeat_interval=...)` overrides it. Provider contexts drain owned cache/bridge/checkpointer/Store teardown across cancellation. `close_agent_stream()` shields close to completion: preserve counts, defer host cancellation, balance repeats, keep active errors, log attached close failures at callers, map close cancellation to failure, never time out.
 
-Reconnect cursor parsing requires ASCII digits and must treat integer-conversion failures as malformed input. Redis cursors additionally require unsigned 64-bit components; use the same parser before sending a cursor to `XREAD` and when detecting replay gaps. Preserve malformed-cursor policy: memory replays retained events, Redis tails active streams and replays ended streams through `end`. `tests/test_stream_bridge.py` directly tests both parsers offline, including oversized sequences, Redis component overflow, non-ASCII digits, and valid uint64 boundaries; integration tests also exercise malformed cursors against real Redis.
+Reconnect cursor parsing requires ASCII digits and must treat integer-conversion failures as malformed input. Redis cursors additionally require unsigned 64-bit components; use the same parser before sending a cursor to `XREAD` and when detecting replay gaps. Preserve malformed-cursor policy: memory replays retained events, Redis tails active streams and replays ended streams through `end`. `tests/test_runtime/test_stream_bridge.py` directly tests both parsers offline, including oversized sequences, Redis component overflow, non-ASCII digits, and valid uint64 boundaries; integration tests also exercise malformed cursors against real Redis.
 
 ### Redis Stream END Publication
 
@@ -50,7 +50,7 @@ tail-only and cannot deduplicate an old mid-stream END. Do not add an unbounded 
 this fast path; cleanup, expiry, and a new producer generation would then need a
 separate lifecycle contract. An unowned recovery END for a missing stream is a
 successful no-op; a live owner's write retains its existing missing-buffer
-`XADD` behavior. Test fakes must mirror the scan switch and both tail fast paths. Coverage: `tests/test_stream_bridge.py`.
+`XADD` behavior. Test fakes must mirror the scan switch and both tail fast paths. Coverage: `tests/test_runtime/test_stream_bridge.py`.
 
 ### Memory Stream Replay
 
@@ -58,7 +58,7 @@ Memory keeps the exact last evicted event ID as bounded per-run metadata. A
 reconnect from that known predecessor replays all retained successors and END,
 matching a live subscriber at the same position. Older or unverifiable evicted
 cursors still emit `StreamGap`; Redis replay policy is unchanged. Coverage in
-`tests/test_memory_stream_reconnect_boundary.py` includes the Gateway SSE consumer
+`tests/test_knowledge/test_memory_stream_reconnect_boundary.py` includes the Gateway SSE consumer
 with real ASGI requests and LangGraph SDK decoding.
 
 ### Checkpoint Channel Modes (`full` / `delta`)
@@ -179,7 +179,7 @@ journal and emit no such event. Recorder failures are fail-open.
 run reads, and sequence recovery split on physical newlines. Do not use
 `str.splitlines()`: U+0085/U+2028/U+2029 inside valid JSON strings must remain
 part of the record. Preserve existing UTF-8 files and the writer format.
-`tests/test_jsonl_event_store_unicode.py` covers Unicode values, reopening,
+`tests/test_persistence/test_jsonl_event_store_unicode.py` covers Unicode values, reopening,
 idempotent writes, LF/CRLF, blank lines, and malformed records.
 Reads and deletes treat a run ID writes reject as an unknown run (routes pass
 URL IDs through); writes still raise.
@@ -193,7 +193,7 @@ shared-read and restrictive modes. Failed permission setup or publication must l
 the run intact; unreadable/corrupt watermarks fail closed. Complete
 thread deletion removes the watermark only after deleting all run files, including
 when no events remain. This does not add multi-process JSONL support. Coverage:
-`tests/test_jsonl_event_store_seq_watermark.py` and the mutation cancellation suite.
+`tests/test_persistence/test_jsonl_event_store_seq_watermark.py` and the mutation cancellation suite.
 
 **Targeted run-event attribution** (`runtime/events/store/`):
 `RunEventStore.find_latest_ai_message_run_ids()` has a complete-or-error
@@ -224,7 +224,7 @@ public put/read results must be detached snapshots. Otherwise mutating a write
 receipt or a paged read silently rewrites later RunEvent replay and every shared
 message projection. The cross-backend contract lives on `RunEventStore` in
 `runtime/events/store/base.py`; regression coverage is
-`tests/test_memory_run_event_snapshot_isolation.py`.
+`tests/test_knowledge/test_memory_run_event_snapshot_isolation.py`.
 
 **Event-store mutation fence** (`runtime/events/store/`): every thread mutation —
 `put`, `put_batch`, `put_if_absent`, `delete_by_thread`, `delete_by_run` — shares
@@ -248,7 +248,7 @@ a pre-admission miss can become an exact hit.
 Thread deletion removes it in the same mutation-fenced transaction only when no
 events remain for the thread, including owner-scoped and zero-row deletions.
 Check all owners and categories; surviving rows retain the allocation floor.
-`tests/test_run_event_store.py` pins cleanup, recreation and cursor visibility.
+`tests/test_persistence/test_run_event_store.py` pins cleanup, recreation and cursor visibility.
 
 **Changed-run discovery:** Use the durable `(change_seq, run_id)` cursor and repeat history audits after admission. Details: `backend/docs/runtime-guidance-details.md`.
 
@@ -256,7 +256,7 @@ Check all owners and categories; surviving rows retain the allocation floor.
 On a thread change, remove prior index membership only after snapshot construction
 succeeds; prune empty buckets and retain same-thread retry order. Indexed queries
 and thread cleanup follow the current row's thread. Coverage:
-`tests/test_memory_run_store_replacement_index.py` (native Manager + real SQLite).
+`tests/test_knowledge/test_memory_run_store_replacement_index.py` (native Manager + real SQLite).
 
 **Terminal run cleanup:** Close streams, journals, and graph references even on cancellation. Details: `backend/docs/runtime-guidance-details.md`.
 
@@ -265,7 +265,7 @@ the stamper's generation callback captures the journal. Diagnostic tracebacks ma
 retain finalizer frames, so config/callback removal alone is insufficient. Keep
 the DEBUG checkpoint-inspection failure regression in `test_run_worker_rollback.py`.
 
-**`RunManager._runs` holds only records this worker admitted.** A cross-worker idempotent reuse returns the `store_only` row from `_record_from_store()` unregistered: the peer never finalizes or `cleanup()`s it, so a registered copy stays `pending`/`running`, 409s later same-thread admissions, hides the owner's orphan from reconciliation, and sends a peer `cancel()` down the local-owner path. Pinned by `test_peer_idempotent_reuse_*` and `test_peer_cancel_of_reused_run_*` (`tests/test_multi_worker_run_ownership.py`) plus `tests/test_gateway_services.py::test_start_run_peer_idempotent_reuse_*`.
+**`RunManager._runs` holds only records this worker admitted.** A cross-worker idempotent reuse returns the `store_only` row from `_record_from_store()` unregistered: the peer never finalizes or `cleanup()`s it, so a registered copy stays `pending`/`running`, 409s later same-thread admissions, hides the owner's orphan from reconciliation, and sends a peer `cancel()` down the local-owner path. Pinned by `test_peer_idempotent_reuse_*` and `test_peer_cancel_of_reused_run_*` (`tests/test_storage/test_multi_worker_run_ownership.py`) plus `tests/test_gateway/test_gateway_services.py::test_start_run_peer_idempotent_reuse_*`.
 
 **A `RunRecord` owner matches its durable row.** HTTP admissions omit `user_id` and the SQL store stamps the ambient user, so `create()` and `_admit_thread_operation()` resolve an omitted owner from the contextvar, keeping `None` without one — never `get_effective_user_id()`'s `default` bucket. A `None` record made SQL keyed retries on a peer or after `cleanup()` return 500, hid HTTP runs from owner-scoped history, and skipped their MCP `background_tasks` projection. Pinned by `test_run_record_owner_matches_row_stamped_from_context`, `test_keyed_retry_without_explicit_user_*`, the `sql` case of `test_start_run_peer_idempotent_reuse_*`, `test_run_manager_*_admitted_without_explicit_user`, and `test_run_manager_keeps_omitted_owner_unset_without_user_context`.
 
@@ -371,13 +371,13 @@ Drain tasks are named `jsonl-mutation:{thread_id}` for asyncio task dumps. Multi
 the admitted group keeps its records on success or completes rollback on failure.
 This is a store-local guarantee, not a change to RunJournal cancellation policy or
 JSONL's single-process deployment constraint. Regression coverage is in
-`tests/test_jsonl_event_store_cancellation.py`.
+`tests/test_persistence/test_jsonl_event_store_cancellation.py`.
 
 ## Completed-evidence provenance
 
 Gateway admission and RunManager validate host-owned evidence origin against the shared `EVIDENCE_ORIGINS` in `runtime/runs/schemas.py`. Preserve the string values and reject client metadata as provenance; only trusted Python entry points set the admission argument.
 
-Idempotent resume reuse preserves both the private request identity and the original evidence origin/agent across worker and store boundaries. A retry must not relabel existing evidence. Memory/SQLite parity is covered in `tests/test_completed_evidence_admission.py`.
+Idempotent resume reuse preserves both the private request identity and the original evidence origin/agent across worker and store boundaries. A retry must not relabel existing evidence. Memory/SQLite parity is covered in `tests/test_persistence/test_completed_evidence_admission.py`.
 
 Completed-evidence finalization obeys the journal write-ownership contract:
 unknown or cancelled write outcomes cannot yield a receipt or be replayed. Only
@@ -400,5 +400,5 @@ an engine, retaining that fence without a second pool checkout. Different engine
 and overridden Run lookups retain their ordinary read path. Plain callable guards
 remain supported; they must not acquire another connection from the writer's pool.
 Memory guard/deletion locks are per-thread, so a slow guard cannot block another
-thread. Coverage: `tests/test_recovery_terminal_pool.py` (PostgreSQL via
+thread. Coverage: `tests/test_persistence/test_recovery_terminal_pool.py` (PostgreSQL via
 `TEST_POSTGRES_URI`).

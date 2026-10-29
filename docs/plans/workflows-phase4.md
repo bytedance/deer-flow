@@ -13,7 +13,7 @@
 
 ## Validation boundaries
 
-`backend/tests/test_workflow_gateway_acceptance.py` starts two real Gateways with
+`backend/tests/test_extensions/test_workflow_gateway_acceptance.py` starts two real Gateways with
 normal login/CSRF, shared PostgreSQL 17, Redis 7, and nginx round-robin routing.
 The deterministic model replaces provider answers, not AgentRuns, admission,
 LangGraph/checkpoints, storage or authorization. Test-only barriers pause real

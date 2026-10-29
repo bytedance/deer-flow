@@ -71,7 +71,7 @@ No match: skip inspection, log ID. Tests: `test_read_mark_tool_call_correlation.
 2. **ToolOutputBudgetMiddleware** - Budgets model-bound text/JSON with limits/exemptions; externalizes to thread outputs (`tool_output.storage_subdir`, default `.tool-results`, `TOOL_RESULTS_DIRNAME`) with synopsis/`read_file` refs. Preserve mixed-result media. Restore blob refs across hosts using the recovering Gateway's normal umask; hash/write failures fall back inline. Internal files bypass workspace/delivery scans. Publication/elision/bash exit marker: [contract](TOOL_OUTPUT_PERSISTENCE.md). Elision: `tool_call_args`; retain newest `keep_recent_writes` writes. The placeholder comes from `WRITE_ELISION_PLACEHOLDER_TEMPLATE` (`constants.py`) and `write_file` rejects a payload that *is* that placeholder (whole payload, up to surrounding whitespace), so an imitated placeholder cannot become a deliverable (#7319). Controls: `elide_superseded_writes`, `superseded_write_min_chars`.
    Superseded-write elision is opt-in: enabling it reduces context but rewrites
    earlier model-request prefixes when later actions supersede writes (#7319).
-   Tests: `tests/test_tool_output_synopsis_budget.py`.
+   Tests: `tests/test_tools/test_tool_output_synopsis_budget.py`.
 3. **ToolResultSanitizationMiddleware** - Neutralizes framework/injection tags (e.g. `<system-reminder>`) and boundary markers in *remote-content* tool results (`web_fetch`/`web_search`/`image_search`/`web_capture`) so attacker-controlled fetched pages cannot forge trusted framework context. Mirrors `InputSanitizationMiddleware`'s user-input guardrail for the other untrusted-content entry point; sits inner of `ToolOutputBudgetMiddleware`. Local tool output (bash/read_file) is left untouched. Scope is a name-based allowlist for the first-party web tools, plus every MCP-sourced tool via its `deerflow_mcp` metadata tag, so an MCP server naming its fetcher `fetch_url` is still covered
 
    Result-rewriting middlewares between the raw callable boundary and the
@@ -128,7 +128,7 @@ No match: skip inspection, log ID. Tests: `test_read_mark_tool_call_correlation.
    their `error` fields belong to the document. Explicit error status, existing
    metadata and legacy `Error:` failures remain authoritative; other tools keep
    JSON error inference. Real truncation markers still produce partial results.
-   `tests/test_read_file_json_result_meta.py` exercises native sync/async reads,
+   `tests/test_utils/test_read_file_json_result_meta.py` exercises native sync/async reads,
    receipts and follow-up calls with the progress guard on and off.
 16. **ArtifactCaptureMiddleware** - See [tool artifacts](TOOL_ARTIFACTS.md).
 
@@ -136,9 +136,9 @@ Authorization identity is independent of enforcement. Gateway strips client iden
 
 Gateway route permissions and per-caller skill visibility are documented in the [Gateway guide](../../../../../app/gateway/AGENTS.md#route-and-skill-listing-authorization). Runtime skill activation remains a separate layer.
 
-Model authorization uses `authz.py::resolve_model_authorization()` (same cached-provider, internal-role, and principal-building path as route authorization) as the Gateway integration point for the `models` router: `list_models` filters names through `filter_resources(principal, "model", ...)`, and `get_model` enforces `authorize(resource="model", action="use")` with a deny surfacing as 403; provider errors follow `authorization.fail_closed` (fail-open returns the unfiltered list / proceeds). At runtime, `lead_agent/agent.py::_authorize_model_name` — called from `_make_lead_agent` and from `DeerFlowClient._ensure_agent` — applies the same `model:use` check to the resolved model name. On deny it scans the `filter_resources`-visible names (excluding the denied model), re-verifying each candidate with `authorize("model", "use")` before falling back, because a custom provider may allow `list` while denying `use`; no usable fallback raises under `fail_closed` and keeps the original model under fail-open. The built-in RBAC provider maps this to the per-role `models` policy key. Tests: `tests/test_models_authorization.py`.
+Model authorization uses `authz.py::resolve_model_authorization()` (same cached-provider, internal-role, and principal-building path as route authorization) as the Gateway integration point for the `models` router: `list_models` filters names through `filter_resources(principal, "model", ...)`, and `get_model` enforces `authorize(resource="model", action="use")` with a deny surfacing as 403; provider errors follow `authorization.fail_closed` (fail-open returns the unfiltered list / proceeds). At runtime, `lead_agent/agent.py::_authorize_model_name` — called from `_make_lead_agent` and from `DeerFlowClient._ensure_agent` — applies the same `model:use` check to the resolved model name. On deny it scans the `filter_resources`-visible names (excluding the denied model), re-verifying each candidate with `authorize("model", "use")` before falling back, because a custom provider may allow `list` while denying `use`; no usable fallback raises under `fail_closed` and keeps the original model under fail-open. The built-in RBAC provider maps this to the per-role `models` policy key. Tests: `tests/test_models/test_models_authorization.py`.
 
-Sandbox authorization (`sandbox:execute`) gates every sandbox acquisition before `provider.acquire` — including this middleware's eager path (`before_agent` / `abefore_agent` skip acquisition on deny instead of raising, deferring to the lazy per-tool gate). See the [sandbox module guide](../../sandbox/AGENTS.md) authorization-gate paragraph and `tests/test_sandbox_authorization.py`.
+Sandbox authorization (`sandbox:execute`) gates every sandbox acquisition before `provider.acquire` — including this middleware's eager path (`before_agent` / `abefore_agent` skip acquisition on deny instead of raising, deferring to the lazy per-tool gate). See the [sandbox module guide](../../sandbox/AGENTS.md) authorization-gate paragraph and `tests/test_sandbox/test_sandbox_authorization.py`.
 
 Before changing a later authorization phase, read the [authorization RFC](../../../../../../docs/plans/2026-07-10-pluggable-authorization-rfc.md) and its [implementation notes](../../../../../../docs/plans/2026-07-10-pluggable-authorization-implementation-notes.md). The notes are the cumulative handoff record for merged PR behavior, reviewer feedback, trust-boundary decisions, deferred scope, and required regression coverage.
 
@@ -187,5 +187,5 @@ llm-error-handling, terminal-response and model-length middlewares. `has_visible
 each content block's `type` by equality, never set membership: `type: []` / `type: {}` are legal
 JSON from a provider, and hashing an unhashable value would raise TypeError out of the middleware
 chain instead of skipping the block and reading the remaining text. Tests:
-`tests/test_model_response.py` plus the middleware-level classification cases in
-`tests/test_llm_error_handling_middleware.py`.
+`tests/test_models/test_model_response.py` plus the middleware-level classification cases in
+`tests/test_models/test_llm_error_handling_middleware.py`.

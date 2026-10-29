@@ -248,7 +248,7 @@ with the read-only opt-in check from `backend/`:
 DEER_FLOW_RUN_LIVE_TESTS=1 \
 LIGHTRAG_BASE_URL=http://localhost:9621 \
 LIGHTRAG_EVIDENCE_QUERY='a question matching an indexed document' \
-uv run pytest tests/test_knowledge_contract_live.py -m live -q
+uv run pytest tests/test_knowledge/test_knowledge_contract_live.py -m live -q
 ```
 
 Set `LIGHTRAG_API_KEY` in the environment if required. This test performs no

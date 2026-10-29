@@ -16,7 +16,7 @@ cap and operator remediation; deadlines remain ordinary restore errors. Do not
 silently truncate required resources or imply unchanged over-limit data can succeed
 on retry. Log restore failures with owner/thread context and the exception chain;
 caller-facing errors identify the logical tree without exposing host paths.
-Regressions: `tests/test_e2b_sandbox_provider.py` exercises release, expiry and
+Regressions: `tests/test_sandbox/test_e2b_sandbox_provider.py` exercises release, expiry and
 recreation using saved bytes, plus isolation, reuse and failed restoration.
 
 Reconciliation floors active-client TTL renewals at the SDK's default timeout
@@ -66,13 +66,13 @@ installed; the lifespan shuts the provider down after the run drain.
 Quote the complete `grep --include=<pattern>` argument with `shlex.quote` before
 passing it to the shell. The shell must not split or expand filename patterns;
 grep owns basename globbing and `path_matches` owns root-relative directory
-scoping. `tests/test_sandbox_search_contract.py` pins this across providers using
+scoping. `tests/test_sandbox/test_sandbox_search_contract.py` pins this across providers using
 real temporary files and offline shell transports.
 
 Use `grep --null` to separate the filename from `line:text`, then parse the
 line number only after that NUL delimiter. Colons are valid path characters,
 so never split the whole record on them. Real-shell regressions in
-`tests/test_e2b_sandbox_provider.py` cover colon-containing files and directories.
+`tests/test_sandbox/test_e2b_sandbox_provider.py` cover colon-containing files and directories.
 
 Split `grep` and `glob` output records only on `"\n"`, matching
 `parse_remote_search_output`. Do not use `splitlines()`: its other boundaries

@@ -11,7 +11,7 @@ Log the malformed container's path and type, or that no result objects remain,
 before returning a format error. Keep queries, credentials, and payload values
 out of these diagnostics; ordinary missing/empty results are not format errors.
 
-`tests/test_brave_response_shapes.py` exercises the real tool and `_brave_get`
+`tests/test_community/test_brave_response_shapes.py` exercises the real tool and `_brave_get`
 through an offline HTTPX transport with synthetic JSON bodies. Do not mock the
 normalizer or substitute its final output. Patch the provider's `httpx` reference
 with a local client factory and `HTTPStatusError`; never replace the shared
@@ -20,4 +20,4 @@ with a local client factory and `HTTPStatusError`; never replace the shared
 Image result URLs use `community.url_safety.safe_public_result_url` (imported
 as `_safe_public_url`); do not add a provider-local copy. It checks strings
 without DNS and shares the non-public address predicate with fetch validation.
-Tests: `tests/test_image_result_url_safety.py` plus the existing provider suite.
+Tests: `tests/test_uploads/test_image_result_url_safety.py` plus the existing provider suite.

@@ -46,6 +46,6 @@
 - `bash` 修改文件不走闸；但它改变 hash，会使后续 `write_file`/`str_replace` 被逼重读，方向一致。
 - ~~闸校验与实际写入之间存在极窄的 TOCTOU 窗口（并行工具调用），作为护栏可接受。~~ 该窗口已按 #3912 review 意见通过 per-path 临界区消除（见"并发语义"）——同轮并行重复写正是 Case 2 的变体，不应写掉。
 
-## 测试（TDD，`backend/tests/test_read_before_write_middleware.py`）
+## 测试（TDD，`backend/tests/test_utils/test_read_before_write_middleware.py`）
 
 覆盖：新建放行；未读改已存在文件（overwrite/append/str_replace）拦截；读后放行；写后 mark 过期、再写拦截、重读后放行；mark 随消息被删（模拟总结）后拦截；范围读也记 mark；hash 失败 fail-open；str_replace 不存在文件放行；`enabled=False` 全透传；同步与异步路径；链序 pin 测试更新。
