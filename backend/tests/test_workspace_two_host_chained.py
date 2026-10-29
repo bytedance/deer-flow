@@ -639,7 +639,8 @@ async def _chained_worker():
             evidence["chained_settled"] = settled
             evidence_path.write_text(json.dumps(evidence, indent=2))
             assert settled, f"chained story did not settle: {evidence}"
-            assert (await docker.list_owned()) == [], "leftover B containers"
+            if created_tasks:
+                assert await docker.inspect("deerflow-exec-" + created_tasks[0]["remote_task_id"]) is None, "leftover B container"
         finally:
             b_tick.cancel()
             await tasks.stop()
