@@ -699,21 +699,13 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         return prompt, end
 
     def _render_summary_prompt(self, body: str) -> str | None:
-        """Render ``summary_prompt`` with the selected history, or refuse the step.
-
-        ``summary_prompt`` is a ``str.format`` template with a ``{messages}``
-        slot. A template carrying a literal brace raises ``KeyError`` or
-        ``ValueError`` here, and this render runs outside the generation
-        try/except — left unguarded the exception escapes ``abefore_model`` and
-        fails the whole run instead of skipping compaction. Report it and return
-        ``None`` so the caller keeps history, the same outcome as any other
-        summary failure.
-        """
+        """Keep template-authoring failures inside the compaction failure boundary."""
         try:
             return self.summary_prompt.format(messages=body).rstrip()
-        except (KeyError, IndexError, ValueError) as exc:
+        except (AttributeError, IndexError, KeyError, TypeError, ValueError) as exc:
             logger.warning(
-                "Summarization template failed to render; keeping history. summary_prompt is a str.format template: use {messages} for the history and double literal braces ({{ }}) to output them. error=%s",
+                "Summarization template failed to render; keeping history. Use {messages} for history and double literal braces ({{ }}). summary_prompt_hash=%s error=%s",
+                canonical_hash(self.summary_prompt),
                 exc,
             )
             return None

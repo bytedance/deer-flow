@@ -17,6 +17,10 @@ hooks/history/removal only on success. Cap breaches use a bounded process-local
 5m cooldown across builds for the same user/thread/executor/window/policy;
 smaller source or changed policy retries immediately. See the linked contract.
 `trim_tokens_to_summarize=None` uses one unbounded step.
+Template syntax and field-lookup failures share `_render_summary_prompt` for
+both render sites: return `None` before model calls, hooks or history changes.
+Automatic turns retain context; manual compaction uses `SummaryGenerationError`.
+Warnings identify the template by the existing release-policy fingerprint.
 
 Todo compaction: [contract](../../../../../docs/summarization.md#todo-reminders).
 
