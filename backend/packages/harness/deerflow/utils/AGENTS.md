@@ -1,3 +1,18 @@
+### Readability Fallback
+
+`readability.py` caches the optional Readability.js availability probe. If the
+Node extractor is unavailable, its probe raises, or an attempted extraction
+cannot launch Node, subsequent calls in that process use readabilipy's Python
+fallback without retrying Node. A non-zero Node exit can be document-specific,
+so it falls back only for that document and later documents retry Node. If a
+future readabilipy version removes the private availability probe, log that
+once at import and attempt extraction instead of silently disabling Node. Keep
+successful Node extraction unchanged and allow unexpected parser/programming
+exceptions to propagate. The resolved-body fallback preserves article links
+when Python extraction returns the original document wrapper. Regression
+coverage lives in `tests/test_readability.py` and
+`tests/test_web_fetch_relative_links.py`.
+
 ### Atomic Byte Publication
 
 `atomic_write.publish_bytes_atomically` owns browser screenshot and Browserless
@@ -22,6 +37,10 @@ Shelf `stage_document_bytes` drains preparation, writes, close and failure
 cleanup before propagating cancellation. Retain the opened handle across its
 handoff, but leave waiting for incoming chunks cancellable; regressions in
 `tests/test_project_document_staging_cancellation.py` cover both shelf entry points.
+Shelf conversion also drains its final staging discard before releasing
+single-flight ownership. Cleanup failures warn without replacing the conversion
+result, original error or cancellation; the retention sweep owns later retries.
+Coverage lives in `tests/test_project_document_tools.py::TestConversionCleanup`.
 Local Linux/macOS text revisions opt into a short `temporary_prefix` and
 `preserve_metadata_from` (a caller-owned descriptor). Staging starts at `0600`;
 `file_revision_metadata` transfers ownership, mode, ACLs and xattrs before data.

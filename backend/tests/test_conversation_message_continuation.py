@@ -199,7 +199,7 @@ def test_offsets_follow_the_current_text_of_a_live_source():
             return json.loads(await reader(thread_id="source", message_seq=row["seq"], offset=offset))
 
         at_end, beyond = await read(6000), await read(6001)
-        row["content"]["content"] = "b" * 5000  # the source is edited between reads
+        events._events["source"][row["seq"] - 1]["content"]["content"] = "b" * 5000  # model a store-side edit; receipts are detached
         return at_end, beyond, await read(4000), await read(5500)
 
     at_end, beyond, edited, shrunk = asyncio.run(exercise())

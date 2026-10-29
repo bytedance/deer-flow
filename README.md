@@ -536,6 +536,12 @@ fences, including unclosed fences, in complete and streamed replies.
    TAVILY_API_KEY=your-tavily-api-key
    ```
 
+   `make dev` and `make start` read `.env` as data, never as a shell script, so a
+   value means what the Gateway reads: `$$`, backticks and `$(...)` stay as
+   written, and an unquoted value may contain spaces. `$NAME`, `${NAME}`,
+   `${NAME:-default}` and an unquoted leading `~` still expand, and
+   single-quoted values stay literal.
+
    </details>
 
 For an explicit backend dotenv file, export `DEER_FLOW_ENV_FILE` before startup,
@@ -751,7 +757,11 @@ DeerFlow still uses `Forwarded` / `X-Forwarded-*` headers to recover the browser
 > The producer-lease recovery behavior above is gated by `stream_bridge.producer_lease_recovery_enabled`. Keep it disabled while old Gateway binaries or their runs remain; enable it on every instance only after the writer rollout and drain complete.
 >
 > With run ownership heartbeats enabled, terminal success requires acknowledgment
-> from that worker's own durable write. A matching database row alone cannot
+> from that worker's own durable write. Run creation and replacement serialize
+> per conversation: a slow admission does not hold the manager-wide lock needed
+> by another conversation's cached run reads or heartbeat snapshots. Their own
+> Store I/O can still encounter database or pool contention. New runs remain
+> hidden until their initial Store write succeeds. A matching database row alone cannot
 > confirm success, and completion metadata cannot retry a rejected terminal
 > transition. Each run renews independently, so a stalled store operation does
 > not delay other runs. If acknowledgment remains unavailable when the last
@@ -784,6 +794,8 @@ DeerFlow still uses `Forwarded` / `X-Forwarded-*` headers to recover the browser
 > In single-process JSONL deployments, cancelling an admitted event-store mutation waits for its background file I/O, rollback, and bookkeeping to settle before releasing the thread write lock. This prevents an older cancelled write from recreating deleted records or rolling back a later successful write. Cancellation can therefore wait on slow storage; it does not stop an in-flight filesystem operation. Callers still waiting to acquire the lock can cancel without starting a mutation. A batch spanning multiple threads drains its current thread group before propagating cancellation; subsequent thread groups do not start.
 >
 > After a run publishes its terminal stream marker, its process-local `RunRecord` remains available for the existing five-minute grace period before cleanup; durable run history remains available through `RunStore`, while the stream bridge retains its delivery tail on its separate cleanup schedule.
+>
+> With in-memory run storage, replacing a run snapshot under another thread removes its previous thread membership. Old-thread history and usage queries exclude it, and deleting the old thread preserves the reassigned run.
 >
 > Run cancellation may land on any Gateway worker. A non-owning worker now persists the interrupt or rollback request for the live owner, which observes it during lease renewal and performs the normal cancellation flow; load-balancer routing alone no longer produces a 409. The first accepted action wins even if a retry lands on the owner, and accepted cancellation competes atomically with owner completion. Dead owners still follow lease takeover and orphan recovery. Cancellation latency is therefore bounded by the lease heartbeat interval.
 
@@ -1136,6 +1148,7 @@ In plan mode, malformed TODO statuses return normal tool-validation errors witho
 Tool-produced paths and URLs can be retained as short artifact handles across context compaction (`tool_artifacts` in `config.yaml`). Handles distinguish separate tool-result occurrences, even when a provider reuses call IDs. Standard MCP image URLs are captured alongside file references, including results from stdio and HTTP servers. Detected file URLs preserve their query strings and fragments. Free-text sandbox paths retain spaces inside matching ASCII quotes, backticks, or curly quote pairs, including backslash-escaped wrappers. Unterminated spans and delimited values containing a line break or tab are skipped. Free-text artifact references retain balanced ASCII and CJK brackets in literal paths and URLs while trimming surrounding prose punctuation. When PII redaction is enabled, model-visible artifact labels follow that policy; internal references stay intact for tool argument resolution. The configured registry limit retains the newest artifacts, while checkpointed processing identities prevent evicted results from being recaptured after restart. Resolution runs before authorization and write-safety checks; unknown or expired handles return an error without executing the tool. Small unknown structured results may be retained as complete JSON up to 4096 UTF-8 bytes; empty or oversized payloads are skipped. Handles are agent-local: task arguments resolve parent handles to concrete references, and delegated reports must return concrete references rather than child-local handles. A truncated model projection reports how many handles are omitted.
 
 DeerFlow supports configurable MCP servers and skills to extend its capabilities.
+Inline MCP audio results are not supported. Stdio tools report an explicit error, matching HTTP/SSE tools, rather than treating base64 audio as a successful text result.
 When durable MCP background tasks are enabled, agents can use `list_background_tasks(status="failed")` or `status="input_required"` to find failed tasks or tasks awaiting input in the current chat. Other supported statuses are `submitted`, `working`, `completed`, and `cancelled`; omitting the status preserves existing behavior. The database applies the filter before limiting results to the 20 most recent matching tasks. When combined with `active_only=true`, both filters apply: active statuses are `submitted`, `working`, and `input_required`, so terminal statuses return an empty list. `GET /api/threads/{thread_id}/mcp-tasks` supports the same `status` and `active_only` filters before its `limit` (default 50, range 1–100); for example, `?status=failed&limit=20`. Unknown statuses return 422, and omitting the filters preserves the existing response.
 For HTTP/SSE MCP servers, OAuth token flows are supported (`client_credentials`, `refresh_token`).
 Missing, malformed, or out-of-range token response `expires_in` values use a one-hour default lifetime. This includes lifetimes that cannot be added to the current time without overflowing the expiry timestamp.
@@ -1797,6 +1810,7 @@ validated or converted, and provider-specific format restrictions still apply.
 
 The [music-generation skill](skills/public/music-generation/SKILL.md#output-handling) preserves existing output when the provider returns malformed, empty or unrecognized audio.
 
+The bundled skill-creator trigger evaluator drains CLI output through EOF, so a completed subprocess does not turn a recorded skill trigger into a false negative.
 The bundled skill-creator description optimizer reads YAML frontmatter consistently with skill validation, preserving quoted strings and multiline descriptions. Its scripts require PyYAML, as does the skill package validator. Invalid skill metadata is reported on stderr with a nonzero exit status rather than a traceback.
 
 Skills are loaded progressively — only when the task needs them, not all at once. This keeps the context window lean and makes DeerFlow work well even with token-sensitive models.
@@ -2098,6 +2112,13 @@ Extra requests may consume quota or incur cost. See
 
 When using Tavily for `web_fetch`, extracted pages without a title use their URL
 as the heading; their content remains available to the agent.
+For providers that use the shared Readability extractor, Readability.js is
+optional. DeerFlow caches an unavailable Node.js toolchain or failed process
+launch and uses the existing Python fallback for later fetches instead of
+repeatedly starting a missing toolchain. A non-zero extraction exit falls back
+only for that document, because malformed or oversized input can fail while
+the toolchain remains healthy. The fallback keeps resolved article links in
+the returned Markdown.
 Chat tool-step titles accept leading blank lines and up to three spaces before
 a page's first H1 heading. Indented code, including mixed spaces and tabs, is
 not used as a title; the tool step falls back to the URL.
@@ -2858,6 +2879,8 @@ The factory still does not load YAML or create SQL infrastructure: the caller su
 
 Administrators can add, edit, disable, and delete reusable worker definitions from **Settings → Subagents**. Built-in and `config.yaml` definitions remain visible there as read-only entries. The default Lead Agent can use every enabled runtime sub-agent; each page-created Custom Agent can instead allow all, none, or a selected set. That selection is enforced both in the model-visible directory and by the server-side `task` tool. Managed definitions are deployment-wide in this version and follow `agent_storage.backend`: atomic files for a local deployment or the shared application database for multiple instances.
 
+Native workers support per-subagent `thinking_enabled` and `reasoning_effort` through YAML configuration and the managed-subagent API. Unconfigured workers keep the existing thinking-off request; the selected model's required-thinking policy, supported effort values and aliases still apply. These settings do not inherit the lead agent's thinking preferences.
+
 For example, independent read-only research can run concurrently when the wall-clock savings outweigh duplicated discovery and synthesis cost, while a repository refactor with shared files and sequential test feedback remains with the lead agent. When `max_concurrent_subagents` is `1`, parallel and multi-batch routing guidance is disabled; delegation remains available only for material specialist or context-isolation benefit.
 
 ### Sandbox & File System
@@ -3093,7 +3116,7 @@ recording the others. A concurrent scratch-file removal therefore does not
 discard the whole snapshot or suppress detection of other produced outputs.
 This remains a best-effort scan, not an atomic filesystem snapshot.
 
-Files presented through `present_files` remain part of the thread's artifact state, and the Web UI restores the artifact panel and selected document after a page refresh. Long artifact lists scroll within the panel on desktop and in the mobile drawer, keeping every file reachable. When a completed response successfully presents between 2 and 50 files, its final file card also offers one ZIP download. Archive membership comes from the terminal delivery receipt rather than browser-supplied paths, and the ZIP contains the current file versions, which may have changed since the response. The currently selected formal artifact is refreshed once when the run finishes so edits become visible without a manual reload. Existing UTF-8 text artifacts under `/mnt/user-data/outputs` can also be edited and explicitly saved from the panel on Unix and Windows while the thread is idle; saves use content revisions to prevent overwriting agent changes. Source previews also recognize extensionless `Dockerfile` and `Makefile` artifacts by their file names. Unknown file types, including names such as `constructor` and `__proto__`, retain the download fallback.
+Files presented through `present_files` remain part of the thread's artifact state, and the Web UI restores the artifact panel and selected document after a page refresh. Long artifact lists scroll within the panel on desktop and in the mobile drawer, keeping every file reachable. When a completed response successfully presents between 2 and 50 files, its final file card also offers one ZIP download. Archive membership comes from the terminal delivery receipt rather than browser-supplied paths, and the ZIP contains the current file versions, which may have changed since the response. The currently selected formal artifact is refreshed once when the run finishes so edits become visible without a manual reload. Existing UTF-8 text artifacts under `/mnt/user-data/outputs` can also be edited and explicitly saved from the panel on Unix and Windows while the thread is idle; saves use content revisions to prevent overwriting agent changes. A delayed background read cannot replace a successfully saved revision in the editor; cancelled preview and full-file reads also abort their HTTP requests. Source previews also recognize extensionless `Dockerfile` and `Makefile` artifacts by their file names. Unknown file types, including names such as `constructor` and `__proto__`, retain the download fallback.
 
 Unsaved artifact edits survive switching chats, workspace pages, or visiting the
 home page and returning in the same browser tab. Drafts stay in memory for the
@@ -3662,6 +3685,10 @@ documents with the `list_project_documents` and `read_project_document` tools.
 
 Document character counts use a bounded, thread-safe cache; concurrent reads
 do not serialize full file scans behind its cache lock.
+
+Shelf conversion cleanup failures are logged without replacing the read result
+or its original error. Cancelled reads wait for their staging cleanup to finish;
+files that cannot be removed remain eligible for the existing retention sweep.
 
 ### Archive read semantics
 
