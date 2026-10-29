@@ -3289,6 +3289,11 @@ become available in the next batch, when rejected additions can be retried.
 
 ### Long-Term Memory
 
+DeerMem trims oversized user/history summaries against the configured token
+counter, including the omission marker and retained facts. Mixed-language text
+does not rely on an average character/token ratio; the existing guaranteed-fact
+allowance remains unchanged.
+
 Settings > Appearance > Language also supplies the preferred language for replies
 and new automatic DeerMem facts and summary updates on subsequent chat turns and
 replays. Explicit user language requests take precedence. Existing memories are

@@ -411,6 +411,10 @@ Checkpoint reuse requires the block to exist before the run.
 Gateway input handling removes forged dynamic-context markers.
 
 `prompt.py::_count_tokens` controls the injection budget.
+Oversized summaries use bounded prefix search, counting each assembled candidate
+with its omission marker, separators and protected Facts block. Only counted
+fits replace the facts-only fallback; BPE prefix counts need not be monotone,
+so the search guarantees a fitting candidate rather than the longest prefix.
 Default `tiktoken` mode loads and caches its encoding lazily.
 A failed load uses character estimation for a 600-second cooldown.
 Concurrent callers use character estimation while one load is active.
