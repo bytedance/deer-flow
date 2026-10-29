@@ -608,6 +608,16 @@ async def _chained_worker():
                         reset_current_workspace(selected)
                     if task is not None:
                         evidence["b_task_status"] = task["status"]
+                        evidence["notification_status"] = task.get("notification_status")
+                    if evidence.get("b_task_status") == "completed" and not evidence.get("notification_driven"):
+                        evidence["notification_driven"] = True
+                        try:
+                            from datetime import timedelta
+
+                            await tasks.run_once(now=datetime.now(UTC) + timedelta(seconds=30))
+                            evidence["notification_run_once"] = "ok"
+                        except Exception as exc:
+                            evidence["notification_run_once"] = f"{type(exc).__name__}: {str(exc)[:200]}
                     evidence_path.write_text(json.dumps(evidence, indent=2))
                 if not host.executions and created_tasks and evidence.get("b_task_status") == "completed":
                     import sqlalchemy as sa
