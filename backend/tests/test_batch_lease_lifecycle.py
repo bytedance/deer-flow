@@ -308,10 +308,13 @@ async def test_each_scheduler_claim_has_a_fresh_ownership_generation(repository,
 
 
 @pytest.mark.asyncio
-async def test_recovery_does_not_overwrite_a_renewal_after_its_expiry_read(repository, monkeypatch):
+@pytest.mark.parametrize("batch_paused", [False, True])
+async def test_recovery_does_not_overwrite_a_renewal_after_its_expiry_read(repository, monkeypatch, batch_paused):
     await create_batch(repository)
     now = datetime.now(UTC)
     item = (await repository.claim_items(now=now, lease_owner="live-worker", lease_seconds=10, limit=1))[0]
+    if batch_paused:
+        await repository.pause_batch("batch-lease-test", user_id="user-1")
     paused, release = asyncio.Event(), asyncio.Event()
     original = AsyncSession.execute
     recovery = None
