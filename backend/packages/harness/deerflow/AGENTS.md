@@ -58,15 +58,9 @@ logout and restores the complete old tree on any switch failure.
 Offload config/DDGS together. Only returned empties mean `No images found`;
 the SDK sentinel can hide timeouts. See `tests/test_image_search_errors.py`.
 
-### Browser Progress Screenshots (`community/browser_automation/`)
+### Browser Automation
 
-Hidden per-action browser progress frames use JPEG at quality 80 to keep their
-storage and transfer cost bounded relative to lossless PNG. The explicit
-`browser_screenshot` tool remains PNG because it creates a user-requested
-artifact. New automatic capture entry points must reuse the shared progress
-encoding definition in `tools.py` so the byte encoding and `.jpg` suffix cannot
-drift. `browser_screenshot` never replaces an `outputs/` file: it hard-links
-onto the first free `-N` name.
+Screenshot and session rules: [browser guidance](community/browser_automation/AGENTS.md).
 
 ### Embedded Client (`packages/harness/deerflow/client.py`)
 
