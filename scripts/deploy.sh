@@ -126,9 +126,24 @@ NC='\033[0m'
 
 # ── DEER_FLOW_HOME ────────────────────────────────────────────────────────────
 
+# Compose resolves relative bind sources from docker/, while this launcher
+# reads and creates them from the checkout. Export absolute host paths so both
+# sides use the same files, including the host paths passed to AIO sandboxes.
+resolve_host_path() {
+    if command -v cygpath >/dev/null 2>&1; then
+        cygpath -am -- "$1"
+    elif [[ "$1" = /* ]]; then
+        printf '%s\n' "$1"
+    else
+        printf '%s\n' "$REPO_ROOT/$1"
+    fi
+}
+
 if [ -z "$DEER_FLOW_HOME" ]; then
     export DEER_FLOW_HOME="$REPO_ROOT/backend/.deer-flow"
 fi
+DEER_FLOW_HOME="$(resolve_host_path "$DEER_FLOW_HOME")"
+export DEER_FLOW_HOME
 echo -e "${BLUE}DEER_FLOW_HOME=$DEER_FLOW_HOME${NC}"
 mkdir -p "$DEER_FLOW_HOME"
 
@@ -160,6 +175,8 @@ export DEER_FLOW_REPO_ROOT="$REPO_ROOT"
 if [ -z "$DEER_FLOW_CONFIG_PATH" ]; then
     export DEER_FLOW_CONFIG_PATH="$REPO_ROOT/config.yaml"
 fi
+DEER_FLOW_CONFIG_PATH="$(resolve_host_path "$DEER_FLOW_CONFIG_PATH")"
+export DEER_FLOW_CONFIG_PATH
 
 if  [ "$CMD" != "down" ] && [ ! -f "$DEER_FLOW_CONFIG_PATH" ]; then
     # Try to seed from repo (config.example.yaml is the canonical template)
@@ -183,6 +200,8 @@ fi
 if [ -z "$DEER_FLOW_EXTENSIONS_CONFIG_PATH" ]; then
     export DEER_FLOW_EXTENSIONS_CONFIG_PATH="$REPO_ROOT/extensions_config.json"
 fi
+DEER_FLOW_EXTENSIONS_CONFIG_PATH="$(resolve_host_path "$DEER_FLOW_EXTENSIONS_CONFIG_PATH")"
+export DEER_FLOW_EXTENSIONS_CONFIG_PATH
 
 if [ ! -f "$DEER_FLOW_EXTENSIONS_CONFIG_PATH" ]; then
     if [ -f "$REPO_ROOT/extensions_config.json" ]; then

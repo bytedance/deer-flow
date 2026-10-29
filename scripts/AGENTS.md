@@ -516,3 +516,11 @@ dotenv files. Unset/empty selection preserves the optional root .env default;
 explicit invalid files reject build/start before Docker. Stopping remains
 possible after the selected file is removed. Tests: `test_deploy_env_file.py`
 and the existing deployment/Compose suites.
+
+Production host path selectors (`DEER_FLOW_HOME`, `DEER_FLOW_CONFIG_PATH`, and
+`DEER_FLOW_EXTENSIONS_CONFIG_PATH`) resolve from the checkout before any file
+checks or writes. Export absolute paths for Compose: its relative bind sources
+would otherwise resolve from `docker/`, including the AIO host-state paths.
+Use native absolute paths under Git Bash; do not require the target to exist or
+change Compose's project directory/build context. Offline launcher and real
+Compose-config coverage: `backend/tests/test_deploy_relative_paths.py`.
