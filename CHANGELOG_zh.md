@@ -9,8 +9,10 @@
 
 ## [未发布]
 
+## [2.2.0] — 2026-10-29
+
 本节累积面向 **2.2.0** 里程碑（[2.2.0](https://github.com/bytedance/deer-flow/milestone/3)）的工作。
-截至 2026-10-28，该里程碑已合并 **1068 个拉取请求**。
+该里程碑随本次发布收尾，共合并 **1068 个拉取请求**。
 
 ### 新增
 
@@ -10607,7 +10609,8 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 - **CI：** 统一 PR / issue 打标签逻辑，修复 reviewing 任务的崩溃与标签抖动。
   ([#3455])
 
-[未发布]: https://github.com/bytedance/deer-flow/compare/v2.1.0...HEAD
+[未发布]: https://github.com/bytedance/deer-flow/compare/v2.2.0...HEAD
+[2.2.0]: https://github.com/bytedance/deer-flow/releases/tag/v2.2.0
 [2.1.0]: https://github.com/bytedance/deer-flow/releases/tag/v2.1.0
 [2.0.0]: https://github.com/bytedance/deer-flow/releases/tag/v2.0.0
 

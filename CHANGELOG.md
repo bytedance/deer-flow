@@ -7,9 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0] — 2026-10-29
+
 This section accumulates work toward the **2.2.0** milestone
 ([2.2.0](https://github.com/bytedance/deer-flow/milestone/3)).
-As of 2026-10-28, the milestone includes **1068 merged pull requests**.
+This release closes that milestone with **1068 merged pull requests**.
 
 ### Added
 
@@ -13836,7 +13838,8 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 - **ci:** Consolidate PR/issue labeling and fix the reviewing-job crash and
   label thrash. ([#3455])
 
-[Unreleased]: https://github.com/bytedance/deer-flow/compare/v2.1.0...HEAD
+[Unreleased]: https://github.com/bytedance/deer-flow/compare/v2.2.0...HEAD
+[2.2.0]: https://github.com/bytedance/deer-flow/releases/tag/v2.2.0
 [2.1.0]: https://github.com/bytedance/deer-flow/releases/tag/v2.1.0
 [2.0.0]: https://github.com/bytedance/deer-flow/releases/tag/v2.0.0
 
