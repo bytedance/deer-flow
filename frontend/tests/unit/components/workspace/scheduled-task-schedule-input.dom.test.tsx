@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "@rstest/core";
+import { afterAll, afterEach, describe, expect, rs, test } from "@rstest/core";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 
 import {
@@ -7,6 +7,17 @@ import {
 } from "@/components/workspace/scheduled-task-schedule-input";
 import { I18nProvider } from "@/core/i18n/context";
 
+// The pre-fix component reads this list at module load, before any test runs.
+const supportedValuesOf = rs.hoisted(() =>
+  rs
+    .spyOn(
+      Intl as unknown as { supportedValuesOf: (key: string) => string[] },
+      "supportedValuesOf",
+    )
+    .mockReturnValue(["America/Los_Angeles"]),
+);
+
+afterAll(() => supportedValuesOf.mockRestore());
 afterEach(cleanup);
 
 describe("ScheduledTaskScheduleInput", () => {
@@ -17,7 +28,7 @@ describe("ScheduledTaskScheduleInput", () => {
     fireEvent.click(await screen.findByRole("option", { name }));
   }
 
-  function renderCron(cron: string) {
+  function renderCron(cron: string, timezone = "UTC") {
     const emitted: ScheduleValue[] = [];
     render(
       <I18nProvider initialLocale="en-US">
@@ -25,7 +36,7 @@ describe("ScheduledTaskScheduleInput", () => {
           initial={{
             schedule_type: "cron",
             schedule_spec: { cron },
-            timezone: "UTC",
+            timezone,
           }}
           onChange={(value) => emitted.push(value)}
         />
@@ -33,6 +44,43 @@ describe("ScheduledTaskScheduleInput", () => {
     );
     return emitted;
   }
+
+  test.each(["UTC", "US/Pacific"])(
+    "offers saved timezone %s when the browser's list omits it",
+    async (timezone) => {
+      const emitted = renderCron("0 9 * * *", timezone);
+      const picker = screen.getByTestId("schedule-timezone");
+
+      fireEvent.keyDown(picker, { key: "ArrowDown" });
+      await screen.findByRole("option", { name: timezone });
+      expect(screen.getAllByRole("option", { name: timezone })).toHaveLength(1);
+
+      fireEvent.click(
+        screen.getByRole("option", {
+          name: "America/Los_Angeles",
+        }),
+      );
+      expect(emitted.at(-1)?.timezone).toBe("America/Los_Angeles");
+
+      fireEvent.keyDown(picker, { key: "ArrowDown" });
+      fireEvent.click(await screen.findByRole("option", { name: timezone }));
+      expect(emitted.at(-1)?.timezone).toBe(timezone);
+      expect(picker.textContent).toBe(timezone);
+    },
+  );
+
+  test("does not offer an invalid saved timezone", async () => {
+    renderCron("0 9 * * *", "Not/AZone");
+
+    fireEvent.keyDown(screen.getByTestId("schedule-timezone"), {
+      key: "ArrowDown",
+    });
+    await screen.findByRole("option", {
+      name: "America/Los_Angeles",
+    });
+
+    expect(screen.queryByRole("option", { name: "Not/AZone" })).toBeNull();
+  });
 
   test.each(["15 * * * *", "30 14 * * *", "30 14 * * 1,3,5", "30 14 21 * *"])(
     "keeps %s when opening the custom cron editor",
