@@ -351,12 +351,19 @@ async def _chained_controller():
                 assert probe.status_code == 403, probe.status_code
             deadline = time.monotonic() + 600
             occurrence_id = evidence["occurrence_id"]
+
+            async def occurrence_status():
+                rows = await central_app.state.scheduled_task_run_repo.list_by_task(SCHEDULER_ID)
+                for row in rows:
+                    if row["id"] == occurrence_id:
+                        return row.get("status")
+                return None
+
             while time.monotonic() < deadline:
-                occurrence = await central_app.state.scheduled_task_run_repo.get(occurrence_id)
-                if occurrence and occurrence.get("status") == "success":
+                if await occurrence_status() == "success":
                     break
                 await asyncio.sleep(2.0)
-            occurrence = await central_app.state.scheduled_task_run_repo.get(occurrence_id)
+            occurrence = {"status": await occurrence_status()}
             with sa.create_engine(native_url).connect() as check:
                 runs = check.execute(sa.text("SELECT run_id,status FROM runs ORDER BY created_at")).fetchall()
                 checkpoints = check.execute(sa.text("SELECT count(*) FROM checkpoints")).scalar_one()
