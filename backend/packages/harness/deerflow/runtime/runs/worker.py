@@ -25,7 +25,7 @@ import sys
 import threading
 import time
 import weakref
-from collections.abc import Callable, Coroutine, Mapping
+from collections.abc import Callable, Coroutine, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager
 from contextvars import Context
 from dataclasses import dataclass, field
@@ -2715,6 +2715,16 @@ async def _prepare_goal_continuation_input(
         )
         if checkpoint_tuple is None:
             return None
+        if _has_pending_interrupt(checkpoint_tuple):
+            # A park is not a finished turn. Every write below goes through
+            # ``write_thread_goal``, whose new head checkpoint cannot carry
+            # ``pending_writes`` (keyed by checkpoint id), so evaluating here
+            # destroys the park. This must precede
+            # ``_has_durable_goal_turn_receipt``, which reads the same pending
+            # writes and then *persists* that conclusion. Answering the park
+            # restores normal evaluation, so nothing is owed.
+            # See "A park is not a finished turn" in ``docs/TOOL_APPROVAL.md``.
+            return None
         checkpoint_id_before = _checkpoint_id(checkpoint_tuple)
         messages = await _materialized_checkpoint_messages(accessor, thread_id)
         conversation_signature_before = visible_conversation_signature(messages)
@@ -3345,6 +3355,21 @@ def valid_run_message_id_entry(message_id: Any, run_id: Any) -> bool:
     return isinstance(message_id, str) and bool(message_id) and isinstance(run_id, str) and bool(run_id)
 
 
+def _has_pending_interrupt(ckpt_tuple: Any) -> bool:
+    """Whether this checkpoint still holds an unanswered ``interrupt()``.
+
+    A park lives only as a pending *write*, never in ``channel_values``, and the
+    stream is not a substitute (a client that omits ``values`` never sees it).
+    ``__interrupt__`` is spelled literally because LangGraph 1.0 made the
+    ``INTERRUPT`` constant private, for removal in 2.0.
+    """
+    for write in getattr(ckpt_tuple, "pending_writes", None) or ():
+        # Entries are ``(task_id, channel, value)``; tolerate anything else.
+        if isinstance(write, Sequence) and not isinstance(write, (str, bytes)) and len(write) >= 2 and write[1] == "__interrupt__":
+            return True
+    return False
+
+
 async def persist_run_history_metadata(
     *,
     checkpointer: Any,
@@ -3374,6 +3399,14 @@ async def persist_run_history_metadata(
         for _attempt in range(3):
             ckpt_tuple = await _call_checkpointer_method(checkpointer, "aget_tuple", "get_tuple", ckpt_config)
             if ckpt_tuple is None:
+                return False
+
+            # A parked run is not a finished turn: ``interrupt()`` exits normally,
+            # so it arrives here staged as ``success``. The ``aput`` below parents
+            # a new latest checkpoint, which cannot carry the park's pending write
+            # — later state reads would lose an approval the client already saw.
+            # See "A park is not a finished turn" in ``docs/TOOL_APPROVAL.md``.
+            if _has_pending_interrupt(ckpt_tuple):
                 return False
 
             checkpoint = dict(getattr(ckpt_tuple, "checkpoint", {}) or {})
