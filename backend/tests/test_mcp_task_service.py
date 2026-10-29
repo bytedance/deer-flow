@@ -4922,6 +4922,53 @@ async def test_stop_bounds_drain_of_service_owned_compensation_tasks(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_stop_logs_pending_compensation_on_poller_timeout(monkeypatch, caplog):
+    monkeypatch.setattr(service_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.05)
+    service = McpTaskService(
+        repository=FakeRepository(),
+        drivers=McpTaskDriverRegistry(),
+        poll_interval_seconds=60,
+        lease_seconds=120,
+        max_concurrent_polls=3,
+    )
+    poller_started = asyncio.Event()
+    poller_release = asyncio.Event()
+    compensation_started = asyncio.Event()
+    compensation_release = asyncio.Event()
+
+    async def blocked_run_once(*, now):
+        poller_started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            await poller_release.wait()
+
+    async def release_claim():
+        compensation_started.set()
+        await compensation_release.wait()
+
+    monkeypatch.setattr(service, "run_once", blocked_run_once)
+    compensation = asyncio.create_task(release_claim(), name="test-mcp-timeout-compensation")
+    service._track_compensation_task(compensation, action="release poll claim", task_id="task-1")
+    await compensation_started.wait()
+    await service.start()
+    await poller_started.wait()
+
+    try:
+        with caplog.at_level(logging.WARNING):
+            await asyncio.wait_for(service.stop(), timeout=0.5)
+        assert "before compensation drain could start" in caplog.text
+        assert "1 MCP compensation task(s)" in caplog.text
+        assert compensation in service._compensation_tasks
+    finally:
+        poller_release.set()
+        compensation_release.set()
+        if service._task is not None:
+            await asyncio.wait_for(service._task, timeout=1)
+        await _wait_for_compensation_tasks_to_clear(service)
+
+
+@pytest.mark.asyncio
 async def test_stop_preserves_cancellation_while_draining_compensation_tasks(monkeypatch):
     monkeypatch.setattr(service_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.5)
     service = McpTaskService(
@@ -4965,4 +5012,3 @@ async def test_stop_preserves_cancellation_while_draining_compensation_tasks(mon
         if not stopping.done():
             stopping.cancel()
         await _wait_for_compensation_tasks_to_clear(service)
-
