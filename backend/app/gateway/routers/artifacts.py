@@ -531,6 +531,9 @@ async def get_artifact(thread_id: ThreadId, path: str, request: Request, downloa
     raise AssertionError(f"Unhandled artifact response kind: {kind!r}")
 
 
+# Legacy local-file reads allow untracked threads. Shared checkpoint blobs must
+# recheck a surviving authorization record, including trusted internal owners.
+@require_permission("threads", "read", owner_check=True, require_existing=True)
 async def _get_viewed_image_blob_response(
     thread_id: str,
     path: str,
@@ -548,6 +551,10 @@ async def _get_viewed_image_blob_response(
 
     virtual_path = f"/{path.lstrip('/')}"
     try:
+        store = await asyncio.to_thread(get_blob_store_if_enabled)
+        if store is None:
+            return None
+
         from app.gateway.services import build_thread_checkpoint_state_accessor
 
         accessor, config = await build_thread_checkpoint_state_accessor(request, thread_id=thread_id)
@@ -572,7 +579,8 @@ async def _get_viewed_image_blob_response(
             or not mime_type.startswith("image/")
         ):
             return None
-        path_mime_type, _ = mimetypes.guess_type(virtual_path)
+        # A cold mimetypes database stats/reads system files during its first lookup.
+        path_mime_type, _ = await asyncio.to_thread(mimetypes.guess_type, virtual_path)
         if path_mime_type != mime_type:
             return None
         blob_ref_data = metadata.get("blob_ref")
@@ -581,14 +589,11 @@ async def _get_viewed_image_blob_response(
         blob_ref = BlobRef.model_validate(blob_ref_data)
         if blob_ref.kind != "viewed-image" or blob_ref.sha256 != expected_sha256 or blob_ref.size != expected_size or blob_ref.content_type != mime_type:
             return None
-        store = await asyncio.to_thread(get_blob_store_if_enabled)
-        if store is None:
-            return None
         content = await asyncio.to_thread(store.get_bytes, blob_ref)
         if len(content) != expected_size or hashlib.sha256(content).hexdigest() != expected_sha256:
             return None
-    except Exception:
-        logger.debug("Could not resolve viewed-image blob for thread artifact", exc_info=True)
+    except Exception as exc:
+        logger.warning("Could not resolve viewed-image blob for thread artifact (%s)", type(exc).__name__)
         return None
 
     etag = f'"{expected_sha256}"'

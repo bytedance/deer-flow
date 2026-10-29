@@ -5,6 +5,7 @@ import {
   buildWriteFileDraftContent,
   createHtmlPreviewScrollKey,
   getArtifactViewState,
+  parseWriteFileArtifact,
 } from "@/core/artifacts/preview";
 
 const ARTIFACT_PATH = "/artifact-fixtures/report.html";
@@ -283,3 +284,22 @@ test("scopes HTML scroll restoration without exposing the artifact path", () => 
   expect(html).not.toContain("/artifact-fixtures/a");
   expect(html).not.toContain("<script>alert");
 });
+
+test("parses a write-file artifact URL and its tool-call coordinates", () => {
+  expect(
+    parseWriteFileArtifact(
+      `write-file:${ARTIFACT_PATH}?message_id=ai-1&tool_call_id=call-1`,
+    ),
+  ).toEqual({
+    path: ARTIFACT_PATH,
+    messageId: "ai-1",
+    toolCallId: "call-1",
+  });
+});
+
+test.each(["write-file:%E0%A4%A", "write-file://["])(
+  "rejects a malformed write-file URL: %s",
+  (filepath) => {
+    expect(parseWriteFileArtifact(filepath)).toBeUndefined();
+  },
+);

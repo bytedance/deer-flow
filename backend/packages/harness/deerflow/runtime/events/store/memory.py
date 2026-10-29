@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import bisect
 import weakref
+from copy import deepcopy
 from datetime import UTC, datetime
 
 from deerflow.runtime.events.message_identity import message_identity
@@ -66,8 +67,8 @@ class MemoryRunEventStore(RunEventStore):
             "run_id": run_id,
             "event_type": event_type,
             "category": category,
-            "content": content,
-            "metadata": metadata or {},
+            "content": deepcopy(content),
+            "metadata": deepcopy(metadata) if metadata is not None else {},
             "seq": seq,
             "created_at": created_at or datetime.now(UTC).isoformat(),
         }
@@ -89,21 +90,23 @@ class MemoryRunEventStore(RunEventStore):
         metadata=None,
         created_at=None,
     ):
-        return self._put_one(
-            thread_id=thread_id,
-            run_id=run_id,
-            event_type=event_type,
-            category=category,
-            content=content,
-            metadata=metadata,
-            created_at=created_at,
+        return deepcopy(
+            self._put_one(
+                thread_id=thread_id,
+                run_id=run_id,
+                event_type=event_type,
+                category=category,
+                content=content,
+                metadata=metadata,
+                created_at=created_at,
+            )
         )
 
     async def put_batch(self, events):
         results = []
         for ev in events:
             record = self._put_one(**ev)
-            results.append(record)
+            results.append(deepcopy(record))
         return results
 
     async def put_if_absent(
@@ -124,16 +127,18 @@ class MemoryRunEventStore(RunEventStore):
                 raise RunEventLifecycleRejected(f"Run lifecycle no longer admits terminal evidence for {thread_id}/{run_id}")
             for event in self._events_by_run.get(thread_id, {}).get(run_id, []):
                 if event["event_type"] == event_type:
-                    return event, False
+                    return deepcopy(event), False
             return (
-                self._put_one(
-                    thread_id=thread_id,
-                    run_id=run_id,
-                    event_type=event_type,
-                    category=category,
-                    content=content,
-                    metadata=metadata,
-                    created_at=created_at,
+                deepcopy(
+                    self._put_one(
+                        thread_id=thread_id,
+                        run_id=run_id,
+                        event_type=event_type,
+                        category=category,
+                        content=content,
+                        metadata=metadata,
+                        created_at=created_at,
+                    )
                 ),
                 True,
             )
@@ -148,14 +153,14 @@ class MemoryRunEventStore(RunEventStore):
             # whole window before applying the limit.
             lo = bisect.bisect_right(messages, after_seq, key=lambda e: e["seq"])
             hi = len(messages) if before_seq is None else bisect.bisect_left(messages, before_seq, key=lambda e: e["seq"])
-            return messages[lo : min(hi, lo + limit)]
+            return deepcopy(messages[lo : min(hi, lo + limit)])
         elif before_seq is not None:
             # Records with seq < before_seq, then the last `limit` of them.
             hi = bisect.bisect_left(messages, before_seq, key=lambda e: e["seq"])
-            return messages[max(0, hi - limit) : hi]
+            return deepcopy(messages[max(0, hi - limit) : hi])
         else:
             # Return the latest `limit` records, ascending.
-            return messages[-limit:]
+            return deepcopy(messages[-limit:])
 
     async def list_events(
         self,
@@ -177,7 +182,7 @@ class MemoryRunEventStore(RunEventStore):
             run_events = [e for e in run_events if (e.get("metadata") or {}).get("task_id") == task_id]
         if after_seq is not None:
             run_events = [e for e in run_events if e.get("seq", 0) > after_seq]
-        return run_events[:limit]
+        return deepcopy(run_events[:limit])
 
     async def list_messages_by_run(self, thread_id, run_id, *, limit=50, before_seq=None, after_seq=None, user_id: str | None | _AutoSentinel = AUTO):
         # Per-run, messages-only, seq-sorted: the seq window is a contiguous
@@ -191,8 +196,8 @@ class MemoryRunEventStore(RunEventStore):
         # return the last ``limit`` (the latest page, or the page ending just
         # before ``before_seq``). Matches the prior filter-based semantics.
         if after_seq is not None:
-            return window[:limit]
-        return window[-limit:]
+            return deepcopy(window[:limit])
+        return deepcopy(window[-limit:])
 
     async def get_last_visible_ai_seq_by_run(self, thread_id, run_ids, *, user_id: str | None | _AutoSentinel = AUTO):
         result: dict[str, int] = {}
