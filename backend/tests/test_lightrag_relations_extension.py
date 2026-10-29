@@ -34,6 +34,16 @@ def graph(monkeypatch):
     return LightRAGProvider({"base_url": "https://lr.example", "api_key_env": "LR_TEST_KEY", "user_ids": ["alice"]}, transport=httpx.MockTransport(handle)), calls, state
 
 
+@pytest.mark.parametrize("field", ["timeout", "top_k"])
+@pytest.mark.parametrize("value", [True, False])
+def test_numeric_settings_reject_booleans(monkeypatch, field, value):
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[2] / "examples/deerflow-extension-lightrag"))
+    from deerflow_extension_lightrag.provider import Settings
+
+    with pytest.raises(ValueError, match="must not be a boolean"):
+        Settings.model_validate({"base_url": "https://lr.example", "api_key_env": "LR_TEST_KEY", "user_ids": ["alice"], field: value})
+
+
 @pytest.mark.asyncio
 async def test_relationship_only_cites_joined_real_chunks(graph):
     provider, _, state = graph

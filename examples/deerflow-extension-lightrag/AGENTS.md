@@ -17,3 +17,6 @@ first referencing edge. Every edge names its evidence result positions; prefix
 truncation therefore cannot leave a retained edge pointing to omitted evidence.
 
 At the hit limit, distinguish omitted evidence from absent retrieved evidence.
+Numeric settings reject YAML booleans before Pydantic coercion; keep this guard
+on every added numeric field so `true` cannot silently become a short timeout or
+one-result limit.
