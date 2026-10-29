@@ -87,3 +87,13 @@ run20 判别数据（清理前抢救）：`identical_client_trace = [403×10, Co
 4. GREEN 判据保持：occurrence success + ≥2 个 success run + ≥1 个 completed B + worker 零残留容器。
 
 重跑：`TENANT_TWO_HOST_SLICE=3 python3 scripts/tenant_two_host_slice.py`（最新提交 e1a2276df，归档 4e465e3a…b94f）。
+
+
+## 2026-10-29 slice 3 尾巴收敛到通知一步（run28 诊断）
+
+已确认链路：调度发射→C1 真实运行 success→工具经真实 MCP HTTP 提交（input_files 内联修复生效）→**真实 Docker B completed**→task completed。run28 新证据：worker 显式 `tasks.run_once` 返回 ok 但 `mcp_tasks.notification_status` 停在 **pending**、无 notification_error、C2 未发射、occurrence 卡 running。
+
+### 下次第一步（通知为何不派发）
+`app/mcp_tasks/service.py` `run_once`→通知分支的触发条件（notified_version/event_version、next_notify_at/lease、workspace scope）。对比依赖测试 L838-846：他们在 execute 内部轮询期间由 poller 驱动通知，且 `capture_real_submission` 后 task 的 event_version 在 B 完成时 bump。可加证据：run_once 前后读 task 的 event_version/notified_version/notification_lease 字段；在 launch_notification lambda 里 try/except 记录异常（当前异常被服务层吞掉只递增重试）。另一疑点：`services.launch_mcp_task_notification_run(app=worker_app)` 需要 worker 侧 get_run_context（已补）与 forward 路由 workspace scope。
+- 提交链注意：f-string 曾因 heredoc 丢收尾引号且 ruff 管道掩码退出码导致坏提交（run27 教训）——以后 lint 用 `set -o pipefail` 或不用管道。
+- 最新提交 ab52ea8d3；重跑 `TENANT_TWO_HOST_SLICE=3 python3 scripts/tenant_two_host_slice.py`。
