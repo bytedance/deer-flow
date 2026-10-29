@@ -29,7 +29,7 @@ def _guard(tool, owner: str, server_name: str):
 
     @functools.wraps(original)
     async def invoke(*args, **kwargs):
-        if resolve_runtime_user_id(kwargs.get("runtime")) != owner:
+        if resolve_runtime_user_id(kwargs.get("deerflow_runtime")) != owner:
             raise ToolException("This MCP connection belongs to another user")
         server = await asyncio.to_thread(current_connection)
         if server is None:

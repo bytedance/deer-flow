@@ -636,7 +636,7 @@ async def test_gateway_registers_driver_for_personal_only_task_toolsets(personal
             identity = set_current_user(SimpleNamespace(id="alice"))
             try:
                 result = await tools[0].coroutine(
-                    runtime=SimpleNamespace(context={"thread_id": "thread-1", "thread_incarnation": "incarnation-1", "run_id": "run-1"}, config={}, tool_call_id="call-1"),
+                    deerflow_runtime=SimpleNamespace(context={"thread_id": "thread-1", "thread_incarnation": "incarnation-1", "run_id": "run-1"}, config={}, tool_call_id="call-1"),
                     topic="MCP",
                 )
             finally:
