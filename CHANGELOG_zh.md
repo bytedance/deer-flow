@@ -12,6 +12,13 @@
 本节累积面向 **2.3.0** 里程碑（[2.3.0](https://github.com/bytedance/deer-flow/milestone/4)）的工作。
 截至 2026-10-28，该里程碑已合并 **1068 个拉取请求**。
 
+### 修复
+
+- **智能体：** `PUT /api/agents/{name}` 传入 `"description": null` 时现在会把描述重置为
+  空。此前会把 null 原样保存，而智能体配置不接受该值，导致之后每次加载都失败：更新本身、
+  GET 和修复性更新都返回 500，文件后端会把它从智能体列表中漏掉，数据库后端会让该用户的
+  整个列表失败，与它的对话也会失败。已以 null 描述保存的智能体现在可以重新加载。([#7638])
+
 ## [2.2.0] — 2026-10-29
 
 本节累积面向 **2.2.0** 里程碑（[2.2.0](https://github.com/bytedance/deer-flow/milestone/3)）的工作。
@@ -12685,3 +12692,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7643]: https://github.com/bytedance/deer-flow/pull/7643
 [#7651]: https://github.com/bytedance/deer-flow/pull/7651
 [#7659]: https://github.com/bytedance/deer-flow/pull/7659
+[#7638]: https://github.com/bytedance/deer-flow/pull/7638

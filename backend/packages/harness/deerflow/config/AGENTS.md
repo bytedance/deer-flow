@@ -30,7 +30,9 @@ explicitly carries forward the existing owner's display name when re-bootstrappi
 the Gateway explicitly overrides it when supplied, including null to clear.
 Both stores use `parse_agent_config` to ignore only an invalid stored
 `display_name` on read, logging the agent identifier without the invalid value
-and without rewriting storage. Other config errors still
+and without rewriting storage. It also reads a stored null `description`
+(a bare YAML key, or what `PUT /api/agents/{name}` used to write) as `""`; that
+route now stores an explicit null as `""`. Other config errors still
 raise, and API create/update validation remains strict.
 
 **Main Configuration** (`config.yaml`):
