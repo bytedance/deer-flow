@@ -18,3 +18,13 @@ Dataset IDs derive from endpoint/tenant/native base, not credentials or labels.
 Tests live in `backend/tests/test_weknora_extension*.py`; live tests require
 explicit opt-in and an already indexed instance. Do not fabricate a live result.
 See README for version references, configuration and the authorization model.
+
+Optional entries_search uses KB-bound Wiki search and published pages only.
+Check capabilities.wiki and returned base membership; reject document filters
+before HTTP. Wiki responses use a separate pages envelope. Never advertise
+entity relations based on the Wiki page-link graph.
+
+Wiki lexical search retries only successful empty pages with up to four distinct
+whitespace-separated keywords of at least two characters. Keep retries in the
+same authorized base, validate every response, deduplicate title/excerpt pairs,
+and never retry provider/auth/schema errors. Nonempty phrase results stay intact.

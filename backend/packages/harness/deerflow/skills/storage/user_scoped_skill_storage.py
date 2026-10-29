@@ -45,6 +45,7 @@ from deerflow.skills.permissions import make_skill_written_path_sandbox_readable
 from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
 from deerflow.skills.storage.skill_storage import SKILL_MD_FILE, walk_skill_directories
 from deerflow.skills.types import SkillCategory
+from deerflow.utils.atomic_write import cleanup_failed_atomic_write
 
 logger = logging.getLogger(__name__)
 
@@ -132,15 +133,13 @@ class UserScopedSkillStorage(LocalSkillStorage):
         )
         tmp_path = Path(tmp_path_str)
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(states, f, indent=2)
+            handle = os.fdopen(fd, "w", encoding="utf-8", newline="")
+            fd = None  # The file object now owns the descriptor.
+            with handle:
+                json.dump(states, handle, indent=2)
             tmp_path.replace(self._skill_states_file)
-        except Exception:
-            # Best-effort cleanup of the temp file on failure.
-            try:
-                tmp_path.unlink(missing_ok=True)
-            except OSError:
-                pass
+        except BaseException:
+            cleanup_failed_atomic_write(tmp_path, fd)
             raise
 
     def get_skill_enabled_state(self, skill_name: str) -> bool:
@@ -157,7 +156,7 @@ class UserScopedSkillStorage(LocalSkillStorage):
     def set_skill_enabled_state(self, skill_name: str, enabled: bool) -> None:
         """Set the enabled state for a custom/legacy skill and persist."""
         removal_names = (skill_name,) if not enabled else ()
-        with self._skill_projection_mutation(remove_names=removal_names):
+        with self._skill_projection_mutation(remove_names=removal_names, names=(skill_name,)):
             states = self._read_skill_states()
             states[skill_name] = {"enabled": enabled}
             self._write_skill_states(states)
@@ -185,6 +184,12 @@ class UserScopedSkillStorage(LocalSkillStorage):
     # ------------------------------------------------------------------
 
     def load_skills(self, *, enabled_only: bool = False) -> list:
+        from deerflow.skills.mutations.guard import managed_read
+
+        with managed_read(self):
+            return self._load_skills_unlocked(enabled_only=enabled_only)
+
+    def _load_skills_unlocked(self, *, enabled_only: bool = False) -> list:
         """Discover all skills and merge enabled state per isolation scope.
 
         Delegates skill discovery and PUBLIC enabled-state to
@@ -279,30 +284,33 @@ class UserScopedSkillStorage(LocalSkillStorage):
         diagnostics cannot establish ownership outside the caller's custom root.
         Root ancestors must not redirect into another user's storage either.
         """
-        root = self._user_custom_root
-        expected = self._paths.base_dir.resolve() / "users" / self._user_id / "skills" / "custom"
-        if root.resolve() != expected or not root.is_dir():
-            return []
-        diagnostics: list[SkillLoadDiagnostic] = []
-        for current, dirs, files in walk_skill_directories(root):
-            package_dir = Path(current)
-            if not package_dir.resolve().is_relative_to(expected):
-                dirs.clear()
-                continue
-            dirs[:] = sorted(name for name in dirs if not name.startswith("."))
-            if SKILL_MD_FILE not in files:
-                continue
-            dirs.clear()
-            try:
-                skill_file = (package_dir / SKILL_MD_FILE).resolve(strict=True)
-                if not skill_file.is_relative_to(expected):
+        from deerflow.skills.mutations.guard import managed_read
+
+        with managed_read(self):
+            root = self._user_custom_root
+            expected = self._paths.base_dir.resolve() / "users" / self._user_id / "skills" / "custom"
+            if root.resolve() != expected or not root.is_dir():
+                return []
+            diagnostics: list[SkillLoadDiagnostic] = []
+            for current, dirs, files in walk_skill_directories(root):
+                package_dir = Path(current)
+                if not package_dir.resolve().is_relative_to(expected):
+                    dirs.clear()
                     continue
-                # Preserve the logical SKILL.md name for owned internal links.
-                parse_skill_file(package_dir / SKILL_MD_FILE, SkillCategory.CUSTOM, package_dir.relative_to(root), diagnostics=diagnostics)
-            except (OSError, RuntimeError):
-                # A concurrently removed/retargeted package is not a YAML error.
-                continue
-        return diagnostics
+                dirs[:] = sorted(name for name in dirs if not name.startswith("."))
+                if SKILL_MD_FILE not in files:
+                    continue
+                dirs.clear()
+                try:
+                    skill_file = (package_dir / SKILL_MD_FILE).resolve(strict=True)
+                    if not skill_file.is_relative_to(expected):
+                        continue
+                    # Preserve the logical SKILL.md name for owned internal links.
+                    parse_skill_file(package_dir / SKILL_MD_FILE, SkillCategory.CUSTOM, package_dir.relative_to(root), diagnostics=diagnostics)
+                except (OSError, RuntimeError):
+                    # A concurrently removed/retargeted package is not a YAML error.
+                    continue
+            return diagnostics
 
     def _iter_skill_files(self) -> Iterable[tuple[SkillCategory, Path, Path]]:
         # 1. Public skills: always from global root
@@ -399,19 +407,19 @@ class UserScopedSkillStorage(LocalSkillStorage):
     # ------------------------------------------------------------------
 
     def write_custom_skill(self, name: str, relative_path: str, content: str) -> None:
-        with self._skill_projection_mutation():
+        with self._skill_projection_mutation(names=(name,)):
             target = self.validate_relative_path(relative_path, self.get_custom_skill_dir(name))
             target.parent.mkdir(parents=True, exist_ok=True)
             tmp_path = None
             try:
-                with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, dir=str(target.parent)) as tmp_file:
+                with tempfile.NamedTemporaryFile("w", encoding="utf-8", newline="", delete=False, dir=str(target.parent)) as tmp_file:
                     tmp_path = Path(tmp_file.name)
                     tmp_file.write(content)
                 tmp_path.replace(target)
                 make_skill_written_path_sandbox_readable(self.get_custom_skill_dir(name), target)
             finally:
                 if tmp_path is not None:
-                    tmp_path.unlink(missing_ok=True)
+                    cleanup_failed_atomic_write(tmp_path)
 
     # ------------------------------------------------------------------
     # Public helpers

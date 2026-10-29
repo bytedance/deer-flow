@@ -470,6 +470,85 @@ def test_validate_local_tool_path_prioritizes_user_data_before_custom_mounts() -
             validate_local_tool_path(f"{VIRTUAL_PATH_PREFIX}/workspace/../../etc/passwd", _THREAD_DATA, read_only=True)
 
 
+def test_volume_mount_config_normalizes_trailing_slashes() -> None:
+    """The provider strips trailing slashes when building mappings; the config must too.
+
+    Otherwise a natural ``container_path: /mnt/reports/`` spelling works at the
+    sandbox layer while every tool's path gate compares against the raw value
+    and rejects the mount with a confusing PermissionError.
+    """
+    from deerflow.config.sandbox_config import VolumeMountConfig
+
+    assert VolumeMountConfig(host_path="/tmp/host", container_path="/mnt/reports/").container_path == "/mnt/reports"
+    assert VolumeMountConfig(host_path="/tmp/host", container_path="/mnt/reports//").container_path == "/mnt/reports"
+    assert VolumeMountConfig(host_path="/tmp/host", container_path="/mnt/reports").container_path == "/mnt/reports"
+
+
+@pytest.mark.parametrize("raw", ["/", "//", "///", ""])
+def test_volume_mount_config_rejects_the_container_root(raw: str) -> None:
+    """The container root and a blank value cannot be expressed in the path gates, so reject them at load.
+
+    On ``main`` an empty ``container_path`` made the gates match every absolute
+    path (``path == "" or path.startswith("/")``), letting one mount's
+    ``read_only`` flag silently apply to all paths.
+    """
+    from pydantic import ValidationError
+
+    from deerflow.config.sandbox_config import VolumeMountConfig
+
+    with pytest.raises(ValidationError, match="container_path"):
+        VolumeMountConfig(host_path="/tmp/host", container_path=raw)
+
+
+def test_skills_config_normalizes_trailing_slashes() -> None:
+    """skills.container_path feeds the same as-is prefix comparison in _is_skills_path."""
+    from deerflow.config.skills_config import SkillsConfig
+
+    assert SkillsConfig(container_path="/mnt/skills/").container_path == "/mnt/skills"
+    assert SkillsConfig(container_path="/mnt/skills//").container_path == "/mnt/skills"
+    assert SkillsConfig().container_path == "/mnt/skills"
+
+
+@pytest.mark.parametrize("raw", ["/", "//", ""])
+def test_skills_config_rejects_the_container_root(raw: str) -> None:
+    from pydantic import ValidationError
+
+    from deerflow.config.skills_config import SkillsConfig
+
+    with pytest.raises(ValidationError, match="container_path"):
+        SkillsConfig(container_path=raw)
+
+
+def test_is_skills_path_accepts_prefix_declared_with_trailing_slash() -> None:
+    """A skills prefix configured as ``/mnt/skills/`` must keep gating skills paths."""
+    from deerflow.config.skills_config import SkillsConfig
+
+    prefix = SkillsConfig(container_path="/mnt/skills/").container_path
+    with patch("deerflow.sandbox.tools._get_skills_container_path", return_value=prefix):
+        assert _is_skills_path("/mnt/skills/reporter/SKILL.md")
+        assert not _is_skills_path("/mnt/skillsmalformed/SKILL.md")
+
+
+def test_validate_local_tool_path_accepts_mount_declared_with_trailing_slash() -> None:
+    """A mount configured as ``/mnt/reports/`` must keep working for reads and writes."""
+    from deerflow.config.sandbox_config import VolumeMountConfig
+
+    mounts = [VolumeMountConfig(host_path="/tmp/host-reports", container_path="/mnt/reports/", read_only=False)]
+    with patch("deerflow.sandbox.tools._get_custom_mounts", return_value=mounts):
+        validate_local_tool_path("/mnt/reports/notes.txt", _THREAD_DATA, read_only=True)
+        validate_local_tool_path("/mnt/reports/notes.txt", _THREAD_DATA, read_only=False)
+
+
+def test_validate_local_tool_path_honors_read_only_mount_declared_with_trailing_slash() -> None:
+    from deerflow.config.sandbox_config import VolumeMountConfig
+
+    mounts = [VolumeMountConfig(host_path="/tmp/host-reports", container_path="/mnt/reports/", read_only=True)]
+    with patch("deerflow.sandbox.tools._get_custom_mounts", return_value=mounts):
+        validate_local_tool_path("/mnt/reports/notes.txt", _THREAD_DATA, read_only=True)
+        with pytest.raises(PermissionError, match="read-only mount"):
+            validate_local_tool_path("/mnt/reports/notes.txt", _THREAD_DATA, read_only=False)
+
+
 def test_validate_local_tool_path_rejects_bare_virtual_root() -> None:
     """The bare /mnt/user-data root without trailing slash is not a valid sub-path."""
     with pytest.raises(PermissionError, match="Only paths under"):
@@ -753,6 +832,35 @@ def test_replace_virtual_paths_in_command_does_not_rewrite_prefix_siblings(sibli
 
     assert result == f"cat {sibling}"
     assert "/tmp/deer-flow/threads/t1" not in result
+
+
+@pytest.mark.parametrize(
+    "embedded",
+    [
+        "http://localhost:2026/api/threads/abc/artifacts/mnt/user-data/outputs/report.html",
+        "https://example.com/mnt/user-data/outputs/a.txt",
+        "backup/mnt/user-data/outputs/a.txt",
+        "./mnt/user-data/outputs/a.txt",
+    ],
+)
+def test_replace_virtual_paths_in_command_does_not_rewrite_embedded_roots(embedded: str) -> None:
+    """The left-hand mirror of the prefix-sibling rule above.
+
+    ``/mnt/user-data`` inside a longer path or URL — notably DeerFlow's own
+    artifact URLs — is not a virtual path. Rewriting it splices the thread's host
+    directory into the URL, so the request misses and leaks the host layout.
+    """
+    result = replace_virtual_paths_in_command(f"curl -s {embedded}", _THREAD_DATA)
+
+    assert result == f"curl -s {embedded}"
+    assert "/tmp/deer-flow/threads/t1" not in result
+
+
+def test_replace_virtual_paths_in_command_still_rewrites_roots_that_start_a_path() -> None:
+    result = replace_virtual_paths_in_command("cat file:///mnt/user-data/outputs/a.txt --out=/mnt/user-data/outputs/b.txt", _THREAD_DATA)
+
+    assert "/mnt/user-data" not in result
+    assert result.count("/tmp/deer-flow/threads/t1/user-data/outputs/") == 2
 
 
 @pytest.mark.parametrize(
@@ -1084,6 +1192,68 @@ def test_validate_local_bash_command_paths_blocks_brace_expansion_host_paths(com
         ("cat ~root/.ssh/id_rsa", "~root/.ssh/id_rsa"),
         ("ls ~deploy/", "~deploy/"),
         ("make --directory=~deploy/app", "~deploy/app"),
+        # The awk exemption covers only the single-quoted inline program.
+        ("awk '{print $1}' $HOME/.ssh/id_rsa", "$HOME/.ssh/id_rsa"),
+        ("awk -f prog.awk '$HOME/.ssh/id_rsa'", "$HOME/.ssh/id_rsa"),
+        ("awk -v 'cmd=cat $HOME/.ssh/id_rsa' 'BEGIN{system(cmd)}'", "$HOME/.ssh/id_rsa"),
+        # A string literal inside the program can reach a shell via system().
+        ("awk 'BEGIN{system(\"cat $HOME/.ssh/id_rsa\")}'", "$HOME/.ssh/id_rsa"),
+        # A quote inside an awk regex or comment must not hide a later string.
+        ('awk \'/"/ {system("cat $HOME/.ssh/id_rsa")}\' /mnt/user-data/workspace/data.txt', "$HOME/.ssh/id_rsa"),
+        ('awk \'$0 ~ /"/ {system("cat $HOME/.ssh/id_rsa")}\' /mnt/user-data/workspace/data.txt', "$HOME/.ssh/id_rsa"),
+        ('awk \'{print /"/; system("cat $HOME/.ssh/id_rsa")}\' /mnt/user-data/workspace/data.txt', "$HOME/.ssh/id_rsa"),
+        ('awk \'{gsub(/"/, ""); system("cat $HOME/.ssh/id_rsa")}\' /mnt/user-data/workspace/data.txt', "$HOME/.ssh/id_rsa"),
+        ('awk \'{x = "a" # "\nsystem("cat $HOME/.ssh/id_rsa") }\'', "$HOME/.ssh/id_rsa"),
+        ('awk \'BEGIN { # "\nsystem("cat $HOME/.ssh/id_rsa") }\'', "$HOME/.ssh/id_rsa"),
+        # In awk a ``/`` after ``)`` or at the start of a line opens a regex.
+        ('awk \'{ if (1) /"b/; system("cat $HOME/.ssh/id_rsa")}\' /mnt/user-data/workspace/data.txt', "$HOME/.ssh/id_rsa"),
+        ('awk \'{ while (0) /"b/; system("cat $HOME/.ssh/id_rsa")}\' /mnt/user-data/workspace/data.txt', "$HOME/.ssh/id_rsa"),
+        ('awk \'NR==1\n/"b/{system("cat $HOME/.ssh/id_rsa")}\' /mnt/user-data/workspace/data.txt', "$HOME/.ssh/id_rsa"),
+        # An unrecognised option may take the next word as its value (gawk's
+        # ``--assign`` is ``-v``), so the following word is not the program.
+        ("gawk --assign 'cmd=cat $HOME/.ssh/id_rsa' 'BEGIN{system(cmd)}'", "$HOME/.ssh/id_rsa"),
+        ("awk --assign 'cmd=cat $HOME/.ssh/id_rsa' 'BEGIN{system(cmd)}'", "$HOME/.ssh/id_rsa"),
+        # Re-interpreted or expanded program text is not exempt.
+        ("sh -c 'awk \"{print \\$HOME/x}\"'", "$HOME/x"),
+        ("bash -c 'awk {print $HOME/.ssh/id_rsa}'", "$HOME/.ssh/id_rsa"),
+        ("eval awk '{print $HOME/.ssh/id_rsa}'", "$HOME/.ssh/id_rsa"),
+        ('awk "{print $HOME/.ssh/id_rsa}"', "$HOME/.ssh/id_rsa"),
+        ("bash <<EOF\nawk '{print $HOME/.ssh/id_rsa}'\nEOF", "$HOME/.ssh/id_rsa"),
+        ("awk() { bash -c \"$1\"; }; awk 'cat $HOME/.ssh/id_rsa'", "$HOME/.ssh/id_rsa"),
+        # bash splices a backslash-newline before parsing, so these define an
+        # ``awk`` function or alias too; a continuation anywhere forfeits the exemption.
+        ('aw\\\nk() { eval "$1"; }; awk \'printf "%s" $HOME/.ssh/id_rsa\'', "$HOME/.ssh/id_rsa"),
+        ('function aw\\\nk() { eval "$1"; }; awk \'printf "%s" $HOME/.ssh/id_rsa\'', "$HOME/.ssh/id_rsa"),
+        ("alia\\\ns awk=eval; shopt -s expand_aliases; awk 'printf \"%s\" $HOME/.ssh/id_rsa'", "$HOME/.ssh/id_rsa"),
+        # Commands that can redefine what ``awk`` runs forfeit the exemption.
+        ("awk () { eval \"$1\"; }; awk 'cat $HOME/.ssh/id_rsa'", "$HOME/.ssh/id_rsa"),
+        ("function awk { eval \"$1\"; }; awk 'cat $HOME/.ssh/id_rsa'", "$HOME/.ssh/id_rsa"),
+        ("hash -p /mnt/user-data/workspace/evil awk; awk 'cat $HOME/.ssh/id_rsa'", "$HOME/.ssh/id_rsa"),
+        ("PATH=/mnt/user-data/workspace:$PATH awk 'cat $HOME/.ssh/id_rsa'", "$HOME/.ssh/id_rsa"),
+        ("export PATH=/mnt/user-data/workspace:$PATH; awk 'cat $HOME/.ssh/id_rsa'", "$HOME/.ssh/id_rsa"),
+        ("source /mnt/user-data/workspace/defs.sh; awk 'cat $HOME/.ssh/id_rsa'", "$HOME/.ssh/id_rsa"),
+        (". /mnt/user-data/workspace/defs.sh; awk 'cat $HOME/.ssh/id_rsa'", "$HOME/.ssh/id_rsa"),
+        ("eval \"$(cat /mnt/user-data/workspace/defs.sh)\"; awk 'cat $HOME/.ssh/id_rsa'", "$HOME/.ssh/id_rsa"),
+        # zsh defines functions and aliases through special arrays.
+        ("functions[awk]='eval \"$1\"'; awk 'cat $HOME/.ssh/id_rsa'", "$HOME/.ssh/id_rsa"),
+        ("functions[awk]='eval \"$1\"'; awk 'cat /etc/passwd'", "/etc/passwd"),
+        ("aliases[awk]=eval; awk 'cat $HOME/.ssh/id_rsa'", "$HOME/.ssh/id_rsa"),
+        ("autoload -Uz awk; awk 'cat $HOME/.ssh/id_rsa'", "$HOME/.ssh/id_rsa"),
+        ("enable -f /mnt/user-data/workspace/evil.so awk; awk 'cat $HOME/.ssh/id_rsa'", "$HOME/.ssh/id_rsa"),
+        # Inside awk code only a single-segment ``/x`` skips the absolute-path
+        # scan, so a multi-segment path stays rejected even after ``)``.
+        ("awk '{print ($1)/etc/passwd}' /mnt/user-data/workspace/data.txt", "/etc/passwd"),
+        ("awk 'BEGIN{x = 1 /etc/shadow}'", "/etc/shadow"),
+        # An ``awk`` word that is an argument of another command is not a command.
+        ("echo $(true) awk '{print $NF/2}'", "$NF/2"),
+        ("echo >| awk '{print $NF/2}'", "$NF/2"),
+        ("echo x) awk '{print $NF/2}'", "$NF/2"),
+        ("eval $(true) awk '{print $HOME/.ssh/id_rsa}'", "$HOME/.ssh/id_rsa"),
+        ("echo `true` awk '{print $HOME/.ssh/id_rsa}'", "$HOME/.ssh/id_rsa"),
+        ('echo "$(echo "x") awk \'{print $HOME/.ssh/id_rsa}\'"', "$HOME/.ssh/id_rsa"),
+        # Quoting the scanner does not model fails closed.
+        ("awk $'{print $HOME/.ssh/id_rsa}'", "$HOME/.ssh/id_rsa"),
+        ("awk '{print $NF/2}' $'/mnt/user-data/workspace/data.txt' 'x' $HOME/.ssh/id_rsa", "$HOME/.ssh/id_rsa"),
     ],
 )
 def test_validate_local_bash_command_paths_blocks_variable_prefixed_host_paths(command: str, rejected: str) -> None:
@@ -1113,6 +1283,38 @@ def test_validate_local_bash_command_paths_blocks_variable_prefixed_host_paths(c
         # awk field arithmetic is not a path.
         "du -k /mnt/user-data/workspace | awk '{print $1/1024}'",
         "awk -F, '{print $1/$2}' /mnt/user-data/uploads/data.csv",
+        # Inside a single-quoted awk program bash expands nothing and ``$``
+        # is awk's field operator (#7021).
+        "awk '{print $NF/2}' /mnt/user-data/workspace/data.txt",
+        "awk '{print $sum/$n}' /mnt/user-data/workspace/data.txt",
+        "awk -F, '{total+=$3} END {print total/NR}' /mnt/user-data/workspace/data.csv",
+        "gawk '{print $NF/2}' /mnt/user-data/workspace/data.txt",
+        "mawk '{print $NF/2}' /mnt/user-data/workspace/data.txt",
+        "nawk '{print $NF/2}' /mnt/user-data/workspace/data.txt",
+        "awk -F: -v n=2 '{print $NF/n}' /mnt/user-data/workspace/data.txt",
+        "cat /mnt/user-data/workspace/data.txt | awk -- '{print $NF/2}' && echo done",
+        "awk '{print \"avg\", $sum/$n}' /mnt/user-data/workspace/data.txt",
+        "awk '{print $NF/2 \" MB\"}' /mnt/user-data/workspace/data.txt",
+        # ``/`` and ``#`` inside an awk string literal are plain text.
+        "awk '{n=split($0,p,\"/\"); print $1/p[n]}' /mnt/user-data/workspace/data.csv",
+        "awk '{split($0, a, \"/\"); print $1/a[1]}' /mnt/user-data/workspace/data.csv",
+        "awk -F'#' '{print \"#\" $NF/2}' /mnt/user-data/workspace/data.txt",
+        # ``/`` after ``)`` is division unless the ``)`` closes an if/while/for
+        # condition; the absolute-path scan is exempt inside awk code too.
+        "awk '{avg=($2+$3)/2; print $NF/avg}' /mnt/user-data/workspace/data.txt",
+        "awk '{print ($NF+1)/2, $NF/2}' /mnt/user-data/workspace/data.txt",
+        "awk '{print length($0)/2}' /mnt/user-data/workspace/data.txt",
+        "awk '{a[$1]/=2; print a[$1]/2}' /mnt/user-data/workspace/data.txt",
+        # The command word is found like the shell does: basename, after an
+        # assignment prefix, inside ``$(...)``, before a comment.
+        "/usr/bin/awk '{print $NF/2}' /mnt/user-data/workspace/data.txt",
+        "LC_ALL=C awk '{print $NF/2}' /mnt/user-data/workspace/data.txt",
+        "echo \"$(awk '{print $NF/2}' /mnt/user-data/workspace/data.txt)\"",
+        "x=$(awk '{print $NF/2}' /mnt/user-data/workspace/data.txt); echo \"$x\"",
+        "awk '{print $NF/2}' /mnt/user-data/workspace/data.txt # don't worry",
+        "awk '{print \"<<\", $NF/2}' /mnt/user-data/workspace/data.txt",
+        "(awk '{print $NF/2}' /mnt/user-data/workspace/data.txt)",
+        "awk '{print $NF/2}' /mnt/user-data/workspace/data.txt 2>/dev/null",
     ],
 )
 def test_validate_local_bash_command_paths_allows_non_path_variable_uses(command: str) -> None:
@@ -1132,6 +1334,11 @@ def test_validate_local_bash_command_paths_allows_non_path_variable_uses(command
 def test_validate_local_bash_command_paths_rejects_cdpath_relocation(command: str) -> None:
     with pytest.raises(PermissionError, match="Unsafe working directory change via CDPATH"):
         validate_local_bash_command_paths(command, _THREAD_DATA)
+
+
+def test_validate_local_bash_command_paths_rejects_absolute_path_after_awk_program() -> None:
+    with pytest.raises(PermissionError, match="/etc/passwd"):
+        validate_local_bash_command_paths("awk '{print $NF/2}' /etc/passwd", _THREAD_DATA)
 
 
 def test_validate_local_bash_command_paths_rejects_pwd_traversal_like_relative_traversal() -> None:

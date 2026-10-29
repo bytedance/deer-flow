@@ -32,9 +32,69 @@ from deerflow.utils.assembly_io import run_assembly
 
 logger = logging.getLogger(__name__)
 
+_BROWSER_EVIDENCE_FIELDS = (
+    "id",
+    "provider",
+    "dataset_id",
+    "document_id",
+    "chunk_id",
+    "dataset_name",
+    "document_name",
+    "text",
+)
+
+
+def _browser_evidence_snapshot(artifact: object) -> dict[str, Any] | None:
+    """Project one persisted evidence artifact into the browser contract.
+
+    Durable batch artifacts are already bounded at write time, but this
+    projection also protects older or manually repaired rows from exposing
+    arbitrary JSON fields such as provider credentials or execution metadata.
+    """
+    if not isinstance(artifact, dict):
+        return None
+    payload = artifact.get("knowledge_sources")
+    if not isinstance(payload, dict) or payload.get("version") != 1:
+        return None
+    raw_sources = payload.get("sources")
+    if not isinstance(raw_sources, list):
+        return None
+    sources: list[dict[str, Any]] = []
+    read_omissions = max(0, len(raw_sources) - 100)
+    for source in raw_sources[:100]:
+        if not isinstance(source, dict) or source.get("provider") != "ragflow":
+            continue
+        if not all(isinstance(source.get(field), str) for field in _BROWSER_EVIDENCE_FIELDS):
+            continue
+        if any(len(source[field]) > 512 for field in ("dataset_name", "document_name")):
+            read_omissions += 1
+            continue
+        if any(len(source[field]) > 256 for field in ("id", "dataset_id", "document_id", "chunk_id")):
+            read_omissions += 1
+            continue
+        # Keep legacy or manually repaired rows bounded at read time too;
+        # write-time limits do not protect this endpoint from old oversized text.
+        if len(source["text"]) > 16_000:
+            read_omissions += 1
+            continue
+        record = {field: source[field] for field in _BROWSER_EVIDENCE_FIELDS}
+        pages = source.get("pages")
+        record["pages"] = sorted({page for page in pages[:100] if isinstance(page, int) and not isinstance(page, bool) and 1 <= page <= 1_000_000}) if isinstance(pages, list) else []
+        record["truncated"] = source.get("truncated") is True
+        sources.append(record)
+    omitted_count = payload.get("omitted_count", 0)
+    if not isinstance(omitted_count, int) or isinstance(omitted_count, bool) or omitted_count < 0:
+        omitted_count = 0
+    return {"version": 1, "sources": sources, "omitted_count": omitted_count + read_omissions}
+
+
 # Strong references to scheduled registry releases: an event loop keeps only
 # weak references to its tasks.
 _pending_releases: set[Future[None]] = set()
+
+# Terminal outcomes must not keep durable attempts leased forever when resource
+# teardown hangs. The execution supervisor still owns those resources afterwards.
+_TERMINAL_CLEANUP_GRACE_SECONDS = 60.0
 
 
 def _usage(records: list[dict[str, Any]] | None) -> dict[str, int] | None:
@@ -267,6 +327,54 @@ class SubagentBatchService:
         fields = ("id", "item_key", "position", "status", "attempt", "result", "result_truncated", "error", "stop_reason", "acceptance_criteria", "acceptance_verdict")
         return {key: items[0].get(key) for key in fields}
 
+    async def read_browser_batch_item(
+        self,
+        *,
+        batch_id: str,
+        user_id: str,
+        thread_id: str,
+        position: int,
+    ) -> dict[str, Any] | None:
+        """Read a fixed, owner-scoped projection for browser result review.
+
+        This path intentionally reads the stored report and evidence snapshot
+        only. It never invokes a provider, exposes the original prompt or
+        execution specification, or depends on the batch worker being alive.
+        """
+        if position < 0:
+            return None
+        batch = await self._repository.get_batch(batch_id, user_id=user_id)
+        if batch is None or batch["thread_id"] != thread_id:
+            return None
+        items = await self._repository.list_items(
+            batch_id,
+            user_id=user_id,
+            offset=position,
+            limit=1,
+            include_result=True,
+        )
+        if not items or items[0].get("position") != position:
+            return None
+        item = items[0]
+        return {
+            "id": item.get("id"),
+            "item_key": item.get("item_key"),
+            "position": item.get("position"),
+            "status": item.get("status"),
+            "attempt": item.get("attempt"),
+            "model_name": item.get("model_name"),
+            "report": item.get("result"),
+            "report_truncated": item.get("result_truncated") is True,
+            "error": item.get("error"),
+            "stop_reason": item.get("stop_reason"),
+            "acceptance_criteria": item.get("acceptance_criteria"),
+            "acceptance_verdict": item.get("acceptance_verdict"),
+            "evidence": _browser_evidence_snapshot(item.get("result_artifact")),
+            "started_at": item.get("started_at"),
+            "completed_at": item.get("completed_at"),
+            "updated_at": item.get("updated_at"),
+        }
+
     async def cancel_batch(
         self,
         *,
@@ -361,6 +469,8 @@ class SubagentBatchService:
             self._execution_ids[item_id] = execution_id
             marked_running = False
             status_poll_every = min(self._config.poll_interval_seconds, max(1.0, self._config.lease_seconds / 3))
+            cleanup_deadline: float | None = None
+            loop = asyncio.get_running_loop()
             while True:
                 result = get_background_task_result(execution_id)
                 if result is None:
@@ -373,12 +483,27 @@ class SubagentBatchService:
                     )
                     if not marked_running:
                         request_cancel_background_task(execution_id)
+                status_wait = status_poll_every
+                execution_done = getattr(result, "execution_done_event", None)
                 if result.status.is_terminal:
-                    break
+                    if execution_done is None or execution_done.is_set():
+                        break
+                    if cleanup_deadline is None:
+                        cleanup_deadline = loop.time() + _TERMINAL_CLEANUP_GRACE_SECONDS
+                    remaining = cleanup_deadline - loop.time()
+                    if remaining <= 0:
+                        logger.warning(
+                            "Batch execution %s cleanup exceeded %.0fs; finalizing its published %s outcome while resource cleanup remains supervised",
+                            execution_id,
+                            _TERMINAL_CLEANUP_GRACE_SECONDS,
+                            result.status.value,
+                        )
+                        break
+                    status_wait = min(status_wait, remaining)
                 if not lease.valid:
                     request_cancel_background_task(execution_id)
                 try:
-                    await asyncio.wait_for(self._stop.wait(), timeout=status_poll_every)
+                    await asyncio.wait_for(self._stop.wait(), timeout=status_wait)
                     if self._stop.is_set():
                         raise asyncio.CancelledError
                 except TimeoutError:

@@ -371,6 +371,51 @@ def test_hidden_tool_frames_do_not_complete_visible_calls(hidden_part, tool_name
     assert ("TOOL_RESULT" in snapshot.content_json) is (hidden_part == "call")
 
 
+@pytest.mark.parametrize("result_count", [1, 2])
+@pytest.mark.parametrize("same_name", [False, True])
+def test_snapshot_omits_ambiguous_calls_without_losing_other_history(result_count, same_name):
+    messages = [
+        AIMessage(content="", tool_calls=[{"name": "bash", "args": {"input": "EARLIER_COMPLETED"}, "id": "reused"}]),
+        ToolMessage(content="Earlier result", tool_call_id="reused"),
+        AIMessage(
+            content="Keep this explanation",
+            tool_calls=[
+                {"name": "bash", "args": {"input": "AMBIGUOUS_FIRST"}, "id": "reused"},
+                {"name": "bash" if same_name else "task", "args": {"input": "AMBIGUOUS_SECOND"}, "id": "reused"},
+                {"name": "read_file", "args": {"path": "UNIQUE_COMPLETED"}, "id": "unique"},
+            ],
+        ),
+        *[ToolMessage(content=f"Observed result {index}", tool_call_id="reused") for index in range(result_count)],
+        ToolMessage(content="Unique result", tool_call_id="unique"),
+    ]
+    before = [message.model_dump() for message in messages]
+    snapshot = ParentContextSnapshot.from_state({"messages": messages})
+    assert "AMBIGUOUS" not in snapshot.content_json
+    assert "EARLIER_COMPLETED" in snapshot.content_json
+    assert "UNIQUE_COMPLETED" in snapshot.content_json
+    assert "Keep this explanation" in snapshot.content_json
+    assert "Observed result 0" in snapshot.content_json
+    assert [message.model_dump() for message in messages] == before
+
+
+def test_ambiguous_calls_do_not_reassign_results_to_an_earlier_pending_call():
+    messages = [
+        AIMessage(content="", tool_calls=[{"name": "task", "args": {"input": "EARLIER_PENDING"}, "id": "reused"}]),
+        AIMessage(
+            content="Current history",
+            tool_calls=[
+                {"name": "bash", "args": {"input": "AMBIGUOUS_FIRST"}, "id": "reused"},
+                {"name": "task", "args": {"input": "AMBIGUOUS_SECOND"}, "id": "reused"},
+            ],
+        ),
+        ToolMessage(content="Current result", tool_call_id="reused"),
+    ]
+    snapshot = ParentContextSnapshot.from_state({"messages": messages})
+    assert "EARLIER_PENDING" not in snapshot.content_json
+    assert "AMBIGUOUS" not in snapshot.content_json
+    assert "Current result" in snapshot.content_json
+
+
 @pytest.mark.parametrize("tool_name", ["task", "batch_task", "write_file", "bash", "custom_lookup"])
 @pytest.mark.parametrize("result_state", ["pending", "success", "error", "hidden"])
 def test_snapshot_keeps_only_result_paired_calls_in_mixed_dispatch(tool_name, result_state):

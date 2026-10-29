@@ -84,7 +84,7 @@ async def reap(run):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stage", ["receipt", "subagent_flush", "thread_status", "terminal_status", "journal_close", "end"])
+@pytest.mark.parametrize("stage", ["receipt", "terminal_event", "subagent_flush", "thread_status", "terminal_status", "journal_close", "end"])
 async def test_cancellation_preserves_terminal_lifecycle(monkeypatch, stage):
     entered, release, closed = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
@@ -94,7 +94,7 @@ async def test_cancellation_preserves_terminal_lifecycle(monkeypatch, stage):
 
     class GatedEventStore(MemoryRunEventStore):
         async def put_if_absent(self, **kwargs):
-            if stage == "receipt" and kwargs.get("event_type") == "run.delivery":
+            if (stage == "receipt" and kwargs.get("event_type") == "run.delivery") or (stage == "terminal_event" and kwargs.get("event_type") == "run.terminal"):
                 await gate()
             return await super().put_if_absent(**kwargs)
 
@@ -189,6 +189,44 @@ async def test_cancel_is_preserved_when_guarded_flush_fails(monkeypatch):
         assert state["end"], state
     finally:
         release.set()
+        await reap(run)
+
+
+@pytest.mark.asyncio
+async def test_stream_producer_lease_brackets_terminal_commit_and_end(monkeypatch):
+    run_store = MemoryRunStore()
+    order = []
+
+    class TrackingBridge(MemoryStreamBridge):
+        async def start_producer_lease(self, run_id):
+            order.append(("start", (await run_store.get(run_id))["status"]))
+            return True
+
+        async def publish_end(self, run_id):
+            order.append(("end", (await run_store.get(run_id))["status"]))
+            await super().publish_end(run_id)
+
+        def transfer_producer_lease(self, run_id, owner_task):
+            order.append(("transfer", owner_task.get_name()))
+
+        async def finish_producer_lease(self, run_id):
+            order.append(("finish", (await run_store.get(run_id))["status"]))
+
+    run = await start_run(
+        monkeypatch,
+        event_store=MemoryRunEventStore(),
+        run_store=run_store,
+        bridge=TrackingBridge(),
+    )
+    try:
+        await asyncio.wait_for(run.worker, timeout=5)
+        assert order == [
+            ("start", "running"),
+            ("transfer", f"run-finalization-{run.record.run_id}"),
+            ("end", "success"),
+            ("finish", "success"),
+        ]
+    finally:
         await reap(run)
 
 

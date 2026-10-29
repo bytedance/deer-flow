@@ -510,7 +510,7 @@ def _convert_call_tool_result(
     from langchain_core.messages import ToolMessage
     from langchain_core.messages.content import create_file_block, create_image_block, create_text_block
     from langchain_core.tools import ToolException
-    from mcp.types import EmbeddedResource, ImageContent, ResourceLink, TextContent, TextResourceContents
+    from mcp.types import AudioContent, EmbeddedResource, ImageContent, ResourceLink, TextContent, TextResourceContents
 
     # Pass ToolMessage through directly (interceptor short-circuit).
     if isinstance(call_tool_result, ToolMessage):
@@ -554,6 +554,8 @@ def _convert_call_tool_result(
             lc_content.append(create_text_block(text=_resolve_text(item.text)))
         elif isinstance(item, ImageContent):
             lc_content.append(create_image_block(base64=item.data, mime_type=item.mimeType))
+        elif isinstance(item, AudioContent):
+            raise NotImplementedError(f"AudioContent conversion to LangChain content blocks is not yet supported. Received audio with mime type: {item.mimeType}")
         elif isinstance(item, ResourceLink):
             mime = item.mimeType or None
             url = _resolve_link_url(str(item.uri))
@@ -1042,6 +1044,7 @@ class _PreparedServerDiscovery:
     bindings: dict[str, ServerBinding]
     ownership_domain: MCPPoolDomain
     connection_scope: str
+    personal_user_id: str | None = None
 
 
 def _prepare_server_client(
@@ -1321,6 +1324,7 @@ def _prepare_server_discovery(
         bindings=server_bindings,
         ownership_domain=ownership_domain,
         connection_scope="personal" if personal_user_id is not None else "deployment",
+        personal_user_id=personal_user_id,
     )
 
 
@@ -1331,7 +1335,7 @@ async def _discover_and_wrap_prepared(
     """Run the OAuth/discovery phase, then wrap successful results in order."""
     client_cls, load_mcp_tools_fn = adapter_symbols
     extensions_config = prepared.config
-    oauth_token_manager = OAuthTokenManager.from_extensions_config(extensions_config) if prepared.connection_scope == "personal" else get_mcp_task_oauth_token_manager(extensions_config)
+    oauth_token_manager = OAuthTokenManager.from_extensions_config(extensions_config, owner_user_id=prepared.personal_user_id) if prepared.connection_scope == "personal" else get_mcp_task_oauth_token_manager(extensions_config)
 
     # Only selected, valid connections reach this point. Selected-but-invalid
     # servers are intentionally not contacted for OAuth headers (F1 contract).

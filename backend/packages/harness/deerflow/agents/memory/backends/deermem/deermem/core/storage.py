@@ -39,6 +39,7 @@ from .paths import (
     agent_facts_directory,
     agent_metadata_directory,
     agent_usage_path,
+    agent_watermark_path,
     fact_file_path,
     memory_file_path,
     safe_user_id,
@@ -406,7 +407,12 @@ def _render_fact_markdown(fact: dict[str, Any]) -> bytes:
 
 def _parse_fact_markdown(path: Path) -> dict[str, Any]:
     try:
-        text = path.read_text(encoding="utf-8")
+        # ``utf-8-sig`` drops a leading BOM, matching ``_load_memory_file``.
+        # Facts are hand-editable ``.md`` files, so a Windows editor can add one;
+        # the ``startswith("---\n")`` check below would then read a valid fact as
+        # "missing YAML front matter" and raise MemoryStorageCorruption over an
+        # encoding artifact.
+        text = path.read_text(encoding="utf-8-sig")
         if not text.startswith("---\n"):
             raise ValueError("missing YAML front matter")
         front, body = text[4:].split("\n---\n", 1)
@@ -449,6 +455,11 @@ def _parse_listed_fact(path: Path) -> dict[str, Any] | None:
         if os.path.lexists(path):
             raise
         return None
+
+
+def _is_extraction_watermark(value: Any) -> bool:
+    """A persisted watermark is a non-empty list of strings (a message identity)."""
+    return isinstance(value, list) and bool(value) and all(isinstance(part, str) for part in value)
 
 
 def _fsync_parent_directory(directory: Path) -> None:
@@ -599,6 +610,26 @@ class MemoryStorage(abc.ABC):
     ) -> None:
         """Remove sidecar data for selected facts, or the whole scope."""
 
+    def get_extraction_watermark(
+        self,
+        thread_id: str,
+        *,
+        agent_name: str,
+        user_id: str | None = None,
+    ) -> list[str] | None:
+        """Return one thread's persisted extraction watermark; None = none kept."""
+        return None
+
+    def set_extraction_watermark(
+        self,
+        thread_id: str,
+        watermark: list[str] | None,
+        *,
+        agent_name: str,
+        user_id: str | None = None,
+    ) -> None:
+        """Persist one thread's extraction watermark (None drops it); optional."""
+
     def close(self) -> None:
         """Release optional storage resources."""
 
@@ -645,6 +676,30 @@ class FileMemoryStorage(MemoryStorage):
         if not isinstance(value, expected_type):
             logger.warning("Ignoring DeerMem sidecar with invalid root type: %s", path)
             return expected_type()
+        return value
+
+    @staticmethod
+    def _read_watermark_sidecar(path: Path) -> dict[str, Any]:
+        """Read the watermark sidecar, raising when the file cannot be read.
+
+        Unlike ``_read_json_sidecar`` an ``OSError`` other than a missing file
+        propagates: the writer rewrites the whole file, and treating an
+        unreadable one as empty would replace every other thread's watermark.
+        Content that is not a JSON object holds no usable watermark, so it reads
+        as empty and the next write repairs it.
+        """
+        try:
+            raw = path.read_bytes()
+        except FileNotFoundError:
+            return {}
+        try:
+            value = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            logger.warning("Ignoring malformed DeerMem watermark sidecar %s", path)
+            return {}
+        if not isinstance(value, dict):
+            logger.warning("Ignoring DeerMem watermark sidecar with invalid root type: %s", path)
+            return {}
         return value
 
     def get_fact_usage(
@@ -860,6 +915,68 @@ class FileMemoryStorage(MemoryStorage):
                 metadata_path.rmdir()
             except OSError:
                 pass
+
+    def get_extraction_watermark(
+        self,
+        thread_id: str,
+        *,
+        agent_name: str,
+        user_id: str | None = None,
+    ) -> list[str] | None:
+        path = self._get_memory_file_path(agent_name, user_id=user_id)
+        key = self._cache_key(agent_name, user_id=user_id)
+        with (
+            self._scope_lock(key),
+            _process_file_lock(
+                path.parent / ".memory.lock",
+                float(getattr(self._config, "file_lock_timeout_seconds", 10)),
+            ),
+        ):
+            raw = self._read_watermark_sidecar(agent_watermark_path(path, agent_name))
+        value = raw.get(thread_id)
+        return list(value) if _is_extraction_watermark(value) else None
+
+    def set_extraction_watermark(
+        self,
+        thread_id: str,
+        watermark: list[str] | None,
+        *,
+        agent_name: str,
+        user_id: str | None = None,
+    ) -> None:
+        """Write through one thread's watermark without touching the manifest.
+
+        The sidecar is keyed by thread id and bounded by
+        ``watermark_max_keys`` (0 = unbounded). The advanced thread is
+        re-inserted last, so the cap drops the least-recently-advanced threads;
+        a dropped thread re-extracts one batch on its next turn. A sidecar that
+        cannot be read raises before anything is written, so the other threads'
+        watermarks survive.
+        """
+        path = self._get_memory_file_path(agent_name, user_id=user_id)
+        sidecar_path = agent_watermark_path(path, agent_name)
+        key = self._cache_key(agent_name, user_id=user_id)
+        with (
+            self._scope_lock(key),
+            _process_file_lock(
+                path.parent / ".memory.lock",
+                float(getattr(self._config, "file_lock_timeout_seconds", 10)),
+            ),
+        ):
+            raw = self._read_watermark_sidecar(sidecar_path)
+            watermarks = {other: value for other, value in raw.items() if other != thread_id and _is_extraction_watermark(value)}
+            if watermark is not None:
+                watermarks[thread_id] = list(watermark)
+            cap = self._config.watermark_max_keys
+            if cap > 0 and len(watermarks) > cap:
+                watermarks = dict(list(watermarks.items())[-cap:])
+            if watermarks:
+                _atomic_write(
+                    sidecar_path,
+                    json.dumps(watermarks, ensure_ascii=False, indent=2).encode("utf-8"),
+                )
+            else:
+                sidecar_path.unlink(missing_ok=True)
 
     @staticmethod
     def _cache_key(agent_name: str | None = None, *, user_id: str | None = None) -> tuple[str | None, str | None]:
@@ -1143,7 +1260,11 @@ class FileMemoryStorage(MemoryStorage):
         if not path.exists():
             return None
         try:
-            value = json.loads(path.read_text(encoding="utf-8"))
+            # utf-8-sig: a summary hand-edited on Windows may carry a BOM. The
+            # payload is still valid JSON, so raising MemoryStorageCorruption
+            # here would brick the backend (and the opt-in Markdown loader
+            # would quarantine recoverable state) over an encoding artifact.
+            value = json.loads(path.read_text(encoding="utf-8-sig"))
         except (json.JSONDecodeError, OSError, UnicodeError) as exc:
             raise MemoryStorageCorruption(f"Failed to load global memory JSON {path}: {exc}") from exc
         if not isinstance(value, dict):

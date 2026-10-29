@@ -1870,7 +1870,7 @@ def _make_provider_with_active_sandbox(tmp_path, sandbox_id: str):
         sandbox_id: aio_mod.SandboxInfo(sandbox_id=sandbox_id, sandbox_url="http://sandbox-host"),
     }
     provider._thread_sandboxes = {}
-    provider._last_activity = {sandbox_id: 0.0}
+    provider._last_activity = {sandbox_id: time.monotonic()}
     provider._local_teardown = set()
     provider._acquire_epoch = {}
     provider._acquire_epoch_counter = 0
@@ -3414,7 +3414,7 @@ def test_warm_reclaim_keeps_failed_stop_fence_for_unsafe_generation(failure_reco
     with pytest.raises(RuntimeError, match="stop failed"):
         provider.destroy(old.sandbox_id)
     candidate = type(old)(old.sandbox_id, old.sandbox_url, container_id=generation)
-    provider._warm_pool[old.sandbox_id] = (candidate, time.time())
+    provider._warm_pool[old.sandbox_id] = (candidate, time.monotonic())
     provider._warm_pool_identity[old.sandbox_id] = None
     provider_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
 
@@ -3444,7 +3444,7 @@ def test_warm_reclaim_does_not_clear_fence_if_entry_changes(failure_recovery_lif
     def swap_during_publish(sandbox_id):
         publish(sandbox_id)
         with provider._lock:
-            provider._warm_pool[sandbox_id] = (unvalidated, time.time())
+            provider._warm_pool[sandbox_id] = (unvalidated, time.monotonic())
 
     monkeypatch.setattr(provider, "_publish_ownership", swap_during_publish)
     assert provider._reclaim_warm_pool_sandbox("thread-failure-recovery", old.sandbox_id, user_id="alice") is None
@@ -3769,6 +3769,120 @@ def test_signal_handler_forwards_original_signal_when_shutdown_fails(tmp_path, m
     assert "Sandbox shutdown failed while handling signal" in caplog.text
 
 
+@pytest.mark.parametrize(
+    ("host_owned", "expected"),
+    [(False, {"SIGTERM", "SIGINT", "SIGHUP"}), (True, {"SIGHUP"})],
+    ids=["standalone", "host-owned"],
+)
+def test_signal_handlers_leave_stop_signals_to_a_host_that_owns_shutdown(tmp_path, monkeypatch, host_owned, expected):
+    """The Gateway drains runs before sandbox shutdown; only SIGHUP, which uvicorn ignores, keeps the fallback."""
+    from deerflow.sandbox import sandbox_provider as registry
+
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    if not hasattr(aio_mod.signal, "SIGHUP"):
+        pytest.skip("SIGHUP not available on this platform")
+    provider = _make_provider(tmp_path)
+    provider.shutdown = MagicMock()
+    forwarded = MagicMock()
+    installed = {}
+    monkeypatch.setattr(aio_mod.signal, "getsignal", lambda _signum: forwarded)
+    monkeypatch.setattr(aio_mod.signal, "signal", lambda signum, handler: installed.__setitem__(signum, handler))
+
+    with registry.hold_sandbox_shutdown_ownership() if host_owned else contextlib.nullcontext():
+        provider._register_signal_handlers()
+
+    assert {aio_mod.signal.Signals(signum).name for signum in installed} == expected
+    installed[aio_mod.signal.SIGHUP](aio_mod.signal.SIGHUP, None)
+    provider.shutdown.assert_called_once_with()
+    forwarded.assert_called_once_with(aio_mod.signal.SIGHUP, None)
+
+
+def test_acquire_refuses_once_shutdown_began_even_after_a_failed_teardown(tmp_path):
+    """A retryable shutdown failure reopens shutdown, not admission."""
+    from deerflow.sandbox.exceptions import SandboxCapacityExceededError
+
+    provider = _make_provider(tmp_path)
+    provider._lock = threading.Lock()
+    provider._warm_pool = {}
+    provider._shutdown_called = False
+    provider._stop_idle_checker = MagicMock(side_effect=RuntimeError("reaper still alive"))
+    provider._ensure_skills_projection = MagicMock()
+
+    with pytest.raises(RuntimeError, match="reaper still alive"):
+        provider.shutdown()
+    assert provider._shutdown_called is False
+
+    with pytest.raises(SandboxCapacityExceededError) as sync_exc:
+        provider.acquire("thread-late", user_id="alice")
+    assert sync_exc.value.reason == "shutdown"
+    with pytest.raises(SandboxCapacityExceededError) as async_exc:
+        asyncio.run(provider.acquire_async("thread-late", user_id="alice"))
+    assert async_exc.value.reason == "shutdown"
+    # A caller already queued on the per-thread serializer rechecks after its wait.
+    with pytest.raises(SandboxCapacityExceededError):
+        provider._acquire_internal("thread-late", user_id="alice")
+    with pytest.raises(SandboxCapacityExceededError):
+        asyncio.run(provider._acquire_internal_async("thread-late", user_id="alice"))
+    provider._ensure_skills_projection.assert_not_called()
+    provider.reset()
+
+
+def test_sandbox_created_after_shutdown_began_is_rolled_back_not_tracked(tmp_path):
+    """An in-flight create that finishes after shutdown's snapshot must not leak its container."""
+    from deerflow.sandbox.exceptions import SandboxCapacityExceededError
+
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = _make_provider(tmp_path)
+    provider._lock = threading.Lock()
+    provider._warm_pool = {}
+    provider._sandbox_infos = {}
+    provider._thread_sandboxes = {}
+    provider._last_activity = {}
+    provider._publish_ownership = MagicMock()
+    provider._destroy_unready_sandbox = MagicMock()
+    provider._admission_closed = True
+    info = aio_mod.SandboxInfo(sandbox_id="sandbox-late", sandbox_url="http://sandbox-late")
+
+    with pytest.raises(SandboxCapacityExceededError):
+        provider._register_created_sandbox("thread-late", "sandbox-late", info, user_id="alice")
+
+    provider._destroy_unready_sandbox.assert_called_once_with("sandbox-late", info)
+    assert "sandbox-late" not in provider._sandboxes
+    provider.reset()
+
+
+@pytest.mark.parametrize("path", ["warm-reclaim", "discovered"])
+def test_shutdown_starting_during_ownership_publish_blocks_activation(tmp_path, path):
+    """Shutdown that begins during the store round trip must leave nothing active behind."""
+    from deerflow.sandbox.exceptions import SandboxCapacityExceededError
+
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = _make_provider(tmp_path)
+    provider._lock = threading.Lock()
+    provider._sandbox_infos = {}
+    provider._thread_sandboxes = {}
+    provider._last_activity = {}
+    provider._check_sandbox_reuse_policy = MagicMock()
+    provider._check_tracked_sandbox_alive = MagicMock(return_value=True)
+    provider._publish_ownership = MagicMock(side_effect=lambda _sandbox_id: setattr(provider, "_admission_closed", True))
+    info = aio_mod.SandboxInfo(sandbox_id="sandbox-late", sandbox_url="http://sandbox-late")
+    provider._warm_pool = {"sandbox-late": (info, 1.0)} if path == "warm-reclaim" else {}
+
+    with pytest.raises(SandboxCapacityExceededError), patch.object(aio_mod, "AioSandbox") as sandbox_cls:
+        if path == "warm-reclaim":
+            provider._reclaim_warm_pool_sandbox("thread-late", "sandbox-late", user_id="alice")
+        else:
+            provider._register_discovered_sandbox("thread-late", info, user_id="alice")
+
+    assert provider._sandboxes == {} and provider._thread_sandboxes == {}
+    if path == "warm-reclaim":
+        # Still warm, so shutdown's warm-pool pass destroys it.
+        assert provider._warm_pool == {"sandbox-late": (info, 1.0)}
+    else:
+        sandbox_cls.return_value.close.assert_called_once_with()
+    provider.reset()
+
+
 def test_cleanup_idle_sandboxes_keeps_active_cleanup_and_delegates_warm_expiry(tmp_path):
     """AIO active-idle cleanup must remain local while warm expiry uses the shared lifecycle."""
     aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
@@ -3779,7 +3893,7 @@ def test_cleanup_idle_sandboxes_keeps_active_cleanup_and_delegates_warm_expiry(t
         "active-old": aio_mod.SandboxInfo(sandbox_id="active-old", sandbox_url="http://active-old"),
     }
     provider._thread_sandboxes = {("default", "thread-old"): "active-old"}
-    provider._last_activity = {"active-old": 0.0}
+    provider._last_activity = {"active-old": time.monotonic() - 10_000}
     provider._warm_pool = {
         "warm-old": (
             aio_mod.SandboxInfo(sandbox_id="warm-old", sandbox_url="http://warm-old"),

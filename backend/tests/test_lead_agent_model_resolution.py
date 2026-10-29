@@ -4,18 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
 from unittest.mock import ANY, AsyncMock, MagicMock, create_autospec
 
 import pytest
-from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware
-from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
-from langchain_core.outputs import ChatGeneration, ChatResult
-from langchain_core.tools import tool
+from langchain_core.messages import HumanMessage
 
 from deerflow.agents.lead_agent import agent as lead_agent_module
 from deerflow.agents.middlewares import summarization_middleware as summarization_middleware_module
@@ -33,60 +27,6 @@ from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.config.subagents_config import SubagentsAppConfig
 from deerflow.config.summarization_config import SummarizationConfig
 from deerflow.runtime.checkpoint_mode import INTERNAL_CHECKPOINT_MODE_KEY
-from deerflow.runtime.secret_context import write_slash_skill_source_path
-from deerflow.skills.types import Skill, SkillCategory
-
-_POLICY_INTEGRATION_TOOL_CALLS: list[str] = []
-
-
-@tool
-def policy_integration_dangerous_tool() -> str:
-    """Record an invocation of a tool that the active skill does not allow."""
-    _POLICY_INTEGRATION_TOOL_CALLS.append("executed")
-    return "executed"
-
-
-class _PolicyBypassModel(BaseChatModel):
-    """Emit a forbidden call even when the bound schema omits it."""
-
-    call_count: int = 0
-    bound_tool_names: list[list[str]] = []
-
-    @property
-    def _llm_type(self) -> str:
-        return "policy-bypass-test"
-
-    def bind_tools(self, tools: Any, **kwargs: Any):
-        self.bound_tool_names.append([tool.name for tool in tools])
-        return self
-
-    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
-        self.call_count += 1
-        if self.call_count == 1:
-            message = AIMessage(
-                content="",
-                tool_calls=[
-                    {
-                        "id": "forbidden-call",
-                        "name": policy_integration_dangerous_tool.name,
-                        "args": {},
-                    }
-                ],
-            )
-        else:
-            message = AIMessage(content="done")
-        return ChatResult(generations=[ChatGeneration(message=message)])
-
-
-class _PolicyStorageStub:
-    def __init__(self, skills: list[Skill]):
-        self._skills = skills
-
-    def load_skills(self, *, enabled_only: bool = False) -> list[Skill]:
-        return [skill for skill in self._skills if skill.enabled or not enabled_only]
-
-    def get_container_root(self) -> str:
-        return "/mnt/skills"
 
 
 def _make_app_config(models: list[ModelConfig], loop_detection: LoopDetectionConfig | None = None) -> AppConfig:
@@ -107,6 +47,68 @@ def _make_model(name: str, *, supports_thinking: bool) -> ModelConfig:
         supports_thinking=supports_thinking,
         supports_vision=False,
     )
+
+
+@pytest.fixture
+def model_control_assembly(monkeypatch):
+    import deerflow.models.selection as selection
+    import deerflow.tools as tools
+
+    app_config = _make_app_config([_make_model(name, supports_thinking=False) for name in ("default", "chosen")])
+    strict = MagicMock()
+    fallback = MagicMock(side_effect=lambda name, **kwargs: name)
+    model_factory = MagicMock(return_value=object())
+    monkeypatch.setattr(selection, "authorize_selected_model", strict)
+    monkeypatch.setattr(lead_agent_module, "_authorize_model_name", fallback)
+    monkeypatch.setattr(lead_agent_module, "load_agent_config", lambda *args, **kwargs: None)
+    monkeypatch.setattr(lead_agent_module, "_load_enabled_available_skills", lambda *args, **kwargs: [])
+    monkeypatch.setattr(lead_agent_module, "build_middlewares", lambda *args, **kwargs: [])
+    monkeypatch.setattr(lead_agent_module, "apply_prompt_template", lambda **kwargs: "system prompt")
+    monkeypatch.setattr(lead_agent_module, "build_tracing_callbacks", lambda: [])
+    monkeypatch.setattr(lead_agent_module, "create_chat_model", model_factory)
+    monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
+    monkeypatch.setattr(tools, "get_available_tools", lambda **kwargs: [])
+    return app_config, strict, fallback, model_factory
+
+
+@pytest.mark.parametrize("requested,selected,reason", [("default", "chosen", "same model_name"), (None, "default", "same model_name"), ("missing", "missing", "not configured")])
+def test_assembly_rejects_invalid_explicit_model_selection(model_control_assembly, requested, selected, reason):
+    app_config, strict, fallback, model_factory = model_control_assembly
+    with pytest.raises(ValueError, match=reason):
+        lead_agent_module._make_lead_agent({"context": {"model_name": requested, "model_selection_requested": selected}}, app_config=app_config)
+    strict.assert_not_called()
+    fallback.assert_not_called()
+    model_factory.assert_not_called()
+
+
+@pytest.mark.parametrize("denied", [False, True])
+def test_assembly_explicit_model_never_uses_default_fallback(model_control_assembly, denied):
+    app_config, strict, fallback, model_factory = model_control_assembly
+    if denied:
+        strict.side_effect = ValueError("Model use denied")
+        with pytest.raises(ValueError, match="Model use denied"):
+            lead_agent_module._make_lead_agent({"context": {"model_name": "chosen", "model_selection_requested": "chosen"}}, app_config=app_config)
+        model_factory.assert_not_called()
+    else:
+        lead_agent_module._make_lead_agent({"context": {"model_name": "chosen", "model_selection_requested": "chosen"}}, app_config=app_config)
+        assert model_factory.call_args.kwargs["name"] == "chosen"
+    assert strict.call_args.args == ("chosen",)
+    fallback.assert_not_called()
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_assembly_child_selection_requires_enabled_subagents(model_control_assembly, enabled):
+    app_config, strict, fallback, model_factory = model_control_assembly
+    config = {"context": {"subagent_enabled": enabled, "subagent_model_name": "chosen"}}
+    if enabled:
+        lead_agent_module._make_lead_agent(config, app_config=app_config)
+        assert strict.call_args.args == ("chosen",)
+        assert model_factory.call_args.kwargs["name"] == "default"
+    else:
+        with pytest.raises(ValueError, match="requires enabled subagents"):
+            lead_agent_module._make_lead_agent(config, app_config=app_config)
+        strict.assert_not_called()
+    assert fallback.call_args.args == ("default",)
 
 
 class ConfiguredGuardMiddleware(AgentMiddleware):
@@ -911,10 +913,9 @@ def test_build_middlewares_passes_run_model_name_to_summarization(monkeypatch):
     assert captured["run_model_name"] == "custom-agent-model"
 
 
-def test_build_middlewares_orders_skill_activation_before_policy_and_durable_context(monkeypatch):
+def test_build_middlewares_orders_skill_activation_before_durable_context(monkeypatch):
     from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
     from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
-    from deerflow.agents.middlewares.skill_tool_policy_middleware import SkillToolPolicyMiddleware
 
     app_config = _make_app_config([_make_model("safe-model", supports_thinking=False)])
     monkeypatch.setattr(lead_agent_module, "build_lead_runtime_middlewares", lambda *, app_config, lazy_init=True: [])
@@ -928,88 +929,13 @@ def test_build_middlewares_orders_skill_activation_before_policy_and_durable_con
     )
 
     activation_idx = next(i for i, middleware in enumerate(middlewares) if isinstance(middleware, SkillActivationMiddleware))
-    policy_idx = next(i for i, middleware in enumerate(middlewares) if isinstance(middleware, SkillToolPolicyMiddleware))
     durable_idx = next(i for i, middleware in enumerate(middlewares) if isinstance(middleware, DurableContextMiddleware))
-    assert policy_idx == activation_idx + 1
-    assert durable_idx == policy_idx + 1
-    assert middlewares[activation_idx]._slash_source_owner_token == middlewares[policy_idx]._slash_source_owner_token
-
-
-@pytest.mark.parametrize("use_stale_path", [False, True], ids=["restrictive-skill", "stale-active-path"])
-def test_compiled_skill_policy_chain_filters_schema_and_blocks_execution(monkeypatch, use_stale_path):
-    from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
-    from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
-    from deerflow.agents.middlewares.skill_tool_policy_middleware import SkillToolPolicyMiddleware
-
-    app_config = _make_app_config(
-        [_make_model("safe-model", supports_thinking=False)],
-        loop_detection=LoopDetectionConfig(enabled=False),
-    )
-    monkeypatch.setattr(lead_agent_module, "build_lead_runtime_middlewares", lambda *, app_config, lazy_init=True: [])
-    monkeypatch.setattr(lead_agent_module, "_create_summarization_middleware", lambda **_kwargs: None)
-    monkeypatch.setattr(lead_agent_module, "_create_todo_list_middleware", lambda is_plan_mode: None)
-
-    middlewares = lead_agent_module.build_middlewares(
-        {"configurable": {"is_plan_mode": False, "subagent_enabled": False}},
-        model_name="safe-model",
-        app_config=app_config,
-    )
-    activation_idx = next(i for i, middleware in enumerate(middlewares) if isinstance(middleware, SkillActivationMiddleware))
-    durable_idx = next(i for i, middleware in enumerate(middlewares) if isinstance(middleware, DurableContextMiddleware))
-    compiled_slice = middlewares[activation_idx : durable_idx + 1]
-    assert [type(middleware) for middleware in compiled_slice] == [SkillActivationMiddleware, SkillToolPolicyMiddleware, DurableContextMiddleware]
-
-    skill_dir = Path("/tmp/skills/public/restricted")
-    restricted = Skill(
-        name="restricted",
-        description="Restrictive integration skill",
-        license="MIT",
-        skill_dir=skill_dir,
-        skill_file=skill_dir / "SKILL.md",
-        relative_path=Path("restricted"),
-        category=SkillCategory.PUBLIC,
-        allowed_tools=("read_file",),
-        enabled=True,
-    )
-    policy = compiled_slice[1]
-    policy._storage = lambda: _PolicyStorageStub([] if use_stale_path else [restricted])
-
-    context: dict[str, object] = {}
-    active_path = "/mnt/skills/public/missing/SKILL.md" if use_stale_path else restricted.get_container_file_path()
-    write_slash_skill_source_path(
-        context,
-        active_path,
-        owner_token=policy._slash_source_owner_token,
-    )
-    model = _PolicyBypassModel()
-    _POLICY_INTEGRATION_TOOL_CALLS.clear()
-    graph = create_agent(
-        model=model,
-        tools=[policy_integration_dangerous_tool],
-        middleware=compiled_slice,
-        state_schema=ThreadState,
-    )
-
-    result = graph.invoke(
-        {"messages": [HumanMessage(content="continue under the active skill")]},
-        context=context,
-    )
-
-    # LangChain skips ``bind_tools`` entirely when middleware filters the
-    # request to zero schemas. If the forbidden schema survived, this list
-    # would contain a binding with ``policy_integration_dangerous_tool``.
-    assert model.bound_tool_names == []
-    assert _POLICY_INTEGRATION_TOOL_CALLS == []
-    blocked = [message for message in result["messages"] if isinstance(message, ToolMessage) and message.tool_call_id == "forbidden-call"]
-    assert len(blocked) == 1
-    assert blocked[0].status == "error"
-    assert "not allowed by the active skill policy" in blocked[0].content
+    assert durable_idx == activation_idx + 1
 
 
 def test_build_middlewares_places_mcp_routing_before_deferred_filter(monkeypatch):
     from deerflow.agents.middlewares.deferred_tool_filter_middleware import DeferredToolFilterMiddleware
     from deerflow.agents.middlewares.mcp_routing_middleware import McpRoutingMiddleware
-    from deerflow.agents.middlewares.skill_tool_policy_middleware import SkillToolPolicyMiddleware
     from deerflow.agents.middlewares.tool_promotion_audit_middleware import DeferredToolPromotionAuditMiddleware
     from deerflow.tools.builtins.tool_search import DeferredToolSetup
 
@@ -1033,9 +959,8 @@ def test_build_middlewares_places_mcp_routing_before_deferred_filter(monkeypatch
     routing_idx = next(i for i, middleware in enumerate(middlewares) if isinstance(middleware, McpRoutingMiddleware))
     filter_idx = next(i for i, middleware in enumerate(middlewares) if isinstance(middleware, DeferredToolFilterMiddleware))
     audit_idx = next(i for i, middleware in enumerate(middlewares) if isinstance(middleware, DeferredToolPromotionAuditMiddleware))
-    policy_idx = next(i for i, middleware in enumerate(middlewares) if isinstance(middleware, SkillToolPolicyMiddleware))
-    assert audit_idx < policy_idx
     assert routing_idx < filter_idx
+    assert audit_idx < filter_idx
 
 
 def test_build_middlewares_uses_loop_detection_config(monkeypatch):

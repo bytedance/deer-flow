@@ -149,6 +149,11 @@ def agent_eviction_audit_path(memory_path: Path, agent_name: str) -> Path:
     return agent_metadata_directory(memory_path, agent_name) / "eviction-audit.json"
 
 
+def agent_watermark_path(memory_path: Path, agent_name: str) -> Path:
+    """Return the per-thread extraction watermark sidecar path for one agent."""
+    return agent_metadata_directory(memory_path, agent_name) / "watermarks.json"
+
+
 def fact_file_path(memory_path: Path, fact_id: str, *, agent_name: str) -> Path:
     """Return the sharded Markdown path for one agent-owned fact."""
     if not fact_id or not re.fullmatch(r"[A-Za-z0-9_-]+", fact_id):

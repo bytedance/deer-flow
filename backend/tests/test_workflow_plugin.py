@@ -46,7 +46,7 @@ class Runs:
 
     file_content = b"original file"
 
-    async def configuration_revision(self, *, assistant_ids):
+    async def configuration_revision(self, *, assistant_ids, durable=False):
         if self.denied:
             raise AgentRunError(403, "revoked")
         return self.revision
@@ -210,6 +210,43 @@ async def test_sequential_parallel_branch_loop_structured_results(plugin):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("material", ["x" * 9000, "材料" * 750, "x" * 11998], ids=["ascii-report", "chinese-report", "maximum-output"])
+async def test_step_output_can_be_handed_to_next_agent_without_truncation(plugin, material):
+    runs = plugin[3]
+    original_answer = runs.answer
+
+    async def answer(run, input):
+        await original_answer(run, input)
+        task = json.loads(input["messages"][0]["content"])
+        content = material if task == "prepare" else {"received": True}
+        runs.threads[run.thread_id]["values"]["messages"][-1]["content"] = json.dumps(content)
+
+    runs.answer = answer
+    launched = await launch(
+        plugin,
+        """
+        const first = await agent({stepId:'prepare',agentRef:'lead_agent',task:'prepare'});
+        const second = await agent({stepId:'produce',agentRef:'lead_agent',task:{material:first.output,instruction:'Use the supplied material'}});
+        return second.output;
+        """,
+    )
+    final = await done(plugin, launched["run_id"])
+    assert final["status"] == "completed", final
+    assert final["result"] == {"received": True}
+    assert len(runs.starts) == 2
+    assert json.loads(runs.starts[1][1]["messages"][0]["content"]) == {"material": material, "instruction": "Use the supplied material"}
+
+
+@pytest.mark.asyncio
+async def test_oversized_agent_task_is_rejected_before_child_admission(plugin):
+    launched = await launch(plugin, "return await agent({stepId:'large',agentRef:'lead_agent',task:'x'.repeat(16001)});")
+    final = await done(plugin, launched["run_id"])
+    assert final["status"] == "failed"
+    assert not plugin[3].starts
+    assert not plugin[2].processes
+
+
+@pytest.mark.asyncio
 async def test_background_return_idempotency_and_owner_scope(plugin):
     script = "return await agent({stepId:'a',agentRef:'lead_agent',task:'blocked'});"
     first = await launch(plugin, script)
@@ -356,7 +393,7 @@ async def test_service_shutdown_drains_children_and_worker(plugin):
     assert all(r.status == "interrupted" for r in plugin[3].runs.values())
     await plugin[2].start(None)
     final = await plugin[1]["get"]({"run_id": result["run_id"]}, context(plugin[3]))
-    assert final["status"] == "cancelled"
+    assert final["status"] == "needs_reconciliation"
 
 
 @pytest.mark.asyncio
@@ -453,6 +490,7 @@ async def test_startup_marks_unfinished_records_interrupted_without_replay(plugi
     await done(plugin, result["run_id"])
     record = await asyncio.to_thread(plugin[2].store.get, "alice", result["run_id"])
     record["status"] = "running"
+    record.pop("recovery_version", None)
     await asyncio.to_thread(plugin[2].store.put, "alice", record)
     await plugin[2].stop()
     await plugin[2].start(None)
@@ -607,7 +645,10 @@ async def test_cancel_while_agent_pending_stops_promptly(plugin):
 )
 async def test_spinning_script_still_hits_turn_limit(plugin, monkeypatch, script):
     service = plugin[2]
-    monkeypatch.setattr(sys.modules[type(service).__module__], "TURN_LIMIT", 50)
+    # Exercise the frame cap without racing 50 durable frame commits against
+    # the fixture's short wall deadline on loaded CI runners.
+    monkeypatch.setattr(sys.modules[type(service).__module__], "TURN_LIMIT", 3)
+    monkeypatch.setitem(service.config, "timeout_seconds", 30)
     result = await launch(plugin, script)
     final = await done(plugin, result["run_id"])
     assert final["status"] == "failed", final
@@ -744,7 +785,7 @@ async def test_cancelled_launch_caller_keeps_committed_sqlite_launch_owned(plugi
             await asyncio.wait_for(runs.entered.wait(), 5)
             await plugin[1]["cancel"]({"run_id": retry["run_id"]}, context(runs))
         final = await done(plugin, retry["run_id"])
-        assert final["status"] == "cancelled", final
+        assert final["status"] in ({"recoverable", "needs_reconciliation"} if shutdown else {"cancelled"}), final
         assert len(runs.starts) <= 1
         assert not service.entries and not service.workers and not service.processes
         await plugin[1]["delete"]({"run_id": retry["run_id"]}, context(runs))
@@ -912,7 +953,7 @@ async def test_phase2_fail_closed_checkpoint_and_restart(plugin, script):
         replacement = Workflows(service.config)
         await replacement.start(None)
         try:
-            assert (await replacement.get({"run_id": run_id}, context(runs)))["status"] == "interrupted"
+            assert (await replacement.get({"run_id": run_id}, context(runs)))["status"] == "recoverable"
             with pytest.raises(ValueError):
                 await replacement.resume({"run_id": run_id, "step_id": "p", "attempt": 1, "fingerprint": paused["fingerprint"]}, context(runs))
         finally:

@@ -40,11 +40,13 @@ class _FakeRunManager:
         store,
         run_ownership_config=None,
         event_store=None,
+        recovery_terminal_publisher=None,
         on_orphans_recovered=None,
     ):
         self.store = store
         self.run_ownership_config = run_ownership_config
         self.event_store = event_store
+        self.recovery_terminal_publisher = recovery_terminal_publisher
         self.on_orphans_recovered = on_orphans_recovered
         self.reconcile_calls: list[dict] = []
         self.list_by_thread_calls: list[dict] = []
@@ -89,6 +91,7 @@ class _FakeStreamBridge:
     def __init__(self, *, existing_streams: set[str] | None = None) -> None:
         self.publish_end_calls: list[str] = []
         self.cleanup_calls: list[tuple[str, float]] = []
+        self.expired_producer_cleanup_calls: list[str] = []
         self._existing_streams: set[str] = existing_streams if existing_streams is not None else set()
 
     async def stream_exists(self, run_id: str) -> bool:
@@ -99,6 +102,10 @@ class _FakeStreamBridge:
 
     async def cleanup(self, run_id: str, *, delay: float = 0) -> None:
         self.cleanup_calls.append((run_id, delay))
+
+    async def cleanup_expired_producer(self, run_id: str) -> bool:
+        self.expired_producer_cleanup_calls.append(run_id)
+        return True
 
 
 class _RetainedMemoryStreamBridge(MemoryStreamBridge):
@@ -130,6 +137,34 @@ class _DelayedCleanupStreamBridge(_FakeStreamBridge):
             raise
 
 
+class _RetryingRecoveredStreamBridge(_FakeStreamBridge):
+    producer_lease_retry_delay_seconds = 0
+
+    def __init__(self) -> None:
+        super().__init__(existing_streams={"run-1"})
+        self.publish_attempts = 0
+
+    async def publish_end(self, run_id: str) -> None:
+        self.publish_attempts += 1
+        if self.publish_attempts == 1:
+            raise RuntimeError("producer still active")
+        await super().publish_end(run_id)
+
+
+class _MissingActiveRecoveredStreamBridge(_RetryingRecoveredStreamBridge):
+    def __init__(self) -> None:
+        super().__init__()
+        self._existing_streams.clear()
+
+    async def cleanup_expired_producer(self, run_id: str) -> bool:
+        self.expired_producer_cleanup_calls.append(run_id)
+        return False
+
+    async def publish_end(self, run_id: str) -> None:
+        self.publish_attempts += 1
+        await _FakeStreamBridge.publish_end(self, run_id)
+
+
 @pytest.mark.anyio
 async def test_recovered_run_stream_end_skips_expired_stream():
     """Startup recovery should not recreate an already-expired retained stream."""
@@ -142,6 +177,7 @@ async def test_recovered_run_stream_end_skips_expired_stream():
 
     assert stream_bridge.publish_end_calls == []
     assert stream_bridge.cleanup_calls == []
+    assert stream_bridge.expired_producer_cleanup_calls == ["expired-run"]
 
 
 @pytest.mark.anyio
@@ -163,6 +199,39 @@ async def test_shutdown_flushes_delayed_recovered_stream_cleanup_immediately():
 
     assert stream_bridge.delayed_cleanup_cancelled.is_set()
     assert stream_bridge.cleanup_calls == [("run-1", 60.0), ("run-1", 0)]
+
+
+@pytest.mark.anyio
+async def test_recovered_stream_end_retries_after_producer_lease_delay():
+    stream_bridge = _RetryingRecoveredStreamBridge()
+
+    cleanups = await gateway_deps._publish_recovered_run_stream_end(
+        stream_bridge,
+        [SimpleNamespace(run_id="run-1", thread_id="thread-1")],
+        cleanup_delay=0,
+    )
+    await asyncio.gather(*(task for _run_id, task in cleanups))
+
+    assert stream_bridge.publish_attempts == 2
+    assert stream_bridge.publish_end_calls == ["run-1"]
+    assert stream_bridge.cleanup_calls == [("run-1", 0)]
+
+
+@pytest.mark.anyio
+async def test_missing_recovered_stream_retries_while_producer_is_active():
+    stream_bridge = _MissingActiveRecoveredStreamBridge()
+
+    cleanups = await gateway_deps._publish_recovered_run_stream_end(
+        stream_bridge,
+        [SimpleNamespace(run_id="run-1", thread_id="thread-1")],
+        cleanup_delay=0,
+    )
+    await asyncio.gather(*(task for _run_id, task in cleanups))
+
+    assert stream_bridge.expired_producer_cleanup_calls == ["run-1"]
+    assert stream_bridge.publish_attempts == 1
+    assert stream_bridge.publish_end_calls == ["run-1"]
+    assert stream_bridge.cleanup_calls == [("run-1", 0)]
 
 
 @pytest.mark.anyio
@@ -255,6 +324,7 @@ async def test_sqlite_runtime_reconciles_orphaned_runs_on_startup(monkeypatch):
     assert _FakeRunManager.instances[0].reconcile_calls
     assert _FakeRunManager.instances[0].reconcile_calls[0]["error"]
     assert _FakeRunManager.instances[0].reconcile_calls[0]["stop_reason"] == runtime_module.ORPHAN_RECOVERY_STOP_REASON
+    assert _FakeRunManager.instances[0].recovery_terminal_publisher is app.state.recovery_terminal_publisher
     assert _FakeRunManager.instances[0].list_by_thread_calls == [{"thread_id": "thread-1", "user_id": None, "limit": 1}]
     assert thread_store.status_updates == [("thread-1", "error", None)]
     assert stream_bridge.publish_end_calls == ["run-1"]
@@ -276,6 +346,9 @@ async def test_sql_runtime_shares_run_repository_with_scheduler(monkeypatch):
     async def noop(*_args, **_kwargs):
         return None
 
+    # This test asserts repository identity, not SQL startup/recovery. Its
+    # session factory is intentionally an opaque sentinel, not a usable DB.
+    monkeypatch.setattr("deerflow.extensions.host_capabilities.HostCapabilities.start", noop)
     monkeypatch.setattr(engine_module, "init_engine_from_config", noop)
     monkeypatch.setattr(engine_module, "get_session_factory", lambda: session_factory)
     monkeypatch.setattr(engine_module, "close_engine", noop)
@@ -289,6 +362,9 @@ async def test_sql_runtime_shares_run_repository_with_scheduler(monkeypatch):
     async with gateway_deps.langgraph_runtime(app, config):
         assert app.state.scheduled_task_repo._run_repository is app.state.run_store
         assert app.state.scheduled_task_run_repo._run_repository is app.state.run_store
+        assert app.state.scheduled_task_repo._recovery_terminal_publisher is app.state.recovery_terminal_publisher
+        assert app.state.scheduled_task_run_repo._recovery_terminal_publisher is app.state.recovery_terminal_publisher
+        assert _FakeRunManager.instances[-1].recovery_terminal_publisher is app.state.recovery_terminal_publisher
 
 
 @pytest.mark.anyio

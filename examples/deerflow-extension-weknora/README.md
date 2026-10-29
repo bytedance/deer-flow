@@ -179,7 +179,44 @@ against v0.8.3's `internal/handler/knowledgebase.go`, `internal/handler/session/
 
 This package registers the current `RetrievalProvider` contract rather than
 importing the older branch's provider discovery or native citation format.
-Uploads, deletion, processing management, Wiki/Graph, a knowledge management
+Uploads, deletion, processing management, Wiki/Graph management, a knowledge management
 page and new DeerFlow ACL persistence remain outside the read-only delivery.
 Shared-contract durable batch source forwarding retains the existing core
 limitation; ordinary subagent forwarding uses the shared evidence path.
+
+## New Phase 1: published knowledge entries
+
+On a host containing #6269's new Phase 1, add this independent tool entry:
+
+```yaml
+  - name: knowledge_entries_search
+    group: knowledge
+    use: deerflow.knowledge.tools:knowledge_entries_search_tool
+    provider: weknora
+```
+
+Keep or remove `knowledge_search` independently. Both use the same plugin
+connection bindings and current executor identity. Entries use v0.8.3's
+`GET /api/v1/knowledgebase/{kb_id}/wiki/search?q=...&limit=...`, reusing the
+published-page approach from superbuzzy's original `search_wiki()` while
+returning the current shared evidence contract. The endpoint returns `{pages}`
+rather than the document API's `{success,data}` envelope. Only Wiki-enabled
+bases and published pages are included; returned base membership is checked.
+
+Wiki search supports dataset filtering but not document filtering: a generated
+page may combine several documents. The shared selector therefore offers only
+base selection when both document and entry tools are configured. Recovered
+unsupported document selections fail closed, with no unfiltered retry.
+
+The pinned WeKnora API exposes Wiki links at `/wiki/graph`, not a public entity
+relation retrieval endpoint. This package does not advertise `relations_search`
+or substitute that page graph for entity relations. Use a provider with real
+relation evidence, such as the optional [LightRAG plugin](../deerflow-extension-lightrag/README.md).
+New Wiki retrieval has also passed real OrbStack/GLM integration checks; see the
+2026-10-20 follow-up in [the validation record](VALIDATION.md).
+
+Wiki search first sends the original query. If that returns no pages, it tries
+at most four distinct whitespace-separated keywords (at least two characters),
+within the same authorized knowledge base, and merges duplicate evidence. This
+helps model-generated keyword combinations match the upstream lexical search;
+it does not perform unrestricted search or retry authorization/provider errors.

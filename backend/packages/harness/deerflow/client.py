@@ -1856,10 +1856,11 @@ class DeerFlowClient:
             if config_path is None:
                 raise FileNotFoundError("Cannot locate extensions_config.json. Set DEER_FLOW_EXTENSIONS_CONFIG_PATH or ensure it exists in the project root.")
 
+            from deerflow.skills.mutations.guard import managed_global_state_write
             from deerflow.skills.projection import skill_projection_mutation
 
             removal_names = (name,) if not enabled else ()
-            with skill_projection_mutation(storage, "public", remove_names=removal_names):
+            with managed_global_state_write(storage, name), skill_projection_mutation(storage, "public", remove_names=removal_names):
                 with extensions_config_write_lock, extensions_config_file_lock(config_path):
                     # The projection lock is cross-process, but the singleton
                     # cache is not. Reload raw from disk under the config lock.
@@ -1872,10 +1873,12 @@ class DeerFlowClient:
                 storage.set_skill_enabled_state(name, enabled)
             else:
                 # Fallback for non-user-scoped storage (unlikely in practice)
+                from deerflow.skills.mutations.guard import managed_global_state_write
+
                 config_path = ExtensionsConfig.resolve_config_path()
                 if config_path is None:
                     raise FileNotFoundError("Cannot locate extensions_config.json. Set DEER_FLOW_EXTENSIONS_CONFIG_PATH or ensure it exists in the project root.")
-                with extensions_config_write_lock, extensions_config_file_lock(config_path):
+                with managed_global_state_write(storage, name), extensions_config_write_lock, extensions_config_file_lock(config_path):
                     self._write_skill_enabled_state(config_path, name, enabled)
 
         # Invalidate the prompt cache for this caller (and for all users if
@@ -2056,6 +2059,7 @@ class DeerFlowClient:
         """
         validate_thread_id(thread_id)
         from deerflow.uploads.companions import invalidate_overwritten_upload, register_companion
+        from deerflow.utils.atomic_write import cleanup_failed_atomic_write
         from deerflow.utils.file_conversion import CONVERTIBLE_EXTENSIONS, convert_file_to_markdown
 
         # Validate all files upfront to avoid partial uploads.
@@ -2103,7 +2107,7 @@ class DeerFlowClient:
                     conversion_source = None
                     if src_path.suffix.lower() in CONVERTIBLE_EXTENSIONS:
                         if conversion_sources is None:
-                            conversion_sources = tempfile.TemporaryDirectory(prefix="deerflow-upload-source-")
+                            conversion_sources = tempfile.TemporaryDirectory(prefix="deerflow-upload-source-", ignore_cleanup_errors=True)
                         conversion_source = Path(conversion_sources.name) / dest_name
                     if dest_name in existing_names:
                         if conversion_source is not None:
@@ -2115,27 +2119,33 @@ class DeerFlowClient:
                         dest_name = dest.name
                 except UnsafeUploadPathError:
                     if conversion_source is not None:
-                        conversion_source.unlink(missing_ok=True)
+                        # Skipping one unsafe file must survive a failed discard,
+                        # or a locked temp turns the skip into a batch failure.
+                        cleanup_failed_atomic_write(conversion_source)
                     logger.warning("Skipping upload with unsafe destination: %s", dest_name)
                     skipped_files.append(dest_name)
                     continue
                 invalidate_overwritten_upload(dest)
+                # Same-name collisions land under the next free ``_N`` suffix;
+                # report the name the bytes actually landed under, never the
+                # requested one (issue #3750).
+                resolved_name = dest.name
 
                 info: dict[str, Any] = {
-                    "filename": dest_name,
+                    "filename": resolved_name,
                     "size": dest.stat().st_size,
                     "path": str(dest),
-                    "virtual_path": upload_virtual_path(dest_name),
-                    "artifact_url": upload_artifact_url(thread_id, dest_name),
+                    "virtual_path": upload_virtual_path(resolved_name),
+                    "artifact_url": upload_artifact_url(thread_id, resolved_name),
                 }
-                if dest_name != src_path.name:
+                if resolved_name != src_path.name:
                     info["original_filename"] = src_path.name
 
                 if src_path.suffix.lower() in CONVERTIBLE_EXTENSIONS:
                     # Reserve companion .md name before convert so two stems
                     # that collapse to the same .md (or a prior .md upload)
                     # cannot silently overwrite each other.
-                    provisional_md_name = Path(dest_name).with_suffix(".md").name
+                    provisional_md_name = Path(resolved_name).with_suffix(".md").name
                     unique_md_name = claim_unique_filename(provisional_md_name, seen_names)
                     try:
                         # Convert the same private capture used to publish the
@@ -2152,11 +2162,10 @@ class DeerFlowClient:
                                 # copy, not write_bytes: the companion keeps the
                                 # converter's permissions, so a sandbox running as
                                 # another uid can still read it.
-                                if unique_md_name in existing_names:
-                                    md_path = copy_upload_file_no_symlink(uploads_dir, unique_md_name, converted)
-                                else:
-                                    md_path = publish_upload_copy(uploads_dir, unique_md_name, converted, claim_seed=provisional_md_name, seen_names=seen_names)
-                                    unique_md_name = md_path.name
+                                # Existing Markdown may be user-authored or owned
+                                # by another document from an earlier upload call.
+                                md_path = publish_upload_copy(uploads_dir, unique_md_name, converted, claim_seed=provisional_md_name, seen_names=seen_names)
+                                unique_md_name = md_path.name
                     except UnsafeUploadPathError:
                         logger.warning("Skipping markdown companion with unsafe destination: %s", unique_md_name)
                         md_path = None
@@ -2181,12 +2190,16 @@ class DeerFlowClient:
                         seen_names.discard(unique_md_name)
 
                 if conversion_source is not None:
-                    conversion_source.unlink(missing_ok=True)
+                    # The upload already succeeded; a capture we cannot discard
+                    # must not replace that result or drop the later files.
+                    cleanup_failed_atomic_write(conversion_source)
                 uploaded_files.append(info)
         finally:
             if conversion_pool is not None:
                 conversion_pool.shutdown(wait=True)
             if conversion_sources is not None:
+                # ignore_cleanup_errors keeps a locked capture from turning a
+                # decided batch outcome into a cleanup error.
                 conversion_sources.cleanup()
 
         message = f"Successfully uploaded {len(uploaded_files)} file(s)"

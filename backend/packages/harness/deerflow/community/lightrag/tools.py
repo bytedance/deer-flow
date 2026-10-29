@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Mapping
 from typing import Literal
 
 from langchain_core.tools import StructuredTool
-from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, SecretStr, ValidationError, field_validator
+from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, SecretStr, ValidationError, ValidationInfo, field_validator
 
 from deerflow.community.provider_credentials import redact_secret, reject_url_userinfo, resolve_api_key
 from deerflow.config import get_app_config
+from deerflow.config._boolean_guards import reject_boolean
 from deerflow.knowledge import format_result
 from deerflow.knowledge.providers import validate_scope_capabilities
 from deerflow.knowledge.sources import redact_strings, source_artifact
@@ -48,6 +50,24 @@ class _LightRAGRetrievalSettings(BaseModel):
     @classmethod
     def _reject_url_userinfo(cls, value: AnyHttpUrl) -> AnyHttpUrl:
         return reject_url_userinfo(value)
+
+    @field_validator("top_k", "max_chars_per_chunk", "max_total_chars", mode="before")
+    @classmethod
+    def _reject_boolean_integers(cls, value: object, info: ValidationInfo) -> object:
+        """Reject booleans before Pydantic coerces them to integers."""
+        return reject_boolean(value, info, kind="an integer")
+
+    @field_validator("chunk_top_k", mode="before")
+    @classmethod
+    def _reject_boolean_optional_integer(cls, value: object, info: ValidationInfo) -> object:
+        """Reject booleans before Pydantic coerces them to an optional integer."""
+        return reject_boolean(value, info, kind="an integer or null")
+
+    @field_validator("timeout", mode="before")
+    @classmethod
+    def _reject_boolean_timeout(cls, value: object, info: ValidationInfo) -> object:
+        """Reject booleans before Pydantic coerces them to a number."""
+        return reject_boolean(value, info, kind="a number")
 
 
 def _api_key(settings: _LightRAGRetrievalSettings) -> str | None:
@@ -110,7 +130,8 @@ async def _search(query: str, *, with_sources: bool = False) -> str | tuple[str,
     if not query:
         return "Error: query must not be empty."
 
-    settings, error = _settings_or_error()
+    # Config resolution stats and hashes the config files; keep it off the event loop.
+    settings, error = await asyncio.to_thread(_settings_or_error)
     if settings is None:
         return error or "Error: Invalid LightRAG settings for knowledge_search; check config.yaml."
 

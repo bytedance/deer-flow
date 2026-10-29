@@ -25,6 +25,7 @@ Providers
 ---------
 ``boxlite``       BoxLite micro-VM sandbox (requires ``pip install boxlite``).
 ``aio-docker``    AIO Docker sandbox (requires Docker daemon + ``deerflow-harness`` extras).
+``opensandbox``   OpenSandbox service (requires ``deerflow-harness[opensandbox]`` and sandbox config).
 
 Scenarios
 ---------
@@ -49,6 +50,7 @@ import argparse
 import importlib
 import importlib.metadata
 import json
+import math
 import os
 import re
 import statistics
@@ -240,6 +242,7 @@ def _make_aio_provider(config: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
         "container_prefix": config.get("container_prefix"),
         "replicas": config.get("replicas", 3),
         "idle_timeout": config.get("idle_timeout", 600),
+        "health_check_skip_seconds": config.get("health_check_skip_seconds", 0.0),
         "mounts": config.get("mounts", []),
         "environment": config.get("environment", {}),
         "provisioner_url": config.get("provisioner_url", ""),
@@ -256,9 +259,64 @@ def _make_aio_provider(config: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
     return provider, {**sandbox_attrs, "image": provider._config["image"]}
 
 
+def _make_opensandbox_provider(config: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
+    """Use the configured connection and the production lifecycle, with strict cleanup accounting."""
+    from deerflow.community.opensandbox.provider import OpenSandboxProvider
+    from deerflow.config.app_config import get_app_config, pop_current_app_config, push_current_app_config
+
+    class BenchmarkOpenSandboxProvider(OpenSandboxProvider):
+        # Production cleanup logs failures and continues. A benchmark must still
+        # attempt every cleanup, but cannot report a successful run afterwards.
+        def __init__(self):
+            self._cleanup_failures: set[str] = set()
+            super().__init__()
+
+        def _destroy_quietly(self, sandbox, *, context: str) -> None:
+            try:
+                sandbox.destroy()
+            except Exception:
+                with self._lock:
+                    self._cleanup_failures.add(sandbox.remote_id)
+
+        def _check_cleanup(self) -> None:
+            with self._lock:
+                failed = sorted(self._cleanup_failures)
+            if failed:
+                # Report resource identities for manual cleanup, never arbitrary
+                # SDK exception text that might contain connection credentials.
+                raise RuntimeError(f"OpenSandbox benchmark cleanup unconfirmed for remote IDs: {', '.join(failed)}")
+
+        def destroy(self, sandbox_id: str) -> None:
+            # The runner calls this after release. Reuse the provider's owner of
+            # identity removal instead of separately editing its three maps.
+            with self._acquire_serializer.hold(sandbox_id):
+                self._invalidate_sandbox(sandbox_id, reason="benchmark_no_warmpool")
+            self._check_cleanup()
+
+        def shutdown(self) -> None:
+            if self._shutdown_called:
+                return
+            super().shutdown()
+            self._check_cleanup()
+
+    app_config = get_app_config()
+    overrides = {key: config[key] for key in ("replicas", "idle_timeout", "image") if config.get(key) is not None}
+    sandbox_config = app_config.sandbox.model_copy(update=overrides)
+    # Preserve resolved connection/environment settings without mutating either
+    # the caller's config or a module-global getter used by another provider.
+    push_current_app_config(app_config.model_copy(update={"sandbox": sandbox_config}))
+    try:
+        provider = BenchmarkOpenSandboxProvider()
+    finally:
+        pop_current_app_config()
+    # Only non-secret benchmark dimensions leave the factory.
+    return provider, {key: provider._config[key] for key in ("image", "replicas", "idle_timeout")}
+
+
 PROVIDER_FACTORIES: dict[str, Callable] = {
     "boxlite": _make_boxlite_provider,
     "aio-docker": _make_aio_provider,
+    "opensandbox": _make_opensandbox_provider,
 }
 
 
@@ -695,14 +753,20 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
+    if math.isnan(args.idle_timeout) or args.idle_timeout < 0:
+        raise SystemExit("idle timeout must be nonnegative and not NaN")
+    if math.isnan(args.health_check_skip_seconds) or args.health_check_skip_seconds < 0:
+        raise SystemExit("health-check skip seconds must be nonnegative and not NaN")
+    if args.provider == "opensandbox" and (args.fault_inject is not None or args.health_check_skip_seconds != 0):
+        raise SystemExit("opensandbox benchmarks do not support --fault-inject or nonzero --health-check-skip-seconds")
     if min(args.concurrency, args.users, args.replicas) < 1 or min(args.iterations, args.warmup_iterations) < 0:
         raise SystemExit("concurrency, users and replicas must be positive; iteration counts must be nonnegative")
     if args.fault_inject is not None and (args.concurrency != 1 or args.no_warmpool or args.scenario != "warm_same_thread"):
         raise SystemExit("fault injection requires warm_same_thread, concurrency=1 and an enabled warm pool")
     if args.fault_inject is not None and not 0 <= args.fault_inject < args.iterations:
         raise SystemExit("fault injection iteration must be inside the measured batch")
-    if args.scenario == "idle_timeout" and (args.concurrency != 1 or args.idle_timeout <= 0):
-        raise SystemExit("idle_timeout requires concurrency=1 and a positive idle timeout")
+    if args.scenario == "idle_timeout" and (args.concurrency != 1 or not math.isfinite(args.idle_timeout) or args.idle_timeout <= 0):
+        raise SystemExit("idle_timeout requires concurrency=1 and a finite positive idle timeout")
     if args.workload == "state_reuse" and (args.scenario != "warm_same_thread" or args.concurrency != 1):
         raise SystemExit("state_reuse requires --scenario warm_same_thread --concurrency 1")
     args.run_id = args.run_id or uuid.uuid4().hex[:12]
@@ -786,7 +850,35 @@ def main(argv: list[str] | None = None) -> int:
         return int(any(not result.success for result in results))
 
     finally:
-        provider.shutdown()
+        cleanup_started = time.perf_counter()
+        try:
+            provider.shutdown()
+        except Exception as exc:
+            if args.provider == "opensandbox":
+                # Preserve failed final cleanup in the existing provider-row
+                # format so summarize.py cannot turn a failed run green.
+                elapsed = (time.perf_counter() - cleanup_started) * 1000
+                failure = BenchResult(
+                    provider=args.provider,
+                    scenario="shutdown",
+                    workload="cleanup",
+                    iteration=-1,
+                    concurrency=args.concurrency,
+                    thread_id="",
+                    user_id="",
+                    acquire_ms=0,
+                    run_ms=0,
+                    release_ms=0,
+                    total_ms=elapsed,
+                    cleanup_ms=elapsed,
+                    success=False,
+                    error=str(exc),
+                    run_id=args.run_id,
+                    users=args.users,
+                    no_warmpool=args.no_warmpool,
+                )
+                _write_results([failure], output_path, config_used)
+            raise
 
 
 def _run_idle_timeout_scenario(

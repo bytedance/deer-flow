@@ -1,9 +1,82 @@
 """MCP task projection tests for the run worker."""
 
-from langchain_core.messages import HumanMessage
+from copy import deepcopy
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
 from langgraph.types import Command
 
-from deerflow.runtime.runs.worker import _merge_state_into_graph_input, _project_background_tasks
+from deerflow.runtime.runs.manager import RunManager
+from deerflow.runtime.runs.schemas import RunStatus
+from deerflow.runtime.runs.worker import RunContext, _project_background_tasks, run_agent
+
+
+async def _run_with_task_repository(graph_input, task_repo):
+    manager = RunManager()
+    record = await manager.create("thread-mcp-projection", user_id="alice")
+    received = []
+
+    class RecordingAgent:
+        async def astream(self, graph_input, **_kwargs):
+            received.append(graph_input)
+            yield {"messages": []}
+
+    await run_agent(
+        SimpleNamespace(publish=AsyncMock(), publish_end=AsyncMock(), cleanup=AsyncMock()),
+        manager,
+        record,
+        ctx=RunContext(checkpointer=None, mcp_task_repo=task_repo),
+        agent_factory=lambda **_kwargs: RecordingAgent(),
+        graph_input=graph_input,
+        config={},
+        thread_incarnation="incarnation-1",
+    )
+    assert record.status == RunStatus.success
+    assert len(received) == 1
+    return received[0]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("graph_input", [None, Command(resume="approved")], ids=["static", "dynamic"])
+@pytest.mark.parametrize("with_repository", [False, True], ids=["no-repository", "repository"])
+async def test_continuation_preserves_control_input_without_task_projection(graph_input, with_repository, caplog):
+    task_repo = SimpleNamespace(list_by_thread=AsyncMock(return_value=[])) if with_repository else None
+
+    received = await _run_with_task_repository(graph_input, task_repo)
+
+    assert received is graph_input
+    assert "failed to project MCP task state" not in caplog.text
+    if task_repo is not None:
+        task_repo.list_by_thread.assert_not_awaited()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("graph_input", [{}, {"messages": [], "background_tasks": [{"task_id": "stale"}]}], ids=["empty", "existing-projection"])
+async def test_new_input_refreshes_task_projection_without_mutating_input(graph_input, caplog):
+    task_rows = [{"id": "mcp-task-1", "task_name": "Research", "status": "working", "updated_at": "2026-08-15T08:00:00+00:00"}]
+    task_repo = SimpleNamespace(list_by_thread=AsyncMock(return_value=task_rows))
+    original_input = deepcopy(graph_input)
+
+    received = await _run_with_task_repository(graph_input, task_repo)
+
+    assert received == {**original_input, "background_tasks": _project_background_tasks(task_rows)}
+    assert received is not graph_input
+    assert graph_input == original_input
+    task_repo.list_by_thread.assert_awaited_once_with("thread-mcp-projection", user_id="alice", thread_incarnation="incarnation-1", limit=20)
+    assert "failed to project MCP task state" not in caplog.text
+
+
+@pytest.mark.anyio
+async def test_task_projection_failure_preserves_new_input_and_logs_warning(caplog):
+    task_repo = SimpleNamespace(list_by_thread=AsyncMock(side_effect=RuntimeError("task store unavailable")))
+    graph_input = {"messages": []}
+
+    received = await _run_with_task_repository(graph_input, task_repo)
+
+    assert received is graph_input
+    assert "failed to project MCP task state" in caplog.text
+    assert "task store unavailable" in caplog.text
 
 
 def test_project_background_tasks_neutralizes_task_names():
@@ -26,47 +99,3 @@ def test_project_background_tasks_neutralizes_task_names():
             "updated_at": "2026-08-15T08:00:00+00:00",
         }
     ]
-
-
-_PROJECTION = {"background_tasks": [{"task_id": "mcp-task-1", "status": "working"}]}
-
-
-def test_merges_the_projection_into_a_plain_state_input():
-    """A fresh turn passes a state mapping; keep the existing merge semantics."""
-    merged = _merge_state_into_graph_input({"messages": [HumanMessage(content="hi")]}, _PROJECTION)
-
-    assert merged["background_tasks"] == _PROJECTION["background_tasks"]
-    assert len(merged["messages"]) == 1
-
-
-def test_merges_the_projection_into_a_resume_command():
-    """A run resuming a parked approval passes a ``Command``, not a mapping.
-
-    ``{**Command(...)}`` raises ``TypeError: 'Command' object is not a
-    mapping``, which the caller's ``except Exception`` swallowed — so every
-    resume of a gated tool call silently lost its background-task projection.
-    ``Command.update`` is the state delta LangGraph applies before the
-    interrupted node replays, so that is where the projection belongs.
-    """
-    resume_payload = {"decisions": [{"type": "approve"}]}
-
-    merged = _merge_state_into_graph_input(Command(resume=resume_payload), _PROJECTION)
-
-    assert isinstance(merged, Command)
-    # The resume answer must survive untouched, or the parked call never resolves.
-    assert merged.resume == resume_payload
-    assert merged.update == _PROJECTION
-
-
-def test_a_resume_command_keeps_its_own_state_update():
-    """Never clobber an update a caller already put on the command."""
-    merged = _merge_state_into_graph_input(Command(resume="yes", update={"marker": "kept"}), _PROJECTION)
-
-    assert merged.update == {"marker": "kept", **_PROJECTION}
-
-
-def test_leaves_an_input_with_nowhere_to_put_state_alone():
-    """A bare message list has no state channel; don't guess a shape for it."""
-    messages = [HumanMessage(content="hi")]
-
-    assert _merge_state_into_graph_input(messages, _PROJECTION) is messages
