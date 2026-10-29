@@ -10,7 +10,7 @@ remain slice boundaries (no AIO execution, no cross-host NAS, no revocation).
 """
 
 import asyncio
-import hashlib
+import base64
 import json
 import os
 import time
@@ -548,7 +548,9 @@ async def _chained_worker():
                 "request_key": "two-host-chained-report",
                 "profile": "small",
                 "argv": ["/bin/sh", "-c", "set -eu; cat /inputs/program.txt > /output/report.md; cat /output/report.md"],
-                "input_refs": {"program.txt": {"path": "uploads/program.txt", "sha256": hashlib.sha256(b"two host owned dependency report").hexdigest()}},
+                # Inline bytes: the scheduler uses fresh_thread_per_run, so an
+                # upload in a fixed thread directory is unreachable to the run.
+                "input_files": {"program.txt": base64.b64encode(b"two host owned dependency report").decode("ascii")},
             },
             "task_repo": assembly["task_repo"],
             "run_store": assembly["run_store"],
