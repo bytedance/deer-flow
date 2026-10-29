@@ -141,8 +141,13 @@ def _graph_builder(saver, tools_registry):
         if completed is None or completed["status"] != TaskStatus.COMPLETED.value:
             return {"messages": [AIMessage(content="Waiting for the real Docker report")], "title": "Owned dependency report"}
         publication = tools_registry["publication"]
-        report = (publication / completed["remote_task_id"] / "files" / "report.md").read_text()
-        result = json.loads((publication / completed["remote_task_id"] / "result.json").read_bytes())
+        selected_paths = set_current_workspace(tools_registry["context"])
+        try:
+            outputs = publication.paths.sandbox_outputs_dir(created[0]["thread_id"], user_id=owner)
+        finally:
+            reset_current_workspace(selected_paths)
+        report = (outputs / completed["remote_task_id"] / "files" / "report.md").read_text()
+        result = json.loads((outputs / completed["remote_task_id"] / "result.json").read_bytes())
         assert report == "two host owned dependency report" and result["stdout"] == report and result["exit_code"] == 0
         return {"messages": [AIMessage(content="Delivered " + report)], "title": "Owned dependency report"}
 
@@ -568,7 +573,7 @@ async def _chained_worker():
             "owner": owner,
             "thread": None,
             "context": _workspace_context(),
-            "publication": workspace_root,
+            "publication": publication,
         }
         original_factory = services.resolve_agent_factory
 
