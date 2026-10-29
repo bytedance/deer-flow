@@ -617,7 +617,7 @@ async def _chained_worker():
                             await tasks.run_once(now=datetime.now(UTC) + timedelta(seconds=30))
                             evidence["notification_run_once"] = "ok"
                         except Exception as exc:
-                            evidence["notification_run_once"] = f"{type(exc).__name__}: {str(exc)[:200]}
+                            evidence["notification_run_once"] = f"{type(exc).__name__}: {str(exc)[:200]}"
                     evidence_path.write_text(json.dumps(evidence, indent=2))
                 if not host.executions and created_tasks and evidence.get("b_task_status") == "completed":
                     import sqlalchemy as sa
