@@ -1031,7 +1031,14 @@ class ScheduledTaskRepository:
         finally:
             if self._recovery_terminal_publisher is not None:
                 for target in recovery_targets:
-                    await self._recovery_terminal_publisher.publish(target)
+                    confirmation = await self._recovery_terminal_publisher.publish(target)
+                    if not confirmation.confirmed:
+                        logger.warning(
+                            "Scheduled recovery terminal publication for run %s returned %s",
+                            target.run_id,
+                            confirmation.value,
+                            extra={"run_id": target.run_id, "recovery_path": "reconcile_stuck_once_tasks", "confirmation": confirmation.value},
+                        )
 
     async def _reconcile_stuck_once_tasks(
         self,
