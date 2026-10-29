@@ -1126,11 +1126,19 @@ def test_fast_path_trusted_claim_does_not_take_over_owned_row() -> None:
     assert final_record["user_id"] == "owner-a"
 
 
-def test_insert_race_concurrent_trusted_claims_have_one_winner() -> None:
+def test_insert_race_concurrent_trusted_claims_have_one_winner(monkeypatch) -> None:
     from sqlalchemy.exc import IntegrityError
 
     from app.gateway.auth_disabled import AUTH_SOURCE_INTERNAL
     from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME, INTERNAL_SYSTEM_ROLE
+    from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
+
+    # These INSERTs represent separate Gateways: they share SQL rows but have
+    # distinct process-local lifecycle locks. Same-Gateway serialization is
+    # covered with the real stores in test_thread_create_idempotency.py.
+    worker_locks = [AsyncKeyedLockTable[str](), AsyncKeyedLockTable[str]()]
+    next_worker = iter(worker_locks)
+    monkeypatch.setattr(threads, "goal_thread_lock", lambda thread_id: next(next_worker).hold(thread_id))
 
     class _ConcurrentInsertRaceStore(MemoryThreadMetaStore):
         def __init__(self):
@@ -1184,6 +1192,7 @@ def test_insert_race_concurrent_trusted_claims_have_one_winner() -> None:
     assert final_record["user_id"] in owners
     assert len(failures) == 1
     assert failures[0].status_code == 500
+    assert all(not table._entries_by_loop for table in worker_locks)
 
 
 def test_create_thread_maps_memory_owner_conflict_to_404() -> None:
