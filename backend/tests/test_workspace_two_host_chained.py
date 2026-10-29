@@ -551,6 +551,7 @@ async def _chained_worker():
                 # Inline bytes: the scheduler uses fresh_thread_per_run, so an
                 # upload in a fixed thread directory is unreachable to the run.
                 "input_files": {"program.txt": base64.b64encode(b"two host owned dependency report").decode("ascii")},
+                "input_refs": {},
             },
             "task_repo": assembly["task_repo"],
             "run_store": assembly["run_store"],
