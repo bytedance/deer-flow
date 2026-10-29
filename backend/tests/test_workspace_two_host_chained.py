@@ -334,8 +334,6 @@ async def _chained_controller():
             evidence["occurrence_queued"] = True
             evidence["occurrence_id"] = queued["task_run_id"]
             evidence_path.write_text(json.dumps(evidence, indent=2))
-        finally:
-            reset_current_workspace(workspace_token)
 
         server = uvicorn.Server(uvicorn.Config(central_app, host="0.0.0.0", port=NATIVE_PORT, log_level="warning", lifespan="on"))
         serve = asyncio.create_task(server.serve())
@@ -378,6 +376,7 @@ async def _chained_controller():
             server.should_exit = True
             await asyncio.gather(serve, return_exceptions=True)
             await foreground.stop()
+            reset_current_workspace(workspace_token)
             reset_current_user(principal_token)
             services.get_run_context = original_get_run_context
             deps._cached_repo, deps._cached_local_provider = original_repo, original_provider
