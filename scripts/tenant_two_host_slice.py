@@ -19,8 +19,10 @@ from pathlib import Path
 
 WORKTREE = Path("/Users/wenbinwang/.codex/worktrees/1d28/deerflow2")
 KEY = os.environ.get("TENANT_SSH_IDENTITY", "/Users/wenbinwang/Documents/docs/genbalde/key/genbalde-drama-keypair.pem")
-CONTROLLER, WORKER = "139.196.30.22", "47.117.5.254"
-CONTROLLER_PRIVATE = "192.168.0.190"
+CONTROLLER = os.environ.get("TENANT_CONTROLLER", "139.196.30.22")
+WORKER = os.environ.get("TENANT_WORKER", "47.117.5.254")
+CONTROLLER_PRIVATE = os.environ.get("TENANT_CONTROLLER_PRIVATE", "192.168.0.190")
+WORKER_PRIVATE = os.environ.get("TENANT_WORKER_PRIVATE", "192.168.0.189")
 CROOT = "/srv/deerflow-twohost"
 PHASE = "two-host-b-slice-20261028-51"
 PORT = 8021
@@ -339,6 +341,15 @@ echo $! > {CROOT}/{PHASE}/controller.pid
     if not mount:
         sys.exit("native controller never created the pool mount id")
     must(WORKER, f"mkdir -p {CROOT}/{PHASE}/pool && printf '%s' '{mount}' > {CROOT}/{PHASE}/pool/pool-mount-id", what="worker mount sync")
+    print("[controller] wait for the native RPC port to accept before starting the worker")
+    deadline = time.time() + 120
+    while time.time() < deadline:
+        probe = ssh(CONTROLLER, f"timeout 2 bash -c '</dev/tcp/127.0.0.1/{PORT + 1}' >/dev/null 2>&1 && echo OPEN || true")
+        if probe.stdout.strip() == "OPEN":
+            break
+        time.sleep(2)
+    else:
+        sys.exit("native controller RPC port never opened")
     worker_env = dict(common)
     worker_env.update(
         {

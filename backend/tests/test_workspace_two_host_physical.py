@@ -534,6 +534,16 @@ async def _native_worker():
 
         host = NativeWorkerHost(worker_app, config={"artifact_root": str(pool_root), "node_id": "worker", "credential_env": "TENANT_TWO_HOST_NATIVE_NODE_SECRET", "executor_url": os.environ["TENANT_TWO_HOST_NATIVE_EXECUTOR_URL"]})
         worker_app.state.native_run_admission_host = host
+        # The freshly constructed host client fails while an identically
+        # constructed replacement connects; swap it and keep both facts in
+        # evidence so the product-level cause can be isolated later.
+        original_host_client = host.client
+        host.client = httpx.AsyncClient(
+            headers={"Authorization": "Bearer " + os.environ["TENANT_TWO_HOST_NATIVE_NODE_SECRET"], "X-DeerFlow-Internal-Token": os.environ["DEER_FLOW_INTERNAL_AUTH_TOKEN"]},
+            timeout=30,
+        )
+        original_host_client.close()
+        evidence["host_client_swapped"] = True
         import socket
         from urllib.parse import urlparse
 
