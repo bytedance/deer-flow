@@ -95,12 +95,11 @@ hard-code business logic into core. Working examples:
 AgentRuns; POSIX, one process/store; approval and session-authorized recovery; uncertain admissions need reconciliation;
 no multi-Gateway failover or hard currency budget.
 
-Knowledge management is an optional extension at
-`examples/deerflow-extension-knowledge-management/` (see its `AGENTS.md` and
-`CONTRACT.md`). It uses existing plugin/router/principal extension points;
-retrieval has no management dependency. Writes require explicit administrator
-resource/operation grants and upstream authorization. Provider-managed stages
-are not completion evidence; uncertain writes must be reconciled, not retried.
+Knowledge management/space policy: `examples/deerflow-extension-knowledge-{management,platform}/`
+(scoped `AGENTS.md`, `CONTRACT.md`). Use existing plugin/router/principal contracts;
+retrieval stays independent. Space policy intersects administrator/resource/operation
+and upstream grants, never grants chat access. SQLite holds plugin-owned space policy.
+Provider stages are not completion evidence; reconcile uncertain writes, never retry.
 
 Root runtime configs: copy `config.example.yaml` → `config.yaml` and
 `extensions_config.example.json` → `extensions_config.json` (MCP/skills).
@@ -227,6 +226,8 @@ Repo-wide conventions:
 - **Test-driven development** — features and bug fixes ship with tests. Backend tests live
   in `backend/tests/` (TDD is mandatory there; see [backend/AGENTS.md](backend/AGENTS.md));
   frontend tests live in `frontend/tests/`.
+  Skill-creator tests must preserve YAML values/body, restore bytecode settings,
+  and check invalid metadata through offline CLI subprocesses.
   Public skill script regressions live in `tests/skills/` and run in Skill Review CI
   independently of package review. Exercise dependency fallbacks with the optional
   import unavailable and mock HTTP transport to keep tests offline.

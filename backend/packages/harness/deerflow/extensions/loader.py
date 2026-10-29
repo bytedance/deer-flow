@@ -83,8 +83,8 @@ class ExtensionSpec(BaseModel):
 class Diagnostic:
     """A load- or run-time problem attributed to a specific extension.
 
-    The repository has no structured diagnostics channel today; this is a
-    deliberately minimal one whose only job is keeping failures attributable.
+    Raw details stay in the Gateway log. HTTP diagnostics use a redacted
+    projection while this record keeps the failure attributable.
     """
 
     level: DiagnosticLevel

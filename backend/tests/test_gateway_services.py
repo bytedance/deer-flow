@@ -2272,6 +2272,81 @@ async def test_start_run_releases_preallocated_producer_after_admission_conflict
 
 
 @pytest.mark.asyncio
+async def test_start_run_admits_cross_process_run_when_producer_tracking_unavailable(
+    _stub_app_config,
+):
+    """A transient lease failure must degrade, not reject the run with a 500.
+
+    ``RedisStreamBridge.start_producer_lease`` returns ``False`` only after a
+    transient Redis error whose partial registration was safely rolled back
+    (see its ``except (RedisError, TimeoutError)`` branch): nothing is left
+    tracked. An untracked producer falls back to the historical conservative
+    recovery path (wait for the real END or the retained-stream TTL), which is
+    no less safe than pre-lease behaviour. Admission must therefore proceed;
+    the lease is simply never transferred or finished because none was taken.
+    """
+    from unittest.mock import patch
+
+    from app.gateway.services import start_run
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    run_store = MemoryRunStore()
+    run_manager = RunManager(store=run_store)
+    events = []
+    agent_started = asyncio.Event()
+    release = asyncio.Event()
+
+    class UntrackedCrossProcessBridge:
+        supports_cross_process = True
+
+        async def start_producer_lease(self, run_id):
+            events.append(("start", run_id))
+            return False
+
+        def transfer_producer_lease(self, run_id, owner_task):
+            events.append(("transfer", run_id, owner_task))
+
+        async def finish_producer_lease(self, run_id):
+            events.append(("finish", run_id))
+
+        async def abort_producer_lease(self, run_id):
+            events.append(("abort", run_id))
+
+    bridge = UntrackedCrossProcessBridge()
+
+    async def fake_run_agent(_bridge, _manager, record, **_kwargs):
+        agent_started.set()
+        await release.wait()
+
+    request = _make_start_run_request(
+        run_manager,
+        stream_bridge=bridge,
+    )
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
+    ):
+        record = await start_run(
+            _run_create_request(),
+            "thread-stream-producer-untracked",
+            request,
+        )
+        try:
+            await asyncio.wait_for(agent_started.wait(), timeout=1)
+            # Admitted (no 500); no lease was transferred or finished because
+            # none could be established.
+            assert events == [("start", record.run_id)]
+            assert (await run_store.get(record.run_id))["status"] == "pending"
+        finally:
+            release.set()
+            await asyncio.wait_for(record.task, timeout=1)
+
+    # No lease was taken, so none is transferred, finished, or aborted.
+    assert events == [("start", record.run_id)]
+
+
+@pytest.mark.asyncio
 async def test_pending_cancel_bypasses_thread_metadata_and_logs_failure(_stub_app_config, caplog):
     from unittest.mock import AsyncMock, patch
 
@@ -2936,6 +3011,81 @@ async def test_recover_knowledge_scope_skips_hidden_conversation_reference_messa
         )
 
     assert recovered == source_scope
+
+
+@pytest.mark.parametrize("input_fields", [{}, {"input": None}, {"input": {}}], ids=["omitted", "null", "empty-object"])
+@pytest.mark.parametrize("source_scope", [None, {"version": 1, "mode": "disabled"}, {"version": 1, "mode": "selected", "dataset_ids": ["source"]}])
+@pytest.mark.parametrize("checkpoint_fields", [{}, {"checkpoint_id": "selected"}, {"checkpoint_id": "selected", "checkpoint_ns": "child"}])
+@pytest.mark.asyncio
+async def test_static_resume_preserves_input_and_recovers_source_scope(_stub_app_config, input_fields, source_scope, checkpoint_fields):
+    from unittest.mock import AsyncMock, patch
+
+    from app.gateway.routers.thread_runs import RunCreateRequest
+    from app.gateway.services import start_run
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    set_app_config(
+        AppConfig.model_validate(
+            {
+                "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+                "knowledge_base": {"enabled": True, "scope_selection_enabled": True},
+                "tools": [{"name": "knowledge_search", "group": "knowledge", "use": "deerflow.community.ragflow.tools:knowledge_search_tool"}],
+            }
+        )
+    )
+    request = _make_start_run_request(RunManager(store=MemoryRunStore()))
+    recover_scope = AsyncMock(return_value=source_scope)
+    captured = {}
+
+    async def fake_run_agent(*_args, **kwargs):
+        captured.update(kwargs)
+
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
+        patch("app.gateway.services._recover_run_knowledge_scope", new=recover_scope),
+        patch("app.gateway.services._load_scope_agent_config", new=AsyncMock(return_value=SimpleNamespace(tool_groups=["knowledge"], knowledge_scope={"version": 1, "mode": "selected", "dataset_ids": ["new-default"]}))),
+    ):
+        record = await start_run(RunCreateRequest(**input_fields, config={"configurable": checkpoint_fields}), "thread-static-scope", request)
+        await record.task
+
+    if input_fields.get("input") is None:
+        assert captured["graph_input"] is None
+        assert captured["knowledge_scope"] == source_scope
+        recover_scope.assert_awaited_once_with(request, thread_id="thread-static-scope", target_message_id=None, **checkpoint_fields)
+    else:
+        assert captured["graph_input"] == {}
+        assert captured["knowledge_scope"] is None
+        recover_scope.assert_not_awaited()
+
+
+@pytest.mark.parametrize("mode", ["full", "delta"])
+@pytest.mark.asyncio
+async def test_static_resume_recovers_selected_checkpoint_scope(_stub_app_config, mode):
+    from unittest.mock import patch
+
+    from langchain_core.messages import HumanMessage
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    from app.gateway.services import _recover_run_knowledge_scope
+    from deerflow.runtime.checkpoint_state import CheckpointStateAccessor, build_state_mutation_graph
+
+    accessor = CheckpointStateAccessor.bind(build_state_mutation_graph("scope", mode), InMemorySaver(), mode=mode)
+    config = {"configurable": {"thread_id": "scope-history", "checkpoint_ns": ""}}
+    source_scope = {"version": 1, "mode": "disabled"}
+    selected = await accessor.aupdate(config, {"messages": [HumanMessage(id="first", content="old turn", additional_kwargs={"knowledge_scope": source_scope})]}, as_node="scope")
+    await accessor.aupdate(config, {"messages": [HumanMessage(id="second", content="new turn", additional_kwargs={"knowledge_scope": {"version": 1, "mode": "selected", "dataset_ids": ["new"]}})]}, as_node="scope")
+
+    async def build_accessor(_request, *, thread_id, checkpoint_id=None):
+        read_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+        if checkpoint_id is not None:
+            read_config["configurable"]["checkpoint_id"] = checkpoint_id
+        return accessor, read_config
+
+    with patch("app.gateway.services.build_thread_checkpoint_state_accessor", side_effect=build_accessor):
+        scope = await _recover_run_knowledge_scope(SimpleNamespace(), thread_id="scope-history", target_message_id=None, checkpoint_id=selected["configurable"]["checkpoint_id"])
+    assert scope == source_scope
 
 
 @pytest.mark.parametrize(
