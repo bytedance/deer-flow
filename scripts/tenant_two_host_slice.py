@@ -35,7 +35,9 @@ OWNER = "33333333-3333-4333-8333-333333333333"
 def ssh(host: str, script: str, stdin_text: str = "") -> subprocess.CompletedProcess:
     return subprocess.run(
         ["ssh", "-i", KEY, "-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes", f"root@{host}", script],
-        input=stdin_text, capture_output=True, text=True,
+        input=stdin_text,
+        capture_output=True,
+        text=True,
     )
 
 
@@ -112,7 +114,9 @@ def env_flags(env: dict) -> str:
 
 def clean_phase(host: str) -> None:
     """Remove only this phase's own labeled containers/networks and its dir."""
-    must(host, f"""set -eu
+    must(
+        host,
+        f"""set -eu
 for c in $(docker ps -aq --filter label=org.deerflow.tenant.owned={PHASE}); do
   docker rm -fv $c >/dev/null
 done
@@ -120,7 +124,9 @@ for n in $(docker network ls --filter label=org.deerflow.tenant.owned={PHASE} --
   docker network rm $n >/dev/null 2>&1 || true
 done
 rm -rf {CROOT}/{PHASE}
-""", what="phase cleanup")
+""",
+        what="phase cleanup",
+    )
 
 
 def prepare(host: str, digest: str) -> None:
@@ -146,20 +152,26 @@ def main() -> None:
     prepare(WORKER, digest)
 
     print("[controller] postgres")
-    must(CONTROLLER, f"""set -eu
+    must(
+        CONTROLLER,
+        f"""set -eu
 docker rm -fv {PHASE}-pg >/dev/null 2>&1 || true
 docker run -d --pull=never --name {PHASE}-pg --label org.deerflow.tenant.owned={PHASE} \\
   -p {CONTROLLER_PRIVATE}:55432:5432 -e POSTGRES_PASSWORD=two-host-only -e POSTGRES_DB=tenant \\
   --cpus 1 --memory 1g {PG_IMAGE} >/dev/null
 for i in $(seq 1 30); do docker exec {PHASE}-pg pg_isready -U postgres >/dev/null 2>&1 && break; sleep 1; done
 for db in tenant_native tenant_executor; do docker exec {PHASE}-pg psql -U postgres -c "CREATE DATABASE $db"; done
-""", what="controller postgres")
+""",
+        what="controller postgres",
+    )
     base = f"postgresql+psycopg://postgres:two-host-only@{CONTROLLER_PRIVATE}:55432"
     native_url = base + "/tenant_native"
     executor_url = base + "/tenant_executor"
 
     print("[controller] migrations and native seeding")
-    must(CONTROLLER, f"""set -eu
+    must(
+        CONTROLLER,
+        f"""set -eu
 docker run --rm --pull=never --network host -v {CROOT}/{PHASE}/source.tar.gz:/run/source.tar.gz:ro --entrypoint /bin/sh {NATIVE_IMAGE} -c '
 set -eu; rm -rf /tmp/source; mkdir /tmp/source; tar xzf /run/source.tar.gz -C /tmp/source
 cd /tmp/source/backend
@@ -207,10 +219,14 @@ upgrade_schema(executor)
 executor.dispose()
 print("MIGRATED_AND_SEEDED")
 PY'
-""", what="migrations")
+""",
+        what="migrations",
+    )
 
     print("[controller] start controller pytest (background)")
-    must(CONTROLLER, f"""set -eu
+    must(
+        CONTROLLER,
+        f"""set -eu
 printf '[]' > {CROOT}/{PHASE}/evidence/owned.json
 nohup docker run --rm --pull=never --name {PHASE}-controller --label org.deerflow.tenant.owned={PHASE} \\
   --network host \\
@@ -224,7 +240,9 @@ nohup docker run --rm --pull=never --name {PHASE}-controller --label org.deerflo
   && /app/backend/.venv/bin/python -m pytest tests/test_workspace_two_host_physical.py -q --tb=short --no-showlocals' \\
   > {CROOT}/{PHASE}/controller.log 2>&1 &
 echo $! > {CROOT}/{PHASE}/controller.pid
-""", what="controller start")
+""",
+        what="controller start",
+    )
 
     print("[controller] wait for pool mount id, sync to worker")
     deadline = time.time() + 120
@@ -239,7 +257,9 @@ echo $! > {CROOT}/{PHASE}/controller.pid
     must(WORKER, f"mkdir -p {CROOT}/{PHASE}/pool && printf '%s' '{mount}' > {CROOT}/{PHASE}/pool/pool-mount-id && printf '[]' > {CROOT}/{PHASE}/evidence/owned.json", what="worker mount sync")
 
     print("[worker] run worker pytest")
-    must(WORKER, f"""set -eu
+    must(
+        WORKER,
+        f"""set -eu
 docker run --rm --pull=never --name {PHASE}-worker --label org.deerflow.tenant.owned={PHASE} \\
   -v /var/run/docker.sock:/var/run/docker.sock:ro -v /usr/bin/docker:/usr/bin/docker:ro \\
   -v {CROOT}/{PHASE}:{CROOT}/{PHASE} \\
@@ -253,7 +273,9 @@ docker run --rm --pull=never --name {PHASE}-worker --label org.deerflow.tenant.o
   -v {CROOT}/{PHASE}/source.tar.gz:/run/source.tar.gz:ro \
   --entrypoint /bin/sh {NATIVE_IMAGE} -c 'mkdir -p /tmp/source && tar xzf /run/source.tar.gz -C /tmp/source && cp -n /tmp/source/config.example.yaml /tmp/source/config.yaml && cd /tmp/source/backend \
   && /app/backend/.venv/bin/python -m pytest tests/test_workspace_two_host_physical.py -q --tb=short --no-showlocals'
-""", what="worker pytest")
+""",
+        what="worker pytest",
+    )
 
     print("[controller] wait for controller pytest to finish")
     deadline = time.time() + 300
@@ -270,8 +292,6 @@ docker run --rm --pull=never --name {PHASE}-worker --label org.deerflow.tenant.o
     print(f"[done] artifacts in /private/tmp/{PHASE}-artifacts (digest {digest})")
 
 
-
-
 REDIS_IMAGE = "sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499"
 NATIVE_SECRET = "two-host-native-node-secret-32-bytes-fixed"
 INTERNAL_TOKEN = "two-host-internal-auth-token"
@@ -282,7 +302,9 @@ def run_slice_two() -> None:
     print(f"[freeze] archive sha256 {digest}")
     prepare(CONTROLLER, digest)
     prepare(WORKER, digest)
-    must(CONTROLLER, f"""set -eu
+    must(
+        CONTROLLER,
+        f"""set -eu
 docker rm -fv {PHASE}-pg {PHASE}-redis >/dev/null 2>&1 || true
 docker run -d --pull=never --name {PHASE}-pg --label org.deerflow.tenant.owned={PHASE} \
   -p {CONTROLLER_PRIVATE}:55432:5432 -e POSTGRES_PASSWORD=two-host-only -e POSTGRES_DB=tenant \
@@ -291,14 +313,18 @@ for i in $(seq 1 30); do docker exec {PHASE}-pg pg_isready -U postgres >/dev/nul
 for db in tenant_native tenant_executor; do docker exec {PHASE}-pg psql -U postgres -c "CREATE DATABASE $db"; done
 docker run -d --pull=never --name {PHASE}-redis --label org.deerflow.tenant.owned={PHASE} \
   -p {CONTROLLER_PRIVATE}:6390:6379 {REDIS_IMAGE} >/dev/null
-""", what="controller pg+redis")
+""",
+        what="controller pg+redis",
+    )
     base = f"postgresql+psycopg://postgres:two-host-only@{CONTROLLER_PRIVATE}:55432"
     native_url = base + "/tenant_native"
     executor_url = base + "/tenant_executor"
     native_async_url = f"postgresql+asyncpg://postgres:two-host-only@{CONTROLLER_PRIVATE}:55432/tenant_native"
     redis_url = f"redis://{CONTROLLER_PRIVATE}:6390/0"
     print("[controller] slice-two migrations and seeding")
-    must(CONTROLLER, f"""set -eu
+    must(
+        CONTROLLER,
+        f"""set -eu
 cat > /tmp/.two-host-migrate.py
 docker run --rm --pull=never --network host \\
   -e NATIVE_ASYNC='{native_async_url}' -e NATIVE_SYNC='{native_url}' -e EXECUTOR_SYNC='{executor_url}' \\
@@ -309,7 +335,10 @@ cd /tmp/source/backend
 export PYTHONPATH=/tmp/source/backend:/tmp/source/backend/packages/harness:/tmp/source/backend/packages/extension-api:/tmp/source/backend/packages/ecs-executor
 /app/backend/.venv/bin/python /run/migrate.py'
 rm -f /tmp/.two-host-migrate.py
-""", what="slice-two migrations", stdin_text=_SLICE_TWO_MIGRATE)
+""",
+        what="slice-two migrations",
+        stdin_text=_SLICE_TWO_MIGRATE,
+    )
     common = dict(COMMON_ENV)
     common.update(
         {
@@ -317,12 +346,15 @@ rm -f /tmp/.two-host-migrate.py
             "TENANT_TWO_HOST_NATIVE_ASYNC_URL": native_async_url,
             "TENANT_TWO_HOST_REDIS_URL": redis_url,
             "TENANT_TWO_HOST_WORKER_CREDENTIAL": NATIVE_SECRET,
-            "DEER_FLOW_INTERNAL_AUTH_TOKEN": INTERNAL_TOKEN, "HTTPX_DEBUG": "1",
+            "DEER_FLOW_INTERNAL_AUTH_TOKEN": INTERNAL_TOKEN,
+            "HTTPX_DEBUG": "1",
             "TEST_EXECUTOR_POSTGRES_URL": executor_url,
         }
     )
     print("[controller] start native-controller pytest (background)")
-    must(CONTROLLER, f"""set -eu
+    must(
+        CONTROLLER,
+        f"""set -eu
 nohup docker run --rm --pull=never --name {PHASE}-controller --label org.deerflow.tenant.owned={PHASE} \
   --network host \
   -e TENANT_TWO_HOST_ROLE=native-controller -e TENANT_TWO_HOST_NATIVE_PORT={PORT + 1} \
@@ -333,7 +365,9 @@ nohup docker run --rm --pull=never --name {PHASE}-controller --label org.deerflo
   && /app/backend/.venv/bin/python -m pytest tests/test_workspace_two_host_physical.py -q --tb=short --no-showlocals' \
   > {CROOT}/{PHASE}/controller.log 2>&1 &
 echo $! > {CROOT}/{PHASE}/controller.pid
-""", what="native-controller start")
+""",
+        what="native-controller start",
+    )
     print("[controller] wait for pool mount id, sync to worker")
     deadline = time.time() + 120
     mount = ""
@@ -364,14 +398,18 @@ echo $! > {CROOT}/{PHASE}/controller.pid
         }
     )
     print("[worker] run native-worker pytest")
-    must(WORKER, f"""set -eu
+    must(
+        WORKER,
+        f"""set -eu
 docker run --rm --pull=never --name {PHASE}-worker --label org.deerflow.tenant.owned={PHASE} \
   --network host \
   -v {CROOT}/{PHASE}:{CROOT}/{PHASE} -v {CROOT}/{PHASE}/source.tar.gz:/run/source.tar.gz:ro \
   {env_flags(worker_env)} \
   --entrypoint /bin/sh {NATIVE_IMAGE} -c 'mkdir -p /tmp/source && tar xzf /run/source.tar.gz -C /tmp/source && cp -n /tmp/source/config.example.yaml /tmp/source/config.yaml && cd /tmp/source/backend \
   && /app/backend/.venv/bin/python -m pytest tests/test_workspace_two_host_physical.py -q --tb=short --no-showlocals'
-""", what="native-worker pytest")
+""",
+        what="native-worker pytest",
+    )
     print("[controller] wait for native-controller pytest to finish")
     deadline = time.time() + 300
     while time.time() < deadline:
@@ -428,14 +466,14 @@ print("SLICE_TWO_MIGRATED")
 """
 
 
-
-
 def run_slice_three() -> None:
     digest = freeze_archive(f"/private/tmp/{PHASE}-source.tar")
     print(f"[freeze] archive sha256 {digest}")
     prepare(CONTROLLER, digest)
     prepare(WORKER, digest)
-    must(CONTROLLER, f"""set -eu
+    must(
+        CONTROLLER,
+        f"""set -eu
 docker rm -fv {PHASE}-pg {PHASE}-redis >/dev/null 2>&1 || true
 docker run -d --pull=never --name {PHASE}-pg --label org.deerflow.tenant.owned={PHASE} \
   -p {CONTROLLER_PRIVATE}:55432:5432 -e POSTGRES_PASSWORD=two-host-only -e POSTGRES_DB=tenant \
@@ -444,14 +482,18 @@ for i in $(seq 1 30); do docker exec {PHASE}-pg pg_isready -U postgres >/dev/nul
 for db in tenant_native tenant_executor; do docker exec {PHASE}-pg psql -U postgres -c "CREATE DATABASE $db"; done
 docker run -d --pull=never --name {PHASE}-redis --label org.deerflow.tenant.owned={PHASE} \
   -p {CONTROLLER_PRIVATE}:6390:6379 {REDIS_IMAGE} >/dev/null
-""", what="controller pg+redis")
+""",
+        what="controller pg+redis",
+    )
     base = f"postgresql+psycopg://postgres:two-host-only@{CONTROLLER_PRIVATE}:55432"
     native_url = base + "/tenant_native"
     executor_url = base + "/tenant_executor"
     native_async_url = f"postgresql+asyncpg://postgres:two-host-only@{CONTROLLER_PRIVATE}:55432/tenant_native"
     redis_url = f"redis://{CONTROLLER_PRIVATE}:6390/0"
     print("[controller] slice-three migrations and seeding")
-    must(CONTROLLER, f"""set -eu
+    must(
+        CONTROLLER,
+        f"""set -eu
 cat > /tmp/.two-host-migrate.py
 docker run --rm --pull=never --network host \
   -e NATIVE_ASYNC='{native_async_url}' -e NATIVE_SYNC='{native_url}' -e EXECUTOR_SYNC='{executor_url}' \
@@ -462,7 +504,10 @@ cd /tmp/source/backend
 export PYTHONPATH=/tmp/source/backend:/tmp/source/backend/packages/harness:/tmp/source/backend/packages/extension-api:/tmp/source/backend/packages/ecs-executor
 /app/backend/.venv/bin/python /run/migrate.py'
 rm -f /tmp/.two-host-migrate.py
-""", what="slice-three migrations", stdin_text=_SLICE_TWO_MIGRATE)
+""",
+        what="slice-three migrations",
+        stdin_text=_SLICE_TWO_MIGRATE,
+    )
     common = dict(COMMON_ENV)
     common.update(
         {
@@ -472,11 +517,14 @@ rm -f /tmp/.two-host-migrate.py
             "TENANT_TWO_HOST_WORKER_CREDENTIAL": NATIVE_SECRET,
             "DEER_FLOW_INTERNAL_AUTH_TOKEN": INTERNAL_TOKEN,
             "TEST_EXECUTOR_POSTGRES_URL": executor_url,
+            "TENANT_TWO_HOST_CONTROLLER_PRIVATE_HOST": CONTROLLER_PRIVATE,
             "HTTPX_DEBUG": "1",
         }
     )
     print("[controller] start chained-controller pytest (background)")
-    must(CONTROLLER, f"""set -eu
+    must(
+        CONTROLLER,
+        f"""set -eu
 nohup docker run --rm --pull=never --name {PHASE}-controller --label org.deerflow.tenant.owned={PHASE} \
   --network host \
   -e TENANT_TWO_HOST_ROLE=chained-controller -e TENANT_TWO_HOST_NATIVE_PORT={PORT + 1} \
@@ -487,7 +535,9 @@ nohup docker run --rm --pull=never --name {PHASE}-controller --label org.deerflo
   && /app/backend/.venv/bin/python -m pytest tests/test_workspace_two_host_chained.py -q --tb=short --no-showlocals' \
   > {CROOT}/{PHASE}/controller.log 2>&1 &
 echo $! > {CROOT}/{PHASE}/controller.pid
-""", what="chained-controller start")
+""",
+        what="chained-controller start",
+    )
     print("[controller] wait for pool mount id, sync to worker")
     deadline = time.time() + 120
     mount = ""
@@ -518,7 +568,9 @@ echo $! > {CROOT}/{PHASE}/controller.pid
         }
     )
     print("[worker] run chained-worker pytest (with docker socket for real B)")
-    must(WORKER, f"""set -eu
+    must(
+        WORKER,
+        f"""set -eu
 docker run --rm --pull=never --name {PHASE}-worker --label org.deerflow.tenant.owned={PHASE} \
   --network host \
   -v /var/run/docker.sock:/var/run/docker.sock:ro -v /usr/bin/docker:/usr/bin/docker:ro \
@@ -526,7 +578,9 @@ docker run --rm --pull=never --name {PHASE}-worker --label org.deerflow.tenant.o
   {env_flags(worker_env)} \
   --entrypoint /bin/sh {NATIVE_IMAGE} -c 'mkdir -p /tmp/source && tar xzf /run/source.tar.gz -C /tmp/source && cp -n /tmp/source/config.example.yaml /tmp/source/config.yaml && cd /tmp/source/backend \
   && /app/backend/.venv/bin/python -m pytest tests/test_workspace_two_host_chained.py -q --tb=short --no-showlocals'
-""", what="chained-worker pytest")
+""",
+        what="chained-worker pytest",
+    )
     print("[controller] wait for chained-controller pytest to finish")
     deadline = time.time() + 600
     while time.time() < deadline:
