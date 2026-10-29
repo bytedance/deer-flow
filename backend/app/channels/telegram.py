@@ -163,7 +163,8 @@ class TelegramChannel(Channel):
         # chat_id -> last sent message_id for threaded replies
         self._last_bot_message: dict[str, int] = {}
         # stream_key ("chat_id:thread_ts") -> state of the in-flight streamed
-        # bot message being edited in place: {"message_id", "last_edit_at", "last_text"}
+        # bot message being edited in place: {"message_id", "last_edit_at",
+        # "last_text", "bound_message_id"}
         self._stream_messages: dict[str, dict[str, Any]] = {}
 
     @property
@@ -322,12 +323,15 @@ class TelegramChannel(Channel):
         key = self._stream_key(msg.chat_id, msg.thread_ts)
 
         if not msg.is_final:
-            previous = self._stream_messages.get(key)
-            previous_id = previous["message_id"] if previous else None
             await self._send_stream_update(chat_id, key, msg.text, reply_to=self._parse_message_id(msg.thread_ts))
             state = self._stream_messages.get(key)
-            if state is not None and state["message_id"] != previous_id:
-                await self._record_bot_message_thread(msg, state["message_id"])
+            # The inbound handler pre-registers the "Working on it..." message
+            # as the stream target, so stream edits keep the same message id
+            # for the whole stream. Track the bound message id instead of
+            # requiring an id change, or binding is skipped throughout.
+            if state is not None and state.get("bound_message_id") != state["message_id"]:
+                if await self._record_bot_message_thread(msg, state["message_id"]):
+                    state["bound_message_id"] = state["message_id"]
             return
 
         state = self._stream_messages.pop(key, None)
@@ -355,7 +359,7 @@ class TelegramChannel(Channel):
             if sent_id is not None:
                 await self._record_bot_message_thread(msg, sent_id)
 
-    async def _record_bot_message_thread(self, msg: OutboundMessage, message_id: int | None) -> None:
+    async def _record_bot_message_thread(self, msg: OutboundMessage, message_id: int | None) -> bool:
         """Bind a delivered bot message id to the DeerFlow thread that produced it.
 
         In a group, a reply addresses the message it replies to, so when a user
@@ -365,14 +369,21 @@ class TelegramChannel(Channel):
         (deer-flow#7653). Recording it here — in the same store/repo the
         manager resolves with — makes the reply continue the original thread.
 
+        Automatic aliases claim (insert-if-absent) instead of overwriting, in
+        both storage paths, so an explicit rebinding (for example a ``/new``
+        issued while an answer streams) always wins over the stale automatic
+        alias (deer-flow#7656 P2 review).
+
         Best-effort: delivery has already succeeded by the time this runs, so
-        a store failure is logged and never raised.
+        a store failure is logged and never raised. Returns True when the
+        binding was recorded, False when there was nothing to record or
+        recording failed.
         """
         if not message_id or not msg.thread_id:
-            return
+            return False
         try:
             if msg.connection_id and msg.owner_user_id and self._connection_repo is not None:
-                await self._connection_repo.set_thread_id(
+                await self._connection_repo.claim_thread_id(
                     connection_id=msg.connection_id,
                     owner_user_id=msg.owner_user_id,
                     provider="telegram",
@@ -380,19 +391,21 @@ class TelegramChannel(Channel):
                     external_topic_id=str(message_id),
                     thread_id=msg.thread_id,
                 )
-                return
+                return True
             store = self.config.get("channel_store")
             if store is None:
-                return
-            await store.set_thread_id(
+                return False
+            await store.claim_thread_id(
                 "telegram",
                 msg.chat_id,
                 msg.thread_id,
                 topic_id=str(message_id),
                 user_id=msg.owner_user_id or "",
             )
+            return True
         except Exception:
             logger.warning("[Telegram] failed to record thread binding for bot message=%s", message_id)
+            return False
 
     async def _send_stream_update(self, chat_id: int, key: str, text: str, reply_to: int | None = None) -> None:
         """Edit the in-flight streamed message with accumulated text.
