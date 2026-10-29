@@ -71,6 +71,30 @@ def test_load_config_snapshots_custom_skills_container_path(monkeypatch):
     assert provider._load_config()["skills_container_path"] == "/custom-skills"
 
 
+def test_try_lock_file_initializes_empty_sidecar_after_acquisition(tmp_path, monkeypatch):
+    """An async Windows holder must own byte 0 before writing the sentinel."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    observed_sizes: list[int] = []
+
+    class FakeMsvcrt:
+        LK_NBLCK = 1
+        LK_UNLCK = 2
+
+        @staticmethod
+        def locking(fd: int, mode: int, _size: int) -> None:
+            if mode == FakeMsvcrt.LK_NBLCK:
+                observed_sizes.append(os.fstat(fd).st_size)
+
+    monkeypatch.setattr(aio_mod, "fcntl", None)
+    monkeypatch.setattr(aio_mod, "msvcrt", FakeMsvcrt)
+    path = tmp_path / "empty-sidecar.lock"
+    with open(path, "a+", encoding="utf-8") as lock_file:
+        assert aio_mod._try_lock_file_exclusive(lock_file) is True
+
+    assert observed_sizes == [0]
+    assert path.read_bytes() == b"\0"
+
+
 def test_load_config_wires_bash_command_timeout_to_aio_default(monkeypatch):
     aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
     sandbox_config = SandboxConfig(
