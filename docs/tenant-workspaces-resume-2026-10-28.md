@@ -67,3 +67,23 @@ run20 判别数据（清理前抢救）：`identical_client_trace = [403×10, Co
 ## 2026-10-29 slice 2 GREEN（终局）
 
 `config.yaml` 缺失是 25 轮 RED 的真正根因（`deps.get_config()` 503 → execute 异常 → refuse 循环 → run pending；可见的 ConnectError 全部是 controller 300s 超时退场后的尾部噪音）。修复后 slice 2 全绿：controller `run_status=success`、共享 PG 6 条跨进程 checkpoint、worker 真实认领/采用/执行/上报。证据 `two-host-c-slice-20261028-51.json`。下一片：C1(AIO 工具)→B→C2 调度串联（复用 slice 1 的 B 组件 + slice 2 的 C 通道 + ScheduledTaskService 语义），然后跨机撤权/重启 → M5。
+
+
+## 2026-10-29 slice 3（合龙 C1→B→C2）进展检查点
+
+24 轮修复后主干已通（run24 证据）：
+- 调度 occurrence 排队→control 服务发射 ✓（需显式起 `dispatch_enabled=True` 的 ScheduledTaskService）
+- C1 真实运行：native 派发→worker NativeWorkerHost 采用→确定性图执行 ✓（run success）
+- C1 工具经**真实 MCP HTTP**（http://192.168.0.190:8022/mcp）提交 B ✓（`b_task_submitted_over_mcp_http`）
+- **B 在合龙流程里由 worker 经共享池真实 Docker 执行完成** ✓（job cf980ff4 completed）
+- 9 条共享 checkpoint；occurrence 停在 running（controller 600s 超时打断）
+
+修复链：模块级预导 tasks→runs（导入环免疫）；list_by_task 查 occurrence（无 user_id 参数）；等待段全程 set_current_workspace；`task_runtime.set_mcp_task_submitter(tasks)`；工具 schema 需 `input_refs`（可传空 dict）；fresh_thread_per_run → input 改内联 base64；DNS rebinding 421 → 遍历 routes 置 `manager.security_settings=None`；task 读需 thread_id+thread_incarnation 且包 workspace scope；从 submit request 捕获线程身份；捕获放 service 层（TaskSubmission 无 task_id）。
+
+### 剩余尾巴（下次第一步）
+1. 第二个 B 提交（35b61cce failed）来源待查：疑 C2 图实例的 plan 在 created_tasks 尚空时又发了一次（图按 run 重建、registry 共享但 C2 启动时序）或驱动重试。对照 worker 完整日志中两次 submit 的调用栈。
+2. task 行状态 failed（对应第二次提交）：修 1 后应消失。
+3. occurrence 收敛：controller 等待循环里 status 仍 running——C2 完成路径（通知→launch→worker claim→checkpoint 续跑→answer 读已发布报告）未在 600s 内走完，先修 1/2 再观察。
+4. GREEN 判据保持：occurrence success + ≥2 个 success run + ≥1 个 completed B + worker 零残留容器。
+
+重跑：`TENANT_TWO_HOST_SLICE=3 python3 scripts/tenant_two_host_slice.py`（最新提交 e1a2276df，归档 4e465e3a…b94f）。
