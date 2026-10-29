@@ -190,6 +190,7 @@ async def _chained_controller():
     )
     owner = os.environ["TENANT_TWO_HOST_OWNER"]
     context = _workspace_context()
+    controller_private_host = os.environ["TENANT_TWO_HOST_CONTROLLER_PRIVATE_HOST"]
     evidence_path = Path(os.environ["TEST_SCOPE_EVIDENCE"])
     pool_root = Path(os.environ["TENANT_TWO_HOST_ARTIFACT_ROOT"]).resolve()
     workspace_root = Path(os.environ["TENANT_TWO_HOST_WORKSPACE_ROOT"]).resolve()
@@ -265,6 +266,11 @@ async def _chained_controller():
         deps._cached_local_provider = LocalAuthProvider(assembly["users"])
         principal = await deps.get_local_provider().get_user(owner)
         principal_token = set_current_user(principal)
+        session_manager = getattr(central_app.state, "mcp_session_manager", None)
+        if session_manager is not None and getattr(session_manager, "settings", None) is not None:
+            # The VPC fixture host is not in the SDK DNS-rebind allowlist.
+            allowed = list(getattr(session_manager.settings, "allowed_hosts", None) or [])
+            session_manager.settings.allowed_hosts = allowed + [controller_private_host]
         dispatcher = NativeDispatchHost(
             central_app,
             pool,
