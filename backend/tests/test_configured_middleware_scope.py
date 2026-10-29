@@ -103,9 +103,10 @@ def test_loader_requires_a_concrete_host_scope(scope):
         load_configured_extension_middlewares(_config([]), scope=scope)
 
 
-def test_default_loader_scope_is_lead():
+def test_loader_requires_explicit_scope():
     config = _config([_entry("lead", "lead"), _entry("subagent", "subagent")])
-    assert [mw.label for mw in load_configured_extension_middlewares(config)] == ["lead"]
+    with pytest.raises(TypeError, match="required keyword-only argument: 'scope'"):
+        load_configured_extension_middlewares(config)
 
 
 def test_real_lead_and_subagent_builders_select_their_own_scope(tmp_path, monkeypatch):

@@ -37,7 +37,7 @@ def _config(*entries) -> SimpleNamespace:
 
 
 def test_string_entry_still_zero_arg():
-    loaded = load_configured_extension_middlewares(_config(f"{__name__}:ZeroArgMiddleware"))
+    loaded = load_configured_extension_middlewares(_config(f"{__name__}:ZeroArgMiddleware"), scope="lead")
 
     assert len(loaded) == 1
     assert isinstance(loaded[0], ZeroArgMiddleware)
@@ -46,7 +46,7 @@ def test_string_entry_still_zero_arg():
 def test_dict_entry_passes_constructor_kwargs():
     entry = ConfiguredMiddlewareSpec.model_validate({"class": f"{__name__}:RecordingMiddleware", "kwargs": {"max_tool_calls": 3}})
 
-    loaded = load_configured_extension_middlewares(_config(entry))
+    loaded = load_configured_extension_middlewares(_config(entry), scope="lead")
 
     assert len(loaded) == 1
     assert isinstance(loaded[0], RecordingMiddleware)
@@ -54,7 +54,7 @@ def test_dict_entry_passes_constructor_kwargs():
 
 
 def test_raw_dict_entry_passes_constructor_kwargs():
-    loaded = load_configured_extension_middlewares(_config({"class": f"{__name__}:RecordingMiddleware", "kwargs": {"max_tool_calls": 2}}))
+    loaded = load_configured_extension_middlewares(_config({"class": f"{__name__}:RecordingMiddleware", "kwargs": {"max_tool_calls": 2}}), scope="lead")
 
     assert len(loaded) == 1
     assert isinstance(loaded[0], RecordingMiddleware)
@@ -63,13 +63,13 @@ def test_raw_dict_entry_passes_constructor_kwargs():
 
 def test_malformed_raw_dict_fails_at_load():
     with pytest.raises(ValidationError):
-        load_configured_extension_middlewares(_config({"class": f"{__name__}:RecordingMiddleware", "unexpected": "lead"}))
+        load_configured_extension_middlewares(_config({"class": f"{__name__}:RecordingMiddleware", "unexpected": "lead"}), scope="lead")
 
 
 def test_empty_kwargs_matches_zero_arg_constructor():
     entry = ConfiguredMiddlewareSpec.model_validate({"class": f"{__name__}:RecordingMiddleware"})
 
-    loaded = load_configured_extension_middlewares(_config(entry))
+    loaded = load_configured_extension_middlewares(_config(entry), scope="lead")
 
     assert loaded[0].max_tool_calls == 10
 
@@ -78,7 +78,7 @@ def test_unknown_constructor_kwarg_fails_loudly():
     entry = ConfiguredMiddlewareSpec.model_validate({"class": f"{__name__}:ZeroArgMiddleware", "kwargs": {"not_a_param": 1}})
 
     with pytest.raises(TypeError):
-        load_configured_extension_middlewares(_config(entry))
+        load_configured_extension_middlewares(_config(entry), scope="lead")
 
 
 def test_extensions_config_keeps_string_entries():

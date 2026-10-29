@@ -23,13 +23,13 @@ def _middleware_spec(entry: str | ConfiguredMiddlewareSpec | dict[str, Any]) -> 
     return ConfiguredMiddlewareSpec.model_validate(entry)
 
 
-def load_configured_extension_middlewares(app_config: "AppConfig", *, scope: Literal["lead", "subagent"] = "lead") -> list[AgentMiddleware]:
+def load_configured_extension_middlewares(app_config: "AppConfig", *, scope: Literal["lead", "subagent"]) -> list[AgentMiddleware]:
     """Instantiate config-declared agent middlewares.
 
     Each entry is a ``module.path:ClassName`` string or a
     ``ConfiguredMiddlewareSpec`` (``class`` plus optional ``kwargs`` and
-    ``apply_to``). The host supplies the concrete chain scope; legacy callers
-    default to the lead chain. Excluded entries are not imported or constructed.
+    ``apply_to``). The host must explicitly supply the concrete chain scope.
+    Excluded entries are not imported or constructed.
     Import, attribute, and subclass validation intentionally go through the
     shared reflection resolver so failures carry the same actionable
     dependency hints as models, tools, sandbox providers, and guardrail
