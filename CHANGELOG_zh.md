@@ -12,6 +12,14 @@
 本节累积面向 **2.3.0** 里程碑（[2.3.0](https://github.com/bytedance/deer-flow/milestone/4)）的工作。
 截至 2026-10-28，该里程碑已合并 **1068 个拉取请求**。
 
+### 修复
+
+- **记忆：** `GET /api/memory/config` 与 `/api/memory/status` 现在会把 `backend_config`
+  中的凭据值（`api_key`、token、密码、`Authorization` 请求头，任意层级）遮蔽为 `***`。
+  此前它们按加载结果原样返回配置，而 `$VAR` 引用此时已被解析，因此 DeerMem 提取模型的密钥
+  或 Honcho 的 `api_key` 会以明文返回给所有拥有 `memory:read` 的调用方；在默认关闭授权时，
+  这就是所有已登录用户。非机密配置项、`api_key_env` 变量名和未设置的值保持不变。([#7665])
+
 ## [2.2.0] — 2026-10-29
 
 本节累积面向 **2.2.0** 里程碑（[2.2.0](https://github.com/bytedance/deer-flow/milestone/3)）的工作。
@@ -1328,12 +1336,6 @@
   阻止智能体配置与宿主授权已经允许的工具，即使该声明为空也是如此。保留解析、校验、
   导出、技能激活权限，以及现有的密钥和用户隔离边界。([#6935])
 ### 修复
-
-- **记忆：** `GET /api/memory/config` 与 `/api/memory/status` 现在会把 `backend_config`
-  中的凭据值（`api_key`、token、密码、`Authorization` 请求头，任意层级）遮蔽为 `***`。
-  此前它们按加载结果原样返回配置，而 `$VAR` 引用此时已被解析，因此 DeerMem 提取模型的密钥
-  或 Honcho 的 `api_key` 会以明文返回给所有拥有 `memory:read` 的调用方；在默认关闭授权时，
-  这就是所有已登录用户。非机密配置项、`api_key_env` 变量名和未设置的值保持不变。([#7665])
 
 - **项目：** `_convert_and_publish` 中的暂存丢弃改为经
   `await_drained` 排空，读取器被反复取消时，unlink 工作线程在仍持有
