@@ -62,3 +62,8 @@ worker 侧 `NativeWorkerHost` 轮询 300 秒全部 `ConnectError: All connection
 run20 判别数据（清理前抢救）：`identical_client_trace = [403×10, ConnectError×2]`、`socket_trace = [ok×10, refused×2]` —— **与 NativeWorkerHost 完全相同构造的客户端全程正常**，唯 host 自建实例失败。结合时序（mount-id 早于 uvicorn 绑定，worker 在 mount-id 出现后即启动）：host 客户端首次 poll 落在 uvicorn 起来前，首次 ConnectError 后该客户端实例未恢复。预检/复刻客户端因重试到 403 才开始，错过毒化窗口，故正常。
 
 **下一步修复（不动产品）**：runner 把 worker 启动门槛从"mount-id 出现"改为"controller 8022 端口 TCP 可达"（生产语义本如此）；若仍复现再深入 httpx 池行为。清理已执行：两机 phase 标签容器（含 pg/redis）与目录已删，本地 runner 已停。重跑：`TENANT_TWO_HOST_SLICE=2 python3 scripts/tenant_two_host_slice.py`。
+
+
+## 2026-10-29 slice 2 GREEN（终局）
+
+`config.yaml` 缺失是 25 轮 RED 的真正根因（`deps.get_config()` 503 → execute 异常 → refuse 循环 → run pending；可见的 ConnectError 全部是 controller 300s 超时退场后的尾部噪音）。修复后 slice 2 全绿：controller `run_status=success`、共享 PG 6 条跨进程 checkpoint、worker 真实认领/采用/执行/上报。证据 `two-host-c-slice-20261028-51.json`。下一片：C1(AIO 工具)→B→C2 调度串联（复用 slice 1 的 B 组件 + slice 2 的 C 通道 + ScheduledTaskService 语义），然后跨机撤权/重启 → M5。

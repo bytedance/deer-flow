@@ -1,0 +1,28 @@
+{
+  "phase": "two-host-b-slice-20261028-51 (slice 2: native C)",
+  "date": "2026-10-29",
+  "classification": "GREEN slice 2 of the two-host main: one native C run dispatched by the controller over real VPC TCP, adopted and executed by a fully constructed NativeWorkerHost on the worker, with graph checkpoints shared through the controller PostgreSQL (AsyncPostgresSaver) and the run settling success on the controller",
+  "hosts": {
+    "controller": "139.196.30.22 (192.168.0.190): native dispatch uvicorn :8022, PostgreSQL tenant_native/tenant_executor, Redis :6390",
+    "worker": "47.117.5.254 (192.168.0.189): real NativeWorkerHost poll loop over VPC TCP, deterministic C graph, shared-PG checkpointer, Redis stream bridge"
+  },
+  "source": {
+    "worktree_head": "30f55042f",
+    "archive_sha256": "66dd293d6e5d9d7381465d5bc8adc5e67164a9ef153bbb8240fb12278b883ab6",
+    "freeze": "deterministic pinned-date commit-tree + gzip -n -9 of worktree HEAD"
+  },
+  "story": {
+    "controller_evidence": "/private/tmp/two-host-b-slice-20261028-51-artifacts/native-controller.json",
+    "worker_evidence": "/private/tmp/two-host-b-slice-20261028-51-artifacts/native-worker.json",
+    "admitted_native": true,
+    "run_status": "success",
+    "shared_checkpoints": 6,
+    "worker_claimed_over_real_tcp": true,
+    "worker_get_report_sequence": "poll/get/report observed in host request trace",
+    "tests": "controller 1 passed in 41.62s; worker assertions passed in the same run"
+  },
+  "root_cause_chain": "Twenty-five runs isolated the failure layer by layer: network fine (socket trace ok), httpx fine (identical-client trace 403), host loop fine (request trace showed claim/get/report working). The real defect was worker containers lacking config.yaml — deps.get_config() raised 503 inside NativeWorkerHost.execute(), the refusal loop left the run pending, and the visible ConnectError spam was only the controller's own 300s timeout teardown. Fix: materialize config.yaml from the archived config.example.yaml in every two-host native container before pytest (commit 30f55042f).",
+  "other_fixes_this_slice": "redis pinned image id; migration container stdin staging; scheduled-package import cycle (tasks-before-runs via importlib, isort-proof); RunContext/DbRunEventStore/ThreadMetaRepository import paths; UUID owner with resolvable email; workspace scope around create_or_reject; port-open gate before starting the worker; host/worker addresses parameterized via env",
+  "boundaries": "Deterministic C graph only — no real model, no AIO sandbox execution yet, no scheduler occurrence, no B integration in this slice (B side proven by slice 1). Remaining two-host work: C1(AIO tool)→B→C2 scheduled occurrence chaining, real Scheduler launch, cross-host revocation/restart recovery, then M5-M11. Tenant activation false.",
+  "debug_instrumentation": "The worker test retains the traced request wrapper, socket/httpx watchers and the swapped identical client from the diagnosis; they document the isolation chain and are inert when the loop is healthy."
+}
