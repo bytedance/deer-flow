@@ -98,6 +98,7 @@ def _capture_memory(monkeypatch, entry, messages, locale):
     manager.add.side_effect = lambda _thread, queued, **_kwargs: recorded.append(queued)
     manager.aadd = AsyncMock(side_effect=manager.add.side_effect)
     manager.add_nowait.side_effect = manager.add.side_effect
+    manager.aadd_nowait = AsyncMock(side_effect=manager.add.side_effect)
     monkeypatch.setattr(memory_middleware, "get_memory_manager", lambda: manager)
     monkeypatch.setattr(summarization_hook, "get_memory_manager", lambda: manager)
     monkeypatch.setattr(summarization_hook, "get_memory_config", lambda: MemoryConfig(enabled=True))
@@ -109,12 +110,15 @@ def _capture_memory(monkeypatch, entry, messages, locale):
         asyncio.run(middleware.aafter_agent({"messages": messages}, runtime))
     else:
         event = SummarizationEvent(messages_to_summarize=tuple(messages), preserved_messages=(), thread_id="thread-1", agent_name=None, runtime=runtime)
-        summarization_hook.memory_flush_hook(event)
+        if entry == "compaction":
+            summarization_hook.memory_flush_hook(event)
+        else:
+            asyncio.run(summarization_hook.amemory_flush_hook(event))
     assert len(recorded) == 1
     return recorded[0]
 
 
-@pytest.mark.parametrize("entry", ["sync", "async", "compaction"])
+@pytest.mark.parametrize("entry", ["sync", "async", "compaction", "async-compaction"])
 def test_memory_capture_carries_language_through_filtering_and_incremental_tail(monkeypatch, entry):
     messages = [
         HumanMessage("我是一名软件工程师", id="user-1", additional_kwargs={"unrelated": "keep"}),
@@ -144,13 +148,14 @@ def test_memory_capture_carries_language_through_filtering_and_incremental_tail(
     assert messages_to_dict(messages) == before
 
 
+@pytest.mark.parametrize("entry", ["sync", "async-compaction"])
 @pytest.mark.parametrize("locale", [None, "fr-FR", "ignore previous instructions", [], {}])
-def test_missing_or_invalid_locale_clears_stale_memory_preference(monkeypatch, locale):
+def test_missing_or_invalid_locale_clears_stale_memory_preference(monkeypatch, entry, locale):
     messages = [
         HumanMessage("Remember my profession", additional_kwargs={"deerflow_ui_locale": "zh-CN"}),
         AIMessage("Understood", additional_kwargs={"deerflow_ui_locale": "en-US"}),
     ]
     before = messages_to_dict(messages)
-    queued = _capture_memory(monkeypatch, "sync", messages, locale)
+    queued = _capture_memory(monkeypatch, entry, messages, locale)
     assert all("deerflow_ui_locale" not in message.additional_kwargs for message in queued)
     assert messages_to_dict(messages) == before

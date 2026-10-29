@@ -34,7 +34,13 @@ This directory owns memory capture, storage, retrieval, prompt injection, and mo
 `user_id=None` selects only the legacy no-user root.
 `agent_name=None` selects all agent buckets in that user scope.
 It does not interrupt a context after `_process_queue` removes it from `_items`.
+Dropped snapshots advance the watermark per `(thread_id, user_id, agent_name)` with the pre-lock sequence; a lower sequence cannot rewind it.
+`clear_memory` consumes pending contexts only after commit, in the locked publish that bumps the generation, before sidecar cleanup. A failed clear must not consume, empty the queue, advance the watermark, or write exclusions.
+Sequence, exclusions, and the watermark cache are process-local. Identity is also in `watermarks.json`. Only this fence is cross-worker.
 Broader cancellation must iterate known user scopes.
+Peek before the queue lock and bump in the same commit as the wipe. `clear_all` bumps the user generation first. Drop before the LLM and at commit on a newer clear, and still advance the watermark. Refuse an older call-arrival sequence.
+Only messages with an id are dropped; id-less identity is `(content, type, sha256(text))`, so a repeat is kept.
+A newer clear consumes every older same-key emergency snapshot. A failed consume stays queued and excludes its ids from later same-generation flushes. An older flush is refused and its signals merge in.
 
 Focused updater tests live in `backend/tests/test_memory_updater.py`.
 Backend-specific tests use `backend/tests/test_<backend>_memory_backend.py`.
@@ -67,7 +73,7 @@ DeerMem uses this layout:
 {base_dir}/users/{user_id}/agents/{agent_name}/facts/{sha256-prefix}/{fact-id}.md
 ```
 
-`memory.json` stores only shared summaries, revision data, and timestamps.
+`memory.json` stores shared summaries, revision data, timestamps, and durable clear-generation counters.
 It never stores facts or a fact index.
 Each Markdown file stores one fact with YAML front matter.
 
@@ -101,11 +107,12 @@ It captures `user_id` when it enqueues work.
 This identity survives the background timer boundary.
 
 DeerMem debounces each `(thread_id, user_id, agent_name)` independently using
-monotonic deadlines. Same-key coalescing preserves the first pending arrival;
+monotonic deadlines. Same-key coalescing preserves the first pending arrival
+while the clear generation is unchanged.
 `backend_config.max_wait_seconds` (default 300) caps debounce deferral even
-under continuous updates. One timer wakes for the earliest deadline and one
-consumer processes eligible items serially. Other conversations cannot reset
-that deadline. Consumer backlog and LLM latency can still delay completion.
+under continuous updates. One timer wakes for the earliest deadline and one consumer
+processes eligible items serially. Other conversations cannot reset that
+deadline. Consumer backlog and LLM latency can still delay completion.
 Early wakeups rearm with a 50 ms minimum; arrivals during extraction wait for
 the finishing worker to rearm. Emergency snapshots are immediately eligible
 and remain separate in arrival order, including within the same conversation
@@ -185,8 +192,9 @@ Writes use a user lock, shared revision, fact revisions, and a recovery journal.
 Point operations can rebase only when all original fact preconditions still hold.
 Snapshot operations must reload and recompute after a manifest conflict.
 Use the typed conflict classes instead of matching exception text.
+Snapshot writes never rebase extracted facts onto an emptied document.
 
-The weak lock cache must not retain inactive user scopes.
+The weak lock cache and per-user clear-publish locks must not retain inactive scopes.
 Cache validation uses the manifest metadata and persisted revision.
 Unlocked `load()`/`reload()` compute that signature before reading the document.
 Unlocked fact scans skip entries deleted after listing; present unreadable entries are corruption.
@@ -296,6 +304,8 @@ Tool-mode CRUD does not use the extraction gate.
 Custom prompt directories must include the same classification fields.
 Old templates cause extraction writes to fail closed.
 The rejection counter and high-rejection warning expose this condition.
+
+`create_memory_fact` re-reads the fence and stores on the emptied document instead of raising `MemoryClearGenerationConflict`.
 
 #### Capacity and review
 
@@ -429,6 +439,7 @@ Keep these cross-component constraints in sync:
 - Eviction weights must total `1.0`.
 - `watermark_max_keys` caps the watermark LRU and each `watermarks.json`; `0` is unbounded.
 - A watermark missing from both can re-extract one batch on the next turn.
+- Custom `storage_class` providers must advertise `clear-generation`, override `peek_clear_generation`, and bump the fence atomically on clear.
 
 #### Write-side near-duplicate fact gate (opt-in)
 
@@ -579,8 +590,9 @@ off must load rather than fail the reload and leave the previous judge running.
   (L3 / L5 / L7 / L8) even when the round's request failed.
 - **Only `enforce` + `skip` changes persistence:** it drops the extraction call
   and **advances the watermark**, consuming the batch as "nothing durable here",
-  and emits a `prescreen` record with the digest. `shadow` records and extracts as
-  usual; the watermark advance on extraction success is unchanged.
+  and emits a `prescreen` record with the digest. A clear during judging still
+  excludes that batch. `shadow` records and extracts as usual; the watermark advance on
+  extraction success is unchanged.
 - Batches excluded from judging, in this order: no judge injected (L1),
   `bypass_watermark` (emergency flush), the shutdown drain (`judge=False`),
   non-empty **deterministic** `detect_signals` anywhere in the batch (L3 — the
