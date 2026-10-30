@@ -1832,6 +1832,8 @@ class WechatChannel(Channel):
 
     @staticmethod
     def _coerce_float(value: Any, default: float) -> float:
+        if isinstance(value, bool):
+            return default
         try:
             parsed = float(value)
         except (OverflowError, TypeError, ValueError):
@@ -1840,9 +1842,22 @@ class WechatChannel(Channel):
 
     @staticmethod
     def _coerce_int(value: Any, default: int) -> int:
+        """Coerce a configured byte limit into an ``int``, falling back to *default*.
+
+        A ``bool`` is not a byte count and neither is a fractional float: a bare
+        ``int()`` turns ``true`` into a one-byte limit that drops every
+        attachment, and silently truncates ``3.5``. An unquoted ``.inf`` makes
+        ``int()`` raise ``OverflowError`` out of the constructor, so the whole
+        channel refuses to start. All three fall back to *default* here, the
+        same bar ``_coerce_float`` applies one function above. A literal ``0``
+        is kept because it is the documented "no limit" value; only shapes that
+        are not counts at all are replaced.
+        """
+        if isinstance(value, bool) or (isinstance(value, float) and not value.is_integer()):
+            return default
         try:
-            return int(value)
-        except (TypeError, ValueError):
+            return int(value)  # type: ignore[call-overload]
+        except (OverflowError, TypeError, ValueError):
             return default
 
     @staticmethod

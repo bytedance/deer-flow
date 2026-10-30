@@ -106,7 +106,7 @@ def test_timing_config_requires_positive_finite_values():
         "qrcode_poll_timeout": "_qrcode_poll_timeout",
     }
 
-    for invalid in (0, -1, float("nan"), float("inf"), float("-inf"), 10**1000):
+    for invalid in (0, -1, float("nan"), float("inf"), float("-inf"), 10**1000, True, False):
         channel = WechatChannel(
             bus=MessageBus(),
             config={"bot_token": "test-token", **dict.fromkeys(timing_defaults, invalid)},
@@ -115,6 +115,41 @@ def test_timing_config_requires_positive_finite_values():
 
     channel = WechatChannel(bus=MessageBus(), config={"bot_token": "test-token", "polling_retry_delay": "0.25"})
     assert channel._retry_delay == 0.25
+
+
+def test_byte_limit_config_rejects_values_that_are_not_counts():
+    from app.channels.wechat import WechatChannel
+
+    limit_defaults = {
+        "max_inbound_image_bytes": WechatChannel.DEFAULT_MAX_IMAGE_BYTES,
+        "max_outbound_image_bytes": WechatChannel.DEFAULT_MAX_OUTBOUND_IMAGE_BYTES,
+        "max_inbound_file_bytes": WechatChannel.DEFAULT_MAX_INBOUND_FILE_BYTES,
+        "max_outbound_file_bytes": WechatChannel.DEFAULT_MAX_OUTBOUND_FILE_BYTES,
+    }
+
+    # A bool is an int subclass, so a bare int() turns `true` into a one-byte
+    # limit that drops every attachment; `.inf` used to raise OverflowError out
+    # of the constructor and stop the channel from starting at all.
+    for invalid in (True, False, 3.5, float("nan"), float("inf"), float("-inf"), "abc", None):
+        channel = WechatChannel(
+            bus=MessageBus(),
+            config={"bot_token": "test-token", **dict.fromkeys(limit_defaults, invalid)},
+        )
+        assert {key: getattr(channel, f"_{key}") for key in limit_defaults} == limit_defaults
+
+    # A literal 0 stays "no limit" and integral shapes are still read.
+    channel = WechatChannel(
+        bus=MessageBus(),
+        config={"bot_token": "test-token", **dict.fromkeys(limit_defaults, 0)},
+    )
+    assert {key: getattr(channel, f"_{key}") for key in limit_defaults} == dict.fromkeys(limit_defaults, 0)
+
+    channel = WechatChannel(
+        bus=MessageBus(),
+        config={"bot_token": "test-token", "max_inbound_image_bytes": "2048", "max_outbound_file_bytes": 4096.0},
+    )
+    assert channel._max_inbound_image_bytes == 2048
+    assert channel._max_outbound_file_bytes == 4096
 
 
 def test_qrcode_status_uses_dedicated_request_timeout():
