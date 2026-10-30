@@ -4,12 +4,11 @@ Background — see issue bytedance/deer-flow#4271.
 
 Some providers stop generation because the output budget is exhausted and
 surface that through ``finish_reason='length'`` while still returning assistant
-content. DeerFlow preserves visible content, adds a deterministic notice
-whenever tool calls were suppressed (even when partial text survived), and
-drops tool calls that may have been truncated at the output boundary before
-they can execute. The stamped ``model_length_termination`` marker tells
-downstream guards (notably ``TodoMiddleware``) to stand down rather than
-re-engage a capped turn.
+content. DeerFlow preserves visible content, adds a deterministic notice to
+every detected output-length cap, and drops tool calls that may have been
+truncated at the output boundary before they can execute. The stamped
+``model_length_termination`` marker tells downstream guards (notably
+``TodoMiddleware``) to stand down rather than re-engage a capped turn.
 
 Stop-reason surfacing for subagents:
   The lead worker reads ``stop_reason`` from ``runtime.context``. The subagent

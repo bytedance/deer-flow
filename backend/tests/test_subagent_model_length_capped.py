@@ -63,6 +63,7 @@ async def test_length_capped_answer_completes_with_model_length_capped(executor_
     assert result.status == executor_module.SubagentStatus.COMPLETED, result.error
     assert result.stop_reason == "model_length_capped"
     assert "Section 1 covers the" in result.result
+    assert "output limit" in result.result
     content, _ = format_subagent_result_message(result.status.value, result=result.result, stop_reason=result.stop_reason)
     assert content.startswith("Task Succeeded (capped: model output length limit)")
 

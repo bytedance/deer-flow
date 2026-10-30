@@ -761,8 +761,8 @@ def build_middlewares(
 
     # A provider may also cap the final assistant response at the model output
     # limit. Detector-matched caps stamp stop_reason=model_length_capped,
-    # suppress that response's tool calls, and append a length notice when no
-    # visible text was produced.
+    # suppress that response's tool calls, and append a length notice to the
+    # capped response content.
     middlewares.append(ModelLengthFinishReasonMiddleware())
 
     # SafetyFinishReasonMiddleware — suppress tool execution when the provider

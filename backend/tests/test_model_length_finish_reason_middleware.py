@@ -72,12 +72,7 @@ def test_visible_text_length_cap_appends_incomplete_response_notice():
 
     result = mw._apply({"messages": [msg]}, runtime)
 
-    assert result is not None
-    replacement = result["messages"][0]
-    assert replacement.content.startswith(msg.content)
-    assert "output limit" in replacement.content
-    assert replacement.response_metadata == msg.response_metadata
-    assert replacement.additional_kwargs["model_length_termination"]["suppressed_tool_call_count"] == 0
+    _assert_visible_cap_notice(result, msg)
     assert runtime.context["stop_reason"] == MODEL_LENGTH_CAPPED_STOP_REASON
 
 
