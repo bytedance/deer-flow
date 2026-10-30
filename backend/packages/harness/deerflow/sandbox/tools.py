@@ -1948,18 +1948,31 @@ def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState 
     return result
 
 
-def _apply_cwd_prefix(command: str, thread_data: ThreadDataState | None) -> str:
-    """Prepend 'cd <workspace> &&' so relative paths are anchored to the thread workspace.
+def _apply_cwd_prefix(command: str, thread_data: ThreadDataState | None, *, shell: str | None = None) -> str:
+    """Prepend 'cd <workspace>' so relative paths are anchored to the thread workspace.
+
+    POSIX shells chain with ``&&`` so the command only runs after a successful
+    cd. Windows PowerShell 5.1 (the OS-default ``powershell.exe``) has no
+    ``&&`` statement separator -- feeding it one is a parse error that fails
+    every host-bash call on such hosts -- so PowerShell chains with ``;``; the
+    workspace directory is created by the harness before the command runs.
 
     Args:
         command: The bash command to execute.
         thread_data: The thread data containing the workspace path.
+        shell: The local execution shell, when known; the PowerShell family
+            selects the ``;`` separator.
 
     Returns:
-        The command prefixed with 'cd <workspace> &&' if workspace_path is available,
-        otherwise the original command unchanged.
+        The command prefixed with the workspace cd if workspace_path is
+        available, otherwise the original command unchanged.
     """
     if thread_data and (workspace := thread_data.get("workspace_path")):
+        # Resolve the shell here when the caller does not know it, so existing
+        # callers (and their test doubles) keep the two-argument shape.
+        resolved = shell or (LocalSandbox._get_shell() if _is_windows() else None)
+        if resolved is not None and LocalSandbox._is_powershell(resolved):
+            return f"cd {shlex.quote(workspace)}; {command}"
         return f"cd {shlex.quote(workspace)} && {command}"
     return command
 
