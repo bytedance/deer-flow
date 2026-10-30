@@ -57,17 +57,18 @@ class Mem0Client:
         try:
             resp = self._http.request(method, path, **kwargs)
         except httpx.HTTPError as e:
-            raise Mem0APIError(f"mem0 request failed: {e}") from e
+            # Transport exceptions can include credential-bearing URLs or bodies.
+            raise Mem0APIError(f"mem0 {context} request failed ({type(e).__name__})") from None
         if resp.status_code == 401:
             raise Mem0AuthError("mem0 authentication failed (check the API key)")
         if resp.status_code >= 400:
-            raise Mem0APIError(f"mem0 {context} -> {resp.status_code}: {resp.text[:200]}")
+            raise Mem0APIError(f"mem0 {context} -> {resp.status_code}")
         if not resp.content:
             return {}
         try:
             payload = resp.json()
         except (json.JSONDecodeError, UnicodeDecodeError, RecursionError) as e:
-            raise Mem0APIError(f"mem0 {context} returned malformed JSON: {e}") from e
+            raise Mem0APIError(f"mem0 {context} returned malformed JSON ({type(e).__name__})") from None
         if not isinstance(payload, dict):
             raise Mem0APIError(f"mem0 {context} returned a non-object JSON payload")
         return payload

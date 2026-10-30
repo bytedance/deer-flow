@@ -39,6 +39,9 @@ Broader cancellation must iterate known user scopes.
 Focused updater tests live in `backend/tests/test_memory_updater.py`.
 Backend-specific tests use `backend/tests/test_<backend>_memory_backend.py`.
 
+Mem0 request diagnostics expose operation/status/type only; suppress remote
+body and transport/decoder text, including rendered exception chains.
+
 #### Identity and isolation
 
 Resolve users with `resolve_runtime_user_id(runtime)` in middleware and tools.

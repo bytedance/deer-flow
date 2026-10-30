@@ -79,3 +79,7 @@ page; no partial context is returned. Diagnostics identify the ID field without
 echoing the invalid ID or memory content. Existing scalar and absent-ID
 handling, first-occurrence ordering, and whole-entry character budgets remain
 unchanged.
+
+HTTP failure diagnostics retain the operation, status code or exception type,
+not upstream response text, transport messages or rendered decoder causes.
+This applies to reads, writes and startup probes, including policy warnings.
