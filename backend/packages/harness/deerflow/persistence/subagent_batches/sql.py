@@ -5,7 +5,7 @@ from collections import Counter
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import func, select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import defer
@@ -255,8 +255,30 @@ class SubagentBatchRepository:
             return []
         claimed: list[dict[str, Any]] = []
         async with self._sf() as session:
+            expired_item_exists = (
+                select(SubagentBatchItemRow.id)
+                .where(
+                    SubagentBatchItemRow.batch_id == SubagentBatchRow.id,
+                    SubagentBatchItemRow.status.in_(("leased", "running")),
+                    SubagentBatchItemRow.lease_expires_at < now,
+                    SubagentBatchItemRow.id.not_in(exclude_item_ids),
+                )
+                .exists()
+            )
             batches = list(
-                (await session.execute(select(SubagentBatchRow).where(SubagentBatchRow.status.in_(("queued", "running", "paused"))).order_by(SubagentBatchRow.created_at, SubagentBatchRow.id).with_for_update(skip_locked=True))).scalars()
+                (
+                    await session.execute(
+                        select(SubagentBatchRow)
+                        .where(
+                            or_(
+                                SubagentBatchRow.status.in_(("queued", "running")),
+                                and_(SubagentBatchRow.status == "paused", expired_item_exists),
+                            )
+                        )
+                        .order_by(SubagentBatchRow.created_at, SubagentBatchRow.id)
+                        .with_for_update(skip_locked=True)
+                    )
+                ).scalars()
             )
             for batch in batches:
                 if len(claimed) >= limit:

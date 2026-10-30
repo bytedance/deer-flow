@@ -50,6 +50,10 @@ missing or strictly older leases remain recoverable.
 
 `McpTaskRepository` retains upstream poll claims' eligibility-fenced UPDATE after candidate selection, so an interleaved cancellation or competing claim is not overwritten. Cancel claims reserve the SQLite writer before SELECT; `FOR UPDATE SKIP LOCKED` alone does not serialize SQLite readers. Renewal is one owner/token/phase/expiry-fenced UPDATE and changes only lease expiry, explicitly preserving the ORM `updated_at` column. A stale generation, expired lease, terminal task or changed cancellation phase cannot renew. Keep local draining-row exclusions before LIMIT. See [control-call leases](../../../../docs/mcp-control-leases.md).
 
+## Subagent batch lease recovery
+
+`subagent_batches/sql.py::claim_items` admits a paused parent to the recovery scan only when it holds an expired active item (`leased`/`running`, `lease_expires_at < now`, respecting `exclude_item_ids`), so idle paused batches take no row lock on the scheduler's poll. Expired items still reconcile while paused: retryable ones return to `queued` for an explicit resume, exhausted ones become `failed`, and `_refresh_batch_status` projects an all-terminal batch through the normal `completed`/`failed` rule. Capture `was_paused` before that projection — it mutates the row in place — and skip promotion/claiming afterwards; the `runnable_batch` subselect in the promote/claim UPDATEs is the deeper gate. Coverage: `tests/test_batch_lease_lifecycle.py` (paused retryable, paused exhausted, paused unexpired).
+
 ## Run terminal authority and lease expiry
 
 `RunRepository.update_status(..., owner_worker_id=...)` and
