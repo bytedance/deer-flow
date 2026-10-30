@@ -15,9 +15,7 @@ def package_script(monkeypatch):
 
 
 @pytest.mark.parametrize("destination", ["root", "nested", "cwd", "aliased_cwd", "outside"])
-def test_package_skips_its_own_archive(
-    tmp_path, monkeypatch, package_script, destination
-):
+def test_package_skips_its_own_archive(tmp_path, monkeypatch, package_script, destination):
     skill = tmp_path / "example"
     skill.mkdir()
     (skill / "SKILL.md").write_text(
