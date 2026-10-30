@@ -10,6 +10,7 @@ import platform
 import re
 import subprocess
 import sys
+import tempfile
 import zipfile
 from datetime import UTC, datetime
 from io import StringIO
@@ -867,9 +868,12 @@ def render_bundle_readme(triage: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _default_out_path(project_root: Path) -> Path:
+def _reserve_default_out_path(output_dir: Path) -> Path:
+    """Reserve a distinct bundle name before writing it."""
     timestamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
-    return project_root / ".deer-flow" / "support-bundles" / f"deer-flow-support-bundle-{timestamp}.zip"
+    fd, name = tempfile.mkstemp(prefix=f"deer-flow-support-bundle-{timestamp}-", suffix=".zip", dir=output_dir)
+    os.close(fd)
+    return Path(name)
 
 
 def _write_json(zf: zipfile.ZipFile, name: str, data: Any) -> None:
@@ -901,12 +905,16 @@ def create_support_bundle(
     project_root = project_root.resolve()
     config_path = (config_path or project_root / "config.yaml").resolve()
     extensions_config_path = (extensions_config_path or project_root / "extensions_config.json").resolve()
-    out_path = (out_path or _default_out_path(project_root)).resolve()
-    # `--out` names the zip, so a directory there would only fail inside
-    # zipfile with a raw PermissionError/IsADirectoryError.
-    if out_path.is_dir():
-        raise ValueError(f"--out must be a file path, not a directory: {out_path}")
-    out_path.parent.mkdir(parents=True, exist_ok=True)
+    output_dir = project_root / ".deer-flow" / "support-bundles"
+    if out_path is None:
+        output_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        out_path = out_path.resolve()
+        # `--out` names the zip, so a directory there would only fail inside
+        # zipfile with a raw PermissionError/IsADirectoryError.
+        if out_path.is_dir():
+            raise ValueError(f"--out must be a file path, not a directory: {out_path}")
+        out_path.parent.mkdir(parents=True, exist_ok=True)
     if thread_id:
         _validate_thread_id(thread_id)
 
@@ -944,6 +952,8 @@ def create_support_bundle(
 
     issue_summary = render_issue_summary(triage)
     issue_draft = render_ai_issue_draft(triage, issue_summary, doctor)
+    if out_path is None:
+        out_path = _reserve_default_out_path(output_dir)
     with zipfile.ZipFile(out_path, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
         _write_text(zf, "README.md", render_bundle_readme(triage))
         _write_text(zf, "issue-summary.md", issue_summary)

@@ -226,7 +226,11 @@ fences, including unclosed fences, in complete and streamed replies.
    `make support-bundle`. The command prints reporter next steps, writes a
    `*-issue-summary.md` file to paste into the issue, a `*-issue-draft.md` file
    for AI-assisted issue filing, and an optional evidence zip under
-   `.deer-flow/support-bundles/`. If an AI assistant files the issue, start from
+   `.deer-flow/support-bundles/`. Each default run gets a distinct timestamped ZIP
+   and matching summary/draft files, even when runs start in the same second.
+   On POSIX, the default ZIP is private to the creating OS user (mode 0600).
+   An explicit `--out` path remains the exact output filename and can replace an
+   existing file. If an AI assistant files the issue, start from
    the draft and replace every REQUIRED placeholder instead of inventing missing
    facts. Attach the zip only if a maintainer asks for it, or if the summary
    alone is not enough. Maintainers and AI triage tools can start with
