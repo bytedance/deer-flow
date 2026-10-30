@@ -1,5 +1,6 @@
 """JSON depth limits must not replace successful native tool results."""
 
+import json
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -80,9 +81,16 @@ async def test_native_read_file_graph_preserves_deep_json(tmp_path, monkeypatch,
     from deerflow.sandbox import tools as sandbox_tools
     from deerflow.sandbox.local.local_sandbox import LocalSandbox
 
-    # String construction avoids recursive Python fixtures. No fixed depth is
-    # assumed to exceed every Python version's parser limit.
+    # String construction avoids recursive Python fixtures. Count the deep case
+    # as regression coverage only when the real parser rejects this fixture.
     content = "[" * depth + "0" + "]" * depth
+    if depth > 10:
+        try:
+            json.loads(content)
+        except RecursionError:
+            pass
+        else:
+            pytest.skip(f"json.loads accepts {depth} nested arrays; parser depth limit is not exercised")
     path = tmp_path / "nested.json"
     path.write_text(content, encoding="utf-8")
     sandbox = LocalSandbox("json-depth-test")

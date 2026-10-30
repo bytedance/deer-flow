@@ -6,6 +6,7 @@ to `unknown` / recoverable / `try_alternative`, without classifying incidental
 JSON fields as auth failures. Producer metadata remains authoritative. Keep
 depth regressions in `tests/test_tool_result_meta_json_depth.py`, including real
 LocalSandbox reads through both synchronous and asynchronous agent graphs.
+Deep graph cases must establish a real parser depth failure or report a skip.
 
 Async gate waiters own separate cross-loop futures. Cancel only their signal;
 notify outside the state lock. `_await_off_thread` drains started I/O across
