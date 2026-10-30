@@ -586,6 +586,55 @@ def test_serialize_cyclic_structures_terminate_json_safe():
     json.dumps(serialize_lc_object({"a": cyclic, "b": loop}), allow_nan=False)
 
 
+def test_serialize_cycle_inside_model_dump_output_terminates():
+    """A cycle inside a model_dump() result is cut and keeps the message a mapping.
+
+    The cycle may sit below a fresh copy (``_SelfReferentialDump``) or below
+    the copies pydantic makes before reaching the caller's own dict
+    (``additional_kwargs``); either way the walk meets it and replaces the
+    back-reference with None. On main the resulting RecursionError degraded the
+    whole message to its str() repr.
+    """
+    import json
+
+    from langchain_core.messages import AIMessage
+
+    from deerflow.runtime.serialization import serialize, serialize_lc_object
+
+    class _SelfReferentialDump:
+        def model_dump(self):
+            dumped = {"name": "x"}
+            dumped["self"] = dumped
+            return dumped
+
+    expected = {"name": "x", "self": {"name": "x", "self": None}}
+    assert serialize_lc_object(_SelfReferentialDump()) == expected
+    assert serialize_lc_object({"a": _SelfReferentialDump()}) == {"a": expected}
+
+    kwargs = {"k": 1}
+    kwargs["self"] = kwargs
+    chunk, _metadata = serialize((AIMessage(content="REAL_TOKEN_TEXT", additional_kwargs=kwargs), {}), mode="messages")
+    assert isinstance(chunk, dict)
+    assert chunk["content"] == "REAL_TOKEN_TEXT"
+    # How many levels pydantic copies before the original dict is a pydantic
+    # detail; only require a finite chain of the original keys ending in None.
+    node, levels = chunk["additional_kwargs"], 0
+    while node is not None:
+        assert node["k"] == 1
+        node, levels = node["self"], levels + 1
+    assert 1 <= levels <= 10
+    json.dumps(chunk, allow_nan=False)
+
+
+def test_serialize_deep_output_is_idempotent():
+    """Re-serializing the output is a no-op, including truncated deep values."""
+    from deerflow.runtime.serialization import serialize_lc_object
+
+    for depth in (150, 5000):
+        once = serialize_lc_object({"payload": _deep_nested(depth), "metric": float("inf")})
+        assert serialize_lc_object(once) == once
+
+
 def test_serialize_shared_subtree_is_duplicated_not_treated_as_cycle():
     from deerflow.runtime.serialization import serialize_lc_object
 
