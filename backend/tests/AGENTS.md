@@ -31,6 +31,12 @@ event waiters during teardown.
 benchmark module's clock binding. Keep asyncio's clock real, initialize
 `Trace.started` from the controlled clock, and advance ticks at event gates.
 
+`test_bench_opensandbox.py` owns provider-independent sandbox benchmark CLI
+validation. Invalid timing values must be rejected through real `main()` before
+fail-loud factories run; accepted controls must preserve factory inputs and JSONL
+dimensions. Keep live providers stubbed and OpenSandbox's unsupported-option
+checks distinct from shared timing validation.
+
 `test_doctor_script.py` runs a copied doctor from a temporary checkout with an
 empty-model config. Drop inherited `DEER_FLOW_*`, `PYTHONPATH` and `PYTHONHOME`
 from child processes; cover help, invalid flags, normal reporting and an
@@ -50,6 +56,8 @@ and real advisory contention. Release all storage/producer gates before bounded
 cleanup, preserve healthy controls in refusal cases, and retain Journal/Seal
 compatibility coverage. Protocol: [Run outcome](../docs/RUN_EVENT_STREAM.md#authoritative-run-outcome).
 `test_goal_loop_stop_probe.py` runs the standalone Goal-loop reproduction through the native graph, loop middleware, worker and checkpoints. Only model responses are scripted; do not replace the Goal decision or simulate the stop-reason write.
+
+`test_run_recursion_capped.py` drives a real graph through the worker until LangGraph raises `GraphRecursionError`. Only model responses are scripted; do not raise the error or write the stop reason by hand.
 
 InfoQuest fetch log assertions install the real `UrlRedactionFilter` on the
 capture handler with fixture-scoped cleanup. Expect scheme/host context with
@@ -488,3 +496,20 @@ Multi-instance harness tests use `support.shell.require_script_bash()` for shell
 smoke checks. Keep config content and secret stability checks portable; isolate
 POSIX owner-only permission assertions so Windows skips only those checks.
 Nginx path expectations must include quoted-string escaping for native paths.
+
+## Launcher dotenv parsing
+
+`serve.sh` never sources root `.env`: stdlib-only `scripts/dotenv_exports.py`
+(host Python, before `uv sync`) tokenizes it like python-dotenv, keeps `.env`
+over shell exports and the `$NAME`/`${NAME:-x}`/leading-`~` expansion that
+`support_bundle.py` mirrors (keep both expanders in step), and prints
+shell-quoted exports for `eval`. `test_serve_dotenv.py` and the launcher-block
+cases in `test_support_bundle.py` run the real block; harnesses that copy
+`serve.sh` with a `.env` must copy the parser too.
+
+## Channel artifact turn sequencing
+
+`test_channels.py` models consecutive artifact-producing turns by awaiting an
+async outbound callback before sending the next inbound message. Keep the real
+worker-pool concurrency, preserve per-turn artifact assertions, and stop the
+manager in `finally` so a failure cannot leave tasks using a closed test loop.

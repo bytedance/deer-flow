@@ -29,7 +29,8 @@ Tests: `html-assets.dom.test.ts`, `artifact-file-preview.dom.test.tsx`,
 2. Stream events update thread state (messages, artifacts, todos, goal). The main thread stream uses the LangGraph SDK's `throttle: true` mode so updates received in the same macrotask coalesce before React is notified; do not replace it with a numeric delay without validating the SDK's trailing-debounce behavior on a continuous stream.
    File-tool artifact auto-open work must run in an effect with timer cleanup; never schedule timers while rendering streamed `write_file` or `str_replace` updates.
    `ThreadState.artifacts` remains the authoritative artifact list. The artifacts provider persists only thread-scoped panel UI state (`open`, selected path, and a refresh bootstrap cache) in session storage; an initial empty stream value must not overwrite that restored state before history finishes loading.
-   Formal artifact content is refreshed once when the run finishes; transient `write-file:` previews remain message-driven.
+   Refetch formal artifacts when runs finish; `write-file:` previews stay message-driven.
+   On save, cancel reads before cache/draft writes; pass both hooks' signals via loader to fetch.
    UTF-8 outputs under `/mnt/user-data/outputs` are editable while idle. Root drafts survive SPA/home/showcase routes and unknown auth; confirmed account change/logout clears them. Owner/generation fences reject stale updates. Auth binds through a stable setter context, outside the typing state subscription. Drafts preview in Markdown/HTML and warn on unload off-route. SHA-256 conflicts preserve edits. Layout, draft-context and editor DOM tests cover this.
    Regular artifact text loads request at most the first 1 MiB through an HTTP
    byte range. A truncated preview must stay lightweight and expose an explicit

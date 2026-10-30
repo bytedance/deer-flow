@@ -145,6 +145,11 @@ configured default. `max_recursion_limit` (default `1000`) caps both sources to
 limit runaway LLM cost. Both settings are read per run, so changes apply to the
 next request without a Gateway restart.
 
+A run that reaches its limit ends with status `error` and
+`stop_reason: recursion_capped`. Its error message lists up to five outputs it
+created but did not present and asks the user to send a message to continue.
+An active goal stands down without an evaluator call and stays active.
+
 These settings also apply to IM channel runs. A `recursion_limit` in an IM
 channel's `session.config` (for all channels, one channel or one user) takes
 precedence. The GitHub channel instead uses `250`, or a higher
@@ -336,6 +341,26 @@ presets do not route China keys to international endpoints or infer a Coding
 Plan from the model name. Plans/regions without a preset can use the custom
 OpenAI-compatible option if their documented protocol is compatible; native
 protocols need a verified backend preset or operator YAML configuration.
+
+The `moonshot-cn` preset recognizes the exact IDs `kimi-k3.1-pro` and
+`kimi-k3.1-pro-highspeed`. Both require thinking, preserve reasoning history,
+and accept top-level `reasoning_effort` values `low`, `high` and `max`, with
+`max` as the default. The existing reasoning contract keeps thinking enabled
+when a caller requests it off. Unsupported effort values use the default;
+these models do not declare aliases for the generic effort vocabulary.
+
+For these two models at the official `https://api.moonshot.cn/v1` endpoint,
+`PatchedChatDeepSeek` omits `thinking` and the fixed sampling parameters
+`temperature`, `top_p`, `n`, `presence_penalty` and `frequency_penalty` from
+the final request, including values supplied through `extra_body`. Moonshot
+uses its fixed values (respectively `1.0`, `0.95`, `1`, `0`, `0`). This rule
+also applies to explicit YAML profiles using that adapter and endpoint;
+Kimi K2.5, unknown model IDs and custom endpoints retain their existing behavior.
+Image capability covers base64/data-URL images and provider file IDs, not
+public image URLs; DeerFlow's image middleware uses base64. This declaration
+does not add video UI support. See the official
+[K3.1 quickstart](https://platform.kimi.com/docs/guide/kimi-k3-1-pro-quickstart)
+and [model parameter reference](https://platform.kimi.com/docs/api/models-overview).
 
 Endpoint/auth sources used for these presets include the official
 [OpenAI SDK](https://github.com/openai/openai-python/blob/main/src/openai/_client.py),
@@ -1015,6 +1040,31 @@ retry budget when retries are enabled; the earlier of that deadline and
 `max_wait_seconds` applies and is checked again at dispatch. With retries disabled,
 only queue wait is bounded by admission, and the existing HTTP timeout semantics
 still apply.
+
+#### Jina crawl diagnostics
+
+Set `log_level: debug` in root `config.yaml` and restart the Gateway to enable
+`deerflow.community.jina_ai.jina_client` completion summaries. INFO emits no new
+summary. Each logical crawl emits one `Jina crawl completed` message containing:
+
+- `outcome`: `success`, `error`, or `cancelled`.
+- `reason`: `success`, `empty_response`, `response_limit`, `invalid_configuration`,
+  `nonretryable_http`, `attempt_exhaustion`, `retry_after_unfit`,
+  `budget_exhaustion`, `request_failure`, or `cancellation`.
+- `attempts`: calls started at HTTPX's POST/stream API, including failed connections;
+  zero for rejected settings. This does not prove remote delivery.
+- `elapsed_seconds`: monotonic duration through completion/cleanup.
+- `backoff_seconds`: measured time awaiting retry sleep, including a partially
+  cancelled wait, rather than the planned delay. Neither duration estimates
+  provider latency or cost.
+
+Fields remain in the message in plain and enhanced JSON logging. Existing
+`logging.enhance` trace filtering supplies the inherited request trace ID when
+enabled; no new ID is created. Concurrent crawls keep independent counters but
+may share a request trace. Summaries contain no URL, credentials, response body,
+headers, or exception text. Existing error logs and return values are unchanged.
+Emission is best effort if a logging handler fails. These provider-local records
+explain internal retry decisions; they do not replace tracing or tool results.
 
 #### Jina response byte budget
 

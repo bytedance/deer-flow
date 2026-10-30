@@ -655,11 +655,11 @@ class WeComChannel(Channel):
 
         state = await self._connection_repo.consume_oauth_state(provider="wecom", state=code)
         if state is None:
-            await self._send_connection_reply(frame, "WeCom connection code is invalid or expired.")
+            await self._send_connection_reply(frame, await self._connect_reply_text("invalid_code"))
             return True
 
         if not user_id:
-            await self._send_connection_reply(frame, "WeCom connection could not be completed from this message.")
+            await self._send_connection_reply(frame, await self._connect_reply_text("incomplete", owner_user_id=state["owner_user_id"]))
             return True
 
         body = frame.get("body", {}) or {}
@@ -669,7 +669,7 @@ class WeComChannel(Channel):
         if chattype == "group":
             chatid = str(body.get("chatid") or "").strip()
             if not chatid:
-                await self._send_connection_reply(frame, "WeCom connection could not be completed from this message.")
+                await self._send_connection_reply(frame, await self._connect_reply_text("incomplete", owner_user_id=state["owner_user_id"]))
                 return True
             workspace_id = f"{aibotid}:group:{chatid}" if aibotid else f"group:{chatid}"
             raw_group_name = str(body.get("chatname") or body.get("group_name") or "").strip()
@@ -694,7 +694,7 @@ class WeComChannel(Channel):
             metadata=metadata,
             status="connected",
         )
-        await self._send_connection_reply(frame, "WeCom connected to DeerFlow.")
+        await self._send_connection_reply(frame, await self._connect_reply_text("connected", owner_user_id=state["owner_user_id"]))
         return True
 
     async def _send_connection_reply(self, frame: dict[str, Any], text: str) -> None:

@@ -71,6 +71,39 @@ cannot see each other's memory by construction.
   workspace-scoped search, while the passive per-turn write middleware is
   retained because Honcho's deriver learns from `add()` writes.
 
+## Incremental conversation capture
+
+Checkpoint history is cumulative. For messages with stable source IDs, the
+adapter stores an opaque `deerflow_source_id` in Honcho message metadata and
+checks the session's metadata-filtered `messages/list` endpoint before appending
+new messages. This requires session-read access as well as message-write access.
+Lookups and writes use batches of at most 100 messages. Each lookup requests
+100 records per page and consumes at most 10 pages before publishing that batch.
+All advertised pages must be consumed; a larger page count aborts capture rather
+than using partial results. The budget allows multiple stored records per source
+identity, but exceptionally duplicate-heavy histories may exceed it.
+
+The identity includes the owner, source message ID, role, peer and normalized
+text. Distinct messages with identical text are retained; edited source messages
+are captured as new versions, not replacements of old Honcho records. Stored
+identities survive manager/process restarts and overlapping compacted history.
+An unavailable, malformed or over-budget lookup aborts that capture with a
+`capture lookup failed` warning instead of assuming the history is new.
+This is distinct from `write failed` for setup or message-write errors; a later
+capture can retry normally once the lookup succeeds.
+
+Lookup and append are serialized per endpoint/workspace/session within one
+process, including across manager instances. This is **not exactly-once delivery**:
+independent processes must serialize access to a session upstream. A retry can
+recognize an earlier write whose response was lost once the committed records
+are visible to the lookup, but Honcho does not provide an atomic deduplication
+constraint here.
+
+Direct callers without stable message IDs retain append-on-every-call behavior.
+Records written before this metadata was introduced cannot be matched reliably:
+the first capture after upgrading may replay that older history once. This
+change does not remove historical duplicates or migrate existing records.
+
 ## Limitations
 
 - No DeerMem-style fact CRUD: `create_fact`/`delete_fact`/`update_fact`,
@@ -81,8 +114,10 @@ cannot see each other's memory by construction.
   unsupported-operation error; conversation writes still happen through the
   retained middleware. DeerMem remains the default backend.
 - No migration of existing DeerMem data.
-- Writes are fire-and-forget per call: a failed write is logged and dropped
-  (at-most-once); nothing is buffered locally, so `shutdown_flush` is a no-op.
+- Writes run synchronously within each call. Failed captures are logged; no
+  retry is scheduled or buffered locally, so `shutdown_flush` is a no-op.
+  A later call can retry messages still present in its history, while stored
+  source identities suppress already committed messages.
 - `agent_name` is not mapped — Honcho models the user, not per-agent facts.
 
 ## Async execution and failure behavior

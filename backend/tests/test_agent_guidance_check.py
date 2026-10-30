@@ -23,6 +23,7 @@ EXPECTED_GUIDANCE_PATHS = {
     "backend/packages/harness/deerflow/agents/memory/AGENTS.md",
     "backend/packages/harness/deerflow/agents/task_continuity/AGENTS.md",
     "backend/packages/harness/deerflow/community/brave/AGENTS.md",
+    "backend/packages/harness/deerflow/community/browser_automation/AGENTS.md",
     "backend/packages/harness/deerflow/community/groundroute/AGENTS.md",
     "backend/packages/harness/deerflow/community/image_search/AGENTS.md",
     "backend/packages/harness/deerflow/community/infoquest/AGENTS.md",

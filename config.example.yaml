@@ -20,7 +20,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 63
+config_version: 64
 
 # Optional operator-owned literal prompt extensions (see CONFIGURATION.md):
 # lead_prompt_overlay:
@@ -396,29 +396,20 @@ models:
   # for example on Docker Desktop:
   #   base_url: http://host.docker.internal:8080/v1
 
-  # Example: Anthropic Claude model (with extended thinking)
-  # supports_thinking: true is required — without it, DeerFlow silently falls
-  # back to non-thinking mode even when the UI thinking toggle is on.
-  # budget_tokens is required by the Anthropic API when thinking.type=enabled
-  # (no server default; min 1024; must be less than max_tokens).
-  # - name: claude-sonnet-4
-  #   display_name: Claude Sonnet 4
+  # Example: Anthropic Claude model (thinks by default)
+  # Claude Sonnet 5.5 rejects extended thinking (budget_tokens), thinking
+  # type disabled, temperature, top_p and top_k, so leave them out.
+  # max_tokens covers both thinking and the answer.
+  # - name: claude-sonnet-5-5
+  #   display_name: Claude Sonnet 5.5
   #   use: langchain_anthropic:ChatAnthropic
-  #   model: claude-sonnet-4-20250514
+  #   model: claude-sonnet-5-5
   #   api_key: $ANTHROPIC_API_KEY
   #   default_request_timeout: 600.0
   #   max_retries: 2
-  #   max_tokens: 16000         # Per-call output cap
+  #   max_tokens: 16000         # Per-call output cap (thinking + answer)
   #   context_window: 200000    # Total prompt + completion capacity
   #   supports_vision: true
-  #   supports_thinking: true
-  #   when_thinking_enabled:
-  #     thinking:
-  #       type: enabled
-  #       budget_tokens: 4096   # required; min 1024; must be < max_tokens
-  #   when_thinking_disabled:
-  #     thinking:
-  #       type: disabled
 
   # Example: Google Gemini model (native SDK, no thinking support)
   # - name: gemini-2.5-pro
@@ -1422,10 +1413,10 @@ tool_search:
 #
 # The same middleware also elides the `content` argument of successful
 # write_file calls from model-bound requests once the same path was read or
-# modified again later (issue #5328): the file on disk is then the source of
-# truth, and the read-before-write gate forces a read_file before the next
-# modification anyway, so the historical copy only costs context. Stored
-# history, receipts, and the run journal keep the original arguments.
+# modified again later (issue #5328). This optimization is opt-in because a
+# later superseding action rewrites an earlier model-request prefix, reducing
+# provider prompt-cache reuse (#7319). Stored history, receipts, and the run
+# journal keep the original arguments when it is enabled.
 
 tool_output:
   enabled: true
@@ -1444,10 +1435,11 @@ tool_output:
   # tool_overrides:
   #   web_search: 8000
   #   bash: 20000
-  # Replace a successful write_file call's `content` with a short placeholder
-  # pointing at read_file once a later successful read_file / write_file /
-  # str_replace of the same path exists. Only the model-bound request changes.
-  elide_superseded_writes: true
+  # Opt in to replacing a successful write_file call's `content` with a short
+  # placeholder pointing at read_file once a later successful read_file /
+  # write_file / str_replace of the same path exists. Only the model-bound
+  # request changes, but doing so rewrites an earlier prompt prefix.
+  elide_superseded_writes: false
   # Only elide content at least this many characters long (a character count,
   # not tokens: CJK text costs ~3-4x more per character than ASCII). 0 elides
   # every non-empty content.
@@ -2062,6 +2054,8 @@ subagent_runtime:
 #       # token_budget:        # per-agent override of the global token_budget above
 #       #   max_tokens: 3000000  # raise the ceiling for deep-research tasks
 #       # model: qwen3:32b     # Use a specific model (default: inherit from lead agent)
+#       # thinking_enabled: true  # Enable thinking/reasoning for this subagent (default: false)
+#       # reasoning_effort: medium # Use an effort value or alias supported by this model
 #       # skills:               # Skill discovery/activation allowlist (default: all enabled)
 #       #   - web-search
 #       #   - data-analysis
@@ -2089,11 +2083,15 @@ subagent_runtime:
 #   #       - data-analysis
 #   #       - visualization
 #   #     model: inherit          # 'inherit' uses parent's model
+#   #     thinking_enabled: true   # Enable thinking/reasoning (default: false)
+#   #     reasoning_effort: medium  # Use an effort value or alias supported by this model
 #   #     max_turns: 80
 #   #     timeout_seconds: 600
 #
 #   # Model override: by default, subagents inherit the lead agent's model.
 #   # Set `model` to use a different model (e.g., a local Ollama model for cost savings).
+#   # Unset thinking requests false; the selected model's required-thinking policy
+#   # and effort defaults/aliases still apply. Parent thinking settings are not inherited.
 #   # The model name must match a name defined in the `models:` section above.
 
 # Durable native-subagent batches. Disabled by default because enabling it can
@@ -3058,8 +3056,10 @@ run_ownership:
 #   # Security: keep this enabled unless you intentionally want legacy open-bot behavior.
 #   # Disabling it lets unbound external IM users create DeerFlow threads/runs.
 #   require_bound_identity: true
-#   # Language of scheduled-task IM notices (en-US or zh-CN) for owners without
-#   # a web UI language preference (e.g. auth disabled). Restart-required.
+#   # Language (en-US or zh-CN) of DeerFlow's own IM texts: scheduled-task
+#   # notices and the /connect and /goal replies. Used for owners without a web
+#   # UI language preference (e.g. auth disabled) and for replies with no known
+#   # owner (an invalid connect code). Restart-required.
 #   notification_locale: en-US
 #
 #   telegram:
