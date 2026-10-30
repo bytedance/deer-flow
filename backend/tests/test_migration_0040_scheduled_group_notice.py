@@ -19,9 +19,11 @@ PREVIOUS = "0039_user_disabled"
 COLUMN = "notification_group_connection_id"
 
 
-def test_group_notification_revision_has_one_head_after_0039():
+def test_group_notification_revision_is_in_single_chain_after_0039():
     script = ScriptDirectory(str(bootstrap._MIGRATIONS_DIR))
-    assert script.get_heads() == [REVISION]
+    assert len(script.get_heads()) == 1
+    assert REVISION in {revision.revision for revision in script.walk_revisions()}
+    assert script.get_revision("0041_im_notice_preferences").down_revision == REVISION
     assert script.get_revision(REVISION).down_revision == PREVIOUS
     assert len(REVISION) <= 32
 

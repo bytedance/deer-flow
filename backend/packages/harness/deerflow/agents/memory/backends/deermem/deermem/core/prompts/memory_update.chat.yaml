@@ -95,6 +95,9 @@ messages:
       - longTermBackground: Unchanging foundational facts about the user
 
       **Multilingual Content**:
+      - When a preferred memory language is supplied, use it for new facts and updated summary prose unless the user explicitly requests another memory language.
+      - The preferred language is a current-run UI setting, not a durable fact about the user. Do not store it or translate unchanged facts merely to match it.
+      - Keep JSON keys, categories, and classification values unchanged.
       - Preserve original language for proper nouns and company names
       - Keep technical terms in their original form (DeepSeek, LangGraph, etc.)
       - Note language capabilities in personalContext

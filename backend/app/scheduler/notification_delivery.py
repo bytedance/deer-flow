@@ -19,9 +19,14 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from app.channels.base import ChannelUnavailable
-from app.channels.capabilities import supports_proactive_notifications
-from app.channels.notification_groups import is_feishu_notification_group
+from app.channels.capabilities import supports_proactive_group_notifications, supports_proactive_notifications
+from app.channels.notification_groups import is_notification_group
 from app.scheduler.notification_text import DEFAULT_NOTIFICATION_LOCALE, redact_egress_text, render_notification_text, wants_result_summary
+from deerflow.persistence.user.im_notifications import (
+    DISABLED_BY_OWNER,
+    IM_RUNTIME_NOTIFICATION_EVENTS,
+    RUNTIME_NOTIFICATION_SOURCE_KINDS,
+)
 
 __all__ = ["NotificationDeliveryWorker", "redact_egress_text", "render_notification_text"]
 
@@ -43,6 +48,12 @@ SummaryResolver = Callable[[str, str | None], Any]
 # and ``status``. Sync or async callables are both accepted. The worker uses
 # it to confirm, at send time, that the delivery's target is still bound.
 ConnectionResolver = Callable[[str], Any]
+
+# Returns the providers this instance must not claim rows for, or None for no
+# restriction. Under ``channels.leader_lease`` (``ChannelService
+# .notification_excluded_providers``) these are the providers another instance
+# holds the transport of: claiming their rows here would only park them.
+ExcludedProvidersResolver = Callable[[], Any]
 
 # A claimed row stuck in "sending" longer than this is considered orphaned
 # (process died between claim and the final status write) and flipped back
@@ -68,6 +79,10 @@ class NotificationDeliveryWorker:
         batch_size: int = 10,
         resolve_run_summary: SummaryResolver | None = None,
         resolve_connections: ConnectionResolver | None = None,
+        excluded_providers: ExcludedProvidersResolver | None = None,
+        resolve_notification_preferences: Callable[[str], Any] | None = None,
+        resolve_notification_event_preferences: Callable[[str], Any] | None = None,
+        resolve_human_input_pending: Callable[..., Any] | None = None,
         stale_sending_timeout_seconds: int = _STALE_SENDING_TIMEOUT_SECONDS,
         stop_timeout_seconds: float = _STOP_TIMEOUT_SECONDS,
         default_locale: str = DEFAULT_NOTIFICATION_LOCALE,
@@ -76,6 +91,10 @@ class NotificationDeliveryWorker:
         self._resolve_channel = resolve_channel
         self._resolve_run_summary = resolve_run_summary
         self._resolve_connections = resolve_connections
+        self._excluded_providers = excluded_providers
+        self._resolve_notification_preferences = resolve_notification_preferences
+        self._resolve_notification_event_preferences = resolve_notification_event_preferences
+        self._resolve_human_input_pending = resolve_human_input_pending
         self._poll_interval_seconds = poll_interval_seconds
         self._batch_size = batch_size
         self._stale_sending_timeout_seconds = stale_sending_timeout_seconds
@@ -119,7 +138,11 @@ class NotificationDeliveryWorker:
 
     async def run_once(self, *, now: datetime) -> None:
         await self._recover_stale_sending(now)
-        rows = await self._delivery_repo.claim_due_deliveries(now=now, limit=self._batch_size)
+        excluded = self._current_exclusions()
+        if excluded is None:
+            rows = await self._delivery_repo.claim_due_deliveries(now=now, limit=self._batch_size)
+        else:
+            rows = await self._delivery_repo.claim_due_deliveries(now=now, limit=self._batch_size, exclude_providers=excluded)
         for row in rows:
             try:
                 await self._deliver(row)
@@ -133,6 +156,15 @@ class NotificationDeliveryWorker:
                     await self._delivery_repo.mark_failed(row["id"], claim_token=row.get("claim_token"), error="delivery crashed before completion")
                 except Exception:
                     logger.warning("Could not mark crashed delivery %s as failed; stale reset will recover it", row.get("id"), exc_info=True)
+
+    def _current_exclusions(self) -> frozenset[str] | None:
+        """Providers to leave to the instance holding their transport (read fresh every poll)."""
+        if self._excluded_providers is None:
+            return None
+        excluded = self._excluded_providers()
+        if not isinstance(excluded, (set, frozenset, list, tuple)) or not excluded:
+            return None
+        return frozenset(str(provider) for provider in excluded)
 
     async def _recover_stale_sending(self, now: datetime) -> None:
         """Lease-style reconciliation, run before every claim (the first poll
@@ -218,7 +250,14 @@ class NotificationDeliveryWorker:
                 if (
                     row_owner == owner_user_id
                     and connection.get("id") == target
-                    and is_feishu_notification_group(provider=connection.get("provider"), status=connection.get("status"), workspace_id=connection.get("workspace_id"), metadata=connection.get("metadata"))
+                    and connection.get("provider") == provider
+                    and supports_proactive_group_notifications(provider)
+                    and is_notification_group(
+                        provider=connection.get("provider"),
+                        status=connection.get("status"),
+                        workspace_id=connection.get("workspace_id"),
+                        metadata=connection.get("metadata"),
+                    )
                 ):
                     return True
                 continue
@@ -226,11 +265,90 @@ class NotificationDeliveryWorker:
                 return True
         return False
 
+    async def _check_notification_preference(self, delivery: dict[str, Any]) -> bool:
+        if self._resolve_notification_preferences is None:
+            return True
+        try:
+            preferences = self._resolve_notification_preferences(delivery.get("owner_user_id") or "")
+            if inspect.isawaitable(preferences):
+                preferences = await preferences
+            if not isinstance(preferences, dict) or type(preferences.get(delivery.get("provider"))) is not bool:
+                raise ValueError("Invalid notification preference response")
+        except Exception:
+            logger.warning("Could not verify notification preference for delivery %s; parking it", delivery["id"], exc_info=True)
+            await self._delivery_repo.mark_failed(delivery["id"], claim_token=delivery.get("claim_token"), error="could not verify notification preference", count_attempt=False)
+            return False
+        if not preferences[delivery["provider"]]:
+            await self._delivery_repo.mark_failed(delivery["id"], claim_token=delivery.get("claim_token"), error=DISABLED_BY_OWNER, count_attempt=False, terminal=True)
+            return False
+        source_kind = delivery.get("source_kind") or (delivery.get("payload") or {}).get("source_kind")
+        event = delivery.get("event")
+        if source_kind in RUNTIME_NOTIFICATION_SOURCE_KINDS and isinstance(event, str) and event in IM_RUNTIME_NOTIFICATION_EVENTS:
+            if self._resolve_notification_event_preferences is not None:
+                try:
+                    event_prefs = self._resolve_notification_event_preferences(delivery.get("owner_user_id") or "")
+                    if inspect.isawaitable(event_prefs):
+                        event_prefs = await event_prefs
+                except Exception:
+                    logger.warning("Could not verify runtime event preference for delivery %s; parking it", delivery["id"], exc_info=True)
+                    await self._delivery_repo.mark_failed(delivery["id"], claim_token=delivery.get("claim_token"), error="could not verify notification preference", count_attempt=False)
+                    return False
+                if isinstance(event_prefs, dict) and not event_prefs.get(event, False):
+                    await self._delivery_repo.mark_failed(delivery["id"], claim_token=delivery.get("claim_token"), error=DISABLED_BY_OWNER, count_attempt=False, terminal=True)
+                    return False
+            elif preferences.get(event) is False:
+                await self._delivery_repo.mark_failed(delivery["id"], claim_token=delivery.get("claim_token"), error=DISABLED_BY_OWNER, count_attempt=False, terminal=True)
+                return False
+        return True
+
+    async def _check_human_input_pending(self, delivery: dict[str, Any]) -> bool:
+        if delivery.get("event") != "human_input_requested" or self._resolve_human_input_pending is None:
+            return True
+        try:
+            params = inspect.signature(self._resolve_human_input_pending).parameters
+            positional = [p for p in params.values() if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)]
+            if len(positional) >= 2:
+                payload = delivery.get("payload") if isinstance(delivery.get("payload"), dict) else {}
+                thread_id = payload.get("thread_id") or ""
+                request_id = payload.get("request_id") or payload.get("tool_call_id")
+                pending = self._resolve_human_input_pending(thread_id, request_id)
+            else:
+                pending = self._resolve_human_input_pending(delivery)
+            if inspect.isawaitable(pending):
+                pending = await pending
+        except Exception:
+            logger.warning("Could not verify human input request state for delivery %s; parking it", delivery["id"], exc_info=True)
+            await self._delivery_repo.mark_failed(
+                delivery["id"],
+                claim_token=delivery.get("claim_token"),
+                error="could not verify human input request state",
+                count_attempt=False,
+            )
+            return False
+        if pending is None:
+            await self._delivery_repo.mark_failed(
+                delivery["id"],
+                claim_token=delivery.get("claim_token"),
+                error="could not verify human input request state",
+                count_attempt=False,
+            )
+            return False
+        if not pending:
+            await self._delivery_repo.mark_failed(
+                delivery["id"],
+                claim_token=delivery.get("claim_token"),
+                error="human_input_request_already_resolved",
+                count_attempt=False,
+                terminal=True,
+            )
+            return False
+        return True
+
     async def _deliver(self, delivery: dict[str, Any]) -> None:
         delivery_id = delivery["id"]
         provider = delivery.get("provider") or ""
         target_type = (delivery.get("payload") or {}).get("target_type")
-        if target_type not in (None, "group") or (target_type == "group" and provider != "feishu"):
+        if target_type not in (None, "group") or (target_type == "group" and not supports_proactive_group_notifications(provider)):
             await self._delivery_repo.mark_failed(delivery_id, claim_token=delivery.get("claim_token"), error="unsupported notification target type", terminal=True)
             return
         if not supports_proactive_notifications(provider):
@@ -264,6 +382,10 @@ class NotificationDeliveryWorker:
             if still_connected is None:
                 await self._delivery_repo.mark_failed(delivery_id, claim_token=delivery.get("claim_token"), error="could not verify the target's channel connection", count_attempt=False)
                 return
+        if not await self._check_notification_preference(delivery):
+            return
+        if not await self._check_human_input_pending(delivery):
+            return
         # Re-check channel liveness at delivery time, not enqueue time: the
         # channel may have been disabled or disconnected after the outbox row
         # was written, and the row stays retryable for when it comes back.
@@ -284,6 +406,14 @@ class NotificationDeliveryWorker:
                 # in place (its payload is the durable outbox snapshot).
                 enriched = dict(delivery)
                 enriched["payload"] = {**(delivery.get("payload") or {}), "result_summary": summary}
+        # Summary/config lookups can await long enough for a user to mute.
+        if not await self._check_notification_preference(delivery):
+            return
+        if not await self._check_human_input_pending(delivery):
+            return
+        is_active_claim = getattr(self._delivery_repo, "is_active_claim", None)
+        if callable(is_active_claim) and not await is_active_claim(delivery_id, claim_token=delivery.get("claim_token")):
+            return
         try:
             send = channel.send_group_notification_for_owner if target_type == "group" else channel.send_notification_for_owner
             await send(

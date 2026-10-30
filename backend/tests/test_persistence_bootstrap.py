@@ -22,11 +22,14 @@ table-level backfill works.
 from __future__ import annotations
 
 import asyncio
+import os
+import uuid
 from pathlib import Path
 
 import pytest
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import create_async_engine
+from support.postgres import asyncpg_test_url
 
 # Pre-import models so Base.metadata is populated before bootstrap reads it.
 import deerflow.persistence.models  # noqa: F401
@@ -42,6 +45,7 @@ from deerflow.persistence.bootstrap import (
     bootstrap_schema,
 )
 from deerflow.persistence.migrations._helpers import _normalize_default
+from deerflow.persistence.postgres_schema import build_asyncpg_connect_args
 
 # Mark only async tests via the decorator below; module-level pytestmark would
 # spuriously warn for the sync ``TestDecideState`` cases.
@@ -308,6 +312,8 @@ async def test_legacy_with_manual_workaround_column_warns_on_drift(
         # JSON ≈ JSON, so the equivalence check must NOT produce a "type" diff
         # entry here -- that would be a false positive on the matching-type case.
         assert "type actual=" not in msg, f"unexpected type drift on matching JSON column: {msg!r}"
+        helper_warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING" and r.name == "deerflow.persistence.migrations._helpers"]
+        assert helper_warnings == [msg], f"expected only the token_usage_by_model drift, got: {helper_warnings!r}"
     finally:
         await engine.dispose()
 
@@ -348,7 +354,96 @@ async def test_legacy_with_wrong_type_workaround_warns_on_type_drift(
         # Nullability + server_default match the model -- no other diffs.
         assert "nullable" not in msg, f"unexpected nullability drift on matching column: {msg!r}"
         assert "server_default" not in msg, f"unexpected server_default drift on matching column: {msg!r}"
+        # The seed is the full model schema minus this one column, so every
+        # other column a revision finds already present matches the model and
+        # the real drift must not be buried among false positives.
+        helper_warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING" and r.name == "deerflow.persistence.migrations._helpers"]
+        assert helper_warnings == [msg], f"expected only the token_usage_by_model drift, got: {helper_warnings!r}"
     finally:
+        await engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# No false positives: a column a revision finds already present in the model's
+# own shape must stay quiet on both dialects. The model spells types and
+# defaults generically (``sa.String``, ``sa.BigInteger``, ``sa.DateTime``,
+# ``server_default="0"``, ``sa.false()``) while reflection reports the
+# dialect's spelling (``VARCHAR``, ``BIGINT``, Postgres ``TIMESTAMP``, ``'0'``),
+# so the comparator must render the model side through the dialect first.
+# ---------------------------------------------------------------------------
+
+
+async def _drift_engine(tmp_path: Path, backend: str):
+    if backend == "sqlite":
+        return create_async_engine(_url(tmp_path)), ""
+    uri = os.environ.get("TEST_POSTGRES_URI")
+    if not uri:
+        pytest.skip("requires TEST_POSTGRES_URI (real Postgres drift reflection)")
+    schema = f"drift_{uuid.uuid4().hex}"
+    engine = create_async_engine(asyncpg_test_url(uri), connect_args=build_asyncpg_connect_args(schema))
+    async with engine.begin() as conn:
+        await conn.execute(sa.text(f'CREATE SCHEMA "{schema}"'))
+    return engine, schema
+
+
+def _seed_at_revision(revision: str, *, drop_version_row: bool):
+    async def seed(engine, schema: str) -> None:
+        await asyncio.to_thread(_upgrade, _get_alembic_config(engine, postgres_schema=schema), revision)
+        if drop_version_row:
+            async with engine.begin() as conn:
+                await conn.execute(sa.text("DROP TABLE alembic_version"))
+
+    return seed
+
+
+async def _seed_model_schema_without_version_row(engine, schema: str) -> None:
+    # The empty branch commits ``create_all`` before it stamps head; a process
+    # that dies in between leaves exactly this, and the next start takes the
+    # legacy branch over columns every revision finds already present.
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+
+async def _seed_model_schema_with_text_token_usage(engine, schema: str) -> None:
+    await _seed_model_schema_without_version_row(engine, schema)
+    async with engine.begin() as conn:
+        await conn.execute(sa.text("ALTER TABLE runs DROP COLUMN token_usage_by_model"))
+        await conn.execute(sa.text("ALTER TABLE runs ADD COLUMN token_usage_by_model TEXT NOT NULL DEFAULT '{}'"))
+
+
+@asyncio_test
+@pytest.mark.parametrize("backend", ["sqlite", "postgres"])
+@pytest.mark.parametrize(
+    ("seed", "expected_drift"),
+    [
+        pytest.param(_seed_at_revision(BASELINE, drop_version_row=True), [], id="pre_alembic_baseline"),
+        # 0025 re-runs 0023's ``safe_add_column`` for ``runs.change_seq``.
+        pytest.param(_seed_at_revision("0022_scheduled_occurrence_seq", drop_version_row=False), [], id="upgrade_across_change_seq_repair"),
+        pytest.param(_seed_model_schema_without_version_row, [], id="model_schema_without_version_row"),
+        pytest.param(_seed_model_schema_with_text_token_usage, ["runs.token_usage_by_model"], id="real_drift_only"),
+    ],
+)
+async def test_bootstrap_warns_only_on_columns_that_really_drift(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    backend: str,
+    seed,
+    expected_drift: list[str],
+) -> None:
+    engine, schema = await _drift_engine(tmp_path, backend)
+    try:
+        await seed(engine, schema)
+
+        with caplog.at_level("WARNING", logger="deerflow.persistence.migrations._helpers"):
+            await bootstrap_schema(engine, backend=backend, postgres_schema=schema)
+
+        assert await _alembic_version(engine) == HEAD
+        warned = [r.getMessage() for r in caplog.records if r.levelname == "WARNING" and r.name == "deerflow.persistence.migrations._helpers"]
+        assert [m.removeprefix("safe_add_column: ").split(" ", 1)[0] for m in warned] == expected_drift, f"unexpected drift warnings: {warned!r}"
+    finally:
+        if schema:
+            async with engine.begin() as conn:
+                await conn.execute(sa.text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
         await engine.dispose()
 
 
@@ -395,6 +490,101 @@ def test_type_equivalent_returns_true_on_missing_info() -> None:
     assert _type_equivalent(None, sa.JSON()) is True
     assert _type_equivalent(sa.JSON(), None) is True
     assert _type_equivalent("", "JSON") is True
+
+
+def test_type_equivalent_renders_model_types_through_the_dialect() -> None:
+    """The model's generic types meet reflection's dialect types on equal terms."""
+    from sqlalchemy.dialects import postgresql, sqlite
+
+    from deerflow.persistence.migrations._helpers import _type_equivalent
+
+    sqlite_dialect = sqlite.dialect()
+    postgres_dialect = postgresql.dialect()
+    # Reflected (actual) on the left, model (desired) on the right.
+    assert _type_equivalent(sa.VARCHAR(length=128), sa.String(length=128), sqlite_dialect) is True
+    assert _type_equivalent(sa.BIGINT(), sa.BigInteger(), sqlite_dialect) is True
+    assert _type_equivalent(sqlite.DATETIME(), sa.DateTime(timezone=True), sqlite_dialect) is True
+    assert _type_equivalent(sa.VARCHAR(length=64), sa.String(length=64), postgres_dialect) is True
+    assert _type_equivalent(sa.BIGINT(), sa.BigInteger(), postgres_dialect) is True
+    assert _type_equivalent(postgresql.TIMESTAMP(timezone=True), sa.DateTime(timezone=True), postgres_dialect) is True
+    assert _type_equivalent(postgresql.JSONB(), sa.JSON(), postgres_dialect) is True
+    # Precision is a parameter like length; the time-zone suffix is not.
+    assert _type_equivalent(postgresql.TIMESTAMP(timezone=True, precision=3), sa.DateTime(timezone=True), postgres_dialect) is True
+    assert _type_equivalent(postgresql.TIMESTAMP(timezone=False, precision=3), sa.DateTime(timezone=True), postgres_dialect) is False
+    # Rendering both sides must not hide a real mismatch.
+    assert _type_equivalent(sa.TEXT(), sa.JSON(), sqlite_dialect) is False
+    assert _type_equivalent(sa.TEXT(), sa.JSON(), postgres_dialect) is False
+    assert _type_equivalent(postgresql.TIMESTAMP(timezone=False), sa.DateTime(timezone=True), postgres_dialect) is False
+    assert _type_equivalent(sa.INTEGER(), sa.BigInteger(), postgres_dialect) is False
+    # SQLite reflects an unrecognized declared type as NullType, which no
+    # dialect can render: missing info, not drift.
+    assert _type_equivalent(sa.types.NullType(), sa.String(length=64), sqlite_dialect) is True
+
+
+def test_normalize_default_renders_model_defaults_like_reflection() -> None:
+    """``server_default="0"`` / ``sa.false()`` compare equal to how each dialect reflects them."""
+    from sqlalchemy.dialects import postgresql, sqlite
+
+    sqlite_dialect = sqlite.dialect()
+    postgres_dialect = postgresql.dialect()
+    string_zero = sa.Column("c", sa.Integer(), server_default="0").server_default
+    false_default = sa.Column("c", sa.Boolean(), server_default=sa.false()).server_default
+
+    # SQLite reflects ``DEFAULT '0'`` quoted; Postgres reflects it bare on an
+    # integer column and as ``'0'::bigint`` on a bigint one.
+    assert _normalize_default(string_zero, sqlite_dialect) == _normalize_default("'0'", sqlite_dialect) == "0"
+    assert _normalize_default(string_zero, postgres_dialect) == _normalize_default("0", postgres_dialect) == "0"
+    assert _normalize_default("'0'::bigint", postgres_dialect) == "0"
+    assert _normalize_default(false_default, sqlite_dialect) == _normalize_default("0", sqlite_dialect)
+    assert _normalize_default(false_default, postgres_dialect) == _normalize_default("false", postgres_dialect)
+    assert _normalize_default(sa.text("'{}'")) == _normalize_default("'{}'::jsonb") == "{}"
+    # A different default still differs.
+    assert _normalize_default(string_zero, sqlite_dialect) != _normalize_default("'1'", sqlite_dialect)
+    assert _normalize_default(false_default, postgres_dialect) != _normalize_default("true", postgres_dialect)
+
+    # An explicit empty-string default is a default, not the absence of one.
+    empty_string = sa.Column("c", sa.Text(), server_default="").server_default
+    assert _normalize_default(empty_string, sqlite_dialect) == _normalize_default("''", sqlite_dialect) == ""
+    assert _normalize_default("''::text", postgres_dialect) == ""
+    assert _normalize_default(None) is None
+
+
+@asyncio_test
+@pytest.mark.parametrize("backend", ["sqlite", "postgres"])
+async def test_empty_string_default_stays_distinct_from_no_default(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    backend: str,
+) -> None:
+    """``DEFAULT ''`` and no default drift from each other, through real reflection."""
+    from deerflow.persistence.migrations._helpers import _check_column_drift
+
+    engine, schema = await _drift_engine(tmp_path, backend)
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(sa.text("CREATE TABLE drift_defaults (empty_default TEXT DEFAULT '', no_default TEXT)"))
+
+        def check(sync_conn) -> None:
+            inspector = sa.inspect(sync_conn)
+            columns = {column["name"]: column for column in inspector.get_columns("drift_defaults")}
+            _check_column_drift("drift_defaults", sa.Column("no_default", sa.Text(), server_default=""), columns["no_default"], inspector.dialect)
+            _check_column_drift("drift_defaults", sa.Column("empty_default", sa.Text()), columns["empty_default"], inspector.dialect)
+            # Matching empty-string defaults stay quiet.
+            _check_column_drift("drift_defaults", sa.Column("empty_default", sa.Text(), server_default=""), columns["empty_default"], inspector.dialect)
+
+        with caplog.at_level("WARNING", logger="deerflow.persistence.migrations._helpers"):
+            async with engine.connect() as conn:
+                await conn.run_sync(check)
+
+        warned = [r.getMessage() for r in caplog.records if r.levelname == "WARNING" and r.name == "deerflow.persistence.migrations._helpers"]
+        assert len(warned) == 2, f"expected exactly the two mismatched defaults, got: {warned!r}"
+        assert "drift_defaults.no_default" in warned[0] and "server_default actual=None desired=''" in warned[0], warned[0]
+        assert "drift_defaults.empty_default" in warned[1] and "server_default actual='' desired=None" in warned[1], warned[1]
+    finally:
+        if schema:
+            async with engine.begin() as conn:
+                await conn.execute(sa.text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+        await engine.dispose()
 
 
 # ---------------------------------------------------------------------------

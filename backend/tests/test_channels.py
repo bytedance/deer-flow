@@ -12,9 +12,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 
 from app.channels.base import Channel
+from app.channels.dedupe_store import MemoryInboundDedupeStore
 from app.channels.message_bus import (
     PENDING_CLARIFICATION_METADATA_KEY,
     InboundMessage,
@@ -804,7 +806,7 @@ class TestChannelManager:
                     await allow_third_lookup.wait()
                 return None
 
-            async def create_thread(_client, _msg):
+            async def create_first_thread(_client, _msg):
                 nonlocal create_calls, active_later_creates, max_active_later_creates
                 create_calls += 1
                 call_number = create_calls
@@ -823,10 +825,10 @@ class TestChannelManager:
                     await release_later_creates.wait()
                 finally:
                     active_later_creates -= 1
-                return f"thread-{call_number}"
+                return f"thread-{call_number}", True
 
             manager._lookup_thread_id = lookup_thread_id
-            manager._create_thread = create_thread
+            manager._create_first_thread = create_first_thread
             client = MagicMock()
             first_msg = InboundMessage(channel_name="slack", chat_id="C1", user_id="U1", text="first")
             second_msg = InboundMessage(channel_name="slack", chat_id="C1", user_id="U1", text="second")
@@ -1435,15 +1437,22 @@ class TestChannelManager:
 
         _run(go())
 
-    def test_streaming_transient_failure_releases_dedupe_key(self, tmp_path, monkeypatch):
-        """Release a swallowed streaming error only after its final outbound.
+    @pytest.mark.parametrize("admitted", [False, True], ids=["before-admission", "after-admission"])
+    def test_streaming_transient_failure_releases_dedupe_key_only_before_admission(self, tmp_path, monkeypatch, admitted):
+        """A swallowed streaming error releases the key only while the manager
+        still owns the outcome, and only after its final outbound.
 
         _release_inbound_dedupe_key lives in _handle_message's `except Exception`
         handler, but _handle_streaming_chat handles its own errors and never
         re-raises — so without an explicit release the key recorded on receipt
         survives the full dedupe TTL and the provider's redelivery (the retry
-        that would recover the failure) is silently dropped. Releasing before
-        the final outbound would let that retry overtake the terminal reply.
+        that would recover a failure) is silently dropped. Releasing before the
+        final outbound would let that retry overtake the terminal reply.
+
+        Once the Gateway has admitted the run (a frame arrived), a broken
+        stream no longer releases the key: the run continues on the Gateway
+        (``on_disconnect: continue``), so the redelivery would execute the
+        same turn twice.
         """
         monkeypatch.setattr("app.channels.manager.STREAM_UPDATE_MIN_INTERVAL_SECONDS", 0.0)
         from app.channels.manager import ChannelManager
@@ -1465,10 +1474,11 @@ class TestChannelManager:
 
             def _failing_stream(*args, **kwargs):
                 async def gen():
-                    yield _make_stream_part(
-                        "messages-tuple",
-                        [{"id": "ai-1", "content": "Partial", "type": "AIMessageChunk"}, {"langgraph_node": "agent"}],
-                    )
+                    if admitted:
+                        yield _make_stream_part(
+                            "messages-tuple",
+                            [{"id": "ai-1", "content": "Partial", "type": "AIMessageChunk"}, {"langgraph_node": "agent"}],
+                        )
                     raise ConnectionError("stream broken")
 
                 return gen()
@@ -1494,10 +1504,12 @@ class TestChannelManager:
 
             # The provider redelivers the same message after the failure.
             await bus.publish_inbound(_inbound())
-            await _wait_for(lambda: manager._client.runs.stream.call_count == 2)
+            await asyncio.wait_for(bus.join_inbound(), timeout=5)
             await manager.stop()
 
-            assert manager._client.runs.stream.call_count == 2
+            # Before admission the retry runs; after admission it is a duplicate
+            # of a run the Gateway is still executing and must be dropped.
+            assert manager._client.runs.stream.call_count == (1 if admitted else 2)
 
         _run(go())
 
@@ -1552,6 +1564,40 @@ class TestChannelManager:
             await manager.stop()
 
             assert manager._client.runs.wait.call_count == 2
+
+        _run(go())
+
+    def test_wait_reports_a_step_limit_stop_and_releases_dedupe_key(self, tmp_path):
+        """``/wait`` returns a step-limit stop only as an error: reply with its message, not a generic failure."""
+        from app.channels.manager import ChannelManager
+
+        step_limit_text = "The run stopped at its step limit (recursion_limit=100) before finishing. Created but not presented: /mnt/user-data/outputs/report.md. Send a message to continue."
+
+        async def go():
+            bus = MessageBus()
+            manager = ChannelManager(bus=bus, store=JsonChannelStore(path=tmp_path / "store.json"))
+            outbound_received: list[OutboundMessage] = []
+
+            async def capture_outbound(msg: OutboundMessage) -> None:
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+            manager._client = _make_mock_langgraph_client()
+            # The SDK's exception for the Gateway's /wait error envelope.
+            manager._client.runs.wait = AsyncMock(side_effect=Exception(f"GraphRecursionError: {step_limit_text}"))
+            await manager.start()
+
+            def _inbound() -> InboundMessage:
+                return InboundMessage(channel_name="wechat", chat_id="wx_user_1", user_id="wx_user_1", text="write the report", metadata={"message_id": "m-1"})
+
+            await bus.publish_inbound(_inbound())
+            await _wait_for(lambda: len(outbound_received) == 1)
+            assert [m.text for m in outbound_received] == [step_limit_text]
+
+            # The run ended, so a provider redelivery may retry it.
+            await bus.publish_inbound(_inbound())
+            await _wait_for(lambda: manager._client.runs.wait.call_count == 2)
+            await manager.stop()
 
         _run(go())
 
@@ -1947,7 +1993,7 @@ class TestChannelManager:
 
             history_by_checkpoint: dict[tuple[str, str], list[str]] = {}
 
-            async def _runs_wait(thread_id, assistant_id, *, input, config, context, multitask_strategy=None, metadata=None):
+            async def _runs_wait(thread_id, assistant_id, *, input, config, context, multitask_strategy=None, metadata=None, on_disconnect=None):
                 del assistant_id, context  # unused in this test, kept for signature parity
 
                 checkpoint_ns = config.get("configurable", {}).get("checkpoint_ns")
@@ -5249,19 +5295,33 @@ class TestResolveRunParamsUserId:
         assert run_context["channel_user_id"] == "U-platform"
 
     def test_github_channel_gets_raised_recursion_limit(self):
-        """Autonomous GitHub coding runs (clone → edit → test → push → PR) need
-        more super-steps than an interactive chat turn. The default
-        ``recursion_limit`` of 100 is raised for the github channel only."""
+        """Autonomous GitHub coding runs (clone → edit → test → push → PR) get
+        a channel floor of 250 super-steps; other channels send no
+        ``recursion_limit`` and leave the budget to the Gateway."""
         manager = self._manager()
 
         gh_msg = InboundMessage(channel_name="github", chat_id="zhfeng/llm-gateway", user_id="zhfeng", text="hi")
         _, gh_config, _ = manager._resolve_run_params(gh_msg, "thread-1")
         assert gh_config["recursion_limit"] >= 250
 
-        # Interactive channels keep the default ceiling.
         slack_msg = InboundMessage(channel_name="slack", chat_id="C1", user_id="u", text="hi")
         _, slack_config, _ = manager._resolve_run_params(slack_msg, "thread-1")
-        assert slack_config["recursion_limit"] == 100
+        assert "recursion_limit" not in slack_config
+
+    def test_im_run_uses_gateway_configured_recursion_limit(self):
+        """An IM run without a session value gets the operator's top-level
+        ``recursion_limit``, like Gateway API runs, instead of a fixed 100."""
+        from app.gateway.services import build_run_config
+        from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
+
+        set_app_config(AppConfig.model_validate({"sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"}, "recursion_limit": 700}))
+        try:
+            manager = self._manager()
+            msg = InboundMessage(channel_name="telegram", chat_id="c", user_id="u", text="hi")
+            _, run_config, _ = manager._resolve_run_params(msg, "thread-1")
+            assert build_run_config("thread-1", run_config, None)["recursion_limit"] == 700
+        finally:
+            reset_app_config()
 
     def test_github_channel_recursion_limit_respects_higher_override(self):
         """An explicit higher recursion_limit in channel/user config must not be
@@ -5548,6 +5608,10 @@ class TestGithubFireAndForget:
             # multitask_strategy must still be ``reject`` — concurrent runs on
             # the same GitHub thread are surfaced via ConflictError below.
             assert create_args[1]["multitask_strategy"] == "reject"
+            # ``runs.create`` returns as soon as the run is pending, so there is
+            # no long-lived request whose disconnect could cancel the run — and
+            # the SDK's ``create`` has no ``on_disconnect`` parameter at all.
+            assert "on_disconnect" not in create_args[1]
 
         _run(go())
 
@@ -5727,6 +5791,249 @@ async def _stale_pin_drain_setup(thread_id, *, model, pin=None, session_model=No
     mock_client.runs.create = AsyncMock(side_effect=_make_allowlist_exc(model))
     manager._client = mock_client
     return manager, carrier_msg, mock_client, bus
+
+
+class TestChannelRunDisconnectPolicy:
+    """IM runs must outlive the HTTP request that created them.
+
+    The manager holds ``runs.wait`` / ``runs.stream`` open for the whole run,
+    and that request dies with the receiving Gateway instance: a leader
+    hand-off, a rolling restart, a crash. The Gateway's default
+    ``on_disconnect`` is ``cancel``, which would cancel the run itself, so
+    every long-lived channel request asks for ``continue``: the run finishes
+    and persists its thread state even though the IM reply is lost with the
+    transport.
+    """
+
+    def test_runs_wait_asks_gateway_to_continue_on_disconnect(self):
+        from app.channels.manager import CHANNEL_RUN_ON_DISCONNECT, ChannelManager
+
+        assert CHANNEL_RUN_ON_DISCONNECT == "continue"
+
+        async def go():
+            bus = MessageBus()
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+            mock_client = _make_mock_langgraph_client(thread_id="slack-thread-1")
+            manager._client = mock_client
+
+            await manager._handle_chat(InboundMessage(channel_name="slack", chat_id="C123", user_id="U1", text="hi"))
+
+            mock_client.runs.wait.assert_called_once()
+            wait_kwargs = mock_client.runs.wait.call_args.kwargs
+            assert wait_kwargs["on_disconnect"] == "continue"
+            assert wait_kwargs["multitask_strategy"] == "reject"
+
+        _run(go())
+
+    def test_runs_stream_asks_gateway_to_continue_on_disconnect(self):
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+            captured: dict[str, object] = {}
+
+            async def _stream(thread_id, assistant_id, **kwargs):  # noqa: ARG001
+                captured.update(kwargs)
+                yield _make_stream_part(
+                    "values",
+                    {
+                        "messages": [
+                            {"type": "human", "content": "hi"},
+                            {"type": "ai", "content": "done"},
+                        ],
+                        "artifacts": [],
+                    },
+                )
+
+            mock_client = _make_mock_langgraph_client(thread_id="feishu-thread-1")
+            mock_client.runs.stream = MagicMock(side_effect=_stream)
+            manager._client = mock_client
+
+            await manager._handle_chat(InboundMessage(channel_name="feishu", chat_id="chat1", user_id="user1", text="hi"))
+
+            mock_client.runs.stream.assert_called_once()
+            assert captured["on_disconnect"] == "continue"
+            assert captured["multitask_strategy"] == "reject"
+
+        _run(go())
+
+
+class TestDedupeKeySurvivesAdmittedRun:
+    """A provider redelivery must not start a second run for a turn the
+    Gateway may already be executing.
+
+    Channel runs are created with ``on_disconnect: continue`` (see
+    ``TestChannelRunDisconnectPolicy``), so a run outlives the manager worker
+    that requested it. Releasing the inbound dedupe key when that worker is
+    cancelled (a leader hand-off, a shutdown) would let the provider's
+    redelivery through on the replacement instance and execute the same turn
+    twice. The key is therefore released only while the manager still owns the
+    outcome: before the run request leaves it, or when the Gateway provably
+    rejected the request.
+    """
+
+    @staticmethod
+    def _message(channel: str) -> InboundMessage:
+        if channel == "github":
+            # Shaped like app.gateway.github.dispatcher.fanout_event output.
+            return InboundMessage(
+                channel_name="github",
+                chat_id="zhfeng/llm-gateway",
+                user_id="alice",
+                owner_user_id="alice",
+                text="@bot please review",
+                topic_id="7:reviewer",
+                workspace_id="zhfeng/llm-gateway",
+                metadata={"message_id": "d1:alice:reviewer", "agent_name": "reviewer"},
+            )
+        return InboundMessage(channel_name=channel, chat_id="C1", user_id="U1", text="hi", metadata={"event_id": "evt-1", "team_id": "T1"})
+
+    @staticmethod
+    def _manager(store: MemoryInboundDedupeStore, bus: MessageBus):
+        from app.channels.manager import ChannelManager
+
+        return ChannelManager(
+            bus=bus,
+            store=JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json"),
+            inbound_dedupe_store=store,
+            max_concurrency=1,
+            shutdown_grace_period_seconds=0,
+        )
+
+    @staticmethod
+    def _final_stream(*_args, **_kwargs):
+        async def gen():
+            yield _make_stream_part(
+                "values",
+                {"messages": [{"type": "human", "content": "hi"}, {"type": "ai", "content": "done"}], "artifacts": []},
+            )
+
+        return gen()
+
+    async def _hand_off(self, channel: str, *, block: str) -> tuple[MagicMock, bool]:
+        """Cancel instance A while it is blocked at *block*, then redeliver on B.
+
+        Returns B's LangGraph client and whether the dedupe key was still
+        recorded between A's cancellation and B's redelivery.
+        """
+        import app.gateway.github.run_policy  # noqa: F401 — register the fire-and-forget policy
+        from app.channels.manager import ChannelManager
+
+        store = MemoryInboundDedupeStore()
+        blocked = asyncio.Event()
+
+        async def _block(*_args, **_kwargs):
+            blocked.set()
+            await asyncio.Event().wait()
+
+        def _blocking_stream(*_args, **_kwargs):
+            async def gen():
+                yield _make_stream_part(
+                    "messages-tuple",
+                    [{"id": "ai-1", "content": "Partial", "type": "AIMessageChunk"}, {"langgraph_node": "agent"}],
+                )
+                blocked.set()
+                await asyncio.Event().wait()
+
+            return gen()
+
+        bus_a = MessageBus()
+        manager_a = self._manager(store, bus_a)
+        client_a = _make_mock_langgraph_client(thread_id="thread-a")
+        if block == "thread_create":
+            client_a.threads.create = AsyncMock(side_effect=_block)
+        elif block == "wait":
+            client_a.runs.wait = AsyncMock(side_effect=_block)
+        elif block == "stream":
+            client_a.runs.stream = MagicMock(side_effect=_blocking_stream)
+        elif block == "create":
+            client_a.runs.create = AsyncMock(side_effect=_block)
+        else:
+            raise AssertionError(block)
+        manager_a._client = client_a
+        await manager_a.start()
+        await bus_a.publish_inbound(self._message(channel))
+        await asyncio.wait_for(blocked.wait(), timeout=5)
+        # Grace period 0: stop() cancels the worker in the middle of the handler,
+        # exactly what a leader hand-off or a shutdown does.
+        await manager_a.stop()
+
+        key = ChannelManager._inbound_dedupe_key(self._message(channel))
+        assert key is not None
+        recorded_after_cancel = key in store._store
+
+        bus_b = MessageBus()
+        manager_b = self._manager(store, bus_b)
+        client_b = _make_mock_langgraph_client(thread_id="thread-b")
+        client_b.runs.stream = MagicMock(side_effect=self._final_stream)
+        client_b.runs.create = AsyncMock(return_value={"run_id": "run-b", "status": "pending"})
+        manager_b._client = client_b
+        await manager_b.start()
+        await bus_b.publish_inbound(self._message(channel))
+        await asyncio.wait_for(bus_b.join_inbound(), timeout=5)
+        await manager_b.stop()
+        return client_b, recorded_after_cancel
+
+    @staticmethod
+    def _run_requests(client: MagicMock) -> int:
+        return client.runs.wait.call_count + client.runs.stream.call_count + client.runs.create.call_count
+
+    @pytest.mark.parametrize(
+        ("channel", "block"),
+        [("slack", "wait"), ("feishu", "stream"), ("github", "create")],
+        ids=["slack-wait", "feishu-stream", "github-create"],
+    )
+    def test_cancel_after_the_run_request_keeps_the_key_so_redelivery_is_dropped(self, channel, block):
+        async def go():
+            client_b, recorded_after_cancel = await self._hand_off(channel, block=block)
+            assert recorded_after_cancel is True
+            assert self._run_requests(client_b) == 0
+
+        _run(go())
+
+    @pytest.mark.parametrize("channel", ["slack", "feishu", "github"])
+    def test_cancel_before_the_run_request_releases_the_key_so_redelivery_retries(self, channel):
+        async def go():
+            client_b, recorded_after_cancel = await self._hand_off(channel, block="thread_create")
+            assert recorded_after_cancel is False
+            assert self._run_requests(client_b) == 1
+
+        _run(go())
+
+    @pytest.mark.parametrize(
+        ("error", "kept"),
+        [
+            (httpx.ReadTimeout("read timed out"), True),
+            (httpx.RemoteProtocolError("peer closed connection"), True),
+            (httpx.ConnectError("connection refused"), False),
+            (RuntimeError("unexpected"), False),
+        ],
+        ids=["read-timeout-keeps", "protocol-error-keeps", "connect-error-releases", "unexpected-error-releases"],
+    )
+    def test_wait_failure_releases_the_key_only_when_the_gateway_cannot_have_admitted_the_run(self, error, kept):
+        """``/wait`` confirms admission only with its final response, so a
+        failure after the request was read by the Gateway (a read timeout, a
+        dropped connection) must keep the key: the run is still executing."""
+
+        async def go():
+            from app.channels.manager import ChannelManager
+
+            store = MemoryInboundDedupeStore()
+            manager = self._manager(store, MessageBus())
+            client = _make_mock_langgraph_client(thread_id="thread-1")
+            client.runs.wait = AsyncMock(side_effect=error)
+            manager._client = client
+            msg = self._message("slack")
+            assert await manager._is_duplicate_inbound(msg) is False  # recorded on receipt, as the worker does
+
+            await manager._handle_message(msg)
+
+            assert (ChannelManager._inbound_dedupe_key(msg) in store._store) is kept
+
+        _run(go())
 
 
 class TestGithubFollowupBuffer:
@@ -6513,7 +6820,7 @@ class TestGithubFollowupBuffer:
             def get_status(self):
                 return {}
 
-        def fake_from_app_config(app_config=None, *, get_stream_bridge=None, credentials_cipher=None):
+        def fake_from_app_config(app_config=None, *, get_stream_bridge=None, credentials_cipher=None, **_lease):
             captured["get_stream_bridge"] = get_stream_bridge
             return _FakeService()
 
@@ -6573,6 +6880,10 @@ class _BoundIdentityRepo:
                 "thread_id": thread_id,
             }
         )
+
+    async def claim_thread_id(self, **binding) -> str:
+        await self.set_thread_id(**binding)
+        return binding["thread_id"]
 
 
 class TestChannelManagerBoundIdentityPolicy:
@@ -7486,22 +7797,29 @@ class TestHandleChatWithArtifacts:
             manager._client = mock_client
 
             outbound_received = []
-            bus.subscribe_outbound(lambda msg: outbound_received.append(msg))
+            outbound_queue: asyncio.Queue[OutboundMessage] = asyncio.Queue()
+
+            async def record_outbound(msg: OutboundMessage) -> None:
+                outbound_received.append(msg)
+                await outbound_queue.put(msg)
+
+            bus.subscribe_outbound(record_outbound)
             await manager.start()
-
-            # Send two messages with the same topic_id (same thread)
-            for text in ["make report", "add chart"]:
-                msg = InboundMessage(
-                    channel_name="test",
-                    chat_id="c1",
-                    user_id="u1",
-                    text=text,
-                    topic_id="topic-dup",
-                )
-                await bus.publish_inbound(msg)
-
-            await _wait_for(lambda: len(outbound_received) >= 2)
-            await manager.stop()
+            try:
+                # Model completed turns on one thread; concurrent worker replies
+                # can arrive in either order after off-loop artifact preparation.
+                for text in ["make report", "add chart"]:
+                    msg = InboundMessage(
+                        channel_name="test",
+                        chat_id="c1",
+                        user_id="u1",
+                        text=text,
+                        topic_id="topic-dup",
+                    )
+                    await bus.publish_inbound(msg)
+                    await asyncio.wait_for(outbound_queue.get(), timeout=5.0)
+            finally:
+                await manager.stop()
 
             assert len(outbound_received) == 2
 
@@ -8045,6 +8363,104 @@ class TestFeishuChannel:
             assert json.loads(reply_request.body.content)["elements"][0]["content"] == "> What changed in the last run?\n\nthinking..."
             assert json.loads(first_patch_request.body.content)["elements"][0]["content"] == "> What changed in the last run?\n\nQueued behind another request"
             assert json.loads(final_patch_request.body.content)["elements"][0]["content"] == "> What changed in the last run?\n\nAnswer ready"
+
+        _run(go())
+
+    @staticmethod
+    def _streaming_alias_channel(tmp_path, *, fail_once: str | None = None):
+        """A Feishu channel with a running card and a store that records every alias write."""
+        from lark_oapi.api.im.v1 import (
+            CreateMessageReactionRequest,
+            CreateMessageReactionRequestBody,
+            Emoji,
+            PatchMessageRequest,
+            PatchMessageRequestBody,
+            ReplyMessageRequest,
+            ReplyMessageRequestBody,
+        )
+
+        from app.channels.feishu import FeishuChannel
+
+        class RecordingStore(JsonChannelStore):
+            def __init__(self, path):
+                super().__init__(path)
+                self.writes: list[str] = []
+                self.fail_once = fail_once
+
+            async def set_thread_id(self, channel_name, chat_id, thread_id, *, topic_id=None, user_id=""):
+                self.writes.append(topic_id)
+                if topic_id == self.fail_once:
+                    self.fail_once = None
+                    raise RuntimeError("offline store failure")
+                await super().set_thread_id(channel_name, chat_id, thread_id, topic_id=topic_id, user_id=user_id)
+
+        store = RecordingStore(tmp_path / "store.json")
+        channel = FeishuChannel(MessageBus(), config={"channel_store": store})
+        channel._api_client = MagicMock()
+        channel._ReplyMessageRequest = ReplyMessageRequest
+        channel._ReplyMessageRequestBody = ReplyMessageRequestBody
+        channel._PatchMessageRequest = PatchMessageRequest
+        channel._PatchMessageRequestBody = PatchMessageRequestBody
+        channel._CreateMessageReactionRequest = CreateMessageReactionRequest
+        channel._CreateMessageReactionRequestBody = CreateMessageReactionRequestBody
+        channel._Emoji = Emoji
+        reply_response = MagicMock()
+        reply_response.data.message_id = "om-running-card"
+        channel._api_client.im.v1.message.reply = MagicMock(return_value=reply_response)
+        channel._api_client.im.v1.message.patch = MagicMock()
+        channel._api_client.im.v1.message_reaction.create = MagicMock()
+        return channel, store
+
+    @staticmethod
+    def _streamed_chunk(text: str, *, is_final: bool) -> OutboundMessage:
+        return OutboundMessage(
+            channel_name="feishu",
+            chat_id="chat-1",
+            thread_id="thread-1",
+            text=text,
+            is_final=is_final,
+            thread_ts="om-source-msg",
+            metadata={"user_id": "ou-user", "message_id": "om-source-msg", "topic_id": "om-root", "root_id": "om-root", "parent_id": "om-parent", "thread_id": "omt-thread"},
+        )
+
+    def test_streaming_writes_each_thread_alias_once_per_reply(self, tmp_path):
+        aliases = ["om-source-msg", "om-running-card", "om-root", "om-parent", "omt-thread"]
+
+        async def go():
+            channel, store = self._streaming_alias_channel(tmp_path)
+            await channel._send_running_reply("om-source-msg")
+
+            await channel.send(self._streamed_chunk("He", is_final=False))
+            assert store.writes == aliases
+
+            for text in ("Hell", "Hello", "Hello wo"):
+                await channel.send(self._streamed_chunk(text, is_final=False))
+            assert store.writes == aliases
+            assert channel._api_client.im.v1.message.patch.call_count == 4
+
+            # An alias dropped mid-stream is restored: the final outbound writes
+            # every alias again, as each chunk used to.
+            await store.remove("feishu", "chat-1", topic_id="om-parent")
+            await channel.send(self._streamed_chunk("Hello world", is_final=True))
+            assert store.writes == aliases * 2
+            for topic_id in aliases:
+                assert await store.get_thread_id("feishu", "chat-1", topic_id=topic_id) == "thread-1"
+            assert "om-source-msg" not in channel._remembered_thread_aliases
+
+        _run(go())
+
+    def test_streaming_retries_a_failed_thread_alias_on_the_next_chunk(self, tmp_path):
+        async def go():
+            channel, store = self._streaming_alias_channel(tmp_path, fail_once="om-root")
+            await channel._send_running_reply("om-source-msg")
+
+            await channel.send(self._streamed_chunk("He", is_final=False))
+            assert await store.get_thread_id("feishu", "chat-1", topic_id="om-root") is None
+
+            store.writes.clear()
+            await channel.send(self._streamed_chunk("Hello", is_final=False))
+            assert store.writes == ["om-root"]
+            assert await store.get_thread_id("feishu", "chat-1", topic_id="om-root") == "thread-1"
 
         _run(go())
 
@@ -10670,7 +11086,7 @@ class TestSlackAllowedUsers:
         assert inbound.text == "/help"
         assert inbound.msg_type == InboundMessageType.COMMAND
 
-    def test_scalar_allowed_users_warns_and_matches_stringified_event_user_id(self, caplog):
+    def test_numeric_scalar_allowed_users_matches_stringified_event_user_id(self, caplog):
         from app.channels.slack import SlackChannel
 
         bus = MessageBus()
@@ -10697,10 +11113,72 @@ class TestSlackAllowedUsers:
         ):
             channel._handle_message_event(event)
 
-        assert "Slack allowed_users should be a list" in caplog.text
+        # A scalar is one entry under the shared allowlist contract, not a misconfiguration.
+        assert caplog.records == []
         channel._loop.call_soon_threadsafe.assert_called_once()
         inbound = bus.get_inbound_nowait()
         assert inbound.user_id == "123456"
+
+    @pytest.mark.parametrize(
+        ("allowed_users", "admitted"),
+        [([""], False), ({"U123456": True}, False), ([" U123456 "], True), (frozenset({"U123456"}), True)],
+        ids=["blank-entry", "mapping", "padded-entry", "frozenset"],
+    )
+    def test_allowlist_gate_uses_parsed_user_ids(self, allowed_users, admitted):
+        from app.channels.slack import SlackChannel
+
+        bus = MessageBus()
+        channel = SlackChannel(bus=bus, config={"allowed_users": allowed_users})
+        channel._loop = self._immediate_loop()
+        channel._add_reaction = MagicMock()
+        channel._send_running_reply = MagicMock()
+
+        event = {"user": "U123456", "text": "hello from slack", "channel": "C123", "ts": "1710000000.000100"}
+        with patch("app.channels.slack.asyncio.run_coroutine_threadsafe", side_effect=self._submit_coro):
+            channel._handle_message_event(event)
+
+        assert (not bus.inbound_queue.empty()) is admitted
+        assert channel._add_reaction.called is admitted
+
+    @pytest.mark.parametrize("allowed_users", [None, [], (), set(), frozenset(), "", " "])
+    def test_unset_or_empty_allowlist_allows_everyone_quietly(self, allowed_users, caplog):
+        from app.channels.slack import _parse_allowed_users
+
+        with caplog.at_level(logging.WARNING, logger="app.channels.slack"):
+            assert _parse_allowed_users(allowed_users) is None
+        assert caplog.records == []
+
+    @pytest.mark.parametrize("allowed_users", ["U123456,U654321", ","])
+    def test_scalar_with_separators_stays_one_literal_id_and_warns(self, allowed_users, caplog):
+        from app.channels.slack import _parse_allowed_users
+
+        with caplog.at_level(logging.WARNING, logger="app.channels.slack"):
+            assert _parse_allowed_users(allowed_users) == {allowed_users}
+        assert "YAML list" in caplog.text
+
+    def test_invalid_entries_are_dropped_with_a_warning(self, caplog):
+        from app.channels.slack import _parse_allowed_users
+
+        with caplog.at_level(logging.WARNING, logger="app.channels.slack"):
+            assert _parse_allowed_users(["U123456", True, 4.2, None, "  "]) == {"U123456"}
+        assert "True" in caplog.text
+        assert "4.2" in caplog.text
+        assert not any(record.levelno == logging.ERROR for record in caplog.records)
+
+    @pytest.mark.parametrize(
+        "allowed_users",
+        [[""], ["", "  "], [None], [True], {"U123456": True}, {}, True, 4.2],
+        ids=["blank-entry", "blank-entries", "null-entry", "bool-entry", "mapping", "empty-mapping", "bool-scalar", "float-scalar"],
+    )
+    def test_allowlist_without_a_valid_user_id_denies_everyone(self, allowed_users, caplog):
+        # A mapping must not authorize its keys, and a list whose entries are
+        # all blank (e.g. ``[$SLACK_USER_ID]`` with the variable set to an
+        # empty string) must not turn into "allow all".
+        from app.channels.slack import _parse_allowed_users
+
+        with caplog.at_level(logging.ERROR, logger="app.channels.slack"):
+            assert _parse_allowed_users(allowed_users) == frozenset()
+        assert any(record.levelno == logging.ERROR for record in caplog.records)
 
     def test_raises_after_all_retries_exhausted(self):
         from app.channels.slack import SlackChannel
@@ -11440,7 +11918,7 @@ class TestTelegramInboundMessages:
                 ch._tg_loop = telegram_loop
                 ch._thread = loop_thread
                 ch._running = True
-                ch._application = SimpleNamespace(bot=SimpleNamespace())
+                ch._application = SimpleNamespace(bot=SimpleNamespace(shutdown=AsyncMock()), updater=SimpleNamespace(running=False), running=False, shutdown=AsyncMock())
                 ch._download_bot = DownloadBot()
 
                 stop_task = asyncio.create_task(ch.stop())
@@ -11512,7 +11990,7 @@ class TestTelegramInboundMessages:
                 ch._tg_loop = telegram_loop
                 ch._thread = loop_thread
                 ch._running = True
-                ch._application = SimpleNamespace(bot=SimpleNamespace())
+                ch._application = SimpleNamespace(bot=SimpleNamespace(shutdown=AsyncMock()), updater=SimpleNamespace(running=False), running=False, shutdown=AsyncMock())
                 ch._download_bot = DownloadBot()
 
                 first = asyncio.create_task(ch.stop())
@@ -11577,7 +12055,7 @@ class TestTelegramInboundMessages:
                 ch._tg_loop = telegram_loop
                 ch._thread = loop_thread
                 ch._running = True
-                ch._application = SimpleNamespace(bot=SimpleNamespace())
+                ch._application = SimpleNamespace(bot=SimpleNamespace(shutdown=AsyncMock()), updater=SimpleNamespace(running=False), running=False, shutdown=AsyncMock())
                 ch._download_bot = DownloadBot()
                 monkeypatch.setattr(telegram_module, "TELEGRAM_SHUTDOWN_TIMEOUT_SECONDS", 0.01)
 
@@ -12701,6 +13179,7 @@ class TestTelegramStreaming:
                 chat_id=12345,
                 text="Working on it...",
                 reply_to_message_id=42,
+                allow_sending_without_reply=True,
             )
 
         _run(go())
@@ -13084,12 +13563,22 @@ class TestHandleGoalCommand:
     """Covers the IM-channel ``/goal`` handler (get/set/clear via the Gateway)."""
 
     @staticmethod
-    def _install_mock_httpx(monkeypatch, calls, *, goal_payload=None, fail_method=None):
+    def _install_mock_httpx(monkeypatch, calls, *, goal_payload=None, fail_method=None, state_values=None, state_status=200, runs=()):
         class MockResponse:
+            def __init__(self, url):
+                self.url = url
+
             def raise_for_status(self):
-                return None
+                if self.url.endswith("/state") and state_status != 200:
+                    request = httpx.Request("GET", self.url)
+                    raise httpx.HTTPStatusError("state unavailable", request=request, response=httpx.Response(state_status, request=request))
 
             def json(self):
+                # The Gateway endpoints the status reply reads, routed by path.
+                if self.url.endswith("/state"):
+                    return {"values": dict(state_values or {})}
+                if "/runs/page" in self.url:
+                    return {"data": list(runs), "has_more": False}
                 return {"goal": goal_payload}
 
         class MockAsyncClient:
@@ -13106,7 +13595,7 @@ class TestHandleGoalCommand:
                 calls.append({"method": method, "url": url, **kwargs})
                 if fail_method == method:
                     raise RuntimeError("gateway down")
-                return MockResponse()
+                return MockResponse(url)
 
             async def get(self, url, **kwargs):
                 return await self._record("get", url, **kwargs)
@@ -13120,12 +13609,12 @@ class TestHandleGoalCommand:
         monkeypatch.setattr("app.channels.manager.httpx.AsyncClient", MockAsyncClient)
 
     @staticmethod
-    def _make_manager(monkeypatch, *, thread_id):
+    def _make_manager(monkeypatch, *, thread_id, **kwargs):
         from app.channels.manager import ChannelManager
 
         bus = MessageBus()
         store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
-        manager = ChannelManager(bus=bus, store=store, gateway_url="http://gateway:8001")
+        manager = ChannelManager(bus=bus, store=store, gateway_url="http://gateway:8001", **kwargs)
 
         async def _lookup(msg):
             return thread_id
@@ -13157,7 +13646,7 @@ class TestHandleGoalCommand:
 
     def test_status_with_active_goal_reports_objective(self, monkeypatch):
         calls = []
-        self._install_mock_httpx(monkeypatch, calls, goal_payload={"objective": "ship it"})
+        self._install_mock_httpx(monkeypatch, calls, goal_payload={"objective": "ship it", "status": "active"})
 
         async def go():
             manager = self._make_manager(monkeypatch, thread_id="t-1")
@@ -13165,6 +13654,71 @@ class TestHandleGoalCommand:
             assert reply == "Goal: ship it"
             assert calls[0]["method"] == "get"
             assert calls[0]["url"].endswith("/api/threads/t-1/goal")
+            # An active goal also asks whether a run is in flight, never for the met record.
+            assert [call["url"].removeprefix("http://gateway:8001") for call in calls[1:]] == ["/api/threads/t-1/runs/page?limit=1"]
+
+        _run(go())
+
+    # The evaluator's own words: never part of an IM reply (host codes only).
+    _EVALUATOR_NOTE = "The checker says the provider returned 401 for token sk-secret"
+
+    @pytest.mark.parametrize(
+        ("goal_fields", "run_status", "state_line"),
+        [
+            pytest.param({}, "running", "In progress.", id="in-progress"),
+            pytest.param({"last_evaluation": {"satisfied": False, "stand_down_reason": "blocked:needs_user_input"}}, "pending", "In progress.", id="in-flight-run-hides-earlier-stand-down"),
+            pytest.param({"continuation_count": 2, "last_evaluation": {"satisfied": False}}, "running", "In progress: auto-continued 2/8 times.", id="continuing"),
+            pytest.param({"continuation_count": 8, "last_evaluation": {"satisfied": False, "stand_down_reason": "max_continuations_reached"}}, "success", "Stopped: the continuation limit was reached.", id="stopped-at-limit"),
+            pytest.param({"last_evaluation": {"satisfied": False, "stand_down_reason": "no_progress_detected"}}, "success", "Stopped: no progress was made between turns.", id="stopped-no-progress"),
+            pytest.param({"max_continuations": 0, "last_evaluation": {"satisfied": False, "stand_down_reason": "max_continuations_reached"}}, "success", "Stopped: the goal is not met yet.", id="stopped-auto-continue-off"),
+            pytest.param({"last_evaluation": {"satisfied": False, "stand_down_reason": "blocked:needs_user_input"}}, "success", "Waiting for you: it needs your input.", id="waiting-for-you"),
+            pytest.param({"last_evaluation": {"satisfied": False, "stand_down_reason": "blocked:external_wait"}}, "error", "Waiting: it is waiting on something external.", id="waiting"),
+            pytest.param({"last_evaluation": {"satisfied": False, "stand_down_reason": "no_durable_end_of_turn"}}, "success", "No final reply was saved. It's checked again after your next message.", id="unchecked"),
+            pytest.param({"last_evaluation": {"satisfied": False, "stand_down_reason": "a_code_from_a_newer_server"}}, "success", "Stopped.", id="unknown-code-is-not-shown"),
+            pytest.param({"continuation_count": 3, "last_evaluation": {"satisfied": False}}, "success", "Paused: auto-continued 3/8 times; the run ended before the goal was confirmed.", id="paused"),
+            pytest.param({}, "success", None, id="set"),
+        ],
+    )
+    def test_status_reports_goal_state_like_the_web_goal_bar(self, monkeypatch, goal_fields, run_status, state_line):
+        goal = {"objective": "ship it", "status": "active", "continuation_count": 0, "max_continuations": 8, **goal_fields}
+        if "last_evaluation" in goal:
+            goal["last_evaluation"] = {**goal["last_evaluation"], "reason": self._EVALUATOR_NOTE}
+        calls = []
+        self._install_mock_httpx(monkeypatch, calls, goal_payload=goal, runs=[{"run_id": "r-1", "status": run_status}])
+
+        async def go():
+            manager = self._make_manager(monkeypatch, thread_id="t-1")
+            reply = await manager._handle_goal_command(self._msg("/goal"), "")
+            assert reply == "\n".join(["Goal: ship it"] + ([state_line] if state_line else []))
+            assert "401" not in reply and "secret" not in reply
+
+        _run(go())
+
+    @pytest.mark.parametrize(
+        ("relied_on_assumption", "expected"),
+        [(False, "Goal met: ship it"), (True, "Goal met, with an assumption: ship it")],
+    )
+    def test_status_reports_a_met_goal_from_its_outcome_record(self, monkeypatch, relied_on_assumption, expected):
+        # A met goal is cleared (GET /goal says none) and recorded as goal_outcome.
+        outcome = {
+            "status": "achieved",
+            "objective": "ship it",
+            "goal_created_at": "2026-10-26T08:00:00Z",
+            "achieved_at": "2026-10-26T08:30:00Z",
+            "continuation_count": 1,
+            "max_continuations": 8,
+            "reason": self._EVALUATOR_NOTE,
+            "relied_on_assumption": relied_on_assumption,
+            "reply_message_id": "ai-1",
+        }
+        calls = []
+        self._install_mock_httpx(monkeypatch, calls, goal_payload=None, state_values={"goal_outcome": outcome})
+
+        async def go():
+            manager = self._make_manager(monkeypatch, thread_id="t-1")
+            reply = await manager._handle_goal_command(self._msg("/goal"), "")
+            assert reply == expected
+            assert [call["url"].removeprefix("http://gateway:8001") for call in calls] == ["/api/threads/t-1/goal", "/api/threads/t-1/state"]
 
         _run(go())
 
@@ -13176,6 +13730,59 @@ class TestHandleGoalCommand:
             manager = self._make_manager(monkeypatch, thread_id="t-1")
             reply = await manager._handle_goal_command(self._msg("/goal"), "")
             assert reply == "No active goal."
+
+        _run(go())
+
+    @pytest.mark.parametrize(("state_status", "expected"), [(404, "No active goal."), (500, "Failed to fetch goal information.")])
+    def test_status_when_the_thread_state_cannot_be_read(self, monkeypatch, state_status, expected):
+        # 404: a bound thread with no checkpoint yet, so nothing was ever met there.
+        calls = []
+        self._install_mock_httpx(monkeypatch, calls, goal_payload=None, state_status=state_status)
+
+        async def go():
+            manager = self._make_manager(monkeypatch, thread_id="t-1")
+            assert await manager._handle_goal_command(self._msg("/goal"), "") == expected
+
+        _run(go())
+
+    def test_goal_replies_follow_the_owner_language(self, monkeypatch):
+        from dataclasses import replace
+
+        from app.channels.reply_locale import ReplyLocaleResolver
+
+        lookups = []
+
+        class _Preferences:  # stands in for the user_preferences table
+            def __init__(self, sessions):
+                pass
+
+            async def get(self, user_id):
+                lookups.append(user_id)
+                return {"locale": "zh-CN"} if user_id == "owner-zh" else {}
+
+        monkeypatch.setattr("app.channels.reply_locale.UserPreferencesRepository", _Preferences)
+        stopped = {"objective": "写周报", "status": "active", "continuation_count": 8, "max_continuations": 8, "last_evaluation": {"satisfied": False, "stand_down_reason": "max_continuations_reached"}}
+        outcome = {"status": "achieved", "objective": "写周报", "goal_created_at": "", "relied_on_assumption": False}
+        resolver = ReplyLocaleResolver(session_factory=object(), default_locale="en-US")
+
+        async def reply(args, owner, **mock):
+            calls = []
+            self._install_mock_httpx(monkeypatch, calls, **mock)
+            manager = self._make_manager(monkeypatch, thread_id="t-1", reply_locale=resolver)
+            msg = replace(self._msg(f"/goal {args}".strip()), owner_user_id=owner)
+            return await manager._handle_goal_command(msg, args)
+
+        async def go():
+            assert await reply("", "owner-zh", goal_payload=stopped) == "目标：写周报\n已停止：已达到继续处理的次数上限。"
+            assert await reply("", "owner-zh", goal_payload=None, state_values={"goal_outcome": outcome}) == "目标已达成：写周报"
+            assert await reply("", "owner-zh", goal_payload=None) == "当前没有目标。"
+            assert await reply("", "owner-zh", fail_method="get") == "无法获取目标信息。"
+            assert await reply("clear", "owner-zh") == "目标已清除。"
+            assert await reply("clear", "owner-zh", fail_method="delete") == "无法清除目标。"
+            assert await reply("do X", "owner-zh", fail_method="put") == "无法设置目标。"
+            # No language preference: the configured default (en-US here).
+            assert await reply("", "owner-en", goal_payload=stopped) == "Goal: 写周报\nStopped: the continuation limit was reached."
+            assert set(lookups) == {"owner-zh", "owner-en"}
 
         _run(go())
 
@@ -13235,12 +13842,12 @@ class TestHandleGoalCommand:
             chats = []
 
             async def _create(client, msg):
-                return "new-thread"
+                return "new-thread", True
 
             async def _handle_chat(msg, **kwargs):
                 chats.append((msg, kwargs))
 
-            monkeypatch.setattr(manager, "_create_thread", _create)
+            monkeypatch.setattr(manager, "_create_first_thread", _create)
             monkeypatch.setattr(manager, "_get_client", lambda: object())
             monkeypatch.setattr(manager, "_handle_chat", _handle_chat)
 

@@ -90,6 +90,7 @@ _artifact_archive_slots = asyncio.Semaphore(4)
 _MISSING_REGENERATE_BASE_DETAIL = "Could not find an addressable checkpoint before the target user message"
 _UNSAFE_REGENERATE_LINEAGE_DETAIL = "Could not safely resolve the checkpoint before the target user message"
 THREAD_MESSAGE_LEGACY_SCAN_BATCH = 201
+MAX_EVENT_TYPE_FILTERS = 100
 _LEGACY_IDEMPOTENCY_REQUEST_KEY = "idempotency_request"
 
 
@@ -104,23 +105,32 @@ IdempotencyKeyHeader = Annotated[
 
 
 def _scope_http_run_idempotency_key(request: Request, thread_id: str, key: str | None) -> str | None:
-    """Namespace a caller key for the process-wide run idempotency index."""
+    """Namespace a caller key for the process-wide run idempotency index.
+
+    Browser and API keys are scoped by owner and thread. A trusted internal
+    caller's key is scoped by owner only: the IM channel manager derives it
+    from the provider message, and a redelivery may be requested on another
+    thread once ``/new`` rebound the conversation; it must then meet the run
+    admitted for the first delivery (a 409) instead of starting a second one.
+    """
     if not isinstance(key, str):
         return None
     key = key.strip()
     if not key:
         raise HTTPException(status_code=422, detail="Idempotency-Key must not be blank")
     owner_id = get_trusted_internal_owner_user_id(request)
+    user = getattr(request.state, "user", None)
     if owner_id is None:
-        user = getattr(request.state, "user", None)
         user_id = getattr(user, "id", None)
         owner_id = str(user_id) if user_id is not None else get_effective_user_id()
+    if getattr(user, "system_role", None) == INTERNAL_SYSTEM_ROLE:
+        return "internal-run:" + hashlib.sha256(f"{owner_id}\0{key}".encode()).hexdigest()
     digest = hashlib.sha256(f"{owner_id}\0{thread_id}\0{key}".encode()).hexdigest()
     return f"http-run:{digest}"
 
 
 async def _refresh_store_backed_run(run_mgr: Any, record: Any) -> Any:
-    """Overlay durable status/error onto a hydrated store-only record."""
+    """Overlay durable status/error/stop reason onto a hydrated store-only record."""
     if not getattr(record, "store_only", False):
         return record
     store = getattr(run_mgr, "_store", None)
@@ -144,6 +154,8 @@ async def _refresh_store_backed_run(run_mgr: Any, record: Any) -> Any:
             pass
     if "error" in row:
         record.error = row.get("error")
+    if "stop_reason" in row:
+        record.stop_reason = row.get("stop_reason")
     return record
 
 
@@ -1841,7 +1853,15 @@ async def list_run_events(
     await _require_run_visible_to_scope(run_id, thread_id, request)
     user_id = await _run_scope_user_id(request, thread_id)
     event_store = get_run_event_store(request)
-    types = event_types.split(",") if event_types else None
+    if event_types:
+        types = event_types.split(",")
+        if len(types) > MAX_EVENT_TYPE_FILTERS:
+            raise HTTPException(
+                status_code=422,
+                detail=f"event_types accepts at most {MAX_EVENT_TYPE_FILTERS} values",
+            )
+    else:
+        types = None
     events = await event_store.list_events(
         thread_id,
         run_id,

@@ -14,7 +14,7 @@ from weakref import WeakValueDictionary
 from deerflow_extension_api import AgentRunError
 from deerflow_extension_api.agent_runs import AGENT_RUNS_CONTEXT_KEY
 
-from . import history
+from . import history, shared_state
 from .store import TERMINAL, Store
 
 NAMESPACE = "community.agent-teams"
@@ -45,10 +45,13 @@ def identity(*parts):
 
 
 def shared(team):
-    messages = team["messages"][-8:]
-    while messages and len(json.dumps(messages, ensure_ascii=False).encode()) > 24000:
-        messages = messages[1:]
-    return {"team_id": team["id"], "goal": team["goal"], "members": [{k: m[k] for k in ("id", "name", "agent")} for m in team["members"]], "messages": messages}
+    result = shared_state.context_projection(team)
+    result["messages"] = team["messages"][-8:]
+    while result["messages"] and len(json.dumps(result, ensure_ascii=False).encode()) > 24000:
+        result["messages"] = result["messages"][1:]
+    if len(json.dumps(result, ensure_ascii=False).encode()) > 24000:
+        raise ValueError("Stored team context exceeds the response budget")
+    return result
 
 
 def pending_clarification(messages):
@@ -222,6 +225,7 @@ class Teams:
         # Never project frozen run inputs or process-local capabilities.
         result = {
             **team,
+            "public_state": shared_state.snapshot(team, include_archived=True),
             "connected": (owner, team_id) in self.handles,
             "total_jobs": len(team["jobs"]),
             "jobs": jobs,
@@ -299,6 +303,15 @@ class Teams:
     async def read_context(self, payload, context):
         fields(payload, "team_id")
         return shared(await self.member_snapshot(payload, context))
+
+    async def publish_state(self, payload, context):
+        return await self.db("change", context.principal.user_id, text(payload, "team_id", 64), lambda team: shared_state.publish(team, payload, context))
+
+    async def read_state(self, payload, context):
+        return shared_state.read(await self.member_snapshot(payload, context), payload)
+
+    async def update_state(self, payload, context):
+        return await self.db("change", context.principal.user_id, text(payload, "team_id", 64), lambda team: shared_state.update(team, payload, context))
 
     async def member_snapshot(self, payload, context):
         team = await self.db("get", context.principal.user_id, text(payload, "team_id", 64))
@@ -566,6 +579,7 @@ class Teams:
                 "If you are a listed member, use your available peer-request tool only when another member needs to do additional work. "
                 "Use the exact registered tool names in your tool list. Your final answer is automatically returned to the requester. "
                 "Retrieve earlier retained evidence with your available team history/result tools when needed. "
+                "Use the available team state tools to publish durable objectives, plans, findings, questions and requirements. Read an entry before updating its revision. "
                 "Do not send a separate peer request just to report completion. Do not wait in a polling loop.\n"
             ) + json.dumps({"request": job["text"], "your_member_id": job["member_id"], "source_thread": job["source"], "kind": job["kind"], **shared(team)}, ensure_ascii=False)
             # Freeze and persist input before start(): tick releases reservations only while input is None.

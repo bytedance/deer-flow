@@ -34,6 +34,7 @@ export const GOAL_HOST_REASON_TEXTS: readonly string[] = [
   "No visible assistant evidence is available yet.",
   "The turn ended on a question to the user that has not been answered.",
   "No durable assistant end-of-turn receipt was available.",
+  "The run reached its step limit before finishing.",
 ];
 
 export function isThreadGoalOutcome(
@@ -153,6 +154,8 @@ type StopRow = { stop: GoalStopKey; chip: GoalBarChip };
 const STOP_BY_REASON: Partial<Record<GoalReasonKey, StopRow>> = {
   noProgress: { stop: "noProgress", chip: "stopped" },
   tokenCapped: { stop: "tokenCapped", chip: "stopped" },
+  loopCapped: { stop: "loopCapped", chip: "stopped" },
+  recursionCapped: { stop: "recursionCapped", chip: "stopped" },
   missingEvidence: { stop: "missingEvidence", chip: "stopped" },
   runFailed: { stop: "runFailed", chip: "stopped" },
   externalWait: { stop: "external", chip: "waiting" },

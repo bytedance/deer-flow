@@ -12,11 +12,12 @@ from typing import Any, Literal
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
-from app.channels.capabilities import supports_proactive_notifications
+from app.channels.capabilities import supports_proactive_group_notifications, supports_proactive_notifications
 from app.channels.runtime_config_store import (
-    ChannelRuntimeConfigStore,
+    RuntimeConfigStore,
     apply_runtime_connection_config,
     merge_runtime_channel_configs,
+    resolve_runtime_config_store,
 )
 from app.channels.wechat_qr_login import QRLoginError, WechatQRLogin
 from app.gateway.deps import require_admin_user
@@ -57,6 +58,7 @@ class ChannelProviderResponse(BaseModel):
     # Whether scheduled-task updates can be pushed to this app (the provider
     # implements proactive push); Settings labels each provider card with it.
     proactive_notifications: bool = False
+    proactive_group_notifications: bool = False
 
 
 class ChannelProvidersResponse(BaseModel):
@@ -87,6 +89,10 @@ class ChannelConnectResponse(BaseModel):
     code: str
     instruction: str
     expires_in: int
+
+
+class ChannelConnectRequest(BaseModel):
+    group_name: str | None = Field(default=None, max_length=256)
 
 
 class WechatQRLoginResponse(BaseModel):
@@ -177,34 +183,34 @@ def _get_app_config():
     return get_app_config()
 
 
-async def _get_runtime_config_store(request: Request) -> ChannelRuntimeConfigStore:
+async def _get_runtime_config_store(request: Request) -> RuntimeConfigStore:
+    """The runtime config store, resolved once per process; every call on it blocks, so offload them."""
     store = getattr(request.app.state, "channel_runtime_config_store", None)
-    if isinstance(store, ChannelRuntimeConfigStore):
+    if store is not None:
         return store
-    # Constructing the store reads its JSON file from disk; keep it off the
-    # event loop.
-    store = await asyncio.to_thread(ChannelRuntimeConfigStore)
+    # Resolving reads paths (and the JSON store's file) from disk; keep it off
+    # the event loop. The database store holds no state of its own.
+    store = await asyncio.to_thread(resolve_runtime_config_store, _get_app_config(), cipher=getattr(request.app.state, "credentials_cipher", None))
     request.app.state.channel_runtime_config_store = store
     return store
 
 
 async def _get_channel_connections_config(request: Request) -> ChannelConnectionsConfig:
+    # Re-read on every request, never cached on app.state: another Gateway
+    # instance may have saved the runtime config (e.g. the Telegram username)
+    # since the last one.
     config = getattr(request.app.state, "channel_connections_config", None)
     if not isinstance(config, ChannelConnectionsConfig):
         config = _get_app_config().channel_connections
-    config = apply_runtime_connection_config(config, store=await _get_runtime_config_store(request))
-    request.app.state.channel_connections_config = config
-    return config
+    if not (config.enabled and config.telegram.enabled):
+        # Only the Telegram deep-link username comes from the runtime store.
+        return config
+    return await asyncio.to_thread(apply_runtime_connection_config, config, store=await _get_runtime_config_store(request))
 
 
 async def _get_channels_config(request: Request) -> dict[str, Any]:
-    state_config = getattr(request.app.state, "channels_config", None)
-    if isinstance(state_config, dict):
-        return state_config
-
-    result = await _load_channels_config(request, await _get_channel_connections_config(request))
-    request.app.state.channels_config = result
-    return result
+    """``channels.*`` from config.yaml with the runtime config overlaid, read fresh for every request."""
+    return await _load_channels_config(request, await _get_channel_connections_config(request))
 
 
 async def _load_channels_config(request: Request, config: ChannelConnectionsConfig) -> dict[str, Any]:
@@ -212,11 +218,7 @@ async def _load_channels_config(request: Request, config: ChannelConnectionsConf
     extra = app_config.model_extra or {}
     channels_config = extra.get("channels")
     result = dict(channels_config) if isinstance(channels_config, dict) else {}
-    merge_runtime_channel_configs(
-        result,
-        config,
-        store=await _get_runtime_config_store(request),
-    )
+    await asyncio.to_thread(merge_runtime_channel_configs, result, config, store=await _get_runtime_config_store(request))
     return result
 
 
@@ -358,6 +360,7 @@ async def _create_state(
     *,
     owner_user_id: str,
     provider: str,
+    metadata: dict[str, Any] | None = None,
 ) -> str:
     now = datetime.now(UTC)
     state = _new_binding_code()
@@ -370,6 +373,7 @@ async def _create_state(
         expires_at=now + timedelta(seconds=_STATE_TTL_SECONDS),
         max_pending=_MAX_PENDING_CONNECT_CODES_PER_PROVIDER,
         now=now,
+        metadata=metadata,
     )
     if not inserted:
         raise HTTPException(
@@ -483,6 +487,7 @@ def _provider_response(
         credential_fields=_credential_fields(provider),
         credential_values=credential_values,
         proactive_notifications=supports_proactive_notifications(provider),
+        proactive_group_notifications=supports_proactive_group_notifications(provider),
     )
 
 
@@ -578,7 +583,14 @@ async def get_channel_connections(request: Request) -> ChannelConnectionsRespons
         return ChannelConnectionsResponse(connections=[])
     repo = _get_repository(request, config)
     rows = await repo.list_connections(_get_user_id(request))
-    return ChannelConnectionsResponse(connections=[ChannelConnectionResponse(**row) for row in rows])
+    connections = []
+    for row in rows:
+        if row.get("provider") == "wechat":
+            # Old bindings stored this private routing token in metadata. New
+            # workers keep it encrypted; never return legacy tokens to browsers.
+            row = {**row, "metadata": {key: value for key, value in (row.get("metadata") or {}).items() if key != "context_token"}}
+        connections.append(ChannelConnectionResponse(**row))
+    return ChannelConnectionsResponse(connections=connections)
 
 
 @router.delete("/connections/{connection_id}", status_code=204)
@@ -644,7 +656,7 @@ async def _disconnect_channel_provider_runtime(provider: str, request: Request) 
 
 
 @router.post("/{provider}/connect", response_model=ChannelConnectResponse)
-async def connect_channel_provider(provider: str, request: Request) -> ChannelConnectResponse:
+async def connect_channel_provider(provider: str, request: Request, body: ChannelConnectRequest | None = None) -> ChannelConnectResponse:
     config = await _get_channel_connections_config(request)
     channels_config = await _get_channels_config(request)
     if not config.enabled:
@@ -663,10 +675,14 @@ async def connect_channel_provider(provider: str, request: Request) -> ChannelCo
         raise HTTPException(status_code=400, detail="Channel provider is not configured")
 
     repo = _get_repository(request, config)
+    group_name = body.group_name.strip() if body and body.group_name else ""
+    if group_name and not supports_proactive_group_notifications(provider):
+        raise HTTPException(status_code=422, detail="This channel does not support notification group names.")
     code = await _create_state(
         repo,
         owner_user_id=_get_user_id(request),
         provider=provider,
+        metadata={"notification_group_name": group_name} if group_name else None,
     )
     return ChannelConnectResponse(
         provider=provider,
@@ -724,7 +740,11 @@ async def _commit_runtime_channel_config(
     provider: str,
     runtime_config: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    """Persist one runtime config change and reconcile the live cache atomically to cancellation."""
+    """Persist one runtime config change, owned across cancellation, and return the config as now stored.
+
+    The write bumps the provider's version in a database store, which is how
+    the instance holding the provider's leader lease learns about it.
+    """
 
     async def _commit() -> dict[str, Any]:
         store = await _get_runtime_config_store(request)
@@ -732,22 +752,21 @@ async def _commit_runtime_channel_config(
             await run_drained_write("Disconnect channel runtime config", store.set_provider_disconnected, (), provider)
         else:
             await run_drained_write("Save channel runtime config", store.set_provider_config, (), provider, runtime_config)
-
-        # Re-read the live cached config after the durable write so concurrent
-        # mutations for sibling providers are preserved. The outer drain keeps
-        # cancellation owned until this in-memory reconciliation also lands.
-        live_channels_config = await _get_channels_config(request)
-        if runtime_config is None:
-            live_channels_config.pop(provider, None)
-        else:
-            live_channels_config[provider] = runtime_config
-        request.app.state.channels_config = live_channels_config
-        return live_channels_config
+        # Read back, so the response also reflects sibling providers saved
+        # meanwhile (on this or another instance).
+        return await _get_channels_config(request)
 
     return await await_drained(_commit())
 
 
 async def _apply_runtime_channel_config(request: Request, config: ChannelConnectionsConfig, provider: str, runtime_config: dict[str, Any]) -> ChannelProviderResponse:
+    # Refuse before starting anything: a transport started on credentials the
+    # store then cannot persist would run on settings nobody can see.
+    if not (await _get_runtime_config_store(request)).can_store_credentials:
+        raise HTTPException(
+            status_code=503,
+            detail="Channel credentials cannot be stored: the credentials encryption key (DEER_FLOW_CREDENTIALS_KEY) is unavailable. Check the Gateway logs, or configure the channel in config.yaml.",
+        )
     started = await _restart_runtime_channel_if_available(provider, runtime_config)
     if started is False:
         display_name = _PROVIDER_META[provider]["display_name"]

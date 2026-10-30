@@ -28,14 +28,18 @@ class FakeDeliveryRepo:
         self.terminal_failures = []
         self.resets = []
         self.events = []
+        self.exclusions = []
 
     async def reset_stale_sending_rows(self, *, now, timeout):
         self.resets.append((now, timeout))
         self.events.append("reset")
         return 0
 
-    async def claim_due_deliveries(self, *, now, limit):
-        claimed, self.rows = self.rows[:limit], self.rows[limit:]
+    async def claim_due_deliveries(self, *, now, limit, **kwargs):
+        excluded = kwargs.get("exclude_providers") or frozenset()
+        self.exclusions.append(kwargs.get("exclude_providers"))
+        claimed = [row for row in self.rows if row["provider"] not in excluded][:limit]
+        self.rows = [row for row in self.rows if row not in claimed]
         self.claims.append((now, limit))
         self.events.append("claim")
         return claimed
@@ -161,7 +165,7 @@ async def test_group_notice_requires_current_exact_group_binding(updates):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("provider,target_type", [("wecom", "group"), ("feishu", "unknown"), ("feishu", "private")])
+@pytest.mark.parametrize("provider,target_type", [("wecom", "group"), ("wechat", "group"), ("feishu", "unknown"), ("feishu", "private")])
 async def test_invalid_group_target_type_never_falls_back_to_personal_notice(provider, target_type):
     repo = FakeDeliveryRepo([_delivery_row(provider=provider, target="ou_owner", payload={"target_type": target_type})])
     channel = FakeChannel()
@@ -171,6 +175,26 @@ async def test_invalid_group_target_type_never_falls_back_to_personal_notice(pro
     assert len(repo.terminal_failures) == 1
     assert channel.sent == []
     assert channel.group_sent == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider", "workspace_id", "metadata"),
+    [
+        ("qq", "app1:group:group-openid", {"chat_type": "group", "group_openid": "group-openid"}),
+        ("wecom", "bot1:group:wr_chat_1", {"aibotid": "bot1", "chattype": "group", "chatid": "wr_chat_1"}),
+    ],
+)
+async def test_qq_and_wecom_group_notices_use_group_hook_only(provider, workspace_id, metadata):
+    repo = FakeDeliveryRepo([_delivery_row(provider=provider, target="group-binding", payload={"target_type": "group", "run_status": "success"})])
+    channel = FakeChannel()
+    group_conn = _group_connection(provider=provider, workspace_id=workspace_id, metadata=metadata)
+    worker = NotificationDeliveryWorker(delivery_repo=repo, resolve_channel=lambda p: channel if p == provider else None, resolve_connections=lambda owner: [group_conn])
+    await worker.run_once(now=datetime.now(UTC))
+    assert repo.sent == ["delivery-1"]
+    assert channel.group_sent[0][:2] == ("user-1", "group-binding")
+    assert channel.sent == []
+    assert channel.owners == []
 
 
 @pytest.mark.asyncio
@@ -1020,5 +1044,146 @@ async def test_binding_check_reads_the_real_connection_repository_shape(tmp_path
 
         assert await conn_repo.disconnect_connection(connection_id=bound["id"], owner_user_id="user-1") is True
         assert await worker._target_still_connected(_delivery_row()) is False
+    finally:
+        await close_engine()
+
+
+@pytest.mark.asyncio
+async def test_worker_leaves_rows_of_providers_another_instance_leads():
+    """``excluded_providers`` is read on every poll; ``None`` or an empty set claims everything."""
+    repo = FakeDeliveryRepo([_delivery_row(delivery_id="d-wecom"), _delivery_row(delivery_id="d-feishu", provider="feishu")])
+    channel = FakeChannel()
+    led_elsewhere = {"value": frozenset({"feishu"})}
+    worker = NotificationDeliveryWorker(delivery_repo=repo, resolve_channel=lambda provider: channel if provider == "wecom" else None, excluded_providers=lambda: led_elsewhere["value"])
+
+    await worker.run_once(now=datetime.now(UTC))
+    assert repo.exclusions == [frozenset({"feishu"})]
+    assert repo.sent == ["d-wecom"]
+    assert [row["id"] for row in repo.rows] == ["d-feishu"]  # left pending, not parked
+
+    led_elsewhere["value"] = frozenset()
+    await worker.run_once(now=datetime.now(UTC))
+    assert repo.exclusions[-1] is None  # no restriction: the plain claim
+    assert repo.rows == []
+
+
+@pytest.mark.asyncio
+async def test_worker_ignores_a_non_collection_exclusion_result():
+    """A test double or a misbehaving resolver must not narrow the claim to nothing."""
+    from unittest.mock import MagicMock
+
+    repo = FakeDeliveryRepo([_delivery_row()])
+    worker = NotificationDeliveryWorker(delivery_repo=repo, resolve_channel=lambda provider: FakeChannel(), excluded_providers=MagicMock())
+    await worker.run_once(now=datetime.now(UTC))
+    assert repo.exclusions == [None]
+    assert repo.sent == ["delivery-1"]
+
+
+@pytest.mark.asyncio
+async def test_wecom_group_notification_for_owner_and_multi_group_binding_isolation(tmp_path):
+    from datetime import timedelta
+    from unittest.mock import AsyncMock
+
+    from deerflow.persistence.channel_connections import ChannelConnectionRepository
+    from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+
+    await init_engine("sqlite", url=f"sqlite+aiosqlite:///{tmp_path / 'wecom_group.db'}", sqlite_dir=str(tmp_path))
+    try:
+        conn_repo = ChannelConnectionRepository(get_session_factory())
+        ws_client = FakeWsClient()
+        ws_client.reply = AsyncMock()
+        ws_client.reply_stream = AsyncMock()
+        channel = WeComChannel(bus=MessageBus(), config={"bot_id": "bot-1", "connection_repo": conn_repo})
+        channel._bot_id = "bot-1"
+        channel._ws_client = ws_client
+        channel._running = True
+        channel._ws_transport_up = True
+
+        for code in ("code-priv", "code-g1", "code-g2"):
+            await conn_repo.create_oauth_state(
+                owner_user_id="user-1",
+                provider="wecom",
+                state=code,
+                expires_at=datetime.now(UTC) + timedelta(minutes=5),
+            )
+
+        await channel._bind_connection_from_connect_code(
+            frame={"body": {"aibotid": "bot-1", "chattype": "single"}},
+            user_id="GaoZhiChao",
+            code="code-priv",
+        )
+        await channel._bind_connection_from_connect_code(
+            frame={"body": {"aibotid": "bot-1", "chattype": "group", "chatid": "wr_group_1"}},
+            user_id="GaoZhiChao",
+            code="code-g1",
+        )
+        await channel._bind_connection_from_connect_code(
+            frame={"body": {"aibotid": "bot-1", "chattype": "group", "chatid": "wr_group_2"}},
+            user_id="GaoZhiChao",
+            code="code-g2",
+        )
+
+        connections = await conn_repo.list_connections("user-1")
+        assert len(connections) == 3
+        by_workspace = {row["workspace_id"]: row for row in connections}
+        assert set(by_workspace) == {"bot-1", "bot-1:group:wr_group_1", "bot-1:group:wr_group_2"}
+        assert by_workspace["bot-1:group:wr_group_1"]["workspace_name"] is None
+        assert by_workspace["bot-1:group:wr_group_2"]["workspace_name"] is None
+        g1_id = by_workspace["bot-1:group:wr_group_1"]["id"]
+        g2_id = by_workspace["bot-1:group:wr_group_2"]["id"]
+        priv_id = by_workspace["bot-1"]["id"]
+        assert len({g1_id, g2_id, priv_id}) == 3
+
+        # A group-specific binding resolves only that group; a private binding
+        # must not authorize an unrelated, unbound group.
+        bound_group_inbound = channel._make_inbound(
+            chat_id="wr_group_1",
+            user_id="GaoZhiChao",
+            text="hello",
+            metadata={"aibotid": "bot-1", "chattype": "group", "chatid": "wr_group_1"},
+        )
+        bound_group_inbound = await channel._attach_connection_identity(bound_group_inbound)
+        assert bound_group_inbound.connection_id == g1_id
+        assert bound_group_inbound.owner_user_id == "user-1"
+
+        legacy_group_inbound = channel._make_inbound(
+            chat_id="wr_legacy_group",
+            user_id="GaoZhiChao",
+            text="hello from legacy group",
+            metadata={"aibotid": "bot-1", "chattype": "group", "chatid": "wr_legacy_group"},
+        )
+        legacy_group_inbound = await channel._attach_connection_identity(legacy_group_inbound)
+        assert legacy_group_inbound.connection_id is None
+        assert legacy_group_inbound.owner_user_id is None
+
+        await channel.send_group_notification_for_owner(
+            owner_user_id="user-1",
+            target=g1_id,
+            text_markdown="**group 1 notice**",
+        )
+        await channel.send_group_notification_for_owner(
+            owner_user_id="user-1",
+            target=g2_id,
+            text_markdown="**group 2 notice**",
+        )
+        assert ws_client.calls == [
+            ("wr_group_1", {"msgtype": "markdown", "markdown": {"content": "**group 1 notice**"}}),
+            ("wr_group_2", {"msgtype": "markdown", "markdown": {"content": "**group 2 notice**"}}),
+        ]
+
+        # Private binding ID or foreign owner must not be accepted as a group target.
+        with pytest.raises(RuntimeError, match="group notification destination"):
+            await channel.send_group_notification_for_owner(
+                owner_user_id="user-1",
+                target=priv_id,
+                text_markdown="nope",
+            )
+        with pytest.raises(RuntimeError, match="group notification destination"):
+            await channel.send_group_notification_for_owner(
+                owner_user_id="other-user",
+                target=g1_id,
+                text_markdown="nope",
+            )
+        assert len(ws_client.calls) == 2
     finally:
         await close_engine()

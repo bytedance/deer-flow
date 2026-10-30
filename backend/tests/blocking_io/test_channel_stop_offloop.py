@@ -29,6 +29,7 @@ from app.channels.discord import DiscordChannel
 from app.channels.feishu import FeishuChannel
 from app.channels.message_bus import MessageBus
 from app.channels.slack import SlackChannel
+from app.channels.telegram import TelegramChannel
 
 pytestmark = pytest.mark.asyncio
 
@@ -88,7 +89,7 @@ async def test_slack_stop_keeps_connect_cleanup_off_loop(monkeypatch) -> None:
         await channel.stop()
 
 
-@pytest.mark.parametrize("channel_cls", [FeishuChannel, DingTalkChannel, DiscordChannel])
+@pytest.mark.parametrize("channel_cls", [FeishuChannel, DingTalkChannel, DiscordChannel, TelegramChannel])
 async def test_stop_joins_sdk_thread_off_loop(channel_cls) -> None:
     release = threading.Event()
     sdk_thread = threading.Thread(target=release.wait, daemon=True)

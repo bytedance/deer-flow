@@ -93,3 +93,19 @@ def parse_allowed_users[UserId: Hashable](
     if not user_ids:
         logger.error("[%s] allowed_users has no valid %s; denying every user until it is fixed", channel_name, valid_id_name)
     return frozenset(user_ids)
+
+
+def parse_string_or_int_user_id(entry: Any) -> str | None:
+    """A user ID from a non-blank string or an integer, else ``None``.
+
+    An unquoted YAML number keeps matching its string form. Quote IDs with
+    leading zeros.
+    """
+    if isinstance(entry, bool):
+        # bool is an int subclass: ``true`` must not become the user "True".
+        return None
+    if isinstance(entry, int):
+        return str(entry)
+    if isinstance(entry, str):
+        return entry.strip() or None
+    return None

@@ -2344,6 +2344,19 @@ export function mockLangGraphAPI(
   );
 
   // Models list — model picker dropdown
+  // Agent settings also read these catalogs. Keep ordinary UI specs independent
+  // of any real Gateway listening locally; catalog-specific specs override them.
+  void page.route("**/api/subagents", (route) =>
+    route.request().method() === "GET"
+      ? route.fulfill({ json: { subagents: [] } })
+      : route.fallback(),
+  );
+  void page.route("**/api/agent-tool-groups", (route) =>
+    route.request().method() === "GET"
+      ? route.fulfill({ json: { tool_groups: [] } })
+      : route.fallback(),
+  );
+
   void page.route("**/api/models", (route) => {
     if (route.request().method() === "GET") {
       return route.fulfill({
@@ -2353,6 +2366,24 @@ export function mockLangGraphAPI(
           models: [],
           token_usage: { enabled: false },
         }),
+      });
+    }
+    return route.fallback();
+  });
+
+  // General UI specs do not choose a model. Model-control specs can override
+  // this preview just as they override the empty model list above.
+  void page.route("**/api/models/resolve", (route) => {
+    if (route.request().method() === "POST") {
+      return route.fulfill({
+        json: {
+          status: "none",
+          scope: null,
+          query: "",
+          model_name: null,
+          candidates: [],
+          task_offset: 0,
+        },
       });
     }
     return route.fallback();
@@ -2389,6 +2420,24 @@ export function mockLangGraphAPI(
     }
     return route.fallback();
   });
+
+  void page.route("**/api/knowledge/capabilities?*", (route) =>
+    route.fulfill({
+      json: {
+        operations: featureFlags.knowledgeScopeSelectionEnabled
+          ? [
+              "search",
+              "sources",
+              "catalog",
+              "documents",
+              "dataset_filter",
+              "document_filter",
+            ]
+          : ["search"],
+        scope_selection_enabled: featureFlags.knowledgeScopeSelectionEnabled,
+      },
+    }),
+  );
 
   void page.route("**/api/mcp/config", (route) =>
     route.fulfill({ json: { mcp_servers: {} } }),

@@ -53,3 +53,22 @@ jobs:
             uv run --project backend --no-sync python scripts/check_extension.py "$package"
             echo "::endgroup::"
           done
+      # Each package's own tests run in an isolated environment against this
+      # checkout's extension-api, so a contract change that breaks them fails here.
+      - name: Test bundled extension packages that ship tests
+        shell: bash
+        run: |
+          for package in examples/deerflow-extension-*/; do
+            [ -d "${package}tests" ] || continue
+            echo "::group::Test ${package%/}"
+            (
+              cd "$package"
+              uv venv --python 3.12
+              uv pip install -e ../../backend/packages/extension-api
+              uv pip install -e ".[dev]"
+              uv run --no-project pytest -q
+              uv run --no-project ruff check .
+              uv run --no-project ruff format --check .
+            )
+            echo "::endgroup::"
+          done

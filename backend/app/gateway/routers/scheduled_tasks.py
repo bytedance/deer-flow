@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -9,7 +10,8 @@ from zoneinfo import ZoneInfo
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import AwareDatetime, BaseModel, Field
 
-from app.channels.notification_groups import is_feishu_notification_group
+from app.channels.capabilities import supports_proactive_group_notifications
+from app.channels.notification_groups import is_notification_group
 from app.gateway.authz import require_permission
 from app.gateway.deps import (
     get_config,
@@ -36,6 +38,8 @@ from deerflow.scheduler.schedules import (
     validate_timezone,
 )
 from deerflow.utils.thread_id import ThreadId
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["scheduled-tasks"])
 
@@ -78,7 +82,9 @@ async def resolve_scheduled_task_assistant_id(raw: str | None, *, user_id: str) 
     except FileNotFoundError as exc:
         raise scheduler_error(422, "unknown_assistant", f"Unknown assistant_id {raw!r}") from exc
     except ValueError as exc:
-        raise scheduler_error(422, "invalid_assistant", str(exc)) from exc
+        # The store's parse error names the config file's host path.
+        logger.warning("Failed to load agent config for assistant_id %r: %s", raw, exc)
+        raise scheduler_error(422, "invalid_assistant", f"Agent config for assistant_id {raw!r} could not be loaded") from exc
     if config is None:
         raise scheduler_error(422, "unknown_assistant", f"Unknown assistant_id {raw!r}")
     return normalized
@@ -110,7 +116,7 @@ async def _validate_notification_group(request: Request, connection_id: str | No
     if connection_id is None:
         return None
     if not connection_id.strip() or len(connection_id) > 64:
-        raise scheduler_error(422, "invalid_notification_group", "Select a connected Feishu group belonging to this user")
+        raise scheduler_error(422, "invalid_notification_group", "Select a connected notification group belonging to this user")
 
     # Reuse the connection UI's current config and owner-scoped repository.
     # Keep this REST-only: the conversation scheduling tools have no group field.
@@ -126,9 +132,19 @@ async def _validate_notification_group(request: Request, connection_id: str | No
     for connection in connections:
         if not isinstance(connection, dict) or connection.get("id") != connection_id or connection.get("owner_user_id") != user_id:
             continue
-        if is_feishu_notification_group(provider=connection.get("provider"), status=connection.get("status"), workspace_id=connection.get("workspace_id"), metadata=connection.get("metadata")):
+        provider = connection.get("provider")
+        if (
+            isinstance(provider, str)
+            and supports_proactive_group_notifications(provider)
+            and is_notification_group(
+                provider=provider,
+                status=connection.get("status"),
+                workspace_id=connection.get("workspace_id"),
+                metadata=connection.get("metadata"),
+            )
+        ):
             return connection_id
-    raise scheduler_error(422, "invalid_notification_group", "Select a connected Feishu group belonging to this user")
+    raise scheduler_error(422, "invalid_notification_group", "Select a connected notification group belonging to this user")
 
 
 class ScheduledTaskCreateRequest(BaseModel):

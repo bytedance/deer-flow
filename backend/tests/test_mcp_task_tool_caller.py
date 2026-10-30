@@ -3,6 +3,7 @@ import sys
 from collections.abc import Coroutine
 from contextlib import asynccontextmanager, suppress
 from datetime import timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -16,6 +17,8 @@ from deerflow.config.extensions_config import ExtensionsConfig, McpUserScopedAut
 from deerflow.config.paths import Paths
 from deerflow.mcp.session_pool import MCPSessionPool
 from deerflow.mcp.task_tool_caller import McpTaskToolCaller
+from deerflow.mcp.tasks.ordinary import McpTaskConnectionUnavailableError
+from deerflow.mcp.user_config import PersonalMcpConfigSnapshot
 from deerflow.mcp_scope import mcp_session_scope_key
 from deerflow.runtime.user_context import get_current_user, reset_current_user, set_current_user
 
@@ -182,6 +185,43 @@ async def test_personal_stdio_task_call_uses_personal_pool_domain() -> None:
     session.call_tool.assert_awaited_once_with("status_report", {"task_id": "remote-1"})
 
 
+def test_connection_unavailable_error_preserves_lookup_error_compatibility() -> None:
+    assert issubclass(McpTaskConnectionUnavailableError, LookupError)
+
+
+@pytest.mark.asyncio
+async def test_missing_deployment_task_server_is_a_permanent_connection_error() -> None:
+    caller = McpTaskToolCaller(_config())
+
+    with pytest.raises(McpTaskConnectionUnavailableError, match="missing or disabled in the startup configuration"):
+        await caller.call_tool(
+            server_name="removed",
+            tool_name="status_report",
+            arguments={"task_id": "remote-1"},
+            user_id="user-1",
+            thread_id="thread-1",
+        )
+
+
+@pytest.mark.asyncio
+async def test_stale_personal_task_server_name_is_a_permanent_connection_error() -> None:
+    caller = McpTaskToolCaller(ExtensionsConfig())
+    snapshot = PersonalMcpConfigSnapshot(Path("personal-mcp.json"), None, _config())
+
+    with (
+        patch("deerflow.mcp.task_tool_caller.load_user_mcp_config_if_changed", return_value=snapshot),
+        pytest.raises(McpTaskConnectionUnavailableError, match="missing, disabled or changed"),
+    ):
+        await caller.call_tool(
+            server_name="stale-personal-server",
+            tool_name="status_report",
+            arguments={"task_id": "remote-1"},
+            user_id="user-1",
+            thread_id="thread-1",
+            connection_scope="personal",
+        )
+
+
 @pytest.mark.asyncio
 @pytest.mark.no_auto_user
 @pytest.mark.parametrize("has_ambient_user", [False, True], ids=["no-user", "existing-user"])
@@ -204,7 +244,7 @@ async def test_task_without_applicable_user_auth_preserves_interceptor_context(t
 
     caller._interceptors.append(inspect_context)
     session = SimpleNamespace(initialize=AsyncMock(), call_tool=AsyncMock(return_value="result"))
-    pool = SimpleNamespace(get_session=AsyncMock(return_value=session))
+    pool = MCPSessionPool()
     user_token = set_current_user(ambient_user) if ambient_user is not None else None
     try:
         with (
@@ -223,6 +263,7 @@ async def test_task_without_applicable_user_auth_preserves_interceptor_context(t
         assert observed_users == [ambient_user]
         assert get_current_user() is ambient_user
     finally:
+        await pool.close_all()
         if user_token is not None:
             reset_current_user(user_token)
 

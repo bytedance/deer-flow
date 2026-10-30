@@ -306,3 +306,107 @@ def test_locale_falls_back_to_the_configured_default():
     assert render_notification_text(notice("run_failed", locale="zh-CN", run_status="failed"), default_locale="en-US").splitlines()[-1] == CLOSING["zh-CN"]
     assert render_notification_text(notice("run_failed", locale="fr-FR", run_status="failed"), default_locale="zh-CN").splitlines()[-1] == CLOSING["zh-CN"]
     assert render_notification_text(delivery, default_locale="fr-FR").splitlines()[-1] == CLOSING["en-US"]
+
+
+def runtime_notice(event, *, source_kind="run", locale="en-US", run_id=RUN_ID, **payload):
+    base = {
+        "payload_version": 2,
+        "source_kind": source_kind,
+        "task_title": "Ship release notes",
+        "locale": locale,
+    }
+    return {
+        "id": "delivery-rt-1",
+        "source_kind": source_kind,
+        "source_key": run_id or "req-1",
+        "task_id": None,
+        "task_run_id": None,
+        "run_id": run_id,
+        "event": event,
+        "provider": "feishu",
+        "target": "ou_123",
+        "payload": {**base, **payload},
+    }
+
+
+@pytest.mark.parametrize("locale", NOTIFICATION_LOCALES)
+def test_runtime_notices_render_localized_without_ids_or_links(locale):
+    completed = render_notification_text(
+        runtime_notice(
+            "run_completed",
+            locale=locale,
+            run_status="success",
+            relied_on_assumption=True,
+            result_summary="Drafted the changelog and verified links.",
+        )
+    )
+    failed = render_notification_text(
+        runtime_notice(
+            "run_failed",
+            locale=locale,
+            run_status="failed",
+        )
+    )
+    input_needed = render_notification_text(
+        runtime_notice(
+            "human_input_requested",
+            source_kind="human_input_request",
+            locale=locale,
+            run_status="success",
+            question="Which target branch should we tag?",
+            result_summary="Should not appear on human_input_requested",
+        )
+    )
+    for text in (completed, failed, input_needed):
+        assert_no_raw_identifiers(text)
+        assert RUN_ID not in text
+        assert "http" not in text
+    if locale == "en-US":
+        assert completed.splitlines() == [
+            "Task “Ship release notes”",
+            "Completed. Goal met, with an assumption.",
+            "Result: Drafted the changelog and verified links.",
+            "Open DeerFlow → Conversations for details.",
+        ]
+        assert failed.splitlines() == [
+            "Task “Ship release notes”",
+            "Failed to complete.",
+            "Open DeerFlow → Conversations for details.",
+        ]
+        assert input_needed.splitlines() == [
+            "Task “Ship release notes”",
+            "Waiting for your input in the conversation.",
+            "Question: Which target branch should we tag?",
+            "Open DeerFlow → Conversations to continue.",
+        ]
+    else:
+        assert completed.splitlines() == [
+            "任务“Ship release notes”",
+            "已完成。目标已达成（含假设）。",
+            "结果：Drafted the changelog and verified links.",
+            "在 DeerFlow 的对话页查看详情。",
+        ]
+        assert failed.splitlines() == [
+            "任务“Ship release notes”",
+            "运行失败，未能完成。",
+            "在 DeerFlow 的对话页查看详情。",
+        ]
+        assert input_needed.splitlines() == [
+            "任务“Ship release notes”",
+            "正在等待你在对话中确认或补充信息。",
+            "待确认：Which target branch should we tag?",
+            "在 DeerFlow 的对话页继续处理。",
+        ]
+
+
+def test_runtime_human_input_question_redacts_secrets_and_skips_result_summary():
+    secret = "sk-" + ("S" * 40)
+    delivery = runtime_notice(
+        "human_input_requested",
+        source_kind="human_input_request",
+        question=f"Should we rotate {secret} now?",
+    )
+    assert not wants_result_summary(delivery)
+    text = render_notification_text(delivery)
+    assert secret not in text
+    assert "Question: Should we rotate [redacted] now?" in text

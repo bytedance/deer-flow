@@ -40,6 +40,16 @@ export const enUS: Translations = {
       "This entry comes from the repository extension catalog. Ask your deployment administrator to confirm its installation and activation status.",
     installationGuide: "Installation guide",
     catalog: {
+      workflows: {
+        title: "Script workflows",
+        description:
+          "Save versioned Agent workflows, resume within the same Gateway process and review exact retained output versions. No restart replay or hard monetary budget.",
+      },
+      reportSections: {
+        title: "Sectioned long-form writing",
+        description:
+          "Write long reports section by section and assemble them into a downloadable Markdown document.",
+      },
       agentTeams: {
         title: "Agent teams",
         description:
@@ -69,6 +79,36 @@ export const enUS: Translations = {
         title: "Extension development example",
         description:
           "Explore middleware, task lifecycle, model observers, services and HTTP route contributions.",
+      },
+      retrieval: {
+        title: "Local retrieval example",
+        description:
+          "Demonstrate read-only retrieval and structured tool results using fixed sample documents, without an external knowledge service.",
+      },
+      lightrag: {
+        title: "LightRAG",
+        description:
+          "Retrieve documents and entity relations from LightRAG with shared source citations.",
+      },
+      knowledgePlatform: {
+        title: "Knowledge spaces and connections",
+        description:
+          "Manage hierarchical spaces, resource sharing and inherited policies with explicit administrator grants. Requires installation and configuration; no management page or global retrieval ACL is included.",
+      },
+      knowledgeManagement: {
+        title: "Knowledge ingestion and processing",
+        description:
+          "Ingest files, URLs and text through WeKnora and manage processing with explicit administrator grants. Requires installation and configuration; no management page is included.",
+      },
+      weknora: {
+        title: "WeKnora knowledge retrieval",
+        description:
+          "Search WeKnora knowledge bases and selected documents with source citations. Requires administrator installation and access configuration.",
+      },
+      knowledge: {
+        title: "Knowledge scope example",
+        description:
+          "Search sample documents within selected knowledge bases or files and inspect source citations.",
       },
     },
     pageUnavailable: "Extension page unavailable",
@@ -220,6 +260,15 @@ export const enUS: Translations = {
     showBrowser: "Open browser panel",
   },
 
+  browserStream: {
+    connecting: "Connecting…",
+    disconnected: "Disconnected",
+    handshakeTimeout:
+      "Live browser connection timed out. Check your network or proxy, then turn Live off and on to retry.",
+    connectionFailed:
+      "Live browser connection failed or closed. Check your connection and access permissions, then turn Live off and on to retry.",
+  },
+
   skillUsage: {
     used: "Skills used",
     title: "Skills",
@@ -251,6 +300,11 @@ export const enUS: Translations = {
   home: {
     docs: "Docs",
     blog: "Blog",
+    searchDocs: "Search docs…",
+    searchDocsLabel: "Search documentation",
+    searchNoResults: "No results. Try fewer or different words.",
+    searchLoadFailed: "Search is unavailable right now.",
+    searchLoading: "Loading…",
   },
 
   // Welcome
@@ -287,6 +341,9 @@ export const enUS: Translations = {
   },
 
   artifactPreview: {
+    loadingPreview: "Preparing preview...",
+    resourcesUnavailable:
+      "Some preview resources could not be loaded. View the source or download the files for the complete content.",
     limited: (previewSize, totalSize) =>
       totalSize
         ? `Showing the first ${previewSize} of ${totalSize}.`
@@ -522,6 +579,10 @@ export const enUS: Translations = {
           "No progress between turns. Reply with what's missing, or rephrase the goal with /goal.",
         tokenCapped:
           "Token budget reached. Send a message to continue; a new run starts with a fresh budget.",
+        loopCapped:
+          "Repeated tool calls triggered a safety stop. Adjust the approach and send a new message to retry; your goal stays active.",
+        recursionCapped:
+          "The run reached its step limit before finishing. Send a new message to continue; your goal stays active.",
         missingEvidence:
           "Goal check: evidence missing. Ask it to show the result or explain what's missing; if the goal no longer applies, run /goal clear.",
         runFailed:
@@ -827,6 +888,18 @@ export const enUS: Translations = {
     cancel: "Cancel",
     retryItem: "Retry",
     exportResults: "Export JSONL",
+    viewResult: "Review result",
+    resultTitle: "Batch result",
+    resultDescription: "Stored report and captured evidence for this item.",
+    report: "Report",
+    evidence: "Captured evidence",
+    noEvidence: "No captured evidence",
+    acceptance: "Acceptance",
+    noReport: "No report has been stored yet.",
+    loadResultFailed: "Couldn't load batch result",
+    truncated: "Report truncated",
+    omittedEvidence: (count) => `${count} evidence entries omitted`,
+    pagesLabel: "Pages",
     viewItems: "View items",
     hideItems: "Hide items",
     itemsFailed: "Couldn't load batch items",
@@ -1024,6 +1097,11 @@ export const enUS: Translations = {
         "This task has a saved group destination, but group notifications are unavailable on this server.",
       clearSaved: "Clear group notification",
       bind: "Bind a Feishu group",
+      bindWecom: "Bind a WeCom group",
+      bindQq: "Bind a QQ group",
+      name: "Group name",
+      nameHint:
+        "Name this group so you can recognize it when choosing a notification destination. Rebind a group to change its name.",
       refresh: "Refresh group list",
       bindInstructions:
         "Add the bot to the group, then mention the bot and send this command in that group. Refresh the group list after binding.",
@@ -1036,19 +1114,19 @@ export const enUS: Translations = {
       copyFailed: "Could not copy. Select and copy the command above.",
       newCode: "Generate a new code",
       close: "Close binding instructions",
-      label: "Also notify a Feishu group (optional)",
-      detailLabel: "Additional Feishu group",
+      label: "Also notify a group (optional)",
+      detailLabel: "Additional group",
       none: "No additional group",
       personalHint:
         "Your personal notifications stay unchanged. The selected group also receives task updates.",
-      emptyHint: "Bind a Feishu group below, then refresh the list.",
+      emptyHint: "Bind a group below, then refresh the list.",
       loading: "Loading groups…",
       unavailable: "Selected group unavailable",
       unavailableHint:
         "The selected group is no longer available. Keep it, remove it, or choose another group.",
       unnamed: "Group name unavailable",
       unnamedHint:
-        "Check the app's group-information permission, then bind the group again to load its name.",
+        "Bind the group again with a recognizable name before selecting it.",
       loadFailed:
         "Could not load groups. Your selection is kept; you can save other changes or remove it.",
     },
@@ -1184,6 +1262,8 @@ export const enUS: Translations = {
         maxContinuations: "Continuation limit reached",
         noProgress: "No progress between turns",
         tokenCapped: "Token budget reached",
+        loopCapped: "Repeated tool calls reached the safety limit",
+        recursionCapped: "The run reached its step limit",
         evaluatorFailed: "Couldn't check the goal; the run itself may be fine",
         noDurableEndOfTurn: "Couldn't check the goal: no final reply was saved",
         threadChanged:
@@ -1382,8 +1462,10 @@ export const enUS: Translations = {
       "You can save this agent at any time from the top-right menu, even if this is only a first draft.",
     saveCommandMessage:
       "Please save this custom agent now based on everything we have discussed so far. Treat this as my explicit confirmation to save. If some details are still missing, make reasonable assumptions, generate a concise first SOUL.md in English, and call setup_agent immediately without asking me for more confirmation.",
+    agentSaveFailed:
+      "DeerFlow could not save this agent. Review the tool error and try again.",
     agentCreatedPendingRefresh:
-      "The agent was created, but DeerFlow could not load it yet. Please refresh this page in a moment.",
+      "DeerFlow could not confirm the saved agent. Please try saving it again.",
     more: "More actions",
     agentCreated: "Agent created!",
     startChatting: "Start chatting",
@@ -1411,6 +1493,13 @@ export const enUS: Translations = {
       "Save tool access before choosing default knowledge bases.",
     settingsModel: "Default model",
     settingsModelDefault: "Use global default",
+    settingsModelSwitchNeedsCatalog:
+      "Load the selected model before saving this model change. Retry loading, or restore the original model to save other changes.",
+    settingsReasoningUnsupported: "not supported",
+    settingsThinkingRequiredHint:
+      "This model requires thinking. The saved Off setting can prevent runs from starting. Choose Inherit or On to replace it.",
+    settingsReasoningUnsupportedHint:
+      "This saved value is not supported by the selected model. Choose Inherit or a supported value to replace it.",
     settingsTemperature: "Temperature",
     settingsTemperatureHint: "0 = deterministic, higher = more creative (0–2).",
     settingsMaxTokens: "Max output tokens",
@@ -1627,6 +1716,24 @@ export const enUS: Translations = {
       expiredTitle: "QR code expired",
       failedTitle: "Unable to connect",
     },
+    bindingCode: {
+      description: (provider: string) =>
+        `Send this command to the ${provider} bot to link it to your DeerFlow account.`,
+      loading: "Generating a binding code…",
+      copy: "Copy command",
+      copied: "Copied",
+      copyFailed: "Could not copy. Select and copy the command above.",
+      expiresAt: (time: string) => `Expires at ${time}`,
+      waiting: (provider: string) => `Waiting for your message in ${provider}…`,
+      connected: (provider: string) => `${provider} is connected`,
+      done: "Done",
+      expired: "This binding code has expired.",
+      newCode: "Generate a new code",
+      failed: "Could not create a binding code.",
+      tooManyCodes:
+        "Too many unused codes. Use a code you already have or wait about 10 minutes for them to expire.",
+      retry: "Try again",
+    },
     setupDescription:
       "Enter the values needed by this server process. They are not written to config.yaml.",
     saveAndConnect: "Save and connect",
@@ -1644,9 +1751,10 @@ export const enUS: Translations = {
     },
     connectedAs: (name: string) => `Connected as ${name}.`,
     scheduledUpdates: {
-      supported: "Scheduled task updates: sent here",
+      supported:
+        "Scheduled task updates: supported; manage in Notification settings",
       supportedAfterConnect:
-        "Scheduled task updates: available after you connect",
+        "Scheduled task updates: supported; connect to manage notifications",
       unsupported: "Scheduled task updates: not available for this app yet",
     },
   },
@@ -1662,6 +1770,9 @@ export const enUS: Translations = {
   // Tool calls
   toolCalls: {
     details: "Tool details",
+    failed: "Failed",
+    scheduleTaskPending: "Scheduled task operation",
+    stopScheduledTaskPending: "Pause this scheduled task",
     toolName: "Tool name",
     callId: "Call ID",
     input: "Input",
@@ -1991,7 +2102,8 @@ export const enUS: Translations = {
       lightDescription: "Bright palette with higher contrast for daytime.",
       darkDescription: "Dim palette that reduces glare for focus.",
       languageTitle: "Language",
-      languageDescription: "Switch between languages.",
+      languageDescription:
+        "Choose the interface language and preferred language for replies.",
     },
     tools: {
       adminRequired: "Admin privileges are required to manage MCP tools.",
@@ -2388,6 +2500,39 @@ export const enUS: Translations = {
       testBody: "This is a test notification.",
       notSupported: "Your browser does not support notifications.",
       disableNotification: "Disable notification",
+      channels: {
+        title: "Scheduled task notifications",
+        description:
+          "Choose which connected apps receive scheduled task updates. Turning these off does not affect chatting. Pending notifications and retries are cancelled, and turning them back on does not resend old updates. Notifications already being delivered may still arrive.",
+        providers: {
+          feishu: "Feishu / Lark",
+          wecom: "WeCom",
+          wechat: "WeChat",
+          qq: "QQ",
+        },
+        toggleLabel: (provider: string) =>
+          `${provider} scheduled task notifications`,
+        eventsTitle: "Task & goal run notifications",
+        eventsDescription:
+          "Optional IM reminders for ordinary web or background task runs and goals on your enabled apps above (off by default).",
+        events: {
+          run_completed: "Task or goal completed",
+          run_failed: "Task or goal failed",
+          human_input_requested: "Needs your input",
+        },
+        eventToggleLabel: (event: string) => `${event} notifications`,
+        loading: "Loading notification preferences…",
+        saving: "Saving…",
+        loadFailed:
+          "Could not load notification preferences. Please try again.",
+        saveFailed:
+          "Could not save this change. The previous setting is still shown; please try again.",
+        unavailable:
+          "This service does not support notification preferences yet.",
+        empty:
+          "Connect an app that supports scheduled task notifications in Settings → Channels.",
+        retry: "Retry",
+      },
     },
     account: {
       profileTitle: "Profile",
@@ -2454,6 +2599,10 @@ export const enUS: Translations = {
         "SSO login is not allowed for your account. Contact your administrator.",
       account_disabled:
         "This account has been disabled. Contact your administrator.",
+      invalid_email: "Please enter a valid email address.",
+      password_too_short: "Password must be at least 6 characters.",
+      registration_password_too_short:
+        "Password must be at least 8 characters.",
     },
   },
 };

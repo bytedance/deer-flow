@@ -11,6 +11,7 @@ threads by the local UTC offset.
 """
 
 import re
+from datetime import UTC, datetime
 
 import pytest
 
@@ -34,6 +35,46 @@ async def _cleanup():
     from deerflow.persistence.engine import close_engine
 
     await close_engine()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("write_method", ["put", "put_batch", "put_if_absent"])
+@pytest.mark.parametrize(
+    ("timestamp", "expected"),
+    [
+        ("2026-10-14T12:34:56.123456+08:00", "2026-10-14T04:34:56.123456+00:00"),
+        ("2026-10-14T23:45:00-05:30", "2026-10-15T05:15:00+00:00"),
+        ("2026-10-14T04:34:56Z", "2026-10-14T04:34:56+00:00"),
+        ("2026-10-14T04:34:56", "2026-10-14T04:34:56+00:00"),
+    ],
+)
+async def test_run_event_timestamp_preserves_instant_after_sqlite_round_trip(tmp_path, write_method, timestamp, expected):
+    from deerflow.runtime.events.store.db import DbRunEventStore
+
+    store = DbRunEventStore(await _init_sqlite(tmp_path))
+    event = dict(thread_id="t-tz", run_id="r-tz", event_type="llm.ai.response", category="message", content="answer", created_at=timestamp)
+    try:
+        if write_method == "put_batch":
+            written = (await store.put_batch([event]))[0]
+        elif write_method == "put_if_absent":
+            written, created = await store.put_if_absent(**event)
+            assert created
+        else:
+            written = await store.put(**event)
+
+        assert written["created_at"] == expected
+        # A new query must read the persisted clock value, not the ORM identity map.
+        fetched = await store.list_events("t-tz", "r-tz", user_id=None)
+        assert len(fetched) == 1
+        assert fetched[0]["created_at"] == expected
+        assert datetime.fromisoformat(fetched[0]["created_at"]).tzinfo == UTC
+
+        if write_method == "put_if_absent":
+            existing, created = await store.put_if_absent(**{**event, "created_at": "2026-10-16T00:00:00Z"})
+            assert not created
+            assert existing["created_at"] == expected
+    finally:
+        await _cleanup()
 
 
 @pytest.mark.anyio

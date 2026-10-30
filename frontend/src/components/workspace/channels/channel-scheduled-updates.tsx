@@ -7,12 +7,9 @@ import { useI18n } from "@/core/i18n/hooks";
 import { cn } from "@/lib/utils";
 
 /**
- * Whether scheduled-task updates reach this app ("Scheduled task updates:
- * sent here" / "... available after you connect" / "... not available for
- * this app yet"). Only providers that
- * implement proactive push receive them (WeCom and Feishu/Lark today). Renders nothing for
- * an older backend that does not report `proactive_notifications`, rather
- * than claiming an app it cannot judge is unsupported.
+ * Advertise proactive notification capability, not the user's delivery preference.
+ * Preferences are managed once in Settings → Notifications. Older backends that
+ * omit the capability render no claim about support.
  */
 export function ChannelScheduledUpdates({
   provider,

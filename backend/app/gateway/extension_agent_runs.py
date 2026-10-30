@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import json
 import math
+import secrets
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from typing import Any
 
-from deerflow_extension_api.agent_runs import AgentRun, AgentRunError
+from deerflow_extension_api.agent_runs import AgentRun, AgentRunError, ExecutionFence
 from fastapi import HTTPException, Request
 from pydantic import TypeAdapter, ValidationError
 
@@ -20,6 +23,12 @@ from deerflow.runtime.user_context import reset_current_user, set_current_user
 from deerflow.utils.thread_id import ThreadId
 
 _THREAD_ID = TypeAdapter(ThreadId)
+
+
+def _configuration_json_default(value):
+    if isinstance(value, (set, frozenset)):
+        return sorted(value, key=lambda item: json.dumps(item, sort_keys=True, default=_configuration_json_default))
+    return str(value)
 
 
 def _json_object(value: Mapping[str, Any] | None) -> dict[str, Any] | None:
@@ -45,6 +54,7 @@ class GatewayAgentRunsHost:
         self.app = app
         self.load_user = load_user
         self.active = True
+        self.revision_key = secrets.token_bytes(32)
 
     def close(self) -> None:
         self.active = False
@@ -121,6 +131,66 @@ class _BoundAgentRuns:
         finally:
             reset_current_user(token)
 
+    async def configuration_evidence(self, *, thread_id, run_id):
+        import copy
+
+        from app.gateway.deps import get_run_manager
+        from deerflow.runtime.assembly_evidence import EVIDENCE_KEY
+
+        async with self._request("runs:read", thread_id) as request:
+            record = await get_run_manager(request).get(run_id, user_id=self._user_id)
+            if record is None or record.thread_id != thread_id:
+                raise AgentRunError(404, "Run unavailable")
+            evidence = (record.metadata or {}).get(EVIDENCE_KEY)
+            if not isinstance(evidence, dict) or evidence.get("run_id") != run_id or evidence.get("thread_id") != thread_id:
+                raise AgentRunError(409, "Host assembly evidence unavailable")
+            return copy.deepcopy(evidence)
+
+    async def read_artifact(self, *, thread_id, path):
+        from app.gateway.extension_artifacts import read_output_snapshot
+        from app.gateway.routers.artifacts import reserve_artifact_write
+
+        async with self._request("threads:read", thread_id) as request:
+            async with reserve_artifact_write(request, thread_id, user_id=self._user_id):
+                return await asyncio.to_thread(read_output_snapshot, self._user_id, thread_id, path)
+
+    async def configuration_revision(self, *, assistant_ids: list[str], durable: bool = False) -> str:
+        from deerflow.config.agents_config import load_agent_config, load_agent_soul
+        from deerflow.config.app_config import get_app_config
+        from deerflow.config.extensions_config import get_extensions_config
+
+        if not isinstance(assistant_ids, list) or len(assistant_ids) > 32 or any(not isinstance(name, str) or not name or len(name) > 80 for name in assistant_ids):
+            raise AgentRunError(422, "Invalid Agent references")
+        names = sorted(set(assistant_ids))
+        async with self._request("runs:create"):
+
+            def snapshot():
+                agents = {}
+                for name in names:
+                    if name == "lead_agent":
+                        continue
+                    try:
+                        config = load_agent_config(name, user_id=self._user_id)
+                    except FileNotFoundError:
+                        config = None
+                    if config is None:
+                        agents[name] = None
+                        continue
+                    agents[name] = [config.model_dump(mode="python"), load_agent_soul(name, user_id=self._user_id)]
+                value = [get_app_config().model_dump(mode="python"), get_extensions_config().model_dump(mode="python"), names, agents]
+                # JSON-mode Pydantic dumps turn sets into arbitrarily ordered lists.
+                # Keep set identity until encoding so independent hash seeds agree,
+                # while ordered model/tool lists still detect precedence changes.
+                raw = json.dumps(value, sort_keys=True, ensure_ascii=True, default=_configuration_json_default).encode()
+                key = self._host.revision_key
+                if durable:
+                    from app.gateway.auth.config import get_auth_config
+
+                    key = hmac.new(get_auth_config().jwt_secret.encode(), b"deerflow:configuration-revision:v1", hashlib.sha256).digest()
+                return hmac.new(key, raw, hashlib.sha256).hexdigest()
+
+            return await asyncio.to_thread(snapshot)
+
     async def create_thread(self, *, assistant_id="lead_agent", thread_id=None, metadata=None) -> str:
         from app.gateway.routers.threads import ThreadCreateRequest, create_thread
 
@@ -128,7 +198,7 @@ class _BoundAgentRuns:
             response = await create_thread(ThreadCreateRequest(assistant_id=assistant_id, thread_id=thread_id, metadata=_json_object(metadata) or {}), request)
             return response.thread_id
 
-    async def _start(self, *, thread_id, input=None, resume=None, context=None, idempotency_key=None):
+    async def _start(self, *, thread_id, input=None, resume=None, context=None, idempotency_key=None, execution_fence=None):
         from app.gateway.routers.thread_runs import create_run
         from app.gateway.run_models import RunCreateRequest
         from app.gateway.services import resolve_thread_assistant_id
@@ -142,13 +212,21 @@ class _BoundAgentRuns:
         if run_context is not None and any(key in run_context for key in ("agent_name", "is_bootstrap")):
             raise AgentRunError(422, "Agent identity is bound to the thread")
         async with self._request("runs:create", thread_id) as request:
+            if execution_fence is not None:
+                if not isinstance(execution_fence, ExecutionFence) or self._plugin_namespace is None or execution_fence.namespace != self._plugin_namespace:
+                    raise AgentRunError(422, "Execution fence must belong to this plugin")
+                from app.gateway.deps import get_run_manager, get_stream_bridge
+
+                if not get_run_manager(request).heartbeat_enabled or getattr(get_stream_bridge(request), "supports_cross_process", False) is not True:
+                    raise AgentRunError(503, "Fenced Agent admission requires run heartbeats and a cross-process stream bridge")
+                request.state.extension_execution_fence = execution_fence
             assistant_id = await resolve_thread_assistant_id(request, thread_id, fail_closed=True)
             body = RunCreateRequest(assistant_id=assistant_id, input=run_input, command=command, context=run_context, on_disconnect="continue")
             response = await create_run(thread_id, body, request, idempotency_key=f"extension:{self._plugin_namespace or ''}:{idempotency_key}" if idempotency_key is not None else None)
             return _view(response)
 
-    async def start(self, *, thread_id, input, context=None, idempotency_key=None) -> AgentRun:
-        return await self._start(thread_id=thread_id, input=input, context=context, idempotency_key=idempotency_key)
+    async def start(self, *, thread_id, input, context=None, idempotency_key=None, execution_fence=None) -> AgentRun:
+        return await self._start(thread_id=thread_id, input=input, context=context, idempotency_key=idempotency_key, execution_fence=execution_fence)
 
     async def resume(self, *, thread_id, resume, idempotency_key=None) -> AgentRun:
         if resume is None:
@@ -167,11 +245,26 @@ class _BoundAgentRuns:
         async with self._request("threads:read", thread_id) as request:
             return (await get_thread_state(thread_id, request)).model_dump(mode="json")
 
-    async def cancel(self, *, thread_id, run_id) -> None:
+    async def cancel(self, *, thread_id, run_id, execution_fence=None) -> None:
         from app.gateway.routers.thread_runs import cancel_run
 
         async with self._request("runs:cancel", thread_id) as request:
-            await cancel_run(thread_id, run_id, request, wait=False, action="interrupt")
+            if execution_fence is not None:
+                from app.gateway.deps import get_run_manager
+                from deerflow.runtime.runs.manager import ConflictError, RunIdempotencyUnsupported
+
+                if not isinstance(execution_fence, ExecutionFence) or self._plugin_namespace is None or execution_fence.namespace != self._plugin_namespace:
+                    raise AgentRunError(422, "Execution fence must belong to this plugin")
+                manager = get_run_manager(request)
+                run = await manager.get(run_id, user_id=self._user_id)
+                if run is None or run.thread_id != thread_id:
+                    raise AgentRunError(404, "Run unavailable")
+                try:
+                    await manager.request_fenced_cancel(run_id, execution_fence=execution_fence, user_id=self._user_id)
+                except (ConflictError, RunIdempotencyUnsupported) as exc:
+                    raise AgentRunError(409, str(exc)) from exc
+            else:
+                await cancel_run(thread_id, run_id, request, wait=False, action="interrupt")
 
     async def wait(self, *, thread_id, run_id, timeout=60) -> AgentRun:
         if not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or not 0 < timeout <= 3600:

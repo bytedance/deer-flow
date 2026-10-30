@@ -11,10 +11,13 @@ import logging
 import math
 import mimetypes
 import secrets
+import shutil
 import tempfile
 import time
 from collections.abc import Mapping
+from contextlib import suppress
 from enum import IntEnum
+from functools import partial
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlparse
@@ -24,13 +27,16 @@ from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 from app.channels.allowed_users import parse_allowed_users
-from app.channels.base import Channel
+from app.channels.base import Channel, ChannelUnavailable
 from app.channels.commands import is_known_channel_command
 from app.channels.connection_identity import attach_connection_identity
-from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
+from app.channels.credential_staging import cleanup_stale_credential_staging, credential_staging_prefix
+from app.channels.message_bus import INBOUND_FILE_CLEANUP_KEY, InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment, cleanup_inbound_files
+from deerflow.utils.atomic_write import publish_bytes_atomically
 from deerflow.utils.file_io import await_drained
 
 logger = logging.getLogger(__name__)
+_monotonic = time.monotonic
 
 
 class MessageItemType(IntEnum):
@@ -227,6 +233,9 @@ class WechatChannel(Channel):
     DEFAULT_QRCODE_POLL_INTERVAL = 2.0
     DEFAULT_QRCODE_POLL_TIMEOUT = 180.0
     DEFAULT_QRCODE_BOT_TYPE = 3
+    DEFAULT_QRCODE_STATUS_TIMEOUT = 30.0
+    # Browser QR login allows a small cushion over the channel polling timeout.
+    DEFAULT_QRCODE_ADMIN_STATUS_TIMEOUT = DEFAULT_QRCODE_STATUS_TIMEOUT + 5.0
     DEFAULT_API_TIMEOUT = 15.0
     DEFAULT_CONFIG_TIMEOUT = 10.0
     DEFAULT_CDN_TIMEOUT = 30.0
@@ -405,6 +414,78 @@ class WechatChannel(Channel):
             max_retries=_max_retries,
         )
 
+    async def send_notification(self, *, target: str, text_markdown: str) -> None:
+        """Notifications need the owner's current binding, not a chat cache."""
+        await self.send_notification_for_owner(owner_user_id=None, target=target, text_markdown=text_markdown)
+
+    async def send_notification_for_owner(self, *, owner_user_id: str | None, target: str, text_markdown: str) -> None:
+        self._require_notification_transport()
+        if not owner_user_id or self._connection_repo is None:
+            raise RuntimeError("WeChat notifications require an owner-bound private conversation")
+        connection = await self._notification_binding(owner_user_id, target)
+        try:
+            credentials = await self._connection_repo.get_credentials(connection["id"])
+        except Exception as exc:
+            raise ChannelUnavailable("WeChat notification context lookup is unavailable") from exc
+        extra = credentials.get("extra") if isinstance(credentials, dict) else None
+        context = extra.get("wechat_notification_context") if isinstance(extra, dict) else None
+        token = context.get("context_token") if isinstance(context, dict) else None
+        if not isinstance(token, str) or not token.strip() or context.get("chat_id") != target or context.get("bot_token_sha256") != hashlib.sha256(self._bot_token.encode()).hexdigest():
+            raise RuntimeError("WeChat notification needs fresh context; send the bot a private message first")
+        current = await self._notification_binding(owner_user_id, target)
+        if current["id"] != connection["id"]:
+            raise RuntimeError("WeChat notification identity is no longer connected")
+        self._require_notification_transport()
+        payload = self._text_message_payload(chat_id=target, context_token=token, text=text_markdown, client_id_prefix="deerflow-notification")
+        try:
+            # The outbox owns retries; do not call the chat reply retry helper.
+            data = await self._request_json("/ilink/bot/sendmessage", payload, require_object=True)
+        except httpx.TransportError as exc:
+            raise ChannelUnavailable("WeChat notification transport is unavailable") from exc
+        except httpx.HTTPStatusError as exc:
+            raise RuntimeError(f"WeChat notification rejected: HTTP {exc.response.status_code}") from None
+        # iLink permits omitted success codes, but malformed codes are not ACKs.
+        if any(code is not None and (type(code) not in (int, float) or code != 0) for code in (data.get("ret"), data.get("errcode"))):
+            # The provider's free-form errmsg can echo context credentials.
+            raise RuntimeError("WeChat notification was not acknowledged by iLink")
+
+    def _require_notification_transport(self) -> None:
+        if not self.is_running or not self._bot_token or self._client is None or self._client.is_closed:
+            raise ChannelUnavailable("WeChat channel is not connected")
+
+    async def _notification_binding(self, owner_user_id: str, target: str) -> dict[str, Any]:
+        try:
+            connection = await self._connection_repo.find_connection_by_external_identity(provider=self.name, external_account_id=target, workspace_id=target)
+        except Exception as exc:
+            raise ChannelUnavailable("WeChat notification binding lookup is unavailable") from exc
+        if (
+            not connection
+            or not connection.get("id")
+            or connection.get("owner_user_id") != owner_user_id
+            or connection.get("provider") != self.name
+            or connection.get("status") != "connected"
+            or connection.get("external_account_id") != target
+            or connection.get("workspace_id") != target
+        ):
+            raise RuntimeError("WeChat notification identity is no longer connected")
+        return connection
+
+    async def _remember_notification_context(self, *, connection_id: str, owner_user_id: str, chat_id: str, context_token: str) -> None:
+        if not context_token or not self._bot_token:
+            return
+        try:
+            await self._connection_repo.store_connection_context(
+                connection_id,
+                owner_user_id=owner_user_id,
+                provider=self.name,
+                external_account_id=chat_id,
+                workspace_id=chat_id,
+                extra={"wechat_notification_context": {"chat_id": chat_id, "context_token": context_token, "bot_token_sha256": hashlib.sha256(self._bot_token.encode()).hexdigest()}},
+            )
+        except Exception as exc:
+            # A context write failure must not drop an otherwise valid chat turn.
+            logger.warning("[WeChat] notification context was not persisted: %s", type(exc).__name__)
+
     async def _send_text_message(
         self,
         *,
@@ -414,7 +495,20 @@ class WechatChannel(Channel):
         client_id_prefix: str,
         max_retries: int,
     ) -> None:
-        payload = {
+        payload = self._text_message_payload(chat_id=chat_id, context_token=context_token, text=text, client_id_prefix=client_id_prefix)
+
+        async def send_message() -> None:
+            data = await self._request_json("/ilink/bot/sendmessage", payload)
+            self._ensure_success(data, "sendmessage")
+
+        await self._send_with_retry(
+            send_message,
+            max_retries=max_retries,
+            log_prefix="[WeChat]",
+        )
+
+    def _text_message_payload(self, *, chat_id: str, context_token: str, text: str, client_id_prefix: str) -> dict[str, Any]:
+        return {
             "msg": {
                 "from_user_id": "",
                 "to_user_id": chat_id,
@@ -431,16 +525,6 @@ class WechatChannel(Channel):
             },
             "base_info": self._base_info(),
         }
-
-        async def send_message() -> None:
-            data = await self._request_json("/ilink/bot/sendmessage", payload)
-            self._ensure_success(data, "sendmessage")
-
-        await self._send_with_retry(
-            send_message,
-            max_retries=max_retries,
-            log_prefix="[WeChat]",
-        )
 
     async def send_file(self, msg: OutboundMessage, attachment: ResolvedAttachment) -> bool:
         if attachment.is_image:
@@ -721,6 +805,9 @@ class WechatChannel(Channel):
         # bind can bootstrap an external identity that is not yet whitelisted.
         connect_code = self._pending_connect_code(text)
         if connect_code:
+            if raw_message.get("group_id"):
+                await self._send_connection_reply(chat_id, context_token, await self._connect_reply_text("private_chat_only"))
+                return
             handled = await self._bind_connection_from_connect_code(
                 chat_id=chat_id,
                 context_token=context_token,
@@ -733,36 +820,43 @@ class WechatChannel(Channel):
             return
 
         files = await self._extract_inbound_files(raw_message)
-        if not text and not files:
-            return
+        published = False
+        try:
+            if not text and not files:
+                return
 
-        thread_ts = context_token or str(raw_message.get("client_id") or raw_message.get("msg_id") or "").strip() or None
+            thread_ts = context_token or str(raw_message.get("client_id") or raw_message.get("msg_id") or "").strip() or None
 
-        if context_token:
-            self._context_tokens_by_chat[chat_id] = context_token
-            if thread_ts:
-                self._context_tokens_by_thread[thread_ts] = context_token
+            if context_token:
+                self._context_tokens_by_chat[chat_id] = context_token
+                if thread_ts:
+                    self._context_tokens_by_thread[thread_ts] = context_token
 
-        inbound = self._make_inbound(
-            chat_id=chat_id,
-            user_id=chat_id,
-            text=text,
-            msg_type=InboundMessageType.COMMAND if is_known_channel_command(text) else InboundMessageType.CHAT,
-            thread_ts=thread_ts,
-            files=files,
-            metadata={
-                "context_token": context_token,
-                "ilink_user_id": chat_id,
-                "message_id": str(raw_message.get("message_id") or raw_message.get("msg_id") or "").strip(),
-                "ref_msg": self._extract_ref_message(raw_message),
-                "raw_message": raw_message,
-            },
-        )
-        inbound.topic_id = None
-        inbound = await self._attach_connection_identity(inbound)
-        # The iLink poll loop processes updates sequentially on the Gateway
-        # loop, so no provider-side task needs a pre-handoff reservation.
-        await self._publish_inbound_or_drop(inbound)
+            inbound = self._make_inbound(
+                chat_id=chat_id,
+                user_id=chat_id,
+                text=text,
+                msg_type=InboundMessageType.COMMAND if is_known_channel_command(text) else InboundMessageType.CHAT,
+                thread_ts=thread_ts,
+                files=files,
+                metadata={
+                    "context_token": context_token,
+                    "ilink_user_id": chat_id,
+                    "message_id": str(raw_message.get("message_id") or raw_message.get("msg_id") or "").strip(),
+                    "ref_msg": self._extract_ref_message(raw_message),
+                    "raw_message": raw_message,
+                },
+            )
+            inbound.topic_id = None
+            inbound = await self._attach_connection_identity(inbound)
+            if context_token and not raw_message.get("group_id") and inbound.connection_id and inbound.owner_user_id:
+                await self._remember_notification_context(connection_id=inbound.connection_id, owner_user_id=inbound.owner_user_id, chat_id=chat_id, context_token=context_token)
+            # The iLink poll loop processes updates sequentially on the Gateway
+            # loop, so no provider-side task needs a pre-handoff reservation.
+            published = await self._publish_inbound_or_drop(inbound)
+        finally:
+            if not published:
+                await cleanup_inbound_files(files)
 
     async def _attach_connection_identity(self, inbound: InboundMessage) -> InboundMessage:
         return await attach_connection_identity(
@@ -778,24 +872,22 @@ class WechatChannel(Channel):
 
         state = await self._connection_repo.consume_oauth_state(provider="wechat", state=code)
         if state is None:
-            await self._send_connection_reply(chat_id, context_token, "WeChat connection code is invalid or expired.")
+            await self._send_connection_reply(chat_id, context_token, await self._connect_reply_text("invalid_code"))
             return True
 
         if not chat_id:
-            await self._send_connection_reply(chat_id, context_token, "WeChat connection could not be completed from this message.")
+            await self._send_connection_reply(chat_id, context_token, await self._connect_reply_text("incomplete", owner_user_id=state["owner_user_id"]))
             return True
 
-        await self._connection_repo.upsert_connection(
+        connection = await self._connection_repo.upsert_connection(
             owner_user_id=state["owner_user_id"],
             provider="wechat",
             external_account_id=chat_id,
             workspace_id=chat_id,
-            metadata={
-                "context_token": context_token,
-            },
             status="connected",
         )
-        await self._send_connection_reply(chat_id, context_token, "WeChat connected to DeerFlow.")
+        await self._remember_notification_context(connection_id=connection["id"], owner_user_id=state["owner_user_id"], chat_id=chat_id, context_token=context_token)
+        await self._send_connection_reply(chat_id, context_token, await self._connect_reply_text("connected", owner_user_id=state["owner_user_id"]))
         return True
 
     async def _send_connection_reply(self, chat_id: str, context_token: str, text: str) -> None:
@@ -836,7 +928,11 @@ class WechatChannel(Channel):
         params = {"qrcode": qrcode}
         if verify_code:
             params["verify_code"] = verify_code
-        return await self._request_public_get_json("/ilink/bot/get_qrcode_status", params=params, timeout=timeout)
+        return await self._request_public_get_json(
+            "/ilink/bot/get_qrcode_status",
+            params=params,
+            timeout=self.DEFAULT_QRCODE_STATUS_TIMEOUT if timeout is None else timeout,
+        )
 
     async def _save_auth_state_drained(
         self,
@@ -881,9 +977,19 @@ class WechatChannel(Channel):
             qrcode_img_content=qrcode_img_content or None,
         )
 
-        deadline = time.monotonic() + max(self._qrcode_poll_timeout, 1.0)
-        while time.monotonic() < deadline:
-            status_data = await self.request_login_status(qrcode)
+        deadline = _monotonic() + max(self._qrcode_poll_timeout, 1.0)
+        while True:
+            remaining = deadline - _monotonic()
+            if remaining <= 0:
+                break
+            try:
+                async with asyncio.timeout(remaining):
+                    status_data = await self.request_login_status(
+                        qrcode,
+                        timeout=min(remaining, self.DEFAULT_QRCODE_STATUS_TIMEOUT),
+                    )
+            except TimeoutError:
+                break
             status = str(status_data.get("status") or "").strip().lower()
             if status == "confirmed":
                 token = str(status_data.get("bot_token") or "").strip()
@@ -919,7 +1025,7 @@ class WechatChannel(Channel):
         )
         raise TimeoutError("Timed out waiting for WeChat QR confirmation")
 
-    async def _request_json(self, path: str, payload: dict[str, Any], *, timeout: float | None = None) -> dict[str, Any]:
+    async def _request_json(self, path: str, payload: dict[str, Any], *, timeout: float | None = None, require_object: bool = False) -> dict[str, Any]:
         client = await self._ensure_client()
         response = await client.post(
             f"{self._base_url}{path}",
@@ -929,6 +1035,8 @@ class WechatChannel(Channel):
         )
         response.raise_for_status()
         data = response.json()
+        if require_object and not isinstance(data, dict):
+            raise RuntimeError("iLink response is not a JSON object")
         return data if isinstance(data, dict) else {}
 
     async def _request_public_get_json(
@@ -1202,17 +1310,21 @@ class WechatChannel(Channel):
 
         message_id = str(raw_message.get("message_id") or raw_message.get("msg_id") or raw_message.get("client_id") or "msg")
 
-        for index, item in enumerate(item_list):
-            if not isinstance(item, Mapping):
-                continue
-            if item.get("type") == int(MessageItemType.IMAGE):
-                image_file = await self._extract_image_file(item, message_id=message_id, index=index)
-                if image_file:
-                    files.append(image_file)
-            elif item.get("type") == int(MessageItemType.FILE):
-                file_info = await self._extract_file_item(item, message_id=message_id, index=index)
-                if file_info:
-                    files.append(file_info)
+        try:
+            for index, item in enumerate(item_list):
+                if not isinstance(item, Mapping):
+                    continue
+                if item.get("type") == int(MessageItemType.IMAGE):
+                    image_file = await self._extract_image_file(item, message_id=message_id, index=index)
+                    if image_file:
+                        files.append(image_file)
+                elif item.get("type") == int(MessageItemType.FILE):
+                    file_info = await self._extract_file_item(item, message_id=message_id, index=index)
+                    if file_info:
+                        files.append(file_info)
+        except (Exception, asyncio.CancelledError):
+            await cleanup_inbound_files(files)
+            raise
         return files
 
     async def _extract_image_file(self, item: Mapping[str, Any], *, message_id: str, index: int) -> dict[str, Any] | None:
@@ -1274,16 +1386,15 @@ class WechatChannel(Channel):
         detected_image = _detect_image_extension_and_mime(decrypted)
         image_extension = detected_image[0] if detected_image else ".jpg"
         filename = _safe_media_filename("wechat-image", image_extension, message_id=message_id, index=index)
-        stored_path = await asyncio.to_thread(self._stage_downloaded_file, filename, decrypted)
-        if stored_path is None:
+        staged_file = await self._stage_inbound_file(filename, decrypted)
+        if staged_file is None:
             return None
 
         mime_type = detected_image[1] if detected_image else mimetypes.guess_type(filename)[0] or "image/jpeg"
         return {
             "type": "image",
-            "filename": stored_path.name,
+            **staged_file,
             "size": len(decrypted),
-            "path": str(stored_path),
             "mime_type": mime_type,
             "source": "wechat",
             "message_item_type": int(MessageItemType.IMAGE),
@@ -1346,35 +1457,63 @@ class WechatChannel(Channel):
             logger.warning("[WeChat] inbound file exceeds size limit (%d bytes), skipping message_id=%s", len(decrypted), message_id)
             return None
 
-        stored_path = await asyncio.to_thread(self._stage_downloaded_file, filename, decrypted)
-        if stored_path is None:
+        staged_file = await self._stage_inbound_file(filename, decrypted)
+        if staged_file is None:
             return None
 
         return {
             "type": "file",
-            "filename": stored_path.name,
+            **staged_file,
             "size": len(decrypted),
-            "path": str(stored_path),
             "mime_type": mime_type,
             "source": "wechat",
             "message_item_type": int(MessageItemType.FILE),
             "full_url": full_url,
         }
 
+    async def _stage_inbound_file(self, filename: str, content: bytes) -> dict[str, Any] | None:
+        staged_file: dict[str, Any] = {}
+
+        def stage() -> None:
+            path = self._stage_downloaded_file(filename, content)
+            if path is not None:
+                staged_file.update({"filename": path.name, "path": str(path), INBOUND_FILE_CLEANUP_KEY: partial(shutil.rmtree, path.parent)})
+
+        try:
+            # Drain the write before releasing its directory, even if cancelled
+            # before the worker has returned the new path to the event loop.
+            await await_drained(asyncio.to_thread(stage))
+        except (Exception, asyncio.CancelledError):
+            await cleanup_inbound_files([staged_file])
+            raise
+        return staged_file or None
+
     def _stage_downloaded_file(self, filename: str, content: bytes) -> Path | None:
+        if not filename or filename in {".", ".."} or Path(filename).name != filename or "/" in filename or "\\" in filename or "\x00" in filename:
+            logger.warning("[WeChat] unsafe inbound staging filename, dropping media file")
+            return None
         download_dir = self._download_dir()
         if download_dir is None:
             # Silent None here made an attachment vanish with no log line —
             # the same observability gap as a mislabeled skip reason.
             logger.warning("[WeChat] no state directory configured, dropping staged inbound media file %s", filename)
             return None
+        staging_dir = None
         try:
             download_dir.mkdir(parents=True, exist_ok=True)
-            path = download_dir / filename
+            # Keep the display name while giving each attachment exclusive
+            # storage until the manager has consumed the published message.
+            staging_dir = Path(tempfile.mkdtemp(prefix="inbound-", dir=download_dir))
+            path = staging_dir / filename
             path.write_bytes(content)
             return path
         except OSError:
             logger.exception("[WeChat] failed to persist inbound media file %s", filename)
+            if staging_dir is not None:
+                try:
+                    shutil.rmtree(staging_dir)
+                except OSError:
+                    logger.warning("[WeChat] failed to clean up staged inbound media file %s", filename, exc_info=True)
             return None
 
     @staticmethod
@@ -1557,7 +1696,7 @@ class WechatChannel(Channel):
             return
         try:
             data = json.loads(self._cursor_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
             logger.warning("[WeChat] failed to read cursor state from %s", self._cursor_path)
             return
         cursor = data.get("get_updates_buf")
@@ -1569,16 +1708,22 @@ class WechatChannel(Channel):
             return
         try:
             self._cursor_path.parent.mkdir(parents=True, exist_ok=True)
-            self._cursor_path.write_text(json.dumps({"get_updates_buf": self._get_updates_buf}, ensure_ascii=False, indent=2), encoding="utf-8")
+            # Publish through the shared helper: it fsyncs the staged bytes
+            # before the rename (so a machine crash cannot leave a truncated
+            # cursor behind) and re-applies an existing file's mode.
+            publish_bytes_atomically(self._cursor_path, json.dumps({"get_updates_buf": self._get_updates_buf}, ensure_ascii=False, indent=2).encode("utf-8"))
         except OSError:
             logger.warning("[WeChat] failed to persist cursor state to %s", self._cursor_path)
 
     def _load_auth_state(self) -> None:
-        if not self._auth_path or not self._auth_path.exists():
+        if not self._auth_path:
+            return
+        cleanup_stale_credential_staging(self._auth_path)
+        if not self._auth_path.exists():
             return
         try:
             data = json.loads(self._auth_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
             logger.warning("[WeChat] failed to read auth state from %s", self._auth_path)
             return
         if not isinstance(data, dict):
@@ -1633,17 +1778,28 @@ class WechatChannel(Channel):
                 # iLink bot_token is never briefly readable at umask defaults
                 # (mirrors ChannelRuntimeConfigStore._save). NamedTemporaryFile
                 # uses mkstemp, which creates the file at 0o600 from the start.
-                fd = tempfile.NamedTemporaryFile(mode="w", dir=self._auth_path.parent, suffix=".tmp", delete=False, encoding="utf-8")
+                fd = tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", newline="", dir=self._auth_path.parent, prefix=credential_staging_prefix(self._auth_path), suffix=".tmp", delete=False)
                 try:
                     json.dump(data, fd, ensure_ascii=False, indent=2)
                     fd.close()
                     Path(fd.name).replace(self._auth_path)
                 except BaseException:
-                    fd.close()
-                    Path(fd.name).unlink(missing_ok=True)
+                    # Cleanup is best-effort: a failing close or unlink must not take
+                    # the original persist error with it, and the unlink is still
+                    # attempted after a failed close.
+                    try:
+                        fd.close()
+                    except OSError:
+                        with suppress(Exception):
+                            logger.warning("Failed to close temporary WeChat auth state file %s", fd.name, exc_info=True)
+                    try:
+                        Path(fd.name).unlink(missing_ok=True)
+                    except OSError:
+                        with suppress(Exception):
+                            logger.warning("Failed to remove temporary WeChat auth state file %s", fd.name, exc_info=True)
                     raise
             except OSError:
-                logger.warning("[WeChat] failed to persist auth state to %s", self._auth_path)
+                logger.warning("[WeChat] failed to persist auth state to %s", self._auth_path, exc_info=True)
             else:
                 # Hardening only; the destination already inherits 0o600 from the
                 # temp file. A chmod failure on filesystems without POSIX perms

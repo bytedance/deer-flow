@@ -59,7 +59,7 @@ Commands:
   up [--skip-install] [--no-nginx]  Start containers, render the config, start A, then B, then nginx
   down                              Stop everything; delete the containers and harness data (logs are kept)
   status                            Show containers, Gateways and nginx
-  logs [a|b|nginx|all] [-f]         Print the last 100 log lines (-f follows)
+  logs [a|b|nginx|all] [-f]         Print the last 100 log lines (default a and b; all adds nginx; -f follows)
   check [--with-llm]                Run the cross-instance checks against the running pair
   stop <a|b> [--kill]               Stop one Gateway (SIGTERM; --kill sends SIGKILL to simulate a crash)
   start <a|b>                       Start a stopped Gateway again
@@ -80,7 +80,7 @@ Environment overrides:
   DEERFLOW_MI_FRONTEND_PORT, DEERFLOW_MI_POSTGRES_PORT, DEERFLOW_MI_REDIS_PORT
   DEERFLOW_MI_POSTGRES_CONTAINER, DEERFLOW_MI_REDIS_CONTAINER,
   DEERFLOW_MI_POSTGRES_IMAGE, DEERFLOW_MI_REDIS_IMAGE
-  DEERFLOW_MI_KEEP_CHANNELS=1 keep IM channels enabled (both Gateways then connect every bot)
+  DEERFLOW_MI_KEEP_CHANNELS=1 keep IM channels enabled (the leader lease gives each bot to one Gateway)
   DEERFLOW_MI_HEALTH_TIMEOUT  seconds to wait for each Gateway's /health (default 180)
 
 'make stop' and 'make dev' reclaim port 8001 and this checkout's Gateways, so
@@ -579,12 +579,13 @@ cmd_status() {
 }
 
 cmd_logs() {
-    local follow=false arg files=""
+    # nginx.log holds what the nginx command printed while starting.
+    local follow=false arg files="" nginx_logs="nginx.log nginx-error.log nginx-access.log"
     for arg in "$@"; do
         case "$arg" in
             a | b) files="$files gateway-$arg.log" ;;
-            nginx) files="$files nginx-error.log nginx-access.log" ;;
-            all) files="$files gateway-a.log gateway-b.log" ;;
+            nginx) files="$files $nginx_logs" ;;
+            all) files="$files gateway-a.log gateway-b.log $nginx_logs" ;;
             -f | --follow) follow=true ;;
             *) die "Unknown option for logs: $arg" ;;
         esac

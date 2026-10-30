@@ -16,6 +16,7 @@ from urllib.parse import quote_plus
 
 import httpx
 
+from app.channels.allowed_users import parse_allowed_users, parse_string_or_int_user_id
 from app.channels.base import Channel, ChannelStopTimeout, abort_connection_transport, shutdown_private_loop
 from app.channels.commands import is_known_channel_command, strip_leading_mentions
 from app.channels.connection_identity import attach_connection_identity
@@ -72,20 +73,20 @@ def _normalize_conversation_type(raw: Any) -> str:
     return _CONVERSATION_TYPE_P2P
 
 
-def _normalize_allowed_users(allowed_users: Any) -> set[str]:
-    if allowed_users is None:
-        return set()
-    if isinstance(allowed_users, str):
-        values = [allowed_users]
-    elif isinstance(allowed_users, (list, tuple, set)):
-        values = allowed_users
-    else:
-        logger.warning(
-            "DingTalk allowed_users should be a list of user IDs; treating %s as one string value",
-            type(allowed_users).__name__,
-        )
-        values = [allowed_users]
-    return {str(uid) for uid in values if str(uid)}
+def _parse_allowed_users(allowed_users: Any) -> frozenset[str] | None:
+    """Parse DingTalk staff IDs with the shared fail-closed allowlist semantics.
+
+    Staff IDs are often all digits, so integer entries are accepted as text.
+    """
+    return parse_allowed_users(
+        allowed_users,
+        parse_user_id=parse_string_or_int_user_id,
+        logger=logger,
+        channel_name="DingTalk",
+        expected_id="a DingTalk staff ID (senderStaffId)",
+        valid_id_name="staff ID",
+        warn_on_scalar_separators=True,
+    )
 
 
 def _is_dingtalk_command(text: str) -> bool:
@@ -187,7 +188,7 @@ class DingTalkChannel(Channel):
         self._main_loop: asyncio.AbstractEventLoop | None = None
         self._client_id: str = ""
         self._client_secret: str = ""
-        self._allowed_users: set[str] = _normalize_allowed_users(config.get("allowed_users"))
+        self._allowed_users: frozenset[str] | None = _parse_allowed_users(config.get("allowed_users"))
         self._cached_token: str = ""
         self._token_expires_at: float = 0.0
         self._token_lock = asyncio.Lock()
@@ -205,6 +206,11 @@ class DingTalkChannel(Channel):
         # Serialize inbound-file writes into the uploads directory to avoid
         # racing writers clobbering one another (mirrors FeishuChannel).
         self._file_write_lock = threading.Lock()
+        # Strong references to the per-message stream handler tasks. asyncio only
+        # keeps a weak reference to a task once it awaits, so a dropped
+        # ``create_task`` result can be garbage-collected mid-execution and its
+        # exception never observed; the done callback keeps the set bounded.
+        self._background_tasks: set[asyncio.Task[Any]] = set()
 
     @property
     def supports_streaming(self) -> bool:
@@ -507,7 +513,10 @@ class DingTalkChannel(Channel):
                     keepalive = asyncio.create_task(client.keepalive(websocket))
                     try:
                         async for raw_message in websocket:
-                            asyncio.create_task(client.background_task(json.loads(raw_message)))
+                            task = asyncio.create_task(client.background_task(json.loads(raw_message)))
+                            self._background_tasks.add(task)
+                            task.add_done_callback(self._background_tasks.discard)
+                            task.add_done_callback(self._log_task_error)
                     finally:
                         keepalive.cancel()
             except websockets.exceptions.ConnectionClosedError as exc:
@@ -520,6 +529,15 @@ class DingTalkChannel(Channel):
                     break
                 logger.exception("[DingTalk] stream error")
                 await asyncio.sleep(_DINGTALK_STREAM_ERROR_RETRY_SECONDS)
+
+    @staticmethod
+    def _log_task_error(task: asyncio.Task[Any]) -> None:
+        """Retrieve and log failures from per-message stream tasks."""
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error("[DingTalk] stream message task failed: %s", exc, exc_info=exc)
 
     async def _open_stream_connection(self, client: Any) -> dict[str, Any] | None:
         """Fetch a Stream ticket: ``DingTalkStreamClient.open_connection()`` with a deadline.
@@ -603,7 +621,7 @@ class DingTalkChannel(Channel):
                     logger.warning("[DingTalk] main loop not running, cannot bind channel connection")
                 return
 
-            if self._allowed_users and sender_staff_id not in self._allowed_users:
+            if self._allowed_users is not None and sender_staff_id not in self._allowed_users:
                 logger.debug("[DingTalk] ignoring message from non-allowed user: %s", sender_staff_id)
                 return
 
@@ -880,6 +898,7 @@ class DingTalkChannel(Channel):
                 virtual_path=virtual_path,
                 content=content,
                 owner_prefix="dingtalk-upload",
+                release_on_last=True,
             )
             if not synced:
                 # Mirror Feishu: the agent's non-local sandbox cannot see this
@@ -998,7 +1017,7 @@ class DingTalkChannel(Channel):
                 conversation_type,
                 sender_staff_id,
                 conversation_id,
-                "DingTalk connection code is invalid or expired.",
+                await self._connect_reply_text("invalid_code"),
             )
             return True
 
@@ -1007,7 +1026,7 @@ class DingTalkChannel(Channel):
                 conversation_type,
                 sender_staff_id,
                 conversation_id,
-                "DingTalk connection could not be completed from this message.",
+                await self._connect_reply_text("incomplete", owner_user_id=state["owner_user_id"]),
             )
             return True
 
@@ -1027,7 +1046,7 @@ class DingTalkChannel(Channel):
             conversation_type,
             sender_staff_id,
             conversation_id,
-            "DingTalk connected to DeerFlow.",
+            await self._connect_reply_text("connected", owner_user_id=state["owner_user_id"]),
         )
         return True
 
@@ -1099,14 +1118,20 @@ class DingTalkChannel(Channel):
                     raise ValueError("DingTalk access token response did not contain a usable accessToken")
 
                 raw_expires_in = data.get("expireIn", 7200)
+                now = time.monotonic()
                 try:
                     expires_in = int(raw_expires_in)
-                except (TypeError, ValueError):
+                    # A lifetime within the refresh margin is already stale.
+                    if expires_in <= _TOKEN_REFRESH_MARGIN_SECONDS:
+                        raise ValueError
+                    expires_at = now + expires_in - _TOKEN_REFRESH_MARGIN_SECONDS
+                except (TypeError, ValueError, OverflowError):
                     logger.warning("[DingTalk] invalid expireIn value %r, using default 7200s", raw_expires_in)
                     expires_in = 7200
+                    expires_at = now + expires_in - _TOKEN_REFRESH_MARGIN_SECONDS
 
                 self._cached_token = access_token.strip()
-                self._token_expires_at = time.monotonic() + expires_in - _TOKEN_REFRESH_MARGIN_SECONDS
+                self._token_expires_at = expires_at
                 return self._cached_token
 
     @staticmethod
@@ -1226,7 +1251,9 @@ class DingTalkChannel(Channel):
             return None
 
         try:
-            replier = AICardReplier(self._dingtalk_client, chatbot_message)
+            token_client = _CardTokenClient(self._dingtalk_client.credential)
+            token_client.access_token = await self._get_access_token()
+            replier = AICardReplier(token_client, chatbot_message)
             card_instance_id = await replier.async_create_and_deliver_card(
                 card_template_id=self._card_template_id,
                 card_data={"content": initial_text},
@@ -1253,6 +1280,7 @@ class DingTalkChannel(Channel):
         if not replier:
             raise RuntimeError(f"No AICardReplier found for track ID {out_track_id}")
 
+        replier.dingtalk_client.access_token = await self._get_access_token()
         await replier.async_streaming(
             card_instance_id=out_track_id,
             content_key="content",
@@ -1288,6 +1316,26 @@ class DingTalkChannel(Channel):
         except (httpx.HTTPError, OSError):
             logger.exception("[DingTalk] failed to upload media: %s", file_path)
             return None
+
+
+class _CardTokenClient:
+    """The client ``AICardReplier`` sees: it serves the channel's access token.
+
+    The replier's async methods call ``dingtalk_client.get_access_token()``
+    inline, and dingtalk-stream's version refreshes through ``requests.post``
+    with no timeout, so on the Gateway loop every refresh (about every two
+    hours) blocked the loop for the whole request, indefinitely if DingTalk
+    stalled. The channel sets ``access_token`` from its own bounded
+    ``_get_access_token()`` before every replier call, so the replier never
+    fetches a token itself.
+    """
+
+    def __init__(self, credential: Any) -> None:
+        self.credential = credential
+        self.access_token = ""
+
+    def get_access_token(self) -> str:
+        return self.access_token
 
 
 class _DingTalkMessageHandler:

@@ -10,21 +10,24 @@ sync with the channel registry and the channel classes.
   ``Channel.send_notification`` (push with no inbound message to reply to).
   Only these providers get scheduled-task notification rows; to add one, see
   the ``Channel.send_notification`` docstring.
+- ``proactive_group_notifications``: the provider's channel class implements
+  ``Channel.send_group_notification_for_owner`` for explicit group notification
+  bindings.
 """
 
 from __future__ import annotations
 
 CHANNEL_CAPABILITIES: dict[str, dict[str, bool]] = {
-    "buzz": {"supports_streaming": True, "proactive_notifications": False},
-    "dingtalk": {"supports_streaming": False, "proactive_notifications": False},
-    "discord": {"supports_streaming": False, "proactive_notifications": False},
-    "feishu": {"supports_streaming": True, "proactive_notifications": True},
-    "github": {"supports_streaming": False, "proactive_notifications": False},
-    "qq": {"supports_streaming": False, "proactive_notifications": False},
-    "slack": {"supports_streaming": False, "proactive_notifications": False},
-    "telegram": {"supports_streaming": True, "proactive_notifications": False},
-    "wechat": {"supports_streaming": False, "proactive_notifications": False},
-    "wecom": {"supports_streaming": True, "proactive_notifications": True},
+    "buzz": {"supports_streaming": True, "proactive_notifications": False, "proactive_group_notifications": False},
+    "dingtalk": {"supports_streaming": False, "proactive_notifications": False, "proactive_group_notifications": False},
+    "discord": {"supports_streaming": False, "proactive_notifications": False, "proactive_group_notifications": False},
+    "feishu": {"supports_streaming": True, "proactive_notifications": True, "proactive_group_notifications": True},
+    "github": {"supports_streaming": False, "proactive_notifications": False, "proactive_group_notifications": False},
+    "qq": {"supports_streaming": False, "proactive_notifications": True, "proactive_group_notifications": True},
+    "slack": {"supports_streaming": False, "proactive_notifications": False, "proactive_group_notifications": False},
+    "telegram": {"supports_streaming": True, "proactive_notifications": False, "proactive_group_notifications": False},
+    "wechat": {"supports_streaming": False, "proactive_notifications": True, "proactive_group_notifications": False},
+    "wecom": {"supports_streaming": True, "proactive_notifications": True, "proactive_group_notifications": True},
 }
 
 
@@ -32,3 +35,9 @@ def supports_proactive_notifications(provider: str) -> bool:
     """Whether scheduled-task notices can be pushed to ``provider`` (unknown provider: False)."""
     entry = CHANNEL_CAPABILITIES.get(provider) if isinstance(provider, str) else None
     return bool(entry) and entry.get("proactive_notifications") is True
+
+
+def supports_proactive_group_notifications(provider: str) -> bool:
+    """Whether explicit group notices can be pushed to ``provider`` (unknown provider: False)."""
+    entry = CHANNEL_CAPABILITIES.get(provider) if isinstance(provider, str) else None
+    return bool(entry) and entry.get("proactive_group_notifications") is True

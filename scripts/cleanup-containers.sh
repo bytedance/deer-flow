@@ -22,14 +22,23 @@ echo "Cleaning up sandbox containers with prefix: ${PREFIX}"
 cleanup_docker() {
     if command -v docker &> /dev/null; then
         echo -n "Checking Docker containers... "
-        DOCKER_CONTAINERS=$(docker ps -q --filter "name=${PREFIX}" 2>/dev/null || echo "")
+        # Docker's name filter matches substrings. Check the returned names as
+        # well so a container like not-deer-flow-sandbox is never stopped.
+        DOCKER_LIST=$(docker ps --filter "name=${PREFIX}-" --format '{{.ID}} {{.Names}} {{.Status}}' 2>/dev/null || true)
+        docker_ids=()
+        docker_rows=()
+        while read -r cid name status; do
+            case "$name" in
+                "$PREFIX"-*) docker_ids+=("$cid"); docker_rows+=("$cid $name $status") ;;
+            esac
+        done <<< "$DOCKER_LIST"
 
-        if [ -n "$DOCKER_CONTAINERS" ]; then
+        if [ "${#docker_ids[@]}" -gt 0 ]; then
             echo ""
             echo "Found Docker containers to clean up:"
-            docker ps --filter "name=${PREFIX}" --format "table {{.ID}}\t{{.Names}}\t{{.Status}}"
+            printf '  %s\n' "${docker_rows[@]}"
             echo "Stopping Docker containers..."
-            echo "$DOCKER_CONTAINERS" | xargs docker stop 2>/dev/null || true
+            docker stop "${docker_ids[@]}" >/dev/null 2>&1 || true
             echo -e "${GREEN}✓ Docker containers stopped${NC}"
         else
             echo -e "${GREEN}none found${NC}"
@@ -49,21 +58,23 @@ cleanup_apple_container() {
 
         if [ "$CONTAINER_LIST" != "[]" ] && [ -n "$CONTAINER_LIST" ]; then
             # Extract container IDs that match our prefix
-            CONTAINER_IDS=$(echo "$CONTAINER_LIST" | python3 -c "
+            CONTAINER_IDS=$(echo "$CONTAINER_LIST" | CLEANUP_CONTAINER_PREFIX="$PREFIX" python3 -c '
 import json
+import os
 import sys
 try:
     containers = json.load(sys.stdin)
     if isinstance(containers, list):
+        prefix = os.environ["CLEANUP_CONTAINER_PREFIX"] + "-"
         for c in containers:
             if isinstance(c, dict):
-                # Apple Container uses 'id' field which contains the container name
-                cid = c.get('configuration').get('id', '')
-                if '${PREFIX}' in cid:
+                configuration = c.get("configuration")
+                cid = configuration.get("id") if isinstance(configuration, dict) else None
+                if isinstance(cid, str) and cid.startswith(prefix):
                     print(cid)
 except:
     pass
-" 2>/dev/null || echo "")
+' 2>/dev/null || echo "")
 
             if [ -n "$CONTAINER_IDS" ]; then
                 echo ""

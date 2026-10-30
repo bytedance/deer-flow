@@ -40,6 +40,15 @@ export const zhCN: Translations = {
       "此条目来自仓库扩展目录；实际安装和启用状态请由部署管理员确认。",
     installationGuide: "查看安装说明",
     catalog: {
+      workflows: {
+        title: "脚本工作流",
+        description:
+          "保存版本化 Agent 工作流，在同一 Gateway 进程内恢复，并确认确切的保留输出版本。不支持重启回放或硬金额预算。",
+      },
+      reportSections: {
+        title: "分段长文写作",
+        description: "逐段撰写长报告，并将各章节汇总为可下载的 Markdown 文档。",
+      },
       agentTeams: {
         title: "Agent 团队",
         description: "让完整 Custom Agent 通过 @成员、共享记录与任务交接协作。",
@@ -65,6 +74,34 @@ export const zhCN: Translations = {
         title: "扩展开发示例",
         description:
           "演示中间件、任务生命周期、模型观察器、服务和 HTTP 路由的扩展方式。",
+      },
+      retrieval: {
+        title: "本地检索示例",
+        description:
+          "使用固定示例文档演示只读检索与结构化工具结果，不连接外部知识库。",
+      },
+      lightrag: {
+        title: "LightRAG",
+        description: "从 LightRAG 检索文档与实体关系，并使用统一的来源引用。",
+      },
+      knowledgePlatform: {
+        title: "知识空间与连接",
+        description:
+          "在管理员明确授权后管理多层级空间、资源共享与继承策略。需要安装和配置，不包含管理页面，也不改变全局检索权限。",
+      },
+      knowledgeManagement: {
+        title: "知识入库与处理",
+        description:
+          "通过 WeKnora 导入文件、网址和文本，并在管理员明确授权后管理处理任务。需要安装和配置，不包含管理页面。",
+      },
+      weknora: {
+        title: "WeKnora 知识检索",
+        description:
+          "检索 WeKnora 知识库和所选文档，并展示来源引用。需要管理员安装并配置访问权限。",
+      },
+      knowledge: {
+        title: "知识范围选择示例",
+        description: "用示例文档演示知识库和文件范围选择、检索及来源引用。",
       },
     },
     pageUnavailable: "扩展页面不可用",
@@ -210,6 +247,15 @@ export const zhCN: Translations = {
     showBrowser: "打开浏览器面板",
   },
 
+  browserStream: {
+    connecting: "正在连接…",
+    disconnected: "连接已断开",
+    handshakeTimeout:
+      "实时浏览器连接超时。请检查网络或代理设置，然后关闭并重新开启 Live 以重试。",
+    connectionFailed:
+      "实时浏览器连接失败或已关闭。请检查网络连接和访问权限，然后关闭并重新开启 Live 以重试。",
+  },
+
   skillUsage: {
     used: "使用的技能",
     title: "技能",
@@ -239,6 +285,11 @@ export const zhCN: Translations = {
   home: {
     docs: "文档",
     blog: "博客",
+    searchDocs: "搜索文档…",
+    searchDocsLabel: "搜索文档",
+    searchNoResults: "未找到结果，请尝试更少或不同的关键词。",
+    searchLoadFailed: "搜索暂时不可用。",
+    searchLoading: "加载中…",
   },
 
   // Welcome
@@ -274,6 +325,9 @@ export const zhCN: Translations = {
   },
 
   artifactPreview: {
+    loadingPreview: "正在准备预览...",
+    resourcesUnavailable:
+      "部分预览资源无法加载。可查看源代码或下载文件以获取完整内容。",
     limited: (previewSize, totalSize) =>
       totalSize
         ? `当前显示 ${totalSize} 中的前 ${previewSize}。`
@@ -486,6 +540,10 @@ export const zhCN: Translations = {
           "连续几轮没有进展。回复说明还缺什么，或用 /goal 换个说法重新设置目标。",
         tokenCapped:
           "已达到 token 预算。发送消息即可继续，新的运行会重新计算预算。",
+        loopCapped:
+          "重复工具调用触发了安全停止。调整要求后发送新消息即可重试，目标会保留。",
+        recursionCapped:
+          "运行达到了步数上限，未能完成。发送新消息即可继续，目标会保留。",
         missingEvidence:
           "目标检查：缺少依据。可以让它展示结果或说明卡在哪里；如果目标已不适用，用 /goal clear 清除目标。",
         runFailed:
@@ -768,6 +826,18 @@ export const zhCN: Translations = {
     cancel: "取消",
     retryItem: "重试",
     exportResults: "导出 JSONL",
+    viewResult: "查看结果",
+    resultTitle: "批处理结果",
+    resultDescription: "查看该条目的持久化报告和已捕获证据。",
+    report: "报告",
+    evidence: "已捕获证据",
+    noEvidence: "没有已捕获证据",
+    acceptance: "验收结果",
+    noReport: "该条目还没有保存报告。",
+    loadResultFailed: "无法加载批处理结果",
+    truncated: "报告已截断",
+    omittedEvidence: (count) => `${count} 条证据未展示`,
+    pagesLabel: "页码",
     viewItems: "查看条目",
     hideItems: "收起条目",
     itemsFailed: "无法加载批处理条目",
@@ -960,6 +1030,11 @@ export const zhCN: Translations = {
       savedUnavailable: "已有群通知配置，当前服务未启用群通知。",
       clearSaved: "清除群通知",
       bind: "绑定飞书群",
+      bindWecom: "绑定企业微信群",
+      bindQq: "绑定 QQ 群",
+      name: "群名称",
+      nameHint:
+        "为这个群取一个容易识别的名称，便于选择通知目标。重新绑定可修改群名称。",
       refresh: "刷新群列表",
       bindInstructions:
         "先把机器人加入群聊，再在群里 @机器人 并发送这条命令。完成绑定后刷新群列表。",
@@ -972,16 +1047,16 @@ export const zhCN: Translations = {
       copyFailed: "复制失败，请选中上方命令手动复制。",
       newCode: "生成新绑定码",
       close: "关闭绑定说明",
-      label: "额外通知到飞书群（可选）",
-      detailLabel: "额外通知到飞书群",
+      label: "额外通知到群聊（可选）",
+      detailLabel: "额外通知到群聊",
       none: "仅通知本人",
       personalHint: "你现有的个人通知保持不变，所选群也会收到任务更新。",
-      emptyHint: "先在下方绑定飞书群，再刷新群列表。",
+      emptyHint: "先在下方绑定群聊，再刷新群列表。",
       loading: "正在加载群列表…",
       unavailable: "已选群暂不可用",
       unavailableHint: "已选群当前不可用。可以保留、移除或选择其他群。",
       unnamed: "群名称不可用",
-      unnamedHint: "请检查应用的群信息读取权限，再重新绑定该群以获取群名称。",
+      unnamedHint: "请重新绑定该群并设置容易识别的名称，再选择通知目标。",
       loadFailed:
         "无法加载群列表，已保留当前选择。仍可保存其他修改或移除所选群。",
     },
@@ -1113,6 +1188,8 @@ export const zhCN: Translations = {
         maxContinuations: "已达到继续处理的次数上限",
         noProgress: "连续多轮没有进展",
         tokenCapped: "已达到 token 预算",
+        loopCapped: "重复工具调用触发了安全停止",
+        recursionCapped: "运行达到了步数上限",
         evaluatorFailed: "未能检查目标，这次运行本身可能没问题",
         noDurableEndOfTurn: "未能检查目标：没有保存最终回复",
         threadChanged: "未能检查目标：检查期间对话发生了变化",
@@ -1294,8 +1371,9 @@ export const zhCN: Translations = {
       "你可以在右上角的菜单里随时保存这个智能体，就算目前还只是初稿也可以。",
     saveCommandMessage:
       "请现在根据我们目前已经讨论的全部内容保存这个自定义智能体。这就是我明确的保存确认。如果仍有少量细节缺失，请根据上下文做出合理假设，生成一份简洁的英文初始 SOUL.md，并直接调用 setup_agent，不要再向我索要额外确认。",
+    agentSaveFailed: "DeerFlow 未能保存这个智能体。请查看工具错误后重试。",
     agentCreatedPendingRefresh:
-      "智能体已创建，但 DeerFlow 暂时还无法读取到它。请稍后刷新当前页面。",
+      "DeerFlow 未能确认智能体已保存，请重新尝试保存。",
     more: "更多操作",
     agentCreated: "智能体已创建！",
     startChatting: "开始对话",
@@ -1319,6 +1397,13 @@ export const zhCN: Translations = {
     settingsKnowledgeSaveToolAccess: "请先保存工具权限，再选择默认知识库。",
     settingsModel: "默认模型",
     settingsModelDefault: "使用全局默认",
+    settingsModelSwitchNeedsCatalog:
+      "请先加载所选模型，再保存模型切换。你可以重试加载，或恢复原模型后保存其他修改。",
+    settingsReasoningUnsupported: "不支持",
+    settingsThinkingRequiredHint:
+      "此模型必须开启思考，已保存的关闭设置可能导致运行无法开始。请选择继承或开启以替换该值。",
+    settingsReasoningUnsupportedHint:
+      "所选模型不支持此已保存值。请选择继承或支持的值以替换它。",
     settingsTemperature: "温度",
     settingsTemperatureHint: "0 = 确定性输出，越高越发散（0–2）。",
     settingsMaxTokens: "最大输出 token",
@@ -1468,7 +1553,8 @@ export const zhCN: Translations = {
     unconfigured: "未配置",
     unavailable: "当前无法使用渠道连接。",
     unavailableShort: "不可用",
-    setupTitle: (name: string) => `连接 ${name}`,
+    setupTitle: (name: string) =>
+      /^[A-Za-z0-9]/.test(name) ? `连接 ${name}` : `连接${name}`,
     setupEditTitle: (name: string) => `修改 ${name}`,
     wechatQr: {
       restart: "重新扫码",
@@ -1525,6 +1611,34 @@ export const zhCN: Translations = {
       expiredTitle: "二维码已过期",
       failedTitle: "连接未完成",
     },
+    // A Latin name keeps the usual spaces ("发给 Slack 机器人"); a Chinese one
+    // does not ("发给飞书机器人").
+    bindingCode: {
+      description: (provider: string) =>
+        /^[A-Za-z0-9]/.test(provider)
+          ? `把下面这条命令发给 ${provider} 机器人，即可绑定到你的 DeerFlow 账号。`
+          : `把下面这条命令发给${provider}机器人，即可绑定到你的 DeerFlow 账号。`,
+      loading: "正在生成绑定码…",
+      copy: "复制命令",
+      copied: "已复制",
+      copyFailed: "复制失败，请选中上方命令手动复制。",
+      expiresAt: (time: string) => `${time} 过期`,
+      waiting: (provider: string) =>
+        /^[A-Za-z0-9]/.test(provider)
+          ? `正在等待 ${provider} 中的绑定消息…`
+          : `正在等待${provider}中的绑定消息…`,
+      connected: (provider: string) =>
+        /^[A-Za-z0-9]/.test(provider)
+          ? `${provider} 已连接`
+          : `${provider}已连接`,
+      done: "完成",
+      expired: "绑定码已过期。",
+      newCode: "重新生成绑定码",
+      failed: "无法生成绑定码。",
+      tooManyCodes:
+        "未使用的绑定码太多。请先用已有的绑定码，或等它们过期（约 10 分钟）后再试。",
+      retry: "重试",
+    },
     setupDescription:
       "填写当前服务进程需要的配置值。这些内容不会写入 config.yaml。",
     saveAndConnect: "保存并连接",
@@ -1542,8 +1656,8 @@ export const zhCN: Translations = {
     },
     connectedAs: (name: string) => `已连接为 ${name}。`,
     scheduledUpdates: {
-      supported: "定时任务通知：会发送到这里",
-      supportedAfterConnect: "定时任务通知：连接后可发送到这里",
+      supported: "定时任务通知：已支持，可在通知设置中管理",
+      supportedAfterConnect: "定时任务通知：已支持，连接后可管理通知",
       unsupported: "定时任务通知：此应用暂不支持",
     },
   },
@@ -1559,6 +1673,9 @@ export const zhCN: Translations = {
   // Tool calls
   toolCalls: {
     details: "工具详情",
+    failed: "执行失败",
+    scheduleTaskPending: "定时任务操作",
+    stopScheduledTaskPending: "暂停此定时任务",
     toolName: "工具名称",
     callId: "调用 ID",
     input: "输入",
@@ -1873,7 +1990,7 @@ export const zhCN: Translations = {
       lightDescription: "更明亮的配色，适合日间使用。",
       darkDescription: "更暗的配色，减少眩光方便专注。",
       languageTitle: "语言",
-      languageDescription: "在不同语言之间切换。",
+      languageDescription: "选择界面语言及回复时优先使用的语言。",
     },
     tools: {
       adminRequired: "需要管理员权限才能管理 MCP 工具。",
@@ -2242,6 +2359,34 @@ export const zhCN: Translations = {
       testBody: "这是一条测试通知。",
       notSupported: "当前浏览器不支持通知功能。",
       disableNotification: "关闭通知",
+      channels: {
+        title: "定时任务通知",
+        description:
+          "选择哪些已连接的应用接收定时任务更新。关闭通知不影响聊天。待发和重试中的通知会取消，重新开启不会补发旧通知。已经开始投递的通知仍可能送达。",
+        providers: {
+          feishu: "飞书 / Lark",
+          wecom: "企业微信",
+          wechat: "微信",
+          qq: "QQ",
+        },
+        toggleLabel: (provider: string) => `${provider}定时任务通知`,
+        eventsTitle: "普通任务与目标提醒",
+        eventsDescription:
+          "可选：通过上方已开启的应用接收普通网页或后台任务、目标的运行提醒（默认关闭）。",
+        events: {
+          run_completed: "任务或目标已完成",
+          run_failed: "任务或目标运行失败",
+          human_input_requested: "需要你参与确认",
+        },
+        eventToggleLabel: (event: string) => `${event}通知`,
+        loading: "正在加载通知偏好…",
+        saving: "正在保存…",
+        loadFailed: "无法加载通知偏好，请重试。",
+        saveFailed: "未能保存此更改，当前仍显示之前的设置，请重试。",
+        unavailable: "当前服务尚不支持通知偏好设置。",
+        empty: "请在设置 → 频道中连接支持定时任务通知的应用。",
+        retry: "重试",
+      },
     },
     account: {
       profileTitle: "个人信息",
@@ -2305,6 +2450,9 @@ export const zhCN: Translations = {
         "该邮箱对应的账号已存在。请使用密码登录或联系管理员。",
       sso_not_allowed: "你的账号不允许使用 SSO 登录。请联系管理员。",
       account_disabled: "账号已停用，请联系管理员。",
+      invalid_email: "请输入有效的邮箱地址。",
+      password_too_short: "密码至少需要 6 个字符。",
+      registration_password_too_short: "密码至少需要 8 个字符。",
     },
   },
 };

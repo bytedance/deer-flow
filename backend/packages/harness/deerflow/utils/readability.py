@@ -3,6 +3,7 @@ import re
 import subprocess
 from html import escape, unescape
 from html.parser import HTMLParser
+from threading import Lock
 from urllib.parse import urljoin, urlparse, uses_relative
 
 from bs4 import BeautifulSoup
@@ -10,6 +11,45 @@ from markdownify import markdownify as md
 from readabilipy import simple_json_from_html_string
 
 logger = logging.getLogger(__name__)
+
+try:
+    from readabilipy.simple_json import have_node as _readabilipy_have_node
+except ImportError:  # pragma: no cover - compatibility with future readabilipy layouts
+    logger.warning(
+        "Cannot import readabilipy's Node availability probe; attempting Readability.js extraction directly",
+        exc_info=True,
+    )
+    _readabilipy_have_node = None
+
+_readability_js_launch_failed = False
+_readability_js_available_cached: bool | None = None
+_readability_js_probe_lock = Lock()
+
+
+def _readability_js_available() -> bool:
+    """Cache whether the optional Node extractor can be used."""
+    global _readability_js_available_cached
+
+    if _readability_js_launch_failed:
+        return False
+    if _readabilipy_have_node is None:
+        return True
+    if _readability_js_available_cached is not None:
+        return _readability_js_available_cached
+    with _readability_js_probe_lock:
+        if _readability_js_launch_failed:
+            return False
+        if _readability_js_available_cached is not None:
+            return _readability_js_available_cached
+        try:
+            _readability_js_available_cached = bool(_readabilipy_have_node())
+        except (subprocess.SubprocessError, OSError, ValueError):
+            logger.warning("Readability.js availability probe failed; using the Python fallback", exc_info=True)
+            _readability_js_available_cached = False
+            return False
+        if not _readability_js_available_cached:
+            logger.warning("Readability.js is unavailable; using the Python fallback")
+        return _readability_js_available_cached
 
 
 class Article:
@@ -60,6 +100,10 @@ class Article:
 
 
 _BASE_TAG_RE = re.compile(r"<base", re.IGNORECASE)
+# A successful Readability.js extraction always strips <body> and <title>;
+# their presence in the content signals the subprocess returned the raw document.
+_UNEXTRACTED_DOC_RE = re.compile(r"<body\b[^>]*>|<title\b[^>]*>", re.IGNORECASE)
+_BODY_INNER_RE = re.compile(r"<body[^>]*>(.*)</body>", re.DOTALL | re.IGNORECASE)
 
 
 def _resolve_html_urls(html: str, url: str) -> str:
@@ -152,26 +196,46 @@ class _DestinationRewriter(HTMLParser):
 
 class ReadabilityExtractor:
     def extract_article(self, html: str, *, url: str | None = None) -> Article:
+        global _readability_js_launch_failed
+
         if url:
             html = _resolve_html_urls(html, url)
-        try:
-            article = simple_json_from_html_string(html, use_readability=True)
-        except (subprocess.CalledProcessError, FileNotFoundError) as exc:
-            stderr = getattr(exc, "stderr", None)
-            if isinstance(stderr, bytes):
-                stderr = stderr.decode(errors="replace")
-            stderr_info = f"; stderr={stderr.strip()}" if isinstance(stderr, str) and stderr.strip() else ""
-            logger.warning(
-                "Readability.js extraction failed with %s%s; falling back to pure-Python extraction",
-                type(exc).__name__,
-                stderr_info,
-                exc_info=True,
-            )
+        article = None
+        if _readability_js_available():
+            try:
+                article = simple_json_from_html_string(html, use_readability=True)
+            except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+                # A missing executable is an environment-level failure. A
+                # non-zero exit can be document-specific (OOM, stack depth,
+                # malformed input), so only disable Node for the former.
+                if isinstance(exc, FileNotFoundError):
+                    _readability_js_launch_failed = True
+                stderr = getattr(exc, "stderr", None)
+                if isinstance(stderr, bytes):
+                    stderr = stderr.decode(errors="replace")
+                stderr_info = f"; stderr={stderr.strip()}" if isinstance(stderr, str) and stderr.strip() else ""
+                logger.warning(
+                    "Readability.js extraction failed with %s%s; falling back to pure-Python extraction",
+                    type(exc).__name__,
+                    stderr_info,
+                    exc_info=True,
+                )
+        if article is None:
             article = simple_json_from_html_string(html, use_readability=False)
 
         html_content = article.get("content")
         if not html_content or not str(html_content).strip():
             html_content = "No content could be extracted from this page"
+
+        # Detect silent Readability.js degradation: a successful extraction always
+        # strips <body> and <title> from the content. Their presence means the
+        # subprocess returned the raw document (e.g. on Windows where the node
+        # bridge may not produce real output). When detected, use the resolved
+        # HTML's <body> content so that <a> destinations survive.
+        if url and html and _UNEXTRACTED_DOC_RE.search(html_content):
+            logger.info("Readability.js returned the unextracted document; using resolved HTML body")
+            body_match = _BODY_INNER_RE.search(html)
+            html_content = body_match.group(1) if body_match else html
 
         title = article.get("title")
         if not title or not str(title).strip():

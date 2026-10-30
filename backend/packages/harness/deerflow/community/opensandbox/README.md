@@ -94,7 +94,15 @@ The full DeerFlow surface is implemented:
 
 - `execute_command` forwards per-call environment variables and positive
   wall-clock timeouts through `RunCommandOpts`, preserving stdout, stderr, and
-  non-zero exit information in DeerFlow's string result.
+  non-zero exit information in DeerFlow's string result. An explicit
+  `CommandExecError` with value `context deadline exceeded` and no numeric
+  exit code ends with `Error: command timed out` and `Exit Code: 124`, keeping
+  any partial output. Transport exceptions and other missing-code errors keep
+  their existing error reporting. Numeric exits, including signal termination
+  (`-1`), keep their own code: a signal-only event does not identify whether a
+  command deadline or another kill caused it. Servers that expose only that
+  signal status need additional deadline information before it can safely be
+  normalized to 124.
 - Text and binary file operations use OpenSandbox's native filesystem API.
   Append is serialized as a read-modify-write because SDK 0.1.x has no append
   primitive.

@@ -15,11 +15,14 @@ from deerflow.persistence.scheduled_task_runs.finalization import FinalizationOb
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
 from deerflow.persistence.scheduled_task_runs.projection import account_launch, can_project
 from deerflow.persistence.scheduled_tasks.model import ACTIVE_RUN_STATUSES, LIVE_TASK_STATUSES, ONCE_TASK_STATUS_BY_RUN_STATUS, TERMINAL_RUN_STATUSES, TERMINAL_TASK_STATUSES, ScheduledTaskRow
-from deerflow.scheduler.host_notes import RUN_ERROR_END_REACHED
+from deerflow.runtime.events.terminal import RecoveryTerminalPublisher, RecoveryTerminalTarget
+from deerflow.scheduler.host_notes import RUN_ERROR_END_REACHED, RUN_ERROR_INTERRUPTED
 from deerflow.utils.goal_objective import normalize_goal_objective
 from deerflow.utils.time import coerce_iso
 
 logger = logging.getLogger(__name__)
+
+_TERMINAL_DURABLE_RUN_STATUSES = frozenset({"success", "error", "timeout", "interrupted"})
 
 
 class ScheduledTaskQuotaExceeded(ValueError):
@@ -89,9 +92,11 @@ class ScheduledTaskRepository:
         session_factory: async_sessionmaker[AsyncSession],
         *,
         run_repository: RunRepository | None = None,
+        recovery_terminal_publisher: RecoveryTerminalPublisher | None = None,
     ) -> None:
         self._sf = session_factory
         self._run_repository = run_repository or RunRepository(session_factory)
+        self._recovery_terminal_publisher = recovery_terminal_publisher
         self._finalization_observer: FinalizationObserver | None = None
 
     def set_finalization_observer(self, callback: FinalizationObserver | None) -> None:
@@ -651,6 +656,78 @@ class ScheduledTaskRepository:
             await session.commit()
             return accepted
 
+    async def reconcile_terminal_runs(self, *, now: datetime, limit: int = 100) -> int:
+        """Finalize running occurrences whose durable run already finished.
+
+        A completion hook can fail after the durable run committed its terminal
+        status, leaving the occurrence in ``running`` until a restart. This
+        non-destructive pass only consumes already-terminal ``runs`` rows; it
+        never takes over, interrupts, or otherwise touches a live run.
+
+        Each candidate commits in its own transaction. A poisoned occurrence
+        (for example, the same observer/database failure that made the sweep
+        necessary) rolls back only its own savepoint, is logged, and cannot
+        prevent later candidates from finalizing or the rest of the poller from
+        running.
+        """
+        async with self._sf() as session:
+            candidates = list(
+                (
+                    await session.execute(
+                        select(ScheduledTaskRunRow.id, ScheduledTaskRunRow.task_id)
+                        .join(RunRow, RunRow.run_id == ScheduledTaskRunRow.run_id)
+                        .where(
+                            ScheduledTaskRunRow.status == "running",
+                            ScheduledTaskRunRow.run_id.is_not(None),
+                            RunRow.status.in_(tuple(_TERMINAL_DURABLE_RUN_STATUSES)),
+                            RunRow.operation_kind == "run",
+                        )
+                        .order_by(ScheduledTaskRunRow.created_at.asc(), ScheduledTaskRunRow.id.asc())
+                        .limit(limit)
+                    )
+                ).all()
+            )
+        finalized = 0
+        for occurrence_id, task_id in candidates:
+            try:
+                async with self._sf() as session:
+                    task = await self._lock_task(session, task_id)
+                    occurrence = await session.get(ScheduledTaskRunRow, occurrence_id, with_for_update=True)
+                    if occurrence is None or occurrence.task_id != task_id or occurrence.status != "running" or occurrence.run_id is None:
+                        continue
+                    run = await session.get(RunRow, occurrence.run_id)
+                    if run is None or run.status not in _TERMINAL_DURABLE_RUN_STATUSES or run.operation_kind != "run":
+                        continue
+                    metadata = run.metadata_json if isinstance(run.metadata_json, dict) else {}
+                    if metadata.get("scheduled_task_id") != task_id or metadata.get("scheduled_task_run_id") != occurrence_id:
+                        continue
+                    if run.status == "success":
+                        status, error = "success", None
+                    elif run.status == "interrupted":
+                        status, error = "interrupted", run.error or RUN_ERROR_INTERRUPTED
+                    else:
+                        status, error = "failed", run.error
+                    accepted = await finalize_occurrence(
+                        session,
+                        task,
+                        occurrence,
+                        status=status,
+                        error=error,
+                        finished_at=now,
+                        run_id=run.run_id,
+                        goal_verdict=run.goal_verdict,
+                        observer=self._finalization_observer,
+                    )
+                    await session.commit()
+                    if accepted:
+                        finalized += 1
+            except Exception:
+                logger.exception(
+                    "Failed to reconcile scheduled occurrence %s from its terminal run; leaving it for the next poll",
+                    occurrence_id,
+                )
+        return finalized
+
     async def claim_dispatch_lease(
         self,
         task_id: str,
@@ -943,6 +1020,27 @@ class ScheduledTaskRepository:
         lease_grace_seconds: int = 10,
     ) -> int:
         """Cancel once tasks only after their underlying run is no longer live."""
+        recovery_targets: list[RecoveryTerminalTarget] = []
+        try:
+            return await self._reconcile_stuck_once_tasks(
+                error=error,
+                now=now,
+                lease_grace_seconds=lease_grace_seconds,
+                recovery_targets=recovery_targets,
+            )
+        finally:
+            if self._recovery_terminal_publisher is not None:
+                for target in recovery_targets:
+                    await self._recovery_terminal_publisher.publish(target)
+
+    async def _reconcile_stuck_once_tasks(
+        self,
+        *,
+        error: str,
+        now: datetime,
+        lease_grace_seconds: int,
+        recovery_targets: list[RecoveryTerminalTarget],
+    ) -> int:
         async with self._sf() as session:
             result = await session.execute(
                 select(ScheduledTaskRow.id).where(
@@ -982,6 +1080,16 @@ class ScheduledTaskRepository:
                         error=error,
                         stop_reason="scheduled_task_orphan_recovered",
                     )
+                    if claimed and self._recovery_terminal_publisher is not None:
+                        target = self._recovery_terminal_publisher.authorize_takeover(
+                            claimed=claimed,
+                            thread_id=candidate.thread_id,
+                            run_id=candidate.run_id,
+                            user_id=candidate.user_id,
+                            operation_kind=candidate.operation_kind,
+                        )
+                        if target is not None:
+                            recovery_targets.append(target)
                     if not claimed:
                         refreshed = await self._run_repository.get(candidate.run_id, user_id=None)
                         if refreshed is not None and refreshed.get("status") in {"pending", "running"}:
