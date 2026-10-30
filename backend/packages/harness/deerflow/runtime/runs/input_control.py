@@ -110,7 +110,8 @@ class RunInputControl:
         for entry in entries:
             self.delivered.add(entry["id"])
             direct = entry.get("source", "user") == "user"
-            self.current_input = entry["id"] if direct else None
+            if direct:
+                self.current_input = entry["id"]
             messages.append(
                 HumanMessage(
                     content=entry["text"],

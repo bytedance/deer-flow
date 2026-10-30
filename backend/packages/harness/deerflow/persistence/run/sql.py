@@ -81,7 +81,7 @@ class RunRepository(RunStore):
             query = select(RunRow.run_id).where(RunRow.thread_id == thread_id, RunRow.status.in_(("pending", "running")), RunRow.cancel_action.is_(None), RunRow.run_inputs_json["closed"].as_boolean().is_(False))
             if user_id is not None:
                 query = query.where(RunRow.user_id == user_id)
-            return (await session.execute(query.limit(1))).scalar_one_or_none()
+            return (await session.execute(query.order_by(RunRow.created_at.desc(), RunRow.run_id.desc()).limit(1))).scalar_one_or_none()
 
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._sf = session_factory

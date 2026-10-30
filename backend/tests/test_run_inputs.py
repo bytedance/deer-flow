@@ -18,6 +18,25 @@ USER_ID = "00000000-0000-0000-0000-000000000001"
 
 
 @pytest.mark.asyncio
+async def test_active_input_run_orders_legacy_rows_without_the_active_run_index(tmp_path):
+    from deerflow.persistence.run.model import RunRow
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'legacy-inputs.db'}")
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+            # Healthy databases forbid multiple active Runs. Exercise only
+            # the fallback ordering for a legacy DB without that constraint.
+            await conn.execute(sa.text("DROP INDEX uq_runs_thread_active"))
+            for run_id, day in [("old", 1), ("new-a", 2), ("new-z", 2)]:
+                await conn.execute(RunRow.__table__.insert().values(run_id=run_id, thread_id="thread", user_id=USER_ID, status="running", created_at=datetime(2026, 1, day, tzinfo=UTC), run_inputs_json={"closed": False, "items": []}))
+        store = RunRepository(async_sessionmaker(engine, expire_on_commit=False))
+        assert await store.active_input_run("thread", user_id=USER_ID) == "new-z"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_input_migration_preserves_existing_runs_on_upgrade_and_rollback(tmp_path):
     from deerflow.persistence import bootstrap
     from deerflow.persistence.run.model import RunRow

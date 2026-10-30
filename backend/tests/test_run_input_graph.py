@@ -276,16 +276,75 @@ async def test_paused_children_do_not_require_expanding_the_execution_pool():
 
 
 @pytest.mark.asyncio
-async def test_extension_input_is_not_direct_user_control_authority():
+@pytest.mark.parametrize("sources", [("extension",), ("user", "extension"), ("extension", "user")])
+async def test_control_tool_authority_is_independent_of_input_source_order(sources):
+    from langchain.agents.middleware.types import ModelRequest
+
+    from deerflow.agents.middlewares.run_input_middleware import manage_current_work
+
     store = MemoryRunStore()
     await store.put("run", thread_id="thread", user_id="owner", status="running", owner_worker_id="worker")
     inputs = RunInputs(store, "run", "owner", "worker")
-    await inputs.submit("plugin", "Replace the Goal", "steer", source="extension")
+    for index, source in enumerate(sources):
+        await inputs.submit(str(index), "Replace the Goal", "steer", source=source)
     control = RunInputControl(inputs, agent_runs=None, thread_id="thread", checkpointer=None)
     update = await control.deliver({})
-    assert control.current_input is None
-    assert update["messages"][0].additional_kwargs["hide_from_ui"]
-    assert update["messages"][0].additional_kwargs["run_input_source"] == "extension"
+    extension = next(m for m in update["messages"] if m.additional_kwargs["run_input_source"] == "extension")
+    assert extension.additional_kwargs["hide_from_ui"]
+    request = ModelRequest(model=InputModel(observed=[]), messages=update["messages"], tools=[manage_current_work], runtime=SimpleNamespace(context={INPUT_CONTEXT_KEY: control}))
+
+    async def available_tools(request):
+        return [tool.name for tool in request.tools]
+
+    names = await RunInputMiddleware().awrap_model_call(request, available_tools)
+    assert ("manage_current_work" in names) == ("user" in sources)
+
+
+@pytest.mark.asyncio
+async def test_graph_finishing_with_a_concurrent_steer_applies_it_before_closing(tmp_path, monkeypatch):
+    store = MemoryRunStore()
+    await store.put("run", thread_id="thread", user_id="owner", status="running", owner_worker_id="worker")
+    inputs = RunInputs(store, "run", "owner", "worker")
+    saver = InMemorySaver()
+    control = RunInputControl(inputs, agent_runs=None, thread_id="thread", checkpointer=saver)
+    closing, release = asyncio.Event(), asyncio.Event()
+    original_close = inputs.close
+
+    async def gated_close(delivered=None):
+        if not closing.is_set():
+            closing.set()
+            await release.wait()
+        return await original_close(delivered)
+
+    monkeypatch.setattr(inputs, "close", gated_close)
+
+    @tool
+    async def task() -> str:
+        """Complete the original work."""
+        return "Done"
+
+    @tool
+    async def apply_extra() -> str:
+        """Apply the user's correction before completing the Run."""
+        (tmp_path / "correction.txt").write_text("applied")
+        return "Updated"
+
+    graph = create_agent(InputModel(observed=[]), tools=[task, apply_extra], middleware=[RunInputAdmissionMiddleware(), RunInputMiddleware()], state_schema=ThreadState, context_schema=dict, checkpointer=saver)
+    run = asyncio.create_task(graph.ainvoke({"messages": [HumanMessage(content="Original task")]}, {"configurable": {"thread_id": "thread"}}, context={INPUT_CONTEXT_KEY: control}))
+    try:
+        await asyncio.wait_for(closing.wait(), 5)
+        await inputs.submit("last", "Apply this correction", "steer")
+        release.set()
+        await asyncio.wait_for(run, 5)
+        assert (tmp_path / "correction.txt").read_text() == "applied"
+        state = await inputs.read()
+        assert state["closed"] and state["items"][0]["status"] == "applied"
+    finally:
+        release.set()
+        if not run.done():
+            run.cancel()
+        await asyncio.gather(run, return_exceptions=True)
+        await control.close()
 
 
 @pytest.mark.asyncio
