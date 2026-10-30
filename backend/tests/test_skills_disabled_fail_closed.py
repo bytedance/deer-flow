@@ -1,14 +1,8 @@
 """A broken extensions config must not re-enable a disabled skill.
 
-``SkillStorage.load_skills()`` merges the enabled state from
-``extensions_config.json``. When that file cannot be read, the parsed default
-(``enabled=True`` from ``parse_skill_file``) must not stand in for the answer:
-an unrelated defect in the file — a malformed ``mcpServers`` entry, a trailing
-comma — would otherwise silently re-enable every skill an operator disabled.
+``SkillStorage.load_skills()`` merges the enabled state from ``extensions_config.json``. When that file cannot be read, the parsed default (``enabled=True`` from ``parse_skill_file``) must not stand in for the answer: an unrelated defect in the file — a malformed ``mcpServers`` entry, a trailing comma — would otherwise silently re-enable every skill an operator disabled.
 
-The sandbox projection fails closed on the same error
-(``projection._rebuild_public_locked`` clears the view), so the runtime half of
-the gate has to agree with it.
+The sandbox projection fails closed on the same error (``projection._rebuild_public_locked`` clears the view), so the runtime half of the gate has to agree with it.
 """
 
 from __future__ import annotations
@@ -41,10 +35,7 @@ def disabled_skill_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path
     root = tmp_path / "skills"
     _write_public_skill(root, "demo")
     config_path = tmp_path / "extensions_config.json"
-    config_path.write_text(
-        json.dumps({"mcpServers": {}, "skills": {"demo": {"enabled": False}}}),
-        encoding="utf-8",
-    )
+    config_path.write_text(json.dumps({"mcpServers": {}, "skills": {"demo": {"enabled": False}}}), encoding="utf-8")
     monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(config_path))
     reset_extensions_config()
     return root
@@ -57,15 +48,11 @@ def test_disabled_skill_is_disabled_while_the_config_loads(disabled_skill_root: 
     assert storage.load_skills(enabled_only=True) == []
 
 
-def test_disabled_skill_stays_disabled_when_the_config_cannot_be_read(
-    disabled_skill_root: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_disabled_skill_stays_disabled_when_the_config_cannot_be_read(disabled_skill_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     storage = LocalSkillStorage(str(disabled_skill_root))
 
     def _raise(*_args: object, **_kwargs: object) -> None:
-        # What one schema-invalid ``mcpServers`` entry raises from
-        # ``McpServerConfig._validate_header_names``; a malformed JSON file
-        # raises ``ValueError`` from the same call site.
+        # What one schema-invalid ``mcpServers`` entry raises from ``McpServerConfig._validate_header_names``; a malformed JSON file raises ``ValueError`` from the same call site.
         raise ValueError("headers maps the same HTTP header under two spellings ('X-Api-Key' and 'x-api-key')")
 
     monkeypatch.setattr(ExtensionsConfig, "from_file", classmethod(_raise))
