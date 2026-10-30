@@ -41,7 +41,7 @@ from pathlib import Path
 from typing import Any
 
 from deerflow.runtime.events.message_identity import message_identity
-from deerflow.runtime.events.store.base import RunEventLifecycleRejected, RunEventStore, match_ai_message_run_id, normalize_message_ids
+from deerflow.runtime.events.store.base import RunEventLifecycleRejected, RunEventStore, RunEventStoreNotCommittedError, match_ai_message_run_id, normalize_message_ids
 from deerflow.runtime.user_context import AUTO, _AutoSentinel
 from deerflow.utils.thread_id import validate_thread_id
 
@@ -255,8 +255,8 @@ class JsonlRunEventStore(RunEventStore):
         write lock. Records are grouped by run_id and appended to their own
         run files while that lock is held. If a write fails and rollback
         succeeds, already-appended groups for the current thread are restored
-        so callers (e.g. worker.py's flush-retry path) may safely re-buffer
-        that thread's batch. When a batch contains multiple thread IDs, thread
+        and RunEventStoreNotCommittedError permits retry of the entire batch
+        only if no earlier thread group committed. For multiple thread IDs, thread
         groups are processed sequentially, so a later failure does not roll
         back earlier thread groups. Cancellation drains the current thread group
         before propagating, without starting subsequent groups. This rollback
@@ -268,11 +268,19 @@ class JsonlRunEventStore(RunEventStore):
         # Group by thread_id; each thread has its own write lock and seq counter.
         by_thread: dict[str, list[dict[str, Any]]] = {}
         for ev in events:
+            # Keep invalid identifiers as validation errors, before any I/O.
+            validate_thread_id(ev["thread_id"])
+            self._validate_id(ev["run_id"], "run_id")
             by_thread.setdefault(ev["thread_id"], []).append(ev)
 
         results: list[dict[str, Any]] = []
         for thread_id, batch in by_thread.items():
-            records = await self._write_batch_async(thread_id, batch)
+            try:
+                records = await self._write_batch_async(thread_id, batch)
+            except RunEventStoreNotCommittedError as exc:
+                if results:
+                    raise RuntimeError("JSONL batch partially committed before a later thread failed") from exc
+                raise
             results.extend(records)
         return results
 
@@ -314,25 +322,28 @@ class JsonlRunEventStore(RunEventStore):
 
     async def _write_batch_async(self, thread_id: str, batch: list[dict[str, Any]]) -> list[dict[str, Any]]:
         async def mutate():
-            await self._ensure_seq_loaded(thread_id)
-            records: list[dict[str, Any]] = []
-            for ev in batch:
-                seq = self._next_seq(thread_id)
-                record = {
-                    "thread_id": thread_id,
-                    "run_id": ev["run_id"],
-                    "event_type": ev["event_type"],
-                    "category": ev["category"],
-                    "content": ev.get("content", ""),
-                    "metadata": ev.get("metadata") or {},
-                    "seq": seq,
-                    "created_at": ev.get("created_at") or datetime.now(UTC).isoformat(),
-                }
-                records.append(record)
-            records_by_run: dict[str, list[dict[str, Any]]] = {}
-            for record in records:
-                records_by_run.setdefault(record["run_id"], []).append(record)
-            run_batches = [(self._run_file(thread_id, run_id), run_records) for run_id, run_records in records_by_run.items()]
+            try:
+                await self._ensure_seq_loaded(thread_id)
+                records: list[dict[str, Any]] = []
+                for ev in batch:
+                    seq = self._next_seq(thread_id)
+                    record = {
+                        "thread_id": thread_id,
+                        "run_id": ev["run_id"],
+                        "event_type": ev["event_type"],
+                        "category": ev["category"],
+                        "content": ev.get("content", ""),
+                        "metadata": ev.get("metadata") or {},
+                        "seq": seq,
+                        "created_at": ev.get("created_at") or datetime.now(UTC).isoformat(),
+                    }
+                    records.append(record)
+                records_by_run: dict[str, list[dict[str, Any]]] = {}
+                for record in records:
+                    records_by_run.setdefault(record["run_id"], []).append(record)
+                run_batches = [(self._run_file(thread_id, run_id), run_records) for run_id, run_records in records_by_run.items()]
+            except Exception as exc:
+                raise RunEventStoreNotCommittedError("JSONL batch preparation failed before append") from exc
             await asyncio.to_thread(self._append_record_groups, run_batches)
             return records
 
@@ -357,7 +368,8 @@ class JsonlRunEventStore(RunEventStore):
             for path, records in groups:
                 original_sizes[path] = path.stat().st_size if path.exists() else None
                 self._append_records(path, records)
-        except Exception:
+        except Exception as exc:
+            rolled_back = True
             for path, original_size in original_sizes.items():
                 try:
                     if original_size is None:
@@ -367,11 +379,14 @@ class JsonlRunEventStore(RunEventStore):
                         with open(path, "r+b") as f:
                             f.truncate(original_size)
                 except OSError:
+                    rolled_back = False
                     logger.error(
                         "Failed to roll back JSONL batch append for %s; retrying the batch may create duplicate records",
                         path,
                         exc_info=True,
                     )
+            if rolled_back:
+                raise RunEventStoreNotCommittedError("JSONL batch append rolled back") from exc
             raise
 
     async def list_messages(self, thread_id, *, limit=50, before_seq=None, after_seq=None, user_id: str | None | _AutoSentinel = AUTO):

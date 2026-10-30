@@ -168,7 +168,7 @@ Since [#3658](https://github.com/bytedance/deer-flow/pull/3658) usage is attribu
 
 ### Subtask steps disappear after a reload
 
-Steps are backfilled from `subagent.step` run events ([#3845](https://github.com/bytedance/deer-flow/pull/3845)). Older versions dropped a batch when the event store write failed; since [#4082](https://github.com/bytedance/deer-flow/pull/4082) it is re-buffered and retried. Check that the run event store is writable.
+Steps are backfilled from `subagent.step` run events. Check that the event store is writable and inspect the run's `subagent history incomplete` finalization warning. Only a write explicitly confirmed as uncommitted is re-buffered for retry (including DB pre-commit failures and successful JSONL rollback). Three consecutive failed attempts, an ambiguous error, or store cancellation stops further subagent-event persistence for that run and releases pending payloads. Live streaming continues, but reloaded history may be incomplete. Finalization logs unconfirmed and skipped event counts plus a bounded sample of affected task IDs. An unconfirmed batch may already be stored; its count is not a count of definitely lost events.
 
 ### The chat page suddenly shows only the subagent's conversation
 
