@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import operator
 import re
 from datetime import UTC, datetime, timedelta
@@ -26,6 +27,8 @@ from deerflow.scheduler.host_notes import RUN_ERROR_END_REACHED
 from deerflow.scheduler.schedules import next_run_at as compute_next_run_at
 from deerflow.scheduler.schedules import should_advance_schedule_cursor
 from deerflow.utils.time import coerce_iso
+
+logger = logging.getLogger(__name__)
 
 EXECUTING_RUN_STATUSES: tuple[str, ...] = ("launching", "running")
 _SCHEDULER_BUDGET_LOCK_KEY = 4694001
@@ -1043,7 +1046,14 @@ class ScheduledTaskRunRepository:
         finally:
             if self._recovery_terminal_publisher is not None:
                 for target in recovery_targets:
-                    await self._recovery_terminal_publisher.publish(target)
+                    confirmation = await self._recovery_terminal_publisher.publish(target)
+                    if not confirmation.confirmed:
+                        logger.warning(
+                            "Scheduled recovery terminal publication for run %s returned %s",
+                            target.run_id,
+                            confirmation.value,
+                            extra={"run_id": target.run_id, "recovery_path": "reconcile_active_runs", "confirmation": confirmation.value},
+                        )
 
     async def _reconcile_active_runs(
         self,
@@ -1122,6 +1132,8 @@ class ScheduledTaskRunRepository:
                             run_id=candidate.run_id,
                             user_id=candidate.user_id,
                             operation_kind=candidate.operation_kind,
+                            run_incarnation=candidate.run_incarnation,
+                            retention_revision=candidate.evidence_retention_revision,
                         )
                         if target is not None:
                             recovery_targets.append(target)

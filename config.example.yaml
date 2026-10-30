@@ -2789,6 +2789,16 @@ run_events:
   backend: memory
   max_trace_content: 10240
   track_token_usage: true
+  # With a fencing-capable SQL RunStore and DB event store:
+  # off: host-authorized writes still check Run incarnation, epoch and state;
+  #      stale Journal flushes after takeover or deletion may be rejected.
+  # strict: additionally checks raw SQL and unaware legacy writers via the
+  #         database trigger after an offline cutover.
+  # Restart-required; strict requires database.backend: postgres and backend: db.
+  # Stop every Gateway, activate the database policy, then restart all with the
+  # matching cutover ID. See README.md#configuration for the offline cutover.
+  producer_fencing: "off"
+  # producer_cutover_id: deployment-2026-10-27
 
 # ============================================================================
 # Agent Storage Configuration

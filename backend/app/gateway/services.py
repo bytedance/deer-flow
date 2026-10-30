@@ -31,6 +31,7 @@ from langgraph.types import Command
 from app.gateway.auth_disabled import AUTH_DISABLED_USER_ID, AUTH_SOURCE_INTERNAL, get_auth_disabled_user, is_auth_disabled
 from app.gateway.authz import require_cancel_permission_if, resolve_route_permissions
 from app.gateway.deps import get_checkpointer, get_local_provider, get_run_context, get_run_manager, get_stream_bridge
+from app.gateway.history_seed import reserve_history_seed, write_history_seed
 from app.gateway.internal_auth import (
     INTERNAL_OWNER_USER_ID_HEADER_NAME,
     INTERNAL_SYSTEM_ROLE,
@@ -1920,35 +1921,41 @@ async def ensure_checkpoint_history_seeded(
     if await event_store.list_messages(thread_id, limit=1, user_id=None):
         return
 
-    checkpoint_config = {
-        "configurable": {
-            "thread_id": thread_id,
-            "checkpoint_ns": "",
-        }
-    }
+    checkpoint_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
     if await get_checkpointer(request).aget_tuple(checkpoint_config) is None:
         return
 
-    accessor, config = await abuild_checkpoint_state_accessor(
-        request,
-        thread_id=thread_id,
-        assistant_id=assistant_id,
-    )
-    snapshot = await accessor.aget(config)
-    values = getattr(snapshot, "values", None)
-    messages = values.get("messages") if isinstance(values, dict) else None
-    if not isinstance(messages, list) or not messages:
+    async def checkpoint_messages() -> list:
+        accessor, config = await abuild_checkpoint_state_accessor(request, thread_id=thread_id, assistant_id=assistant_id)
+        snapshot = await accessor.aget(config)
+        values = getattr(snapshot, "values", None)
+        messages = values.get("messages") if isinstance(values, dict) else None
+        return messages if isinstance(messages, list) else []
+
+    # Eligibility is advisory; an empty head needs no migration reservation.
+    # Discard this preview and reread under admission before any publication.
+    if not await checkpoint_messages():
         return
 
-    events = build_checkpoint_history_seed_events(
-        messages,
-        thread_id=thread_id,
-        run_id_prefix=f"checkpoint-seed-{thread_id}",
-    )
-    if not events:
-        return
-    await event_store.put_batch(events)
-    logger.info("Seeded %d checkpoint-history events for thread %s", len(events), thread_id)
+    async with reserve_history_seed(request, thread_id) as reservation:
+        if reservation is not None and await event_store.list_messages(thread_id, limit=1, user_id=None):
+            return
+        if await get_checkpointer(request).aget_tuple(checkpoint_config) is None:
+            return
+
+        messages = await checkpoint_messages()
+        if not messages:
+            return
+
+        events = build_checkpoint_history_seed_events(
+            messages,
+            thread_id=thread_id,
+            run_id_prefix=f"checkpoint-seed-{thread_id}",
+        )
+        if not events:
+            return
+        await write_history_seed(request, events, reservation=reservation, seed_kind="checkpoint", assistant_id=assistant_id)
+        logger.info("Seeded %d checkpoint-history events for thread %s", len(events), thread_id)
 
 
 def _message_identifier(message: Any) -> str | None:
