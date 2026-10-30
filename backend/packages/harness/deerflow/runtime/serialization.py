@@ -28,29 +28,83 @@ def serialize_lc_object(obj: Any) -> Any:
     ``allow_nan=False`` and raises, turning a thread read into HTTP 500). This is
     a display/wire normalization only; persisted checkpoint state is never routed
     through here.
+
+    Containers are walked with an explicit stack rather than recursive Python
+    calls, so nesting depth is bounded by heap, not by the interpreter recursion
+    limit. Structured wire fields (tool-call ``args``, the ``todos`` /
+    ``task_notes`` state channels, ``additional_kwargs``) are arbitrary-depth
+    JSON produced by models/tools; a pathological-but-valid nesting previously
+    raised ``RecursionError`` (REST 500 / stream failure) or — when it happened
+    inside ``model_dump()`` — was swallowed and the whole object degraded to its
+    ``str()`` repr. A self-referential container terminates with the
+    back-reference replaced by ``None``.
+    """
+    out, items, root_id = _stage_node(obj)
+    if items is None:
+        # Leaf value — already normalized.
+        return out
+
+    # Iterative depth-first walk. Each frame owns one output container and the
+    # (reversed) list of its children still to stage; ``active_ids`` holds the
+    # ids of source containers on the current ancestor chain (root included) so
+    # a self-reference is replaced by None instead of looping forever. A shared
+    # (non-cyclic) subtree referenced from two branches is still duplicated,
+    # matching the former output.
+    frames: list[tuple[Any, list[tuple[Any, Any]], int]] = [(out, list(reversed(items)), root_id)]
+    active_ids: set[int] = {root_id}
+    while frames:
+        container, pending, container_id = frames[-1]
+        if not pending:
+            frames.pop()
+            active_ids.discard(container_id)
+            continue
+        key, child = pending.pop()
+        child_out, child_items, child_id = _stage_node(child)
+        if child_items is None:
+            container[key] = child_out
+        elif child_id in active_ids:
+            container[key] = None
+        else:
+            container[key] = child_out
+            active_ids.add(child_id)
+            frames.append((child_out, list(reversed(child_items)), child_id))
+    return out
+
+
+def _stage_node(obj: Any) -> tuple[Any, list[tuple[Any, Any]] | None, int]:
+    """Map one object to an output container/value plus its raw children.
+
+    Returns ``(output, items, obj_id)``: ``items`` is ``None`` for a leaf value,
+    otherwise a list of ``(key, raw_child)`` pairs (``key`` is the dict key or
+    the list index) and ``obj_id`` is the identity used for cycle detection.
+    This performs exactly one level of the per-node mapping the recursive
+    walker used to do; it never descends itself, so it cannot overflow the call
+    stack (the constant re-staging of a ``model_dump()`` result is one extra
+    fixed frame).
     """
     if obj is None:
-        return None
+        return None, None, 0
     # ``bool`` is a subclass of ``int``, so it passes through unchanged here.
     if isinstance(obj, (str, int)):
-        return obj
+        return obj, None, 0
     if isinstance(obj, float):
-        return obj if math.isfinite(obj) else None
+        return (obj if math.isfinite(obj) else None), None, 0
     if isinstance(obj, dict):
-        return {k: serialize_lc_object(v) for k, v in obj.items()}
+        return {}, list(obj.items()), id(obj)
     if isinstance(obj, (list, tuple)):
-        return [serialize_lc_object(item) for item in obj]
-    # Pydantic v2 — recurse so non-finite floats nested in the dump (e.g. a
+        # Pre-sized so the order-independent walk can fill slots by index.
+        return [None] * len(obj), list(enumerate(obj)), id(obj)
+    # Pydantic v2 — stage the dump so non-finite floats nested there (e.g. a
     # message's ``response_metadata``) are normalized too, not returned raw.
     if hasattr(obj, "model_dump"):
         try:
-            return serialize_lc_object(obj.model_dump())
+            return _stage_node(obj.model_dump())
         except Exception:
             pass
     # Pydantic v1 / older objects
     if hasattr(obj, "dict"):
         try:
-            return serialize_lc_object(obj.dict())
+            return _stage_node(obj.dict())
         except Exception:
             pass
     # Interrupt is a __slots__ class — no model_dump/dict/__dict__, so it
@@ -61,17 +115,13 @@ def serialize_lc_object(obj: Any) -> Any:
         pass
     else:
         if isinstance(obj, Interrupt):
-            return serialize_lc_object(
-                {
-                    "value": obj.value,
-                    "id": getattr(obj, "id", None),
-                }
-            )
+            interrupt_dict = {"value": obj.value, "id": getattr(obj, "id", None)}
+            return {}, list(interrupt_dict.items()), id(interrupt_dict)
     # Last resort
     try:
-        return str(obj)
+        return str(obj), None, 0
     except Exception:
-        return repr(obj)
+        return repr(obj), None, 0
 
 
 def serialize_channel_values(channel_values: dict[str, Any]) -> dict[str, Any]:
