@@ -22,6 +22,13 @@ preallocated run IDs. Details: [admission isolation](../../../../docs/runtime-gu
 
 ### Stream Bridge Heartbeats
 
+`_SubagentEventBuffer` drains owned writes through caller cancellation. Only
+`RunEventStoreNotCommittedError` permits re-buffered writes to retry. Generic
+errors and store cancellation leave an unknown batch pending, fence successor
+writes, and stop accepting persistence payloads so a long live run cannot grow
+the failed buffer. SSE and business status remain independent. Regression:
+`tests/test_worker_subagent_write_outcome.py` (Worker and reopened JSONL).
+
 Observed Redis streams removed during replay yield `StreamGap` with empty bounds; initially empty streams still wait. After this gap, `/wait` refreshes store-only status and completes only for a terminal run with no retained stream.
 
 Memory stream cleanup retires the captured stream generation, clears its retained

@@ -2596,6 +2596,12 @@ error and timeout policies. Repeated cancellation does not abandon this cleanup.
 Task-stop reports an interrupted execution as aborted, preserving any completed,
 failed or timed-out outcome already published before cancellation.
 
+Sub-agent step history is persisted separately from live streaming. If a batch
+write loses its acknowledgement, the run stops persisting further sub-agent
+events rather than replaying potentially committed steps. Live delivery and the
+agent's outcome continue normally, but reloaded step history may be incomplete.
+Only writes explicitly confirmed as uncommitted are eligible for retry.
+
 Ordinary `task` calls accept `context_mode="isolated"` (default) or
 `context_mode="snapshot"`. Isolated tasks receive their delegated prompt as
 before. Snapshot tasks also receive the parent's retained conversation and

@@ -69,6 +69,7 @@ from deerflow.runtime.context_keys import (
     checkpoint_agent_binding_metadata,
 )
 from deerflow.runtime.events.message_identity import attach_message_seq, message_identity
+from deerflow.runtime.events.store.base import RunEventStoreNotCommittedError
 from deerflow.runtime.goal import (
     DEFAULT_MAX_GOAL_CONTINUATIONS,
     DEFAULT_MAX_NO_PROGRESS_CONTINUATIONS,
@@ -841,10 +842,11 @@ class _SubagentEventBuffer:
         self._thread_id = thread_id
         self._run_id = run_id
         self._pending: list[dict[str, Any]] = []
+        self._write_outcome_unknown = False
 
     async def add(self, chunk: Any) -> None:
         """Buffer one custom stream chunk; flush on a terminal event or threshold."""
-        if self._event_store is None:
+        if self._event_store is None or self._write_outcome_unknown:
             return
         # Lazy import: importing deerflow.subagents at module load triggers its
         # package __init__ (executor → agents → tools → task_tool), which imports
@@ -860,41 +862,45 @@ class _SubagentEventBuffer:
             await self.flush()
 
     async def flush(self) -> None:
-        """Persist buffered events in one ``put_batch`` call; swallow store errors."""
-        if self._event_store is None or not self._pending:
+        """Drain one batch; retry only a proven uncommitted write.
+
+        A failed acknowledgement can follow a successful commit. Keep that
+        batch pending for diagnostics, but fence this buffer's later writes
+        instead of duplicating history or overtaking an unknown predecessor.
+        Live SSE delivery is independent and remains best-effort throughout.
+        """
+        if self._event_store is None or not self._pending or self._write_outcome_unknown:
             return
         batch = self._pending
         self._pending = []
         write_task = asyncio.create_task(self._event_store.put_batch(batch))
         cancellation: asyncio.CancelledError | None = None
-        failure: Exception | None = None
-        while True:
+        while not write_task.done():
             try:
-                await asyncio.shield(write_task)
-                break
+                # wait() neither cancels the owned write nor raises its outcome.
+                # This distinguishes caller cancellation from store cancellation
+                # even when both happen during the same event-loop iteration.
+                await asyncio.wait({write_task})
             except asyncio.CancelledError as exc:
                 host_task = asyncio.current_task()
-                if host_task is None or not host_task.cancelling():
-                    # The store task itself was cancelled. It did not confirm
-                    # durability, so retain the batch for a later flush.
-                    self._pending = batch + self._pending
-                    raise
                 if cancellation is None:
                     cancellation = exc
-                while host_task.cancelling():
+                while host_task is not None and host_task.cancelling():
                     host_task.uncancel()
-            except Exception as exc:
-                failure = exc
-                break
 
-        if failure is not None:
-            # Re-buffer the failed batch (ahead of any events queued since) so a
-            # transient store error does not silently drop subagent step events.
+        try:
+            write_task.result()
+        except (Exception, asyncio.CancelledError) as failure:
+            # Only this explicit store contract proves replay is safe. Generic
+            # exceptions and store-originated cancellation are ambiguous, even
+            # if they look like transient transport failures.
             self._pending = batch + self._pending
+            self._write_outcome_unknown = not isinstance(failure, RunEventStoreNotCommittedError)
             logger.warning(
-                "Run %s: failed to persist %d subagent step event(s)",
+                "Run %s: failed to persist %d subagent step event(s); %s",
                 self._run_id,
                 len(batch),
+                "outcome unknown, persistence stopped without replay" if self._write_outcome_unknown else "not committed, retained for retry",
                 exc_info=(type(failure), failure, failure.__traceback__),
             )
         if cancellation is not None:
