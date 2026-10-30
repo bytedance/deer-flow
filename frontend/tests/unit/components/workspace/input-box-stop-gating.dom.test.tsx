@@ -106,9 +106,7 @@ describe("InputBox stop gating (runs:cancel)", () => {
     renderComposer({ onStop, onBusySubmit });
     const input = screen.getByRole("textbox");
     fireEvent.change(input, { target: { value: "Include 2025" } });
-    fireEvent.click(
-      screen.getByRole("button", { name: "Send update" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "Send update" }));
     await waitFor(() =>
       expect(onBusySubmit).toHaveBeenCalledWith("Include 2025", "queue"),
     );
@@ -121,13 +119,9 @@ describe("InputBox stop gating (runs:cancel)", () => {
     );
     expect((input as HTMLTextAreaElement).value).toBe("Include 2025");
     expect(onStop).not.toHaveBeenCalled();
-    fireEvent.click(
-      screen.getByRole("button", { name: "Send update" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "Send update" }));
     await waitFor(() => expect((input as HTMLTextAreaElement).value).toBe(""));
-    fireEvent.click(
-      screen.getByRole("button", { name: "Stop current task" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "Stop current task" }));
     expect(onStop).toHaveBeenCalledTimes(1);
   });
 
@@ -140,9 +134,7 @@ describe("InputBox stop gating (runs:cancel)", () => {
     expect(
       screen.queryByRole("button", { name: "Send while working" }),
     ).toBeNull();
-    expect(
-      screen.queryByRole("button", { name: "Send update" }),
-    ).toBeNull();
+    expect(screen.queryByRole("button", { name: "Send update" })).toBeNull();
   });
   it("disables the stop affordance for a denied role and never fires onStop", () => {
     const onStop = rs.fn();

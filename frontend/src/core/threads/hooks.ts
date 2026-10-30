@@ -46,7 +46,6 @@ import { messageToStep } from "../tasks/steps";
 import { promptInputFilePartToFile, uploadFiles } from "../uploads";
 import { uuid } from "../utils/uuid";
 
-
 import {
   branchThreadFromTurn,
   fetchThreadTokenUsage,
@@ -2380,8 +2379,8 @@ export function useThreadStream({
     refetchInterval: (q) =>
       isThreadLoading || activeRunId
         ? 1000
-        : q.state.data?.items.some(
-              (x) => ["pending", "applying", "dispatching"].includes(x.status),
+        : q.state.data?.items.some((x) =>
+              ["pending", "applying", "dispatching"].includes(x.status),
             )
           ? 5000
           : false,
