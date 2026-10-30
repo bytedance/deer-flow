@@ -35,6 +35,12 @@ This release closes that milestone with **1068 merged pull requests**.
 
 ### Added
 
+- **community:** New web search provider: Desearch
+  (`deerflow.community.desearch.tools:web_search_tool`), configured with
+  `DESEARCH_API_KEY` or `api_key`; one GET /web request per search.
+  The endpoint returns up to 20 results per request; DeerFlow returns at most
+  10 (default 5).
+
 - **plugins:** Add an administrator-only `GET /api/plugins/diagnostics`
   endpoint returning a redacted snapshot of the Gateway process's retained
   extension diagnostics. Each item carries a `source` restricted to dotted
