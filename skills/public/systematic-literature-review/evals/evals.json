@@ -11,6 +11,9 @@
         "The search used --category cs.CV",
         "The search used --sort-by relevance, not submittedDate",
         "The search was executed only once without retries",
+        "The search used --output-dir and retained the complete original paper records",
+        "Subagent prompts passed generated batch file paths rather than retyped paper metadata",
+        "The merge_extractions.py script succeeded before synthesis and supplied canonical citation metadata",
         "Metadata extraction was delegated via the task tool to subagents, not done inline or via python -c",
         "The APA template file (templates/apa.md) was read",
         "The final report was saved to /mnt/user-data/outputs/ with a filename matching slr-<topic-slug>-<YYYYMMDD>.md",
@@ -20,7 +23,8 @@
         "The report contains a Convergences and Disagreements section",
         "The report contains a Gaps and Open Questions section",
         "The report contains per-paper annotations for each of the 10 papers",
-        "The references section uses APA 7th format with arXiv URLs"
+        "The references section uses APA 7th format with arXiv URLs",
+        "The report draft stayed in the evidence workspace until publish_report.py verified retrieval membership and coverage; present_files used only the successful output path"
       ]
     },
     {
@@ -36,7 +40,8 @@
         "The present_files tool was called",
         "The report contains BibTeX entries using @misc, not @article",
         "Each BibTeX entry includes eprint and primaryClass fields",
-        "The report contains thematic synthesis, not just a list of papers"
+        "The report contains thematic synthesis, not just a list of papers",
+        "The report draft stayed in the evidence workspace until publish_report.py verified retrieval membership and coverage; present_files used only the successful output path"
       ]
     },
     {
@@ -51,7 +56,8 @@
         "The report uses IEEE numeric citations [1], [2], etc. in the text",
         "The references section uses IEEE format with numbered entries",
         "The report contains per-paper annotations for all papers",
-        "The report identifies themes across the papers"
+        "The report identifies themes across the papers",
+        "The report draft stayed in the evidence workspace until publish_report.py verified retrieval membership and coverage; present_files used only the successful output path"
       ]
     },
     {
