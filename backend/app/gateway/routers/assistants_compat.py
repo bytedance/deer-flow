@@ -100,6 +100,8 @@ async def search_assistants(body: AssistantSearchRequest | None = None) -> list[
         assistants = [a for a in assistants if a.graph_id == body.graph_id]
     if body and body.name:
         assistants = [a for a in assistants if body.name.lower() in a.name.lower()]
+    if body and body.metadata:
+        assistants = [a for a in assistants if all(key in a.metadata and a.metadata[key] == value for key, value in body.metadata.items())]
 
     offset = body.offset if body else 0
     limit = body.limit if body else 10
