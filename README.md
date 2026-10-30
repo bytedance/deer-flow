@@ -722,6 +722,11 @@ DeerFlow still uses `Forwarded` / `X-Forwarded-*` headers to recover the browser
 > normal `end` signal. A new reader whose initial attachment loses the race with
 > cleanup receives a gap so it can recover the saved result.
 >
+> When a continuation follows a model error, provider requests omit only the
+> trailing framework-generated error fallback assistant messages. The fallback
+> remains in durable and visible history, and older or all-fallback messages are
+> preserved for providers that can replay them.
+>
 > During SSE replay-gap recovery, the Web UI preserves a reconnect pointer claimed by another run while durable state is loading. An older recovery cannot overwrite that pointer when it rejoins its own stream. Even a stale foreign pointer is preserved, so the next reload may first check that run before active-run recovery rejoins, adding a reconnect cycle.
 >
 > Store-only SSE and `/wait` consumers can finish after a heartbeat when run-manager
