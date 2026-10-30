@@ -1,5 +1,7 @@
 ### Subagent System (`packages/harness/deerflow/subagents/`)
 
+Drain cleanup; preserve terminal outcomes on cancel.
+
 Accumulate validated ToolMessage knowledge across values frames in
 `SubagentResult.knowledge_sources`: at most 100 sources, deduplicated by evidence ID.
 Publish before terminal state; retain through compaction. Ordinary `task` forwards
@@ -48,7 +50,10 @@ citation references, and opaque base64/URL/image sources.
 
 **Interrupted usage**: After stream cleanup, publish the collector's final
 snapshot on cancellation/timeout; callbacks can precede values chunks.
-`execute_async()` owns terminalization; `SubagentResult` guards first write.
+Cancellation terminalizes before task-stop notification and still propagates;
+Sync `execute()` shares the worker's result and publishes FAILED before timeout
+cancellation; `execute_async()` publishes TIMED_OUT. First terminal write wins.
+Stream cleanup precedes notification; late cancellation cannot replace a timeout.
 Parent journals deduplicate by `source_run_id`; batch writes need a live lease.
 
 **Durable batch acceptance**: Normalize optional `batch_task` criteria before
@@ -71,6 +76,8 @@ by lease/3. `tests/test_batch_lease_lifecycle.py` covers real SQLite interleavin
 threaded initialization, peer cancellation and renewal drain.
 
 **Built-in Agents**: `general-purpose` (all tools except `task`) and `bash` (command specialist)
+
+Native worker reasoning settings come from YAML or managed definitions, with explicit per-agent overrides. Unset values request False/None, never parent thinking. Send original settings to the model factory to preserve validation and adjustment logs; record normalized effective settings in the assembly observer. Legacy stored definitions may omit both fields.
 **Registry and managed definitions**: Resolve built-ins → `config.yaml custom_agents` → enabled admin-managed definitions → explicit `subagents.agents.<name>` overrides. Managed definitions are deployment-wide, use Custom Agents' `agent_storage.backend`, and remain stored but inactive on built-in/config name collisions. Default Lead Agent sees the full enabled catalog. Snapshot a Custom Agent's `allowed_subagents` into run metadata (`None` = all, `[]` = deny, list = allowlist); enforce it in prompt discovery and `task`, never reload mutable caller policy inside the tool.
 **Benefit-based routing policy**: Default to direct execution. Permit `task` only when parallel latency, specialist skill or context isolation clearly outweigh startup, duplicate discovery, synthesis, state conflicts and side effects. Parallel scopes need independent outputs and disjoint mutable state; use the fewest useful agents, reassessing each batch. Bounded sequential delegation requires strong specialist/context benefit. A per-response limit of 1 permits only material specialist/context benefit: omit parallel/multi-batch benefits. Align `lead_agent/prompt.py`, the `task` description and built-in roles. Tests: `test_subagent_routing_prompt.py`, `test_subagent_prompt_security.py`, `test_lead_agent_prompt.py`.
 **User-scoped Skills**: Use `get_or_new_user_skill_storage(user_id)` with parent runtime identity (`DEFAULT_USER_ID` only if absent), preserving lead-agent custom-skill shadowing/visibility; never use the global-only catalog.

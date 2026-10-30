@@ -1838,6 +1838,69 @@ class TestCardMode:
 
         _run(go())
 
+    def test_card_calls_use_the_channel_token_not_the_sdk_fetch(self, monkeypatch):
+        """The AI card replier sends the channel's httpx token; the SDK never fetches one.
+
+        dingtalk-stream's ``get_access_token()`` posts with ``requests`` and no
+        timeout, inline in the replier's async methods on the Gateway loop.
+        """
+        pytest.importorskip("dingtalk_stream")
+        import dingtalk_stream
+        from dingtalk_stream import card_replier
+        from support.local_sockets import LocalHttpServer
+
+        async def go():
+            async with LocalHttpServer(body={"accessToken": "tok-1", "expireIn": 7200}) as api:
+                base = api.url.removesuffix("/open")
+                monkeypatch.setattr("app.channels.dingtalk.DINGTALK_API_BASE", base)
+                monkeypatch.setattr(card_replier, "DINGTALK_OPENAPI_ENDPOINT", base)
+                channel = DingTalkChannel(MessageBus(), config={"card_template_id": "tpl_123"})
+                channel._client_id, channel._client_secret = "id", "secret"
+                sdk_client = MagicMock()
+                sdk_client.credential.client_id = "id"
+                sdk_client.get_access_token.side_effect = AssertionError("the SDK must not fetch a token")
+                channel._dingtalk_client = sdk_client
+                incoming = dingtalk_stream.ChatbotMessage()
+                incoming.conversation_type = _CONVERSATION_TYPE_P2P
+                incoming.sender_staff_id = "user_001"
+
+                track = await channel._create_and_deliver_card("Working on it...", chatbot_message=incoming)
+                assert track
+
+                # An expired channel token is refreshed before the streamed update.
+                channel._token_expires_at = 0.0
+                api.body = {"accessToken": "tok-2", "expireIn": 7200}
+                await channel._stream_update_card(track, "done", is_finalize=True)
+
+            sdk_client.get_access_token.assert_not_called()
+            assert [(method, path, headers.get("x-acs-dingtalk-access-token")) for method, path, headers in api.calls] == [
+                ("POST", "/v1.0/oauth2/accessToken", None),
+                ("POST", "/v1.0/card/instances/createAndDeliver", "tok-1"),
+                ("POST", "/v1.0/oauth2/accessToken", None),
+                ("PUT", "/v1.0/card/streaming", "tok-2"),
+            ]
+            assert api.requests[0] == {"appKey": "id", "appSecret": "secret"}
+            assert api.requests[3]["outTrackId"] == track
+            assert api.requests[3]["isFinalize"] is True
+
+        _run(go())
+
+    def test_stream_update_card_raises_when_the_channel_token_fails(self):
+        """A token failure surfaces, so ``send`` falls back instead of dropping the update."""
+
+        async def go():
+            channel = DingTalkChannel(MessageBus(), config={"card_template_id": "tpl_123"})
+            replier = MagicMock()
+            replier.async_streaming = AsyncMock()
+            channel._card_repliers["track_001"] = replier
+            channel._get_access_token = AsyncMock(side_effect=ValueError("bad token response"))
+
+            with pytest.raises(ValueError, match="bad token response"):
+                await channel._stream_update_card("track_001", "content", is_finalize=True)
+            replier.async_streaming.assert_not_awaited()
+
+        _run(go())
+
     def test_stop_clears_card_state(self):
         async def go():
             bus = MessageBus()

@@ -10,7 +10,7 @@ import socket
 import sqlite3
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any
 from sqlalchemy.exc import IntegrityError as SAIntegrityError
 
 from deerflow.runtime.events.terminal import RecoveryTerminalPublisher
+from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, get_current_user, resolve_user_id
 from deerflow.utils.time import is_lease_expired
 from deerflow.utils.time import now_iso as _now_iso
@@ -353,6 +354,9 @@ class RunManager:
         # preserving ``_runs`` iteration order (see ``_thread_records_locked``).
         self._runs_by_thread: dict[str, dict[str, None]] = {}
         self._lock = asyncio.Lock()
+        self._admission_locks = AsyncKeyedLockTable[str]()
+        self._snapshot_locks = AsyncKeyedLockTable[str]()
+        self._pending_admissions: dict[str, dict[str, int]] = {}
         self._store = store
         self._persistence_retry_policy = persistence_retry_policy or PersistenceRetryPolicy()
         self._worker_id = worker_id or _generate_worker_id()
@@ -369,6 +373,43 @@ class RunManager:
         self._lease_checks: dict[str, asyncio.Task[None]] = {}
         self._lease_operations: dict[str, asyncio.Task] = {}
         self._lease_deadlines: dict[str, asyncio.TimerHandle] = {}
+
+    @asynccontextmanager
+    async def _admission_scope(self, thread_id: str, run_id: str) -> AsyncIterator[None]:
+        # Manager state is owned by one event loop. Register before the first
+        # await so readers of a preallocated ID also wait for its publication.
+        threads = self._pending_admissions.setdefault(run_id, {})
+        threads[thread_id] = threads.get(thread_id, 0) + 1
+        try:
+            async with self._admission_locks.hold(thread_id):
+                yield
+        finally:
+            threads[thread_id] -= 1
+            if not threads[thread_id]:
+                del threads[thread_id]
+            if not threads:
+                self._pending_admissions.pop(run_id, None)
+
+    @asynccontextmanager
+    async def _run_scope(self, run_id: str) -> AsyncIterator[None]:
+        threads = set(self._pending_admissions.get(run_id, ()))
+        record = self._runs.get(run_id)
+        if record is not None:
+            threads.add(record.thread_id)
+        async with AsyncExitStack() as stack:
+            for thread_id in sorted(threads):
+                await stack.enter_async_context(self._admission_locks.hold(thread_id))
+            yield
+
+    @asynccontextmanager
+    async def _run_registry_lock(self, run_id: str) -> AsyncIterator[None]:
+        async with self._run_scope(run_id), self._lock:
+            yield
+
+    @asynccontextmanager
+    async def _thread_registry_lock(self, thread_id: str) -> AsyncIterator[None]:
+        async with self._admission_locks.hold(thread_id), self._lock:
+            yield
 
     def _index_run_locked(self, record: RunRecord) -> None:
         """Register *record* in the thread index. Caller must hold ``self._lock``."""
@@ -500,8 +541,8 @@ class RunManager:
         Initial run creation is part of the run visibility boundary: callers
         should not observe a run in memory unless its backing store row exists.
         Unlike follow-up status/model updates, failures are propagated so the
-        caller can treat creation as failed. Rollback is the caller's
-        responsibility after inserting the record into ``_runs``.
+        caller can treat creation as failed. The caller keeps the record private
+        until this method returns successfully.
         """
         if self._store is None:
             return
@@ -793,7 +834,7 @@ class RunManager:
         """Persist token usage and completion data to the backing store."""
         row_recovery_payload: dict[str, Any] | None = None
         record: RunRecord | None = None
-        async with self._lock:
+        async with self._run_registry_lock(run_id):
             record = self._runs.get(run_id)
             if record is not None and record.ownership_lost:
                 logger.warning("Skipped completion persistence for run %s after lease ownership was lost", run_id)
@@ -889,7 +930,7 @@ class RunManager:
     async def update_run_progress(self, run_id: str, **kwargs) -> None:
         """Persist a running token/message snapshot without changing status."""
         should_persist = True
-        async with self._lock:
+        async with self._run_registry_lock(run_id):
             record = self._runs.get(run_id)
             if record is not None:
                 should_persist = record.status == RunStatus.running and not record.ownership_lost
@@ -907,7 +948,7 @@ class RunManager:
     async def update_finalizing_progress(self, run_id: str, **kwargs) -> None:
         """Persist final fields while the durable row is deliberately active."""
         should_persist = False
-        async with self._lock:
+        async with self._run_registry_lock(run_id):
             record = self._runs.get(run_id)
             if record is not None and not record.ownership_lost:
                 should_persist = record.status not in (RunStatus.pending, RunStatus.running)
@@ -931,7 +972,7 @@ class RunManager:
 
     async def seal_completed_evidence(self, run_id: str, receipt) -> bool:
         """Best-effort evidence metadata is independent of business completion."""
-        async with self._lock:
+        async with self._run_registry_lock(run_id):
             record = self._runs.get(run_id)
             if record is None or record.ownership_lost:
                 return False
@@ -942,7 +983,7 @@ class RunManager:
         return await seal(run_id, owner_worker_id=owner_worker_id, receipt=receipt)
 
     async def mark_evidence_partial(self, run_id: str, *, error: str) -> bool:
-        async with self._lock:
+        async with self._run_registry_lock(run_id):
             record = self._runs.get(run_id)
             if record is None or record.ownership_lost:
                 return False
@@ -998,21 +1039,15 @@ class RunManager:
             evidence_origin=evidence_origin,
             evidence_agent_id=evidence_agent_id,
         )
-        async with self._lock:
-            self._runs[run_id] = record
-            self._index_run_locked(record)
-            persisted = False
+        async with self._admission_scope(thread_id, run_id):
             try:
                 await self._persist_new_run_to_store(record)
-                persisted = True
             except Exception:
-                logger.warning("Failed to persist run %s; rolled back in-memory record", run_id, exc_info=True)
+                logger.warning("Failed to persist run %s; record was not registered", run_id, exc_info=True)
                 raise
-            finally:
-                # Also covers cancellation, which bypasses ``except Exception``.
-                if not persisted:
-                    self._runs.pop(run_id, None)
-                    self._unindex_run_locked(run_id, record.thread_id)
+            async with self._lock:
+                self._runs[run_id] = record
+                self._index_run_locked(record)
         logger.info("Run created: run_id=%s thread_id=%s", run_id, thread_id)
         return record
 
@@ -1031,7 +1066,7 @@ class RunManager:
             raise_on_store_error: Propagate store hydration/mapping failures so
                 lifecycle callers can distinguish them from a missing run.
         """
-        async with self._lock:
+        async with self._run_registry_lock(run_id):
             record = self._runs.get(run_id)
         if record is not None:
             return record
@@ -1046,7 +1081,7 @@ class RunManager:
             return None
         # Re-check after store await: a concurrent create() may have inserted the
         # in-memory record while the store call was in flight.
-        async with self._lock:
+        async with self._run_registry_lock(run_id):
             record = self._runs.get(run_id)
         if record is not None:
             return record
@@ -1115,7 +1150,7 @@ class RunManager:
         def _page(records: list[RunRecord]) -> list[RunRecord]:
             return sorted(records, key=lambda record: run_sort_key(record.created_at, record.run_id), reverse=True)[:limit]
 
-        async with self._lock:
+        async with self._thread_registry_lock(thread_id):
             memory_records = [
                 record
                 for record in self._thread_records_locked(thread_id)
@@ -1169,7 +1204,7 @@ class RunManager:
         correct pagination.
         """
         resolved_user_id = resolve_user_id(user_id, method_name="RunManager.list_successful_regenerate_sources")
-        async with self._lock:
+        async with self._thread_registry_lock(thread_id):
             memory_records = [record for record in self._thread_records_locked(thread_id) if record.operation_kind == ThreadOperationKind.run and (resolved_user_id is None or record.user_id == resolved_user_id)]
 
         sources = set(await self._store.list_successful_regenerate_sources(thread_id, user_id=resolved_user_id)) if self._store is not None else set()
@@ -1240,7 +1275,7 @@ class RunManager:
                     continue
                 records_by_id[record.run_id] = record
 
-        async with self._lock:
+        async with self._thread_registry_lock(thread_id):
             memory_records = [record for record in self._thread_records_locked(thread_id) if resolved_user_id is None or record.user_id == resolved_user_id]
         for record in memory_records:
             records_by_id[record.run_id] = record
@@ -1249,13 +1284,13 @@ class RunManager:
 
     async def try_start(self, run_id: str) -> RunStartOutcome:
         """Transition an uncancelled pending run to running before building the agent."""
-        async with self._lock:
+        async with self._run_registry_lock(run_id):
             record = self._runs.get(run_id)
         if record is None:
             raise RunStartupError(f"Cannot start unknown run {run_id}")
 
         async with record.start_lock:
-            async with self._lock:
+            async with self._run_registry_lock(run_id):
                 if record.abort_event.is_set() or record.status != RunStatus.pending:
                     return RunStartOutcome.cancelled
 
@@ -1269,7 +1304,7 @@ class RunManager:
                 except Exception as exc:
                     raise RunStartupError(f"Failed to start run {run_id}: {exc}") from exc
                 if updated is False:
-                    async with self._lock:
+                    async with self._run_registry_lock(run_id):
                         if record.status == RunStatus.pending:
                             record.status = RunStatus.interrupted
                             record.terminal_status_persisted = False
@@ -1277,7 +1312,7 @@ class RunManager:
                             record.updated_at = _now_iso()
                     return RunStartOutcome.cancelled
 
-            async with self._lock:
+            async with self._run_registry_lock(run_id):
                 if record.abort_event.is_set() or record.status != RunStatus.pending:
                     restore_status = record.status
                     restore_error = record.error
@@ -1299,7 +1334,7 @@ class RunManager:
 
     async def fail_start_if_pending(self, run_id: str, *, error: str) -> bool:
         """Mark an admitted run as failed if its worker task could not be attached."""
-        async with self._lock:
+        async with self._run_registry_lock(run_id):
             record = self._runs.get(run_id)
             if record is None or record.status != RunStatus.pending:
                 return False
@@ -1314,7 +1349,7 @@ class RunManager:
             RunStatus.error,
             error=error,
         )
-        async with self._lock:
+        async with self._run_registry_lock(run_id):
             if self._runs.get(run_id) is record:
                 record.terminal_status_persisted = persisted
         return True
@@ -1330,7 +1365,7 @@ class RunManager:
         if not run_ids:
             return {}
         resolved_user_id = resolve_user_id(user_id, method_name="RunManager.get_many_by_thread")
-        async with self._lock:
+        async with self._thread_registry_lock(thread_id):
             records_by_id = {
                 record.run_id: record for record in self._thread_records_locked(thread_id) if record.operation_kind == ThreadOperationKind.run and record.run_id in run_ids and (resolved_user_id is None or record.user_id == resolved_user_id)
             }
@@ -1365,7 +1400,7 @@ class RunManager:
         persist: bool = True,
     ) -> None:
         """Transition a run to a new status."""
-        async with self._lock:
+        async with self._run_registry_lock(run_id):
             record = self._runs.get(run_id)
             if record is None:
                 logger.warning("set_status called for unknown run %s", run_id)
@@ -1401,7 +1436,7 @@ class RunManager:
         if persist:
             persisted = await self._persist_status(record, status, error=error, stop_reason=stop_reason)
             if status not in (RunStatus.pending, RunStatus.running):
-                async with self._lock:
+                async with self._run_registry_lock(run_id):
                     record.terminal_status_persisted = self._has_final_terminal_ack(record) if self.heartbeat_enabled and self._store is not None else persisted
             if not persisted and self.heartbeat_enabled and status == RunStatus.success and not record.ownership_lost:
                 await self._mark_ownership_lost(
@@ -1415,7 +1450,7 @@ class RunManager:
 
     async def persist_current_status(self, run_id: str) -> bool:
         """Persist the status already staged on the in-memory run record."""
-        async with self._lock:
+        async with self._run_registry_lock(run_id):
             record = self._runs.get(run_id)
             if record is None:
                 logger.warning("persist_current_status called for unknown run %s", run_id)
@@ -1425,7 +1460,7 @@ class RunManager:
             stop_reason = record.stop_reason
         persisted = await self._persist_status(record, status, error=error, stop_reason=stop_reason)
         if status not in (RunStatus.pending, RunStatus.running):
-            async with self._lock:
+            async with self._run_registry_lock(run_id):
                 record.terminal_status_persisted = self._has_final_terminal_ack(record) if self.heartbeat_enabled and self._store is not None else persisted
         if not persisted and self.heartbeat_enabled and status == RunStatus.success and not record.ownership_lost:
             await self._mark_ownership_lost(
@@ -1457,7 +1492,7 @@ class RunManager:
             )
             return None
 
-        async with self._lock:
+        async with self._run_registry_lock(run_id):
             record = self._runs.get(run_id)
             if record is None or record.store_only or record.ownership_lost:
                 return None
@@ -1507,7 +1542,7 @@ class RunManager:
 
     async def set_finalizing(self, run_id: str, finalizing: bool) -> None:
         """Mark whether a run is performing post-cancel cleanup."""
-        async with self._lock:
+        async with self._run_registry_lock(run_id):
             record = self._runs.get(run_id)
             if record is None:
                 logger.warning("set_finalizing called for unknown run %s", run_id)
@@ -1525,7 +1560,7 @@ class RunManager:
     ) -> None:
         """Wait until older same-thread runs have finished post-cancel cleanup."""
         while True:
-            async with self._lock:
+            async with self._thread_registry_lock(thread_id):
                 found_current = False
                 prior_finalizing = False
                 for record in self._thread_records_locked(thread_id):
@@ -1549,7 +1584,7 @@ class RunManager:
 
     async def has_later_run(self, thread_id: str, run_id: str) -> bool:
         """Return whether a newer in-memory run has been admitted for the thread."""
-        async with self._lock:
+        async with self._thread_registry_lock(thread_id):
             seen_current = False
             for record in self._thread_records_locked(thread_id):
                 if record.run_id == run_id:
@@ -1561,7 +1596,7 @@ class RunManager:
 
     async def has_later_started_run(self, thread_id: str, run_id: str) -> bool:
         """Return whether a newer same-thread run may have already advanced state."""
-        async with self._lock:
+        async with self._thread_registry_lock(thread_id):
             seen_current = False
             for record in self._thread_records_locked(thread_id):
                 if record.run_id == run_id:
@@ -1588,22 +1623,23 @@ class RunManager:
         """Publish only host assembly evidence, once, before execution."""
         from deerflow.runtime.assembly_evidence import EVIDENCE_KEY
 
-        async with self._lock:
-            record = self._runs.get(run_id)
-            if record is None or evidence.get("run_id") != run_id or evidence.get("thread_id") != record.thread_id:
-                raise ValueError("Assembly/run binding mismatch")
-            if EVIDENCE_KEY in record.metadata:
-                if record.metadata[EVIDENCE_KEY] != evidence:
-                    raise ValueError("Run assembly evidence is immutable")
-                return
-            record.metadata = {**record.metadata, EVIDENCE_KEY: copy.deepcopy(evidence)}
+        async with self._run_scope(run_id), self._snapshot_locks.hold(run_id):
+            async with self._lock:
+                record = self._runs.get(run_id)
+                if record is None or evidence.get("run_id") != run_id or evidence.get("thread_id") != record.thread_id:
+                    raise ValueError("Assembly/run binding mismatch")
+                if EVIDENCE_KEY in record.metadata:
+                    if record.metadata[EVIDENCE_KEY] != evidence:
+                        raise ValueError("Run assembly evidence is immutable")
+                    return
+                record.metadata = {**record.metadata, EVIDENCE_KEY: copy.deepcopy(evidence)}
             if not await self._persist_to_store(record):
                 record.metadata.pop(EVIDENCE_KEY, None)
                 raise RuntimeError("Unable to persist assembly evidence")
 
     async def update_model_name(self, run_id: str, model_name: str | None) -> None:
         """Update the model name for a run."""
-        async with self._lock:
+        async with self._run_registry_lock(run_id):
             record = self._runs.get(run_id)
             if record is None:
                 logger.warning("update_model_name called for unknown run %s", run_id)
@@ -1688,7 +1724,7 @@ class RunManager:
         action: str,
     ) -> None:
         """Set process-local abort state without status persistence or cleanup."""
-        async with self._lock:
+        async with self._run_registry_lock(run_id):
             record = self._runs.get(run_id)
             if record is None or (record.status not in (RunStatus.pending, RunStatus.running) and not self._awaits_terminal_commit(record)) or record.abort_event.is_set():
                 return
@@ -1746,7 +1782,7 @@ class RunManager:
         # ------------------------------------------------------------------
         # Local path — this worker owns the run in-memory.
         # ------------------------------------------------------------------
-        async with self._lock:
+        async with self._run_registry_lock(run_id):
             record = self._runs.get(run_id)
             if record is not None:
                 if record.status == RunStatus.interrupted:
@@ -1771,7 +1807,7 @@ class RunManager:
             elif outcome != CancelOutcome.lease_valid_elsewhere:
                 return outcome
 
-        async with self._lock:
+        async with self._run_registry_lock(run_id):
             record = self._runs.get(run_id)
             if record is not None:
                 if record.status == RunStatus.interrupted or record.abort_event.is_set():
@@ -1797,7 +1833,7 @@ class RunManager:
                 # cancellation; ordinary runs retain immediate persistence.
                 return CancelOutcome.cancelled
             persisted = await self._persist_status(record, RunStatus.interrupted)
-            async with self._lock:
+            async with self._run_registry_lock(run_id):
                 if self._runs.get(run_id) is record:
                     record.terminal_status_persisted = self._has_final_terminal_ack(record) if self.heartbeat_enabled and self._store is not None else persisted
             if not persisted and self._store is not None:
@@ -2001,14 +2037,14 @@ class RunManager:
                 raise RuntimeError(f"Cancelled admission {record.run_id} remains active in the run store")
 
         if stored is None:
-            async with self._lock:
+            async with self._run_registry_lock(record.run_id):
                 if self._runs.get(record.run_id) is record:
                     self._runs.pop(record.run_id, None)
                     self._unindex_run_locked(record.run_id, record.thread_id)
             return
 
         stored_status = RunStatus(stored.get("status") or RunStatus.pending.value)
-        async with self._lock:
+        async with self._run_registry_lock(record.run_id):
             if self._runs.get(record.run_id) is record:
                 record.status = stored_status
                 record.terminal_status_persisted = stored_status not in (
@@ -2044,7 +2080,7 @@ class RunManager:
         already has a pending/running run.  For ``interrupt``/``rollback``,
         cancels inflight runs before creating.
 
-        Lock ordering invariant: the local ``self._lock`` is held across
+        Lock ordering invariant: the per-thread admission gate is held across
         the local check, the store insert, and the local register, so the
         store insert can never succeed while a same-worker ConflictError
         is about to fire (which would leak a pending row in the store).
@@ -2093,52 +2129,53 @@ class RunManager:
             idempotency_request=idempotency_request,
         )
 
-        async with self._lock:
-            if idempotency_key is not None and execution_fence is None:
-                for existing in self._runs.values():
-                    if existing.idempotency_key != idempotency_key:
-                        continue
+        async with self._admission_scope(thread_id, run_id):
+            async with self._lock:
+                if idempotency_key is not None and execution_fence is None:
+                    for existing in self._runs.values():
+                        if existing.idempotency_key != idempotency_key:
+                            continue
+                        if existing.thread_id != thread_id or existing.user_id != user_id:
+                            raise RunIdempotencyKeyMismatch("Run idempotency key resolved to a different thread or user")
+                        existing.idempotency_reused = True
+                        return existing
+
+                def reuse_idempotent_run(conflict: RunIdempotencyConflict) -> RunRecord:
+                    # A locally held record for this key already returned above, so
+                    # the conflicting row belongs to a peer or to a run this worker
+                    # has cleaned up. Return a store-only handle without registering
+                    # it: nothing here finalizes or cleans up that record, so a
+                    # registered copy would keep its admission-time status, reject
+                    # later admissions for the thread, and shadow the durable row
+                    # for get(), cancel(), and orphan reconciliation.
+                    existing = self._record_from_store(conflict.existing)
                     if existing.thread_id != thread_id or existing.user_id != user_id:
-                        raise RunIdempotencyKeyMismatch("Run idempotency key resolved to a different thread or user")
+                        raise RunIdempotencyKeyMismatch("Run idempotency key resolved to a different thread or user") from conflict
                     existing.idempotency_reused = True
                     return existing
 
-            def reuse_idempotent_run(conflict: RunIdempotencyConflict) -> RunRecord:
-                # A locally held record for this key already returned above, so
-                # the conflicting row belongs to a peer or to a run this worker
-                # has cleaned up. Return a store-only handle without registering
-                # it: nothing here finalizes or cleans up that record, so a
-                # registered copy would keep its admission-time status, reject
-                # later admissions for the thread, and shadow the durable row
-                # for get(), cancel(), and orphan reconciliation.
-                existing = self._record_from_store(conflict.existing)
-                if existing.thread_id != thread_id or existing.user_id != user_id:
-                    raise RunIdempotencyKeyMismatch("Run idempotency key resolved to a different thread or user") from conflict
-                existing.idempotency_reused = True
-                return existing
+                # 1) Local inflight check (same-worker guard; cross-worker is the
+                #    store's partial unique index below).
+                local_inflight = [r for r in self._thread_records_locked(thread_id) if r.status in (RunStatus.pending, RunStatus.running) or r.finalizing or r.scheduled_goal_cleanup_pending]
 
-            # 1) Local inflight check (same-worker guard; cross-worker is the
-            #    store's partial unique index below).
-            local_inflight = [r for r in self._thread_records_locked(thread_id) if r.status in (RunStatus.pending, RunStatus.running) or r.finalizing or r.scheduled_goal_cleanup_pending]
+                if any(r.scheduled_goal_cleanup_pending for r in local_inflight):
+                    raise ConflictError(f"Thread {thread_id} has a scheduled goal awaiting finalization")
 
-            if any(r.scheduled_goal_cleanup_pending for r in local_inflight):
-                raise ConflictError(f"Thread {thread_id} has a scheduled goal awaiting finalization")
+                if multitask_strategy in ("interrupt", "rollback") and any(record.operation_kind != ThreadOperationKind.run for record in local_inflight):
+                    raise ConflictError(f"Thread {thread_id} has an active checkpoint write")
 
-            if multitask_strategy in ("interrupt", "rollback") and any(record.operation_kind != ThreadOperationKind.run for record in local_inflight):
-                raise ConflictError(f"Thread {thread_id} has an active checkpoint write")
+                if multitask_strategy == "reject" and local_inflight:
+                    raise ConflictError(f"Thread {thread_id} already has an active run")
 
-            if multitask_strategy == "reject" and local_inflight:
-                raise ConflictError(f"Thread {thread_id} already has an active run")
+                if multitask_strategy in ("interrupt", "rollback") and local_inflight:
+                    logger.info(
+                        "Preparing to cancel %d inflight run(s) on thread %s (strategy=%s)",
+                        len(local_inflight),
+                        thread_id,
+                        multitask_strategy,
+                    )
 
-            if multitask_strategy in ("interrupt", "rollback") and local_inflight:
-                logger.info(
-                    "Preparing to cancel %d inflight run(s) on thread %s (strategy=%s)",
-                    len(local_inflight),
-                    thread_id,
-                    multitask_strategy,
-                )
-
-            # 2) Persist to store while still holding the local lock. The
+            # 2) Persist with only the same-thread admission gate held. The
             #    store is the source of truth for cross-process atomicity.
             if self._store is not None:
                 if idempotency_request is not None and not _store_accepts_idempotency_parameter(self._store, "idempotency_request"):
@@ -2242,27 +2279,28 @@ class RunManager:
                     # rows as interrupted in the same transaction; no extra
                     # store write is needed for them.
 
-            # 3) Only now safe to register locally — store insert succeeded.
-            self._runs[run_id] = record
-            self._index_run_locked(record)
-            self._arm_lease_deadline(record)
+            async with self._lock:
+                # 3) Only now safe to register locally — store insert succeeded.
+                self._runs[run_id] = record
+                self._index_run_locked(record)
+                self._arm_lease_deadline(record)
 
-            # 4) Cancel local in-memory inflight (interrupt/rollback). The
-            #    store-side counterparts were already cancelled in step 2.
-            if self._store is None and multitask_strategy in ("interrupt", "rollback"):
-                for r in local_inflight:
-                    if r.finalizing:
-                        continue
-                    r.abort_action = multitask_strategy
-                    r.abort_event.set()
-                    task_active = r.task is not None and not r.task.done()
-                    r.finalizing = task_active
-                    if task_active:
-                        r.task.cancel()
-                    r.status = RunStatus.interrupted
-                    r.terminal_status_persisted = self._store is None
-                    r.updated_at = now
-                    interrupted_records.append(r)
+                # 4) Cancel local in-memory inflight (interrupt/rollback). The
+                #    store-side counterparts were already cancelled in step 2.
+                if self._store is None and multitask_strategy in ("interrupt", "rollback"):
+                    for r in local_inflight:
+                        if r.finalizing:
+                            continue
+                        r.abort_action = multitask_strategy
+                        r.abort_event.set()
+                        task_active = r.task is not None and not r.task.done()
+                        r.finalizing = task_active
+                        if task_active:
+                            r.task.cancel()
+                        r.status = RunStatus.interrupted
+                        r.terminal_status_persisted = self._store is None
+                        r.updated_at = now
+                        interrupted_records.append(r)
 
         # Outside the lock: persist interrupted status for locally-cancelled
         # runs. Store-side claimed rows are already finalised. Cancellation at
@@ -2328,7 +2366,7 @@ class RunManager:
             if reservation_task is None:
                 raise RuntimeError("Thread operation reservation requires an active asyncio task")
             lease_lost = True
-            async with self._lock:
+            async with self._run_registry_lock(record.run_id):
                 if self._runs.get(record.run_id) is record:
                     record.task = reservation_task
                     lease_lost = record.abort_event.is_set()
@@ -2355,7 +2393,7 @@ class RunManager:
                             exc_info=True,
                         )
             finally:
-                async with self._lock:
+                async with self._run_registry_lock(record.run_id):
                     removed = self._runs.pop(record.run_id, None)
                     if removed is not None:
                         self._unindex_run_locked(record.run_id, removed.thread_id)
@@ -2472,7 +2510,7 @@ class RunManager:
 
     async def has_inflight(self, thread_id: str) -> bool:
         """Return ``True`` if *thread_id* has a pending or running run."""
-        async with self._lock:
+        async with self._thread_registry_lock(thread_id):
             return any(r.operation_kind == ThreadOperationKind.run and (r.status in (RunStatus.pending, RunStatus.running) or r.finalizing) for r in self._thread_records_locked(thread_id))
 
     async def cleanup(self, run_id: str, *, delay: float = 300) -> None:
@@ -2488,7 +2526,7 @@ class RunManager:
             return
         if delay > 0:
             await asyncio.sleep(delay)
-        async with self._lock:
+        async with self._run_registry_lock(run_id):
             record = self._runs.pop(run_id, None)
             if record is not None:
                 self._unindex_run_locked(run_id, record.thread_id)
@@ -2505,7 +2543,7 @@ class RunManager:
 
     async def owns_active_admission(self, record: RunRecord) -> bool:
         """Confirm the existing run slot without holding a SQL writer transaction."""
-        async with self._lock:
+        async with self._run_registry_lock(record.run_id):
             if self._runs.get(record.run_id) is not record or record.ownership_lost:
                 return False
         if self._store is None:
@@ -2841,6 +2879,18 @@ class RunManager:
         return loop.time() < deadline and self._rollback_retry_authorized(record, initial_allow_interrupted=initial_allow_interrupted)
 
     async def _renew_one_lease(self, record: RunRecord) -> None:
+        # Assembly publication writes a complete snapshot. Keep the Store
+        # renewal and its local ACK together so that snapshot cannot restore
+        # the previous lease. Waiting for this gate retains the expiry timer.
+        self._arm_lease_deadline(record)
+        async with self._snapshot_locks.hold(record.run_id):
+            action = await self._renew_one_lease_locked(record)
+        if action is not None:
+            # Do not acquire the thread gate while holding the snapshot gate:
+            # assembly publication takes them in the opposite order.
+            await self._signal_local_cancel(record.run_id, action=action)
+
+    async def _renew_one_lease_locked(self, record: RunRecord) -> str | None:
         assert self._store is not None and self._run_ownership_config is not None
         if self._has_final_terminal_ack(record):
             await self._release_confirmed_terminal_barrier(record, timeout=0)
@@ -2915,7 +2965,7 @@ class RunManager:
                     if renewal.cancel_action is not None:
                         action = renewal.cancel_action if renewal.cancel_action in ("interrupt", "rollback") else "interrupt"
                         # Signal here, before joining any other run's decision.
-                        await self._signal_local_cancel(record.run_id, action=action)
+                        return action
                     return
                 if (
                     retry_index == 0

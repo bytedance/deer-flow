@@ -9,6 +9,7 @@ from test_terminal_store_contract import store as store
 
 from deerflow.config.run_ownership_config import RunOwnershipConfig
 from deerflow.runtime import RunManager, RunStatus
+from deerflow.runtime.runs import manager as manager_module
 
 
 def manager_for(run_store):
@@ -41,7 +42,15 @@ async def finish(manager, record, *tasks):
 
 
 @pytest.mark.anyio
-async def test_pre_rollback_renewal_retries_after_interrupted_ack(store):
+async def test_pre_rollback_renewal_retries_after_interrupted_ack(store, monkeypatch):
+    now = datetime.now(UTC)
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now if tz is not None else now.replace(tzinfo=None)
+
+    monkeypatch.setattr(manager_module, "datetime", Clock)
     manager = manager_for(store)
     record = await running_record(manager)
     entered, release = asyncio.Event(), asyncio.Event()
@@ -66,6 +75,9 @@ async def test_pre_rollback_renewal_retries_after_interrupted_ack(store):
         assert record.rollback_finalization_pending
         old_expiry = record.lease_expires_at
 
+        # Memory calls may finish within one Windows wall-clock tick. Pin a
+        # later renewal instant instead of relying on incidental test latency.
+        now += timedelta(seconds=1)
         release.set()
         await asyncio.wait_for(renewal, 2)
 

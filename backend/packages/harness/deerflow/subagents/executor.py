@@ -62,9 +62,12 @@ from deerflow.tracing import (
     inject_langfuse_metadata,
 )
 from deerflow.utils.bash_exit import BASH_TOOL_NAMES, bash_exit_status
+from deerflow.utils.file_io import await_drained
 from deerflow.utils.messages import message_content_to_text
 
 if TYPE_CHECKING:
+    from deerflow.models.reasoning import ResolvedReasoning
+
     # Imported lazily at runtime inside _build_initial_state: importing
     # tool_search eagerly would run tools/builtins/__init__ -> task_tool ->
     # `from deerflow.subagents import SubagentExecutor`, which re-enters this
@@ -988,6 +991,11 @@ class SubagentExecutor:
             self.model_name: str | None = resolve_subagent_model_name(config, parent_model, app_config=app_config)
         else:
             self.model_name = None
+        # Resolve thinking_enabled: config explicit > False
+        self.thinking_enabled = config.thinking_enabled if config.thinking_enabled is not None else False
+        # Resolve reasoning_effort: config explicit > None
+        self.reasoning_effort = config.reasoning_effort
+
         self.sandbox_state = sandbox_state
         self.thread_data = thread_data
         self.uploaded_files = deepcopy(uploaded_files) if uploaded_files is not None else None
@@ -1099,7 +1107,24 @@ class SubagentExecutor:
         app_config = self._get_resolved_app_config()
         if self.model_name is None:
             self.model_name = resolve_subagent_model_name(self.config, self.parent_model, app_config=app_config)
-        model = create_chat_model(name=self.model_name, thinking_enabled=False, app_config=app_config, attach_tracing=False)
+        from deerflow.models.reasoning import ReasoningPolicyError, resolve_reasoning_contract, resolve_reasoning_request
+
+        get_model_config = getattr(app_config, "get_model_config", None)
+        model_config = get_model_config(self.model_name) if callable(get_model_config) else None
+        if model_config is None:
+            model_config = next((profile for profile in getattr(app_config, "models", []) if profile.name == self.model_name), None)
+        try:
+            effective_reasoning = resolve_reasoning_request(resolve_reasoning_contract(model_config), thinking_enabled=self.thinking_enabled, reasoning_effort=self.reasoning_effort)
+        except ReasoningPolicyError as exc:
+            raise ValueError(f"Model {self.model_name}: {exc}") from exc
+        # Preserve the original request for the factory's validation and logs.
+        model = create_chat_model(
+            name=self.model_name,
+            thinking_enabled=self.thinking_enabled,
+            reasoning_effort=self.reasoning_effort,
+            app_config=app_config,
+            attach_tracing=False,
+        )
 
         from deerflow.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
 
@@ -1217,7 +1242,8 @@ class SubagentExecutor:
         tool_node = tool_graph_node.data if tool_graph_node is not None else None
         self._return_direct_tools = {tool.name for tool in tool_node.tools_by_name.values() if tool.return_direct} if isinstance(tool_node, ToolNode) else set()
         self._describe_assembly(
-            app_config=app_config,
+            model_config=model_config,
+            effective_reasoning=effective_reasoning,
             tools=bound_tools,
             middlewares=middlewares,
             deferred_setup=deferred_setup,
@@ -1266,7 +1292,8 @@ class SubagentExecutor:
     def _describe_assembly(
         self,
         *,
-        app_config: Any,
+        model_config: Any,
+        effective_reasoning: "ResolvedReasoning",
         tools: list[Any],
         middlewares: list[Any],
         deferred_setup: "DeferredToolSetup | None",
@@ -1288,8 +1315,6 @@ class SubagentExecutor:
         from deerflow.extensions.notify import notify_agent_assembled
 
         try:
-            get_model_config = getattr(app_config, "get_model_config", None)
-            model_config = get_model_config(self.model_name) if callable(get_model_config) else None
             if model_config is None:
                 # A name the profile table does not know still has an identity;
                 # a missing profile must not blank out the whole descriptor.
@@ -1301,12 +1326,6 @@ class SubagentExecutor:
                     supports_vision=False,
                 )
             deferred_names = deferred_setup.deferred_names if deferred_setup is not None else frozenset()
-            # Subagents request thinking off; the model's reasoning contract
-            # decides what that means (a required-thinking model stays on), and
-            # the descriptor reports the effective policy the factory applied.
-            from deerflow.models.reasoning import resolve_reasoning_contract, resolve_reasoning_request
-
-            effective_reasoning = resolve_reasoning_request(resolve_reasoning_contract(model_config), thinking_enabled=False, reasoning_effort=None)
             descriptor = build_assembly_descriptor(
                 namespace="deerflow",
                 agent_name=self.config.name,
@@ -2068,6 +2087,18 @@ class SubagentExecutor:
                         tool_receipts=terminal_receipts(),
                     )
 
+        except asyncio.CancelledError:
+            # The outer background wrapper observes cancellation only after this
+            # function's task-stop hook. Publish it here so observers see ABORTED;
+            # a previously published hard timeout still wins the terminal race.
+            result.try_set_terminal(
+                SubagentStatus.CANCELLED,
+                error="Cancelled by user",
+                token_usage_records=collector.snapshot_records() if collector is not None else None,
+                tool_receipts=terminal_receipts(),
+            )
+            raise
+
         except Exception as e:
             logger.exception(f"[trace={self.trace_id}] Subagent {self.config.name} async execution failed")
             result.try_set_terminal(
@@ -2078,44 +2109,47 @@ class SubagentExecutor:
             )
 
         finally:
-            # Cancellation (including wait_for's execution timeout) bypasses
-            # the terminal branches above. A completed model response can be
-            # in the collector before its graph node publishes a values chunk.
-            # Stream teardown has drained at this point; publish its final
-            # usage before the outer wrapper chooses CANCELLED or TIMED_OUT.
+            # A completed model response can be in the collector before its
+            # graph node publishes a values chunk. Publish final usage after
+            # stream teardown, including cancellation and hard-timeout cleanup.
             if collector is not None:
                 result.update_token_usage_records(collector.snapshot_records())
-            if execution_context is not None:
-                try:
-                    from deerflow.sandbox.lease import release_sandbox_execution_lease_async
 
-                    await release_sandbox_execution_lease_async(execution_context)
-                except Exception:
-                    logger.warning(
-                        "[trace=%s] Failed to release sandbox execution lease for subagent %s",
-                        self.trace_id,
-                        self.config.name,
-                        exc_info=True,
-                    )
-            if task_info is not None and task_store is not None:
-                try:
-                    await notify_task_stop(
-                        loaded_extensions,
-                        task_store,
-                        task_info,
-                        subagent_task_outcome(
-                            cancelled=result.status is SubagentStatus.CANCELLED,
-                            succeeded=result.status is SubagentStatus.COMPLETED,
-                        ),
-                        timeout=_EXTENSION_TASK_NOTIFY_TIMEOUT_SECONDS,
-                    )
-                except Exception:
-                    logger.warning(
-                        "[trace=%s] Extension task-stop notification failed for subagent %s (non-fatal)",
-                        self.trace_id,
-                        self.config.name,
-                        exc_info=True,
-                    )
+            async def cleanup_execution() -> None:
+                if execution_context is not None:
+                    try:
+                        from deerflow.sandbox.lease import release_sandbox_execution_lease_async
+
+                        await release_sandbox_execution_lease_async(execution_context)
+                    except Exception:
+                        logger.warning(
+                            "[trace=%s] Failed to release sandbox execution lease for subagent %s",
+                            self.trace_id,
+                            self.config.name,
+                            exc_info=True,
+                        )
+                if task_info is not None and task_store is not None:
+                    try:
+                        await notify_task_stop(
+                            loaded_extensions,
+                            task_store,
+                            task_info,
+                            subagent_task_outcome(
+                                cancelled=result.status is SubagentStatus.CANCELLED,
+                                succeeded=result.status is SubagentStatus.COMPLETED,
+                            ),
+                            timeout=_EXTENSION_TASK_NOTIFY_TIMEOUT_SECONDS,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "[trace=%s] Extension task-stop notification failed for subagent %s (non-fatal)",
+                            self.trace_id,
+                            self.config.name,
+                            exc_info=True,
+                        )
+
+            # Keep capacity and execution-done ownership until the whole tail settles.
+            await await_drained(cleanup_execution())
 
         return result
 
@@ -2128,6 +2162,8 @@ class SubagentExecutor:
         long-lived isolated loop. Reusing that loop keeps shared async clients
         from being tied to a short-lived loop that gets closed per execution.
         """
+        if result_holder is None:
+            result_holder = SubagentResult(task_id=str(uuid.uuid4())[:8], trace_id=self.trace_id, status=SubagentStatus.PENDING)
         future: Future[SubagentResult] | None = None
         parent_context = _copy_isolated_subagent_context()
         try:
@@ -2136,9 +2172,11 @@ class SubagentExecutor:
                 lambda: self._aexecute(task, result_holder),
             )
             return future.result(timeout=self.config.timeout_seconds)
-        except FuturesTimeoutError:
-            if result_holder is not None:
-                result_holder.cancel_event.set()
+        except FuturesTimeoutError as exc:
+            # Publish the synchronous API's failure before cancellation can
+            # reach task-stop observers or win the terminal-state race.
+            result_holder.try_set_terminal(SubagentStatus.FAILED, error=str(exc))
+            result_holder.cancel_event.set()
             if future is not None:
                 future.cancel()
             raise
@@ -2169,19 +2207,19 @@ class SubagentExecutor:
         Returns:
             SubagentResult with the execution result.
         """
+        # Share one holder with the worker even when the caller did not supply
+        # one, so a timeout and its cleanup report the same terminal outcome.
+        result = result_holder
+        if result is None:
+            result = SubagentResult(
+                task_id=str(uuid.uuid4())[:8],
+                trace_id=self.trace_id,
+                status=SubagentStatus.PENDING,
+            )
         try:
-            return self._execute_in_isolated_loop(task, result_holder)
+            return self._execute_in_isolated_loop(task, result)
         except Exception as e:
             logger.exception(f"[trace={self.trace_id}] Subagent {self.config.name} execution failed")
-            # Create a result with error if we don't have one
-            if result_holder is not None:
-                result = result_holder
-            else:
-                result = SubagentResult(
-                    task_id=str(uuid.uuid4())[:8],
-                    trace_id=self.trace_id,
-                    status=SubagentStatus.RUNNING,
-                )
             result.try_set_terminal(SubagentStatus.FAILED, error=str(e))
             return result
 
