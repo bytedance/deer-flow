@@ -357,7 +357,7 @@ async def _delete_checkpoint_rows(saver: Any, thread_id: str, key: tuple[str, st
         )
 
 
-async def _delete_unreachable_blobs(saver: Any, thread_id: str, survivor_versions: set) -> None:
+async def _delete_unreachable_blobs(saver: Any, thread_id: str, survivor_versions: set[Any]) -> None:
     """Whole-thread blob GC: drop exactly the versions no surviving checkpoint
     references (memory ``saver.blobs`` / Postgres ``checkpoint_blobs``)."""
     if isinstance(saver, InMemorySaver):
@@ -554,7 +554,7 @@ async def enforce_thread_retention(
         survivor_versions: set[Any] = set()
         for key, node in nodes.items():
             if key not in deleted_keys:
-                survivor_versions.update(node.versions)
+                survivor_versions.update(version for _channel, version in node.versions)
 
         # Invalidate before touching source-of-truth rows. If cache deletion
         # fails, fail closed with every checkpoint intact; doing this after the

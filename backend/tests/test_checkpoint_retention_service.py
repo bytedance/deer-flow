@@ -302,6 +302,8 @@ async def test_runtime_duration_leaf_pruned_by_default(saver_env: _SaverEnv) -> 
     assert duration_id not in await _listed_checkpoint_ids(saver_env, thread_id)
     resumed = await saver_env.saver.aget_tuple(_config_thread(thread_id, checkpoint_ids[-1]))
     assert resumed is not None
+    resumed_messages = resumed.checkpoint["channel_values"]["messages"]
+    assert [message.id for message in resumed_messages] == message_ids
     base = await _walk(saver_env, _config_thread(thread_id, checkpoint_ids[-1]), message_ids[-1])
     assert base is not None
     assert report.stats_after["checkpoint_rows"] == report.stats_before["checkpoint_rows"] - 1
