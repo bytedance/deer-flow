@@ -59,6 +59,14 @@ Parameters:
 - `--output-file`: Absolute path to output MP3 file (required)
 - `--transcript-file`: Absolute path to output transcript markdown file (optional, but recommended)
 
+Use different files for the input JSON, output MP3, and optional transcript.
+Paths that resolve to the same file, including existing hard links, are rejected
+before transcript writes or TTS calls so they cannot overwrite one another.
+On macOS, missing paths differing only by ASCII letter case are checked against the existing
+parent volume's case policy. If that policy is unavailable, choose names differing
+by more than case. A collision diagnostic includes both original path arguments.
+Non-ASCII case differences, Unicode normalization aliases in missing names, and concurrent filesystem changes are outside this preflight.
+
 > [!IMPORTANT]
 > - Execute the script in one complete call. Do NOT split the workflow into separate steps.
 > - The script handles all TTS API calls and audio generation internally.
