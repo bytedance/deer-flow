@@ -265,22 +265,9 @@ def _make_opensandbox_provider(config: dict[str, Any]) -> tuple[Any, dict[str, A
     from deerflow.config.app_config import get_app_config, pop_current_app_config, push_current_app_config
 
     class BenchmarkOpenSandboxProvider(OpenSandboxProvider):
-        # Production cleanup logs failures and continues. A benchmark must still
-        # attempt every cleanup, but cannot report a successful run afterwards.
-        def __init__(self):
-            self._cleanup_failures: set[str] = set()
-            super().__init__()
-
-        def _destroy_quietly(self, sandbox, *, context: str) -> None:
-            try:
-                sandbox.destroy()
-            except Exception:
-                with self._lock:
-                    self._cleanup_failures.add(sandbox.remote_id)
-
         def _check_cleanup(self) -> None:
             with self._lock:
-                failed = sorted(self._cleanup_failures)
+                failed = sorted({sandbox.remote_id for sandbox in self._pending_destroy.values()})
             if failed:
                 # Report resource identities for manual cleanup, never arbitrary
                 # SDK exception text that might contain connection credentials.
@@ -294,9 +281,11 @@ def _make_opensandbox_provider(config: dict[str, Any]) -> tuple[Any, dict[str, A
             self._check_cleanup()
 
         def shutdown(self) -> None:
-            if self._shutdown_called:
-                return
-            super().shutdown()
+            try:
+                super().shutdown()
+            except RuntimeError:
+                self._check_cleanup()
+                raise
             self._check_cleanup()
 
     app_config = get_app_config()

@@ -102,6 +102,8 @@ failures instead of accepting them as success. A final cleanup failure exits non
 and appends a failed `shutdown` / `cleanup` row, so `summarize.py` also exits nonzero.
 These rows are cleanup diagnostics, not command latency samples. Inspect the remote
 IDs in the error and clean up unconfirmed resources through the test service.
+Repeated shutdown retries pending remote IDs through the production management
+client; the benchmark does not bypass ownership tracking or retry a closed SDK transport.
 The benchmark cannot establish physical deletion beyond the provider's destroy
 contract. The Docker-prefix resource sampler below does not measure remote
 OpenSandbox resources; collect server-side metrics separately.

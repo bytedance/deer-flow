@@ -62,6 +62,11 @@ def _is_not_found(error: BaseException) -> bool:
     return False
 
 
+def _is_remote_absent(error: BaseException) -> bool:
+    """Only management API absence acknowledges an unsuccessful DELETE."""
+    return any(getattr(item, "status_code", None) in (404, 410) for item in _exception_chain(error))
+
+
 def _join_event_text(chunks) -> str:
     """Reconstruct the line-oriented text emitted by OpenSandbox SSE events."""
     return "\n".join(str(chunk).rstrip("\n") for chunk in chunks)
@@ -130,6 +135,7 @@ class OpenSandboxSandbox(Sandbox):
         sandbox_timeout: timedelta | None = None,
         default_command_timeout: float = 600,
         on_terminal_failure: Callable[[str, str], None] | None = None,
+        retry_termination: Callable[[str], None] | None = None,
     ) -> None:
         super().__init__(id)
         if sandbox_timeout is not None and sandbox_timeout.total_seconds() <= 0:
@@ -142,6 +148,8 @@ class OpenSandboxSandbox(Sandbox):
         self._sandbox_timeout = sandbox_timeout
         self._default_command_timeout = float(default_command_timeout)
         self._on_terminal_failure = on_terminal_failure
+        self._retry_termination = retry_termination
+        self._termination_confirmed = False
         self._state_lock = threading.Lock()
         # renew() sets an absolute expiration instead of taking a maximum. Keep
         # each renewal and its operation under one lock so a later short file
@@ -160,14 +168,20 @@ class OpenSandboxSandbox(Sandbox):
             return self._closed
 
     def destroy(self) -> None:
-        """Terminate the remote sandbox and close its SDK resources."""
+        """Request termination; a retired transport requires fresh management I/O."""
         with self._operation_lock:
             with self._state_lock:
-                if self._closed:
+                if self._termination_confirmed:
                     return
+                already_closed = self._closed
             error: Exception | None = None
             try:
-                self._sandbox.destroy()
+                if already_closed:
+                    if self._retry_termination is None:
+                        raise RuntimeError("OpenSandbox termination is unconfirmed; retry using a fresh management client")
+                    self._retry_termination(self.remote_id)
+                else:
+                    self._sandbox.destroy()
             except Exception as exc:  # SDK errors are normalized below.
                 error = exc
             finally:
@@ -175,8 +189,10 @@ class OpenSandboxSandbox(Sandbox):
                 # so this client cannot safely be reused after either outcome.
                 with self._state_lock:
                     self._closed = True
-            if error is not None and not _is_terminal_failure(error, api_not_found_is_terminal=True):
+            if error is not None and not _is_remote_absent(error):
                 raise error
+            with self._state_lock:
+                self._termination_confirmed = True
 
     def _note_failure(self, error: Exception, *, api_not_found_is_terminal: bool = False) -> None:
         if self._on_terminal_failure is None or not _is_terminal_failure(error, api_not_found_is_terminal=api_not_found_is_terminal):

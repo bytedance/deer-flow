@@ -983,6 +983,11 @@ DeerFlow supports multiple sandbox execution modes:
 - **Docker Execution** (runs sandbox code in isolated Docker containers)
 - **Docker Execution with Kubernetes** (runs sandbox code in Kubernetes pods via provisioner service)
 
+The optional [OpenSandbox provider](backend/packages/harness/deerflow/community/opensandbox/README.md)
+retains unconfirmed deletions and retries them through fresh management clients.
+If shutdown reports outstanding work, retry after SDK operations finish or the
+management service recovers.
+
 The optional [Tenki provider](backend/packages/harness/deerflow/community/tenki/README.md)
 retains failed termination handles for retry and rejects late acquisitions after
 reset or shutdown. If shutdown reports outstanding work, retry after its SDK
