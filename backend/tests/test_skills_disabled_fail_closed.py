@@ -1,8 +1,12 @@
 """A broken extensions config must not re-enable a disabled skill.
 
-``SkillStorage.load_skills()`` merges the enabled state from ``extensions_config.json``. When that file cannot be read, the parsed default (``enabled=True`` from ``parse_skill_file``) must not stand in for the answer: an unrelated defect in the file — a malformed ``mcpServers`` entry, a trailing comma — would otherwise silently re-enable every skill an operator disabled.
+``SkillStorage.load_skills()`` merges the enabled state from ``extensions_config.json``. When that file
+cannot be read, the parsed default (``enabled=True`` from ``parse_skill_file``) must not stand in for the
+answer: an unrelated defect in the file — a malformed ``mcpServers`` entry, a trailing comma — would
+otherwise silently re-enable every skill an operator disabled.
 
-The sandbox projection fails closed on the same error (``projection._rebuild_public_locked`` clears the view), so the runtime half of the gate has to agree with it.
+The sandbox projection fails closed on the same error (``projection._rebuild_public_locked`` clears the
+view), so the runtime half of the gate has to agree with it.
 """
 
 from __future__ import annotations
@@ -52,7 +56,8 @@ def test_disabled_skill_stays_disabled_when_the_config_cannot_be_read(disabled_s
     storage = LocalSkillStorage(str(disabled_skill_root))
 
     def _raise(*_args: object, **_kwargs: object) -> None:
-        # What one schema-invalid ``mcpServers`` entry raises from ``McpServerConfig._validate_header_names``; a malformed JSON file raises ``ValueError`` from the same call site.
+        # What one schema-invalid ``mcpServers`` entry raises from ``McpServerConfig._validate_header_names``;
+        # a malformed JSON file raises ``ValueError`` from the same call site.
         raise ValueError("headers maps the same HTTP header under two spellings ('X-Api-Key' and 'x-api-key')")
 
     monkeypatch.setattr(ExtensionsConfig, "from_file", classmethod(_raise))
