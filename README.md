@@ -1774,6 +1774,8 @@ Discovery follows operator-managed directory symlinks, but skips links back to a
 
 Skill Markdown and bundled text resources use UTF-8. Skill-creator CLI and review utilities read and write text explicitly as UTF-8 so localized skills behave consistently across operating systems.
 
+For standalone skill exports, the bundled skill creator's `scripts/package_skill.py` can be run by file path from any directory, or as `python -m scripts.package_skill` from the skill-creator directory. Both entry points validate the skill before writing a `.skill` archive.
+
 Custom-skill writes and security-scan staging preserve submitted line endings
 on every platform, so the scanner checks the bytes that will be stored.
 
@@ -2792,6 +2794,8 @@ Snapshots preserve whole excerpts, not freshly fetched provider content. They in
 Explicitly enabled nested `task` delegation propagates omitted opaque source IDs in its captured artifact. Each outer report filters and deduplicates those IDs, and independently captured evidence can restore an omitted source. The durable snapshot publishes only the final count. Legacy task artifacts without omission IDs cannot reconstruct earlier forwarding losses; unknown prose citations are not treated as captured evidence.
 
 If an item's final lease expires after exhausting the retry budget, the batch reaches a terminal state once all items are terminal: `failed` when none succeeded, or `completed` when at least one succeeded. The item remains `failed` in both cases so partial results stay visible.
+
+Paused batches also reconcile expired attempts after a worker exits. Retryable items remain queued without starting new work until you explicitly resume the batch; exhausted attempts become failed and can be retried individually.
 
 Direct `create_deerflow_agent(...)` integrations can own the same boundary explicitly instead of relying on Gateway startup. Construct one `SubagentRuntime` and share it across every graph in that application; its `max_running`, ordinary per-run total, bound `task` tool, and optional durable-batch tools then use the same caller-owned snapshot and execution controller. A runtime with a batch repository owns a worker and must be started before graph construction and stopped during application shutdown:
 
