@@ -37,6 +37,10 @@ Shelf `stage_document_bytes` drains preparation, writes, close and failure
 cleanup before propagating cancellation. Retain the opened handle across its
 handoff, but leave waiting for incoming chunks cancellable; regressions in
 `tests/test_project_document_staging_cancellation.py` cover both shelf entry points.
+Shelf conversion also drains its final staging discard before releasing
+single-flight ownership. Cleanup failures warn without replacing the conversion
+result, original error or cancellation; the retention sweep owns later retries.
+Coverage lives in `tests/test_project_document_tools.py::TestConversionCleanup`.
 Local Linux/macOS text revisions opt into a short `temporary_prefix` and
 `preserve_metadata_from` (a caller-owned descriptor). Staging starts at `0600`;
 `file_revision_metadata` transfers ownership, mode, ACLs and xattrs before data.
@@ -131,6 +135,13 @@ cannot admit a run. `tests/blocking_io/test_agent_factory_resolve_offloop.py`
 pins offload, executor isolation, request context, and failure ordering.
 
 Tool and agent assembly re-enters `get_available_tools()` and may block on MCP discovery, so the four async assembly entry points — `run_agent`'s `agent_factory` call, `task_tool`, durable batch `_execute_item`, and `abuild_checkpoint_state_accessor` — dispatch through `deerflow.utils.assembly_io.run_assembly`, a dedicated ContextVar-preserving bounded executor (`DEER_FLOW_ASSEMBLY_WORKERS`, default 8) rather than the loop's default executor; a hung MCP server therefore parks an assembly worker instead of queueing unrelated default-executor work, and the pool logs a warning when pending assemblies exceed the worker count. `tests/blocking_io/test_tool_assembly_offloop.py` pins all four offloads plus the ContextVar propagation.
+
+### Document Conversion
+
+`file_conversion.convert_file_to_markdown` resolves the live PDF converter in
+its drained parsing worker. Config cache hits still stat/hash files; keep them
+off-loop with parsing. Cold/cache-hit coverage uses real temporary configs in
+`tests/blocking_io/test_file_conversion_offloop.py`.
 
 ### Uploaded Document Summaries
 

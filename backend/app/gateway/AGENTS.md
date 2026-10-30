@@ -4,6 +4,11 @@ Reject external `sandbox`, `thread_data`, `viewed_images`, `goal_outcome`. Non-n
 
 Studio retains sanitized creation metadata.
 
+HTTP and run metadata creation share `goal_thread_lock`. Lock in detached
+`_ensure_thread_metadata`; preserve await-free attachment and cancel/drain
+ownership. Its 5s budget covers admission and I/O: timeout fails strict starts;
+others omit incarnation (MCP fails closed). Tests: `test_thread_create_run_metadata_race.py`.
+
 Capability Center's `business` adapter validates bundled credentials and creates
 an MCP connection. The MCP API permits only its isolated launcher and credential
 environment keys; reject arbitrary commands and manifest-policy bypasses. Keep
@@ -76,28 +81,32 @@ OIDC redirects retain existing endpoint query bytes (RFC 6749 section 3.1).
 Malformed IdP bodies raise `OIDCError` (502/`sso_failed`).
 `tests/test_oidc_auth.py` pins query, state-cookie, nonce and PKCE agreement.
 
-Personal Access Tokens (`app.gateway.auth.pat`, `Authorization: Bearer dfp_...`) run as their owning user: an invalid Bearer is a hard 401 with no cookie fallback, which keeps `CSRFMiddleware`'s Bearer skip safe (origin checks still run). Scopes narrow within the allowlisted threads/runs/projects routes (including `POST /api/threads/{id}/move`); every other authenticated route 403s PAT callers (admin included). PAT management and `/change-password` require session auth; only SHA-256 digests are stored (`0017`).
+PATs (`app.gateway.auth.pat`, `Authorization: Bearer dfp_...`) act as their owner.
+Invalid Bearers return 401 without cookie fallback, keeping `CSRFMiddleware`'s
+Bearer skip safe; origin checks still run. Scopes narrow allowlisted thread/run/
+project routes, including `POST /api/threads/{id}/move`; other authenticated
+routes reject PATs with 403, even for admins. PAT management and `/change-password`
+require session auth. Store only SHA-256 digests (`0017`).
 
-Thread→project membership is written by thread creation (`POST /api/threads` with
-a validated `project_id`), branch creation (the new row inherits the source
-thread's project; an archived/deleted project degrades the branch to unassigned
-instead of failing), and explicit moves (`POST /api/threads/{id}/move`); run
-admission never modifies membership; it only pins the resolved project context
-read-only into the run context. The server-reserved `deerflow_project_id`
-metadata key is a read-only exposure of the `threads_meta.project_id` column and
-is stripped from client writes.
+Thread→project membership is written only by thread creation (`POST /api/threads`
+with validated `project_id`), branch creation (inherit the source project;
+archived/deleted projects become unassigned rather than failing), and explicit
+`POST /api/threads/{id}/move`. Run admission pins resolved project context
+read-only and never changes membership. Server-reserved `deerflow_project_id`
+metadata exposes `threads_meta.project_id` read-only and is stripped from client writes.
 
-Localhost persistence deliberately reads the direct request `Host` and ignores `Forwarded` / `X-Forwarded-Host`. Scheme and auth-origin reconstruction still consume forwarding headers. The bundled nginx sets `X-Forwarded-Proto`, but preserves an upstream HTTPS value and does not overwrite every forwarded header, so the outer trusted proxy must replace or strip client-supplied forwarding headers before traffic reaches DeerFlow.
+Localhost persistence trusts direct `Host`, not `Forwarded`/`X-Forwarded-Host`.
+Scheme/auth-origin reconstruction still uses forwarding headers. Nginx sets
+`X-Forwarded-Proto` but preserves upstream HTTPS and some other forwarded headers;
+the outer trusted proxy must replace/strip client copies before DeerFlow.
 
-Standalone local LangGraph Studio is recognized only through the upstream
-`Auth.types.StudioUser` principal type, never by its reusable identity string.
-The type is resolved once at import; an older SDK without it degrades to normal
-owner scoping.
-For that principal's assistant reads/searches, `langgraph_auth.add_owner_filter`
-selects genuine server-registered assistants plus assistants owned by Studio;
-all other resources remain owner-scoped. Assistant create/update handlers make
-both `user_id` and `created_by=user` server-owned, because LangGraph gives
-`created_by=system` privileged ownership semantics during run creation. The
+Recognize standalone Studio only by upstream `Auth.types.StudioUser`, never its
+reusable identity string. Resolve the type once at import; older SDKs without
+it retain normal owner scoping. For its assistant reads/searches,
+`langgraph_auth.add_owner_filter` admits genuine server-registered assistants
+and Studio-owned rows; other resources stay owner-scoped. Assistant create/update
+forces server-owned `user_id` and `created_by=user`: LangGraph treats
+`created_by=system` as privileged run ownership. The
 custom application module in `langgraph_studio.py` is imported before the
 locked in-memory runtime lifespan. At that pre-runtime boundary it derives
 genuine system assistant IDs from the CLI-provided graph registry, removes
