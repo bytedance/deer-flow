@@ -1,5 +1,22 @@
 # AIO Sandbox
 
+Local AIO image profiles scope container IDs to the selected profile generation.
+When that identity changes, an idle cached container is parked before the next
+acquire; an execution holder defers replacement until it drains. Do not refresh
+the old container's activity on later turns or destroy a live holder.
+Only a deterministic base ID or a container tagged with that base ID enters the
+image rotation path; unrelated cached IDs keep normal ownership checks.
+Image configuration errors do not block generic sandbox tools.
+For managed image profiles, cache only confirmed positive per-command
+environment support for the current local backend/image. Legacy negatives and
+remote backends still probe before deciding whether startup credentials are needed.
+Probe errors mean unknown support: clear inherited image keys so generic tools
+remain available; only a confirmed legacy result permits managed startup keys.
+Before legacy image generation, check startup key presence without sending its
+value. An uncredentialed fallback is fenced and recycled at release under the
+normal holder/ownership rules; a new turn reprobes and provisions it. A failed
+key-presence check remains unknown and must not run the image command.
+
 ## Stdin contracts per transport
 
 AIO has two distinct stdin contracts: the persistent `/v1/shell` transport is a

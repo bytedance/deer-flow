@@ -6,6 +6,7 @@ rs.mock("@/core/config", () => ({ getBackendBaseURL: () => "" }));
 import { fetch } from "@/core/api/fetcher";
 import {
   fetchConversationReferencesCapability,
+  fetchImageGenerationManagementEnabled,
   fetchScheduledTasksFeature,
   fetchSubagentBatchesCapability,
 } from "@/core/features/api";
@@ -21,6 +22,29 @@ function jsonResponse(body: unknown): Response {
 
 beforeEach(() => {
   mockedFetch.mockReset();
+});
+
+describe("image management feature", () => {
+  it("hides management when the Gateway explicitly disables it", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse({ image_generation_management: { enabled: false } }),
+    );
+    await expect(fetchImageGenerationManagementEnabled()).resolves.toBe(false);
+  });
+
+  it("hides management when an older Gateway omits the feature", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse({ agents_api: { enabled: true } }),
+    );
+    await expect(fetchImageGenerationManagementEnabled()).resolves.toBe(false);
+  });
+
+  it("shows management when the Gateway enables it", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse({ image_generation_management: { enabled: true } }),
+    );
+    await expect(fetchImageGenerationManagementEnabled()).resolves.toBe(true);
+  });
 });
 
 describe("subagent batch feature capability", () => {

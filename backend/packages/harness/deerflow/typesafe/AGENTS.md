@@ -68,4 +68,3 @@ the endpoint and service label, so a
 rubric and no failure policy: the three adapters override their connection resolution, their
 client and the value the endpoint judges (``input`` text instead of a ``state`` object), and
 inherit the rest.
-

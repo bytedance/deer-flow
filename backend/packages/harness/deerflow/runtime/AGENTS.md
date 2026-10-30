@@ -1,3 +1,12 @@
+### Image Source Selection
+
+Before graph streaming, the worker binds unattended runs to the server source
+when both image sources are usable and no saved default is valid. Interactive
+runs use the chat choice card. For IM replies, accept `1`/`2` or an exact label
+only when the latest checkpoint message is that card and its channel/sender
+match trusted run context. Convert to `human_input_response`, recheck the
+managed revision and server identity, then bind. Checkpoints survive restarts.
+
 ### Checkpoint History Cache
 
 Lock registry/LRU/stats/lifecycle without awaits, saver I/O or copy callbacks.

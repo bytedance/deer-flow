@@ -34,24 +34,29 @@ Generate a structured JSON file in `/mnt/user-data/workspace/` with naming patte
 
 ### Step 3: Execute Generation
 
-Call the Python script:
-```bash
-python /mnt/skills/public/image-generation/scripts/generate.py \
-  --prompt-file /mnt/user-data/workspace/prompt-file.json \
-  --reference-images /path/to/ref1.jpg /path/to/ref2.png \
-  --output-file /mnt/user-data/outputs/generated-image.jpg
-  --aspect-ratio 16:9
+Call `check_image_generation` before preparing the prompt. If it reports missing
+or invalid configuration, stop and direct the user to Settings > Models > Image
+models. Then call the `generate_image` tool:
+
+```json
+{
+  "prompt_file": "/mnt/user-data/workspace/prompt-file.json",
+  "reference_images": ["/mnt/user-data/uploads/ref1.jpg", "/mnt/user-data/uploads/ref2.png"],
+  "output_file": "/mnt/user-data/outputs/generated-image.jpg",
+  "aspect_ratio": "16:9"
+}
 ```
 
 Parameters:
 
-- `--prompt-file`: Absolute path to JSON prompt file (required)
-- `--reference-images`: Absolute paths to reference images (optional, space-separated)
-- `--output-file`: Absolute path to output image file (required)
-- `--aspect-ratio`: Aspect ratio of the generated image (optional, default: 16:9)
+- `prompt_file`: Absolute path to JSON prompt file (required)
+- `reference_images`: Absolute paths to reference images (optional)
+- `output_file`: Absolute path to output image file (required)
+- `aspect_ratio`: Aspect ratio of the generated image (optional, default: 16:9)
 
 [!NOTE]
-Do NOT read the python file, just call it with the parameters.
+The tool passes configured credentials only to its controlled script execution.
+Do not run the image script through `bash` when using a web-managed image profile.
 
 ## Character Generation Example
 
@@ -79,11 +84,8 @@ Create prompt file: `/mnt/user-data/workspace/asian-woman.json`
 ```
 
 Execute generation:
-```bash
-python /mnt/skills/public/image-generation/scripts/generate.py \
-  --prompt-file /mnt/user-data/workspace/cyberpunk-hacker.json \
-  --output-file /mnt/user-data/outputs/cyberpunk-hacker-01.jpg \
-  --aspect-ratio 2:3
+```json
+{"prompt_file": "/mnt/user-data/workspace/cyberpunk-hacker.json", "output_file": "/mnt/user-data/outputs/cyberpunk-hacker-01.jpg", "aspect_ratio": "2:3"}
 ```
 
 With reference images:
@@ -112,12 +114,8 @@ With reference images:
   }
 }
 ```
-```bash
-python /mnt/skills/public/image-generation/scripts/generate.py \
-  --prompt-file /mnt/user-data/workspace/star-wars-scene.json \
-  --reference-images /mnt/user-data/uploads/character-ref.jpg /mnt/user-data/uploads/vehicle-ref.jpg \
-  --output-file /mnt/user-data/outputs/star-wars-scene-01.jpg \
-  --aspect-ratio 16:9
+```json
+{"prompt_file": "/mnt/user-data/workspace/star-wars-scene.json", "reference_images": ["/mnt/user-data/uploads/character-ref.jpg", "/mnt/user-data/uploads/vehicle-ref.jpg"], "output_file": "/mnt/user-data/outputs/star-wars-scene-01.jpg", "aspect_ratio": "16:9"}
 ```
 
 ## Common Scenarios
@@ -174,7 +172,7 @@ For scenarios where visual accuracy is critical, **use the `image_search` tool f
    image_search(query="Japanese woman street photography 1990s", size="Large")
    ```
 2. Download the returned image URLs to local files
-3. Use the downloaded images as `--reference-images` parameter in the generation script
+3. Pass the downloaded image paths as `reference_images` to `generate_image`.
 
 This approach significantly improves generation quality by providing the model with concrete visual guidance rather than relying solely on text descriptions.
 

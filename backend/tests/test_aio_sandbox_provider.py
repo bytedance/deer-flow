@@ -631,6 +631,34 @@ def test_cached_sandbox_is_replaced_when_expected_identity_changes(
         provider._ownership.close()
 
 
+def test_image_profile_rotation_waits_for_holder_then_parks_old_container(tmp_path, monkeypatch):
+    from deerflow.sandbox.lease import get_sandbox_lease_manager
+
+    provider, sandbox, aio_mod = _make_provider_with_active_sandbox(tmp_path, "old-image-id")
+    provider._thread_sandboxes = {("alice", "thread-image"): "old-image-id"}
+    sandbox._deerflow_base_identity = provider._base_sandbox_id_for_thread("thread-image", "alice")
+    monkeypatch.setattr(provider, "_thread_skill_projection_active", lambda *_args: False)
+    monkeypatch.setattr(provider, "_configured_skills_container_path", lambda: aio_mod.DEFAULT_SKILLS_CONTAINER_PATH)
+    monkeypatch.setattr(provider, "_sandbox_id_for_thread", lambda *_args: "new-image-id")
+    manager = get_sandbox_lease_manager(provider)
+    try:
+        manager.retain("live-run", "old-image-id", thread_id="thread-image", user_id="alice")
+        with pytest.raises(aio_mod.SandboxPolicyReplacementDeferredError, match="outdated image profile"):
+            provider._reuse_in_process_sandbox("thread-image", user_id="alice")
+        assert provider._thread_sandboxes[("alice", "thread-image")] == "old-image-id"
+        sandbox.close.assert_not_called()
+
+        manager.release("live-run")
+        assert provider._reuse_in_process_sandbox("thread-image", user_id="alice") is None
+        assert ("alice", "thread-image") not in provider._thread_sandboxes
+        assert "old-image-id" in provider._warm_pool
+        sandbox.close.assert_called_once_with()
+        provider._backend.destroy.assert_not_called()
+    finally:
+        provider.reset()
+        provider._ownership.close()
+
+
 def test_policy_scoped_create_excludes_local_config_mounts_below_skills_root(
     tmp_path,
     monkeypatch,
@@ -673,6 +701,7 @@ def test_policy_scoped_create_excludes_local_config_mounts_below_skills_root(
 
     backend.create = _create
     provider._backend = backend
+    monkeypatch.setattr(provider, "_managed_image_profile", lambda: None)
     monkeypatch.setattr(aio_mod, "wait_for_sandbox_ready", lambda *_a, **_k: True)
     monkeypatch.setattr(provider, "_get_extra_mounts", lambda *_a, **_k: [])
     monkeypatch.setattr(
@@ -938,6 +967,7 @@ async def test_discover_or_create_with_lock_async_offloads_lock_file_open_and_cl
     provider._last_activity = {}
     provider._lock = aio_mod.threading.Lock()
     provider._backend = SimpleNamespace(discover=MagicMock(return_value=None))
+    monkeypatch.setattr(provider, "_sandbox_id_for_thread", lambda *_args: "sandbox-async-lock")
 
     monkeypatch.setattr(aio_mod, "get_paths", lambda: Paths(base_dir=tmp_path))
 
@@ -1638,6 +1668,7 @@ async def test_acquire_internal_async_offloads_cached_reuse_health_check(tmp_pat
     provider, _sandbox, _ = _make_provider_with_active_sandbox(tmp_path, "sandbox-cached-async")
     provider._thread_sandboxes = {("default", "thread-cached-async"): "sandbox-cached-async"}
     provider._backend.is_alive = MagicMock(return_value=True)
+    monkeypatch.setattr(provider, "_sandbox_id_for_thread", lambda *_args: "sandbox-cached-async")
 
     to_thread_calls: list[tuple[object, tuple[object, ...]]] = []
 
@@ -3188,11 +3219,12 @@ def test_acquire_drops_dead_cached_sandbox(tmp_path, monkeypatch):
     assert provider._sandboxes["sandbox-dead"].base_url == "http://fresh-sandbox"
 
 
-def test_acquire_keeps_cached_sandbox_when_health_check_errors(tmp_path):
+def test_acquire_keeps_cached_sandbox_when_health_check_errors(tmp_path, monkeypatch):
     """Transient backend health-check errors must not destroy a tracked sandbox."""
     provider, sandbox, _ = _make_provider_with_active_sandbox(tmp_path, "sandbox-transient")
     provider._thread_sandboxes = {("default", "thread-transient"): "sandbox-transient"}
     provider._backend.is_alive = MagicMock(side_effect=OSError("docker daemon busy"))
+    monkeypatch.setattr(provider, "_sandbox_id_for_thread", lambda *_args: "sandbox-transient")
 
     sandbox_id = provider.acquire("thread-transient", user_id="default")
 

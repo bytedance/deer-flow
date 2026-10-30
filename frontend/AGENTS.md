@@ -47,17 +47,18 @@ E2E tests live under `tests/e2e/` and use Playwright with Chromium. They mock al
 
 CI runs four E2E shards; only shard 1 runs auth recovery. Suite reports stay separate.
 
-The dedicated `run-history.ts` hook replaces the unpaged runs hook. Show counts
-only after a successful history read, never during initial loading or errors.
-Scheduled run history uses task/page query keys and the existing live offset API.
-Fetch 51 rows to display 50 plus a next-page sentinel; never append pages. Only
-page zero polls or refreshes on focus/reconnect. Task switches reset to page zero,
-and consumed AbortSignals cancel obsolete reads. Live offsets are not snapshots;
-explicit mutations or navigation may observe newly inserted runs.
+Use `run-history.ts` for scheduled runs; show counts only after successful
+reads. Query by task/page with live offsets: fetch 51 rows for 50 shown plus a
+next-page sentinel, never append. Only page zero polls or refreshes on
+focus/reconnect. Task changes reset to zero; consumed AbortSignals cancel stale
+reads. Mutations and navigation can reveal newly inserted runs.
 Run status `unmet` identifies a finished occurrence whose scheduled goal was not satisfied; keep it distinct from execution failure.
 `core/scheduled-tasks/goal-outcome.ts` maps goal verdicts and host reason codes for run history; show known codes as localized labels; unknown codes, raw run errors and the evaluator's reason stay behind the run row's Details. Check-failure codes are "unchecked", not a miss. `contracts/scheduled_goal_notes_contract.json` pins the host strings it and `run-error.ts` match.
 Scheduled-task views read state through the pure `core/scheduled-tasks` helpers (`status.ts`, `actions.ts`, `format.ts`, `describeTaskSchedule`, `errors.ts`) so list, detail and chat card agree. "Is a run active?" is `status === "running"` or `active_run_status` (a recurring task stays `enabled` while it runs). Default views show no IDs, ISO times, cron strings or enum names; errors localize by `detail.code` (`contracts/scheduled_task_errors_contract.json`) with raw text only behind Details. `tests/e2e/utils/readable.ts` and `tests/unit/helpers/readable.ts` assert this.
-The tasks page (`app/workspace/scheduled-tasks/page.tsx`) only composes `components/workspace/scheduled-tasks/*`: list with status tabs, detail (Runs / Stops when / goal / Does / notes / History), outcome notice, create/edit/duplicate dialog (PATCH sends only changed fields, `null` clears) and the renew dialog that a `limits_exhausted` Resume opens. `?task_id=` selects a task; `?thread_id=` scopes the list to one chat.
+The tasks page composes `components/workspace/scheduled-tasks/*` for the tabbed
+list, detail, outcome, create/edit/duplicate, and renewal after a
+`limits_exhausted` Resume. PATCH sends changed fields only; `null` clears.
+`?task_id=` selects a task, while `?thread_id=` scopes the list to a chat.
 `notification_group_connection_id` adds one Feishu group without changing personal
 notifications. The selector requires `features.scheduled_tasks.group_notifications`
 (absent = false); otherwise a saved target is preserved but explicitly clearable.
@@ -77,6 +78,7 @@ Keep IM notification preferences viewer-fenced and separate from browser alerts;
 
 ## Architecture
 
+Image-model settings behavior is documented in the image-generation section of `../README.md`.
 Model controls: `core/models/use-model-control` + HumanInputCard.
 
 Knowledge evidence is parsed in `core/citations/sources.ts` from version-1
