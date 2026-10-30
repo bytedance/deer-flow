@@ -7,6 +7,7 @@ import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 from types import SimpleNamespace
+from typing import Any
 
 from langgraph.types import Overwrite
 
@@ -14,7 +15,10 @@ from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummari
 from deerflow.config.agents_config import validate_agent_name
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.runtime.checkpoint_state import CheckpointStateAccessor
-from deerflow.runtime.context_keys import CHECKPOINT_AGENT_NAME_METADATA_KEY, DEFAULT_AGENT_NAME_METADATA_VALUE
+from deerflow.runtime.context_keys import CHECKPOINT_AGENT_NAME_METADATA_KEY, DEFAULT_AGENT_NAME_METADATA_VALUE, checkpoint_agent_binding_metadata
+from deerflow.runtime.tracing_snapshot import restore_snapshot
+from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.tracing.scoped import async_tracing_scope
 
 logger = logging.getLogger(__name__)
 _AGENT_CONFIG_NOT_LOADED = object()
@@ -86,6 +90,7 @@ def _create_compaction_middleware(
         keep=keep,
         run_model_name=run_model_name,
         skip_memory_flush=skip_memory_flush,
+        attach_tracing=True,
     )
     if middleware is None:
         raise ContextCompactionDisabled("Context compaction is disabled.")
@@ -156,8 +161,26 @@ async def compact_thread_context(
 ) -> ThreadCompactionResult:
     """Summarize old messages in a thread and write a compacted checkpoint."""
     resolved_app_config = app_config or get_app_config()
+    snapshot = await accessor.aget({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}})
+    tracing_snapshot = await asyncio.to_thread(restore_snapshot, getattr(snapshot, "metadata", None) or {}, user_id=user_id or get_effective_user_id(), app_config=resolved_app_config)
+    async with async_tracing_scope(tracing_snapshot):
+        return await _compact_thread_context(accessor, thread_id, keep=keep, force=force, user_id=user_id, agent_name=agent_name, model_name=model_name, app_config=resolved_app_config, snapshot=snapshot)
+
+
+async def _compact_thread_context(
+    accessor: CheckpointStateAccessor,
+    thread_id: str,
+    *,
+    keep: tuple[str, int | float] | None,
+    force: bool,
+    user_id: str | None,
+    agent_name: str | None,
+    model_name: str | None,
+    app_config: AppConfig,
+    snapshot: Any,
+) -> ThreadCompactionResult:
+    resolved_app_config = app_config or get_app_config()
     read_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
-    snapshot = await accessor.aget(read_config)
     snapshot_config = snapshot.config or {}
     checkpoint_id = snapshot_config.get("configurable", {}).get("checkpoint_id")
     if not checkpoint_id:
@@ -220,8 +243,9 @@ async def compact_thread_context(
         return ThreadCompactionResult(thread_id=thread_id, compacted=False, reason="not_enough_messages")
 
     update_config = dict(snapshot.config)
-    if binding_known:
-        update_config["metadata"] = {CHECKPOINT_AGENT_NAME_METADATA_KEY: (DEFAULT_AGENT_NAME_METADATA_VALUE if checkpoint_agent_name is None else checkpoint_agent_name)}
+    checkpoint_bindings = checkpoint_agent_binding_metadata(getattr(snapshot, "metadata", None))
+    if checkpoint_bindings:
+        update_config["metadata"] = checkpoint_bindings
     updated_config = await accessor.aupdate(
         update_config,
         {

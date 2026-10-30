@@ -31,6 +31,10 @@ def setup_monocle_tracing_if_enabled() -> bool:
     if not is_monocle_tracing_enabled():
         return False
 
+    from deerflow.tracing.scoped import install_global_tracing_guard
+
+    install_global_tracing_guard()
+
     monocle = get_tracing_config().monocle
     # Fail fast on an unknown MONOCLE_EXPORTERS value or a missing OKAHU_API_KEY,
     # with a clear message, before instrumenting. Validated here (not in the

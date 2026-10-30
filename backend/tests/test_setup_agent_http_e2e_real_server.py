@@ -305,6 +305,11 @@ def test_real_http_create_agent_lands_in_authenticated_user_dir(
         # Sanity: the stream should have produced at least one event
         assert "event:" in transcript, f"no SSE events in response: {transcript[:500]!r}"
 
+        runs = client.get(f"/api/threads/{thread_id}/runs")
+        assert runs.status_code == 200, runs.text
+        assert len(runs.json()) == 1
+        assert runs.json()[0]["metadata"]["deerflow_tracing_agent_name"] == "lead_agent"
+
         # --- 4. Verify filesystem outcome ---
         expected_dir = isolated_deer_flow_home / "users" / auth_uid / "agents" / agent_name
         default_dir = isolated_deer_flow_home / "users" / "default" / "agents" / agent_name

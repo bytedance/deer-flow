@@ -47,6 +47,39 @@ async def _seed_reuse_task(task_repo: ScheduledTaskRepository, *, task_id: str, 
     return task
 
 
+async def test_queued_tracing_snapshot_references_survive_repository_reopen(tmp_path):
+    from cryptography.fernet import Fernet
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from deerflow.config.credentials_key import CredentialsCipher
+    from deerflow.persistence.tracing_profiles.sql import SqlTracingProfileRepository
+    from deerflow.runtime.tracing_snapshot import snapshot_references
+    from deerflow.tracing.profiles import TracingProfileService
+
+    config = DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path))
+    await init_engine_from_config(config)
+    engine = create_engine(f"sqlite:///{tmp_path / 'deerflow.db'}", connect_args={"check_same_thread": False})
+    try:
+        sf = get_session_factory()
+        now = datetime.now(UTC)
+        await _seed_reuse_task(ScheduledTaskRepository(sf), task_id="task-tracing", now=now)
+        service = TracingProfileService(SqlTracingProfileRepository(sessionmaker(engine, expire_on_commit=False)), CredentialsCipher.from_keys([Fernet.generate_key()]))
+        await asyncio.to_thread(service.set_binding, "lead_agent", "user-1", mode="disabled", profile_id=None, expected_revision=0)
+        snapshot = await asyncio.to_thread(service.resolve_snapshot, "lead_agent", "user-1")
+        refs = snapshot_references(snapshot)
+        await ScheduledTaskRunRepository(sf).create(
+            run_record_id="occurrence-tracing", task_id="task-tracing", thread_id="thread-1", scheduled_for=now, trigger="manual", status="queued", expected_task_user_id="user-1", tracing_snapshot_refs=refs
+        )
+        await close_engine()
+        await init_engine_from_config(config)
+        rows = await ScheduledTaskRunRepository(get_session_factory()).list_queued_runs(limit=10)
+        assert rows[0]["tracing_snapshot_refs"] == refs
+    finally:
+        engine.dispose()
+        await close_engine()
+
+
 def _make_service(task_repo, run_repo, launch_run, *, queue_timeout_seconds: int = 3600):
     return ScheduledTaskService(
         task_repo=task_repo,

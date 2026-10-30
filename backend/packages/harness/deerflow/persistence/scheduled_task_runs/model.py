@@ -25,6 +25,7 @@ class ScheduledTaskRunRow(Base):
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     goal_objective: Mapped[str | None] = mapped_column(Text, nullable=True)
     goal_verdict: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    tracing_snapshot_refs: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     stop_requested_run_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     lease_owner: Mapped[str | None] = mapped_column(String(128), nullable=True)
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

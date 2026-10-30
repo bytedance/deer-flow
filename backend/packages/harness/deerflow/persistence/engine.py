@@ -100,6 +100,21 @@ def _is_duplicate_database_error(exc: BaseException) -> bool:
     return _has_sqlstate(exc, _DUPLICATE_DATABASE_SQLSTATE)
 
 
+def _configure_sqlite_engine(engine: AsyncEngine) -> None:
+    from sqlalchemy import event
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def _enable_sqlite_wal(dbapi_conn, _record):
+        cursor = dbapi_conn.cursor()
+        try:
+            cursor.execute("PRAGMA journal_mode=WAL;")
+            cursor.execute("PRAGMA synchronous=NORMAL;")
+            cursor.execute("PRAGMA foreign_keys=ON;")
+            cursor.execute("PRAGMA busy_timeout=30000;")
+        finally:
+            cursor.close()
+
+
 async def _auto_create_postgres_db(url: str) -> None:
     """Connect to the ``postgres`` maintenance DB and CREATE DATABASE.
 
@@ -192,8 +207,6 @@ async def init_engine(
     if backend == "sqlite":
         import os
 
-        from sqlalchemy import event
-
         # Offload the directory creation: ``init_engine`` runs on the FastAPI
         # lifespan event loop, and a sync ``os.makedirs`` (a stat + mkdir
         # syscall) blocks it during startup. Mirrors the #1912 fix for the
@@ -216,16 +229,7 @@ async def init_engine(
         # mirrored on the alembic-spawned engine in
         # ``migrations/env.py::run_migrations_online`` so its connections
         # behave identically.
-        @event.listens_for(_engine.sync_engine, "connect")
-        def _enable_sqlite_wal(dbapi_conn, _record):  # noqa: ARG001 — SQLAlchemy contract
-            cursor = dbapi_conn.cursor()
-            try:
-                cursor.execute("PRAGMA journal_mode=WAL;")
-                cursor.execute("PRAGMA synchronous=NORMAL;")
-                cursor.execute("PRAGMA foreign_keys=ON;")
-                cursor.execute("PRAGMA busy_timeout=30000;")
-            finally:
-                cursor.close()
+        _configure_sqlite_engine(_engine)
     elif backend == "postgres":
         from deerflow.persistence.postgres_schema import build_asyncpg_connect_args
 
@@ -316,6 +320,59 @@ async def init_engine_from_config(config) -> None:
         sqlite_dir=config.sqlite_dir if config.backend == "sqlite" else "",
         postgres_schema=config.postgres_schema if config.backend == "postgres" else "",
     )
+
+
+async def bootstrap_schema_from_config(config) -> None:
+    """Prepare embedded persistence with a temporary, independently owned engine.
+
+    Does not initialize or close the Gateway's process-global engine. Callers
+    may use the synchronous client bridge; all engine work and disposal finish
+    on the same event loop before that bridge returns.
+    """
+    if config.backend == "memory":
+        return
+
+    from deerflow.persistence.bootstrap import bootstrap_schema
+
+    schema = config.postgres_schema if config.backend == "postgres" else ""
+    if config.backend == "sqlite":
+        import os
+
+        await asyncio.to_thread(os.makedirs, config.sqlite_dir or ".", exist_ok=True)
+
+    def create_engine() -> AsyncEngine:
+        if config.backend == "postgres":
+            from deerflow.persistence.postgres_schema import build_asyncpg_connect_args
+
+            return create_async_engine(
+                config.app_sqlalchemy_url,
+                **_postgres_engine_kwargs(echo=config.echo_sql, pool_size=config.pool_size, pool_recycle=config.pool_recycle, command_timeout=config.command_timeout, connect_args=build_asyncpg_connect_args(schema)),
+            )
+        engine = create_async_engine(config.app_sqlalchemy_url, echo=config.echo_sql, json_serializer=_json_serializer)
+        _configure_sqlite_engine(engine)
+        return engine
+
+    async def prepare(engine: AsyncEngine) -> None:
+        if schema:
+            from sqlalchemy.schema import CreateSchema
+
+            async with engine.begin() as connection:
+                await connection.execute(CreateSchema(schema, if_not_exists=True))
+        await bootstrap_schema(engine, backend=config.backend, postgres_schema=schema)
+
+    engine = create_engine()
+    try:
+        try:
+            await prepare(engine)
+        except Exception as exc:
+            if config.backend != "postgres" or "does not exist" not in str(exc):
+                raise
+            await await_drained(engine.dispose())
+            await _auto_create_postgres_db(config.app_sqlalchemy_url)
+            engine = create_engine()
+            await prepare(engine)
+    finally:
+        await await_drained(engine.dispose())
 
 
 def get_session_factory() -> async_sessionmaker[AsyncSession] | None:

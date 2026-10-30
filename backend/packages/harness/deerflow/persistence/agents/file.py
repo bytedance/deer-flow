@@ -170,19 +170,19 @@ class FileAgentStore(AgentStore):
         paths = _ac.get_paths()
         effective_user = user_id or _ac.get_effective_user_id()
         agent_dir = paths.user_agent_dir(effective_user, name)
-        if not agent_dir.exists():
-            # A legacy shared-layout agent is intentionally left in place (the
-            # write path never targets it); report it distinctly.
-            return "legacy" if paths.agent_dir(name).exists() else "missing"
-        if not (agent_dir / "config.yaml").is_file():
-            # The directory holds memory/facts data but is not a custom agent
-            # (no config.yaml) — preserve it rather than deleting a user's memory
-            # (#4279). rmtree below would otherwise take the whole tree.
-            return "not-custom-agent"
-        # rmtree removes config.yaml, SOUL.md and the co-located memory.json in
-        # one shot — the historical behaviour.
-        shutil.rmtree(agent_dir)
-        return "deleted"
+        from deerflow.persistence.tracing_profiles.identity import file_agent_deletion_transaction, file_agent_identity_lock
+        from deerflow.persistence.tracing_profiles.sql import reset_deleted_agent_binding
+
+        with file_agent_deletion_transaction() as session, file_agent_identity_lock(agent_dir):
+            if not agent_dir.exists():
+                return "legacy" if paths.agent_dir(name).exists() else "missing"
+            if not (agent_dir / "config.yaml").is_file():
+                # A memory-only directory belongs to the user, not this Agent.
+                return "not-custom-agent"
+            shutil.rmtree(agent_dir)
+            if session is not None:
+                reset_deleted_agent_binding(session, effective_user, name.lower())
+            return "deleted"
 
     def signature(self) -> Hashable:
         sig: list[tuple[str, str, float]] = []

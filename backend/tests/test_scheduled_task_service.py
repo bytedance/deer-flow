@@ -1,5 +1,6 @@
 import asyncio
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
@@ -139,6 +140,48 @@ class DummyRunRepo:
         self.reconcile_count += 1
         self.reconciled = kwargs
         return 0
+
+
+@pytest.mark.asyncio
+async def test_queued_occurrence_freezes_tracing_before_profile_changes():
+    task = {
+        "id": "task-tracing",
+        "user_id": "alice",
+        "thread_id": "thread-tracing",
+        "context_mode": "reuse_thread",
+        "assistant_id": "researcher",
+        "prompt": "Research",
+        "schedule_type": "interval",
+        "schedule_spec": {"every_seconds": 600},
+        "timezone": "UTC",
+        "status": "enabled",
+    }
+    task_repo = DummyTaskRepo([task])
+    run_repo = DummyRunRepo(active_count=3)
+    frozen = SimpleNamespace(snapshot_id="queued-frozen", agent_name="researcher")
+    resolutions = []
+    launches = []
+
+    def resolve(agent_name, user_id):
+        resolutions.append((agent_name, user_id))
+        return frozen
+
+    async def launch(**kwargs):
+        launches.append(kwargs)
+        return {"run_id": "run-tracing", "thread_id": kwargs["thread_id"]}
+
+    service = ScheduledTaskService(task_repo=task_repo, task_run_repo=run_repo, launch_run=launch, poll_interval_seconds=5, lease_seconds=120, max_concurrent_runs=3, resolve_tracing_snapshot=resolve)
+    result = await service.dispatch_task(task, now=datetime.now(UTC), trigger="manual")
+    refs = {"deerflow_tracing_snapshot_id": "queued-frozen", "deerflow_tracing_agent_name": "researcher"}
+    assert result["outcome"] == "queued"
+    assert run_repo.created["tracing_snapshot_refs"] == refs
+
+    frozen = SimpleNamespace(snapshot_id="profile-replaced", agent_name="researcher")
+    run_repo.active_count = 0
+    await service._attempt_queued_run(task, {"id": run_repo.created["run_record_id"], "thread_id": "thread-tracing", "trigger": "manual", "tracing_snapshot_refs": refs}, now=datetime.now(UTC))
+
+    assert resolutions == [("researcher", "alice")]
+    assert launches[0]["metadata"]["tracing_snapshot_refs"] == refs
 
 
 @pytest.mark.asyncio

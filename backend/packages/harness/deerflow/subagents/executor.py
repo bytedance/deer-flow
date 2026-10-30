@@ -39,6 +39,7 @@ from deerflow.knowledge_scope import KNOWLEDGE_SCOPE_RUNTIME_KEY, execution_scop
 from deerflow.mcp_scope import THREAD_INCARNATION_CONTEXT_KEY
 from deerflow.models import create_chat_model
 from deerflow.runtime.runs.stream_cleanup import close_agent_stream
+from deerflow.runtime.tracing_snapshot import snapshot_references, stamp_snapshot_references
 from deerflow.runtime.user_context import DEFAULT_USER_ID
 from deerflow.skills.types import Skill
 from deerflow.subagents.capacity import (
@@ -61,6 +62,7 @@ from deerflow.tracing import (
     build_tracing_callbacks,
     inject_langfuse_metadata,
 )
+from deerflow.tracing.scoped import async_tracing_scope, capture_tracing_parent_context, get_current_snapshot
 from deerflow.utils.bash_exit import BASH_TOOL_NAMES, bash_exit_status
 from deerflow.utils.file_io import await_drained
 from deerflow.utils.messages import message_content_to_text
@@ -73,6 +75,7 @@ if TYPE_CHECKING:
     # `from deerflow.subagents import SubagentExecutor`, which re-enters this
     # still-initializing package. Type-only here keeps the annotation precise.
     from deerflow.tools.builtins.tool_search import DeferredToolSetup
+    from deerflow.tracing.profiles import RunTracingSnapshot
 
 logger = logging.getLogger(__name__)
 
@@ -838,11 +841,11 @@ def _copy_isolated_subagent_context() -> Context:
     callbacks = inherited_config.get("callbacks")
     if isinstance(callbacks, BaseCallbackManager):
         isolated_callbacks = callbacks.copy()
-        isolated_callbacks.handlers = [handler for handler in callbacks.handlers if not getattr(handler, "deerflow_loop_bound", False)]
-        isolated_callbacks.inheritable_handlers = [handler for handler in callbacks.inheritable_handlers if not getattr(handler, "deerflow_loop_bound", False)]
+        isolated_callbacks.handlers = [handler for handler in callbacks.handlers if not getattr(handler, "deerflow_loop_bound", False) and not getattr(handler, "deerflow_scoped_tracing", False)]
+        isolated_callbacks.inheritable_handlers = [handler for handler in callbacks.inheritable_handlers if not getattr(handler, "deerflow_loop_bound", False) and not getattr(handler, "deerflow_scoped_tracing", False)]
     elif isinstance(callbacks, (list, tuple)):
-        isolated_callbacks = [handler for handler in callbacks if not getattr(handler, "deerflow_loop_bound", False)]
-    elif getattr(callbacks, "deerflow_loop_bound", False):
+        isolated_callbacks = [handler for handler in callbacks if not getattr(handler, "deerflow_loop_bound", False) and not getattr(handler, "deerflow_scoped_tracing", False)]
+    elif getattr(callbacks, "deerflow_loop_bound", False) or getattr(callbacks, "deerflow_scoped_tracing", False):
         isolated_callbacks = None
     else:
         isolated_callbacks = callbacks
@@ -921,6 +924,8 @@ class SubagentExecutor:
         tool_progress_recorder: Any | None = None,
         context_snapshot: ParentContextSnapshot | None = None,
         thread_incarnation: str | None | object = _THREAD_INCARNATION_UNSET,
+        tracing_snapshot: "RunTracingSnapshot | None" = None,
+        tracing_parent_contexts: Mapping[str, Any] | None = None,
     ):
         """Initialize the executor.
 
@@ -1023,6 +1028,8 @@ class SubagentExecutor:
         # trace contract, and ``_aexecute`` rebinds it because a subagent runs
         # on the isolated loop thread where the parent ContextVar may be gone.
         self.deerflow_trace_id = resolve_trace_id(deerflow_trace_id)
+        self.tracing_snapshot = tracing_snapshot if tracing_snapshot is not None else get_current_snapshot()
+        self.tracing_parent_contexts = deepcopy(dict(tracing_parent_contexts)) if tracing_parent_contexts is not None else capture_tracing_parent_context()
         self.knowledge_scope = execution_scope(knowledge_scope) if knowledge_scope is not None else None
         # Parent run's extension snapshot. Binding it here (rather than reading
         # the singleton at execution time) is what keeps one run on a single
@@ -1658,21 +1665,23 @@ class SubagentExecutor:
             )
         with ensure_trace_context(self.deerflow_trace_id):
             try:
-                capacity = self.execution_capacity or get_subagent_execution_capacity()
-                async with capacity.slot():
-                    with result._state_lock:
-                        if result.status.is_terminal:
-                            return result
-                        result.status = SubagentStatus.RUNNING
-                        result.started_at = _utcnow()
-                    return await self._aexecute_admitted(task, result)
-            except SubagentCapacityError as exc:
-                result.try_set_terminal(
-                    SubagentStatus.FAILED,
-                    error=str(exc),
-                    admission_failure=True,
-                )
-                return result
+                async with async_tracing_scope(self.tracing_snapshot, parent_contexts=self.tracing_parent_contexts):
+                    try:
+                        capacity = self.execution_capacity or get_subagent_execution_capacity()
+                        async with capacity.slot():
+                            with result._state_lock:
+                                if result.status.is_terminal:
+                                    return result
+                                result.status = SubagentStatus.RUNNING
+                                result.started_at = _utcnow()
+                            return await self._aexecute_admitted(task, result)
+                    except SubagentCapacityError as exc:
+                        result.try_set_terminal(
+                            SubagentStatus.FAILED,
+                            error=str(exc),
+                            admission_failure=True,
+                        )
+                        return result
             finally:
                 result.execution_done_event.set()
 
@@ -1805,6 +1814,8 @@ class SubagentExecutor:
                 "callbacks": [collector],
                 "tags": [collector_caller],
             }
+            stamp_snapshot_references(run_config.setdefault("metadata", {}), self.tracing_snapshot)
+            run_config["metadata"].update({"thread_id": self.thread_id, "deerflow_run_id": self.run_id, "model_name": self.model_name})
 
             # Inject tracing callbacks at the graph level so a single subagent run
             # produces one trace with all node / LLM / tool calls as child spans.
@@ -1823,6 +1834,7 @@ class SubagentExecutor:
                 assistant_id = f"subagent:{normalized_name}"
             else:
                 assistant_id = "subagent"
+            run_config["run_name"] = assistant_id
 
             # Inject Langfuse trace-attribute metadata so the subagent trace
             # links to the parent thread and carries the correct session/user IDs.
@@ -1863,6 +1875,7 @@ class SubagentExecutor:
             context["is_internal"] = self.is_internal
             context["authz_attributes"] = dict(self.authz_attributes)
             context[DEERFLOW_TRACE_METADATA_KEY] = self.deerflow_trace_id
+            context.update(snapshot_references(self.tracing_snapshot))
             if self.knowledge_scope is not None:
                 context[KNOWLEDGE_SCOPE_RUNTIME_KEY] = dict(self.knowledge_scope)
             context["is_subagent"] = True

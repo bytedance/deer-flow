@@ -1515,6 +1515,19 @@ schemas, arguments, results, or catalog hash into the promotion event itself.
 
 #### LangSmith Tracing
 
+Agent settings also supports authorized tracing profiles, explicit per-Agent
+disable, shared revision activation, and Arize AX. See the
+[Agent tracing guide](backend/docs/AGENT_TRACING.md) for storage prerequisites,
+credential rotation, secure collector endpoints, the optional gRPC transport,
+and run snapshot behavior. Monocle remains opt-in and leaves the global OTel
+provider untouched when disabled.
+Embedded Python clients initialize their durable database before the first
+conversation; a separate Gateway startup is not required.
+Fully disabled tracing keeps a non-secret frozen decision without loading an
+encryption key. Credential-backed profiles load their key on first use. Preview
+unused tracing history with `deerflow tracing cleanup`; see the guide before
+applying cleanup in an idle maintenance window.
+
 DeerFlow has built-in [LangSmith](https://smith.langchain.com) integration for observability. When enabled, all LLM calls, agent runs, and tool executions are traced and visible in the LangSmith dashboard.
 
 Add the following to your `.env` file:

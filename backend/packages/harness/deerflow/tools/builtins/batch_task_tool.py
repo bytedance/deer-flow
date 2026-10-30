@@ -24,6 +24,7 @@ from deerflow.mcp_scope import (
     THREAD_INCARNATION_METADATA_GUARD_KEY,
     runtime_thread_incarnation,
 )
+from deerflow.runtime.tracing_snapshot import TRACING_PARENT_CONTEXT_KEY, TRACING_REFERENCE_KEYS
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.subagents.batch_runtime import (
     BatchItemInput,
@@ -34,6 +35,7 @@ from deerflow.subagents.batch_runtime import (
 from deerflow.subagents.registry import get_available_subagent_names, get_subagent_config
 from deerflow.tools.sync import make_sync_tool_wrapper
 from deerflow.tools.types import Runtime
+from deerflow.tracing.scoped import capture_tracing_parent_context
 
 
 class BatchTaskItem(BaseModel):
@@ -237,6 +239,8 @@ async def batch_task(
         "is_internal": context.get("is_internal") is True,
         "authz_attributes": normalize_authz_attributes(context.get("authz_attributes")),
     }
+    execution_spec.update({key: context[key] for key in TRACING_REFERENCE_KEYS if key in context})
+    execution_spec[TRACING_PARENT_CONTEXT_KEY] = capture_tracing_parent_context()
     if THREAD_INCARNATION_CONTEXT_KEY in context:
         execution_spec[THREAD_INCARNATION_CONTEXT_KEY] = context[THREAD_INCARNATION_CONTEXT_KEY]
     if KNOWLEDGE_SCOPE_RUNTIME_KEY in context:

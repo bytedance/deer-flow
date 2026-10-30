@@ -261,7 +261,12 @@ class ScheduledTaskRunRepository:
         expected_task_updated_at: datetime | str | None = None,
         expected_task_lease_owner: str | None = None,
         release_task_lease_status: str | None = None,
+        tracing_snapshot_refs: dict[str, str] | None = None,
     ) -> dict[str, Any]:
+        from deerflow.persistence.tracing_profiles.sql import validate_tracing_admission
+        from deerflow.runtime.tracing_snapshot import TRACING_CHECKPOINT_KEYS
+
+        tracing_snapshot_refs = {key: value for key, value in (tracing_snapshot_refs or {}).items() if key in TRACING_CHECKPOINT_KEYS}
         row = ScheduledTaskRunRow(
             id=run_record_id,
             task_id=task_id,
@@ -271,8 +276,10 @@ class ScheduledTaskRunRepository:
             status=status,
             launch_accounted=False,
             created_at=datetime.now(UTC),
+            tracing_snapshot_refs=dict(tracing_snapshot_refs) if tracing_snapshot_refs is not None else None,
         )
         async with self._sf() as session:
+            await validate_tracing_admission(session, tracing_snapshot_refs, owner_user_id=expected_task_user_id)
             # Every occurrence with a parent participates in the same DB
             # ordering, including terminal records and uncoordinated callers.
             task = await self._lock_task(session, task_id)

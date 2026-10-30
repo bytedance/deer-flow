@@ -20,6 +20,7 @@ from typing import Any
 
 from deerflow.config import get_enabled_tracing_providers
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, resolve_trace_id
+from deerflow.tracing.scoped import get_current_snapshot
 
 # Lazy-imported below to avoid a circular import: ``deerflow.runtime`` eagerly
 # imports the run worker, which in turn needs ``deerflow.tracing``.
@@ -54,7 +55,9 @@ def build_langfuse_trace_metadata(
             it is what ties a Langfuse trace back to the log lines and the
             ``X-Trace-Id`` the same request returned.
     """
-    if "langfuse" not in get_enabled_tracing_providers():
+    snapshot = get_current_snapshot()
+    providers = [provider.provider for provider in snapshot.providers] if snapshot is not None else get_enabled_tracing_providers()
+    if "langfuse" not in providers:
         return {}
 
     from deerflow.runtime.user_context import DEFAULT_USER_ID

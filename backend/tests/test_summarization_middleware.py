@@ -1207,6 +1207,21 @@ def _factory_app_config(model_names, *, summary_model_name=None, summarization_k
     )
 
 
+def test_standalone_summary_models_attach_scoped_tracing_for_anchor_and_fallback(monkeypatch):
+    observed = []
+    builder = _tracking_create_chat_model([])
+
+    def create(**kwargs):
+        observed.append(kwargs["attach_tracing"])
+        return builder(**kwargs)
+
+    monkeypatch.setattr("deerflow.agents.middlewares.summarization_middleware.create_chat_model", create)
+    middleware = create_summarization_middleware(app_config=_factory_app_config(("run-model", "fallback")), run_model_name="run-model", attach_tracing=True)
+    assert middleware is not None
+    assert middleware._model_for("fallback") is not None
+    assert observed == [True, True]
+
+
 @pytest.mark.parametrize("trim_limit", [None, 80, 4000])
 def test_factory_preserves_explicit_summary_input_limit(monkeypatch, trim_limit):
     monkeypatch.setattr("deerflow.agents.middlewares.summarization_middleware.create_chat_model", _tracking_create_chat_model([]))

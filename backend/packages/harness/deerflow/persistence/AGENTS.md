@@ -1,5 +1,17 @@
 # Persistence lifecycle
 
+Tracing cleanup is an explicit maintenance operation. Its fence and run-clock
+locks exclude new admissions; active operations and live worker leases defer
+snapshot deletion. Preserve run, queue, batch and all-namespace checkpoint
+references through parsed JSON, never raw text matching. Only known unified-SQL
+captures published transactionally or explicitly released are eligible;
+unmanaged and pending captures remain protected. See
+[`AGENT_TRACING.md`](../../../../docs/AGENT_TRACING.md).
+
+Embedded clients bootstrap the application schema before their first durable
+conversation through a temporary engine. Reuse the shared migration state machine
+and connection settings; never replace or close the Gateway's global engine.
+
 Postgres bootstrap owns its session-scoped advisory lock until `pg_advisory_unlock` completes. Drain that unlock across host cancellation before leaving the SQLAlchemy connection context; repeated cancellation must not return a pooled session while it still holds the bootstrap mutex. Ordinary database errors remain best-effort and are logged.
 
 Acquire that lock by polling `pg_try_advisory_lock`, never with a blocking `pg_advisory_lock`: the app engine's asyncpg `command_timeout` bounds every statement, so a blocking acquire fails a second instance's startup whenever a peer's migration outlasts it.

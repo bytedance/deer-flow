@@ -52,7 +52,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="deerflow",
         description="DeerFlow terminal workbench — a TUI over the embedded DeerFlow harness.",
-        epilog="Extension management: deerflow extensions --help",
+        epilog="Extension management: deerflow extensions --help. Tracing retention: deerflow tracing cleanup --help",
         add_help=True,
     )
     parser.add_argument("message", nargs="*", help="initial prompt for the TUI, or the message for --print, --json or --cli")
@@ -245,6 +245,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         from deerflow.extensions.cli import main as extensions_main
 
         return extensions_main(argv[1:])
+    if argv and argv[0] == "tracing":
+        from deerflow.tracing.cli import main as tracing_main
+
+        return tracing_main(argv[1:])
     plan = plan_launch(
         argv,
         stdin_isatty=sys.stdin.isatty(),

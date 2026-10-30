@@ -67,6 +67,7 @@ def _make_client(_monkeypatch) -> DeerFlowClient:
     fake_app_config = SimpleNamespace(
         models=[SimpleNamespace(name="stub-model")],
         authorization=AuthorizationConfig(enabled=False),
+        database=SimpleNamespace(backend="memory"),
     )
     client = DeerFlowClient.__new__(DeerFlowClient)
     client._app_config = fake_app_config

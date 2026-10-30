@@ -29,6 +29,7 @@ import re
 import threading
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 from cryptography.fernet import Fernet, InvalidToken, MultiFernet
 
@@ -156,6 +157,25 @@ def get_credentials_cipher() -> CredentialsCipher:
         if _cipher is None:
             _cipher = load_credentials_cipher()
         return _cipher
+
+
+def get_tracing_credentials_cipher(config: Any) -> CredentialsCipher:
+    """Load tracing encryption authority only for an operation that needs secrets.
+
+    Check shared-key requirements before using the process cache: a local cipher
+    loaded by another feature cannot make a multi-instance tracing write safe.
+    """
+    from deerflow.config.deployment_config import multi_instance_declaration
+
+    declaration = multi_instance_declaration(config)
+    scheduler_multi_instance = bool(getattr(getattr(config, "scheduler", None), "multi_instance", False))
+    raw = os.environ.get(CREDENTIALS_KEY_ENV_VAR, "")
+    if not raw.strip() and (declaration is not None or scheduler_multi_instance):
+        knob = declaration.knob if declaration is not None else "scheduler.multi_instance=true"
+        raise CredentialsKeyError(f"{knob} requires an explicit shared {CREDENTIALS_KEY_ENV_VAR} for tracing credentials. Set the same key on every instance before configuring tracing.")
+    if raw.strip():
+        parse_credentials_keys(raw)
+    return get_credentials_cipher()
 
 
 def reset_credentials_cipher() -> None:

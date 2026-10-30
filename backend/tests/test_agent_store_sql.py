@@ -20,6 +20,7 @@ from deerflow.persistence.agents.base import AgentExistsError
 from deerflow.persistence.agents.model import AgentRow
 from deerflow.persistence.agents.sql import SqlAgentStore
 from deerflow.persistence.base import Base
+from deerflow.persistence.tracing_profiles.model import AgentTracingBindingRow, TracingAdmissionFenceRow
 
 
 @pytest.fixture()
@@ -28,7 +29,7 @@ def store(tmp_path):
     url = f"sqlite:///{tmp_path}/agents.db"
     create_engine(url)  # touch the file
     engine = create_engine(url)
-    Base.metadata.create_all(engine, tables=[AgentRow.__table__])
+    Base.metadata.create_all(engine, tables=[AgentRow.__table__, AgentTracingBindingRow.__table__, TracingAdmissionFenceRow.__table__])
     engine.dispose()
     return SqlAgentStore(url)
 

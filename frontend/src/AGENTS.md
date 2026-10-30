@@ -1,5 +1,7 @@
 ### Data Flow
 
+Tracing queries use dedicated APIs and viewer-scoped cache keys.
+
 Scope local-turn ordering to `displayThreadId ?? threadId`, the displayed
 conversation identity. Confirming a new chat changes the SDK `threadId` from
 undefined to its existing display ID; preserve the human anchor across that

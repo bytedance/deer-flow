@@ -34,6 +34,7 @@ from deerflow.persistence.agents.base import (
     parse_agent_config,
 )
 from deerflow.persistence.agents.model import AgentRow
+from deerflow.persistence.tracing_profiles.sql import _lock_admission_fence, reset_deleted_agent_binding
 from deerflow.runtime.user_context import get_effective_user_id
 
 logger = logging.getLogger(__name__)
@@ -202,7 +203,10 @@ class SqlAgentStore(AgentStore):
     def delete(self, name: str, *, user_id: str | None = None) -> AgentDeleteOutcome:
         effective_user = user_id or get_effective_user_id()
         with self._Session() as session:
+            _lock_admission_fence(session)
             result = session.execute(delete(AgentRow).where(AgentRow.user_id == effective_user, AgentRow.name == name.lower()))
+            if result.rowcount > 0:
+                reset_deleted_agent_binding(session, effective_user, name.lower())
             session.commit()
             row_deleted = result.rowcount > 0
         agent_dir = get_paths().user_agent_dir(effective_user, name)

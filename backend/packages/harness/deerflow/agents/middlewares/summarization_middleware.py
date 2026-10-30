@@ -132,6 +132,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         run_model_name: str | None = None,
         anchor_model_name: str | None = _UNSET,  # type: ignore[assignment]
         prebuilt_models: Mapping[str | None, Any | None] | None = None,
+        attach_tracing: bool = False,
         extensions=None,
         **kwargs,
     ) -> None:
@@ -151,6 +152,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         # broken (expired key, quota, outage) the run's own working model can still
         # compact.
         self._app_config = app_config
+        self._attach_tracing = attach_tracing
         self._configured_summary_model_name = configured_model_name
         self._run_model_name = run_model_name
         # The summary LLM call runs inside a LangGraph middleware hook, so its token
@@ -275,7 +277,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
                 name=name,
                 thinking_enabled=_summary_model_thinking_enabled(name, self._app_config),
                 app_config=self._app_config,
-                attach_tracing=False,
+                attach_tracing=self._attach_tracing,
             )
             built = self._tag_nostream(model.with_config(tags=["middleware:summarize"]))
         except Exception:
@@ -1081,7 +1083,7 @@ def _summary_model_thinking_enabled(name: str | None, app_config: Any) -> bool:
     return model_config is not None and resolve_reasoning_contract(model_config).thinking_required
 
 
-def _build_summary_model(candidate_names: list[str | None], app_config: Any) -> tuple[Any | None, str | None]:
+def _build_summary_model(candidate_names: list[str | None], app_config: Any, *, attach_tracing: bool = False) -> tuple[Any | None, str | None]:
     """Build the first constructible summarization model candidate (guarded).
 
     The returned model is tagged for RunJournal attribution but *not* TAG_NOSTREAM (the
@@ -1101,7 +1103,7 @@ def _build_summary_model(candidate_names: list[str | None], app_config: Any) -> 
                 name=name,
                 thinking_enabled=_summary_model_thinking_enabled(name, app_config),
                 app_config=app_config,
-                attach_tracing=False,
+                attach_tracing=attach_tracing,
             )
         except Exception:
             logger.exception("Failed to build summarization model %r; trying the next candidate", name)
@@ -1184,6 +1186,7 @@ def create_summarization_middleware(
     skip_memory_flush: bool = False,
     archive_task_history: bool = True,
     run_model_name: str | None = None,
+    attach_tracing: bool = False,
     extensions=None,
 ) -> DeerFlowSummarizationMiddleware | None:
     """Create the configured summarization middleware.
@@ -1201,6 +1204,9 @@ def create_summarization_middleware(
 
     ``archive_task_history=False`` keeps subagent-internal messages out of the
     parent thread archive, independently of the long-term memory opt-out.
+
+    ``attach_tracing=True`` instruments standalone manual compaction models.
+    Graph middleware inherits its invocation callbacks and keeps this disabled.
 
     ``skip_memory_flush`` omits the ``memory_flush_hook`` that otherwise
     flushes pre-compaction messages into the durable memory queue. The lead
@@ -1233,6 +1239,7 @@ def create_summarization_middleware(
     anchor_model, anchor_name = _build_summary_model(
         [profile_name, default_name, None],
         resolved_app_config,
+        attach_tracing=attach_tracing,
     )
     if anchor_model is None:
         logger.warning("Summarization is enabled but no run-profile model could be constructed; compaction is unavailable for this build")
@@ -1247,7 +1254,7 @@ def create_summarization_middleware(
     # not recover until a new middleware instance is built.
     prebuilt_models: dict[str | None, Any | None] = {}
     if config.model_name is not None and config.model_name != anchor_name:
-        summary_model, _ = _build_summary_model([config.model_name], resolved_app_config)
+        summary_model, _ = _build_summary_model([config.model_name], resolved_app_config, attach_tracing=attach_tracing)
         prebuilt_models[config.model_name] = summary_model
 
     # LangChain's SummarizationMiddleware raises ValueError at construction when a
@@ -1298,5 +1305,6 @@ def create_summarization_middleware(
         run_model_name=run_model_name,
         anchor_model_name=anchor_name,
         prebuilt_models=prebuilt_models,
+        attach_tracing=attach_tracing,
         extensions=extensions,
     )
