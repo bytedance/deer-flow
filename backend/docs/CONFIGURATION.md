@@ -813,7 +813,7 @@ Notes:
 scripts/dev_multi_instance.sh up             # containers, config, Gateway A, then B, then nginx
 scripts/dev_multi_instance.sh check          # automated cross-instance checks (below)
 scripts/dev_multi_instance.sh stop b --kill  # SIGKILL B to simulate a crash; `start b` brings it back
-scripts/dev_multi_instance.sh logs a -f
+scripts/dev_multi_instance.sh logs a -f      # follow Gateway A; also b, nginx, or all (both Gateways and nginx)
 scripts/dev_multi_instance.sh down
 ```
 
