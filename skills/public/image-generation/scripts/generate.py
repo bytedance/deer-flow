@@ -124,6 +124,36 @@ def _to_data_url(image_path: str) -> str:
     return f"data:{_guess_mime(image_path)};base64,{b64}"
 
 
+def _detect_reference_mime(image_path: str) -> str:
+    """Detect the MIME type from a reference image's actual contents.
+
+    The Gemini reference path submits the original file bytes unchanged, so the
+    declared mimeType must describe those bytes. Reads the format Pillow reports
+    for the validated image and falls back to the filename extension when Pillow
+    is unavailable or the format is unrecognized. Reference images reaching this
+    helper have already passed validate_image(), which itself requires Pillow.
+    """
+    try:
+        from PIL import Image  # lazy import: keeps module importable without Pillow
+
+        with Image.open(image_path) as image:
+            image_format = (image.format or "").upper()
+        content_mime = {
+            "PNG": "image/png",
+            "JPEG": "image/jpeg",
+            "GIF": "image/gif",
+            "WEBP": "image/webp",
+            "BMP": "image/bmp",
+            "TIFF": "image/tiff",
+            "MPO": "image/jpeg",
+        }.get(image_format)
+        if content_mime:
+            return content_mime
+    except Exception:
+        pass
+    return _guess_mime(image_path)
+
+
 def _ensure_output_dir(output_file: str) -> None:
     """Create the output file's parent directory so nested paths don't fail."""
     output_dir = os.path.dirname(output_file)
@@ -221,7 +251,9 @@ def _generate_image_gemini(
     for reference_image in valid_reference_images:
         with open(reference_image, "rb") as f:
             image_b64 = base64.b64encode(f.read()).decode("utf-8")
-        parts.append({"inlineData": {"mimeType": "image/jpeg", "data": image_b64}})
+        parts.append(
+            {"inlineData": {"mimeType": _detect_reference_mime(reference_image), "data": image_b64}}
+        )
 
     bearer_value = os.getenv("GEMINI_API_KEY")
     if not bearer_value:
