@@ -111,6 +111,13 @@ including values inside lists or structs, before opening the output file. Filter
 or replace them in SQL, for example `CASE WHEN isfinite(ratio) THEN ratio ELSE
 NULL END AS ratio`. Finite numbers, nulls, and text such as `'NaN'` remain valid.
 
+SQL execution errors, missing summary tables, and unsupported export formats also
+exit nonzero and report diagnostics on stderr without overwriting existing output
+files. Unsupported output extensions are rejected before creating parent
+directories. Correct the SQL, table name, or output extension before retrying.
+Successful operations, including valid queries returning zero rows, exit zero and
+keep their normal stdout output.
+
 ### Parameters
 
 | Parameter | Required | Description |

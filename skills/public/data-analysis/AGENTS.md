@@ -41,3 +41,13 @@ List each duplicate name once in result-column order, using `repr` so embedded
 line breaks remain escaped. At the CLI action-dispatch boundary, report
 `ValueError` as a short stderr error with a nonzero exit; close the connection
 in `finally` for both successful and failed actions. Other exceptions propagate.
+
+SQL execution failures, unresolved summary tables, and unsupported export formats
+raise `ValueError` through that same CLI boundary, rather than printing and
+returning successful error strings. Retain available-table diagnostics and chain
+the original query/lookup exception. Validate the output extension before creating
+parent directories; unsupported and missing extensions must have no export-path
+side effects. Offline regressions under the repository's root tests directory
+use actual CLI subprocesses over a matching cache, check exit
+status/stderr and output-file preservation, and verify that `main` closes its real
+DuckDB connection. Empty query results remain success.
