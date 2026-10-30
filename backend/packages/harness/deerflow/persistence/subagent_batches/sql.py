@@ -255,10 +255,13 @@ class SubagentBatchRepository:
             return []
         claimed: list[dict[str, Any]] = []
         async with self._sf() as session:
-            batches = list((await session.execute(select(SubagentBatchRow).where(SubagentBatchRow.status.in_(("queued", "running"))).order_by(SubagentBatchRow.created_at, SubagentBatchRow.id).with_for_update(skip_locked=True))).scalars())
+            batches = list(
+                (await session.execute(select(SubagentBatchRow).where(SubagentBatchRow.status.in_(("queued", "running", "paused"))).order_by(SubagentBatchRow.created_at, SubagentBatchRow.id).with_for_update(skip_locked=True))).scalars()
+            )
             for batch in batches:
                 if len(claimed) >= limit:
                     break
+                was_paused = batch.status == "paused"
                 runnable_batch = select(SubagentBatchRow.id).where(SubagentBatchRow.id == batch.id, SubagentBatchRow.status.in_(("queued", "running")))
 
                 expired = list(
@@ -304,6 +307,13 @@ class SubagentBatchRepository:
 
                 if terminalized_expired:
                     await self._refresh_batch_status(session, batch, now=now)
+
+                # Pause blocks promotion and claiming, but expired item leases
+                # still reconcile above: retryable items return to queued for
+                # an explicit resume, exhausted ones become failed, and a batch
+                # whose items are all terminal follows the normal completion rule.
+                if was_paused:
+                    continue
 
                 counts = await self._counts(session, batch.id)
                 live = counts["queued"] + counts["leased"] + counts["running"]

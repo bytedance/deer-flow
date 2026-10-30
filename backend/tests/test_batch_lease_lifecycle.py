@@ -420,3 +420,66 @@ async def test_heartbeat_exit_drains_an_in_flight_renewal_across_repeated_cancel
         if not task.done():
             task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_paused_batch_requeues_expired_retryable_item_without_claiming(repository):
+    await create_batch(repository, max_attempts=2)
+    now = datetime.now(UTC)
+    item = (await repository.claim_items(now=now, lease_owner="departed-worker", lease_seconds=10, limit=1))[0]
+    await repository.mark_item_running(item["id"], lease_owner="departed-worker", now=now)
+    await repository.pause_batch("batch-lease-test", user_id="user-1")
+
+    recovered_at = now + timedelta(seconds=11)
+    assert await repository.claim_items(now=recovered_at, lease_owner="recoverer", lease_seconds=10, limit=1) == []
+
+    row = await row_snapshot(repository, item["id"])
+    assert row["status"] == "queued"
+    assert row["lease_owner"] is None
+    batch = await repository.get_batch("batch-lease-test", user_id="user-1")
+    assert batch["status"] == "paused"
+    assert batch["completed_at"] is None
+
+    await repository.resume_batch("batch-lease-test", user_id="user-1")
+    resumed = await repository.claim_items(now=recovered_at + timedelta(seconds=1), lease_owner="next-worker", lease_seconds=10, limit=1)
+    assert [claimed["id"] for claimed in resumed] == [item["id"]]
+    assert resumed[0]["attempt"] == 2
+
+
+@pytest.mark.asyncio
+async def test_paused_batch_terminalizes_exhausted_expired_item(repository):
+    await create_batch(repository, max_attempts=1)
+    now = datetime.now(UTC)
+    item = (await repository.claim_items(now=now, lease_owner="departed-worker", lease_seconds=10, limit=1))[0]
+    await repository.mark_item_running(item["id"], lease_owner="departed-worker", now=now)
+    await repository.pause_batch("batch-lease-test", user_id="user-1")
+
+    recovered_at = now + timedelta(seconds=11)
+    assert await repository.claim_items(now=recovered_at, lease_owner="recoverer", lease_seconds=10, limit=1) == []
+
+    row = await row_snapshot(repository, item["id"])
+    assert row["status"] == "failed"
+    assert row["lease_owner"] is None
+    assert "maximum retry count" in row["error"]
+    batch = await repository.get_batch("batch-lease-test", user_id="user-1")
+    assert batch["status"] == "failed"
+    assert batch["completed_at"] is not None
+
+    retried = await repository.retry_item("batch-lease-test", item["id"], user_id="user-1")
+    assert retried is not None
+    assert retried["status"] == "pending"
+    assert (await repository.get_batch("batch-lease-test", user_id="user-1"))["status"] == "queued"
+
+
+@pytest.mark.asyncio
+async def test_paused_batch_without_expired_leases_stays_unclaimed(repository):
+    await create_batch(repository, max_attempts=2)
+    now = datetime.now(UTC)
+    item = (await repository.claim_items(now=now, lease_owner="worker", lease_seconds=10, limit=1))[0]
+    await repository.mark_item_running(item["id"], lease_owner="worker", now=now)
+    await repository.pause_batch("batch-lease-test", user_id="user-1")
+
+    assert await repository.claim_items(now=now + timedelta(seconds=5), lease_owner="recoverer", lease_seconds=10, limit=1) == []
+    row = await row_snapshot(repository, item["id"])
+    assert row["status"] == "running"
+    assert row["lease_owner"] == "worker"
