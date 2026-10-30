@@ -4,6 +4,11 @@ Reject external `sandbox`, `thread_data`, `viewed_images`, `goal_outcome`. Non-n
 
 Studio retains sanitized creation metadata.
 
+HTTP and run metadata creation share `goal_thread_lock`. Lock in detached
+`_ensure_thread_metadata`; preserve await-free attachment and cancel/drain
+ownership. Its 5s budget covers admission and I/O: timeout fails strict starts;
+others omit incarnation (MCP fails closed). Tests: `test_thread_create_run_metadata_race.py`.
+
 Capability Center's `business` adapter validates bundled credentials and creates
 an MCP connection. The MCP API permits only its isolated launcher and credential
 environment keys; reject arbitrary commands and manifest-policy bypasses. Keep
