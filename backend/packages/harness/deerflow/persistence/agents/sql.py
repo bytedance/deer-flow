@@ -34,6 +34,7 @@ from deerflow.persistence.agents.base import (
     parse_agent_config,
 )
 from deerflow.persistence.agents.model import AgentRow
+from deerflow.persistence.json_compat import dumps_json_safe
 from deerflow.runtime.user_context import get_effective_user_id
 
 logger = logging.getLogger(__name__)
@@ -49,7 +50,13 @@ _engines_lock = threading.Lock()
 
 def _build_engine(url: str) -> Engine:
     connect_args = {"check_same_thread": False} if url.startswith("sqlite") else {}
-    engine = create_engine(url, future=True, pool_pre_ping=True, connect_args=connect_args)
+    # Postgres jsonb rejects the bare NaN/Infinity token the lenient default
+    # dumps would emit for a non-finite float in agent state; SQLite accepts
+    # it and does not take a json_serializer dialect kwarg at all.
+    engine_kwargs: dict[str, object] = {}
+    if not url.startswith("sqlite"):
+        engine_kwargs["json_serializer"] = dumps_json_safe
+    engine = create_engine(url, future=True, pool_pre_ping=True, connect_args=connect_args, **engine_kwargs)
     if url.startswith("sqlite"):
         # Mirror the async engine's per-connection PRAGMAs (persistence/engine.py).
         # journal_mode=WAL is persistent on the DB file (the async bootstrap sets
