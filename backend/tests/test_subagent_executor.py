@@ -169,6 +169,8 @@ def _setup_executor_classes():
     sandbox_provider_module = importlib.import_module("deerflow.sandbox.sandbox_provider")
     sandbox_overwrite_module = importlib.import_module("deerflow.sandbox.overwrite")
     sandbox_prewarm_module = importlib.import_module("deerflow.sandbox.prewarm")
+    for module_name in ("deerflow.models.factory", "deerflow.models.openai_codex_provider", "deerflow.agents.assembly_descriptor"):
+        importlib.import_module(module_name)
 
     # Remove mocked executor if exists (from conftest.py)
     if "deerflow.subagents.executor" in sys.modules:
@@ -395,6 +397,105 @@ def msg(classes):
 class TestAgentConstruction:
     """Test _create_agent() wiring before execution starts."""
 
+    @pytest.mark.parametrize(
+        "thinking,effort,mode,expected_thinking,expected_effort,expected_adjustment",
+        [
+            (None, None, "optional", False, "lite", None),
+            (True, "high", "optional", True, "deep", "effort_aliased"),
+            (False, None, "required", True, "lite", "thinking_forced_on"),
+            (True, None, "unsupported", False, None, "thinking_unsupported"),
+            (True, "unknown", "optional", True, "lite", "effort_unsupported_value"),
+            (True, "high", "legacy", True, "high", None),
+            (True, None, "legacy-unsupported", False, None, None),
+        ],
+    )
+    def test_reasoning_factory_and_observer_agree(self, classes, base_config, monkeypatch, caplog, thinking, effort, mode, expected_thinking, expected_effort, expected_adjustment):
+        from deerflow.config.app_config import AppConfig
+        from deerflow.config.model_config import ModelConfig
+        from deerflow.config.sandbox_config import SandboxConfig
+        from deerflow.extensions.registry import ExtensionRegistry
+        from deerflow.subagents import executor as executor_module
+
+        factory = importlib.import_module("deerflow.models.factory")
+        profile_settings = {}
+        if mode in {"legacy", "legacy-unsupported"}:
+            profile_settings = {
+                "supports_thinking": mode == "legacy",
+                "supports_reasoning_effort": True,
+                "when_thinking_enabled": {"extra_body": {"thinking": {"type": "enabled"}}},
+            }
+        else:
+            reasoning = {"thinking": mode, "dialect": "openai_extra_body"}
+            if mode != "unsupported":
+                reasoning["effort"] = {"values": ["lite", "deep"], "default": "lite", "aliases": {"high": "deep"}}
+            profile_settings["reasoning"] = reasoning
+        profile = ModelConfig(name="child-model", use="langchain_openai:ChatOpenAI", model="child-model", **profile_settings)
+        app_config = AppConfig(models=[profile], sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"))
+        unchanged = app_config.model_dump()
+        captured = {}
+
+        class RecordingModel:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        class Observer:
+            def on_agent_assembled(self, app_store, descriptor):
+                captured["descriptor"] = descriptor
+
+        registry = ExtensionRegistry()
+        with registry.attributed_to("reasoning-test"):
+            registry.agent_assembly_observer(Observer())
+        monkeypatch.setattr(factory, "resolve_class", lambda *args: RecordingModel)
+        monkeypatch.setattr(executor_module, "create_chat_model", factory.create_chat_model)
+        monkeypatch.setattr(executor_module, "create_agent", lambda **kwargs: SimpleNamespace(get_graph=lambda: SimpleNamespace(nodes={})))
+        monkeypatch.setitem(
+            sys.modules,
+            "deerflow.agents.middlewares.tool_error_handling_middleware",
+            _module("deerflow.agents.middlewares.tool_error_handling_middleware", build_subagent_runtime_middlewares=lambda **kwargs: []),
+        )
+        base_config.thinking_enabled = thinking
+        base_config.reasoning_effort = effort
+        executor = classes["SubagentExecutor"](config=base_config, tools=[], app_config=app_config, parent_model="child-model", extensions=registry.build())
+        if mode == "legacy-unsupported":
+            with pytest.raises(ValueError, match="Model child-model does not support thinking.*supports_thinking"):
+                asyncio.run(executor._create_agent())
+            assert not captured
+            assert app_config.model_dump() == unchanged
+            return
+
+        with caplog.at_level(logging.INFO, logger=factory.__name__):
+            asyncio.run(executor._create_agent())
+        if expected_adjustment is not None:
+            assert any(record.name == factory.__name__ and expected_adjustment in record.getMessage() for record in caplog.records)
+        descriptor = captured["descriptor"]
+        assert descriptor.thinking_enabled is expected_thinking
+        assert descriptor.reasoning_effort == expected_effort
+        assert captured.get("reasoning_effort") == expected_effort
+        assert captured["extra_body"]["thinking"]["type"] == ("enabled" if expected_thinking else "disabled")
+        assert app_config.model_dump() == unchanged
+
+    def test_required_thinking_rejection_names_model_before_creation(self, classes, base_config, monkeypatch):
+        from deerflow.config.app_config import AppConfig
+        from deerflow.config.model_config import ModelConfig
+        from deerflow.config.sandbox_config import SandboxConfig
+        from deerflow.models.reasoning import ReasoningPolicyError
+        from deerflow.subagents import executor as executor_module
+
+        profile = ModelConfig(name="required-worker-model", use="langchain_openai:ChatOpenAI", model="test-model", reasoning={"thinking": "required", "on_disable_request": "reject"})
+        app_config = AppConfig(models=[profile], sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"))
+        model_factory = MagicMock(side_effect=AssertionError("model creation must not start"))
+        graph_factory = MagicMock(side_effect=AssertionError("graph creation must not start"))
+        monkeypatch.setattr(executor_module, "create_chat_model", model_factory)
+        monkeypatch.setattr(executor_module, "create_agent", graph_factory)
+        executor = classes["SubagentExecutor"](config=base_config, tools=[], app_config=app_config, parent_model=profile.name)
+
+        with pytest.raises(ValueError, match=f"Model {profile.name}: model requires thinking") as error:
+            asyncio.run(executor._create_agent())
+
+        assert isinstance(error.value.__cause__, ReasoningPolicyError)
+        model_factory.assert_not_called()
+        graph_factory.assert_not_called()
+
     def test_create_agent_threads_explicit_app_config_to_model_and_middlewares(
         self,
         classes,
@@ -460,6 +561,7 @@ class TestAgentConstruction:
         assert captured["model"] == {
             "name": "parent-model",
             "thinking_enabled": False,
+            "reasoning_effort": None,
             "app_config": app_config,
             # attach_tracing=False pairs with graph-root tracing callbacks
             # injected in _aexecute (see TestSubagentTracingWiring). Without

@@ -13,6 +13,13 @@ errors preserve cache fallbacks and valid neighbors, including Redis outages/pur
 Escape literal stems for SCAN; recheck byte/string keys before UNLINK. Preserve
 namespace/thread bounds, cursor iteration and outage/TTL fallback.
 
+### Run Admission
+
+Run admission and assembly publication serialize per thread across Store I/O.
+Keep registry locks short; heartbeat snapshots must not queue on an
+admission gate. Preserve same-thread publication visibility, including reads of
+preallocated run IDs. Details: [admission isolation](../../../../docs/runtime-guidance-details.md#deferred-terminal-commits-and-lease-ownership).
+
 ### Stream Bridge Heartbeats
 
 Observed Redis streams removed during replay yield `StreamGap` with empty bounds; initially empty streams still wait. After this gap, `/wait` refreshes store-only status and completes only for a terminal run with no retained stream.
@@ -210,6 +217,15 @@ owner, but `AUTO` resolves to the internal user's `make_safe_user_id` form, so
 Gateway thread/run reads (including run-row lookups) must pass
 `_run_scope_user_id()` explicitly.
 
+**In-memory RunEvent snapshot ownership** (`runtime/events/store/memory.py`):
+The thread- and run-keyed indexes deliberately share their internal event dicts,
+but caller-owned `content` and `metadata` must be copied at admission, and
+public put/read results must be detached snapshots. Otherwise mutating a write
+receipt or a paged read silently rewrites later RunEvent replay and every shared
+message projection. The cross-backend contract lives on `RunEventStore` in
+`runtime/events/store/base.py`; regression coverage is
+`tests/test_memory_run_event_snapshot_isolation.py`.
+
 **Event-store mutation fence** (`runtime/events/store/`): every thread mutation —
 `put`, `put_batch`, `put_if_absent`, `delete_by_thread`, `delete_by_run` — shares
 one serialization domain: the per-thread `asyncio` lock, plus (on PostgreSQL) the
@@ -235,6 +251,12 @@ Check all owners and categories; surviving rows retain the allocation floor.
 `tests/test_run_event_store.py` pins cleanup, recreation and cursor visibility.
 
 **Changed-run discovery:** Use the durable `(change_seq, run_id)` cursor and repeat history audits after admission. Details: `backend/docs/runtime-guidance-details.md`.
+
+**Memory run snapshots:** `MemoryRunStore.put` replaces existing rows like SQL.
+On a thread change, remove prior index membership only after snapshot construction
+succeeds; prune empty buckets and retain same-thread retry order. Indexed queries
+and thread cleanup follow the current row's thread. Coverage:
+`tests/test_memory_run_store_replacement_index.py` (native Manager + real SQLite).
 
 **Terminal run cleanup:** Close streams, journals, and graph references even on cancellation. Details: `backend/docs/runtime-guidance-details.md`.
 

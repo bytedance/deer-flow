@@ -965,11 +965,17 @@ async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadRe
     and an empty checkpoint (so state endpoints work immediately).
     Idempotent: returns the existing record when ``thread_id`` already exists.
     """
+    thread_id = resolve_thread_id(body.thread_id)
+    async with goal_thread_lock(thread_id):
+        return await _create_thread_locked(body, request, thread_id)
+
+
+async def _create_thread_locked(body: ThreadCreateRequest, request: Request, thread_id: str) -> ThreadResponse:
+    """Keep the idempotency read and initial writes in one lifecycle lock."""
     from app.gateway.deps import get_thread_store
 
     checkpointer = get_checkpointer(request)
     thread_store = get_thread_store(request)
-    thread_id = resolve_thread_id(body.thread_id)
     now = now_iso()
     thread_owner_user_id = get_trusted_internal_owner_user_id(request)
     thread_owner_kwargs = {"user_id": thread_owner_user_id} if thread_owner_user_id else {}
@@ -1006,13 +1012,13 @@ async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadRe
         raise HTTPException(status_code=404, detail="Thread not found") from None
     except IntegrityError:
         # The idempotency read above and this insert are not atomic: a
-        # concurrent request for the same thread_id can commit in between, so
+        # another worker's request for the same thread_id can commit in between, so
         # the SQL-backed store rejects ours on the duplicate primary key.
         # Honour the documented idempotency contract by resolving the
         # now-existing record — running the same owner reconciliation the fast
-        # path does — instead of surfacing the conflict as a 500. The memory
-        # store serializes same-id creates under its per-thread lock and keeps
-        # its historical overwrite behavior, so it does not reach this branch.
+        # path does — instead of surfacing the conflict as a 500. Same-process
+        # HTTP creates share the lifecycle lock; the memory store retains its
+        # historical overwrite behavior for direct callers.
         existing_record = await _resolve_existing_thread(thread_store, thread_id, thread_owner_user_id, thread_owner_kwargs)
         if existing_record is not None:
             return _existing_thread_response(thread_id, existing_record)
