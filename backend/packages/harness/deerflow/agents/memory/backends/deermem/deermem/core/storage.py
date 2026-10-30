@@ -146,7 +146,7 @@ def _normalize_legacy_import_fact(value: Any) -> dict[str, Any] | None:
     else:
         try:
             numeric_confidence = float(confidence)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             numeric_confidence = 0.5
     fact["confidence"] = min(1.0, max(0.0, numeric_confidence)) if math.isfinite(numeric_confidence) else 0.5
 
