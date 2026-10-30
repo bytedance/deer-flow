@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 
 class _FakePydanticV2:
     """Object with model_dump (Pydantic v2)."""
@@ -503,13 +505,13 @@ def test_serialize_values_mode_strips_base64_from_hidden_messages():
 
 
 # ---------------------------------------------------------------------------
-# Deeply nested / cyclic structures must not overflow the serializer.
+# Deep and cyclic nesting (#7716).
 #
-# Structured (non-string) fields on the wire are arbitrary-depth JSON produced
-# by models/tools: tool-call ``args``, ``additional_kwargs``, the ``todos`` /
-# ``task_notes`` state channels. A pathological-but-valid nesting (see the
-# 10k-array case in #7678) must neither raise RecursionError (REST 500 / stream
-# crash) nor silently degrade a whole message to its ``str()`` repr.
+# Model-authored fields such as tool-call ``args`` can nest arbitrarily deep.
+# A value past the recursion limit used to raise RecursionError (failing the
+# stream publish) or, inside a ``model_dump()`` result, degrade the whole
+# message to its ``str()`` repr. Nesting beyond ``_MAX_NESTING_DEPTH`` and
+# references back to an enclosing container are emitted as ``None``.
 # ---------------------------------------------------------------------------
 def _deep_nested(depth):
     node = "leaf"
@@ -518,42 +520,37 @@ def _deep_nested(depth):
     return node
 
 
-def test_serialize_deeply_nested_structure_does_not_overflow():
+def _nesting_depth(value):
+    depth = 0
+    while isinstance(value, list):
+        depth += 1
+        value = value[0] if value else None
+    return depth, value
+
+
+def test_serialize_deep_nesting_within_cap_round_trips():
+    """Nesting past the recursive walk but within the cap is preserved exactly."""
+    from deerflow.runtime.serialization import _MAX_NESTING_DEPTH, _RECURSIVE_WALK_DEPTH, serialize_lc_object
+
+    for depth in (_RECURSIVE_WALK_DEPTH - 1, _RECURSIVE_WALK_DEPTH + 1, _MAX_NESTING_DEPTH - 1):
+        assert serialize_lc_object({"payload": _deep_nested(depth)}) == {"payload": _deep_nested(depth)}
+
+
+def test_serialize_nesting_beyond_cap_is_truncated_to_none():
     import json
 
-    from deerflow.runtime.serialization import serialize_channel_values_for_api, serialize_lc_object
+    from deerflow.runtime.serialization import _MAX_NESTING_DEPTH, serialize_lc_object
 
-    deep = _deep_nested(5000)
-    # Direct primitive/container traversal.
-    out = serialize_lc_object({"payload": deep})
-    assert json.dumps(out, allow_nan=False)
-
-    # REST surface: structured tool-call args nested in a checkpointed message
-    # are re-serialized on every thread/history read.
-    channel = {"messages": [{"role": "ai", "tool_calls": [{"name": "ingest", "args": {"payload": deep}}]}]}
-    api_out = serialize_channel_values_for_api(channel)
-    assert json.dumps(api_out, allow_nan=False)
-    leaf = api_out["messages"][0]["tool_calls"][0]["args"]["payload"]
-    for _ in range(5000):
-        assert isinstance(leaf, list)
-        leaf = leaf[0]
-    assert leaf == "leaf"
+    out = serialize_lc_object({"payload": _deep_nested(20_000)})
+    depth, innermost = _nesting_depth(out["payload"])
+    assert depth == _MAX_NESTING_DEPTH - 1
+    assert innermost is None
+    # 20k levels is past json.dumps' own C recursion guard; the capped output is not.
+    json.dumps(out, allow_nan=False)
 
 
-def test_serialize_deeply_nested_structured_channel_values():
-    from deerflow.runtime.serialization import serialize
-
-    # Free-form model/tool-authored state channels (todos / task_notes).
-    state = {"todos": _deep_nested(3000), "task_notes": {"nested": _deep_nested(3000)}}
-    result = serialize(state, mode="values")
-    import json
-
-    assert json.dumps(result, allow_nan=False)
-
-
-def test_serialize_messages_mode_deep_nested_message_stays_mapping():
-    """The model_dump branch must not swallow RecursionError and fall through
-    to ``str(obj)``: a deeply nested message still serializes to a mapping."""
+def test_serialize_deeply_nested_message_stays_mapping():
+    """A deep tool-call arg inside an AIMessage must not degrade the chunk to str()."""
     import json
 
     from langchain_core.messages import AIMessage
@@ -564,23 +561,120 @@ def test_serialize_messages_mode_deep_nested_message_stays_mapping():
         content="REAL_TOKEN_TEXT",
         tool_calls=[{"name": "ingest", "args": {"payload": _deep_nested(3000)}, "id": "c1", "type": "tool_call"}],
     )
-    payload = serialize((message, {"langgraph_node": "agent"}), mode="messages")
-    chunk = payload[0]
+    chunk, metadata = serialize((message, {"langgraph_node": "agent"}), mode="messages")
     assert isinstance(chunk, dict)
     assert chunk["content"] == "REAL_TOKEN_TEXT"
-    assert json.dumps(payload, allow_nan=False)
+    assert chunk["tool_calls"][0]["name"] == "ingest"
+    assert metadata == {"langgraph_node": "agent"}
+    json.dumps([chunk, metadata], allow_nan=False)
 
 
-def test_serialize_cyclic_structure_terminates_json_safe():
-    """A self-referential structure terminates instead of overflowing; the
-    back-reference is replaced with None so output stays encodable."""
+def test_serialize_cyclic_structures_terminate_json_safe():
+    """A reference back to an enclosing container becomes None; output stays encodable."""
     import json
 
     from deerflow.runtime.serialization import serialize_lc_object
 
     cyclic = {"name": "root"}
     cyclic["self"] = cyclic
-    out = serialize_lc_object(cyclic)
-    assert out["name"] == "root"
-    assert out["self"] is None
-    json.dumps(out, allow_nan=False)
+    assert serialize_lc_object(cyclic) == {"name": "root", "self": None}
+
+    loop = []
+    loop.append(loop)
+    assert serialize_lc_object(loop) == [None]
+
+    json.dumps(serialize_lc_object({"a": cyclic, "b": loop}), allow_nan=False)
+
+
+def test_serialize_shared_subtree_is_duplicated_not_treated_as_cycle():
+    from deerflow.runtime.serialization import serialize_lc_object
+
+    shared = {"k": [1, 2]}
+    deep = _deep_nested(300)
+    out = serialize_lc_object({"a": shared, "b": shared, "c": deep, "d": deep})
+    assert out["a"] == out["b"] == {"k": [1, 2]}
+    assert out["c"] == out["d"] == deep
+
+
+def test_serialize_interrupt_with_message_value_on_deep_walk():
+    """The iterative walk must not reuse the id of a freed model_dump()/Interrupt
+    dict as a cycle marker: sibling message payloads stay intact."""
+    from langchain_core.messages import AIMessage, HumanMessage
+    from langgraph.types import Interrupt
+
+    from deerflow.runtime.serialization import serialize_lc_object
+
+    shallow = {"__interrupt__": [Interrupt(value=AIMessage(content="needs approval"), id="i1")]}
+    expected_value = serialize_lc_object(shallow)["__interrupt__"][0]["value"]
+    assert expected_value["content"] == "needs approval"
+
+    # The deep sibling forces the iterative walk over the whole value.
+    deep_state = {
+        "__interrupt__": [
+            Interrupt(value=AIMessage(content="needs approval"), id="i1"),
+            Interrupt(value={"msg": HumanMessage(content="question")}, id="i2"),
+        ],
+        "todos": _deep_nested(300),
+    }
+    out = serialize_lc_object(deep_state)
+    assert out["__interrupt__"][0] == {"value": expected_value, "id": "i1"}
+    assert out["__interrupt__"][1]["value"]["msg"]["content"] == "question"
+    assert out["todos"] == _deep_nested(300)
+
+
+def test_serialize_self_returning_model_dump_terminates():
+    """A model_dump() that keeps returning objects ends as None instead of looping."""
+
+    class _SelfDumping:
+        def model_dump(self):
+            return self
+
+    from deerflow.runtime.serialization import serialize_lc_object
+
+    assert serialize_lc_object(_SelfDumping()) is None
+    assert serialize_lc_object({"x": _SelfDumping(), "y": 1}) == {"x": None, "y": 1}
+
+
+@pytest.mark.asyncio
+async def test_publish_deep_subagent_step_custom_event():
+    """A subagent step carried by the ``task_running`` custom event is never
+    checkpointed, so a deep tool-call arg reaches the publish path directly.
+    It must publish as a JSON-encodable frame instead of failing the run."""
+    import json
+
+    from langchain_core.messages import AIMessage
+
+    from app.gateway.services import format_sse
+    from deerflow.runtime.runs.worker import _publish_stream_item
+    from deerflow.subagents.step_events import capture_step_message
+
+    captured: list[dict] = []
+    message = AIMessage(content="REAL_TOKEN_TEXT", id="m1", tool_calls=[{"name": "t", "args": {"p": _deep_nested(1200)}, "id": "c1", "type": "tool_call"}])
+    assert capture_step_message(message, captured, set())
+
+    class _Bridge:
+        def __init__(self):
+            self.published = []
+
+        async def publish(self, run_id, event, payload):
+            self.published.append((event, payload))
+
+    class _SubagentEvents:
+        async def add(self, chunk):
+            pass
+
+    bridge = _Bridge()
+    chunk = {"type": "task_running", "task_id": "c1", "message": captured[0], "message_index": 1, "total_messages": 1}
+    await _publish_stream_item(
+        bridge=bridge,
+        run_id="run-1",
+        mode="custom",
+        chunk=chunk,
+        namespace=(),
+        file_tool_chunk_batcher=None,
+        subagent_events=_SubagentEvents(),
+    )
+    [(event, payload)] = bridge.published
+    assert event == "custom"
+    assert payload["message"]["content"] == "REAL_TOKEN_TEXT"
+    json.loads(format_sse(event, payload).split("data: ", 1)[1])
