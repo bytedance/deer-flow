@@ -5,6 +5,12 @@ best-effort sweep. Configuration failures skip automatic cleanup and preserve
 the listing; never substitute a default policy for an unreadable one. Resolve
 the policy before consuming the reconciliation throttle window.
 
+HTTP creation holds `goal_thread_lock` from the idempotency lookup through the
+initial checkpoint write. Same-id HTTP creates must return the existing row,
+including in memory mode; retain the native memory store's overwrite contract
+and SQL duplicate-insert recovery across workers. Release on failure/cancellation
+without blocking different thread IDs. Tests: `test_thread_create_idempotency.py`.
+
 `GET /api/plugins/diagnostics` uses `require_admin_user` before reading the
 canonical runtime diagnostic snapshot. Return bounded entry-point identifiers,
 known levels and fixed summaries; raw messages stay in logs. Never clear the

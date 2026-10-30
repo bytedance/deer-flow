@@ -7,9 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+This section accumulates work toward the **2.3.0** milestone
+([2.3.0](https://github.com/bytedance/deer-flow/milestone/4)).
+
+### Fixed
+
+- **memory:** `GET /api/memory/config` and `/api/memory/status` now mask
+  credential values in `backend_config` (`api_key`, tokens, passwords,
+  `Authorization` headers, at any depth) as `***`. They returned the config as
+  loaded, with `$VAR` references already resolved, so a DeerMem extraction
+  model key or a Honcho `api_key` reached every caller with `memory:read` in
+  plaintext, which with authorization disabled (the default) is every
+  signed-in user. Non-secret knobs, `api_key_env` names and unset values are
+  unchanged. ([#7665])
+
+## [2.2.0] — 2026-10-29
+
 This section accumulates work toward the **2.2.0** milestone
 ([2.2.0](https://github.com/bytedance/deer-flow/milestone/3)).
-As of 2026-10-28, the milestone includes **1068 merged pull requests**.
+This release closes that milestone with **1068 merged pull requests**.
 
 ### Added
 
@@ -14678,7 +14694,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5217]: https://github.com/bytedance/deer-flow/pull/5217
 [#5219]: https://github.com/bytedance/deer-flow/pull/5219
 [#5221]: https://github.com/bytedance/deer-flow/pull/5221
-[#5224]: https://github.com/bytedance/deer-flow/pull/5224
+[#5224]: https://github.com/bytedance/deer-flow/commit/572744975d369fda88168aaa7b481282f939affe
 [#5225]: https://github.com/bytedance/deer-flow/pull/5225
 [#5227]: https://github.com/bytedance/deer-flow/pull/5227
 [#5228]: https://github.com/bytedance/deer-flow/pull/5228
@@ -14687,9 +14703,9 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5236]: https://github.com/bytedance/deer-flow/pull/5236
 [#5238]: https://github.com/bytedance/deer-flow/pull/5238
 [#5239]: https://github.com/bytedance/deer-flow/pull/5239
-[#5244]: https://github.com/bytedance/deer-flow/pull/5244
+[#5244]: https://github.com/bytedance/deer-flow/commit/9ce6fdcb2252ea005b4fa98ca50bd3857e1f681a
 [#5245]: https://github.com/bytedance/deer-flow/pull/5245
-[#5247]: https://github.com/bytedance/deer-flow/pull/5247
+[#5247]: https://github.com/bytedance/deer-flow/commit/fa89a125267be4213009376ec0e232a0c2411ca8
 [#5249]: https://github.com/bytedance/deer-flow/pull/5249
 [#5251]: https://github.com/bytedance/deer-flow/pull/5251
 [#5254]: https://github.com/bytedance/deer-flow/pull/5254
@@ -14746,7 +14762,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5367]: https://github.com/bytedance/deer-flow/pull/5367
 [#5369]: https://github.com/bytedance/deer-flow/pull/5369
 [#5371]: https://github.com/bytedance/deer-flow/pull/5371
-[#5373]: https://github.com/bytedance/deer-flow/pull/5373
+[#5373]: https://github.com/bytedance/deer-flow/commit/d5ae3882b6708fa9af7289a0c3c0be3eee157203
 [#5374]: https://github.com/bytedance/deer-flow/pull/5374
 [#5375]: https://github.com/bytedance/deer-flow/pull/5375
 [#5377]: https://github.com/bytedance/deer-flow/pull/5377
@@ -14773,7 +14789,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5408]: https://github.com/bytedance/deer-flow/pull/5408
 [#5410]: https://github.com/bytedance/deer-flow/pull/5410
 [#5411]: https://github.com/bytedance/deer-flow/pull/5411
-[#5413]: https://github.com/bytedance/deer-flow/pull/5413
+[#5413]: https://github.com/bytedance/deer-flow/commit/daf32cd24632f2cc7465aeb62f2a1e1e768eceb2
 [#5415]: https://github.com/bytedance/deer-flow/pull/5415
 [#5416]: https://github.com/bytedance/deer-flow/pull/5416
 [#5418]: https://github.com/bytedance/deer-flow/pull/5418
@@ -14956,8 +14972,8 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5736]: https://github.com/bytedance/deer-flow/pull/5736
 [#5738]: https://github.com/bytedance/deer-flow/pull/5738
 [#5739]: https://github.com/bytedance/deer-flow/pull/5739
-[#5740]: https://github.com/bytedance/deer-flow/pull/5740
-[#5741]: https://github.com/bytedance/deer-flow/pull/5741
+[#5740]: https://github.com/bytedance/deer-flow/commit/e7128dc7d6b4d49153b10f7276f010384ec4e6af
+[#5741]: https://github.com/bytedance/deer-flow/commit/363b0fc1b4a5bd6c142d1f1df9fb9743cca550a3
 [#5745]: https://github.com/bytedance/deer-flow/pull/5745
 [#5748]: https://github.com/bytedance/deer-flow/pull/5748
 [#5750]: https://github.com/bytedance/deer-flow/pull/5750
@@ -14970,7 +14986,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5760]: https://github.com/bytedance/deer-flow/pull/5760
 [#5761]: https://github.com/bytedance/deer-flow/pull/5761
 [#5762]: https://github.com/bytedance/deer-flow/pull/5762
-[#5763]: https://github.com/bytedance/deer-flow/pull/5763
+[#5763]: https://github.com/bytedance/deer-flow/commit/39351315bf5d096fc84ad8307d3702b6aa5b3e24
 [#5767]: https://github.com/bytedance/deer-flow/pull/5767
 [#5769]: https://github.com/bytedance/deer-flow/pull/5769
 [#5775]: https://github.com/bytedance/deer-flow/pull/5775
@@ -15038,7 +15054,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5880]: https://github.com/bytedance/deer-flow/pull/5880
 [#5881]: https://github.com/bytedance/deer-flow/pull/5881
 [#5883]: https://github.com/bytedance/deer-flow/pull/5883
-[#5884]: https://github.com/bytedance/deer-flow/pull/5884
+[#5884]: https://github.com/bytedance/deer-flow/commit/e8cb5e9c4f5f274401eeb555aff62e713035cbf4
 [#5888]: https://github.com/bytedance/deer-flow/pull/5888
 [#5890]: https://github.com/bytedance/deer-flow/pull/5890
 [#5892]: https://github.com/bytedance/deer-flow/pull/5892
@@ -15100,9 +15116,9 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5999]: https://github.com/bytedance/deer-flow/pull/5999
 [#6000]: https://github.com/bytedance/deer-flow/pull/6000
 [#6008]: https://github.com/bytedance/deer-flow/pull/6008
-[#6009]: https://github.com/bytedance/deer-flow/pull/6009
+[#6009]: https://github.com/bytedance/deer-flow/commit/b87ebd940227465d611084e5bf49582aaeb4e9bd
 [#6013]: https://github.com/bytedance/deer-flow/pull/6013
-[#6015]: https://github.com/bytedance/deer-flow/pull/6015
+[#6015]: https://github.com/bytedance/deer-flow/commit/f87a04e581829ff35afd4fa228240071b486192f
 [#6017]: https://github.com/bytedance/deer-flow/pull/6017
 [#6018]: https://github.com/bytedance/deer-flow/pull/6018
 [#6020]: https://github.com/bytedance/deer-flow/pull/6020
@@ -15126,7 +15142,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6060]: https://github.com/bytedance/deer-flow/pull/6060
 [#6062]: https://github.com/bytedance/deer-flow/pull/6062
 [#6063]: https://github.com/bytedance/deer-flow/pull/6063
-[#6066]: https://github.com/bytedance/deer-flow/pull/6066
+[#6066]: https://github.com/bytedance/deer-flow/commit/73fdbcfdf4b5f4037b62bc2ce9d8b60ec04e69f8
 [#6067]: https://github.com/bytedance/deer-flow/pull/6067
 [#6068]: https://github.com/bytedance/deer-flow/pull/6068
 [#6069]: https://github.com/bytedance/deer-flow/pull/6069
@@ -15152,7 +15168,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6105]: https://github.com/bytedance/deer-flow/pull/6105
 [#6107]: https://github.com/bytedance/deer-flow/pull/6107
 [#6109]: https://github.com/bytedance/deer-flow/pull/6109
-[#6112]: https://github.com/bytedance/deer-flow/pull/6112
+[#6112]: https://github.com/bytedance/deer-flow/commit/52b21d13ac6e674a19cb76013d097e73f108c994
 [#6113]: https://github.com/bytedance/deer-flow/pull/6113
 [#6115]: https://github.com/bytedance/deer-flow/pull/6115
 [#6117]: https://github.com/bytedance/deer-flow/pull/6117
@@ -15253,7 +15269,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6298]: https://github.com/bytedance/deer-flow/pull/6298
 [#6299]: https://github.com/bytedance/deer-flow/pull/6299
 [#6302]: https://github.com/bytedance/deer-flow/pull/6302
-[#6304]: https://github.com/bytedance/deer-flow/pull/6304
+[#6304]: https://github.com/bytedance/deer-flow/commit/b85e4ae74bb407e1e2396243a8a6e8f5b2420e3f
 [#6305]: https://github.com/bytedance/deer-flow/pull/6305
 [#6306]: https://github.com/bytedance/deer-flow/pull/6306
 [#6307]: https://github.com/bytedance/deer-flow/pull/6307
@@ -15637,6 +15653,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7017]: https://github.com/bytedance/deer-flow/pull/7017
 [#7018]: https://github.com/bytedance/deer-flow/pull/7018
 [#7020]: https://github.com/bytedance/deer-flow/pull/7020
+[#7022]: https://github.com/bytedance/deer-flow/issues/7022
 [#7023]: https://github.com/bytedance/deer-flow/pull/7023
 [#7024]: https://github.com/bytedance/deer-flow/pull/7024
 [#7031]: https://github.com/bytedance/deer-flow/pull/7031
@@ -15909,3 +15926,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7643]: https://github.com/bytedance/deer-flow/pull/7643
 [#7651]: https://github.com/bytedance/deer-flow/pull/7651
 [#7659]: https://github.com/bytedance/deer-flow/pull/7659
+[#7665]: https://github.com/bytedance/deer-flow/pull/7665

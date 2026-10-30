@@ -330,6 +330,11 @@ export function ArtifactFileDetail({
         content: submittedDraftContent,
         expectedSha256: submittedBaselineSha256,
       });
+      // A refetch started before or during the save can still return old bytes.
+      // Cancel both preview and full reads before publishing the saved revision.
+      await queryClient.cancelQueries({
+        queryKey: ["artifact", filepathFromProps, threadId, isMock],
+      });
       setDrafts((current) => ({
         ...current,
         [filepath]: (() => {
