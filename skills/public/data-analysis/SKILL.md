@@ -263,6 +263,7 @@ The script automatically caches loaded data to avoid re-parsing files on every c
 - On first load, files are parsed and stored in a persistent DuckDB database under the system temporary directory (`.data-analysis-cache/`)
 - The cache key hashes the ordered input basenames and a separate SHA256 digest of each file. Renaming, reordering, or changing inputs creates a new cache; moving unchanged, identically named inputs to another directory preserves reuse. The updated key namespace ignores older cached table maps, which are rebuilt on first use
 - Subsequent calls with the same files will use the cached database directly (near-instant startup)
+- Both freshly loaded and reused snapshots are read-only during analysis. SQL cannot update, delete, or alter cached source tables; ordinary SELECT/CTE queries and result exports still work. Older writable caches are rebuilt from the input files once.
 - Cache is transparent — no extra parameters needed
 
 This is especially useful when running multiple queries against the same data files (inspect → query → summary).
