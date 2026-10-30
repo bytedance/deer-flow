@@ -19,6 +19,12 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **dev:** `scripts/dev_multi_instance.sh logs all` now prints the nginx logs
+  as well as both Gateway logs; it printed only the Gateway logs, the same as
+  `logs` with no argument. `logs nginx` and `logs all` also include `nginx.log`,
+  the nginx start command's own output, which no option printed before.
+  ([#7723])
+
 - **memory:** `GET /api/memory/config` and `/api/memory/status` now mask
   credential values in `backend_config` (`api_key`, tokens, passwords,
   `Authorization` headers, at any depth) as `***`. They returned the config as
@@ -15934,4 +15940,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7651]: https://github.com/bytedance/deer-flow/pull/7651
 [#7659]: https://github.com/bytedance/deer-flow/pull/7659
 [#7665]: https://github.com/bytedance/deer-flow/pull/7665
+[#7723]: https://github.com/bytedance/deer-flow/pull/7723
 [#7729]: https://github.com/bytedance/deer-flow/pull/7729

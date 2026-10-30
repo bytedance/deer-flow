@@ -2803,6 +2803,8 @@ Explicitly enabled nested `task` delegation propagates omitted opaque source IDs
 
 If an item's final lease expires after exhausting the retry budget, the batch reaches a terminal state once all items are terminal: `failed` when none succeeded, or `completed` when at least one succeeded. The item remains `failed` in both cases so partial results stay visible.
 
+Paused batches also reconcile expired attempts after a worker exits. Retryable items remain queued without starting new work until you explicitly resume the batch; exhausted attempts become failed and can be retried individually.
+
 Direct `create_deerflow_agent(...)` integrations can own the same boundary explicitly instead of relying on Gateway startup. Construct one `SubagentRuntime` and share it across every graph in that application; its `max_running`, ordinary per-run total, bound `task` tool, and optional durable-batch tools then use the same caller-owned snapshot and execution controller. A runtime with a batch repository owns a worker and must be started before graph construction and stopped during application shutdown:
 
 ```python
