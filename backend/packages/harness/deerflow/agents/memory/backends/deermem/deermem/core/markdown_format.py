@@ -31,7 +31,7 @@ import json
 import re
 from typing import Any
 
-_OPEN_FENCE_RE = re.compile(r"```memory-json[ \t]*\r?\n")
+_OPEN_FENCE_RE = re.compile(r"(?m)^ {0,3}```memory-json[ \t]*\r?\n")
 _CLOSE_FENCE_RE = re.compile(r"[ \t\r\n]*\r?\n[ \t]*```[ \t]*(?:\r?\n|$)")
 
 
