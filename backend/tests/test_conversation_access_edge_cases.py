@@ -39,9 +39,9 @@ def test_visible_text_is_parsed_once_per_scan_and_refreshed_on_the_next_read(mon
 
     calls = Counter()
 
-    def track_projection(row):
+    def track_projection(row, **kwargs):
         calls[row["seq"]] += 1
-        return _visible_text(row)
+        return _visible_text(row, **kwargs)
 
     monkeypatch.setattr(conversation_access, "_visible_text", track_projection)
 

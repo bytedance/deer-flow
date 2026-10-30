@@ -16,6 +16,7 @@ import hashlib
 import logging
 import re
 import uuid
+from collections.abc import Mapping
 from copy import deepcopy
 from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
@@ -181,7 +182,7 @@ def compute_run_durations(runs) -> dict[str, int]:
     return durations
 
 
-def stamp_turn_duration_on_last_ai(messages, run_durations: dict[str, int]) -> None:
+def stamp_turn_duration_on_last_ai(messages, run_durations: dict[str, int], *, thread_id: str | None = None) -> None:
     """Attach each run's elapsed seconds to that run's final visible AI message only.
 
     ``turn_duration`` is the run's wall-clock lifetime (``compute_run_durations``),
@@ -209,7 +210,17 @@ def stamp_turn_duration_on_last_ai(messages, run_durations: dict[str, int]) -> N
             continue
         content = msg.get("content")
         payload = content if isinstance(content, dict) else msg
-        metadata = msg.get("metadata") or {}
+        metadata = msg.get("metadata")
+        if metadata is None:
+            metadata = {}
+        elif not isinstance(metadata, Mapping):
+            logger.warning(
+                "Ignoring malformed event metadata for thread %s at row seq %s: expected a mapping, got %s",
+                sanitize_log_param(thread_id or "<unknown>"),
+                msg.get("seq", "<unknown>"),
+                type(metadata).__name__,
+            )
+            metadata = {}
         is_middleware = str(metadata.get("caller", "")).startswith("middleware:")
         if payload.get("type") == "ai" and not is_middleware:
             payload.setdefault("additional_kwargs", {})["turn_duration"] = run_durations[rid]
@@ -1544,7 +1555,7 @@ async def list_thread_messages(
     run_durations = compute_run_durations(runs)
 
     if run_durations:
-        stamp_turn_duration_on_last_ai(messages, run_durations)
+        stamp_turn_duration_on_last_ai(messages, run_durations, thread_id=thread_id)
 
     return messages
 
@@ -1613,7 +1624,7 @@ async def _enrich_thread_message_page(
     # endpoints already use ``stamp_turn_duration_on_last_ai``; the page
     # endpoint was inlining the equivalent loop but stamping every AI row,
     # which #4163 fixed for the other paths and missed here.
-    stamp_turn_duration_on_last_ai(data, run_durations)
+    stamp_turn_duration_on_last_ai(data, run_durations, thread_id=thread_id)
     return data
 
 
@@ -1678,7 +1689,7 @@ async def list_run_messages(
         if record:
             durations = compute_run_durations([record])
             if durations:
-                stamp_turn_duration_on_last_ai(data, durations)
+                stamp_turn_duration_on_last_ai(data, durations, thread_id=thread_id)
 
     return {"data": data, "has_more": has_more}
 

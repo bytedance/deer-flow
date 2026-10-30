@@ -57,7 +57,7 @@ def _source_id(reference: str, request_url: str) -> str:
     return validate_thread_id(match.group(1))
 
 
-def _visible_text(row: dict) -> tuple[str, str] | None:
+def _visible_text(row: dict, *, thread_id: str | None = None) -> tuple[str, str] | None:
     message = row.get("content")
     if not isinstance(message, Mapping):
         return None
@@ -68,8 +68,16 @@ def _visible_text(row: dict) -> tuple[str, str] | None:
         extra = {}
     if role not in {"user", "assistant"} or extra.get("hide_from_ui") or message.get("name") == "summary":
         return None
-    metadata = row.get("metadata") or {}
-    if not isinstance(metadata, Mapping):
+    metadata = row.get("metadata")
+    if metadata is None:
+        metadata = {}
+    elif not isinstance(metadata, Mapping):
+        logger.warning(
+            "Ignoring malformed conversation metadata for thread %s at row seq %s: expected a mapping, got %s",
+            thread_id or "<unknown>",
+            row.get("seq", "<unknown>"),
+            type(metadata).__name__,
+        )
         metadata = {}
     if str(metadata.get("caller", "")).startswith(("middleware:", "subagent:")):
         return None
@@ -233,7 +241,7 @@ def _prepare_owner_bound_conversation_reader(
         found: dict[int, tuple[str, str, int]] = {}
 
         def include_target(row: dict) -> bool:
-            parsed = _visible_text(row) if row["seq"] == message_seq else None
+            parsed = _visible_text(row, thread_id=thread_id) if row["seq"] == message_seq else None
             if parsed is None:
                 return False
             role, text = parsed
@@ -278,7 +286,7 @@ def _prepare_owner_bound_conversation_reader(
         parsed_text: dict[int, tuple[str, str]] = {}
 
         def include_message(row: dict) -> bool:
-            parsed = _visible_text(row)
+            parsed = _visible_text(row, thread_id=thread_id)
             if parsed is None:
                 return False
             role, text = parsed
