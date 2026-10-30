@@ -158,7 +158,7 @@ The provisioner is configured via environment variables (set in [docker-compose-
 | `SKILLS_PVC_NAME` | empty (use hostPath) | PVC name for skills volume; when set, sandbox Pods use PVC instead of hostPath |
 | `SKILLS_PVC_SUBPATH_TEMPLATE` | empty | Optional `subPath` template for `SKILLS_PVC_NAME`. Supports `{user_id}` and `{thread_id}`. When empty, the skills PVC root is mounted unchanged |
 | `USERDATA_PVC_NAME` | empty (use hostPath) | PVC name for user-data volume; when set, uses PVC with `subPath: deer-flow/users/{user_id}/threads/{thread_id}/user-data` |
-| `KUBECONFIG_PATH` | `/root/.kube/config` | Path to kubeconfig **inside** the provisioner container |
+| `KUBECONFIG_PATH` | `/home/deerflow/.kube/config` | Path to kubeconfig **inside** the provisioner container. The container runs as uid 1000 (`deerflow`), so this must stay under a path that user can traverse and read — `/root/...` is not readable |
 | `SANDBOX_SERVICE_TYPE` | `NodePort` | Service type for sandbox access. Use `ClusterIP` when backend and provisioner run inside the same Kubernetes cluster |
 | `NODE_HOST` | `host.docker.internal` | Hostname that backend containers use to reach host NodePorts; ignored when `SANDBOX_SERVICE_TYPE=ClusterIP` |
 | `K8S_API_SERVER` | (from kubeconfig) | Override K8s API server URL (e.g., `https://host.docker.internal:26443`) |
@@ -267,7 +267,10 @@ docker compose -p deer-flow-dev -f docker/docker-compose-dev.yaml up -d provisio
 ```
 
 The compose file:
-- Mounts your host's `~/.kube/config` into the container
+- Mounts your host's `~/.kube/config` into the container at
+  `/home/deerflow/.kube/config` (the home of the unprivileged uid-1000 user the
+  image runs as — see `docker/provisioner/Dockerfile`) and sets
+  `KUBECONFIG_PATH` to the same path
 - Adds `extra_hosts` entry for `host.docker.internal` (required on Linux)
 - Configures environment variables for K8s access
 
@@ -313,12 +316,24 @@ docker exec deer-flow-gateway curl -s $SANDBOX_URL/v1/sandbox
 
 ### Issue: "Kubeconfig not found"
 
-**Cause**: The kubeconfig file doesn't exist at the mounted path.
+**Cause**: The kubeconfig file doesn't exist at the mounted path, or it is not
+readable by the container's unprivileged user. The provisioner runs as uid 1000
+(`deerflow`), so `os.path.exists()` returns `False` on a permission error and the
+client falls back to in-cluster config.
 
 **Solution**: 
 - Ensure `~/.kube/config` exists on your host machine
 - Run `kubectl config view` to verify
 - Check the volume mount in docker-compose-dev.yaml
+- Confirm the container user can actually read it:
+  ```bash
+  docker exec deer-flow-provisioner test -r /home/deerflow/.kube/config && echo readable
+  ```
+  A `0600` file owned by host uid 1000 (the usual single-user Linux setup) is
+  readable as-is. Otherwise make the file readable by uid 1000 (prefer matching
+  the owner/group over widening it for everyone, since it carries cluster
+  credentials), or run the service with `user: "$(id -u):$(id -g)"` so the
+  container uid matches the host owner.
 
 ### Issue: "Kubeconfig path is a directory"
 
@@ -328,7 +343,7 @@ docker exec deer-flow-gateway curl -s $SANDBOX_URL/v1/sandbox
 - Ensure the compose mount source is a file (e.g., `~/.kube/config`) not a directory
 - Verify inside container:
   ```bash
-  docker exec deer-flow-provisioner ls -ld /root/.kube/config
+  docker exec deer-flow-provisioner ls -ld /home/deerflow/.kube/config
   ```
 - Expected output should indicate a regular file (`-`), not a directory (`d`)
 

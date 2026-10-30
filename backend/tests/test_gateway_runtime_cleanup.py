@@ -33,6 +33,26 @@ def _extract_nginx_location_block(content: str, location: str) -> str:
     raise AssertionError(f"missing nginx block closer for {needle}")
 
 
+def _iter_nginx_location_blocks(content: str):
+    """Yield every ``location`` block of *content*, braces balanced."""
+    for match in re.finditer(r"location\s+[^{]*\{", content):
+        start = match.start()
+        brace_start = content.find("{", start)
+
+        depth = 0
+        for index in range(brace_start, len(content)):
+            char = content[index]
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    yield content[start : index + 1]
+                    break
+        else:
+            raise AssertionError(f"missing nginx block closer for {match.group(0)!r}")
+
+
 def _assert_frontend_upgrade_header_is_conditional(content: str) -> None:
     frontend_block = _extract_nginx_location_block(content, "/")
 
@@ -154,6 +174,53 @@ def test_nginx_frontend_upgrade_header_is_conditional():
         content = _read(path)
 
         _assert_frontend_upgrade_header_is_conditional(content)
+
+
+def test_nginx_proxying_locations_strip_gateway_internal_trust_headers():
+    """Every nginx proxying location must clear the Gateway's trust headers.
+
+    The Gateway treats ``X-DeerFlow-Internal-Token`` / ``X-DeerFlow-Owner-User-Id``
+    as internal credentials that bypass session auth and impersonate an arbitrary
+    owner, and browsers can set arbitrary custom headers. nginx does not inherit
+    ``proxy_set_header`` into locations that define their own, so each location
+    that forwards to an upstream clears both explicitly — the container entry
+    point (``nginx.conf``) and the host entry point used by ``scripts/serve.sh``
+    and ``scripts/nginx.sh`` (``nginx.local.conf``).
+    """
+    for path in ("docker/nginx/nginx.local.conf", "docker/nginx/nginx.conf"):
+        content = _read(path)
+        proxying = [block for block in _iter_nginx_location_blocks(content) if "proxy_pass" in block]
+
+        assert proxying, f"{path}: no proxying locations found"
+        assert len(proxying) == content.count("proxy_pass "), f"{path}: unparsed proxy_pass outside a location block"
+
+        for block in proxying:
+            location = block.splitlines()[0].strip()
+            assert 'proxy_set_header X-DeerFlow-Internal-Token "";' in block, f"{path}: {location}"
+            assert 'proxy_set_header X-DeerFlow-Owner-User-Id "";' in block, f"{path}: {location}"
+
+
+def test_next_proxy_surface_strips_gateway_internal_trust_headers():
+    """The Next.js hop is a public proxy too, so it clears the same headers.
+
+    ``next.config.js`` forwards client request headers through its rewrites
+    (``/api/langgraph/*``, ``/api/agents``, ``/api/skills``, and the catch-all
+    ``/api/:path*``), so stripping in the route handlers alone leaves the rewrite
+    surface open. ``src/proxy.ts`` is the Next 16 equivalent of ``middleware.ts``
+    and covers app-router routes and rewrites in one place.
+    """
+    proxy_file = _read("frontend/src/proxy.ts")
+
+    assert 'headers.delete("x-deerflow-internal-token")' in proxy_file
+    assert 'headers.delete("x-deerflow-owner-user-id")' in proxy_file
+    # The matcher must not carve `/api/*` out; it only skips Next's own build
+    # output and static media.
+    matcher = proxy_file.split("matcher:", 1)[1]
+    assert "api" not in matcher, "the /api rewrite surface must stay matched"
+    assert "_next/" in matcher
+    # An extension-based exclusion would let `/api/threads/<id>/artifacts/report.png`
+    # reach the Gateway through the same rewrite with the trust headers intact.
+    assert "png" not in matcher and "svg" not in matcher
 
 
 def test_nginx_frontend_upgrade_check_allows_dedicated_websocket_locations():

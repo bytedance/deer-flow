@@ -42,7 +42,10 @@ services:
         APT_MIRROR: ${APT_MIRROR:-}
     container_name: deer-flow-provisioner
     volumes:
-      - ~/.kube/config:/root/.kube/config:ro
+      # The provisioner runs as uid 1000 (docker/provisioner/Dockerfile) and
+      # cannot traverse /root (0700 root:root). Mount the kubeconfig under that
+      # user's home and keep KUBECONFIG_PATH pointing at the same path.
+      - ~/.kube/config:/home/deerflow/.kube/config:ro
     environment:
       - K8S_NAMESPACE=deer-flow
       - SANDBOX_IMAGE=enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest
@@ -65,7 +68,7 @@ services:
       # USERDATA_PVC_NAME uses subPath (deer-flow/users/{user_id}/threads/{thread_id}/user-data) automatically.
       # - SKILLS_PVC_NAME=deer-flow-skills-pvc
       # - USERDATA_PVC_NAME=deer-flow-userdata-pvc
-      - KUBECONFIG_PATH=/root/.kube/config
+      - KUBECONFIG_PATH=/home/deerflow/.kube/config
       - NODE_HOST=host.docker.internal
       # Override K8S API server URL since kubeconfig uses 127.0.0.1
       # which is unreachable from inside the container

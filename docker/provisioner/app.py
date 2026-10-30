@@ -119,8 +119,10 @@ ALLOWED_EXTRA_MOUNT_PATHS = {
 }
 
 # Path to the kubeconfig *inside* the provisioner container.
-# Typically the host's ~/.kube/config is mounted here.
-KUBECONFIG_PATH = os.environ.get("KUBECONFIG_PATH", "/root/.kube/config")
+# Typically the host's ~/.kube/config is mounted here. The container runs as
+# uid 1000 (see Dockerfile), which cannot traverse /root (0700 root:root), so
+# the default lives under that user's home and must match the compose mount.
+KUBECONFIG_PATH = os.environ.get("KUBECONFIG_PATH", "/home/deerflow/.kube/config")
 PROVISIONER_API_KEY = os.environ.get("PROVISIONER_API_KEY", "")
 
 # The hostname / IP that the backend uses to reach NodePort services. On Docker

@@ -169,7 +169,10 @@ services:
         PIP_INDEX_URL: ${PIP_INDEX_URL:-}
     container_name: deer-flow-provisioner
     volumes:
-      - ~/.kube/config:/root/.kube/config:ro
+      # The provisioner runs as uid 1000 (docker/provisioner/Dockerfile) and
+      # cannot traverse /root (0700 root:root). Mount the kubeconfig under that
+      # user's home and keep KUBECONFIG_PATH pointing at the same path.
+      - ~/.kube/config:/home/deerflow/.kube/config:ro
     environment:
       - K8S_NAMESPACE=deer-flow
       - SANDBOX_IMAGE=enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest
@@ -184,7 +187,7 @@ services:
       - LARK_CLI_BROKER_IMAGE=${LARK_CLI_BROKER_IMAGE:-}
       - THREADS_HOST_PATH=${DEER_FLOW_HOME}/threads
       - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_HOME}
-      - KUBECONFIG_PATH=/root/.kube/config
+      - KUBECONFIG_PATH=/home/deerflow/.kube/config
       - NODE_HOST=host.docker.internal
       - K8S_API_SERVER=https://host.docker.internal:26443
     env_file:

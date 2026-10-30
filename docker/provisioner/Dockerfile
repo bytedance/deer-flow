@@ -24,8 +24,15 @@ RUN pip install --no-cache-dir \
 WORKDIR /app
 COPY app.py .
 
-RUN useradd --create-home --uid 1000 deerflow
+# Run as an unprivileged user. The kubeconfig mount target must live under this
+# user's home: /root is 0700 root:root in the base image, so a non-root process
+# cannot traverse into /root/.kube/config (os.path.exists() returns False on
+# EACCES and the client silently falls back to in-cluster config). Keep this
+# path in sync with KUBECONFIG_PATH (see app.py and the compose mounts).
+RUN useradd --create-home --uid 1000 deerflow \
+    && install -d -o deerflow -g deerflow -m 0700 /home/deerflow/.kube
 USER deerflow
+ENV HOME=/home/deerflow
 
 EXPOSE 8002
 
