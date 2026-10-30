@@ -38,6 +38,19 @@ def cleanup_failed_atomic_write(temporary: Path, fd: int | None = None) -> None:
             logger.warning("Failed to remove temporary output file %s", temporary, exc_info=True)
 
 
+def _clear_destination_read_only(path: Path, mode: int | None) -> bool:
+    """Clear a Windows read-only attribute blocking ``os.replace`` over *path*.
+
+    POSIX rename ignores the target's permission bits; Windows refuses to
+    replace a read-only file. Returns ``True`` when the attribute was cleared,
+    so the caller reapplies *mode* after the replacement.
+    """
+    if os.name != "nt" or mode is None or mode & stat.S_IWRITE:
+        return False
+    os.chmod(path, mode | stat.S_IWRITE)
+    return True
+
+
 def publish_bytes_atomically(path: Path, content: bytes, *, temporary_prefix: str | None = None, preserve_metadata_from: int | None = None) -> None:
     """Replace *path* with complete bytes, preserving its existing mode.
 
@@ -54,6 +67,11 @@ def publish_bytes_atomically(path: Path, content: bytes, *, temporary_prefix: st
     except FileNotFoundError:
         mode = None
 
+    # Windows refuses to replace a read-only destination *and* to unlink a
+    # sibling that inherited that mode, so the preserved mode is copied after
+    # publication there; POSIX copies it onto the sibling before the rename.
+    mode_after_publish = os.name == "nt" and mode is not None and preserve_metadata_from is None
+
     prefix = temporary_prefix if temporary_prefix is not None else f".{path.name}."
     temporary = path.with_name(f"{prefix}{uuid4().hex}.tmp")
     flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0)
@@ -68,13 +86,17 @@ def publish_bytes_atomically(path: Path, content: bytes, *, temporary_prefix: st
                 preserve_revision_metadata(preserve_metadata_from, handle.fileno())
             handle.write(content)
             handle.flush()
-            if mode is not None and preserve_metadata_from is None:
-                if os.name == "nt":
-                    os.chmod(temporary, mode)
-                else:
-                    os.fchmod(handle.fileno(), mode)
+            if mode is not None and preserve_metadata_from is None and not mode_after_publish:
+                os.fchmod(handle.fileno(), mode)
             os.fsync(handle.fileno())
+        cleared_read_only = _clear_destination_read_only(path, mode)
         os.replace(temporary, path)
+        if mode_after_publish or cleared_read_only:
+            try:
+                os.chmod(path, mode)
+            except OSError:
+                with suppress(Exception):
+                    logger.warning("Failed to restore permissions on %s", path, exc_info=True)
     except BaseException:
         cleanup_failed_atomic_write(temporary, fd)
         raise
