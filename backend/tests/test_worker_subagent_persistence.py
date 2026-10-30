@@ -17,6 +17,7 @@ import sys
 
 import pytest
 
+from deerflow.runtime.events.store.base import RunEventStoreNotCommittedError
 from deerflow.runtime.runs.worker import _SubagentEventBuffer
 
 
@@ -55,7 +56,7 @@ class _FakeStore:
 
 class _BoomStore:
     async def put_batch(self, events):
-        raise RuntimeError("db down")
+        raise RunEventStoreNotCommittedError("db down before write")
 
 
 def _running_step(task_id="call_1", message_index=1):
@@ -177,7 +178,7 @@ class _FailOnceStore:
     async def put_batch(self, events):
         self.calls += 1
         if self.calls == 1:
-            raise RuntimeError("transient db error")
+            raise RunEventStoreNotCommittedError("transient db error before write")
         self.batches.append([dict(e) for e in events])
         return list(events)
 
