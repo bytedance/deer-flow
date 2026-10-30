@@ -66,6 +66,8 @@ from deerflow.utils.file_io import await_drained
 from deerflow.utils.messages import message_content_to_text
 
 if TYPE_CHECKING:
+    from deerflow.models.reasoning import ResolvedReasoning
+
     # Imported lazily at runtime inside _build_initial_state: importing
     # tool_search eagerly would run tools/builtins/__init__ -> task_tool ->
     # `from deerflow.subagents import SubagentExecutor`, which re-enters this
@@ -989,6 +991,11 @@ class SubagentExecutor:
             self.model_name: str | None = resolve_subagent_model_name(config, parent_model, app_config=app_config)
         else:
             self.model_name = None
+        # Resolve thinking_enabled: config explicit > False
+        self.thinking_enabled = config.thinking_enabled if config.thinking_enabled is not None else False
+        # Resolve reasoning_effort: config explicit > None
+        self.reasoning_effort = config.reasoning_effort
+
         self.sandbox_state = sandbox_state
         self.thread_data = thread_data
         self.uploaded_files = deepcopy(uploaded_files) if uploaded_files is not None else None
@@ -1100,7 +1107,24 @@ class SubagentExecutor:
         app_config = self._get_resolved_app_config()
         if self.model_name is None:
             self.model_name = resolve_subagent_model_name(self.config, self.parent_model, app_config=app_config)
-        model = create_chat_model(name=self.model_name, thinking_enabled=False, app_config=app_config, attach_tracing=False)
+        from deerflow.models.reasoning import ReasoningPolicyError, resolve_reasoning_contract, resolve_reasoning_request
+
+        get_model_config = getattr(app_config, "get_model_config", None)
+        model_config = get_model_config(self.model_name) if callable(get_model_config) else None
+        if model_config is None:
+            model_config = next((profile for profile in getattr(app_config, "models", []) if profile.name == self.model_name), None)
+        try:
+            effective_reasoning = resolve_reasoning_request(resolve_reasoning_contract(model_config), thinking_enabled=self.thinking_enabled, reasoning_effort=self.reasoning_effort)
+        except ReasoningPolicyError as exc:
+            raise ValueError(f"Model {self.model_name}: {exc}") from exc
+        # Preserve the original request for the factory's validation and logs.
+        model = create_chat_model(
+            name=self.model_name,
+            thinking_enabled=self.thinking_enabled,
+            reasoning_effort=self.reasoning_effort,
+            app_config=app_config,
+            attach_tracing=False,
+        )
 
         from deerflow.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
 
@@ -1218,7 +1242,8 @@ class SubagentExecutor:
         tool_node = tool_graph_node.data if tool_graph_node is not None else None
         self._return_direct_tools = {tool.name for tool in tool_node.tools_by_name.values() if tool.return_direct} if isinstance(tool_node, ToolNode) else set()
         self._describe_assembly(
-            app_config=app_config,
+            model_config=model_config,
+            effective_reasoning=effective_reasoning,
             tools=bound_tools,
             middlewares=middlewares,
             deferred_setup=deferred_setup,
@@ -1267,7 +1292,8 @@ class SubagentExecutor:
     def _describe_assembly(
         self,
         *,
-        app_config: Any,
+        model_config: Any,
+        effective_reasoning: "ResolvedReasoning",
         tools: list[Any],
         middlewares: list[Any],
         deferred_setup: "DeferredToolSetup | None",
@@ -1289,8 +1315,6 @@ class SubagentExecutor:
         from deerflow.extensions.notify import notify_agent_assembled
 
         try:
-            get_model_config = getattr(app_config, "get_model_config", None)
-            model_config = get_model_config(self.model_name) if callable(get_model_config) else None
             if model_config is None:
                 # A name the profile table does not know still has an identity;
                 # a missing profile must not blank out the whole descriptor.
@@ -1302,12 +1326,6 @@ class SubagentExecutor:
                     supports_vision=False,
                 )
             deferred_names = deferred_setup.deferred_names if deferred_setup is not None else frozenset()
-            # Subagents request thinking off; the model's reasoning contract
-            # decides what that means (a required-thinking model stays on), and
-            # the descriptor reports the effective policy the factory applied.
-            from deerflow.models.reasoning import resolve_reasoning_contract, resolve_reasoning_request
-
-            effective_reasoning = resolve_reasoning_request(resolve_reasoning_contract(model_config), thinking_enabled=False, reasoning_effort=None)
             descriptor = build_assembly_descriptor(
                 namespace="deerflow",
                 agent_name=self.config.name,

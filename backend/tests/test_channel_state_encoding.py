@@ -22,10 +22,8 @@ def _state_io_calls(filename: str, class_name: str, method_name: str, call_name:
     ("filename", "class_name", "method_name", "call_name"),
     [
         ("store.py", "JsonChannelStore", "_save", "NamedTemporaryFile"),
-        ("discord.py", "DiscordChannel", "_persist_thread_mappings", "write_text"),
         ("runtime_config_store.py", "ChannelRuntimeConfigStore", "_save", "NamedTemporaryFile"),
         ("buzz_seen_events.py", "BuzzSeenEventStore", "_write_snapshot", "NamedTemporaryFile"),
-        ("wechat.py", "WechatChannel", "_save_state", "write_text"),
         ("wechat.py", "WechatChannel", "_save_auth_state", "NamedTemporaryFile"),
     ],
 )
@@ -57,3 +55,67 @@ def test_discord_state_read_is_explicitly_utf8() -> None:
         keywords = {keyword.arg: keyword.value for keyword in call.keywords}
         encoding = keywords.get("encoding")
         assert isinstance(encoding, ast.Constant) and encoding.value == "utf-8"
+
+
+def test_discord_thread_mappings_publish_utf8_lf_bytes(tmp_path: Path) -> None:
+    import threading
+
+    from app.channels.discord import DiscordChannel
+
+    channel = DiscordChannel.__new__(DiscordChannel)
+    channel._thread_store_lock = threading.Lock()
+    channel._active_threads = {"微信:资源": {"thread_id": "thread-讨论"}}
+    channel._thread_store_path = tmp_path / "discord-threads.json"
+
+    channel._persist_thread_mappings()
+
+    text = channel._thread_store_path.read_bytes().decode("utf-8")
+    assert "\r" not in text
+    assert json.loads(text)["微信:资源"]["thread_id"] == "thread-讨论"
+
+
+def test_wechat_cursor_state_publishes_utf8_lf_bytes(tmp_path: Path) -> None:
+    from app.channels.wechat import WechatChannel
+
+    channel = WechatChannel.__new__(WechatChannel)
+    channel._cursor_path = tmp_path / "wechat-cursor.json"
+    channel._get_updates_buf = "游标-1"
+
+    channel._save_state()
+
+    text = channel._cursor_path.read_bytes().decode("utf-8")
+    assert "\r" not in text
+    assert json.loads(text) == {"get_updates_buf": "游标-1"}
+
+
+def _method_calls(filename: str, class_name: str, method_name: str) -> list[ast.Call]:
+    module = ast.parse((CHANNELS / filename).read_text(encoding="utf-8"))
+    owner = next(node for node in module.body if isinstance(node, ast.ClassDef) and node.name == class_name)
+    method = next(node for node in owner.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == method_name)
+    return [node for node in ast.walk(method) if isinstance(node, ast.Call)]
+
+
+@pytest.mark.parametrize(
+    ("filename", "class_name", "method_name"),
+    [
+        ("discord.py", "DiscordChannel", "_persist_thread_mappings"),
+        ("wechat.py", "WechatChannel", "_save_state"),
+    ],
+)
+def test_json_channel_state_writers_publish_through_the_helper(filename: str, class_name: str, method_name: str) -> None:
+    """Platform-independent: the call shape, not just the bytes it happens to emit.
+
+    CI runs with ``PYTHONUTF8=1``, so a regression to ``write_text(...)`` without
+    ``encoding=`` would still produce valid UTF-8 there; only a source-level check
+    catches it on every platform.
+    """
+    calls = _method_calls(filename, class_name, method_name)
+    names = [call.func.attr if isinstance(call.func, ast.Attribute) else call.func.id for call in calls if isinstance(call.func, (ast.Attribute, ast.Name))]
+    assert "publish_bytes_atomically" in names, f"{filename}:{class_name}.{method_name} must publish through the helper"
+
+    for call in calls:
+        if not isinstance(call.func, ast.Attribute) or call.func.attr not in {"write_text", "write_bytes"}:
+            continue
+        keywords = {keyword.arg: keyword.value for keyword in call.keywords}
+        encoding = keywords.get("encoding")
+        assert isinstance(encoding, ast.Constant) and encoding.value == "utf-8", f"{filename}:{call.lineno} writes text without an explicit utf-8 encoding"

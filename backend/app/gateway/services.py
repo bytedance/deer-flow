@@ -164,6 +164,8 @@ _TERMINAL_RUN_STATUSES = {
 _TERMINAL_STREAM_RECOVERED = "recovered"
 _TERMINAL_STREAM_PRODUCER_EXPIRED = "producer_expired"
 
+# Includes same-thread create admission and metadata I/O; timeout rejects strict
+# starts and leaves non-strict starts without verified metadata (MCP fails closed).
 _THREAD_METADATA_SETUP_TIMEOUT_SECONDS = 5.0
 
 # Message metadata a scheduled launch puts on its prompt: the task, run and the
@@ -261,6 +263,18 @@ async def _ensure_thread_metadata(
     require_existing_thread: bool = False,
 ) -> dict[str, Any]:
     """Ensure an admitted run's thread exists without delaying task attachment."""
+    async with goal_thread_lock(record.thread_id):
+        return await _ensure_thread_metadata_locked(run_ctx, record, owner_user_id=owner_user_id, require_existing_thread=require_existing_thread)
+
+
+async def _ensure_thread_metadata_locked(
+    run_ctx: RunContext,
+    record: RunRecord,
+    *,
+    owner_user_id: str | None,
+    require_existing_thread: bool,
+) -> dict[str, Any]:
+    """Share create admission with HTTP while retaining detached task ownership."""
     thread_store = run_ctx.thread_store
     existing = await thread_store.get(record.thread_id)
     if existing is None and owner_user_id:
