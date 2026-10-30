@@ -481,6 +481,54 @@ async def test_personal_tool_guard_reuses_validation_and_rejects_file_replacemen
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("parameter", ["runtime", "deerflow_runtime"])
+async def test_personal_tool_guard_reads_the_injected_runtime_for_either_transport(personal_client, parameter):
+    """HTTP/SSE tools keep the adapter's ``runtime``; pooled stdio uses ``deerflow_runtime``."""
+    from typing import Annotated
+
+    from langchain_core.messages import AIMessage
+    from langchain_core.tools import InjectedToolArg, StructuredTool
+    from langgraph.graph import END, START, MessagesState, StateGraph
+    from langgraph.prebuilt import ToolNode
+
+    from deerflow.mcp.user_tools import _guard
+    from deerflow.tools.types import Runtime
+
+    assert create(personal_client, "alice").status_code == 200
+    server_name = next(iter(load_user_mcp_config("alice").mcp_servers))
+    calls = []
+
+    async def invoke_runtime(runtime: Annotated[Runtime | None, InjectedToolArg()] = None, **arguments):
+        calls.append(arguments)
+        return "ok"
+
+    async def invoke_deerflow_runtime(deerflow_runtime: Runtime | None = None, **arguments):
+        calls.append(arguments)
+        return "ok"
+
+    coroutine = invoke_runtime if parameter == "runtime" else invoke_deerflow_runtime
+    tool = _guard(
+        StructuredTool(name="personal_test", description="Personal test", args_schema={"type": "object", "properties": {"runtime": {"type": "string"}}}, coroutine=coroutine),
+        "alice",
+        server_name,
+    )
+    builder = StateGraph(MessagesState, context_schema=dict)
+    builder.add_node("tools", ToolNode([tool]))
+    builder.add_edge(START, "tools")
+    builder.add_edge("tools", END)
+    graph = builder.compile()
+    message = AIMessage(content="", tool_calls=[{"name": "personal_test", "args": {"runtime": "python"}, "id": "call-1", "type": "tool_call"}])
+
+    # No ambient user: only the injected runtime says who is calling.
+    result = await graph.ainvoke({"messages": [message]}, context={"user_id": "alice"})
+    assert result["messages"][-1].content == "ok"
+    assert calls == [{"runtime": "python"} if parameter == "deerflow_runtime" else {}]
+
+    with pytest.raises(ToolException, match="belongs to another user"):
+        await graph.ainvoke({"messages": [message]}, context={"user_id": "bob"})
+
+
+@pytest.mark.asyncio
 async def test_background_calls_resolve_only_persisted_task_owner(personal_client, monkeypatch):
     import deerflow.mcp.user_config as user_config
     from deerflow.mcp.task_tool_caller import McpTaskToolCaller
