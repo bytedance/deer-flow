@@ -23,16 +23,26 @@ For those launches, export the effective `DEER_FLOW_HOME` when collecting a bund
 and ensure the checkout `.env` does not override it. Tests clear all three runtime
 path variables and compare storage defaults with the launcher's actual shell blocks.
 
-## Dependency Check Diagnostics
+## Dependency and Label Checks
 
-`check_extension.py` checks wheels with Gateway's asset validator.
-CI builds and checks all bundled examples in `extension-package-check.yml`.
-Tests: `backend/tests/test_extension_check_script.py`.
+`check_extension.py`: Gateway wheel asset validator; example CI:
+`extension-package-check.yml`. Tests: `backend/tests/test_extension_check_script.py`.
 
-`check.py` decodes captured output as UTF-8 with replacement and runs pnpm with
-`PYTHONIOENCODING=utf-8:backslashreplace`. Preserve Unicode diagnostics and exit
-status in `make check`, independently of the host locale.
-Tests: `backend/tests/test_check_script.py`.
+`check.py`: UTF-8 replacement decoding; pnpm uses
+`PYTHONIOENCODING=utf-8:backslashreplace`. Preserve `make check` Unicode/exit
+status in any locale. Tests: `backend/tests/test_check_script.py`.
+
+`doctor.py`/`setup_wizard.py`: at `main` start, retain stdout encoding with
+`errors="replace"`; guard `reconfigure` for embedded/captured streams.
+Legacy-terminal/pipe tests: `backend/tests/test_setup_script_encoding.py`.
+
+`sync_labels.py`: guard stdout/stderr `reconfigure` at `main` start. Retain
+TTY encodings; intentionally force UTF-8 on redirects for CI logs. Both use
+`errors="backslashreplace"`; decode `gh` output as UTF-8 with replacement.
+Tests (stub `gh`/`yaml`, ASCII stdio): `backend/tests/test_sync_labels_script.py`.
+
+`check_label_declarations.py`: stdlib-only; reject unsupported expressions.
+Tests: `backend/tests/test_label_declarations.py`.
 
 ## Manual Claude OAuth Export
 
@@ -45,6 +55,20 @@ trimming its contents. Offline CLI coverage:
 `backend/tests/test_claude_keychain_export.py`.
 
 ## Service Startup Contracts
+
+`serve.sh` reads `DEER_FLOW_GATEWAY_STARTUP_TIMEOUT` after root `.env` for
+local Gateway port readiness (positive integer seconds, default 30). Reject
+invalid values before cleanup/startup except `--stop`; keep frontend/nginx waits.
+Launcher/wait-loop tests (processes, readiness and time stubbed):
+`backend/tests/test_serve_gateway_startup_timeout.py`.
+
+Both launchers call `sandbox-mode.sh` via Bash; keep it Bash/awk-only.
+Dev passes `$PROJECT_ROOT/config.yaml`; prod passes `$DEER_FLOW_CONFIG_PATH`.
+For AIO, omitted/blank/empty-quoted/YAML-null URLs (including comments) select
+`aio`; preserve quoting so `"null"` and `"~"` remain nonempty strings.
+This is not a general YAML parser or URL validator; aliases, multiline values
+and environment expansion are out of scope. Offline helper and launcher tests:
+`backend/tests/test_docker_sandbox_mode_detection.py`.
 
 The setup wizard offers Webz.io as a news-only `web_search` provider using
 `deerflow.community.webz.tools:web_search_tool` and `WEBZ_API_KEY`. Keep its
@@ -64,6 +88,22 @@ indentless lists are supported; nested option names and block-scalar text
 must not enable the browser extra. Keep the detector standard-library-only
 because it runs before dependency synchronization. Read UTF-8 config files
 with or without a leading BOM so the first section remains detectable.
+`detect_uv_extras.py` checks an existing `DEER_FLOW_CONFIG_PATH` first, then
+`DEER_FLOW_PROJECT_ROOT/config.yaml`, before the legacy checkout candidates.
+Keep this lookup standard-library-only; test shadowing checkout configs and
+the CLI under `python -S` in `backend/tests/test_detect_uv_extras.py`.
+For Discord and Buzz, detect the provider extra when either legacy
+`channels.<provider>.enabled` is true or both `channel_connections.enabled`
+and `channel_connections.<provider>.enabled` are true. Keep these gates aligned
+with `enabled_transport_providers()` in the channel service, including setup
+wizard output. The provider set includes only channel providers declared in
+`backend/pyproject.toml` under `[project.optional-dependencies]`; update it when
+a channel gains or loses an extra. Providers whose SDKs are core dependencies
+must not be added to this set. Nonempty `UV_EXTRAS` continues to override
+config-derived extras.
+`serve.sh`'s config-presence gate also accepts the project-root file when the
+checkout has no config. `tests/test_serve_config_presence.py` runs the full
+launcher through dependency detection with service operations stubbed.
 `setup-sandbox.sh` also strips the leading BOM and normalizes CRLF before selecting the image;
 keep its shell filter compatible with GNU and BSD sed.
 An Apple Container pull that succeeds on macOS must not fail the setup step
@@ -178,6 +218,8 @@ multi-instance gate and every endpoint/data root inside its state dir
 Unless `keep_channels` is requested, disable provider flags in both `channels`
 and `channel_connections`; UI credentials can otherwise connect a bot
 later. Preserve `channels.leader_lease` and connection metadata.
+`--out` is a file path for `render-config`, `secrets` and `nginx-conf`; a
+directory, or a file ancestor, is rejected before any write.
 
 ## Shell Script Invocation Contract
 
@@ -188,12 +230,24 @@ likewise prefix the target with `bash`. This keeps documented `make` commands
 working when a source archive, `core.fileMode=false`, or a non-POSIX filesystem
 does not preserve executable bits.
 
+The Windows wrapper resolves `bash.exe` under the Git installation root, which
+is the parent of `cmd/`, `bin/`, or `mingw64/bin/` depending on the distribution:
+Git for Windows puts `git.exe` in `cmd/`, while PortableGit and GitHub Desktop
+put it in `mingw64/bin/`. Bash and sh stay at `<root>/bin` and `<root>/usr/bin`
+in both layouts. `backend/tests/support/shell.py` mirrors the same rule for the
+shell-script suites.
+
 `make clean` deletes `backend/.deer-flow` (database, users, threads, uploads,
 secrets), which both compose stacks mount into `deer-flow-gateway`. Its recipe
 runs `check-data-not-in-use.sh` before `make stop` (which would stop a live
 stack's sandboxes) and refuses while that container runs; an absent or
 unreachable Docker passes. `make stop` must still run before the delete: it
 stops `deer-flow-sandbox*` containers, whose thread mounts live in that tree.
+`cleanup-containers.sh` must verify an anchored `<prefix>-` name after Docker's
+substring `name=` filter, and use the same rule for Apple Container IDs. Parse
+Apple Container JSON without interpolating the prefix into Python source; bad
+entries must not hide later valid containers. Offline stub coverage lives in
+`backend/tests/test_cleanup_containers_script.py`.
 `RUNTIME_DATA_CONTENTS` feeds both the help line and the deletion notice.
 
 Host-side pnpm calls must go through `scripts/pnpm.py`. With native Windows
@@ -426,7 +480,7 @@ Memory backend async boundary:
   `failure_policy.read: fail_closed`; other recall errors preserve the existing
   log-and-empty-context behavior.
 
-CI runs these regression tests for every pull request via [.github/workflows/backend-unit-tests.yml](../.github/workflows/backend-unit-tests.yml).
+CI: `.github/workflows/backend-unit-tests.yml` runs these tests on every PR.
 
 Agentic browser sessions are process-local. Browser use is refused when the Gateway runs
 more than one worker process, because ordinary uvicorn worker dispatch does not provide
@@ -446,11 +500,19 @@ The support bundle's `extensions_config.json` reader accepts UTF-8 with or
 without a leading BOM, matching the runtime loader. Preserve redaction and
 avoid flagging a valid BOM-prefixed file as a syntax error in triage output.
 
-Support-bundle and doctor tool captures explicitly decode UTF-8 with replacement
-for invalid bytes. Set `PYTHONIOENCODING=utf-8:backslashreplace` only in the copied
-support-bundle child environment so Python helpers can print Unicode and escape
-surrogates without aborting diagnostics or changing the parent.
-Keep exit codes, timeouts and redaction intact; do not rely on the host locale.
-Regressions use real local children, including ASCII/GBK capture defaults,
-nonzero exits, surrogate characters and malformed output, without invoking
-provider diagnostics. Doctor covers both `_run` streams and pnpm runner capture.
+Support-bundle/doctor captures use UTF-8 with replacement, preserving exit codes,
+timeouts and redaction. Only copied support-bundle child env sets
+`PYTHONIOENCODING=utf-8:backslashreplace` for Unicode/surrogates; parent unchanged.
+Offline real-child tests: ASCII/GBK defaults, nonzero exits, surrogates,
+invalid bytes; no provider calls. Doctor covers both `_run` streams/pnpm capture.
+
+## Production dotenv selection
+
+`deploy.sh` resolves `DEER_FLOW_COMPOSE_ENV_FILE` from the checkout before
+creating state or probing secrets. Keep Compose interpolation, Gateway and
+provisioner env files, secret probes, and UV_EXTRAS discovery on that one path.
+Normalize host paths for Git Bash; quote path arguments rather than sourcing
+dotenv files. Unset/empty selection preserves the optional root .env default;
+explicit invalid files reject build/start before Docker. Stopping remains
+possible after the selected file is removed. Tests: `test_deploy_env_file.py`
+and the existing deployment/Compose suites.

@@ -10,6 +10,10 @@ MAX_FRAME = 48 * 1024
 
 BOOT = r"""
 (() => {
+  // Replay must not observe wall time or host randomness. These globals are
+  // unavailable; callers pass timestamps and random seeds explicitly in args.
+  Object.defineProperty(globalThis,'Date',{value:undefined,writable:false,configurable:false});
+  Object.defineProperty(Math,'random',{value:()=>{throw new Error('Pass randomness in args');},writable:false,configurable:false});
   const encode=JSON.stringify.bind(JSON), decode=JSON.parse.bind(JSON);
   const requests=[], pending=new Map(); let serial=0, final=null;
   const clone=value=>decode(encode(value));
@@ -18,6 +22,12 @@ BOOT = r"""
     if(pending.size>=64){reject(new Error('Pending call limit'));return;}
     const id=++serial; requests.push({type:'agent',id,payload:clone(payload)});pending.set(id,{resolve,reject});
   })),writable:false,configurable:false});
+  for(const name of ['pause','humanCheckpoint','captureArtifact','readArtifact']) {
+    Object.defineProperty(globalThis,name,{value:Object.freeze(payload=>new Promise((resolve,reject)=>{
+      if(pending.size>=64){reject(new Error('Pending call limit'));return;}
+      const id=++serial; requests.push({type:name,id,payload:clone(payload)});pending.set(id,{resolve,reject});
+    })),writable:false,configurable:false});
+  }
   Object.defineProperty(globalThis,'parallel',{value:Object.freeze(tasks=>{
     if(!Array.isArray(tasks)||tasks.length>64) throw new Error('Parallel item limit');
     return Promise.all(tasks.map(task=>task()));
@@ -83,12 +93,15 @@ def main():
     launch(request["script"], json.dumps(request["args"]))
     while True:
         # Bound each JS turn and require a parent round trip between batches.
+        idle = False
         for _ in range(64):
             if not ctx.execute_pending_job():
+                idle = True
                 break
         messages = json.loads(take())
         outcome = result()
-        write({"messages": messages, "outcome": json.loads(outcome) if outcome else None})
+        # idle: the job queue drained, so only a response can make further progress.
+        write({"messages": messages, "outcome": json.loads(outcome) if outcome else None, "idle": idle})
         if outcome:
             return
         response = read()

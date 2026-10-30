@@ -57,6 +57,7 @@ import {
 } from "@/core/skills";
 import { useSkills } from "@/core/skills/hooks";
 import { pathOfThread } from "@/core/threads/utils";
+import { isIMEComposing } from "@/lib/ime";
 import { cn } from "@/lib/utils";
 
 import { WorkspaceChangeBadge } from "../changes";
@@ -70,7 +71,10 @@ import { Tooltip } from "../tooltip";
 
 import { KnowledgeScopeSummary } from "./knowledge-scope-summary";
 import { MarkdownContent } from "./markdown-content";
-import { createMarkdownLinkComponent } from "./markdown-link";
+import {
+  createMarkdownLinkComponent,
+  MessageArtifactPathsContext,
+} from "./markdown-link";
 import { MessageReasoning } from "./message-reasoning";
 
 function FeedbackButtons({
@@ -589,6 +593,7 @@ function MessageContent_({
                 editState.onDraftChange(event.currentTarget.value)
               }
               onKeyDown={(event) => {
+                if (isIMEComposing(event)) return;
                 if (event.key === "Escape") {
                   event.preventDefault();
                   editState.onCancel();
@@ -649,12 +654,14 @@ function MessageContent_({
           {reasoningContent}
         </MessageReasoning>
       )}
-      <MarkdownContent
-        content={contentToDisplay}
-        isLoading={isLoading}
-        className="my-3"
-        components={components}
-      />
+      <MessageArtifactPathsContext.Provider value={artifactPaths}>
+        <MarkdownContent
+          content={contentToDisplay}
+          isLoading={isLoading}
+          className="my-3"
+          components={components}
+        />
+      </MessageArtifactPathsContext.Provider>
       <CitationSourcesPanel sources={citationSources} />
       <KnowledgeSourcesPanel content={contentToDisplay} />
       {message.type === "ai" && showWorkspaceChanges && (

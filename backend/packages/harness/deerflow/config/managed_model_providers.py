@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 _OPENAI = "langchain_openai:ChatOpenAI"
 _DEEPSEEK = "deerflow.models.patched_deepseek:PatchedChatDeepSeek"
 _MINIMAX = "deerflow.models.patched_minimax:PatchedChatMiniMax"
+MOONSHOT_K31_MODELS = frozenset({"kimi-k3.1-pro", "kimi-k3.1-pro-highspeed"})
 
 
 @dataclass(frozen=True)
@@ -95,7 +96,7 @@ def _capabilities(provider: str, model: str) -> dict[str, Any]:
             when_thinking_enabled={"extra_body": {"thinking": {"type": "enabled"}}},
             when_thinking_disabled={"extra_body": {"thinking": {"type": "disabled"}}},
         )
-        result["reasoning"]["effort"] = {"values": ["high", "max"], "default": "high", "aliases": {"minimal": "high", "low": "high", "medium": "high"}}
+        result["reasoning"]["effort"] = {"values": ["low", "medium", "high", "max", "xhigh"], "default": "low", "aliases": {"minimal": "low"}}
     elif provider in {"zai", "zhipu-cn"} and model in {"glm-4.5", "glm-4.6", "glm-4.7", "glm-5.3-flash"}:
         result.update(
             reasoning={"thinking": "optional", "dialect": "openai_extra_body", "history": "preserve"},
@@ -116,6 +117,11 @@ def _capabilities(provider: str, model: str) -> dict[str, Any]:
             temperature=1.0,
             when_thinking_enabled={"extra_body": {"thinking": {"type": "enabled"}}, "temperature": 1.0},
             when_thinking_disabled={"extra_body": {"thinking": {"type": "disabled"}}, "temperature": 0.6},
+        )
+    elif provider == "moonshot-cn" and model in MOONSHOT_K31_MODELS:
+        result.update(
+            supports_vision=True,
+            reasoning={"thinking": "required", "dialect": "none", "history": "preserve", "effort": {"values": ["low", "high", "max"], "default": "max"}},
         )
     elif provider in {"minimax", "minimax-cn"} and model in {"MiniMax-M2.7", "MiniMax-M2.7-highspeed"}:
         result["reasoning"] = {"thinking": "required", "dialect": "none", "history": "preserve"}

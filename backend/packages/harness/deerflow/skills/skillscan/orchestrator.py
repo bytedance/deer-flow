@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import ast
 import io
+import json
 import logging
+import math
 import posixpath
 import re
 import stat
@@ -24,7 +26,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 from urllib.parse import urlsplit
 
-from deerflow.skills.package_files import is_code_file, is_executable_binary_prefix
+from deerflow.skills.package_files import EXEC_SNIFF_BYTES, executable_binary_magic, is_code_file, is_executable_binary_prefix
 from deerflow.skills.package_paths import is_eval_fixture_skill_md
 from deerflow.skills.skillscan.models import (
     FindingSeverity,
@@ -126,6 +128,8 @@ _PLACEHOLDER_VALUES = {"", "x", "xx", "xxx", "xxxx", "changeme", "change-me", "e
 # word (`tokenizer`, `secretive`) still stays quiet, so this is not a blanket match.
 _SECRET_ASSIGNMENT_RE = re.compile(r"(?im)(?<![A-Za-z0-9])(token|password|passwd|api[_-]?key|secret|credential)s?\b[\"']?\s*[:=]\s*[\"']?([^\"'\s#]+)")
 _SECRET_ASSIGNMENT_NAME_RE = re.compile(r"(?i)^(?:token|password|passwd|api[_-]?key|secret|credential)s?$")
+# Model-usage counters share the credential suffix but hold integer measurements.
+_TOKEN_COUNT_NAMES = {"tokens", "total_tokens", "input_tokens", "output_tokens", "prompt_tokens", "completion_tokens", "cached_tokens", "reasoning_tokens"}
 _SECRET_TOKEN_PATTERNS = tuple(
     re.compile(pattern)
     for pattern in (
@@ -177,7 +181,13 @@ _ENV_STANDALONE_OPTIONS = {"0", "i", "v"}
 _ENV_EXIT_OPTIONS = {"--help", "--version", "--null"}
 _ENV_MAX_SPLIT_STEPS = 256
 _ENV_MAX_SPLIT_CHARS = 65_536
-_SHELL_NAMES = {"bash", "dash", "fish", "sh", "zsh"}
+_SHELL_NAMES = {"ash", "bash", "csh", "dash", "fish", "ksh", "mksh", "sh", "tcsh", "zsh"}
+# The download-pipe matcher below and the structural `env` fallback share this one
+# vocabulary: a name listed here is matched after a pipe, after an interpreter path
+# and behind `env`/`sudo`. Every entry starts with a distinct character, which is
+# what keeps the alternation free of the overlapping repeats the pattern above
+# documents, so a new name has to keep that property.
+_SHELL_NAME_ALTERNATION = "|".join(sorted(_SHELL_NAMES))
 _SHELL_SEPARATORS = {";", "&", "&&", "|", "||", "(", ")", "`", "\n"}
 # The head of a heredoc redirection: `<<` or `<<-`, an optional quoted delimiter,
 # then the delimiter word. Requiring a leading letter/underscore keeps arithmetic
@@ -262,7 +272,7 @@ def scan_archive_preflight(archive_path: Path) -> ScanResult:
                     continue
                 try:
                     with zf.open(info) as member:
-                        prefix = member.read(8)
+                        prefix = member.read(EXEC_SNIFF_BYTES)
                 except Exception as e:
                     scanner_errors.append(f"{normalized}: failed to read archive member prefix: {e}")
                     continue
@@ -313,7 +323,7 @@ def scan_skill_dir(skill_dir: Path) -> ScanResult:
             findings.append(_finding("package-undecodable-script", file=rel_path, evidence=evidence))
             # A decoded executable is string-table noise that reads as secrets
             # and URLs; its CRITICAL executable finding already blocks it.
-            if is_executable_binary_prefix(file_bytes[:8]):
+            if is_executable_binary_prefix(file_bytes[:EXEC_SNIFF_BYTES]):
                 continue
 
         try:
@@ -354,8 +364,8 @@ def _scan_file_package_properties(rel_path: str, file_bytes: bytes, file_size: i
         findings.append(_finding("package-git-directory", file=rel_path, evidence=".git"))
     if _is_nested_archive_name(rel_path) or _looks_like_archive(file_bytes):
         findings.append(_nested_archive_finding(rel_path, file_bytes[:8], lambda: file_bytes, []))
-    if is_executable_binary_prefix(file_bytes[:8]):
-        findings.append(_finding("package-executable-binary", file=rel_path, evidence=_binary_magic_evidence(file_bytes[:8])))
+    if is_executable_binary_prefix(file_bytes[:EXEC_SNIFF_BYTES]):
+        findings.append(_finding("package-executable-binary", file=rel_path, evidence=_binary_magic_evidence(file_bytes[:EXEC_SNIFF_BYTES])))
     return findings
 
 
@@ -400,9 +410,52 @@ def _scan_secret_assignments_by_text(rel_path: str, text: str) -> list[SecurityF
     """``name[:=]value`` sweep for line-oriented text, and for Python that will not parse."""
     for match in _SECRET_ASSIGNMENT_RE.finditer(text):
         value = match.group(2).strip()
+        if _is_token_usage_measurement(text, match):
+            continue
         if not _looks_like_placeholder(value):
             return [_finding_from_match("secret-env-assignment", rel_path, text, match)]
     return []
+
+
+def _is_token_usage_measurement(text: str, match: re.Match[str]) -> bool:
+    """Recognize typed usage counts and benchmark summaries, not credentials."""
+    if match.group(1).lower() != "token" or text[match.end(1) : match.end(1) + 1].lower() != "s":
+        return False
+    start = match.start(1)
+    # Recover the entire key: matching only its suffix would also exempt an
+    # unrelated credential such as access_total_tokens. Scan only this key.
+    while start and (text[start - 1].isalnum() or text[start - 1] in "_.-"):
+        start -= 1
+    end = match.end(1) + 1
+    name = text[start:end].lower()
+    if name not in _TOKEN_COUNT_NAMES:
+        return False
+    if text[end : end + 1] in {'"', "'"} and (not start or text[start - 1] != text[end]):
+        return False
+    value_start = match.start(2)
+    quote = text[value_start - 1] if value_start else ""
+    # The text sweep includes an adjacent JSON delimiter in the value. Require
+    # the whole value to be numeric so strings and trailing payloads stay visible.
+    if quote not in {'"', "'"} and re.fullmatch(r"[0-9]+[,}\]]?", match.group(2)):
+        return True
+    if name != "tokens":
+        return False
+    # Benchmark summaries use four numeric statistics or a signed numeric delta.
+    # Bound parsing independently of file size; other containers remain findings.
+    if quote == '"':
+        value_start -= 1
+    try:
+        value, _ = json.JSONDecoder(object_pairs_hook=tuple).raw_decode(text[value_start : value_start + 512])
+    except ValueError:
+        return False
+    if isinstance(value, str):
+        return re.fullmatch(r"[+-][0-9]+(?:\.[0-9]+)?", value) is not None
+    return (
+        isinstance(value, tuple)
+        and len(value) == 4
+        and {key for key, _ in value} == {"mean", "stddev", "min", "max"}
+        and all(type(number) in {int, float} and number >= 0 and (isinstance(number, int) or math.isfinite(number)) for _, number in value)
+    )
 
 
 def _python_secret_assignment_target(node: ast.expr) -> str | None:
@@ -1150,7 +1203,7 @@ def _scan_shell(rel_path: str, text: str) -> list[SecurityFinding]:
         # the two branches mutually exclusive, so each token is consumed in
         # exactly one way and a failing chain stays linear.
         r"|-(?![acCDghprRtTuU]\b)\S+(?:\s|\\\r?\n)+)*?)?(?:/usr/(?:local/)?bin/|/bin/)?"
-        r"(?:bash|zsh|dash|fish|sh)\b",
+        rf"(?:{_SHELL_NAME_ALTERNATION})\b",
         text,
     ):
         findings.append(_finding_from_match("shell-curl-pipe-shell", rel_path, text, match))
@@ -1249,7 +1302,7 @@ def _nested_zip_contains_executable(data: bytes) -> bool:
                     continue
                 try:
                     with nested.open(info) as member:
-                        if is_executable_binary_prefix(member.read(8)):
+                        if is_executable_binary_prefix(member.read(EXEC_SNIFF_BYTES)):
                             return True
                 except Exception:
                     continue
@@ -1345,9 +1398,10 @@ def _looks_like_archive(file_bytes: bytes) -> bool:
 
 
 def _binary_magic_evidence(prefix: bytes) -> str:
-    if prefix.startswith(b"\x7fELF"):
+    magic = executable_binary_magic(prefix) or b""
+    if magic.startswith(b"\x7fELF"):
         return "ELF"
-    if prefix.startswith(b"MZ"):
+    if magic.startswith(b"MZ"):
         return "PE"
     return "Mach-O"
 
@@ -1511,7 +1565,12 @@ def _call_is_network_sink(call_name: str) -> bool:
 # narrowing the model has to change that test rather than change behaviour silently.
 #
 # Compound bodies are still walked from isolated entry-state copies so `if True:` is not a
-# universal bypass, but ambiguous bindings are dropped rather than joined. Every AST visit
+# universal bypass. A part that cannot follow a sibling's binding -- an `if` branch, the one
+# `match` case that runs, a `try` or loop body -- keeps the enclosing handle live and applies its
+# own rebinding in source order; parts that can follow a sibling (a loop or `try` `else`, a
+# handler, a `finally`) still start with those names dropped, so a rebind on one path cannot be
+# read as live on the next. Names the statement binds as it dispatches -- a loop target, an
+# `except ... as` name, a `match` capture -- are always dropped first. Every AST visit
 # and copied scope entry consumes a deterministic work budget, and the walk stops as soon
 # as it finds one sink. This bounds the branch-copy cost on untrusted source.
 
@@ -1532,7 +1591,6 @@ _PYTHON_CLIENT_SPECS = {
     "aiohttp.ClientSession": _ClientSpec(frozenset({"request", "get", "post", "put", "patch", "delete", "head", "options"}), async_context=True),
 }
 _PYTHON_CLIENT_CONSTRUCTORS = frozenset(_PYTHON_CLIENT_SPECS)
-_PYTHON_CLIENT_SINK_METHODS = frozenset().union(*(spec.methods for spec in _PYTHON_CLIENT_SPECS.values()))
 _PYTHON_CLIENT_ANALYSIS_BUDGET = 100_000
 _PYTHON_SCOPE_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
 _PYTHON_COMPREHENSION_NODES = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
@@ -1680,19 +1738,31 @@ def _walk_client_scope(node: ast.AST, scope: _ClientScope, inherited: _ClientSco
 
 
 def _walk_client_branching(node: ast.AST, scope: _ClientScope, inherited: _ClientScope, analysis: _ClientAnalysis) -> None:
-    """Analyze a compound statement without deciding which of its parts run, or in what order.
+    """Analyze a compound statement part by part, dropping only the bindings that can already be stale.
 
-    Every name the statement may bind is dropped *before* any body is walked, not after. Dropping
-    afterwards would be wrong for the parts that run after a sibling has already rebound the name --
-    a `finally` after a handler replaced the handle, a later `except*` clause, a second loop
-    iteration -- and each of those disagreements is a benign file hard-blocked as `CRITICAL`.
-    Ordering the parts instead of dropping is the control-flow interpreter this signal is not.
+    A name is dropped before a part is walked when some *other* part of the same statement can run
+    before it and rebind that name: an `else` after a loop body, a `finally` after a handler replaced
+    the handle, a later `except*` clause. Reading such an earlier path's rebind as still live is a
+    benign file hard-blocked as `CRITICAL`.
 
-    Bodies are still walked, each from its own copy, so a construction inside one branch cannot leak
-    into a sibling and a sink inside a branch is still seen. What is lost is a name that the same
-    statement both calls and rebinds; that is the documented false negative.
+    A part that cannot follow a sibling -- a branch of an `if`/`elif`/`else` chain, the one `match`
+    case that runs, a `try` body, a loop body -- is walked with the enclosing handle intact, and the
+    part then applies its own rebinding in source order. That is the rule the top level already uses,
+    where a rebind after a call cannot retract it, and it is what stops a call that really happened
+    from disappearing because a later statement in that same part rebinds the name (issue #4296,
+    case 1).
+
+    Names the statement binds as it dispatches -- a loop target, an `except ... as` name, a `match`
+    capture -- are dropped after the header is walked and before every part, because the header is
+    evaluated while those bindings do not exist yet: a sink in `for s in s.post(...)` really happens
+    under the enclosing handle. Everything the statement may bind is then dropped from the enclosing
+    scope once its parts are walked, so a binding made inside a part never reaches the code that
+    follows the statement.
     """
-    _drop_client_bindings(scope, _branching_bound_names(node, analysis))
+    entry_names = _branching_entry_bound_names(node, analysis)
+    # Names rebound by ordinary statements inside the parts: which part ran is undecided here, so they
+    # stay dropped for the parts that can follow a sibling and live for the parts that cannot.
+    sibling_names = _branching_bound_names(node, analysis) - entry_names
     for header in _branching_header_exprs(node):
         walrus_names = _walrus_target_names(header, analysis)
         if walrus_names:
@@ -1701,11 +1771,13 @@ def _walk_client_branching(node: ast.AST, scope: _ClientScope, inherited: _Clien
         _walk_client_scope(header, scope, inherited, analysis)
         if analysis.found is not None:
             return
-    for body in _branching_bodies(node):
-        branch_scope = scope.copy_without(analysis)
+    _drop_client_bindings(scope, entry_names)
+    for body, follows_sibling in _branching_parts(node):
+        branch_scope = scope.copy_without(analysis, sibling_names if follows_sibling else None)
         _walk_client_statements(body, branch_scope, inherited, analysis)
         if analysis.found is not None:
             return
+    _drop_client_bindings(scope, entry_names | sibling_names)
 
 
 def _branching_header_exprs(node: ast.AST) -> list[ast.AST]:
@@ -1720,20 +1792,54 @@ def _branching_header_exprs(node: ast.AST) -> list[ast.AST]:
     return []  # `try` has no header; handler types run only when an exception was raised
 
 
-def _branching_bodies(node: ast.AST) -> list[list[ast.AST]]:
+def _branching_parts(node: ast.AST) -> list[tuple[list[ast.AST], bool]]:
+    """The statement's parts, each tagged with whether a sibling part can run before it.
+
+    `False` marks a part that starts from the state at the statement itself: the branches of an
+    `if`/`elif`/`else` chain are mutually exclusive, only one `match` case runs, and a `try` body or a
+    loop body is the first thing its statement runs. A binding made in some other part cannot be the
+    value this part starts from, so an enclosing handle stays live here.
+
+    `True` marks a part that can follow a sibling's binding: a loop or `try` `else`, a handler after
+    its `try` body, a later `except*` clause, and a `finally` after any of them.
+    """
     if isinstance(node, (ast.Try, ast.TryStar)):
         # A handler's `type` expression and its body run on the same path, so they share one copy.
         handlers = [[*([handler.type] if handler.type is not None else []), *handler.body] for handler in node.handlers]
-        return [node.body, *handlers, node.orelse, node.finalbody]
+        return [(node.body, False), *((body, True) for body in [*handlers, node.orelse, node.finalbody])]
     if isinstance(node, ast.Match):
-        return [[*([case.guard] if case.guard is not None else []), *case.body] for case in node.cases]
+        return [([*([case.guard] if case.guard is not None else []), *case.body], False) for case in node.cases]
     if isinstance(node, ast.If):
-        return [node.body, node.orelse]
+        return [(node.body, False), (node.orelse, False)]
     if isinstance(node, (ast.For, ast.AsyncFor)):
-        return [node.body, node.orelse]
+        return [(node.body, False), (node.orelse, True)]
     if isinstance(node, ast.While):
-        return [node.body, node.orelse]
+        return [(node.body, False), (node.orelse, True)]
     return []
+
+
+def _branching_bodies(node: ast.AST) -> list[list[ast.AST]]:
+    return [body for body, _follows_sibling in _branching_parts(node)]
+
+
+def _branching_entry_bound_names(node: ast.AST, analysis: _ClientAnalysis) -> set[str]:
+    """Names the statement binds as it dispatches, never from a statement inside one of its parts.
+
+    These are not order-dependent: a loop target, an exception name and a `match` capture hold a new
+    value before any body of the statement runs, so an enclosing handle under the same name is already
+    gone for every part walked below. Dropping them here rather than with the rest is what lets a
+    later sink in the same part still be seen.
+    """
+    names: set[str] = set()
+    declared: set[str] = set()
+    if isinstance(node, (ast.For, ast.AsyncFor)):
+        names.update(_client_assignment_target_names(node.target))
+    if isinstance(node, (ast.Try, ast.TryStar)):
+        names.update(handler.name for handler in node.handlers if handler.name)
+    if isinstance(node, ast.Match):
+        for case in node.cases:
+            _collect_client_scope_bindings(case.pattern, names, declared, analysis)
+    return names - declared
 
 
 def _branching_bound_names(node: ast.AST, analysis: _ClientAnalysis) -> set[str]:

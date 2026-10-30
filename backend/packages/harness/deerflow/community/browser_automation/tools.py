@@ -17,12 +17,16 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import logging
+import os
 import re
+import stat
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
+from uuid import uuid4
 
 from langchain.tools import InjectedToolCallId, tool
 from langchain_core.messages import ToolMessage
@@ -35,6 +39,7 @@ from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.constants import BROWSER_FRAMES_DIRNAME
 from deerflow.tools.types import Runtime
 from deerflow.utils.atomic_write import publish_bytes_atomically as _publish_bytes_atomically
+from deerflow.utils.output_names import output_name_candidates
 
 from .session import BrowserSession, BrowserSessionManager, PageSnapshot, ScreenshotType, get_browser_session_manager
 
@@ -48,6 +53,8 @@ _OUTPUTS_VIRTUAL_PREFIX = f"{VIRTUAL_PATH_PREFIX}/outputs"
 _BROWSER_FRAMES_DIRNAME = BROWSER_FRAMES_DIRNAME
 _FRAMES_VIRTUAL_PREFIX = f"{_OUTPUTS_VIRTUAL_PREFIX}/{_BROWSER_FRAMES_DIRNAME}"
 _SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
+# Without no-follow support, os.link may follow a symlink at the staged name.
+_LINK_CAN_SKIP_SYMLINKS = os.link in os.supports_follow_symlinks
 
 
 @dataclass(frozen=True)
@@ -116,17 +123,23 @@ class _SessionLease:
         self._manager.release_session(self._thread_id, self.session)
 
 
-def _resolve_session(runtime: Runtime, tool_name: str) -> _SessionLease:
-    # Launch config (headless/viewport/timeout/cdp_url) is read from a single
-    # canonical source — always ``browser_navigate`` — regardless of which tool
-    # first creates the session. ``get_session`` caches per thread and ignores
-    # these params for later callers, so keying launch config off the calling
-    # tool made it "first tool to run wins": a ``headless: false`` set only on
-    # ``browser_navigate`` was silently dropped if another tool (or the live WS)
-    # initialized the session first. ``tool_name`` is retained for callers that
-    # read their own non-launch config (e.g. ``browser_get_text``'s max_chars).
-    del tool_name
-    cfg = _get_tool_config("browser_navigate")
+async def _launch_config() -> dict:
+    """Read the session launch config off the event loop.
+
+    Launch config (headless/viewport/timeout/cdp_url) is read from a single
+    canonical source — always ``browser_navigate`` — regardless of which tool
+    first creates the session. ``get_session`` caches per thread and ignores
+    these params for later callers, so keying launch config off the calling
+    tool made it "first tool to run wins": a ``headless: false`` set only on
+    ``browser_navigate`` was silently dropped if another tool (or the live WS)
+    initialized the session first. Config resolution stats and hashes the
+    config files, so it runs in a worker.
+    """
+    return await asyncio.to_thread(_get_tool_config, "browser_navigate")
+
+
+def _resolve_session(runtime: Runtime, cfg: dict) -> _SessionLease:
+    """Pin this thread's browser session, launching it with *cfg* (see :func:`_launch_config`)."""
     headless = _as_bool(cfg.get("headless"), True)
     timeout_ms = _as_int(cfg.get("timeout_ms"), 30000)
     width = _as_int(cfg.get("viewport_width"), 1280)
@@ -267,7 +280,7 @@ async def navigate_and_capture(*, thread_id: str | None, url: str, outputs_path:
     url_error = await asyncio.to_thread(_validate_url, "browser_navigate", url)
     if url_error:
         raise ValueError(url_error)
-    cfg = _get_tool_config("browser_navigate")
+    cfg = await _launch_config()
     manager = get_browser_session_manager()
     with manager.acquire_session(
         thread_id,
@@ -316,7 +329,7 @@ async def browser_navigate_tool(runtime: Runtime, url: str, tool_call_id: Annota
         url_error = await asyncio.to_thread(_validate_url, "browser_navigate", url)
         if url_error:
             return _tool_message(url_error, tool_call_id)
-        with _resolve_session(runtime, "browser_navigate") as session:
+        with _resolve_session(runtime, await _launch_config()) as session:
             snapshot = await session.navigate(url)
             screenshot = await _capture_step_screenshot(runtime, session, "navigate")
             return _snapshot_command(runtime, session, snapshot, tool_call_id, f"Navigated to {url}.", screenshot)
@@ -329,7 +342,7 @@ async def browser_navigate_tool(runtime: Runtime, url: str, tool_call_id: Annota
 async def browser_snapshot_tool(runtime: Runtime, tool_call_id: Annotated[str, InjectedToolCallId]) -> Command:
     """Re-read the current page's interactive elements without acting. Use this to refresh the [ref] element list after the page changed on its own (e.g. async content loaded) or when you are unsure of the current state."""
     try:
-        with _resolve_session(runtime, "browser_snapshot") as session:
+        with _resolve_session(runtime, await _launch_config()) as session:
             snapshot = await session.snapshot()
             screenshot = await _capture_step_screenshot(runtime, session, "snapshot")
             return _snapshot_command(runtime, session, snapshot, tool_call_id, "", screenshot)
@@ -350,7 +363,7 @@ async def browser_click_tool(runtime: Runtime, ref: int, tool_call_id: Annotated
         ref: The element reference number to click.
     """
     try:
-        with _resolve_session(runtime, "browser_click") as session:
+        with _resolve_session(runtime, await _launch_config()) as session:
             snapshot = await session.click(ref)
             screenshot = await _capture_step_screenshot(runtime, session, "click")
             return _snapshot_command(runtime, session, snapshot, tool_call_id, f"Clicked element [{ref}].", screenshot)
@@ -378,7 +391,7 @@ async def browser_type_tool(
         submit: When true, press Enter after typing to submit.
     """
     try:
-        with _resolve_session(runtime, "browser_type") as session:
+        with _resolve_session(runtime, await _launch_config()) as session:
             snapshot = await session.type_text(ref, text, submit=submit)
             action = f"Typed into element [{ref}] and submitted." if submit else f"Typed into element [{ref}]."
             screenshot = await _capture_step_screenshot(runtime, session, "type")
@@ -392,9 +405,9 @@ async def browser_type_tool(
 async def browser_get_text_tool(runtime: Runtime, tool_call_id: Annotated[str, InjectedToolCallId]) -> Command:
     """Read the visible text content of the current page. Use this to extract readable text after navigating/interacting, e.g. to quote results or summarize content. Output is truncated for large pages."""
     try:
-        with _resolve_session(runtime, "browser_get_text") as session:
-            cfg = _get_tool_config("browser_get_text")
-            max_chars = _as_int(cfg.get("max_chars"), 8000)
+        cfg = await asyncio.to_thread(_get_tool_config, "browser_get_text")
+        max_chars = _as_int(cfg.get("max_chars"), 8000)
+        with _resolve_session(runtime, await _launch_config()) as session:
             text = await session.get_text(max_chars=max_chars)
         return _tool_message(text or "(page has no visible text)", tool_call_id)
     except Exception as e:
@@ -406,7 +419,7 @@ async def browser_get_text_tool(runtime: Runtime, tool_call_id: Annotated[str, I
 async def browser_back_tool(runtime: Runtime, tool_call_id: Annotated[str, InjectedToolCallId]) -> Command:
     """Go back to the previous page in the browser session's history."""
     try:
-        with _resolve_session(runtime, "browser_back") as session:
+        with _resolve_session(runtime, await _launch_config()) as session:
             snapshot = await session.back()
             screenshot = await _capture_step_screenshot(runtime, session, "back")
             return _snapshot_command(runtime, session, snapshot, tool_call_id, "Went back.", screenshot)
@@ -440,6 +453,64 @@ def _write_screenshot(outputs_path: Path, name: str, content: bytes) -> str:
     return name
 
 
+def _publish_screenshot_no_overwrite(outputs_path: Path, name: str, content: bytes) -> str:
+    """Publish *content* under *name*, or its first free ``-1``, ``-2``, ... variant.
+
+    The outputs directory also holds the user's own deliverables, so a
+    screenshot never replaces an existing file. The complete capture is staged
+    under a hidden, exclusively created sibling (``0666 & ~umask``, like
+    ``Path.write_bytes``), then hard-linked onto each candidate name: the
+    ``os.link`` is the whole no-overwrite guard, failing with
+    :class:`FileExistsError` when the name exists as anything (a file, a
+    symlink, a concurrent capture), so no name is checked before it is claimed.
+    The final name never shows a partial capture. Staging shares the outputs
+    directory, so the link is same-filesystem; like Gateway uploads, outputs
+    need hard-link support and other link failures propagate.
+
+    The sandbox can write ``outputs/`` too, so it could swap the staged name for
+    a symlink to a host file before the link. The link does not follow symlinks
+    where supported, and the published name must be the regular-file inode
+    written here; anything else is removed and the capture fails. The staged
+    descriptor stays open until that check: an unlinked but open inode cannot be
+    freed, so a swapped-in file can never reuse its number (Linux filesystems
+    reuse a freed inode number at once) and pass as the capture.
+    """
+    outputs_path.mkdir(parents=True, exist_ok=True)
+    staged = outputs_path / f".{name}.{uuid4().hex}.tmp"
+    fd = os.open(staged, os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0), 0o666)
+    try:
+        try:
+            handle = os.fdopen(fd, "wb")
+        except BaseException:
+            os.close(fd)
+            raise
+        with handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+            staged_stat = os.fstat(handle.fileno())
+            for candidate in output_name_candidates(name):
+                destination = outputs_path / candidate
+                try:
+                    if _LINK_CAN_SKIP_SYMLINKS:
+                        os.link(staged, destination, follow_symlinks=False)
+                    else:
+                        os.link(staged, destination)
+                except FileExistsError:
+                    continue
+                published = os.lstat(destination)
+                if not stat.S_ISREG(published.st_mode) or not os.path.samestat(published, staged_stat):
+                    destination.unlink(missing_ok=True)
+                    raise OSError(f"Staged browser screenshot changed before publication: {staged.name}")
+                return candidate
+        raise FileExistsError(errno.EEXIST, "No free screenshot name", str(outputs_path / name))
+    finally:
+        try:
+            staged.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("Failed to remove staged browser screenshot: %s", staged, exc_info=True)
+
+
 @tool("browser_screenshot", parse_docstring=True)
 async def browser_screenshot_tool(
     runtime: Runtime,
@@ -454,17 +525,17 @@ async def browser_screenshot_tool(
     stateless page load.
 
     Args:
-        filename: Optional output filename (extension is forced to .png).
+        filename: Optional output filename (extension is forced to .png). An existing file is never replaced; the screenshot takes the next free name such as report-1.png.
         full_page: Capture the full scrollable page instead of just the viewport.
     """
     try:
         outputs_path = _thread_outputs_path(runtime)
         if isinstance(outputs_path, str):
             return _tool_message(outputs_path, tool_call_id)
-        with _resolve_session(runtime, "browser_screenshot") as session:
+        with _resolve_session(runtime, await _launch_config()) as session:
             content = await session.screenshot_bytes(full_page=full_page)
             name = _safe_screenshot_name(filename)
-            final_name = await asyncio.to_thread(_write_screenshot, outputs_path, name, content)
+            final_name = await asyncio.to_thread(_publish_screenshot_no_overwrite, outputs_path, name, content)
         virtual_path = f"{_OUTPUTS_VIRTUAL_PREFIX}/{final_name}"
         return Command(
             update={

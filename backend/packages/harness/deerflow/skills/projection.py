@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import shutil
+import stat
 import tempfile
 import threading
 from collections.abc import Iterator
@@ -18,6 +19,7 @@ from typing import TYPE_CHECKING
 
 from deerflow.skills.parser import parse_skill_file
 from deerflow.skills.types import SKILL_MD_FILE, Skill, SkillCategory
+from deerflow.utils.atomic_write import cleanup_failed_atomic_write
 from deerflow.utils.file_lock import retry_until_locked
 
 if TYPE_CHECKING:
@@ -33,9 +35,10 @@ except ImportError:  # pragma: no cover - Windows
 
 _locks_guard = threading.Lock()
 _process_locks: dict[Path, threading.RLock] = {}
+_held_projection_locks = threading.local()
 _MANIFEST_VERSION = 1
 _MAX_REBUILD_ATTEMPTS = 2
-_THREAD_PROJECTION_POLICY_VERSION = 1
+_THREAD_PROJECTION_POLICY_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -98,25 +101,59 @@ def _lock_for(path: Path) -> threading.RLock:
 
 
 @contextmanager
-def _projection_lock(root: Path) -> Iterator[None]:
+def _projection_lock(root: Path, *, timeout: float | None = None, check=None) -> Iterator[None]:
     """Serialize projection replacement in-process and across POSIX workers."""
+    import time
+
     lock_path = root.parent / f".{root.name}.projection.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     process_lock = _lock_for(lock_path)
-    with process_lock, lock_path.open("a", encoding="utf-8") as lock_file:
-        if fcntl is not None:
-            fcntl.flock(lock_file, fcntl.LOCK_EX)
-        else:  # pragma: no cover - Windows
-            lock_file.seek(0)
-            msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
-        try:
+    key = lock_path.resolve()
+    deadline = None if timeout is None else time.monotonic() + timeout
+    while not process_lock.acquire(timeout=0.05):
+        if check:
+            check()
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError("Skill projection lock timeout")
+    try:
+        held = getattr(_held_projection_locks, "paths", None)
+        if held is None:
+            held = _held_projection_locks.paths = set()
+        if key in held:
+            # Opening and flocking a second descriptor deadlocks even though
+            # the in-process RLock is reentrant. Nested readers share the fd.
             yield
-        finally:
-            if fcntl is not None:
-                fcntl.flock(lock_file, fcntl.LOCK_UN)
-            else:  # pragma: no cover - Windows
-                lock_file.seek(0)
-                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+            return
+        with lock_path.open("a", encoding="utf-8") as lock_file:
+
+            def acquire_region() -> None:
+                if fcntl is not None:
+                    fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                else:  # pragma: no cover - Windows
+                    lock_file.seek(0)
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+
+            retry_until_locked(
+                acquire_region,
+                interval=0.02,
+                deadline=deadline,
+                sleep=time.sleep,
+                monotonic=time.monotonic,
+                check=check,
+                timeout_message="Skill projection lock timeout",
+            )
+            held.add(key)
+            try:
+                yield
+            finally:
+                held.remove(key)
+                if fcntl is not None:
+                    fcntl.flock(lock_file, fcntl.LOCK_UN)
+                else:  # pragma: no cover - Windows
+                    lock_file.seek(0)
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+    finally:
+        process_lock.release()
 
 
 def _copy_into_view(source: str, target: str, *, follow_symlinks: bool = True) -> str:
@@ -402,21 +439,66 @@ def _write_manifest(scope_root: Path, source_signature: str, view_signature: str
     if view_signature is not None:
         payload["view_signature"] = view_signature
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+        stream = os.fdopen(fd, "w", encoding="utf-8")
+        fd = None  # The file object now owns the descriptor.
+        with stream:
             json.dump(payload, stream, sort_keys=True)
         temporary.replace(target)
-    except Exception:
-        temporary.unlink(missing_ok=True)
+    except BaseException:
+        cleanup_failed_atomic_write(temporary, fd)
         raise
 
 
+def _thread_view_signature(paths: SkillProjectionPaths) -> str:
+    """Sign projected bytes/layout without NFS-sensitive inode/size/timestamps.
+
+    Unlike source/shared-view metadata checks, this reads every projected file
+    in bounded chunks. That cost preserves next-acquire repair of sandbox edits
+    without recopying the whole view when only filesystem metadata settles.
+    Symlinks are signed as links, never opened; special files are not read.
+    """
+    digest = hashlib.sha256()
+    for category in ("public", "custom", "legacy", "integrations"):
+        digest.update(f"root:{category}\0".encode())
+        stack = [(getattr(paths, category), Path("."))]
+        while stack:
+            current, relative_root = stack.pop()
+            with os.scandir(current) as entries:
+                ordered = sorted(entries, key=lambda entry: entry.name)
+            child_dirs: list[tuple[Path, Path]] = []
+            for entry in ordered:
+                relative = relative_root / entry.name
+                if entry.is_symlink():
+                    value = ["link", os.readlink(entry.path)]
+                elif entry.is_dir(follow_symlinks=False):
+                    value = ["dir"]
+                    child_dirs.append((Path(entry.path), relative))
+                elif entry.is_file(follow_symlinks=False):
+                    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+                    fd = os.open(entry.path, flags)
+                    try:
+                        metadata = os.fstat(fd)
+                        if not stat.S_ISREG(metadata.st_mode):
+                            raise ValueError(f"Projected skill file changed type: {entry.path}")
+                        with os.fdopen(fd, "rb", closefd=False) as stream:
+                            content = hashlib.file_digest(stream, "sha256").hexdigest()
+                        value = ["file", content, metadata.st_mode & 0o111]
+                    finally:
+                        os.close(fd)
+                else:
+                    value = ["special", stat.S_IFMT(entry.stat(follow_symlinks=False).st_mode)]
+                digest.update(json.dumps([category, relative.as_posix(), value], separators=(",", ":")).encode())
+            stack.extend(reversed(child_dirs))
+    return digest.hexdigest()
+
+
 def _view_signature(paths: SkillProjectionPaths, scope: str) -> str:
+    if scope == "thread":
+        return _thread_view_signature(paths)
     digest = hashlib.sha256()
     if scope == "public":
         _update_tree_digest(digest, paths.public, "public_view")
-    elif scope in {"user", "thread"}:
-        if scope == "thread":
-            _update_tree_digest(digest, paths.public, "public_view")
+    elif scope == "user":
         _update_tree_digest(digest, paths.custom, "custom_view")
         _update_tree_digest(digest, paths.legacy, "legacy_view")
         _update_tree_digest(digest, paths.integrations, "integrations_view")
@@ -451,9 +533,13 @@ def _thread_projection_is_fresh(
     if manifest_before is None or manifest_before.get("version") != _MANIFEST_VERSION:
         return False
     source_sig = _thread_source_signature(storage, allowed_skills)
+    if manifest_before.get("source_signature") != source_sig:
+        return False
+    # Thread view metadata can settle after a rebuild on shared storage. Check
+    # bytes/layout instead, retaining repair of out-of-band edits on any FS.
     view_sig = _view_signature(paths, "thread")
     manifest_after = _read_manifest(scope_root)
-    return manifest_before == manifest_after and manifest_before.get("source_signature") == source_sig and manifest_before.get("view_signature") == view_sig
+    return manifest_before == manifest_after and manifest_before.get("view_signature") == view_sig
 
 
 def _load_public_skills(storage: SkillStorage, *, enabled_only: bool) -> list[Skill]:
@@ -615,6 +701,19 @@ def ensure_thread_skill_projection(
     thread_id: str,
     allowed_skills: set[str] | None,
 ) -> SkillProjectionPaths | None:
+    from deerflow.skills.mutations.guard import managed_global_read, managed_read
+
+    # Global -> owner -> thread. No fresh-view fast path bypasses recovery.
+    with managed_global_read(storage):
+        with managed_read(storage):
+            return _ensure_thread_skill_projection(storage, thread_id, allowed_skills)
+
+
+def _ensure_thread_skill_projection(
+    storage: SkillStorage,
+    thread_id: str,
+    allowed_skills: set[str] | None,
+) -> SkillProjectionPaths | None:
     """Ensure the filesystem view for one run's effective Agent skill policy.
 
     ``None`` keeps the existing shared projection for threads that have never
@@ -656,6 +755,19 @@ def rebuild_skill_projections(
     include_public: bool = True,
     include_user: bool = True,
 ) -> SkillProjectionPaths:
+    from deerflow.skills.mutations.guard import managed_global_read, managed_read
+
+    with managed_global_read(storage):
+        with managed_read(storage):
+            return _rebuild_skill_projections(storage, include_public=include_public, include_user=include_user)
+
+
+def _rebuild_skill_projections(
+    storage: SkillStorage,
+    *,
+    include_public: bool = True,
+    include_user: bool = True,
+) -> SkillProjectionPaths:
     """Rebuild enabled-only projection scopes visible through ``storage``."""
     paths = get_skill_projection_paths(storage)
     user_id = getattr(storage, "user_id", None)
@@ -682,6 +794,14 @@ def _public_projection_is_fresh(storage: SkillStorage, paths: SkillProjectionPat
 
 
 def ensure_skill_projections(storage: SkillStorage) -> SkillProjectionPaths:
+    from deerflow.skills.mutations.guard import managed_global_read, managed_read
+
+    with managed_global_read(storage):
+        with managed_read(storage):
+            return _ensure_skill_projections(storage)
+
+
+def _ensure_skill_projections(storage: SkillStorage) -> SkillProjectionPaths:
     """Repair stale projection scopes, otherwise leave their inodes untouched."""
     paths = get_skill_projection_paths(storage)
 
@@ -729,6 +849,7 @@ def skill_projection_mutation(
     *,
     remove: tuple[tuple[SkillCategory, Path], ...] = (),
     remove_names: tuple[str, ...] = (),
+    mutation_names: tuple[str, ...] = (),
 ) -> Iterator[None]:
     """Hold a projection scope lock across a source/state mutation."""
     if not isinstance(storage.get_skills_root_path(), Path):
@@ -767,7 +888,9 @@ def skill_projection_mutation(
         _validate_projection_relative_path(relative_path)
         removals.add((root, relative_path))
 
-    with _projection_lock(scope_root):
+    from deerflow.skills.mutations.guard import managed_name_writes
+
+    with managed_name_writes(storage, mutation_names), _projection_lock(scope_root):
         if remove_names:
             names = set(remove_names)
             skills = _load_public_skills(storage, enabled_only=False) if scope == "public" else storage.load_skills(enabled_only=False)
@@ -782,7 +905,10 @@ def skill_projection_mutation(
             _manifest_path(scope_root).unlink(missing_ok=True)
             for root, relative_path in removals:
                 _remove_projection_relative(root, relative_path)
-            yield
+            from deerflow.skills.mutations.guard import managed_writer
+
+            with managed_writer(storage, mutation_names):
+                yield
             rebuild()
         except Exception:
             _clear_projection_scope(scope_root, *category_roots.values())
@@ -819,50 +945,6 @@ def ensure_public_skill_projection(*, app_config=None) -> bool:
 @contextmanager
 def skill_projection_read_lock(storage: SkillStorage, *, timeout: float = 5.0, check=None) -> Iterator[None]:
     """Bounded, non-mutating acquisition of the existing user projection lock."""
-    import time
-
     root = (storage.get_skills_root_path() / "custom") if getattr(storage, "user_id", None) is None else get_skill_projection_paths(storage).custom.parent
-    lock_path = root.parent / f".{root.name}.projection.lock"
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    process_lock = _lock_for(lock_path)
-    deadline = time.monotonic() + timeout
-    acquired = False
-    try:
-        while not acquired:
-            if check:
-                check()
-            acquired = process_lock.acquire(timeout=min(0.05, max(0, deadline - time.monotonic())))
-            if not acquired and time.monotonic() >= deadline:
-                raise TimeoutError("Skill projection lock timeout")
-        with lock_path.open("a", encoding="utf-8") as lock_file:
-            locked = False
-            try:
-
-                def acquire_region() -> None:
-                    if fcntl is not None:
-                        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    else:  # pragma: no cover - Windows
-                        lock_file.seek(0)
-                        msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
-
-                retry_until_locked(
-                    acquire_region,
-                    interval=0.02,
-                    deadline=deadline,
-                    sleep=time.sleep,
-                    monotonic=time.monotonic,
-                    check=check,
-                    timeout_message="Skill projection lock timeout",
-                )
-                locked = True
-                yield
-            finally:
-                if locked:
-                    if fcntl is not None:
-                        fcntl.flock(lock_file, fcntl.LOCK_UN)
-                    else:  # pragma: no cover - Windows
-                        lock_file.seek(0)
-                        msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
-    finally:
-        if acquired:
-            process_lock.release()
+    with _projection_lock(root, timeout=timeout, check=check):
+        yield

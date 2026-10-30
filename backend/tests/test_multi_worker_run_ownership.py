@@ -210,7 +210,7 @@ async def test_peer_idempotent_reuse_does_not_shield_crashed_owner_from_reconcil
 
     # The owner crashes: its lease lapses past the grace window without renewal.
     expired_lease = (datetime.now(UTC) - timedelta(seconds=60)).isoformat()
-    assert await store.update_lease(first.run_id, owner_worker_id="worker-a", lease_expires_at=expired_lease)
+    store._runs[first.run_id]["lease_expires_at"] = expired_lease
 
     recovered = await peer.reconcile_orphaned_inflight_runs(error="owner expired")
 
@@ -454,8 +454,8 @@ async def test_reconciliation_skips_active_lease_runs():
 
 
 @pytest.mark.anyio
-async def test_reconciliation_skips_candidate_when_owner_renews_lease_after_scan():
-    """A renewed lease between scan and claim must keep the run active."""
+async def test_reconciliation_claims_when_expired_owner_attempts_renewal_after_scan():
+    """An expired owner cannot revive its lease between scan and takeover."""
     store = MemoryRunStore()
     grace = 10
     expired_lease = (datetime.now(UTC) - timedelta(seconds=grace + 5)).isoformat()
@@ -477,7 +477,7 @@ async def test_reconciliation_skips_candidate_when_owner_renews_lease_after_scan
             owner_worker_id="worker-alive",
             lease_expires_at=renewed_lease,
         )
-        assert updated is True
+        assert updated is False
         return rows
 
     store.list_inflight_with_expired_lease = list_then_owner_renews
@@ -490,10 +490,10 @@ async def test_reconciliation_skips_candidate_when_owner_renews_lease_after_scan
         error="Gateway restarted before this run reached a durable final state.",
     )
 
-    assert recovered == []
+    assert [r.run_id for r in recovered] == ["race-run"]
     stored = await store.get("race-run")
-    assert stored["status"] == "running"
-    assert datetime.fromisoformat(stored["lease_expires_at"]) > datetime.now(UTC)
+    assert stored["status"] == "error"
+    assert stored["lease_expires_at"] == expired_lease
 
 
 @pytest.mark.anyio
@@ -972,6 +972,10 @@ async def test_transient_renewal_exception_before_deadline_keeps_run_alive():
         return await original_update_lease(*args, **kwargs)
 
     store.update_lease = fail_once_then_renew
+    # Keep the confirmed deadline inside the 30-second lease window. Renewal
+    # computes a fresh now+lease value; Windows' coarse clock can otherwise make
+    # two immediate samples identical and defeat the strict > below.
+    record.lease_expires_at = (datetime.now(UTC) + timedelta(seconds=10)).isoformat()
     original_expiry = record.lease_expires_at
 
     try:
@@ -1068,7 +1072,6 @@ async def test_late_successful_renewal_still_fences_local_run():
     near_expiry = (datetime.now(UTC) + timedelta(milliseconds=50)).isoformat()
     record.lease_expires_at = near_expiry
     store._runs[record.run_id]["lease_expires_at"] = near_expiry
-    original_update_lease = store.update_lease
 
     async def renew_after_timeout_cancellation(*args, **kwargs):
         try:
@@ -1077,7 +1080,10 @@ async def test_late_successful_renewal_still_fences_local_run():
             # Simulate a store operation that commits successfully despite the
             # caller's deadline cancellation.
             pass
-        return await original_update_lease(*args, **kwargs)
+        # Deliberately bypass the built-in Store's expiry guard to exercise
+        # the Manager against an unsafe/legacy Store's late positive result.
+        store._runs[args[0]]["lease_expires_at"] = kwargs["lease_expires_at"]
+        return True
 
     store.update_lease = renew_after_timeout_cancellation
 
@@ -1194,8 +1200,8 @@ async def test_renewal_rejected_by_own_terminal_commit_releases_barrier():
     record.task = asyncio.create_task(asyncio.sleep(3600))
     record.terminal_commit_pending = True
     await manager.set_status(record.run_id, RunStatus.success, persist=False)
-    # The terminal write lands before the worker clears its barrier.
-    assert (await store.finalize_if_not_cancelled(record.run_id, status="success")).finalized
+    # Only a Manager-owned operation supplies an attributable acknowledgment.
+    await manager.set_status_if_not_cancelled(record.run_id, RunStatus.success)
 
     try:
         await manager._renew_leases()
@@ -2123,6 +2129,37 @@ async def test_local_owner_cancel_falls_back_when_durable_request_fails():
 
 
 @pytest.mark.anyio
+async def test_local_cancel_does_not_claim_unpersisted_terminal_status():
+    class FailingStatusStore(MemoryRunStore):
+        async def update_status(self, run_id, status, **kwargs):
+            if status == RunStatus.interrupted.value:
+                raise OSError("status store unavailable")
+            return await super().update_status(run_id, status, **kwargs)
+
+    store = FailingStatusStore()
+    manager = _make_manager(
+        store=store,
+        worker_id="worker-a",
+        run_ownership_config=_lease_config(heartbeat_enabled=True, lease_seconds=5),
+    )
+    record = await manager.create_or_reject("thread-1")
+    await manager.set_status(record.run_id, RunStatus.running)
+    record.task = asyncio.create_task(asyncio.sleep(3600))
+
+    try:
+        assert await manager.cancel(record.run_id) == CancelOutcome.cancelled
+        assert record.ownership_lost
+        assert record.status == RunStatus.error
+        assert record.terminal_commit_proof is None
+        assert record.terminal_status_persisted is False
+        assert (await store.get(record.run_id))["status"] == RunStatus.running.value
+    finally:
+        if not record.task.done():
+            record.task.cancel()
+        await asyncio.gather(record.task, return_exceptions=True)
+
+
+@pytest.mark.anyio
 async def test_owner_cancel_retry_on_peer_is_accepted():
     """A peer must treat the owner's interrupted status as an accepted cancel."""
     store = MemoryRunStore()
@@ -2531,6 +2568,7 @@ async def test_heartbeat_cancels_task_on_lease_loss():
     # doesn't await).
     await asyncio.sleep(0)
     assert record.ownership_lost is True
+    assert record.terminal_status_persisted is False
     assert record.abort_event.is_set() is True
     assert record.task.cancelled()
 
@@ -2552,7 +2590,7 @@ async def test_cancel_returns_taken_over_when_peer_claims_during_local_cancel():
     # the race: in-memory cancel succeeds, but store write is blocked.
     original = store.update_status
 
-    async def race_update(run_id, status, *, error=None, stop_reason=None):
+    async def race_update(run_id, status, *, error=None, stop_reason=None, **kwargs):
         # Simulate peer takeover: flip to error before our write lands
         run = store._runs.get(run_id)
         if run and run["status"] == "running" and status == "interrupted":
@@ -2560,7 +2598,7 @@ async def test_cancel_returns_taken_over_when_peer_claims_during_local_cancel():
             run["error"] = "peer takeover"
             run["updated_at"] = datetime.now(UTC).isoformat()
             return False  # our write was blocked
-        return await original(run_id, status, error=error, stop_reason=stop_reason)
+        return await original(run_id, status, error=error, stop_reason=stop_reason, **kwargs)
 
     store.update_status = race_update
 
@@ -2629,6 +2667,41 @@ async def test_peer_reconciliation_fences_late_success_and_completion():
     assert record.status == RunStatus.error
     assert row["status"] == "error"
     assert row["error"] == "peer takeover"
+
+
+@pytest.mark.anyio
+async def test_peer_error_takeover_is_not_mistaken_for_local_error_commit():
+    store = MemoryRunStore()
+    config = _lease_config(heartbeat_enabled=True, grace_seconds=0)
+    owner = _make_manager(
+        store=store,
+        worker_id="worker-a",
+        run_ownership_config=config,
+    )
+    peer = _make_manager(
+        store=store,
+        worker_id="worker-b",
+        run_ownership_config=config,
+    )
+    record = await owner.create("thread-1")
+    await owner.set_status(record.run_id, RunStatus.running)
+    expired = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+    record.lease_expires_at = expired
+    store._runs[record.run_id]["lease_expires_at"] = expired
+
+    recovered = await peer.reconcile_orphaned_inflight_runs(error="peer takeover")
+    assert [item.run_id for item in recovered] == [record.run_id]
+
+    await owner.set_status(
+        record.run_id,
+        RunStatus.error,
+        error="local failure",
+    )
+
+    row = await store.get(record.run_id)
+    assert row["error"] == "peer takeover"
+    assert record.ownership_lost is True
+    assert record.terminal_status_persisted is False
 
 
 @pytest.mark.anyio
@@ -2781,3 +2854,41 @@ def test_compute_retry_after_normal():
     assert val is not None
     # lease_expires_at is ~45s from now + grace_seconds 10 = ~55, within reason
     assert 40 <= val <= 65
+
+
+@pytest.mark.anyio
+async def test_cancellation_during_terminal_receipt_cannot_commit_staged_success():
+    config = _lease_config(heartbeat_enabled=True)
+    store = MemoryRunStore()
+    manager = _make_manager(store=store, run_ownership_config=config)
+    record = await manager.create_or_reject("late-cancel")
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    class ReceiptStore(MemoryRunEventStore):
+        async def put_if_absent(self, **event):
+            if event["event_type"] == "run.delivery":
+                entered.set()
+                await release.wait()
+            return await super().put_if_absent(**event)
+
+    class Agent:
+        async def astream(self, *args, **kwargs):
+            yield {"messages": []}
+
+    bridge = SimpleNamespace(publish=AsyncMock(), publish_end=AsyncMock(), cleanup=AsyncMock())
+    record.task = asyncio.create_task(run_agent(bridge, manager, record, ctx=RunContext(checkpointer=None, event_store=ReceiptStore()), agent_factory=lambda **kwargs: Agent(), graph_input={}, config={}))
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        assert record.status == RunStatus.success
+        assert await store.request_cancel(record.run_id, action="interrupt") == "interrupt"
+        await manager._renew_leases()
+        assert record.abort_event.is_set()
+        release.set()
+        await asyncio.wait_for(record.task, 1)
+        assert not record.ownership_lost
+        assert record.status == RunStatus.interrupted
+        assert (await store.get(record.run_id))["status"] == "interrupted"
+        bridge.publish_end.assert_awaited_once()
+    finally:
+        release.set()
+        await asyncio.wait_for(asyncio.gather(record.task, return_exceptions=True), 1)

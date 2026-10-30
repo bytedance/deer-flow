@@ -17,8 +17,10 @@
 # Running Compose yourself works too, but export DEER_FLOW_ROOT as the absolute
 # checkout path first (see CONTRIBUTING.md for the Windows form). Unset, the
 # DEER_FLOW_HOST_BASE_DIR and THREADS_HOST_PATH values below render as
-# /backend/.deer-flow, so the provisioner bind-mounts the wrong host paths:
+# /backend/.deer-flow, so the provisioner bind-mounts the wrong host paths.
+# The default stack does not need Kubernetes:
 #   DEER_FLOW_ROOT="$PWD" docker compose -f docker/docker-compose-dev.yaml up --build
+# Add `--profile provisioner` when using provisioner/Kubernetes sandbox mode.
 # The -f path resolves against your shell's directory, not against this file:
 # from the repository root use docker/docker-compose-dev.yaml; from inside
 # docker/ use the bare docker-compose-dev.yaml, as make docker-start does.
@@ -57,6 +59,8 @@ services:
   # cluster via the K8s API.
   # Backend accesses sandboxes directly via host.docker.internal:{NodePort}.
   provisioner:
+    profiles:
+      - provisioner
     build:
       context: ./provisioner
       dockerfile: Dockerfile
@@ -119,7 +123,13 @@ services:
   # ── Reverse Proxy ──────────────────────────────────────────────────────
   # Routes API traffic to gateway and (optionally) provisioner.
   nginx:
-    image: nginx:alpine
+    # Pinned tag, not `nginx:alpine`: from 1.31.3 the alpine builds ship musl
+    # 1.2.6, whose pwrite() issues pwritev2(RWF_NOAPPEND) — seccomp profiles
+    # on older Docker/EOL kernels reject that syscall and the master dies in a
+    # restart loop with `pwrite() "/run/nginx.pid" failed (1: Operation not
+    # permitted)` (#7615, nginx/docker-nginx#1059). 1.31.2 is the last musl
+    # 1.2.5 (pwrite64) alpine build. Keep in lockstep with docker-compose.yaml.
+    image: nginx:1.31.2-alpine
     container_name: deer-flow-nginx
     # Loopback-only by default; see the note in docker-compose.yaml. Override
     # with BIND_HOST when you deliberately need the dev stack reachable from

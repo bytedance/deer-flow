@@ -17,6 +17,7 @@ from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.skills.permissions import make_skill_written_path_sandbox_readable
 from deerflow.skills.storage.skill_storage import SKILL_MD_FILE, SkillStorage, walk_skill_directories
 from deerflow.skills.types import SkillCategory
+from deerflow.utils.atomic_write import cleanup_failed_atomic_write
 
 logger = logging.getLogger(__name__)
 
@@ -91,28 +92,38 @@ class LocalSkillStorage(SkillStorage):
                 yield category, category_path, Path(current_root) / SKILL_MD_FILE
 
     def read_custom_skill(self, name: str) -> str:
-        if not self.custom_skill_exists(name):
-            raise FileNotFoundError(f"Custom skill '{name}' not found.")
-        return (self.get_custom_skill_dir(name) / SKILL_MD_FILE).read_text(encoding="utf-8")
+        from deerflow.skills.mutations.guard import managed_read
+
+        with managed_read(self):
+            if not self.custom_skill_exists(name):
+                raise FileNotFoundError(f"Custom skill '{name}' not found.")
+            # Read BOM-tolerantly so a SKILL.md saved by a Windows editor does not
+            # return its BOM as the first character of the content this API hands
+            # back. The frontmatter path tolerates the BOM via ``_FRONTMATTER_RE``
+            # instead, which only covers the front matter, not this whole-file read.
+            return (self.get_custom_skill_dir(name) / SKILL_MD_FILE).read_text(encoding="utf-8-sig")
 
     def write_custom_skill(self, name: str, relative_path: str, content: str) -> None:
-        with self._skill_projection_mutation():
+        with self._skill_projection_mutation(names=(name,)):
             target = self.validate_relative_path(relative_path, self.get_custom_skill_dir(name))
             target.parent.mkdir(parents=True, exist_ok=True)
             tmp_path = None
             try:
-                with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, dir=str(target.parent)) as tmp_file:
+                # newline="" publishes the caller's bytes: a default text write
+                # turns LF into os.linesep, so a SKILL.md written on Windows
+                # reached disk with CRLF that the API never returned.
+                with tempfile.NamedTemporaryFile("w", encoding="utf-8", newline="", delete=False, dir=str(target.parent)) as tmp_file:
                     tmp_path = Path(tmp_file.name)
                     tmp_file.write(content)
                 tmp_path.replace(target)
                 make_skill_written_path_sandbox_readable(self.get_custom_skill_dir(name), target)
             finally:
                 if tmp_path is not None:
-                    tmp_path.unlink(missing_ok=True)
+                    cleanup_failed_atomic_write(tmp_path)
 
     def remove_custom_skill_file(self, name: str, relative_path: str) -> str | None:
         removal = ((SkillCategory.CUSTOM, Path(name)),)
-        with self._skill_projection_mutation(remove=removal):
+        with self._skill_projection_mutation(remove=removal, names=(name,)):
             return super().remove_custom_skill_file(name, relative_path)
 
     async def ainstall_skill_from_archive(self, archive_path: str | Path) -> dict:
@@ -205,7 +216,7 @@ class LocalSkillStorage(SkillStorage):
         """Stage and move the validated skill into place (blocking; runs off the event loop)."""
         from deerflow.skills.installer import _move_staged_skill_into_reserved_target
 
-        with self._skill_projection_mutation():
+        with self._skill_projection_mutation(names=(skill_name,)):
             with tempfile.TemporaryDirectory(prefix=f".installing-{skill_name}-", dir=custom_dir) as staging_root:
                 staging_target = Path(staging_root) / skill_name
                 shutil.copytree(skill_dir, staging_target)
@@ -229,7 +240,7 @@ class LocalSkillStorage(SkillStorage):
                     e,
                 )
         removal = ((SkillCategory.CUSTOM, Path(name)),)
-        with self._skill_projection_mutation(remove=removal):
+        with self._skill_projection_mutation(remove=removal, names=(name,)):
             if target.is_symlink():
                 # An operator-linked package (see
                 # ``_is_external_skill_directory_symlink``): the skill is the
@@ -244,6 +255,7 @@ class LocalSkillStorage(SkillStorage):
         *,
         remove: tuple[tuple[SkillCategory, Path], ...] = (),
         remove_names: tuple[str, ...] = (),
+        names: tuple[str, ...] = (),
     ):
         if getattr(self, "user_id", None) is None:
             from deerflow.skills.projection import _projection_lock
@@ -251,14 +263,17 @@ class LocalSkillStorage(SkillStorage):
             return _projection_lock(self.get_skills_root_path() / "custom")
         from deerflow.skills.projection import skill_projection_mutation
 
-        return skill_projection_mutation(self, "user", remove=remove, remove_names=remove_names)
+        return skill_projection_mutation(self, "user", remove=remove, remove_names=remove_names, mutation_names=names)
 
     def append_history(self, name: str, record: dict) -> None:
         self.validate_skill_name(name)
         payload = {"ts": datetime.now(UTC).isoformat(), **record}
         history_path = self.get_skill_history_file(name)
         history_path.parent.mkdir(parents=True, exist_ok=True)
-        with history_path.open("a", encoding="utf-8") as f:
+        # JSONL records are LF-delimited on every host: a translated record
+        # boundary made read_history and any raw-byte reader describe different
+        # revisions of the same entry.
+        with history_path.open("a", encoding="utf-8", newline="") as f:
             f.write(json.dumps(payload, ensure_ascii=False))
             f.write("\n")
 

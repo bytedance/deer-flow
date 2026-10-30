@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Repository guidance source of truth; `CLAUDE.md` imports `@AGENTS.md`.
+Guidance source; `CLAUDE.md` imports `@AGENTS.md`.
 Module guides:
 
 - **[backend/AGENTS.md](backend/AGENTS.md)** — backend depth: harness/app split, agent &
@@ -11,20 +11,18 @@ Module guides:
 
 ## What is DeerFlow
 
-DeerFlow pairs a LangGraph super agent with a Next.js chat UI. The backend provides
-sandboxed execution, persistent memory, subagents, and extensible built-in, MCP,
-and community tools, isolated per thread. Feishu, Slack, Telegram, Discord, and
-DingTalk connect through the Gateway.
+DeerFlow combines LangGraph and Next.js with thread-isolated sandbox execution,
+memory, subagents and extensible tools. IM channels connect through the Gateway.
 
 ## Service Topology
 
 A single `make dev` / Docker stack runs four cooperating services:
 
-| Service         | Port   | Role                                                                 |
-| --------------- | ------ | ------------------------------------------------------------------- |
-| **Nginx**       | `2026` | Unified reverse-proxy entry point — open this in the browser        |
-| **Gateway API** | `8001` | FastAPI REST API + embedded LangGraph-compatible agent runtime      |
-| **Frontend**    | `3000` | Next.js web interface                                               |
+| Service | Port | Role |
+| --- | --- | --- |
+| **Nginx** | `2026` | Unified reverse-proxy entry point — open this in the browser |
+| **Gateway API** | `8001` | FastAPI REST API + embedded LangGraph-compatible agent runtime |
+| **Frontend** | `3000` | Next.js web interface |
 | **Provisioner** | `8002` | Optional — only when sandbox is configured for provisioner/K8s mode |
 
 Nginx is the single public entry: it proxies `/api/*` to the Gateway, rewriting
@@ -32,6 +30,11 @@ Nginx is the single public entry: it proxies `/api/*` to the Gateway, rewriting
 [backend/AGENTS.md](backend/AGENTS.md) for the runtime and router detail. It compresses
 HTML and configured textual assets, deliberately leaving SSE, fonts, images, audio, and
 video uncompressed at the proxy layer.
+
+Keep the dedicated `/api/threads/{thread_id}/browser/stream` WebSocket regex before
+the generic threads regex in Docker, local and Helm nginx configs. Upgrade headers
+and the 600s read timeout are pinned by `backend/tests/test_nginx_browser_websocket.py`.
+Helm uses nginx's default connect/send timeouts for the in-cluster Gateway.
 
 Both Compose files publish nginx at `"${BIND_HOST:-127.0.0.1}:${PORT:-2026}:2026"`
 (README's **loopback default**); bare `"${PORT}:2026"` binds `0.0.0.0`. Root `PORT`
@@ -41,29 +44,33 @@ redirect `make dev`'s port wait. Nginx's IPv4+IPv6 `default_server` and Gateway'
 Require explicit bind addresses for new published ports;
 `backend/tests/test_compose_default_bind_host.py` pins every service in both files.
 
+Provisioner PVC mode declares `USERDATA_PVC_NAME` once as `user-data`; extra and
+Lark broker credential mounts reuse it with their existing subPaths and read-only
+flags. Keep credential mounts broker-only and keep distinct volumes in hostPath mode.
+
 ## Repository Map
 
 ```
 deer-flow/
-├── Makefile                        # Root orchestration: drives the full stack (dev/start/stop, docker, setup)
-├── config.example.yaml             # Template → copy to config.yaml (gitignored) at repo root
+├── Makefile  # Root orchestration: drives the full stack (dev/start/stop, docker, setup)
+├── config.example.yaml  # Template → copy to config.yaml (gitignored) at repo root
 ├── extensions_config.example.json  # Template → copy to extensions_config.json (gitignored): MCP servers + skills
-├── backend/                        # Python backend — see backend/AGENTS.md
-│   ├── Makefile                    # Per-module backend commands (dev, gateway, test, lint, migrate-rev)
-│   ├── extensions/sources/         # Deployable snapshots of locally installed Python extensions
-│   ├── packages/extension-api/     # deerflow-extension-api package (import: deerflow_extension_api.*) — public extension contract
-│   ├── packages/harness/           # deerflow-harness package (import: deerflow.*) — agent framework
-│   └── app/                        # FastAPI Gateway + IM channels (import: app.*)
-├── frontend/                       # Next.js frontend (pnpm) — see frontend/AGENTS.md
-├── docker/                         # docker-compose files, nginx config, provisioner
-├── skills/                         # Agent skills: public/ (committed), custom/ (gitignored)
-│                                    # Managed integration skill packs are global at .deer-flow/integrations/skills/{provider}/
-│                                    # Integration credentials and enabled state remain per-user
-├── contracts/                      # Cross-component JSON contracts (e.g. subagent status, skill review)
-├── examples/                       # Extension examples: deerflow-extension-{example,bookmarks,agent-teams}
-├── scripts/                        # Root orchestration scripts invoked by the Makefile (check, configure, doctor, support_bundle, serve, nginx, docker, deploy, setup_wizard)
-├── tests/                          # Root-level tests (currently tests/skills/ — public skill tests)
-└── docs/                           # Cross-cutting docs, plans, and design notes
+├── backend/  # Python backend — see backend/AGENTS.md
+│   ├── Makefile  # Per-module backend commands (dev, gateway, test, lint, migrate-rev)
+│   ├── extensions/sources/  # Deployable snapshots of locally installed Python extensions
+│   ├── packages/extension-api/  # deerflow-extension-api package (import: deerflow_extension_api.*) — public extension contract
+│   ├── packages/harness/  # deerflow-harness package (import: deerflow.*) — agent framework
+│   └── app/  # FastAPI Gateway + IM channels (import: app.*)
+├── frontend/  # Next.js frontend (pnpm) — see frontend/AGENTS.md
+├── docker/  # docker-compose files, nginx config, provisioner
+├── skills/  # Agent skills: public/ (committed), custom/ (gitignored)
+│  # Managed integration skill packs are global at .deer-flow/integrations/skills/{provider}/
+│  # Integration credentials and enabled state remain per-user
+├── contracts/  # Cross-component JSON contracts (e.g. subagent status, skill review)
+├── examples/  # Extension examples: deerflow-extension-{example,bookmarks,agent-teams}
+├── scripts/  # Root orchestration scripts invoked by the Makefile (check, configure, doctor, support_bundle, serve, nginx, docker, deploy, setup_wizard)
+├── tests/  # Root-level tests (currently tests/skills/ — public skill tests)
+└── docs/  # Cross-cutting docs, plans, and design notes
 ```
 
 Third-party extensions load from operator-controlled `config.yaml -> plugins:`.
@@ -84,13 +91,19 @@ compaction, or authentication. If existing hooks cannot express the feature, add
 generic hook to the extension contract plus an extension that uses it — do not
 hard-code business logic into core. Working examples:
 `examples/deerflow-extension-{example,bookmarks,agent-teams}`.
-[Script workflows guide](examples/deerflow-extension-workflows/AGENTS.md): public
-AgentRuns; POSIX, one process/store; no resume/replay or hard currency budget.
+[Workflow guide](examples/deerflow-extension-workflows/AGENTS.md): public
+AgentRuns; POSIX, one process/store; approval and session-authorized recovery; uncertain admissions need reconciliation;
+no multi-Gateway failover or hard currency budget.
 
-Runtime config lives at the **repo root**: copy `config.example.yaml` → `config.yaml`
-(main app config) and `extensions_config.example.json` → `extensions_config.json` (MCP
-servers + skills). Both real files are gitignored and may be edited at runtime via the
-Gateway API. Config schema and resolution order are documented in
+Knowledge management/space policy: `examples/deerflow-extension-knowledge-{management,platform}/`
+(scoped `AGENTS.md`, `CONTRACT.md`). Use existing plugin/router/principal contracts;
+retrieval stays independent. Space policy intersects administrator/resource/operation
+and upstream grants, never grants chat access. SQLite holds plugin-owned space policy.
+Provider stages are not completion evidence; reconcile uncertain writes, never retry.
+
+Root runtime configs: copy `config.example.yaml` → `config.yaml` and
+`extensions_config.example.json` → `extensions_config.json` (MCP/skills).
+Both are gitignored and Gateway-editable; schema/resolution:
 [backend/AGENTS.md](backend/AGENTS.md).
 
 Skill quality review note:
@@ -164,8 +177,6 @@ cd frontend && pnpm check     # Lint + type check (run before committing)
 cd frontend && pnpm test      # Unit tests
 ```
 
-Root `make` drives the stack; backend `make` and frontend `pnpm` drive their modules.
-
 Host pnpm calls use `scripts/pnpm.py`: native Windows tries `pnpm.cmd` before
 `pnpm`; POSIX reverses the order. Its Corepack fallback applies the same ordering
 to `corepack.cmd` and `corepack`. The runner operates from `frontend/` so
@@ -173,16 +184,9 @@ Corepack honors its pinned package-manager version.
 
 ### Prerequisites before `make dev`
 
-First-time setup (`make dev` does not generate config):
-
-```bash
-make config      # copy config.example.yaml -> config.yaml and extensions_config.example.json -> extensions_config.json (both gitignored)
-make install     # install frontend + backend deps and pre-commit hooks
-make dev         # then start everything
-```
-
-Services require `config.yaml`. Both runtime configs are API-editable and gitignored;
-never commit them.
+Run `make config`, then `make install`, then `make dev` on first setup.
+`make dev` requires existing config; both runtime configs are API-editable and
+gitignored. Never commit them.
 
 ### Run a single test
 
@@ -222,20 +226,24 @@ Repo-wide conventions:
 - **Test-driven development** — features and bug fixes ship with tests. Backend tests live
   in `backend/tests/` (TDD is mandatory there; see [backend/AGENTS.md](backend/AGENTS.md));
   frontend tests live in `frontend/tests/`.
-  Public skill script regressions live in `tests/skills/`; exercise dependency fallbacks
-  with the optional import unavailable and mock HTTP transport to keep tests offline.
+  Skill-creator tests must preserve YAML values/body, restore bytecode settings,
+  and check invalid metadata through offline CLI subprocesses.
+  Public skill script regressions live in `tests/skills/` and run in Skill Review CI
+  independently of package review. Exercise dependency fallbacks with the optional
+  import unavailable and mock HTTP transport to keep tests offline.
+  Video, podcast, and chart-visualization CLI failures exit non-zero;
+  diagnostics on stderr, success URLs on stdout; test offline.
 - **Before pushing** — backend `make format`, frontend `pnpm check`.
   Backend CI enforces `ruff format --check`.
-- **Skill text encoding** — treat `SKILL.md` and other textual skill resources as UTF-8;
-  Python utilities that read or write them must pass `encoding="utf-8"` rather than
-  relying on the platform locale.
-- **Version sources must stay in lockstep** — a release version must match identically in
-  `backend/pyproject.toml`, `frontend/package.json`, and `deploy/helm/deer-flow/Chart.yaml`
-  (`version` + `appVersion`), and `backend/uv.lock` must record the same version for the root
-  package (uv stores its PEP 440 form, e.g. `2.1.0rc0`). Pushing a `v*` git tag triggers CI
-  that runs `scripts/verify_versions.sh` and **blocks all publishing** if any source drifts.
-  Before bumping a version, run `scripts/bump_version.sh <ver>` (aligns the four fields and
-  refreshes `backend/uv.lock` at once — it needs `uv` on `PATH`) and
-  `scripts/verify_versions.sh <ver>` to catch drift early. See [RELEASING.md](RELEASING.md).
+- **Skill text encoding** — use explicit UTF-8 for textual skill resources.
+  Read `SKILL.md` with `encoding="utf-8-sig"` to strip a leading BOM; write with
+  `encoding="utf-8"`. Never rely on the platform locale.
+- **Version lockstep** — keep `backend/pyproject.toml`,
+  `backend/packages/harness/pyproject.toml`, `frontend/package.json`, and
+  `deploy/helm/deer-flow/Chart.yaml` (`version`/`appVersion`) identical.
+  `backend/uv.lock` must match both `deer-flow` and `deerflow-harness` in PEP 440 form.
+  Run `scripts/bump_version.sh <ver>` (requires `uv` on `PATH`) to update all five
+  fields and the lock, then `scripts/verify_versions.sh <ver>`. `v*` tag CI blocks
+  all publishing on drift. See [RELEASING.md](RELEASING.md).
 - **Don't edit `CLAUDE.md`** — it only contains `@AGENTS.md`. All agent guidance changes
   belong here in `AGENTS.md`; `CLAUDE.md` is a thin import shim.

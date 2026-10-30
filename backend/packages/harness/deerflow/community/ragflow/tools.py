@@ -10,10 +10,11 @@ from dataclasses import dataclass
 from typing import Any, cast
 
 from langchain_core.tools import StructuredTool
-from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, SecretStr, ValidationError, field_validator
+from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, SecretStr, ValidationError, ValidationInfo, field_validator
 
 from deerflow.community.provider_credentials import redact_secret, reject_url_userinfo, resolve_api_key
 from deerflow.config import get_app_config
+from deerflow.config._boolean_guards import reject_boolean
 from deerflow.knowledge import format_result
 from deerflow.knowledge.sources import redact_strings
 from deerflow.knowledge_scope import (
@@ -88,6 +89,18 @@ class _RAGFlowRetrievalSettings(BaseModel):
     @classmethod
     def _reject_url_userinfo(cls, value: AnyHttpUrl) -> AnyHttpUrl:
         return reject_url_userinfo(value)
+
+    @field_validator("page_size", "top_k", "max_chars_per_chunk", "max_total_chars", mode="before")
+    @classmethod
+    def _reject_boolean_integers(cls, value: object, info: ValidationInfo) -> object:
+        """Reject booleans before Pydantic coerces them to integers."""
+        return reject_boolean(value, info, kind="an integer")
+
+    @field_validator("timeout", "similarity_threshold", "vector_similarity_weight", mode="before")
+    @classmethod
+    def _reject_boolean_numbers(cls, value: object, info: ValidationInfo) -> object:
+        """Reject booleans before Pydantic coerces them to numbers."""
+        return reject_boolean(value, info, kind="a number")
 
 
 def _api_key(settings: _RAGFlowRetrievalSettings) -> str | None:
@@ -324,15 +337,6 @@ async def resolve_ragflow_datasets(
     return await _resolve_datasets(client, settings, requested_dataset_ids)
 
 
-def _group_searchable_datasets(datasets: list[_ResolvedDataset]) -> list[tuple[str, list[str]]]:
-    groups: dict[str, list[str]] = {}
-    for dataset in datasets:
-        if dataset.chunk_count == 0:
-            continue
-        groups.setdefault(dataset.embedding_model, []).append(dataset.dataset_id)
-    return sorted(groups.items())
-
-
 async def _validate_document_filters(
     client: RAGFlowClient,
     document_filters: list[dict[str, Any]],
@@ -527,7 +531,8 @@ async def knowledge_search(
         if resolved_scope["mode"] == "disabled":
             return "Error: Knowledge search is disabled for this turn."
 
-    settings, error = _settings_or_error()
+    # Config resolution stats and hashes the config files; keep it off the event loop.
+    settings, error = await asyncio.to_thread(_settings_or_error)
     if settings is None:
         return error or "Error: Invalid RAGFlow settings for knowledge_search; check config.yaml."
 
@@ -588,7 +593,7 @@ async def knowledge_search(
 
 async def list_knowledge_bases() -> str:
     """List accessible RAGFlow knowledge-base names without exposing UUIDs."""
-    settings, error = _settings_or_error()
+    settings, error = await asyncio.to_thread(_settings_or_error)
     if settings is None:
         return error or "Error: Invalid RAGFlow settings for knowledge_search; check config.yaml."
 

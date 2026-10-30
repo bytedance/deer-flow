@@ -16,7 +16,8 @@ from app.channels.base import Channel, ChannelStopTimeout
 from app.channels.leadership import ChannelLeadership, RenewOutcome
 from app.channels.manager import DEFAULT_CHANNEL_MAX_CONCURRENCY, DEFAULT_CHANNEL_SHUTDOWN_GRACE_PERIOD_SECONDS, DEFAULT_GATEWAY_URL, DEFAULT_LANGGRAPH_URL, ChannelManager
 from app.channels.message_bus import DEFAULT_INBOUND_QUEUE_MAXSIZE, MessageBus
-from app.channels.runtime_config_store import merge_runtime_channel_configs
+from app.channels.reply_locale import ReplyLocaleResolver, supported_locale
+from app.channels.runtime_config_store import RuntimeConfigStore, SqlChannelRuntimeConfigStore, merge_runtime_channel_configs, overlay_runtime_channel_configs, resolve_runtime_config_store, runtime_channel_disconnected
 from app.channels.store import ChannelStore, SqlChannelStore, resolve_channel_store
 from deerflow.config.channel_leader_lease_config import CHANNEL_LEADER_LEASE_FIELD, CHANNEL_LEADER_LEASE_KEY, ChannelLeaderLeaseConfig, channel_leader_lease_config
 from deerflow.utils.file_io import await_drained
@@ -132,9 +133,26 @@ def _resolve_non_negative_float(config: dict[str, Any], config_key: str, default
     return float(value)
 
 
-def _merge_channel_connection_runtime_config(channels_config: dict[str, Any], app_config: AppConfig) -> None:
+def _runtime_config_enabled(app_config: Any) -> bool:
     connection_config = getattr(app_config, "channel_connections", None)
-    merge_runtime_channel_configs(channels_config, connection_config)
+    return connection_config is not None and bool(getattr(connection_config, "enabled", False))
+
+
+def _prepare_runtime_config(channels_config: dict[str, Any], app_config: AppConfig, *, credentials_cipher: Any | None) -> RuntimeConfigStore | None:
+    """Overlay the web-UI runtime config on ``channels_config`` and return the store it came from.
+
+    ``None`` when ``channel_connections`` is off (no runtime config applies).
+    The database store first moves a pre-table ``runtime-config.json`` into
+    the table (idempotent, tolerant of a peer importing concurrently), so the
+    overlay already sees it. Blocks: ``from_app_config`` runs off the loop.
+    """
+    if not _runtime_config_enabled(app_config):
+        return None
+    store = resolve_runtime_config_store(app_config, cipher=credentials_cipher)
+    if isinstance(store, SqlChannelRuntimeConfigStore):
+        store.import_legacy_json()
+    merge_runtime_channel_configs(channels_config, app_config.channel_connections, store=store)
+    return store
 
 
 def _make_connection_repo(connection_config: ChannelConnectionsConfig | None, *, credentials_cipher: Any | None = None):
@@ -199,6 +217,8 @@ class ChannelService:
         get_stream_bridge: Callable[[], StreamBridge | None] | None = None,
         store: ChannelStore | None = None,
         leadership: ChannelLeadership | None = None,
+        runtime_config_store: RuntimeConfigStore | None = None,
+        credentials_cipher: Any | None = None,
     ) -> None:
         config = dict(channels_config or {})
         # ``channels.leader_lease`` is a settings block, not a provider: take it
@@ -216,6 +236,13 @@ class ChannelService:
         # runs this constructor off the loop.
         self.store: ChannelStore = store if store is not None else resolve_channel_store(app_config)
         self._connection_repo = connection_repo
+        # Language of DeerFlow's own replies (/connect, /goal): the owner's web UI
+        # language, read from the connection repository's database, else
+        # channel_connections.notification_locale (captured here; restart-scoped).
+        self._reply_locale = ReplyLocaleResolver(
+            session_factory=getattr(connection_repo, "session_factory", None),
+            default_locale=supported_locale(getattr(getattr(app_config, "channel_connections", None), "notification_locale", None)),
+        )
         self._get_stream_bridge = get_stream_bridge
         langgraph_url = _resolve_service_url(config, "langgraph_url", _CHANNELS_LANGGRAPH_URL_ENV, DEFAULT_LANGGRAPH_URL)
         gateway_url = _resolve_service_url(config, "gateway_url", _CHANNELS_GATEWAY_URL_ENV, DEFAULT_GATEWAY_URL)
@@ -236,6 +263,7 @@ class ChannelService:
             require_bound_identity=require_bound_identity,
             inbound_dedupe_store=make_inbound_dedupe_store(app_config),
             get_stream_bridge=get_stream_bridge,
+            reply_locale=self._reply_locale,
         )
         self._channels: dict[str, Any] = {}  # name -> Channel instance
         self._config = config
@@ -254,6 +282,13 @@ class ChannelService:
         self._lease_actions: dict[str, asyncio.Task] = {}
         # provider -> (consecutive failed starts, monotonic time of next retry)
         self._lease_start_backoff: dict[str, tuple[int, float]] = {}
+        # Web-UI runtime config (``channel_runtime_configs`` for a database).
+        # Resolved on first reload when not given; the cipher decrypts it then.
+        self._runtime_config_store = runtime_config_store
+        self._credentials_cipher = credentials_cipher
+        # provider -> runtime config version this instance has applied; the
+        # lease supervisor compares it with the store to apply peers' saves.
+        self._runtime_config_versions: dict[str, int] = {}
 
     @classmethod
     def from_app_config(
@@ -286,7 +321,7 @@ class ChannelService:
         extra = app_config.model_extra or {}
         if "channels" in extra:
             channels_config = dict(extra["channels"] or {})
-        _merge_channel_connection_runtime_config(channels_config, app_config)
+        runtime_config_store = _prepare_runtime_config(channels_config, app_config, credentials_cipher=credentials_cipher)
         connection_config = getattr(app_config, "channel_connections", None)
         connections_enabled = connection_config is not None and getattr(connection_config, "enabled", False)
         require_bound_identity = bool(connections_enabled and getattr(connection_config, "require_bound_identity", True))
@@ -299,6 +334,8 @@ class ChannelService:
             app_config=app_config,
             get_stream_bridge=get_stream_bridge,
             leadership=leadership,
+            runtime_config_store=runtime_config_store,
+            credentials_cipher=credentials_cipher,
         )
 
     async def start(self) -> None:
@@ -493,30 +530,47 @@ class ChannelService:
         logger.info("ChannelService stopped")
 
     def _load_channel_config(self, name: str) -> dict[str, Any] | None:
-        """Load the latest config for a specific channel from disk.
+        """Load the latest config for a specific channel (see :meth:`_read_channel_config`).
 
-        Uses ``get_app_config()`` which detects file changes via config
-        signature, so edits to ``config.yaml`` are picked up without a process
-        restart.
-        The UI runtime-config overlay applied at startup is re-applied here
-        so a file-driven reload neither drops credentials entered from the
-        browser nor resurrects a channel disconnected from it.
         Returns a snapshot without mutating shared state, or ``None`` when
         unavailable. The restart caller owns publication and cached fallback.
         """
         try:
-            from deerflow.config.app_config import get_app_config
-
-            app_config = get_app_config()
-            extra = app_config.model_extra or {}
-            channels_config = dict(extra.get("channels") or {})
-            _merge_channel_connection_runtime_config(channels_config, app_config)
-            channel_config = channels_config.get(name)
-            if isinstance(channel_config, dict):
-                return channel_config
+            return self._read_channel_config(name)
         except Exception:
             logger.exception("Failed to load config snapshot for channel %s", name)
         return None
+
+    def _read_channel_config(self, name: str) -> dict[str, Any] | None:
+        """Read ``name``'s current config; blocks (call off the loop) and raises on failure.
+
+        Uses ``get_app_config()`` which detects file changes via config
+        signature, so edits to ``config.yaml`` are picked up without a process
+        restart. The web-UI runtime config is re-read from its store and
+        overlaid, so a reload neither drops credentials entered from the
+        browser (on any instance) nor resurrects a channel disconnected from
+        it. A disconnect reads as its disabled tombstone, not as absent: a
+        caller that falls back to its cached config for an absent provider
+        must not revive credentials a peer disconnected.
+        """
+        from deerflow.config.app_config import get_app_config
+
+        app_config = get_app_config()
+        extra = app_config.model_extra or {}
+        channels_config = dict(extra.get("channels") or {})
+        store = self._runtime_store(app_config)
+        if store is not None:
+            overlay_runtime_channel_configs(channels_config, app_config.channel_connections, store.load_all(), keep_disconnected=True)
+        channel_config = channels_config.get(name)
+        return dict(channel_config) if isinstance(channel_config, dict) else None
+
+    def _runtime_store(self, app_config: Any) -> RuntimeConfigStore | None:
+        """The runtime config store, resolved on first use (blocks); ``None`` while ``channel_connections`` is off."""
+        if not _runtime_config_enabled(app_config):
+            return None
+        if self._runtime_config_store is None:
+            self._runtime_config_store = resolve_runtime_config_store(app_config, cipher=self._credentials_cipher)
+        return self._runtime_config_store
 
     def _channel_lock(self, name: str) -> asyncio.Lock:
         """Return the per-channel lifecycle lock ensuring serialized mutations."""
@@ -591,9 +645,9 @@ class ChannelService:
         if not await self._claim_transport(name):
             leader = self.leader_of(name)
             if accept_peer_leader and leader is not None:
-                # Runtime config does not reach the holder yet: it keeps the
-                # config it started with until it starts the channel again.
-                logger.warning("Channel %s is connected by Gateway instance %s, which keeps its current configuration until it next starts the channel", name, leader)
+                # The caller persists the config to the shared runtime config
+                # store; the holder applies it on its next lease round.
+                logger.info("Channel %s is connected by Gateway instance %s, which applies the saved configuration on its next leader lease round", name, leader)
                 return True
             return False
 
@@ -741,6 +795,7 @@ class ChannelService:
                 config["seen_event_store_path"] = await asyncio.to_thread(_default_seen_store_path)
             if self._connection_repo is not None:
                 config["connection_repo"] = self._connection_repo
+            config["reply_locale"] = self._reply_locale
             # A stop may have started while this coroutine was suspended in
             # pre-start I/O above. Fence publication again immediately before
             # the new instance becomes service-owned.
@@ -778,6 +833,8 @@ class ChannelService:
     # running on every instance. ``_supervise`` renews held leases every
     # ``renew_interval`` seconds, takes free ones, and stops a transport
     # *before* giving its lease up for lost (see ``app.channels.leadership``).
+    # The same round applies web-UI runtime config saved on any instance: the
+    # store's per-provider ``version`` says which providers to re-read.
 
     def _arbitrated(self, name: str) -> bool:
         """Whether ``name``'s transport is subject to the leader lease in this process."""
@@ -822,8 +879,8 @@ class ChannelService:
         its own transport, and a claim here would only park the row for the
         channel-down interval. The peer check covers a provider connected from
         the web UI on another instance, which never enters this instance's
-        config. Providers no instance runs stay claimable, so their rows still
-        settle.
+        config until its next round applies the runtime config. Providers no
+        instance runs stay claimable, so their rows still settle.
         """
         if self._leadership is None:
             return None
@@ -870,9 +927,23 @@ class ChannelService:
         # handed to per-provider tasks so it never delays a renewal. The
         # whole-table read keeps status and notification claims aware of
         # leases this instance has no config for.
-        observed, *decisions = await asyncio.gather(self._leadership.observe_all(), *(self._lease_round(name) for name in ordered), return_exceptions=True)
+        observed, versions, *decisions = await asyncio.gather(
+            self._leadership.observe_all(),
+            self._read_runtime_config_versions(),
+            *(self._lease_round(name) for name in ordered),
+            return_exceptions=True,
+        )
         if isinstance(observed, BaseException):
             logger.error("Channel leader lease table read failed", exc_info=observed)
+        if isinstance(versions, BaseException):
+            logger.error("Channel runtime config versions read failed; retrying on the next tick", exc_info=versions)
+        elif self._running:
+            # Scheduled before the lease decisions: applying a provider's new
+            # config outranks a plain start of the same provider this round,
+            # while a fail-closed stop below still preempts it.
+            for name, version in sorted(versions.items()):
+                if self._arbitrated(name) and self._runtime_config_versions.get(name) != version:
+                    self._schedule_lease_action(name, lambda name=name, version=version: self._apply_runtime_config(name, version), preempt=False)
         for name, decision in zip(ordered, decisions):
             if isinstance(decision, BaseException):
                 logger.error("Channel %s leader lease round failed", name, exc_info=decision)
@@ -914,6 +985,64 @@ class ChannelService:
             # so credentials saved since this instance started are used.
             return (lambda: self._start_led_transport(name, reload_config=True)), False
         return None
+
+    async def _read_runtime_config_versions(self) -> dict[str, int]:
+        store = self._runtime_config_store
+        if store is None:
+            return {}
+        return await asyncio.wait_for(asyncio.to_thread(store.versions), timeout=self._leadership.operation_timeout)
+
+    async def _apply_runtime_config(self, name: str, version: int) -> None:
+        """Apply the runtime config of ``name`` as saved on any instance, then record ``version``.
+
+        Acts only when the freshly read config differs from the one this
+        instance runs on: a transport running here restarts with it, or stops
+        and hands its lease back when the provider was disabled or
+        disconnected, and a held lease whose transport is down (a start that
+        failed on the old credentials) starts it now rather than on the next
+        round. Without a lease here only the cached config changes, so the
+        next lease round competes for the provider (or leaves it) on current
+        credentials. A read that races a local reconfiguration is dropped
+        unrecorded, and so is a failed one: the next round retries.
+        """
+        if not self._running:
+            return
+        epoch = self._config_epochs.get(name, 0)
+        config = await asyncio.to_thread(self._read_channel_config, name)
+        async with self._channel_lock(name):
+            if not self._running or self._config_epochs.get(name, 0) != epoch:
+                return
+            current = self._config.get(name)
+            if config is not None and current is None and runtime_channel_disconnected(config):
+                config = None  # a disconnect this instance already applied by never loading the provider
+            started = False
+            if config != current:
+                self._bump_config_epoch(name)
+                try:
+                    if config is None:
+                        self._config.pop(name, None)
+                    else:
+                        self._config[name] = config
+                    # New credentials deserve an immediate start, not the backoff earned by the old ones.
+                    self._lease_start_backoff.pop(name, None)
+                    channel = self._channels.get(name)
+                    if channel is not None:
+                        if self._wants_transport(name):
+                            await self._restart_channel_locked(name, reload_config=False)
+                        else:
+                            await self._stop_and_discard_channel(name, channel)
+                    elif self._wants_transport(name) and self._leadership.has_record(name):
+                        await self._restart_channel_locked(name, reload_config=False)
+                        started = True
+                    if name not in self._channels:
+                        await self._release_idle_lease(name)
+                finally:
+                    self._bump_config_epoch(name)
+                logger.info("Applied runtime config version %d of channel %s", version, name)
+            self._runtime_config_versions[name] = version
+        if started:
+            # Same retry bookkeeping as a start from the lease round.
+            self._record_lease_start(name, ok=self._transport_running(name) or not self._wants_transport(name))
 
     def _schedule_lease_action(self, name: str, action: Callable[[], Awaitable[None]], *, preempt: bool) -> None:
         current = self._lease_actions.get(name)

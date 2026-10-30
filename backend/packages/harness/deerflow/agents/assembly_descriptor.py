@@ -46,6 +46,7 @@ _MODEL_METADATA_FIELDS = frozenset(
     {
         "name",
         "display_name",
+        "aliases",
         "description",
         "use",
         "context_window",
@@ -429,7 +430,10 @@ def _skill_content_hash(skill: object) -> str | None:
     if not isinstance(skill_file, Path):
         return None
     try:
-        content = skill_file.read_text(encoding="utf-8")
+        # Same read as ``skill_activation_middleware._read_skill_content``, whose
+        # content this digest is defined to describe: ``utf-8-sig`` so a BOM a
+        # Windows editor wrote is not part of the digest.
+        content = skill_file.read_text(encoding="utf-8-sig")
     except OSError:
         return None
     return canonical_hash(content)

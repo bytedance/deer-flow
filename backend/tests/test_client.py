@@ -9,6 +9,7 @@ import stat
 import tempfile
 import threading
 import zipfile
+from contextlib import contextmanager
 from enum import Enum
 from pathlib import Path
 from types import SimpleNamespace
@@ -31,6 +32,7 @@ from deerflow.agents.thread_state import DeltaThreadState, ThreadState
 from deerflow.client import DeerFlowClient, StreamEvent
 from deerflow.config.agents_config import AgentConfig
 from deerflow.config.authorization_config import AuthorizationConfig, AuthorizationProviderConfig
+from deerflow.config.database_config import DatabaseConfig
 from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig
 from deerflow.config.paths import Paths
 from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
@@ -61,8 +63,7 @@ def mock_app_config():
     config.skills.deferred_discovery = False
     config.skills.container_path = "/mnt/skills"
     config.tool_search.enabled = False
-    config.database.checkpoint_channel_mode = "full"
-    config.database.checkpoint_delta.snapshot_frequency = 10
+    config.database = DatabaseConfig(backend="memory")
     config.authorization = AuthorizationConfig(enabled=False)
     return config
 
@@ -2786,6 +2787,46 @@ class TestSkillsManagement:
         finally:
             tmp_path.unlink()
 
+    def test_update_public_skill_enters_managed_write_before_projection(self, client, tmp_path):
+        from deerflow.skills import projection
+        from deerflow.skills.mutations import guard
+
+        skill = self._make_skill(enabled=True)
+        updated_skill = self._make_skill(enabled=False)
+        config_file = tmp_path / "extensions_config.json"
+        config_file.write_text('{"skills": {}}', encoding="utf-8")
+        events = []
+
+        @contextmanager
+        def record_managed_write(*_args, **_kwargs):
+            events.append("managed-enter")
+            try:
+                yield
+            finally:
+                events.append("managed-exit")
+
+        @contextmanager
+        def record_projection(*_args, **_kwargs):
+            events.append("projection-enter")
+            try:
+                yield
+            finally:
+                events.append("projection-exit")
+
+        with (
+            patch(
+                "deerflow.skills.storage.local_skill_storage.LocalSkillStorage.load_skills",
+                side_effect=[[skill], [skill], [updated_skill], [updated_skill]],
+            ),
+            patch("deerflow.client.ExtensionsConfig.resolve_config_path", return_value=config_file),
+            patch("deerflow.client.reload_extensions_config"),
+            patch.object(guard, "managed_global_state_write", record_managed_write),
+            patch.object(projection, "skill_projection_mutation", record_projection),
+        ):
+            client.update_skill("test-skill", enabled=False)
+
+        assert events == ["managed-enter", "projection-enter", "projection-exit", "managed-exit"]
+
     def test_update_skill_persists_state_when_source_omits_skills(self, client):
         skill = self._make_skill(enabled=True)
         updated_skill = self._make_skill(enabled=False)
@@ -2833,6 +2874,7 @@ class TestSkillsManagement:
         skill = self._make_skill(enabled=True)
         skill.category = category
         storage = MagicMock()
+        storage._app_config = client._app_config
         storage.load_skills.side_effect = [[skill], [self._make_skill(enabled=False)]]
 
         with (
@@ -3193,13 +3235,20 @@ class TestUploads:
                 patch("deerflow.client.get_uploads_dir", return_value=uploads_dir),
                 patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir),
             ):
-                client.upload_files("thread-1", [authored])
+                result = client.upload_files("thread-1", [authored])
 
             from deerflow.utils.file_outline import extract_outline_for_file
 
-            assert resolve_companion(uploads_dir / "a.pdf") is None
-            assert extract_outline_for_file(uploads_dir / "a.pdf") == ([], [])
-            assert extract_outline_for_file(uploads_dir / "a_1.md")[0] == [{"title": "My notes", "line": 1}]
+            # Same-name uploads can no longer clobber an earlier file in place
+            # (issue #3750): the authored copy lands under the next free
+            # suffix, and the a.pdf companion record stays valid because its
+            # markdown was never destroyed.
+            assert result["files"][0]["filename"] == "a_1_1.md"
+            assert resolve_companion(uploads_dir / "a.pdf") == uploads_dir / "a_1.md"
+            assert (uploads_dir / "a_1.md").read_text(encoding="utf-8") == "FROM:a.pdf"
+            assert (uploads_dir / "a_1_1.md").read_text(encoding="utf-8") == "# My notes"
+            assert extract_outline_for_file(uploads_dir / "a.pdf") == ([], ["FROM:a.pdf"])
+            assert extract_outline_for_file(uploads_dir / "a_1_1.md")[0] == [{"title": "My notes", "line": 1}]
 
     def test_upload_files_failed_conversion_releases_the_claimed_markdown_name(self, client):
         """A conversion that writes nothing must not reserve stem.md against a later companion.
@@ -5336,7 +5385,7 @@ class TestUploadDuplicateFilenames:
             assert companion.read_bytes() == source.read_bytes()
         assert len(list(uploads_dir.iterdir())) == 4
 
-    def test_sequential_upload_keeps_replacement_behavior(self, client, tmp_path):
+    def test_sequential_upload_preserves_existing_file_and_reports_claimed_name(self, client, tmp_path):
         uploads_dir = tmp_path / "uploads"
         uploads_dir.mkdir()
         first = tmp_path / "first" / "data.txt"
@@ -5350,9 +5399,14 @@ class TestUploadDuplicateFilenames:
             client.upload_files("t-dup", [first])
             result = client.upload_files("t-dup", [second])
 
-        assert result["files"][0]["filename"] == "data.txt"
-        assert (uploads_dir / "data.txt").read_bytes() == b"second"
-        assert len(list(uploads_dir.iterdir())) == 1
+        info = result["files"][0]
+        assert info["filename"] == "data_1.txt"
+        assert info["original_filename"] == "data.txt"
+        assert info["virtual_path"] == "/mnt/user-data/uploads/data_1.txt"
+        assert info["artifact_url"].endswith("/uploads/data_1.txt")
+        assert (uploads_dir / "data.txt").read_bytes() == b"first"
+        assert (uploads_dir / "data_1.txt").read_bytes() == b"second"
+        assert len(list(uploads_dir.iterdir())) == 2
 
     def test_duplicate_filenames_auto_renamed(self, client):
         """Two files with same basename → second gets _1 suffix."""

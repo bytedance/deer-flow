@@ -1,0 +1,25 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "deerflow-extension-knowledge-platform"
+version = "0.1.0"
+description = "Optional platform connection and hierarchical knowledge-space policy"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.12"
+dependencies = ["deerflow-extension-api>=0.2.9,<0.3", "deerflow-extension-knowledge-management>=0.1.0,<0.2", "fastapi>=0.115,<1", "pydantic>=2,<3"]
+
+[project.entry-points."deerflow.extensions"]
+knowledge-platform = "deerflow_extension_knowledge_platform:install"
+
+[tool.hatch.build.targets.wheel]
+packages = ["deerflow_extension_knowledge_platform"]
+
+[tool.ruff]
+line-length = 240
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
