@@ -72,7 +72,9 @@ async def test_streamed_subagent_events_are_not_replayed_after_unknown_write(out
     persisted = await store.list_events("thread", "run")
     assert [event["event_type"] for event in persisted] == ["subagent.step", "subagent.end"]
     assert store.calls == 1
-    assert len(buffer._pending) <= buffer.FLUSH_THRESHOLD
+    assert buffer._pending == []
+    assert buffer._unconfirmed_events == 2
+    assert buffer._skipped_events == 98
     streamed = [event.data async for event in bridge.subscribe("run") if event.event == "custom"]
     assert streamed == events  # Persistence failure must not break live delivery.
 

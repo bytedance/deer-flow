@@ -22,7 +22,7 @@ from deerflow.persistence.models.run_event import RunEventRow, RunEventThreadSeq
 from deerflow.persistence.run.model import CompletedRunSnapshotRow, RunRow
 from deerflow.persistence.run.sql import RunRepository
 from deerflow.runtime.events.message_identity import message_identity
-from deerflow.runtime.events.store.base import RunEventLifecycleRejected, RunEventStore, SessionAwareRunEventLifecycleGuard
+from deerflow.runtime.events.store.base import RunEventLifecycleRejected, RunEventStore, RunEventStoreNotCommittedError, SessionAwareRunEventLifecycleGuard
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, get_current_user, resolve_user_id
 from deerflow.utils.time import coerce_iso
 
@@ -253,35 +253,46 @@ class DbRunEventStore(RunEventStore):
         user_id = self._user_id_from_context()
         # All events belong to the same thread (validated above).
         thread_id = events[0]["thread_id"]
-        async with self._get_write_lock(thread_id):
-            async with self._sf() as session:
-                async with session.begin():
-                    max_seq = await self._max_seq_for_thread(session, thread_id)
-                    seq = max_seq or 0
-                    rows = []
-                    for e in events:
-                        seq += 1
-                        content = e.get("content", "")
-                        category = e.get("category", "trace")
-                        metadata = e.get("metadata")
-                        content, metadata = self._truncate_trace(category, content, metadata)
-                        db_content, metadata = self._content_to_db(content, metadata)
-                        row = RunEventRow(
-                            thread_id=e["thread_id"],
-                            run_id=e["run_id"],
-                            user_id=e.get("user_id", user_id),
-                            event_type=e["event_type"],
-                            category=category,
-                            content=db_content,
-                            content_sha256=hashlib.sha256(db_content.encode("utf-8")).hexdigest(),
-                            event_metadata=metadata,
-                            seq=seq,
-                            created_at=_parse_created_at(e.get("created_at")),
-                        )
-                        session.add(row)
-                        rows.append(row)
-                    await self._raise_seq_watermark(session, thread_id, seq)
-                return [self._row_to_dict(r) for r in rows]
+        commit_started = False
+        try:
+            async with self._get_write_lock(thread_id):
+                async with self._sf() as session:
+                    async with session.begin():
+                        max_seq = await self._max_seq_for_thread(session, thread_id)
+                        seq = max_seq or 0
+                        rows = []
+                        for e in events:
+                            seq += 1
+                            content = e.get("content", "")
+                            category = e.get("category", "trace")
+                            metadata = e.get("metadata")
+                            content, metadata = self._truncate_trace(category, content, metadata)
+                            db_content, metadata = self._content_to_db(content, metadata)
+                            row = RunEventRow(
+                                thread_id=e["thread_id"],
+                                run_id=e["run_id"],
+                                user_id=e.get("user_id", user_id),
+                                event_type=e["event_type"],
+                                category=category,
+                                content=db_content,
+                                content_sha256=hashlib.sha256(db_content.encode("utf-8")).hexdigest(),
+                                event_metadata=metadata,
+                                seq=seq,
+                                created_at=_parse_created_at(e.get("created_at")),
+                            )
+                            session.add(row)
+                            rows.append(row)
+                        await self._raise_seq_watermark(session, thread_id, seq)
+                        await session.flush()
+                        commit_started = True
+                    return [self._row_to_dict(r) for r in rows]
+        except Exception as exc:
+            if not commit_started:
+                # No COMMIT was issued; checkout, preparation and flush errors
+                # cannot have committed this transaction. Commit/ack failures
+                # and post-commit receipt errors must remain ambiguous.
+                raise RunEventStoreNotCommittedError("DB batch failed before commit") from exc
+            raise
 
     async def put_if_absent(
         self,

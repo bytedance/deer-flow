@@ -168,7 +168,7 @@ import { Callout } from "nextra/components";
 
 ### 刷新后子任务的步骤消失
 
-步骤从 `subagent.step` 运行事件回填（[#3845](https://github.com/bytedance/deer-flow/pull/3845)）。若事件存储写入失败，旧版本会丢弃这批事件，[#4082](https://github.com/bytedance/deer-flow/pull/4082) 之后改为重新缓冲重试。检查运行事件存储是否可写。
+步骤从 `subagent.step` 运行事件回填。检查事件存储是否可写，以及该次运行收尾时的 `subagent history incomplete` 警告。只有存储明确确认整批未提交时才重新缓冲重试（包括数据库提交前失败和 JSONL 成功回滚）。连续三次写入失败、结果不确定的异常或存储自身取消，会停止该次运行后续子 Agent 事件的持久化并释放待写负载。实时流继续，但刷新后的历史可能不完整。收尾日志记录未确认与跳过的事件数量，以及有数量上限的受影响任务 ID 样本；未确认批次可能已经写入，不能把其数量当作确定丢失的事件数。
 
 ### 对话页面突然只显示子 Agent 的对话
 

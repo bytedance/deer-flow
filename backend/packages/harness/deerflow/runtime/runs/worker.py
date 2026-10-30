@@ -836,17 +836,22 @@ class _SubagentEventBuffer:
     #: Flush once this many events are buffered, bounding memory and reload lag on
     #: a single deep subagent without paying a per-step lock.
     FLUSH_THRESHOLD = 25
+    MAX_WRITE_ATTEMPTS = 3
 
     def __init__(self, event_store: Any | None, thread_id: str, run_id: str) -> None:
         self._event_store = event_store
         self._thread_id = thread_id
         self._run_id = run_id
         self._pending: list[dict[str, Any]] = []
-        self._write_outcome_unknown = False
+        self._persistence_stopped = False
+        self._consecutive_failures = 0
+        self._unconfirmed_events = 0
+        self._skipped_events = 0
+        self._affected_tasks: set[str] = set()
 
     async def add(self, chunk: Any) -> None:
         """Buffer one custom stream chunk; flush on a terminal event or threshold."""
-        if self._event_store is None or self._write_outcome_unknown:
+        if self._event_store is None:
             return
         # Lazy import: importing deerflow.subagents at module load triggers its
         # package __init__ (executor → agents → tools → task_tool), which imports
@@ -857,6 +862,10 @@ class _SubagentEventBuffer:
         record = subagent_run_event(chunk)
         if record is None:
             return
+        if self._persistence_stopped:
+            self._skipped_events += 1
+            self._remember_task(record)
+            return
         self._pending.append({"thread_id": self._thread_id, "run_id": self._run_id, **record})
         if record["event_type"] == "subagent.end" or len(self._pending) >= self.FLUSH_THRESHOLD:
             await self.flush()
@@ -864,12 +873,12 @@ class _SubagentEventBuffer:
     async def flush(self) -> None:
         """Drain one batch; retry only a proven uncommitted write.
 
-        A failed acknowledgement can follow a successful commit. Keep that
-        batch pending for diagnostics, but fence this buffer's later writes
+        A failed acknowledgement can follow a successful commit. Release that
+        batch and fence this buffer's later writes
         instead of duplicating history or overtaking an unknown predecessor.
         Live SSE delivery is independent and remains best-effort throughout.
         """
-        if self._event_store is None or not self._pending or self._write_outcome_unknown:
+        if self._event_store is None or not self._pending:
             return
         batch = self._pending
         self._pending = []
@@ -894,17 +903,44 @@ class _SubagentEventBuffer:
             # Only this explicit store contract proves replay is safe. Generic
             # exceptions and store-originated cancellation are ambiguous, even
             # if they look like transient transport failures.
-            self._pending = batch + self._pending
-            self._write_outcome_unknown = not isinstance(failure, RunEventStoreNotCommittedError)
+            self._consecutive_failures += 1
+            retryable = isinstance(failure, RunEventStoreNotCommittedError)
+            self._persistence_stopped = not retryable or self._consecutive_failures >= self.MAX_WRITE_ATTEMPTS
+            if self._persistence_stopped:
+                self._unconfirmed_events += len(batch) + len(self._pending)
+                for event in batch + self._pending:
+                    self._remember_task(event)
+                self._pending.clear()
+            else:
+                self._pending = batch + self._pending
             logger.warning(
                 "Run %s: failed to persist %d subagent step event(s); %s",
                 self._run_id,
                 len(batch),
-                "outcome unknown, persistence stopped without replay" if self._write_outcome_unknown else "not committed, retained for retry",
+                "persistence stopped (unknown outcome or retry limit)" if self._persistence_stopped else "not committed, retained for retry",
                 exc_info=(type(failure), failure, failure.__traceback__),
             )
+        else:
+            self._consecutive_failures = 0
         if cancellation is not None:
             raise cancellation
+
+    def _remember_task(self, event: dict[str, Any]) -> None:
+        task_id = event.get("metadata", {}).get("task_id")
+        if isinstance(task_id, str) and len(self._affected_tasks) < 20:
+            self._affected_tasks.add(task_id)
+
+    def log_summary(self) -> None:
+        if self._unconfirmed_events or self._skipped_events or self._pending:
+            for event in self._pending:
+                self._remember_task(event)
+            logger.warning(
+                "Run %s: subagent history incomplete; unconfirmed=%d skipped=%d task_ids_sample=%s",
+                self._run_id,
+                self._unconfirmed_events + len(self._pending),
+                self._skipped_events,
+                sorted(self._affected_tasks),
+            )
 
 
 def _bind_trace_id(config: dict[str, Any], runtime_ctx: dict[str, Any]) -> str:
@@ -1902,7 +1938,10 @@ async def run_agent(
                 # Persist any subagent step events still buffered (#3779) — including on
                 # abort/exception paths, where the stream loop broke before its own flush.
                 if not record.ownership_lost and subagent_events is not None:
-                    await subagent_events.flush()
+                    try:
+                        await subagent_events.flush()
+                    finally:
+                        subagent_events.log_summary()
 
                 if not record.ownership_lost and event_store is not None and pre_run_workspace_snapshot is not None:
                     try:
