@@ -220,6 +220,13 @@ contract probes execute the actual migration test setup through SQLAlchemy's
 dialect argument conversion, stopping before database acquisition; the real
 SQLite/PostgreSQL cases still exercise upgrade, downgrade and re-upgrade.
 
+## Batch lease renewal races
+
+`test_batch_lease_lifecycle.py` parks recovery after the per-item expiry SELECT,
+identified by selected item columns; the parent query can contain the same expiry
+predicate. Assert one rejected item UPDATE as well as the preserved row, so an
+empty expiry scan cannot satisfy the concurrency guard.
+
 ## DingTalk stream tasks
 
 DingTalk stream lifecycle tests drive `_serve_stream` with a fake websocket and
