@@ -75,6 +75,21 @@ function idsOf(messages: Message[]): (string | undefined)[] {
   return messages.map((message) => message.id);
 }
 
+test("a pending checkpoint copy cannot replace the same Run's completed task result", () => {
+  const completed = withKwargs(
+    { ...msg("done", "tool", "Completed"), tool_call_id: "reused" } as Message,
+    { run_id: "run-1", subagent_status: "completed" },
+  );
+  const pending = withKwargs(
+    { ...msg("pending", "tool", "Pending"), tool_call_id: "reused" } as Message,
+    { run_id: "run-1", subagent_pending: true },
+  );
+  expect(dedupeMessagesByIdentity([completed, pending])).toEqual([completed]);
+  // Provider call IDs may be reused by later Runs. Keep their pending result.
+  const later = withKwargs(pending, { run_id: "run-2" });
+  expect(dedupeMessagesByIdentity([completed, later])).toEqual([later]);
+});
+
 test("messageIdentity collapses X and X__user and keys tools by tool_call_id", () => {
   expect(messageIdentity(msg("req-1", "human", "q"))).toBe("message:req-1");
   expect(messageIdentity(msg("req-1__user", "human", "q"))).toBe(

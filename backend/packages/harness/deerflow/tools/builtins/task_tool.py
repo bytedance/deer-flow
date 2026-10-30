@@ -1095,11 +1095,18 @@ async def task_tool(
     explicit_capacity = _explicit_execution_capacity.get()
     if explicit_capacity is not None:
         executor_kwargs["execution_capacity"] = explicit_capacity
+    from deerflow.runtime.runs.input_control import run_input_control
+
+    input_control = run_input_control(parent_context)
+    if input_control is not None:
+        executor_kwargs["input_gate"] = input_control.child(tool_call_id)
     executor = SubagentExecutor(**executor_kwargs)
 
     # Keep the provider tool-call ID for stream/message correlation, but use a
     # server-generated execution ID for process-wide background task control.
     execution_id = executor.execute_async(prompt, task_id=tool_call_id)
+    if input_control is not None:
+        input_control.bind_execution(tool_call_id, execution_id)
 
     # Poll for task completion in backend (removes need for LLM to poll)
     poll_count = 0

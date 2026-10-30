@@ -777,6 +777,17 @@ def build_middlewares(
     # ClarificationMiddleware should always be last
     middlewares.append(ClarificationMiddleware())
 
+    from deerflow.runtime.runs.input_control import run_input_control
+
+    if run_input_control(cfg) is not None:
+        from deerflow.agents.middlewares.run_input_middleware import RunInputAdmissionMiddleware, RunInputMiddleware
+
+        # New direct input goes through the ordinary sanitization chain.
+        middlewares.insert(0, RunInputAdmissionMiddleware())
+        # after_agent runs in reverse order: decide whether to continue before
+        # sandbox and other terminal cleanup hooks execute.
+        middlewares.append(RunInputMiddleware())
+
     # Extension contributions are merged only here, once the full stack exists.
     # Doing it inside build_lead_runtime_middlewares() would place
     # MODEL_PHYSICAL contributions above the lead-specific middlewares appended

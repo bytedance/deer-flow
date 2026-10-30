@@ -406,6 +406,8 @@ class RunJournal(BaseCallbackHandler):
         self._last_ai_msg: str | None = None
         self._first_human_msg: str | None = None
         self._first_human_message_captured = False
+        self._captured_run_inputs: set[str] = set()
+        self._terminal_task_results: set[str] = set()
         self._msg_count = 0
         self._had_llm_error_fallback = False
         self._llm_error_fallback_message: str | None = None
@@ -552,7 +554,7 @@ class RunJournal(BaseCallbackHandler):
         if caller == "lead_agent" and not self._first_human_message_captured and messages:
             for batch in reversed(messages):
                 for m in reversed(batch):
-                    if _should_persist_human_input_message(m):
+                    if _should_persist_human_input_message(m) and not m.additional_kwargs.get("run_input_id"):
                         persisted_message = restore_original_human_message(m)
                         self.set_first_human_message(self._message_text(persisted_message))
                         self._put(
@@ -565,6 +567,16 @@ class RunJournal(BaseCallbackHandler):
                         break
                 if self._first_human_message_captured:
                     break
+
+        if caller == "lead_agent":
+            for batch in messages:
+                for m in batch:
+                    input_id = m.additional_kwargs.get("run_input_id")
+                    if input_id and input_id not in self._captured_run_inputs and isinstance(m, HumanMessage):
+                        persisted = restore_original_human_message(m)
+                        self._put(event_type=LLM_HUMAN_INPUT_EVENT.event_type, category=LLM_HUMAN_INPUT_EVENT.category, content=persisted.model_dump(), metadata={"caller": caller})
+                        self._record_message_summary(persisted, caller=caller)
+                        self._captured_run_inputs.add(input_id)
 
     def on_llm_start(self, serialized: dict, prompts: list[str], *, run_id: UUID, parent_run_id: UUID | None = None, tags: list[str] | None = None, metadata: dict[str, Any] | None = None, **kwargs: Any) -> None:
         # Fallback: on_chat_model_start is preferred. This just tracks latency.
@@ -885,6 +897,11 @@ class RunJournal(BaseCallbackHandler):
             self._current_run_tool_call_names[tool_call_id] = str(name or "")
 
     def _persist_tool_result_message(self, message: BaseMessage) -> None:
+        if isinstance(message, ToolMessage) and message.name == "task":
+            from deerflow.subagents.status_contract import read_subagent_result_metadata
+
+            if read_subagent_result_metadata(message.additional_kwargs) is not None:
+                self._terminal_task_results.add(message.tool_call_id)
         self._put(
             event_type=LLM_TOOL_RESULT_EVENT.event_type,
             category=LLM_TOOL_RESULT_EVENT.category,
@@ -894,6 +911,21 @@ class RunJournal(BaseCallbackHandler):
         if identity:
             self._persisted_tool_message_identities.add(identity)
         self._record_message_summary(message)
+
+    def record_deferred_task_result(self, message: ToolMessage) -> None:
+        """Persist the outcome of an owned deferred task, once, for history.
+
+        A real on_tool_end result wins over a cancellation/failure fallback.
+        This never rewrites the model's earlier pending ToolMessage.
+        """
+        if not self._closed and self._current_run_tool_call_names.get(message.tool_call_id) == "task" and message.tool_call_id not in self._terminal_task_results:
+            self._persist_tool_result_message(message)
+
+    def record_steered_response(self, message: AIMessage) -> None:
+        """Append the pre-execution correction without rewriting a feed row."""
+        if not self._closed:
+            self._put(event_type=LLM_AI_RESPONSE_EVENT.event_type, category=LLM_AI_RESPONSE_EVENT.category, content=message.model_dump(), metadata={"caller": "lead_agent", "adjusted_by_input": True})
+            self._record_message_summary(message, caller="lead_agent")
 
     def record_interrupted_ai_responses(self, messages: Iterable[AIMessage]) -> int:
         """Persist visible streamed text that never reached ``on_llm_end``.
