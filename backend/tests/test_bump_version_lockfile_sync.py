@@ -73,6 +73,10 @@ if args not in (["lock"], ["lock", "--check"]):
     sys.exit(f"fake uv: unsupported invocation {args}")
 
 root = Path.cwd()
+failure = root / "fail-next-lock"
+if args == ["lock"] and failure.exists():
+    failure.unlink()
+    sys.exit("synthetic resolver unavailable")
 lock_path = root / "uv.lock"
 lock_text = lock_path.read_text(encoding="utf-8")
 
@@ -196,4 +200,65 @@ def test_bump_version_refuses_to_run_without_uv(tmp_path: Path) -> None:
     assert "uv" in (result.stderr + result.stdout)
     assert (root / "backend" / "pyproject.toml").read_text(encoding="utf-8") == PYPROJECT, "the script edited files before checking for uv"
     assert (root / "backend" / "packages" / "harness" / "pyproject.toml").read_text(encoding="utf-8") == HARNESS_PYPROJECT, "the script edited files before checking for uv"
+    assert _lock_version(root) == "2.1.0rc0"
+
+
+@pytest.mark.parametrize("aligned", ["backend/pyproject.toml", "backend/packages/harness/pyproject.toml", "frontend/package.json", "deploy/helm/deer-flow/Chart.yaml"])
+def test_bump_version_accepts_already_aligned_sources(tmp_path: Path, aligned: str) -> None:
+    root = _write_sandbox(tmp_path / "repo")
+    source = root / aligned
+    source.write_text(source.read_text(encoding="utf-8").replace("2.1.0-rc0", "2.2.0"), encoding="utf-8")
+    bin_dir = _install_fake_uv(root)
+
+    result = _run_bump(root, "2.2.0", path_prefix=bin_dir)
+
+    assert result.returncode == 0, result.stderr
+    assert _lock_version(root) == "2.2.0"
+    assert (bin_dir / "uv-calls.log").read_text(encoding="utf-8").splitlines() == ["uv lock", "uv lock --check"]
+
+
+def test_bump_version_can_retry_after_lock_failure(tmp_path: Path) -> None:
+    root = _write_sandbox(tmp_path / "repo")
+    bin_dir = _install_fake_uv(root)
+    (root / "backend/fail-next-lock").touch()
+
+    failed = _run_bump(root, "2.2.0", path_prefix=bin_dir)
+
+    assert failed.returncode != 0
+    assert "synthetic resolver unavailable" in failed.stderr
+    assert "re-run" in failed.stderr
+    assert _lock_version(root) == "2.1.0rc0"
+    versions = [root / name for name in ("backend/pyproject.toml", "backend/packages/harness/pyproject.toml", "frontend/package.json", "deploy/helm/deer-flow/Chart.yaml")]
+    before_retry = [source.read_bytes() for source in versions]
+    assert all(b"2.2.0" in content for content in before_retry)
+
+    retried = _run_bump(root, "2.2.0", path_prefix=bin_dir)
+
+    assert retried.returncode == 0, retried.stderr
+    assert _lock_version(root) == "2.2.0"
+    assert [source.read_bytes() for source in versions] == before_retry
+    assert (bin_dir / "uv-calls.log").read_text(encoding="utf-8").splitlines() == ["uv lock", "uv lock", "uv lock --check"]
+
+
+@pytest.mark.parametrize(
+    ("name", "line"),
+    [
+        ("backend/pyproject.toml", 'version = "2.1.0-rc0"'),
+        ("backend/packages/harness/pyproject.toml", 'version = "2.1.0-rc0"'),
+        ("frontend/package.json", '  "version": "2.1.0-rc0",'),
+        ("deploy/helm/deer-flow/Chart.yaml", "version: 2.1.0-rc0"),
+        ("deploy/helm/deer-flow/Chart.yaml", 'appVersion: "2.1.0-rc0"'),
+    ],
+)
+def test_bump_version_still_rejects_missing_fields(tmp_path: Path, name: str, line: str) -> None:
+    root = _write_sandbox(tmp_path / "repo")
+    source = root / name
+    source.write_text(source.read_text(encoding="utf-8").replace(line + "\n", ""), encoding="utf-8")
+    bin_dir = _install_fake_uv(root)
+
+    result = _run_bump(root, "2.2.0", path_prefix=bin_dir)
+
+    assert result.returncode != 0
+    assert "version" in result.stderr
+    assert (bin_dir / "uv-calls.log").read_text(encoding="utf-8") == ""
     assert _lock_version(root) == "2.1.0rc0"

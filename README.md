@@ -3947,6 +3947,7 @@ See [backend/docs/TUI.md](backend/docs/TUI.md) for the full guide.
 ## Documentation
 
 - [Contributing Guide](CONTRIBUTING.md) - Development environment setup and workflow
+- [Release Guide](RELEASING.md) - Version alignment and retrying interrupted lock updates
 - [Configuration Guide](backend/docs/CONFIGURATION.md) - Setup and configuration instructions
 - [Architecture Overview](backend/CLAUDE.md) - Technical architecture details
 - [Backend Architecture](backend/README.md) - Backend architecture and API reference
