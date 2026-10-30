@@ -46,6 +46,10 @@ vars; `summarize` and pytest are offline. See its README for the protocol.
 Benchmarks in `scripts/benchmark/` must be standalone and reproducible. Import
 production functions; never duplicate them or introduce an alternative runtime.
 
+`scripts/benchmark/deferred_tools/`: production discovery vs pinned SchemaRouter.
+Use synthetic post-policy catalogs; no execution or labels in adapters.
+Its README defines metrics, negative controls and commands.
+
 Sandbox benchmarks reuse production lifecycle. Reject negative/NaN timing values
 before provider creation, export no secrets, and fail on final cleanup errors.
 See the sandbox benchmark README for supported options and tests.

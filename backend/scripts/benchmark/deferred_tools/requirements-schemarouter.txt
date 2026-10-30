@@ -1,0 +1,2 @@
+# Optional evaluator only; backend/project dependencies are unchanged.
+schemarouter==0.17.0 --hash=sha256:bd4648145ad62208f01ce2c50e9e52b910c6a1a3c2f5cbbd88a475ee19930f26
