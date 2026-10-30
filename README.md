@@ -1787,6 +1787,9 @@ and is treated as missing measurements. Its token and duration fields accept fin
 non-negative numbers (including zero); invalid fields emit a warning naming the file
 and field and use the existing fallback independently, preserving valid measurements
 and other runs.
+The same numeric validation applies to `grading.json` durations. Missing, null,
+or invalid grading durations fall back to valid sibling timing data, then zero,
+so one unusable duration cannot abort the benchmark report.
 
 `SKILL.md` YAML frontmatter must open and close with `---` on its own line (trailing spaces or tabs are allowed). A line such as `---suffix` is not a closing delimiter.
 

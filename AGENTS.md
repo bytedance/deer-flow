@@ -231,6 +231,8 @@ Repo-wide conventions:
   Public skill script regressions live in `tests/skills/` and run in Skill Review CI
   independently of package review. Exercise dependency fallbacks with the optional
   import unavailable and mock HTTP transport to keep tests offline.
+  Skill-creator duration validation covers both grading and sibling timing data;
+  keep invalid grading durations from bypassing the existing timing fallback.
   Video, podcast, and chart-visualization CLI failures exit non-zero;
   diagnostics on stderr, success URLs on stdout; test offline.
 - **Before pushing** — backend `make format`, frontend `pnpm check`.
