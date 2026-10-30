@@ -15,10 +15,12 @@ pytestmark = pytest.mark.skipif(BASH is None, reason="repo shell-script tests ne
 
 @pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
 @pytest.mark.parametrize("encoding", ["utf-8", "utf-8-sig"])
+@pytest.mark.parametrize("quote", ["", "'", '"'], ids=["plain", "single-quoted", "double-quoted"])
 @pytest.mark.parametrize("configured", [True, False], ids=["configured", "commented"])
-def test_setup_sandbox_image_selection(tmp_path, encoding, configured, newline):
+def test_setup_sandbox_image_selection(tmp_path, encoding, configured, newline, quote):
     image = "example.invalid/custom-sandbox:review"
-    config = f"sandbox:\n  image: {image}\n" if configured else f"# sandbox:\n#   image: {image}\n"
+    scalar = f"{quote}{image}{quote} # custom sandbox image"
+    config = f"sandbox:\n  image: {scalar}\n" if configured else f"# sandbox:\n#   image: {scalar}\n"
     (tmp_path / "config.yaml").write_bytes(config.replace("\n", newline).encode(encoding))
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
