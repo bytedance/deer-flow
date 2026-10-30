@@ -1789,6 +1789,79 @@ def _is_non_path_literal_fragment(fragment: str) -> bool:
     return False
 
 
+_EXPRESSION_DIVISION_CLOSERS = (")", "]", "}")
+
+
+def _function_call_paren_before(command: str, close_pos: int) -> bool:
+    """Whether the ``)`` at *close_pos* closes a ``name(...)``, not a substitution.
+
+    Walks left from *close_pos* counting parens and stops at the matching
+    ``(``. Fails closed (returns False) on anything the walk cannot reason
+    about — a quote or backtick, which can hide a paren from plain counting —
+    or when the parens never balance. The shape is a call only when the
+    character before the matching ``(`` is a word character: ``sum(xs)/2`` is
+    division in an inline program, while ``$(pwd)/x`` (command substitution)
+    and ``(pwd)/x`` (subshell output) keep their unknown runtime values, and
+    ``x=(1 2)/y`` (assignment) is not a call either.
+    """
+    depth = 1
+    position = close_pos - 1
+    while position >= 0:
+        char = command[position]
+        if char in "\"'`":
+            return False
+        if char == ")":
+            depth += 1
+        elif char == "(":
+            depth -= 1
+            if depth == 0:
+                before = command[position - 1] if position > 0 else ""
+                return bool(before) and (before.isalnum() or before == "_")
+        position -= 1
+    return False
+
+
+def _is_expression_division_after_closer(command: str, start: int, segment: str) -> bool:
+    """Whether a single-segment absolute-path match is division, not a path.
+
+    A ``/`` that directly follows ``)``, ``]`` or ``}`` continues an expression
+    in every language an agent writes inline: ``($2+$3)/2`` in shell
+    arithmetic, ``$F[1]/2`` in perl, ``x[0]/n`` under ``python3 -c``. The
+    #7023 exemption covers only single-quoted awk programs, so the same
+    arithmetic everywhere else was reported as an unsafe absolute path
+    (#7444). The per-closer rules keep every unknown-value path build
+    rejected:
+
+    - after ``}`` only an all-digit segment qualifies — no standard host
+      directory starts with a digit, the same rationale as ``$1/1024`` — so
+      ``${HOME}/etc`` stays rejected;
+    - after ``)`` an all-digit segment qualifies on that rationale, and an
+      identifier segment qualifies only when the ``)`` closes a ``name(...)``
+      call (``_function_call_paren_before``): ``$(pwd)/x``, ``(pwd)/x`` and
+      ``x=(1 2)/y`` keep being rejected;
+    - after ``]`` any segment qualifies: bash has no path-building form that
+      ends ``]/name`` (array reads need ``${a[0]}/...``, whose ``}`` the
+      previous rule already polices, and a bare ``x[0]/n`` word is a relative
+      glob this guard does not police).
+
+    Only single-segment matches reach this check (the caller rejects
+    multi-segment ``/a/b`` shapes first), so ``$(dirname f)/etc/passwd`` is
+    still rejected as a whole path.
+    """
+    if start == 0:
+        return False
+    closer = command[start - 1]
+    if closer not in _EXPRESSION_DIVISION_CLOSERS:
+        return False
+    if closer == "]":
+        return bool(segment)
+    if closer == "}":
+        return segment.isdigit()
+    if segment.isdigit():
+        return True
+    return bool(segment) and _function_call_paren_before(command, start - 1)
+
+
 def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState | None) -> None:
     """Validate absolute paths in local-sandbox bash commands.
 
@@ -1812,6 +1885,10 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
     exemption is withheld from any command that could redefine ``awk`` or
     re-read quoted text (see ``_awk_program_field_spans``);
     ``$PWD/...`` is checked like the relative path it is equivalent to.
+    Outside awk programs, a single-segment match directly after ``)``, ``]``
+    or ``}`` is division in an inline expression (``($2+$3)/2``,
+    ``$F[1]/2``, ``x[0]/n``) and is exempt under the per-closer rules of
+    ``_is_expression_division_after_closer``.
     A windows-incompatible segment still rejects a path that is not already
     stored on the host; an existing host file may be read or renamed.
     """
@@ -1843,6 +1920,8 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
             if awk_field_spans is None:
                 awk_field_spans = _awk_program_field_spans(command)
             if _is_in_spans(match.start(), awk_field_spans):
+                continue
+            if _is_expression_division_after_closer(command, match.start(), match.group()[1:]):
                 continue
         absolute_path = match.group()
         if _is_non_path_literal_fragment(absolute_path):
