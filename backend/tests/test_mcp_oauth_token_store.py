@@ -673,3 +673,46 @@ def test_request_fingerprint_follows_token_request_parameters_not_the_chain():
         assert oauth_token_request_fingerprint(changed) != fingerprint, update
         assert oauth_config_fingerprint(changed) == oauth_config_fingerprint(base), "the refresh-token chain is unaffected"
     assert oauth_token_request_fingerprint(base.model_copy(update={"extra_token_params": {"resource": "https://api"}})) == fingerprint
+
+
+def test_shared_store_refresh_waiters_leave_default_executor_available(session_factory, cipher, endpoint, monkeypatch):
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        executor = ThreadPoolExecutor(max_workers=1)
+        loop.set_default_executor(executor)
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        handle = endpoint.handle
+
+        async def held_response(request):
+            entered.set()
+            await release.wait()
+            return handle(request)
+
+        monkeypatch.setattr(endpoint, "handle", held_response)
+        manager = _replica(session_factory, cipher)
+        callers = [asyncio.create_task(manager.get_authorization_header(SERVER))]
+        try:
+            await asyncio.wait_for(entered.wait(), 5)
+            callers.extend(asyncio.create_task(manager.get_authorization_header(SERVER)) for _ in range(2))
+            # The marker runs after both waiters have reached their suspension.
+            waiting = loop.create_future()
+            loop.call_soon(waiting.set_result, None)
+            await waiting
+            assert await asyncio.wait_for(asyncio.to_thread(lambda: "executor-ready"), 5) == "executor-ready"
+            release.set()
+            assert await asyncio.wait_for(asyncio.gather(*callers), 5) == ["Bearer access-1"] * 3
+            peer = _replica(session_factory, cipher)
+            assert await asyncio.wait_for(peer.get_authorization_header(SERVER), 5) == "Bearer access-1"
+        finally:
+            release.set()
+            for caller in callers:
+                caller.cancel()
+            await asyncio.gather(*callers, return_exceptions=True)
+            executor.shutdown(wait=True, cancel_futures=True)
+
+    asyncio.run(scenario())
+    assert endpoint.refresh_requests == ["refresh-0"]
+    (row,) = _rows(session_factory)
+    assert (row.version, row.refresh_lease_owner) == (1, None)
+    assert cipher.decrypt_text(row.refresh_token_enc) == "refresh-1"
