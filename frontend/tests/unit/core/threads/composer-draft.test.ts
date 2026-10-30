@@ -6,6 +6,7 @@ import {
   getSessionComposerDraftStorage,
   readComposerDraft,
   resolveComposerDraft,
+  retireSentComposerDraft,
   writeComposerDraft,
   type ComposerDraftStorage,
 } from "@/core/threads/composer-draft";
@@ -69,6 +70,46 @@ describe("composer draft storage", () => {
     writeComposerDraft(storage, key, draft);
 
     expect(readComposerDraft(storage, key)).toEqual(draft);
+  });
+
+  it("preserves a later draft when only conversation references changed", () => {
+    const storage = new MemoryStorage();
+    const key = "draft-key";
+    const laterDraft = {
+      text: "Compare these conversations",
+      skillName: null,
+      conversationReferences: [
+        {
+          threadId: "thread-later",
+          title: "Later conversation",
+        },
+      ],
+    };
+    writeComposerDraft(storage, key, laterDraft);
+
+    retireSentComposerDraft(storage, key, [laterDraft.text], ["thread-sent"]);
+
+    expect(readComposerDraft(storage, key)).toEqual(laterDraft);
+  });
+
+  it("retires the sent draft when its conversation references still match", () => {
+    const storage = new MemoryStorage();
+    const key = "draft-key";
+    const sentDraft = {
+      text: "Compare these conversations",
+      skillName: null,
+      conversationReferences: [
+        {
+          threadId: "thread-sent",
+          title: "Sent conversation",
+        },
+      ],
+    };
+    writeComposerDraft(storage, key, sentDraft);
+
+    retireSentComposerDraft(storage, key, [sentDraft.text], ["thread-sent"]);
+
+    expect(readComposerDraft(storage, key)).toBeNull();
   });
 
   it("removes empty drafts and explicitly cleared drafts", () => {
