@@ -10,6 +10,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 This section accumulates work toward the **2.3.0** milestone
 ([2.3.0](https://github.com/bytedance/deer-flow/milestone/4)).
 
+### Fixed
+
+- **memory:** `GET /api/memory/config` and `/api/memory/status` now mask
+  credential values in `backend_config` (`api_key`, tokens, passwords,
+  `Authorization` headers, at any depth) as `***`. They returned the config as
+  loaded, with `$VAR` references already resolved, so a DeerMem extraction
+  model key or a Honcho `api_key` reached every caller with `memory:read` in
+  plaintext, which with authorization disabled (the default) is every
+  signed-in user. Non-secret knobs, `api_key_env` names and unset values are
+  unchanged. ([#7665])
+
 ## [2.2.0] — 2026-10-29
 
 This section accumulates work toward the **2.2.0** milestone
@@ -15915,3 +15926,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7643]: https://github.com/bytedance/deer-flow/pull/7643
 [#7651]: https://github.com/bytedance/deer-flow/pull/7651
 [#7659]: https://github.com/bytedance/deer-flow/pull/7659
+[#7665]: https://github.com/bytedance/deer-flow/pull/7665
