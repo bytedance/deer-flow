@@ -116,13 +116,16 @@ class GitHubAPI:
     ) -> Dict:
         """Get repository directory tree.
 
+        Pass the reference raw, without pre-encoding it. It is URL-encoded as a
+        single path segment before the request is sent.
+
         ``HEAD`` is resolved by GitHub to the repository's default branch, so a
         repository that uses neither ``main`` nor ``master`` gets its current tree.
         Guessing those two names instead served the tree of an abandoned branch
         whenever the repository kept a stale ``master`` around.
         """
         params = {"recursive": "1"} if recursive else {}
-        return self._get(f"/repos/{owner}/{repo}/git/trees/{branch}", params)
+        return self._get(f"/repos/{owner}/{repo}/git/trees/{quote(branch, safe='')}", params)
 
     def get_file_content(self, owner: str, repo: str, path: str) -> str:
         """Get content of a file using its raw repository-relative path."""

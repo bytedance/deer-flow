@@ -57,6 +57,10 @@ python /path/to/skill/scripts/github_api.py <owner> <repo> tree
 - releases
 
 The `issues` command returns repository issues only, excluding pull requests. It follows additional pages when needed to fill the requested issue limit; use `prs` to research pull requests separately.
+When calling `GitHubAPI.get_tree()` from Python, pass the raw branch, tag, or
+commit reference. The client URL-encodes it, including literal `#` and `%`
+characters; do not pre-encode the reference.
+)
 
 **Round 2 - Discovery (3-5 web_search)**
 - Get overview and identify key terms
