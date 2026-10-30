@@ -8,7 +8,7 @@ access from a model argument or an ambient HTTP request.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -71,7 +71,10 @@ def _message_type(message: Any) -> str | None:
 
 
 def _is_thread_history_hidden_message_row(row: dict[str, Any]) -> bool:
-    caller = str((row.get("metadata") or {}).get("caller", ""))
+    metadata = row.get("metadata") or {}
+    if not isinstance(metadata, Mapping):
+        metadata = {}
+    caller = str(metadata.get("caller", ""))
     return caller.startswith("middleware:") or (caller.startswith("subagent:") and _message_type(row.get("content")) == "ai")
 
 

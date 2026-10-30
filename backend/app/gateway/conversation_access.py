@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
@@ -59,14 +59,19 @@ def _source_id(reference: str, request_url: str) -> str:
 
 def _visible_text(row: dict) -> tuple[str, str] | None:
     message = row.get("content")
-    if not isinstance(message, dict):
+    if not isinstance(message, Mapping):
         return None
     role = message.get("type") or message.get("role")
     role = {"human": "user", "ai": "assistant"}.get(role, role)
     extra = message.get("additional_kwargs") or {}
+    if not isinstance(extra, Mapping):
+        extra = {}
     if role not in {"user", "assistant"} or extra.get("hide_from_ui") or message.get("name") == "summary":
         return None
-    if str((row.get("metadata") or {}).get("caller", "")).startswith(("middleware:", "subagent:")):
+    metadata = row.get("metadata") or {}
+    if not isinstance(metadata, Mapping):
+        metadata = {}
+    if str(metadata.get("caller", "")).startswith(("middleware:", "subagent:")):
         return None
     content = message.get("content")
     if role == "user" and isinstance(extra.get("original_user_content"), str):
