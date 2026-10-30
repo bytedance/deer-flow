@@ -196,19 +196,15 @@ when no events remain. This does not add multi-process JSONL support. Coverage:
 `tests/test_jsonl_event_store_seq_watermark.py` and the mutation cancellation suite.
 
 **Targeted run-event attribution** (`runtime/events/store/`):
-`RunEventStore.find_latest_ai_message_run_ids()` has a complete-or-error
-contract. Its default implementation walks `list_messages()` backward in
-1000-row pages, preserves the first page's high-watermark through the exclusive
-`before_seq` cursor, and raises when a full page has no safe progressing `seq`.
-Memory and database stores use that bounded path; the JSONL store overrides it
-with one complete thread-log read because each JSONL page would otherwise
-rescan every run file. That JSONL snapshot task is named `jsonl-snapshot:{thread_id}` for
-asyncio task dumps and retains the per-thread lock until its off-thread full-log
-read settles even through caller cancellation. It deliberately has no drain
-timeout: releasing ownership while the worker can still read files would let a
-writer enter the supposedly stable snapshot. The default and JSONL paths share the public
-`normalize_message_ids()` and `match_ai_message_run_id()` helpers from
-`events/store/base.py`. Database owner filtering is inherited on every page.
+`find_latest_ai_message_run_ids()` is complete-or-error. Default/memory/database
+walk `list_messages()` backward in 1000-row pages, preserving the first page's
+high-watermark via exclusive `before_seq`; reject full pages without safe seq
+progress. JSONL scans all files off-thread, retaining newest valid seq/run per
+target ID. Its `jsonl-snapshot:{thread_id}` task holds the per-thread lock through
+iterator exhaustion and caller cancellation, without a drain timeout: never
+release ownership while the worker can still read. All paths share public
+`normalize_message_ids()` / `match_ai_message_run_id()` from `events/store/base.py`;
+database owner filtering applies on every page.
 
 **Run-event read identity**: `list_messages`, `list_events` and
 `list_messages_by_run` accept `user_id` on every backend (DB filters;
@@ -356,6 +352,11 @@ missing critic usage adds `missing_usage_calls` to the model bucket, making the
 run's full cost unpriced instead of reporting a partial total as complete.
 Accounting includes critic usage, while the graph token-budget middleware does
 not gate standalone critic calls. A graph token limit is not a strict billing cap.
+
+## JSONL bounded reads
+
+Query contracts, memory bounds and regressions:
+[JSONL history memory](../../../../docs/jsonl-history-memory.md).
 
 ## JSONL mutation cancellation
 
