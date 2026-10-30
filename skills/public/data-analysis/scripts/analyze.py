@@ -563,6 +563,14 @@ def main():
         parser.error("--sql is required for 'query' action")
     if args.action == "summary" and not args.table:
         parser.error("--table is required for 'summary' action")
+    if args.action == "query" and args.output_file and os.path.exists(args.output_file):
+        for file_path in args.files:
+            if os.path.exists(file_path) and os.path.samefile(
+                args.output_file, file_path
+            ):
+                parser.error(
+                    f"--output-file must not overwrite an input file: {file_path}"
+                )
 
     # Compute file hash for caching
     files_hash = compute_files_hash(args.files)
