@@ -864,8 +864,8 @@ def _host_default_should_keep_hidden_message(additional_kwargs: Any) -> bool:
 def _host_default_llm() -> Any:
     """deer-flow default for DeerMem's ``host_llm`` slot (zero-config extraction).
 
-    Builds the host's default chat model (``create_chat_model(name=None)`` ->
-    app default, ``attach_tracing=True`` so memory LLM calls surface in langfuse
+    Resolves a migrated legacy ``model_name`` through the host model registry,
+    or builds the app default when absent. ``attach_tracing=True`` so memory LLM calls surface in langfuse
     via the callbacks' ``on_memory_llm_call`` metadata merge), mirroring pre-abstraction
     ``model_name: null``. Returns ``None`` if no model is available (no models
     configured) so DeerMem no-ops extraction with a clear error rather than
@@ -874,9 +874,10 @@ def _host_default_llm() -> Any:
     try:
         from deerflow.models import create_chat_model
 
-        return create_chat_model(name=None)
+        name = get_memory_config().backend_config.get("model_name")
+        return create_chat_model(name=name or None)
     except Exception:  # noqa: BLE001 - no default model is a config state, not a crash
-        logger.warning("Could not build host default model for DeerMem memory extraction; memory extraction will be disabled", exc_info=True)
+        logger.warning("Could not build host model for DeerMem memory extraction; memory extraction will be disabled", exc_info=True)
         return None
 
 
