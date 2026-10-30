@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import stat
+from contextlib import suppress
 
 from deerflow_extension_api.host_capabilities import HostCapabilityError
 
@@ -52,11 +53,17 @@ def replace_main(root, content: bytes, *, operation_id: str) -> None:
                 except FileNotFoundError:
                     pass
                 except OSError:
-                    # The publication outcome is already decided; a leftover
-                    # temp is reported here and detected again by
-                    # ``assert_temporary_absent``, so it must not replace that
-                    # outcome with the cleanup error.
-                    logger.warning("Failed to remove skill mutation temporary %s", temporary, exc_info=True)
+                    # The publication outcome is already decided. A leftover from
+                    # a failed publication is swept later by ``cleanup_temporary``
+                    # when ``resolve_prepared`` classifies the outcome (reached
+                    # from ``publish_prepared``'s except path or from recovery);
+                    # a leftover after a decided-successful publication is not
+                    # revisited, so the discard must not replace that outcome
+                    # with its own error. ``suppress`` keeps a raising logging
+                    # handler from becoming that error either, matching
+                    # ``cleanup_failed_atomic_write``.
+                    with suppress(Exception):
+                        logger.warning("Failed to remove skill mutation temporary %s", temporary, exc_info=True)
         finally:
             os.close(directory)
             if parent is not None:
