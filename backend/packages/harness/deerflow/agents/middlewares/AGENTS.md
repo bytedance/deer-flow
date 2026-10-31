@@ -8,6 +8,12 @@ depth regressions in `tests/test_tool_result_meta_json_depth.py`, including real
 LocalSandbox reads through both synchronous and asynchronous agent graphs.
 Deep graph cases must establish a real parser depth failure or report a skip.
 
+Tool-call argument normalization is equally best-effort: a JSON string or Python
+structure nested past the parser's recursion limit becomes opaque args (or an
+empty object during replay repair), and clarification options fall back to the
+raw string instead of raising `RecursionError`. Keep depth regressions in
+`tests/test_tool_call_json_depth.py`.
+
 Async gate waiters own separate cross-loop futures. Cancel only their signal;
 notify outside the state lock. `_await_off_thread` drains started I/O across
 repeated cancellation.

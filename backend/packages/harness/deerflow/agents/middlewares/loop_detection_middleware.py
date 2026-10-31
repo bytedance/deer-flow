@@ -110,6 +110,14 @@ _UI_NARRATION_TOOLS = frozenset({"bash", "ls", "glob", "grep"})
 type _RunScopeKey = tuple[str, str | None]
 
 
+def _stable_args_key(value: object) -> str | None:
+    """Serialize opaque args for a stable key, or None past the recursion limit."""
+    try:
+        return json.dumps(value, sort_keys=True, default=str)
+    except (TypeError, ValueError, RecursionError):
+        return None
+
+
 def _normalize_tool_call_args(raw_args: object) -> tuple[dict, str | None]:
     """Normalize tool call args to a dict plus an optional fallback key.
 
@@ -123,17 +131,17 @@ def _normalize_tool_call_args(raw_args: object) -> tuple[dict, str | None]:
     if isinstance(raw_args, str):
         try:
             parsed = json.loads(raw_args)
-        except (TypeError, ValueError, json.JSONDecodeError):
+        except (TypeError, ValueError, json.JSONDecodeError, RecursionError):
             return {}, raw_args
 
         if isinstance(parsed, dict):
             return parsed, None
-        return {}, json.dumps(parsed, sort_keys=True, default=str)
+        return {}, _stable_args_key(parsed)
 
     if raw_args is None:
         return {}, None
 
-    return {}, json.dumps(raw_args, sort_keys=True, default=str)
+    return {}, _stable_args_key(raw_args)
 
 
 def _coerce_line_number(value: object) -> int | None:

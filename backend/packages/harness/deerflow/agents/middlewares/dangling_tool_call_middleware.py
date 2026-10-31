@@ -143,7 +143,7 @@ def _parse_json_object(value: object) -> dict | None:
         return None
     try:
         parsed = json.loads(value)
-    except ValueError:
+    except (ValueError, RecursionError):
         return None
     return parsed if isinstance(parsed, dict) else None
 
@@ -153,7 +153,7 @@ def _normalize_tool_arguments(arguments: object) -> str:
     if isinstance(arguments, dict):
         try:
             return json.dumps(arguments, ensure_ascii=False, allow_nan=False)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, RecursionError):
             return "{}"
     return arguments if _parse_json_object(arguments) is not None else "{}"
 
