@@ -47,6 +47,7 @@ import { useArtifactContent } from "@/core/artifacts/hooks";
 import {
   getArtifactViewState,
   getTabularDelimiter,
+  parseWriteFileArtifact,
 } from "@/core/artifacts/preview";
 import { urlOfArtifact } from "@/core/artifacts/utils";
 import {
@@ -106,13 +107,15 @@ export function ArtifactFileDetail({
   const isWriteFile = useMemo(() => {
     return filepathFromProps.startsWith("write-file:");
   }, [filepathFromProps]);
-  const filepath = useMemo(() => {
-    if (isWriteFile) {
-      const url = new URL(filepathFromProps);
-      return decodeURIComponent(url.pathname);
-    }
-    return filepathFromProps;
-  }, [filepathFromProps, isWriteFile]);
+  // `write-file:` URLs come from messages and from the panel's persisted
+  // selection, so parse them through the guarded helper instead of `new URL`
+  // + `decodeURIComponent` directly: a malformed value must degrade to the
+  // raw string, not throw during render.
+  const parsedWriteFile = useMemo(
+    () => (isWriteFile ? parseWriteFileArtifact(filepathFromProps) : undefined),
+    [filepathFromProps, isWriteFile],
+  );
+  const filepath = parsedWriteFile?.path ?? filepathFromProps;
   // Keep these local because ChatBox replaces context artifacts with thread state.
   const [openedPresentedFilepaths, setOpenedPresentedFilepaths] = useState<
     string[]
@@ -178,15 +181,15 @@ export function ArtifactFileDetail({
   const isSupportPreview =
     language === "html" || language === "markdown" || isTabular;
   const toolResult = (() => {
-    if (!isWriteFile) {
-      return undefined;
-    }
-    const url = new URL(filepathFromProps);
-    const toolCallId = url.searchParams.get("tool_call_id");
+    const toolCallId = parsedWriteFile?.toolCallId;
     if (!toolCallId) {
       return undefined;
     }
-    return findToolCallResult(toolCallId, thread.messages);
+    return findToolCallResult(
+      toolCallId,
+      thread.messages,
+      parsedWriteFile?.messageId,
+    );
   })();
   const artifactViewState = getArtifactViewState({
     filepath: filepathFromProps,
@@ -321,24 +324,38 @@ export function ArtifactFileDetail({
       return;
     }
 
+    const submittedDraftContent = activeDraft.draftContent;
+    const submittedBaselineSha256 = activeDraft.baselineSha256;
     setIsSaving(true);
     try {
       const result = await updateArtifactContent({
         threadId,
         filepath,
-        content: activeDraft.draftContent,
-        expectedSha256: activeDraft.baselineSha256,
+        content: submittedDraftContent,
+        expectedSha256: submittedBaselineSha256,
       });
-      const savedContent = activeDraft.draftContent;
+      // A refetch started before or during the save can still return old bytes.
+      // Cancel both preview and full reads before publishing the saved revision.
+      await queryClient.cancelQueries({
+        queryKey: ["artifact", filepathFromProps, threadId, isMock],
+      });
       setDrafts((current) => ({
         ...current,
-        [filepath]: {
-          filepath,
-          baselineContent: savedContent,
-          baselineSha256: result.sha256,
-          draftContent: savedContent,
-          conflict: false,
-        },
+        [filepath]: (() => {
+          const currentDraft = current[filepath] ?? activeDraft;
+          const changedSinceSubmit =
+            currentDraft.draftContent !== submittedDraftContent ||
+            currentDraft.baselineSha256 !== submittedBaselineSha256;
+          return {
+            ...currentDraft,
+            baselineContent: submittedDraftContent,
+            baselineSha256: result.sha256,
+            draftContent: changedSinceSubmit
+              ? currentDraft.draftContent
+              : submittedDraftContent,
+            conflict: false,
+          };
+        })(),
       }));
       queryClient.setQueryData(
         ["artifact", filepathFromProps, threadId, isMock, fullContentRequested],
@@ -348,7 +365,7 @@ export function ArtifactFileDetail({
             | undefined,
         ) => ({
           ...current,
-          content: savedContent,
+          content: submittedDraftContent,
           sha256: result.sha256,
         }),
       );
@@ -698,6 +715,7 @@ export function ArtifactFileDetail({
                 content={editorContent}
                 language={language ?? "text"}
                 scrollKey={`${threadId}:${filepathFromProps}`}
+                artifact={{ filepath, threadId, isMock }}
                 url={url}
                 truncated={truncated}
                 active={effectiveViewMode === "preview" && !isLoading}

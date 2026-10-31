@@ -21,7 +21,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.gateway.auth.models import User
-from app.gateway.auth.repositories.base import UserNotFoundError, UserRepository
+from app.gateway.auth.repositories.base import LastActiveAdminError, LastAdminRemainsError, UserNotFoundError, UserRepository
 from deerflow.persistence.user.model import OAUTH_IDENTITY_INDEX_NAME, UserRow
 
 # ``email`` is ``mapped_column(unique=True, index=True)``, which SQLAlchemy
@@ -136,6 +136,7 @@ def _normalize_email(email: str) -> str:
 # Fixed 63-bit key for pg_advisory_xact_lock(bigint); scopes the first-admin
 # claim without colliding with other advisory-lock users in this database.
 _FIRST_ADMIN_LOCK_KEY = int.from_bytes(hashlib.sha256(b"deerflow:auth:first-admin-claim").digest()[:8], "big") & 0x7FFFFFFFFFFFFFFF
+_ROLE_MUTATION_LOCK_KEY = int.from_bytes(hashlib.sha256(b"deerflow:auth:role-mutation").digest()[:8], "big") & 0x7FFFFFFFFFFFFFFF
 
 
 class SQLiteUserRepository(UserRepository):
@@ -152,7 +153,7 @@ class SQLiteUserRepository(UserRepository):
             id=UUID(row.id),
             email=row.email,
             password_hash=row.password_hash,
-            system_role=row.system_role,  # type: ignore[arg-type]
+            system_role=row.system_role,
             # SQLite loses tzinfo on read; reattach UTC so downstream
             # code can compare timestamps reliably.
             created_at=row.created_at if row.created_at.tzinfo else row.created_at.replace(tzinfo=UTC),
@@ -160,6 +161,7 @@ class SQLiteUserRepository(UserRepository):
             oauth_id=row.oauth_id,
             needs_setup=row.needs_setup,
             token_version=row.token_version,
+            disabled=row.disabled,
         )
 
     @staticmethod
@@ -174,6 +176,7 @@ class SQLiteUserRepository(UserRepository):
             oauth_id=user.oauth_id,
             needs_setup=user.needs_setup,
             token_version=user.token_version,
+            disabled=user.disabled,
         )
 
     # ── CRUD ──────────────────────────────────────────────────────────
@@ -299,6 +302,66 @@ class SQLiteUserRepository(UserRepository):
             row = result.scalars().first()
             return self._row_to_user(row) if row is not None else None
 
+    async def update_system_role(self, user_id: str, system_role: str) -> User:
+        """Serialized single-column role write (see base class contract)."""
+        async with self._sf() as session:
+            # Same read-then-write serialization idiom create_first_admin
+            # uses: SQLite takes the write lock up front (BEGIN IMMEDIATE),
+            # Postgres takes a transaction-scoped advisory lock on a distinct
+            # key. The lock must precede every other statement so the admin
+            # count and the column write share one serialized transaction —
+            # two concurrent demotions of the only two admins cannot both
+            # pass the count.
+            await self._serialize_account_role_mutation(session)
+            row = await session.get(UserRow, user_id)
+            if row is None:
+                raise UserNotFoundError(f"User {user_id} no longer exists")
+            if row.system_role == "admin" and system_role != "admin":
+                # Count ACTIVE admins only: a disabled admin cannot
+                # authenticate, so counting them would let "disable B, then
+                # demote self" (or a combined role+disable request) strand
+                # the deployment with zero usable management credentials.
+                active_admins = await session.scalar(select(func.count()).select_from(UserRow).where(UserRow.system_role == "admin", UserRow.disabled.is_(False)))
+                if active_admins is None or active_admins <= 1:
+                    raise LastAdminRemainsError("cannot demote the last remaining admin")
+            row.system_role = system_role
+            await session.commit()
+            return self._row_to_user(row)
+
+    async def set_disabled(self, user_id: str, disabled: bool) -> User:
+        """Serialized single-column account enable/disable (see base contract)."""
+        async with self._sf() as session:
+            # Same serialization idiom as update_system_role: the
+            # active-admin count and the column write share one transaction.
+            await self._serialize_account_role_mutation(session)
+            row = await session.get(UserRow, user_id)
+            if row is None:
+                raise UserNotFoundError(f"User {user_id} no longer exists")
+            if disabled and not row.disabled and row.system_role == "admin":
+                active_admins = await session.scalar(select(func.count()).select_from(UserRow).where(UserRow.system_role == "admin", UserRow.disabled.is_(False)))
+                if active_admins is None or active_admins <= 1:
+                    raise LastActiveAdminError("cannot disable the last remaining active admin")
+            row.disabled = disabled
+            await session.commit()
+            return self._row_to_user(row)
+
+    @staticmethod
+    async def _serialize_account_role_mutation(session: AsyncSession) -> None:
+        """Serialize role mutations before the admin count is read.
+
+        Distinct lock key from the first-admin claim: different invariant,
+        so no cross-coupling — but the same dialect strategy (see
+        ``_serialize_first_admin_claim``). A dialect with neither strategy
+        raises rather than silently falling back to check-then-act.
+        """
+        dialect = session.get_bind().dialect.name
+        if dialect == "sqlite":
+            await session.execute(text("BEGIN IMMEDIATE"))
+        elif dialect == "postgresql":
+            await session.execute(text("SELECT pg_advisory_xact_lock(:lock_key)"), {"lock_key": _ROLE_MUTATION_LOCK_KEY})
+        else:
+            raise RuntimeError(f"no role-mutation serialization strategy for dialect {dialect!r}")
+
     async def update_user(self, user: User) -> User:
         async with self._sf() as session:
             row = await session.get(UserRow, str(user.id))
@@ -329,7 +392,15 @@ class SQLiteUserRepository(UserRepository):
                 row.email = canonical_email
             user.email = row.email
             row.password_hash = user.password_hash
-            row.system_role = user.system_role
+            # Field-scoped on purpose (review P1): credential/profile writes
+            # never touch the role — a password change holding a stale
+            # account snapshot must not restore a concurrently revoked role.
+            # Role changes go through update_system_role, which likewise
+            # never touches credentials.
+            user.system_role = row.system_role
+            # disabled is account-lifecycle state: only set_disabled writes
+            # it (same field-scoping as the role column).
+            user.disabled = row.disabled
             row.oauth_provider = user.oauth_provider
             row.oauth_id = user.oauth_id
             row.needs_setup = user.needs_setup
@@ -347,6 +418,12 @@ class SQLiteUserRepository(UserRepository):
         async with self._sf() as session:
             result = await session.scalars(stmt)
             return list(result)
+
+    async def list_users(self) -> list[User]:
+        stmt = select(UserRow).order_by(UserRow.created_at, UserRow.id)
+        async with self._sf() as session:
+            result = await session.scalars(stmt)
+            return [self._row_to_user(row) for row in result]
 
     async def count_admin_users(self) -> int:
         stmt = select(func.count()).select_from(UserRow).where(UserRow.system_role == "admin")

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import errno
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -323,6 +325,37 @@ class TestLoadAgentSoul:
 
         assert soul == expected_soul
 
+    def test_strips_a_leading_bom_from_named_agent_soul(self, tmp_path):
+        """A SOUL.md saved by a Windows editor keeps a UTF-8 BOM.
+
+        ``str.strip()`` does not remove U+FEFF, so without normalization the mark
+        becomes the first character of the text injected into the lead agent's
+        ``<soul>`` block. SOUL.md is edited outside DeerFlow (Notepad, PowerShell
+        5.1), which is exactly where a BOM comes from.
+        """
+        expected_soul = "You are a specialized code review expert."
+        _write_agent(tmp_path, "code-reviewer", {"name": "code-reviewer"}, soul="\ufeff" + expected_soul)
+
+        with patch("deerflow.config.agents_config.get_paths", return_value=_make_paths(tmp_path)):
+            from deerflow.config.agents_config import AgentConfig, load_agent_soul
+
+            cfg = AgentConfig(name="code-reviewer")
+            soul = load_agent_soul(cfg.name)
+
+        assert soul == expected_soul
+
+    def test_strips_a_leading_bom_from_the_default_agent_soul(self, tmp_path):
+        """The default agent reads ``{base_dir}/SOUL.md`` directly — a second read site."""
+        expected_soul = "You are the default agent."
+        (tmp_path / "SOUL.md").write_text("\ufeff" + expected_soul, encoding="utf-8")
+
+        with patch("deerflow.config.agents_config.get_paths", return_value=_make_paths(tmp_path)):
+            from deerflow.config.agents_config import load_agent_soul
+
+            soul = load_agent_soul(None)
+
+        assert soul == expected_soul
+
     def test_missing_soul_file_returns_none(self, tmp_path):
         agent_dir = tmp_path / "agents" / "no-soul"
         agent_dir.mkdir(parents=True)
@@ -605,6 +638,152 @@ def disabled_agent_client(tmp_path):
 
 
 class TestAgentsAPI:
+    def test_agent_package_round_trip_preserves_portable_behavior(self, agent_client):
+        payload = {
+            "name": "research-lead",
+            "display_name": "Research Lead",
+            "description": "Coordinates a research team",
+            "model": "deepseek-v3",
+            "tool_groups": ["web", "file:read"],
+            "mcp_plugins": ["papers"],
+            "skills": ["literature-review"],
+            "allowed_subagents": ["researcher", "reporter"],
+            "model_settings": {"temperature": 0.2, "max_tokens": 12000},
+            "thinking_enabled": True,
+            "reasoning_effort": "high",
+            "soul": "Delegate independent searches, then synthesize evidence.",
+        }
+        assert agent_client.post("/api/agents", json=payload).status_code == 201
+
+        exported = agent_client.get("/api/agents/research-lead/export")
+
+        assert exported.status_code == 200
+        assert exported.headers["content-disposition"] == 'attachment; filename="research-lead.deerflow-agent.json"'
+        package = exported.json()
+        assert package == {
+            "format": "deerflow.custom-agent",
+            "version": 1,
+            "agent": {**payload, "memory_enabled": True},
+        }
+
+        imported = agent_client.post(
+            "/api/agents/import",
+            params={"name": "research-lead-copy"},
+            json=package,
+        )
+        assert imported.status_code == 201
+        assert imported.json() == {**payload, "name": "research-lead-copy", "knowledge_scope": None}
+
+    def test_agent_package_excludes_runtime_state_and_operator_github_binding(self, agent_client, tmp_path):
+        assert agent_client.post("/api/agents", json={"name": "portable", "soul": "Portable soul"}).status_code == 201
+        agent_dir = tmp_path / "users" / "test-user-autouse" / "agents" / "portable"
+        config_file = agent_dir / "config.yaml"
+        config = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+        config["memory_enabled"] = False
+        config["github"] = {
+            "installation_id": 12345,
+            "bot_login": "private-bot",
+            "bindings": [{"repo": "private/repository"}],
+        }
+        config_file.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+        (agent_dir / "memory.json").write_text('{"secret": "remembered"}', encoding="utf-8")
+
+        package = agent_client.get("/api/agents/portable/export").json()
+
+        assert package["agent"]["memory_enabled"] is False
+        assert "github" not in package["agent"]
+        assert "memory" not in package
+        assert "memory" not in package["agent"]
+        assert "secret" not in str(package)
+
+    @pytest.mark.parametrize(
+        "package",
+        [
+            {"agent": {"name": "bad", "soul": "x"}},
+            {"format": "deerflow.custom-agent", "agent": {"name": "bad", "soul": "x"}},
+            {"format": "deerflow.custom-agent", "version": 2, "agent": {"name": "bad", "soul": "x"}},
+            {"format": "unknown", "version": 1, "agent": {"name": "bad", "soul": "x"}},
+            {
+                "format": "deerflow.custom-agent",
+                "version": 1,
+                "agent": {"name": "bad", "soul": "x", "github": {"installation_id": 1}},
+            },
+            {"format": "deerflow.custom-agent", "version": 1, "agent": {"name": "bad name", "soul": "x"}},
+        ],
+    )
+    def test_agent_package_import_rejects_unsupported_or_unsafe_documents(self, agent_client, package):
+        response = agent_client.post("/api/agents/import", json=package)
+        assert response.status_code == 422
+        assert agent_client.get("/api/agents").json()["agents"] == []
+
+    def test_agent_package_import_conflicts_explicitly_and_never_overwrites(self, agent_client):
+        assert agent_client.post("/api/agents", json={"name": "reviewer", "soul": "original"}).status_code == 201
+        package = {
+            "format": "deerflow.custom-agent",
+            "version": 1,
+            "agent": {"name": "reviewer", "description": "incoming", "soul": "replacement"},
+        }
+
+        response = agent_client.post("/api/agents/import", json=package)
+
+        assert response.status_code == 409
+        assert agent_client.get("/api/agents/reviewer").json()["soul"] == "original"
+
+    def test_agent_package_import_is_scoped_to_current_user(self, agent_client, tmp_path):
+        import app.gateway.routers.agents as agents_router
+
+        package = {
+            "format": "deerflow.custom-agent",
+            "version": 1,
+            "agent": {"name": "shared-agent", "description": "shared definition", "soul": "shared soul"},
+        }
+
+        with patch.object(agents_router, "get_effective_user_id", return_value="alice"):
+            assert agent_client.post("/api/agents/import", json=package).status_code == 201
+        with patch.object(agents_router, "get_effective_user_id", return_value="bob"):
+            assert agent_client.post("/api/agents/import", json=package).status_code == 201
+
+        alice_dir = tmp_path / "users" / "alice" / "agents" / "shared-agent"
+        bob_dir = tmp_path / "users" / "bob" / "agents" / "shared-agent"
+        assert (alice_dir / "SOUL.md").read_text(encoding="utf-8") == "shared soul"
+        assert (bob_dir / "SOUL.md").read_text(encoding="utf-8") == "shared soul"
+        assert alice_dir != bob_dir
+
+    def test_agent_package_round_trip_uses_configured_store_abstraction(self, agent_client, tmp_path):
+        from sqlalchemy import create_engine
+
+        import app.gateway.routers.agents as agents_router
+        from deerflow.persistence.agents.model import AgentRow
+        from deerflow.persistence.agents.sql import SqlAgentStore
+        from deerflow.persistence.base import Base
+
+        url = f"sqlite:///{tmp_path}/agents.db"
+        engine = create_engine(url)
+        Base.metadata.create_all(engine, tables=[AgentRow.__table__])
+        engine.dispose()
+        store = SqlAgentStore(url)
+        package = {
+            "format": "deerflow.custom-agent",
+            "version": 1,
+            "agent": {"name": "database-agent", "description": "shared backend", "soul": "database soul"},
+        }
+
+        with (
+            patch.object(agents_router, "get_agent_store", return_value=store),
+            patch("deerflow.persistence.agents.get_agent_store", return_value=store),
+        ):
+            imported = agent_client.post("/api/agents/import", json=package)
+            exported = agent_client.get("/api/agents/database-agent/export")
+
+        assert imported.status_code == 201
+        assert exported.status_code == 200
+        assert exported.json()["agent"] == {
+            "name": "database-agent",
+            "description": "shared backend",
+            "memory_enabled": True,
+            "soul": "database soul",
+        }
+
     @pytest.mark.parametrize("display_name", ["x" * 150, 123, "\u200b" * 3])
     def test_invalid_stored_display_name_falls_back_in_api(self, agent_client, display_name):
         from deerflow.persistence.agents.file import FileAgentStore
@@ -954,6 +1133,94 @@ class TestUserProfileAPI:
         assert response.json()["content"] is None
 
 
+class TestAgentsAPIErrorDetail:
+    """Unexpected-failure responses must not echo the exception text.
+
+    Agent config parse errors and filesystem ``OSError``s name absolute host
+    paths under ``users/<user_id>/``; they belong in the server log only.
+    """
+
+    def _user_dir(self, tmp_path: Path) -> Path:
+        return tmp_path / "users" / "test-user-autouse"
+
+    def _break_agent_config(self, agent_client, tmp_path: Path) -> Path:
+        assert agent_client.post("/api/agents", json={"name": "broken", "soul": "x"}).status_code == 201
+        config_file = self._user_dir(tmp_path) / "agents" / "broken" / "config.yaml"
+        config_file.write_text("name: broken\n  bad: [\n", encoding="utf-8")
+        return config_file
+
+    def test_get_agent_with_unparsable_config_returns_fixed_500(self, agent_client, tmp_path, caplog):
+        config_file = self._break_agent_config(agent_client, tmp_path)
+
+        response = agent_client.get("/api/agents/broken")
+
+        assert response.status_code == 500
+        assert response.json() == {"detail": "Failed to get agent"}
+        assert str(config_file) in caplog.text
+
+    def test_update_agent_with_unparsable_config_returns_fixed_500(self, agent_client, tmp_path, caplog):
+        config_file = self._break_agent_config(agent_client, tmp_path)
+
+        response = agent_client.put("/api/agents/broken", json={"description": "new"})
+
+        assert response.status_code == 500
+        assert response.json() == {"detail": "Failed to update agent"}
+        assert str(config_file) in caplog.text
+
+    def test_list_agents_os_error_returns_fixed_500(self, agent_client, tmp_path, caplog):
+        agents_root = self._user_dir(tmp_path) / "agents"
+        agents_root.parent.mkdir(parents=True)
+        agents_root.write_text("not a directory", encoding="utf-8")
+
+        response = agent_client.get("/api/agents")
+
+        assert response.status_code == 500
+        assert response.json() == {"detail": "Failed to list agents"}
+        assert str(agents_root) in caplog.text
+
+    def test_create_agent_os_error_returns_fixed_500(self, agent_client, tmp_path, caplog):
+        agents_root = self._user_dir(tmp_path) / "agents"
+        agents_root.parent.mkdir(parents=True)
+        agents_root.write_text("not a directory", encoding="utf-8")
+
+        response = agent_client.post("/api/agents", json={"name": "fresh", "soul": "x"})
+
+        assert response.status_code == 500
+        assert response.json() == {"detail": "Failed to create agent"}
+        assert str(agents_root) in caplog.text
+
+    def test_delete_agent_os_error_returns_fixed_500(self, agent_client, tmp_path, caplog):
+        from deerflow.persistence.agents.file import FileAgentStore
+
+        assert agent_client.post("/api/agents", json={"name": "locked", "soul": "x"}).status_code == 201
+        agent_dir = self._user_dir(tmp_path) / "agents" / "locked"
+        denied = PermissionError(errno.EACCES, os.strerror(errno.EACCES), str(agent_dir))
+
+        with patch.object(FileAgentStore, "delete", side_effect=denied):
+            response = agent_client.delete("/api/agents/locked")
+
+        assert response.status_code == 500
+        assert response.json() == {"detail": "Failed to delete agent"}
+        assert str(agent_dir) in caplog.text
+
+    @pytest.mark.parametrize(
+        ("method", "kwargs", "detail"),
+        [
+            ("get", {}, "Failed to read user profile"),
+            ("put", {"json": {"content": "hi"}}, "Failed to update user profile"),
+        ],
+    )
+    def test_user_profile_os_error_returns_fixed_500(self, agent_client, tmp_path, caplog, method, kwargs, detail):
+        user_md = self._user_dir(tmp_path) / "USER.md"
+        user_md.mkdir(parents=True)
+
+        response = getattr(agent_client, method)("/api/user-profile", **kwargs)
+
+        assert response.status_code == 500
+        assert response.json() == {"detail": detail}
+        assert str(user_md) in caplog.text
+
+
 class TestAgentsApiDisabled:
     def test_agents_list_returns_403(self, disabled_agent_client):
         response = disabled_agent_client.get("/api/agents")
@@ -971,6 +1238,15 @@ class TestAgentsApiDisabled:
     def test_agent_create_returns_403(self, disabled_agent_client):
         response = disabled_agent_client.post("/api/agents", json={"name": "example-agent", "soul": "blocked"})
         assert response.status_code == 403
+
+    def test_agent_portability_routes_return_403(self, disabled_agent_client):
+        package = {
+            "format": "deerflow.custom-agent",
+            "version": 1,
+            "agent": {"name": "example-agent", "soul": "blocked"},
+        }
+        assert disabled_agent_client.post("/api/agents/import", json=package).status_code == 403
+        assert disabled_agent_client.get("/api/agents/example-agent/export").status_code == 403
 
     def test_agent_update_returns_403(self, disabled_agent_client):
         response = disabled_agent_client.put("/api/agents/example-agent", json={"description": "blocked"})

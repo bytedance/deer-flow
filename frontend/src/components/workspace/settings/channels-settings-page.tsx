@@ -33,6 +33,7 @@ import {
   prepareConnectWindow,
 } from "@/core/channels/open-connect-url";
 import {
+  channelProviderName,
   providerCanConnect,
   providerCanEditRuntimeConfig,
   providerNeedsRuntimeConfig,
@@ -41,8 +42,10 @@ import type { ChannelConnection, ChannelProvider } from "@/core/channels/types";
 import { useI18n } from "@/core/i18n/hooks";
 import { cn } from "@/lib/utils";
 
+import { ChannelBindingCodeDialog } from "../channels/channel-binding-code-dialog";
 import { ChannelProviderIcon } from "../channels/channel-provider-icon";
 import { ChannelRuntimeConfigDialog } from "../channels/channel-runtime-config-dialog";
+import { ChannelScheduledUpdates } from "../channels/channel-scheduled-updates";
 
 import { SettingsSection } from "./settings-section";
 
@@ -118,6 +121,7 @@ function ChannelProviderItem({
   const disconnectProviderMutation = useDisconnectChannelProvider();
   const [setupOpen, setSetupOpen] = useState(false);
   const [setupStep, setSetupStep] = useState<"setup" | "binding">("setup");
+  const [bindingOpen, setBindingOpen] = useState(false);
   const openSetup = () => {
     setSetupStep("setup");
     setSetupOpen(true);
@@ -151,6 +155,12 @@ function ChannelProviderItem({
       closeConnectWindow(preparedWindow ?? null);
       setSetupStep(connectProvider.configured ? "binding" : "setup");
       setSetupOpen(true);
+      return;
+    }
+    // The command stays in a dialog with copy and expiry, not a passing toast.
+    if (connectProvider.auth_mode === "binding_code") {
+      closeConnectWindow(preparedWindow ?? null);
+      setBindingOpen(true);
       return;
     }
     const connectWindow =
@@ -188,7 +198,7 @@ function ChannelProviderItem({
         </ItemMedia>
         <ItemContent className="min-w-0">
           <ItemTitle className="w-full">
-            <span className="truncate">{provider.display_name}</span>
+            <span className="truncate">{channelProviderName(provider, t)}</span>
             <Badge
               variant={isConnected ? "default" : "outline"}
               className={cn(!isConnected && "text-muted-foreground")}
@@ -206,6 +216,11 @@ function ChannelProviderItem({
               ? ` ${provider.unavailable_reason}`
               : ""}
           </ItemDescription>
+          <ChannelScheduledUpdates
+            provider={provider}
+            connected={isConnected}
+            className="mt-1"
+          />
         </ItemContent>
         <ItemActions className="ml-auto">
           {isConnected ? (
@@ -332,6 +347,11 @@ function ChannelProviderItem({
               );
             });
         }}
+      />
+      <ChannelBindingCodeDialog
+        provider={provider}
+        open={bindingOpen}
+        onOpenChange={setBindingOpen}
       />
     </>
   );

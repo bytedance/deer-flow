@@ -6,13 +6,13 @@ import asyncio
 import os
 import stat
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from support.symlinks import symlink_or_skip
 
 from app.channels.base import Channel
-from app.channels.message_bus import InboundMessage, MessageBus, OutboundMessage, ResolvedAttachment
+from app.channels.message_bus import HUMAN_INPUT_REQUEST_METADATA_KEY, PENDING_CLARIFICATION_METADATA_KEY, InboundMessage, MessageBus, OutboundMessage, ResolvedAttachment
 
 
 def _run(coro):
@@ -282,6 +282,128 @@ class TestResolveAttachments:
 
 
 class TestInboundFileIngestion:
+    def test_concurrent_same_name_downloads_preserve_both_payloads(self, tmp_path):
+        from app.channels import manager
+
+        uploads_dir = tmp_path / "uploads"
+        uploads_dir.mkdir()
+        payloads = [b"first attachment" * 127, b"second attachment" * 91]
+
+        async def scenario():
+            # Each reader starts after its call's directory snapshot. Hold
+            # both downloads there so neither snapshot can see the other file.
+            downloads_ready = asyncio.Event()
+            arrivals = 0
+
+            async def reader(file_info, client):
+                nonlocal arrivals
+                arrivals += 1
+                if arrivals == 2:
+                    downloads_ready.set()
+                await asyncio.wait_for(downloads_ready.wait(), timeout=5)
+                return payloads[file_info["index"]]
+
+            messages = [InboundMessage(channel_name="test-channel", chat_id="chat-1", user_id="user-1", text="attachment", files=[{"filename": "report.txt", "index": index}]) for index in range(2)]
+            with patch("deerflow.uploads.manager.ensure_uploads_dir", return_value=uploads_dir), patch.dict(manager.INBOUND_FILE_READERS, {"test-channel": reader}):
+                tasks = [asyncio.create_task(manager._ingest_inbound_files("thread-1", msg)) for msg in messages]
+                try:
+                    return await asyncio.wait_for(asyncio.gather(*tasks), timeout=10)
+                finally:
+                    downloads_ready.set()
+                    for task in tasks:
+                        if not task.done():
+                            task.cancel()
+                    await asyncio.gather(*tasks, return_exceptions=True)
+
+        results = asyncio.run(scenario())
+        assert all(len(batch) == 1 for batch in results)
+        names = [batch[0]["filename"] for batch in results]
+        assert len(set(names)) == 2
+        for batch, payload in zip(results, payloads, strict=True):
+            saved = batch[0]
+            assert (uploads_dir / saved["filename"]).read_bytes() == payload
+            assert saved["path"] == f"/mnt/user-data/uploads/{saved['filename']}"
+            assert saved["size"] == len(payload)
+
+    def test_file_created_during_download_is_not_overwritten(self, tmp_path):
+        from app.channels import manager
+
+        uploads_dir = tmp_path / "uploads"
+        uploads_dir.mkdir()
+        prior_payload = b"another request published this file"
+        new_payload = b"this attachment arrived later"
+
+        async def reader(file_info, client):
+            # A second uploader wins both the original and first suffix
+            # after this ingestion has taken its directory snapshot.
+            for name in ("report.txt", "report_1.txt"):
+                await asyncio.to_thread((uploads_dir / name).write_bytes, prior_payload)
+            return new_payload
+
+        msg = InboundMessage(channel_name="test-channel", chat_id="chat-1", user_id="user-1", text="attachment", files=[{"filename": "report.txt"}])
+        with patch("deerflow.uploads.manager.ensure_uploads_dir", return_value=uploads_dir), patch.dict(manager.INBOUND_FILE_READERS, {"test-channel": reader}):
+            result = asyncio.run(manager._ingest_inbound_files("thread-1", msg))
+
+        assert len(result) == 1
+        assert result[0]["filename"] not in {"report.txt", "report_1.txt"}
+        assert (uploads_dir / result[0]["filename"]).read_bytes() == new_payload
+        for name in ("report.txt", "report_1.txt"):
+            assert (uploads_dir / name).read_bytes() == prior_payload
+
+    def test_gateway_conversion_staging_link_is_a_filename_collision(self, tmp_path):
+        from app.channels import manager
+        from app.gateway.routers.uploads import _link_staged_no_overwrite
+
+        uploads_dir = tmp_path / "uploads"
+        uploads_dir.mkdir()
+        gateway_payload = b"gateway upload still being converted"
+        inbound_payload = b"independent IM attachment"
+
+        def publish_gateway_upload():
+            staged = uploads_dir / ".upload-fixture.part"
+            staged.write_bytes(gateway_payload)
+            # Gateway retains the staged link while a conversion descriptor
+            # owns this inode. This is an ordinary upload, not an unsafe path.
+            return _link_staged_no_overwrite(staged, uploads_dir, "report.pdf", unlink_staged=False)
+
+        async def reader(file_info, client):
+            published = await asyncio.to_thread(publish_gateway_upload)
+            assert (await asyncio.to_thread(published.stat)).st_nlink == 2
+            return inbound_payload
+
+        msg = InboundMessage(channel_name="test-channel", chat_id="chat-1", user_id="user-1", text="attachment", files=[{"filename": "report.pdf"}])
+        with patch("deerflow.uploads.manager.ensure_uploads_dir", return_value=uploads_dir), patch.dict(manager.INBOUND_FILE_READERS, {"test-channel": reader}):
+            result = asyncio.run(manager._ingest_inbound_files("thread-1", msg))
+
+        assert len(result) == 1
+        assert result[0]["filename"] != "report.pdf"
+        assert (uploads_dir / result[0]["filename"]).read_bytes() == inbound_payload
+        assert (uploads_dir / "report.pdf").read_bytes() == gateway_payload
+        assert (uploads_dir / ".upload-fixture.part").read_bytes() == gateway_payload
+
+    def test_case_variant_names_keep_both_inbound_attachments(self, tmp_path):
+        from app.channels import manager
+
+        uploads_dir = tmp_path / "uploads"
+        uploads_dir.mkdir()
+        msg = InboundMessage(
+            channel_name="telegram",
+            chat_id="chat-1",
+            user_id="user-1",
+            text="see attachments",
+            files=[
+                {"type": "file", "filename": "Report.txt", "_content": b"first"},
+                {"type": "file", "filename": "report.txt", "_content": b"second"},
+            ],
+        )
+
+        with patch("deerflow.uploads.manager.ensure_uploads_dir", return_value=uploads_dir):
+            result = _run(manager._ingest_inbound_files("thread-1", msg))
+
+        assert [item["filename"] for item in result] == ["Report.txt", "report_1.txt"]
+        assert (uploads_dir / "Report.txt").read_bytes() == b"first"
+        assert (uploads_dir / "report_1.txt").read_bytes() == b"second"
+
     def test_consumes_inline_channel_bytes_without_exposing_them_downstream(self, tmp_path):
         from app.channels import manager
 
@@ -412,6 +534,7 @@ class TestInboundFileIngestion:
 
 
 class TestInboundFileSandboxPerms:
+    @pytest.mark.skipif(os.name != "posix", reason="POSIX-only: Windows CRT chmod cannot express the 0644 mode this test asserts")
     def test_make_inbound_file_sandbox_readable_sets_group_other_read(self, tmp_path):
         from app.channels.manager import _make_inbound_file_sandbox_readable
 
@@ -426,6 +549,7 @@ class TestInboundFileSandboxPerms:
         assert mode & stat.S_IRGRP
         assert mode & stat.S_IROTH
 
+    @pytest.mark.skipif(os.name != "posix", reason="POSIX-only: Windows CRT chmod cannot express the 0644 mode this test asserts")
     def test_make_inbound_file_sandbox_readable_preserves_owner_bits(self, tmp_path):
         from app.channels.manager import _make_inbound_file_sandbox_readable
 
@@ -441,6 +565,7 @@ class TestInboundFileSandboxPerms:
         assert mode == 0o644
         assert not (mode & stat.S_IWOTH)
 
+    @pytest.mark.skipif(os.name != "posix", reason="POSIX-only: Windows CRT chmod cannot express the 0600 mode this test asserts")
     def test_make_inbound_file_sandbox_readable_skips_symlink(self, tmp_path):
         from support.symlinks import symlink_or_skip
 
@@ -463,6 +588,7 @@ class TestInboundFileSandboxPerms:
         # Best-effort helper: a missing file is a silent no-op.
         _make_inbound_file_sandbox_readable(tmp_path / "does-not-exist.txt")
 
+    @pytest.mark.skipif(os.name != "posix", reason="POSIX-only: Windows CRT chmod cannot express the 0600 mode this test asserts")
     def test_make_inbound_file_sandbox_readable_swap_after_lstat_does_not_follow_symlink(self, tmp_path, monkeypatch):
         from app.channels.manager import _make_inbound_file_sandbox_readable
 
@@ -491,6 +617,12 @@ class TestInboundFileSandboxPerms:
                 os.unlink(path)
                 os.symlink(target, path)
             return st
+
+        # Staging the TOCTOU swap needs symlink creation; a host without the
+        # privilege cannot stage the race at all, so skip before installing the hook.
+        probe = tmp_path / ".symlink_probe"
+        symlink_or_skip(probe, upload)
+        probe.unlink()
 
         monkeypatch.setattr(os, "lstat", racing_lstat)
 
@@ -688,6 +820,15 @@ class _DummyChannel(Channel):
         return True
 
 
+def _file_reply(tmp_path, *, channel_name="dummy", text="Your files are ready.", metadata=None):
+    attachments = []
+    for name in ("first.csv", "second.csv"):
+        path = tmp_path / name
+        path.write_text("value\n1\n")
+        attachments.append(ResolvedAttachment(f"/mnt/user-data/outputs/{name}", path, name, "text/csv", path.stat().st_size, False))
+    return OutboundMessage(channel_name=channel_name, chat_id="chat-1", thread_id="thread-1", thread_ts="source-1", connection_id="connection-1", owner_user_id="owner-1", text=text, attachments=attachments, metadata=metadata or {})
+
+
 class TestBaseChannelOnOutbound:
     def test_default_receive_file_returns_original_message(self):
         """The base Channel.receive_file returns the original message unchanged."""
@@ -759,7 +900,8 @@ class TestBaseChannelOnOutbound:
         assert len(ch.sent_messages) == 1
         assert len(ch.sent_files) == 0
 
-    def test_send_file_failure_does_not_block_others(self, tmp_path):
+    @pytest.mark.parametrize("failure", ["false", "exception"])
+    def test_send_file_failure_does_not_block_others(self, tmp_path, failure):
         """If one attachment upload fails, remaining attachments still get sent."""
         bus = MessageBus()
         ch = _DummyChannel(bus)
@@ -772,7 +914,9 @@ class TestBaseChannelOnOutbound:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
-                raise RuntimeError("upload failed")
+                if failure == "exception":
+                    raise RuntimeError("private upload details must not reach the chat")
+                return False
             return await original_send_file(msg, att)
 
         ch.send_file = flaky_send_file  # type: ignore
@@ -798,6 +942,96 @@ class TestBaseChannelOnOutbound:
         # First upload failed, second succeeded
         assert len(ch.sent_files) == 1
         assert ch.sent_files[0][1].filename == "ok.txt"
+        assert len(ch.sent_messages) == 2
+        feedback = ch.sent_messages[-1]
+        assert "1/2" in feedback.text
+        assert "fail.txt" in feedback.text and "ok.txt" not in feedback.text
+        assert "DeerFlow" in feedback.text
+        assert "private upload details" not in feedback.text
+        assert feedback.attachments == []
+        assert f1.exists() and f2.exists()
+
+    @pytest.mark.parametrize("locale,expected", [("en-US", "could not be sent"), ("zh-CN", "未能发送")])
+    def test_all_failed_files_get_one_localized_reply_in_the_same_conversation(self, tmp_path, locale, expected):
+        channel = _DummyChannel(MessageBus())
+        metadata = {"locale": locale, "context_token": "private-routing-token", PENDING_CLARIFICATION_METADATA_KEY: True, HUMAN_INPUT_REQUEST_METADATA_KEY: {"question": "Choose one"}}
+        msg = _file_reply(tmp_path, metadata=metadata)
+
+        async def refuse(message, attachment):
+            channel.sent_files.append((message, attachment))
+            return False
+
+        channel.send_file = refuse
+
+        async def deliver():
+            channel.bus.subscribe_outbound(channel._on_outbound)
+            await channel.bus.publish_outbound(msg)
+
+        _run(deliver())
+
+        assert len(channel.sent_messages) == 2
+        feedback = channel.sent_messages[-1]
+        assert expected in feedback.text
+        assert all(attachment.filename in feedback.text for attachment in msg.attachments)
+        assert str(tmp_path) not in feedback.text and "private-routing-token" not in feedback.text
+        assert (feedback.chat_id, feedback.thread_id, feedback.thread_ts, feedback.connection_id, feedback.owner_user_id) == (msg.chat_id, msg.thread_id, msg.thread_ts, msg.connection_id, msg.owner_user_id)
+        assert not feedback.attachments and not feedback.artifacts
+        assert feedback.metadata == {"locale": locale, "context_token": "private-routing-token"}
+        assert msg.metadata == metadata and len(msg.attachments) == 2
+
+    @pytest.mark.parametrize("text,expected", [("Your files are ready.", "does not support sending files"), ("文件已经生成。", "不支持发送附件")])
+    def test_unsupported_channel_explains_in_the_original_reply(self, tmp_path, text, expected):
+        class TextOnlyChannel(_DummyChannel):
+            send_file = Channel.send_file
+
+        channel = TextOnlyChannel(MessageBus())
+        original_text = f"{text}\n\nCreated Files: first.csv, second.csv"
+        msg = _file_reply(tmp_path, text=original_text)
+        _run(channel._on_outbound(msg))
+
+        assert len(channel.sent_messages) == 1
+        assert expected in channel.sent_messages[0].text
+        assert channel.sent_messages[0].text.index(expected) < channel.sent_messages[0].text.index(text)
+        assert all(a.filename in channel.sent_messages[0].text for a in msg.attachments)
+        assert all(channel.sent_messages[0].text.count(a.filename) == 1 for a in msg.attachments)
+        assert "DeerFlow" in channel.sent_messages[0].text
+        assert not channel.sent_files
+        assert msg.text == original_text and len(msg.attachments) == 2
+
+    def test_expired_feedback_does_not_retry_uploads_or_remove_files(self, tmp_path, caplog):
+        channel = _DummyChannel(MessageBus())
+        msg = _file_reply(tmp_path)
+        attempts = []
+
+        async def refuse(message, attachment):
+            attempts.append(attachment.filename)
+            return False
+
+        async def send(message):
+            channel.sent_messages.append(message)
+            if len(channel.sent_messages) > 1:
+                raise RuntimeError("reply window expired")
+
+        channel.send_file = refuse
+        channel.send = send
+        _run(channel._on_outbound(msg))
+
+        assert attempts == ["first.csv", "second.csv"]
+        assert len(channel.sent_messages) == 2
+        assert all(a.actual_path.exists() for a in msg.attachments)
+        assert "feedback" in caplog.text.lower()
+
+    def test_cancellation_during_upload_does_not_send_a_completion_notice(self, tmp_path):
+        channel = _DummyChannel(MessageBus())
+        msg = _file_reply(tmp_path)
+
+        async def cancelled(message, attachment):
+            raise asyncio.CancelledError
+
+        channel.send_file = cancelled
+        with pytest.raises(asyncio.CancelledError):
+            _run(channel._on_outbound(msg))
+        assert channel.sent_messages == [msg]
 
     def test_send_raises_skips_file_uploads(self, tmp_path):
         """When send() raises, file uploads are skipped entirely."""
@@ -850,6 +1084,63 @@ class TestBaseChannelOnOutbound:
 # ---------------------------------------------------------------------------
 # ChannelManager artifact resolution integration
 # ---------------------------------------------------------------------------
+
+
+class TestWecomAttachmentDeliveryFeedback:
+    def test_lost_reply_context_never_falls_back_to_a_proactive_send(self, tmp_path):
+        from types import SimpleNamespace
+
+        from app.channels.wecom import WeComChannel
+
+        channel = WeComChannel(MessageBus(), {})
+        msg = _file_reply(tmp_path, channel_name="wecom")
+        channel._ws_frames[msg.thread_ts] = {"body": {"msgid": msg.thread_ts}}
+        channel._ws_stream_ids[msg.thread_ts] = "stream-1"
+        channel._ws_client = SimpleNamespace(reply_stream=AsyncMock(), send_message=AsyncMock())
+
+        async def expired(message, attachment):
+            channel._clear_ws_context(msg.thread_ts)
+            return False
+
+        channel.send_file = expired
+        _run(channel._on_outbound(msg))
+
+        channel._ws_client.reply_stream.assert_awaited_once()
+        channel._ws_client.send_message.assert_not_awaited()
+        assert all(a.actual_path.exists() for a in msg.attachments)
+
+    @pytest.mark.parametrize("feedback_expired", [False, True])
+    def test_failed_upload_feedback_precedes_context_cleanup(self, tmp_path, feedback_expired):
+        from types import SimpleNamespace
+
+        from app.channels.wecom import WeComChannel
+
+        channel = WeComChannel(MessageBus(), {})
+        msg = _file_reply(tmp_path, channel_name="wecom")
+        frame = {"body": {"msgid": msg.thread_ts}}
+        channel._ws_frames[msg.thread_ts] = frame
+        channel._ws_stream_ids[msg.thread_ts] = "stream-1"
+        replies = []
+
+        async def reply(reply_frame, body):
+            assert channel._ws_frames[msg.thread_ts] is frame
+            assert reply_frame is frame
+            replies.append(body)
+            if feedback_expired:
+                raise RuntimeError("reply window expired")
+
+        channel._ws_client = SimpleNamespace(reply_stream=AsyncMock(), reply=AsyncMock(side_effect=reply))
+        channel._upload_media_ws = AsyncMock(return_value=None)
+        _run(channel._on_outbound(msg))
+
+        channel._ws_client.reply_stream.assert_awaited_once_with(frame, "stream-1", msg.text, True)
+        assert len(replies) == 1
+        assert replies[0]["msgtype"] == "text"
+        assert "could not be sent" in replies[0]["text"]["content"]
+        assert channel._upload_media_ws.await_count == 2
+        assert msg.thread_ts not in channel._ws_frames
+        assert msg.thread_ts not in channel._ws_stream_ids
+        assert all(a.actual_path.exists() for a in msg.attachments)
 
 
 class TestManagerArtifactResolution:
@@ -1456,3 +1747,78 @@ class TestWeChatDownloadGuardLabels:
             assert channel._stage_downloaded_file("photo.bin", b"x") is None
 
         assert "no state directory configured" in caplog.text
+
+
+@pytest.mark.parametrize("channel_name", ["feishu", "dingtalk"])
+@pytest.mark.parametrize("mounted", [False, True])
+def test_embedded_upload_retries_claim_collision(tmp_path, monkeypatch, channel_name, mounted):
+    """A publisher winning after the filename claim must keep its own bytes."""
+    import importlib
+    from io import BytesIO
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from deerflow.config.paths import Paths
+    from deerflow.uploads.manager import write_upload_file_no_symlink
+
+    paths = Paths(str(tmp_path))
+    paths.ensure_thread_dirs("thread-1", user_id="owner")
+    uploads = paths.sandbox_uploads_dir("thread-1", user_id="owner")
+    module = importlib.import_module(f"app.channels.{channel_name}")
+    monkeypatch.setattr(module, "get_paths", lambda: paths)
+    synced = []
+
+    class Provider:
+        uses_thread_data_mounts = mounted
+
+        async def acquire_async(self, thread_id=None, *, user_id=None):
+            assert not mounted
+            assert (thread_id, user_id) == ("thread-1", "owner")
+            return "remote-sandbox"
+
+        def get(self, sandbox_id):
+            return SimpleNamespace(update_file=lambda path, content: synced.append((path, content)), release_command_scope=lambda scope: None)
+
+        def release(self, sandbox_id):
+            pass
+
+    provider = Provider()
+    monkeypatch.setattr(module, "get_sandbox_provider", lambda: provider)
+    claim = module.claim_unique_filename
+    other_files = {}
+
+    def publish_after_claim(name, seen):
+        chosen = claim(name, seen)
+        if len(other_files) < 2:
+            content = f"other-publisher-{len(other_files)}".encode()
+            write_upload_file_no_symlink(uploads, chosen, content, exclusive=True)
+            other_files[chosen] = content
+        return chosen
+
+    monkeypatch.setattr(module, "claim_unique_filename", publish_after_claim)
+    payload = b"CHANNEL ATTACHMENT"
+    if channel_name == "feishu":
+        channel = module.FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test"})
+        channel._GetMessageResourceRequest = MagicMock()
+        response = MagicMock()
+        response.success.return_value = True
+        response.file = BytesIO(payload)
+        response.file_name = "report.pdf"
+        channel._api_client = MagicMock()
+        channel._api_client.im.v1.message_resource.get.return_value = response
+        files = [{"file_key": "file-key"}]
+    else:
+        channel = module.DingTalkChannel(MessageBus(), config={})
+        channel._download_by_code = AsyncMock(return_value=payload)
+        files = [{"type": "file", "download_code": "file-key", "filename": "report.pdf"}]
+    message = InboundMessage(channel_name=channel_name, chat_id="chat-1", user_id="sender", thread_ts="message-1", text="[file]", files=files)
+
+    result = _run(channel.receive_file(message, "thread-1", user_id="owner"))
+
+    for name, content in other_files.items():
+        assert (uploads / name).read_bytes() == content
+    assert set(other_files) == {"report.pdf", "report_1.pdf"}
+    assert (uploads / "report_2.pdf").read_bytes() == payload
+    advertised = "/mnt/user-data/uploads/report_2.pdf"
+    assert advertised in result.text
+    assert synced == ([] if mounted else [(advertised, payload)])

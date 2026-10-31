@@ -21,6 +21,34 @@ from deerflow.runtime.runs.store.base import (
 
 
 class MemoryRunStore(RunStore):
+    supports_run_inputs = True
+
+    async def mutate_run_inputs(self, run_id, change, *, user_id=None, owner_worker_id=None):
+        from deerflow.runtime.runs.inputs import InputConflict, empty_input_state
+
+        row = self._runs.get(run_id)
+        if row is None or (user_id is not None and row.get("user_id") != user_id):
+            raise InputConflict("Run not found")
+        if owner_worker_id is not None:
+            lease = row.get("lease_expires_at")
+            if row.get("owner_worker_id") != owner_worker_id or (lease and datetime.fromisoformat(lease).replace(tzinfo=UTC) <= datetime.now(UTC)):
+                raise InputConflict("Run ownership changed")
+        state = copy.deepcopy(row.get("run_inputs") or empty_input_state())
+        change(state, row)
+        row["run_inputs"] = state
+        return copy.deepcopy(state)
+
+    async def list_input_runs(self, thread_id, *, user_id=None, limit=10):
+        rows = [x for x in await self.list_by_thread(thread_id, user_id=user_id, limit=len(self._runs_by_thread.get(thread_id, {}))) if (x.get("run_inputs") or {}).get("items")]
+        return copy.deepcopy(rows[:limit])
+
+    async def active_input_run(self, thread_id, *, user_id=None):
+        for run_id in reversed(self._runs_by_thread.get(thread_id, {})):
+            row = self._runs[run_id]
+            if (user_id is None or row.get("user_id") == user_id) and row.get("status") in ("pending", "running") and row.get("run_inputs") is not None and not row["run_inputs"]["closed"] and not row.get("cancel_action"):
+                return run_id
+        return None
+
     def __init__(self) -> None:
         self._runs: dict[str, dict[str, Any]] = {}
         self._change_seq = 0
@@ -69,6 +97,9 @@ class MemoryRunStore(RunStore):
         owner_worker_id=None,
         lease_expires_at=None,
         idempotency_key=None,
+        evidence_origin="unknown",
+        evidence_agent_id=None,
+        idempotency_request=None,
     ):
         now = datetime.now(UTC).isoformat()
         existing = self._runs.get(run_id)
@@ -76,6 +107,8 @@ class MemoryRunStore(RunStore):
             "run_id": run_id,
             "thread_id": thread_id,
             "assistant_id": assistant_id,
+            "evidence_origin": evidence_origin,
+            "evidence_agent_id": evidence_agent_id,
             "user_id": user_id,
             "model_name": model_name,
             "status": status,
@@ -91,11 +124,17 @@ class MemoryRunStore(RunStore):
             "owner_worker_id": owner_worker_id,
             "lease_expires_at": lease_expires_at,
             "idempotency_key": idempotency_key,
+            "idempotency_request": copy.deepcopy(idempotency_request),
             # ``put`` is an idempotent snapshot write. Preserve a cancellation
             # request that may have raced a retry of an earlier snapshot.
             "cancel_action": existing.get("cancel_action") if existing else None,
             "cancel_requested_at": existing.get("cancel_requested_at") if existing else None,
+            "run_inputs": copy.deepcopy(existing.get("run_inputs")) if existing else None,
         }
+        # Move membership only after the replacement snapshot was built; a
+        # failed copy must leave the prior row and its index intact.
+        if existing is not None and existing["thread_id"] != thread_id:
+            self._unindex_run(run_id, existing["thread_id"])
         self._mark_changed(self._runs[run_id])
         self._index_run(run_id, thread_id)
 
@@ -199,9 +238,15 @@ class MemoryRunStore(RunStore):
         thread_run_ids = self._runs_by_thread.get(thread_id) or ()
         return {run_id: run for run_id in thread_run_ids if run_id in run_ids and (run := self._runs.get(run_id)) is not None and run.get("operation_kind", "run") == "run" and (user_id is None or run.get("user_id") == user_id)}
 
-    async def update_status(self, run_id, status, *, error=None, stop_reason=None, goal_verdict=None):
+    async def update_status(self, run_id, status, *, error=None, stop_reason=None, goal_verdict=None, owner_worker_id=None):
         run = self._runs.get(run_id)
         if run is None:
+            return False
+        if owner_worker_id is not None and not self._live_owner(run, owner_worker_id):
+            return False
+        if owner_worker_id is not None and run["status"] == "interrupted" and status != "error":
+            return False
+        if owner_worker_id is not None and status == "success" and (run["status"] not in ("pending", "running") or run.get("cancel_action") is not None):
             return False
         # Guard: only transition rows that are still active. ``interrupted``
         # is included for the rollback path (``interrupted → error`` finalize).
@@ -257,11 +302,13 @@ class MemoryRunStore(RunStore):
             removed += 1
         return removed
 
-    async def update_run_completion(self, run_id, *, status, **kwargs):
+    async def update_run_completion(self, run_id, *, status, require_terminal=False, owner_worker_id=None, **kwargs):
         run = self._runs.get(run_id)
         if run is None:
             return False
         current_status = run.get("status")
+        if require_terminal and (status in ("pending", "running") or current_status != status or run.get("owner_worker_id") != owner_worker_id):
+            return False
         allowed_sources = {"pending", "running", status}
         if status == "error":
             allowed_sources.add("interrupted")
@@ -269,6 +316,8 @@ class MemoryRunStore(RunStore):
             return False
         run["status"] = status
         for key, value in kwargs.items():
+            if require_terminal and key in ("error", "stop_reason", "goal_verdict"):
+                continue
             if value is not None:
                 run[key] = copy.deepcopy(value) if key == "goal_verdict" else value
         run["updated_at"] = datetime.now(UTC).isoformat()
@@ -334,19 +383,28 @@ class MemoryRunStore(RunStore):
     # Multi-worker run ownership methods
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _live_owner(run, owner_worker_id) -> bool:
+        from deerflow.utils.time import is_lease_expired
+
+        return run.get("owner_worker_id") == owner_worker_id and not is_lease_expired(run.get("lease_expires_at"), grace_seconds=0)
+
     async def update_lease(
         self,
         run_id: str,
         *,
         owner_worker_id: str,
         lease_expires_at: str,
+        allow_interrupted: bool = False,
     ) -> bool:
         run = self._runs.get(run_id)
         if run is None:
             return False
-        if run["status"] not in ("pending", "running"):
+        if run["status"] not in (("pending", "running", "interrupted") if allow_interrupted else ("pending", "running")):
             return False
-        if run.get("owner_worker_id") != owner_worker_id:
+        if not self._live_owner(run, owner_worker_id):
+            return False
+        if datetime.fromisoformat(lease_expires_at) <= datetime.now(UTC):
             return False
         run["owner_worker_id"] = owner_worker_id
         run["lease_expires_at"] = lease_expires_at
@@ -359,6 +417,7 @@ class MemoryRunStore(RunStore):
         *,
         owner_worker_id: str,
         lease_expires_at: str,
+        allow_interrupted: bool = False,
     ) -> LeaseRenewal:
         # Delegate through ``update_lease`` so lightweight subclasses and tests
         # that override the legacy primitive keep the same behavior.
@@ -366,6 +425,7 @@ class MemoryRunStore(RunStore):
             run_id,
             owner_worker_id=owner_worker_id,
             lease_expires_at=lease_expires_at,
+            **({"allow_interrupted": True} if allow_interrupted else {}),
         )
         if not renewed:
             return LeaseRenewal(renewed=False)
@@ -396,9 +456,12 @@ class MemoryRunStore(RunStore):
         error: str | None = None,
         stop_reason: str | None = None,
         goal_verdict: dict[str, Any] | None = None,
+        owner_worker_id: str | None = None,
     ) -> StatusFinalization:
         run = self._runs.get(run_id)
         if run is None:
+            return StatusFinalization(finalized=False)
+        if owner_worker_id is not None and (run["status"] not in ("pending", "running") or not self._live_owner(run, owner_worker_id)):
             return StatusFinalization(finalized=False)
         if run.get("cancel_action") is not None:
             return StatusFinalization(
@@ -503,6 +566,9 @@ class MemoryRunStore(RunStore):
         created_at: str | None = None,
         grace_seconds: int = 10,
         idempotency_key: str | None = None,
+        evidence_origin: str = "unknown",
+        evidence_agent_id: str | None = None,
+        idempotency_request: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         from deerflow.runtime.runs.manager import ConflictError
 
@@ -580,6 +646,8 @@ class MemoryRunStore(RunStore):
             "run_id": run_id,
             "thread_id": thread_id,
             "assistant_id": assistant_id,
+            "evidence_origin": evidence_origin,
+            "evidence_agent_id": evidence_agent_id,
             "user_id": user_id,
             "model_name": model_name,
             "status": "pending",
@@ -591,6 +659,7 @@ class MemoryRunStore(RunStore):
             "owner_worker_id": owner_worker_id,
             "lease_expires_at": lease_expires_at,
             "idempotency_key": idempotency_key,
+            "idempotency_request": copy.deepcopy(idempotency_request),
             "cancel_action": None,
             "cancel_requested_at": None,
             "created_at": created_at or now,
@@ -601,4 +670,6 @@ class MemoryRunStore(RunStore):
         new_row["change_seq"] = change_seq
         self._runs[run_id] = new_row
         self._index_run(run_id, thread_id)
-        return new_row, claimed
+        # Commit acknowledgments must not change when a later writer mutates
+        # the in-memory row while the caller is waiting to receive this result.
+        return copy.deepcopy(new_row), copy.deepcopy(claimed)

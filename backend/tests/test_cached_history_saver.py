@@ -1,9 +1,11 @@
 """CachedHistorySaver composition vs. the saver's own full walk."""
 
 from typing import Any
+from uuid import uuid4
 
 import pytest
-from langgraph.checkpoint.base import BaseCheckpointSaver, CheckpointTuple
+from langgraph.checkpoint.base import BaseCheckpointSaver, CheckpointTuple, empty_checkpoint
+from langgraph.checkpoint.memory import InMemorySaver
 
 from deerflow.runtime.checkpoint_cache.memory import MemoryCheckpointHistoryCache
 from deerflow.runtime.checkpointer.cached_saver import CachedHistorySaver
@@ -396,3 +398,83 @@ async def test_stats_expose_composition_counters():
     assert stats["full_walks"] == 0
     assert stats["compose_hits"] == 3  # c1-level + c2-level (cold) + c3
     assert stats["hits"] >= 1
+
+
+# ----------------------------------------------------------------------
+# Fan-out write order: the compose path must agree with the inner saver's
+# canonical (task_id, idx) order, not storage/arrival order.
+#
+# These use a REAL InMemorySaver (not _DictSaver): the base-class delta walk
+# returns writes in stored order, but InMemorySaver's native override sorts a
+# checkpoint's writes by (task_id, idx). CheckpointTuple.pending_writes, which
+# the cache composes from, keeps arrival order. A fan-out super-step attaches
+# several writes for one channel to a single checkpoint; when they arrive out
+# of task_id order (parallel tasks finishing in any order), composing from the
+# raw pending_writes diverges from the authoritative walk unless the cache
+# re-establishes the (task_id, idx) order. _DictSaver cannot catch this (its
+# walk is the unsorted base implementation), so the regression lives here.
+# ----------------------------------------------------------------------
+
+_FANOUT_CHANNEL = "messages"
+
+
+def _seed_fanout_thread(saver: InMemorySaver) -> dict:
+    """Build root -> snapshot(c1, two out-of-order fan-out writes) -> c2 target.
+
+    c1 carries ``channel_values[messages]`` (a snapshot seed) AND two writes for
+    ``messages`` deliberately inserted in DESCENDING task_id order (``task-b``
+    before ``task-a``). Materializing c2 composes THROUGH c1, exercising
+    ``_channel_writes`` on c1's ``pending_writes``. Returns c2's config.
+    """
+    thread_id = f"fanout-{uuid4().hex}"
+    base = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+
+    cfg0 = saver.put(base, empty_checkpoint(), {}, {})
+
+    c1 = empty_checkpoint()
+    c1["channel_values"] = {_FANOUT_CHANNEL: ["seed"]}
+    c1["channel_versions"] = {_FANOUT_CHANNEL: "1"}
+    cfg1 = saver.put(cfg0, c1, {}, {_FANOUT_CHANNEL: "1"})
+    # Arrival order is the reverse of task_id order on purpose.
+    saver.put_writes(cfg1, [(_FANOUT_CHANNEL, ["fan-b"])], "task-b")
+    saver.put_writes(cfg1, [(_FANOUT_CHANNEL, ["fan-a"])], "task-a")
+
+    return saver.put(cfg1, empty_checkpoint(), {}, {})
+
+
+def _write_task_ids(history: dict[str, Any]) -> list[str]:
+    return [w[0] for w in history[_FANOUT_CHANNEL]["writes"]]
+
+
+@pytest.mark.anyio
+async def test_fanout_compose_matches_inner_canonical_order():
+    """Composed fan-out history must equal the inner saver's native walk,
+    ordered by task_id, regardless of the writes' arrival order."""
+    oracle = InMemorySaver()
+    oracle_cfg = _seed_fanout_thread(oracle)
+    expected = await oracle.aget_delta_channel_history(config=oracle_cfg, channels=[_FANOUT_CHANNEL])
+    assert _write_task_ids(expected) == ["task-a", "task-b"]  # canonical order
+
+    inner = InMemorySaver()
+    cfg = _seed_fanout_thread(inner)
+    saver = _wrap(inner, MemoryCheckpointHistoryCache(max_entries=16))
+    composed = await saver.aget_delta_channel_history(config=cfg, channels=[_FANOUT_CHANNEL])
+
+    assert _write_task_ids(composed) == _write_task_ids(expected)
+    assert composed[_FANOUT_CHANNEL]["writes"] == expected[_FANOUT_CHANNEL]["writes"]
+
+
+def test_sync_fanout_compose_matches_inner_canonical_order():
+    """Sync twin: the sync compose path must preserve the same canonical order."""
+    oracle = InMemorySaver()
+    oracle_cfg = _seed_fanout_thread(oracle)
+    expected = oracle.get_delta_channel_history(config=oracle_cfg, channels=[_FANOUT_CHANNEL])
+    assert _write_task_ids(expected) == ["task-a", "task-b"]
+
+    inner = InMemorySaver()
+    cfg = _seed_fanout_thread(inner)
+    saver = _wrap(inner, MemoryCheckpointHistoryCache(max_entries=16))
+    composed = saver.get_delta_channel_history(config=cfg, channels=[_FANOUT_CHANNEL])
+
+    assert _write_task_ids(composed) == _write_task_ids(expected)
+    assert composed[_FANOUT_CHANNEL]["writes"] == expected[_FANOUT_CHANNEL]["writes"]

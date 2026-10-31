@@ -18,6 +18,31 @@ from blockbuster import BlockBuster
 from kubernetes.client.rest import ApiException
 
 
+def test_presence_checks_pod_without_requiring_service_or_access_url(monkeypatch, provisioner_module):
+    core = MagicMock()
+    core.read_namespaced_pod.return_value = SimpleNamespace(metadata=SimpleNamespace(uid="pod-generation"), status=SimpleNamespace(phase="Pending"))
+    monkeypatch.setattr(provisioner_module, "core_v1", core)
+    access_url = MagicMock(side_effect=AssertionError("Service readiness cannot attest Pod absence"))
+    monkeypatch.setattr(provisioner_module, "_sandbox_access_url", access_url)
+
+    assert provisioner_module.sandbox_presence("sandbox-id").model_dump() == {"sandbox_id": "sandbox-id", "exists": True, "container_id": "pod-generation"}
+    access_url.assert_not_called()
+    core.read_namespaced_pod.assert_called_once_with("sandbox-sandbox-id", provisioner_module.K8S_NAMESPACE)
+
+
+@pytest.mark.parametrize("status", [404, 403, 503])
+def test_presence_only_attests_absence_on_kubernetes_not_found(monkeypatch, provisioner_module, status):
+    core = MagicMock()
+    core.read_namespaced_pod.side_effect = ApiException(status=status)
+    monkeypatch.setattr(provisioner_module, "core_v1", core)
+    if status == 404:
+        assert provisioner_module.sandbox_presence("sandbox-id").model_dump() == {"sandbox_id": "sandbox-id", "exists": False, "container_id": None}
+    else:
+        with pytest.raises(provisioner_module.HTTPException) as error:
+            provisioner_module.sandbox_presence("sandbox-id")
+        assert error.value.status_code == 500
+
+
 def test_provisioner_thread_id_pattern_matches_gateway_contract(provisioner_module) -> None:
     from deerflow.utils.thread_id import THREAD_ID_PATTERN
 
@@ -78,6 +103,37 @@ def test_provisioner_threads_shell_capacity_into_sandbox_pod(
     assert env["MAX_SHELL_SESSIONS"] == "13"
 
 
+def test_broker_request_without_image_cannot_mount_credentials(monkeypatch, provisioner_module):
+    core = _RecordingCoreV1(event_loop_thread_id=-1)
+    monkeypatch.setattr(provisioner_module, "core_v1", core)
+    monkeypatch.setattr(provisioner_module, "LARK_CLI_BROKER_IMAGE", "")
+    with pytest.raises(provisioner_module.HTTPException) as error:
+        provisioner_module.create_sandbox(provisioner_module.CreateSandboxRequest(sandbox_id="new-sandbox", provision_lark_cli_broker=True))
+    assert error.value.status_code == 503
+    assert core.created_pods == []
+
+
+def test_broker_request_cannot_reuse_non_broker_pod(monkeypatch, provisioner_module):
+    core = _RecordingCoreV1(event_loop_thread_id=-1)
+    monkeypatch.setattr(provisioner_module, "core_v1", core)
+    monkeypatch.setattr(provisioner_module, "LARK_CLI_BROKER_IMAGE", "broker-image")
+    with pytest.raises(provisioner_module.HTTPException) as error:
+        provisioner_module.create_sandbox(provisioner_module.CreateSandboxRequest(sandbox_id="sandbox-existing", provision_lark_cli_broker=True))
+    assert error.value.status_code == 409
+    assert core.created_pods == []
+    assert "sandbox-existing" in core.service_sandboxes
+
+
+def test_stale_negative_capability_cannot_bypass_configured_broker(monkeypatch, provisioner_module):
+    core = _RecordingCoreV1(event_loop_thread_id=-1)
+    monkeypatch.setattr(provisioner_module, "core_v1", core)
+    monkeypatch.setattr(provisioner_module, "LARK_CLI_BROKER_IMAGE", "broker-image")
+    with pytest.raises(provisioner_module.HTTPException) as error:
+        provisioner_module.create_sandbox(provisioner_module.CreateSandboxRequest(sandbox_id="new-sandbox", provision_lark_cli_runtime=True, provision_lark_cli_broker=False))
+    assert error.value.status_code == 409
+    assert core.created_pods == []
+
+
 def test_provisioner_rejects_insufficient_capacity_without_replacing_existing_pod(
     monkeypatch: pytest.MonkeyPatch,
     provisioner_module,
@@ -120,7 +176,7 @@ def test_capacity_replacement_recovers_when_service_outlives_old_pod(monkeypatch
 def test_capacity_read_failure_does_not_authorize_creation(monkeypatch, provisioner_module, failure):
     core = _RecordingCoreV1(event_loop_thread_id=-1)
     monkeypatch.setattr(provisioner_module, "core_v1", core)
-    monkeypatch.setattr(provisioner_module, "_get_pod_shell_capacity", MagicMock(side_effect=failure))
+    monkeypatch.setattr(provisioner_module, "_pod_shell_capacity", MagicMock(side_effect=failure))
 
     with pytest.raises(provisioner_module.HTTPException) as error:
         provisioner_module.create_sandbox(provisioner_module.CreateSandboxRequest(sandbox_id="sandbox-existing", max_shell_sessions=13))
@@ -143,7 +199,7 @@ def test_list_sandboxes_skips_invalid_capacity_metadata(
 
     monkeypatch.setattr(
         provisioner_module,
-        "_get_pod_shell_capacity",
+        "_pod_shell_capacity",
         invalid_capacity,
     )
 
@@ -241,6 +297,119 @@ async def test_capacity_upgrade_preserves_peer_pod_after_discovery_error(monkeyp
         new._acquire_serializer.close()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_acquire", [False, True], ids=["sync", "async"])
+async def test_quarantined_pod_cleanup_recovers_after_partial_delete(monkeypatch, tmp_path, provisioner_module, async_acquire):
+    """A lost Service must not strand the fenced Pod after a temporary delete failure."""
+    from test_sandbox_orphan_reconciliation import _make_provider_for_reconciliation
+
+    from deerflow.community.aio_sandbox import aio_sandbox_provider as provider_mod
+    from deerflow.community.aio_sandbox import remote_backend as remote_mod
+    from deerflow.community.aio_sandbox.quarantine import SandboxQuarantine
+    from deerflow.community.aio_sandbox.sandbox_info import SandboxInfo
+    from deerflow.config.paths import Paths
+
+    provider = _make_provider_for_reconciliation()
+    sid = "sandbox-existing"
+    core = _RecordingCoreV1(event_loop_thread_id=threading.get_ident())
+    old_info = SandboxInfo(sid, "http://sandbox", container_id="old-pod")
+    provider._backend = remote_mod.RemoteSandboxBackend("http://provisioner:8002")
+    provider._quarantine = SandboxQuarantine(tmp_path / "quarantine", "provisioner")
+    sandbox = MagicMock()
+    sandbox.requires_container_recycle = True
+    provider._sandboxes[sid] = sandbox
+    provider._sandbox_infos[sid] = old_info
+    provider._thread_sandboxes[("user-a", "thread-a")] = sid
+    provider._active_sandbox_identity[sid] = ("user-a", "thread-a")
+    provider._publish_ownership(sid)
+    monkeypatch.setattr(provisioner_module, "core_v1", core)
+    monkeypatch.setattr(provider_mod, "get_paths", lambda: Paths(base_dir=tmp_path / "state"))
+    monkeypatch.setattr(provider, "_ensure_skills_projection", lambda *_args: None)
+    monkeypatch.setattr(provider, "_thread_skill_projection_active", lambda *_args: False)
+    monkeypatch.setattr(provider, "_sandbox_id_for_thread", lambda *_args: sid)
+    monkeypatch.setattr(provider, "_get_extra_mounts", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(provider, "_lark_integration_active", lambda *_args: False)
+    monkeypatch.setattr(provider, "_lark_broker_active", lambda *_args: False)
+    monkeypatch.setattr(provider_mod, "wait_for_sandbox_ready", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(provider_mod, "wait_for_sandbox_ready_async", AsyncMock(return_value=True))
+    monkeypatch.setattr(provider_mod, "AioSandbox", MagicMock())
+    monkeypatch.setattr(remote_mod, "user_should_see_legacy_skills", lambda _uid: False)
+    original_read_pod = core.read_namespaced_pod
+    original_delete_pod = core.delete_namespaced_pod
+    deleted_under_fence = []
+
+    def read_pod(*args):
+        pod = original_read_pod(*args)
+        if not core.created_pods:
+            pod.metadata.uid = old_info.container_id
+        return pod
+
+    def delete_pod(*args):
+        deleted_under_fence.append((provider._ownership.owner(sid), sid in provider._local_teardown))
+        if len(deleted_under_fence) == 1:
+            raise ApiException(status=503, reason="temporary Kubernetes outage")
+        original_delete_pod(*args)
+
+    def response(status, payload):
+        result = requests.Response()
+        result.status_code = status
+        result._content = json.dumps(payload).encode()
+        return result
+
+    def get(url, **_kwargs):
+        try:
+            if url.endswith("/presence"):
+                payload = provisioner_module.sandbox_presence(sid).model_dump()
+            elif url.endswith("/api/sandboxes"):
+                payload = provisioner_module.list_sandboxes()
+            else:
+                payload = provisioner_module.get_sandbox(sid).model_dump()
+            return response(200, payload)
+        except provisioner_module.HTTPException as exc:
+            return response(exc.status_code, {"detail": exc.detail})
+
+    def post(_url, *, json, **_kwargs):
+        try:
+            result = provisioner_module.create_sandbox(provisioner_module.CreateSandboxRequest(**json))
+            return response(200, result.model_dump())
+        except provisioner_module.HTTPException as exc:
+            return response(exc.status_code, {"detail": exc.detail})
+
+    def delete(_url, **_kwargs):
+        try:
+            return response(200, provisioner_module.destroy_sandbox(sid))
+        except provisioner_module.HTTPException as exc:
+            return response(exc.status_code, {"detail": exc.detail})
+
+    monkeypatch.setattr(core, "read_namespaced_pod", read_pod)
+    monkeypatch.setattr(core, "delete_namespaced_pod", delete_pod)
+    monkeypatch.setattr(core, "list_namespaced_service", lambda *_args, **_kwargs: SimpleNamespace(items=[_node_port_service(item) for item in core.service_sandboxes]))
+    monkeypatch.setattr(requests, "get", get)
+    monkeypatch.setattr(requests, "post", post)
+    monkeypatch.setattr(requests, "delete", delete)
+    try:
+        await asyncio.to_thread(provider.release, sid)
+        assert sid not in core.service_sandboxes
+        assert sid in core.pod_shell_capacities
+        assert provider._quarantine.contains(old_info)
+        await asyncio.to_thread(provider._reconcile_orphans)
+
+        if async_acquire:
+            acquired = await provider.acquire_async("thread-a", user_id="user-a")
+        else:
+            acquired = await asyncio.to_thread(provider.acquire, "thread-a", user_id="user-a")
+
+        assert acquired == sid
+        assert len(deleted_under_fence) == 2
+        assert deleted_under_fence == [(provider._owner_id, True)] * 2
+        assert sid in core.service_sandboxes
+        assert provider._sandbox_infos[sid].container_id != old_info.container_id
+        assert not provider._quarantine.contains(old_info)
+    finally:
+        provider.reset()
+        provider._ownership.close()
+
+
 class _RecordingCoreV1:
     def __init__(
         self,
@@ -294,8 +463,11 @@ class _RecordingCoreV1:
         if capacity is None:
             raise ApiException(status=404)
         return SimpleNamespace(
+            metadata=SimpleNamespace(uid=f"pod-{sandbox_id}-{len(self.created_pods)}", deletion_timestamp=None),
             status=SimpleNamespace(phase="Running"),
-            spec=SimpleNamespace(
+            spec=self.created_pod_specs[sandbox_id].spec
+            if sandbox_id in self.created_pod_specs
+            else SimpleNamespace(
                 containers=[
                     SimpleNamespace(
                         name="sandbox",
@@ -362,6 +534,7 @@ def test_sandbox_business_route_handlers_are_sync(provisioner_module) -> None:
         provisioner_module.create_sandbox,
         provisioner_module.destroy_sandbox,
         provisioner_module.get_sandbox,
+        provisioner_module.sandbox_presence,
         provisioner_module.list_sandboxes,
     ):
         assert not inspect.iscoroutinefunction(handler)
@@ -375,9 +548,10 @@ def test_sandbox_business_route_handlers_are_sync(provisioner_module) -> None:
         ("POST", "/api/sandboxes", {"sandbox_id": "sandbox-new", "thread_id": "thread-1", "user_id": "user-1"}, "sandbox-new"),
         ("DELETE", "/api/sandboxes/sandbox-existing", None, None),
         ("GET", "/api/sandboxes/sandbox-existing", None, None),
+        ("GET", "/api/sandboxes/sandbox-existing/presence", None, None),
         ("GET", "/api/sandboxes", None, None),
     ],
-    ids=["create-existing", "create-new", "destroy", "get", "list"],
+    ids=["create-existing", "create-new", "destroy", "get", "presence", "list"],
 )
 async def test_sandbox_business_routes_run_k8s_client_off_event_loop_thread(
     method: str,

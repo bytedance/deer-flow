@@ -127,7 +127,7 @@ python -c "import secrets; print(secrets.token_urlsafe(32))"
 - **本地开发**（`make dev`）：Gateway embedded runtime 完全兼容；无 admin 时访问 `/setup` 初始化
 - **Gateway embedded runtime**：标准脚本、Docker dev 和生产部署均通过 Gateway 提供认证与 LangGraph-compatible API
 - **Docker 部署**：完全兼容，`.deer-flow/data/deerflow.db` 需持久化卷挂载
-- **IM 渠道**（Feishu/Slack/Telegram）：通过 Gateway 内部认证通信，使用 `default` 用户桶
+- **IM 渠道**（Feishu/Slack/Telegram）：通过 Gateway 内部认证通信。已通过 `/connect` 绑定的发送者使用绑定 owner 的用户桶，未绑定的发送者使用规范化后的平台用户 ID；只有设置 `DEER_FLOW_AUTH_DISABLED=1` 的单用户模式才统一使用 `default` 用户桶。详见 [IM_CHANNEL_CONNECTIONS.md](IM_CHANNEL_CONNECTIONS.md)
 - **DeerFlowClient**（嵌入式）：不经过 HTTP，不受认证影响
 
 ## 故障排查

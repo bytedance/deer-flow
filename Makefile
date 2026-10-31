@@ -1,6 +1,6 @@
 # DeerFlow - Unified Development Environment
 
-.PHONY: help config config-upgrade check check-agent-guidance install extension-install extension-upgrade extension-list extension-enable extension-disable extension-remove setup doctor support-bundle detect-thread-boundaries detect-blocking-io dev dev-daemon start start-daemon nginx stop up down prod-logs clean docker-init docker-start docker-stop docker-logs docker-logs-frontend docker-logs-gateway docker-logs-redis setup-sandbox
+.PHONY: help config config-upgrade test-config-version check check-agent-guidance install extension-install extension-upgrade extension-list extension-enable extension-disable extension-remove setup doctor support-bundle detect-thread-boundaries detect-blocking-io dev dev-daemon dev-multi dev-multi-check dev-multi-down start start-daemon nginx stop up down prod-logs clean docker-init docker-start docker-stop docker-logs docker-logs-frontend docker-logs-gateway docker-logs-redis setup-sandbox
 
 BASH ?= bash
 BACKEND_UV_RUN = cd backend && uv run
@@ -20,6 +20,8 @@ else
 endif
 
 FRONTEND_PNPM = $(PYTHON) ../scripts/pnpm.py
+# What `make clean` deletes; shared by its help line and deletion notice.
+RUNTIME_DATA_CONTENTS = database, users, threads, uploads, memory, secrets
 
 help:
 	@echo "DeerFlow Development Commands:"
@@ -28,6 +30,7 @@ help:
 	@echo "  make support-bundle  - Create a redacted issue summary, AI draft, and evidence bundle"
 	@echo "  make config          - Generate local config files (aborts if config already exists)"
 	@echo "  make config-upgrade  - Merge new fields from config.example.yaml into config.yaml"
+	@echo "  make test-config-version - Run config upgrade tests with the public uv index"
 	@echo "  make check           - Check if all required tools are installed"
 	@echo "  make check-agent-guidance - Validate scoped AGENTS.md file and chain budgets"
 	@echo "  make detect-thread-boundaries - Inventory backend executor/thread/event-loop boundaries"
@@ -46,7 +49,10 @@ help:
 	@echo "  make start-daemon    - Start prod services in background (daemon mode)"
 	@echo "  make nginx           - Start nginx alone in the foreground (local dev config)"
 	@echo "  make stop            - Stop all running services"
-	@echo "  make clean           - Clean up processes and temporary files"
+	@echo "  make dev-multi       - Start two Gateways as a local multi-instance cluster (Postgres + Redis in Docker)"
+	@echo "  make dev-multi-check - Run the cross-instance checks against that pair"
+	@echo "  make dev-multi-down  - Stop the pair and delete its containers and data"
+	@echo "  make clean           - Stop local services and DELETE local runtime data (backend/.deer-flow: $(RUNTIME_DATA_CONTENTS)) and logs"
 	@echo ""
 	@echo "Docker Production Commands:"
 	@echo "  make up              - Build and start production Docker services (localhost:2026)"
@@ -83,6 +89,9 @@ config:
 
 config-upgrade:
 	@$(RUN_SHELL_SCRIPT) ./scripts/config-upgrade.sh
+
+test-config-version:
+	@$(RUN_SHELL_SCRIPT) ./scripts/test-config-version.sh
 
 # Check required tools
 check:
@@ -172,9 +181,22 @@ nginx:
 stop:
 	@$(RUN_SHELL_SCRIPT) ./scripts/serve.sh --stop
 
-# Clean up
-clean: stop
-	@echo "Cleaning up..."
+# Two Gateways on shared Postgres, Redis and DEER_FLOW_HOME (scripts/dev_multi_instance.sh --help)
+dev-multi:
+	@$(RUN_SHELL_SCRIPT) ./scripts/dev_multi_instance.sh up
+
+dev-multi-check:
+	@$(RUN_SHELL_SCRIPT) ./scripts/dev_multi_instance.sh check
+
+dev-multi-down:
+	@$(RUN_SHELL_SCRIPT) ./scripts/dev_multi_instance.sh down
+
+# Clean up: deletes local runtime data, not just temporary files. The guard
+# runs before stop, which would otherwise stop a running stack's sandboxes.
+clean:
+	@$(RUN_SHELL_SCRIPT) ./scripts/check-data-not-in-use.sh
+	@$(MAKE) --no-print-directory stop
+	@echo "Deleting local runtime data in backend/.deer-flow ($(RUNTIME_DATA_CONTENTS)) and logs/*.log..."
 	@-rm -rf backend/.deer-flow 2>/dev/null || true
 	@-rm -rf logs/*.log 2>/dev/null || true
 	@echo "✓ Cleanup complete"

@@ -1,8 +1,10 @@
 import asyncio
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
 
+from deerflow.config.stream_bridge_config import StreamBridgeConfig
 from deerflow.runtime.checkpoint_cache import provider as checkpoint_provider
 from deerflow.runtime.checkpoint_cache import redis as checkpoint_redis
 from deerflow.runtime.stream_bridge import async_provider as stream_provider
@@ -30,6 +32,20 @@ class _BlockingStreamBridge:
         await self.allow_close.wait()
 
 
+async def _wait_for_owner_event(task: asyncio.Task[None], event: asyncio.Event) -> None:
+    waiter = asyncio.create_task(event.wait())
+    try:
+        done, _ = await asyncio.wait((task, waiter), timeout=1, return_when=asyncio.FIRST_COMPLETED)
+        if task in done:
+            await task
+            raise AssertionError("provider owner finished before its lifecycle event")
+        if waiter not in done:
+            raise TimeoutError("provider did not reach its lifecycle event")
+    finally:
+        waiter.cancel()
+        await asyncio.gather(waiter, return_exceptions=True)
+
+
 async def _assert_close_is_drained(cm, close_started: asyncio.Event, allow_close: asyncio.Event) -> None:
     entered = asyncio.Event()
     leave = asyncio.Event()
@@ -42,9 +58,9 @@ async def _assert_close_is_drained(cm, close_started: asyncio.Event, allow_close
     task: asyncio.Task[None] | None = None
     try:
         task = asyncio.create_task(owner())
-        await asyncio.wait_for(entered.wait(), timeout=1)
+        await _wait_for_owner_event(task, entered)
         leave.set()
-        await asyncio.wait_for(close_started.wait(), timeout=1)
+        await _wait_for_owner_event(task, close_started)
 
         task.cancel()
         for _ in range(5):
@@ -61,8 +77,9 @@ async def _assert_close_is_drained(cm, close_started: asyncio.Event, allow_close
             await task
     finally:
         allow_close.set()
-        if task is not None and not task.done():
-            task.cancel()
+        if task is not None:
+            if not task.done():
+                task.cancel()
             await asyncio.gather(task, return_exceptions=True)
 
 
@@ -107,7 +124,7 @@ async def test_checkpoint_cache_redis_context_drains_close_across_repeated_cance
 async def test_stream_bridge_context_drains_close_across_repeated_cancellation(monkeypatch: pytest.MonkeyPatch) -> None:
     bridge = _BlockingStreamBridge()
     monkeypatch.setattr(stream_memory, "MemoryStreamBridge", lambda **_kwargs: bridge)
-    config = SimpleNamespace(stream_bridge=SimpleNamespace(type="memory", queue_maxsize=8, heartbeat_interval_seconds=1.0))
+    config = SimpleNamespace(stream_bridge=StreamBridgeConfig(type="memory", queue_maxsize=8, heartbeat_interval_seconds=1.0))
 
     await _assert_close_is_drained(
         stream_provider.make_stream_bridge(config),
@@ -123,7 +140,7 @@ async def test_stream_bridge_redis_context_drains_close_across_repeated_cancella
     bridge = _BlockingStreamBridge()
     monkeypatch.setattr(stream_redis, "RedisStreamBridge", lambda *_args, **_kwargs: bridge)
     config = SimpleNamespace(
-        stream_bridge=SimpleNamespace(
+        stream_bridge=StreamBridgeConfig(
             type="redis",
             redis_url="redis://localhost:6379/0",
             queue_maxsize=8,
@@ -138,3 +155,21 @@ async def test_stream_bridge_redis_context_drains_close_across_repeated_cancella
         bridge.close_started,
         bridge.allow_close,
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_stage", ["enter", "close"])
+async def test_close_drain_helper_propagates_owner_failure(failure_stage: str) -> None:
+    error = RuntimeError(f"provider {failure_stage} failed")
+
+    @asynccontextmanager
+    async def failing_context():
+        if failure_stage == "enter":
+            raise error
+        yield
+        raise error
+
+    with pytest.raises(RuntimeError, match=f"provider {failure_stage} failed") as raised:
+        await _assert_close_is_drained(failing_context(), asyncio.Event(), asyncio.Event())
+
+    assert raised.value is error

@@ -10,7 +10,11 @@ import {
   type ArtifactViewerTarget,
 } from "@/core/artifacts/viewer";
 import { getServerSideUser } from "@/core/auth/server";
-import { assertNever, buildLoginUrl } from "@/core/auth/types";
+import {
+  ACCOUNT_DISABLED_LOGIN_URL,
+  assertNever,
+  buildLoginUrl,
+} from "@/core/auth/types";
 import { getI18n } from "@/core/i18n/server";
 
 const POST_LOGIN_FALLBACK = "/workspace";
@@ -48,6 +52,9 @@ async function requireViewerAccess(target: ArtifactViewerTarget | null) {
           target ? buildArtifactViewerURL(target) : POST_LOGIN_FALLBACK,
         ),
       );
+    case "account_disabled":
+      // No `next`: a disabled account cannot sign back in to recover it.
+      redirect(ACCOUNT_DISABLED_LOGIN_URL);
     case "needs_setup":
     case "system_setup_required":
       redirect("/setup");

@@ -10,6 +10,12 @@ class SchedulerConfig(BaseModel):
     poll_interval_seconds: int = Field(default=5, ge=1, le=300)
     lease_seconds: int = Field(default=120, ge=5, le=3600)
     max_concurrent_runs: int = Field(default=3, ge=1, le=32)
+    max_concurrent_runs_per_user: int = Field(
+        default=2,
+        ge=0,
+        le=32,
+        description="Cap on launching/running scheduled runs per task owner; 0 = no per-owner cap. The effective cap is min(this, max_concurrent_runs). Queue selection is fair to owners either way.",
+    )
     queue_timeout_seconds: int = Field(default=3600, ge=60, le=604800)
     min_once_delay_seconds: int = Field(default=60, ge=1, le=86400)
     recursion_limit: int = Field(
@@ -28,6 +34,7 @@ class SchedulerConfig(BaseModel):
         "poll_interval_seconds",
         "lease_seconds",
         "max_concurrent_runs",
+        "max_concurrent_runs_per_user",
         "queue_timeout_seconds",
         "min_once_delay_seconds",
         "recursion_limit",

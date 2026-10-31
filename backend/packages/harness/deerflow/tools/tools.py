@@ -16,10 +16,8 @@ from deerflow.scheduler.runtime import SchedulerRunCapability, is_scheduler_capa
 from deerflow.subagents.batch_runtime import is_subagent_batch_runtime_available
 from deerflow.tools.builtins import (
     ask_clarification_tool,
-    batch_status,
-    batch_task,
+    build_inspect_run_status_tool,
     cancel_background_task,
-    cancel_batch,
     list_background_tasks,
     list_uploaded_files,
     present_file_tool,
@@ -79,7 +77,7 @@ def _extract_max_tokens(model_config: object | None) -> int | None:
 
     Handles ModelConfig (where max_tokens may be stored as an extra dynamic field),
     dicts, SimpleNamespace, or test stubs. Rejects booleans, mocks, non-numeric
-    values, negative numbers, zero, and None.
+    values, non-finite numbers, negative numbers, zero, and None.
     """
     if model_config is None:
         return None
@@ -89,7 +87,7 @@ def _extract_max_tokens(model_config: object | None) -> int | None:
     try:
         val = int(raw)
         return val if val > 0 else None
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError):
         return None
 
 
@@ -199,7 +197,10 @@ def get_available_tools(
     if subagent_enabled:
         builtin_tools.extend(SUBAGENT_TOOLS)
         if is_subagent_batch_runtime_available():
-            builtin_tools.extend((batch_task, batch_status, cancel_batch))
+            from deerflow.subagents.batch_runtime import get_subagent_batch_submitter
+            from deerflow.tools.builtins.batch_task_tool import bind_batch_tools
+
+            builtin_tools.extend(bind_batch_tools(submitter_provider=get_subagent_batch_submitter, app_config=config))
         logger.info("Including native subagent tools")
 
     # If no model_name specified, use the first model (default)
@@ -208,6 +209,7 @@ def get_available_tools(
 
     # Add view_image_tool only if the model supports vision
     model_config = config.get_model_config(model_name) if model_name else None
+    builtin_tools.append(build_inspect_run_status_tool(context_window=model_config.context_window if model_config else None))
     if model_config is not None and model_config.supports_vision:
         builtin_tools.append(view_image_tool)
         logger.info(f"Including view_image_tool for model '{model_name}' (supports_vision=True)")
@@ -219,22 +221,27 @@ def get_available_tools(
     # models configured without max_tokens.
     max_tokens = _extract_max_tokens(chat_model if chat_model is not None else model_config)
     if max_tokens is not None:
-        safe_chars = int(max_tokens * 3 * 0.7)
-        budget_note = (
-            f"\n\nPER-RESPONSE BUDGET: your output limit is {max_tokens} tokens "
-            f"(≈{safe_chars} chars). Single non-append writes above this will be truncated. "
-            "For larger documents, write the first section now, "
-            "then use append=True for subsequent sections."
-        )
-        loaded_tools = [
-            _clone_tool_with_description(
-                tool,
-                f"{getattr(tool, 'description', '') or ''}{budget_note}",
+        try:
+            safe_chars = int(max_tokens * 3 * 0.7)
+        except OverflowError:
+            # Even finite caps can be too large for this optional estimate.
+            pass
+        else:
+            budget_note = (
+                f"\n\nPER-RESPONSE BUDGET: your output limit is {max_tokens} tokens "
+                f"(≈{safe_chars} chars). Single non-append writes above this will be truncated. "
+                "For larger documents, write the first section now, "
+                "then use append=True for subsequent sections."
             )
-            if tool.name == "write_file" and hasattr(tool, "description") and "PER-RESPONSE BUDGET:" not in (getattr(tool, "description", "") or "")
-            else tool
-            for tool in loaded_tools
-        ]
+            loaded_tools = [
+                _clone_tool_with_description(
+                    tool,
+                    f"{getattr(tool, 'description', '') or ''}{budget_note}",
+                )
+                if tool.name == "write_file" and hasattr(tool, "description") and "PER-RESPONSE BUDGET:" not in (getattr(tool, "description", "") or "")
+                else tool
+                for tool in loaded_tools
+            ]
 
     # Get cached MCP tools if enabled
     # NOTE: We use ExtensionsConfig.from_file() instead of config.extensions
@@ -262,9 +269,9 @@ def get_available_tools(
 
                         # Tag MCP-sourced tools so deferred-tool assembly at each
                         # agent construction site can identify them. Lead agents
-                        # assemble their full configured MCP catalog and apply active
-                        # skill policy at runtime; subagents may pass an already
-                        # policy-filtered list because their skills load at startup.
+                        # assemble their full configured MCP catalog; subagents
+                        # may pass an already filtered list reflecting their own
+                        # tool configuration and authorization.
                         for t in mcp_tools:
                             tag_mcp_tool(t)
                 else:

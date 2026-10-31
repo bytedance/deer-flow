@@ -23,6 +23,9 @@ class LLMProvider:
     # capability (e.g. MiniMax M3 supports vision but M2.7 is text-only). The
     # provider-level extra_config holds the default (default_model) capability.
     model_vision_overrides: dict[str, bool] = field(default_factory=dict)
+    # Per-model extra_config keys to leave out for models whose API rejects
+    # them (e.g. Claude Sonnet 5.5 rejects budget_tokens and thinking disabled).
+    model_omitted_config: dict[str, tuple[str, ...]] = field(default_factory=dict)
     auth_hint: str | None = None
     base_url_prompt: str | None = None
     model_prompt: str | None = None
@@ -38,6 +41,8 @@ class LLMProvider:
         config = dict(self.extra_config)
         if model_name in self.model_vision_overrides:
             config["supports_vision"] = self.model_vision_overrides[model_name]
+        for key in self.model_omitted_config.get(model_name, ()):
+            config.pop(key, None)
         return config
 
 
@@ -256,10 +261,10 @@ LLM_PROVIDERS: list[LLMProvider] = [
     LLMProvider(
         name="anthropic",
         display_name="Anthropic",
-        description="Claude Sonnet 4 with extended thinking",
+        description="Claude Sonnet 5.5 with thinking",
         use="langchain_anthropic:ChatAnthropic",
-        models=["claude-sonnet-4-20250514", "claude-opus-4-5", "claude-sonnet-4-5"],
-        default_model="claude-sonnet-4-20250514",
+        models=["claude-sonnet-5-5", "claude-opus-4-5", "claude-sonnet-4-5"],
+        default_model="claude-sonnet-5-5",
         env_var="ANTHROPIC_API_KEY",
         package="langchain-anthropic",
         extra_config={
@@ -269,6 +274,8 @@ LLM_PROVIDERS: list[LLMProvider] = [
             "supports_vision": True,
             **ANTHROPIC_THINKING_CONFIG,
         },
+        # Sonnet 5.5 thinks by default and rejects budget_tokens and thinking disabled.
+        model_omitted_config={"claude-sonnet-5-5": ("when_thinking_enabled", "when_thinking_disabled")},
     ),
     LLMProvider(
         name="deepseek",
@@ -496,6 +503,40 @@ LLM_PROVIDERS: list[LLMProvider] = [
         },
     ),
     LLMProvider(
+        name="opper",
+        display_name="Opper",
+        description="EU-hosted AI gateway, 700+ models behind one OpenAI-compatible API",
+        use="langchain_openai:ChatOpenAI",
+        models=["claude-sonnet-4-6", "gpt-5.5", "gemini-3.8-flash", "gpt-5.4-mini"],
+        default_model="claude-sonnet-4-6",
+        env_var="OPPER_API_KEY",
+        package="langchain-openai",
+        extra_config={
+            "base_url": "https://api.opper.ai/v3/compat",
+            "request_timeout": 600.0,
+            "max_retries": 2,
+            "max_tokens": 8192,
+            "temperature": 0.7,
+        },
+    ),
+    LLMProvider(
+        name="api_route",
+        display_name="API Route",
+        description="OpenAI-compatible gateway (models depend on your API key)",
+        use="langchain_openai:ChatOpenAI",
+        models=["gpt-6.1-sol"],
+        default_model="gpt-6.1-sol",
+        env_var="API_ROUTE_API_KEY",
+        package="langchain-openai",
+        extra_config={
+            "base_url": "https://global.api-route.com/v1",
+            "request_timeout": 600.0,
+            "max_retries": 2,
+            "max_tokens": 8192,
+            "temperature": 0.7,
+        },
+    ),
+    LLMProvider(
         name="vllm",
         display_name="vLLM",
         description="Self-hosted OpenAI-compatible serving",
@@ -672,6 +713,25 @@ SEARCH_PROVIDERS: list[SearchProvider] = [
         description="One key across six engines, price-routed with failover, API key required",
         use="deerflow.community.groundroute.tools:web_search_tool",
         env_var="GROUNDROUTE_API_KEY",
+        extra_config={"max_results": 5},
+    ),
+    SearchProvider(
+        name="webz",
+        display_name="Webz.io News Search",
+        description="Recent news search (not general web search), API key required",
+        use="deerflow.community.webz.tools:web_search_tool",
+        env_var="WEBZ_API_KEY",
+        extra_config={"max_results": 5},
+    ),
+    SearchProvider(
+        name="youcom",
+        display_name="You.com",
+        description="Own index with extracted page snippets, free tier needs no key",
+        use="deerflow.community.youcom.tools:web_search_tool",
+        # No env_var: the provider falls back to You.com's keyless endpoint, so the
+        # wizard should not demand a key. Operators who have one set YDC_API_KEY in
+        # .env (or api_key in config.yaml) and the provider switches endpoints.
+        env_var=None,
         extra_config={"max_results": 5},
     ),
 ]

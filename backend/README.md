@@ -94,6 +94,15 @@ Async task delegation with concurrent execution:
 - **Execution**: Background thread pools with status tracking and SSE events
 - **Flow**: Agent calls `task()` tool → executor runs subagent in background → polls for completion → returns result
 
+Durable `batch_task` items keep their lease during tool initialization, execution,
+and acceptance checks. Each claim uses a fresh ownership token; a recovered
+attempt cannot be overwritten by an earlier worker's renewal or result. Workers
+exclude their own active items from local recovery, while other workers can still
+recover abandoned leases. Expiry recovery rechecks the captured lease so it cannot
+overwrite a heartbeat that renewed after the expiry read. Pending promotion and
+queued claims use conditional database writes, so competing workers cannot claim
+the same item or undo a pause/cancellation observed after their initial read.
+
 ### Memory System
 
 LLM-powered persistent context retention across conversations:
@@ -118,6 +127,8 @@ LLM-powered persistent context retention across conversations:
 | **MCP** | Any Model Context Protocol server (stdio, SSE, HTTP transports) |
 | **Skills** | Domain-specific workflows injected via system prompt |
 
+Jina AI web fetch follows HTTP redirects from its API endpoint, including 307/308 redirects, which retain the POST method and body.
+
 ### Run Event Storage
 
 For direct `RunEventStore.list_messages` callers, `after_seq` and `before_seq`
@@ -130,9 +141,14 @@ to the last returned sequence to page forward through a bounded history range.
 
 FastAPI application providing REST endpoints for frontend integration:
 
+Integer metadata filters match exact JSON integers, including signed-64-bit
+boundaries. Stored integers outside that range are ignored rather than rounded
+to a boundary (SQLite) or causing the search to fail (PostgreSQL).
+
 | Route | Purpose |
 |-------|---------|
 | `GET /api/models` | List available LLM models |
+| `GET /api/plugins/diagnostics` | Read redacted diagnostics for this Gateway process (admin only) |
 | `GET/PUT /api/mcp/config` | Manage MCP server configurations |
 | `POST /api/mcp/cache/reset` | Reset cached MCP tools so they reload on next use |
 | `GET /api/skills` | List skills visible to the caller |
@@ -140,13 +156,17 @@ FastAPI application providing REST endpoints for frontend integration:
 | `POST /api/skills/install` | Install skill from `.skill` archive |
 | `GET /api/memory` | Retrieve memory data |
 | `POST /api/memory/reload` | Force memory reload |
-| `GET /api/memory/config` | Memory configuration |
-| `GET /api/memory/status` | Combined config + data |
+| `GET /api/memory/config` | Memory configuration; credential values in `backend_config` are masked |
+| `GET /api/memory/status` | Combined config (masked the same way) + data |
 | `GET /api/threads/{id}/runs/{run_id}/events` | Debug/audit events for one run; filter `event_types=context:memory` for effective memory identity |
-| `POST /api/threads/{id}/uploads` | Upload files (auto-converts PDF/PPT/Excel/Word to Markdown, rejects directory paths, auto-renames duplicate filenames in one request) |
+| `POST /api/threads/{id}/uploads` | Upload files (optional PDF/PPT/Excel/Word-to-Markdown conversion, rejects directory paths, auto-renames duplicate filenames in one request) |
 | `GET /api/threads/{id}/uploads/list` | List uploaded files |
 | `DELETE /api/threads/{id}` | Delete DeerFlow-managed local thread data after LangGraph thread deletion; unexpected failures are logged server-side and return a generic 500 detail |
 | `GET /api/threads/{id}/artifacts/{path}` | Serve generated artifacts |
+
+Automatic document conversion is disabled by default. Trusted deployments can
+enable it with `uploads.auto_convert_documents: true` in `config.yaml`; see
+[file upload configuration](docs/FILE_UPLOAD.md#支持的文档格式).
 
 Cancelling an upload waits for an already-running document conversion worker to
 finish before removing its temporary source. This prevents cleanup from deleting
@@ -517,8 +537,11 @@ the only execution path, which keeps operational mistakes off the table. See
 ### Testing
 
 ```bash
-# Default offline backend suite (live external-API and blocking-I/O tests are excluded)
+# Default offline backend suite (four parallel shards; excludes live and blocking-I/O tests)
 make test
+
+# Run the same shards sequentially
+make test TEST_JOBS=1
 
 # Strict blocking-I/O suite
 make test-blocking-io

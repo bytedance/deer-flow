@@ -1,6 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 
 import { mockLangGraphAPI } from "./utils/mock-api";
+import { setLocaleCookie } from "./utils/scheduled-fixtures";
 
 const channelProviders = [
   ["buzz", "Buzz", "binding_code"],
@@ -303,9 +304,20 @@ test.describe("IM channels", () => {
     await expect(sidebar.getByText("Slack")).toBeVisible({ timeout: 15_000 });
     await sidebar.getByRole("button", { name: "Connect" }).click();
 
+    const dialog = page.getByRole("dialog", { name: "Connect Slack" });
     await expect(
-      page.getByText("Send /connect abc123 to the DeerFlow Slack bot."),
+      dialog.getByText("/connect abc123", { exact: true }),
     ).toBeVisible();
+    await page
+      .context()
+      .grantPermissions(["clipboard-read", "clipboard-write"]);
+    await dialog.getByRole("button", { name: "Copy command" }).click();
+    await expect(
+      dialog.getByRole("button", { name: "Copied", exact: true }),
+    ).toBeVisible();
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(
+      "/connect abc123",
+    );
     expect(slackConnectCalls).toBe(1);
   });
 
@@ -400,9 +412,14 @@ test.describe("IM channels", () => {
     await setupDialog.getByLabel("Bot token").fill("xoxb-ui");
     await setupDialog.getByRole("button", { name: "Save and connect" }).click();
 
-    await expect(setupDialog).toBeHidden();
+    // The binding step keeps the "Connect Slack" title; the form is gone.
+    await expect(page.getByLabel("Bot token")).toBeHidden();
+    const bindingDialog = page.getByRole("dialog", { name: "Connect Slack" });
     await expect(
-      page.getByText("Send /connect abc123 to the DeerFlow Slack bot."),
+      bindingDialog.getByText("/connect abc123", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      bindingDialog.getByRole("button", { name: "Copy command" }),
     ).toBeVisible();
     expect(slackConnectCalls).toBe(1);
   });
@@ -833,3 +850,74 @@ for (const entry of ["sidebar", "settings"] as const) {
     });
   }
 }
+
+test.describe("scheduled task updates per app", () => {
+  const COPY = {
+    en: {
+      supported:
+        "Scheduled task updates: supported; manage in Notification settings",
+      unsupported: "Scheduled task updates: not available for this app yet",
+      dialog: "Settings",
+      wecom: "WeCom",
+      feishu: "Feishu",
+    },
+    zh: {
+      supported: "定时任务通知：已支持，可在通知设置中管理",
+      unsupported: "定时任务通知：此应用暂不支持",
+      dialog: "设置",
+      wecom: "企业微信",
+      feishu: "飞书",
+    },
+  } as const;
+
+  for (const lang of ["en", "zh"] as const) {
+    test(`WeCom shows notification capability, Feishu says not yet (${lang})`, async ({
+      page,
+    }) => {
+      const copy = COPY[lang];
+      await setLocaleCookie(page, lang);
+      mockLangGraphAPI(page);
+      mockChannelsAPI(
+        page,
+        defaultProviders()
+          .filter(({ provider }) => ["feishu", "wecom"].includes(provider))
+          .map((provider) => ({
+            ...provider,
+            // This fixture advertises push only for WeCom.
+            proactive_notifications: provider.provider === "wecom",
+          })),
+      );
+
+      await page.goto("/workspace/chats/new?settings=channels");
+      const dialog = page.getByRole("dialog", { name: copy.dialog });
+      // Cards carry the provider's name in the UI language, the same label
+      // the thread origin markers use, not the backend's English name.
+      const card = (name: string) =>
+        dialog.locator("[data-slot='item']").filter({ hasText: name });
+      const wecomCard = card(copy.wecom);
+      const feishuCard = card(copy.feishu);
+      await expect(
+        wecomCard.getByTestId("channel-scheduled-updates"),
+      ).toHaveText(copy.supported);
+      await expect(
+        feishuCard.getByTestId("channel-scheduled-updates"),
+      ).toHaveText(copy.unsupported);
+      if (lang === "zh") {
+        await expect(wecomCard).not.toContainText("WeCom");
+        await expect(feishuCard).not.toContainText("Feishu");
+      }
+
+      // The sidebar's channel list says the same.
+      await page.keyboard.press("Escape");
+      const sidebar = page.locator("[data-sidebar='sidebar']");
+      const lines = sidebar.getByTestId("channel-scheduled-updates");
+      await expect(lines).toHaveCount(2);
+      await expect(
+        sidebar.locator("li").filter({ hasText: copy.wecom }),
+      ).toContainText(copy.supported);
+      await expect(
+        sidebar.locator("li").filter({ hasText: copy.feishu }),
+      ).toContainText(copy.unsupported);
+    });
+  }
+});

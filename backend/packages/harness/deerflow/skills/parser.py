@@ -4,6 +4,7 @@ from pathlib import Path
 
 import yaml
 
+from .diagnostics import SkillLoadDiagnostic, yaml_load_diagnostic
 from .frontmatter import _FRONTMATTER_RE
 from .types import SKILL_MD_FILE, SecretRequirement, Skill, SkillCategory
 
@@ -144,6 +145,12 @@ def parse_required_secrets(raw: object, skill_file: Path) -> tuple[SecretRequire
     environment-variable name are dropped with a warning, so one malformed
     declaration does not invalidate the whole skill. Raises ValueError only when
     the field is present but is not a list.
+
+    Duplicate names collapse into the first entry of that name, but a name is
+    required when *any* declaration of it is required: without that merge an
+    earlier ``optional: true`` entry hides a later required one and the skill
+    silently runs without the secret. This is the same fail-closed direction as
+    the malformed-``optional`` handling below (issue #5738).
     """
     if raw is None:
         return ()
@@ -151,7 +158,7 @@ def parse_required_secrets(raw: object, skill_file: Path) -> tuple[SecretRequire
         raise ValueError(f"required-secrets in {skill_file} must be a list")
 
     secrets: list[SecretRequirement] = []
-    seen: set[str] = set()
+    positions: dict[str, int] = {}
     for item in raw:
         if isinstance(item, str):
             name, optional = item.strip(), False
@@ -175,9 +182,12 @@ def parse_required_secrets(raw: object, skill_file: Path) -> tuple[SecretRequire
         if not _ENV_VAR_NAME_RE.match(name):
             logger.warning("Ignoring required-secrets entry with invalid env var name in %s: %r", skill_file, name)
             continue
-        if name in seen:
+        position = positions.get(name)
+        if position is not None:
+            if not optional and secrets[position].optional:
+                secrets[position] = SecretRequirement(name=name, optional=False)
             continue
-        seen.add(name)
+        positions[name] = len(secrets)
         secrets.append(SecretRequirement(name=name, optional=optional))
     return tuple(secrets)
 
@@ -198,7 +208,7 @@ def parse_secrets_autonomous(raw: object, skill_file: Path) -> bool:
     return False
 
 
-def parse_skill_file(skill_file: Path, category: SkillCategory, relative_path: Path | None = None) -> Skill | None:
+def parse_skill_file(skill_file: Path, category: SkillCategory, relative_path: Path | None = None, *, diagnostics: list[SkillLoadDiagnostic] | None = None) -> Skill | None:
     """Parse a SKILL.md file and extract metadata.
 
     Args:
@@ -206,6 +216,8 @@ def parse_skill_file(skill_file: Path, category: SkillCategory, relative_path: P
         category: Category of the skill.
         relative_path: Relative path from the category root to the skill
             directory.  Defaults to the skill directory name when omitted.
+        diagnostics: Optional management-only sink for YAML failures. The caller
+            must authorize the file path before requesting diagnostics.
 
     Returns:
         Skill object if parsing succeeds, None otherwise.
@@ -225,6 +237,8 @@ def parse_skill_file(skill_file: Path, category: SkillCategory, relative_path: P
         try:
             metadata = yaml.safe_load(front_matter_text)
         except yaml.YAMLError as exc:
+            if diagnostics is not None:
+                diagnostics.append(yaml_load_diagnostic((relative_path or Path(skill_file.parent.name)).as_posix(), exc, front_matter_text, content.count("\n", 0, front_matter_match.start(1))))
             logger.error("%s", _format_yaml_error(skill_file, exc, front_matter_text))
             return None
         if not isinstance(metadata, dict):

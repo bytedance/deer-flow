@@ -35,8 +35,8 @@ async def test_list_run_events_forwards_task_id_and_after_seq():
     calls: dict = {}
 
     class FakeStore:
-        async def list_events(self, thread_id, run_id, *, event_types=None, task_id=None, limit=500, after_seq=None):
-            calls.update(thread_id=thread_id, run_id=run_id, event_types=event_types, task_id=task_id, limit=limit, after_seq=after_seq)
+        async def list_events(self, thread_id, run_id, *, event_types=None, task_id=None, limit=500, after_seq=None, user_id=None):
+            calls.update(thread_id=thread_id, run_id=run_id, event_types=event_types, task_id=task_id, limit=limit, after_seq=after_seq, user_id=user_id)
             return [{"seq": 1, "event_type": "subagent.step"}]
 
     class FakeState:
@@ -48,6 +48,7 @@ async def test_list_run_events_forwards_task_id_and_after_seq():
     class FakeRequest:
         app = FakeApp()
         _deerflow_test_bypass_auth = True
+        cookies: dict = {}
 
     result = await list_run_events(
         thread_id="t1",
@@ -63,6 +64,7 @@ async def test_list_run_events_forwards_task_id_and_after_seq():
     assert calls["task_id"] == "task-A"
     assert calls["after_seq"] == 7
     assert calls["event_types"] == ["subagent.start", "subagent.step", "subagent.end"]
+    assert calls["user_id"] is None
 
 
 @pytest.mark.anyio
@@ -80,7 +82,7 @@ async def test_list_run_events_redacts_historical_run_start_metadata():
     }
 
     class FakeStore:
-        async def list_events(self, thread_id, run_id, *, event_types=None, task_id=None, limit=500, after_seq=None):
+        async def list_events(self, thread_id, run_id, *, event_types=None, task_id=None, limit=500, after_seq=None, user_id=None):
             return [stored_row]
 
     class FakeState:
@@ -92,6 +94,7 @@ async def test_list_run_events_redacts_historical_run_start_metadata():
     class FakeRequest:
         app = FakeApp()
         _deerflow_test_bypass_auth = True
+        cookies: dict = {}
 
     events = await list_run_events(
         thread_id="legacy-thread",
@@ -175,6 +178,7 @@ async def test_effective_memory_flows_from_injection_to_the_existing_debug_api()
     class FakeRequest_:
         app = FakeApp()
         _deerflow_test_bypass_auth = True
+        cookies: dict = {}
 
     events = await list_run_events(
         thread_id="t1",
@@ -192,3 +196,60 @@ async def test_effective_memory_flows_from_injection_to_the_existing_debug_api()
         "project_context_revision": None,
         "project_shelf_revision": None,
     }
+
+
+@pytest.mark.parametrize("count", [100, 101])
+@pytest.mark.anyio
+async def test_list_run_events_bounds_event_type_filter_cardinality(count: int) -> None:
+    from fastapi import HTTPException
+
+    from app.gateway.routers.thread_runs import MAX_EVENT_TYPE_FILTERS, list_run_events
+
+    calls: dict = {}
+
+    class FakeStore:
+        async def list_events(
+            self,
+            thread_id,
+            run_id,
+            *,
+            event_types=None,
+            task_id=None,
+            limit=500,
+            after_seq=None,
+            user_id=None,
+        ):
+            calls["event_types"] = event_types
+            return []
+
+    class FakeState:
+        run_event_store = FakeStore()
+
+    class FakeApp:
+        state = FakeState()
+
+    class FakeRequest:
+        app = FakeApp()
+        _deerflow_test_bypass_auth = True
+        cookies: dict = {}
+
+    event_types = ",".join(f"type-{i}" for i in range(count))
+    kwargs = {
+        "thread_id": "t1",
+        "run_id": "r1",
+        "request": FakeRequest(),
+        "event_types": event_types,
+        "task_id": None,
+        "limit": 500,
+        "after_seq": None,
+    }
+
+    if count > MAX_EVENT_TYPE_FILTERS:
+        with pytest.raises(HTTPException) as exc_info:
+            await list_run_events(**kwargs)
+        assert exc_info.value.status_code == 422
+        assert str(MAX_EVENT_TYPE_FILTERS) in exc_info.value.detail
+        assert calls == {}
+    else:
+        assert await list_run_events(**kwargs) == []
+        assert len(calls["event_types"]) == MAX_EVENT_TYPE_FILTERS

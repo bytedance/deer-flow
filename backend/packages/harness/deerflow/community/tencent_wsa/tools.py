@@ -9,6 +9,7 @@ from typing import Any
 import httpx
 from langchain.tools import tool
 
+from deerflow.community.url_safety import safe_public_result_url
 from deerflow.config import get_app_config
 
 logger = logging.getLogger(__name__)
@@ -41,10 +42,26 @@ def _get_api_key(tool_name: str = "web_search", *, extras: Mapping[str, Any] | N
 
 
 def _coerce_max_results(value: object, *, default: int = _DEFAULT_MAX_RESULTS) -> int:
-    if isinstance(value, int) and not isinstance(value, bool):
+    """Coerce configured/tool max_results into a bounded positive int.
+
+    Bools and all floats (including integral ones such as 2.0) fall back to
+    the default; only ints and integer strings are accepted.
+    String parsing uses ``int(...)`` inside a try/except so digit-class Unicode
+    that ``str.isdigit()`` accepts but ``int`` rejects (e.g. ``"²"``, ``"1²"``)
+    falls back to the default instead of raising, matching Brave/Serply/etc.
+    Valid decimal Unicode such as ``"٣"`` still parses.
+    """
+    if isinstance(value, bool):
+        logger.warning("Invalid Tencent Cloud WSA max_results=%r; using default %s", value, default)
+        return default
+    if isinstance(value, int):
         result = value
-    elif isinstance(value, str) and value.strip().isdigit():
-        result = int(value.strip())
+    elif isinstance(value, str):
+        try:
+            result = int(value.strip())
+        except (ValueError, OverflowError):
+            logger.warning("Invalid Tencent Cloud WSA max_results=%r; using default %s", value, default)
+            return default
     else:
         logger.warning("Invalid Tencent Cloud WSA max_results=%r; using default %s", value, default)
         return default
@@ -159,6 +176,16 @@ def _get_response(data: dict[str, Any], query: str) -> tuple[dict[str, Any] | No
 
 
 def _parse_results(response: dict[str, Any], *, max_results: int) -> list[dict[str, Any]] | None:
+    """Return the result rows of a WSA response, or None if malformed.
+
+    A missing or null ``Pages`` is an empty search. A non-list container, or a
+    non-empty container holding no usable page, is malformed: the caller
+    reports the provider's format error rather than "No results found", which
+    would tell the agent the query legitimately matched nothing — the
+    containment rule the sibling providers already apply (brave, groundroute,
+    tavily, sofya). Individual malformed entries in an otherwise valid
+    container are still skipped so the valid rows survive.
+    """
     pages = response.get("Pages")
     if pages is None:
         return []
@@ -192,7 +219,7 @@ def _parse_results(response: dict[str, Any], *, max_results: int) -> list[dict[s
         content = page_data.get("content") or page_data.get("passage") or ""
         result = {
             "title": title if isinstance(title, str) else "",
-            "url": url if isinstance(url, str) else "",
+            "url": safe_public_result_url(url),
             "snippet": content if isinstance(content, str) else "",
         }
         for field in ("date", "site", "score"):
@@ -202,6 +229,9 @@ def _parse_results(response: dict[str, Any], *, max_results: int) -> list[dict[s
         results.append(result)
         if len(results) >= max_results:
             break
+    if pages and not results:
+        logger.error("Tencent Cloud WSA returned 'Pages' with no usable page objects")
+        return None
     return results
 
 

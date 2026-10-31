@@ -28,6 +28,7 @@ def isolated_worker_env(monkeypatch):
     """
     monkeypatch.delenv("GATEWAY_WORKERS", raising=False)
     monkeypatch.delenv("WEB_CONCURRENCY", raising=False)
+    monkeypatch.delenv("DEER_FLOW_MULTI_INSTANCE", raising=False)
 
 
 class _FakeDedupe:
@@ -105,6 +106,29 @@ def test_factory_warns_when_memory_explicit_under_multi_worker(monkeypatch, capl
         store = make_inbound_dedupe_store(app)
     assert isinstance(store, MemoryInboundDedupeStore)
     assert any("dedupe_storage=memory with GATEWAY_WORKERS>1" in r.message for r in caplog.records)
+
+
+def test_factory_warns_when_memory_explicit_under_a_declared_multi_instance_deployment(monkeypatch, caplog):
+    """Kubernetes replicas run one worker each and declare their peers instead of a worker count."""
+    import logging
+
+    monkeypatch.setenv("DEER_FLOW_MULTI_INSTANCE", "1")
+    app = _FakeApp("memory", "sqlite")
+    with caplog.at_level(logging.WARNING):
+        store = make_inbound_dedupe_store(app)
+    assert isinstance(store, MemoryInboundDedupeStore)
+    assert any("dedupe_storage=memory with DEER_FLOW_MULTI_INSTANCE=1" in r.message for r in caplog.records)
+
+
+def test_factory_warns_when_auto_resolves_memory_under_a_declared_multi_instance_deployment(monkeypatch, caplog):
+    import logging
+
+    monkeypatch.setenv("DEER_FLOW_MULTI_INSTANCE", "true")
+    app = _FakeApp("auto", "sqlite")
+    with caplog.at_level(logging.WARNING):
+        store = make_inbound_dedupe_store(app)
+    assert isinstance(store, MemoryInboundDedupeStore)
+    assert any("Multi-worker deployment detected but dedupe_storage=auto" in r.message for r in caplog.records)
 
 
 def test_factory_warns_when_auto_resolves_memory_under_multi_worker(monkeypatch, caplog):

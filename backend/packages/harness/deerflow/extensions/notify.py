@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import logging
+import threading
 import time
 from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from typing import Any
@@ -20,6 +22,7 @@ from deerflow_extension_api import (
 )
 
 from deerflow.extensions.registry import LoadedExtensions
+from deerflow.utils.file_io import await_drained
 
 logger = logging.getLogger(__name__)
 
@@ -115,15 +118,26 @@ async def _notify_each(
     """Invoke contributors in order, fail-open, within one shared budget."""
     loop = asyncio.get_running_loop()
     deadline = None if timeout is None else loop.time() + timeout
+    # ``budget_spent`` latches once the shared budget runs out, so the skip
+    # decision never depends on a second clock read. The loop runs a scheduled
+    # timeout up to one ``clock_resolution`` *early* (``BaseEventLoop._run_once``
+    # compares each handle's ``_when`` against ``now + clock_resolution``), so on
+    # a coarse clock — Windows' ~15.6 ms against budgets as small as 20 ms —
+    # ``loop.time()`` can still sit strictly before ``deadline`` at the moment
+    # the budget has in fact expired. That raced both the log classification and
+    # the skip of later contributors (#6453).
+    budget_spent = False
     for source, contributor in contributors:
+        timeout_scope: asyncio.Timeout | None = None
         try:
             call = invoke(contributor)
             if deadline is None:
                 await call
                 continue
 
-            remaining = deadline - loop.time()
+            remaining = 0.0 if budget_spent else deadline - loop.time()
             if remaining <= 0:
+                budget_spent = True
                 close = getattr(call, "close", None)
                 if callable(close):
                     close()
@@ -135,9 +149,15 @@ async def _notify_each(
                     timeout,
                 )
                 continue
-            await asyncio.wait_for(call, remaining)
+            # ``asyncio.timeout`` records whether *it* expired, so the handler
+            # below never re-reads the clock to tell a spent budget from a
+            # ``TimeoutError`` the contributor raised on its own.
+            timeout_scope = asyncio.timeout(remaining)
+            async with timeout_scope:
+                await call
         except TimeoutError:
-            if deadline is not None and loop.time() >= deadline:
+            if timeout_scope is not None and timeout_scope.expired():
+                budget_spent = True
                 # Budget exhaustion mid-hook is the same expected operational
                 # condition as the skip above, so it stays a warning rather
                 # than a hook failure with an asyncio-internal traceback.
@@ -182,33 +202,70 @@ async def _notify_each(
 # loops, but extension resources must always be touched on the loop where they
 # were started.
 _notify_loop: asyncio.AbstractEventLoop | None = None
-_pending_dispatches: set[asyncio.Future[Any]] = set()
+_pending_dispatches: set[concurrent.futures.Future[None]] = set()
 _warned_no_loop = False
 _system_observations_enabled = True
+# Serializes detached-dispatch admission with shutdown suspension and snapshots.
+_dispatch_state_lock = threading.Lock()
 
 
 def set_extension_notify_loop(loop: asyncio.AbstractEventLoop | None) -> None:
     """Bind extension notifications to the loop that owns extension resources."""
     global _notify_loop, _system_observations_enabled, _warned_no_loop
-    _notify_loop = loop
-    _system_observations_enabled = True
-    _warned_no_loop = False
+    with _dispatch_state_lock:
+        _notify_loop = loop
+        _system_observations_enabled = True
+        _warned_no_loop = False
+
+
+async def drain_extension_notify_dispatches(*, timeout: float = 5.0) -> None:
+    """Boundedly drain already-submitted fire-and-forget observations.
+
+    New detached observations are suspended before the snapshot so shutdown
+    cannot open a submit-after-snapshot window. The bounded wait keeps a wedged
+    extension observer from holding Gateway teardown forever.
+    """
+    suspend_extension_system_observations()
+    # Once suspension owns the same lock as dispatch admission, no new future
+    # can be registered; completed futures may still be removed by callbacks.
+    with _dispatch_state_lock:
+        pending = tuple(_pending_dispatches)
+    if not pending:
+        return
+
+    async def _wait() -> None:
+        try:
+            async with asyncio.timeout(timeout):
+                await asyncio.gather(
+                    *(asyncio.wrap_future(future) for future in pending),
+                    return_exceptions=True,
+                )
+        except TimeoutError:
+            logger.warning(
+                "Timed out after %.1fs draining %d pending extension observation(s)",
+                timeout,
+                len(pending),
+            )
+
+    await await_drained(_wait())
 
 
 def reset_extension_notify_loop() -> None:
     """Remove the process-wide loop binding during host shutdown or tests."""
     global _notify_loop, _system_observations_enabled, _warned_no_loop
-    _notify_loop = None
-    _system_observations_enabled = True
-    _warned_no_loop = False
-    _pending_dispatches.clear()
+    with _dispatch_state_lock:
+        _notify_loop = None
+        _system_observations_enabled = True
+        _warned_no_loop = False
+        _pending_dispatches.clear()
 
 
 def suspend_extension_system_observations() -> None:
     """Drop new fire-and-forget observations while awaited hooks still drain."""
     global _system_observations_enabled
-    if _notify_loop is not None:
-        _system_observations_enabled = False
+    with _dispatch_state_lock:
+        if _notify_loop is not None:
+            _system_observations_enabled = False
 
 
 async def _notify_each_on_extension_loop(
@@ -424,6 +481,11 @@ async def observe_system_model_call(
     return response
 
 
+def _discard_pending_dispatch(future: concurrent.futures.Future[None]) -> None:
+    with _dispatch_state_lock:
+        _pending_dispatches.discard(future)
+
+
 def dispatch_system_model_observation(
     coro: Coroutine[Any, Any, None],
     what: str,
@@ -431,31 +493,36 @@ def dispatch_system_model_observation(
     """Submit a synchronous call site's observation to the registered loop."""
     global _warned_no_loop
 
-    loop = _notify_loop
     submitted = False
     try:
-        if not _system_observations_enabled:
-            return False
-        if loop is None or not loop.is_running():
-            if not _warned_no_loop:
-                _warned_no_loop = True
-                logger.warning(
-                    "No running loop registered for extension observations; %s and later ones are dropped",
+        with _dispatch_state_lock:
+            if not _system_observations_enabled:
+                return False
+            loop = _notify_loop
+            if loop is None or not loop.is_running():
+                if not _warned_no_loop:
+                    _warned_no_loop = True
+                    logger.warning(
+                        "No running loop registered for extension observations; %s and later ones are dropped",
+                        what,
+                    )
+                return False
+            try:
+                future = asyncio.run_coroutine_threadsafe(coro, loop)
+            except Exception:
+                logger.debug(
+                    "Could not dispatch %s to the extension notify loop",
                     what,
+                    exc_info=True,
                 )
-            return False
-        try:
-            future = asyncio.run_coroutine_threadsafe(coro, loop)
-        except Exception:
-            logger.debug(
-                "Could not dispatch %s to the extension notify loop",
-                what,
-                exc_info=True,
-            )
-            return False
-        _pending_dispatches.add(future)
-        future.add_done_callback(_pending_dispatches.discard)
-        submitted = True
+                return False
+            # Registration is part of admission: shutdown cannot suspend and
+            # snapshot between the enabled check and this insertion.
+            _pending_dispatches.add(future)
+            submitted = True
+        # Register outside the lock because add_done_callback may run inline for
+        # an already-completed Future; the callback acquires the same lock.
+        future.add_done_callback(_discard_pending_dispatch)
         return True
     finally:
         if not submitted:

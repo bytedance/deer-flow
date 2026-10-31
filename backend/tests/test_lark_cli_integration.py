@@ -17,6 +17,7 @@ import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 from uuid import uuid4
 
 import pytest
@@ -30,6 +31,7 @@ from app.gateway.routers import integrations as integrations_router
 from deerflow.config import paths as paths_module
 from deerflow.config.paths import Paths
 from deerflow.integrations import lark_cli
+from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.tools import _lark_cli_env_from_runtime
 from deerflow.skills.storage import reset_skill_storage
 from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillStorage
@@ -158,6 +160,13 @@ class _FakeWindowsHandle:
         return False
 
 
+def _force_windows_runtime_branch(monkeypatch) -> None:
+    """Expose an ``os.name == "nt"`` view only through lark_cli."""
+    members = {name: getattr(os, name) for name in dir(os) if not name.startswith("__")}
+    members["name"] = "nt"
+    monkeypatch.setattr(lark_cli, "os", SimpleNamespace(**members))
+
+
 def _windows_os_stub() -> SimpleNamespace:
     """Minimal ``os`` stub that forces the Windows code path in unit tests.
 
@@ -213,6 +222,30 @@ def _advance_lark_flow(user_id: str = "alice") -> str:
         return lark_cli._advance_lark_flow_generation_locked(user_id)
 
 
+class _InstantLoginProcess:
+    """Popen-shaped double whose device-login CLI exits immediately."""
+
+    pid = None  # Markers treat a missing CLI pid as owned by this process.
+
+    def __init__(self, *, stdout: str = "{}", stderr: str = "", returncode: int = 0) -> None:
+        self._result = (stdout, stderr)
+        self._returncode = returncode
+        self.killed = False
+
+    def communicate(self, timeout=None):
+        return self._result
+
+    @property
+    def returncode(self) -> int:
+        return self._returncode
+
+    def kill(self) -> None:
+        self.killed = True
+
+    def poll(self):
+        return self._returncode
+
+
 def test_sandbox_lark_cli_env_prepends_managed_linux_runtime() -> None:
     overlay = lark_cli.lark_cli_env_overlay("alice", sandbox_paths=True)
 
@@ -261,6 +294,32 @@ def test_managed_sandbox_runtime_verifies_and_installs_linux_archives(monkeypatc
     launcher = (runtime / "bin" / "lark-cli").read_text(encoding="utf-8")
     assert "uname -m" in launcher
     assert "x86_64" in launcher and "aarch64" in launcher
+
+
+@pytest.mark.parametrize(
+    ("filler", "magic"),
+    [
+        (b"\n", b"\x7fELF"),
+        (b"\xef\xbb\xbf", b"\x7fELF"),
+        (b" " * 63, b"\xbf\xba\xfe\xca"),
+    ],
+    ids=["newline-elf", "bom-elf", "max-offset-macho-fat64-le"],
+)
+def test_managed_sandbox_runtime_download_accepts_filler_prefixed_binaries_on_windows(monkeypatch, tmp_path, filler, magic) -> None:
+    _patch_paths(monkeypatch, tmp_path / "home")
+    archives = {
+        "lark-cli-1.0.65-linux-amd64.tar.gz": _make_lark_cli_binary_tar(filler + magic + b"-amd64-payload"),
+        "lark-cli-1.0.65-linux-arm64.tar.gz": _make_lark_cli_binary_tar(filler + magic + b"-arm64-payload"),
+    }
+    checksums = "".join(f"{hashlib.sha256(payload).hexdigest()}  {name}\n" for name, payload in archives.items()).encode()
+    assets = {"checksums.txt": checksums, **archives}
+    monkeypatch.setattr(lark_cli, "_download_lark_release_asset", lambda _version, name, **_kwargs: assets[name])
+    _force_windows_runtime_branch(monkeypatch)
+
+    runtime = lark_cli._ensure_managed_sandbox_lark_cli("v1.0.65")
+
+    assert (runtime / "linux-amd64" / "lark-cli").read_bytes() == filler + magic + b"-amd64-payload"
+    assert (runtime / "linux-arm64" / "lark-cli").read_bytes() == filler + magic + b"-arm64-payload"
 
 
 def test_managed_sandbox_runtime_rejects_checksum_mismatch(monkeypatch, tmp_path) -> None:
@@ -346,6 +405,36 @@ def test_managed_sandbox_runtime_rejects_any_symlink_in_prestaged_tree(monkeypat
         lark_cli._ensure_managed_sandbox_lark_cli("v1.0.65")
 
     assert not lark_cli.lark_cli_managed_sandbox_dir().exists()
+
+
+@pytest.mark.parametrize(
+    ("filler", "magic"),
+    [
+        (b"\n", b"\x7fELF"),
+        (b"\xef\xbb\xbf", b"\x7fELF"),
+        (b" " * 63, b"\xbf\xba\xfe\xca"),
+    ],
+    ids=["newline-elf", "bom-elf", "max-offset-macho-fat64-le"],
+)
+def test_managed_sandbox_runtime_accepts_filler_prefixed_binaries_on_windows(monkeypatch, tmp_path, filler, magic) -> None:
+    _patch_paths(monkeypatch, tmp_path / "home")
+    source = tmp_path / "pre-staged"
+    for arch in ("amd64", "arm64"):
+        binary = source / f"linux-{arch}" / "lark-cli"
+        binary.parent.mkdir(parents=True)
+        binary.write_bytes(filler + magic + f"-{arch}-binary".encode())
+        binary.chmod(0o755)
+    launcher = source / "bin" / "lark-cli"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text("#!/bin/sh\n", encoding="utf-8")
+    launcher.chmod(0o755)
+    monkeypatch.setenv(lark_cli.LARK_CLI_SANDBOX_RUNTIME_SOURCE_ENV, str(source))
+    _force_windows_runtime_branch(monkeypatch)
+
+    runtime = lark_cli._ensure_managed_sandbox_lark_cli("v1.0.65")
+
+    assert (runtime / "linux-amd64" / "lark-cli").read_bytes().startswith(filler + magic)
+    assert (runtime / "linux-arm64" / "lark-cli").read_bytes().startswith(filler + magic)
 
 
 def test_managed_sandbox_runtime_rejects_non_executable_prestaged_binary(monkeypatch, tmp_path) -> None:
@@ -693,6 +782,7 @@ def test_status_explicitly_reports_remote_runtime_probe_state(monkeypatch, tmp_p
 def _reset_broker_mode_cache() -> None:
     if hasattr(lark_cli.sandbox_lark_broker_active, "_cache"):
         del lark_cli.sandbox_lark_broker_active._cache
+    lark_cli._LARK_BROKER_MODE_PROBES.clear()
 
 
 def test_sandbox_lark_broker_active_uses_tight_hot_path_timeout(monkeypatch, tmp_path) -> None:
@@ -757,6 +847,314 @@ def test_sandbox_lark_broker_active_false_without_remote_provisioner(monkeypatch
         assert lark_cli.sandbox_lark_broker_active(config) is False
     finally:
         _reset_broker_mode_cache()
+
+
+def test_sandbox_lark_broker_active_recovers_after_failed_probe(monkeypatch, tmp_path) -> None:
+    """A recovered provisioner must be usable before the disabled-mode TTL ends."""
+    _reset_broker_mode_cache()
+    config = _config(tmp_path / "skills")
+    config.sandbox = SimpleNamespace(
+        use="deerflow.community.aio_sandbox:AioSandboxProvider",
+        provisioner_url="http://provisioner:8002",
+    )
+    clock = SimpleNamespace(now=100.0)
+    monkeypatch.setattr(lark_cli, "time", SimpleNamespace(monotonic=lambda: clock.now))
+    response = MagicMock()
+    response.__enter__.return_value = response
+    response.read.return_value = json.dumps({"lark_cli_init_image": True, "lark_cli_broker_image": True}).encode("utf-8")
+    urlopen = MagicMock(side_effect=[TimeoutError("capability response timed out"), response])
+    monkeypatch.setattr(lark_cli.urllib.request, "urlopen", urlopen)
+
+    try:
+        # Cold-start unknown may be reported as unavailable or raised; neither
+        # outcome may suppress the later successful capability response.
+        try:
+            lark_cli.sandbox_lark_broker_active(config)
+        except RuntimeError:
+            pass
+        assert urlopen.call_count == 1
+
+        clock.now += lark_cli.LARK_BROKER_MODE_NEGATIVE_TTL_SECONDS - 1
+        recovered = lark_cli.sandbox_lark_broker_active(config)
+
+        assert recovered is True, "a failed probe must not hide a recovered broker behind the disabled-mode TTL"
+        assert urlopen.call_count == 2
+    finally:
+        _reset_broker_mode_cache()
+
+
+def test_sandbox_lark_broker_active_preserves_confirmed_mode_through_probe_failure(monkeypatch, tmp_path) -> None:
+    """Refresh failure must not downgrade broker mode or prevent its recovery."""
+    _reset_broker_mode_cache()
+    config = _config(tmp_path / "skills")
+    config.sandbox = SimpleNamespace(
+        use="deerflow.community.aio_sandbox:AioSandboxProvider",
+        provisioner_url="http://provisioner:8002",
+    )
+    clock = SimpleNamespace(now=100.0)
+    monkeypatch.setattr(lark_cli, "time", SimpleNamespace(monotonic=lambda: clock.now))
+    response = MagicMock()
+    response.__enter__.return_value = response
+    response.read.return_value = json.dumps({"lark_cli_init_image": True, "lark_cli_broker_image": True}).encode("utf-8")
+    urlopen = MagicMock(side_effect=[response, TimeoutError("capability response timed out"), response])
+    monkeypatch.setattr(lark_cli.urllib.request, "urlopen", urlopen)
+
+    try:
+        assert lark_cli.sandbox_lark_broker_active(config) is True
+        clock.now += lark_cli.LARK_BROKER_MODE_TTL_SECONDS + 1
+        during_failure = lark_cli.sandbox_lark_broker_active(config)
+        assert urlopen.call_count == 2
+
+        clock.now += lark_cli.LARK_BROKER_MODE_NEGATIVE_TTL_SECONDS - 1
+        after_recovery = lark_cli.sandbox_lark_broker_active(config)
+
+        assert (during_failure, after_recovery) == (True, True), "a transient failure must not change the credential isolation mode"
+        assert urlopen.call_count == 3
+    finally:
+        _reset_broker_mode_cache()
+
+
+@pytest.mark.parametrize("payload", [None, {}, {"lark_cli_broker_image": "false"}])
+def test_unknown_broker_capability_cannot_authorize_credential_mounts(monkeypatch, tmp_path, payload):
+    _reset_broker_mode_cache()
+    config = _config(tmp_path / "skills")
+    config.sandbox = SimpleNamespace(use="deerflow.community.aio_sandbox:AioSandboxProvider", provisioner_url="http://provisioner:8002")
+    monkeypatch.setattr(lark_cli, "_probe_provisioner_capabilities", lambda *_args, **_kwargs: payload)
+    try:
+        with pytest.raises(RuntimeError, match="capabilit"):
+            lark_cli.sandbox_lark_broker_active(config)
+    finally:
+        _reset_broker_mode_cache()
+
+
+def test_broker_capability_cache_is_scoped_to_provisioner(monkeypatch, tmp_path):
+    _reset_broker_mode_cache()
+    config = _config(tmp_path / "skills")
+    config.sandbox = SimpleNamespace(use="deerflow.community.aio_sandbox:AioSandboxProvider", provisioner_url="http://old-provisioner:8002")
+    probe = MagicMock(side_effect=[{"lark_cli_broker_image": False}, {"lark_cli_broker_image": True}])
+    monkeypatch.setattr(lark_cli, "_probe_provisioner_capabilities", probe)
+    try:
+        assert lark_cli.sandbox_lark_broker_active(config) is False
+        config.sandbox.provisioner_url = "http://new-provisioner:8002"
+        assert lark_cli.sandbox_lark_broker_active(config) is True
+        assert probe.call_count == 2
+    finally:
+        _reset_broker_mode_cache()
+
+
+@pytest.mark.parametrize("confirmed", [False, True])
+def test_broker_capability_refreshes_a_conflicting_observation(monkeypatch, confirmed):
+    config = SimpleNamespace(sandbox=SimpleNamespace(use="aio_sandbox", provisioner_url="http://provisioner:8002"))
+    monkeypatch.setattr(lark_cli.sandbox_lark_broker_active, "_cache", {}, raising=False)
+    probe = MagicMock(side_effect=[{"lark_cli_broker_image": confirmed}, {"lark_cli_broker_image": not confirmed}])
+    monkeypatch.setattr(lark_cli, "_probe_provisioner_capabilities", probe)
+
+    assert lark_cli.sandbox_lark_broker_active(config) is confirmed
+    assert lark_cli.sandbox_lark_broker_active(config, observed_mode=not confirmed) is not confirmed
+    assert probe.call_count == 2
+
+
+def test_failed_broker_refresh_backs_off_without_extending_confirmation(monkeypatch):
+    config = SimpleNamespace(sandbox=SimpleNamespace(use="aio_sandbox", provisioner_url="http://provisioner:8002"))
+    monkeypatch.setattr(lark_cli.sandbox_lark_broker_active, "_cache", {}, raising=False)
+    clock = SimpleNamespace(now=100.0)
+    monkeypatch.setattr(lark_cli, "time", SimpleNamespace(monotonic=lambda: clock.now))
+    probe = MagicMock(side_effect=[{"lark_cli_broker_image": True}, None, {"lark_cli_broker_image": False}])
+    monkeypatch.setattr(lark_cli, "_probe_provisioner_capabilities", probe)
+
+    assert lark_cli.sandbox_lark_broker_active(config) is True
+    clock.now += lark_cli.LARK_BROKER_MODE_TTL_SECONDS + 1
+    assert lark_cli.sandbox_lark_broker_active(config) is True
+    assert lark_cli.sandbox_lark_broker_active(config) is True
+    assert probe.call_count == 2
+    clock.now += lark_cli.LARK_BROKER_MODE_PROBE_RETRY_SECONDS + 1
+    assert lark_cli.sandbox_lark_broker_active(config) is False
+    assert probe.call_count == 3
+
+
+def test_failed_conflicting_probe_cannot_reuse_a_cached_negative(monkeypatch):
+    config = SimpleNamespace(sandbox=SimpleNamespace(use="aio_sandbox", provisioner_url="http://provisioner:8002"))
+    monkeypatch.setattr(lark_cli.sandbox_lark_broker_active, "_cache", {}, raising=False)
+    clock = SimpleNamespace(now=100.0)
+    monkeypatch.setattr(lark_cli, "time", SimpleNamespace(monotonic=lambda: clock.now))
+    probe = MagicMock(side_effect=[{"lark_cli_broker_image": False}, None, {"lark_cli_broker_image": True}])
+    monkeypatch.setattr(lark_cli, "_probe_provisioner_capabilities", probe)
+
+    assert lark_cli.sandbox_lark_broker_active(config) is False
+    with pytest.raises(RuntimeError, match="unknown"):
+        lark_cli.sandbox_lark_broker_active(config, observed_mode=True)
+    with pytest.raises(RuntimeError, match="unknown"):
+        lark_cli.sandbox_lark_broker_active(config)
+    assert probe.call_count == 2
+    clock.now += lark_cli.LARK_BROKER_MODE_PROBE_RETRY_SECONDS + 1
+    assert lark_cli.sandbox_lark_broker_active(config) is True
+
+
+@pytest.mark.parametrize("previous_broker", [None, True])
+def test_concurrent_failed_broker_probes_share_one_observation(monkeypatch, previous_broker):
+    config = SimpleNamespace(sandbox=SimpleNamespace(use="aio_sandbox", provisioner_url="http://provisioner:8002"))
+    monkeypatch.setattr(lark_cli.sandbox_lark_broker_active, "_cache", {}, raising=False)
+    clock = SimpleNamespace(now=100.0)
+    monkeypatch.setattr(lark_cli, "time", SimpleNamespace(monotonic=lambda: clock.now))
+    if previous_broker:
+        monkeypatch.setattr(lark_cli, "_probe_provisioner_capabilities", lambda *_args, **_kwargs: {"lark_cli_broker_image": True})
+        assert lark_cli.sandbox_lark_broker_active(config) is True
+        clock.now += lark_cli.LARK_BROKER_MODE_TTL_SECONDS + 1
+    entered = threading.Event()
+    release = threading.Event()
+    waiter_looked_up = threading.Event()
+    worker = threading.local()
+    lock = threading.Lock()
+
+    class ObservedLock:
+        def __enter__(self):
+            lock.acquire()
+
+        def __exit__(self, *_args):
+            lock.release()
+            if getattr(worker, "waiter", False):
+                waiter_looked_up.set()
+
+    def probe(*_args, **_kwargs):
+        entered.set()
+        assert release.wait(5)
+        return None
+
+    def invoke(*, waiter=False):
+        worker.waiter = waiter
+        try:
+            return lark_cli.sandbox_lark_broker_active(config)
+        except RuntimeError as exc:
+            assert "unknown" in str(exc)
+            return None
+
+    monkeypatch.setattr(lark_cli, "_LARK_BROKER_MODE_CACHE_LOCK", ObservedLock())
+    probe_mock = MagicMock(side_effect=probe)
+    monkeypatch.setattr(lark_cli, "_probe_provisioner_capabilities", probe_mock)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(invoke)
+        try:
+            assert entered.wait(3)
+            second = pool.submit(invoke, waiter=True)
+            assert waiter_looked_up.wait(3), "network I/O blocked the cache lookup"
+        finally:
+            release.set()
+        assert first.result(timeout=3) is previous_broker
+        assert second.result(timeout=3) is previous_broker
+    assert probe_mock.call_count == 1
+
+
+def test_slow_broker_probe_does_not_block_another_endpoint_cache(monkeypatch):
+    config = SimpleNamespace(sandbox=SimpleNamespace(use="aio_sandbox", provisioner_url="http://slow-provisioner:8002"))
+    other = SimpleNamespace(sandbox=SimpleNamespace(use="aio_sandbox", provisioner_url="http://other-provisioner:8002"))
+    monkeypatch.setattr(lark_cli.sandbox_lark_broker_active, "_cache", {}, raising=False)
+    clock = SimpleNamespace(now=100.0)
+    monkeypatch.setattr(lark_cli, "time", SimpleNamespace(monotonic=lambda: clock.now))
+    monkeypatch.setattr(lark_cli, "_probe_provisioner_capabilities", MagicMock(side_effect=[{"lark_cli_broker_image": True}, {"lark_cli_broker_image": False}]))
+    assert lark_cli.sandbox_lark_broker_active(config) is True
+    assert lark_cli.sandbox_lark_broker_active(other) is False
+    clock.now += lark_cli.LARK_BROKER_MODE_TTL_SECONDS + 1
+    entered = threading.Event()
+    release = threading.Event()
+
+    def probe(*_args, **_kwargs):
+        entered.set()
+        assert release.wait(5)
+        return None
+
+    monkeypatch.setattr(lark_cli, "_probe_provisioner_capabilities", probe)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        pending = pool.submit(lark_cli.sandbox_lark_broker_active, config)
+        try:
+            assert entered.wait(3)
+            cached = pool.submit(lark_cli.sandbox_lark_broker_active, other)
+            assert cached.result(timeout=3) is False
+        finally:
+            release.set()
+        assert pending.result(timeout=3) is True
+
+
+def test_lark_cli_env_from_runtime_refuses_unverified_broker_mode():
+    runtime = SimpleNamespace(context={"user_id": "alice"})
+    sandbox = SimpleNamespace(lark_cli_broker=None)
+
+    with pytest.raises(RuntimeError, match="unverified"):
+        _lark_cli_env_from_runtime(runtime, "lark-cli auth status", sandbox_paths=True, sandbox=sandbox)
+
+
+def test_aio_constructor_without_attestation_refuses_lark_commands(monkeypatch):
+    from deerflow.community.aio_sandbox import aio_sandbox
+
+    monkeypatch.setattr(aio_sandbox, "AioSandboxClient", MagicMock())
+    sandbox = aio_sandbox.AioSandbox("unattested", "https://sandbox.example.test")
+    overlay = MagicMock(return_value={"LARKSUITE_CLI_CONFIG_DIR": "/mnt/config"})
+    monkeypatch.setattr(lark_cli, "lark_cli_env_overlay", overlay)
+    try:
+        with pytest.raises(RuntimeError, match="unverified"):
+            _lark_cli_env_from_runtime(SimpleNamespace(context={"user_id": "alice"}), "lark-cli auth status", sandbox_paths=True, sandbox=sandbox)
+        overlay.assert_not_called()
+    finally:
+        sandbox.close()
+
+
+@pytest.mark.parametrize("broker", [False, True])
+def test_lark_command_overlay_uses_actual_sandbox_mode(monkeypatch, broker):
+    runtime = SimpleNamespace(context={"user_id": "alice"})
+    sandbox = SimpleNamespace(lark_cli_broker=broker)
+    probe = MagicMock(side_effect=AssertionError("execution must use the sandbox's mode"))
+    monkeypatch.setattr(lark_cli, "sandbox_lark_broker_active", probe)
+
+    env = _lark_cli_env_from_runtime(runtime, "lark-cli auth status", sandbox_paths=True, sandbox=sandbox)
+
+    assert ("DEERFLOW_LARK_BROKER_URL" in env) is broker
+    assert ("LARKSUITE_CLI_CONFIG_DIR" in env) is not broker
+    probe.assert_not_called()
+
+
+def test_brokerless_sandbox_provider_keeps_non_broker_overlay(monkeypatch):
+    """Providers without a broker sidecar keep the pre-attestation behavior.
+
+    E2B, OpenSandbox, Tenki, and Boxlite subclass ``Sandbox`` without their
+    own ``lark_cli_broker`` attestation; the base-class ``False`` declares
+    the only mode that exists for them, so the fail-closed raise stays
+    scoped to AioSandbox's deliberate ``None`` default (#6436 review).
+    """
+
+    class _BrokerlessSandbox(Sandbox):
+        def execute_command(self, command, env=None, timeout=None):
+            raise NotImplementedError
+
+        def read_file(self, path, start_line=None, end_line=None):
+            raise NotImplementedError
+
+        def download_file(self, path):
+            raise NotImplementedError
+
+        def list_dir(self, path, max_depth=2):
+            raise NotImplementedError
+
+        def write_file(self, path, content, append=False):
+            raise NotImplementedError
+
+        def glob(self, path, pattern, *, include_dirs=False, max_results=200):
+            raise NotImplementedError
+
+        def grep(self, path, pattern, *, glob=None, literal=False, case_sensitive=False, max_results=100):
+            raise NotImplementedError
+
+        def update_file(self, path, content):
+            raise NotImplementedError
+
+    runtime = SimpleNamespace(context={"user_id": "alice"})
+    sandbox = _BrokerlessSandbox("foreign-provider")
+    probe = MagicMock(side_effect=AssertionError("execution must use the sandbox's mode"))
+    monkeypatch.setattr(lark_cli, "sandbox_lark_broker_active", probe)
+
+    env = _lark_cli_env_from_runtime(runtime, "lark-cli auth status", sandbox_paths=True, sandbox=sandbox)
+
+    assert "DEERFLOW_LARK_BROKER_URL" not in env
+    assert "LARKSUITE_CLI_CONFIG_DIR" in env
+    probe.assert_not_called()
 
 
 def test_install_lark_integration_is_idempotent_across_reinstalls(monkeypatch, tmp_path):
@@ -1054,7 +1452,7 @@ def test_install_lark_integration_rejects_executable_binary_member(monkeypatch, 
     config = _config(tmp_path / "skills")
     archive = _make_lark_cli_source_zip(tmp_path)
     with zipfile.ZipFile(archive, "a") as zf:
-        zf.writestr("cli-1.0.65/skills/lark-doc/bin/tool", b"\x7fELFbinary")
+        zf.writestr("cli-1.0.65/skills/lark-doc/bin/tool", b"\n\x7fELFbinary")
 
     with pytest.raises(ValueError, match="executable binary member"):
         lark_cli.install_lark_integration("alice", config, source_archive=archive)
@@ -1226,7 +1624,7 @@ def test_start_lark_auth_returns_browser_url(monkeypatch, tmp_path):
     assert result.verification_url == "https://open.feishu.cn/auth/mock"
     assert result.device_code == "device-code"
     assert result.generation
-    assert json.loads(lark_cli._lark_flow_state_path("alice").read_text(encoding="utf-8")) == {"generation": result.generation}
+    assert json.loads(lark_cli._lark_flow_state_path("alice").read_text(encoding="utf-8")) == {"generation": result.generation, "device_code_digest": lark_cli._lark_login_code_digest("device-code")}
     assert captured["args"] == [
         "/usr/bin/lark-cli",
         "auth",
@@ -1286,7 +1684,7 @@ def test_start_lark_auth_reuses_parent_flow_generation(monkeypatch, tmp_path):
     result = lark_cli.start_lark_auth("alice", generation=generation)
 
     assert result.generation == generation
-    assert json.loads(lark_cli._lark_flow_state_path("alice").read_text(encoding="utf-8")) == {"generation": generation}
+    assert json.loads(lark_cli._lark_flow_state_path("alice").read_text(encoding="utf-8")) == {"generation": generation, "device_code_digest": lark_cli._lark_login_code_digest("device-code")}
 
 
 def test_lark_cli_env_from_runtime_exposes_settings_auth_to_lark_commands(monkeypatch, tmp_path):
@@ -2179,8 +2577,9 @@ def test_lark_cli_json_rehardens_auth_files_written_by_cli(monkeypatch, tmp_path
 
 def test_lark_cli_env_from_runtime_uses_container_paths_for_sandbox_lark_commands():
     runtime = SimpleNamespace(context={"user_id": "alice"})
+    sandbox = SimpleNamespace(lark_cli_broker=False)
 
-    env = _lark_cli_env_from_runtime(runtime, "/usr/bin/lark-cli auth status", sandbox_paths=True)
+    env = _lark_cli_env_from_runtime(runtime, "/usr/bin/lark-cli auth status", sandbox_paths=True, sandbox=sandbox)
 
     assert env is not None
     assert env["LARKSUITE_CLI_CONFIG_DIR"] == lark_cli.LARK_CLI_SANDBOX_CONFIG_DIR
@@ -2247,13 +2646,13 @@ def test_complete_lark_auth_polls_device_code_and_returns_status(monkeypatch, tm
     config = _config(skills_root)
     captured: dict[str, object] = {}
 
-    def _run_lark_cli_json(args, **kwargs):
+    def _spawn_lark_login_process(args, *, user_id):
         captured["args"] = args
-        captured["kwargs"] = kwargs
-        return {}
+        captured["user_id"] = user_id
+        return _InstantLoginProcess()
 
     monkeypatch.setattr(lark_cli, "_resolve_lark_cli_path", lambda: "/usr/bin/lark-cli")
-    monkeypatch.setattr(lark_cli, "_run_lark_cli_json", _run_lark_cli_json)
+    monkeypatch.setattr(lark_cli, "_spawn_lark_login_process", _spawn_lark_login_process)
     monkeypatch.setattr(
         lark_cli,
         "get_lark_integration_status",
@@ -2288,14 +2687,11 @@ def test_complete_lark_auth_polls_device_code_and_returns_status(monkeypatch, tm
         "device-code",
         "--json",
     ]
-    assert captured["kwargs"] == {
-        "user_id": "alice",
-        "timeout": 45,
-        "allow_empty_success": True,
-    }
+    assert captured["user_id"] == "alice"
 
 
 def test_complete_lark_auth_captures_status_under_lock_and_probes_runtime_after(monkeypatch, tmp_path) -> None:
+    _patch_paths(monkeypatch, tmp_path / "home")
     config = _config(tmp_path / "skills")
     lock_state = {"active": False}
     credential_state = {
@@ -2304,28 +2700,60 @@ def test_complete_lark_auth_captures_status_under_lock_and_probes_runtime_after(
     }
     snapshot_lock_states: list[bool] = []
     status_lock_states: list[bool] = []
+    spawn_lock_states: list[bool] = []
+    first_unlock = threading.Event()
+    lock_exits = {"count": 0}
+    credential_mutex = threading.Lock()
 
     class _CredentialLock:
         def __enter__(self):
+            credential_mutex.acquire()
             assert lock_state["active"] is False
             lock_state["active"] = True
 
         def __exit__(self, *_args):
             lock_state["active"] = False
-            # Model another tab switching credentials as soon as this operation unlocks.
-            credential_state["app_id"] = "next-app"
-            credential_state["auth"] = lark_cli.LarkAuthProbe(status="not_authorized", user=None)
+            if threading.current_thread() is threading.main_thread():
+                lock_exits["count"] += 1
+                first_unlock.set()
+                if lock_exits["count"] == 2:
+                    # Model another tab switching credentials after the
+                    # request captures its post-completion snapshot.
+                    credential_state["app_id"] = "next-app"
+                    credential_state["auth"] = lark_cli.LarkAuthProbe(status="not_authorized", user=None)
+            credential_mutex.release()
+
+    class _LoginProcess:
+        pid = None  # Markers treat a missing CLI pid as owned by this process.
+
+        def communicate(self, timeout=None):
+            # The login runs outside the credential lock: it starts once the
+            # spawn lock is released, and its credential write lands before the
+            # completion snapshot re-acquires the lock.
+            assert first_unlock.wait(timeout=5)
+            credential_state["app_id"] = "completed-app"
+            credential_state["auth"] = lark_cli.LarkAuthProbe(status="authenticated", user="Alice", verified=True)
+            return "{}", ""
+
+        @property
+        def returncode(self) -> int:
+            return 0
+
+        def kill(self) -> None:
+            raise AssertionError("the shared login run must never be killed")
+
+        def poll(self):
+            return 0
+
+    def _spawn_lark_login_process(_args, *, user_id):
+        spawn_lock_states.append(lock_state["active"])
+        return _LoginProcess()
 
     monkeypatch.setattr(lark_cli, "_lark_credential_lock", lambda _user_id: _CredentialLock())
     monkeypatch.setattr(lark_cli, "_require_lark_flow_generation_locked", lambda _user_id, generation: generation)
     monkeypatch.setattr(lark_cli, "_require_lark_cli_path", lambda: "/usr/bin/lark-cli")
-
-    def _complete_login(*_args, **_kwargs):
-        assert lock_state["active"] is True
-        credential_state["app_id"] = "completed-app"
-        credential_state["auth"] = lark_cli.LarkAuthProbe(status="authenticated", user="Alice", verified=True)
-
-    monkeypatch.setattr(lark_cli, "_run_lark_cli_json", _complete_login)
+    monkeypatch.setattr(lark_cli, "_spawn_lark_login_process", _spawn_lark_login_process)
+    monkeypatch.setattr(lark_cli, "ensure_lark_cli_credential_tree", lambda *_args, **_kwargs: None)
 
     def _credential_snapshot(_user_id, *, verify_auth):
         snapshot_lock_states.append(lock_state["active"])
@@ -2375,6 +2803,7 @@ def test_complete_lark_auth_captures_status_under_lock_and_probes_runtime_after(
     assert result.status.app_id == "completed-app"
     assert result.status.auth.status == "authenticated"
     assert result.status.sandbox_runtime_ready is True
+    assert spawn_lock_states == [True]
     assert snapshot_lock_states == [True]
     assert status_lock_states == [False]
 
@@ -2397,7 +2826,7 @@ def test_complete_lark_auth_status_ignores_credential_changes_during_runtime_pro
     monkeypatch.setattr(lark_cli, "probe_lark_auth", lambda _user_id, *, verify=False: credential_state["auth"])
     monkeypatch.setattr(lark_cli, "probe_lark_cli", lambda: lark_cli.LarkCliProbe(available=True, version="1.0.65"))
     monkeypatch.setattr(lark_cli, "_require_lark_cli_path", lambda: "/usr/bin/lark-cli")
-    monkeypatch.setattr(lark_cli, "_run_lark_cli_json", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(lark_cli, "_spawn_lark_login_process", lambda _args, *, user_id: _InstantLoginProcess())
 
     runtime_probes: list[bool] = []
 
@@ -2592,14 +3021,16 @@ def test_complete_lark_auth_accepts_short_automatic_poll_timeout(monkeypatch, tm
     assert "wait_timeout_seconds" in inspect.signature(lark_cli.complete_lark_auth).parameters
     _patch_paths(monkeypatch, tmp_path / "home")
     config = _config(tmp_path / "skills")
-    captured: dict[str, object] = {}
+
+    spawned: list[_InstantLoginProcess] = []
+
+    def _spawn_lark_login_process(_args, *, user_id):
+        process = _InstantLoginProcess()
+        spawned.append(process)
+        return process
 
     monkeypatch.setattr(lark_cli, "_require_lark_cli_path", lambda: "/usr/bin/lark-cli")
-    monkeypatch.setattr(
-        lark_cli,
-        "_run_lark_cli_json",
-        lambda _args, **kwargs: captured.update(kwargs) or {},
-    )
+    monkeypatch.setattr(lark_cli, "_spawn_lark_login_process", _spawn_lark_login_process)
     monkeypatch.setattr(
         lark_cli,
         "get_lark_integration_status",
@@ -2632,7 +3063,10 @@ def test_complete_lark_auth_accepts_short_automatic_poll_timeout(monkeypatch, tm
     )
 
     assert result.success is True
-    assert captured["timeout"] == 8
+    # The short poll budget only bounds the caller's wait: the shared login
+    # process is spawned once and is never terminated by the wait.
+    assert len(spawned) == 1
+    assert spawned[0].killed is False
 
 
 def test_complete_lark_auth_rejects_superseded_generation_before_token_write(monkeypatch, tmp_path) -> None:
@@ -2642,7 +3076,7 @@ def test_complete_lark_auth_rejects_superseded_generation_before_token_write(mon
     current_generation = _advance_lark_flow()
     monkeypatch.setattr(
         lark_cli,
-        "_run_lark_cli_json",
+        "_spawn_lark_login_process",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("stale auth must not write tokens")),
     )
 

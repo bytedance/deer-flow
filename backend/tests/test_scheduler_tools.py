@@ -150,7 +150,8 @@ async def test_management_invocation_cannot_bypass_mode_subagent_or_config_gate(
 
     capability = _capability(capability_mode)
     result = await schedule_task.coroutine(runtime=_runtime(capability=capability, mode=mode, is_subagent=is_subagent, enabled=enabled, tool_enabled=tool_enabled), action="list")
-    assert "error" in result
+    assert (result["code"], result["status_code"]) == ("scheduler_tools_disabled", 503)
+    assert result["error"]
     capability.manage.assert_not_awaited()
     capability.stop_current_schedule.assert_not_awaited()
 
@@ -189,7 +190,8 @@ async def test_self_stop_requires_a_scheduled_lead_run(mode, is_subagent):
 
     capability = _capability("scheduled")
     result = await stop_scheduled_task.coroutine(runtime=_runtime(capability=capability, mode=mode, is_subagent=is_subagent))
-    assert "error" in result
+    assert (result["code"], result["status_code"]) == ("scheduler_tools_disabled", 503)
+    assert result["error"]
     capability.stop_current_schedule.assert_not_awaited()
 
 
@@ -221,11 +223,75 @@ def test_model_visible_schema_excludes_authority_and_self_stop_has_no_arguments(
     from deerflow.tools.scheduled_tasks import schedule_task, stop_scheduled_task
 
     management = schedule_task.tool_call_schema.model_json_schema()
-    assert set(management["properties"]).isdisjoint({"runtime", "user_id", "thread_id", "run_id", "occurrence_id"})
-    assert set(management["properties"]["action"]["enum"]) == {"create", "list", "pause", "delete", "note", "trial"}
+    assert set(management["properties"]).isdisjoint({"runtime", "user_id", "thread_id", "run_id", "occurrence_id", "origin_thread_id", "assistant_id"})
+    assert set(management["properties"]["action"]["enum"]) == {"create", "update", "list", "pause", "resume", "delete", "note", "trial"}
+    assert {"stop_condition", "clear_fields"} <= set(management["properties"])
     assert stop_scheduled_task.tool_call_schema.model_json_schema()["properties"] == {}
     assert "explicit" in schedule_task.description.lower()
-    assert "verbatim" in schedule_task.description.lower()
+    assert "repeat the returned" not in schedule_task.description.lower()
+
+
+def test_schedule_description_steers_the_conversation_contract():
+    from deerflow.tools.scheduled_tasks import schedule_task, stop_scheduled_task
+
+    description = " ".join(schedule_task.description.split())
+    for phrase in (
+        "stop_scheduled_task",
+        "never tell the user a task cannot stop itself",
+        "Never assume UTC",
+        "never delete and recreate",
+        "never promise to report back",
+        "Intervals need no timezone",
+    ):
+        assert phrase in description
+    assert "Repeat the returned" not in description
+    assert "Run this task now" not in description
+    assert "task paused itself" in " ".join(stop_scheduled_task.description.split())
+
+
+def _constraint_keys(schema):
+    found = set()
+    if isinstance(schema, dict):
+        found |= {key for key in schema if key in {"minimum", "exclusiveMinimum", "maximum", "maxLength", "minLength", "strict"}}
+        for value in schema.values():
+            found |= _constraint_keys(value)
+    elif isinstance(schema, list):
+        for value in schema:
+            found |= _constraint_keys(value)
+    return found
+
+
+def test_model_visible_parameters_carry_no_value_constraints():
+    from deerflow.tools.scheduled_tasks import schedule_task
+
+    # Value rules come back as coded results (same codes as REST), never as a
+    # schema rejection the model cannot read.
+    assert _constraint_keys(schedule_task.tool_call_schema.model_json_schema()) == set()
+
+
+@pytest.mark.asyncio
+async def test_update_and_resume_forward_only_allowlisted_fields():
+    from deerflow.tools.scheduled_tasks import schedule_task
+
+    capability = _capability()
+    await schedule_task.coroutine(
+        runtime=_runtime(capability=capability),
+        action="update",
+        task_id="task-1",
+        prompt="Check the checklist",
+        stop_condition="every item is checked",
+        schedule_type="cron",
+        schedule_spec={"cron": "0 10 * * *"},
+        clear_fields=["goal_objective", "max_runs"],
+    )
+    capability.manage.assert_awaited_once_with(
+        action="update",
+        request={"task_id": "task-1", "prompt": "Check the checklist", "stop_condition": "every item is checked", "schedule_type": "cron", "schedule_spec": {"cron": "0 10 * * *"}, "clear_fields": ["goal_objective", "max_runs"]},
+    )
+    capability.manage.reset_mock()
+    await schedule_task.coroutine(runtime=_runtime(capability=capability), action="resume", task_id="task-1", max_runs=10)
+    # context_mode is a create-only field; it is never forwarded to resume/update.
+    capability.manage.assert_awaited_once_with(action="resume", request={"task_id": "task-1", "max_runs": 10})
 
 
 @pytest.mark.parametrize(

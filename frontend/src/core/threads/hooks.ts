@@ -10,18 +10,30 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { toast } from "sonner";
 
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
 
 import { getAPIClient } from "../api";
 import { fetch } from "../api/fetcher";
+import { AuthQueryScopeContext } from "../auth/query-scope";
 import { getBackendBaseURL } from "../config";
+import { useRunInputsEnabled } from "../features";
 import { useI18n } from "../i18n/hooks";
+import type { Locale } from "../i18n/locale";
 import { getMessageRunId } from "../messages/run-duration";
+import { isErrorToolMessage } from "../messages/tool-error";
+import { indexToolResults } from "../messages/tool-result";
 import {
-  hasContent,
+  extractContentFromMessage,
   hasToolCalls,
   isHiddenFromUIMessage,
 } from "../messages/utils";
@@ -52,6 +64,13 @@ import {
   messageIdentity,
   trustedMessageSeq,
 } from "./message-order";
+import {
+  fetchRunInputState,
+  fetchRunInputs,
+  runInputsKey,
+  submitRunInput,
+  type RunInputMode,
+} from "./run-inputs";
 import {
   hasRenderedThreadStateUpdate,
   reduceThreadStateUpdates,
@@ -106,10 +125,14 @@ type SendMessageOptions = {
    */
   conversationReferences?: string[];
   /**
-   * Invoked exactly once when the send passes the in-flight guard and is
-   * genuinely dispatched. It never fires on the early-return path, so callers
-   * can safely perform one-time cleanup (e.g. clearing quoted references)
-   * without losing state when a concurrent send is dropped.
+   * Invoked exactly once when the send is genuinely dispatched: after the
+   * in-flight guard and after any attachments upload, right before the run is
+   * submitted. It never fires for a dropped send or one whose attachments fail
+   * to prepare or upload, so callers can safely perform one-time cleanup (e.g.
+   * clearing quoted references) without losing state a retry still needs.
+   * The guarantee ends at dispatch: a run that fails afterwards does not
+   * reject `thread.submit` (the SDK reports it through the stream's
+   * `onError`), so the send resolves and the composer is cleared as a whole.
    */
   onSent?: () => void;
 };
@@ -150,25 +173,47 @@ export type PendingPreparedReplayMask = {
   replacementHumanMessageId?: string;
 };
 
-export function hasToolResult(messages: Message[], toolName: string): boolean {
-  const matchingToolCallIds = new Set<string>();
-  for (const message of messages) {
+export type ToolResultStatus = "pending" | "success" | "error";
+
+export function getToolResultStatus(
+  messages: Message[],
+  toolName: string,
+): ToolResultStatus {
+  let latestToolCallId: string | undefined;
+  let latestToolCallIndex = -1;
+  for (const [messageIndex, message] of messages.entries()) {
     if (message.type !== "ai") {
       continue;
     }
     for (const toolCall of message.tool_calls ?? []) {
       if (toolCall.name === toolName && toolCall.id) {
-        matchingToolCallIds.add(toolCall.id);
+        latestToolCallId = toolCall.id;
+        latestToolCallIndex = messageIndex;
       }
     }
   }
 
-  return messages.some(
-    (message) =>
-      message.type === "tool" &&
-      (message.name === toolName ||
-        matchingToolCallIds.has(message.tool_call_id)),
-  );
+  const results = latestToolCallId
+    ? (indexToolResults(messages).get(latestToolCallIndex) ?? [])
+    : messages;
+  for (let index = results.length - 1; index >= 0; index -= 1) {
+    const message = results[index];
+    if (message?.type !== "tool") {
+      continue;
+    }
+    const matches = latestToolCallId
+      ? message.tool_call_id === latestToolCallId
+      : message.name === toolName;
+    if (matches) {
+      return isErrorToolMessage(message) ? "error" : "success";
+    }
+  }
+
+  return "pending";
+}
+
+export function hasToolResult(messages: Message[], toolName: string): boolean {
+  return getToolResultStatus(messages, toolName) !== "pending";
 }
 
 /**
@@ -238,15 +283,19 @@ export function buildThreadSubmitMessages({
  * `string[]` under `context.conversation_references`, only when the caller
  * attached them, and never from local settings. A stray key in settings is
  * dropped rather than forwarded, so a stale value can never grant access.
+ * `client_timezone` carries the browser's zone (scheduled-task default only).
+ * `locale` carries the live UI language and overrides any saved value.
  */
 export function buildRunContext({
   settings,
   threadId,
+  locale,
   extraContext,
   conversationReferences,
 }: {
   settings: LocalSettings["context"];
   threadId: string;
+  locale?: Locale;
   extraContext?: Record<string, unknown>;
   conversationReferences?: string[];
 }): Record<string, unknown> {
@@ -258,6 +307,9 @@ export function buildRunContext({
   return {
     ...extraContext,
     ...ownedSettings,
+    ...(typeof extraContext?.model_name === "string"
+      ? { model_name: extraContext.model_name }
+      : {}),
     ...(conversationReferences?.length
       ? { conversation_references: [...conversationReferences] }
       : {}),
@@ -274,7 +326,25 @@ export function buildRunContext({
             ? "low"
             : undefined),
     thread_id: threadId,
+    ...(locale ? { locale } : {}),
+    ...clientTimezoneContext(),
   };
+}
+
+/**
+ * The browser's IANA zone as `context.client_timezone`. The Gateway reads it
+ * only to offer a default zone when a chat creates a scheduled task; it never
+ * reaches the model's context. Omitted when the browser cannot tell.
+ */
+function clientTimezoneContext(): { client_timezone?: string } {
+  try {
+    const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    return typeof timeZone === "string" && timeZone.length > 0
+      ? { client_timezone: timeZone }
+      : {};
+  } catch {
+    return {};
+  }
 }
 
 // Stable identity for "no optimistic messages" so the merged-messages memo
@@ -606,6 +676,7 @@ export function buildThreadMessagesPageUrl(
   baseUrl: string,
   threadId: string,
   beforeSeq?: number,
+  limit?: number,
 ) {
   const normalizedBaseUrl = baseUrl.replace(/\/$/, "");
   const path = `/api/threads/${encodeURIComponent(threadId)}/messages/page`;
@@ -616,6 +687,7 @@ export function buildThreadMessagesPageUrl(
   if (beforeSeq !== undefined) {
     url.searchParams.set("before_seq", String(beforeSeq));
   }
+  if (limit !== undefined) url.searchParams.set("limit", String(limit));
   return normalizedBaseUrl ? url.toString() : `${url.pathname}${url.search}`;
 }
 
@@ -627,6 +699,40 @@ export function flattenThreadHistoryPages(
       .slice()
       .reverse()
       .flatMap((page) => page.data),
+  );
+}
+
+/** Read persisted history independently of the loaded UI and compacted state. */
+export async function fetchThreadExportMessages(threadId: string) {
+  const pages: ThreadMessagesPageResponse[] = [];
+  let beforeSeq: number | undefined;
+  do {
+    const response = await fetch(
+      buildThreadMessagesPageUrl(getBackendBaseURL(), threadId, beforeSeq, 200),
+    );
+    if (!response.ok) {
+      throw new Error("Failed to load conversation for export.");
+    }
+    const page = parseThreadMessagesPageResponse(await response.json());
+    const next = getThreadHistoryNextPageParam(page);
+    if (
+      next !== undefined &&
+      (page.data.length === 0 ||
+        next !== page.data[0]?.seq ||
+        (beforeSeq !== undefined && next >= beforeSeq))
+    ) {
+      throw new Error("Thread export history cursor did not advance.");
+    }
+    pages.push(page);
+    beforeSeq = next;
+  } while (beforeSeq !== undefined);
+  return mergeMessages(
+    buildVisibleHistoryMessages(
+      flattenThreadHistoryPages(pages),
+      new Set<string>(),
+    ),
+    [],
+    [],
   );
 }
 
@@ -981,7 +1087,9 @@ export function restoreReconnectedTurnMessageOrder(
     if (
       message.type === "ai" &&
       !isHiddenFromUIMessage(message) &&
-      hasContent(message) &&
+      // Thinking-only blocks (Anthropic) are not completed answers: require
+      // extractable text/image content to close the turn.
+      extractContentFromMessage(message).length > 0 &&
       !hasToolCalls(message)
     ) {
       candidateStart = index + 1;
@@ -1692,13 +1800,14 @@ export function upsertThreadInInfiniteCache(
       exact: false,
       predicate: (query) => !hasArchiveFilter(query),
     },
-    (oldData: InfiniteData<AgentThread[]> | undefined) => {
+    (oldData: InfiniteThreadsData | undefined) => {
       if (!oldData) {
         return oldData;
       }
 
-      const merged = oldData.pages.map((page) =>
-        page.map((t) =>
+      const merged = oldData.pages.map((page) => ({
+        ...page,
+        threads: page.threads.map((t) =>
           t.thread_id === thread.thread_id
             ? {
                 ...thread,
@@ -1714,20 +1823,27 @@ export function upsertThreadInInfiniteCache(
               }
             : t,
         ),
-      );
+      }));
 
       const exists = merged.some((page) =>
-        page.some((t) => t.thread_id === thread.thread_id),
+        page.threads.some((t) => t.thread_id === thread.thread_id),
       );
       if (exists) {
         return { ...oldData, pages: merged };
       }
 
-      const firstPage = merged[0] ?? [];
+      const firstPage = merged[0] ?? {
+        threads: [],
+        hiddenCount: 0,
+        hasMore: false,
+      };
       const restPages = merged.slice(1);
       return {
         ...oldData,
-        pages: [[thread, ...firstPage], ...restPages],
+        pages: [
+          { ...firstPage, threads: [thread, ...firstPage.threads] },
+          ...restPages,
+        ],
       };
     },
   );
@@ -1753,6 +1869,7 @@ export function invalidateStoppedThreadCaches(
   }
 
   void queryClient.invalidateQueries({ queryKey: ["thread", threadId] });
+  void queryClient.invalidateQueries({ queryKey: runInputsKey(threadId) });
   void queryClient.invalidateQueries({
     queryKey: threadHistoryQueryKey(threadId),
   });
@@ -1869,7 +1986,7 @@ export function useThreadStream({
   onStart,
   onFinish,
 }: ThreadStreamOptions) {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const currentViewThreadId = displayThreadId ?? threadId ?? null;
   const currentViewThreadIdRef = useRef(currentViewThreadId);
   currentViewThreadIdRef.current = currentViewThreadId;
@@ -1929,6 +2046,9 @@ export function useThreadStream({
   // Keep completed IDs across recovery-state resets so stale "running" data
   // cannot restart a submitted or natively reconnected stream.
   const completedRunIdsRef = useRef(new Set<string>());
+  // onCreated fires only for runs this hook submitted. A failed submit stays
+  // with the submit flow; only SDK reconnects are handed to recovery.
+  const submittedRunIdRef = useRef<string | null>(null);
 
   // Keep listeners ref updated with latest callbacks
   useEffect(() => {
@@ -1982,24 +2102,48 @@ export function useThreadStream({
   const { tasksRef, setTasks } = useSubtaskContext();
   const updateSubtask = useUpdateSubtask();
 
-  const scheduleActiveRunRejoinRetry = useCallback(() => {
-    const rejoin = activeRunRejoinRef.current;
-    if (!rejoin.inFlight || !rejoin.threadId || !rejoin.runId) {
-      return;
-    }
+  const scheduleActiveRunRejoinRetry = useCallback(
+    (run: Pick<Run, "thread_id" | "run_id"> | undefined) => {
+      const rejoin = activeRunRejoinRef.current;
+      // SDK 1.6.0 LGP joinStream errors include { thread_id, run_id }; history
+      // errors omit it. Re-verify this callback contract when upgrading the SDK.
+      if (
+        run &&
+        !rejoin.inFlight &&
+        run.run_id !== submittedRunIdRef.current &&
+        readReconnectRun(run.thread_id) === run.run_id
+      ) {
+        // The SDK's same-tab reconnect tries once and keeps its pointer on
+        // error, so the recovery effect would keep deferring to a stream that
+        // no longer exists. Release the pointer and let recovery take over.
+        clearReconnectRun(run.thread_id, run.run_id);
+        setActiveRunRejoinRetry((current) => current + 1);
+        return;
+      }
+      if (
+        !rejoin.inFlight ||
+        !rejoin.threadId ||
+        !rejoin.runId ||
+        run?.thread_id !== rejoin.threadId ||
+        run?.run_id !== rejoin.runId
+      ) {
+        return;
+      }
 
-    rejoin.inFlight = false;
-    clearReconnectRun(rejoin.threadId, rejoin.runId);
-    const retryDelay = ACTIVE_RUN_REJOIN_RETRY_DELAYS_MS[rejoin.attempts - 1];
-    if (retryDelay === undefined) {
-      return;
-    }
+      rejoin.inFlight = false;
+      clearReconnectRun(rejoin.threadId, rejoin.runId);
+      const retryDelay = ACTIVE_RUN_REJOIN_RETRY_DELAYS_MS[rejoin.attempts - 1];
+      if (retryDelay === undefined) {
+        return;
+      }
 
-    rejoin.retryTimer = setTimeout(() => {
-      rejoin.retryTimer = null;
-      setActiveRunRejoinRetry((current) => current + 1);
-    }, retryDelay);
-  }, []);
+      rejoin.retryTimer = setTimeout(() => {
+        rejoin.retryTimer = null;
+        setActiveRunRejoinRetry((current) => current + 1);
+      }, retryDelay);
+    },
+    [],
+  );
 
   const settleActiveRunRejoin = useCallback(() => {
     const rejoin = activeRunRejoinRef.current;
@@ -2046,6 +2190,7 @@ export function useThreadStream({
     // Keep explicit: SDK types claim @default true, but runtime uses throttle ?? false.
     throttle: true,
     onCreated(meta) {
+      submittedRunIdRef.current = meta.run_id;
       handleStreamStart(meta.thread_id, meta.run_id);
       const now = new Date().toISOString();
       upsertThreadInSearchCache(queryClient, {
@@ -2188,8 +2333,8 @@ export function useThreadStream({
         }
       }
     },
-    onError(error) {
-      scheduleActiveRunRejoinRetry();
+    onError(error, run) {
+      scheduleActiveRunRejoinRetry(run);
       setOptimisticMessages([]);
       setOptimisticThreadId(null);
       setLiveMessagesThreadId(null);
@@ -2203,6 +2348,9 @@ export function useThreadStream({
           .filter((id): id is string => Boolean(id)),
       );
       if (threadIdRef.current && !isMock) {
+        void queryClient.invalidateQueries({
+          queryKey: runInputsKey(threadIdRef.current),
+        });
         void queryClient.invalidateQueries({
           queryKey: threadHistoryQueryKey(threadIdRef.current),
         });
@@ -2227,13 +2375,130 @@ export function useThreadStream({
     },
   });
   const { isLoading: isThreadLoading, joinStream } = thread;
+  const runInputAccount = useContext(AuthQueryScopeContext);
+  const inputCapability = useRunInputsEnabled(!!runInputAccount && !isMock);
+  const inputQuery = useQuery({
+    queryKey: [...runInputsKey(onStreamThreadId ?? ""), runInputAccount],
+    queryFn: ({ signal }) => fetchRunInputState(onStreamThreadId!, signal),
+    enabled:
+      inputCapability && !isMock && !!onStreamThreadId && !!runInputAccount,
+    refetchInterval: (q) =>
+      isThreadLoading || activeRunId
+        ? 1000
+        : q.state.data?.items.some((x) =>
+              ["pending", "applying", "dispatching"].includes(x.status),
+            )
+          ? 5000
+          : false,
+    retry: false,
+  });
+  const runInputAttemptRef = useRef<{
+    threadId: string;
+    runId: string;
+    text: string;
+    mode: RunInputMode;
+    id: string;
+    context?: Record<string, unknown>;
+  } | null>(null);
+  const runInputAbortRef = useRef<AbortController | null>(null);
+  useEffect(
+    () => () => {
+      runInputAbortRef.current?.abort();
+      runInputAttemptRef.current = null;
+    },
+    [onStreamThreadId, runInputAccount],
+  );
+  const sendInput = useCallback(
+    async (text: string, mode: RunInputMode) => {
+      const targetThread = onStreamThreadId;
+      const runId = inputQuery.data?.active_run_id;
+      if (!targetThread || !runId)
+        throw new Error(t.inputBox.runInputUnavailable);
+      const previous = runInputAttemptRef.current;
+      const attempt =
+        previous?.threadId === targetThread &&
+        previous.text === text &&
+        previous.mode === mode
+          ? previous
+          : {
+              threadId: targetThread,
+              runId,
+              text,
+              mode,
+              id: uuid(),
+              context:
+                mode === "queue"
+                  ? buildRunContext({
+                      settings: context,
+                      threadId: targetThread,
+                      locale,
+                    })
+                  : undefined,
+            };
+      runInputAttemptRef.current = attempt;
+      const controller = new AbortController();
+      runInputAbortRef.current?.abort();
+      runInputAbortRef.current = controller;
+      try {
+        const item = await submitRunInput({
+          threadId: targetThread,
+          runId: attempt.runId,
+          requestId: attempt.id,
+          text,
+          mode,
+          context: attempt.context,
+          signal: controller.signal,
+        });
+        if (controller.signal.aborted)
+          throw new Error("thread-submission-stale");
+        runInputAttemptRef.current = null;
+        void queryClient.invalidateQueries({
+          queryKey: runInputsKey(targetThread),
+        });
+        return item;
+      } catch (error) {
+        if (!controller.signal.aborted) {
+          const accepted = await fetchRunInputs(targetThread, controller.signal)
+            .then((items) =>
+              items.find(
+                (x) => x.id === attempt.id && x.target_run_id === attempt.runId,
+              ),
+            )
+            .catch(() => undefined);
+          if (accepted && !controller.signal.aborted) {
+            runInputAttemptRef.current = null;
+            void queryClient.invalidateQueries({
+              queryKey: runInputsKey(targetThread),
+            });
+            return accepted;
+          }
+          toast.error(t.inputBox.runInputUnavailable);
+        }
+        throw error;
+      }
+    },
+    [
+      context,
+      inputQuery.data?.active_run_id,
+      locale,
+      onStreamThreadId,
+      queryClient,
+      t.inputBox.runInputUnavailable,
+    ],
+  );
+
+  const inputActiveRunId = inputQuery.data?.active_run_id;
+  const knownActiveRunId =
+    inputActiveRunId && !completedRunIdsRef.current.has(inputActiveRunId)
+      ? inputActiveRunId
+      : activeRunId;
 
   // reconnectOnMount only knows the run id stored in this tab's
   // sessionStorage. A reopened browser or a new tab has no pointer, so recover
   // the newest active run from the server and join its resumable SSE stream.
   useEffect(() => {
     const resolvedThreadId = onStreamThreadId ?? null;
-    const resolvedRunId = activeRunId ?? null;
+    const resolvedRunId = knownActiveRunId ?? null;
     let rejoin = activeRunRejoinRef.current;
 
     if (
@@ -2264,7 +2529,8 @@ export function useThreadStream({
     }
 
     // A matching pointer means the SDK's native same-tab reconnect owns this
-    // run. Do not create a second SSE consumer.
+    // run. Do not create a second SSE consumer; if that reconnect fails,
+    // scheduleActiveRunRejoinRetry releases the pointer.
     if (readReconnectRun(resolvedThreadId) === resolvedRunId) {
       return;
     }
@@ -2275,6 +2541,7 @@ export function useThreadStream({
     void joinStream(resolvedRunId);
   }, [
     activeRunId,
+    knownActiveRunId,
     activeRunRejoinRetry,
     isThreadLoading,
     joinStream,
@@ -2304,7 +2571,10 @@ export function useThreadStream({
     const pendingReplay = pendingPreparedReplayRef.current;
     await stopThreadAndInvalidateCaches(
       queryClient,
-      () => thread.stop(),
+      () =>
+        !thread.isLoading && knownActiveRunId && stoppedThreadId
+          ? getAPIClient(isMock).runs.cancel(stoppedThreadId, knownActiveRunId)
+          : thread.stop(),
       stoppedThreadId,
       isMock,
     );
@@ -2316,6 +2586,7 @@ export function useThreadStream({
   }, [
     clearPreparedReplayMasks,
     displayThreadId,
+    knownActiveRunId,
     isMock,
     queryClient,
     thread,
@@ -2505,10 +2776,6 @@ export function useThreadStream({
       }
       sendInFlightRef.current = true;
 
-      // The send has genuinely proceeded past the in-flight guard, so callers
-      // can now run one-time cleanup that must not fire on the dropped path.
-      options?.onSent?.();
-
       const text = message.text.trim();
 
       // Capture the current human message count before showing optimistic
@@ -2655,6 +2922,10 @@ export function useThreadStream({
           }
         }
 
+        // Attachments are uploaded, so the send is genuinely dispatched and
+        // callers can drop one-time state. A failed upload rejected above
+        // without reaching here, leaving that state for a retry.
+        options?.onSent?.();
         await thread.submit(
           {
             messages: buildThreadSubmitMessages({
@@ -2677,6 +2948,7 @@ export function useThreadStream({
             context: buildRunContext({
               settings: context,
               threadId,
+              locale,
               extraContext,
               conversationReferences: options?.conversationReferences,
             }),
@@ -2700,6 +2972,7 @@ export function useThreadStream({
     [
       thread,
       t.uploads.uploadingFiles,
+      locale,
       context,
       queryClient,
       humanMessageCount,
@@ -2816,7 +3089,7 @@ export function useThreadStream({
           // Replaying a turn never carries conversation references: the grant
           // is per send, so a regenerate or edit runs without them unless the
           // user attaches them again.
-          context: buildRunContext({ settings: context, threadId }),
+          context: buildRunContext({ settings: context, threadId, locale }),
         });
         void queryClient.invalidateQueries({ queryKey: ["thread", threadId] });
         void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
@@ -2853,6 +3126,7 @@ export function useThreadStream({
     },
     [
       context,
+      locale,
       humanMessageCount,
       persistedMessages,
       queryClient,
@@ -3138,6 +3412,11 @@ export function useThreadStream({
   // History messages may overlap with thread.messages; thread.messages take precedence
   const mergedThread = {
     ...thread,
+    isLoading:
+      thread.isLoading ||
+      (inputCapability &&
+        !!knownActiveRunId &&
+        !completedRunIdsRef.current.has(knownActiveRunId)),
     stop: stopThread,
     values: hasVisibleStreamState ? thread.values : EMPTY_THREAD_VALUES,
     messages: mergedMessages,
@@ -3153,6 +3432,23 @@ export function useThreadStream({
     isHistoryLoading,
     hasMoreHistory,
     loadMoreHistory,
+    sendInput,
+    runInputs: (inputQuery.data?.items ?? []).map((item) =>
+      item.mode === "steer" &&
+      (item.status === "pending" || item.status === "applying") &&
+      ((thread.values.applied_run_inputs?.run_id === item.target_run_id &&
+        thread.values.applied_run_inputs.ids.includes(item.id)) ||
+        thread.messages.some(
+          (message) =>
+            message.type === "human" &&
+            getMessageRunId(message) === item.target_run_id &&
+            message.additional_kwargs?.run_input_id === item.id,
+        ))
+        ? { ...item, status: "applied" as const }
+        : item,
+    ),
+    canSendInput: inputCapability && !!inputQuery.data?.active_run_id,
+    activeRunId: knownActiveRunId,
   } as const;
 }
 
@@ -3283,10 +3579,6 @@ export const INFINITE_THREADS_QUERY_KEY_PREFIX = [
   "searchInfinite",
 ] as const;
 
-const INFINITE_THREADS_NEXT_PAGE_PARAM = Symbol(
-  "deerflow.infiniteThreads.nextPageParam",
-);
-
 type InfiniteThreadsParams = Omit<
   NonNullable<Parameters<ThreadsClient["search"]>[0]>,
   "limit" | "offset"
@@ -3298,29 +3590,30 @@ type InfiniteThreadsSearchClient = {
   };
 };
 
-type InfiniteThreadsPageWithNextParam = AgentThread[] & {
-  [INFINITE_THREADS_NEXT_PAGE_PARAM]?: number;
+/**
+ * One loaded page of an infinite thread list. `threads` holds the rows the
+ * list shows; `hiddenCount` counts the server rows the page consumed but the
+ * client filtered out (sidecar threads). Both live in the page data itself so
+ * cache writes and structural sharing, which rebuild pages, keep them.
+ */
+export type InfiniteThreadsPage = {
+  threads: AgentThread[];
+  hiddenCount: number;
+  /** False once the server returned fewer rows than requested. */
+  hasMore: boolean;
 };
 
-function annotateInfiniteThreadsPage(
-  page: AgentThread[],
-  nextPageParam: number | undefined,
-): AgentThread[] {
-  if (nextPageParam !== undefined) {
-    Reflect.set(page, INFINITE_THREADS_NEXT_PAGE_PARAM, nextPageParam);
-  }
-  return page;
-}
+export type InfiniteThreadsData = InfiniteData<InfiniteThreadsPage, number>;
 
 export async function fetchInfiniteThreadsPage(
   apiClient: InfiniteThreadsSearchClient,
   params: InfiniteThreadsParams,
   pageParam: number,
   pageSize: number = INFINITE_THREADS_PAGE_SIZE,
-): Promise<AgentThread[]> {
+): Promise<InfiniteThreadsPage> {
   const threads: AgentThread[] = [];
   let offset = pageParam;
-  let nextPageParam: number | undefined;
+  let hasMore = true;
 
   while (threads.length < pageSize) {
     const currentLimit = pageSize - threads.length;
@@ -3343,59 +3636,73 @@ export async function fetchInfiniteThreadsPage(
     offset += response.length;
 
     if (response.length < currentLimit) {
-      nextPageParam = undefined;
+      hasMore = false;
       break;
     }
-
-    nextPageParam = offset;
   }
 
-  return annotateInfiniteThreadsPage(threads, nextPageParam);
+  return {
+    threads,
+    hiddenCount: offset - pageParam - threads.length,
+    hasMore,
+  };
 }
 
 export function getInfiniteThreadsNextPageParam(
-  lastPage: AgentThread[],
-  allPages: AgentThread[][],
-  pageSize: number = INFINITE_THREADS_PAGE_SIZE,
+  lastPage: InfiniteThreadsPage,
+  allPages: InfiniteThreadsPage[],
 ): number | undefined {
-  const annotatedNextPageParam = Reflect.get(
-    lastPage as InfiniteThreadsPageWithNextParam,
-    INFINITE_THREADS_NEXT_PAGE_PARAM,
-  );
-  if (typeof annotatedNextPageParam === "number") {
-    return annotatedNextPageParam;
-  }
-
-  if (lastPage.length < pageSize) {
+  if (!lastPage.hasMore) {
     return undefined;
   }
-  return allPages.reduce((sum, page) => sum + page.length, 0);
+  // Count visible rows from the cache instead of freezing the fetch-time
+  // offset: a local delete or insert changes the server list the same way.
+  return allPages.reduce(
+    (offset, page) => offset + page.threads.length + page.hiddenCount,
+    0,
+  );
+}
+
+/** List components read plain thread pages; pagination state stays cached. */
+function selectInfiniteThreads(
+  data: InfiniteThreadsData,
+): InfiniteData<AgentThread[], number> {
+  return {
+    pages: data.pages.map((page) => page.threads),
+    pageParams: data.pageParams,
+  };
+}
+
+function updateInfiniteThreadsPages(
+  oldData: InfiniteThreadsData | undefined,
+  update: (threads: AgentThread[]) => AgentThread[],
+): InfiniteThreadsData | undefined {
+  if (!oldData) {
+    return oldData;
+  }
+  return {
+    ...oldData,
+    pages: oldData.pages.map((page) => ({
+      ...page,
+      threads: update(page.threads),
+    })),
+  };
 }
 
 export function mapInfiniteThreadsCache(
-  oldData: InfiniteData<AgentThread[]> | undefined,
+  oldData: InfiniteThreadsData | undefined,
   mapper: (thread: AgentThread) => AgentThread,
-): InfiniteData<AgentThread[]> | undefined {
-  if (!oldData) {
-    return oldData;
-  }
-  return {
-    ...oldData,
-    pages: oldData.pages.map((page) => page.map(mapper)),
-  };
+): InfiniteThreadsData | undefined {
+  return updateInfiniteThreadsPages(oldData, (threads) => threads.map(mapper));
 }
 
 export function filterInfiniteThreadsCache(
-  oldData: InfiniteData<AgentThread[]> | undefined,
+  oldData: InfiniteThreadsData | undefined,
   predicate: (thread: AgentThread) => boolean,
-): InfiniteData<AgentThread[]> | undefined {
-  if (!oldData) {
-    return oldData;
-  }
-  return {
-    ...oldData,
-    pages: oldData.pages.map((page) => page.filter(predicate)),
-  };
+): InfiniteThreadsData | undefined {
+  return updateInfiniteThreadsPages(oldData, (threads) =>
+    threads.filter(predicate),
+  );
 }
 
 function mergeThreadMetadata(
@@ -3458,7 +3765,7 @@ function setThreadInCaches(
   );
   queryClient.setQueriesData(
     filters.infiniteSearch,
-    (oldData: InfiniteData<AgentThread[]> | undefined) =>
+    (oldData: InfiniteThreadsData | undefined) =>
       mapInfiniteThreadsCache(oldData, (thread) =>
         thread.thread_id === threadId ? mapper(thread) : thread,
       ),
@@ -3500,9 +3807,9 @@ export function useInfiniteThreads(
 ) {
   const apiClient = getAPIClient();
   return useInfiniteQuery<
-    AgentThread[],
+    InfiniteThreadsPage,
     Error,
-    InfiniteData<AgentThread[]>,
+    InfiniteData<AgentThread[], number>,
     readonly unknown[],
     number
   >({
@@ -3517,6 +3824,7 @@ export function useInfiniteThreads(
       ),
     getNextPageParam: (lastPage, allPages) =>
       getInfiniteThreadsNextPageParam(lastPage, allPages),
+    select: selectInfiniteThreads,
     refetchOnWindowFocus: false,
     enabled,
   });
@@ -3872,7 +4180,7 @@ export function useDeleteThread() {
           queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
           exact: false,
         },
-        (oldData: InfiniteData<AgentThread[]> | undefined) =>
+        (oldData: InfiniteThreadsData | undefined) =>
           filterInfiniteThreadsCache(
             oldData,
             (t) => !deletedThreadIds.has(t.thread_id),

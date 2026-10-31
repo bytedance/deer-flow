@@ -8,10 +8,13 @@ import re
 import threading
 import time
 from collections.abc import Coroutine
+from concurrent.futures import Future
 from typing import Any
 
-from app.channels.base import Channel
+from app.channels.allowed_users import parse_allowed_users
+from app.channels.base import Channel, ChannelStopTimeout
 from app.channels.connection_identity import attach_connection_identity
+from app.channels.inbound_files import coerce_file_size, safe_inbound_filename
 from app.channels.message_bus import (
     INBOUND_FILE_CONTENT_KEY,
     InboundMessage,
@@ -21,7 +24,6 @@ from app.channels.message_bus import (
     OutboundMessage,
     ResolvedAttachment,
 )
-from deerflow.uploads.manager import is_upload_staging_file, normalize_filename
 
 logger = logging.getLogger(__name__)
 
@@ -113,28 +115,15 @@ def _parse_telegram_user_id(entry: Any) -> int | None:
 
 
 def _parse_allowed_users(allowed_users: Any) -> frozenset[int] | None:
-    """Parse ``channels.telegram.allowed_users``; ``None`` means no allowlist.
-
-    A single ID is shorthand for a one-entry list. Entries that are not numeric
-    user IDs (``@usernames``, floats, booleans) are dropped with a warning. If
-    none remain, the result is an empty set that denies everyone: the operator
-    asked for a restriction, so an unreadable one must not open the bot to all.
-    """
-    if allowed_users is None or (isinstance(allowed_users, str) and not allowed_users.strip()):
-        return None
-    entries = list(allowed_users) if isinstance(allowed_users, list | tuple | set) else [allowed_users]
-    if not entries:
-        return None
-    user_ids: set[int] = set()
-    for entry in entries:
-        user_id = _parse_telegram_user_id(entry)
-        if user_id is None:
-            logger.warning("[Telegram] Ignoring allowed_users entry %r: expected a positive numeric Telegram user ID (not an @username); list several IDs as a YAML list", entry)
-        else:
-            user_ids.add(user_id)
-    if not user_ids:
-        logger.error("[Telegram] allowed_users has no valid numeric user ID; denying every user until it is fixed")
-    return frozenset(user_ids)
+    """Parse positive numeric Telegram IDs with shared fail-closed semantics."""
+    return parse_allowed_users(
+        allowed_users,
+        parse_user_id=_parse_telegram_user_id,
+        logger=logger,
+        channel_name="Telegram",
+        expected_id="a positive numeric Telegram user ID (not an @username)",
+        valid_id_name="numeric user ID",
+    )
 
 
 class TelegramChannel(Channel):
@@ -153,6 +142,8 @@ class TelegramChannel(Channel):
         self._thread: threading.Thread | None = None
         self._tg_loop: asyncio.AbstractEventLoop | None = None
         self._main_loop: asyncio.AbstractEventLoop | None = None
+        self._bootstrap_task: asyncio.Task[None] | None = None
+        self._polling_cleanup_started = False
         # Dedicated Bot for inbound file downloads. The Application's Bot is
         # built on the manager/main loop (see start()), so its httpx
         # connection pool is bound to that loop; opening a fresh download
@@ -161,6 +152,10 @@ class TelegramChannel(Channel):
         # its pool on the loop that performs the download.
         self._download_bot: Any = None
         self._download_bot_lock = asyncio.Lock()
+        # The first stop() owns this Telegram-loop cleanup. A bounded or
+        # cancelled caller leaves it running so a retry can join the same work.
+        self._shutdown_resources_future: Future[None] | None = None
+        self._shutdown_resources_lock = threading.Lock()
         # Tasks submitted from the main dispatcher loop back to PTB's loop.
         # Only the Telegram loop mutates this set.
         self._tg_bridge_tasks: set[asyncio.Task[Any]] = set()
@@ -178,6 +173,13 @@ class TelegramChannel(Channel):
     async def start(self) -> None:
         if self._running:
             return
+        if self._thread is not None and self._thread.is_alive():
+            raise ChannelStopTimeout("Telegram polling worker has not finished shutting down")
+        with self._shutdown_resources_lock:
+            if self._shutdown_resources_future is not None and not self._shutdown_resources_future.done():
+                raise ChannelStopTimeout("Telegram resource cleanup has not finished")
+            self._shutdown_resources_future = None
+        self._polling_cleanup_started = False
 
         try:
             from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters
@@ -204,6 +206,7 @@ class TelegramChannel(Channel):
         app.add_handler(CommandHandler("new", self._cmd_generic))
         app.add_handler(CommandHandler("status", self._cmd_generic))
         app.add_handler(CommandHandler("models", self._cmd_generic))
+        app.add_handler(CommandHandler("model", self._cmd_generic))
         app.add_handler(CommandHandler("memory", self._cmd_generic))
         app.add_handler(CommandHandler("agent", self._cmd_generic))
         app.add_handler(CommandHandler("goal", self._cmd_generic))
@@ -235,44 +238,76 @@ class TelegramChannel(Channel):
         deadline = shutdown_loop.time() + TELEGRAM_SHUTDOWN_TIMEOUT_SECONDS
         telegram_loop = self._tg_loop
         worker_thread = self._thread
+        telegram_loop_running = telegram_loop is not None and telegram_loop.is_running()
 
-        try:
-            if telegram_loop and telegram_loop.is_running():
-                drain_future = asyncio.run_coroutine_threadsafe(self._shutdown_telegram_resources(), telegram_loop)
-                try:
-                    remaining = max(0.0, deadline - shutdown_loop.time())
-                    await asyncio.wait_for(asyncio.wrap_future(drain_future), timeout=remaining)
-                except asyncio.CancelledError:
-                    drain_future.cancel()
-                    raise
-                except TimeoutError:
-                    drain_future.cancel()
-                    logger.warning("[Telegram] timed out shutting down Telegram loop resources during shutdown")
-                except Exception as exc:
-                    logger.warning("[Telegram] failed to shut down Telegram loop resources during shutdown: %s", type(exc).__name__)
-        finally:
-            if telegram_loop and telegram_loop.is_running():
-                try:
-                    telegram_loop.call_soon_threadsafe(telegram_loop.stop)
-                except RuntimeError:
-                    pass
+        # Bridge tasks and the download Bot's HTTPX clients may only be released
+        # on the Telegram loop, so that loop has to outlive the cleanup. Exactly
+        # one cleanup generation is scheduled per channel: a bounded or
+        # cancelled caller leaves it running, and a retried stop() joins the
+        # same work instead of scheduling a second shutdown next to it.
+        cleanup_future = self._shutdown_resources_future
+        if cleanup_future is None and telegram_loop_running:
+            cleanup_future = self._request_telegram_cleanup(telegram_loop)
+        if cleanup_future is not None and not telegram_loop_running and not cleanup_future.done():
+            # Its owner loop is gone, so nothing can finish this cleanup.
+            logger.warning("[Telegram] Telegram loop stopped before its resource cleanup finished; the download bot's HTTPX clients may not have been closed")
+            with self._shutdown_resources_lock:
+                if self._shutdown_resources_future is cleanup_future:
+                    self._shutdown_resources_future = None
+            cleanup_future = None
+        if cleanup_future is not None:
             try:
-                if worker_thread is not None and worker_thread.is_alive():
-                    remaining = max(0.0, deadline - shutdown_loop.time())
-                    if remaining:
-                        try:
-                            await asyncio.wait_for(
-                                asyncio.to_thread(worker_thread.join, remaining),
-                                timeout=remaining,
-                            )
-                        except TimeoutError:
-                            logger.warning("[Telegram] polling thread did not stop within the shutdown budget")
-            finally:
-                if worker_thread is not None and worker_thread.is_alive():
-                    logger.warning("[Telegram] polling thread is still exiting after bounded shutdown")
-                self._thread = None
-                self._application = None
+                remaining = max(0.0, deadline - shutdown_loop.time())
+                # shield(): the deadline and caller cancellation must interrupt
+                # only this wait, never the cleanup the Telegram loop owns.
+                await asyncio.wait_for(asyncio.shield(asyncio.wrap_future(cleanup_future)), timeout=remaining)
+            except asyncio.CancelledError:
+                # Retain the loop and its cleanup: ChannelService keeps this
+                # instance, and its next stop() converges on the same generation.
+                raise
+            except TimeoutError:
+                logger.warning("[Telegram] timed out shutting down Telegram loop resources during shutdown")
+                raise ChannelStopTimeout("Telegram loop cleanup is still running after stop timeout") from None
+            except Exception as exc:
+                logger.warning("[Telegram] failed to shut down Telegram loop resources during shutdown: %s", type(exc).__name__)
+
+        if telegram_loop_running:
+            try:
+                telegram_loop.call_soon_threadsafe(self._stop_telegram_loop, telegram_loop)
+            except RuntimeError:
+                pass
+        if worker_thread is not None and worker_thread.is_alive():
+            remaining = max(0.0, deadline - shutdown_loop.time())
+            if remaining:
+                try:
+                    await asyncio.wait_for(
+                        asyncio.to_thread(worker_thread.join, remaining),
+                        timeout=remaining,
+                    )
+                except TimeoutError:
+                    logger.warning("[Telegram] polling thread did not stop within the shutdown budget")
+        if worker_thread is not None and worker_thread.is_alive():
+            raise ChannelStopTimeout("Telegram polling thread is still running after stop timeout")
+        if self._thread is worker_thread:
+            self._thread = None
+        self._application = None
+        with self._shutdown_resources_lock:
+            if self._shutdown_resources_future is cleanup_future:
+                self._shutdown_resources_future = None
         logger.info("Telegram channel stopped")
+
+    def _request_telegram_cleanup(self, loop: asyncio.AbstractEventLoop) -> Future[None]:
+        """Share one owner-loop cleanup across stop callers and startup failure."""
+        with self._shutdown_resources_lock:
+            if self._shutdown_resources_future is None:
+                self._shutdown_resources_future = asyncio.run_coroutine_threadsafe(self._shutdown_telegram_resources(), loop)
+            return self._shutdown_resources_future
+
+    def _stop_telegram_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        # A stop retry must not interrupt run_until_complete while the polling
+        # thread is joining its cleanup after bootstrap cancellation/failure.
+        if not self._polling_cleanup_started:
+            loop.stop()
 
     async def send(self, msg: OutboundMessage, *, _max_retries: int = 3) -> None:
         if not self._application:
@@ -288,14 +323,20 @@ class TelegramChannel(Channel):
 
         if not msg.is_final:
             await self._send_stream_update(chat_id, key, msg.text, reply_to=self._parse_message_id(msg.thread_ts))
+            state = self._stream_messages.get(key)
+            if state is not None:
+                binding = (msg.thread_id, msg.connection_id, msg.owner_user_id, msg.thread_ts, state["message_id"])
+                if state.get("thread_binding") != binding and await self._remember_reply_thread(msg, state["message_id"], stream_state=state):
+                    state["thread_binding"] = binding
             return
 
         state = self._stream_messages.pop(key, None)
         if state is not None:
+            await self._remember_reply_thread(msg, state["message_id"], stream_state=state)
             if self._can_send_rich(msg.text) and await self._edit_rich_message(chat_id, state["message_id"], msg.text):
                 self._last_bot_message[msg.chat_id] = state["message_id"]
                 return
-            await self._finalize_stream_message(chat_id, msg.chat_id, state, msg.text)
+            await self._finalize_stream_message(chat_id, msg.chat_id, state, msg.text, msg)
             return
 
         if self._can_send_rich(msg.text):
@@ -305,10 +346,51 @@ class TelegramChannel(Channel):
                 logger.warning("[Telegram] Rich Message send failed in chat=%s; falling back to plain text: %s", chat_id, exc)
                 message_id = None
             if message_id is not None:
+                await self._remember_reply_thread(msg, message_id)
                 return
 
         for chunk in self._split_message(msg.text):
-            await self._send_new_message(chat_id, msg.chat_id, chunk, _max_retries=_max_retries)
+            message_id = await self._send_new_message(chat_id, msg.chat_id, chunk, _max_retries=_max_retries)
+            await self._remember_reply_thread(msg, message_id)
+
+    async def _remember_reply_thread(self, msg: OutboundMessage, message_id: int | None, *, stream_state: dict[str, Any] | None = None) -> bool:
+        """Keep group replies on their source thread, without undoing a later /new."""
+        if not msg.thread_id or message_id is None or int(msg.chat_id) >= 0:
+            return True
+        store = self.config.get("channel_store")
+        if msg.connection_id:
+            # Bound conversations must never fall back to the shared legacy store.
+            if self._connection_repo is None or not msg.owner_user_id:
+                return False
+        elif store is None:
+            return False
+        topic_ids = {str(message_id)}
+        if msg.thread_ts:
+            topic_ids.add(msg.thread_ts)
+        try:
+            for topic_id in topic_ids:
+                if msg.connection_id:
+                    await self._connection_repo.claim_thread_id(
+                        connection_id=msg.connection_id,
+                        owner_user_id=msg.owner_user_id,
+                        provider=self.name,
+                        external_conversation_id=msg.chat_id,
+                        external_topic_id=topic_id,
+                        thread_id=msg.thread_id,
+                    )
+                else:
+                    await store.claim_thread_id(self.name, msg.chat_id, msg.thread_id, topic_id=topic_id)
+        except Exception:
+            # Delivery has already succeeded. Retry the binding on the next update,
+            # not the Telegram send, which could duplicate a visible reply.
+            if stream_state is not None and stream_state.get("thread_binding_error_logged"):
+                logger.debug("[Telegram] reply thread mapping retry failed in chat=%s", msg.chat_id)
+            else:
+                logger.exception("[Telegram] failed to remember reply thread mapping in chat=%s", msg.chat_id)
+                if stream_state is not None:
+                    stream_state["thread_binding_error_logged"] = True
+            return False
+        return True
 
     async def _send_stream_update(self, chat_id: int, key: str, text: str, reply_to: int | None = None) -> None:
         """Edit the in-flight streamed message with accumulated text.
@@ -335,6 +417,8 @@ class TelegramChannel(Channel):
         send_kwargs: dict[str, Any] = {"chat_id": chat_id, "text": display}
         if reply_to:
             send_kwargs["reply_to_message_id"] = reply_to
+            if chat_id > 0:
+                send_kwargs["allow_sending_without_reply"] = True
 
         if state is None:
             try:
@@ -372,7 +456,7 @@ class TelegramChannel(Channel):
         state["last_edit_at"] = _monotonic()
         state["last_text"] = display
 
-    async def _finalize_stream_message(self, chat_id: int, chat_key: str, state: dict[str, Any], text: str) -> None:
+    async def _finalize_stream_message(self, chat_id: int, chat_key: str, state: dict[str, Any], text: str, msg: OutboundMessage) -> None:
         """Apply the final text: edit the streamed message, splitting overflow into follow-ups."""
         bot = self._application.bot
         chunks = self._split_message(text or "")
@@ -386,10 +470,12 @@ class TelegramChannel(Channel):
         else:
             # Edit could not be applied (e.g. message deleted) — deliver the
             # first chunk as a fresh message with the standard retry policy.
-            await self._send_new_message(chat_id, chat_key, chunks[0])
+            message_id = await self._send_new_message(chat_id, chat_key, chunks[0])
+            await self._remember_reply_thread(msg, message_id, stream_state=state)
 
         for chunk in chunks[1:]:
-            await self._send_new_message(chat_id, chat_key, chunk)
+            message_id = await self._send_new_message(chat_id, chat_key, chunk)
+            await self._remember_reply_thread(msg, message_id, stream_state=state)
 
     async def _edit_final_chunk(self, bot, chat_id: int, message_id: int, text: str) -> bool:
         """Edit with one rate-limit retry. Returns False if the edit could not be applied."""
@@ -470,6 +556,10 @@ class TelegramChannel(Channel):
         reply_to = self._last_bot_message.get(chat_key)
         if reply_to:
             kwargs["reply_to_message_id"] = reply_to
+            # A deleted private-chat reply must not block delivery. Keep group
+            # replies strict: dropping their target could change forum routing.
+            if chat_id > 0:
+                kwargs["allow_sending_without_reply"] = True
 
         bot = self._application.bot
 
@@ -508,14 +598,19 @@ class TelegramChannel(Channel):
                 kwargs: dict[str, Any] = {"chat_id": chat_id, "photo": input_file}
                 if reply_to:
                     kwargs["reply_to_message_id"] = reply_to
+                    if chat_id > 0:
+                        kwargs["allow_sending_without_reply"] = True
                 sent = await bot.send_photo(**kwargs)
             else:
                 kwargs = {"chat_id": chat_id, "document": input_file}
                 if reply_to:
                     kwargs["reply_to_message_id"] = reply_to
+                    if chat_id > 0:
+                        kwargs["allow_sending_without_reply"] = True
                 sent = await bot.send_document(**kwargs)
 
             self._last_bot_message[msg.chat_id] = sent.message_id
+            await self._remember_reply_thread(msg, sent.message_id)
             logger.info("[Telegram] file sent: %s to chat=%s", attachment.filename, msg.chat_id)
             return True
         except Exception:
@@ -714,21 +809,46 @@ class TelegramChannel(Channel):
                 logger.warning("[Telegram] %d inbound file download task(s) did not cancel promptly", len(still_pending))
 
     async def _shutdown_telegram_resources(self) -> None:
-        """Cancel in-flight PTB bridge work and close the download Bot.
+        """Drain startup and PTB work, then close both Bots on their owner loop.
 
-        Runs on the Telegram loop (scheduled from ``stop()``) and must finish
-        before that loop is stopped, so the download Bot's HTTPX clients are
-        shut down on the loop that owns them.
+        The application may not have reached running or even initialized: PTB
+        Application.shutdown() then skips Bot.shutdown(), despite initialized
+        HTTP clients from an interrupted/failed getMe request.
         """
+        bootstrap = self._bootstrap_task
+        if bootstrap is not None and bootstrap is not asyncio.current_task():
+            if not bootstrap.done():
+                bootstrap.cancel()
+            await asyncio.gather(bootstrap, return_exceptions=True)
         await self._cancel_telegram_bridge_tasks()
         await self._shutdown_download_bot()
+        application = self._application
+        if application is not None:
+            application_cleanup_failed = False
+            try:
+                if application.updater.running:
+                    await application.updater.stop()
+                if application.running:
+                    await application.stop()
+                await application.shutdown()
+            except BaseException:
+                application_cleanup_failed = True
+                raise
+            finally:
+                # Idempotent after full shutdown, necessary after partial init.
+                try:
+                    await application.bot.shutdown()
+                except Exception:
+                    if not application_cleanup_failed:
+                        raise
+                    logger.warning("[Telegram] failed to shut down the application bot", exc_info=True)
 
     async def _shutdown_download_bot(self) -> None:
         """Close the download Bot's HTTPX clients on the Telegram loop.
 
         python-telegram-bot 22.7 exposes no ``Bot.session``; the HTTPX clients
-        are closed by ``Bot.shutdown()``, which is a no-op if the bot was never
-        initialized. Must run on the loop the bot was initialized on.
+        are closed by ``Bot.shutdown()``, which is a no-op if request resources
+        were never initialized or were already shut down. Run on their owner loop.
         """
         bot = self._download_bot
         if bot is None:
@@ -778,25 +898,11 @@ class TelegramChannel(Channel):
 
     @staticmethod
     def _file_size(value: Any) -> int | None:
-        if isinstance(value, bool):
-            return None
-        try:
-            size = int(value)
-        except (TypeError, ValueError):
-            return None
-        return size if size >= 0 else None
+        return coerce_file_size(value)
 
     @staticmethod
     def _safe_inbound_filename(value: Any, fallback: str) -> str:
-        if not isinstance(value, str):
-            return fallback
-        try:
-            candidate = normalize_filename(value.strip())
-        except (UnicodeError, ValueError):
-            return fallback
-        if is_upload_staging_file(candidate) or any(ord(char) < 32 for char in candidate):
-            return fallback
-        return candidate
+        return safe_inbound_filename(value, fallback)
 
     @classmethod
     def _extract_inbound_files(cls, message: Any) -> list[dict[str, Any]]:
@@ -907,11 +1013,11 @@ class TelegramChannel(Channel):
             return
         try:
             bot = self._application.bot
-            sent = await bot.send_message(
-                chat_id=int(chat_id),
-                text="Working on it...",
-                reply_to_message_id=reply_to_message_id,
-            )
+            numeric_chat_id = int(chat_id)
+            kwargs: dict[str, Any] = {"chat_id": numeric_chat_id, "text": "Working on it...", "reply_to_message_id": reply_to_message_id}
+            if numeric_chat_id > 0:
+                kwargs["allow_sending_without_reply"] = True
+            sent = await bot.send_message(**kwargs)
             self._register_stream_message(
                 self._stream_key(chat_id, str(reply_to_message_id)),
                 message_id=sent.message_id,
@@ -922,34 +1028,53 @@ class TelegramChannel(Channel):
         except Exception:
             logger.exception("[Telegram] failed to send running reply in chat=%s", chat_id)
 
+    async def _bootstrap_telegram(self, application: Any) -> None:
+        if self._running:
+            await application.initialize()
+        if self._running:
+            await application.start()
+        if self._running:
+            await application.updater.start_polling()
+
     def _run_polling(self) -> None:
         """Run telegram polling in a dedicated thread."""
         application = self._application
         if application is None:
             return
-        self._tg_loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self._tg_loop)
+        loop = asyncio.new_event_loop()
+        self._tg_loop = loop
+        asyncio.set_event_loop(loop)
         try:
             # Cannot use run_polling() because it calls add_signal_handler(),
             # which only works in the main thread.  Instead, manually
             # initialize the application and start the updater.
-            self._tg_loop.run_until_complete(application.initialize())
-            self._tg_loop.run_until_complete(application.start())
-            self._tg_loop.run_until_complete(application.updater.start_polling())
-            self._tg_loop.run_forever()
+            self._bootstrap_task = loop.create_task(self._bootstrap_telegram(application))
+            loop.run_until_complete(self._bootstrap_task)
+            if self._running:
+                loop.run_forever()
+        except asyncio.CancelledError:
+            # stop() cancelled and awaits bootstrap on this same loop.
+            pass
         except Exception:
             if self._running:
                 logger.exception("Telegram polling error")
         finally:
-            # Graceful shutdown
+            self._running = False
+            self._polling_cleanup_started = True
             try:
-                self._tg_loop.run_until_complete(self._cancel_telegram_bridge_tasks())
-                if application.updater.running:
-                    self._tg_loop.run_until_complete(application.updater.stop())
-                self._tg_loop.run_until_complete(application.stop())
-                self._tg_loop.run_until_complete(application.shutdown())
+                cleanup = self._request_telegram_cleanup(loop)
+                loop.run_until_complete(asyncio.wrap_future(cleanup, loop=loop))
             except Exception:
                 logger.exception("Error during Telegram shutdown")
+            finally:
+                try:
+                    loop.run_until_complete(loop.shutdown_asyncgens())
+                except Exception:
+                    logger.exception("Error shutting down Telegram async generators")
+                finally:
+                    self._bootstrap_task = None
+                    asyncio.set_event_loop(None)
+                    loop.close()
 
     def _check_user(self, user_id: int) -> bool:
         if self._allowed_users is None:
@@ -977,7 +1102,8 @@ class TelegramChannel(Channel):
 
         state = await self._connection_repo.consume_oauth_state(provider="telegram", state=state_token)
         if state is None:
-            await self._run_on_telegram_loop(update.message.reply_text("Telegram connection link is invalid or expired."))
+            text = await self._connect_reply_text("invalid_link")
+            await self._run_on_telegram_loop(update.message.reply_text(text))
             return True
 
         owner_user_id = state["owner_user_id"]
@@ -998,7 +1124,8 @@ class TelegramChannel(Channel):
             status="connected",
         )
         logger.info("[Telegram] bound chat=%s user=%s to DeerFlow user=%s connection=%s", chat_id, user_id, owner_user_id, connection["id"])
-        await self._run_on_telegram_loop(update.message.reply_text("Telegram connected to DeerFlow."))
+        text = await self._connect_reply_text("connected", owner_user_id=owner_user_id)
+        await self._run_on_telegram_loop(update.message.reply_text(text))
         return True
 
     async def _bind_connection_from_start_token(self, update, state_token: str) -> bool:

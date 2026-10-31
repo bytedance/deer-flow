@@ -75,7 +75,7 @@ Canonical acceptance criteria: `file:<path> exists`, `file:<path> non-empty`, `f
 | Field                       | Values                                                                                  |
 | --------------------------- | --------------------------------------------------------------------------------------- |
 | `subagent_status`           | `completed`, `failed`, `cancelled`, `timed_out`, `polling_timed_out`                   |
-| `subagent_stop_reason`      | `token_capped`, `turn_capped`, `loop_capped`                                            |
+| `subagent_stop_reason`      | `token_capped`, `turn_capped`, `loop_capped`, `model_length_capped`                     |
 | Acceptance leaf             | Booleans `checked` and `holds`; rendered as `holds` / `does not hold` / `UNVERIFIED`     |
 | Receipt verification        | `resolved`, `failed`, `unknown`, `no_citation_claims`                                   |
 | Delegation ledger status    | `in_progress` plus the five terminal statuses                                            |

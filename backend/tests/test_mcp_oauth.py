@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
 
-from deerflow.config.extensions_config import ExtensionsConfig
+from deerflow.config.extensions_config import ExtensionsConfig, McpOAuthConfig
 from deerflow.mcp.oauth import OAuthTokenManager, build_oauth_tool_interceptor, get_initial_oauth_headers
 
 
@@ -85,6 +87,99 @@ def test_oauth_token_manager_fetches_and_caches_token(monkeypatch):
     assert len(post_calls) == 1
     assert post_calls[0]["url"] == "https://auth.example.com/oauth/token"
     assert post_calls[0]["data"]["grant_type"] == "client_credentials"
+
+
+@pytest.fixture
+def oauth_now(monkeypatch):
+    now = datetime(2026, 1, 1, 12, 0, 0, 123456, tzinfo=UTC)
+
+    class _FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz):
+            return now
+
+    monkeypatch.setattr("deerflow.mcp.oauth.datetime", _FixedDatetime)
+    return now
+
+
+@pytest.mark.parametrize(
+    "expires_in",
+    [
+        float("inf"),
+        float("-inf"),
+        float("nan"),
+        1e30,
+        10**30,
+        pytest.param(86_400_000_000_000, id="rounded-timedelta-limit"),
+        pytest.param(10**12, id="datetime-overflow"),
+        "not-a-number",
+    ],
+)
+def test_unusable_expires_in_falls_back_to_the_default_lifetime(monkeypatch, oauth_now, expires_in):
+    """A malformed ``expires_in`` must not abort the token fetch.
+
+    Cover conversion, ``timedelta`` construction and ``datetime`` addition:
+    each can reject a lifetime that the token endpoint returns.
+    """
+    post_calls: list[dict[str, Any]] = []
+
+    def _client_factory(*args, **kwargs):
+        return _MockAsyncClient(
+            payload={
+                "access_token": "token-123",
+                "token_type": "Bearer",
+                "expires_in": expires_in,
+            },
+            post_calls=post_calls,
+            **kwargs,
+        )
+
+    monkeypatch.setattr("httpx.AsyncClient", _client_factory)
+
+    config = ExtensionsConfig.model_validate(
+        {
+            "mcpServers": {
+                "secure-http": {
+                    "enabled": True,
+                    "type": "http",
+                    "url": "https://api.example.com/mcp",
+                    "oauth": {
+                        "enabled": True,
+                        "token_url": "https://auth.example.com/oauth/token",
+                        "grant_type": "client_credentials",
+                        "client_id": "client-id",
+                        "client_secret": "client-secret",
+                    },
+                }
+            }
+        }
+    )
+    manager = OAuthTokenManager.from_extensions_config(config)
+
+    header = asyncio.run(manager.get_authorization_header("secure-http"))
+
+    assert header == "Bearer token-123"
+    token = manager._states["secure-http"].token
+    assert token is not None
+    assert token.expires_at == oauth_now + timedelta(hours=1)
+
+
+@pytest.mark.parametrize("offset", [-1, 0, 1], ids=["below-limit", "at-limit", "above-limit"])
+def test_expires_in_at_datetime_limit(monkeypatch, oauth_now, offset):
+    # Integer division preserves the last whole second that can be added,
+    # without the rounding in timedelta.total_seconds().
+    ceiling = (datetime.max.replace(tzinfo=UTC) - oauth_now) // timedelta(seconds=1)
+    expires_in = ceiling + offset
+    _token_endpoint_returns(monkeypatch, {"access_token": "token-123", "expires_in": expires_in})
+    manager = OAuthTokenManager.from_extensions_config(_oauth_server_config())
+
+    header = asyncio.run(manager.get_authorization_header("secure-http"))
+
+    assert header == "Bearer token-123"
+    token = manager._states["secure-http"].token
+    assert token is not None
+    expected_lifetime = 3600 if offset > 0 else expires_in
+    assert token.expires_at == oauth_now + timedelta(seconds=expected_lifetime)
 
 
 def test_oauth_extra_token_params_cannot_override_grant_type(monkeypatch):
@@ -285,7 +380,7 @@ def test_get_initial_oauth_headers_one_failing_server_does_not_drop_others(monke
 
     def _client_factory(**kwargs):
         # The first call is for the failing server, second for the healthy one,
-        # because OAuthTokenManager iterates _oauth_by_server in dict order
+        # because OAuthTokenManager iterates the configured servers in dict order
         # ('broken-http' < 'secure-http').
         if not hasattr(_client_factory, "_count"):
             _client_factory._count = 0  # type: ignore[attr-defined]
@@ -561,7 +656,7 @@ def test_get_authorization_header_cancelled_while_waiting_does_not_leak_lock(mon
     )
 
     manager = OAuthTokenManager.from_extensions_config(config)
-    lock = manager._locks["secure-http"]
+    lock = manager._states["secure-http"].lock
 
     async def scenario() -> None:
         # Simulate another in-flight caller already holding the per-server lock
@@ -613,6 +708,69 @@ def test_get_authorization_header_cancelled_while_waiting_does_not_leak_lock(mon
 
     # Exactly one real token fetch: the cancelled waiter must never reach
     # _fetch_token, so the third call is the only one that performs it.
+    assert len(post_calls) == 1
+
+
+@pytest.mark.parametrize("failure", ["cancel", "error"])
+def test_failed_refresh_owner_allows_cross_loop_waiters_to_retry(monkeypatch, failure):
+    """Pending callers on other loops elect one replacement after owner failure."""
+    owner_entered = threading.Event()
+    release_owner = threading.Event()
+    retry_entered = threading.Event()
+    release_retry = threading.Event()
+    waiters_ready = [threading.Event(), threading.Event()]
+    attempts = 0
+    attempts_guard = threading.Lock()
+    post_calls: list[dict[str, Any]] = []
+
+    class HeldClient(_MockAsyncClient):
+        async def post(self, url, data):
+            nonlocal attempts
+            with attempts_guard:
+                attempts += 1
+                attempt = attempts
+            if attempt == 1:
+                owner_entered.set()
+                assert await asyncio.to_thread(release_owner.wait, 5), "test did not release owner"
+                if failure == "cancel":
+                    asyncio.current_task().cancel()
+                    await asyncio.sleep(0)
+                raise RuntimeError("first refresh failed")
+            retry_entered.set()
+            assert await asyncio.to_thread(release_retry.wait, 5), "test did not release retry"
+            return await super().post(url, data)
+
+    monkeypatch.setattr("httpx.AsyncClient", lambda **kwargs: HeldClient(payload={"access_token": "recovered-token", "expires_in": 3600}, post_calls=post_calls, **kwargs))
+    manager = OAuthTokenManager({"secure-http": McpOAuthConfig(enabled=True, token_url="https://auth.example.com/token", client_id="client-id", client_secret="client-secret")})
+
+    async def call(ready=None):
+        request = asyncio.create_task(manager.get_authorization_header("secure-http"))
+        if ready is not None:
+            # Run after the request has suspended while the original owner is held.
+            asyncio.get_running_loop().call_soon(ready.set)
+        return await asyncio.wait_for(request, 5)
+
+    with ThreadPoolExecutor(max_workers=3) as callers:
+        owner = callers.submit(asyncio.run, call())
+        try:
+            assert owner_entered.wait(5), "owner did not start refresh"
+            waiters = [callers.submit(asyncio.run, call(ready)) for ready in waiters_ready]
+            for ready in waiters_ready:
+                assert ready.wait(5), "waiter did not suspend its authorization request"
+            assert attempts == 1
+            release_owner.set()
+            with pytest.raises(asyncio.CancelledError if failure == "cancel" else RuntimeError):
+                owner.result(timeout=5)
+            assert retry_entered.wait(5), "waiters did not retry refresh"
+            assert attempts == 2
+            release_retry.set()
+            assert [waiter.result(timeout=5) for waiter in waiters] == ["Bearer recovered-token", "Bearer recovered-token"]
+        finally:
+            release_owner.set()
+            release_retry.set()
+
+    assert asyncio.run(manager.get_authorization_header("secure-http")) == "Bearer recovered-token"
+    assert attempts == 2
     assert len(post_calls) == 1
 
 

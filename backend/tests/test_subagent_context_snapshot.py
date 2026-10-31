@@ -1,6 +1,7 @@
 """Dispatch snapshots preserve background without importing execution state."""
 
 import json
+import logging
 from copy import deepcopy
 
 import pytest
@@ -246,6 +247,45 @@ def test_snapshot_preserves_visible_text_blocks_without_private_block_fields(mes
     assert all(block["type"] == "text" for block in snapshot.to_message().content)
 
 
+@pytest.mark.parametrize("message_type", [HumanMessage, AIMessage, ToolMessage])
+@pytest.mark.parametrize("block_type", [[], {}, ["text"], {"type": "text"}])
+def test_snapshot_skips_blocks_with_unhashable_types_without_losing_history(message_type, block_type):
+    # `type: []` / `type: {}` are legal JSON from a provider; probing the type
+    # by equality skips the block instead of raising TypeError out of the
+    # dispatch snapshot the child subagent is built from.
+    content = [
+        {"type": block_type, "text": "MALFORMED BLOCK"},
+        {"type": "text", "text": "kept answer"},
+    ]
+    kwargs = {"tool_call_id": "parent-tool"} if message_type is ToolMessage else {}
+    snapshot = ParentContextSnapshot.from_state({"messages": [message_type(content=content, **kwargs)]})
+
+    assert snapshot is not None
+    text = message_content_to_text(snapshot.to_message().content)
+    assert "kept answer" in text
+    assert "MALFORMED BLOCK" not in text
+    assert "MALFORMED BLOCK" not in snapshot.content_json
+
+
+def test_snapshot_warns_about_non_string_types_but_keeps_deliberate_exclusions_quiet(caplog):
+    # A malformed block must not vanish without a trace, while the deliberate
+    # reasoning/signature/tool-use exclusions stay silent.
+    content = [
+        {"type": [], "text": "MALFORMED BLOCK"},
+        {"type": "reasoning", "reasoning": "deliberately excluded"},
+        {"type": "text", "text": "kept answer"},
+    ]
+    with caplog.at_level(logging.WARNING, logger="deerflow.subagents.context_snapshot"):
+        snapshot = ParentContextSnapshot.from_state({"messages": [HumanMessage(content=content)]})
+
+    warnings = [record for record in caplog.records if record.name == "deerflow.subagents.context_snapshot"]
+    assert len(warnings) == 1
+    assert "non-string type" in warnings[0].getMessage()
+    assert "[]" in warnings[0].getMessage()
+    assert "reasoning" not in caplog.text
+    assert "kept answer" in message_content_to_text(snapshot.to_message().content)
+
+
 @pytest.mark.parametrize("content, expected", [({"key": "value"}, ["key", "value"]), (["text", 42, None, True], ["text", "42", "None", "True"])])
 def test_snapshot_keeps_tool_content_normalized_by_message_constructor(content, expected):
     # ToolMessage coerces non-list payloads and non-dict list items to strings.
@@ -329,6 +369,51 @@ def test_hidden_tool_frames_do_not_complete_visible_calls(hidden_part, tool_name
     assert "UNFINISHED_CALL" not in snapshot.content_json
     assert "PRIVATE" not in snapshot.content_json
     assert ("TOOL_RESULT" in snapshot.content_json) is (hidden_part == "call")
+
+
+@pytest.mark.parametrize("result_count", [1, 2])
+@pytest.mark.parametrize("same_name", [False, True])
+def test_snapshot_omits_ambiguous_calls_without_losing_other_history(result_count, same_name):
+    messages = [
+        AIMessage(content="", tool_calls=[{"name": "bash", "args": {"input": "EARLIER_COMPLETED"}, "id": "reused"}]),
+        ToolMessage(content="Earlier result", tool_call_id="reused"),
+        AIMessage(
+            content="Keep this explanation",
+            tool_calls=[
+                {"name": "bash", "args": {"input": "AMBIGUOUS_FIRST"}, "id": "reused"},
+                {"name": "bash" if same_name else "task", "args": {"input": "AMBIGUOUS_SECOND"}, "id": "reused"},
+                {"name": "read_file", "args": {"path": "UNIQUE_COMPLETED"}, "id": "unique"},
+            ],
+        ),
+        *[ToolMessage(content=f"Observed result {index}", tool_call_id="reused") for index in range(result_count)],
+        ToolMessage(content="Unique result", tool_call_id="unique"),
+    ]
+    before = [message.model_dump() for message in messages]
+    snapshot = ParentContextSnapshot.from_state({"messages": messages})
+    assert "AMBIGUOUS" not in snapshot.content_json
+    assert "EARLIER_COMPLETED" in snapshot.content_json
+    assert "UNIQUE_COMPLETED" in snapshot.content_json
+    assert "Keep this explanation" in snapshot.content_json
+    assert "Observed result 0" in snapshot.content_json
+    assert [message.model_dump() for message in messages] == before
+
+
+def test_ambiguous_calls_do_not_reassign_results_to_an_earlier_pending_call():
+    messages = [
+        AIMessage(content="", tool_calls=[{"name": "task", "args": {"input": "EARLIER_PENDING"}, "id": "reused"}]),
+        AIMessage(
+            content="Current history",
+            tool_calls=[
+                {"name": "bash", "args": {"input": "AMBIGUOUS_FIRST"}, "id": "reused"},
+                {"name": "task", "args": {"input": "AMBIGUOUS_SECOND"}, "id": "reused"},
+            ],
+        ),
+        ToolMessage(content="Current result", tool_call_id="reused"),
+    ]
+    snapshot = ParentContextSnapshot.from_state({"messages": messages})
+    assert "EARLIER_PENDING" not in snapshot.content_json
+    assert "AMBIGUOUS" not in snapshot.content_json
+    assert "Current result" in snapshot.content_json
 
 
 @pytest.mark.parametrize("tool_name", ["task", "batch_task", "write_file", "bash", "custom_lookup"])

@@ -1,11 +1,13 @@
+import re
 from datetime import UTC, datetime, timedelta
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import event
 
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.mcp_scope import THREAD_INCARNATION_CONTEXT_KEY
-from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
+from deerflow.persistence.engine import close_engine, get_engine, get_session_factory, init_engine_from_config
 from deerflow.persistence.subagent_batches import SubagentBatchRepository
 
 _MISSING = object()
@@ -270,6 +272,85 @@ async def test_pause_resume_cancel_and_owner_scope(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_retry_item_keeps_paused_batch_paused_until_resume(tmp_path) -> None:
+    repo = await _repo(tmp_path)
+    await _create(repo, count=3, max_live=3, max_running=3, max_attempts=1)
+    now = datetime.now(UTC)
+    failed = (await repo.claim_items(now=now, lease_owner="worker-1", lease_seconds=60, limit=1))[0]
+    await repo.finalize_item(
+        failed["id"],
+        lease_owner="worker-1",
+        succeeded=False,
+        result=None,
+        result_preview=None,
+        result_truncated=False,
+        error="permanent",
+        stop_reason=None,
+        token_usage=None,
+        model_name="model-a",
+        completed_at=now,
+    )
+    paused = await repo.pause_batch("batch-1", user_id="user-1")
+    assert paused is not None and paused["status"] == "paused"
+    assert await repo.claim_items(now=now + timedelta(seconds=1), lease_owner="worker-2", lease_seconds=60, limit=10) == []
+
+    retried = await repo.retry_item("batch-1", failed["id"], user_id="user-1")
+
+    assert retried is not None
+    assert retried["status"] == "pending"
+    assert retried["attempt"] == 0
+    assert retried["error"] is None
+    batch = await repo.get_batch("batch-1", user_id="user-1")
+    assert batch is not None and batch["status"] == "paused"
+    assert batch["counts"]["pending"] == 1
+    assert batch["counts"]["queued"] == 2
+    assert await repo.claim_items(now=now + timedelta(seconds=2), lease_owner="worker-2", lease_seconds=60, limit=10) == []
+
+    await close_engine()
+    repo = await _repo(tmp_path)
+    batch = await repo.get_batch("batch-1", user_id="user-1")
+    assert batch is not None and batch["status"] == "paused"
+
+    resumed = await repo.resume_batch("batch-1", user_id="user-1")
+    assert resumed is not None and resumed["status"] == "queued"
+    claimed = await repo.claim_items(now=now + timedelta(seconds=3), lease_owner="worker-3", lease_seconds=60, limit=10)
+    assert len(claimed) == 3
+    assert failed["id"] in {item["id"] for item in claimed}
+
+
+@pytest.mark.asyncio
+async def test_retry_item_in_running_batch_keeps_batch_schedulable(tmp_path) -> None:
+    repo = await _repo(tmp_path)
+    await _create(repo, count=3, max_live=3, max_running=3, max_attempts=1)
+    now = datetime.now(UTC)
+    failed = (await repo.claim_items(now=now, lease_owner="worker-1", lease_seconds=60, limit=1))[0]
+    await repo.finalize_item(
+        failed["id"],
+        lease_owner="worker-1",
+        succeeded=False,
+        result=None,
+        result_preview=None,
+        result_truncated=False,
+        error="permanent",
+        stop_reason=None,
+        token_usage=None,
+        model_name="model-a",
+        completed_at=now,
+    )
+    batch = await repo.get_batch("batch-1", user_id="user-1")
+    assert batch is not None and batch["status"] == "running"
+
+    retried = await repo.retry_item("batch-1", failed["id"], user_id="user-1")
+
+    assert retried is not None and retried["status"] == "pending"
+    batch = await repo.get_batch("batch-1", user_id="user-1")
+    assert batch is not None and batch["status"] == "queued"
+    claimed = await repo.claim_items(now=now + timedelta(seconds=1), lease_owner="worker-2", lease_seconds=60, limit=10)
+    assert len(claimed) == 3
+    assert failed["id"] in {item["id"] for item in claimed}
+
+
+@pytest.mark.asyncio
 async def test_cancel_terminalizes_in_flight_items_and_fences_stale_completion(tmp_path) -> None:
     repo = await _repo(tmp_path)
     await _create(repo, count=1, max_live=1, max_running=1)
@@ -380,6 +461,32 @@ async def test_public_projections_omit_execution_context_and_full_results(tmp_pa
     assert "lease_owner" not in public_item
     export_item = (await repo.list_items("batch-1", user_id="user-1", include_result=True))[0]
     assert export_item["result"] == "full private result"
+
+
+@pytest.mark.asyncio
+async def test_item_list_selects_only_the_heavy_columns_it_returns(tmp_path) -> None:
+    # The workspace polls this list every 2 s. Selecting whole rows decoded
+    # every full report and evidence artifact only to return their previews.
+    repo = await _repo(tmp_path)
+    await _create(repo, count=1)
+    statements = []
+    sync_engine = get_engine().sync_engine
+    listener = lambda *args, **kwargs: statements.append(args[2])  # noqa: E731
+    event.listen(sync_engine, "before_cursor_execute", listener)
+    try:
+        public_items = await repo.list_items("batch-1", user_id="user-1")
+        full_items = await repo.list_items("batch-1", user_id="user-1", include_result=True, include_prompt=True)
+    finally:
+        event.remove(sync_engine, "before_cursor_execute", listener)
+
+    item_columns = [set(re.findall(r"subagent_batch_items\.(\w+)", statement)) for statement in statements if "FROM subagent_batch_items" in statement]
+    heavy_columns = {"prompt", "result", "result_artifact"}
+    assert len(item_columns) == 2
+    assert not heavy_columns & item_columns[0]
+    assert heavy_columns <= item_columns[1]
+    assert "result_preview" in public_items[0]
+    assert full_items[0]["prompt"] == "Process 0"
+    assert full_items[0]["result"] is None
 
 
 @pytest.mark.asyncio

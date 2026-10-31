@@ -1,8 +1,7 @@
-import { redirect } from "next/navigation";
 import { type ReactNode } from "react";
 
 import { GatewayOfflineFallback } from "@/components/workspace/gateway-offline-fallback";
-import { AuthProvider } from "@/core/auth/AuthProvider";
+import { AuthDisabledContext, AuthProvider } from "@/core/auth/AuthProvider";
 import { getServerSideUser } from "@/core/auth/server";
 import { assertNever } from "@/core/auth/types";
 import { I18nProvider } from "@/core/i18n/context";
@@ -22,9 +21,12 @@ export default async function AuthLayout({
 
   switch (result.tag) {
     case "authenticated":
-      redirect("/workspace");
+    // Signed-in sessions render the page instead of redirecting here. Layouts
+    // cannot read searchParams, so a redirect from this layout would always
+    // drop `next`, and the post-SSO /auth/callback?next=… arrives with the
+    // fresh session cookie. Each page sends a signed-in user on: login and
+    // the callback to the validated `next`, setup to the workspace.
     case "needs_setup":
-      // Allow access to setup page
       content = (
         <AuthProvider initialUser={result.user}>{children}</AuthProvider>
       );
@@ -32,6 +34,21 @@ export default async function AuthLayout({
     case "system_setup_required":
     case "unauthenticated":
       content = <AuthProvider initialUser={null}>{children}</AuthProvider>;
+      break;
+    case "account_disabled":
+      // Direct /login visits with a suspended session: the SSR verdict is
+      // the only place the reason is known (password login deliberately
+      // answers generically), so hand it to the page through context
+      // instead of discarding it. Layouts cannot read searchParams, so a
+      // param-guarded redirect is not available here either — and an
+      // unconditional redirect to the same login URL would loop.
+      content = (
+        <AuthProvider initialUser={null}>
+          <AuthDisabledContext.Provider value={true}>
+            {children}
+          </AuthDisabledContext.Provider>
+        </AuthProvider>
+      );
       break;
     case "gateway_unavailable":
       // Auth pages have no banner of their own, so render one here. The

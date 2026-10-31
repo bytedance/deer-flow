@@ -1,7 +1,7 @@
 """The Textual application — a terminal workbench over the embedded harness.
 
 The app keeps a single immutable :class:`ViewState` and re-renders it through the
-pure renderers. Agent runs execute on a worker *thread* (``DeerFlowClient.stream``
+pure renderers. Agent runs execute on a daemon thread (``DeerFlowClient.stream``
 is a synchronous generator); each yielded action is marshalled back onto the UI
 thread via ``call_from_thread`` and folded into the reducer.
 """
@@ -9,8 +9,10 @@ thread via ``call_from_thread`` and folded into the reducer.
 from __future__ import annotations
 
 import uuid
-from functools import partial
+from dataclasses import dataclass, field
+from threading import Event, Thread
 
+from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
@@ -26,6 +28,7 @@ from .render import render_header, render_status, render_transcript
 from .runtime import stream_actions
 from .theme import SYMBOLS, THEME
 from .view_state import (
+    AssistantError,
     ClearRows,
     RunEnded,
     RunStarted,
@@ -39,6 +42,24 @@ from .widgets.composer import ComposerInput
 
 _HELP_KEYS = "Keys:  Enter send · PgUp/PgDn scroll transcript · Ctrl+C interrupt or quit · Ctrl+L redraw · / commands · Esc close overlay"
 _HELP_TEXT = f"{format_command_help()}\n{_HELP_KEYS}"
+_QUIT_PENDING_TEXT = "Quitting once the previous run stops; its current step finishes first. Press Ctrl+C again to quit now."
+
+
+@dataclass(eq=False)
+class _Run:
+    """Delivery and cancellation state owned by one worker run."""
+
+    thread_id: str
+    cancelled: Event = field(default_factory=Event)
+    finished: bool = False
+    # Set by the worker thread itself: the synchronous agent stream cannot be
+    # stopped, so it keeps running after an interrupt until its next event.
+    started: Event = field(default_factory=Event)
+    stopped: Event = field(default_factory=Event)
+
+    def worker_running(self) -> bool:
+        """Whether this run's worker may still write to its thread."""
+        return self.started.is_set() and not self.stopped.is_set()
 
 
 _TRANSPARENT_CSS = """
@@ -56,7 +77,13 @@ SelectScreen OptionList {
 
 
 class SelectScreen(ModalScreen):
-    """A centered modal that returns the id of the chosen option (or None)."""
+    """A centered modal that returns the id of the chosen option (or None).
+
+    Labels are shown as written. Textual parses a plain ``str`` as content
+    markup, so a thread title like ``Fix [/bold] in parser`` would raise
+    ``MarkupError`` and ``[a]`` would vanish; wrapping in ``Text`` keeps them
+    literal.
+    """
 
     BINDINGS = [Binding("escape", "cancel", "Close")]
 
@@ -67,8 +94,8 @@ class SelectScreen(ModalScreen):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="dialog"):
-            yield Label(self._title, id="dialog-title")
-            yield OptionList(*[Option(label, id=oid) for oid, label in self._options], id="dialog-list")
+            yield Label(Text(self._title), id="dialog-title")
+            yield OptionList(*[Option(Text(label), id=oid) for oid, label in self._options], id="dialog-list")
 
     def on_mount(self) -> None:
         self.query_one(OptionList).focus()
@@ -190,12 +217,15 @@ class DeerFlowTUI(App):
         self._skills = 0
         self._spinner_idx = 0
         self._streaming = False
-        self._cancelled = False
+        self._run: _Run | None = None
+        self._interrupted_runs: list[_Run] = []
+        self._quit_pending = False
         self._skills_meta: list[dict] = []
         self._model_override: str | None = None
         self._palette_open = False
         self._palette_items: list = []
         self._palette_index = 0
+        self._restored_draft: str | None = None
         self._history = InputHistory()
         self._transcript_dirty = False
         self._transcript_scroll_pending = False
@@ -221,8 +251,8 @@ class DeerFlowTUI(App):
         self.set_interval(0.1, self._tick_spinner)
         self.set_interval(0.06, self._flush_transcript)  # coalesce streaming re-renders
         self.query_one("#composer", ComposerInput).focus()
-        if self.plan and getattr(self.plan, "message", None):
-            self._send_to_agent(self.plan.message)
+        if self.plan and getattr(self.plan, "message", None) and not self._send_to_agent(self.plan.message):
+            self._restore_draft(self.plan.message)
 
     # ----- session info -------------------------------------------------- #
 
@@ -256,14 +286,29 @@ class DeerFlowTUI(App):
         if not stripped:
             return
         self._history.add(text)
-        self._handle_submit(text)
+        if not self._handle_submit(text):
+            self._restore_draft(text)
+
+    def _restore_draft(self, text: str) -> None:
+        # A message that did not start is still the user's draft: put it back so
+        # Enter resends it, instead of leaving it only in input history. A bare
+        # "/skill" would reopen the palette, where Enter fills instead of sends,
+        # so the palette stays closed until the draft is edited.
+        self._restored_draft = text
+        composer = self.query_one("#composer", ComposerInput)
+        composer.value = text
+        composer.cursor_position = len(text)
 
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
         if not isinstance(event.text_area, ComposerInput):
             return
         value = event.text_area.value
         event.text_area.set_class("\n" in value, "multiline")
-        if value.startswith("/") and " " not in value and "\n" not in value:
+        if value == self._restored_draft:
+            self._close_palette()
+            return
+        self._restored_draft = None
+        if value.startswith("/") and not any(char.isspace() for char in value):
             from .command_registry import build_registry, filter_commands
 
             items = filter_commands(build_registry(self._skills_meta), value[1:])
@@ -403,19 +448,20 @@ class DeerFlowTUI(App):
         composer.cursor_position = len(composer.value)
         self._close_palette()
 
-    def _handle_submit(self, text: str) -> None:
+    def _handle_submit(self, text: str) -> bool:
+        """Route a submission; return False when a message for the agent did not start."""
         from .command_registry import resolve
 
         res = resolve(text, skills=self._skill_names)
         if res.kind == "builtin":
             self._handle_builtin(res.name, res.args)
-            return
+            return True
         if res.kind == "unknown":
             self._dispatch(SystemMessage(f"Unknown command /{res.name}. Try /help.", tone="error"))
-            return
+            return True
         # plain message or skill activation (/skill task) both go to the agent,
         # which applies skill-activation semantics on the raw text.
-        self._send_to_agent(text)
+        return self._send_to_agent(text)
 
     def _dispatch_still_working(self) -> None:
         self._dispatch(SystemMessage("Still working — wait for the current run to finish.", tone="info"))
@@ -429,7 +475,7 @@ class DeerFlowTUI(App):
             # post-run persistence, e.g. thread title) is quietly abandoned.
             if self._streaming:
                 self._interrupt_run()
-            self.exit()
+            self._request_quit()
         elif name == "help":
             self._dispatch(SystemMessage(_HELP_TEXT))
         elif name == "new":
@@ -638,22 +684,63 @@ class DeerFlowTUI(App):
 
     # ----- agent run ----------------------------------------------------- #
 
-    def _send_to_agent(self, text: str) -> None:
+    def _send_to_agent(self, text: str) -> bool:
+        """Start a run for ``text``; return False when it was refused or failed to start."""
         if self._streaming:
             self._dispatch_still_working()
-            return
+            return False
+        if self._quit_pending:
+            self._dispatch(SystemMessage(_QUIT_PENDING_TEXT, tone="info"))
+            return False
+        # An interrupted worker cannot be killed: it stops at its next stream
+        # event, so a long tool call keeps running and then checkpoints. A new
+        # run on the same thread would race it, and whichever checkpoint lands
+        # last becomes the thread's state, dropping the other turn.
+        self._interrupted_runs = [run for run in self._interrupted_runs if run.worker_running()]
+        if any(run.thread_id == self._conv_thread_id for run in self._interrupted_runs):
+            self._dispatch(SystemMessage("The interrupted run is still stopping on this thread. Send again once it finishes, or use /new or /resume to continue elsewhere.", tone="info"))
+            return False
         if self._conv_thread_id is None:
             self._conv_thread_id = str(uuid.uuid4())
-        self._cancelled = False
+        run = _Run(self._conv_thread_id)
+        self._run = run
+        self._streaming = True
         self._dispatch(UserSubmitted(text))
-        self.run_worker(
-            partial(self._stream_worker, text, self._conv_thread_id),
-            thread=True,
-            exclusive=True,
-            group="agent",
-        )
+        try:
+            self._start_run_thread(text, run)
+        except Exception:  # noqa: BLE001 - worker creation must release the busy reservation
+            run.cancelled.set()
+            self._run = None
+            self._streaming = False
+            self._dispatch(SystemMessage("Could not start the run. Please try again.", tone="error"))
+            return False
+        return True
 
-    def _stream_worker(self, text: str, thread_id: str) -> None:
+    def _start_run_thread(self, text: str, run: _Run) -> None:
+        # Not a Textual thread worker: those run on asyncio's default executor,
+        # which App.run() and interpreter exit both join, so quitting would hang
+        # until an interrupted step ended. Quit waits for running workers itself.
+        Thread(target=self._stream_worker, args=(text, run), name="deerflow-tui-run", daemon=True).start()
+
+    def _stream_worker(self, text: str, run: _Run) -> None:
+        # Mark the start before checking cancellation: an interrupt either
+        # stops this worker here or sees it started and waits for it.
+        run.started.set()
+        try:
+            self._stream_run(text, run)
+        except Exception as exc:  # noqa: BLE001 - no Textual worker reports a failure of this thread
+            try:
+                if self.call_from_thread(self._on_stream_action, run, AssistantError(str(exc) or exc.__class__.__name__)):
+                    self.call_from_thread(self._on_stream_action, run, RunEnded())
+            except Exception:  # noqa: BLE001 - the app may already have exited
+                pass
+        finally:
+            run.stopped.set()
+
+    def _stream_run(self, text: str, run: _Run) -> None:
+        if run.cancelled.is_set():
+            return
+        thread_id = run.thread_id
         kwargs: dict = {}
         if self._model_override:
             kwargs["model_name"] = self._model_override
@@ -667,23 +754,27 @@ class DeerFlowTUI(App):
 
         latest_title: str | None = None
         for action in stream_actions(self.session.client, text, thread_id=thread_id, **kwargs):
-            if self._cancelled:
+            if run.cancelled.is_set():
+                break
+            if not self.call_from_thread(self._on_stream_action, run, action):
                 break
             if isinstance(action, ThreadTitle):
                 latest_title = action.title
-            self.call_from_thread(self._on_stream_action, thread_id, action)
 
         # Only persist a title for a run that completed normally — an interrupted
         # run may only have emitted the title middleware's first, truncated guess.
-        if writer is not None and latest_title and not self._cancelled:
+        if writer is not None and latest_title and run.finished and not run.cancelled.is_set():
             writer.set_title(thread_id, latest_title)
 
-    def _on_stream_action(self, thread_id: str, action) -> None:
-        # Interrupt/switch may happen after the worker's cancellation check.
-        # Validate the destination when Textual delivers the action to the UI.
-        if thread_id != self._conv_thread_id:
-            return
+    def _on_stream_action(self, run: _Run, action) -> bool:
+        # Cancellation and a new send can occur after the worker's check,
+        # including when both runs belong to the same conversation.
+        if self._run is not run or run.thread_id != self._conv_thread_id or run.cancelled.is_set() or run.finished:
+            return False
+        if isinstance(action, RunEnded):
+            run.finished = True
         self._on_action(action)
+        return True
 
     def _on_action(self, action) -> None:
         self.state = reduce(self.state, action)
@@ -711,7 +802,7 @@ class DeerFlowTUI(App):
         if self._streaming:
             self._interrupt_run()
         else:
-            self.exit()
+            self._request_quit()
 
     def action_escape(self) -> None:
         if self._palette_open:
@@ -720,11 +811,31 @@ class DeerFlowTUI(App):
             self._interrupt_run()
 
     def _interrupt_run(self) -> None:
-        self._cancelled = True
-        self.workers.cancel_group(self, "agent")
+        if self._run is not None:
+            self._run.cancelled.set()
+            self._interrupted_runs.append(self._run)
         self._streaming = False
         self.state = reduce(self.state, RunEnded())
         self._dispatch(SystemMessage("Interrupted.", tone="info"))
+
+    def _running_workers(self) -> list[_Run]:
+        runs = [*self._interrupted_runs, *([self._run] if self._run is not None else [])]
+        return [run for run in runs if run.worker_running()]
+
+    def _request_quit(self) -> None:
+        # An interrupted worker finishes its current step (and checkpoints it);
+        # a completed one may still be writing its title. Exit once they return,
+        # unless a second quit request asks to leave now and drop that work.
+        if self._quit_pending or not self._running_workers():
+            self.exit()
+            return
+        self._quit_pending = True
+        self._dispatch(SystemMessage(_QUIT_PENDING_TEXT, tone="info"))
+        self.set_interval(0.1, self._exit_once_workers_stop)
+
+    def _exit_once_workers_stop(self) -> None:
+        if not self._running_workers():
+            self.exit()
 
     def action_redraw(self) -> None:
         self.refresh(layout=True)

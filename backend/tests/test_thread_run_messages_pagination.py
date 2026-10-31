@@ -164,6 +164,7 @@ def test_after_seq_forwarded_to_event_store():
         limit=51,  # default limit(50) + 1
         before_seq=None,
         after_seq=5,
+        user_id=None,
     )
 
 
@@ -181,6 +182,7 @@ def test_before_seq_forwarded_to_event_store():
         limit=51,
         before_seq=10,
         after_seq=None,
+        user_id=None,
     )
 
 
@@ -198,6 +200,7 @@ def test_custom_limit_forwarded_to_event_store():
         limit=11,  # 10 + 1
         before_seq=None,
         after_seq=None,
+        user_id=None,
     )
 
 
@@ -303,6 +306,41 @@ def test_list_run_messages_injects_turn_duration_only_on_last_ai():
     assert "turn_duration" not in data[0]["content"].get("additional_kwargs", {})
     assert "turn_duration" not in data[1]["content"].get("additional_kwargs", {})
     assert data[2]["content"]["additional_kwargs"]["turn_duration"] == 5
+
+
+def test_list_run_messages_tolerates_malformed_metadata_and_logs(caplog):
+    """Event-store metadata is untrusted and must not break the messages endpoint."""
+    from deerflow.runtime import RunRecord
+
+    mock_run = RunRecord(
+        run_id="run-1",
+        thread_id="thread-1",
+        assistant_id=None,
+        status="success",
+        on_disconnect="cancel",
+        created_at="2026-06-20T10:00:00Z",
+        updated_at="2026-06-20T10:00:05Z",
+    )
+    rows = [
+        {
+            "seq": 7,
+            "run_id": "run-1",
+            "content": {"type": "ai", "text": "Response"},
+            "metadata": ["legacy metadata"],
+        }
+    ]
+    event_store = _make_event_store(rows)
+    run_manager = AsyncMock()
+    run_manager.get.return_value = mock_run
+    app = _make_app(event_store=event_store, run_manager=run_manager)
+
+    with caplog.at_level("WARNING", logger="app.gateway.routers.thread_runs"):
+        with TestClient(app) as client:
+            response = client.get("/api/threads/thread-1/runs/run-1/messages")
+
+    assert response.status_code == 200
+    assert response.json()["data"][0]["content"]["additional_kwargs"]["turn_duration"] == 5
+    assert any("thread thread-1" in record.message and "row seq 7" in record.message and "list" in record.message for record in caplog.records)
 
 
 def test_list_run_messages_turn_duration_skips_middleware_tail():

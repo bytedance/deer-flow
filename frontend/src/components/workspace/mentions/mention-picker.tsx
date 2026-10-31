@@ -104,6 +104,7 @@ export function MentionPicker({
 }) {
   const { t } = useI18n();
   const labels = t.inputBox;
+  const untitled = t.pages.untitled;
   const documents = useInfiniteProjectDocuments(projectId ?? "", {
     enabled: !!projectId,
   });
@@ -156,12 +157,12 @@ export function MentionPicker({
         );
         result.push({
           id: `conversation:${thread.thread_id}`,
-          label: titleOfThread(thread),
+          label: titleOfThread(thread, untitled),
           selection: {
             kind: "conversation",
             reference: {
               threadId: thread.thread_id,
-              title: titleOfThread(thread),
+              title: titleOfThread(thread, untitled),
               agentName: agentNameOfThread(thread),
             },
           },
@@ -207,6 +208,7 @@ export function MentionPicker({
     references,
     filter,
     labels,
+    untitled,
   ]);
   const available = options.filter((option) => !option.disabled);
   const active =

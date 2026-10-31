@@ -11,6 +11,7 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
+from deerflow.skills.diagnostics import SkillLoadDiagnostic
 from deerflow.skills.types import SKILL_MD_FILE, Skill, SkillCategory  # noqa: F401
 from deerflow.utils.host_paths import windows_incompatible_segment
 
@@ -69,6 +70,10 @@ class SkillStorage(ABC):
     def __init__(self, container_path: str = DEFAULT_SKILLS_CONTAINER_PATH) -> None:
         self._container_root = container_path
 
+    def load_custom_skill_diagnostics(self) -> list[SkillLoadDiagnostic]:
+        """No diagnostics unless storage explicitly establishes caller ownership."""
+        return []
+
     # ------------------------------------------------------------------
     # Static protocol helpers (not storage-specific)
     # ------------------------------------------------------------------
@@ -111,7 +116,10 @@ class SkillStorage(ABC):
         with tempfile.TemporaryDirectory() as tmp_dir:
             temp_skill_dir = Path(tmp_dir) / SkillStorage.validate_skill_name(name)
             temp_skill_dir.mkdir(parents=True, exist_ok=True)
-            (temp_skill_dir / SKILL_MD_FILE).write_text(content, encoding="utf-8")
+            # The validator must see the bytes the caller submitted: on Windows
+            # a default text write stores CRLF, so the scan would judge text the
+            # skill file never holds.
+            (temp_skill_dir / SKILL_MD_FILE).write_text(content, encoding="utf-8", newline="")
             is_valid, message, parsed_name = _validate_skill_frontmatter(temp_skill_dir)
             if not is_valid:
                 raise ValueError(message)

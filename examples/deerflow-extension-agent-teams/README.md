@@ -80,6 +80,109 @@ same database; it cannot dispatch through its actions or middleware.
 A new authenticated native mention can also reconnect its team. Existing queued
 jobs then continue under that caller's current delegated capability.
 
+## Maintain team public state
+
+Members can maintain stage objectives, plans, findings, open questions and
+delivery requirements independently of recent messages. Active entries are
+included in `read_team_context` and every newly prepared task or result receipt.
+The original team goal remains unchanged. The team page displays current and
+archived entries with their kind, revision, latest author and source conversation;
+it updates without clearing task drafts.
+
+Three member-only tools manage this state:
+
+- `publish_team_state` takes `team_id`, `request_id`, `kind`, `title` and `content`.
+  Kinds are `objective`, `plan`, `finding`, `question`, and `requirement`. A stable
+  publication ID deduplicates retries from the same member conversation. Reusing
+  it with different original content is rejected; retrying after an update returns
+  the current entry without undoing the update.
+- `read_team_state` takes `team_id`, with optional `entry_id`, `kind`, literal
+  case-insensitive `query` and boolean `include_archived`. It returns all matching
+  current entries and the team-state revision; no paging is needed for this
+  bounded collection. Reads require no run-control capability or reconnect.
+- `update_team_state` takes `team_id`, `entry_id`, `expected_revision`, `title`,
+  `content` and `status` (`active` or `archived`). Any current member may update
+  an entry. Updates compare the entry revision inside the SQLite transaction.
+  A conflict returns `updated=false`, `conflict=true` and the current entry;
+  the caller must reconcile it before trying again. An identical retry of the
+  latest successful update returns success without incrementing the revision.
+  Older retries after another edit return a conflict. Entry kind and creator
+  are immutable; latest author, time and source are stamped by the service.
+
+For example, publish:
+
+```json
+{"team_id":"...","request_id":"cost-plan","kind":"plan","title":"Cost review","content":"Research gathers quotes; Review checks operating costs."}
+```
+
+Then use the returned `entry.id` and `entry.revision` to update:
+
+```json
+{"team_id":"...","entry_id":"...","expected_revision":1,"title":"Cost review","content":"Include annual operating costs.","status":"active"}
+```
+
+State retains the latest version of at most 20 entries, including archived
+entries, with a combined 16,000-byte UTF-8 JSON projection budget. Titles accept
+80 characters/160 UTF-8 bytes and content 1,000 characters/2,000 bytes. Shorten or
+reuse existing entries when approaching these bounds. Archiving removes an entry
+from automatic context but keeps it queryable; it is not deletion and does not
+free its storage slot. Entry revisions detect concurrent replacement; this is
+not an edit-history archive or an automatic summarizer/verification service.
+Writes also enforce the complete 24,000-byte shared-context budget; unusually
+large goals or rosters can leave less than 16,000 bytes for active state.
+
+Entries are member-authored task data with creator and latest-editor attribution.
+The source identifies the editor's member conversation and, when available, its
+current admitted team task. It does not attest that a finding was verified.
+No member can supply another author or a host capability in a publication.
+State persists across restart and shared-history rotation. Legacy teams start
+with empty state without a database migration. Pending jobs keep their frozen
+input for idempotent retries; they do not silently acquire later state edits.
+Members can explicitly query current state during a run.
+
+## Find earlier team evidence
+
+Members have three read-only tools in addition to the short `read_team_context`:
+
+- `read_team_history`: page through retained shared messages, newest first.
+  Optional `member_id`, `job_id` and literal case-insensitive `query` filters
+  apply before pagination. The shared record retains at most 100 messages.
+- `search_team_results`: find finished requests by the same filters, searching
+  both task text and the stored answer. Results follow newest-first request
+  creation order and include completed, failed and cancelled requests; result
+  receipts are excluded to avoid listing a delivery as another member task.
+- `read_team_result`: read one request or receipt by `job_id`. It returns member,
+  requester, status, parent task, timestamps, and `conversation` thread/run IDs,
+  with a short request excerpt and the retained answer. Source IDs are references;
+  the host's ordinary conversation permissions remain authoritative.
+
+For example, a reviewer can search `{"team_id":"...","query":"release evidence"}`
+with `search_team_results`, then pass a returned `job_id` to `read_team_result`.
+The result remains available after leaving the recent eight-message context or
+the shared record, provided its bounded answer was saved in the task ledger.
+Reads work after service restart without reconnecting or starting Agent runs.
+Only the owning user's current member conversations may call these tools.
+
+Pages default to eight records and accept `limit` from 1 to 20. Follow
+`next_cursor` with the same tool and filters; page size may change. Cursors anchor
+to record identity, so newer arrivals do not shift an existing page. Pages are
+live, not immutable snapshots: newly completed older requests may appear on later
+result pages. If an anchor leaves retained history, `cursor_expired=true` returns
+an empty page; restart the query explicitly. Changed filters reject the cursor.
+
+Each response is limited to 24,000 UTF-8 JSON bytes, including metadata and
+escaping, so a page may contain fewer than `limit` records. Search summaries have
+500-byte request/result excerpts; history text and individual answers have a
+6,000-byte limit. `truncated=true` marks shortened text. New answers also preserve
+whether the original collected answer was truncated; legacy answers report
+`result.truncated=null` when that provenance is unknown. `result.available=false`
+distinguishes unfinished work, cancellation without an answer, and a legacy
+answer no longer retained. Inspect the source conversation for further evidence.
+Cancelled requests have no available answer at either cancellation timing;
+their cancellation notices remain in shared history.
+These tools expose retained task data, not hidden reasoning, execution inputs,
+approval responses, attachment bytes or an unbounded transcript archive.
+
 Deleting a finished team removes its plugin records, not its Agent conversations.
 Cancel/finish all queued, running and interrupted jobs first. Each user has their
 own teams. Sharing a host conversation does **not** share its team's private data.
@@ -90,15 +193,34 @@ own teams. Sharing a host conversation does **not** share its team's private dat
   or raw model invocation. Capabilities are process-local, never stored in SQLite.
   Gateway rechecks the user, permission ceiling, current permissions and thread
   access on every call. PAT/internal callers without this capability cannot run teams.
-- Different member conversations can run concurrently; admissions are bounded to
-  eight active plugin jobs shared by all owners in this process, without per-owner
-  quotas or fair scheduling. A busy owner can keep other owners' jobs queued.
-  The tick loop holds a shared lock while checking/admitting jobs, with a ten-second
-  timeout per job advancement; slow host calls delay create, send, cancel, resume,
-  delete and reconnect for all teams until the pass releases the lock. Per-owner
-  fairness and finer-grained locking are outside this example's current scope.
-  Each conversation is serialized, including result
-  receipts. A busy host conversation stays queued without cancelling its run.
+- Admissions are bounded to eight active plugin jobs across this database.
+  New requests and pending answers rotate by owner, one admission attempt per
+  owner per round. The unfinished round carries over between passes, including
+  when a served owner's queue becomes empty. Unavailable queues drop out and new
+  owners join the tail. Spare capacity can be used by any queued owner; existing
+  runs are not preempted when another owner joins.
+- Each team has its own execution/control lock and background worker. Slow host
+  calls in one team do not hold another team's create, send, cancel, resume,
+  delete or reconnect operations, nor stop its background polling. Operations
+  within the same team remain serialized, with a ten-second timeout per job
+  advancement. Shutdown cancels and drains all workers before releasing the
+  database service lock.
+- Each conversation is serialized, including result receipts targeting a source
+  shared across teams. The first unfinished job retains the conversation until
+  it finishes or is cancelled. A busy host conversation stays queued without
+  cancelling its run. Unadmitted conversation waits release their temporary
+  reservation. An admitted job in `waiting_input` also releases its slot even
+  though its original input remains frozen; it still retains the conversation's
+  queue head. Pending answers wait for capacity. Other unfinished frozen jobs,
+  including unknown admission outcomes and resumes already attempted, keep their
+  slots while disconnected and after service restart. Reconnect the owning team
+  to reconcile them. Cancelling an unstarted answer does not admit it.
+- Each planning pass uses one indexed batch query for teams with unfinished jobs.
+  Completed history is not decoded. The plugin database adds a pending-job flag
+  and index, reads legacy rows completely before transactionally backfilling
+  them at initialization, and updates the flag with each team mutation. The
+  projection includes waiting-input jobs for conversation ordering even though
+  those jobs do not occupy active slots.
 - Each owner can have 20 teams. A team accepts at most 100 requests, with separate
   space for up to 100 result receipts (200 total job entries); a handoff chain
   accepts at most 12 requests. Start a new user request for another chain, or a
@@ -107,12 +229,17 @@ own teams. Sharing a host conversation does **not** share its team's private dat
 - Team names accept up to 80 characters / 160 UTF-8 bytes; goals accept up to
   2,000 characters / 4,000 UTF-8 bytes. Tasks and clarification answers accept
   up to 4,000 characters / 8,000 UTF-8 bytes. The UI validates both bounds before
-  submission and preserves oversized text for editing. Native mention labels
+  submission and preserves oversized text for editing. String answers count their
+  raw UTF-8 bytes, including the 8,000-byte ceiling; JSON quotes and escapes do not
+  reduce that allowance. Structured graph-interrupt responses retain an 8,000-byte
+  UTF-8 JSON limit. Responses with unpaired Unicode surrogates are rejected through
+  the normal response validation. Native mention labels
   fall back to the member name when the combined team/member label exceeds the
   host's 120 UTF-16-unit limit; selection still routes by team/member IDs.
-  Shared context contains
-  at most eight recent messages within a 24 KiB JSON budget, plus the goal and
-  roster. Final answers are capped at 6,000 UTF-8 bytes with a truncation notice.
+  Shared context contains the goal, roster, active public state and at most eight
+  recent messages, with a combined 24,000-byte UTF-8 JSON budget. Older recent
+  messages are omitted first to preserve public state. Final answers are capped
+  at 6,000 UTF-8 bytes with a truncation notice.
   Team storage retains the most recent 100 shared messages. Each new job also
   keeps its bounded result independently, so context rotation does not erase its
   activity card. Older installations fall back to retained messages; an unavailable
@@ -146,10 +273,28 @@ real ToolNode dispatch, mention middleware in the Lead middleware pipeline,
 host-compatible mention labels at the UTF-16 boundary with stable routing IDs,
 serialization, interrupts, cancellation, restart/reconnect (including incomplete
 creation), request capacity independent of receipts, ambiguous admission, and
-lifecycle locking. Host-run transport is controlled for deterministic tests.
+lifecycle locking. Event-gated scheduling regressions also cover cross-team control
+isolation, continued background cancellation, owner rotation with single-slot
+release and mixed backlogs, exhausted/cancelled queues and new owners, overlapping
+ticks, pending answers, shared-source receipts, worker
+shutdown and durable slots across restart. Storage regressions cover indexed batch
+reads, terminal-history exclusion, complete legacy reads before backfill, rollback
+and projection updates when queuing, cancelling, finishing or creating receipts.
+History tests cover filtered cursor pagination under new arrivals, expired anchors,
+output byte budgets with escaping and Unicode, old answers after record rotation
+and restart, legacy unavailable/truncation states, owner/member isolation, and
+real ToolNode retrieval followed by another peer handoff.
+Public-state tests cover member-only publication/queries/updates, concurrent
+revision conflicts, replay-safe writes, source attribution, archival, legacy reads,
+restart/history rotation, rollback at count/escaped-JSON limits, bounded combined
+context and actual tool dispatch. Browser checks also exercise live state updates,
+editor attribution, stale revisions and plain-text rendering of untrusted content.
+Host-run transport is controlled for deterministic tests.
 Clarification tests execute the host's real tool and middleware in an Agent graph,
 including repeated questions, peer/mention/result-receipt paths, lost response
-acknowledgements and restart. Queued-request regressions pin handoff attribution
+acknowledgements and restart. Response regressions cover the 7,999/8,000/8,001-byte
+boundaries for both input paths, structured JSON, escaping and malformed Unicode.
+Queued-request regressions pin handoff attribution
 and the chain limit while the first request is running or awaiting admission acknowledgement.
 
 For a browser check, install the repo's frontend dependencies, then start the
