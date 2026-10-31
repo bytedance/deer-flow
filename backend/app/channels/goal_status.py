@@ -16,6 +16,7 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping
 
+from app.channels.reply_locale import supported_locale
 from app.scheduler.notification_text import goal_reason_text
 from deerflow.persistence.scheduled_task_runs.finalization import CHECK_FAILURE_CODES
 from deerflow.runtime.goal import is_active_goal
@@ -65,6 +66,7 @@ _WAITING_KEYS = {"needs_user_input": "waiting_for_you", "external_wait": "waitin
 
 def goal_reply_text(key: str, locale: str) -> str:
     """A fixed ``/goal`` reply (``none``, ``cleared``, ``*_failed``) in ``locale``."""
+    locale = supported_locale(locale)
     return _TEXT[locale][key]
 
 
@@ -102,6 +104,7 @@ def goal_status_text(goal: object, outcome: object, *, running: bool, locale: st
 
     ``running`` says whether the thread has a run pending or in progress.
     """
+    locale = supported_locale(locale)
     text = _TEXT[locale]
     if is_active_goal_state(goal):
         lines = [text["goal"].format(objective=goal["objective"])]
