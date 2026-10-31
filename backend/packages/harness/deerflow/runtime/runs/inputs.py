@@ -23,6 +23,10 @@ class InputConflict(ValueError):
     """The target Run cannot accept or apply this input."""
 
 
+class InputCancelled(InputConflict):
+    """The atomic dispatch claim found an explicitly cancelled input."""
+
+
 def empty_input_state() -> dict[str, Any]:
     return {"closed": False, "items": []}
 
@@ -125,8 +129,10 @@ class RunInputs:
             if row.get("status") in ("pending", "running"):
                 raise InputConflict("The current Run has not finished")
             item = next((x for x in state["items"] if x["id"] == input_id), None)
-            if item is None or item["status"] == "cancelled":
+            if item is None:
                 raise InputConflict("Input not found or removed")
+            if item["status"] == "cancelled":
+                raise InputCancelled("Input not found or removed")
             if item["status"] == "applied":
                 if not item.get("run_id"):
                     raise InputConflict("This input was already applied")
