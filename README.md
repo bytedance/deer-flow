@@ -133,6 +133,8 @@ That prompt is intended for coding agents. It tells the agent to clone the repo 
 
 ### Configuration
 
+Application SQL JSON writes normalize non-finite floats (`NaN`, `Infinity`, `-Infinity`) to `null` on SQLite and PostgreSQL, including DB-backed agent definitions and skill-mutation records. Existing rows are not rewritten.
+
 With `run_events.backend: db`, caller-supplied ISO 8601 event timestamps are normalized to UTC before storage, preserving their instant when SQLite drops timezone information. Timestamps without an offset are treated as UTC. Previously stored timestamps are not rewritten.
 
 Run event streams include `run.terminal` for the owning worker's confirmed final
@@ -3691,6 +3693,10 @@ before the retention sweep reclaims it. Restore returns the document to its
 origin project, or to a project you pick when the origin is gone or archived;
 if the target already holds an identical active file, the entries merge.
 Deleting a project moves its entire shelf to trash in the same step.
+
+If the retention configuration cannot be read, automatic cleanup is deferred
+and the trash listing remains available. Cleanup resumes with the current
+configured retention window once the configuration is readable again.
 
 Permanently deleting read-only documents also works on Windows. A file that is
 already missing does not block deletion; other filesystem errors keep the entry
