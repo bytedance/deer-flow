@@ -31,6 +31,7 @@ import { useI18n } from "../i18n/hooks";
 import type { Locale } from "../i18n/locale";
 import { getMessageRunId } from "../messages/run-duration";
 import { isErrorToolMessage } from "../messages/tool-error";
+import { indexToolResults } from "../messages/tool-result";
 import {
   extractContentFromMessage,
   hasToolCalls,
@@ -179,19 +180,24 @@ export function getToolResultStatus(
   toolName: string,
 ): ToolResultStatus {
   let latestToolCallId: string | undefined;
-  for (const message of messages) {
+  let latestToolCallIndex = -1;
+  for (const [messageIndex, message] of messages.entries()) {
     if (message.type !== "ai") {
       continue;
     }
     for (const toolCall of message.tool_calls ?? []) {
       if (toolCall.name === toolName && toolCall.id) {
         latestToolCallId = toolCall.id;
+        latestToolCallIndex = messageIndex;
       }
     }
   }
 
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index];
+  const results = latestToolCallId
+    ? (indexToolResults(messages).get(latestToolCallIndex) ?? [])
+    : messages;
+  for (let index = results.length - 1; index >= 0; index -= 1) {
+    const message = results[index];
     if (message?.type !== "tool") {
       continue;
     }

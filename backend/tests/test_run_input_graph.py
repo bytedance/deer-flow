@@ -106,6 +106,38 @@ async def test_steer_pauses_a_child_even_before_its_handler_starts():
 
 
 @pytest.mark.asyncio
+async def test_native_task_pending_and_final_results_share_an_id_per_invocation():
+    from deerflow.tools.builtins.task_tool import task_tool
+
+    store = MemoryRunStore()
+    await store.put("run", thread_id="thread", user_id="owner", status="running", owner_worker_id="worker")
+    inputs = RunInputs(store, "run", "owner", "worker")
+    await inputs.submit("update", "Handle this first", "steer")
+    control = RunInputControl(inputs, agent_runs=None, thread_id="thread", checkpointer=None)
+    runtime = SimpleNamespace(context={INPUT_CONTEXT_KEY: control})
+    pending_ids, results = [], []
+    try:
+        for _ in range(2):
+            release = asyncio.Event()
+
+            async def handler(request):
+                await release.wait()
+                result = await task_tool.coroutine(runtime=runtime, prompt="test", subagent_type="unused", tool_call_id="reused", context_mode="invalid")
+                results.append(result.update["messages"][0])
+                return result
+
+            pending = await control.wait_tool(SimpleNamespace(tool_call={"id": "reused", "name": "task", "args": {}}), handler)
+            pending_ids.append(pending.id)
+            release.set()
+            await asyncio.gather(*control.tasks)
+        assert all(pending_ids) and len(set(pending_ids)) == 2
+        assert [message.id for message in results] == pending_ids
+    finally:
+        release.set()
+        await control.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("capped", [False, True])
 async def test_input_during_inference_defers_old_actions_but_never_overrides_budget(capped):
     from deerflow.agents.middlewares.token_budget_middleware import TokenBudgetMiddleware

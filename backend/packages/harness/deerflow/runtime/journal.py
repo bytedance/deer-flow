@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
 from typing import Any, cast
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import AIMessage, AnyMessage, BaseMessage, HumanMessage, ToolMessage, messages_from_dict
@@ -422,6 +422,7 @@ class RunJournal(BaseCallbackHandler):
         self._llm_call_index = 0
         self._seen_llm_starts: set[str] = set()  # langchain run_ids that fired on_chat_model_start
         self._current_run_tool_call_names: dict[str, str] = {}
+        self._current_tool_result_ids: dict[str, str] = {}
         self._active_tool_names: dict[str, str] = {}
         self._persisted_ai_message_identities: set[str] = set()
         self._persisted_tool_message_identities: set[str] = set()
@@ -854,9 +855,6 @@ class RunJournal(BaseCallbackHandler):
 
     @staticmethod
     def _message_identity(message: BaseMessage) -> str | None:
-        tool_call_id = getattr(message, "tool_call_id", None)
-        if isinstance(tool_call_id, str) and tool_call_id:
-            return f"tool:{tool_call_id}"
         message_id = getattr(message, "id", None)
         if isinstance(message_id, str) and message_id:
             return f"message:{message_id}"
@@ -895,8 +893,17 @@ class RunJournal(BaseCallbackHandler):
                 continue
             name = self._tool_call_value(tool_call, "name")
             self._current_run_tool_call_names[tool_call_id] = str(name or "")
+            # A newly emitted assistant call starts a distinct occurrence,
+            # even when the provider reuses an earlier call ID in this run.
+            self._current_tool_result_ids.pop(tool_call_id, None)
+            self._terminal_task_results.discard(tool_call_id)
 
     def _persist_tool_result_message(self, message: BaseMessage) -> None:
+        # Tool callbacks run before the graph reducer assigns missing ids.
+        # Assign on the returned object so the feed and checkpoint share the
+        # same result identity even when a provider reuses its tool_call_id.
+        if isinstance(message, ToolMessage) and not message.id:
+            message.id = str(uuid4())
         if isinstance(message, ToolMessage) and message.name == "task":
             from deerflow.subagents.status_contract import read_subagent_result_metadata
 
@@ -910,6 +917,8 @@ class RunJournal(BaseCallbackHandler):
         identity = self._message_identity(message)
         if identity:
             self._persisted_tool_message_identities.add(identity)
+        if isinstance(message, ToolMessage) and message.tool_call_id in self._current_run_tool_call_names and message.id:
+            self._current_tool_result_ids[message.tool_call_id] = message.id
         self._record_message_summary(message)
 
     def record_deferred_task_result(self, message: ToolMessage) -> None:
@@ -991,8 +1000,12 @@ class RunJournal(BaseCallbackHandler):
         # re-attributed here.
         if self._current_run_tool_call_names.get(tool_call_id) is None:
             return False
+        if not message.id:
+            # A copy serialized before the first capture still lacks its ID.
+            # Restore that occurrence's ID before checking for a replay.
+            message.id = self._current_tool_result_ids.get(tool_call_id)
         identity = self._message_identity(message)
-        return identity is not None and identity not in self._persisted_tool_message_identities
+        return identity is None or identity not in self._persisted_tool_message_identities
 
     def _reconcile_tool_messages(self, messages: Iterable[Any]) -> None:
         for message in messages:
@@ -1855,6 +1868,7 @@ class RunJournal(BaseCallbackHandler):
         self._llm_start_times.clear()
         self._seen_llm_starts.clear()
         self._current_run_tool_call_names.clear()
+        self._current_tool_result_ids.clear()
         self._persisted_ai_message_identities.clear()
         self._persisted_tool_message_identities.clear()
         self._produced_artifacts.clear()

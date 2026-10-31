@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+from uuid import uuid4
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
@@ -14,6 +15,7 @@ from .schemas import GOAL_RUN_HARD_STOP_REASONS
 
 class ChildInputGate:
     def __init__(self, *, can_queue=True):
+        self.result_id = str(uuid4())
         self.can_queue = can_queue
         self.closed = False
         self.resume = threading.Event()
@@ -83,7 +85,7 @@ class RunInputControl:
         self.abandoned = False
 
     def child(self, call_id):
-        if call_id in self.children:
+        if call_id in self.children and not self.children[call_id][0].closed:
             return self.children[call_id][0]
         gate = ChildInputGate(can_queue=not any(not old.resume.is_set() and not old.closed for old, _ in self.children.values()))
         self.children[call_id] = (gate, None)
@@ -142,10 +144,12 @@ class RunInputControl:
 
     async def wait_tool(self, request, handler):
         self.calls[request.tool_call["id"]] = dict(request.tool_call)
+        self.finished_calls.discard(request.tool_call["id"])
         # Create the gate before scheduling: an immediately available input
         # can arrive before the tool handler reaches the native executor.
-        self.child(request.tool_call["id"])
+        gate = self.child(request.tool_call["id"])
         native = asyncio.create_task(handler(request))
+        native.add_done_callback(lambda _: gate.close())
         self.tasks.add(native)
         try:
             while not native.done():
@@ -158,6 +162,7 @@ class RunInputControl:
                     watcher = asyncio.create_task(self._observe(native, call_id))
                     self.tasks.add(watcher)
                     return ToolMessage(
+                        id=gate.result_id,
                         content="The subagent result is pending and will arrive in this Run. The user has sent an updated requirement.",
                         tool_call_id=call_id,
                         name="task",
@@ -194,7 +199,8 @@ class RunInputControl:
     def _failure(self, call_id, status, text):
         from deerflow.subagents.status_contract import make_subagent_additional_kwargs
 
-        message = ToolMessage(content=text, tool_call_id=call_id, name="task", additional_kwargs=make_subagent_additional_kwargs(status, error=text))
+        child = self.children.get(call_id)
+        message = ToolMessage(id=child[0].result_id if child else None, content=text, tool_call_id=call_id, name="task", additional_kwargs=make_subagent_additional_kwargs(status, error=text))
         if self.on_result is not None:
             self.on_result(message)
         return message
