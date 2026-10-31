@@ -141,9 +141,12 @@ def _parse_json_object(value: object) -> dict | None:
     """Parse a JSON-object string, returning None for other inputs."""
     if not isinstance(value, str):
         return None
+    # RecursionError is not a ValueError: a deeply nested argument string (the
+    # model can emit one) has to degrade like any other unparsable value rather
+    # than aborting the turn from the repair hook.
     try:
         parsed = json.loads(value)
-    except ValueError:
+    except (ValueError, RecursionError):
         return None
     return parsed if isinstance(parsed, dict) else None
 

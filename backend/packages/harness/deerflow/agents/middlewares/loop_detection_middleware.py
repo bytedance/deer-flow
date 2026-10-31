@@ -123,7 +123,7 @@ def _normalize_tool_call_args(raw_args: object) -> tuple[dict, str | None]:
     if isinstance(raw_args, str):
         try:
             parsed = json.loads(raw_args)
-        except (TypeError, ValueError, json.JSONDecodeError):
+        except (TypeError, ValueError, json.JSONDecodeError, RecursionError):
             return {}, raw_args
 
         if isinstance(parsed, dict):

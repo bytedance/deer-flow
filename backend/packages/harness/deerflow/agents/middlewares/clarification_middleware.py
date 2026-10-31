@@ -113,7 +113,7 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
         if isinstance(options, str):
             try:
                 options = json.loads(options)
-            except (json.JSONDecodeError, TypeError):
+            except (json.JSONDecodeError, TypeError, RecursionError):
                 options = [options]
 
         if options is None:
@@ -178,7 +178,7 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
         if isinstance(fields, str):
             try:
                 fields = json.loads(fields)
-            except (json.JSONDecodeError, TypeError):
+            except (json.JSONDecodeError, TypeError, RecursionError):
                 return []
         if not isinstance(fields, list):
             return []
