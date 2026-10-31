@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from enum import Enum
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -13,8 +14,18 @@ from deerflow.subagents import batch_service as service_module
 from deerflow.subagents.batch_runtime import BatchSubmitRequest
 from deerflow.subagents.batch_service import SubagentBatchService
 from deerflow.subagents.capacity import SubagentExecutionCapacity
+from deerflow.utils import assembly_io
 
 _MISSING = object()
+
+
+@pytest.fixture
+def isolated_assembly_pool(monkeypatch):
+    # Lifecycle deadlines must not include work queued by other tests, while
+    # retaining the real off-loop assembly and cancellation behavior.
+    with ThreadPoolExecutor(max_workers=assembly_io._ASSEMBLY_WORKERS, thread_name_prefix="test-batch-assembly") as pool:
+        monkeypatch.setattr(assembly_io, "_ASSEMBLY_EXECUTOR", pool)
+        yield
 
 
 class FakeStatus(Enum):
@@ -626,7 +637,7 @@ async def test_stopped_item_releases_its_execution_once_it_turns_terminal(monkey
 
 
 @pytest.mark.asyncio
-async def test_item_error_cancels_and_releases_an_unfinished_execution(monkeypatch) -> None:
+async def test_item_error_cancels_and_releases_an_unfinished_execution(monkeypatch, isolated_assembly_pool) -> None:
     # A repository error while polling fails the durable item; the subagent
     # must not keep running unsupervised, nor stay in the registry.
     registry = _Registry()
