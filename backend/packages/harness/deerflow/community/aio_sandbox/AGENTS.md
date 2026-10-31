@@ -4,7 +4,7 @@
 
 AIO has two distinct stdin contracts: the persistent `/v1/shell` transport is a
 PTY, while `/v1/bash` uses a subprocess pipe that stays open for writes. Keep
-persistent shell commands unchanged: the Lark broker shim already ignores TTY
+persistent shell stdin unchanged: the Lark broker shim already ignores TTY
 input. Only fresh `_run_bash_exec` calls prefix the original command with
 `exec < /dev/null` so default stdin gets immediate EOF; explicit
 pipes/heredocs/files still override fd0. Those sessions are created and
@@ -19,6 +19,15 @@ input. Window overrides must be finite positive seconds, at most 600. Broker
 INFO logs contain argc/exit/elapsed only, never argument values.
 
 Regressions: `tests/test_aio_sandbox.py`, `tests/test_lark_broker.py`.
+
+## Command cancellation
+
+Managed bash uses existing async exec/poll APIs without retrying execution.
+Read only the current console entry; keep exit codes and persistent-shell stdin.
+Legacy Shell needs a same-line owner prefix. Poll by returned session/command identity; stop inherited owner processes through
+a separate fixed control command with pidfds. A missing cleanup receipt fences reuse through existing
+quarantine; it is never a clean stop. Markers support cooperative cleanup, not
+hostile-code isolation.
 
 ## Reuse admission
 

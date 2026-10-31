@@ -32,6 +32,9 @@ async def manage_current_work(action: Literal["continue", "replace", "stop"], ru
         clear_goal = runtime.state.get("goal") is not None
         await control.agent_runs.authorize_control(thread_id=control.thread_id, run_id=control.inputs.run_id, clear_goal=clear_goal)
         await control.stop_children()
+        from deerflow.sandbox.lease import cancel_sandbox_execution_lease_async
+
+        await cancel_sandbox_execution_lease_async(runtime.context, reset=True)
         await control.agent_runs.authorize_control(thread_id=control.thread_id, run_id=control.inputs.run_id, clear_goal=clear_goal)
         control.abandoned = True
         if clear_goal:
