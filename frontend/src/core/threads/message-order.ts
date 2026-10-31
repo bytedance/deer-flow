@@ -39,13 +39,9 @@ export const MESSAGE_SEQ_KEY = "deerflow_seq";
 const INJECTED_USER_MESSAGE_ID_SUFFIX = "__user";
 
 export function messageIdentity(message: Message): string | undefined {
-  if (
-    "tool_call_id" in message &&
-    typeof message.tool_call_id === "string" &&
-    message.tool_call_id.length > 0
-  ) {
-    return `tool:${message.tool_call_id}`;
-  }
+  // Providers can reuse tool_call_id across runs and assistant turns. The
+  // journal assigns result ids before persistence so feed/checkpoint copies
+  // share one identity. Legacy id-less results must not collapse by call id.
   if (typeof message.id === "string" && message.id.length > 0) {
     // DynamicContextMiddleware replaces the submitted HumanMessage(id=X) with
     // a hidden SystemMessage(id=X) and the real HumanMessage(id=X__user).
@@ -74,6 +70,24 @@ export function trustedMessageSeq(message: Message): number | undefined {
 }
 
 export function dedupeMessagesByIdentity(messages: Message[]): Message[] {
+  const taskResultScope = (message: Message) => {
+    const raw = getMessageRunId(message) ?? message.additional_kwargs?.run_id;
+    const runId = typeof raw === "string" ? raw : "";
+    return `${runId}:${messageIdentity(message) ?? ""}`;
+  };
+  const completedTaskResults = new Set(
+    messages
+      .filter(
+        (message) =>
+          message.type === "tool" &&
+          typeof message.additional_kwargs?.subagent_status === "string" &&
+          message.additional_kwargs?.subagent_pending !== true,
+      )
+      .map(taskResultScope),
+  );
+  const supersededPending = (message: Message) =>
+    message.additional_kwargs?.subagent_pending === true &&
+    completedTaskResults.has(taskResultScope(message));
   const lastIndexByIdentity = new Map<string, number>();
   const lastVisibleIndexByIdentity = new Map<string, number>();
 
@@ -84,6 +98,7 @@ export function dedupeMessagesByIdentity(messages: Message[]): Message[] {
   // stream/state channel instead of relying on message dedupe preservation.
   const preservedTurnDurations = new Map<string, number>();
   messages.forEach((message, index) => {
+    if (supersededPending(message)) return;
     const identity = messageIdentity(message);
     if (identity) {
       lastIndexByIdentity.set(identity, index);
@@ -101,6 +116,7 @@ export function dedupeMessagesByIdentity(messages: Message[]): Message[] {
 
   return messages
     .filter((message, index) => {
+      if (supersededPending(message)) return false;
       const identity = messageIdentity(message);
       if (!identity) {
         return true;

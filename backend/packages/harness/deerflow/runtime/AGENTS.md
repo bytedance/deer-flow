@@ -15,6 +15,15 @@ namespace/thread bounds, cursor iteration and outage/TTL fallback.
 
 ### Run Admission
 
+Interactive Queue/Steer inputs belong to the existing RunStore row. Accept only
+owner-bound text; acknowledge it after a durable graph receipt. Queue dispatch
+uses ordinary AgentRuns admission after the old worker finalizes. Steer releases
+a native `task()` wait without marking the child completed; the same executor
+owns cooperative pause, timeout and cancellation. Only direct-user input exposes
+current-work control. Preserve permissions, pool caps and token/loop stops.
+On restart retain unapplied text for explicit retry; never replay side effects
+automatically. Regressions: `test_run_inputs.py`, `test_run_input_graph.py`.
+
 Run admission and assembly publication serialize per thread across Store I/O.
 Keep registry locks short; heartbeat snapshots must not queue on an
 admission gate. Preserve same-thread publication visibility, including reads of
@@ -54,6 +63,12 @@ successful no-op; a live owner's write retains its existing missing-buffer
 
 ### Memory Stream Replay
 
+Memory publication snapshots the payload before allocating an event ID. Each
+subscriber receives its own deep copy outside the stream Condition, so producer
+reuse and reader edits cannot rewrite retained frames. Heartbeat/END sentinels
+keep identity. `tests/test_memory_stream_payload_isolation.py` covers nested
+payloads and Worker-to-Gateway SSE/reconnect metadata, including subgraphs.
+
 Memory keeps the exact last evicted event ID as bounded per-run metadata. A
 reconnect from that known predecessor replays all retained successors and END,
 matching a live subscriber at the same position. Older or unverifiable evicted
@@ -77,7 +92,7 @@ without querying the repository or replacing the control input.
 Before changing checkpoint modes, caches, replay lookup, state replacement or
 rollback, read the [checkpoint contracts](../../../../docs/runtime-guidance-details.md#checkpoint-channel-modes-and-replay).
 
-**Message sequence placement:** Keep backend and frontend message identity rules aligned. Details: `backend/docs/runtime-guidance-details.md`.
+**Message sequence placement:** Keep backend and frontend message identity rules aligned. Tool results use their own message IDs, assigned on missing-ID callback results before persistence; provider call IDs may repeat. Restore pre-capture ID-less copies from the current lead-call result ID; reset it on a new canonical call, not a usage replay. Keep ID-less legacy rows independent. Details: `backend/docs/runtime-guidance-details.md`.
 
 **Thread message cursors:** `list_messages` applies both exclusive bounds before `limit`, paging forward whenever `after_seq` is supplied.
 
