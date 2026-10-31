@@ -151,14 +151,18 @@ class RunManager:
         kwargs: dict | None = None,
         multitask_strategy: str = "reject",
     ) -> RunRecord:
-        """Atomically check for inflight runs and create a new one.
+        """Check for inflight runs and create a new one.
 
         For ``reject`` strategy, raises ``ConflictError`` if thread
         already has a pending/running run.  For ``interrupt``/``rollback``,
         cancels inflight runs before creating.
 
-        This method holds the lock across both the check and the insert,
-        eliminating the TOCTOU race in separate ``has_inflight`` + ``create``.
+        The inflight check and any cancel signals run under one hold of the
+        lock. The lock is then released while awaiting the cancelled worker
+        tasks, and reacquired to insert the new record. The check is not
+        repeated after reacquiring it, so the check and the insert are not
+        atomic: another call on the same thread can pass its own check in
+        that window.
         """
         run_id = str(uuid.uuid4())
         now = _now_iso()
