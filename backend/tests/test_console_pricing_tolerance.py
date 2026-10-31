@@ -63,6 +63,21 @@ def test_cache_hit_price_beyond_the_float_range_is_ignored(monkeypatch):
     assert pricing_map == {}
 
 
+@pytest.mark.parametrize("bad_price", [True, False])
+def test_boolean_price_is_ignored(monkeypatch, bad_price):
+    """float(True) is 1.0: a boolean would silently bill one unit per million.
+
+    ``_token_count`` rejects booleans for the same reason, so the two coercers
+    agree on what counts as a number.
+    """
+    assert _pricing_map(monkeypatch, {**CONFIG, "input_cache_hit_per_million": bad_price}) == {}
+
+
+def test_boolean_input_price_is_ignored(monkeypatch):
+    """``True`` survives the ``or 0`` default, so it has to be rejected here."""
+    assert _pricing_map(monkeypatch, {**CONFIG, "input_per_million": True}) == {}
+
+
 @pytest.mark.parametrize("bad_price", [float("inf"), float("-inf"), float("nan")])
 def test_non_finite_price_is_ignored(monkeypatch, bad_price):
     """Pinned: the guard #7736 added for non-finite floats stays in force."""

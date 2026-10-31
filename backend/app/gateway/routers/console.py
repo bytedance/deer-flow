@@ -154,8 +154,11 @@ class _ModelPricing(NamedTuple):
 def _finite_price(value: object) -> float | None:
     """Coerce one configured price, or None when it is not a usable number.
 
-    Two shapes have to be rejected rather than passed on:
+    Three shapes have to be rejected rather than passed on:
 
+    - ``True`` / ``False`` convert to ``1.0`` / ``0.0``, so a boolean would
+      silently bill one unit per million. ``_token_count`` rejects booleans for
+      the same reason: it is a configuration mistake, not a price.
     - ``10**400`` parses as an exact ``int`` because a JSON integer is not
       bounded by the float range, and ``float()`` then raises ``OverflowError``.
       That is the same junk price as a string, so it must not fail the report.
@@ -165,6 +168,8 @@ def _finite_price(value: object) -> float | None:
       report. The rest of the config layer rejects non-finite values too
       (``allow_inf_nan=False``).
     """
+    if isinstance(value, bool):
+        return None
     try:
         price = float(value)  # type: ignore[arg-type]
     except (TypeError, ValueError, OverflowError):
