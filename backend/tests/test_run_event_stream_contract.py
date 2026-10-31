@@ -14,6 +14,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, LLMResult
 
 from deerflow.runtime.events.catalog import (
+    FINAL_ANSWER_EVIDENCE_EVENT,
     FIXED_RUN_EVENT_DEFINITIONS,
     JOURNAL_RUN_EVENT_DEFINITIONS,
     MIDDLEWARE_EVENT_PATTERN,
@@ -286,6 +287,35 @@ async def test_run_end_backend_storage_semantics_match_contract(tmp_path):
 
 
 @pytest.mark.anyio
+async def test_final_answer_evidence_is_persisted_by_database_store(tmp_path):
+    from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+    from deerflow.runtime.events.store.db import DbRunEventStore
+
+    await init_engine("sqlite", url=f"sqlite+aiosqlite:///{tmp_path / 'answer-evidence.db'}", sqlite_dir=str(tmp_path))
+    try:
+        store = DbRunEventStore(get_session_factory())
+        journal = RunJournal("run-1", "thread-1", store, flush_threshold=100)
+        journal.record_final_answer_evidence(
+            {
+                "schema": "deerflow.final_answer_evidence.v1",
+                "status": "no_action_claims",
+                "final_message_id": "final-1",
+                "final_content_sha256": "a" * 64,
+                "claimed_action_categories": [],
+                "unmatched_action_categories": [],
+                "lead_receipts": {"count": 0, "by_category": {}, "status_counts": {}},
+                "coverage": "current_run_visible",
+            }
+        )
+        await journal.flush()
+        events = await store.list_events("thread-1", "run-1", event_types=["run.answer_evidence"])
+        assert len(events) == 1
+        _assert_fixed_event_valid(events[0], persisted=True)
+    finally:
+        await close_engine()
+
+
+@pytest.mark.anyio
 async def test_run_journal_observed_events_exactly_match_its_catalog():
     store = MemoryRunEventStore()
     journal = RunJournal("run-1", "thread-1", store, flush_threshold=100)
@@ -320,6 +350,18 @@ async def test_run_journal_observed_events_exactly_match_its_catalog():
     journal.on_chain_error(ValueError("run failed"), run_id=uuid4())
     journal.on_chain_end({"messages": []}, run_id=root_run_id, parent_run_id=None)
     journal.record_memory_context(content_sha256="a" * 64)
+    journal.record_final_answer_evidence(
+        {
+            "schema": "deerflow.final_answer_evidence.v1",
+            "status": "no_action_claims",
+            "final_message_id": "final-1",
+            "final_content_sha256": "a" * 64,
+            "claimed_action_categories": [],
+            "unmatched_action_categories": [],
+            "lead_receipts": {"count": 0, "by_category": {}, "status_counts": {}},
+            "coverage": "current_run_visible",
+        }
+    )
     await journal.flush()
 
     events = await store.list_events("thread-1", "run-1")
@@ -328,6 +370,26 @@ async def test_run_journal_observed_events_exactly_match_its_catalog():
     assert {event["event_type"] for event in events} == expected_types
     for event in events:
         _assert_fixed_event_valid(event, persisted=True)
+
+
+def test_final_answer_evidence_event_contract():
+    evidence = {
+        "schema": "deerflow.final_answer_evidence.v1",
+        "status": "claims_without_matching_receipts",
+        "final_message_id": "final-1",
+        "final_content_sha256": "a" * 64,
+        "claimed_action_categories": ["file_write"],
+        "unmatched_action_categories": ["file_write"],
+        "lead_receipts": {"count": 0, "by_category": {}, "status_counts": {}},
+        "coverage": "current_run_visible",
+    }
+    event = {
+        "event_type": FINAL_ANSWER_EVIDENCE_EVENT.event_type,
+        "category": FINAL_ANSWER_EVIDENCE_EVENT.category,
+        "content": evidence,
+        "metadata": {},
+    }
+    _assert_fixed_event_valid(event)
 
 
 @pytest.mark.anyio

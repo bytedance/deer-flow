@@ -14,6 +14,12 @@
 
 ### 新增
 
+- **运行时：** Lead Agent 的最终答复现在会写入一条有界的
+  `run.answer_evidence` trace 事件，把可识别的动作声明与当前 run 的成功工具执行
+  记录关联起来。事件只记录固定的声明类别、工具类别/状态计数和内容哈希，不复制答复正文、
+  工具参数、路径、命令或工具输出。它只是辅助性的执行证据，不代表内容真实或任务验收通过，
+  也不会改写最终答复。([#7783])
+
 - **对话：** 网页端在任务运行时，可在输入框选择 Queue（排队执行）或 Steer（调整当前任务）。
   Queue 等当前任务结束后再执行下一条消息；Steer 让主 Agent 先处理新要求，原生子 Agent 可暂停后恢复。
   Gateway 重启后，尚未确认生效的消息可以手动重试。([#7729])
@@ -12744,4 +12750,5 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7762]: https://github.com/bytedance/deer-flow/pull/7762
 [#7772]: https://github.com/bytedance/deer-flow/pull/7772
 [#7781]: https://github.com/bytedance/deer-flow/pull/7781
+[#7783]: https://github.com/bytedance/deer-flow/pull/7783
 [#7792]: https://github.com/bytedance/deer-flow/pull/7792

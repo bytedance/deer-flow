@@ -59,6 +59,7 @@ RUN_START_EVENT = RunEventDefinition("run.start", "trace")
 RUN_END_EVENT = RunEventDefinition("run.end", "outputs")
 RUN_ERROR_EVENT = RunEventDefinition("run.error", "error")
 RUN_TERMINAL_EVENT = RunEventDefinition("run.terminal", "trace")
+FINAL_ANSWER_EVIDENCE_EVENT = RunEventDefinition("run.answer_evidence", "trace")
 LLM_HUMAN_INPUT_EVENT = RunEventDefinition("llm.human.input", "message")
 LLM_AI_RESPONSE_EVENT = RunEventDefinition("llm.ai.response", "message")
 LLM_TOOL_RESULT_EVENT = RunEventDefinition("llm.tool.result", "message")
@@ -105,6 +106,7 @@ JOURNAL_RUN_EVENT_DEFINITIONS = (
     LLM_TOOL_RESULT_EVENT,
     LLM_ERROR_EVENT,
     MEMORY_CONTEXT_EVENT,
+    FINAL_ANSWER_EVIDENCE_EVENT,
 )
 
 SUBAGENT_RUN_EVENT_DEFINITIONS = (

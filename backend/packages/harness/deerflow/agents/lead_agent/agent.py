@@ -774,6 +774,14 @@ def build_middlewares(
     if safety_config.enabled:
         middlewares.append(SafetyFinishReasonMiddleware.from_config(safety_config))
 
+    if resolved_app_config.verification.receipts_enabled:
+        from deerflow.agents.middlewares.final_answer_evidence_middleware import FinalAnswerEvidenceMiddleware
+
+        # ``after_model`` runs in reverse registration order. Keep the sanitizer
+        # at index 0, and register this after the lead's recovery/safety hooks so
+        # it observes their final message without moving it outside them.
+        middlewares.append(FinalAnswerEvidenceMiddleware())
+
     # ClarificationMiddleware should always be last
     middlewares.append(ClarificationMiddleware())
 

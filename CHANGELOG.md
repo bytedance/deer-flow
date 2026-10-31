@@ -12,6 +12,14 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Added
 
+- **runtime:** Lead-agent final answers now emit a bounded
+  `run.answer_evidence` trace event that links recognized action claims to
+  the current run's successful tool receipts. The event records fixed claim,
+  tool-category and status counters plus a content hash; it never copies the
+  answer, tool arguments, paths, commands or tool output. It is advisory
+  execution evidence, not a truth or task-acceptance verdict, and it never
+  rewrites the answer. ([#7783])
+
 - **chat:** Running Web chats offer Queue and Steer in the composer. Queue
   waits for the next turn; Steer lets the main Agent handle updates while
   native subagents pause and resume. Unconfirmed messages can be retried
@@ -15997,4 +16005,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7762]: https://github.com/bytedance/deer-flow/pull/7762
 [#7772]: https://github.com/bytedance/deer-flow/pull/7772
 [#7781]: https://github.com/bytedance/deer-flow/pull/7781
+[#7783]: https://github.com/bytedance/deer-flow/pull/7783
 [#7792]: https://github.com/bytedance/deer-flow/pull/7792
