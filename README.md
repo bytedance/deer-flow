@@ -722,6 +722,10 @@ DeerFlow still uses `Forwarded` / `X-Forwarded-*` headers to recover the browser
 > normal `end` signal. A new reader whose initial attachment loses the race with
 > cleanup receives a gap so it can recover the saved result.
 >
+> In-memory stream events retain the payload as it was published. Reusing a
+> producer's data object or editing a received event does not change another
+> subscriber's output or reconnect replay.
+>
 > During SSE replay-gap recovery, the Web UI preserves a reconnect pointer claimed by another run while durable state is loading. An older recovery cannot overwrite that pointer when it rejoins its own stream. Even a stale foreign pointer is preserved, so the next reload may first check that run before active-run recovery rejoins, adding a reconnect cycle.
 >
 > Store-only SSE and `/wait` consumers can finish after a heartbeat when run-manager
