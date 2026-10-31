@@ -1238,7 +1238,7 @@ def resolve_agent_factory(assistant_id: str | None):
 # fallback when app config cannot be loaded; the normal server default and hard
 # ceiling are configurable via ``AppConfig.recursion_limit`` and
 # ``AppConfig.max_recursion_limit``.
-_DEFAULT_RECURSION_LIMIT = 100
+_DEFAULT_RECURSION_LIMIT = 1000
 _DEFAULT_MAX_RECURSION_LIMIT = 1000
 
 

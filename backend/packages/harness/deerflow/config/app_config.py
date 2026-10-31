@@ -256,7 +256,7 @@ class AppConfig(BaseModel):
         ),
     )
     recursion_limit: int = Field(
-        default=100,
+        default=1000,
         ge=1,
         description="Default LangGraph recursion_limit for Gateway runs when the client does not provide one. Applied per run and capped by max_recursion_limit.",
     )

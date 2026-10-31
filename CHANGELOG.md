@@ -1702,6 +1702,13 @@ This release closes that milestone with **1068 merged pull requests**.
   because a run is still going keeps the draft and says so. ([#6556])
 ### Changed
 
+- **gateway:** The top-level `recursion_limit` default is now `1000`, preserving
+  the existing web UI budget and matching scheduled runs. UI submissions omit
+  their former hard-coded value, so operators' configured defaults and valid
+  per-request overrides apply consistently. Existing `config.yaml` values are
+  preserved on upgrade; installations still configured to `100` can raise the
+  value explicitly if they want the former UI budget. ([#7323])
+
 - **tool output:** Superseded `write_file` payload elision is now opt-in. The
   optimization remains available, but the default keeps model-bound history
   append-only so later file actions do not invalidate provider prompt-cache
