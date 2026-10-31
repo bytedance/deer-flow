@@ -24,6 +24,11 @@ current-work control. Preserve permissions, pool caps and token/loop stops.
 On restart retain unapplied text for explicit retry; never replay side effects
 automatically. Regressions: `test_run_inputs.py`, `test_run_input_graph.py`.
 
+Queue dispatch skips only `InputCancelled` raised by the store's atomic claim
+before Run admission. Do not infer cancellation from a stale read or exception
+text; other admission errors and uncertain outcomes still stop dispatch for
+explicit reconciliation. Child Run wait failures still stop the queue.
+
 Run admission and assembly publication serialize per thread across Store I/O.
 Keep registry locks short; heartbeat snapshots must not queue on an
 admission gate. Preserve same-thread publication visibility, including reads of

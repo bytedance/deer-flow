@@ -25,6 +25,8 @@
   却遍历未解析的目录树，导致没有任何文档能匹配上，所有超过 24 小时的原件都被当作
   孤立文件删除，Gateway 启动时和 `GET /api/trash/documents` 都会触发。([#7732])
 
+- **对话：** 队列分发开始后，取消某条排队输入不再阻止后续排队输入继续执行。([#7746])
+
 - **开发：** `scripts/dev_multi_instance.sh logs all` 现在除两个 Gateway 日志外也会输出
   nginx 日志；此前它只输出 Gateway 日志，与不带参数的 `logs` 相同。`logs nginx` 与
   `logs all` 还会包含 `nginx.log`（nginx 启动命令自身的输出），此前没有任何选项会输出它。
@@ -12719,3 +12721,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7727]: https://github.com/bytedance/deer-flow/pull/7727
 [#7729]: https://github.com/bytedance/deer-flow/pull/7729
 [#7732]: https://github.com/bytedance/deer-flow/pull/7732
+[#7746]: https://github.com/bytedance/deer-flow/pull/7746
