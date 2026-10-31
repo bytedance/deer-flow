@@ -708,6 +708,7 @@ def _task_result_command(
     receipt_verdict: dict | None = None,
     acceptance_verdict: dict | None = None,
     knowledge_sources: list[dict] | None = None,
+    resume_task_id: str | None = None,
 ) -> Command:
     content, metadata_error = format_subagent_result_message(status, result=result, error=error, stop_reason=stop_reason)
     if acceptance_verdict is not None:
@@ -724,6 +725,19 @@ def _task_result_command(
         else:
             # Preserve the native RAGFlow envelope for existing history and batch readers.
             artifact = {**artifact, "retrieval_sources": unified_artifact["knowledge_sources"], "knowledge_sources_version": 1}
+    additional_kwargs = make_subagent_additional_kwargs(
+        status,
+        result=result,
+        error=metadata_error,
+        stop_reason=stop_reason,
+        model_name=model_name,
+        token_usage=usage,
+        tool_receipts=tool_receipts,
+        receipt_verdict=receipt_verdict,
+        acceptance_verdict=acceptance_verdict,
+    )
+    if resume_task_id is not None:
+        additional_kwargs["resume_task_id"] = resume_task_id
     return Command(
         update={
             "messages": [
@@ -732,17 +746,7 @@ def _task_result_command(
                     tool_call_id=tool_call_id,
                     name="task",
                     artifact=artifact,
-                    additional_kwargs=make_subagent_additional_kwargs(
-                        status,
-                        result=result,
-                        error=metadata_error,
-                        stop_reason=stop_reason,
-                        model_name=model_name,
-                        token_usage=usage,
-                        tool_receipts=tool_receipts,
-                        receipt_verdict=receipt_verdict,
-                        acceptance_verdict=acceptance_verdict,
-                    ),
+                    additional_kwargs=additional_kwargs,
                 )
             ]
         }
@@ -760,6 +764,7 @@ async def task_tool(
     description: str = "",
     context_mode: Literal["isolated", "snapshot"] = "isolated",
     model_name: str | None = None,
+    resume_task_id: str | None = None,
 ) -> str | Command:
     """Delegate a bounded task to a specialized subagent in its own context.
 
@@ -869,6 +874,10 @@ async def task_tool(
         model_name: Optional configured model name for this child only. Omit to
             keep the subagent's configured/inherited model. Does not change the
             parent conversation or the saved subagent configuration.
+        resume_task_id: Optional ID of a previously started, interrupted, or failed
+            subagent execution to resume from. The subagent's historical messages are
+            recovered and sanitized (resolving unfulfilled tool calls and pruning empty
+            turns) before continuation.
     """
     if context_mode not in {"isolated", "snapshot"}:
         return _task_result_command(tool_call_id=tool_call_id, status="failed", error=f"Unknown context_mode '{context_mode}'. Use isolated or snapshot.")
@@ -1041,6 +1050,47 @@ async def task_tool(
         available_tools_kwargs["extensions"] = run_extensions
     tools = await run_assembly(get_available_tools, **available_tools_kwargs)
 
+    # Check for resumption from a prior subagent task
+    initial_messages = None
+    if resume_task_id:
+        from deerflow.subagents.recovery import (
+            extract_resumable_messages,
+            supersede_and_claim_resumable_task,
+        )
+
+        try:
+            previous_result = supersede_and_claim_resumable_task(resume_task_id)
+            if previous_result is None:
+                return _task_result_command(
+                    tool_call_id=tool_call_id,
+                    status="failed",
+                    error=(f"Cannot resume subagent: task '{resume_task_id}' was not found in active or resumable holding registry, or has already been superseded by another resumption."),
+                )
+            if getattr(previous_result, "subagent_type", None) and previous_result.subagent_type != subagent_type:
+                return _task_result_command(
+                    tool_call_id=tool_call_id,
+                    status="failed",
+                    error=(f"Cannot resume subagent: task '{resume_task_id}' was executed as subagent_type '{previous_result.subagent_type}', which does not match requested '{subagent_type}'."),
+                )
+            initial_messages = extract_resumable_messages(previous_result)
+            if not initial_messages:
+                return _task_result_command(
+                    tool_call_id=tool_call_id,
+                    status="failed",
+                    error=f"Cannot resume subagent: task '{resume_task_id}' has no recoverable message history.",
+                )
+            logger.info(f"[trace={trace_id}] Resuming subagent from task {resume_task_id} with {len(initial_messages)} sanitized messages")
+        except Exception as exc:
+            logger.error(
+                f"[trace={trace_id}] Failed to extract resumable messages from task {resume_task_id}",
+                exc_info=True,
+            )
+            return _task_result_command(
+                tool_call_id=tool_call_id,
+                status="failed",
+                error=f"Failed to resume subagent task '{resume_task_id}': {exc}",
+            )
+
     # Create executor
     executor_kwargs = {
         "config": config,
@@ -1069,6 +1119,9 @@ async def task_tool(
         # system-channel authority over framework instructions.
         "acceptance_criteria": acceptance_criteria,
     }
+    if initial_messages is not None:
+        executor_kwargs["initial_messages"] = initial_messages
+        executor_kwargs["resumed_from"] = resume_task_id
     # Carry the host-captured lifecycle, including legacy None, without
     # inventing a legacy scope for missing context or re-reading thread state.
     if THREAD_INCARNATION_CONTEXT_KEY in parent_context:
@@ -1258,6 +1311,7 @@ async def task_tool(
                     usage=usage,
                     tool_receipts=getattr(result, "tool_receipts", None),
                     source_messages=getattr(result, "ai_messages", None),
+                    resume_task_id=execution_id,
                 )
             elif result.status == SubagentStatus.CANCELLED:
                 _report_subagent_usage(runtime, result)
@@ -1281,6 +1335,7 @@ async def task_tool(
                     usage=usage,
                     tool_receipts=getattr(result, "tool_receipts", None),
                     source_messages=getattr(result, "ai_messages", None),
+                    resume_task_id=execution_id,
                 )
             elif result.status == SubagentStatus.TIMED_OUT:
                 _report_subagent_usage(runtime, result)
@@ -1311,6 +1366,7 @@ async def task_tool(
                     usage=usage,
                     tool_receipts=getattr(result, "tool_receipts", None),
                     source_messages=getattr(result, "ai_messages", None),
+                    resume_task_id=execution_id,
                 )
 
             # Still running, wait before next poll
@@ -1348,6 +1404,7 @@ async def task_tool(
                     usage=usage,
                     tool_receipts=getattr(result, "tool_receipts", None),
                     source_messages=getattr(result, "ai_messages", None),
+                    resume_task_id=execution_id,
                 )
     except asyncio.CancelledError:
         # Signal the background subagent thread to stop cooperatively, then
