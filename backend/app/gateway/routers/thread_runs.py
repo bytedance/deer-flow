@@ -223,7 +223,24 @@ def stamp_turn_duration_on_last_ai(messages, run_durations: dict[str, int], *, t
             metadata = {}
         is_middleware = str(metadata.get("caller", "")).startswith("middleware:")
         if payload.get("type") == "ai" and not is_middleware:
-            payload.setdefault("additional_kwargs", {})["turn_duration"] = run_durations[rid]
+            raw_additional_kwargs = payload.get("additional_kwargs")
+            if raw_additional_kwargs is None:
+                additional_kwargs: dict[str, Any] = {}
+            elif isinstance(raw_additional_kwargs, Mapping):
+                # A Mapping is not necessarily mutable (for example, a
+                # MappingProxyType from a serializer), so copy it before
+                # attaching the duration.
+                additional_kwargs = dict(raw_additional_kwargs)
+            else:
+                logger.warning(
+                    "Ignoring malformed message additional_kwargs for thread %s at row seq %s: expected a mapping, got %s",
+                    sanitize_log_param(thread_id or "<unknown>"),
+                    msg.get("seq", "<unknown>"),
+                    type(raw_additional_kwargs).__name__,
+                )
+                additional_kwargs = {}
+            payload["additional_kwargs"] = additional_kwargs
+            additional_kwargs["turn_duration"] = run_durations[rid]
             stamped.add(rid)
 
 
