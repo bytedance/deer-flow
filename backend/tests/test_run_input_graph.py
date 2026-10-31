@@ -137,6 +137,133 @@ async def test_native_task_pending_and_final_results_share_an_id_per_invocation(
         await control.close()
 
 
+async def _start_parallel_tasks(inputs, control, handlers):
+    """Steer only once every native handler runs, so each waiter sees all gates."""
+    started = asyncio.Event()
+    running = set()
+
+    def tracked(call_id):
+        async def handler(request):
+            running.add(call_id)
+            if len(running) == len(handlers):
+                started.set()
+            return await handlers[call_id](request)
+
+        return handler
+
+    waiters = [asyncio.create_task(control.wait_tool(SimpleNamespace(tool_call={"id": call_id, "name": "task", "args": {}}), tracked(call_id))) for call_id in handlers]
+    await asyncio.wait_for(started.wait(), 2)
+    await inputs.submit("update", "Handle this first", "steer")
+    return await asyncio.wait_for(asyncio.gather(*waiters), 5)
+
+
+@pytest.mark.asyncio
+async def test_parallel_pending_results_keep_their_own_ids():
+    store = MemoryRunStore()
+    await store.put("run", thread_id="thread", user_id="owner", status="running", owner_worker_id="worker")
+    inputs = RunInputs(store, "run", "owner", "worker")
+    control = RunInputControl(inputs, agent_runs=None, thread_id="thread", checkpointer=None)
+    release = asyncio.Event()
+
+    async def handler(request):
+        await release.wait()
+        return ToolMessage(content="Finished", name="task", tool_call_id=request.tool_call["id"])
+
+    try:
+        replies = await _start_parallel_tasks(inputs, control, {"first": handler, "second": handler})
+        assert [reply.tool_call_id for reply in replies] == ["first", "second"]
+        assert [reply.id for reply in replies] == [control.children[reply.tool_call_id][0].result_id for reply in replies]
+        assert replies[0].id != replies[1].id
+    finally:
+        release.set()
+        await control.close()
+
+
+@pytest.mark.asyncio
+async def test_finished_task_closes_only_its_own_gate():
+    store = MemoryRunStore()
+    await store.put("run", thread_id="thread", user_id="owner", status="running", owner_worker_id="worker")
+    inputs = RunInputs(store, "run", "owner", "worker")
+    control = RunInputControl(inputs, agent_runs=None, thread_id="thread", checkpointer=None)
+    finished, release = asyncio.Event(), asyncio.Event()
+
+    async def short_task(request):
+        await finished.wait()
+        return ToolMessage(content="Finished", name="task", tool_call_id="short")
+
+    async def long_task(request):
+        await release.wait()
+        return ToolMessage(content="Finished", name="task", tool_call_id="long")
+
+    try:
+        await _start_parallel_tasks(inputs, control, {"short": short_task, "long": long_task})
+        finished.set()
+        short_gate, long_gate = control.children["short"][0], control.children["long"][0]
+        async with asyncio.timeout(2):
+            while not short_gate.closed:
+                await asyncio.sleep(0)
+        assert not long_gate.closed and not long_gate.resume.is_set()
+        control.interrupted_children = {"long"}
+        assert control.resume_children("Include 2025") == ["long"]
+    finally:
+        finished.set()
+        release.set()
+        await control.close()
+
+
+class ParallelTaskModel(InputModel):
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        self.observed.append(messages)
+        if len(self.observed) == 1:
+            message = AIMessage(content="", tool_calls=[{"name": "task", "args": {}, "id": "first"}, {"name": "task", "args": {}, "id": "second"}])
+        else:
+            message = AIMessage(content="New requirement applied")
+        return ChatResult(generations=[ChatGeneration(message=message)])
+
+
+@pytest.mark.asyncio
+async def test_graph_keeps_a_pending_result_for_every_parallel_task():
+    from deerflow.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
+
+    store = MemoryRunStore()
+    await store.put("run", thread_id="thread", user_id="owner", status="running", owner_worker_id="worker")
+    inputs = RunInputs(store, "run", "owner", "worker")
+    saver = InMemorySaver()
+    control = RunInputControl(inputs, agent_runs=SimpleNamespace(), thread_id="thread", checkpointer=saver)
+    entered, release = asyncio.Event(), asyncio.Event()
+    started = []
+
+    @tool
+    async def task() -> str:
+        """Controlled long operation; both parallel calls stay running."""
+        started.append(True)
+        if len(started) == 2:
+            entered.set()
+        await release.wait()
+        return "Long operation completed"
+
+    model = ParallelTaskModel(observed=[])
+    # The real repair layer would otherwise hide a lost result behind a placeholder.
+    graph = create_agent(model, tools=[task], middleware=[RunInputAdmissionMiddleware(), DanglingToolCallMiddleware(), RunInputMiddleware()], state_schema=ThreadState, context_schema=dict, checkpointer=saver)
+    config = {"configurable": {"thread_id": "thread"}}
+    run = asyncio.create_task(graph.ainvoke({"messages": [HumanMessage(content="Original task")]}, config, context={INPUT_CONTEXT_KEY: control}))
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        await inputs.submit("update", "Handle this first", "steer")
+        async with asyncio.timeout(5):
+            while len(model.observed) < 2:
+                await asyncio.sleep(0.01)
+        pending = [message for message in model.observed[1] if isinstance(message, ToolMessage)]
+        assert [message.tool_call_id for message in pending] == ["first", "second"]
+        assert all(message.additional_kwargs.get("subagent_pending") for message in pending)
+        checkpoint = await graph.aget_state(config)
+        assert [message.tool_call_id for message in checkpoint.values["messages"] if isinstance(message, ToolMessage)] == ["first", "second"]
+    finally:
+        release.set()
+        await asyncio.wait_for(asyncio.gather(run, return_exceptions=True), 5)
+        await control.close()
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("capped", [False, True])
 async def test_input_during_inference_defers_old_actions_but_never_overrides_budget(capped):
