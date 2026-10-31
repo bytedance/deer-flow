@@ -3483,6 +3483,12 @@ are checked recursively as well.
 
 ## Embedded Python Client
 
+Async applications can use `await client.achat(...)` or
+`async for event in client.astream(...)`. These run the native asynchronous
+graph and share event semantics with `chat()` / `stream()`. Supply an
+async-capable checkpointer for persistent conversations; see the
+[async client example](backend/docs/STREAMING.md#native-async-embedded-client).
+
 User messages are framed as untrusted input. Reserved XML-like tags are escaped
 for model context only when present; tag-free URLs and shell commands retain
 their ampersands unchanged. Encoded payloads include a note to decode exactly
