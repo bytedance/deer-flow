@@ -76,6 +76,22 @@ class AgentRuns(Protocol):
         """
         ...
 
+    async def send_input(self, *, thread_id: str, run_id: str, text: str, mode: str, request_id: str, context: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        """Queue a new turn or steer the active Run; never change its model."""
+        ...
+
+    async def list_inputs(self, *, thread_id: str) -> dict[str, Any]:
+        """Read host-recorded input IDs/status, including across reconnects."""
+        ...
+
+    async def authorize_control(self, *, thread_id: str, run_id: str, clear_goal: bool = False) -> None:
+        """Recheck cancellation and optional Goal-write authority, without a write."""
+        ...
+
+    async def dispatch_input(self, *, thread_id: str, run_id: str, input_id: str) -> AgentRun:
+        """Dispatch a stored queued input after its Run, using ordinary admission."""
+        ...
+
     async def configuration_evidence(self, *, thread_id: str, run_id: str) -> dict[str, Any]:
         """Read immutable host evidence captured from this run's actual assembly.
 

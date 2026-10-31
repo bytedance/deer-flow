@@ -11,6 +11,88 @@ import {
 const ARTIFACT_PATH = "/artifact-fixtures/report.html";
 const UNSUPPORTED_ARTIFACT_PATH = "/artifact-fixtures/data.csv";
 
+test.each(["OK", "Error: failed", undefined])(
+  "write drafts respect a unique call's leading result: %s",
+  (result) => {
+    const owner = {
+      type: "ai",
+      id: "owner",
+      tool_calls: [
+        {
+          id: "call_0",
+          name: "write_file",
+          args: { path: ARTIFACT_PATH, content: "draft" },
+        },
+      ],
+    };
+    const messages = [
+      ...(result === undefined
+        ? []
+        : [{ type: "tool", tool_call_id: "call_0", content: result }]),
+      owner,
+    ];
+    expect(
+      buildWriteFileDraftContent({
+        filepath: `write-file:${ARTIFACT_PATH}?message_id=owner&tool_call_id=call_0`,
+        messages,
+      }),
+    ).toBe(result === "Error: failed" ? undefined : "draft");
+  },
+);
+
+test("write drafts use their own assistant occurrence when call ids repeat", () => {
+  const messages = [
+    {
+      type: "ai",
+      id: "a1",
+      tool_calls: [
+        {
+          id: "call_0",
+          name: "write_file",
+          args: { path: ARTIFACT_PATH, content: "first" },
+        },
+      ],
+    },
+    { type: "tool", id: "t1", tool_call_id: "call_0", content: "OK" },
+    {
+      type: "ai",
+      id: "a2",
+      tool_calls: [
+        {
+          id: "call_0",
+          name: "write_file",
+          args: { path: ARTIFACT_PATH, content: "failed" },
+        },
+      ],
+    },
+    {
+      type: "tool",
+      id: "t2",
+      tool_call_id: "call_0",
+      content: "Error: failed",
+    },
+    {
+      type: "ai",
+      id: "a3",
+      tool_calls: [
+        {
+          id: "call_0",
+          name: "write_file",
+          args: { path: ARTIFACT_PATH, content: "pending" },
+        },
+      ],
+    },
+  ];
+  const draft = (messageId: string) =>
+    buildWriteFileDraftContent({
+      filepath: `write-file:${ARTIFACT_PATH}?message_id=${messageId}&tool_call_id=call_0`,
+      messages,
+    });
+  expect(draft("a1")).toBe("first");
+  expect(draft("a2")).toBeUndefined();
+  expect(draft("a3")).toBe("pending");
+});
+
 test("allows in-progress write artifacts to render a throttled preview", () => {
   expect(
     getArtifactViewState({
