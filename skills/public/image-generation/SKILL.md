@@ -151,6 +151,12 @@ Read the following template file only when matching the user request.
 
 ## Output Handling
 
+Generation failures — missing credentials, invalid input, and provider errors —
+exit non-zero and write diagnostics to stderr. Reference-image validation
+warnings go to stderr as well, so a failed run leaves stdout empty. Successful
+generation exits 0 and prints its result to stdout. Do not present an image from
+a command that exited non-zero; a file left by an earlier run is not a new result.
+
 After generation:
 
 - Images are typically saved in `/mnt/user-data/outputs/`
@@ -216,8 +222,8 @@ the same structured JSON regardless of which provider is active. MiniMax `image-
 consumes a single text string, so the MiniMax path itself sends only the JSON `prompt`
 field (the other fields such as `style` / `composition` / `negative_prompt` apply to the
 Gemini path) and enables `prompt_optimizer` so MiniMax expands it server-side. MiniMax
-caps that prompt at 1500 characters; if the `prompt` field is longer, the script returns
-an error instead of calling the API. The Gemini path receives the full structured JSON.
+caps that prompt at 1500 characters; if the `prompt` field is longer, the command
+exits 1 and does not call the API. The Gemini path receives the full structured JSON.
 
 ## Notes
 
