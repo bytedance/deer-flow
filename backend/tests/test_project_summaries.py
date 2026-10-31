@@ -412,3 +412,95 @@ class TestGenerator:
 
 async def _fake_model(text: str, metadata: dict | None = None) -> OneshotLLMResult:
     return _result(text, metadata)
+
+
+async def test_stop_drains_workers_before_propagating_repeated_cancellation(repos, text_file, monkeypatch):
+    sf, projects, docs = repos
+    await _shelf_row(projects, docs)
+    _patch_source(monkeypatch, (text_file, None))
+    blocker = asyncio.Event()
+    model_started = asyncio.Event()
+
+    async def blocking_model(**kwargs):
+        model_started.set()
+        await blocker.wait()
+        return _result("finished before shutdown")
+
+    monkeypatch.setattr(summaries, "run_oneshot_llm_detailed", blocking_model)
+    generator = SummaryGenerator(
+        session_factory=sf,
+        paths=None,
+        app_config=_app_config(summary_concurrency=1),
+    )
+    await generator.start()
+    row = await docs.get("doc-1", user_id="u1")
+    assert generator.enqueue(document_id="doc-1", project_id=row["project_id"], user_id="u1") is True
+    await model_started.wait()
+    workers = list(generator._workers)
+
+    stop_task = asyncio.create_task(generator.stop())
+    waited_after_first_cancel = False
+    waited_after_second_cancel = False
+    try:
+
+        async def wait_until_stopping():
+            while not generator._stopping:
+                await asyncio.sleep(0)
+
+        await asyncio.wait_for(wait_until_stopping(), timeout=1)
+        stop_task.cancel()
+        await asyncio.sleep(0)
+        waited_after_first_cancel = not stop_task.done()
+        stop_task.cancel()
+        await asyncio.sleep(0)
+        waited_after_second_cancel = not stop_task.done()
+    finally:
+        # Always let the fake provider finish so a failing regression cannot
+        # leave a background worker behind in the test process.
+        blocker.set()
+        if not stop_task.done():
+            stop_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(stop_task, timeout=2)
+    await asyncio.wait_for(asyncio.gather(*workers, return_exceptions=True), timeout=2)
+
+    assert waited_after_first_cancel
+    assert waited_after_second_cancel
+    assert generator._workers == []
+    assert (await docs.get("doc-1", user_id="u1"))["summary"] == "finished before shutdown"
+
+
+async def test_start_after_stop_restarts_worker_pool(repos, text_file, monkeypatch):
+    sf, projects, docs = repos
+    await _shelf_row(projects, docs)
+    _patch_source(monkeypatch, (text_file, None))
+    monkeypatch.setattr(summaries, "run_oneshot_llm_detailed", lambda **kwargs: _fake_model("restarted summary"))
+    generator = SummaryGenerator(
+        session_factory=sf,
+        paths=None,
+        app_config=_app_config(summary_concurrency=1),
+    )
+
+    await generator.start()
+    first_workers = list(generator._workers)
+    await generator.stop()
+    assert generator._workers == []
+    assert all(task.done() for task in first_workers)
+
+    # A completed shutdown belongs to the previous lifecycle only. Starting
+    # again must clear it and reopen admission for the new worker pool.
+    await generator.start()
+    second_workers = list(generator._workers)
+    assert len(second_workers) == 1
+    assert not generator._stopping
+    assert all(not task.done() for task in second_workers)
+
+    row = await docs.get("doc-1", user_id="u1")
+    assert generator.enqueue(document_id="doc-1", project_id=row["project_id"], user_id="u1") is True
+    await _drain(generator)
+    await generator.stop()
+
+    assert (await docs.get("doc-1", user_id="u1"))["summary"] == "restarted summary"
+    assert generator._workers == []
+    assert all(task.done() for task in second_workers)
