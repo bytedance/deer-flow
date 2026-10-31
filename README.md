@@ -643,6 +643,12 @@ feeds Compose interpolation, Gateway/provisioner variables, and deployment
 secret checks. YAML and runtime-state locations remain separate selectors;
 see [production env files](backend/docs/CONFIGURATION.md#production-compose-env-files).
 
+For production Docker commands, exported `DEER_FLOW_HOME`,
+`DEER_FLOW_CONFIG_PATH`, and `DEER_FLOW_EXTENSIONS_CONFIG_PATH` may use relative
+paths, resolved from the checkout root. For example,
+`DEER_FLOW_HOME=./runtime make up` stores state and persisted secrets in the
+checkout's `runtime/` directory and mounts that same directory into the Gateway.
+
 For persistent deployments, configure `database.backend` as `sqlite` or
 `postgres`. The selected backend is shared by the LangGraph checkpointer,
 LangGraph Store, and DeerFlow application data. The deprecated `checkpointer`
