@@ -2812,3 +2812,156 @@ def test_gpt6_explicit_responses_config_wins_on_custom_endpoint(monkeypatch):
 
     assert captured.get("use_responses_api") is True
     assert captured.get("output_version") == "responses/v1"
+
+
+# ---------------------------------------------------------------------------
+# Tool-call thought_signature / reasoning_content capture and replay (issues #1180, #1790)
+#
+# Both fields are dropped by langchain's parser (``_convert_dict_to_message`` /
+# ``_convert_delta_to_message_chunk``), so a replay alone is a permanent no-op. These
+# tests drive the real inbound path with a raw gateway payload and then assert on the
+# outgoing request payload.
+# ---------------------------------------------------------------------------
+
+
+def _gateway_response(*, signature: str | None = "SIG_A==", reasoning: str | None = "R-THINK") -> dict:
+    """A raw OpenAI-compatible response as a gateway would return it."""
+    message: dict = {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+            {
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "web_fetch", "arguments": "{}"},
+            }
+        ],
+    }
+    if signature is not None:
+        message["tool_calls"][0]["thought_signature"] = signature
+    if reasoning is not None:
+        message["reasoning_content"] = reasoning
+    return {
+        "id": "chatcmpl-1",
+        "object": "chat.completion",
+        "created": 0,
+        "model": "gemini-2.5-flash",
+        "choices": [{"index": 0, "message": message, "finish_reason": "tool_calls"}],
+    }
+
+
+def _assistant_payload(model, messages):
+    payload = model._get_request_payload(messages)
+    return next(msg for msg in payload["messages"] if msg.get("role") == "assistant")
+
+
+def _replay_model():
+    from langchain_openai import ChatOpenAI
+
+    model_class = factory_module._with_assistant_replay(ChatOpenAI)
+    return model_class(model="gemini-2.5-flash", api_key="dummy", base_url="http://127.0.0.1:1/v1")
+
+
+def test_gateway_fields_survive_the_inbound_parse():
+    """The parser drops both fields; the capture half must put them back."""
+    from langchain_core.messages import HumanMessage
+
+    model = _replay_model()
+    assistant = model._create_chat_result(_gateway_response()).generations[0].message
+
+    assert assistant.additional_kwargs["reasoning_content"] == "R-THINK"
+    assert assistant.additional_kwargs["tool_calls"][0]["thought_signature"] == "SIG_A=="
+
+    payload = _assistant_payload(model, [HumanMessage("hi"), assistant])
+
+    assert payload["tool_calls"][0]["thought_signature"] == "SIG_A=="
+    assert payload["reasoning_content"] == "R-THINK"
+
+
+def test_nothing_is_invented_when_the_gateway_sent_no_fields():
+    """A provider that never issued the fields must not receive them."""
+    from langchain_core.messages import HumanMessage
+
+    model = _replay_model()
+    assistant = model._create_chat_result(_gateway_response(signature=None, reasoning=None)).generations[0].message
+
+    assert "reasoning_content" not in assistant.additional_kwargs
+    assert "tool_calls" not in assistant.additional_kwargs
+
+    payload = _assistant_payload(model, [HumanMessage("hi"), assistant])
+
+    assert "reasoning_content" not in payload
+    assert "thought_signature" not in payload["tool_calls"][0]
+
+
+def test_streaming_deltas_carry_the_fields_into_the_merged_message():
+    """Streaming deltas go through a different parser; capture must cover that too."""
+    from langchain_core.messages import AIMessageChunk, HumanMessage
+
+    model = _replay_model()
+
+    def chunk(reasoning: str, *, with_call: bool) -> dict:
+        delta: dict = {"role": "assistant", "reasoning_content": reasoning}
+        if with_call:
+            delta["tool_calls"] = [
+                {
+                    "index": 0,
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "web_fetch", "arguments": "{}"},
+                    "thought_signature": "SIG_A==",
+                }
+            ]
+        return {"id": "chatcmpl-1", "choices": [{"index": 0, "delta": delta}]}
+
+    first = model._convert_chunk_to_generation_chunk(chunk("R-", with_call=True), AIMessageChunk, None)
+    second = model._convert_chunk_to_generation_chunk(chunk("THINK", with_call=False), AIMessageChunk, None)
+    assert first is not None and second is not None
+
+    merged = first.message + second.message
+    payload = _assistant_payload(model, [HumanMessage("hi"), merged])
+
+    assert payload["reasoning_content"] == "R-THINK"
+    assert payload["tool_calls"][0]["thought_signature"] == "SIG_A=="
+
+
+def test_replay_subclass_is_memoized_per_client_class():
+    """The factory runs once per agent build, so the subclass must be reused."""
+    from langchain_openai import ChatOpenAI
+
+    assert factory_module._with_assistant_replay(ChatOpenAI) is factory_module._with_assistant_replay(ChatOpenAI)
+
+
+def test_stock_chatopenai_profile_gains_signature_replay(monkeypatch):
+    """A plain ChatOpenAI profile needs no opt-in: the factory adds the replay."""
+    from langchain_openai import ChatOpenAI
+
+    from deerflow.models.patched_openai import AssistantReplayMixin
+
+    cfg = _make_app_config([_make_model_with_extras("gemini-2.5-flash", base_url="http://gateway.example.com/v1")])
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(ChatOpenAI, {}))
+
+    model = factory_module.create_chat_model(name="gemini-2.5-flash")
+
+    assert isinstance(model, AssistantReplayMixin)
+
+
+def test_client_with_its_own_payload_builder_is_untouched():
+    """Providers that build their own payload keep full control (no double wrapping)."""
+    from deerflow.models.vllm_provider import VllmChatModel
+
+    assert factory_module._with_assistant_replay(VllmChatModel) is VllmChatModel
+
+
+def test_already_patched_class_is_not_rewrapped():
+    """Explicit PatchedChatOpenAI profiles keep the class the operator named."""
+    from deerflow.models.patched_openai import PatchedChatOpenAI
+
+    assert factory_module._with_assistant_replay(PatchedChatOpenAI) is PatchedChatOpenAI
+
+
+def test_non_openai_provider_is_untouched():
+    """ChatAnthropic has no OpenAI payload builder and must never be subclassed here."""
+    from langchain_anthropic import ChatAnthropic
+
+    assert factory_module._with_assistant_replay(ChatAnthropic) is ChatAnthropic
