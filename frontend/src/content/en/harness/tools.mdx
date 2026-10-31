@@ -113,7 +113,7 @@ Community tools connect the agent to external services. They are configured in `
 
 ### Web search
 
-<Tabs items={["DuckDuckGo (default)", "Tavily", "Brave", "Serply", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya", "You.com"]}>
+<Tabs items={["DuckDuckGo (default)", "Tavily", "Brave", "Serply", "SearchApi", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya", "You.com"]}>
   <Tabs.Tab>
 ```yaml
 tools:
@@ -151,6 +151,18 @@ tools:
     # vertical: news   # or scholar; defaults to regular Google Search
 ```
 Live Google results as JSON. Requires a [Serply](https://serply.io) API key. Set `vertical: news` or `vertical: scholar` to search Google News or Google Scholar with the same key; `gl` and `hl` set the result country and language. See the [Serply docs](https://serply.io/docs) for details.
+
+No extra dependency required.
+
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - use: deerflow.community.searchapi.tools:web_search_tool
+    api_key: $SEARCHAPI_API_KEY
+    # vertical: news   # or scholar; defaults to regular Google Search
+```
+Live Google results as JSON. Requires a [SearchApi](https://www.searchapi.io) API key. Set `vertical: news` or `vertical: scholar` to search Google News or Google Scholar with the same key; `gl` and `hl` set the result country and language; the agent's `time_range` maps to Google's time filter. See the [SearchApi docs](https://www.searchapi.io/docs/google) for details.
 
 No extra dependency required.
 
