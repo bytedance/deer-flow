@@ -303,6 +303,11 @@ channels:
   inbound_queue_maxsize: 1000
   max_concurrency: 5
   shutdown_grace_period_seconds: 3
+  # Optional browser-facing DeerFlow URL. When set, resolved HTML artifacts
+  # are also listed as authenticated Markdown links in IM replies; the file
+  # attachment remains the fallback. Env fallback:
+  # DEER_FLOW_CHANNELS_PUBLIC_BASE_URL.
+  public_base_url: https://deer.example.com
 
   telegram:
     enabled: true
