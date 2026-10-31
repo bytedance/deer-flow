@@ -97,6 +97,11 @@ _DEFAULT_WINDOW_SIZE = 20  # track last N tool calls
 _DEFAULT_MAX_TRACKED_THREADS = 100  # LRU limit for tracked thread/run scopes
 _DEFAULT_TOOL_FREQ_WARN = 30  # warn after 30 calls to the same tool type
 _DEFAULT_TOOL_FREQ_HARD_LIMIT = 50  # force-stop after 50 calls to the same tool type
+_DEFAULT_CYCLE_MIN_LEN = 2
+_DEFAULT_CYCLE_MAX_LEN = 4
+# A repeating cycle gets the same call budget as a single tool gets in Layer 2.
+_DEFAULT_CYCLE_WARN_CALLS = _DEFAULT_TOOL_FREQ_WARN
+_DEFAULT_CYCLE_HARD_CALLS = _DEFAULT_TOOL_FREQ_HARD_LIMIT
 _MAX_PENDING_WARNINGS_PER_RUN = 4
 # Stands in for ``read_file``'s omitted ``end_line`` in a call key: the read
 # runs to the last line, which is not the same window as any numbered bound.
@@ -254,6 +259,8 @@ _WARNING_MSG = "[LOOP DETECTED] You are repeating the same tool calls. Stop repe
 
 _TOOL_FREQ_WARNING_MSG = "[LOOP DETECTED] You have called {tool_name} {count} times without producing a final answer. Stop calling {tool_name} and wrap up now. " + _WRAP_UP_INSTRUCTIONS
 
+_TOOL_CYCLE_WARNING_MSG = "[LOOP DETECTED] Your last {count} tool calls repeat the cycle {cycle} without producing a final answer. Stop alternating between these tools and wrap up now. " + _WRAP_UP_INSTRUCTIONS
+
 _HARD_STOP_MSG = "[FORCED STOP] Repeated tool calls exceeded the safety limit. Producing final answer with results collected so far."
 
 _TOOL_FREQ_HARD_STOP_MSG = "[FORCED STOP] Tool {tool_name} called {count} times — exceeded the per-tool safety limit. Producing final answer with results collected so far."
@@ -265,7 +272,7 @@ class _LoopDecision:
 
     message: str
     action: Literal["warn", "hard_stop"]
-    detection_layer: Literal["identical_call_set", "tool_frequency"]
+    detection_layer: Literal["identical_call_set", "tool_frequency", "tool_cycle"]
     tool_names: tuple[str, ...]
     count: int
     threshold: int
@@ -307,6 +314,13 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             high-frequency tools (e.g. ``bash`` in batch pipelines) without
             weakening protection on all other tools. Default: ``None``
             (no overrides).
+        cycle_min_len: Minimum tool-name cycle length to detect. Default: 2.
+        cycle_max_len: Maximum tool-name cycle length to detect. Default: 4.
+        cycle_warn_calls: Number of consecutive calls that follow one
+            repeating tool-name cycle before injecting a warning. Default:
+            30, the same budget Layer 2 gives a single tool by default.
+        cycle_hard_calls: Number of consecutive calls that follow one
+            repeating tool-name cycle before forcing a stop. Default: 50.
     """
 
     def __init__(
@@ -318,6 +332,10 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         tool_freq_warn: int = _DEFAULT_TOOL_FREQ_WARN,
         tool_freq_hard_limit: int = _DEFAULT_TOOL_FREQ_HARD_LIMIT,
         tool_freq_overrides: dict[str, tuple[int, int]] | None = None,
+        cycle_min_len: int = _DEFAULT_CYCLE_MIN_LEN,
+        cycle_max_len: int = _DEFAULT_CYCLE_MAX_LEN,
+        cycle_warn_calls: int = _DEFAULT_CYCLE_WARN_CALLS,
+        cycle_hard_calls: int = _DEFAULT_CYCLE_HARD_CALLS,
     ):
         super().__init__()
         self.warn_threshold = warn_threshold
@@ -328,6 +346,13 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         self.tool_freq_hard_limit = tool_freq_hard_limit
         self._default_tool_freq_thresholds = (tool_freq_warn, tool_freq_hard_limit)
         self._tool_freq_overrides: dict[str, tuple[int, int]] = tool_freq_overrides or {}
+        self.cycle_min_len = cycle_min_len
+        self.cycle_max_len = cycle_max_len
+        self.cycle_warn_calls = cycle_warn_calls
+        self.cycle_hard_calls = cycle_hard_calls
+        # Layer 3 only inspects the tail, so the name history needs to hold the
+        # longest run it compares (whole cycles, rounded up) and no more.
+        self._cycle_window = max(self.cycle_warn_calls, self.cycle_hard_calls) + self.cycle_max_len
         # Layer 2's windowed frequency count can never exceed the deque length,
         # so the deque MUST be at least as long as the largest hard limit it is
         # compared against — otherwise the hard-stop branch is dead code. Do NOT
@@ -369,6 +394,11 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         # call. Cleared per name when the windowed count decays back below the
         # warn threshold, mirroring the hash-layer ``_warned`` pruning.
         self._tool_freq_warned: dict[_RunScopeKey, set[str]] = defaultdict(set)
+        # Layer 3: recent tool names per run scope (bounded to the cycle
+        # window) and the cycles already warned about, so a cycle warning is
+        # enqueued once. Cleared when the tail stops repeating a cycle.
+        self._cycle_name_history: defaultdict[_RunScopeKey, deque[str]] = defaultdict(lambda: deque(maxlen=self._cycle_window))
+        self._cycle_warned: dict[_RunScopeKey, set[str]] = defaultdict(set)
         # Per-thread/run queue of warnings to inject at the next model call.
         # Populated by ``after_model`` (detection) and drained by
         # ``wrap_model_call`` (injection); see module docstring.
@@ -396,6 +426,10 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             "tool_freq_warn": self.tool_freq_warn,
             "tool_freq_hard_limit": self.tool_freq_hard_limit,
             "tool_freq_overrides": self._tool_freq_overrides,
+            "cycle_min_len": self.cycle_min_len,
+            "cycle_max_len": self.cycle_max_len,
+            "cycle_warn_calls": self.cycle_warn_calls,
+            "cycle_hard_calls": self.cycle_hard_calls,
         }
 
     @classmethod
@@ -513,6 +547,8 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             self._tool_name_history.pop(evicted_key, None)
             self._tool_name_counter.pop(evicted_key, None)
             self._tool_freq_warned.pop(evicted_key, None)
+            self._cycle_name_history.pop(evicted_key, None)
+            self._cycle_warned.pop(evicted_key, None)
             self._drop_pending_warning_key_locked(evicted_key)
             logger.debug(
                 "Evicted loop tracking for thread/run scope (LRU)",
@@ -560,6 +596,33 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             self._touch_pending_warning_key_locked(pending_key)
             self._prune_pending_warning_state_locked(protected_key=pending_key)
 
+    @staticmethod
+    def _detect_cycle(names: list[str], min_len: int, max_len: int, min_calls: int) -> str | None:
+        """Return the tail cycle if the last ``min_calls`` tool names (rounded up
+        to whole cycles) repeat one short cycle.
+
+        A cycle must contain at least two distinct names; a single repeated
+        name is Layer 2's job.
+        """
+        for cycle_len in range(min_len, max_len + 1):
+            need = -(-min_calls // cycle_len) * cycle_len
+            if need < 2 * cycle_len or len(names) < need:
+                continue
+            tail = names[-need:]
+            cycle = tail[:cycle_len]
+            if len(set(cycle)) < 2:
+                continue
+            if all(tail[i : i + cycle_len] == cycle for i in range(0, need, cycle_len)):
+                return "→".join(cycle)
+        return None
+
+    @staticmethod
+    def _cycle_key(cycle: str) -> str:
+        """Return one name for a cycle and all its rotations, so ``a→b`` and
+        ``b→a`` (the same loop seen one call later) warn once."""
+        names = cycle.split("→")
+        return min("→".join(names[i:] + names[:i]) for i in range(len(names)))
+
     def _track_and_check(
         self,
         state: AgentState,
@@ -567,11 +630,14 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
     ) -> _LoopDecision | None:
         """Track tool calls and check for loops.
 
-        Two detection layers:
-          1. **Hash-based** (existing): catches identical tool call sets.
-          2. **Frequency-based** (new): catches the same *tool type* being
+        Three detection layers:
+          1. **Hash-based**: catches identical tool call sets.
+          2. **Frequency-based**: catches the same *tool type* being
              called many times with varying arguments (e.g. ``read_file``
              on 40 different files).
+          3. **Cycle-based**: catches a short repeating cycle of tool names
+             (e.g. ``web_search`` / ``web_fetch``) whose arguments differ on
+             every call, which neither layer above sees.
 
         Returns:
             A structured decision when a warning or hard stop is triggered.
@@ -717,6 +783,43 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
                     # future burst of this tool to warn again.
                     self._tool_freq_warned[scope_key].discard(name)
 
+            # --- Layer 3: short repeating tool-name cycles ---
+            cycle_names = self._cycle_name_history[scope_key]
+            cycle_names.extend(str(tc.get("name")) for tc in tool_calls if tc.get("name"))
+            recent_names = list(cycle_names)
+            hard_cycle = self._detect_cycle(recent_names, self.cycle_min_len, self.cycle_max_len, self.cycle_hard_calls)
+            if hard_cycle:
+                logger.error(
+                    "Tool-name cycle hard limit reached — forcing stop",
+                    extra={
+                        "thread_id": thread_id,
+                        "run_id": run_id,
+                        "cycle": hard_cycle,
+                        "count": self.cycle_hard_calls,
+                    },
+                )
+                return _LoopDecision(
+                    message=_HARD_STOP_MSG,
+                    action="hard_stop",
+                    detection_layer="tool_cycle",
+                    tool_names=tuple(hard_cycle.split("→")),
+                    count=self.cycle_hard_calls,
+                    threshold=self.cycle_hard_calls,
+                )
+            warn_cycle = self._detect_cycle(recent_names, self.cycle_min_len, self.cycle_max_len, self.cycle_warn_calls)
+            if warn_cycle is None:
+                # The tail no longer repeats a cycle; let a later one warn again.
+                self._cycle_warned.pop(scope_key, None)
+            elif warning is None and self._cycle_key(warn_cycle) not in self._cycle_warned.get(scope_key, set()):
+                warning = _LoopDecision(
+                    message=_TOOL_CYCLE_WARNING_MSG.format(count=self.cycle_warn_calls, cycle=warn_cycle),
+                    action="warn",
+                    detection_layer="tool_cycle",
+                    tool_names=tuple(warn_cycle.split("→")),
+                    count=self.cycle_warn_calls,
+                    threshold=self.cycle_warn_calls,
+                )
+
             if warning is not None:
                 if warning.detection_layer == "identical_call_set":
                     self._warned[scope_key].add(call_hash)
@@ -728,6 +831,17 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
                             "call_hash": call_hash,
                             "count": warning.count,
                             "tools": list(warning.tool_names),
+                        },
+                    )
+                elif warning.detection_layer == "tool_cycle":
+                    self._cycle_warned[scope_key].add(self._cycle_key("→".join(warning.tool_names)))
+                    logger.warning(
+                        "Tool-name cycle detected — injecting warning",
+                        extra={
+                            "thread_id": thread_id,
+                            "run_id": run_id,
+                            "cycle": "→".join(warning.tool_names),
+                            "count": warning.count,
                         },
                     )
                 else:
@@ -975,6 +1089,8 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
                     self._tool_name_history,
                     self._tool_name_counter,
                     self._tool_freq_warned,
+                    self._cycle_name_history,
+                    self._cycle_warned,
                 ):
                     for key in list(mapping):
                         if key[0] == thread_id:
@@ -993,6 +1109,8 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
                 self._tool_name_history.clear()
                 self._tool_name_counter.clear()
                 self._tool_freq_warned.clear()
+                self._cycle_name_history.clear()
+                self._cycle_warned.clear()
                 self._pending_warnings.clear()
                 self._pending_warning_touch_order.clear()
                 self._stop_reason.clear()
