@@ -67,6 +67,7 @@ _LEASE_START_BACKOFF_MAX_SECONDS = 300.0
 
 _CHANNELS_LANGGRAPH_URL_ENV = "DEER_FLOW_CHANNELS_LANGGRAPH_URL"
 _CHANNELS_GATEWAY_URL_ENV = "DEER_FLOW_CHANNELS_GATEWAY_URL"
+_CHANNELS_PUBLIC_BASE_URL_ENV = "DEER_FLOW_CHANNELS_PUBLIC_BASE_URL"
 
 
 def _channel_has_credentials(name: str, channel_config: dict[str, Any]) -> bool:
@@ -111,6 +112,14 @@ def _resolve_service_url(config: dict[str, Any], config_key: str, env_key: str, 
     if env_value:
         return env_value
     return default
+
+
+def _resolve_optional_service_url(config: dict[str, Any], config_key: str, env_key: str) -> str | None:
+    value = config.pop(config_key, None)
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    env_value = os.getenv(env_key, "").strip()
+    return env_value or None
 
 
 def _resolve_positive_int(config: dict[str, Any], config_key: str, default: int) -> int:
@@ -246,6 +255,7 @@ class ChannelService:
         self._get_stream_bridge = get_stream_bridge
         langgraph_url = _resolve_service_url(config, "langgraph_url", _CHANNELS_LANGGRAPH_URL_ENV, DEFAULT_LANGGRAPH_URL)
         gateway_url = _resolve_service_url(config, "gateway_url", _CHANNELS_GATEWAY_URL_ENV, DEFAULT_GATEWAY_URL)
+        public_base_url = _resolve_optional_service_url(config, "public_base_url", _CHANNELS_PUBLIC_BASE_URL_ENV)
         default_session = config.pop("session", None)
         channel_sessions = {name: channel_config.get("session") for name, channel_config in config.items() if isinstance(channel_config, dict)}
         from app.channels.dedupe_store import make_inbound_dedupe_store
@@ -257,6 +267,7 @@ class ChannelService:
             shutdown_grace_period_seconds=shutdown_grace_period_seconds,
             langgraph_url=langgraph_url,
             gateway_url=gateway_url,
+            public_base_url=public_base_url,
             default_session=default_session if isinstance(default_session, dict) else None,
             channel_sessions=channel_sessions,
             connection_repo=connection_repo,

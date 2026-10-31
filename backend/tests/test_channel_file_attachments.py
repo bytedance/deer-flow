@@ -1163,6 +1163,35 @@ class TestManagerArtifactResolution:
         assert "a.txt" in result
         assert "b.txt" in result
 
+    def test_format_artifact_text_links_html_when_public_base_url_is_set(self):
+        from app.channels.manager import _format_artifact_text
+
+        result = _format_artifact_text(
+            ["/mnt/user-data/outputs/report.html"],
+            thread_id="thread-1",
+            public_base_url="https://deer.example.com",
+        )
+        assert "[report.html](https://deer.example.com/api/threads/thread-1/artifacts/mnt/user-data/outputs/report.html)" in result
+
+    def test_format_artifact_text_leaves_non_html_and_invalid_base_urls_plain(self):
+        from app.channels.manager import _format_artifact_text
+
+        plain = _format_artifact_text(
+            ["/mnt/user-data/outputs/report.pdf"],
+            thread_id="thread-1",
+            public_base_url="https://deer.example.com",
+        )
+        assert "report.pdf" in plain
+        assert "https://deer.example.com" not in plain
+
+        invalid = _format_artifact_text(
+            ["/mnt/user-data/outputs/report.html"],
+            thread_id="thread-1",
+            public_base_url="javascript:alert(1)",
+        )
+        assert "https://" not in invalid
+        assert "javascript:" not in invalid
+
 
 # ---------------------------------------------------------------------------
 # URL-based inbound file reader (WeCom media / WeChat full_url fallback)
