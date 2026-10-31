@@ -206,6 +206,7 @@ not gate SSE recovery.
 | `llm.tool.result` | `message` | `on_tool_end()` |
 | `llm.error` | `trace` | `on_llm_error()` |
 | `context:memory` | `context` | `record_memory_context()` |
+| `run.answer_evidence` | `trace` | `record_final_answer_evidence()` |
 | `middleware:{tag}` | `middleware` | `record_middleware()` |
 
 Current middleware tags are `guardrail`, `loop_detection`,
@@ -265,6 +266,16 @@ cache-skip flags, summary and previous-summary lengths, the number of
 summarized messages, and the middleware's cumulative counters; see
 [summarization.md](summarization.md). Summary text and message content are
 never copied into this event.
+
+`run.answer_evidence` records one deterministic, lead-only observation of the
+terminal visible answer. Its content contains a schema marker,
+the final message ID and SHA-256, claimed and unmatched action categories,
+bounded lead receipt counters by fixed category/status, and a coverage marker. It never
+copies answer text, tool arguments, paths, commands, or tool output. It is an
+advisory execution record, not a truth or task-acceptance verdict, and it does
+not rewrite the final answer. When the run has no usable worker-owned run
+boundary, coverage is `unknown` and status is `insufficient_coverage`; receipts
+from a delegated child never count as the lead's own receipts.
 
 Ordinary task-tool subagents forward loop-detection, tool-promotion, and
 tool-progress appends to the parent run loop through dedicated recorder context
