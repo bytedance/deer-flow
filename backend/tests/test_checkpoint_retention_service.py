@@ -25,6 +25,7 @@ from uuid import uuid4
 import pytest
 from langchain_core.messages import AnyMessage, HumanMessage
 from langgraph.channels import DeltaChannel
+from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import END, START, StateGraph
@@ -222,6 +223,50 @@ async def _write_count(env: _SaverEnv, thread_id: str, checkpoint_id: str) -> in
 
 
 @pytest.mark.anyio
+async def test_postgres_fallback_requires_identical_channel_version_mapping() -> None:
+    """A copy must preserve which version belongs to which channel.
+
+    Comparing only the set of version values accepts a state-changing node
+    whose versions were reassigned between channels.  On Postgres that false
+    positive is destructive: the dropped writes marker makes the fallback the
+    final authority on whether exhaustive retention may delete the node.
+    """
+    saver = InMemorySaver()
+    thread_id = _thread_id()
+    base_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+    parent = empty_checkpoint()
+    parent["channel_versions"] = {"messages": "v1", "goal": "v2"}
+    parent_config = await saver.aput(
+        base_config,
+        parent,
+        {"source": "input", "step": 0, "parents": {}},
+        {},
+    )
+
+    swapped = copy.deepcopy(parent)
+    swapped.update(_new_checkpoint_marker())
+    swapped["channel_versions"] = {"messages": "v2", "goal": "v1"}
+    swapped_config = await saver.aput(
+        parent_config,
+        swapped,
+        {
+            "source": "update",
+            "step": 1,
+            "parents": {},
+            "run_durations": {"run-1": 7},
+        },
+        {},
+    )
+    swapped_id = swapped_config["configurable"]["checkpoint_id"]
+
+    report = await enforce_thread_retention(saver, thread_id)
+
+    assert report.deleted_checkpoint_ids == []
+    assert report.protected_head_ids == {"": swapped_id}
+    assert await saver.aget_tuple(swapped_config) is not None
+
+
+@pytest.mark.anyio
 async def test_linear_thread_prunes_nothing(saver_env: _SaverEnv) -> None:
     """A plain linear thread is one protected ancestor chain: nothing may go."""
     thread_id, checkpoint_ids, _message_ids = await _write_turns(saver_env, steps=4)
@@ -257,6 +302,8 @@ async def test_runtime_duration_leaf_pruned_by_default(saver_env: _SaverEnv) -> 
     assert duration_id not in await _listed_checkpoint_ids(saver_env, thread_id)
     resumed = await saver_env.saver.aget_tuple(_config_thread(thread_id, checkpoint_ids[-1]))
     assert resumed is not None
+    resumed_messages = resumed.checkpoint["channel_values"]["messages"]
+    assert [message.id for message in resumed_messages] == message_ids
     base = await _walk(saver_env, _config_thread(thread_id, checkpoint_ids[-1]), message_ids[-1])
     assert base is not None
     assert report.stats_after["checkpoint_rows"] == report.stats_before["checkpoint_rows"] - 1
@@ -303,9 +350,8 @@ async def test_postgres_round_trip_shape_pruned_by_default(saver_env: _SaverEnv)
     control = copy.deepcopy(dict(head.checkpoint))
     control.update(_new_checkpoint_marker())
     control["channel_versions"] = dict(control["channel_versions"])
-    # A version value no real channel would carry; the classifier compares the
-    # frozenset of versions against the parent's, so any strictly-different
-    # set is what matters.
+    # A version value no real channel would carry; any changed mapping must
+    # remain resumable rather than being classified as a verbatim copy.
     control["channel_versions"]["_control"] = "__control_version__"
     control_id = control["id"]
     control_meta = _pg_round_trip_meta(head.metadata)
