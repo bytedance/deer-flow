@@ -245,6 +245,40 @@ class _BoundAgentRuns:
         async with self._request("threads:read", thread_id) as request:
             return (await get_thread_state(thread_id, request)).model_dump(mode="json")
 
+    async def send_input(self, *, thread_id, run_id, text, mode, request_id, context=None):
+        from app.gateway.routers.thread_runs import create_run_input
+        from app.gateway.run_inputs import RunInputRequest
+
+        async with self._request("runs:create", thread_id) as request:
+            body = RunInputRequest(request_id=request_id, text=text, mode=mode, context=_json_object(context) or {})
+            body = body.model_copy(update={"request_id": hashlib.sha256(f"{self._plugin_namespace or 'host'}:{body.request_id}".encode()).hexdigest()})
+            return await create_run_input(thread_id, run_id, body, request)
+
+    async def dispatch_input(self, *, thread_id, run_id, input_id):
+        from app.gateway.run_inputs import dispatch_one_input
+
+        async with self._request("runs:create", thread_id) as request:
+            return await dispatch_one_input(thread_id, run_id, input_id, request)
+
+    async def list_inputs(self, *, thread_id):
+        from app.gateway.routers.thread_runs import get_thread_inputs
+
+        async with self._request("threads:read", thread_id) as request:
+            return await get_thread_inputs(thread_id, request)
+
+    async def authorize_control(self, *, thread_id, run_id, clear_goal=False):
+        from app.gateway.deps import get_run_manager
+
+        async with self._request("runs:cancel", thread_id) as request:
+            run = await get_run_manager(request).get(run_id, user_id=self._user_id)
+            if run is None or run.thread_id != thread_id:
+                raise AgentRunError(404, "Run unavailable")
+            if run.status not in ("pending", "running"):
+                raise AgentRunError(409, "Run already stopped")
+        if clear_goal:
+            async with self._request("threads:write", thread_id):
+                pass
+
     async def cancel(self, *, thread_id, run_id, execution_fence=None) -> None:
         from app.gateway.routers.thread_runs import cancel_run
 

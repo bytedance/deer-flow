@@ -10,6 +10,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 This section accumulates work toward the **2.3.0** milestone
 ([2.3.0](https://github.com/bytedance/deer-flow/milestone/4)).
 
+### Added
+
+- **chat:** Running Web chats offer Queue and Steer in the composer. Queue
+  waits for the next turn; Steer lets the main Agent handle updates while
+  native subagents pause and resume. Unconfirmed messages can be retried
+  after a Gateway restart. ([#7729])
+
 ### Fixed
 
 - **dev:** `scripts/dev_multi_instance.sh logs all` now prints the nginx logs
@@ -15941,3 +15948,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7665]: https://github.com/bytedance/deer-flow/pull/7665
 [#7723]: https://github.com/bytedance/deer-flow/pull/7723
 [#7727]: https://github.com/bytedance/deer-flow/pull/7727
+[#7729]: https://github.com/bytedance/deer-flow/pull/7729
