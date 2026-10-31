@@ -2526,6 +2526,20 @@ class RunManager:
             return
         if delay > 0:
             await asyncio.sleep(delay)
+        # A terminal worker can still own queued user turns. Retain it in
+        # the registry so shutdown drains it before closing shared storage.
+        async with self._run_registry_lock(run_id):
+            record = self._runs.get(run_id)
+            task = record.task if record is not None else None
+        if task is not None and task is not asyncio.current_task() and not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                current = asyncio.current_task()
+                if current is not None and current.cancelling():
+                    raise
+            except Exception:
+                logger.warning("Worker for run %s failed before record cleanup", run_id, exc_info=True)
         async with self._run_registry_lock(run_id):
             record = self._runs.pop(run_id, None)
             if record is not None:
@@ -2540,6 +2554,11 @@ class RunManager:
     def worker_id(self) -> str:
         """Return this worker's unique identifier."""
         return self._worker_id
+
+    @property
+    def input_store(self):
+        """The existing store, only when it supports atomic Run inputs."""
+        return self._store if getattr(self._store, "supports_run_inputs", False) is True else None
 
     async def owns_active_admission(self, record: RunRecord) -> bool:
         """Confirm the existing run slot without holding a SQL writer transaction."""

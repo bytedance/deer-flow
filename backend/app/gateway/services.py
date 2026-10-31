@@ -202,6 +202,10 @@ _SERVER_OWNED_MESSAGE_METADATA_KEYS = (
             SUBAGENT_RECEIPT_VERDICT_KEY,
             SUBAGENT_ACCEPTANCE_VERDICT_KEY,
             UNTRUSTED_INPUT_KEY,
+            "run_input_id",
+            "run_input_source",
+            "origin_task_id",
+            "subagent_pending",
         }
     )
     | PROVENANCE_KEYS
@@ -635,7 +639,7 @@ def _normalize_input_messages(
 
 #: State channels only the server writes. ``goal_outcome`` is the "goal met"
 #: record that clearing a satisfied goal writes; a caller copy would forge one.
-SERVER_OWNED_STATE_CHANNELS = frozenset({"sandbox", "thread_data", "viewed_images", "goal_outcome"})
+SERVER_OWNED_STATE_CHANNELS = frozenset({"sandbox", "thread_data", "viewed_images", "goal_outcome", "applied_run_inputs"})
 
 
 def _normalize_external_goal(value: Any, *, location: str) -> dict[str, Any] | None:
@@ -932,6 +936,7 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: frozenset[str] = (
             "__run_loop_detection_recorder",
             "__run_tool_promotion_recorder",
             "__run_tool_progress_recorder",
+            "__run_input_control",
             "langgraph_auth_user",
             "langgraph_auth_user_id",
             THREAD_INCARNATION_METADATA_GUARD_KEY,
@@ -2628,6 +2633,11 @@ async def start_run(
                 knowledge_scope=admitted_knowledge_scope,
                 **incarnation_kwargs,
             )
+            if execution_context.agent_runs is not None and run_mgr.input_store is not None:
+                from app.gateway.run_inputs import dispatch_queued_inputs
+                from deerflow.runtime.runs.inputs import RunInputs
+
+                await dispatch_queued_inputs(RunInputs(run_mgr.input_store, record.run_id, record.user_id), agent_runs=execution_context.agent_runs, thread_id=thread_id)
 
         try:
             async with goal_thread_lock(thread_id):
