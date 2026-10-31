@@ -167,8 +167,11 @@ def test_qrcode_bot_type_shares_the_integer_coercer():
         channel = WechatChannel(bus=MessageBus(), config={"bot_token": "test-token", "qrcode_bot_type": invalid})
         assert channel._qrcode_bot_type == WechatChannel.DEFAULT_QRCODE_BOT_TYPE
 
-    # Integral shapes still read through unchanged.
-    for value, expected in ((1, 1), ("2", 2), (4.0, 4)):
+    # Integral shapes still read through unchanged. A literal `0` is kept even
+    # though `False` falls back above: this key has no "0 = no limit" sentinel,
+    # so an explicit `0` is an operator's choice rather than an absent value and
+    # it goes out as-is (wechat.py:925). The asymmetry is deliberate.
+    for value, expected in ((1, 1), ("2", 2), (4.0, 4), (0, 0)):
         channel = WechatChannel(bus=MessageBus(), config={"bot_token": "test-token", "qrcode_bot_type": value})
         assert channel._qrcode_bot_type == expected
 
