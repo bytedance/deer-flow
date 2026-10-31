@@ -12,12 +12,18 @@ from deerflow.agents.middlewares.dangling_tool_call_middleware import (
     _normalize_tool_arguments,
     _parse_json_object,
 )
-from deerflow.agents.middlewares.loop_detection_middleware import _normalize_tool_call_args
+from deerflow.agents.middlewares.loop_detection_middleware import (
+    _hash_tool_calls,
+    _normalize_tool_call_args,
+)
 
-DEEP_ARRAY = "[" * 5000 + "]" * 5000
+# Above the JSON C parser's recursion limit on CPython 3.12 for the platforms this
+# repository builds on (Linux/macOS 64-bit allow roughly 8,000 levels).
+DEEP_DEPTH = 20_000
+DEEP_ARRAY = "[" * DEEP_DEPTH + "]" * DEEP_DEPTH
 
 
-def _deep_dict(depth: int = 5000) -> dict:
+def _deep_dict(depth: int = DEEP_DEPTH) -> dict:
     root: dict = {}
     node = root
     for _ in range(depth):
@@ -27,7 +33,7 @@ def _deep_dict(depth: int = 5000) -> dict:
     return root
 
 
-def _deep_list(depth: int = 5000) -> list:
+def _deep_list(depth: int = DEEP_DEPTH) -> list:
     root: list = []
     node = root
     for _ in range(depth):
@@ -43,6 +49,10 @@ def test_loop_detection_keeps_a_deep_json_string_as_opaque_args():
 
 def test_loop_detection_keeps_deep_structures_as_opaque_args():
     assert _normalize_tool_call_args(_deep_list()) == ({}, None)
+
+
+def test_loop_detection_hash_keeps_deep_dict_args_serializable():
+    assert _hash_tool_calls([{"name": "bash", "args": _deep_dict()}]) is not None
 
 
 def test_clarification_options_keep_a_deep_json_string_as_one_option():

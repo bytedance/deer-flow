@@ -109,6 +109,9 @@ _UI_NARRATION_TOOLS = frozenset({"bash", "ls", "glob", "grep"})
 
 type _RunScopeKey = tuple[str, str | None]
 
+# Deeply nested args cannot be serialized for a key; they collapse to one opaque key.
+_UNSERIALIZABLE_ARGS = "<unserializable>"
+
 
 def _stable_args_key(value: object) -> str | None:
     """Serialize opaque args for a stable key, or None past the recursion limit."""
@@ -198,7 +201,7 @@ def _stable_tool_key(name: str, args: dict, fallback_key: str | None) -> str:
     if name in {"write_file", "str_replace"}:
         if fallback_key is not None:
             return fallback_key
-        return json.dumps(args, sort_keys=True, default=str)
+        return _stable_args_key(args) or _UNSERIALIZABLE_ARGS
 
     if fallback_key is not None:
         return fallback_key
@@ -211,7 +214,7 @@ def _stable_tool_key(name: str, args: dict, fallback_key: str | None) -> str:
     # call look new (#1905).
     if name in _UI_NARRATION_TOOLS:
         args = {field: value for field, value in args.items() if field != "description"}
-    return json.dumps(args, sort_keys=True, default=str)
+    return _stable_args_key(args) or _UNSERIALIZABLE_ARGS
 
 
 def _hash_tool_calls(tool_calls: list[dict]) -> str:
