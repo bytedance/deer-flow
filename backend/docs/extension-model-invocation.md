@@ -5,7 +5,45 @@ An operator-authorized service can make an asynchronous, non-streaming text call
 using DeerFlow's configured models. The host constructs the provider client and
 returns plain data; the extension needs no provider credentials or LangChain dependency.
 
-## Grant and route logical roles
+## Reuse chat models from a plugin page
+
+Newer hosts provide `ActionContext.chat_models` to authenticated browser actions
+and explicit auth-disabled local requests. It is bound to the current user and
+plugin namespace and uses the same chat factory and model:use authorization as
+ordinary conversation requests. It is not injected into model tools, PAT calls,
+internal calls or requests with unstamped authentication provenance.
+
+```python
+from deerflow_extension_api import ModelInvocationRequest, ModelMessage
+
+
+async def generate(payload, ctx):
+    if ctx.chat_models is None:
+        return {"ok": False, "error": {"code": "CHAT_MODELS_UNAVAILABLE"}}
+    result = await ctx.chat_models.invoke(ModelInvocationRequest(
+        messages=[ModelMessage("user", payload["text"])],
+        model_name=payload.get("model_name"),
+        purpose="user-requested-draft",
+    ))
+    return {"content": result.content}
+```
+
+Use `/api/models` for the caller-visible catalog and send its configured model
+name. No `host_access.model_invocation.roles` entry is required. An omitted name
+uses the factory's default model, subject to the same user permission check;
+page pickers should send their visible default explicitly. No arbitrary provider
+URL or credentials can be supplied. Direct model names are rejected by the
+operator-granted service invoker below; its logical-role semantics are unchanged.
+
+Per Gateway/plugin budgets bound concurrency to 2, admitted work to 4, input to
+262144 characters and output to 65536 characters. The deadline is at most 120
+seconds and includes user authorization plus capacity waiting. Caller-requested
+shorter deadlines are honored. Revocation cancels callers (including those waiting
+for authorization); provider work that cannot stop retains its slot until it ends.
+Handles may support user-requested background drafts while the Gateway is alive,
+but do not provide durable execution, cross-process admission or automatic recovery.
+
+## Grant and route logical roles for services
 
 Add `host_access` to the relevant entry in the operator-owned `config.yaml`:
 

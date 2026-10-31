@@ -501,3 +501,9 @@ capability's plugin namespace and recheck the authenticated user as usual. Stamp
 fences on internal request state, never HTTP context/config. Forward admission to
 the RunStore transaction; require run heartbeats and a shared stream bridge. Fenced
 cancel uses the durable cancellation request, consumed by the existing child owner.
+
+ActionContext.chat_models is an optional user-bound page capability supplied by
+the Gateway, separate from service-held model_invoker grants. It accepts
+ModelInvocationRequest.model_name; service-held HostModelInvoker rejects that
+field and continues to require its configured model_role grant. Both reuse the
+same bounded provider path, with user authorization added by the Gateway adapter.

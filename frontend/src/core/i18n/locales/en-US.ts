@@ -95,6 +95,11 @@ export const enUS: Translations = {
         description:
           "Manage hierarchical spaces, resource sharing and inherited policies with explicit administrator grants. Requires installation and configuration; no management page or global retrieval ACL is included.",
       },
+      skillEvolution: {
+        title: "Agent self-evolution",
+        description:
+          "Let the agent propose, review and roll back improvements to its own skills from usage evidence, feedback and trajectory activations. Requires installation and operator grants; the host keeps skill validation and storage.",
+      },
       knowledgeManagement: {
         title: "Knowledge ingestion and processing",
         description:

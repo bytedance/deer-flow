@@ -13,6 +13,7 @@ from typing import Any, Literal
 
 from deerflow_extension_api.agent_runs import AgentRuns
 from deerflow_extension_api.auth import ExtensionPrincipal
+from deerflow_extension_api.model_invocation import ModelInvoker
 from deerflow_extension_api.settings import FrontendBinding, SettingsContribution, SettingsField, SettingValue
 
 
@@ -23,6 +24,9 @@ class ActionContext:
     agent_runs: AgentRuns | None = field(default=None, kw_only=True)
     # Host-stamped browser session; model tools and other callers default closed.
     interaction: Literal["session", "other"] = field(default="other", kw_only=True)
+    # Host-bound page capability: ordinary chat model selection and user ACLs.
+    # Never injected into model tools, PAT or internal calls.
+    chat_models: ModelInvoker | None = field(default=None, kw_only=True)
 
 
 @dataclass(frozen=True)

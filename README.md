@@ -2289,6 +2289,10 @@ This reports configured state without executing plugins or changing files; it do
 not verify package installation or successful Gateway loading. Configuration errors
 exit non-zero with diagnostics on stderr and no inventory on stdout.
 
+The extension directory includes [Agent self-evolution](examples/deerflow-extension-skill-evolution/README.md)
+with English and Chinese discovery metadata. A catalog entry does not confirm
+that the extension is installed or enabled in your deployment.
+
 A managed package declares exactly one standard PEP 621 entry point:
 
 ```toml
@@ -2320,6 +2324,15 @@ do **not** implement a learning/evolution plugin. Automatic changes are limited 
 the body and description of `SKILL.md`; changing permissions, supporting files,
 or enabled state is out of scope. The host contract requires `deerflow-extension-api==0.2.7`. See [Skill evolution host API](docs/skill-evolution-host.md)
 for deployment requirements, grants, recovery, and the plugin integration flow.
+
+The [Agent self-evolution extension](examples/deerflow-extension-skill-evolution/README.md)
+provides a modular workspace with annotation-driven Skill evolution and a reserved
+Memory evolution module. Trajectory data warms in the background when the page opens.
+Evolution uses the same models and user permissions as chat, without separate plugin model-role grants.
+Skill proposals are checked automatically after staging,
+and storage-backed evolution settings survive extension upgrades. Its existing `deerflow-extension-skill-evolution` package
+and configuration identifiers remain compatible.
+
 Once an owner is enrolled, use the Gateway for skill management: standalone SDK
 processes without its durable mutation runtime refuse enrolled skill access,
 including custom-skill YAML diagnostics. Gateway diagnostics recover pending

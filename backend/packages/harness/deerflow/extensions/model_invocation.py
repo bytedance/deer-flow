@@ -194,6 +194,8 @@ class HostModelInvoker:
         )
 
     async def _invoke(self, request, call):
+        if request.model_name is not None:
+            raise ModelInvocationFailed("Direct model names require browser-bound chat access")
         role = request.model_role if request.model_role is not None else "default"
         if not isinstance(role, str) or role not in self._grant.roles:
             raise ModelInvocationUnauthorized("Model role is not granted to this extension")
