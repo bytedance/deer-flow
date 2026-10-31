@@ -39,8 +39,8 @@ TABLE_MAP_SUFFIX = ".table_map.json"
 
 def compute_files_hash(files: list[str]) -> str:
     """Hash the ordered names and contents that determine the loaded table map."""
-    # A new namespace also prevents reuse of maps built by the old allocator.
-    hasher = hashlib.sha256(b"data-analysis-inputs-v2\0")
+    # Older caches could be modified by queries; rebuild from the source files.
+    hasher = hashlib.sha256(b"data-analysis-inputs-v3\0")
     for file_path in files:
         name = os.fsencode(os.path.basename(file_path))
         hasher.update(len(name).to_bytes(8, "big"))
@@ -597,6 +597,9 @@ def main():
             f"\nLoaded {len(table_map)} table(s): {', '.join(table_map.keys())}"
         )
         logger.info(f"Cached database saved to: {db_path}")
+        # Match cache hits: user SQL must never mutate the source snapshot.
+        con.close()
+        con = duckdb.connect(db_path, read_only=True)
 
     try:
         if args.action == "inspect":
