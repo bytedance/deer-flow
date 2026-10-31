@@ -1832,6 +1832,8 @@ class WechatChannel(Channel):
 
     @staticmethod
     def _coerce_float(value: Any, default: float) -> float:
+        if isinstance(value, bool):
+            return default
         try:
             parsed = float(value)
         except (OverflowError, TypeError, ValueError):
@@ -1840,9 +1842,26 @@ class WechatChannel(Channel):
 
     @staticmethod
     def _coerce_int(value: Any, default: int) -> int:
+        """Coerce a configured integer setting into an ``int``, falling back to *default*.
+
+        Both config families read through here: the four attachment byte limits
+        and ``qrcode_bot_type``. A ``bool`` is not a count and neither is a
+        fractional float: a bare ``int()`` turns ``true`` into ``1`` — a
+        one-byte limit that drops every attachment, or a bot type nobody asked
+        for — and silently truncates ``3.5``. An unquoted ``.inf`` makes
+        ``int()`` raise ``OverflowError`` out of the constructor, so the whole
+        channel refuses to start. All three fall back to *default* here, the
+        same bar ``_coerce_float`` applies one function above. A literal ``0``
+        is kept because it is the documented "no limit" value for the byte
+        limits; ``qrcode_bot_type`` has no such sentinel, but it also has no
+        documented meaning for a bool or fractional value, so falling back to
+        the default bot type is the closest thing to "leave it alone".
+        """
+        if isinstance(value, bool) or (isinstance(value, float) and not value.is_integer()):
+            return default
         try:
             return int(value)
-        except (TypeError, ValueError):
+        except (OverflowError, TypeError, ValueError):
             return default
 
     @staticmethod
