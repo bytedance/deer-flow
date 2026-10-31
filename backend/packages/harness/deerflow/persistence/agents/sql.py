@@ -132,13 +132,25 @@ class SqlAgentStore(AgentStore):
         stmt = select(AgentRow).where(AgentRow.user_id == effective_user).order_by(AgentRow.name.asc())
         with self._Session() as session:
             rows = list(session.execute(stmt).scalars())
-        return [parse_agent_config(r.config or {}, r.name) for r in rows]
+        agents: list[AgentConfig] = []
+        for row in rows:
+            try:
+                agents.append(parse_agent_config(row.config or {}, row.name))
+            except Exception as e:  # noqa: BLE001 — one unreadable row must not hide the rest
+                logger.warning("Skipping agent '%s' for user %s: %s", row.name, effective_user, e)
+        return agents
 
     def list_all(self) -> list[tuple[str, AgentConfig]]:
         stmt = select(AgentRow).order_by(AgentRow.user_id.asc(), AgentRow.name.asc())
         with self._Session() as session:
             rows = list(session.execute(stmt).scalars())
-        return [(r.user_id, parse_agent_config(r.config or {}, r.name)) for r in rows]
+        result: list[tuple[str, AgentConfig]] = []
+        for row in rows:
+            try:
+                result.append((row.user_id, parse_agent_config(row.config or {}, row.name)))
+            except Exception as e:  # noqa: BLE001 — one unreadable row must not hide the rest
+                logger.warning("list_all: skipping agent %s/%s: %s", row.user_id, row.name, e)
+        return result
 
     def create(self, name: str, config: dict, soul: str, *, user_id: str | None = None) -> None:
         effective_user = user_id or get_effective_user_id()
