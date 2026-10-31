@@ -67,8 +67,9 @@ def test_upload_business_failure_includes_log_id(kind, tmp_path):
         None,
         SimpleNamespace(image_key=None, file_key=None),
         SimpleNamespace(image_key="", file_key=""),
+        SimpleNamespace(image_key=123, file_key=456),
     ],
-    ids=["no-data", "none-key", "empty-key"],
+    ids=["no-data", "none-key", "empty-key", "non-str-key"],
 )
 def test_upload_success_without_key_raises_runtime_error(kind, data, tmp_path):
     channel = _channel()
