@@ -144,28 +144,36 @@ def extract_skills(
     normalized_root = posixpath.normpath(skills_root.rstrip("/") or "/")
     read_names = frozenset(read_tool_names)
 
-    skill_paths_by_id: dict[str, str] = {}
+    # Read results pair with reads in message order, one occurrence per call.
+    # Providers may reuse one ``tool_call_id`` across runs and thread history
+    # keeps both turns side by side, so a bare id -> path map would let a later
+    # read claim an earlier result and drop that skill from the reminder.
+    pending_reads_by_id: dict[str, list[str | None]] = {}
     for message in messages:
         if not isinstance(message, AIMessage):
             continue
         for tool_call in message.tool_calls or []:
-            if _tool_call_name(tool_call) not in read_names:
-                continue
             tool_call_id = _tool_call_id(tool_call)
-            raw_path = _tool_call_path(tool_call)
-            path = _normalize_under_root(raw_path, normalized_root) if raw_path else None
-            if tool_call_id and path and _is_skill_file(path):
-                skill_paths_by_id[tool_call_id] = path
+            if tool_call_id is None:
+                continue
+            read_path: str | None = None
+            if _tool_call_name(tool_call) in read_names:
+                raw_path = _tool_call_path(tool_call)
+                normalized_path = _normalize_under_root(raw_path, normalized_root) if raw_path else None
+                if normalized_path and _is_skill_file(normalized_path):
+                    read_path = normalized_path
+            pending_reads_by_id.setdefault(tool_call_id, []).append(read_path)
 
     entries: list[SkillEntry] = []
     for index, message in enumerate(messages):
         if not isinstance(message, ToolMessage):
             continue
-        if getattr(message, "status", "success") == "error":
-            continue
         tool_call_id = str(message.tool_call_id) if message.tool_call_id else ""
-        expected_path = skill_paths_by_id.get(tool_call_id)
+        pending_reads = pending_reads_by_id.get(tool_call_id)
+        expected_path = pending_reads.pop(0) if pending_reads else None
         if expected_path is None:
+            continue
+        if getattr(message, "status", "success") == "error":
             continue
         if (message.additional_kwargs or {}).get(SKILL_CONTEXT_DENIED_KEY):
             # The skill:activate decision denied this read's skill — the
