@@ -9,6 +9,7 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
+import pytest_asyncio
 from langchain.agents import create_agent
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage
@@ -109,8 +110,11 @@ async def _run_until_recursion_cap(tmp_path: Path, *, with_goal: bool) -> dict[s
     }
 
 
-@pytest.fixture(autouse=True)
-def _no_network(monkeypatch):
+# Async so the guard is installed inside the test's event loop: on Windows the Proactor
+# loop connects its self-pipe over loopback while being created, which a sync fixture
+# would block before the test runs.
+@pytest_asyncio.fixture(autouse=True)
+async def _no_network(monkeypatch):
     def deny(*args, **kwargs):
         raise AssertionError("this regression must not use the network")
 
