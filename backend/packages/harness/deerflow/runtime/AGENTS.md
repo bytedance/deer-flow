@@ -190,6 +190,16 @@ journal and emit no such event. Recorder failures are fail-open.
 
 **RunJournal write ownership** (`runtime/journal.py`): a batch handed to `store.put_batch()` is owned by a journal task until its outcome settles, so a cancelled `flush()`/`close()` caller detaches the waiter and re-raises `CancelledError` only after the owned write is drained — never abandon or replay the in-flight batch. A generic `put_batch` exception is an ambiguous outcome: it is quarantined, blocks every successor write, and makes `flush()`/`close()` report non-success instead of replaying the batch. Only `RunEventStoreNotCommittedError` means the store proved none of the batch committed and may be deliberately retried; stores must raise it instead of a bare exception for that case. Explicit `flush()` and `close(flush=True)` share one per-journal operation lock, so a successor batch can never overtake an unsettled predecessor, every waiter observes the same settlement, and a normal close detaches only after the whole buffer has settled. `close(flush=False)` is a separate abort path that never queues on that lock: it revokes write ownership before its first await and makes any in-flight flush report non-success rather than a late success. A cancelled event write or pending progress snapshot waits a bounded time to settle; `Task.cancelled()`/a clean return does not prove an uncooperative backend's I/O actually stopped, so this is a bound on waiting, not a termination guarantee. A task that outlives that bound stays supervised until it settles, so its late result is retrieved and logged rather than dropped while lease-loss finalization continues. Background-write and progress-reporter warnings log the exception type and message, whose text is backend-controlled and may echo driver-level parameters, so log consumers must not treat it as payload-free.
 
+`_SubagentEventBuffer` drains owned writes through caller cancellation. Only
+`RunEventStoreNotCommittedError` allows retry; three consecutive failures or an
+unknown outcome stop persistence and release pending payloads. Finalization logs
+unconfirmed/skipped counts and at most 20 task IDs; SSE and business status remain
+independent. DB pre-commit errors and fully rolled-back JSONL batches emit the
+explicit signal; a JSONL batch with an earlier committed thread never does.
+Regression: `test_subagent_store_retry_contract.py` and
+`test_worker_subagent_write_outcome.py` (Worker and reopened JSONL).
+
+
 **JSONL record boundaries** (`runtime/events/store/jsonl.py`): thread reads,
 run reads, and sequence recovery split on physical newlines. Do not use
 `str.splitlines()`: U+0085/U+2028/U+2029 inside valid JSON strings must remain

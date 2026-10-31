@@ -2613,6 +2613,15 @@ error and timeout policies. Repeated cancellation does not abandon this cleanup.
 Task-stop reports an interrupted execution as aborted, preserving any completed,
 failed or timed-out outcome already published before cancellation.
 
+Sub-agent step history is persisted separately from live streaming. A batch
+retries only when the store proves that no event committed (for example, a DB
+failure before commit or a successful JSONL rollback). After three consecutive
+failed attempts, or any ambiguous exception or store cancellation, persistence
+stops for that run without replaying possibly committed events. Pending payloads
+are released; finalization logs unconfirmed and skipped event counts with a
+bounded sample of affected task IDs. Live delivery and the agent's outcome
+continue normally, but reloaded step history may be incomplete.
+
 Ordinary `task` calls accept `context_mode="isolated"` (default) or
 `context_mode="snapshot"`. Isolated tasks receive their delegated prompt as
 before. Snapshot tasks also receive the parent's retained conversation and
