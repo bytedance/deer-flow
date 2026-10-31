@@ -1,9 +1,7 @@
-"""The Perplexity community tool must not occupy an executor thread or block the loop.
+"""Keep network I/O on the event loop and config/metadata reads off it.
 
-Mirrors ``test_youcom_search_async.py``: the request is awaited on the event
-loop thread through ``httpx.AsyncClient`` (no executor thread is held for the
-round-trip), the config lookup that reads the config file stays off the loop,
-and the cold ``User-Agent`` metadata read runs on an executor exactly once.
+Cache the User-Agent so sequential warm calls need no metadata read or
+executor dispatch.
 """
 
 import asyncio
@@ -65,7 +63,7 @@ async def test_perplexity_search_request_runs_on_the_event_loop(monkeypatch) -> 
 
     result = await perplexity_tools.web_search_tool.ainvoke({"query": "vector databases"})
 
-    assert '"error": "No results found"' in result
+    assert '"error": "No results found; try a broader query or relax the search filters"' in result
     assert request_threads, "the request must reach the transport"
     assert all(thread == loop_thread for thread in request_threads)
     assert clients == ["AsyncClient"], "the request must go out through the async client"
@@ -90,7 +88,7 @@ async def test_perplexity_config_lookup_does_not_block_loop(monkeypatch) -> None
 
     result = await perplexity_tools.web_search_tool.ainvoke({"query": "vector databases"})
 
-    assert '"error": "No results found"' in result
+    assert '"error": "No results found; try a broader query or relax the search filters"' in result
     assert config_threads, "config lookup must run"
     assert all(thread != loop_thread for thread in config_threads)
     assert clients == ["AsyncClient"], "the request must go out through the async client"

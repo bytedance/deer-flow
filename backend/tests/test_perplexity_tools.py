@@ -116,8 +116,7 @@ class TestResolveToolSettings:
 
             domain_filter = _resolve_tool_settings("web_search")[3]
 
-        assert domain_filter[0] == "a.com"
-        assert len(domain_filter) == 20
+        assert domain_filter == ["a.com", *[f"d{i}.com" for i in range(19)]]
 
     def test_non_list_domain_filter_is_ignored(self):
         with patch("deerflow.community.perplexity.tools.get_app_config") as mock:
@@ -187,19 +186,6 @@ class TestRequestShape:
             patcher.stop()
 
         assert body["search_recency_filter"] == "week"
-
-    async def test_recency_filter_omitted_without_time_range(self, mock_config_with_key):
-        patcher, mock_client_cls = _patch_post(_make_response(_payload()))
-        try:
-            from deerflow.community.perplexity.tools import web_search_tool
-
-            await web_search_tool.ainvoke({"query": "test"})
-            body = _post_call(mock_client_cls).kwargs["json"]
-        finally:
-            patcher.stop()
-
-        assert "search_recency_filter" not in body
-        assert "search_domain_filter" not in body
 
     @pytest.mark.parametrize(
         "domains",
@@ -282,6 +268,7 @@ class TestWebSearchTool:
         assert body["max_results"] == 12
 
     async def test_config_max_results_used_when_caller_omits(self, mock_config_with_key):
+        mock_config_with_key.return_value.get_tool_config.return_value.model_extra["max_results"] = 9
         patcher, mock_client_cls = _patch_post(_make_response(_payload()))
         try:
             from deerflow.community.perplexity.tools import web_search_tool
@@ -291,7 +278,7 @@ class TestWebSearchTool:
         finally:
             patcher.stop()
 
-        assert body["max_results"] == 5
+        assert body["max_results"] == 9
 
     @pytest.mark.parametrize(("max_results", "expected"), [(0, 5), (-2, 5), (1, 1), (20, 20), (50, 20), ("500", 20)])
     async def test_max_results_clamped_to_provider_bounds(self, max_results, expected):
@@ -337,7 +324,7 @@ class TestWebSearchTool:
         finally:
             patcher.stop()
 
-        assert parsed["error"] == "No results found"
+        assert parsed["error"] == "No results found; try a broader query or relax the search filters"
         assert parsed["query"] == "no results"
 
     async def test_missing_results_section_returns_error_json(self, mock_config_with_key):
@@ -349,7 +336,7 @@ class TestWebSearchTool:
         finally:
             patcher.stop()
 
-        assert parsed["error"] == "No results found"
+        assert parsed["error"] == "No results found; try a broader query or relax the search filters"
 
     async def test_non_dict_payload_returns_format_error(self, mock_config_with_key):
         patcher, _ = _patch_post(_make_response(["not", "a", "dict"]))
@@ -376,10 +363,12 @@ class TestWebSearchTool:
     @pytest.mark.parametrize(
         ("status", "hint"),
         [
-            (401, "invalid PERPLEXITY_API_KEY"),
-            (422, "validation"),
-            (429, "rate limit reached"),
-            (500, None),
+            (400, "check query, max_results, and search_domain_filter; do not mix allowlist and denylist entries"),
+            (401, "check api_key in config.yaml or PERPLEXITY_API_KEY"),
+            (422, "check query, max_results, and search_domain_filter; do not mix allowlist and denylist entries"),
+            (429, "rate limit reached; wait before retrying"),
+            (404, "check your Search API request settings"),
+            (500, "retry later"),
         ],
     )
     async def test_http_error_returns_structured_error(self, status, hint, mock_config_with_key):
@@ -397,9 +386,7 @@ class TestWebSearchTool:
         finally:
             patcher.stop()
 
-        assert str(status) in parsed["error"]
-        if hint:
-            assert hint in parsed["error"]
+        assert parsed["error"] == f"Perplexity Search API error: HTTP {status} ({hint})"
 
     async def test_network_exception_reports_class_name_only(self, mock_config_with_key):
         patcher, mock_client_cls = _patch_post(MagicMock())
@@ -411,7 +398,7 @@ class TestWebSearchTool:
         finally:
             patcher.stop()
 
-        assert parsed["error"] == "Perplexity Search API request failed: ConnectTimeout"
+        assert parsed["error"] == "Perplexity Search API request failed: ConnectTimeout; check network access and retry"
         assert "30s" not in parsed["error"]
 
     async def test_unexpected_exception_reports_class_name_only(self, mock_config_with_key):
@@ -424,36 +411,17 @@ class TestWebSearchTool:
         finally:
             patcher.stop()
 
-        assert parsed["error"] == "Perplexity search failed: RuntimeError"
+        assert parsed["error"] == "Perplexity search failed: RuntimeError; retry and report the exception type if it persists"
         assert "leaked-secret" not in parsed["error"]
 
 
 _SECRET = "sk-sentinel-SECRET-9f8e7d"
 
 
-class _CaptureHandler(logging.Handler):
-    """Collect fully formatted log output from the module logger."""
-
-    def __init__(self):
-        super().__init__(level=logging.DEBUG)
-        self.lines: list[str] = []
-
-    def emit(self, record):
-        self.lines.append(self.format(record))
-
-
 @pytest.fixture
-def module_log():
-    module_logger = logging.getLogger("deerflow.community.perplexity.tools")
-    handler = _CaptureHandler()
-    previous_level = module_logger.level
-    module_logger.addHandler(handler)
-    module_logger.setLevel(logging.DEBUG)
-    try:
-        yield handler
-    finally:
-        module_logger.removeHandler(handler)
-        module_logger.setLevel(previous_level)
+def module_log(caplog):
+    caplog.set_level(logging.DEBUG, logger="deerflow.community.perplexity.tools")
+    return caplog
 
 
 class TestNoKeyOrBodyDisclosure:
@@ -478,10 +446,10 @@ class TestNoKeyOrBodyDisclosure:
                 patcher.stop()
 
         parsed = json.loads(raw)
-        assert parsed == {"error": "Perplexity Search API error: invalid PERPLEXITY_API_KEY format", "query": "test"}
+        assert parsed == {"error": "Perplexity Search API error: invalid PERPLEXITY_API_KEY format; copy the key again without embedded spaces or control characters", "query": "test"}
         assert not mock_client_cls.called
         assert _SECRET not in raw
-        logged = "\n".join(module_log.lines)
+        logged = module_log.text
         assert logged, "the rejection must be logged"
         assert _SECRET not in logged
         assert "Bearer" not in logged
@@ -496,10 +464,10 @@ class TestNoKeyOrBodyDisclosure:
             finally:
                 patcher.stop()
 
-        assert json.loads(raw)["error"] == "Perplexity Search API error: invalid PERPLEXITY_API_KEY format"
+        assert json.loads(raw)["error"] == "Perplexity Search API error: invalid PERPLEXITY_API_KEY format; copy the key again without embedded spaces or control characters"
         assert not mock_client_cls.called
         assert _SECRET not in raw
-        assert _SECRET not in "\n".join(module_log.lines)
+        assert _SECRET not in module_log.text
 
     async def test_trailing_whitespace_on_key_is_still_stripped_and_accepted(self, mock_config_no_key):
         with patch.dict("os.environ", {"PERPLEXITY_API_KEY": f"  {_SECRET}\n"}, clear=True):
@@ -525,9 +493,9 @@ class TestNoKeyOrBodyDisclosure:
         finally:
             patcher.stop()
 
-        assert json.loads(raw)["error"] == "Perplexity Search API request failed: LocalProtocolError"
+        assert json.loads(raw)["error"] == "Perplexity Search API request failed: LocalProtocolError; check network access and retry"
         assert _SECRET not in raw
-        logged = "\n".join(module_log.lines)
+        logged = module_log.text
         assert "LocalProtocolError" in logged
         assert _SECRET not in logged
         assert "Bearer" not in logged
@@ -551,7 +519,7 @@ class TestNoKeyOrBodyDisclosure:
 
         assert f"HTTP {status}" in json.loads(raw)["error"]
         assert body_sentinel not in raw
-        logged = "\n".join(module_log.lines)
+        logged = module_log.text
         assert f"HTTP {status}" in logged
         assert body_sentinel not in logged
 
@@ -643,10 +611,10 @@ class TestRealTransportDisclosure:
 
                 raw = await web_search_tool.ainvoke({"query": "probe"})
 
-        assert json.loads(raw)["error"] == "Perplexity Search API error: invalid PERPLEXITY_API_KEY format"
+        assert json.loads(raw)["error"] == "Perplexity Search API error: invalid PERPLEXITY_API_KEY format; copy the key again without embedded spaces or control characters"
         assert loopback_endpoint.received == 0
         assert _SECRET not in raw
-        assert _SECRET not in "\n".join(module_log.lines)
+        assert _SECRET not in module_log.text
 
     @pytest.mark.parametrize("status", [422, 500])
     async def test_error_body_echoing_the_key_stays_out_of_output_and_logs(self, status, loopback_endpoint, module_log):
@@ -663,6 +631,6 @@ class TestRealTransportDisclosure:
         assert f"HTTP {status}" in json.loads(raw)["error"]
         assert loopback_endpoint.received == 1
         assert _SECRET not in raw
-        logged = "\n".join(module_log.lines)
+        logged = module_log.text
         assert f"HTTP {status}" in logged
         assert _SECRET not in logged

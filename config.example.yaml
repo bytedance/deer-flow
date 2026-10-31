@@ -1093,7 +1093,7 @@ tools:
   # - name: web_search
   #   group: web
   #   use: deerflow.community.perplexity.tools:web_search_tool
-  #   max_results: 5                  # Clamped to 1-20 by the Perplexity Search API
+  #   max_results: 5                  # This provider caps positive counts at 20; invalid counts use 5
   #   # search_type: web              # web (default) or fast
   #   # search_domain_filter: ["example.com", "example.org"]    # Include only these domains (up to 20)
   #   # search_domain_filter: ["-excluded.com"]                 # Or exclude domains; one mode per request

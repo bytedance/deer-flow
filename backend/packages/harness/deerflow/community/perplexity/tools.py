@@ -7,8 +7,8 @@ providers return, so switching ``use:`` needs no prompt changes.
 Configuration (``config.yaml`` ``tools:`` entry, all optional except the key):
 
 - ``api_key``: Perplexity API key; falls back to ``PERPLEXITY_API_KEY``.
-- ``max_results``: default result count when the agent omits it (default 5,
-  clamped to 1-20 by the API).
+- ``max_results``: configured count when the agent omits it (default 5).
+  Invalid or nonpositive values use 5; this provider caps positive counts at 20.
 - ``search_type``: ``web`` (default) or ``fast``.
 - ``search_domain_filter``: up to 20 domains, either all included or all
   excluded (prefix every entry with ``-`` to exclude); one mode per request.
@@ -45,14 +45,14 @@ _MAX_DOMAIN_FILTERS = 20
 _DEFAULT_SEARCH_TYPE = "web"
 _SEARCH_TYPES = ("web", "fast")
 _TIMEOUT_S = 30.0
-# Actionable hints for the failures an operator can actually fix. Any other
-# status just reports its code.
+_VALIDATION_HINT = "check query, max_results, and search_domain_filter; do not mix allowlist and denylist entries"
 _STATUS_HINTS = {
-    401: "invalid PERPLEXITY_API_KEY",
-    422: "request rejected by the Perplexity Search API validation",
-    429: "rate limit reached",
+    400: _VALIDATION_HINT,
+    401: "check api_key in config.yaml or PERPLEXITY_API_KEY",
+    422: _VALIDATION_HINT,
+    429: "rate limit reached; wait before retrying",
 }
-_INVALID_KEY_FORMAT_MESSAGE = "invalid PERPLEXITY_API_KEY format"
+_INVALID_KEY_FORMAT_MESSAGE = "invalid PERPLEXITY_API_KEY format; copy the key again without embedded spaces or control characters"
 
 
 def _is_valid_api_key(api_key: str) -> bool:
@@ -80,8 +80,7 @@ def _resolve_tool_settings(tool_name: str) -> tuple[str | None, object, str, lis
     """Resolve the key, `max_results`, `search_type` and domain filter in one config read.
 
     Config resolution stats the config file, so callers must run this off the
-    agent event loop. Reading every option from a single resolution keeps the
-    tool from touching the config file twice per call.
+    agent event loop.
     """
     config = get_app_config().get_tool_config(tool_name)
     max_results = None
@@ -108,9 +107,7 @@ def _resolve_tool_settings(tool_name: str) -> tuple[str | None, object, str, lis
         elif configured_domains is not None:
             logger.warning("Invalid Perplexity search_domain_filter=%r; expected a list of domains", configured_domains)
     if api_key is None:
-        env_key = os.getenv("PERPLEXITY_API_KEY")
-        if isinstance(env_key, str) and env_key.strip():
-            api_key = env_key.strip()
+        api_key = os.getenv("PERPLEXITY_API_KEY", "").strip() or None
     return api_key, max_results, search_type, domain_filter
 
 
@@ -122,11 +119,11 @@ async def _resolve_user_agent() -> str:
 
 
 def _count_for_request(value: object) -> int:
-    """Coerce ``max_results`` via the shared owner, then apply the API's 1-20 cap.
+    """Coerce ``max_results`` via the shared owner, then cap it at 20.
 
     ``deerflow.community.search_max_results.coerce_max_results`` owns what
-    "invalid" means; the 20-result cap stays here because clamping policy is
-    deliberately per-provider.
+    "invalid" means. The cap stays here because the API rejects counts above
+    20 and clamping policy is per-provider.
     """
     return min(
         coerce_max_results(value, provider="Perplexity", logger=logger, default=_DEFAULT_MAX_RESULTS),
@@ -141,7 +138,7 @@ async def _search(
     search_type: str,
     domain_filter: list[str],
     time_range: SearchTimeRange | None,
-) -> dict:
+) -> object:
     payload: dict = {"query": query, "max_results": count, "search_type": search_type}
     if domain_filter:
         payload["search_domain_filter"] = domain_filter
@@ -165,7 +162,7 @@ async def web_search_tool(query: str, max_results: int | None = None, time_range
 
     Args:
         query: Search keywords describing what you want to find. Be specific for better results.
-        max_results: Maximum number of search results to return. If omitted, uses the configured value (default 5). Clamped to 1-20.
+        max_results: Maximum results. If omitted, uses the configured value or 5. Invalid or nonpositive values use 5; positive counts are capped at 20.
         time_range: Optional relative publication/update window. Use only when the request requires recent results.
     """
     # Config resolution can read files; keep it off the event loop.
@@ -178,7 +175,6 @@ async def web_search_tool(query: str, max_results: int | None = None, time_range
     if not _is_valid_api_key(api_key):
         logger.error("Perplexity search aborted: %s", _INVALID_KEY_FORMAT_MESSAGE)
         return json.dumps({"error": f"Perplexity Search API error: {_INVALID_KEY_FORMAT_MESSAGE}", "query": query}, ensure_ascii=False)
-    # Honor the caller-supplied max_results; fall back to config only when omitted.
     if max_results is None:
         max_results = configured_max_results
     count = _DEFAULT_MAX_RESULTS if max_results is None else _count_for_request(max_results)
@@ -189,34 +185,32 @@ async def web_search_tool(query: str, max_results: int | None = None, time_range
         # Log the status only. Response bodies can echo request details and
         # are not needed to act on any of these failures.
         status = e.response.status_code
-        hint = _STATUS_HINTS.get(status)
-        message = f"Perplexity Search API error: HTTP {status}"
-        if hint:
-            message = f"{message} ({hint})"
+        hint = _STATUS_HINTS.get(status, "retry later" if status >= 500 else "check your Search API request settings")
+        message = f"Perplexity Search API error: HTTP {status} ({hint})"
         logger.error("%s", message)
         return json.dumps({"error": message, "query": query}, ensure_ascii=False)
     except httpx.HTTPError as e:
         # Transport and protocol errors (LocalProtocolError is an httpx.HTTPError)
         # can embed the full Authorization header in str(e); report the class only.
-        message = f"Perplexity Search API request failed: {type(e).__name__}"
+        message = f"Perplexity Search API request failed: {type(e).__name__}; check network access and retry"
         logger.error("%s", message)
         return json.dumps({"error": message, "query": query}, ensure_ascii=False)
     except Exception as e:
-        message = f"Perplexity search failed: {type(e).__name__}"
+        message = f"Perplexity search failed: {type(e).__name__}; retry and report the exception type if it persists"
         logger.error("%s", message)
         return json.dumps({"error": message, "query": query}, ensure_ascii=False)
 
     if not isinstance(data, dict):
         logger.error("Perplexity returned an unexpected payload type: %s", type(data).__name__)
         return json.dumps(
-            {"error": "Perplexity returned an unexpected response format", "query": query},
+            {"error": "Perplexity returned an unexpected response format; retry and report this error if it persists", "query": query},
             ensure_ascii=False,
         )
 
     raw_results = data.get("results")
     results = [r for r in raw_results if isinstance(r, dict)] if isinstance(raw_results, list) else []
     if not results:
-        return json.dumps({"error": "No results found", "query": query}, ensure_ascii=False)
+        return json.dumps({"error": "No results found; try a broader query or relax the search filters", "query": query}, ensure_ascii=False)
 
     normalized_results = [
         {
