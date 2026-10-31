@@ -2805,7 +2805,9 @@ async def _prepare_goal_continuation_input(
         return None
 
     try:
-        evaluator_model = evaluator_model_factory() if evaluator_model_factory is not None else None
+        # The factory builds the evaluator on first use, which can read local
+        # credentials; keep that off the event loop (see utils/AGENTS.md).
+        evaluator_model = await run_assembly(evaluator_model_factory) if evaluator_model_factory is not None else None
         for attempt in range(2):
             try:
                 evaluation = await evaluate_goal_completion(
