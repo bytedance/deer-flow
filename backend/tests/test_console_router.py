@@ -540,7 +540,7 @@ class TestMalformedUsageTolerance:
     of the request and turned every console endpoint into a 500.
     """
 
-    @pytest.mark.parametrize("value", ["n/a", "1.5", None, float("nan"), float("inf"), True, False, -7, [1], {"n": 1}])
+    @pytest.mark.parametrize("value", ["n/a", "1.5", None, float("nan"), float("inf"), True, False, -7, [1], {"n": 1}, 10**400])
     def test_token_count_falls_back_to_zero_for_unusable_values(self, value):
         assert console._token_count(value) == 0
 
@@ -562,6 +562,17 @@ class TestMalformedUsageTolerance:
         # Both counters coerce to 0 -> the bucket is skipped, and the run keeps
         # its legacy run-level totals priced against model_name.
         row = next(r for r in runs["runs"] if r["run_id"] == "r-junk")
+        assert row["cost"] == pytest.approx(_R1_COST_UNCACHED)
+
+    def test_run_cost_survives_counters_beyond_float_range(self, session_factory, monkeypatch, client):
+        # A JSON integer is not bounded by the float range: 10**400 parses as
+        # an exact int, and dividing it by a million raised OverflowError out
+        # of /runs. It is junk like "n/a", so it must not reach _token_cost.
+        _insert_usage_row(session_factory, "r-huge", {"minimax-m2": {"input_tokens": 10**400, "output_tokens": 0}})
+        monkeypatch.setattr(console, "get_app_config", lambda: _priced_config())
+        resp = client.get("/api/console/runs", params={"limit": 50})
+        assert resp.status_code == 200
+        row = next(r for r in resp.json()["runs"] if r["run_id"] == "r-huge")
         assert row["cost"] == pytest.approx(_R1_COST_UNCACHED)
 
     def test_non_finite_pricing_is_ignored_instead_of_500(self, session_factory, monkeypatch, client):

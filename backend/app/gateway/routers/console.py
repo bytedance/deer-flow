@@ -248,14 +248,21 @@ def _token_count(value: object) -> int:
     counters the same way keeps one junk bucket from failing the whole report
     with a 500. Booleans are rejected because ``int(True) == 1`` would invent a
     token, and negatives cannot be spend.
+
+    A JSON integer is not bounded by the float range: ``10**400`` parses as an
+    exact ``int``, and ``_token_cost`` then divides it by a million, which
+    raises ``OverflowError`` on the way back to a float. Such a value is junk
+    in exactly the same way as ``"n/a"``, so it is rejected here too.
     """
     if isinstance(value, bool):
         return 0
     try:
         count = int(value)  # type: ignore[arg-type]
+        if count < 0 or not math.isfinite(float(count)):
+            return 0
     except (TypeError, ValueError, OverflowError):
         return 0
-    return max(count, 0)
+    return count
 
 
 def _usage_is_missing(usage: dict) -> bool:
