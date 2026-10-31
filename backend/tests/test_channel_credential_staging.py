@@ -16,9 +16,12 @@ from app.channels.runtime_config_store import ChannelRuntimeConfigStore, SqlChan
 from app.channels.wechat import WechatChannel
 
 
-def _age(path: Path) -> None:
+def _age(path: Path, *, follow_symlinks: bool = True) -> None:
     old = time.time() - 2 * 24 * 60 * 60
-    os.utime(path, (old, old), follow_symlinks=False)
+    # The flag is only meaningful for the symlink aged in the POSIX-only block below,
+    # where the mtime must land on the link itself rather than on its target. os.utime
+    # raises NotImplementedError for it on Windows, so callers there never pass it.
+    os.utime(path, (old, old), follow_symlinks=follow_symlinks)
 
 
 def _load(kind: str, target: Path):
@@ -95,7 +98,7 @@ def test_restart_sweeps_crash_orphans_without_touching_other_state(tmp_path, mon
     if os.name != "nt":
         link = tmp_path / f".{target.name}.deerflow-symlink.tmp"
         link.symlink_to(retained[0])
-        _age(link)
+        _age(link, follow_symlinks=False)
         retained.append(link)
     if not destination_exists:
         target.unlink()
