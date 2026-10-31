@@ -12,13 +12,28 @@
 本节累积面向 **2.3.0** 里程碑（[2.3.0](https://github.com/bytedance/deer-flow/milestone/4)）的工作。
 截至 2026-10-28，该里程碑已合并 **1068 个拉取请求**。
 
+### 新增
+
+- **对话：** 网页端在任务运行时，可在输入框选择 Queue（排队执行）或 Steer（调整当前任务）。
+  Queue 等当前任务结束后再执行下一条消息；Steer 让主 Agent 先处理新要求，原生子 Agent 可暂停后恢复。
+  Gateway 重启后，尚未确认生效的消息可以手动重试。([#7729])
+
 ### 修复
+
+- **开发：** `scripts/dev_multi_instance.sh logs all` 现在除两个 Gateway 日志外也会输出
+  nginx 日志；此前它只输出 Gateway 日志，与不带参数的 `logs` 相同。`logs nginx` 与
+  `logs all` 还会包含 `nginx.log`（nginx 启动命令自身的输出），此前没有任何选项会输出它。
+  ([#7723])
 
 - **记忆：** `GET /api/memory/config` 与 `/api/memory/status` 现在会把 `backend_config`
   中的凭据值（`api_key`、token、密码、`Authorization` 请求头，任意层级）遮蔽为 `***`。
   此前它们按加载结果原样返回配置，而 `$VAR` 引用此时已被解析，因此 DeerMem 提取模型的密钥
   或 Honcho 的 `api_key` 会以明文返回给所有拥有 `memory:read` 的调用方；在默认关闭授权时，
   这就是所有已登录用户。非机密配置项、`api_key_env` 变量名和未设置的值保持不变。([#7665])
+- **网关：** `GET /threads/{thread_id}/token-usage` 现在在工作线程里解析实时配置。
+  此前 `build_context_usage` 直接内联调用该访问器，而 `get_app_config()` 每次调用都会重新校验
+  ——它先对整个 `config.yaml` 取摘要，再对 `extensions_config.json` 做同样的事——所以在有人打开
+  会话视图前刚好改了配置，就会让运行、消息流与其他线程共用的网关事件循环整段停顿。响应内容不变。([#7727])
 
 ## [2.2.0] — 2026-10-29
 
@@ -12695,3 +12710,6 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7651]: https://github.com/bytedance/deer-flow/pull/7651
 [#7659]: https://github.com/bytedance/deer-flow/pull/7659
 [#7665]: https://github.com/bytedance/deer-flow/pull/7665
+[#7723]: https://github.com/bytedance/deer-flow/pull/7723
+[#7727]: https://github.com/bytedance/deer-flow/pull/7727
+[#7729]: https://github.com/bytedance/deer-flow/pull/7729

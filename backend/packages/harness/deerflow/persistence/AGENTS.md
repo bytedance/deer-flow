@@ -12,6 +12,14 @@ Alembic stamp/upgrade workers started inside `bootstrap_schema()` remain owned b
 
 On SQLite, `BEGIN IMMEDIATE` takes the database-wide write lock, so every unrelated writer (run status, thread metadata, the scheduler) waits for the transaction and fails with `database is locked` after `busy_timeout` (30s). Do slow work such as document conversion before opening a locked transaction; lock only to revalidate and publish, as `ProjectDocumentRepository.publish_under_live_lock` does. `tests/test_project_document_tools.py::TestConversionSerialization` pins this.
 
+## Batch lease recovery
+
+Batch lease recovery includes paused parents only when they have expired active
+items. Reconcile through the existing owner/expiry fence, then skip promotion and
+claiming while paused. Preserve explicit retry/resume and terminal projection;
+`tests/test_paused_batch_lease_recovery.py` covers HTTP, restart and export, and
+`test_batch_lease_lifecycle.py` covers a concurrent renewal.
+
 ## Unique-key upserts
 
 A repository method that creates or updates a row by a unique key must survive two first writers: both can miss the SELECT, and the later INSERT raises `IntegrityError`, a 500 for the caller. Use a dialect `on_conflict_do_update` when every key column is non-null, or retry the select-then-write after rolling back the session, as `ChannelConnectionRepository.upsert_connection` / `set_thread_id` and `FeedbackRepository.upsert` do. Feedback keeps the retry because `user_id` is nullable and a NULL key never conflicts, so ON CONFLICT would stop updating the NULL-user row.

@@ -110,6 +110,7 @@ from deerflow.workspace_changes.types import WorkspaceSnapshot
 
 from .manager import ConflictError, RunManager, RunRecord, RunStartOutcome
 from .naming import resolve_root_run_name
+from .schemas import GOAL_RUN_HARD_STOP_REASONS as _GOAL_RUN_HARD_STOP_REASONS
 from .schemas import RunStatus, ThreadOperationKind
 from .store.base import canonical_run_created_at
 
@@ -236,6 +237,7 @@ def _release_run_scoped_references(
     """Remove worker-owned graph references once durable finalization is done."""
     internal_context_keys = {
         "__run_journal",
+        "__run_input_control",
         CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
         CONVERSATION_READER_CONTEXT_KEY,
         SCHEDULER_CAPABILITY_CONTEXT_KEY,
@@ -615,6 +617,7 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: Final[frozenset[str]] = (
             CONVERSATION_READER_CONTEXT_KEY,
             SCHEDULER_CAPABILITY_CONTEXT_KEY,
             AGENT_RUNS_CONTEXT_KEY,
+            "__run_input_control",
             THREAD_INCARNATION_CONTEXT_KEY,
             THREAD_INCARNATION_METADATA_GUARD_KEY,
             "is_subagent",
@@ -1065,6 +1068,7 @@ async def run_agent(
     goal_evaluator_model: Any | None = None
     delivery_content: dict[str, Any] | None = None
     goal_completion: _GoalCompletionCandidate | None = None
+    input_control = None
     scheduled_goal: GoalState | None = None
     final_goal_verdict: dict[str, Any] | None = None
     produced_output_paths: list[str] | None = None
@@ -1349,6 +1353,27 @@ async def run_agent(
         # runtime-internal channel; user code must not depend on the key name.
         if journal is not None:
             runtime_ctx["__run_journal"] = journal
+        if ctx.agent_runs is not None and run_manager.input_store is not None and not runtime_ctx.get("non_interactive"):
+            from .input_control import RunInputControl
+            from .inputs import INPUT_CONTEXT_KEY, RunInputs
+
+            def record_deferred_result(message):
+                if journal is not None and not record.ownership_lost:
+                    journal.record_deferred_task_result(message)
+
+            def record_steered_response(message):
+                if journal is not None and not record.ownership_lost:
+                    journal.record_steered_response(message)
+
+            input_control = RunInputControl(
+                RunInputs(run_manager.input_store, run_id, record.user_id, run_manager.worker_id),
+                agent_runs=ctx.agent_runs,
+                thread_id=thread_id,
+                checkpointer=checkpointer,
+                on_result=record_deferred_result,
+                on_replan=record_steered_response,
+            )
+            runtime_ctx[INPUT_CONTEXT_KEY] = input_control
         _install_runtime_context(config, runtime_ctx)
         runtime = Runtime(context=cast(Any, runtime_ctx), store=store)
         config.setdefault("configurable", {})["__pregel_runtime"] = runtime
@@ -1544,6 +1569,8 @@ async def run_agent(
 
         async def _stream_once(input_payload: Any, stream_config: RunnableConfig) -> None:
             nonlocal llm_error_fallback_message
+            if input_control is not None:
+                await input_control.inputs.reopen()
             file_tool_chunk_batcher = _LargeFileToolChunkBatcher() if "messages-tuple" in requested_modes else None
             try:
                 async with _checkpoint_thread_lock(thread_id):
@@ -1682,6 +1709,8 @@ async def run_agent(
 
         evidence_execution_started = True
         await _stream_once(graph_input, initial_runnable_config)
+        if input_control is not None:
+            await input_control.confirm_checkpoint()
         while not record.abort_event.is_set() and not llm_error_fallback_message and (journal is None or not journal.had_llm_error_fallback):
             continuation_input = await _prepare_goal_continuation_input(
                 bridge=bridge,
@@ -1861,6 +1890,15 @@ async def run_agent(
             nonlocal runtime_ctx, subagent_events, task_info, task_store, terminal_error_frame
 
             try:
+                if input_control is not None:
+                    try:
+                        await input_control.close()
+                        if not record.ownership_lost:
+                            await input_control.confirm_checkpoint()
+                            if record.status != RunStatus.success or record.stop_reason:
+                                await input_control.inputs.pause()
+                    except Exception:
+                        logger.warning("Could not finalize Run input receipts for %s", run_id, exc_info=True)
                 if record.ownership_lost:
                     logger.warning(
                         "Skipping durable finalization for run %s because this worker no longer owns its lease",
@@ -2302,7 +2340,7 @@ async def run_agent(
 # Helpers
 # ---------------------------------------------------------------------------
 
-_GOAL_RUN_HARD_STOP_REASONS = frozenset({"token_capped", "loop_capped"})
+
 # Stops that end the run with an error before the turn has a final reply: the
 # goal stands down without an evaluator call, since there is nothing to judge.
 _GOAL_RUN_ERROR_STOP_REASONS = frozenset({_RECURSION_CAPPED_STOP_REASON})

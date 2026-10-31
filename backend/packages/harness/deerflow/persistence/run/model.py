@@ -28,6 +28,9 @@ class RunRow(Base):
     multitask_strategy: Mapped[str] = mapped_column(String(20), default="reject")
     metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
     kwargs_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    # Independent of ordinary Run snapshots so late progress writes cannot
+    # overwrite inputs accepted by another Gateway.
+    run_inputs_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     error: Mapped[str | None] = mapped_column(Text)
     stop_reason: Mapped[str | None] = mapped_column(String(50))
     # Final evaluator outcome, written atomically with terminal run status.

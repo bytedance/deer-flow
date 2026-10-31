@@ -722,6 +722,10 @@ DeerFlow still uses `Forwarded` / `X-Forwarded-*` headers to recover the browser
 > normal `end` signal. A new reader whose initial attachment loses the race with
 > cleanup receives a gap so it can recover the saved result.
 >
+> In-memory stream events retain the payload as it was published. Reusing a
+> producer's data object or editing a received event does not change another
+> subscriber's output or reconnect replay.
+>
 > During SSE replay-gap recovery, the Web UI preserves a reconnect pointer claimed by another run while durable state is loading. An older recovery cannot overwrite that pointer when it rejoins its own stream. Even a stale foreign pointer is preserved, so the next reload may first check that run before active-run recovery rejoins, adding a reconnect cycle.
 >
 > Store-only SSE and `/wait` consumers can finish after a heartbeat when run-manager
@@ -1101,6 +1105,14 @@ Signed-in users' notification toggle, default model, conversation mode, and reas
 
 In a new chat, the submitted question stays above its streamed reasoning and
 tool steps while the server creates the conversation and confirms the message.
+
+While a Web task is running, choose **Queue** to send text for the next turn or
+**Steer** to update the current work. Native subagents pause at a safe boundary
+while the main Agent handles the update; active tool calls finish first. Stop
+keeps the Goal, while explicitly replacing the work can clear it. Unapplied
+messages survive database-backed Gateway restarts and require **Send again**;
+interrupted child side effects are not replayed automatically. Existing execution
+limits still apply. Busy input currently accepts text only.
 
 Markdown and JSON conversation exports from the chat header or sidebar read all
 persisted history pages, including earlier turns outside the loaded view or
@@ -1774,6 +1786,8 @@ Discovery follows operator-managed directory symlinks, but skips links back to a
 
 Skill Markdown and bundled text resources use UTF-8. Skill-creator CLI and review utilities read and write text explicitly as UTF-8 so localized skills behave consistently across operating systems.
 
+For standalone skill exports, the bundled skill creator's `scripts/package_skill.py` can be run by file path from any directory, or as `python -m scripts.package_skill` from the skill-creator directory. Both entry points validate the skill before writing a `.skill` archive.
+
 Custom-skill writes and security-scan staging preserve submitted line endings
 on every platform, so the scanner checks the bytes that will be stored.
 
@@ -2219,7 +2233,7 @@ Follow-up suggestions also check `model:use` before calling the selected model, 
 For vision-capable agents, `view_image` and the subsequent model-context image read also require `sandbox:execute`. Allowing the tool name alone does not grant image-file access; a role denied sandbox execution cannot reread previously recorded image metadata after its permissions change. External run input and thread-state updates cannot set `viewed_images` or `thread_data`; when a saved image is read from a host copy, its path must resolve to the current user's thread and the recorded virtual image path.
 Each model request includes at most four recently viewed images and 28 MiB of base64 image data. Images excluded by these limits are reported as omitted; the agent can call `view_image` again to bring one back into context.
 
-Advanced deployments can also extend the agent runtime itself by declaring `AgentMiddleware` classes under `extensions.middlewares` in `config.yaml` or `extensions_config.json`. Each entry is a `module.path:ClassName` string (zero-argument constructor) or an object `{class, kwargs}` whose `kwargs` are passed to the constructor. `kwargs` values must be JSON types (object, array, string, number, boolean, or null); YAML dates and timestamps are coerced to ISO strings so they match JSON. DeerFlow loads the same configured list into the lead-agent and subagent pipelines after their built-in runtime middlewares and loop/token guards, but before the terminal-response/safety/clarification tail, so enterprise forks can add domain guardrails, tool-call governance, or observability hooks without patching the built-in middleware builders. Missing packages, invalid classes, broken modules, and constructor errors fail loudly at agent creation. Treat `config.yaml` and `extensions_config.json` as trusted operator-controlled files: middleware paths are code execution, just like custom tool, model, sandbox, guardrail, MCP server, and MCP interceptor declarations. Gateway skill/MCP toggle endpoints preserve this field but do not expose an API write path for `extensions.middlewares`. Separate lead-only/subagent-only middleware lists are not supported yet.
+Advanced deployments can also extend the agent runtime itself by declaring `AgentMiddleware` classes under `extensions.middlewares` in `config.yaml` or `extensions_config.json`. Each entry is a `module.path:ClassName` string (zero-argument constructor) or an object `{class, kwargs, apply_to}` whose `kwargs` are passed to the constructor. Optional `apply_to` selects `both` (default), `lead`, or `subagent`; legacy strings still apply to both chains. `kwargs` values must be JSON types (object, array, string, number, boolean, or null); YAML dates and timestamps are coerced to ISO strings so they match JSON. DeerFlow loads the selected configured entries into the lead-agent and subagent pipelines after their built-in runtime middlewares and loop/token guards, but before the terminal-response/safety/clarification tail, so enterprise forks can add domain guardrails, tool-call governance, or observability hooks without patching the built-in middleware builders. Missing packages, invalid classes, broken modules, and constructor errors fail loudly at agent creation. Treat `config.yaml` and `extensions_config.json` as trusted operator-controlled files: middleware paths are code execution, just like custom tool, model, sandbox, guardrail, MCP server, and MCP interceptor declarations. Gateway skill/MCP toggle endpoints preserve this field but do not expose an API write path for `extensions.middlewares`. Entries excluded from a chain are not imported or constructed there. Invalid scope values fail configuration validation, and selected entries retain their relative order. Packaged extensions continue to use their existing `AgentScope` contract.
 
 For packaged and configurable runtime integrations, use DeerFlow's extension manager.
 It accepts a Python package requirement, a public HTTPS Git URL, or a local directory, installs the
@@ -2793,6 +2807,8 @@ Explicitly enabled nested `task` delegation propagates omitted opaque source IDs
 
 If an item's final lease expires after exhausting the retry budget, the batch reaches a terminal state once all items are terminal: `failed` when none succeeded, or `completed` when at least one succeeded. The item remains `failed` in both cases so partial results stay visible.
 
+Paused batches also reconcile expired attempts after a worker exits. Retryable items remain queued without starting new work until you explicitly resume the batch; exhausted attempts become failed and can be retried individually.
+
 Direct `create_deerflow_agent(...)` integrations can own the same boundary explicitly instead of relying on Gateway startup. Construct one `SubagentRuntime` and share it across every graph in that application; its `max_running`, ordinary per-run total, bound `task` tool, and optional durable-batch tools then use the same caller-owned snapshot and execution controller. A runtime with a batch repository owns a worker and must be started before graph construction and stopped during application shutdown:
 
 ```python
@@ -2984,6 +3000,8 @@ DeerFlow doesn't just *talk* about doing things. It has its own computer.
 Each task gets its own execution environment with a full filesystem view — skills, workspace, uploads, outputs. The agent reads, writes, and edits files. It can view images and, when configured safely, execute shell commands.
 
 The read-before-write gate ties each read mark to that `read_file` call's result, including custom tools returning multi-message `Command` updates. An unrelated result cannot authorize a write after a failed read or hide a successful read.
+
+Deeply nested JSON returned by tools, including `read_file`, keeps its original content when result analysis reaches the JSON parser's depth limit. Explicit tool failures remain errors with an unknown category when depth prevents analysis.
 
 On Linux and macOS, local sandbox `write_file` replacements and `str_replace` stage complete text before replacing the destination, so write, flush or publication errors retain the previous file. Existing write access is checked; ownership, permission bits, ACLs and extended attributes are transferred before writing staging content. Failure to transfer metadata aborts the save. Successful revisions get a fresh modification time, including empty saves; source-descriptor cleanup errors are warnings and do not change the save result. Files with set-id bits, macOS file flags or content-bound Linux privilege attributes are refused unchanged. Replacement requires parent-directory write access and publishes a new inode; other hard links retain the previous version. Symlinks follow the existing path-validation rules. Append writes, other host platforms (including Windows), shell writes and remote providers keep their existing behavior. This is not a concurrent-writer or power-loss recovery guarantee.
 
@@ -3257,6 +3275,12 @@ when retries are exhausted. Turn Live off and on to start a fresh retry budget.
 **Visible Tool-Run Completion**: For interactive turns, DeerFlow retries an empty post-tool final response once, then surfaces a visible error instead of reporting a silent successful run.
 
 **Run History**: Image-only user input is recorded once per run, even when the agent makes multiple model calls. Its media content remains in history without requiring a text summary.
+Web history keeps separate tool results in their original positions when a
+provider reuses a tool-call ID across turns or runs. Copies of the same result
+are matched by their message ID. Legacy results without message IDs are kept
+separately because their provider ID alone cannot identify an invocation.
+A result delivered before its assistant still resolves when that call is unique
+in the turn. Rebuilt results from the same current invocation keep one history entry.
 
 ### Reading a Referenced Conversation
 

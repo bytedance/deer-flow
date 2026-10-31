@@ -118,6 +118,7 @@ export function collectRenderedSubtasks(
       }
 
       if (message.type === "tool" && message.tool_call_id) {
+        if (message.additional_kwargs?.subagent_pending === true) continue;
         const update = {
           id: message.tool_call_id,
           ...parseSubtaskResult(
