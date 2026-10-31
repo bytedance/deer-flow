@@ -38,6 +38,7 @@ _TEXT: dict[str, dict[str, str]] = {
         "fetch_failed": "Failed to fetch goal information.",
         "clear_failed": "Failed to clear goal.",
         "set_failed": "Failed to set goal.",
+        "busy": "A task is still running. Wait for it to finish before changing the goal.",
     },
     "zh-CN": {
         "goal": "目标：{objective}",
@@ -56,6 +57,7 @@ _TEXT: dict[str, dict[str, str]] = {
         "fetch_failed": "无法获取目标信息。",
         "clear_failed": "无法清除目标。",
         "set_failed": "无法设置目标。",
+        "busy": "当前任务仍在运行，请等待结束后再修改目标。",
     },
 }
 

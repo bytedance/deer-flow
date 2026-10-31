@@ -1318,6 +1318,8 @@ def test_goal_mutations_reject_run_owned_by_another_worker() -> None:
 
     assert put_response.status_code == 409, put_response.text
     assert delete_response.status_code == 409, delete_response.text
+    assert put_response.json()["detail"] == "Thread has a run in flight. Set the goal after the run finishes."
+    assert delete_response.json()["detail"] == "Thread has a run in flight. Clear the goal after the run finishes."
     assert goal_response.status_code == 200, goal_response.text
     assert goal_response.json()["goal"]["objective"] == "Original goal"
 
