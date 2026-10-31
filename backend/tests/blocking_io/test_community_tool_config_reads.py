@@ -40,6 +40,7 @@ from deerflow.community.infoquest import tools as infoquest_tools
 from deerflow.community.jina_ai import tools as jina_tools
 from deerflow.community.jsonify import tools as jsonify_tools
 from deerflow.community.lightrag import tools as lightrag_tools
+from deerflow.community.outcrawl import tools as outcrawl_tools
 from deerflow.community.ragflow import tools as ragflow_tools
 from deerflow.community.searxng import tools as searxng_tools
 from deerflow.community.tavily import tools as tavily_tools
@@ -136,6 +137,8 @@ _CASES = [
     pytest.param(searxng_tools, _call(searxng_tools.web_search_tool, query="q"), 1, id="searxng-web_search"),
     pytest.param(firecrawl_tools, _call(firecrawl_tools.web_search_tool, query="q"), 1, id="firecrawl-web_search"),
     pytest.param(firecrawl_tools, _call(firecrawl_tools.web_fetch_tool, url=_URL), 1, id="firecrawl-web_fetch"),
+    pytest.param(outcrawl_tools, _call(outcrawl_tools.web_search_tool, query="q"), 1, id="outcrawl-web_search"),
+    pytest.param(outcrawl_tools, _call(outcrawl_tools.web_fetch_tool, url=_URL), 1, id="outcrawl-web_fetch"),
     pytest.param(infoquest_tools, _call(infoquest_tools.web_search_tool, query="q"), 1, id="infoquest-web_search"),
     pytest.param(infoquest_tools, _call(infoquest_tools.web_fetch_tool, url=_URL), 1, id="infoquest-web_fetch"),
     pytest.param(infoquest_tools, _call(infoquest_tools.image_search_tool, query="q"), 1, id="infoquest-image_search"),
