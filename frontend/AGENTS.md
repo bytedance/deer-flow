@@ -406,11 +406,11 @@ and require a known model to save a model switch.
 
 ## Full-stack plugin UI
 
-Follow [invariants](../docs/full-stack-plugins.md#frontend-implementation-invariants) for
-plugin loaders/pages/actions: viewer-bound auth, native actions, i18n and
-mount/dispose/abort fencing. Shadow DOM is not a sandbox. Bundled extensions need
-typed en/zh `core/extensions/catalog.ts` entries with their namespace.
-Catalog entries are not proof of installation or activation.
+Follow [plugin invariants](../docs/full-stack-plugins.md#frontend-implementation-invariants):
+viewer-bound auth/CSRF, native actions, i18n, mount/dispose/abort fences.
+Shadow DOM is not a sandbox. Bundled catalogs need typed en/zh entries, namespaces;
+entries do not prove activation. Optional `requestBackend` binds viewers,
+rejects redirects, never retries; routes retain authorization.
 
 ### Composer references
 

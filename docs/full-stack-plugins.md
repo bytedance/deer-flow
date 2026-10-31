@@ -1,5 +1,17 @@
 # Full-stack plugin contributions
 
+Page surfaces may use optional `context.requestBackend(path, options)` for
+contributed `/api/extensions/` routes. It returns the HTTP Response and supports
+method, headers, body (including File) and an optional signal. The host supplies
+the configured Gateway URL, credentialed CSRF fetcher, descriptor-bound viewer
+header and page abort signal. Foreign URLs, traversal and redirects are rejected;
+writes are never retried. Gateway returns 409 for stale viewer headers before
+extension dispatch. This is not an authorization grant: contributed routes must
+retain all principal, plugin and resource checks. Older hosts omit this service;
+modules must render an unavailable state. The independent
+[knowledge center](../examples/deerflow-extension-knowledge-center/README.md)
+demonstrates capability-aware ingestion and status views using existing APIs.
+
 A deployment-installed Python extension can register a `PluginContribution` with
 optional browser code, authenticated backend actions and model tools. This extends
 the existing `install(registry, config)` workflow. MCP and Skills keep their existing

@@ -60,6 +60,11 @@ export const extensionCatalog = [
     package: "deerflow-extension-knowledge-platform",
     namespace: "knowledge-platform",
   },
+  {
+    key: "knowledgeCenter",
+    package: "deerflow-extension-knowledge-center",
+    namespace: "knowledge-center",
+  },
   { key: "lightrag", package: "deerflow-extension-lightrag", namespace: null },
   { key: "weknora", package: "deerflow-extension-weknora", namespace: null },
   { key: "example", package: "deerflow-extension-example", namespace: null },

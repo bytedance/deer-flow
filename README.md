@@ -1741,6 +1741,12 @@ adds connection policies, hierarchical spaces, members and explicit resource sha
 Space-routed management retains existing administrator and Provider grants. It is
 disabled by default and includes no management page or global chat retrieval ACL.
 
+The optional [knowledge center extension](examples/deerflow-extension-knowledge-center/README.md)
+adds an independently enabled workspace page for authorized spaces, file/URL/text
+ingestion and document processing snapshots. It consumes the platform and management
+APIs; it does not grant permissions or add entry editing, versions, graph browsing,
+complete document/task directories or Trace. Retrieval works without it.
+
 The optional [knowledge management extension](examples/deerflow-extension-knowledge-management/README.md)
 adds administrator-authorized file, URL and manual ingestion, processing status,
 reprocessing and cancellation through WeKnora. Parsing, indexing and optional
