@@ -4435,6 +4435,41 @@ class TestCooperativeCancellation:
         """Test that requesting cancellation on a nonexistent task does not raise."""
         executor_module.request_cancel_background_task("nonexistent-task")
 
+    def test_cancel_before_the_coroutine_starts_leaves_no_pending_entry(self, executor_module, classes, base_config):
+        """A cancel that wins the race against the loop must still terminalize.
+
+        ``_submit_to_isolated_loop_in_context`` hands back a Future, and while the
+        loop has not picked the coroutine up ``Future.cancel()`` succeeds — so
+        ``run_with_timeout`` never runs, nothing writes a terminal status, and
+        nothing opens the cleanup fence. The entry stayed PENDING: the poller burned
+        its whole budget waiting, and ``cleanup_background_task`` refused to remove
+        it because it only drops terminal entries.
+        """
+        import concurrent.futures
+
+        SubagentExecutor = classes["SubagentExecutor"]
+        executor = SubagentExecutor(config=base_config, tools=[], thread_id="test-thread")
+
+        never_started = concurrent.futures.Future()
+        with patch.object(executor_module, "_submit_to_isolated_loop_in_context", return_value=never_started):
+            execution_id = executor.execute_async("Task")
+
+        try:
+            assert executor_module._background_tasks[execution_id].status.value == "pending"
+
+            executor_module.request_cancel_background_task(execution_id)
+
+            assert never_started.cancelled()
+            result = executor_module._background_tasks[execution_id]
+            assert result.status.value == "cancelled"
+            assert result.execution_done_event.is_set()
+
+            executor_module.cleanup_background_task(execution_id)
+            assert execution_id not in executor_module._background_tasks
+        finally:
+            executor_module._background_tasks.pop(execution_id, None)
+            executor_module._background_futures.pop(execution_id, None)
+
     def test_execute_async_runs_without_calling_execute(self, executor_module, classes, base_config):
         """Regression: execute_async should not route through execute()/asyncio.run()."""
         import concurrent.futures

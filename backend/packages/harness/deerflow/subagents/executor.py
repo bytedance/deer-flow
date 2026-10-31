@@ -2280,7 +2280,14 @@ class SubagentExecutor:
         with _background_tasks_lock:
             _background_tasks[execution_id] = result
 
+        # Set once the coroutine body actually runs. A ``concurrent.futures``
+        # future reports ``cancelled()`` both when the cancel beat the loop and
+        # when a running coroutine was cancelled, and only the first case leaves
+        # the result without an owner able to publish a terminal status.
+        execution_started = threading.Event()
+
         async def run_with_timeout() -> SubagentResult:
+            execution_started.set()
             execution_task = asyncio.create_task(
                 self._aexecute(task, result),
                 name=f"subagent-{self.config.name}-execution",
@@ -2359,7 +2366,22 @@ class SubagentExecutor:
             _background_futures[execution_id] = execution_future
 
         def forget_future(completed_future: Future[SubagentResult]) -> None:
-            if not completed_future.cancelled():
+            if completed_future.cancelled() and not execution_started.is_set():
+                # ``Future.cancel()`` only wins while the loop has not picked the
+                # coroutine up yet. In that window ``run_with_timeout`` never runs,
+                # so nothing writes a terminal status and nothing opens the cleanup
+                # fence: the entry stayed PENDING and ``cleanup_background_task``
+                # refused to remove it, while the poller waited out its full budget
+                # for a result that could never arrive. Publish the cancellation
+                # here; a cancellation that reached a running coroutine is handled
+                # by its own ``CancelledError`` branch, which owns the terminal write.
+                result.try_set_terminal(
+                    SubagentStatus.CANCELLED,
+                    error="Cancelled before the execution started",
+                    tool_receipts=result.snapshot_tool_receipts(),
+                )
+                _mark_background_execution_done(execution_id, result)
+            elif not completed_future.cancelled():
                 completed_future.exception()
             with _background_tasks_lock:
                 _background_futures.pop(execution_id, None)
