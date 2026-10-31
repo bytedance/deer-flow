@@ -70,9 +70,17 @@ def _message_type(message: Any) -> str | None:
     return str(value) if value else None
 
 
-def _is_thread_history_hidden_message_row(row: dict[str, Any]) -> bool:
-    metadata = row.get("metadata") or {}
-    if not isinstance(metadata, Mapping):
+def _is_thread_history_hidden_message_row(row: dict[str, Any], *, thread_id: str | None = None) -> bool:
+    metadata = row.get("metadata")
+    if metadata is None:
+        metadata = {}
+    elif not isinstance(metadata, Mapping):
+        logger.warning(
+            "Ignoring malformed conversation metadata for thread %s at row seq %s: expected a mapping, got %s",
+            thread_id or "<unknown>",
+            row.get("seq", "<unknown>"),
+            type(metadata).__name__,
+        )
         metadata = {}
     caller = str(metadata.get("caller", ""))
     return caller.startswith("middleware:") or (caller.startswith("subagent:") and _message_type(row.get("content")) == "ai")
@@ -113,7 +121,7 @@ async def scan_visible_thread_messages(
                 if before_seq is not None and row["seq"] >= before_seq:
                     reached_before_bound = True
                     break
-                if (not include_middleware and _is_thread_history_hidden_message_row(row)) or row.get("run_id") in hidden_run_ids or (message_filter is not None and not message_filter(row)):
+                if (not include_middleware and _is_thread_history_hidden_message_row(row, thread_id=thread_id)) or row.get("run_id") in hidden_run_ids or (message_filter is not None and not message_filter(row)):
                     continue
                 visible.append(row)
                 if len(visible) == needed:
@@ -140,7 +148,7 @@ async def scan_visible_thread_messages(
             break
         _validate_message_scan_rows(raw, thread_id=thread_id, scan_before=scan_before, scan_after=None)
         for row in reversed(raw):
-            if (not include_middleware and _is_thread_history_hidden_message_row(row)) or row.get("run_id") in hidden_run_ids or (message_filter is not None and not message_filter(row)):
+            if (not include_middleware and _is_thread_history_hidden_message_row(row, thread_id=thread_id)) or row.get("run_id") in hidden_run_ids or (message_filter is not None and not message_filter(row)):
                 continue
             visible_desc.append(row)
             if len(visible_desc) == needed:

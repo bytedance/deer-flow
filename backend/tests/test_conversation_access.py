@@ -168,6 +168,7 @@ def test_reader_skips_malformed_optional_metadata_without_losing_the_page(caplog
         assert [message["text"] for message in page["messages"]] == ["valid before", "valid after"]
         assert malformed is not None
         assert any("thread source" in record.message and "row seq 2" in record.message for record in caplog.records)
+        assert any("additional_kwargs" in record.message and "thread source" in record.message and "row seq 2" in record.message for record in caplog.records)
 
     asyncio.run(exercise())
 

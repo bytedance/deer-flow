@@ -63,8 +63,16 @@ def _visible_text(row: dict, *, thread_id: str | None = None) -> tuple[str, str]
         return None
     role = message.get("type") or message.get("role")
     role = {"human": "user", "ai": "assistant"}.get(role, role)
-    extra = message.get("additional_kwargs") or {}
-    if not isinstance(extra, Mapping):
+    extra = message.get("additional_kwargs")
+    if extra is None:
+        extra = {}
+    elif not isinstance(extra, Mapping):
+        logger.warning(
+            "Ignoring malformed message additional_kwargs for thread %s at row seq %s: expected a mapping, got %s",
+            thread_id or "<unknown>",
+            row.get("seq", "<unknown>"),
+            type(extra).__name__,
+        )
         extra = {}
     if role not in {"user", "assistant"} or extra.get("hide_from_ui") or message.get("name") == "summary":
         return None
