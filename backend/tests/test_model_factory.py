@@ -2812,3 +2812,74 @@ def test_gpt6_explicit_responses_config_wins_on_custom_endpoint(monkeypatch):
 
     assert captured.get("use_responses_api") is True
     assert captured.get("output_version") == "responses/v1"
+
+
+# ---------------------------------------------------------------------------
+# Tool-call thought_signature replay is applied automatically (issue #1180)
+#
+# Gemini via an OpenAI-compatible gateway rejects a replayed tool call whose
+# thought_signature the stock langchain payload builder dropped. Rather than make
+# every operator discover an explicit `use:` opt-in, any OpenAI-compatible client
+# that keeps the stock builder gets the replay automatically.
+# ---------------------------------------------------------------------------
+
+
+def test_stock_chatopenai_profile_gains_signature_replay(monkeypatch):
+    """A plain ChatOpenAI profile needs no opt-in: the factory adds the replay."""
+    from langchain_openai import ChatOpenAI
+
+    from deerflow.models.patched_openai import ThoughtSignatureReplayMixin
+
+    cfg = _make_app_config([_make_model_with_extras("gemini-2.5-flash", base_url="http://gateway.example.com/v1")])
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(ChatOpenAI, {}))
+
+    model = factory_module.create_chat_model(name="gemini-2.5-flash")
+
+    assert isinstance(model, ThoughtSignatureReplayMixin)
+
+
+def test_signature_survives_the_payload_without_any_config_opt_in():
+    """End-to-end payload check: no opt-in key, no gateway, no API key required."""
+    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+    from langchain_openai import ChatOpenAI
+
+    raw_tool_call = {
+        "id": "call_1",
+        "type": "function",
+        "function": {"name": "web_fetch", "arguments": "{}"},
+        "thought_signature": "SIG_A==",
+    }
+    assistant = AIMessage(
+        content="",
+        tool_calls=[{"name": "web_fetch", "args": {}, "id": "call_1", "type": "tool_call"}],
+        additional_kwargs={"tool_calls": [raw_tool_call]},
+    )
+
+    model_class = factory_module._with_thought_signature_replay(ChatOpenAI)
+    model = model_class(model="gemini-2.5-flash", api_key="dummy", base_url="http://127.0.0.1:1/v1")
+
+    payload = model._get_request_payload([HumanMessage("hi"), assistant, ToolMessage(content="ok", tool_call_id="call_1")])
+
+    assistant_payload = next(msg for msg in payload["messages"] if msg.get("role") == "assistant")
+    assert assistant_payload["tool_calls"][0]["thought_signature"] == "SIG_A=="
+
+
+def test_client_with_its_own_payload_builder_is_untouched():
+    """Providers that build their own payload keep full control (no double wrapping)."""
+    from deerflow.models.vllm_provider import VllmChatModel
+
+    assert factory_module._with_thought_signature_replay(VllmChatModel) is VllmChatModel
+
+
+def test_already_patched_class_is_not_rewrapped():
+    """Explicit PatchedChatOpenAI profiles keep the class the operator named."""
+    from deerflow.models.patched_openai import PatchedChatOpenAI
+
+    assert factory_module._with_thought_signature_replay(PatchedChatOpenAI) is PatchedChatOpenAI
+
+
+def test_non_openai_provider_is_untouched():
+    """ChatAnthropic has no OpenAI payload builder and must never be subclassed here."""
+    from langchain_anthropic import ChatAnthropic
+
+    assert factory_module._with_thought_signature_replay(ChatAnthropic) is ChatAnthropic

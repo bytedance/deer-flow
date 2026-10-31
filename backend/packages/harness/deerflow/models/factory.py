@@ -440,6 +440,33 @@ def _apply_stream_chunk_timeout_default(model_class: type, model_settings_from_c
     model_settings_from_config["stream_chunk_timeout"] = _DEFAULT_STREAM_CHUNK_TIMEOUT_SECONDS
 
 
+def _with_thought_signature_replay(model_class: type) -> type:
+    """Return a client class that replays gateway-issued tool-call signatures.
+
+    Gemini thinking models reached through an OpenAI-compatible gateway require the
+    ``thought_signature`` of every tool call to be echoed back on the following request.
+    langchain's stock payload builder serialises only the standard tool-call fields, so the
+    field is dropped and the gateway answers 400 (issue #1180). ``PatchedChatOpenAI``
+    restores it, but only for profiles that name that class explicitly, and the requirement
+    is invisible: the 400 names nothing in this repository.
+
+    Rather than ask every operator to discover an opt-in, any OpenAI-compatible client that
+    keeps langchain's stock payload builder now gets the replay automatically. The restore is
+    a no-op when no signature was issued, so non-Gemini gateways are unaffected; providers
+    that build their own payload (DeepSeek, MiMo, MiniMax, StepFun, vLLM, Claude, or
+    ``PatchedChatOpenAI`` itself) are returned untouched, so their explicit handling wins.
+    """
+    from langchain_openai import ChatOpenAI
+
+    from deerflow.models.patched_openai import ThoughtSignatureReplayMixin
+
+    if not issubclass(model_class, BaseChatOpenAI) or issubclass(model_class, ThoughtSignatureReplayMixin):
+        return model_class
+    if model_class._get_request_payload is not ChatOpenAI._get_request_payload:
+        return model_class
+    return type(f"{model_class.__name__}WithThoughtSignatureReplay", (ThoughtSignatureReplayMixin, model_class), {"__module__": __name__})
+
+
 # gpt-6 family must use the OpenAI Responses API when tools are attached.
 #
 # The locked ``langchain-openai==1.2.1`` still routes tool use through
@@ -705,6 +732,12 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
             model_settings_from_config["max_retries"] = 0
 
     _warn_unknown_model_settings(model_class, name, model_settings_from_config)
+
+    # Applied last so every class-name and isinstance decision above still sees the
+    # configured client. Any OpenAI-compatible client that keeps langchain's stock
+    # payload builder now replays gateway-issued tool-call signatures, so Gemini behind
+    # a gateway no longer needs to name a patched class (issue #1180).
+    model_class = _with_thought_signature_replay(model_class)
 
     # 配置提供默认值，调用方显式传入的非空参数统一覆盖配置。
     # 先合并再展开，避免同名字段通过两个 **dict 传入时触发 TypeError。

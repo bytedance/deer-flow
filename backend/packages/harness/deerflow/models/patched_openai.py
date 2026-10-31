@@ -30,7 +30,31 @@ from langchain_openai import ChatOpenAI
 from deerflow.models.assistant_payload_replay import restore_assistant_payloads
 
 
-class PatchedChatOpenAI(ChatOpenAI):
+class ThoughtSignatureReplayMixin:
+    """Re-inject tool-call ``thought_signature`` values into an outgoing request payload.
+
+    Mixed into OpenAI-compatible clients whose payload builder would otherwise drop the
+    field a gateway issued (see the module docstring). Clients that keep langchain's stock
+    builder receive it automatically from ``deerflow.models.factory``.
+    """
+
+    def _get_request_payload(
+        self,
+        input_: LanguageModelInput,
+        *,
+        stop: list[str] | None = None,
+        **kwargs: Any,
+    ) -> dict:
+        """Return the request payload with tool-call signatures preserved."""
+        # Capture the original LangChain messages *before* conversion so we can
+        # access fields that the serialiser might drop.
+        original_messages = self._convert_input(input_).to_messages()
+        payload = super()._get_request_payload(input_, stop=stop, **kwargs)
+        restore_assistant_payloads(payload.get("messages", []), original_messages, _restore_tool_call_signatures)
+        return payload
+
+
+class PatchedChatOpenAI(ThoughtSignatureReplayMixin, ChatOpenAI):
     """ChatOpenAI with ``thought_signature`` preservation for Gemini thinking via OpenAI gateway.
 
     When using Gemini with thinking enabled via an OpenAI-compatible gateway,
@@ -42,31 +66,6 @@ class PatchedChatOpenAI(ChatOpenAI):
     See the Gemini example in ``config.example.yaml`` for Google's official
     OpenAI-compatible endpoint and its reasoning configuration.
     """
-
-    def _get_request_payload(
-        self,
-        input_: LanguageModelInput,
-        *,
-        stop: list[str] | None = None,
-        **kwargs: Any,
-    ) -> dict:
-        """Get request payload with ``thought_signature`` preserved on tool-call objects.
-
-        Overrides the parent method to re-inject ``thought_signature`` fields
-        on tool-call objects that were stored in
-        ``additional_kwargs["tool_calls"]`` by LangChain but dropped during
-        serialisation.
-        """
-        # Capture the original LangChain messages *before* conversion so we can
-        # access fields that the serialiser might drop.
-        original_messages = self._convert_input(input_).to_messages()
-
-        # Obtain the base payload from the parent implementation.
-        payload = super()._get_request_payload(input_, stop=stop, **kwargs)
-
-        restore_assistant_payloads(payload.get("messages", []), original_messages, _restore_tool_call_signatures)
-
-        return payload
 
 
 def _restore_tool_call_signatures(payload_msg: dict, orig_msg: AIMessage) -> None:
