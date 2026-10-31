@@ -104,7 +104,6 @@ _SANDBOX_TOOL_CASES = [
 ]
 
 _SANDBOX_TOOL_FORWARDING_CASES = [
-    (bash_tool, {"command": "command", "description": "description"}, ("command", "description")),
     (ls_tool, {"path": "/path", "description": "description"}, ("/path", "description")),
     (
         glob_tool,
@@ -232,6 +231,26 @@ async def test_sandbox_tool_sync_async_signatures_and_forwarding_stay_aligned(
 
     assert await tool_obj.coroutine(runtime=runtime, **call_args_without_description) == "forwarded"
     run_sync_tool.assert_awaited_once_with(tool_obj.func, runtime, *forwarded_without_description)
+
+
+@pytest.mark.asyncio
+async def test_bash_tool_async_forwarding_stays_aligned(monkeypatch) -> None:
+    """bash's async wrapper delegates to its async init runner with the same
+    public signature and forwarding the sync-bridge contract pinned for the
+    other sandbox tools; the body itself moved to the async exec path
+    (#7502), so the seam is bash-specific now."""
+    assert list(inspect.signature(bash_tool.func).parameters) == list(inspect.signature(bash_tool.coroutine).parameters)
+
+    run_async_init = AsyncMock(return_value="forwarded")
+    monkeypatch.setattr("deerflow.sandbox.tools._run_bash_tool_after_async_sandbox_init", run_async_init)
+    runtime = object()
+
+    assert await bash_tool.coroutine(runtime=runtime, command="ls", description="list") == "forwarded"
+    run_async_init.assert_awaited_once_with(runtime, "ls", "list")
+
+    run_async_init.reset_mock()
+    assert await bash_tool.coroutine(runtime=runtime, command="ls") == "forwarded"
+    run_async_init.assert_awaited_once_with(runtime, "ls", "")
 
 
 def test_task_tool_description_is_optional_but_discoverable() -> None:
