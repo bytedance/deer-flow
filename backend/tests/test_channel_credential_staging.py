@@ -18,7 +18,9 @@ from app.channels.wechat import WechatChannel
 
 def _age(path: Path) -> None:
     old = time.time() - 2 * 24 * 60 * 60
-    os.utime(path, (old, old), follow_symlinks=False)
+    # ``follow_symlinks=False`` is POSIX-only; Windows raises NotImplementedError and
+    # every file aged here is a regular file, so the flag buys nothing.
+    os.utime(path, (old, old))
 
 
 def _load(kind: str, target: Path):
