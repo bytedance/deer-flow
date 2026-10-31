@@ -921,6 +921,7 @@ class SubagentExecutor:
         tool_progress_recorder: Any | None = None,
         context_snapshot: ParentContextSnapshot | None = None,
         thread_incarnation: str | None | object = _THREAD_INCARNATION_UNSET,
+        input_gate: Any | None = None,
     ):
         """Initialize the executor.
 
@@ -1000,6 +1001,7 @@ class SubagentExecutor:
         self.thread_data = thread_data
         self.uploaded_files = deepcopy(uploaded_files) if uploaded_files is not None else None
         self.context_snapshot = context_snapshot
+        self.input_gate = input_gate
         self.thread_id = thread_id
         self.thread_incarnation = thread_incarnation
         # Generate trace_id if not provided (for top-level calls)
@@ -1167,6 +1169,11 @@ class SubagentExecutor:
         if mcp_routing_middleware is not None:
             middleware_kwargs["mcp_routing_middleware"] = mcp_routing_middleware
         middlewares = build_subagent_runtime_middlewares(**middleware_kwargs)
+        if self.input_gate is not None:
+            from deerflow.agents.middlewares.run_input_middleware import ChildInputContinuationMiddleware, ChildInputMiddleware
+
+            middlewares.insert(0, ChildInputMiddleware(self.input_gate))
+            middlewares.append(ChildInputContinuationMiddleware(self.input_gate))
         # Authorization Layer 1 for middleware-declared tools (e.g. extension
         # contributions): collect from the built stack, decide with the same
         # provider/principal as the ordinary pass (offloaded off the event
@@ -1659,7 +1666,8 @@ class SubagentExecutor:
         with ensure_trace_context(self.deerflow_trace_id):
             try:
                 capacity = self.execution_capacity or get_subagent_execution_capacity()
-                async with capacity.slot():
+                slot = capacity.slot(wait=False) if self.input_gate is not None and not self.input_gate.can_queue else capacity.slot()
+                async with slot:
                     with result._state_lock:
                         if result.status.is_terminal:
                             return result
@@ -1669,11 +1677,15 @@ class SubagentExecutor:
             except SubagentCapacityError as exc:
                 result.try_set_terminal(
                     SubagentStatus.FAILED,
-                    error=str(exc),
+                    error="No worker slot is available while previous subagents are paused. Complete the priority work in the main Agent or resume the previous subagents first."
+                    if self.input_gate is not None and not self.input_gate.can_queue
+                    else str(exc),
                     admission_failure=True,
                 )
                 return result
             finally:
+                if self.input_gate is not None:
+                    self.input_gate.close()
                 result.execution_done_event.set()
 
     async def _aexecute_admitted(self, task: str, result_holder: SubagentResult | None = None) -> SubagentResult:

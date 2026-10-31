@@ -2,6 +2,7 @@ import { fetch } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
 
 export interface FeaturesResponse {
+  run_inputs?: boolean;
   agents_api: { enabled: boolean };
   browser_control?: { enabled: boolean };
   mcp_tasks?: { enabled: boolean };

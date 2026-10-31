@@ -36,6 +36,7 @@ import {
 import { ThreadArchiveStatus } from "@/components/workspace/thread-archive-status";
 import { ThreadBackgroundTasks } from "@/components/workspace/thread-background-tasks";
 import { ThreadExtensionActions } from "@/components/workspace/thread-extension-actions";
+import { ThreadRunInputs } from "@/components/workspace/thread-run-inputs";
 import { ThreadSubagentBatches } from "@/components/workspace/thread-subagent-batches";
 import { ThreadTitle } from "@/components/workspace/thread-title";
 import { TodoList } from "@/components/workspace/todo-list";
@@ -192,6 +193,10 @@ export default function AgentChatPage() {
     thread,
     pendingUsageMessages,
     sendMessage,
+    sendInput,
+    runInputs,
+    canSendInput,
+    activeRunId,
     regenerateMessage,
     editAndRegenerateMessage,
     isUploading,
@@ -563,6 +568,7 @@ export default function AgentChatPage() {
             <main className="flex min-h-0 max-w-full grow flex-col">
               <div className="flex min-h-0 flex-1 justify-center">
                 <MessageList
+                  activeRunId={activeRunId}
                   archiveDownloadsEnabled={
                     isNewThread || isMock || threadMetadata.data != null
                   }
@@ -650,6 +656,13 @@ export default function AgentChatPage() {
                       />
                     </div>
                   )}
+                  <ThreadRunInputs
+                    inputs={runInputs}
+                    threadId={isNewThread || isMock ? undefined : threadId}
+                    isRunning={thread.isLoading}
+                    canCreate={canCreateRuns}
+                    canCancel={canStopStreaming}
+                  />
                   <InputBox
                     className={cn(
                       "bg-background/5 w-full",
@@ -712,6 +725,7 @@ export default function AgentChatPage() {
                     }}
                     onGoalChange={setLocalGoal}
                     onSubmit={handleSubmit}
+                    onBusySubmit={canSendInput ? sendInput : undefined}
                     onStop={handleStop}
                     canStopStreaming={canStopStreaming}
                     canCreateRuns={canCreateRuns}
