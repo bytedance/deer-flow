@@ -27,15 +27,16 @@ from langchain_core.language_models import LanguageModelInput
 from langchain_core.messages import AIMessage
 from langchain_openai import ChatOpenAI
 
-from deerflow.models.assistant_payload_replay import restore_assistant_payloads
+from deerflow.models.assistant_payload_replay import restore_assistant_payloads, restore_reasoning_content
 
 
-class ThoughtSignatureReplayMixin:
-    """Re-inject tool-call ``thought_signature`` values into an outgoing request payload.
+class AssistantReplayMixin:
+    """Re-inject gateway-issued assistant fields into an outgoing request payload.
 
-    Mixed into OpenAI-compatible clients whose payload builder would otherwise drop the
-    field a gateway issued (see the module docstring). Clients that keep langchain's stock
-    builder receive it automatically from ``deerflow.models.factory``.
+    Mixed into OpenAI-compatible clients whose payload builder would otherwise drop
+    fields the gateway itself issued on the previous turn (see the module docstring).
+    Clients that keep langchain's stock builder receive it automatically from
+    ``deerflow.models.factory``.
     """
 
     def _get_request_payload(
@@ -45,16 +46,16 @@ class ThoughtSignatureReplayMixin:
         stop: list[str] | None = None,
         **kwargs: Any,
     ) -> dict:
-        """Return the request payload with tool-call signatures preserved."""
+        """Return the request payload with replayable assistant fields preserved."""
         # Capture the original LangChain messages *before* conversion so we can
         # access fields that the serialiser might drop.
         original_messages = self._convert_input(input_).to_messages()
         payload = super()._get_request_payload(input_, stop=stop, **kwargs)
-        restore_assistant_payloads(payload.get("messages", []), original_messages, _restore_tool_call_signatures)
+        restore_assistant_payloads(payload.get("messages", []), original_messages, _restore_replayable_assistant_fields)
         return payload
 
 
-class PatchedChatOpenAI(ThoughtSignatureReplayMixin, ChatOpenAI):
+class PatchedChatOpenAI(AssistantReplayMixin, ChatOpenAI):
     """ChatOpenAI with ``thought_signature`` preservation for Gemini thinking via OpenAI gateway.
 
     When using Gemini with thinking enabled via an OpenAI-compatible gateway,
@@ -66,6 +67,19 @@ class PatchedChatOpenAI(ThoughtSignatureReplayMixin, ChatOpenAI):
     See the Gemini example in ``config.example.yaml`` for Google's official
     OpenAI-compatible endpoint and its reasoning configuration.
     """
+
+
+def _restore_replayable_assistant_fields(payload_msg: dict, orig_msg: AIMessage) -> None:
+    """Restore every provider-issued assistant field the stock serialiser drops.
+
+    Gemini gateways require the tool-call ``thought_signature`` back (issue #1180);
+    DeepSeek-style reasoning gateways reject a replayed assistant tool call whose
+    ``reasoning_content`` is missing, which is the failure reported in issue #1790 for
+    Kimi/Qwen-style gateways behind ``PatchedChatOpenAI``. Both fields are echoed only when
+    the message carries them, so a provider that never issued them gets nothing extra.
+    """
+    _restore_tool_call_signatures(payload_msg, orig_msg)
+    restore_reasoning_content(payload_msg, orig_msg)
 
 
 def _restore_tool_call_signatures(payload_msg: dict, orig_msg: AIMessage) -> None:

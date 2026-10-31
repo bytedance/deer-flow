@@ -2828,14 +2828,14 @@ def test_stock_chatopenai_profile_gains_signature_replay(monkeypatch):
     """A plain ChatOpenAI profile needs no opt-in: the factory adds the replay."""
     from langchain_openai import ChatOpenAI
 
-    from deerflow.models.patched_openai import ThoughtSignatureReplayMixin
+    from deerflow.models.patched_openai import AssistantReplayMixin
 
     cfg = _make_app_config([_make_model_with_extras("gemini-2.5-flash", base_url="http://gateway.example.com/v1")])
     _patch_factory(monkeypatch, cfg, model_class=_capturing_class(ChatOpenAI, {}))
 
     model = factory_module.create_chat_model(name="gemini-2.5-flash")
 
-    assert isinstance(model, ThoughtSignatureReplayMixin)
+    assert isinstance(model, AssistantReplayMixin)
 
 
 def test_signature_survives_the_payload_without_any_config_opt_in():
@@ -2855,7 +2855,7 @@ def test_signature_survives_the_payload_without_any_config_opt_in():
         additional_kwargs={"tool_calls": [raw_tool_call]},
     )
 
-    model_class = factory_module._with_thought_signature_replay(ChatOpenAI)
+    model_class = factory_module._with_assistant_replay(ChatOpenAI)
     model = model_class(model="gemini-2.5-flash", api_key="dummy", base_url="http://127.0.0.1:1/v1")
 
     payload = model._get_request_payload([HumanMessage("hi"), assistant, ToolMessage(content="ok", tool_call_id="call_1")])
@@ -2868,18 +2868,51 @@ def test_client_with_its_own_payload_builder_is_untouched():
     """Providers that build their own payload keep full control (no double wrapping)."""
     from deerflow.models.vllm_provider import VllmChatModel
 
-    assert factory_module._with_thought_signature_replay(VllmChatModel) is VllmChatModel
+    assert factory_module._with_assistant_replay(VllmChatModel) is VllmChatModel
 
 
 def test_already_patched_class_is_not_rewrapped():
     """Explicit PatchedChatOpenAI profiles keep the class the operator named."""
     from deerflow.models.patched_openai import PatchedChatOpenAI
 
-    assert factory_module._with_thought_signature_replay(PatchedChatOpenAI) is PatchedChatOpenAI
+    assert factory_module._with_assistant_replay(PatchedChatOpenAI) is PatchedChatOpenAI
 
 
 def test_non_openai_provider_is_untouched():
     """ChatAnthropic has no OpenAI payload builder and must never be subclassed here."""
     from langchain_anthropic import ChatAnthropic
 
-    assert factory_module._with_thought_signature_replay(ChatAnthropic) is ChatAnthropic
+    assert factory_module._with_assistant_replay(ChatAnthropic) is ChatAnthropic
+
+
+def test_reasoning_content_is_replayed_for_stock_clients():
+    """DeepSeek-style gateways reject a replayed tool call without reasoning_content
+
+    (issue #1790), so the same automatic replay must carry that field too.
+    """
+    from langchain_core.messages import AIMessage, HumanMessage
+    from langchain_openai import ChatOpenAI
+
+    assistant = AIMessage(content="answer", additional_kwargs={"reasoning_content": "R-THINK"})
+
+    model_class = factory_module._with_assistant_replay(ChatOpenAI)
+    model = model_class(model="kimi-k2.5", api_key="dummy", base_url="http://127.0.0.1:1/v1")
+
+    payload = model._get_request_payload([HumanMessage("hi"), assistant])
+
+    assert payload["messages"][-1]["reasoning_content"] == "R-THINK"
+
+
+def test_no_reasoning_content_is_invented_when_the_gateway_sent_none():
+    """A provider that never issued reasoning_content must not receive the field."""
+    from langchain_core.messages import AIMessage, HumanMessage
+    from langchain_openai import ChatOpenAI
+
+    assistant = AIMessage(content="answer")
+
+    model_class = factory_module._with_assistant_replay(ChatOpenAI)
+    model = model_class(model="gpt-5.1", api_key="dummy", base_url="http://127.0.0.1:1/v1")
+
+    payload = model._get_request_payload([HumanMessage("hi"), assistant])
+
+    assert "reasoning_content" not in payload["messages"][-1]
