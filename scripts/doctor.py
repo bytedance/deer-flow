@@ -869,10 +869,23 @@ def check_env_file(project_root: Path) -> CheckResult:
 # ---------------------------------------------------------------------------
 
 
-def main() -> int:
+def main(
+    *,
+    startup_mode: str | None = None,
+    startup_host: str = "127.0.0.1",
+    startup_port: int = 2026,
+) -> int:
     # Keep reporting usable on terminals and pipes with legacy encodings.
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(errors="replace")
+
+    startup = None
+    if startup_mode is None and (startup_host != "127.0.0.1" or startup_port != 2026):
+        raise ValueError("select --startup-mode before overriding startup probe targets")
+    if startup_mode is not None:
+        from startup_diagnostics import collect_startup_diagnostics
+
+        startup = collect_startup_diagnostics(startup_mode, host=startup_host, port=startup_port)
 
     project_root = Path(__file__).resolve().parents[1]
 
@@ -912,9 +925,17 @@ def main() -> int:
         check_node(),
         check_pnpm(),
         check_uv(),
-        check_nginx(),
+        CheckResult("host nginx", "skip", "Docker supplies nginx") if startup_mode == "docker" else check_nginx(),
     ]
     sections.append(("System Requirements", sys_checks))
+
+    if startup is not None:
+        sections.append(
+            (
+                f"Startup ({startup_mode})",
+                [CheckResult(item["label"], item["status"], item["detail"], item["fix"]) for item in startup["checks"]],
+            )
+        )
 
     # ── Configuration ─────────────────────────────────────────────────────────
     cfg_checks: list[CheckResult] = [
@@ -980,11 +1001,23 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    from startup_diagnostics import add_startup_arguments
+
     # Parsed here rather than inside main(): the unit tests call main() in-process
     # under pytest, whose argv must not reach argparse.
     parser = argparse.ArgumentParser(
         prog="python scripts/doctor.py",
         description=("DeerFlow Health Check (make doctor): checks system requirements, configuration, LLM provider, and optional components, then prints an actionable report."),
     )
-    parser.parse_args()
-    sys.exit(main())
+    add_startup_arguments(parser)
+    args = parser.parse_args()
+    try:
+        sys.exit(
+            main(
+                startup_mode=args.startup_mode,
+                startup_host=args.startup_host,
+                startup_port=args.startup_port,
+            )
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
