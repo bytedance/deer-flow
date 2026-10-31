@@ -2002,6 +2002,7 @@ async def get_thread_history(
                                 stamp_turn_duration_on_last_ai(
                                     serialized_msgs,
                                     checkpoint_run_durations,
+                                    thread_id=thread_id,
                                 )
                                 raise
 
@@ -2052,6 +2053,7 @@ async def get_thread_history(
                         stamp_turn_duration_on_last_ai(
                             serialized_msgs,
                             resolved_run_durations,
+                            thread_id=thread_id,
                         )
 
                     except Exception:
