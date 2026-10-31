@@ -108,6 +108,52 @@ def test_model_control_unknown_version_is_not_replaced(client):
     assert response.json()["model_name"] is None
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Use a regression model to analyze these sales figures",
+        "Use a data model to design the database schema",
+        "Use the attached model to forecast next month's revenue",
+        "Use a causal model to analyze these sales figures",
+        "Use an econometric model to forecast next month's revenue",
+        "Use a linear model to analyze these sales figures",
+    ],
+)
+def test_model_control_preview_preserves_ordinary_task_text(client, text):
+    data_model = ModelConfig(name="data-chat", model="data-chat", display_name="Data Chat", use="langchain_openai:ChatOpenAI")
+    client.app.dependency_overrides[models_router.get_config] = lambda: _app_config([_legacy_model(), data_model])
+    response = client.post("/api/models/resolve", json={"text": text})
+    assert response.status_code == 200
+    assert response.json() == {"status": "none", "scope": None, "query": "", "model_name": None, "candidates": [], "task_offset": 0}
+
+
+def test_generic_model_control_waits_for_scope_and_then_resolves(client):
+    text = "Use the legacy model to summarize this report"
+    initial = client.post("/api/models/resolve", json={"text": text}).json()
+    assert initial["status"] == "ambiguous"
+    assert initial["scope"] is None
+    chosen = client.post("/api/models/resolve", json={"text": text, "scope": "turn"}).json()
+    assert chosen["status"] == "resolved"
+    assert chosen["model_name"] == "legacy"
+    assert text[chosen["task_offset"] :] == "summarize this report"
+
+
+def test_generic_model_control_denial_does_not_become_task_text(client, monkeypatch):
+    from fastapi import HTTPException
+
+    monkeypatch.setattr(models_router, "get_optional_user_from_request", AsyncMock(return_value=object()))
+    monkeypatch.setattr(models_router, "_resolve_bound_owner_for_model_list", AsyncMock(return_value=None))
+    monkeypatch.setattr(models_router, "resolve_model_authorization", lambda *args, **kwargs: (None, None))
+
+    def deny(*args, **kwargs):
+        raise HTTPException(status_code=403, detail="Model denied")
+
+    monkeypatch.setattr(models_router, "authorize_model_use", deny)
+    result = client.post("/api/models/resolve", json={"text": "Use the legacy model to summarize this report"}).json()
+    assert result["status"] == "unavailable"
+    assert result["candidates"] == []
+
+
 def test_model_control_enforces_use_after_visibility(client, monkeypatch):
     from fastapi import HTTPException
 

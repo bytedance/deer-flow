@@ -2605,6 +2605,15 @@ When `token_budget.enabled` and `token_usage.enabled` are both enabled, each lea
 
 Web chats accept direct model choices such as “ask MODEL to handle this”, “use MODEL for this turn”, and “from now on use MODEL”; Chinese equivalents are supported too. A child choice leaves the main model unchanged, a one-turn choice leaves defaults unchanged, and a conversation choice uses the existing browser-local thread override without changing account preferences. Choices resolve against available configurations and optional `models[].aliases`; ambiguous names or scopes show a selection card before execution, while delegation still requires enabled subagents (Ultra mode).
 
+The broader English “use … to …” form requires a complete configured name,
+display name, provider model ID or alias (ignoring case and repeated whitespace),
+optionally wrapped as “the NAME model” or “my NAME model”. Otherwise the full
+message remains task text: “use a regression model to analyze sales” does not
+open the model picker or remove the requested method. This form does not infer
+brands or partial names; use a configured alias or an explicit scoped control
+such as “use the Gemini model for this turn: …” when requesting an unavailable
+model. A complete name shared by several configurations still asks for a choice.
+
 When a sub-agent ends with `return_direct=True` tools, including tools contributed by extension middleware, their outputs are returned in tool-call order. A failed tool marks the task as failed while preserving the batch outputs.
 
 After its stream closes, a cancelled sub-agent keeps its execution slot until
