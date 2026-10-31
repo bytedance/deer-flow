@@ -126,3 +126,25 @@ async def test_middleware_results_with_reused_call_id_are_reconciled_once(with_i
         assert len({result["id"] for result in results}) == 2
     finally:
         await journal.close()
+
+
+@pytest.mark.anyio
+async def test_deferred_task_completion_keeps_its_pending_id_when_provider_ids_repeat():
+    from deerflow.subagents.status_contract import make_subagent_additional_kwargs
+
+    store = MemoryRunEventStore()
+    journal = RunJournal("run-a", "thread", store)
+    try:
+        for index in range(2):
+            assistant = AIMessage(id=f"assistant-{index}", content="", tool_calls=[{"id": "call_0", "name": "task", "args": {}}])
+            journal.on_llm_end(LLMResult(generations=[[ChatGeneration(message=assistant)]]), run_id=uuid4(), tags=["lead_agent"])
+            pending = ToolMessage(id=f"result-{index}", content="Pending", name="task", tool_call_id="call_0", additional_kwargs={"subagent_pending": True})
+            journal.on_chat_model_start({}, [[assistant, pending]], run_id=uuid4(), tags=["lead_agent"])
+            terminal = ToolMessage(id=pending.id, content="Completed", name="task", tool_call_id="call_0", additional_kwargs=make_subagent_additional_kwargs("completed", result="Done"))
+            journal.record_deferred_task_result(terminal)
+            journal.record_deferred_task_result(terminal)
+        await journal.flush()
+        messages = [row["content"] for row in await store.list_messages("thread") if row["content"].get("type") == "tool"]
+        assert [(message["id"], message["content"]) for message in messages] == [("result-0", "Pending"), ("result-0", "Completed"), ("result-1", "Pending"), ("result-1", "Completed")]
+    finally:
+        await journal.close()

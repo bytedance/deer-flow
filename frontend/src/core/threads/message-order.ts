@@ -70,6 +70,24 @@ export function trustedMessageSeq(message: Message): number | undefined {
 }
 
 export function dedupeMessagesByIdentity(messages: Message[]): Message[] {
+  const taskResultScope = (message: Message) => {
+    const raw = getMessageRunId(message) ?? message.additional_kwargs?.run_id;
+    const runId = typeof raw === "string" ? raw : "";
+    return `${runId}:${messageIdentity(message) ?? ""}`;
+  };
+  const completedTaskResults = new Set(
+    messages
+      .filter(
+        (message) =>
+          message.type === "tool" &&
+          typeof message.additional_kwargs?.subagent_status === "string" &&
+          message.additional_kwargs?.subagent_pending !== true,
+      )
+      .map(taskResultScope),
+  );
+  const supersededPending = (message: Message) =>
+    message.additional_kwargs?.subagent_pending === true &&
+    completedTaskResults.has(taskResultScope(message));
   const lastIndexByIdentity = new Map<string, number>();
   const lastVisibleIndexByIdentity = new Map<string, number>();
 
@@ -80,6 +98,7 @@ export function dedupeMessagesByIdentity(messages: Message[]): Message[] {
   // stream/state channel instead of relying on message dedupe preservation.
   const preservedTurnDurations = new Map<string, number>();
   messages.forEach((message, index) => {
+    if (supersededPending(message)) return;
     const identity = messageIdentity(message);
     if (identity) {
       lastIndexByIdentity.set(identity, index);
@@ -97,6 +116,7 @@ export function dedupeMessagesByIdentity(messages: Message[]): Message[] {
 
   return messages
     .filter((message, index) => {
+      if (supersededPending(message)) return false;
       const identity = messageIdentity(message);
       if (!identity) {
         return true;

@@ -485,6 +485,22 @@ export interface Translations {
         }
     )[];
     pleaseWaitStreaming: string;
+    runInputMode: string;
+    queueMode: string;
+    steerMode: string;
+    queueModeHelp: string;
+    steerModeHelp: string;
+    runInputSend: string;
+    runInputTextOnly: string;
+    runInputUnavailable: string;
+    stopRun: string;
+    runInputQueued: string;
+    runInputSteering: string;
+    runInputUnapplied: string;
+    runInputRetry: string;
+    runInputCancel: string;
+    runInputDispatching: string;
+    runInputReplayUnavailable: string;
     stopStreamingUnavailable: string;
     startTurnUnavailable: string;
   };

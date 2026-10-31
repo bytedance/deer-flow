@@ -54,6 +54,7 @@ from app.gateway.conversation_reader import (
 from app.gateway.deps import get_current_user, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
 from app.gateway.internal_auth import INTERNAL_SYSTEM_ROLE, get_trusted_internal_owner_user_id
 from app.gateway.pagination import trim_run_message_page
+from app.gateway.run_inputs import RunInputRequest, change_run_input, list_thread_inputs, submit_run_input
 from app.gateway.run_models import RunCreateRequest
 from app.gateway.services import (
     abuild_checkpoint_state_accessor,
@@ -81,6 +82,32 @@ from deerflow.workspace_changes import get_workspace_changes_response
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/threads", tags=["runs"])
+
+
+@router.post("/{thread_id}/runs/{run_id}/inputs")
+@require_permission("runs", "create", owner_check=True, require_existing=True)
+async def create_run_input(thread_id: ThreadId, run_id: str, body: RunInputRequest, request: Request):
+    return await submit_run_input(thread_id, run_id, body, request)
+
+
+@router.get("/{thread_id}/inputs")
+@require_permission("threads", "read", owner_check=True, require_existing=True)
+async def get_thread_inputs(thread_id: ThreadId, request: Request):
+    return await list_thread_inputs(thread_id, request)
+
+
+@router.delete("/{thread_id}/runs/{run_id}/inputs/{input_id}")
+@require_permission("runs", "cancel", owner_check=True, require_existing=True)
+async def remove_run_input(thread_id: ThreadId, run_id: str, input_id: str, request: Request):
+    return await change_run_input(thread_id, run_id, input_id, request)
+
+
+@router.post("/{thread_id}/runs/{run_id}/inputs/{input_id}/retry")
+@require_permission("runs", "create", owner_check=True, require_existing=True)
+async def retry_run_input(thread_id: ThreadId, run_id: str, input_id: str, request: Request):
+    return await change_run_input(thread_id, run_id, input_id, request, retry=True)
+
+
 REGENERATE_HISTORY_SCAN_LIMIT = 200
 # Doubled to keep ~200 effective checkpoints when duration-only checkpoints
 # (one per successful run in steady state) consume roughly half of history.
@@ -753,7 +780,17 @@ async def _require_successful_source_run(thread_id: str, run_id: str, request: R
         raise HTTPException(status_code=409, detail="Could not find source run for assistant message")
     if _run_status_value(record) != RunStatus.success.value:
         raise HTTPException(status_code=409, detail="Only successful assistant runs can be edited and rerun")
+    await _reject_multi_input_replay(run_id, request, user_id=user_id)
     return record
+
+
+async def _reject_multi_input_replay(run_id: str, request: Request, *, user_id=None) -> None:
+    store = getattr(get_run_manager(request), "input_store", None)
+    if getattr(store, "supports_run_inputs", False) is not True:
+        return
+    row = await store.get(run_id, user_id=user_id)
+    if row is not None and any(entry.get("mode") == "steer" and entry.get("status") != "cancelled" for entry in (row.get("run_inputs") or {}).get("items", [])):
+        raise HTTPException(409, "This Run was adjusted while working; send a new message instead of replaying part of it")
 
 
 async def _find_interrupted_target_run_id(
@@ -832,6 +869,7 @@ async def _prepare_regenerate_payload(thread_id: str, message_id: str, request: 
         raise HTTPException(status_code=409, detail="Could not find the user message for this assistant response")
     if target_run_id is None:
         raise HTTPException(status_code=409, detail="Could not find source run for assistant message")
+    await _reject_multi_input_replay(target_run_id, request, user_id=await _run_scope_user_id(request, thread_id))
     previous_human_id = _message_id(previous_human)
     if not previous_human_id:
         raise HTTPException(status_code=409, detail="The source user message is missing an id")
