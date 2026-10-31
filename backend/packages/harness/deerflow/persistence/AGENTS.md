@@ -8,7 +8,7 @@ Acquire that lock by polling `pg_try_advisory_lock`, never with a blocking `pg_a
 
 When `database.postgres_schema` is configured, both async ORM connections and the synchronous SQLAlchemy connections used by DB-backed custom agents and managed subagents must use the same `search_path`; preserve this invariant when adding another persistence entry point.
 
-Every JSON column write goes through `dumps_json_safe` (`json_compat.py`): non-finite floats normalize to `None` because PostgreSQL jsonb rejects the bare `NaN`/`Infinity` token (SQLite would silently accept it). Both the async engine's `json_serializer` and the sync agent-storage engine wire it; keep new persistence entry points on it too.
+Every JSON column write goes through `dumps_json_safe` (`json_compat.py`): non-finite floats normalize to `None` because PostgreSQL jsonb rejects the bare `NaN`/`Infinity` token (SQLite would silently accept it). The shared async engine, sync agent-storage engine, and sync skill-mutation engine wire it on both SQLite and PostgreSQL; keep new JSON-writing persistence entry points on it too.
 
 Alembic stamp/upgrade workers started inside `bootstrap_schema()` remain owned by the bootstrap critical section until the worker finishes. Drain those `asyncio.to_thread()` calls across host cancellation before releasing the in-process SQLite bootstrap lock or PostgreSQL advisory lock; otherwise another bootstrap can overlap a still-running migration worker.
 

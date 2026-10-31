@@ -1,8 +1,8 @@
 """PostgreSQL JSON columns must never receive bare NaN/Infinity tokens.
 
 The shared ORM engine's ``json_serializer`` (:func:`deerflow.persistence.engine._json_serializer`)
-and the sync agent-storage engine (:func:`deerflow.persistence.agents.sql._build_engine`)
-both serialized JSON columns with the lenient ``json.dumps`` default
+and the sync agent-storage and skill-mutation engines all use the same serializer.
+Without it they serialize JSON columns with the lenient ``json.dumps`` default
 (``allow_nan=True``). A non-finite float reaching a JSON column — run metadata
 merges caller-supplied values, ``goal_verdict`` and ``token_usage_by_model``
 carry model/provider numbers — is emitted as the bare ``NaN`` / ``Infinity``
@@ -73,20 +73,82 @@ def test_sync_agent_engine_wires_the_safe_serializer_for_postgres(monkeypatch):
     assert _strict_loads(serializer({"x": float("nan")})) == {"x": None}
 
 
-def test_sync_agent_engine_leaves_sqlite_untouched(monkeypatch):
-    import deerflow.persistence.agents.sql as agents_sql
+def test_sync_agent_engine_normalizes_sqlite_json_columns(tmp_path):
+    from sqlalchemy import select, text
+    from sqlalchemy.orm import Session
 
-    captured: dict[str, object] = {}
+    from deerflow.persistence.agents.model import AgentRow
+    from deerflow.persistence.agents.sql import _build_engine
+
+    engine = _build_engine(f"sqlite:///{tmp_path / 'agents.db'}")
+    value = {"label": "文", "keep": [1.5, True, None], "nested": [float("nan"), {"positive": float("inf"), "negative": float("-inf")}]}
+    expected = {"label": "文", "keep": [1.5, True, None], "nested": [None, {"positive": None, "negative": None}]}
+    try:
+        AgentRow.__table__.create(engine)
+        with Session(engine) as session, session.begin():
+            session.add(AgentRow(id="agent", user_id="owner", name="test", config=value))
+        with Session(engine) as session:
+            raw = session.scalar(text("SELECT config FROM agents WHERE id = 'agent'"))
+            assert _strict_loads(raw) == expected
+            assert session.scalar(select(AgentRow.config)) == expected
+    finally:
+        engine.dispose()
+
+
+def test_sync_skill_mutation_engine_wires_the_safe_serializer_for_postgres(monkeypatch):
+    from types import SimpleNamespace
+
+    from deerflow.skills.mutations import topology
+
+    captured = {}
 
     def fake_create_engine(url, **kwargs):
-        captured["kwargs"] = kwargs
-        engine = type("FakeEngine", (), {})()
-        # The sqlite branch registers connect listeners via sqlalchemy.event,
-        # which needs a real target; give it a stand-in that accepts listeners.
-        engine.dialect = type("D", (), {"name": "sqlite"})()
-        return engine
+        captured.update(kwargs)
+        return SimpleNamespace()
 
-    monkeypatch.setattr(agents_sql, "create_engine", fake_create_engine)
-    monkeypatch.setattr(agents_sql.event, "listens_for", lambda *a, **k: lambda f: f)
-    agents_sql._build_engine("sqlite:///tmp/agents.db")
-    assert "json_serializer" not in captured["kwargs"], "sqlite does not accept json_serializer and stores JSON leniently"
+    monkeypatch.setattr(topology, "create_engine", fake_create_engine)
+    topology.mutation_session_factory("postgresql+psycopg://u:p@localhost/db")
+    serializer = captured.get("json_serializer")
+    assert serializer is not None, "the skill-mutation engine must set a json serializer"
+    assert _strict_loads(serializer({"x": float("nan")})) == {"x": None}
+
+
+def test_sync_skill_mutation_engine_normalizes_sqlite_json_columns(tmp_path):
+    from sqlalchemy import select, text
+
+    from deerflow.persistence.skill_mutations.model import SkillProposalRow
+    from deerflow.persistence.user.model import UserRow
+    from deerflow.skills.mutations.topology import mutation_session_factory
+
+    engine, sessions = mutation_session_factory(f"sqlite:///{tmp_path / 'mutations.db'}")
+    value = {"label": "文", "keep": [1.5, True, None], "nested": [float("nan"), {"positive": float("inf"), "negative": float("-inf")}]}
+    expected = {"label": "文", "keep": [1.5, True, None], "nested": [None, {"positive": None, "negative": None}]}
+    try:
+        UserRow.__table__.create(engine)
+        SkillProposalRow.__table__.create(engine)
+        with sessions.begin() as session:
+            session.add(UserRow(id="owner", email="owner@example.test"))
+        with sessions.begin() as session:
+            session.add(
+                SkillProposalRow(
+                    proposal_id="proposal",
+                    plugin_id="test",
+                    owner_id="owner",
+                    target_ref="target",
+                    name="skill",
+                    base_revision={},
+                    sources=[],
+                    candidate_hash="hash",
+                    state="draft",
+                    expires_at=1000,
+                    check_result=value,
+                    idempotency_key="key",
+                    request_hash="hash",
+                )
+            )
+        with sessions() as session:
+            raw = session.scalar(text("SELECT check_result FROM skill_mutation_proposals WHERE proposal_id = 'proposal'"))
+            assert _strict_loads(raw) == expected
+            assert session.scalar(select(SkillProposalRow.check_result)) == expected
+    finally:
+        engine.dispose()
