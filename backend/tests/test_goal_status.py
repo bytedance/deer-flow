@@ -22,7 +22,4 @@ def test_goal_reply_text_known_zh_locale():
 
 def test_goal_status_text_unknown_locale_falls_back_to_default():
     """The status reply also falls back for an unsupported locale."""
-    assert (
-        goal_status_text(None, None, running=False, locale="ja-JP")
-        == "No active goal."
-    )
+    assert goal_status_text(None, None, running=False, locale="ja-JP") == "No active goal."
