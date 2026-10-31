@@ -20,10 +20,12 @@ from urllib.parse import urlparse
 
 import httpx
 from langchain.tools import tool
+from langchain_core.runnables import RunnableConfig
 
 from deerflow.community.search_max_results import coerce_max_results
 from deerflow.community.search_time_range import SearchTimeRange
 from deerflow.community.url_safety import safe_public_result_url as _safe_public_url
+from deerflow.community.web_attempt_budget import WebAttemptBudgetExceeded, _Counter, counter_for_config
 from deerflow.config import get_app_config
 
 logger = logging.getLogger(__name__)
@@ -289,6 +291,7 @@ def _serper_post(
     base_url: object | None = None,
     max_retries: int = 0,
     retry_budget_seconds: float = 30,
+    attempt_budget: _Counter | None = None,
 ) -> tuple[dict | None, str | None]:
     """Send a POST request to a Serper endpoint.
 
@@ -342,6 +345,8 @@ def _serper_post(
                 parsed_endpoint.path,
             )
         with httpx.Client(timeout=30) as client:
+            if attempt_budget is not None:
+                client.event_hooks["request"].append(lambda _request: attempt_budget.reserve())
             for attempt in range(max_retries + 1):
                 try:
                     response = client.post(endpoint, headers=headers, json=payload)
@@ -372,6 +377,8 @@ def _serper_post(
             logger.error("Serper returned an unexpected payload type: %s", type(data).__name__)
             return None, _unexpected_format_error(query)
         return data, None
+    except WebAttemptBudgetExceeded as e:
+        return None, json.dumps({"error": str(e), "query": query, "code": "web_attempt_budget_exhausted"}, ensure_ascii=False)
     except httpx.HTTPStatusError as e:
         resp_text = (e.response.text or "")[:500]
         logger.error("Serper API returned HTTP %s: %s", e.response.status_code, resp_text)
@@ -385,7 +392,7 @@ def _serper_post(
 
 
 @tool("web_search", parse_docstring=True)
-def web_search_tool(query: str, max_results: int = 5, time_range: SearchTimeRange | None = None) -> str:
+def web_search_tool(query: str, max_results: int = 5, time_range: SearchTimeRange | None = None, runnable_config: RunnableConfig = None) -> str:
     """Search the web for information using Google Search via Serper.
 
     Args:
@@ -413,7 +420,7 @@ def web_search_tool(query: str, max_results: int = 5, time_range: SearchTimeRang
         return _missing_key_error(query, "web_search")
 
     base_url = extra.get("base_url")
-    data, error_json = _serper_post(_SERPER_SEARCH_ENDPOINT, api_key, search_query, max_results, time_range=time_range, base_url=base_url, **_retry_options(config))
+    data, error_json = _serper_post(_SERPER_SEARCH_ENDPOINT, api_key, search_query, max_results, time_range=time_range, base_url=base_url, attempt_budget=counter_for_config(runnable_config), **_retry_options(config))
     if error_json is not None:
         error = json.loads(error_json)
         error["query"] = query
@@ -449,7 +456,7 @@ def web_search_tool(query: str, max_results: int = 5, time_range: SearchTimeRang
 
 
 @tool("image_search", parse_docstring=True)
-def image_search_tool(query: str, max_results: int = 5) -> str:
+def image_search_tool(query: str, max_results: int = 5, runnable_config: RunnableConfig = None) -> str:
     """Search for images online using Google Images via Serper. Use this tool BEFORE image generation to find reference images for characters, portraits, objects, scenes, or any content requiring visual accuracy.
 
     The returned image URLs can be used as reference images in image generation to significantly improve quality.
@@ -470,7 +477,7 @@ def image_search_tool(query: str, max_results: int = 5) -> str:
         return _missing_key_error(query, "image_search")
 
     base_url = extra.get("base_url")
-    data, error_json = _serper_post(_SERPER_IMAGES_ENDPOINT, api_key, query, max_results, base_url=base_url, **_retry_options(config))
+    data, error_json = _serper_post(_SERPER_IMAGES_ENDPOINT, api_key, query, max_results, base_url=base_url, attempt_budget=counter_for_config(runnable_config), **_retry_options(config))
     if error_json is not None:
         return error_json
 
