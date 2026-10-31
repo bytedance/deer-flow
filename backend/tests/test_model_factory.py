@@ -2815,13 +2815,121 @@ def test_gpt6_explicit_responses_config_wins_on_custom_endpoint(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Tool-call thought_signature replay is applied automatically (issue #1180)
+# Tool-call thought_signature / reasoning_content capture and replay (issues #1180, #1790)
 #
-# Gemini via an OpenAI-compatible gateway rejects a replayed tool call whose
-# thought_signature the stock langchain payload builder dropped. Rather than make
-# every operator discover an explicit `use:` opt-in, any OpenAI-compatible client
-# that keeps the stock builder gets the replay automatically.
+# Both fields are dropped by langchain's parser (``_convert_dict_to_message`` /
+# ``_convert_delta_to_message_chunk``), so a replay alone is a permanent no-op. These
+# tests drive the real inbound path with a raw gateway payload and then assert on the
+# outgoing request payload.
 # ---------------------------------------------------------------------------
+
+
+def _gateway_response(*, signature: str | None = "SIG_A==", reasoning: str | None = "R-THINK") -> dict:
+    """A raw OpenAI-compatible response as a gateway would return it."""
+    message: dict = {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+            {
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "web_fetch", "arguments": "{}"},
+            }
+        ],
+    }
+    if signature is not None:
+        message["tool_calls"][0]["thought_signature"] = signature
+    if reasoning is not None:
+        message["reasoning_content"] = reasoning
+    return {
+        "id": "chatcmpl-1",
+        "object": "chat.completion",
+        "created": 0,
+        "model": "gemini-2.5-flash",
+        "choices": [{"index": 0, "message": message, "finish_reason": "tool_calls"}],
+    }
+
+
+def _assistant_payload(model, messages):
+    payload = model._get_request_payload(messages)
+    return next(msg for msg in payload["messages"] if msg.get("role") == "assistant")
+
+
+def _replay_model():
+    from langchain_openai import ChatOpenAI
+
+    model_class = factory_module._with_assistant_replay(ChatOpenAI)
+    return model_class(model="gemini-2.5-flash", api_key="dummy", base_url="http://127.0.0.1:1/v1")
+
+
+def test_gateway_fields_survive_the_inbound_parse():
+    """The parser drops both fields; the capture half must put them back."""
+    from langchain_core.messages import HumanMessage
+
+    model = _replay_model()
+    assistant = model._create_chat_result(_gateway_response()).generations[0].message
+
+    assert assistant.additional_kwargs["reasoning_content"] == "R-THINK"
+    assert assistant.additional_kwargs["tool_calls"][0]["thought_signature"] == "SIG_A=="
+
+    payload = _assistant_payload(model, [HumanMessage("hi"), assistant])
+
+    assert payload["tool_calls"][0]["thought_signature"] == "SIG_A=="
+    assert payload["reasoning_content"] == "R-THINK"
+
+
+def test_nothing_is_invented_when_the_gateway_sent_no_fields():
+    """A provider that never issued the fields must not receive them."""
+    from langchain_core.messages import HumanMessage
+
+    model = _replay_model()
+    assistant = model._create_chat_result(_gateway_response(signature=None, reasoning=None)).generations[0].message
+
+    assert "reasoning_content" not in assistant.additional_kwargs
+    assert "tool_calls" not in assistant.additional_kwargs
+
+    payload = _assistant_payload(model, [HumanMessage("hi"), assistant])
+
+    assert "reasoning_content" not in payload
+    assert "thought_signature" not in payload["tool_calls"][0]
+
+
+def test_streaming_deltas_carry_the_fields_into_the_merged_message():
+    """Streaming deltas go through a different parser; capture must cover that too."""
+    from langchain_core.messages import AIMessageChunk, HumanMessage
+
+    model = _replay_model()
+
+    def chunk(reasoning: str, *, with_call: bool) -> dict:
+        delta: dict = {"role": "assistant", "reasoning_content": reasoning}
+        if with_call:
+            delta["tool_calls"] = [
+                {
+                    "index": 0,
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "web_fetch", "arguments": "{}"},
+                    "thought_signature": "SIG_A==",
+                }
+            ]
+        return {"id": "chatcmpl-1", "choices": [{"index": 0, "delta": delta}]}
+
+    first = model._convert_chunk_to_generation_chunk(chunk("R-", with_call=True), AIMessageChunk, None)
+    second = model._convert_chunk_to_generation_chunk(chunk("THINK", with_call=False), AIMessageChunk, None)
+    assert first is not None and second is not None
+
+    merged = first.message + second.message
+    payload = _assistant_payload(model, [HumanMessage("hi"), merged])
+
+    assert payload["reasoning_content"] == "R-THINK"
+    assert payload["tool_calls"][0]["thought_signature"] == "SIG_A=="
+
+
+def test_replay_subclass_is_memoized_per_client_class():
+    """The factory runs once per agent build, so the subclass must be reused."""
+    from langchain_openai import ChatOpenAI
+
+    assert factory_module._with_assistant_replay(ChatOpenAI) is factory_module._with_assistant_replay(ChatOpenAI)
 
 
 def test_stock_chatopenai_profile_gains_signature_replay(monkeypatch):
@@ -2836,32 +2944,6 @@ def test_stock_chatopenai_profile_gains_signature_replay(monkeypatch):
     model = factory_module.create_chat_model(name="gemini-2.5-flash")
 
     assert isinstance(model, AssistantReplayMixin)
-
-
-def test_signature_survives_the_payload_without_any_config_opt_in():
-    """End-to-end payload check: no opt-in key, no gateway, no API key required."""
-    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
-    from langchain_openai import ChatOpenAI
-
-    raw_tool_call = {
-        "id": "call_1",
-        "type": "function",
-        "function": {"name": "web_fetch", "arguments": "{}"},
-        "thought_signature": "SIG_A==",
-    }
-    assistant = AIMessage(
-        content="",
-        tool_calls=[{"name": "web_fetch", "args": {}, "id": "call_1", "type": "tool_call"}],
-        additional_kwargs={"tool_calls": [raw_tool_call]},
-    )
-
-    model_class = factory_module._with_assistant_replay(ChatOpenAI)
-    model = model_class(model="gemini-2.5-flash", api_key="dummy", base_url="http://127.0.0.1:1/v1")
-
-    payload = model._get_request_payload([HumanMessage("hi"), assistant, ToolMessage(content="ok", tool_call_id="call_1")])
-
-    assistant_payload = next(msg for msg in payload["messages"] if msg.get("role") == "assistant")
-    assert assistant_payload["tool_calls"][0]["thought_signature"] == "SIG_A=="
 
 
 def test_client_with_its_own_payload_builder_is_untouched():
@@ -2883,36 +2965,3 @@ def test_non_openai_provider_is_untouched():
     from langchain_anthropic import ChatAnthropic
 
     assert factory_module._with_assistant_replay(ChatAnthropic) is ChatAnthropic
-
-
-def test_reasoning_content_is_replayed_for_stock_clients():
-    """DeepSeek-style gateways reject a replayed tool call without reasoning_content
-
-    (issue #1790), so the same automatic replay must carry that field too.
-    """
-    from langchain_core.messages import AIMessage, HumanMessage
-    from langchain_openai import ChatOpenAI
-
-    assistant = AIMessage(content="answer", additional_kwargs={"reasoning_content": "R-THINK"})
-
-    model_class = factory_module._with_assistant_replay(ChatOpenAI)
-    model = model_class(model="kimi-k2.5", api_key="dummy", base_url="http://127.0.0.1:1/v1")
-
-    payload = model._get_request_payload([HumanMessage("hi"), assistant])
-
-    assert payload["messages"][-1]["reasoning_content"] == "R-THINK"
-
-
-def test_no_reasoning_content_is_invented_when_the_gateway_sent_none():
-    """A provider that never issued reasoning_content must not receive the field."""
-    from langchain_core.messages import AIMessage, HumanMessage
-    from langchain_openai import ChatOpenAI
-
-    assistant = AIMessage(content="answer")
-
-    model_class = factory_module._with_assistant_replay(ChatOpenAI)
-    model = model_class(model="gpt-5.1", api_key="dummy", base_url="http://127.0.0.1:1/v1")
-
-    payload = model._get_request_payload([HumanMessage("hi"), assistant])
-
-    assert "reasoning_content" not in payload["messages"][-1]

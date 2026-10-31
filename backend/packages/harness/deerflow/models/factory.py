@@ -440,6 +440,9 @@ def _apply_stream_chunk_timeout_default(model_class: type, model_settings_from_c
     model_settings_from_config["stream_chunk_timeout"] = _DEFAULT_STREAM_CHUNK_TIMEOUT_SECONDS
 
 
+_ASSISTANT_REPLAY_SUBCLASSES: dict[type, type] = {}
+
+
 def _with_assistant_replay(model_class: type) -> type:
     """Return a client class that replays gateway-issued assistant fields.
 
@@ -465,7 +468,15 @@ def _with_assistant_replay(model_class: type) -> type:
         return model_class
     if model_class._get_request_payload is not ChatOpenAI._get_request_payload:
         return model_class
-    return type(f"{model_class.__name__}WithAssistantReplay", (AssistantReplayMixin, model_class), {"__module__": __name__})
+    wrapped = _ASSISTANT_REPLAY_SUBCLASSES.get(model_class)
+    if wrapped is None:
+        # Memoized: the factory runs once per agent build (lead agent, title and
+        # summarization middlewares, memory manager, subagent executor, managed-models
+        # router), so rebuilding a pydantic subclass every time would pay a class
+        # construction per build and hand back a different class identity each round.
+        wrapped = type(f"{model_class.__name__}WithAssistantReplay", (AssistantReplayMixin, model_class), {"__module__": __name__})
+        _ASSISTANT_REPLAY_SUBCLASSES[model_class] = wrapped
+    return wrapped
 
 
 # gpt-6 family must use the OpenAI Responses API when tools are attached.

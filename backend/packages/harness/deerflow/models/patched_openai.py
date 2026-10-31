@@ -1,42 +1,71 @@
-"""Patched ChatOpenAI that preserves thought_signature for Gemini thinking models.
+"""OpenAI-compatible adapter that survives gateway-specific assistant fields.
 
-When using Gemini with thinking enabled via an OpenAI-compatible gateway (e.g.
-Vertex AI, Google AI Studio, or any proxy), the API requires that the
-``thought_signature`` field on tool-call objects is echoed back verbatim in
-every subsequent request.
+Two fields that some OpenAI-compatible gateways issue on assistant messages must be
+echoed back verbatim on the next request:
 
-The OpenAI-compatible gateway stores the raw tool-call dicts (including
-``thought_signature``) in ``additional_kwargs["tool_calls"]``, but standard
-``langchain_openai.ChatOpenAI`` only serialises the standard fields (``id``,
-``type``, ``function``) into the outgoing payload, silently dropping the
-signature.  That causes an HTTP 400 ``INVALID_ARGUMENT`` error:
+* Gemini's tool-call ``thought_signature`` (required whenever thinking is enabled), and
+* DeepSeek-style ``reasoning_content`` (required by reasoning models such as Kimi/Qwen
+  behind a gateway).
 
-    Unable to submit request because function call `<tool>` in the N. content
-    block is missing a `thought_signature`.
+Neither survives the round trip on its own:
 
-This module fixes the problem by overriding ``_get_request_payload`` to
-re-inject tool-call signatures back into the outgoing payload for any assistant
-message that originally carried them.
+1. **Inbound.** ``langchain_openai`` parses responses with
+   ``_convert_dict_to_message`` / ``_convert_delta_to_message_chunk``, which keep only
+   ``function_call``/``audio`` in ``additional_kwargs`` and normalise tool calls down to
+   ``{name, args, id, type}``. Gateway fields are dropped at parse time, so they never reach
+   ``additional_kwargs`` on their own.
+2. **Outbound.** The payload serialiser only emits the standard tool-call fields, so even
+   a field that did reach ``additional_kwargs`` would not be sent back.
+
+The mixin below closes both gaps: it captures the raw gateway fields while the response
+payload is still in hand, then re-injects them into the outgoing request. Without the
+capture half the replay half is a permanent no-op, which is what issues #1180 and #1790
+kept hitting.
 """
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from langchain_core.language_models import LanguageModelInput
 from langchain_core.messages import AIMessage
+from langchain_core.outputs import ChatGenerationChunk, ChatResult
 from langchain_openai import ChatOpenAI
 
 from deerflow.models.assistant_payload_replay import restore_assistant_payloads, restore_reasoning_content
 
 
-class AssistantReplayMixin:
-    """Re-inject gateway-issued assistant fields into an outgoing request payload.
+def _capture_replayable_fields(message: Any, payload_message: Mapping[str, Any]) -> None:
+    """Stash gateway-issued fields that the parser would drop.
 
-    Mixed into OpenAI-compatible clients whose payload builder would otherwise drop
-    fields the gateway itself issued on the previous turn (see the module docstring).
-    Clients that keep langchain's stock builder receive it automatically from
-    ``deerflow.models.factory``.
+    Applied while the raw response payload is still available, for the same reason
+    ``patched_minimax`` rebuilds its own messages: what the parser discards cannot be
+    recovered later. Streaming calls this per delta, and ``AIMessageChunk`` merging
+    concatenates ``reasoning_content`` and appends tool-call entries, which is the shape
+    the replay expects.
+    """
+    additional_kwargs = message.additional_kwargs
+
+    reasoning = payload_message.get("reasoning_content")
+    if isinstance(reasoning, str) and reasoning:
+        existing = additional_kwargs.get("reasoning_content")
+        additional_kwargs["reasoning_content"] = f"{existing}{reasoning}" if isinstance(existing, str) else reasoning
+
+    raw_tool_calls = payload_message.get("tool_calls")
+    if isinstance(raw_tool_calls, list):
+        signed = [tool_call for tool_call in raw_tool_calls if isinstance(tool_call, Mapping) and (tool_call.get("thought_signature") or tool_call.get("thoughtSignature"))]
+        if signed:
+            existing_calls = additional_kwargs.get("tool_calls")
+            additional_kwargs["tool_calls"] = [*(existing_calls if isinstance(existing_calls, list) else []), *signed]
+
+
+class AssistantReplayMixin:
+    """Capture and replay gateway-issued assistant fields.
+
+    Mixed into OpenAI-compatible clients by ``deerflow.models.factory``. Providers that
+    already build their own messages (DeepSeek, MiMo, MiniMax, StepFun, vLLM) are never
+    wrapped, so their explicit handling still wins.
     """
 
     def _get_request_payload(
@@ -54,29 +83,56 @@ class AssistantReplayMixin:
         restore_assistant_payloads(payload.get("messages", []), original_messages, _restore_replayable_assistant_fields)
         return payload
 
+    def _create_chat_result(
+        self,
+        response: dict | Any,
+        generation_info: dict | None = None,
+    ) -> ChatResult:
+        """Capture gateway fields from a non-streaming response before they are lost."""
+        result = super()._create_chat_result(response, generation_info)
+        payload = response if isinstance(response, Mapping) else response.model_dump()
+        choices = payload.get("choices") or []
+        for index, generation in enumerate(result.generations):
+            choice = choices[index] if index < len(choices) else {}
+            raw_message = choice.get("message") if isinstance(choice, Mapping) else None
+            if isinstance(raw_message, Mapping):
+                _capture_replayable_fields(generation.message, raw_message)
+        return result
+
+    def _convert_chunk_to_generation_chunk(
+        self,
+        chunk: dict,
+        default_chunk_class: type,
+        base_generation_info: dict | None,
+    ) -> ChatGenerationChunk | None:
+        """Capture gateway fields from a streaming delta before they are lost."""
+        generation_chunk = super()._convert_chunk_to_generation_chunk(chunk, default_chunk_class, base_generation_info)
+        if generation_chunk is None:
+            return generation_chunk
+        choices = chunk.get("choices") or (chunk.get("chunk") or {}).get("choices") or []
+        delta = choices[0].get("delta") if choices else None
+        if isinstance(delta, Mapping):
+            _capture_replayable_fields(generation_chunk.message, delta)
+        return generation_chunk
+
 
 class PatchedChatOpenAI(AssistantReplayMixin, ChatOpenAI):
-    """ChatOpenAI with ``thought_signature`` preservation for Gemini thinking via OpenAI gateway.
+    """ChatOpenAI with gateway-issued assistant fields captured and replayed.
 
-    When using Gemini with thinking enabled via an OpenAI-compatible gateway,
-    the API expects ``thought_signature`` to be present on tool-call objects in
-    multi-turn conversations.  This patched version restores those signatures
-    from ``AIMessage.additional_kwargs["tool_calls"]`` into the serialised
-    request payload before it is sent to the API.
-
-    See the Gemini example in ``config.example.yaml`` for Google's official
-    OpenAI-compatible endpoint and its reasoning configuration.
+    Kept for profiles that name the class explicitly. A stock ``ChatOpenAI`` profile
+    receives the same behaviour from ``deerflow.models.factory``, so naming this class is
+    no longer required.
     """
 
 
 def _restore_replayable_assistant_fields(payload_msg: dict, orig_msg: AIMessage) -> None:
-    """Restore every provider-issued assistant field the stock serialiser drops.
+    """Restore every captured assistant field the stock serialiser drops.
 
     Gemini gateways require the tool-call ``thought_signature`` back (issue #1180);
     DeepSeek-style reasoning gateways reject a replayed assistant tool call whose
-    ``reasoning_content`` is missing, which is the failure reported in issue #1790 for
-    Kimi/Qwen-style gateways behind ``PatchedChatOpenAI``. Both fields are echoed only when
-    the message carries them, so a provider that never issued them gets nothing extra.
+    ``reasoning_content`` is missing, which is the failure reported in issue #1790
+    for Kimi/Qwen-style gateways. Each field is restored only when the captured message
+    carries it, so a provider that never issued it gets nothing extra.
     """
     _restore_tool_call_signatures(payload_msg, orig_msg)
     restore_reasoning_content(payload_msg, orig_msg)
