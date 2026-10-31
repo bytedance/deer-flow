@@ -1,5 +1,10 @@
 ## Support Bundle Runtime Home
 
+`dotenv_exports.py` pairs backslash escapes before recognizing closing quotes,
+so a quoted Windows path ending in an escaped backslash cannot consume later
+assignments. Preserve multiline quoted values and the stdlib-only launcher;
+real shell regression coverage lives in `backend/tests/test_serve_dotenv.py`.
+
 Thread manifests use a nonempty `DEER_FLOW_HOME` exclusively, resolving relative
 values from the checkout like the local launcher. Read root `.env` path settings
 without exporting secrets; dotenv overrides shell exports, including empty values.
