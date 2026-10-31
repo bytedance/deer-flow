@@ -15,6 +15,7 @@ import { I18nContext } from "@/core/i18n/context";
 import { enUS } from "@/core/i18n/locales/en-US";
 import { fetchSubtaskSteps } from "@/core/tasks/api";
 import {
+  SubtaskContext,
   SubtasksProvider,
   useSubtaskContext,
   useUpdateSubtask,
@@ -97,7 +98,7 @@ function setup(history = false) {
         threadId={history ? "thread-1" : undefined}
         runId={history ? "run-1" : undefined}
         isLoading
-        fallbackTask={rendered.tasks.get("task-1")!}
+        fallbackTask={rendered.tasksByGroup.get(0)!.get("task-1")!}
       />
     );
   }
@@ -327,5 +328,125 @@ describe("SubtaskCard message synchronization", () => {
       steps: [step],
       usage,
     });
+  });
+});
+
+describe("SubtaskCard turn ownership", () => {
+  function renderOwnedCard({
+    live,
+    fallbackTask,
+    contextTasks,
+    threadId,
+    runId,
+    setTasks = () => undefined,
+  }: {
+    live: boolean;
+    fallbackTask: Subtask;
+    contextTasks: Record<string, Subtask>;
+    threadId?: string;
+    runId?: string;
+    setTasks?: () => void;
+  }) {
+    const client = new QueryClient();
+    client.setQueryData(["models"], {
+      models: [],
+      token_usage: { enabled: false },
+    });
+    return render(
+      <QueryClientProvider client={client}>
+        <I18nContext.Provider
+          value={{ locale: "en-US", setLocale: () => undefined, t: enUS }}
+        >
+          <SubtaskContext.Provider
+            value={{
+              tasks: contextTasks,
+              tasksRef: { current: contextTasks },
+              setTasks,
+            }}
+          >
+            <SubtaskCard
+              taskId={fallbackTask.id}
+              threadId={threadId}
+              runId={runId}
+              isLoading={false}
+              live={live}
+              fallbackTask={fallbackTask}
+            />
+          </SubtaskContext.Provider>
+        </I18nContext.Provider>
+      </QueryClientProvider>,
+    );
+  }
+
+  it("does not take another turn's live steps when the call id is shared across turns", () => {
+    const view = renderOwnedCard({
+      live: false,
+      contextTasks: {
+        call_0: {
+          id: "call_0",
+          status: "in_progress",
+          subagent_type: "researcher",
+          description: "Second task",
+          prompt: "Second task",
+          steps: [
+            {
+              kind: "tool",
+              message_index: 1,
+              text: "later step",
+              tool_name: "later_tool",
+            },
+          ],
+        },
+      },
+      fallbackTask: {
+        id: "call_0",
+        status: "completed",
+        subagent_type: "researcher",
+        description: "First task",
+        prompt: "First task",
+        result: "first result",
+      },
+    });
+
+    expect(screen.getByRole("button").textContent).toContain("First task");
+    fireEvent.click(screen.getByRole("button"));
+    expect(view.container.textContent).toContain("first result");
+    expect(view.container.textContent).not.toContain("later_tool");
+  });
+
+  it("keeps history backfill out of the shared live map", async () => {
+    rs.mocked(fetchSubtaskSteps).mockResolvedValue([
+      {
+        kind: "tool",
+        message_index: 1,
+        text: "history",
+        tool_name: "read_file",
+      },
+    ]);
+    const setTasks = rs.fn();
+    const view = renderOwnedCard({
+      live: false,
+      threadId: "thread-1",
+      runId: "run-1",
+      setTasks,
+      contextTasks: {},
+      fallbackTask: {
+        id: "call_0",
+        status: "in_progress",
+        subagent_type: "researcher",
+        description: "First task",
+        prompt: "First task",
+      },
+    });
+
+    fireEvent.click(screen.getByRole("button"));
+    expect(fetchSubtaskSteps).toHaveBeenCalledWith(
+      "thread-1",
+      "run-1",
+      "call_0",
+    );
+    expect(await screen.findByText("read_file")).toBeTruthy();
+    expect(setTasks).not.toHaveBeenCalled();
+    expect(view.container.textContent).toContain("First task");
   });
 });

@@ -54,6 +54,7 @@ export function SubtaskCard({
   threadId,
   runId,
   isLoading,
+  live = true,
   fallbackTask,
   resultMessage,
 }: {
@@ -62,6 +63,12 @@ export function SubtaskCard({
   threadId?: string;
   runId?: string;
   isLoading: boolean;
+  /**
+   * Whether this card may read the shared live subtask state. The state is
+   * keyed by bare `tool_call_id`, which providers may reuse across runs, so a
+   * card whose id is not owned by this turn alone renders its own snapshot.
+   */
+  live?: boolean;
   fallbackTask: Subtask;
   resultMessage?: Message;
 }) {
@@ -82,7 +89,13 @@ export function SubtaskCard({
     [reportSources, threadId],
   );
   const [collapsed, setCollapsed] = useState(true);
-  const task = resolveRenderedSubtask(useSubtask(taskId), fallbackTask)!;
+  const [backfilledSteps, setBackfilledSteps] =
+    useState<Subtask["steps"]>(undefined);
+  const contextTask = useSubtask(taskId);
+  const task = resolveRenderedSubtask(
+    live ? contextTask : undefined,
+    fallbackTask,
+  )!;
   const { models, tokenUsageEnabled } = useModels();
   const updateSubtask = useUpdateSubtask();
   const modelLabel = resolveSubtaskModelLabel(task.modelName, models);
@@ -100,11 +113,15 @@ export function SubtaskCard({
   // The card shows the subagent's step timeline (#3779): its reasoning turns
   // (AI text) interleaved with the tools it ran (by name). See stepsForDisplay
   // for what is kept/dropped.
-  const displaySteps = stepsForDisplay(task.steps, task.status);
+  const steps = live ? task.steps : backfilledSteps;
+  const displaySteps = stepsForDisplay(steps, task.status);
 
   // Backfill step history on expand for historical runs (#3779). Live runs
   // already have steps from SSE, so the `steps.length` guard skips the fetch.
-  const stepsCount = task.steps?.length ?? 0;
+  // A card that cannot take shared live state keeps the fetched steps locally:
+  // writing them into the shared map would leak them into another turn's card
+  // when a provider reused this call id.
+  const stepsCount = steps?.length ?? 0;
   const backfilledRef = useRef(false);
   useEffect(() => {
     if (collapsed || backfilledRef.current || stepsCount > 0) {
@@ -115,16 +132,21 @@ export function SubtaskCard({
     }
     backfilledRef.current = true;
     fetchSubtaskSteps(threadId, runId, taskId)
-      .then((steps) => {
-        if (steps.length > 0) {
-          updateSubtask({ id: taskId, steps });
+      .then((fetchedSteps) => {
+        if (fetchedSteps.length === 0) {
+          return;
+        }
+        if (live) {
+          updateSubtask({ id: taskId, steps: fetchedSteps });
+        } else {
+          setBackfilledSteps(fetchedSteps);
         }
       })
       .catch(() => {
         // Allow a retry on the next expand if the fetch failed.
         backfilledRef.current = false;
       });
-  }, [collapsed, stepsCount, threadId, runId, taskId, updateSubtask]);
+  }, [collapsed, stepsCount, threadId, runId, taskId, updateSubtask, live]);
   const icon = useMemo(() => {
     if (task.status === "completed") {
       return <CheckCircleIcon className="size-3" />;
