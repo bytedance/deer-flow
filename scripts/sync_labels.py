@@ -65,6 +65,13 @@ def sync_label(label: dict[str, str], repo: str | None, dry_run: bool) -> bool:
 
 
 def main() -> int:
+    # Status symbols must not abort the sync on terminals and pipes with legacy
+    # encodings: this runs from CI and from developer shells, and a half-synced
+    # label set is worse than a replaced glyph. Same guard as scripts/doctor.py.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", help="Target repository as OWNER/NAME")
     parser.add_argument(
