@@ -99,8 +99,16 @@ def test_committed_manifest_matches_schema_and_strict_parser() -> None:
     parsed = parse_manifest(manifest_path.read_bytes(), source=str(manifest_path))
 
     assert len(parsed.waivers) == 2
-    assert parsed.waivers[0].preapproved_file_sha256s == ("sha256:2877bde08bf3f437b9dae3d57585a0840b9b1024736d2e5c6c657b71899269d0",)
-    assert parsed.waivers[1].preapproved_file_sha256s == ("sha256:ea2521ba41c8fd16b2900758c890bb6c6d2b4b01da10b4a860facb8587ed0bde",)
+    assert parsed.waivers[0].preapproved_file_sha256s == (
+        "sha256:2877bde08bf3f437b9dae3d57585a0840b9b1024736d2e5c6c657b71899269d0",
+        "sha256:83e82d6049147a1d8b28a5155b35eed270e9053e9bde8f99893b597a2e7c3974",
+    )
+    assert parsed.waivers[1].preapproved_file_sha256s == (
+        "sha256:ea2521ba41c8fd16b2900758c890bb6c6d2b4b01da10b4a860facb8587ed0bde",
+        "sha256:f86a5c9a3339ae90ffd59635201d09f2c8019dc35b72e517228d31d6b3e1912c",
+        "sha256:bd7bc409540265f91eac3f2c82e104b6db0e0aeb12b3aa7ef4d79116cff8791b",
+        "sha256:9de295d782b3d8e88b03c2489ea2bac64c894bab1f88302ce68b8fc61f72c535",
+    )
 
 
 def test_skill_creator_waivers_match_current_error_findings() -> None:

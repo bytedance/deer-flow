@@ -272,7 +272,10 @@ async def _scan_static_skill_markdown_or_raise(skill_name: str, content: str, *,
         with tempfile.TemporaryDirectory() as tmp:
             skill_dir = Path(tmp) / skill_name
             skill_dir.mkdir(parents=True)
-            (skill_dir / SKILL_MD_FILE).write_text(content, encoding="utf-8")
+            # The static scan must see the bytes the caller submitted: on
+            # Windows a default text write stores CRLF, so the scan would judge
+            # text that never reaches the skill file.
+            (skill_dir / SKILL_MD_FILE).write_text(content, encoding="utf-8", newline="")
             return enforce_static_scan(skill_dir, skill_name=skill_name, app_config=app_config)
 
     try:

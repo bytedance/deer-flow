@@ -141,4 +141,23 @@ describe("api fetcher Request inputs", () => {
     expect(sent[0]?.headers.get("X-CSRF-Token")).toBe("init-token");
     expect(await sent[0]?.text()).toBe("payload");
   });
+
+  it.each(["%E0%A4%A", "abc%", "a+b%zz"])(
+    "forwards a malformed CSRF cookie verbatim instead of throwing: %s",
+    async (cookieValue) => {
+      document.cookie = `csrf_token=${cookieValue}`;
+
+      await apiFetch("http://localhost/api/threads", { method: "POST" });
+
+      expect(sent[0]?.headers.get("X-CSRF-Token")).toBe(cookieValue);
+    },
+  );
+
+  it("still decodes a percent-encoded CSRF cookie", async () => {
+    document.cookie = "csrf_token=cookie%2Dtoken";
+
+    await apiFetch("http://localhost/api/threads", { method: "POST" });
+
+    expect(sent[0]?.headers.get("X-CSRF-Token")).toBe("cookie-token");
+  });
 });

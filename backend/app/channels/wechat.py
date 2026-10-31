@@ -32,6 +32,7 @@ from app.channels.commands import is_known_channel_command
 from app.channels.connection_identity import attach_connection_identity
 from app.channels.credential_staging import cleanup_stale_credential_staging, credential_staging_prefix
 from app.channels.message_bus import INBOUND_FILE_CLEANUP_KEY, InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment, cleanup_inbound_files
+from deerflow.utils.atomic_write import publish_bytes_atomically
 from deerflow.utils.file_io import await_drained
 
 logger = logging.getLogger(__name__)
@@ -805,7 +806,7 @@ class WechatChannel(Channel):
         connect_code = self._pending_connect_code(text)
         if connect_code:
             if raw_message.get("group_id"):
-                await self._send_connection_reply(chat_id, context_token, "Please send the connection code in a private chat with the bot.")
+                await self._send_connection_reply(chat_id, context_token, await self._connect_reply_text("private_chat_only"))
                 return
             handled = await self._bind_connection_from_connect_code(
                 chat_id=chat_id,
@@ -871,11 +872,11 @@ class WechatChannel(Channel):
 
         state = await self._connection_repo.consume_oauth_state(provider="wechat", state=code)
         if state is None:
-            await self._send_connection_reply(chat_id, context_token, "WeChat connection code is invalid or expired.")
+            await self._send_connection_reply(chat_id, context_token, await self._connect_reply_text("invalid_code"))
             return True
 
         if not chat_id:
-            await self._send_connection_reply(chat_id, context_token, "WeChat connection could not be completed from this message.")
+            await self._send_connection_reply(chat_id, context_token, await self._connect_reply_text("incomplete", owner_user_id=state["owner_user_id"]))
             return True
 
         connection = await self._connection_repo.upsert_connection(
@@ -886,7 +887,7 @@ class WechatChannel(Channel):
             status="connected",
         )
         await self._remember_notification_context(connection_id=connection["id"], owner_user_id=state["owner_user_id"], chat_id=chat_id, context_token=context_token)
-        await self._send_connection_reply(chat_id, context_token, "WeChat connected to DeerFlow.")
+        await self._send_connection_reply(chat_id, context_token, await self._connect_reply_text("connected", owner_user_id=state["owner_user_id"]))
         return True
 
     async def _send_connection_reply(self, chat_id: str, context_token: str, text: str) -> None:
@@ -1707,7 +1708,10 @@ class WechatChannel(Channel):
             return
         try:
             self._cursor_path.parent.mkdir(parents=True, exist_ok=True)
-            self._cursor_path.write_text(json.dumps({"get_updates_buf": self._get_updates_buf}, ensure_ascii=False, indent=2), encoding="utf-8", newline="")
+            # Publish through the shared helper: it fsyncs the staged bytes
+            # before the rename (so a machine crash cannot leave a truncated
+            # cursor behind) and re-applies an existing file's mode.
+            publish_bytes_atomically(self._cursor_path, json.dumps({"get_updates_buf": self._get_updates_buf}, ensure_ascii=False, indent=2).encode("utf-8"))
         except OSError:
             logger.warning("[WeChat] failed to persist cursor state to %s", self._cursor_path)
 

@@ -44,6 +44,7 @@ from app.gateway.utils import sanitize_log_param
 from app.mcp_tasks.errors import PermanentNotificationError
 from deerflow.agents.human_input import read_human_input_response
 from deerflow.agents.interaction_policy import resolve_run_interaction_policy
+from deerflow.agents.language import ui_locale
 from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, _REMINDER_DATE_KEY
 from deerflow.agents.middlewares.input_sanitization_middleware import frame_untrusted_text
 from deerflow.agents.middlewares.message_utils import _SUMMARY_MESSAGE_NAME, is_genuine_user_message
@@ -163,6 +164,8 @@ _TERMINAL_RUN_STATUSES = {
 _TERMINAL_STREAM_RECOVERED = "recovered"
 _TERMINAL_STREAM_PRODUCER_EXPIRED = "producer_expired"
 
+# Includes same-thread create admission and metadata I/O; timeout rejects strict
+# starts and leaves non-strict starts without verified metadata (MCP fails closed).
 _THREAD_METADATA_SETUP_TIMEOUT_SECONDS = 5.0
 
 # Message metadata a scheduled launch puts on its prompt: the task, run and the
@@ -260,6 +263,18 @@ async def _ensure_thread_metadata(
     require_existing_thread: bool = False,
 ) -> dict[str, Any]:
     """Ensure an admitted run's thread exists without delaying task attachment."""
+    async with goal_thread_lock(record.thread_id):
+        return await _ensure_thread_metadata_locked(run_ctx, record, owner_user_id=owner_user_id, require_existing_thread=require_existing_thread)
+
+
+async def _ensure_thread_metadata_locked(
+    run_ctx: RunContext,
+    record: RunRecord,
+    *,
+    owner_user_id: str | None,
+    require_existing_thread: bool,
+) -> dict[str, Any]:
+    """Share create admission with HTTP while retaining detached task ownership."""
     thread_store = run_ctx.thread_store
     existing = await thread_store.get(record.thread_id)
     if existing is None and owner_user_id:
@@ -1032,7 +1047,13 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
         # ``build_run_config`` copies ``body.config['configurable']`` verbatim,
         # and ``configurable`` is persisted in checkpoints.
         existing_configurable.pop("client", None)
+        existing_configurable.pop("locale", None)
     existing_runtime_context = config.get("context")
+    if isinstance(existing_runtime_context, dict) and "locale" in existing_runtime_context:
+        locale = ui_locale(existing_runtime_context)
+        existing_runtime_context.pop("locale")
+        if locale is not None:
+            existing_runtime_context["locale"] = locale
     for section in (existing_configurable, existing_runtime_context):
         if isinstance(section, dict):
             for key in _MODEL_SELECTION_CONTEXT_KEYS:
@@ -1049,6 +1070,13 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
 
     configurable = config.setdefault("configurable", {})
     runtime_context = config.setdefault("context", {})
+    # UI language is public request data, never a checkpoint default. An
+    # explicit invalid/null value clears a legacy config.context preference.
+    if "locale" in context and isinstance(runtime_context, dict):
+        runtime_context.pop("locale", None)
+        locale = ui_locale(context)
+        if locale is not None:
+            runtime_context["locale"] = locale
     keys = _CONTEXT_CONFIGURABLE_KEYS | _CONTEXT_INTERNAL_CALLER_KEYS if internal else _CONTEXT_CONFIGURABLE_KEYS
     for key in keys:
         if key in context:
@@ -1331,9 +1359,9 @@ def build_run_config(
     load the matching ``agents/<name>/SOUL.md`` and per-agent config —
     without it the agent silently runs as the default lead agent.
 
-    This mirrors the channel manager's ``_resolve_run_params`` logic except for
-    the recursion default: Gateway API runs use the configured top-level
-    ``recursion_limit``, while IM channel runs retain their own default.
+    This mirrors the channel manager's ``_resolve_run_params`` logic. IM
+    channel runs send no ``recursion_limit`` unless their session config or
+    channel policy sets one, so they get the same configured default here.
     """
     # Lead-agent recursion budget (LangGraph super-steps for the lead graph
     # only). Independent of subagent depth: a `task()` dispatch runs the whole
@@ -1957,11 +1985,19 @@ async def _recover_run_knowledge_scope(
     *,
     thread_id: str,
     target_message_id: str | None,
+    checkpoint_id: str | None = None,
+    checkpoint_ns: str = "",
 ) -> object | None:
-    """Resolve one replay/resume scope from the authoritative latest checkpoint."""
+    """Recover the source turn's scope from the selected checkpoint or head."""
+    checkpoint_kwargs: dict[str, Any] = {}
+    if checkpoint_id is not None:
+        checkpoint_kwargs["checkpoint_id"] = checkpoint_id
+    if checkpoint_ns:
+        checkpoint_kwargs["checkpoint_ns"] = checkpoint_ns
     accessor, config = await build_thread_checkpoint_state_accessor(
         request,
         thread_id=thread_id,
+        **checkpoint_kwargs,
     )
     try:
         snapshot = await accessor.aget(config)
@@ -2238,7 +2274,8 @@ async def start_run(
         if command and command.get("resume") is not None:
             graph_input = Command(resume=command["resume"])
         else:
-            graph_input = normalized_input
+            # LangGraph continues pending work with None; {} starts new input.
+            graph_input = normalized_input if body.input is not None else None
         # Keep the idempotency identity in the caller's pre-stamp shape. A
         # keyed retry can then reuse a run even though its stored run input has
         # Gateway-issued IDs, and old id-less run records remain comparable.
@@ -2293,7 +2330,7 @@ async def start_run(
         scope_graph_input = graph_input if isinstance(graph_input, dict) else {"messages": []}
         current_human_message = _current_human_message(graph_input)
         current_message_has_scope = current_human_message is not None and KNOWLEDGE_SCOPE_KEY in current_human_message.additional_kwargs
-        replay_requires_scope_recovery = isinstance(graph_input, Command) or (isinstance(target_message_id, str) and bool(target_message_id) and (replay_kind != "edit" or not current_message_has_scope))
+        replay_requires_scope_recovery = graph_input is None or isinstance(graph_input, Command) or (isinstance(target_message_id, str) and bool(target_message_id) and (replay_kind != "edit" or not current_message_has_scope))
         is_human_input_response = current_human_message is not None and "human_input_response" in current_human_message.additional_kwargs
         # Clarification and edit-replay messages may intentionally replace the
         # source scope. If either client omits its current selector snapshot,
@@ -2301,11 +2338,16 @@ async def start_run(
         # run to every operator-approved dataset. Other replay paths always use
         # server recovery regardless of client input.
         is_scope_recovery = replay_requires_scope_recovery or (is_human_input_response and not current_message_has_scope)
+        recovery_checkpoint: dict[str, Any] = {}
+        if graph_input is None:
+            configurable = config.get("configurable") or {}
+            recovery_checkpoint = {key: configurable[key] for key in ("checkpoint_id", "checkpoint_ns") if configurable.get(key)}
         recovery_scope = (
             await _recover_run_knowledge_scope(
                 request,
                 thread_id=thread_id,
                 target_message_id=(target_message_id if isinstance(target_message_id, str) else None),
+                **recovery_checkpoint,
             )
             if is_scope_recovery
             else None
@@ -3048,7 +3090,11 @@ def serialize_wait_run_status(record: RunRecord) -> dict[str, Any]:
     """Return durable status and the error envelope recognized by the SDK."""
     result: dict[str, Any] = {"status": record.status.value, "error": record.error}
     if record.status == RunStatus.error:
-        result["__error__"] = {"error": "RunError", "message": record.error or "Run failed."}
+        # A run stopped at its step limit keeps the error name of its stream
+        # error frame, so callers such as IM channels can show its message
+        # instead of a generic failure.
+        name = "GraphRecursionError" if getattr(record, "stop_reason", None) == "recursion_capped" else "RunError"
+        result["__error__"] = {"error": name, "message": record.error or "Run failed."}
     return result
 
 

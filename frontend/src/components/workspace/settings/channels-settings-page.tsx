@@ -42,6 +42,7 @@ import type { ChannelConnection, ChannelProvider } from "@/core/channels/types";
 import { useI18n } from "@/core/i18n/hooks";
 import { cn } from "@/lib/utils";
 
+import { ChannelBindingCodeDialog } from "../channels/channel-binding-code-dialog";
 import { ChannelProviderIcon } from "../channels/channel-provider-icon";
 import { ChannelRuntimeConfigDialog } from "../channels/channel-runtime-config-dialog";
 import { ChannelScheduledUpdates } from "../channels/channel-scheduled-updates";
@@ -120,6 +121,7 @@ function ChannelProviderItem({
   const disconnectProviderMutation = useDisconnectChannelProvider();
   const [setupOpen, setSetupOpen] = useState(false);
   const [setupStep, setSetupStep] = useState<"setup" | "binding">("setup");
+  const [bindingOpen, setBindingOpen] = useState(false);
   const openSetup = () => {
     setSetupStep("setup");
     setSetupOpen(true);
@@ -153,6 +155,12 @@ function ChannelProviderItem({
       closeConnectWindow(preparedWindow ?? null);
       setSetupStep(connectProvider.configured ? "binding" : "setup");
       setSetupOpen(true);
+      return;
+    }
+    // The command stays in a dialog with copy and expiry, not a passing toast.
+    if (connectProvider.auth_mode === "binding_code") {
+      closeConnectWindow(preparedWindow ?? null);
+      setBindingOpen(true);
       return;
     }
     const connectWindow =
@@ -339,6 +347,11 @@ function ChannelProviderItem({
               );
             });
         }}
+      />
+      <ChannelBindingCodeDialog
+        provider={provider}
+        open={bindingOpen}
+        onOpenChange={setBindingOpen}
       />
     </>
   );

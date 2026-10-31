@@ -32,6 +32,8 @@ class ManagedSubagentDefinition(BaseModel):
     disallowed_tools: list[str] = Field(default_factory=lambda: sorted(REQUIRED_DISALLOWED_TOOLS))
     skills: list[str] | None = None
     model: str = "inherit"
+    thinking_enabled: bool | None = None
+    reasoning_effort: str | None = None
     max_turns: int = Field(default=50, ge=1)
     timeout_seconds: int = Field(default=900, ge=1)
     enabled: bool = True

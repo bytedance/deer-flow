@@ -28,6 +28,7 @@ from app.channels.message_bus import (
     OutboundMessage,
     ResolvedAttachment,
 )
+from deerflow.utils.atomic_write import publish_bytes_atomically
 from deerflow.utils.file_io import await_drained
 
 logger = logging.getLogger(__name__)
@@ -275,7 +276,10 @@ class DiscordChannel(Channel):
             try:
                 snapshot = dict(self._active_threads)
                 self._thread_store_path.parent.mkdir(parents=True, exist_ok=True)
-                self._thread_store_path.write_text(json.dumps(snapshot, indent=2), encoding="utf-8", newline="")
+                # Publish through the shared helper: it fsyncs the staged bytes
+                # before the rename (so a machine crash cannot leave an empty
+                # mapping behind) and re-applies an existing file's mode.
+                publish_bytes_atomically(self._thread_store_path, json.dumps(snapshot, indent=2).encode("utf-8"))
             except Exception:
                 logger.exception("[Discord] failed to persist thread mappings")
 
@@ -999,7 +1003,8 @@ class DiscordChannel(Channel):
         """Run the bind flow on the Gateway loop; replies go back through the Discord loop."""
         state = await self._connection_repo.consume_oauth_state(provider="discord", state=code)
         if state is None:
-            await self._run_on_discord_loop(self._send_connection_reply(message, "Discord connection code is invalid or expired."))
+            text = await self._connect_reply_text("invalid_code")
+            await self._run_on_discord_loop(self._send_connection_reply(message, text))
             return True
 
         guild = getattr(message, "guild", None)
@@ -1007,7 +1012,8 @@ class DiscordChannel(Channel):
         author = getattr(message, "author", None)
         user_id = str(getattr(author, "id", "") or "")
         if not user_id:
-            await self._run_on_discord_loop(self._send_connection_reply(message, "Discord connection could not be completed from this message."))
+            text = await self._connect_reply_text("incomplete", owner_user_id=state["owner_user_id"])
+            await self._run_on_discord_loop(self._send_connection_reply(message, text))
             return True
 
         guild_id = str(getattr(guild, "id", "") or "") or None
@@ -1024,7 +1030,8 @@ class DiscordChannel(Channel):
             },
             status="connected",
         )
-        await self._run_on_discord_loop(self._send_connection_reply(message, "Discord connected to DeerFlow."))
+        text = await self._connect_reply_text("connected", owner_user_id=state["owner_user_id"])
+        await self._run_on_discord_loop(self._send_connection_reply(message, text))
         return True
 
     @staticmethod

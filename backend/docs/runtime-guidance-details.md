@@ -295,7 +295,7 @@ PYTHONPATH=. uv run python scripts/benchmark/checkpoint/summarize_production.py 
 ## Checkpoint channel modes and replay
 
 Reject missing selected/head tuples or pending Sends before delta rewrites.
-`Command(resume=...)` also rejects pending nodes except `__start__` on both.
+Null input and `Command(resume=...)` also reject pending nodes except `__start__` on both.
 Use `CheckpointResumeRejected` to skip pre-write rollback; resume at head.
 
 Checkpointer storage runs in one of two channel modes, selected by `checkpoint_channel_mode` in `config.yaml` (default `full`). `delta` mode adopts LangGraph 1.2's `DeltaChannel` for `messages`: checkpoints store a sentinel + per-step writes instead of the full message list, so storage/serde grows O(N) instead of O(N²) in turns. All checkpointer backends (memory/sqlite/postgres) serve both modes unchanged — the semantics live in the compiled graph's channel table, not in the saver.
@@ -332,6 +332,25 @@ Checkpointer storage runs in one of two channel modes, selected by `checkpoint_c
 - Tests: `tests/test_checkpoint_mode.py` (freeze/detect/gate), `tests/test_checkpoint_state.py` (accessor/mutation graph), `tests/test_delta_channel_checkpointers.py` (saver parity), `tests/test_threads_checkpoint_mode.py`, `tests/test_gateway_checkpoint_mode.py` (dual-mode e2e parity), `tests/test_context_compaction.py` (mutation-graph write, no scheduling), `tests/test_run_worker_rollback.py`, `tests/test_cached_history_saver.py` + `tests/test_cached_history_saver_integration.py` (history cache)
 
 ## Deferred terminal commits and lease ownership
+
+RunManager serializes creation, replacement and assembly publication per thread.
+The global registry lock never spans Store I/O; unrelated cached reads and
+heartbeat snapshots do not queue behind an admission gate. Their own Store I/O
+can still encounter database or connection-pool contention. A pending-ID map
+lets readers of preallocated run IDs join the same-thread gate before the record
+is published. Failed or cancelled admissions remove that temporary membership;
+normal creation registers only after its initial write succeeds. Heartbeats use
+the short registry snapshot, not the thread gate, so an admitted run can renew
+while its replacement awaits a Store result. Preserve terminal-attribution and
+cancellation compensation below; changing lock granularity does not grant a new
+worker authority over a durable row.
+
+Assembly evidence persists a full row snapshot. Serialize that write with the
+same run's lease renewal and local acknowledgment, so it cannot restore an old
+lease after renewal. Lock order is thread gate, then snapshot gate, then the
+short registry lock. Renewal uses only the snapshot gate and must release it
+before signaling local cancellation, which acquires the thread gate. Keep the
+lease-expiry timer armed while waiting for the snapshot gate.
 
 **Deferred terminal commit:** With an event store, the worker stages its terminal
 status locally and commits it only after finalization's receipt and duration

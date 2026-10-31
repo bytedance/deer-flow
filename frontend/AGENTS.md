@@ -106,14 +106,8 @@ Users create **threads** (conversations), send messages, set thread-scoped `/goa
 
 ### Source Layout (`src/`)
 
-`AuthProvider` publishes the query owner (user ID, confirmed logout, or unknown
-auth). `QueryClientProvider` owns a mount-local client and remounts its consumers
-when that owner changes, clearing the old cache and cancelling old queries.
-Confirmed logout unmounts query consumers immediately; public and unknown-auth
-routes still render with an independent client. Keep auth outside the query
-provider. Superseded auth refreshes cannot restore an earlier owner.
-
-Auth: trim emails; validate raw passwords.
+Read [auth ownership and recovery](src/core/auth/AGENTS.md) before changing
+`AuthProvider` or `QueryClientProvider`. Auth forms trim emails, not passwords.
 
 See [project structure](README.md#project-structure) for the directory map and
 [src/AGENTS.md](src/AGENTS.md) for component and domain ownership.

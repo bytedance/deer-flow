@@ -61,7 +61,7 @@ def _run_launcher(tmp_path: Path, *, timeout: str | None, ready_at: int = 145, a
     scripts = checkout / "scripts"
     scripts.mkdir(parents=True)
     (checkout / "backend").mkdir()
-    for name in ("serve.sh", "wait-for-port.sh", "detect_uv_extras.py"):
+    for name in ("serve.sh", "dotenv_exports.py", "wait-for-port.sh", "detect_uv_extras.py"):
         shutil.copy2(REPO_ROOT / "scripts" / name, scripts / name)
     (scripts / "nginx-local-conf.sh").write_text("printf 'test-nginx.conf\\n'\n", encoding="utf-8", newline="\n")
     (scripts / "config-upgrade.sh").write_text("exit 0\n", encoding="utf-8", newline="\n")

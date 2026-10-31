@@ -123,17 +123,23 @@ class _SessionLease:
         self._manager.release_session(self._thread_id, self.session)
 
 
-def _resolve_session(runtime: Runtime, tool_name: str) -> _SessionLease:
-    # Launch config (headless/viewport/timeout/cdp_url) is read from a single
-    # canonical source — always ``browser_navigate`` — regardless of which tool
-    # first creates the session. ``get_session`` caches per thread and ignores
-    # these params for later callers, so keying launch config off the calling
-    # tool made it "first tool to run wins": a ``headless: false`` set only on
-    # ``browser_navigate`` was silently dropped if another tool (or the live WS)
-    # initialized the session first. ``tool_name`` is retained for callers that
-    # read their own non-launch config (e.g. ``browser_get_text``'s max_chars).
-    del tool_name
-    cfg = _get_tool_config("browser_navigate")
+async def _launch_config() -> dict:
+    """Read the session launch config off the event loop.
+
+    Launch config (headless/viewport/timeout/cdp_url) is read from a single
+    canonical source — always ``browser_navigate`` — regardless of which tool
+    first creates the session. ``get_session`` caches per thread and ignores
+    these params for later callers, so keying launch config off the calling
+    tool made it "first tool to run wins": a ``headless: false`` set only on
+    ``browser_navigate`` was silently dropped if another tool (or the live WS)
+    initialized the session first. Config resolution stats and hashes the
+    config files, so it runs in a worker.
+    """
+    return await asyncio.to_thread(_get_tool_config, "browser_navigate")
+
+
+def _resolve_session(runtime: Runtime, cfg: dict) -> _SessionLease:
+    """Pin this thread's browser session, launching it with *cfg* (see :func:`_launch_config`)."""
     headless = _as_bool(cfg.get("headless"), True)
     timeout_ms = _as_int(cfg.get("timeout_ms"), 30000)
     width = _as_int(cfg.get("viewport_width"), 1280)
@@ -274,7 +280,7 @@ async def navigate_and_capture(*, thread_id: str | None, url: str, outputs_path:
     url_error = await asyncio.to_thread(_validate_url, "browser_navigate", url)
     if url_error:
         raise ValueError(url_error)
-    cfg = _get_tool_config("browser_navigate")
+    cfg = await _launch_config()
     manager = get_browser_session_manager()
     with manager.acquire_session(
         thread_id,
@@ -323,7 +329,7 @@ async def browser_navigate_tool(runtime: Runtime, url: str, tool_call_id: Annota
         url_error = await asyncio.to_thread(_validate_url, "browser_navigate", url)
         if url_error:
             return _tool_message(url_error, tool_call_id)
-        with _resolve_session(runtime, "browser_navigate") as session:
+        with _resolve_session(runtime, await _launch_config()) as session:
             snapshot = await session.navigate(url)
             screenshot = await _capture_step_screenshot(runtime, session, "navigate")
             return _snapshot_command(runtime, session, snapshot, tool_call_id, f"Navigated to {url}.", screenshot)
@@ -336,7 +342,7 @@ async def browser_navigate_tool(runtime: Runtime, url: str, tool_call_id: Annota
 async def browser_snapshot_tool(runtime: Runtime, tool_call_id: Annotated[str, InjectedToolCallId]) -> Command:
     """Re-read the current page's interactive elements without acting. Use this to refresh the [ref] element list after the page changed on its own (e.g. async content loaded) or when you are unsure of the current state."""
     try:
-        with _resolve_session(runtime, "browser_snapshot") as session:
+        with _resolve_session(runtime, await _launch_config()) as session:
             snapshot = await session.snapshot()
             screenshot = await _capture_step_screenshot(runtime, session, "snapshot")
             return _snapshot_command(runtime, session, snapshot, tool_call_id, "", screenshot)
@@ -357,7 +363,7 @@ async def browser_click_tool(runtime: Runtime, ref: int, tool_call_id: Annotated
         ref: The element reference number to click.
     """
     try:
-        with _resolve_session(runtime, "browser_click") as session:
+        with _resolve_session(runtime, await _launch_config()) as session:
             snapshot = await session.click(ref)
             screenshot = await _capture_step_screenshot(runtime, session, "click")
             return _snapshot_command(runtime, session, snapshot, tool_call_id, f"Clicked element [{ref}].", screenshot)
@@ -385,7 +391,7 @@ async def browser_type_tool(
         submit: When true, press Enter after typing to submit.
     """
     try:
-        with _resolve_session(runtime, "browser_type") as session:
+        with _resolve_session(runtime, await _launch_config()) as session:
             snapshot = await session.type_text(ref, text, submit=submit)
             action = f"Typed into element [{ref}] and submitted." if submit else f"Typed into element [{ref}]."
             screenshot = await _capture_step_screenshot(runtime, session, "type")
@@ -399,9 +405,9 @@ async def browser_type_tool(
 async def browser_get_text_tool(runtime: Runtime, tool_call_id: Annotated[str, InjectedToolCallId]) -> Command:
     """Read the visible text content of the current page. Use this to extract readable text after navigating/interacting, e.g. to quote results or summarize content. Output is truncated for large pages."""
     try:
-        with _resolve_session(runtime, "browser_get_text") as session:
-            cfg = _get_tool_config("browser_get_text")
-            max_chars = _as_int(cfg.get("max_chars"), 8000)
+        cfg = await asyncio.to_thread(_get_tool_config, "browser_get_text")
+        max_chars = _as_int(cfg.get("max_chars"), 8000)
+        with _resolve_session(runtime, await _launch_config()) as session:
             text = await session.get_text(max_chars=max_chars)
         return _tool_message(text or "(page has no visible text)", tool_call_id)
     except Exception as e:
@@ -413,7 +419,7 @@ async def browser_get_text_tool(runtime: Runtime, tool_call_id: Annotated[str, I
 async def browser_back_tool(runtime: Runtime, tool_call_id: Annotated[str, InjectedToolCallId]) -> Command:
     """Go back to the previous page in the browser session's history."""
     try:
-        with _resolve_session(runtime, "browser_back") as session:
+        with _resolve_session(runtime, await _launch_config()) as session:
             snapshot = await session.back()
             screenshot = await _capture_step_screenshot(runtime, session, "back")
             return _snapshot_command(runtime, session, snapshot, tool_call_id, "Went back.", screenshot)
@@ -526,7 +532,7 @@ async def browser_screenshot_tool(
         outputs_path = _thread_outputs_path(runtime)
         if isinstance(outputs_path, str):
             return _tool_message(outputs_path, tool_call_id)
-        with _resolve_session(runtime, "browser_screenshot") as session:
+        with _resolve_session(runtime, await _launch_config()) as session:
             content = await session.screenshot_bytes(full_page=full_page)
             name = _safe_screenshot_name(filename)
             final_name = await asyncio.to_thread(_publish_screenshot_no_overwrite, outputs_path, name, content)
