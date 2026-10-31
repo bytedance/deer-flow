@@ -4,12 +4,11 @@ Background — see issue bytedance/deer-flow#4271.
 
 Some providers stop generation because the output budget is exhausted and
 surface that through ``finish_reason='length'`` while still returning assistant
-content. DeerFlow preserves visible content, adds a deterministic notice
-whenever tool calls were suppressed (even when partial text survived), and
-drops tool calls that may have been truncated at the output boundary before
-they can execute. The stamped ``model_length_termination`` marker tells
-downstream guards (notably ``TodoMiddleware``) to stand down rather than
-re-engage a capped turn.
+content. DeerFlow preserves visible content, adds a deterministic notice to
+every detected output-length cap, and drops tool calls that may have been
+truncated at the output boundary before they can execute. The stamped
+``model_length_termination`` marker tells downstream guards (notably
+``TodoMiddleware``) to stand down rather than re-engage a capped turn.
 
 Stop-reason surfacing for subagents:
   The lead worker reads ``stop_reason`` from ``runtime.context``. The subagent
@@ -38,7 +37,7 @@ from deerflow.agents.middlewares.model_length_termination_detectors import (
     ModelLengthTerminationDetector,
     default_detectors,
 )
-from deerflow.agents.middlewares.model_response import append_visible_text, has_tool_call_intent, has_visible_content
+from deerflow.agents.middlewares.model_response import append_visible_text, has_tool_call_intent
 from deerflow.agents.middlewares.tool_call_metadata import clone_ai_message_with_tool_calls
 
 MODEL_LENGTH_CAPPED_STOP_REASON = "model_length_capped"
@@ -103,6 +102,7 @@ class ModelLengthFinishReasonMiddleware(AgentMiddleware[AgentState]):
 
         return {
             "suppress_truncated_tool_calls": True,
+            "append_notice_to_visible_length_capped_responses": True,
             "length_notice_hash": canonical_hash(_MODEL_LENGTH_CAPPED_CONTENT),
         }
 
@@ -125,6 +125,10 @@ class ModelLengthFinishReasonMiddleware(AgentMiddleware[AgentState]):
         last = messages[-1]
         termination = self._detect(last)
         if termination is None:
+            return None
+        if (last.additional_kwargs or {}).get("model_length_termination"):
+            # The middleware can see its replacement again on the same graph
+            # path; don't append a second notice to an already-marked message.
             return None
 
         ctx = getattr(runtime, "context", None)
@@ -156,9 +160,6 @@ class ModelLengthFinishReasonMiddleware(AgentMiddleware[AgentState]):
         # calls, so clear them before syncing the native provider content.
         content_source = clone_ai_message_with_tool_calls(last.model_copy(update={"invalid_tool_calls": []}), [])
         contains_tool_call = has_tool_call_intent(last) or content_source.content is not last.content
-        contains_visible_content = has_visible_content(content_source)
-        if not contains_tool_call and contains_visible_content:
-            return None
 
         additional_kwargs = dict(last.additional_kwargs or {})
         suppressed_count, suppressed_names = _tool_call_summary(last, content_source.content) if contains_tool_call else (0, [])
