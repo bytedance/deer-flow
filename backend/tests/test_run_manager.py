@@ -236,3 +236,21 @@ async def test_create_or_reject_skips_already_cancelling_runs(manager: RunManage
     )
     assert old.abort_action == "rollback"  # not stomped
     assert new_run.status == RunStatus.pending
+
+
+@pytest.mark.anyio
+async def test_set_status_running_does_not_undo_cancel(manager: RunManager):
+    """A worker that starts after a cancel must not overwrite ``cancelling``."""
+    record = await manager.create("thread-1")
+
+    assert await manager.cancel(record.run_id, action="rollback") is True
+    await manager.set_status(record.run_id, RunStatus.running)
+    assert record.status == RunStatus.cancelling
+
+    # A second signaller must not re-arm the run and replace its abort action.
+    assert await manager.cancel(record.run_id, action="interrupt") is False
+    assert record.abort_action == "rollback"
+
+    await manager.set_status(record.run_id, RunStatus.rolling_back)
+    await manager.set_status(record.run_id, RunStatus.running)
+    assert record.status == RunStatus.rolling_back

@@ -102,6 +102,11 @@ class RunManager:
             if record is None:
                 logger.warning("set_status called for unknown run %s", run_id)
                 return
+            # A cancel can land before the worker starts. The worker's opening
+            # transition must not undo it, or a later cancel would re-arm the run.
+            if status == RunStatus.running and record.status in (RunStatus.cancelling, RunStatus.rolling_back):
+                logger.info("Run %s stays %s, ignoring -> running", run_id, record.status.value)
+                return
             record.status = status
             record.updated_at = _now_iso()
             if error is not None:
