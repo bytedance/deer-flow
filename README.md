@@ -477,7 +477,8 @@ fences, including unclosed fences, in complete and streamed replies.
    value means what the Gateway reads: `$$`, backticks and `$(...)` stay as
    written, and an unquoted value may contain spaces. `$NAME`, `${NAME}`,
    `${NAME:-default}` and an unquoted leading `~` still expand, and
-   single-quoted values stay literal.
+   single-quoted values stay literal. Quoted Windows paths ending in escaped
+   backslashes keep their closing quote and do not discard later settings.
 
    </details>
 
