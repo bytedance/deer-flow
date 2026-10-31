@@ -146,6 +146,10 @@ YAML 同名模型优先，已有任务保留原配置快照。托管模型使用
    这会启动一个交互式向导，引导你选择 LLM provider、可选的 web 搜索工具，以及 sandbox 模式、bash 权限、文件写入等执行/安全偏好。它会生成一份最小化的 `config.yaml`，并把 API key 写入 `.env`，大约 2 分钟完成。
 
    随时可以运行 `make doctor` 检查配置和系统环境，并获得可执行的修复建议。
+   使用 `make doctor STARTUP_MODE=docker` 可额外检查 Docker 引擎、Compose 和入口端口，
+   `STARTUP_MODE=local` 则检查本地服务端口。执行 `make support-bundle STARTUP_MODE=docker`
+   会把启动检查结果和排查建议纳入脱敏诊断包。自定义端口和绑定地址需要显式指定，
+   详见[启动诊断说明](docs/STARTUP_DIAGNOSTICS.md)。
    如果你要提交本地安装、配置或运行问题，可以执行 `make support-bundle`。
    命令会直接打印 reporter 下一步建议，并在 `.deer-flow/support-bundles/` 下生成
    `*-issue-summary.md`、面向 AI 辅助提 issue 的 `*-issue-draft.md`，以及可选证据
