@@ -750,7 +750,7 @@ def build_middlewares(
     if custom_middlewares:
         middlewares.extend(custom_middlewares)
 
-    configured_middlewares = load_configured_extension_middlewares(resolved_app_config)
+    configured_middlewares = load_configured_extension_middlewares(resolved_app_config, scope="lead")
     if configured_middlewares:
         middlewares.extend(configured_middlewares)
 
