@@ -20,6 +20,8 @@
 
 ### 修复
 
+- **对话：** 队列分发开始后，取消某条排队输入不再阻止后续排队输入继续执行。([#7746])
+
 - **开发：** `scripts/dev_multi_instance.sh logs all` 现在除两个 Gateway 日志外也会输出
   nginx 日志；此前它只输出 Gateway 日志，与不带参数的 `logs` 相同。`logs nginx` 与
   `logs all` 还会包含 `nginx.log`（nginx 启动命令自身的输出），此前没有任何选项会输出它。
@@ -12713,3 +12715,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7723]: https://github.com/bytedance/deer-flow/pull/7723
 [#7727]: https://github.com/bytedance/deer-flow/pull/7727
 [#7729]: https://github.com/bytedance/deer-flow/pull/7729
+[#7746]: https://github.com/bytedance/deer-flow/pull/7746
