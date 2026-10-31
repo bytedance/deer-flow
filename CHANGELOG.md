@@ -33,6 +33,12 @@ This section accumulates work toward the **2.3.0** milestone
   plaintext, which with authorization disabled (the default) is every
   signed-in user. Non-secret knobs, `api_key_env` names and unset values are
   unchanged. ([#7665])
+- **gateway:** `GET /threads/{thread_id}/token-usage` now resolves the live
+  config in a worker thread. `build_context_usage` called the accessor inline,
+  and `get_app_config()` revalidates on every call — it digests the whole
+  `config.yaml`, then `extensions_config.json` — so a config edit landing just
+  before a thread view stalled the Gateway event loop that runs, streams and
+  every other thread share. The response is unchanged. ([#7727])
 
 ## [2.2.0] — 2026-10-29
 
@@ -15941,4 +15947,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7659]: https://github.com/bytedance/deer-flow/pull/7659
 [#7665]: https://github.com/bytedance/deer-flow/pull/7665
 [#7723]: https://github.com/bytedance/deer-flow/pull/7723
+[#7727]: https://github.com/bytedance/deer-flow/pull/7727
 [#7729]: https://github.com/bytedance/deer-flow/pull/7729
