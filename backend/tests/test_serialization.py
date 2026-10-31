@@ -110,6 +110,20 @@ def test_serialize_channel_values_strips_pregel_keys():
     assert result["__interrupt__"][0]["value"] == "ask_human"
 
 
+def test_serialize_channel_values_keeps_durable_snapshot_out_of_public_values():
+    from deerflow.runtime.serialization import serialize, serialize_channel_values
+
+    raw = {
+        "messages": [],
+        "durable_context_snapshot": {"content": "middleware-internal"},
+        "title": "Test",
+    }
+    result = serialize_channel_values(raw)
+    assert result == {"messages": [], "title": "Test"}
+    assert serialize(raw, mode="values") == result
+    assert raw["durable_context_snapshot"]["content"] == "middleware-internal"
+
+
 def test_serialize_channel_values_serializes_objects():
     from deerflow.runtime.serialization import serialize_channel_values
 

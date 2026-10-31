@@ -681,7 +681,7 @@ class TestBeforeModelCapture:
         assert out is not None
         assert [(entry["id"], entry["status"], entry["run_id"]) for entry in out["delegations"]] == [("old-call", "cancelled", "run-old")]
         ledger = merge_delegations(existing, out["delegations"])
-        request = middleware._inject(SimpleNamespace(messages=messages, state={"delegations": ledger}, override=lambda **kwargs: SimpleNamespace(**kwargs)))
+        request, _pending = middleware._prepare_request(SimpleNamespace(messages=messages, state={"delegations": ledger}, runtime=None, override=lambda **kwargs: SimpleNamespace(**kwargs)))[:2]
         data = next(message.content for message in request.messages if isinstance(message, HumanMessage) and "<durable_context_data>" in message.content)
         assert "do NOT delegate again" not in data
         assert "[cancelled] research auth" in data
@@ -1086,11 +1086,16 @@ class TestGraphIntegration:
         assert "call_1" not in compacted_ids
 
         last_call_messages = model.received[-1]
-        injected = [message for message in last_call_messages if isinstance(message, HumanMessage) and message.additional_kwargs.get("durable_context_data") and "## Work already delegated" in message.content]
-        assert injected, "delegation ledger was not injected after summarization"
-        assert "research auth" in injected[0].content
-        assert "AUTH_USES_JWT_SENTINEL" in injected[0].content
-        assert "compressed summary" in injected[0].content
+        injected = [message for message in last_call_messages if isinstance(message, HumanMessage) and message.additional_kwargs.get("durable_context_data")]
+        assert injected, "durable context was not injected after summarization"
+        # The block is append-only history now: the ledger ride-alongs from the
+        # first turn and the post-compaction refresh are separate messages, and
+        # the later one supersedes the fields it restates.
+        injected_text = "\n".join(str(message.content) for message in injected)
+        assert "## Work already delegated" in injected_text
+        assert "research auth" in injected_text
+        assert "AUTH_USES_JWT_SENTINEL" in injected_text
+        assert "compressed summary" in injected_text
 
 
 def test_mixed_acceptance_gaps_stay_actionable_in_data_after_real_compaction():
@@ -1551,9 +1556,12 @@ class TestActiveGoalInjection:
         result = agent.invoke({"messages": [HumanMessage(content="Go ahead.")]}, config)
 
         assert result["summary_text"] == "The user approved a plan and the agent started reading files."
-        assert not any(_GOAL_OBJECTIVE in str(message.content) for message in result["messages"])
+        # The objective is gone from the visible turn that stated it — what the
+        # model reads is the hidden durable block, which is persisted history now
+        # (#7320) rather than a per-call re-render.
+        assert not any(_GOAL_OBJECTIVE in str(message.content) for message in result["messages"] if not (getattr(message, "additional_kwargs", None) or {}).get("hide_from_ui"))
         data = _goal_data_messages(model.received[-1])
-        assert data and _GOAL_OBJECTIVE in data[0].content
+        assert data and any(_GOAL_OBJECTIVE in message.content for message in data)
         assert "as you would a request in a user message" in _system_text(model.received[-1])
 
 
@@ -1675,3 +1683,145 @@ def test_artifact_projection_coexists_with_task_notes_and_summary():
     assert "art_a1b2c3d4" in blocks[0]
     assert "Import the report" in blocks[0]
     assert "Previously generated a report." in blocks[0]
+
+
+def _request_view(messages):
+    """Comparable view of what a model call actually received."""
+    return [(str(getattr(message, "type", "")), str(message.content)) for message in messages]
+
+
+class TestRequestPrefixStability:
+    """#7320: consecutive model requests must share the whole previous request.
+
+    Providers that cache prompts only reuse one when the new request starts with
+    the entire previous request, so the durable block must be a stable prefix and
+    its changes must land after it instead of rewriting it.
+    """
+
+    def test_mid_run_change_appends_instead_of_rewriting(self):
+        model = RecordingFakeModel(
+            responses=[
+                AIMessage(content="", id="ai-1", tool_calls=[{"name": "task", "args": {"description": "research auth", "prompt": "do it", "subagent_type": "general-purpose"}, "id": "call_1", "type": "tool_call"}]),
+                AIMessage(content="all done"),
+            ]
+        )
+        agent = create_agent(model=model, tools=[fake_task], middleware=[DurableContextMiddleware()], state_schema=ThreadState)
+
+        agent.invoke({"messages": [HumanMessage(content="research auth then summarize")]})
+
+        assert len(model.received) == 2
+        first = _request_view(model.received[0])
+        second = _request_view(model.received[1])
+        # The first call carries no durable content, so it has no authority
+        # contract; the second prepends it once the delegation ledger exists,
+        # then keeps the whole first request in order behind it, with the
+        # update appended after everything — including the tool batch, whose
+        # assistant/tool adjacency the ordering contract requires.
+        assert second[1 : 1 + len(first)] == first
+        ai_index = next(index for index, (kind, _content) in enumerate(second) if kind == "ai")
+        assert second[ai_index + 1][0] == "tool"
+        assert second[-1][0] == "human" and "## Work already delegated" in second[-1][1]
+
+    def test_frozen_block_is_not_rewritten_across_calls(self):
+        model = RecordingFakeModel(
+            responses=[
+                AIMessage(content="", id="ai-1", tool_calls=[{"name": "task", "args": {"description": "research auth", "prompt": "do it", "subagent_type": "general-purpose"}, "id": "call_1", "type": "tool_call"}]),
+                AIMessage(content="all done"),
+            ]
+        )
+        agent = create_agent(model=model, tools=[fake_task], middleware=[DurableContextMiddleware()], state_schema=ThreadState)
+
+        agent.invoke({"messages": [HumanMessage(content="research auth then summarize")], "summary_text": "EARLIER_WORK_SUMMARY"})
+
+        first_block = [content for _kind, content in _request_view(model.received[0]) if content.startswith("<durable_context")]
+        second_block = [content for _kind, content in _request_view(model.received[1]) if content.startswith("<durable_context")]
+        assert first_block and second_block
+        # The frozen snapshot byte-stays put; only the update message is new.
+        assert second_block[0] == first_block[0]
+        assert "EARLIER_WORK_SUMMARY" in first_block[0]
+        assert any("## Work already delegated" in content for content in second_block[1:])
+
+    def test_new_turn_keeps_the_previous_request_as_a_prefix(self):
+        model = RecordingFakeModel(responses=[AIMessage(content="turn-a"), AIMessage(content="turn-b")])
+        agent = create_agent(model=model, tools=[], middleware=[DurableContextMiddleware()], state_schema=ThreadState, checkpointer=InMemorySaver())
+        config = {"configurable": {"thread_id": "prefix-stability"}}
+
+        agent.invoke({"messages": [HumanMessage(content="first question")]}, config)
+        # A ledger entry arriving between turns must ride in as a new message,
+        # not as a rewrite of the block the first turn already sent.
+        agent.update_state(
+            config,
+            {
+                "delegations": [
+                    {
+                        "id": "call_1",
+                        "description": "research auth",
+                        "subagent_type": "general-purpose",
+                        "status": "completed",
+                        "result_brief": "JWT",
+                        "created_at": "2026-06-30T00:00:00Z",
+                    }
+                ]
+            },
+        )
+        agent.invoke({"messages": [HumanMessage(content="second question")]}, config)
+
+        assert len(model.received) == 2
+        first = _request_view(model.received[0])
+        second = _request_view(model.received[1])
+        # Turn one sent no durable content and therefore no contract; turn two
+        # prepends it, replays the first request in order behind it, and puts
+        # the ledger update at the very end rather than rewriting anything.
+        assert second[1 : 1 + len(first)] == first
+        assert second[-1][0] == "human" and "## Work already delegated" in second[-1][1]
+
+
+class TestConsolidationAndContractGating:
+    """#7334 review: the update tail must consolidate, and the authority
+    contract must not ride requests that carry no durable content at all."""
+
+    def test_update_tail_consolidates_into_a_full_refresh(self):
+        model = RecordingFakeModel(responses=[AIMessage(content="ok")] * 12)
+        agent = create_agent(
+            model=model,
+            tools=[],
+            middleware=[DurableContextMiddleware(task_continuity_enabled=True)],
+            state_schema=ThreadState,
+            checkpointer=InMemorySaver(),
+        )
+        config = {"configurable": {"thread_id": "consolidation"}}
+        for turn in range(10):
+            agent.invoke(
+                {
+                    "messages": [HumanMessage(content=f"turn {turn}")],
+                    "task_notes": {"next": {"content": f"note {turn}", "source_ids": [], "authority": "model_report"}},
+                },
+                config,
+            )
+
+        last = _request_view(model.received[-1])
+        updates = [content for kind, content in last if content.startswith("<durable_context_update>")]
+        refreshes = [content for kind, content in last if content.startswith("<durable_context_data>")]
+        # The tail never grows past the consolidation budget, and once it fills
+        # the newest durable message is a full refresh carrying the current note.
+        assert len(updates) <= 8
+        assert refreshes and "note 9" in refreshes[-1]
+
+    def test_fresh_thread_carries_no_contract_or_block(self):
+        model = RecordingFakeModel(responses=[AIMessage(content="ok")])
+        agent = create_agent(model=model, tools=[], middleware=[DurableContextMiddleware()], state_schema=ThreadState)
+
+        agent.invoke({"messages": [HumanMessage(content="hi")]})
+
+        received = model.received[0]
+        assert not any("## Durable context authority contract" in str(message.content) for message in received)
+        assert not any(message.additional_kwargs.get("durable_context_data") for message in received)
+
+    def test_thread_with_durable_state_carries_the_contract(self):
+        model = RecordingFakeModel(responses=[AIMessage(content="ok")])
+        agent = create_agent(model=model, tools=[], middleware=[DurableContextMiddleware()], state_schema=ThreadState)
+
+        agent.invoke({"messages": [HumanMessage(content="hi")], "summary_text": "EARLIER_SUMMARY"})
+
+        received = model.received[0]
+        assert any("## Durable context authority contract" in str(message.content) for message in received)
