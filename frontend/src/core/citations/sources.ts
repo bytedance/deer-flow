@@ -211,7 +211,7 @@ export function formatCitationMarkdownReference(
   const title = source.title.replace(/([\\[\]])/g, "\\$1");
   // A bare link destination stops at an unbalanced parenthesis. The
   // angle-bracket form keeps URLs with parentheses valid.
-  const url = /[()\s<>]/.test(source.url) ? `<${source.url}>` : source.url;
+  const url = /[()]/.test(source.url) ? `<${source.url}>` : source.url;
   return `[${title}](${url})`;
 }
 
