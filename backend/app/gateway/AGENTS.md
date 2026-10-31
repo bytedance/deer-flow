@@ -254,6 +254,11 @@ Cap edit reads at `MAX_EDITABLE_ARTIFACT_BYTES + 1` despite stale `lstat`.
 
 ### Route and skill authorization
 
+Role writes serialize protection of the last **active** admin. Disabled admins may
+be demoted before restoration; role-only writes preserve credentials and lifecycle
+fields. Regressions: `tests/test_admin_users_router.py` (SQLite/HTTP) and
+`tests/test_disabled_admin_demotion_auth.py` (login, JWT, CSRF, old/new sessions).
+
 `authz.authorize_model_use` shares the `model:use` decision between model details
 and follow-up suggestions, including the factory's first configured model when
 the caller omits `model_name`. Suggestions check admission before their
