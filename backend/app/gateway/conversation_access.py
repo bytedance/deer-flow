@@ -62,6 +62,8 @@ def _visible_text(row: dict, *, thread_id: str | None = None) -> tuple[str, str]
     if not isinstance(message, Mapping):
         return None
     role = message.get("type") or message.get("role")
+    if not isinstance(role, str):
+        return None
     role = {"human": "user", "ai": "assistant"}.get(role, role)
     extra = message.get("additional_kwargs")
     if extra is None:

@@ -97,6 +97,13 @@ def test_only_visible_text_blocks_cross_the_reader():
     assert _visible_text(row) == ("assistant", "visible answer")
 
 
+@pytest.mark.parametrize("malformed_role", [["ai"], {"type": "ai"}])
+def test_visible_text_skips_unhashable_message_roles(malformed_role):
+    row = {"seq": 1, "content": {"type": malformed_role, "content": "ignored"}}
+
+    assert _visible_text(row) is None
+
+
 @pytest.mark.parametrize("path", ["/workspace/chats/source", "/workspace/agents/researcher/chats/source"])
 def test_reference_accepts_both_frontend_conversation_routes(path):
     prepare, _, _, _, _ = _setup()
