@@ -151,6 +151,27 @@ class _ModelPricing(NamedTuple):
     input_cache_hit_per_million: float | None = None
 
 
+def _finite_price(value: object) -> float | None:
+    """Coerce one configured price, or None when it is not a usable number.
+
+    Two shapes have to be rejected rather than passed on:
+
+    - ``10**400`` parses as an exact ``int`` because a JSON integer is not
+      bounded by the float range, and ``float()`` then raises ``OverflowError``.
+      That is the same junk price as a string, so it must not fail the report.
+    - ``nan`` / ``inf`` convert successfully, and NaN then survives every ``<=``
+      comparison and every ``round()``, ending up in the JSON body where
+      Starlette rejects it (``allow_nan=False``) — a 500 for the whole usage
+      report. The rest of the config layer rejects non-finite values too
+      (``allow_inf_nan=False``).
+    """
+    try:
+        price = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return price if math.isfinite(price) else None
+
+
 def _build_pricing_map() -> dict[str, _ModelPricing]:
     """Collect per-model prices from ``models[*].pricing`` in config.yaml.
 
@@ -174,21 +195,12 @@ def _build_pricing_map() -> dict[str, _ModelPricing]:
         raw = getattr(model_cfg, "pricing", None)
         if not isinstance(raw, dict):
             continue
-        try:
-            input_price = float(raw.get("input_per_million") or 0)
-            output_price = float(raw.get("output_per_million") or 0)
-            raw_hit_price = raw.get("input_cache_hit_per_million")
-            cache_hit_price = float(raw_hit_price) if raw_hit_price is not None else None
-        except (TypeError, ValueError):
+        input_price = _finite_price(raw.get("input_per_million") or 0)
+        output_price = _finite_price(raw.get("output_per_million") or 0)
+        raw_hit_price = raw.get("input_cache_hit_per_million")
+        cache_hit_price = _finite_price(raw_hit_price) if raw_hit_price is not None else None
+        if input_price is None or output_price is None or (raw_hit_price is not None and cache_hit_price is None):
             logger.warning("console: ignoring malformed pricing on model %s", model_cfg.name)
-            continue
-        # ``float("nan")`` / ``float(".inf")`` parse successfully, and NaN then
-        # survives every ``<=`` comparison below and every ``round()``, ending up
-        # in the JSON body where Starlette rejects it (allow_nan=False) -- a 500
-        # for the whole usage report. Treat non-finite prices as malformed, the
-        # same way the rest of the config layer does (allow_inf_nan=False).
-        if any(not math.isfinite(price) for price in (input_price, output_price, cache_hit_price) if price is not None):
-            logger.warning("console: ignoring non-finite pricing on model %s", model_cfg.name)
             continue
         if input_price <= 0 and output_price <= 0:
             continue
