@@ -724,6 +724,14 @@ SEARCH_PROVIDERS: list[SearchProvider] = [
         extra_config={"max_results": 5},
     ),
     SearchProvider(
+        name="outcrawl",
+        display_name="Outcrawl",
+        description="Web search with title, URL and snippet, API key required",
+        use="deerflow.community.outcrawl.tools:web_search_tool",
+        env_var="OUTCRAWL_API_KEY",
+        extra_config={"max_results": 5},
+    ),
+    SearchProvider(
         name="youcom",
         display_name="You.com",
         description="Own index with extracted page snippets, free tier needs no key",
@@ -801,6 +809,14 @@ WEB_FETCH_PROVIDERS: list[WebProvider] = [
         description="Page as markdown, cloud browser for JavaScript pages, API key required",
         use="deerflow.community.unbrowse.tools:web_fetch_tool",
         env_var="UNBROWSE_API_KEY",
+        tool_name="web_fetch",
+    ),
+    WebProvider(
+        name="outcrawl",
+        display_name="Outcrawl",
+        description="Page as markdown, rendered in a real browser, API key required",
+        use="deerflow.community.outcrawl.tools:web_fetch_tool",
+        env_var="OUTCRAWL_API_KEY",
         tool_name="web_fetch",
     ),
     WebProvider(

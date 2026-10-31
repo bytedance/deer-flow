@@ -113,7 +113,7 @@ Community tools connect the agent to external services. They are configured in `
 
 ### Web search
 
-<Tabs items={["DuckDuckGo (default)", "Tavily", "Brave", "Serply", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya", "You.com"]}>
+<Tabs items={["DuckDuckGo (default)", "Tavily", "Brave", "Serply", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya", "You.com", "Outcrawl"]}>
   <Tabs.Tab>
 ```yaml
 tools:
@@ -218,6 +218,17 @@ single meta description. Without a key it uses the keyless endpoint (free tier, 
 limits. `max_results` is capped at 100.
 
 Optional API key from [You.com](https://you.com/platform).
+
+No extra dependency required.
+
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - use: deerflow.community.outcrawl.tools:web_search_tool
+    api_key: $OUTCRAWL_API_KEY
+```
+Web search results with title, URL and snippet. Requires an [Outcrawl](https://outcrawl.ai) API key. `max_results` is capped at 20. Also supports `web_fetch` (`deerflow.community.outcrawl.tools:web_fetch_tool`), which returns the page's main content as Markdown.
 
 No extra dependency required.
 
