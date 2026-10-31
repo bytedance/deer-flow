@@ -97,6 +97,7 @@ async def dispatch_queued_inputs(inputs: RunInputs, *, agent_runs, thread_id: st
             except InputCancelled:
                 # Cancellation can win after the snapshot, even during
                 # admission. The atomic claim proves no Run was started.
+                logger.info("Skipping cancelled queued input %s for Run %s", entry["id"], inputs.run_id)
                 continue
             while run.status in ("pending", "running"):
                 # AgentRuns.wait retains its capped backoff and revocation

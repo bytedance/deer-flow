@@ -172,7 +172,7 @@ async def test_dispatch_and_remove_serialize_and_recovery_retains_the_same_key(i
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cancel_at", ["before_snapshot", "while_waiting", "before_claim"])
-async def test_queue_dispatch_skips_cancelled_input_and_runs_its_successor(input_store, cancel_at):
+async def test_queue_dispatch_skips_cancelled_input_and_runs_its_successor(input_store, cancel_at, caplog):
     from app.gateway.run_inputs import dispatch_queued_inputs
 
     inputs = RunInputs(input_store, "run", USER_ID, "worker")
@@ -198,9 +198,12 @@ async def test_queue_dispatch_skips_cancelled_input_and_runs_its_successor(input
             await inputs.cancel("C")
         return SimpleNamespace(run_id=run_id, status="success", stop_reason=None)
 
-    await dispatch_queued_inputs(inputs, agent_runs=SimpleNamespace(dispatch_input=dispatch_input, wait=wait), thread_id="thread")
+    with caplog.at_level("INFO", logger="app.gateway.run_inputs"):
+        await dispatch_queued_inputs(inputs, agent_runs=SimpleNamespace(dispatch_input=dispatch_input, wait=wait), thread_id="thread")
 
     assert dispatched == ["B", "D"]
+    expected_logs = [] if cancel_at == "before_snapshot" else ["Skipping cancelled queued input C for Run run"]
+    assert [record.getMessage() for record in caplog.records if record.name == "app.gateway.run_inputs"] == expected_logs
     state = await inputs.read()
     assert [(x["id"], x["status"], x.get("run_id")) for x in state["items"]] == [
         ("B", "applied", "child-B"),
@@ -253,8 +256,8 @@ async def test_queue_dispatch_stops_on_errors_other_than_confirmed_input_cancell
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("input_id,error", [("cancelled", InputCancelled), ("missing", InputConflict)])
-async def test_dispatch_one_input_preserves_claim_error_without_admitting_run(input_store, monkeypatch, input_id, error):
+@pytest.mark.parametrize("input_id,error,detail", [("cancelled", InputCancelled, "This input was cancelled"), ("missing", InputConflict, "Input not found or removed")])
+async def test_dispatch_one_input_preserves_claim_error_without_admitting_run(input_store, monkeypatch, input_id, error, detail):
     from unittest.mock import AsyncMock
 
     from app.gateway import run_inputs
@@ -269,7 +272,7 @@ async def test_dispatch_one_input_preserves_claim_error_without_admitting_run(in
     create_run = AsyncMock()
     monkeypatch.setattr(thread_runs, "create_run", create_run)
 
-    with pytest.raises(error, match="Input not found or removed") as caught:
+    with pytest.raises(error, match=detail) as caught:
         await run_inputs.dispatch_one_input("thread", "run", input_id, SimpleNamespace())
 
     assert type(caught.value) is error
@@ -315,7 +318,7 @@ async def test_http_input_admission_and_status_are_owner_scoped(input_store, mon
         await input_store.update_status("run", "success")
         retry = await client.post(url + "/one/retry")
         assert retry.status_code == 409, retry.text
-        assert retry.json()["detail"] == "Input not found or removed"
+        assert retry.json()["detail"] == "This input was cancelled"
         user = User(id=uuid4(), email="other@example.com", password_hash="unused")
         assert (await client.post(url, json=body)).status_code == 404
         assert (await client.get("/api/threads/thread/inputs")).json() == {"items": [], "active_run_id": None}

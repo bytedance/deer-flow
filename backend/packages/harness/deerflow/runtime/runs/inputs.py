@@ -132,7 +132,7 @@ class RunInputs:
             if item is None:
                 raise InputConflict("Input not found or removed")
             if item["status"] == "cancelled":
-                raise InputCancelled("Input not found or removed")
+                raise InputCancelled("This input was cancelled")
             if item["status"] == "applied":
                 if not item.get("run_id"):
                     raise InputConflict("This input was already applied")
