@@ -2064,6 +2064,14 @@ Budget exhaustion is logged separately while the tool returns the last error.
 Extra requests may consume quota or incur cost. See
 [Serper retries](backend/docs/CONFIGURATION.md#serper-retries).
 
+With DEBUG logging enabled for `deerflow.community.serper.tools`, each logical
+web/image search emits one best-effort completion summary: tool kind, HTTP
+attempts, monotonic elapsed seconds, measured backoff seconds, outcome and stop
+reason. `completed` and `recovered` distinguish first-attempt and retried success;
+local configuration/key failures report zero attempts. These summaries omit
+queries, URLs, credentials, headers, response bodies and exception text, and are
+silent at INFO. Existing error logs are unchanged.
+
 When using Tavily for `web_fetch`, extracted pages without a title use their URL
 as the heading; their content remains available to the agent.
 For providers that use the shared Readability extractor, Readability.js is
