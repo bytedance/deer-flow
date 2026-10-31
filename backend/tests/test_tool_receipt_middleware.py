@@ -91,7 +91,7 @@ def test_wrap_tool_call_overwrites_tool_supplied_receipt():
     assert receipt["created_at"] != "1970-01-01T00:00:00+00:00"
 
 
-def test_wrap_model_call_injects_hidden_ledger():
+def test_wrap_model_call_appends_receipt_to_its_tool_result():
     middleware = ToolReceiptMiddleware()
     request = MagicMock()
     request.messages = [HumanMessage(content="go"), AIMessage(content="hi"), _stamped_message()]
@@ -105,16 +105,18 @@ def test_wrap_model_call_injects_hidden_ledger():
         return ModelResponse(result=[response_message])
 
     middleware.wrap_model_call(request, handler)
-    ledger_messages = [m for m in captured["messages"] if isinstance(m, HumanMessage) and m.additional_kwargs.get("hide_from_ui")]
-    assert len(ledger_messages) == 1
-    assert "r1" in ledger_messages[0].content and "bash" in ledger_messages[0].content
+    assert len(captured["messages"]) == 3, "no extra message is injected"
+    tool_message = captured["messages"][2]
+    assert tool_message.content.startswith("ok\n\n## Tool receipts")
+    assert "- [r1] bash status=success" in tool_message.content
+    assert request.messages[2].content == "ok", "state messages are not mutated"
     assert response_message.additional_kwargs[TOOL_RECEIPT_LEDGER_KEY][0]["tool_call_id"] == "tc-1"
 
 
-def test_wrap_model_call_snapshots_only_receipts_rendered_within_budget():
+def test_wrap_model_call_snapshots_only_the_current_receipt_epoch():
     middleware = ToolReceiptMiddleware()
     request = MagicMock()
-    request.messages = [HumanMessage(content="go"), *[_stamped_message() for _ in range(30)]]
+    request.messages = [HumanMessage(content="go"), *[_stamped_message() for _ in range(60)]]
     request.override = lambda messages: SimpleNamespace(messages=messages)
     captured = {}
     response_message = AIMessage(content="done")
@@ -125,14 +127,12 @@ def test_wrap_model_call_snapshots_only_receipts_rendered_within_budget():
 
     middleware.wrap_model_call(request, handler)
 
-    ledger_message = next(m for m in captured["messages"] if isinstance(m, HumanMessage) and m.additional_kwargs.get("hide_from_ui"))
     snapshot = response_message.additional_kwargs[TOOL_RECEIPT_LEDGER_KEY]
-    assert snapshot
-    assert snapshot[0]["id"] != "r1"
-    assert snapshot[-1]["id"] == "r30"
-    assert all(f"[{receipt['id']}]" in ledger_message.content for receipt in snapshot)
-    assert "[r1]" not in ledger_message.content
-    assert "older receipts omitted" in ledger_message.content
+    assert [receipt["id"] for receipt in snapshot] == [f"r{n}" for n in range(51, 61)]
+    rendered = [m.content for m in captured["messages"][1:]]
+    assert all(content == "ok" for content in rendered[:50]), "receipts before the epoch are not rendered"
+    assert "## Tool receipts" in rendered[50] and "- [r51] bash" in rendered[50]
+    assert "## Tool receipts" not in rendered[51] and "- [r52] bash" in rendered[51]
 
 
 def test_wrap_model_call_no_receipts_no_injection():
@@ -197,8 +197,7 @@ def test_delegation_only_mode_renders_when_processing_subagent_result():
         return MagicMock()
 
     middleware.wrap_model_call(request, handler)
-    ledger_messages = [m for m in captured["messages"] if isinstance(m, HumanMessage) and m.additional_kwargs.get("hide_from_ui")]
-    assert len(ledger_messages) == 1 and "r1" in ledger_messages[0].content
+    assert "- [r1] bash" in captured["messages"][1].content
 
 
 def test_delegation_only_mode_ignores_delegations_from_earlier_turns():
@@ -241,8 +240,7 @@ def test_delegation_only_mode_scopes_past_hidden_framework_messages():
         return MagicMock()
 
     middleware.wrap_model_call(request, handler)
-    ledger_messages = [m for m in captured["messages"] if isinstance(m, HumanMessage) and m.additional_kwargs.get("hide_from_ui") and "Tool receipts" in str(m.content)]
-    assert len(ledger_messages) == 1
+    assert "## Tool receipts" in captured["messages"][2].content
 
 
 def _build(app_config_dict: dict) -> list:
