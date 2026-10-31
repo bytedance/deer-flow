@@ -22,6 +22,21 @@ logger = logging.getLogger(__name__)
 
 ASK_CLARIFICATION_TOOL_NAME = "ask_clarification"
 
+
+def _tool_call_id(tool_call: dict) -> str:
+    """Return a call's id as the ``str`` that ``ToolMessage`` requires.
+
+    ``tool_call.get("id", "")`` only substitutes for a *missing key*: a call that
+    carries an explicit ``None`` (providers can omit the field, and the
+    transcript-repair middleware exists precisely to relabel such calls) would be
+    passed through unchanged, and ``ToolMessage.tool_call_id`` is a ``str`` — the
+    reply then fails pydantic validation and takes the whole run with it instead
+    of being suppressed. Both reply paths below need the same normalization, so
+    it lives here rather than in either one.
+    """
+    return str(tool_call.get("id") or "")
+
+
 # Whitelisted form field types; anything else degrades to "text" so a bad
 # model-provided type can never produce an unrenderable card.
 FORM_FIELD_TYPES = frozenset({"text", "textarea", "number", "select", "multi_select", "checkbox", "date"})
@@ -487,7 +502,7 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
         as the tool result and either continues low-risk, reversible work
         or reports a blocked result rather than re-asking.
         """
-        tool_call_id = request.tool_call.get("id", "")
+        tool_call_id = _tool_call_id(request.tool_call)
         logger.info("ask_clarification suppressed by run interaction policy; applying unattended risk guidance")
         return ToolMessage(
             id=self._stable_message_id(tool_call_id, "proceed-without-clarification", self._issuing_message_id(request)),
@@ -528,7 +543,7 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
         formatted_message = self._format_clarification_message(args, fields=fields)
 
         # Get the tool call ID
-        tool_call_id = request.tool_call.get("id", "")
+        tool_call_id = _tool_call_id(request.tool_call)
 
         request_id = self._stable_message_id(tool_call_id, formatted_message, self._issuing_message_id(request))
         human_input_payload = self._build_human_input_payload(args, tool_call_id=tool_call_id, request_id=request_id, fields=fields)
