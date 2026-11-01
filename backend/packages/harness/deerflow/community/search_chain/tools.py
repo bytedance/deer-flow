@@ -182,6 +182,8 @@ async def _ddg(call: _Call) -> list[dict]:
         safesearch=call.settings.get("safesearch", ddg.DEFAULT_SAFESEARCH),
         backend=call.settings.get("backend", ddg.DEFAULT_BACKEND),
         time_range=call.time_range,
+        # Forward the DDG tool's pacing knobs only when set, so its defaults apply otherwise.
+        **{key: call.settings[key] for key in ("min_interval_seconds", "max_retries") if key in call.settings},
     )
     rows = _objects(rows, "results")
     return [_result(r.get("title"), r.get("href", r.get("link")), r.get("body", r.get("snippet"))) for r in rows]

@@ -323,3 +323,22 @@ async def test_malformed_provider_payload_fails_over():
 def test_tool_signature_matches_other_web_search_tools():
     assert web_search_tool.name == "web_search"
     assert set(web_search_tool.args) == {"query", "max_results", "time_range"}
+
+
+@pytest.mark.anyio
+async def test_ddg_pacing_settings_are_forwarded_only_when_configured():
+    with (
+        _config(providers=["ddg"], ddg={"min_interval_seconds": 6, "max_retries": 0}),
+        patch("deerflow.community.ddg_search.tools._search_text", return_value=_ddg_rows("x")) as ddg,
+    ):
+        await _run()
+    assert ddg.call_args.kwargs["min_interval_seconds"] == 6
+    assert ddg.call_args.kwargs["max_retries"] == 0
+
+    with (
+        _config(providers=["ddg"]),
+        patch("deerflow.community.ddg_search.tools._search_text", return_value=_ddg_rows("x")) as ddg,
+    ):
+        await _run()
+    assert "min_interval_seconds" not in ddg.call_args.kwargs
+    assert "max_retries" not in ddg.call_args.kwargs

@@ -950,6 +950,8 @@ tools:
   #     base_url: http://localhost:8088  # Required for SearXNG (Docker: http://searxng:8080)
   #   ddg:
   #     backend: auto                    # Same region/safesearch/backend keys as the DDG entry
+  #     min_interval_seconds: 4          # Pacing between DDG calls (plus jitter)
+  #     max_retries: 2                   # Retries when DDG blocks/challenges a request
 
   # Web search tool (uses SearXNG, self-hosted, no API key required)
   # SearXNG is a free internet metasearch engine which aggregates results from
