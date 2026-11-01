@@ -1,3 +1,6 @@
+import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -103,11 +106,108 @@ def test_raises_on_base_resp_error(monkeypatch, tmp_path):
     assert "1008" in str(e.value)
 
 
-def test_missing_api_key_returns_message(monkeypatch, tmp_path):
+def test_missing_api_key_raises(monkeypatch, tmp_path):
     spec = tmp_path / "s.json"
     spec.write_text('{"prompt":"x"}', encoding="utf-8")
-    msg = mus.generate_music(str(spec), str(tmp_path / "o.mp3"))
-    assert "MINIMAX_API_KEY" in msg
+    with pytest.raises(ValueError, match="MINIMAX_API_KEY"):
+        mus.generate_music(str(spec), str(tmp_path / "o.mp3"))
+
+
+@pytest.mark.parametrize(
+    "content, api_key, diagnostic",
+    [
+        ('{"prompt":"jazz"}', None, "MINIMAX_API_KEY"),
+        ("{", None, "Expecting property name"),
+        (None, None, "No such file"),
+        ('{"prompt":""}', "synthetic-key", "prompt"),
+    ],
+    ids=["missing-key", "invalid-json", "missing-file", "empty-prompt"],
+)
+def test_cli_input_failure_returns_status_one(
+    monkeypatch, tmp_path, content, api_key, diagnostic
+):
+    if api_key:
+        monkeypatch.setenv("MINIMAX_API_KEY", api_key)
+    spec = tmp_path / "spec.json"
+    if content is not None:
+        spec.write_text(content, encoding="utf-8")
+    output = tmp_path / "song.mp3"
+    output.write_bytes(b"previous song")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            mus.__file__,
+            "--prompt-file",
+            str(spec),
+            "--output-file",
+            str(output),
+        ],
+        env=os.environ.copy(),
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 1
+    assert diagnostic in result.stderr
+    assert result.stdout == ""
+    assert output.read_bytes() == b"previous song"
+
+
+@pytest.mark.parametrize("succeeds", [False, True], ids=["provider-error", "success"])
+def test_cli_provider_result(monkeypatch, tmp_path, succeeds):
+    monkeypatch.setenv("MINIMAX_API_KEY", "synthetic-key")
+    payload = (
+        {"base_resp": {"status_code": 0}, "data": {"audio": _ID3_AUDIO.hex()}}
+        if succeeds
+        else {"base_resp": {"status_code": 1008, "status_msg": "no balance"}}
+    )
+    spec = tmp_path / "spec.json"
+    spec.write_text('{"prompt":"jazz"}', encoding="utf-8")
+    output = tmp_path / "song.mp3"
+    output.write_bytes(b"previous song")
+    # Only the HTTP transport is replaced; execute the actual CLI in a child.
+    runner = """
+import runpy
+import sys
+from unittest.mock import patch
+import requests
+response = requests.Response()
+response.status_code = 200
+response._content = sys.argv.pop(1).encode("utf-8")
+sys.argv = sys.argv[1:]
+with patch.object(requests, "post", return_value=response):
+    runpy.run_path(sys.argv[0], run_name="__main__")
+"""
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            runner,
+            json.dumps(payload),
+            mus.__file__,
+            "--prompt-file",
+            str(spec),
+            "--output-file",
+            str(output),
+        ],
+        env=os.environ.copy(),
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    if succeeds:
+        assert result.returncode == 0
+        assert "Successfully generated music" in result.stdout
+        assert result.stderr == ""
+        assert output.read_bytes() == _ID3_AUDIO
+    else:
+        assert result.returncode == 1
+        assert "1008" in result.stderr
+        assert result.stdout == ""
+        assert output.read_bytes() == b"previous song"
 
 
 def test_raises_on_missing_audio_data(monkeypatch, tmp_path):
