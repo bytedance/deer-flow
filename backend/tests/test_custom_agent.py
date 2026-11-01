@@ -918,6 +918,40 @@ class TestAgentsAPI:
         assert response.status_code == 200
         assert response.json()["description"] == "new desc"
 
+    def test_update_agent_description_null_resets_to_empty(self, agent_client):
+        """An explicit null description stores the default, not a null the loader rejects.
+
+        ``AgentUpdateRequest.description`` accepts null but ``AgentConfig.description``
+        is a ``str``: the route used to persist ``description: null`` and then fail
+        to read it back, so the PUT, every later GET and repair PUT returned 500.
+        """
+        agent_client.post("/api/agents", json={"name": "desc-agent", "description": "old desc", "soul": "p"})
+
+        response = agent_client.put("/api/agents/desc-agent", json={"description": None})
+        assert response.status_code == 200, response.text
+        assert response.json()["description"] == ""
+
+        tmp_path: Path = agent_client._tmp_path  # type: ignore[attr-defined]
+        stored = yaml.safe_load((tmp_path / "users" / "test-user-autouse" / "agents" / "desc-agent" / "config.yaml").read_text(encoding="utf-8"))
+        assert stored["description"] == ""
+        assert agent_client.get("/api/agents/desc-agent").json()["description"] == ""
+        assert [agent["name"] for agent in agent_client.get("/api/agents").json()["agents"]] == ["desc-agent"]
+
+    def test_stored_null_description_loads_as_empty_and_can_be_repaired(self, agent_client):
+        """A null already in storage (this bug, or a bare ``description:`` in YAML) reads as empty."""
+        from deerflow.persistence.agents.file import FileAgentStore
+
+        FileAgentStore().create("reviewer", {"description": None}, "Soul")
+
+        response = agent_client.get("/api/agents/reviewer")
+        assert response.status_code == 200, response.text
+        assert response.json()["description"] == ""
+        assert [agent["name"] for agent in agent_client.get("/api/agents").json()["agents"]] == ["reviewer"]
+        response = agent_client.put("/api/agents/reviewer", json={"description": "repaired"})
+        assert response.status_code == 200, response.text
+        assert response.json()["description"] == "repaired"
+        assert response.json()["soul"] == "Soul"
+
     def test_update_agent_preserves_hand_authored_non_managed_fields(self, agent_client):
         """Hand-authored ``github:`` and ``memory_enabled`` fields must survive PATCH.
 
