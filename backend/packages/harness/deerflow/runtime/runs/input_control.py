@@ -159,8 +159,8 @@ class RunInputControl:
         try:
             while not native.done():
                 if await self.pending():
-                    for gate, _ in self.children.values():
-                        gate.resume.clear()
+                    for child_gate, _ in self.children.values():
+                        child_gate.resume.clear()
                     call_id = request.tool_call["id"]
                     self.pending_calls.add(call_id)
                     self.observed_tasks.add(native)
