@@ -107,3 +107,9 @@ def test_searxng_enables_no_upstream_inactive_engines():
     settings = yaml.safe_load(SETTINGS_PATH.read_text(encoding="utf-8"))
     listed = set(settings["use_default_settings"]["engines"]["keep_only"])
     assert not listed & UPSTREAM_INACTIVE_GENERAL_ENGINES
+
+
+def test_searxng_down_does_not_require_the_secret():
+    makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
+    down = makefile.split("\nsearxng-down:\n", 1)[1].split("\n\n", 1)[0]
+    assert "SEARXNG_SECRET=" in down

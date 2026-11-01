@@ -74,7 +74,7 @@ searxng-up:
 	docker compose -p deer-flow-searxng -f docker/docker-compose.searxng.yaml up -d
 
 searxng-down:
-	docker compose -p deer-flow-searxng -f docker/docker-compose.searxng.yaml down
+	SEARXNG_SECRET=$${SEARXNG_SECRET:-unused-for-down} docker compose -p deer-flow-searxng -f docker/docker-compose.searxng.yaml down
 
 ## Setup & Diagnosis
 setup:
