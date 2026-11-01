@@ -138,6 +138,11 @@ opaque source links. This preserves retrieval evidence across the delegation
 boundary without placing provider IDs in model-visible text. Never reconstruct
 source records from the child's prose or replace them with fresh provider reads.
 
+MCP routing priority coercion stays aligned between `tool_search._routing_priority`
+and `McpRoutingMiddleware._normalize_index`: use `int(value)`, falling back to
+`0` on `TypeError`, `ValueError`, or `OverflowError`. Cover both the real builder
+and serialized-index paths when changing this contract.
+
 `DeferredToolCatalog.search` reserves `keywords:` for opt-in literal, casefolded,
 whitespace-separated terms (256 query characters, 16 unique terms). Rank by term
 coverage across name/description, then name hits; ties preserve catalog order and
