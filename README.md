@@ -559,7 +559,8 @@ It does not start an unused sandbox provider solely for cleanup.
 Backend processes automatically pick up `config.yaml` changes on the next config access, so model metadata updates do not require a manual restart during development.
 
 Gateway runs use the top-level `recursion_limit` in `config.yaml` when an API
-request does not provide one. The default is `100`; valid per-request values
+request does not provide one. The default is `1000`, matching the web UI and
+scheduled-run budgets; valid per-request values
 take precedence, and `max_recursion_limit` (default `1000`) caps both. Changes
 apply to the next run without restarting the Gateway. This top-level setting
 applies to Gateway API and IM channel runs. A `recursion_limit` in an IM

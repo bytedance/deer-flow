@@ -1008,6 +1008,10 @@ test("anchors an edit-regenerate replay on the replacement human identity", asyn
       "Edited question",
     );
   });
+  const replaySubmitCall = streamMockState.submit.mock.calls.at(
+    -1,
+  ) as unknown as [unknown, Record<string, unknown>] | undefined;
+  expect(replaySubmitCall?.[1]).not.toHaveProperty("config");
 
   // The superseded turn is masked; the replacement human from the prepare
   // response is shown optimistically with its server-assigned identity.
