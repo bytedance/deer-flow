@@ -188,6 +188,24 @@ def test_detect_from_config_browser_via_indentless_tools_list(tmp_path):
     assert detect.detect_from_config(cfg) == ["browser"]
 
 
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("tools:\n  - name: browser_navigate\n    engine: camoufox\n", ["browser", "camoufox"]),
+        ("tools:\n- engine: 'Camoufox'\n  name: browser_navigate\n", ["browser", "camoufox"]),
+        ("tools:\n  - name: browser_navigate\n    engine: chromium\n", ["browser"]),
+        ("tools:\n  - name: browser_navigate\n    # engine: camoufox\n", ["browser"]),
+        # Another tool's engine field never applies to browser_navigate.
+        ("tools:\n  - name: browser_navigate\n  - name: other\n    engine: camoufox\n", ["browser"]),
+        ("tools:\n  - name: browser_navigate\n    opts:\n      engine: camoufox\n", ["browser"]),
+    ],
+)
+def test_detect_camoufox_engine_on_browser_navigate(tmp_path, text, expected):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(text)
+    assert detect.detect_from_config(cfg) == expected
+
+
 def test_detect_from_config_ignores_commented_browser_tool(tmp_path):
     cfg = tmp_path / "config.yaml"
     cfg.write_text(

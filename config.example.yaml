@@ -915,18 +915,49 @@ tools:
   #   max_chars_per_chunk: 800
   #   max_total_chars: 8000
 
+  # DuckDuckGo is a best-effort fallback: upstream may rate-limit or challenge requests.
+  # Prefer Brave/Tavily/Exa or self-hosted SearXNG as the primary search provider.
   # Web search tool (uses DuckDuckGo, no API key required)
   - name: web_search
     group: web
     use: deerflow.community.ddg_search.tools:web_search_tool
     max_results: 5
+    # min_interval_seconds: 4  # Process-wide text-call spacing plus 0-1s jitter (0 disables pacing)
+    # max_retries: 2           # Challenge retries, 0-5; exponential backoff capped at 16s
     # backend: auto          # DDGS backend(s): auto, duckduckgo, brave, wikipedia, etc.
     # region: wt-wt          # wt-wt is normalized for Wikipedia when backend includes auto/all/wikipedia.
     # safesearch: moderate   # on, moderate, off
 
+  # Web search fallback chain (tries several providers in order, one answer per call)
+  # Recommended order: keyed APIs first (brave/tavily/exa), self-hosted SearXNG
+  # next, DuckDuckGo last (keyless but rate-limited). Providers without an API key
+  # (or SearXNG without base_url) are skipped; errors and rate limits fail over to
+  # the next provider. The output's "provider" field names the one that answered;
+  # if all fail, the error lists every provider's failure.
+  # - name: web_search
+  #   group: web
+  #   use: deerflow.community.search_chain.tools:web_search_tool
+  #   providers: [brave, tavily, exa, searxng, ddg]
+  #   max_results: 5
+  #   fallback_on_empty: false   # true: an empty result also moves to the next provider
+  #   brave:
+  #     api_key: $BRAVE_SEARCH_API_KEY   # Optional if the env var is set
+  #   tavily:
+  #     api_key: $TAVILY_API_KEY         # Optional if the env var is set
+  #   exa:
+  #     api_key: $EXA_API_KEY            # Optional if the env var is set; skipped for time_range searches
+  #   searxng:
+  #     base_url: http://localhost:8088  # Required for SearXNG (Docker: http://searxng:8080)
+  #   ddg:
+  #     backend: auto                    # Same region/safesearch/backend keys as the DDG entry
+  #     min_interval_seconds: 4          # Pacing between DDG calls (plus jitter)
+  #     max_retries: 2                   # Retries when DDG blocks/challenges a request
+
   # Web search tool (uses SearXNG, self-hosted, no API key required)
   # SearXNG is a free internet metasearch engine which aggregates results from
-  # various search services. Deploy your own instance: https://github.com/searxng/searxng
+  # various search services. Run make searxng-up with SEARXNG_SECRET exported.
+  # JSON output and multiple engines are configured in docker/searxng/settings.yml.
+  # Docker Gateway: merge the overlay and use http://searxng:8080; see docker/searxng/README.md.
   # For Docker deployments, use the Docker service name instead of localhost.
   # - name: web_search
   #   group: web
@@ -1175,6 +1206,12 @@ tools:
   #   timeout_ms: 30000                # Per-action navigation/interaction timeout
   #   viewport_width: 1280
   #   viewport_height: 720
+  #   # engine: chromium               # chromium (default) | camoufox. camoufox launches an
+  #   #                                # anti-detection Firefox for bot-protected sites. Needs:
+  #   #                                #   cd backend && uv sync --extra browser --extra camoufox
+  #   #                                #   uv run python -m camoufox fetch
+  #   #                                # Keeps the SSRF guard + pinned egress proxy and blocks
+  #   #                                # WebRTC; cannot be combined with cdp_url (Chromium-only).
   #   # allow_private_addresses: false # SSRF guard: keep false in production. Also applies to the
   #   #                                # pinned egress proxy every launched browser connects through.
   #   # cdp_url: http://127.0.0.1:9222 # Attach to YOUR running Chrome (Codex-style)

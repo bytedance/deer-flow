@@ -138,6 +138,11 @@ async def _launch_config() -> dict:
     return await asyncio.to_thread(_get_tool_config, "browser_navigate")
 
 
+def _browser_engine(cfg: dict) -> str:
+    """Return the configured launch engine (``chromium`` when unset)."""
+    return (_as_str(cfg.get("engine")) or "chromium").lower()
+
+
 def _resolve_session(runtime: Runtime, cfg: dict) -> _SessionLease:
     """Pin this thread's browser session, launching it with *cfg* (see :func:`_launch_config`)."""
     headless = _as_bool(cfg.get("headless"), True)
@@ -157,6 +162,7 @@ def _resolve_session(runtime: Runtime, cfg: dict) -> _SessionLease:
         url_guard=validate_browser_url,
         egress_resolver=resolve_browser_egress,
         pin=True,
+        engine=_browser_engine(cfg),
     )
     return _SessionLease(manager, thread_id, session)
 
@@ -291,6 +297,7 @@ async def navigate_and_capture(*, thread_id: str | None, url: str, outputs_path:
         allow_unguarded_cdp=_as_bool(cfg.get("allow_unguarded_cdp"), False),
         url_guard=validate_browser_url,
         egress_resolver=resolve_browser_egress,
+        engine=_browser_engine(cfg),
     ) as session:
         snapshot = await session.navigate(url)
         screenshot_path: str | None = None

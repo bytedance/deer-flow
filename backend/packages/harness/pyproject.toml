@@ -107,6 +107,10 @@ monocle = ["monocle_apptrace>=0.8.8"]
 # so the core harness install stays lean; import is lazy inside the private
 # Playwright loop. After install, run `playwright install chromium` once.
 browser = ["playwright>=1.40"]
+# Opt-in anti-detection Firefox engine for the browser tools (browser_navigate
+# `engine: camoufox`). Imported lazily only when that engine launches. After
+# install, run `uv run python -m camoufox fetch` once to download the browser.
+camoufox = ["deerflow-harness[browser]", "camoufox>=0.5.9"]
 # Optional Chinese tokenization for the FTS5 memory retrieval adapter.
 memory-zh = ["jieba>=0.42.1"]
 
