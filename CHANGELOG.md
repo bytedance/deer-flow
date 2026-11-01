@@ -52,6 +52,10 @@ This section accumulates work toward the **2.3.0** milestone
   the nginx start command's own output, which no option printed before.
   ([#7723])
 
+- **dev:** Preserve closing quotes and following dotenv assignments when a
+  quoted value ends in escaped backslashes in the local launcher.
+  ([#7754](https://github.com/bytedance/deer-flow/pull/7754))
+
 - **memory:** `GET /api/memory/config` and `/api/memory/status` now mask
   credential values in `backend_config` (`api_key`, tokens, passwords,
   `Authorization` headers, at any depth) as `***`. They returned the config as

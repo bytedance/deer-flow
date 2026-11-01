@@ -144,3 +144,27 @@ def test_parser_runs_on_the_standard_library_and_never_executes(tmp_path: Path, 
 
     assert result.stdout.decode("utf-8") == f"export VALUE='{source.format(marker=marker.as_posix())}'\n"
     assert not marker.exists()
+
+
+@pytest.mark.parametrize("quote", ["'", '"'])
+@pytest.mark.parametrize("backslashes", [2, 4])
+def test_quoted_trailing_backslashes_preserve_following_assignments(tmp_path: Path, quote: str, backslashes: int) -> None:
+    path_value = "C:" + "\\" * backslashes
+    dotenv = f"DEER_FLOW_HOME={quote}{path_value}{quote}\nMODEL_NAME={quote}configured-model{quote}\nAFTER=still-loaded\n"
+
+    exported = _exported(tmp_path, dotenv.encode("utf-8"))
+
+    assert exported["DEER_FLOW_HOME"] == "C:" + "\\" * (backslashes // 2)
+    assert exported["MODEL_NAME"] == "configured-model"
+    assert exported["AFTER"] == "still-loaded"
+
+
+@pytest.mark.parametrize("quote", ["'", '"'])
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_quoted_backslash_before_newline_preserves_value(tmp_path: Path, quote: str, newline: str) -> None:
+    dotenv = f"MULTILINE={quote}one\\{newline}two{quote}{newline}AFTER=still-loaded{newline}"
+
+    exported = _exported(tmp_path, dotenv.encode("utf-8"))
+
+    assert exported["MULTILINE"] == "one\\\ntwo"
+    assert exported["AFTER"] == "still-loaded"
