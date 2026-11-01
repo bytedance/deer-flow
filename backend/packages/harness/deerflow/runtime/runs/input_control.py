@@ -87,6 +87,8 @@ class RunInputControl:
     def child(self, call_id):
         if call_id in self.children and not self.children[call_id][0].closed:
             return self.children[call_id][0]
+        # A provider can reuse a finished call's ID; no delivered steer holds the new work.
+        self.interrupted_children.discard(call_id)
         gate = ChildInputGate(can_queue=not any(not old.resume.is_set() and not old.closed for old, _ in self.children.values()))
         self.children[call_id] = (gate, None)
         return gate

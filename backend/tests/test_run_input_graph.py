@@ -634,6 +634,86 @@ async def test_steer_withdrawn_during_a_steering_turn_releases_the_child_it_paus
         await control.close()
 
 
+class ReplacementReusingCallIdModel(InputModel):
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        self.observed.append(messages)
+        calls = {
+            1: [{"name": "task", "args": {}, "id": "call_0"}],
+            2: [{"name": "manage_current_work", "args": {"action": "replace"}, "id": "replace"}],
+            3: [{"name": "task", "args": {}, "id": "call_0"}, {"name": "sibling", "args": {}, "id": "slow"}],
+        }.get(len(self.observed), [])
+        return ChatResult(generations=[ChatGeneration(message=AIMessage(content="" if calls else "Work completed", tool_calls=calls))])
+
+
+@pytest.mark.asyncio
+async def test_steer_withdrawn_from_a_replacement_reusing_a_call_id_releases_it():
+    from deerflow.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
+
+    store = MemoryRunStore()
+    await store.put("run", thread_id="thread", user_id="owner", status="running", owner_worker_id="worker")
+    inputs = RunInputs(store, "run", "owner", "worker")
+    saver = InMemorySaver()
+    old_finished, entered, replacement_entered, withdrawn, sibling_release = (asyncio.Event() for _ in range(5))
+
+    async def authorize_control(**kwargs):
+        old_finished.set()
+        async with asyncio.timeout(5):
+            while not old_gate.closed:
+                await asyncio.sleep(0.01)
+
+    control = RunInputControl(inputs, agent_runs=SimpleNamespace(authorize_control=authorize_control), thread_id="thread", checkpointer=saver)
+    started = []
+
+    @tool
+    async def task() -> str:
+        """The first call is replaced; the second reuses its provider call ID."""
+        started.append(True)
+        if len(started) == 1:
+            entered.set()
+            await old_finished.wait()
+            return "Old result"
+        replacement_entered.set()
+        await withdrawn.wait()
+        await control.child("call_0").boundary()
+        return "Replacement result"
+
+    @tool
+    async def sibling() -> str:
+        """Keeps the tool step open, so the second steer is withdrawn before delivery."""
+        await sibling_release.wait()
+        return "Sibling result"
+
+    model = ReplacementReusingCallIdModel(observed=[])
+    middleware = [RunInputAdmissionMiddleware(), DanglingToolCallMiddleware(), RunInputMiddleware()]
+    graph = create_agent(model, tools=[task, sibling], middleware=middleware, state_schema=ThreadState, context_schema=dict, checkpointer=saver)
+    run = asyncio.create_task(graph.ainvoke({"messages": [HumanMessage(content="Original task")]}, {"configurable": {"thread_id": "thread"}}, context={INPUT_CONTEXT_KEY: control}))
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        old_gate = control.child("call_0")
+        await inputs.submit("first", "Do this instead", "steer")
+        await asyncio.wait_for(replacement_entered.wait(), 5)
+        gate = control.child("call_0")
+        assert gate is not old_gate and control.abandoned
+        await inputs.submit("second", "Handle this first", "steer")
+        async with asyncio.timeout(5):
+            while gate.resume.is_set():
+                await asyncio.sleep(0.01)
+        await inputs.cancel("second")
+        withdrawn.set()
+        sibling_release.set()
+        result = await asyncio.wait_for(run, 5)
+        assert any(message.name == "subagent-result" and "Replacement result" in message.content for message in result["messages"])
+        assert {item["id"]: item["status"] for item in (await inputs.read())["items"]}["second"] == "cancelled"
+    finally:
+        old_finished.set()
+        withdrawn.set()
+        sibling_release.set()
+        if not run.done():
+            run.cancel()
+        await asyncio.gather(run, return_exceptions=True)
+        await control.close()
+
+
 @pytest.mark.asyncio
 async def test_withdrawn_steer_keeps_children_held_by_the_delivered_steer_paused():
     store = MemoryRunStore()
