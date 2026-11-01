@@ -440,6 +440,45 @@ def _apply_stream_chunk_timeout_default(model_class: type, model_settings_from_c
     model_settings_from_config["stream_chunk_timeout"] = _DEFAULT_STREAM_CHUNK_TIMEOUT_SECONDS
 
 
+_ASSISTANT_REPLAY_SUBCLASSES: dict[type, type] = {}
+
+
+def _with_assistant_replay(model_class: type) -> type:
+    """Return a client class that replays gateway-issued assistant fields.
+
+        Two fields the OpenAI-compatible serialiser drops must go back to the gateway that
+        issued them: Gemini's tool-call ``thought_signature`` (issue #1180), and the
+    ``reasoning_content`` of DeepSeek-style reasoning gateways, whose absence is rejected as
+        ``thinking is enabled but reasoning_content is missing in assistant tool call message``
+        (issue #1790). ``PatchedChatOpenAI`` restores them, but only for profiles that name that
+        class, and the requirement is invisible: neither 400 names anything in this repository.
+
+        Rather than ask every operator to discover an opt-in, any OpenAI-compatible client that
+        keeps langchain's stock payload builder now gets the replay automatically. Both restores
+        are no-ops when the gateway issued nothing, so gateways that never send those fields are
+        unaffected; providers that build their own payload (DeepSeek, MiMo, MiniMax, StepFun,
+        vLLM, Claude, or ``PatchedChatOpenAI`` itself) are returned untouched, so their explicit
+        handling still wins.
+    """
+    from langchain_openai import ChatOpenAI
+
+    from deerflow.models.patched_openai import AssistantReplayMixin
+
+    if not issubclass(model_class, BaseChatOpenAI) or issubclass(model_class, AssistantReplayMixin):
+        return model_class
+    if model_class._get_request_payload is not ChatOpenAI._get_request_payload:
+        return model_class
+    wrapped = _ASSISTANT_REPLAY_SUBCLASSES.get(model_class)
+    if wrapped is None:
+        # Memoized: the factory runs once per agent build (lead agent, title and
+        # summarization middlewares, memory manager, subagent executor, managed-models
+        # router), so rebuilding a pydantic subclass every time would pay a class
+        # construction per build and hand back a different class identity each round.
+        wrapped = type(f"{model_class.__name__}WithAssistantReplay", (AssistantReplayMixin, model_class), {"__module__": __name__})
+        _ASSISTANT_REPLAY_SUBCLASSES[model_class] = wrapped
+    return wrapped
+
+
 # gpt-6 family must use the OpenAI Responses API when tools are attached.
 #
 # The locked ``langchain-openai==1.2.1`` still routes tool use through
@@ -705,6 +744,13 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
             model_settings_from_config["max_retries"] = 0
 
     _warn_unknown_model_settings(model_class, name, model_settings_from_config)
+
+    # Applied last so every class-name and isinstance decision above still sees the
+    # configured client. Any OpenAI-compatible client that keeps langchain's stock
+    # payload builder now replays the fields its gateway issued (tool-call
+    # thought_signature, reasoning_content), so a profile on an OpenAI-compatible
+    # gateway no longer needs to name a patched class (issues #1180, #1790).
+    model_class = _with_assistant_replay(model_class)
 
     # 配置提供默认值，调用方显式传入的非空参数统一覆盖配置。
     # 先合并再展开，避免同名字段通过两个 **dict 传入时触发 TypeError。
