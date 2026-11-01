@@ -2563,7 +2563,8 @@ and compacted history. Its optional `role` accepts `user`, `assistant`, or `tool
 and filters before the eight-result limit; omitting it or passing `null` preserves
 search across all roles.
 An archived source whose stored payload cannot be decoded is skipped and
-reported as `partially_expired` instead of failing the search.
+reported as `partially_expired` instead of failing the search, including when a
+`role` filter is applied.
 Search excerpts contain at most 600 characters around the earliest locatable
 matching occurrence that fits and include `excerpt_start` / `excerpt_end`, a
 zero-based, half-open character range

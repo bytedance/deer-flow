@@ -193,14 +193,14 @@ def _decode_archived_source(payload: object) -> dict | None:
     """Decode one stored source row, or None when it is unusable.
 
     A truncated or hand-edited archive can hold malformed JSON, a payload
-    nested past the parser's recursion limit, or a non-object without an id.
-    One bad row must not abort the whole lookup.
+    nested past the parser's recursion limit, or an object missing the string
+    ``id``/``text`` both readers index. One bad row must not abort the lookup.
     """
     try:
         row = json.loads(payload)
     except (ValueError, TypeError, RecursionError):
         return None
-    if not isinstance(row, dict) or not isinstance(row.get("id"), str):
+    if not isinstance(row, dict) or not isinstance(row.get("id"), str) or not isinstance(row.get("text"), str):
         return None
     return row
 
@@ -230,9 +230,15 @@ def lookup(state: dict, runtime, *, query: str | None = None, source_id: str | N
                     rows = db.execute(f"SELECT payload FROM sources WHERE batch IN ({placeholders}) AND id=? ORDER BY rowid LIMIT 1", [*batches, source_id])
                 else:
                     match = " OR ".join('"' + term.replace('"', '""') + '"' for term in keywords)
-                    role_filter = " AND json_extract(payload, '$.role') = ?" if role is not None else ""
+                    # CASE evaluates json_extract only for valid payloads, so one corrupt row
+                    # cannot raise inside the predicate and abort every role-filtered match.
+                    role_filter = " AND CASE WHEN json_valid(payload) THEN json_extract(payload, '$.role') END = ?" if role is not None else ""
                     parameters = [match, *batches, *([role] if role is not None else []), 8]
                     rows = db.execute(f"SELECT payload FROM sources WHERE sources MATCH ? AND batch IN ({placeholders}){role_filter} ORDER BY rank LIMIT ?", parameters)
+                    if role is not None:
+                        corrupt = db.execute(f"SELECT 1 FROM sources WHERE sources MATCH ? AND batch IN ({placeholders}) AND NOT json_valid(payload) LIMIT 1", [match, *batches]).fetchone()
+                        if corrupt and status != "unavailable":
+                            status = "partially_expired"
                 for (payload,) in rows:
                     row = _decode_archived_source(payload)
                     if row is None:
