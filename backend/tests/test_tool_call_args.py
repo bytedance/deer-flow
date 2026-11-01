@@ -312,6 +312,78 @@ class TestProviderSerializers:
         assert self.PAYLOAD not in json.dumps(formatted, ensure_ascii=False)
 
 
+class TestGeminiProviderSerializer:
+    """Exercise the native Gemini history builder without a client or API call."""
+
+    @staticmethod
+    def _history(messages):
+        from langchain_google_genai.chat_models import _parse_chat_history
+
+        _system, history = _parse_chat_history(messages, model="gemini-2.5-flash")
+        return history
+
+    def test_parallel_calls_keep_their_own_arguments_and_thought_signatures(self):
+        sibling_args = {"path": "/mnt/user-data/outputs/other.md", "content": "keep this"}
+        message = AIMessage(
+            content="",
+            tool_calls=[
+                {"name": "write_file", "id": "call-1", "args": dict(ARGS)},
+                {"name": "write_file", "id": "call-2", "args": sibling_args},
+            ],
+            additional_kwargs={
+                "function_call": {"name": "write_file", "arguments": json.dumps(ARGS)},
+                "__gemini_function_call_thought_signatures__": {"call-1": "Zmlyc3Q=", "call-2": "c2Vjb25k"},
+            },
+        )
+        original = message.model_dump()
+        baseline = self._history([message])
+        assert baseline[0].parts[0].function_call.args == ARGS
+
+        rewritten = rewrite_tool_call_args(message, {"call-1": NEW_ARGS})
+        (serialized,) = self._history([rewritten])
+
+        assert [part.function_call.name for part in serialized.parts] == ["write_file", "write_file"]
+        assert [part.function_call.args for part in serialized.parts] == [NEW_ARGS, sibling_args]
+        assert [part.thought_signature for part in serialized.parts] == [b"first", b"second"]
+        assert ARGS["content"] not in serialized.model_dump_json()
+        assert message.model_dump() == original
+
+    def test_blocked_write_replay_sends_elided_arguments_and_error_result(self):
+        from deerflow.agents.middlewares.read_before_write_middleware import WRITE_BLOCK_KEY, elide_blocked_write_payloads
+
+        message = AIMessage(
+            content="",
+            tool_calls=[{"name": "write_file", "id": "call-1", "args": dict(ARGS)}],
+            additional_kwargs={"function_call": {"name": "write_file", "arguments": json.dumps(ARGS)}},
+        )
+        blocked = ToolMessage(
+            content="Error: read the existing file before writing.",
+            name="write_file",
+            tool_call_id="call-1",
+            status="error",
+            additional_kwargs={WRITE_BLOCK_KEY: {"path": ARGS["path"], "tool": "write_file"}},
+        )
+        messages = [HumanMessage(content="Update the report"), message, blocked]
+        original = [item.model_dump() for item in messages]
+        baseline = self._history(messages)
+        assert ARGS["content"] in baseline[1].model_dump_json()
+
+        rewritten = elide_blocked_write_payloads(messages, min_chars=1)
+        assert rewritten is not None
+        history = self._history(rewritten)
+
+        assert [item.role for item in history] == ["user", "model", "user"]
+        call = history[1].parts[0].function_call
+        assert call.name == "write_file"
+        assert call.args["path"] == ARGS["path"]
+        assert call.args["content"].startswith("[payload elided:")
+        assert ARGS["content"] not in "".join(item.model_dump_json() for item in history)
+        result = history[2].parts[0].function_response
+        assert result.name == "write_file"
+        assert result.response == {"output": blocked.content}
+        assert [item.model_dump() for item in messages] == original
+
+
 class TestResponseChainInvalidation:
     """A rewritten history must be replayed, never chained to the original server-side copy."""
 
