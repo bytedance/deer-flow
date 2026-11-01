@@ -377,6 +377,37 @@ class TestExtractSkills:
         ]
         assert extract_skills(msgs, skills_root=_ROOT, read_tool_names=_READ) == []
 
+    def test_keeps_each_read_when_a_provider_reuses_one_tool_call_id(self):
+        first_path = "/mnt/skills/public/a/SKILL.md"
+        second_path = "/mnt/skills/public/b/SKILL.md"
+        msgs = [
+            _ai_read("call_0", first_path),
+            ToolMessage(content="A", tool_call_id="call_0", id="tm1", additional_kwargs=_skill_metadata(first_path, "A")),
+            _ai_read("call_0", second_path),
+            ToolMessage(content="B", tool_call_id="call_0", id="tm2", additional_kwargs=_skill_metadata(second_path, "B")),
+        ]
+
+        out = extract_skills(msgs, skills_root=_ROOT, read_tool_names=_READ)
+
+        assert [entry["path"] for entry in out] == [first_path, second_path]
+        assert [entry["description"] for entry in out] == ["A", "B"]
+
+    def test_reused_id_with_a_non_skill_read_keeps_later_skill_read(self):
+        first_path = "/mnt/skills/public/a/SKILL.md"
+        second_path = "/mnt/skills/public/b/SKILL.md"
+        msgs = [
+            _ai_read("call_0", first_path),
+            ToolMessage(content="A", tool_call_id="call_0", id="tm1", additional_kwargs=_skill_metadata(first_path, "A")),
+            _ai_read("call_0", "/workspace/notes.md"),
+            ToolMessage(content="notes", tool_call_id="call_0", id="tm2"),
+            _ai_read("call_0", second_path),
+            ToolMessage(content="B", tool_call_id="call_0", id="tm3", additional_kwargs=_skill_metadata(second_path, "B")),
+        ]
+
+        out = extract_skills(msgs, skills_root=_ROOT, read_tool_names=_READ)
+
+        assert [entry["path"] for entry in out] == [first_path, second_path]
+
 
 class TestRenderSkillContext:
     def test_empty_returns_empty_string(self):
