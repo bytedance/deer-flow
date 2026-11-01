@@ -14,7 +14,7 @@ import pytest
 from support.detectors import blocking_io_changed, blocking_io_static, thread_boundaries
 from support.detectors.repo_root import resolve_repo_root
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 def test_resolve_repo_root_finds_marker_from_detector_location():

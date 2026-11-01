@@ -52,7 +52,7 @@ async def test_live_management_ingestion_to_scoped_evidence(monkeypatch):
             pytest.fail("Processing timed out; retain the printed document ID for reconciliation")
         assert state["state"] == "completed" and state["searchable"], "Upstream processing did not complete"
 
-    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[2] / "examples/deerflow-extension-weknora"))
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[3] / "examples/deerflow-extension-weknora"))
     from deerflow_extension_weknora import WeKnoraProvider
 
     from deerflow.knowledge import KnowledgeRequestContext, format_result, sources_from_messages

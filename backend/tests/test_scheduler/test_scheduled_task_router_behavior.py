@@ -1463,7 +1463,7 @@ async def test_update_omitting_assistant_id_keeps_existing_even_if_agent_is_gone
 # --- PR1: lifecycle, limits, stop condition and coded errors over HTTP ----------------------
 
 
-_CONTRACT = json.loads((Path(__file__).resolve().parents[2] / "contracts" / "scheduled_task_errors_contract.json").read_text(encoding="utf-8"))
+_CONTRACT = json.loads((Path(__file__).resolve().parents[3] / "contracts" / "scheduled_task_errors_contract.json").read_text(encoding="utf-8"))
 _CONTRACT_CODES = set(_CONTRACT["ui_codes"]) | set(_CONTRACT["agent_only_codes"])
 _OWNER = User(id=UUID("12345678-1234-1234-1234-123456789abc"), email="lifecycle@example.com", password_hash="unused", system_role="user")
 OWNER = str(_OWNER.id)

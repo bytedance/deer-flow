@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 SKILL_CREATOR_ROOT = REPO_ROOT / "skills" / "public" / "skill-creator"
 SCRIPTS_DIR = SKILL_CREATOR_ROOT / "scripts"
 VALIDATOR_PATH = SCRIPTS_DIR / "quick_validate.py"

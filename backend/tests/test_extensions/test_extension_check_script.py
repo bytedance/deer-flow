@@ -7,7 +7,7 @@ from zipfile import ZipFile
 
 import pytest
 
-SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "check_extension.py"
+SCRIPT = Path(__file__).resolve().parents[3] / "scripts" / "check_extension.py"
 spec = importlib.util.spec_from_file_location("extension_check_script", SCRIPT)
 checker = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(checker)

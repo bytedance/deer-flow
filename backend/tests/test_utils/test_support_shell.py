@@ -182,7 +182,7 @@ def test_makefile_shell_wrapper_runs_portablegit_bash(tmp_path: Path):
     system_root = Path(os.environ.get("SystemRoot", r"C:\Windows"))
     bash.parent.mkdir()
     shutil.copy(system_root / "System32" / "cmd.exe", bash)
-    wrapper = Path(__file__).resolve().parents[2] / "scripts" / "run-with-git-bash.cmd"
+    wrapper = Path(__file__).resolve().parents[3] / "scripts" / "run-with-git-bash.cmd"
 
     env = {**os.environ, "PATH": os.pathsep.join([str(git_root / "mingw64" / "bin"), str(system_root / "System32")])}
     result = subprocess.run(["cmd", "/c", str(wrapper), "/c", "echo", "BASH_OK"], capture_output=True, text=True, env=env, timeout=60)

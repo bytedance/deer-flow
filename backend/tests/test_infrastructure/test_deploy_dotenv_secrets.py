@@ -24,7 +24,7 @@ from pathlib import Path
 import pytest
 from support.shell import find_script_bash
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 # Every test here shells out to bash; on Windows that must be Git Bash --
 # the WSL launcher and Store alias stubs cannot run the repo scripts.

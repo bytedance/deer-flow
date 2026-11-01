@@ -18,7 +18,7 @@ from pathlib import Path
 import yaml
 from _gateway_shutdown_budget import HOOKS_BOUNDED_BY_SHUTDOWN_HOOK_TIMEOUT, lifespan_shutdown_seconds
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 COMPOSE_PATH = REPO_ROOT / "docker" / "docker-compose.yaml"
 DEV_COMPOSE_PATH = REPO_ROOT / "docker" / "docker-compose-dev.yaml"
 DEV_ENTRYPOINT_PATH = REPO_ROOT / "docker" / "dev-entrypoint.sh"

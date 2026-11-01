@@ -37,7 +37,7 @@ def test_source_schema_matches_cross_component_contract():
 
     from deerflow.knowledge.sources import ARTIFACT_VERSION
 
-    schema = json.loads((Path(__file__).parents[2] / "contracts/knowledge_sources.v1.json").read_text(encoding="utf-8"))
+    schema = json.loads((Path(__file__).parents[3] / "contracts/knowledge_sources.v1.json").read_text(encoding="utf-8"))
     Draft202012Validator.check_schema(schema)
     properties = schema["$defs"]["source"]["properties"]
     model = KnowledgeSource.model_json_schema(mode="serialization")["properties"]

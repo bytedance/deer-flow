@@ -18,7 +18,7 @@ from deerflow.agents.memory.backends.deermem.deermem.config import DeerMemConfig
 from deerflow.agents.memory.backends.deermem.deermem.core.paths import agent_facts_directory, memory_file_path
 from deerflow.config.memory_config import MemoryConfig
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 MEMORY_GUIDES = (
     Path("frontend/src/content/en/harness/memory.mdx"),
     Path("frontend/src/content/zh/harness/memory.mdx"),

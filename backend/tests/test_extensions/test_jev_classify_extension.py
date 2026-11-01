@@ -16,7 +16,7 @@ from langgraph.prebuilt import ToolNode
 from deerflow.extensions.loader import ExtensionSpec, load_extensions
 from deerflow.extensions.plugin_tools import build_plugin_tools, plugin_tool_name
 
-EXAMPLE = Path(__file__).resolve().parents[2] / "examples/deerflow-extension-jev-classify"
+EXAMPLE = Path(__file__).resolve().parents[3] / "examples/deerflow-extension-jev-classify"
 REAL_ASYNC_CLIENT = httpx.AsyncClient
 KEY = "test-only-not-a-real-key"
 CATEGORIES = [{"name": "billing", "description": "Payments, invoices and refunds."}, {"name": "technical", "description": "Product bugs and integration failures."}]

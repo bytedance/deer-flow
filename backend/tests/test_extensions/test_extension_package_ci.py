@@ -9,7 +9,7 @@ import pytest
 import yaml
 from packaging.requirements import Requirement
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 TEST_STEP = "Test bundled extension packages that ship tests"
 
 

@@ -59,7 +59,7 @@ def client(monkeypatch):
     # config.yaml is gitignored, so tests cannot rely on it existing. The committed
     # example is a valid config and gives every other section (database above all)
     # a real value for the app lifespan.
-    baseline = AppConfig.from_file(str(Path(__file__).resolve().parents[2] / "config.example.yaml"))
+    baseline = AppConfig.from_file(str(Path(__file__).resolve().parents[3] / "config.example.yaml"))
 
     def _make(*, allow_registration: bool) -> TestClient:
         set_auth_config(AuthConfig(jwt_secret=_TEST_SECRET))

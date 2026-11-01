@@ -211,7 +211,7 @@ def test_export_upload_roundtrip_uses_existing_scanner_and_rejects_conflict(app,
 
     from deerflow.skills.security_scanner import ScanResult
 
-    source = Path(__file__).resolve().parents[2] / "skills/public/data-analysis"
+    source = Path(__file__).resolve().parents[3] / "skills/public/data-analysis"
     alice = app.state.stores["alice"]
     bob = app.state.stores["bob"]
     shutil.copytree(source, alice.get_custom_skill_dir("data-analysis"), ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))

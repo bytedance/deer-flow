@@ -30,7 +30,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 BACKEND_DOCKERFILE = REPO_ROOT / "backend" / "Dockerfile"
 WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
 COMPOSE_PATHS = (

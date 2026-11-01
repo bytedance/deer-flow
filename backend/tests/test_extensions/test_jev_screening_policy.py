@@ -18,7 +18,7 @@ from deerflow.extensions.anchors import outermost
 from deerflow.extensions.injection import inject_middlewares
 from deerflow.extensions.loader import ExtensionSpec, load_extensions
 
-EXAMPLE = Path(__file__).resolve().parents[2] / "examples/deerflow-extension-jev-screening"
+EXAMPLE = Path(__file__).resolve().parents[3] / "examples/deerflow-extension-jev-screening"
 
 
 @pytest.fixture(autouse=True)

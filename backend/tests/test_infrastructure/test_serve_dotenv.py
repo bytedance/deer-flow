@@ -25,7 +25,7 @@ import pytest
 from dotenv import dotenv_values
 from support.shell import require_script_bash
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 SCRIPTS = REPO_ROOT / "scripts"
 
 _DUMP_ENVIRONMENT = "\"$TEST_PYTHON\" -c 'import json, os, sys; sys.stdout.write(json.dumps(dict(os.environ)))'"

@@ -27,7 +27,7 @@ from deerflow.config.app_config import AppConfig
 from tests.test_mcp.test_mcp_cache_reconciliation import reconciler  # noqa: F401 - fixture re-export
 
 # Load .env from project root (for OPENAI_API_KEY etc.)
-load_dotenv(os.path.join(os.path.dirname(__file__), "../../.env"))
+load_dotenv(os.path.join(os.path.dirname(__file__), "../../../.env"))
 
 # ---------------------------------------------------------------------------
 # Markers

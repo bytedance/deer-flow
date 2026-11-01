@@ -28,7 +28,7 @@ from app.gateway.deps import _enforce_postgres_for_multi_worker, _validate_memor
 from deerflow.config.app_config import AppConfig
 from deerflow.config.deployment_config import MULTI_INSTANCE_ENV_VAR, multi_instance_declaration
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 HELPER_PATH = REPO_ROOT / "scripts" / "dev_multi_instance.py"
 SHELL_PATH = REPO_ROOT / "scripts" / "dev_multi_instance.sh"
 

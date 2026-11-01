@@ -19,7 +19,7 @@ from deerflow.persistence.scheduled_task_runs import finalization
 from deerflow.runtime.goal import DEFAULT_MAX_GOAL_CONTINUATIONS, DEFAULT_MAX_NO_PROGRESS_CONTINUATIONS, GOAL_BLOCKERS
 from deerflow.runtime.runs import worker
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
+_REPO_ROOT = Path(__file__).resolve().parents[3]
 _CONTRACT = json.loads((_REPO_ROOT / "contracts" / "scheduled_goal_notes_contract.json").read_text(encoding="utf-8"))
 _CODES = set(_CONTRACT["unmet_reason_codes"])
 

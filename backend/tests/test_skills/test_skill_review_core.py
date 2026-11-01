@@ -17,7 +17,7 @@ from deerflow.skills.review.readers import ArchivePackageReader, parse_skill_uri
 from deerflow.skills.review.renderer import build_static_report, render_report_markdown
 from deerflow.skills.review.resource_graph import _extract_references
 
-CONTRACTS_DIR = Path(__file__).resolve().parents[2] / "contracts" / "skill_review"
+CONTRACTS_DIR = Path(__file__).resolve().parents[3] / "contracts" / "skill_review"
 
 
 def test_video_generation_runtime_credentials_pass_skill_review(tmp_path):
@@ -28,7 +28,7 @@ def test_video_generation_runtime_credentials_pass_skill_review(tmp_path):
     left behind when a test imports the skill script) is not part of the
     committed package and must not fail the review.
     """
-    repo_skill_dir = Path(__file__).resolve().parents[2] / "skills" / "public" / "video-generation"
+    repo_skill_dir = Path(__file__).resolve().parents[3] / "skills" / "public" / "video-generation"
     tracked = subprocess.run(
         ["git", "ls-files", "--", "."],
         cwd=repo_skill_dir,

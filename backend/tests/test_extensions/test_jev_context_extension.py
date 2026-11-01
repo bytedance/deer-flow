@@ -32,7 +32,7 @@ from deerflow.extensions.stack import compose_with_extensions
 
 @pytest.fixture
 def jev(monkeypatch):
-    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[2] / "examples/deerflow-extension-jev-context"))
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[3] / "examples/deerflow-extension-jev-context"))
     monkeypatch.setenv("TYPESAFE_API_KEY", "test-only-not-a-real-key")
     import deerflow_extension_jev_context.compaction as module
 
@@ -229,7 +229,7 @@ def test_live_script_checks_all_required_settings_before_requests(jev, monkeypat
     else:
         monkeypatch.setenv(missing, value)
     requests = transport(monkeypatch)
-    script = Path(__file__).resolve().parents[2] / "examples/deerflow-extension-jev-context/scripts/verify_live.py"
+    script = Path(__file__).resolve().parents[3] / "examples/deerflow-extension-jev-context/scripts/verify_live.py"
     original_search_path = sys.path
     original_entries = list(original_search_path)
     monkeypatch.setattr(sys, "path", list(sys.path))

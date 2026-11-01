@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 SPEC = importlib.util.spec_from_file_location("label_declarations", REPO_ROOT / "scripts/check_label_declarations.py")
 assert SPEC is not None and SPEC.loader is not None
 checker = importlib.util.module_from_spec(SPEC)

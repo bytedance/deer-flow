@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 from support.shell import find_script_bash
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 BASH = find_script_bash()
 pytestmark = pytest.mark.skipif(BASH is None, reason="repo shell-script tests need Git Bash on Windows")
 

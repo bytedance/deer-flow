@@ -69,7 +69,7 @@ def test_support_bundle_thread_id_pattern_matches_canonical() -> None:
 
     from deerflow.utils.thread_id import THREAD_ID_PATTERN
 
-    script = Path(__file__).resolve().parents[2] / "scripts" / "support_bundle.py"
+    script = Path(__file__).resolve().parents[3] / "scripts" / "support_bundle.py"
     spec = importlib.util.spec_from_file_location("support_bundle", script)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

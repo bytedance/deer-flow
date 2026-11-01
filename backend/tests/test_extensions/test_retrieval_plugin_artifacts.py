@@ -21,7 +21,7 @@ from deerflow.runtime.serialization import serialize_channel_values_for_api
 
 @pytest.fixture
 def retrieval_plugin(monkeypatch):
-    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[2] / "examples/deerflow-extension-retrieval"))
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[3] / "examples/deerflow-extension-retrieval"))
 
     def load(config=None):
         loaded, diagnostics = load_extensions([ExtensionSpec(use="deerflow_extension_retrieval:install", config={} if config is None else config)])

@@ -233,7 +233,7 @@ def test_public_skill_real_install_roundtrip(tmp_path, monkeypatch, skill_name):
 
     from deerflow.skills import installer
 
-    public = Path(__file__).resolve().parents[2] / "skills/public" / skill_name
+    public = Path(__file__).resolve().parents[3] / "skills/public" / skill_name
     storage = LocalSkillStorage(host_path=str(tmp_path / "source"))
     root = storage.get_custom_skill_dir(skill_name)
     shutil.copytree(public, root, ignore=shutil.ignore_patterns("__pycache__"))

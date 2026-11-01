@@ -781,7 +781,7 @@ def test_explicit_invalid_project_root_does_not_fall_back_to_current_checkout(
     monkeypatch,
 ) -> None:
     monkeypatch.setenv("DEER_FLOW_PROJECT_ROOT", str(tmp_path / "not-a-checkout"))
-    monkeypatch.chdir(Path(__file__).resolve().parents[2])
+    monkeypatch.chdir(Path(__file__).resolve().parents[3])
 
     with pytest.raises(FileNotFoundError, match="DEER_FLOW_PROJECT_ROOT"):
         find_project_root()
@@ -2719,7 +2719,7 @@ def test_dependency_sync_uses_the_same_configured_optional_extras_as_startup(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    repository_root = Path(__file__).resolve().parents[2]
+    repository_root = Path(__file__).resolve().parents[3]
     config_path = tmp_path / "deployment.yaml"
     config_path.write_text(
         "database:\n  backend: postgres\ntools:\n  - name: browser_navigate\n",

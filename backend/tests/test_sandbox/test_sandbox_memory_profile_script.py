@@ -7,7 +7,7 @@ from pathlib import Path
 
 
 def _load_module():
-    repo_root = Path(__file__).resolve().parents[2]
+    repo_root = Path(__file__).resolve().parents[3]
     script_path = repo_root / "scripts" / "sandbox_memory_profile.py"
     spec = importlib.util.spec_from_file_location("sandbox_memory_profile", script_path)
     assert spec is not None

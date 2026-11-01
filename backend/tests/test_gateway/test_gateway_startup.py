@@ -11,7 +11,7 @@ import pytest
 from support.compose import DOCKER, requires_docker_compose
 from support.shell import find_script_bash
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 # Only the two deploy.sh tests shell out; they need Git Bash on Windows (the
 # WSL launcher and Store alias stubs cannot run the repo scripts).

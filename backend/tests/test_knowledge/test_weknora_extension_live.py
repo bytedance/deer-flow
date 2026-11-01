@@ -15,7 +15,7 @@ async def test_weknora_live_selected_document_evidence(monkeypatch):
     names = ["WEKNORA_BASE_URL", "WEKNORA_TENANT_ID", "WEKNORA_KNOWLEDGE_BASE_ID", "WEKNORA_DOCUMENT_ID", "WEKNORA_EVIDENCE_QUERY", "WEKNORA_API_KEY"]
     if any(not os.getenv(name) for name in names):
         pytest.fail("Set all documented WEKNORA_* variables for live verification")
-    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[2] / "examples/deerflow-extension-weknora"))
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[3] / "examples/deerflow-extension-weknora"))
     from deerflow_extension_weknora import WeKnoraProvider
 
     from deerflow.knowledge import KnowledgeRequestContext, format_result, sources_from_messages

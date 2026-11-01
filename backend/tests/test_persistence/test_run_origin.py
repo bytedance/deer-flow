@@ -32,7 +32,7 @@ from deerflow.persistence.run import RunRepository
 from deerflow.persistence.run.model import RunChangeClockRow, RunRow
 from deerflow.runtime.run_origin import DEERFLOW_ORIGIN_KEY, ORIGIN_KINDS, admit_origin, make_origin, origin_kind_of
 
-CONTRACT = json.loads((Path(__file__).resolve().parents[2] / "contracts" / "thread_origin_contract.json").read_text())
+CONTRACT = json.loads((Path(__file__).resolve().parents[3] / "contracts" / "thread_origin_contract.json").read_text())
 
 
 # ---------------------------------------------------------------------------
@@ -50,7 +50,7 @@ def test_contract_matches_the_module():
 def test_origin_key_is_distinct_from_the_message_level_scheduled_origin_key():
     from app.gateway.services import SCHEDULED_ORIGIN_KEY
 
-    notes = json.loads((Path(__file__).resolve().parents[2] / "contracts" / "scheduled_goal_notes_contract.json").read_text())
+    notes = json.loads((Path(__file__).resolve().parents[3] / "contracts" / "scheduled_goal_notes_contract.json").read_text())
     assert DEERFLOW_ORIGIN_KEY != SCHEDULED_ORIGIN_KEY == notes["scheduled_origin_key"]
 
 

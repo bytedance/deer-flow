@@ -1975,7 +1975,7 @@ class TestConfigVersion:
     def test_config_version_bumped(self):
         import yaml
 
-        example_path = os.path.join(os.path.dirname(__file__), "..", "..", "config.example.yaml")
+        example_path = os.path.join(os.path.dirname(__file__), "..", "..", "..", "config.example.yaml")
         if os.path.exists(example_path):
             with open(example_path, encoding="utf-8") as f:
                 data = yaml.safe_load(f)
@@ -1984,7 +1984,7 @@ class TestConfigVersion:
     def test_config_example_has_tool_output_section(self):
         import yaml
 
-        example_path = os.path.join(os.path.dirname(__file__), "..", "..", "config.example.yaml")
+        example_path = os.path.join(os.path.dirname(__file__), "..", "..", "..", "config.example.yaml")
         if os.path.exists(example_path):
             with open(example_path, encoding="utf-8") as f:
                 data = yaml.safe_load(f)
@@ -2756,7 +2756,7 @@ class TestSupersededWriteElision:
     def test_config_example_documents_the_keys(self):
         import yaml
 
-        example_path = os.path.join(os.path.dirname(__file__), "..", "..", "config.example.yaml")
+        example_path = os.path.join(os.path.dirname(__file__), "..", "..", "..", "config.example.yaml")
         with open(example_path, encoding="utf-8") as f:
             data = yaml.safe_load(f)
         tool_output = data["tool_output"]

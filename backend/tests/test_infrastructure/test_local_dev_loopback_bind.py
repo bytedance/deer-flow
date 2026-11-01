@@ -26,7 +26,7 @@ from types import SimpleNamespace
 import pytest
 from support.shell import require_script_bash
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 SERVE_SH = REPO_ROOT / "scripts" / "serve.sh"
 NGINX_SH = REPO_ROOT / "scripts" / "nginx.sh"
 NGINX_LOCAL_CONF_SH = REPO_ROOT / "scripts" / "nginx-local-conf.sh"

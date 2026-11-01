@@ -14,7 +14,7 @@ from pathlib import Path
 
 import yaml
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 COMPOSE_PATH = REPO_ROOT / "docker" / "docker-compose.yaml"
 DOCKERFILE_PATH = REPO_ROOT / "backend" / "Dockerfile"
 HELM_GATEWAY_PATH = REPO_ROOT / "deploy" / "helm" / "deer-flow" / "templates" / "gateway-deployment.yaml"

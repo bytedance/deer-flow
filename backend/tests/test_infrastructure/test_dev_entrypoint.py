@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 from support.shell import require_posix_sh
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 ENTRYPOINT = REPO_ROOT / "docker" / "dev-entrypoint.sh"
 
 

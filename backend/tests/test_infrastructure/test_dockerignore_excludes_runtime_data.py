@@ -31,7 +31,7 @@ from pathlib import Path, PurePosixPath
 
 import pytest
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 DOCKERIGNORE = REPO_ROOT / ".dockerignore"
 
 # Host-local runtime and secret paths that must never enter the build context.

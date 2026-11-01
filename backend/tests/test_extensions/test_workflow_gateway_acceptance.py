@@ -20,7 +20,7 @@ import httpx
 import pytest
 import yaml
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 EXAMPLE = ROOT / "examples/deerflow-extension-workflows"
 pytestmark = pytest.mark.skipif(os.name != "posix" or os.getenv("DEERFLOW_WORKFLOW_ACCEPTANCE") != "1", reason="Opt-in POSIX two-Gateway Docker acceptance")
 

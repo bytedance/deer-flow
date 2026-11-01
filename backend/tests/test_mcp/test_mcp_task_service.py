@@ -4203,7 +4203,7 @@ def test_failing_release_does_not_leak_unretrieved_shield_exception(tmp_path):
     import sys
     import textwrap
 
-    backend_dir = os.path.dirname(os.path.dirname(__file__))
+    backend_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
     probe = textwrap.dedent(
         """
         import asyncio, gc

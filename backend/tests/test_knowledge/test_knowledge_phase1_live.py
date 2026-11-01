@@ -40,7 +40,7 @@ def _evidence(result):
 
 async def test_weknora_live_published_entries(monkeypatch):
     env = _required("WEKNORA_BASE_URL", "WEKNORA_TENANT_ID", "WEKNORA_WIKI_BASE_ID", "WEKNORA_API_KEY", "WEKNORA_WIKI_QUERY")
-    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[2] / "examples/deerflow-extension-weknora"))
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[3] / "examples/deerflow-extension-weknora"))
     from deerflow_extension_weknora import WeKnoraProvider
 
     from deerflow.knowledge import KnowledgeRequestContext
@@ -59,7 +59,7 @@ async def test_weknora_live_published_entries(monkeypatch):
 
 async def test_lightrag_live_relation_evidence(monkeypatch):
     env = _required("LIGHTRAG_BASE_URL", "LIGHTRAG_API_KEY", "LIGHTRAG_RELATION_QUERY")
-    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[2] / "examples/deerflow-extension-lightrag"))
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[3] / "examples/deerflow-extension-lightrag"))
     from deerflow_extension_lightrag import LightRAGProvider
 
     from deerflow.knowledge import KnowledgeRequestContext
@@ -98,7 +98,7 @@ async def test_live_glm_three_tools_and_citations(monkeypatch):
     from langchain_openai import ChatOpenAI
 
     for package in ("weknora", "lightrag"):
-        monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[2] / f"examples/deerflow-extension-{package}"))
+        monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[3] / f"examples/deerflow-extension-{package}"))
     from deerflow_extension_lightrag import LightRAGProvider
     from deerflow_extension_weknora import WeKnoraProvider
 

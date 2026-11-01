@@ -36,7 +36,7 @@ from deerflow.config.pii_redaction_config import PiiRedactionConfig
 from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.extensions.loader import ExtensionSpec, load_extensions
 
-EXAMPLE = Path(__file__).resolve().parents[2] / "examples/deerflow-extension-jev-screening"
+EXAMPLE = Path(__file__).resolve().parents[3] / "examples/deerflow-extension-jev-screening"
 REAL_CLIENT = httpx.AsyncClient
 WARNING = "[Potential instruction addressed to the assistant"
 

@@ -9,7 +9,7 @@ without a restart, and the semantics below decide how an in-flight record
 follows a changed policy.
 
 Semantics every implementation must share (pinned by
-``tests/test_login_throttle_store.py`` against both stores):
+``tests/test_authz/test_login_throttle_store.py`` against both stores):
 
 - ``record_failure`` increments the count. A new count below ``max_attempts``
   leaves the IP counting with no lock (so a failure after the operator

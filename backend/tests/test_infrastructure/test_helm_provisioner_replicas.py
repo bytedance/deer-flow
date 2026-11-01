@@ -34,7 +34,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 CHART = REPO_ROOT / "deploy" / "helm" / "deer-flow"
 VALUES = CHART / "values.yaml"
 README = CHART / "README.md"

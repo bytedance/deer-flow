@@ -26,7 +26,7 @@ set -e
 
 # `--print-extras` is a dry-run hook: parse + validate UV_EXTRAS, print the
 # resulting `--extra X` flags to stdout, and exit. Used by the unit test in
-# backend/tests/test_dev_entrypoint.py and useful for ad-hoc debugging.
+# backend/tests/test_infrastructure/test_dev_entrypoint.py and useful for ad-hoc debugging.
 PRINT_EXTRAS_ONLY=0
 if [ "${1:-}" = "--print-extras" ]; then
     PRINT_EXTRAS_ONLY=1

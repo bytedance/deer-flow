@@ -107,7 +107,7 @@ async def _openviking_mcp_server() -> AsyncIterator[tuple[str, _RequestCapture, 
 
 
 def _write_openviking_extensions_config(path: Path, url: str) -> None:
-    example_path = Path(__file__).resolve().parents[2] / "extensions_config.example.json"
+    example_path = Path(__file__).resolve().parents[3] / "extensions_config.example.json"
     example = json.loads(example_path.read_text(encoding="utf-8"))
     openviking = deepcopy(example["mcpServers"]["openviking"])
     openviking["enabled"] = True

@@ -9,7 +9,7 @@ from deerflow_extension_api.auth import ExtensionPrincipal
 
 @pytest.fixture
 def platform(tmp_path, monkeypatch):
-    root = Path(__file__).resolve().parents[2]
+    root = Path(__file__).resolve().parents[3]
     for package in ("knowledge-platform", "knowledge-management"):
         monkeypatch.syspath_prepend(str(root / "examples" / f"deerflow-extension-{package}"))
     from deerflow_extension_knowledge_platform.models import Settings, resource_key

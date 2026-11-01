@@ -22,7 +22,7 @@ from deerflow.subagents.status_contract import (
     read_subagent_result_metadata,
 )
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
+_REPO_ROOT = Path(__file__).resolve().parents[3]
 _CONTRACT_PATH = _REPO_ROOT / "contracts" / "subagent_status_contract.json"
 
 

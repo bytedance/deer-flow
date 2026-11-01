@@ -11,7 +11,7 @@ from deerflow.knowledge import KnowledgeRequestContext, format_result, sources_f
 
 @pytest.fixture
 def adapter(monkeypatch):
-    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[2] / "examples/deerflow-extension-weknora"))
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[3] / "examples/deerflow-extension-weknora"))
     from deerflow_extension_weknora import WeKnoraProvider
 
     monkeypatch.setenv("WEKNORA_TEST_KEY", "synthetic-secret")

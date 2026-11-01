@@ -176,7 +176,7 @@ _CANONICAL_0019_SCHEMA_FLOOR: dict[str, frozenset[str]] = {
 
 # Baseline (stamp target for legacy DBs). Pinned here so the bootstrap layer
 # fails loudly if the baseline revision is ever renamed without updating the
-# stamp call. ``tests/test_persistence_bootstrap.py`` asserts this string is a
+# stamp call. ``tests/test_persistence/test_persistence_bootstrap.py`` asserts this string is a
 # real revision id in the script tree.
 _BASELINE_REVISION = "0001_baseline"
 

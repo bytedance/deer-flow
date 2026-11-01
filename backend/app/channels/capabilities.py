@@ -1,7 +1,7 @@
 """Static per-provider channel capabilities.
 
 Dependency-free on purpose: the scheduler and the Settings API read it without
-importing any channel SDK. ``tests/test_channel_capabilities.py`` keeps it in
+importing any channel SDK. ``tests/test_channels/test_channel_capabilities.py`` keeps it in
 sync with the channel registry and the channel classes.
 
 - ``supports_streaming``: the fallback the channel manager uses when no live

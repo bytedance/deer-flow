@@ -11,7 +11,7 @@ from deerflow.agents import create_deerflow_agent
 from deerflow.client import DeerFlowClient
 from deerflow.config.extensions_config import ExtensionsConfig
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 MIDDLEWARE_GUIDES = (
     Path("backend/CONTRIBUTING.md"),
     Path("frontend/src/content/en/harness/customization.mdx"),

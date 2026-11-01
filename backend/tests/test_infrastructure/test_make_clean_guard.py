@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 pytestmark = pytest.mark.skipif(
     os.name == "nt" or shutil.which("make") is None or shutil.which("bash") is None,

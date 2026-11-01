@@ -8,7 +8,7 @@ import yaml
 
 @pytest.mark.parametrize(("workflow", "job"), [("e2e-tests.yml", "e2e-tests"), ("replay-e2e.yml", "fullstack-replay-render")])
 def test_browser_ci_installs_chromium_before_running_tests(workflow, job):
-    root = Path(__file__).resolve().parents[2]
+    root = Path(__file__).resolve().parents[3]
     config = yaml.safe_load((root / ".github/workflows" / workflow).read_text(encoding="utf-8"))
     browser_job = config["jobs"][job]
     # Runner images are maintained by CI owners; do not freeze a temporary

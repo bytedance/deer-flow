@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 # The script imports pyyaml at module load; the stub keeps these tests hermetic
 # (pyyaml is not a backend dependency — the Makefile runs the script with

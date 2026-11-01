@@ -1,27 +1,22 @@
 ## Support Bundle Runtime Home
 
-Thread manifests use a nonempty `DEER_FLOW_HOME` exclusively, resolving relative
-values from the checkout like the local launcher. Read root `.env` path settings
-without exporting secrets; dotenv overrides shell exports, including empty values.
-Expand unquoted leading tildes, preserving quoted literals. If python-dotenv is
-unavailable or `.env` cannot be read/decoded as UTF-8, retain shell/legacy lookup
-so troubleshooting remains usable. Read the complete file before applying any
-assignments so a decoding failure cannot partially override shell values.
-Resolve `$NAME`, `${NAME}` and `${NAME:-literal}` in unquoted/double-quoted
-values using a private environment with checkout `PWD` and earlier dotenv
-assignments. Single-quoted values and escaped dollars stay literal. Parse the
-file without sourcing it or executing command substitutions.
-When home is unset and `DEER_FLOW_PROJECT_ROOT` is configured, search the launcher's
-`backend/.deer-flow` first, then the standalone harness project root. Scan both
-legacy threads and user-scoped threads in that root. With no override, retain
-the two checkout layouts. Display an external home as `{DEER_FLOW_HOME}` rather
-than its absolute host path, and never include file contents in the manifest.
-Coverage lives in `backend/tests/test_infrastructure/test_support_bundle.py`.
-This lookup follows the local launcher's root `.env`; it does not discover
-`backend/.env` or `DEER_FLOW_ENV_FILE` used by standalone Gateway launches.
-For those launches, export the effective `DEER_FLOW_HOME` when collecting a bundle
-and ensure the checkout `.env` does not override it. Tests clear all three runtime
-path variables and compare storage defaults with the launcher's actual shell blocks.
+Thread manifests use nonempty `DEER_FLOW_HOME` exclusively; resolve relative paths
+from the checkout like the launcher. Root `.env` overrides shell values,
+even empty ones; never export secrets. Decode all UTF-8 before assignments.
+Missing python-dotenv or unreadable/invalid UTF-8 keeps
+shell/legacy lookup. Expand only unquoted leading tildes. Resolve `$NAME`, `${NAME}`
+and `${NAME:-literal}` in unquoted/double-quoted values against a private environment
+with checkout `PWD` and earlier assignments. Quoted tildes, single quotes and escaped dollars
+stay literal; never source dotenv or execute substitutions.
+
+Without home, configured `DEER_FLOW_PROJECT_ROOT` searches `backend/.deer-flow`
+before the standalone harness root; otherwise retain both checkout layouts.
+Scan legacy and user-scoped threads. Render external homes as `{DEER_FLOW_HOME}`;
+never expose host paths or file contents. Only root `.env` participates, not
+`backend/.env` or `DEER_FLOW_ENV_FILE`. Standalone launches must export effective
+`DEER_FLOW_HOME` and prevent root `.env` overriding it. Coverage:
+`backend/tests/test_infrastructure/test_support_bundle.py`; clear all three runtime
+path variables and compare defaults with actual launcher shell blocks.
 
 ## Dependency and Label Checks
 

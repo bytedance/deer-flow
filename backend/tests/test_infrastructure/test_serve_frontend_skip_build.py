@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 SERVE_SH = REPO_ROOT / "scripts" / "serve.sh"
 ROOT_MAKEFILE = REPO_ROOT / "Makefile"
 

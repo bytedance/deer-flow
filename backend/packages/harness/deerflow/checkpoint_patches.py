@@ -14,7 +14,7 @@ first post-migration write in ``langgraph-checkpoint`` 4.2.0 (upstream #8526)
 while keeping its own override, so a behavioural probe cannot see the fix.
 The harness dependency floor (``langgraph-checkpoint>=4.2.0``) is what keeps
 that bug out, and
-``tests/test_delta_channel_checkpointers.py::test_full_to_delta_migration_replays_on_same_thread``
+``tests/test_persistence/test_delta_channel_checkpointers.py::test_full_to_delta_migration_replays_on_same_thread``
 is the regression gate that fails when the fix is absent. Do not re-add a
 version-guarded saver patch: the guard that used to live here read
 ``langgraph``'s version, but ``InMemorySaver`` ships in the independently

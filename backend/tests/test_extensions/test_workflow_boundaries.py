@@ -39,7 +39,7 @@ def test_evidence_projects_actual_assembly_without_credentials():
 def test_artifact_versions_are_append_only_and_owner_scoped(tmp_path, monkeypatch):
     from pathlib import Path
 
-    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[2] / "examples/deerflow-extension-workflows"))
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[3] / "examples/deerflow-extension-workflows"))
     from deerflow_extension_workflows.store import Store
 
     store = Store(tmp_path / "workflows.sqlite")

@@ -15,7 +15,7 @@ from deerflow.models.factory import create_chat_model
 
 @pytest.mark.parametrize("thinking_enabled,effort", [(True, None), (True, "medium"), (True, "high"), (False, "minimal")])
 def test_gemini_example_request(thinking_enabled, effort):
-    example = (Path(__file__).resolve().parents[2] / "config.example.yaml").read_text(encoding="utf-8")
+    example = (Path(__file__).resolve().parents[3] / "config.example.yaml").read_text(encoding="utf-8")
     block = example.split("  # Example: Gemini model via ", 1)[1].split("\n\n", 1)[0]
     lines = block[block.index("  # - name:") :].splitlines()
     settings = yaml.safe_load("\n".join(line.removeprefix("  # ") for line in lines))[0]

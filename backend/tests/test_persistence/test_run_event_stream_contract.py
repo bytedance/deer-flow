@@ -32,7 +32,7 @@ from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.journal import RunJournal
 from deerflow.subagents.step_events import SUBAGENT_STEP_MAX_CHARS, capture_step_message, subagent_run_event
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 CONTRACT_PATH = REPO_ROOT / "contracts" / "run_event_stream_contract.json"
 DOC_PATH = REPO_ROOT / "backend" / "docs" / "RUN_EVENT_STREAM.md"
 

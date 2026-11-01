@@ -27,7 +27,7 @@ from deerflow.agents.middlewares.durable_context_middleware import DurableContex
 from deerflow.client import DeerFlowClient, StreamEvent
 from deerflow.config.app_config import reload_app_config, reset_app_config, set_app_config
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
+_REPO_ROOT = Path(__file__).resolve().parents[3]
 _ROOT_CONFIG = _REPO_ROOT / "config.yaml"
 
 _skip_reason = None

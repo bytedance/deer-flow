@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-SCRIPT_PATH = Path(__file__).resolve().parents[2] / "scripts" / "load_memory_sample.py"
+SCRIPT_PATH = Path(__file__).resolve().parents[3] / "scripts" / "load_memory_sample.py"
 SPEC = importlib.util.spec_from_file_location("load_memory_sample", SCRIPT_PATH)
 assert SPEC is not None and SPEC.loader is not None
 loader = importlib.util.module_from_spec(SPEC)

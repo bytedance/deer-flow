@@ -47,7 +47,7 @@ class TestConfigExampleToolSearchSection:
 
         import yaml
 
-        example_path = os.path.join(os.path.dirname(__file__), "..", "..", "config.example.yaml")
+        example_path = os.path.join(os.path.dirname(__file__), "..", "..", "..", "config.example.yaml")
         if not os.path.exists(example_path):
             return None
         with open(example_path, encoding="utf-8") as f:

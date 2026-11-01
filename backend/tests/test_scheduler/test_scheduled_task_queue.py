@@ -1068,7 +1068,7 @@ async def test_expired_launch_claim_attaches_existing_run_instead_of_relaunching
 
 # --- PR2 M1: per-owner run cap and fair queue selection ------------------------------------
 
-_QUEUE_CONTRACT = json.loads((Path(__file__).resolve().parents[2] / "contracts" / "scheduled_goal_notes_contract.json").read_text(encoding="utf-8"))
+_QUEUE_CONTRACT = json.loads((Path(__file__).resolve().parents[3] / "contracts" / "scheduled_goal_notes_contract.json").read_text(encoding="utf-8"))
 _OWNER_A = User(id=UUID("aaaaaaaa-0000-4000-8000-000000000001"), email="owner-a@example.com", password_hash="unused", system_role="user")
 OWNER_A = str(_OWNER_A.id)
 OWNER_B = "bbbbbbbb-0000-4000-8000-000000000002"

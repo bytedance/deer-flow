@@ -12,7 +12,7 @@ from deerflow.knowledge import KnowledgeRequestContext, format_result, sources_f
 
 @pytest.fixture
 def graph(monkeypatch):
-    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[2] / "examples/deerflow-extension-lightrag"))
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[3] / "examples/deerflow-extension-lightrag"))
     from deerflow_extension_lightrag import LightRAGProvider
 
     monkeypatch.setenv("LR_TEST_KEY", "synthetic-key")

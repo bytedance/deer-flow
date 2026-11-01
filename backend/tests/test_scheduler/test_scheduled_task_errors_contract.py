@@ -11,7 +11,7 @@ from app.gateway import scheduled_task_access, scheduled_task_errors, scheduled_
 from app.gateway.routers import scheduled_tasks
 from app.gateway.scheduled_task_errors import SCHEDULER_AGENT_ERROR_CODES, SCHEDULER_UI_ERROR_CODES, scheduler_error, tool_error_payload
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
+_REPO_ROOT = Path(__file__).resolve().parents[3]
 _CONTRACT = json.loads((_REPO_ROOT / "contracts" / "scheduled_task_errors_contract.json").read_text(encoding="utf-8"))
 _RAISE = re.compile(r'scheduler_error\(\s*\d+,\s*"([a-z_]+)"')
 

@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 from support.shell import require_script_bash
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 # Keep the complete launcher and detector, replacing process/service operations.
 # Stop at dependency synchronization, before any service can be launched.

@@ -258,7 +258,7 @@ def test_parallel_search_example_is_explicitly_opt_in_and_uses_anonymous_http_tr
     import json
     from pathlib import Path
 
-    example = json.loads((Path(__file__).parents[2] / "extensions_config.example.json").read_text())
+    example = json.loads((Path(__file__).parents[3] / "extensions_config.example.json").read_text())
     parallel = example["mcpServers"]["parallel-search"]
 
     assert parallel["enabled"] is False

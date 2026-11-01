@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 PAYLOAD = {"summary": {"blockers": 0, "errors": 0, "warnings": 0, "infos": 1}, "completeness": {}, "notes": ["判定说明 ✗ 🎉"]}
 

@@ -374,7 +374,7 @@ async def test_packaged_provider_catalog_scope_and_sources(monkeypatch):
     from deerflow.knowledge import KnowledgeRequestContext, format_result, sources_from_messages
     from deerflow.knowledge.providers import resolve_knowledge_provider
 
-    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[2] / "examples/deerflow-extension-knowledge"))
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[3] / "examples/deerflow-extension-knowledge"))
     loaded, diagnostics = load_extensions([ExtensionSpec(use="deerflow_extension_knowledge:install")])
     assert diagnostics == []
     provider = resolve_knowledge_provider(provider_config("synthetic-example"), extensions=loaded)

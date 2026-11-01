@@ -12,7 +12,7 @@ the normalized count before sending the request.
 
 Other providers retain local normalization, including Exa's generic integer
 helper and SearXNG's inline validation; Tavily passes configured values through.
-``tests/test_search_max_results_single_owner.py`` tracks the known helper and
+``tests/test_community/test_search_max_results_single_owner.py`` tracks the known helper and
 inline coercion patterns, rather than proving arbitrary provider semantics.
 
 Deliberately *not* decided here: whether an otherwise-valid value has an upper
@@ -21,7 +21,7 @@ straight to the API. Changing that policy needs a maintainer call.
 
 ``logger`` is a parameter rather than a module-level logger here on purpose:
 callers pass their own logger so a warning keeps its originating module in
-``record.name`` (``tests/test_ddg_search_tools.py`` pins that).
+``record.name`` (``tests/test_community/test_ddg_search_tools.py`` pins that).
 """
 
 from __future__ import annotations

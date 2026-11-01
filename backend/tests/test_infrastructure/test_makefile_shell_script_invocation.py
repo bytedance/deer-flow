@@ -27,7 +27,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 MAKEFILE = REPO_ROOT / "Makefile"
 
 # A recipe line is a tab-indented command, optionally silenced with "@".

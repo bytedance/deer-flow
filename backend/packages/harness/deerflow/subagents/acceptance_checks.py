@@ -1617,7 +1617,7 @@ _VALUE_TAKING_OPTION_TOKENS = frozenset(
 )
 
 #: A criterion argument scopes the run's selection only when it is path-like
-#: (``tests/security``, ``tests/test_auth.py``); dotted module names, make
+#: (``tests/security``, ``tests/test_authz/test_auth.py``); dotted module names, make
 #: targets, and bare runner invocations leave the runner default in charge,
 #: so extra positionals after them narrow rather than widen.
 _CRITERION_PATHLIKE_ARG_RE = re.compile(r"[/\\]|\.(?:py|jsx?|tsx?|go|rs|java|rb|php)$")
@@ -1885,8 +1885,8 @@ def _criterion_connectors_preserved(expected_ops: list[str], executed_within_ops
     Criterion operators carry semantics the match must preserve: an expected
     ``&&`` makes the next segment conditional on the previous segment's
     success, so executing it as ``;`` (``cd missing; pytest
-    tests/test_auth.py`` against criterion ``cd missing && pytest
-    tests/test_auth.py``) lets a failed preceding step be bypassed while the
+    tests/test_authz/test_auth.py`` against criterion ``cd missing && pytest
+    tests/test_authz/test_auth.py``) lets a failed preceding step be bypassed while the
     run still succeeds from the wrong state. The reverse substitution is
     sound: an unconditional criterion connector (``;``) executed as ``&&``
     is the stricter run — with a recorded success the final segment provably

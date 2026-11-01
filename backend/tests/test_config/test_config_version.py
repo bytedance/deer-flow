@@ -159,7 +159,7 @@ def test_version_26_config_upgrades_to_checkpoint_channel_mode(tmp_path, caplog)
     """
     import subprocess
 
-    repo_root = Path(__file__).resolve().parents[2]
+    repo_root = Path(__file__).resolve().parents[3]
     example_src = repo_root / "config.example.yaml"
     example_data = yaml.safe_load(example_src.read_text(encoding="utf-8"))
     expected_version = example_data["config_version"]
@@ -205,7 +205,7 @@ def test_version_41_config_moves_legacy_ragflow_settings_to_tool(tmp_path):
     """The v46 migration keeps provider settings on the RAGFlow tool entry."""
     import subprocess
 
-    repo_root = Path(__file__).resolve().parents[2]
+    repo_root = Path(__file__).resolve().parents[3]
     example_src = repo_root / "config.example.yaml"
     expected_version = yaml.safe_load(example_src.read_text(encoding="utf-8"))["config_version"]
     assert expected_version >= 46
@@ -260,7 +260,7 @@ def test_version_41_tools_only_ragflow_config_enables_knowledge_capability(tmp_p
     """Tools-only legacy configs must not be disabled by the new capability gate."""
     import subprocess
 
-    repo_root = Path(__file__).resolve().parents[2]
+    repo_root = Path(__file__).resolve().parents[3]
     example_src = repo_root / "config.example.yaml"
     expected_version = yaml.safe_load(example_src.read_text(encoding="utf-8"))["config_version"]
     assert expected_version >= 46
@@ -307,7 +307,7 @@ def test_version_45_tools_only_ragflow_config_runs_knowledge_migration(tmp_path)
     """The knowledge migration must run for configs at the former base version."""
     import subprocess
 
-    repo_root = Path(__file__).resolve().parents[2]
+    repo_root = Path(__file__).resolve().parents[3]
     example_src = repo_root / "config.example.yaml"
     expected_version = yaml.safe_load(example_src.read_text(encoding="utf-8"))["config_version"]
     assert expected_version > 45
@@ -357,7 +357,7 @@ def test_version_45_tools_only_lightrag_config_keeps_knowledge_tool_available(tm
     """Upgrading a configured LightRAG provider must enable the new knowledge gate."""
     import subprocess
 
-    repo_root = Path(__file__).resolve().parents[2]
+    repo_root = Path(__file__).resolve().parents[3]
     example_src = repo_root / "config.example.yaml"
     expected_version = yaml.safe_load(example_src.read_text(encoding="utf-8"))["config_version"]
     assert expected_version > 45
@@ -415,7 +415,7 @@ def test_version_45_lightrag_config_preserves_explicit_disabled_gate(tmp_path):
     """Migration must not override an operator's explicit knowledge gate value."""
     import subprocess
 
-    repo_root = Path(__file__).resolve().parents[2]
+    repo_root = Path(__file__).resolve().parents[3]
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         yaml.dump(
@@ -461,7 +461,7 @@ def test_version_45_lightrag_config_preserves_explicit_disabled_gate(tmp_path):
 
 def _load_repo_example() -> dict:
     """Load the real repo config.example.yaml (first-run template)."""
-    example_path = Path(__file__).resolve().parents[2] / "config.example.yaml"
+    example_path = Path(__file__).resolve().parents[3] / "config.example.yaml"
     with open(example_path, encoding="utf-8") as f:
         return yaml.safe_load(f) or {}
 
@@ -551,7 +551,7 @@ def test_version_46_pii_enabled_config_upgrade_generates_token_secret(tmp_path):
     validation instead of failing startup after the version bump."""
     import subprocess
 
-    repo_root = Path(__file__).resolve().parents[2]
+    repo_root = Path(__file__).resolve().parents[3]
     example_src = repo_root / "config.example.yaml"
     expected_version = yaml.safe_load(example_src.read_text(encoding="utf-8"))["config_version"]
     assert expected_version >= 47
@@ -596,7 +596,7 @@ def test_version_46_pii_disabled_config_upgrade_skips_token_secret(tmp_path):
     """The migration must not invent a secret when redaction is off."""
     import subprocess
 
-    repo_root = Path(__file__).resolve().parents[2]
+    repo_root = Path(__file__).resolve().parents[3]
     example_src = repo_root / "config.example.yaml"
     expected_version = yaml.safe_load(example_src.read_text(encoding="utf-8"))["config_version"]
     assert expected_version >= 47
@@ -650,7 +650,7 @@ def _run_config_upgrade_in_checkout(checkout: Path, **env_overrides: str):
     if "DEER_FLOW_CONFIG_PATH" not in env_overrides and project_root.is_dir() and not (project_root / "config.yaml").is_file():
         assert not any(path.exists() for path in _legacy_config_candidates()), "would fall back to the real repository's config.yaml"
 
-    repo_root = Path(__file__).resolve().parents[2]
+    repo_root = Path(__file__).resolve().parents[3]
     (checkout / "scripts").mkdir(parents=True, exist_ok=True)
     (checkout / "backend").mkdir(exist_ok=True)
     shutil.copy2(repo_root / "scripts" / "config-upgrade.sh", checkout / "scripts" / "config-upgrade.sh")
@@ -790,7 +790,7 @@ def test_config_upgrade_feeds_inline_python_on_stdin():
     `|| goto :error`) and `make dev` fails before the Gateway starts. Feeding
     the payload on stdin is safe across every spawn chain.
     """
-    repo_root = Path(__file__).resolve().parents[2]
+    repo_root = Path(__file__).resolve().parents[3]
     script = (repo_root / "scripts" / "config-upgrade.sh").read_text(encoding="utf-8")
     assert 'python -c "' not in script
     assert script.count("<<'DEERFLOW_UPGRADE_PY'") == 2

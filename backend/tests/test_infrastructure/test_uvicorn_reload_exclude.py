@@ -30,7 +30,7 @@ from pathlib import Path
 import pytest
 from uvicorn.config import resolve_reload_patterns
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 LAUNCHERS = {
     "scripts/serve.sh": REPO_ROOT / "scripts" / "serve.sh",

@@ -383,7 +383,7 @@ async def _run_phase(case: ProductionCase, saver: Any, timing: _TimingSaver, wor
 
     app_config = AppConfig.model_validate(
         {
-            # Mirrors tests/test_lead_agent_model_resolution.py::_make_model:
+            # Mirrors tests/test_agents/test_lead_agent_model_resolution.py::_make_model:
             # `use` is a required ModelConfig field, so a provider/api_key
             # style entry does not validate.
             "models": [

@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 CHART = REPO_ROOT / "deploy" / "helm" / "deer-flow"
 GATEWAY_TEMPLATE = CHART / "templates" / "gateway-deployment.yaml"
 RUNTIME_CONFIG_PATH = "/app/backend/.deer-flow/extensions-config/extensions_config.json"

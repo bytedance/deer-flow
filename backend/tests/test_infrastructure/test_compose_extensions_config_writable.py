@@ -28,7 +28,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 PROD_COMPOSE = REPO_ROOT / "docker" / "docker-compose.yaml"
 
 EXTENSIONS_CONFIG_TARGET = "/app/backend/extensions_config.json"

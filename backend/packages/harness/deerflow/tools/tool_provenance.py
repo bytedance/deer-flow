@@ -43,7 +43,7 @@ DECLARED_TOOL_SOURCE_METADATA_KEY = "deerflow_tool_source"
 # Mirrors the host plugin-namespace registration rule
 # (deerflow.config.plugin_settings). Independent copy on purpose: this module is
 # a leaf that must not import the extension registry, and
-# tests/test_plugin_targets.py asserts all three copies agree on one sample set.
+# tests/test_extensions/test_plugin_targets.py asserts all three copies agree on one sample set.
 _NAMESPACE_PATTERN = r"[a-z][a-z0-9_.-]{0,95}"
 _NAMESPACE_RE = re.compile(_NAMESPACE_PATTERN)
 

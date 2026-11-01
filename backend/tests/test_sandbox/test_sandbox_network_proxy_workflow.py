@@ -2,7 +2,7 @@ from pathlib import Path
 
 import yaml
 
-WORKFLOW = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "sandbox-network-proxy-image.yaml"
+WORKFLOW = Path(__file__).resolve().parents[3] / ".github" / "workflows" / "sandbox-network-proxy-image.yaml"
 
 
 def test_pull_request_proxy_build_has_read_only_permissions():

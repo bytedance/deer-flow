@@ -652,7 +652,7 @@ def test_nested_zip_without_executable_member_stays_warning(tmp_path: Path) -> N
 
 
 def test_bundled_public_skills_have_no_critical_findings() -> None:
-    public_skills_root = Path(__file__).parents[2] / "skills" / "public"
+    public_skills_root = Path(__file__).parents[3] / "skills" / "public"
     skill_dirs = sorted({skill_md.parent for skill_md in public_skills_root.rglob("SKILL.md")})
     assert skill_dirs, f"no bundled public skills found under {public_skills_root}"
 
@@ -2120,7 +2120,7 @@ def test_bundled_public_skill_scripts_report_no_secret_assignment() -> None:
     hostile review material that the reviewer withholds from SkillScan, and declaration
     scanning of real ``SKILL.md`` prose is governed by a separate rule.
     """
-    skills_public_dir = Path(__file__).resolve().parents[2] / "skills" / "public"
+    skills_public_dir = Path(__file__).resolve().parents[3] / "skills" / "public"
     offenders: dict[str, list[tuple[str | None, int | None]]] = {}
     for skill_dir in sorted(path for path in skills_public_dir.iterdir() if path.is_dir()):
         hits = [finding for finding in _secret_assignments(scan_skill_dir(skill_dir)["findings"]) if (finding["file"] or "").endswith(".py")]

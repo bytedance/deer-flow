@@ -24,7 +24,7 @@ def test_app_config_carries_verification_section():
 
 
 def test_versioned_example_publishes_verification_section():
-    example_path = Path(__file__).resolve().parents[2] / "config.example.yaml"
+    example_path = Path(__file__).resolve().parents[3] / "config.example.yaml"
     example = yaml.safe_load(example_path.read_text(encoding="utf-8"))
 
     assert example["config_version"] >= 34

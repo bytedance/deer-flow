@@ -27,7 +27,7 @@ from deerflow.persistence.scheduled_task_runs import finalization
 from deerflow.runtime import goal
 from deerflow.runtime.runs import worker
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
+_REPO_ROOT = Path(__file__).resolve().parents[3]
 _CONTRACT = json.loads((_REPO_ROOT / "contracts" / "thread_goal_contract.json").read_text(encoding="utf-8"))
 _MET = {"satisfied": True, "blocker": "none", "reason": "The report is complete."}
 

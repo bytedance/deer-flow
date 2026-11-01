@@ -460,7 +460,7 @@ class Channel(ABC):
         it uses ``channel_connections.notification_locale``. Never raises.
         """
         # Deferred: it loads the scheduler's locale list, and importing
-        # app.channels must stay light (tests/test_channel_capabilities.py).
+        # app.channels must stay light (tests/test_channels/test_channel_capabilities.py).
         from app.channels.reply_locale import ReplyLocaleResolver, connect_reply_text
 
         resolver = self._reply_locale or ReplyLocaleResolver()

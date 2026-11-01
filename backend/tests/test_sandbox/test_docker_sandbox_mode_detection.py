@@ -14,7 +14,7 @@ import pytest
 import yaml
 from support.shell import find_script_bash
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 SCRIPT_PATH = REPO_ROOT / "scripts" / "docker.sh"
 BASH_EXECUTABLE = find_script_bash()
 

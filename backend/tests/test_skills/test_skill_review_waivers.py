@@ -25,7 +25,7 @@ from support.symlinks import symlink_or_skip
 from deerflow.skills.review.analyzer import analyze_skill_package
 from deerflow.skills.review.readers import LocalDirectoryReader
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 def _write_target(repo_root: Path, content: bytes = b"safe subprocess invocation\n") -> tuple[Path, str]:

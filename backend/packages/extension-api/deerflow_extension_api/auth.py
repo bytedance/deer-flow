@@ -24,7 +24,7 @@ EXTENSION_PLUGIN_AUTHZ_RESOLVER_ASYNC_KEY = "deerflow_extension_plugin_authz_res
 
 # Mirrors the host's plugin-namespace registration rule
 # (deerflow.config.plugin_settings). Kept local because this package must not
-# import the host; tests/test_plugin_targets.py asserts every copy agrees.
+# import the host; tests/test_extensions/test_plugin_targets.py asserts every copy agrees.
 _NAMESPACE_RE = re.compile(r"[a-z][a-z0-9_.-]{0,95}\Z")
 
 _ManagementScope = Literal["read", "write"]

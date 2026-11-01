@@ -27,7 +27,7 @@ def test_worker_imports_first_without_circular_import():
     pytest preloads many modules, so the cycle only reproduces when worker is the
     first deerflow import — hence a clean subprocess.
     """
-    repo_backend = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    repo_backend = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     env = {**os.environ, "PYTHONPATH": repo_backend}
     result = subprocess.run(
         [sys.executable, "-c", "import deerflow.runtime.runs.worker"],

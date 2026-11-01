@@ -10,7 +10,7 @@ from deerflow_extension_api.auth import ExtensionPrincipal
 
 @pytest.fixture
 def management(monkeypatch):
-    root = Path(__file__).resolve().parents[2]
+    root = Path(__file__).resolve().parents[3]
     monkeypatch.syspath_prepend(str(root / "examples/deerflow-extension-knowledge-management"))
     from deerflow_extension_knowledge_management.weknora import WeKnoraManagement
 
@@ -292,7 +292,7 @@ async def test_ingested_document_flows_through_existing_scope_and_citations(mana
 
     from deerflow.knowledge import KnowledgeRequestContext, format_result, sources_from_messages
 
-    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[2] / "examples/deerflow-extension-weknora"))
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[3] / "examples/deerflow-extension-weknora"))
     from deerflow_extension_weknora import WeKnoraProvider
 
     provider, _, state = management

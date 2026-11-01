@@ -12,7 +12,7 @@ import pytest
 
 @pytest.fixture
 def exporter(monkeypatch):
-    script = Path(__file__).resolve().parents[2] / "scripts" / "export_claude_code_oauth.py"
+    script = Path(__file__).resolve().parents[3] / "scripts" / "export_claude_code_oauth.py"
     spec = importlib.util.spec_from_file_location("claude_keychain_export", script)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

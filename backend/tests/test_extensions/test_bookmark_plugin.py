@@ -17,7 +17,7 @@ from deerflow.extensions.plugin_tools import build_plugin_tools
 
 @pytest.fixture
 def bookmarks(tmp_path, monkeypatch):
-    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[2] / "examples/deerflow-extension-bookmarks"))
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[3] / "examples/deerflow-extension-bookmarks"))
 
     def load():
         loaded, diagnostics = load_extensions([ExtensionSpec(use="deerflow_extension_bookmarks:install", config={"enabled": True, "storage_path": str(tmp_path / "bookmarks.sqlite")})])

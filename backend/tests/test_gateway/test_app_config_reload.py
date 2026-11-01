@@ -214,7 +214,7 @@ def test_resolve_checkpoint_graph_cache_max_tolerates_stub_configs() -> None:
 
 
 def test_config_example_does_not_enable_empty_extensions_block_by_default():
-    config_example_path = Path(__file__).resolve().parents[2] / "config.example.yaml"
+    config_example_path = Path(__file__).resolve().parents[3] / "config.example.yaml"
 
     config_data = yaml.safe_load(config_example_path.read_text(encoding="utf-8"))
 

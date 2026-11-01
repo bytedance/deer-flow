@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 PNPM_SCRIPT = REPO_ROOT / "scripts" / "pnpm.py"
 FRONTEND_DIR = REPO_ROOT / "frontend"
 PNPM_MODULE = runpy.run_path(str(PNPM_SCRIPT))

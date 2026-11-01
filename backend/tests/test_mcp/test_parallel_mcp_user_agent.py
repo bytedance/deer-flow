@@ -46,7 +46,7 @@ async def test_parallel_example_user_agent_reaches_tool_requests(tmp_path, monke
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        example = json.loads((Path(__file__).parents[2] / "extensions_config.example.json").read_text())
+        example = json.loads((Path(__file__).parents[3] / "extensions_config.example.json").read_text())
         parallel = example["mcpServers"]["parallel-search"]
         parallel["enabled"] = True
         parallel["url"] = f"http://127.0.0.1:{server.server_port}/parallel"

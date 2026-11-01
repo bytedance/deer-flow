@@ -2,7 +2,7 @@
 
 Implements exactly the two deletion shapes proven safe by
 ``docs/checkpoint-retention-contract.md`` and its executable suite
-(``tests/test_checkpoint_retention_contract.py``) — nothing else:
+(``tests/test_persistence/test_checkpoint_retention_contract.py``) — nothing else:
 
 - **Trailing duration-only leaves** — ``persist_run_durations`` appends
   metadata-only checkpoints after a run finishes; while no later run has
@@ -122,7 +122,7 @@ def _row_field(row: Any, name: str, index: int) -> Any:
     name-addressable and positional access raises ``KeyError: 0``. aiosqlite
     rows are plain tuples. Reading through this helper keeps the per-backend
     helpers independent of which saver opened the cursor: the Postgres leg of
-    ``tests/test_checkpoint_retention_service.py`` failed on exactly that
+    ``tests/test_persistence/test_checkpoint_retention_service.py`` failed on exactly that
     assumption, on six scenarios, the first time CI ran it.
     """
     try:

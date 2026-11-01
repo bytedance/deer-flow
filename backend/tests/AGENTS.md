@@ -1,5 +1,10 @@
 # Backend Tests
 
+After moving tests, adjust paths derived from `__file__` for the new directory
+depth. `test_infrastructure/test_test_repository_paths.py` checks literal
+repository-root declarations without importing the test modules. Keep backend-root
+paths distinct from repository-root paths, then run collection and both offline suites.
+
 `test_lark_broker_image.py` stages Python files from the broker Dockerfile's
 final-stage COPY instructions. Run shim installation and the health endpoint
 under `-I -S`, adding only the staged script directory to the import path;

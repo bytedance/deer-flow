@@ -5,7 +5,7 @@ from pathlib import Path, PurePosixPath
 
 import pytest
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 CHECKER_PATH = REPO_ROOT / "scripts" / "check_agent_guidance.py"
 EXPECTED_GUIDANCE_PATHS = {
     "AGENTS.md",

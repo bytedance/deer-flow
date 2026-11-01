@@ -973,7 +973,7 @@ class DeerFlowClient:
         consumer of the same ``create_agent()`` factory — not a wrapper
         around Gateway.  The two paths **should** stay in sync on which
         LangGraph stream modes they subscribe to; that invariant is
-        enforced by ``tests/test_client.py::test_messages_mode_emits_token_deltas``
+        enforced by ``tests/test_gateway/test_client.py::test_messages_mode_emits_token_deltas``
         rather than by a shared constant, because the three layers
         (Graph, Platform SDK, HTTP) each use their own naming
         (``messages`` vs ``messages-tuple``) and cannot literally share

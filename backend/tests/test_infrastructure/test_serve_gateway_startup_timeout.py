@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 from support.shell import require_script_bash
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 # Stub process launches and readiness/time, retaining serve.sh's admission,
 # timeout forwarding, failure diagnostics and cleanup, plus the real wait loop.

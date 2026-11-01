@@ -38,7 +38,7 @@ def test_deermem_language_map_matches_the_ui_allowlist():
 
 
 def test_ui_languages_match_shared_contract():
-    contract_path = Path(__file__).resolve().parents[2] / "contracts" / "ui_locales.v1.json"
+    contract_path = Path(__file__).resolve().parents[3] / "contracts" / "ui_locales.v1.json"
     contract = json.loads(contract_path.read_text(encoding="utf-8"))
     assert UI_LANGUAGES == contract["languages"]
 

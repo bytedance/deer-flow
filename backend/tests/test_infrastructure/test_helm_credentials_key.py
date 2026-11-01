@@ -23,7 +23,7 @@ from cryptography.fernet import Fernet
 
 from deerflow.config.credentials_key import CREDENTIALS_KEY_ENV_VAR, parse_credentials_keys
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 CHART = REPO_ROOT / "deploy" / "helm" / "deer-flow"
 APP_SECRET_TEMPLATE = CHART / "templates" / "secret-app.yaml"
 README = CHART / "README.md"

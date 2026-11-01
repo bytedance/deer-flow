@@ -27,7 +27,7 @@ import pytest
 import yaml
 from support.compose import DOCKER, requires_docker_compose
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 COMPOSE_PATHS = {
     "prod": REPO_ROOT / "docker" / "docker-compose.yaml",
     "dev": REPO_ROOT / "docker" / "docker-compose-dev.yaml",

@@ -11,7 +11,7 @@ import pytest
 import yaml
 from support.nginx_conf import NGINX_CONFIGS, extract_location_block, read_config
 
-CHART = Path(__file__).resolve().parents[2] / "deploy" / "helm" / "deer-flow"
+CHART = Path(__file__).resolve().parents[3] / "deploy" / "helm" / "deer-flow"
 BROWSER_PATTERN = r"^/api/threads/[^/]+/browser/stream"
 
 

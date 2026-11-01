@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "cleanup-containers.sh"
+SCRIPT = Path(__file__).resolve().parents[3] / "scripts" / "cleanup-containers.sh"
 
 
 def _stub(path: Path, name: str, source: str) -> None:
