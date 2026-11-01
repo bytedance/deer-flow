@@ -4,6 +4,10 @@ Web Search Tool - Search the web using DuckDuckGo (no API key required).
 
 import json
 import logging
+import re
+from random import uniform
+from threading import Lock
+from time import monotonic, sleep
 
 from langchain.tools import tool
 
@@ -42,6 +46,37 @@ WIKIPEDIA_LANGUAGE_ALIASES = {
     "tzh": "zh",
     "wt": "en",
 }
+
+
+# This synchronous tool is offloaded by LangChain's ainvoke. Keep lock waits,
+# pacing sleeps and the SDK call together in that worker, never on the loop.
+_call_lock = Lock()
+_last_call: float | None = None
+DEFAULT_MIN_INTERVAL_SECONDS = 4.0
+DEFAULT_MAX_RETRIES = 2
+
+
+def _is_challenge(error: Exception) -> bool:
+    seen = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        text = f"{type(error).__name__}: {error}".lower()
+        if re.search(r"ratelimit|rate[ -]?limit|\b202\b|\b429\b|anomaly|captcha|challenge|blocked|vqd", text):
+            return True
+        error = error.__cause__ or error.__context__
+    return False
+
+
+def _paced_text(ddgs, query: str, search_kwargs: dict, min_interval_seconds: float) -> list[dict]:
+    global _last_call
+    with _call_lock:
+        if _last_call is not None and min_interval_seconds > 0:
+            delay = _last_call + min_interval_seconds + uniform(0, 1) - monotonic()
+            if delay > 0:
+                sleep(delay)
+        _last_call = monotonic()
+        results = ddgs.text(query, **search_kwargs)
+        return list(results) if results else []
 
 
 def _normalize_backend(backend: str | list[str] | tuple[str, ...] | None) -> str:
@@ -124,6 +159,8 @@ def _search_text(
     safesearch: str | None = DEFAULT_SAFESEARCH,
     backend: str | list[str] | tuple[str, ...] | None = DEFAULT_BACKEND,
     time_range: SearchTimeRange | None = None,
+    min_interval_seconds: float = DEFAULT_MIN_INTERVAL_SECONDS,
+    max_retries: int = DEFAULT_MAX_RETRIES,
 ) -> list[dict]:
     """
     Execute text search using DuckDuckGo.
@@ -135,6 +172,8 @@ def _search_text(
         safesearch: Safe search level
         backend: DDGS backend(s), e.g. "auto", "duckduckgo", or "duckduckgo,brave"
         time_range: Optional relative publication/update window
+        min_interval_seconds: Minimum process-wide text-call interval, plus jitter
+        max_retries: Number of extra attempts for upstream challenges (0-5)
 
     Returns:
         List of search results
@@ -165,15 +204,29 @@ def _search_text(
         }
         if time_range is not None:
             search_kwargs["timelimit"] = DDGS_TIMELIMIT_BY_TIME_RANGE[time_range]
-        results = ddgs.text(query, **search_kwargs)
-        return list(results) if results else []
+        min_interval_seconds = float(min_interval_seconds)
+        if not 0 <= min_interval_seconds <= 300:
+            raise ValueError("min_interval_seconds must be between 0 and 300")
+        if isinstance(max_retries, bool) or not isinstance(max_retries, int) or not 0 <= max_retries <= 5:
+            raise ValueError("max_retries must be an integer between 0 and 5")
+        for attempt in range(max_retries + 1):
+            try:
+                return _paced_text(ddgs, query, search_kwargs, min_interval_seconds)
+            except Exception as exc:
+                if not _is_challenge(exc):
+                    raise
+                if attempt == max_retries:
+                    raise DDGSearchError(f"DuckDuckGo blocked/challenged this request: {type(exc).__name__}: {exc}") from exc
+                sleep(min(2**attempt, 16))
 
+    except DDGSearchError:
+        raise
     except Exception as e:
         # ddgs signals a genuinely empty result set with the exact message
         # "No results found."; every other failure (rate limit, timeout,
         # blocked HTML, SDK error) must surface as an error instead, or the
         # agent reads an outage as "no matches" and rewrites the query.
-        if str(e).strip().rstrip(".!").lower() == "no results found":
+        if not _is_challenge(e) and str(e).strip().rstrip(".!").lower() == "no results found":
             return []
         raise DDGSearchError(f"{type(e).__name__}: {e}") from e
 
@@ -195,6 +248,7 @@ def web_search_tool(
     region = DEFAULT_REGION
     safesearch = DEFAULT_SAFESEARCH
     backend = DEFAULT_BACKEND
+    pacing_options = {}
 
     if config is not None:
         # Override tool call defaults from config if set.
@@ -202,6 +256,7 @@ def web_search_tool(
         region = config.model_extra.get("region", region)
         safesearch = config.model_extra.get("safesearch", safesearch)
         backend = config.model_extra.get("backend", backend)
+        pacing_options = {key: config.model_extra[key] for key in ("min_interval_seconds", "max_retries") if key in config.model_extra}
 
     try:
         results = _search_text(
@@ -211,6 +266,7 @@ def web_search_tool(
             safesearch=safesearch,
             backend=backend,
             time_range=time_range,
+            **pacing_options,
         )
     except DDGSearchError as e:
         logger.error("DuckDuckGo search failed: %s", e)
