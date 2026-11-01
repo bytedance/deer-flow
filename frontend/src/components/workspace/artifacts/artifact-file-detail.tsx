@@ -185,7 +185,11 @@ export function ArtifactFileDetail({
     if (!toolCallId) {
       return undefined;
     }
-    return findToolCallResult(toolCallId, thread.messages);
+    return findToolCallResult(
+      toolCallId,
+      thread.messages,
+      parsedWriteFile?.messageId,
+    );
   })();
   const artifactViewState = getArtifactViewState({
     filepath: filepathFromProps,

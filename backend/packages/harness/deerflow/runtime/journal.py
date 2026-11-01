@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
 from typing import Any, cast
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import AIMessage, AnyMessage, BaseMessage, HumanMessage, ToolMessage, messages_from_dict
@@ -406,6 +406,8 @@ class RunJournal(BaseCallbackHandler):
         self._last_ai_msg: str | None = None
         self._first_human_msg: str | None = None
         self._first_human_message_captured = False
+        self._captured_run_inputs: set[str] = set()
+        self._terminal_task_results: set[str] = set()
         self._msg_count = 0
         self._had_llm_error_fallback = False
         self._llm_error_fallback_message: str | None = None
@@ -420,6 +422,7 @@ class RunJournal(BaseCallbackHandler):
         self._llm_call_index = 0
         self._seen_llm_starts: set[str] = set()  # langchain run_ids that fired on_chat_model_start
         self._current_run_tool_call_names: dict[str, str] = {}
+        self._current_tool_result_ids: dict[str, str] = {}
         self._active_tool_names: dict[str, str] = {}
         self._persisted_ai_message_identities: set[str] = set()
         self._persisted_tool_message_identities: set[str] = set()
@@ -552,7 +555,7 @@ class RunJournal(BaseCallbackHandler):
         if caller == "lead_agent" and not self._first_human_message_captured and messages:
             for batch in reversed(messages):
                 for m in reversed(batch):
-                    if _should_persist_human_input_message(m):
+                    if _should_persist_human_input_message(m) and not m.additional_kwargs.get("run_input_id"):
                         persisted_message = restore_original_human_message(m)
                         self.set_first_human_message(self._message_text(persisted_message))
                         self._put(
@@ -565,6 +568,16 @@ class RunJournal(BaseCallbackHandler):
                         break
                 if self._first_human_message_captured:
                     break
+
+        if caller == "lead_agent":
+            for batch in messages:
+                for m in batch:
+                    input_id = m.additional_kwargs.get("run_input_id")
+                    if input_id and input_id not in self._captured_run_inputs and isinstance(m, HumanMessage):
+                        persisted = restore_original_human_message(m)
+                        self._put(event_type=LLM_HUMAN_INPUT_EVENT.event_type, category=LLM_HUMAN_INPUT_EVENT.category, content=persisted.model_dump(), metadata={"caller": caller})
+                        self._record_message_summary(persisted, caller=caller)
+                        self._captured_run_inputs.add(input_id)
 
     def on_llm_start(self, serialized: dict, prompts: list[str], *, run_id: UUID, parent_run_id: UUID | None = None, tags: list[str] | None = None, metadata: dict[str, Any] | None = None, **kwargs: Any) -> None:
         # Fallback: on_chat_model_start is preferred. This just tracks latency.
@@ -842,9 +855,6 @@ class RunJournal(BaseCallbackHandler):
 
     @staticmethod
     def _message_identity(message: BaseMessage) -> str | None:
-        tool_call_id = getattr(message, "tool_call_id", None)
-        if isinstance(tool_call_id, str) and tool_call_id:
-            return f"tool:{tool_call_id}"
         message_id = getattr(message, "id", None)
         if isinstance(message_id, str) and message_id:
             return f"message:{message_id}"
@@ -883,8 +893,22 @@ class RunJournal(BaseCallbackHandler):
                 continue
             name = self._tool_call_value(tool_call, "name")
             self._current_run_tool_call_names[tool_call_id] = str(name or "")
+            # A newly emitted assistant call starts a distinct occurrence,
+            # even when the provider reuses an earlier call ID in this run.
+            self._current_tool_result_ids.pop(tool_call_id, None)
+            self._terminal_task_results.discard(tool_call_id)
 
     def _persist_tool_result_message(self, message: BaseMessage) -> None:
+        # Tool callbacks run before the graph reducer assigns missing ids.
+        # Assign on the returned object so the feed and checkpoint share the
+        # same result identity even when a provider reuses its tool_call_id.
+        if isinstance(message, ToolMessage) and not message.id:
+            message.id = str(uuid4())
+        if isinstance(message, ToolMessage) and message.name == "task":
+            from deerflow.subagents.status_contract import read_subagent_result_metadata
+
+            if read_subagent_result_metadata(message.additional_kwargs) is not None:
+                self._terminal_task_results.add(message.tool_call_id)
         self._put(
             event_type=LLM_TOOL_RESULT_EVENT.event_type,
             category=LLM_TOOL_RESULT_EVENT.category,
@@ -893,7 +917,24 @@ class RunJournal(BaseCallbackHandler):
         identity = self._message_identity(message)
         if identity:
             self._persisted_tool_message_identities.add(identity)
+        if isinstance(message, ToolMessage) and message.tool_call_id in self._current_run_tool_call_names and message.id:
+            self._current_tool_result_ids[message.tool_call_id] = message.id
         self._record_message_summary(message)
+
+    def record_deferred_task_result(self, message: ToolMessage) -> None:
+        """Persist the outcome of an owned deferred task, once, for history.
+
+        A real on_tool_end result wins over a cancellation/failure fallback.
+        This never rewrites the model's earlier pending ToolMessage.
+        """
+        if not self._closed and self._current_run_tool_call_names.get(message.tool_call_id) == "task" and message.tool_call_id not in self._terminal_task_results:
+            self._persist_tool_result_message(message)
+
+    def record_steered_response(self, message: AIMessage) -> None:
+        """Append the pre-execution correction without rewriting a feed row."""
+        if not self._closed:
+            self._put(event_type=LLM_AI_RESPONSE_EVENT.event_type, category=LLM_AI_RESPONSE_EVENT.category, content=message.model_dump(), metadata={"caller": "lead_agent", "adjusted_by_input": True})
+            self._record_message_summary(message, caller="lead_agent")
 
     def record_interrupted_ai_responses(self, messages: Iterable[AIMessage]) -> int:
         """Persist visible streamed text that never reached ``on_llm_end``.
@@ -959,8 +1000,12 @@ class RunJournal(BaseCallbackHandler):
         # re-attributed here.
         if self._current_run_tool_call_names.get(tool_call_id) is None:
             return False
+        if not message.id:
+            # A copy serialized before the first capture still lacks its ID.
+            # Restore that occurrence's ID before checking for a replay.
+            message.id = self._current_tool_result_ids.get(tool_call_id)
         identity = self._message_identity(message)
-        return identity is not None and identity not in self._persisted_tool_message_identities
+        return identity is None or identity not in self._persisted_tool_message_identities
 
     def _reconcile_tool_messages(self, messages: Iterable[Any]) -> None:
         for message in messages:
@@ -1823,6 +1868,7 @@ class RunJournal(BaseCallbackHandler):
         self._llm_start_times.clear()
         self._seen_llm_starts.clear()
         self._current_run_tool_call_names.clear()
+        self._current_tool_result_ids.clear()
         self._persisted_ai_message_identities.clear()
         self._persisted_tool_message_identities.clear()
         self._produced_artifacts.clear()

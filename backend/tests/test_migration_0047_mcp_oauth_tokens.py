@@ -44,9 +44,10 @@ pytestmark = pytest.mark.asyncio
 
 
 async def test_0047_remains_in_the_single_migration_chain():
-    assert bootstrap._get_head_revision() == "0048_extension_execution_leases"
+    assert bootstrap._get_head_revision() == "0049_run_inputs"
     script = ScriptDirectory(str(bootstrap._MIGRATIONS_DIR))
-    assert script.get_heads() == ["0048_extension_execution_leases"]
+    assert script.get_heads() == ["0049_run_inputs"]
+    assert script.get_revision("0049_run_inputs").down_revision == "0048_extension_execution_leases"
     assert script.get_revision("0048_extension_execution_leases").down_revision == REVISION
     assert script.get_revision(REVISION).down_revision == PREVIOUS
     assert script.get_revision(PREVIOUS).down_revision == "0045_completed_run_evidence"
