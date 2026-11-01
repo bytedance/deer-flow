@@ -1,5 +1,13 @@
 ### Sandbox System (`packages/harness/deerflow/sandbox/`)
 
+`supports_lazy_agent_skill_isolation` defaults to false. Opt in only when
+canonical acquire/reuse exposes the prepared thread projection without a
+separate skill upload. AIO uses stable read-only category mounts. Only fresh
+runs without state/context sandbox bindings may defer policy-scoped acquire;
+persisted/fork-restored bindings and upload providers keep eager rebind/sync.
+Keep first-tool authorization intact. Regressions:
+`tests/test_lazy_aio_skill_projection.py` and `tests/test_sandbox_middleware.py`.
+
 Sandbox restore requires a thread ID, even forks.
 
 On startup failure, close reads and kill/reap the child, preserving the error.
