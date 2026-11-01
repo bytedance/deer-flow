@@ -332,7 +332,7 @@ def _coerce_confidence(value: Any, default: float = 0.0) -> float:
     """
     try:
         confidence = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return max(0.0, min(1.0, default))
     if not math.isfinite(confidence):
         return max(0.0, min(1.0, default))
