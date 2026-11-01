@@ -1115,6 +1115,9 @@ keeps the Goal, while explicitly replacing the work can clear it. Unapplied
 messages survive database-backed Gateway restarts and require **Send again**;
 interrupted child side effects are not replayed automatically. Existing execution
 limits still apply. Busy input currently accepts text only.
+If a run rejects an update because it has finished, retrying the retained draft
+during the next run targets that run. Uncertain network failures retain the
+original submission identity so retries can reconcile the same accepted input.
 
 Markdown and JSON conversation exports from the chat header or sidebar read all
 persisted history pages, including earlier turns outside the loaded view or

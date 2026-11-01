@@ -23,6 +23,7 @@ import { toast } from "sonner";
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
 
 import { getAPIClient } from "../api";
+import { GatewayApiError } from "../api/errors";
 import { fetch } from "../api/fetcher";
 import { AuthQueryScopeContext } from "../auth/query-scope";
 import { getBackendBaseURL } from "../config";
@@ -2471,6 +2472,17 @@ export function useThreadStream({
               queryKey: runInputsKey(targetThread),
             });
             return accepted;
+          }
+          // A conflict rejects this submission. Let the next user attempt
+          // target the current run, but retain the original identity for
+          // uncertain failures: the recent-input list may omit its receipt.
+          if (
+            !controller.signal.aborted &&
+            runInputAttemptRef.current === attempt &&
+            error instanceof GatewayApiError &&
+            error.status === 409
+          ) {
+            runInputAttemptRef.current = null;
           }
           toast.error(t.inputBox.runInputUnavailable);
         }

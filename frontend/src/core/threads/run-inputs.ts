@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import { throwGatewayApiError } from "@/core/api/errors";
 import { fetch } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
 
@@ -27,12 +28,7 @@ export const runInputsKey = (threadId: string) =>
 
 async function readResponse(response: Response) {
   if (!response.ok) {
-    const body = (await response.json().catch(() => ({}))) as {
-      detail?: unknown;
-    };
-    throw new Error(
-      typeof body.detail === "string" ? body.detail : `HTTP ${response.status}`,
-    );
+    await throwGatewayApiError(response, `HTTP ${response.status}`);
   }
   return response.json() as Promise<unknown>;
 }
