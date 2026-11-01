@@ -924,6 +924,29 @@ tools:
     # region: wt-wt          # wt-wt is normalized for Wikipedia when backend includes auto/all/wikipedia.
     # safesearch: moderate   # on, moderate, off
 
+  # Web search fallback chain (tries several providers in order, one answer per call)
+  # Recommended order: keyed APIs first (brave/tavily/exa), self-hosted SearXNG
+  # next, DuckDuckGo last (keyless but rate-limited). Providers without an API key
+  # (or SearXNG without base_url) are skipped; errors and rate limits fail over to
+  # the next provider. The output's "provider" field names the one that answered;
+  # if all fail, the error lists every provider's failure.
+  # - name: web_search
+  #   group: web
+  #   use: deerflow.community.search_chain.tools:web_search_tool
+  #   providers: [brave, tavily, exa, searxng, ddg]
+  #   max_results: 5
+  #   fallback_on_empty: false   # true: an empty result also moves to the next provider
+  #   brave:
+  #     api_key: $BRAVE_SEARCH_API_KEY   # Optional if the env var is set
+  #   tavily:
+  #     api_key: $TAVILY_API_KEY         # Optional if the env var is set
+  #   exa:
+  #     api_key: $EXA_API_KEY            # Optional if the env var is set; skipped for time_range searches
+  #   searxng:
+  #     base_url: http://localhost:8088  # Required for SearXNG (Docker: http://searxng:8080)
+  #   ddg:
+  #     backend: auto                    # Same region/safesearch/backend keys as the DDG entry
+
   # Web search tool (uses SearXNG, self-hosted, no API key required)
   # SearXNG is a free internet metasearch engine which aggregates results from
   # various search services. Deploy your own instance: https://github.com/searxng/searxng
