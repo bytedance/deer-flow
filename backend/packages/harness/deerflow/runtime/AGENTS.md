@@ -268,6 +268,13 @@ Check all owners and categories; surviving rows retain the allocation floor.
 **Changed-run discovery:** Use the durable `(change_seq, run_id)` cursor and repeat history audits after admission. Details: `backend/docs/runtime-guidance-details.md`.
 
 **Memory run snapshots:** `MemoryRunStore.put` replaces existing rows like SQL.
+Copy caller metadata/kwargs and progress/completion payloads on ingest. Public
+row queries and idempotency-conflict rows return detached deep snapshots, so
+reader edits cannot change stored status, ownership, indexes or usage, and later
+writes cannot change an earlier read. Copy only selected rows after filtering,
+sorting and pagination; the cost is proportional to their payload size.
+`tests/test_memory_run_store_snapshot_isolation.py` uses real SQLite as a control
+and exercises native RunManager hydration.
 On a thread change, remove prior index membership only after snapshot construction
 succeeds; prune empty buckets and retain same-thread retry order. Indexed queries
 and thread cleanup follow the current row's thread. Coverage:
