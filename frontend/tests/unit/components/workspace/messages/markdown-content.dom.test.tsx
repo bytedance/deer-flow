@@ -38,6 +38,34 @@ describe("MarkdownContent bounded streaming cadence", () => {
     );
     expect(container.textContent).toBe(content);
   });
+
+  it("never commits a reveal prefix that splits a surrogate pair", () => {
+    rs.useFakeTimers();
+    // 182 UTF-16 units; the second commit boundary lands on unit 128,
+    // exactly between the emoji's two units.
+    const content = `${"a".repeat(127)}😀${"b".repeat(53)}`;
+    const loneSurrogate = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])/;
+    const { container } = render(
+      <MarkdownContent content={content} isLoading={true} />,
+    );
+
+    act(() => {
+      void rs.advanceTimersByTime(50);
+    });
+    expect(container.textContent).toHaveLength(64);
+
+    act(() => {
+      void rs.advanceTimersByTime(50);
+    });
+    // The commit snapped one unit forward so the emoji stays whole.
+    expect(container.textContent).toBe(`${"a".repeat(127)}😀`);
+    expect(container.textContent ?? "").not.toMatch(loneSurrogate);
+
+    act(() => {
+      void rs.advanceTimersByTime(50);
+    });
+    expect(container.textContent).toBe(content);
+  });
 });
 
 describe("MarkdownContent streaming list transitions (DOM)", () => {
