@@ -78,6 +78,7 @@ class RunInputControl:
         self.children: dict[str, tuple[ChildInputGate, str | None]] = {}
         self.interrupted_children: set[str] = set()
         self.receipts: list[HumanMessage] = []
+        self.deferred_usage: list[tuple[str, dict[str, int]]] = []
         self.pending_calls: set[str] = set()
         self.finished_calls: set[str] = set()
         self.on_result = on_result
@@ -87,6 +88,8 @@ class RunInputControl:
     def child(self, call_id):
         if call_id in self.children and not self.children[call_id][0].closed:
             return self.children[call_id][0]
+        # A provider can reuse a finished call's ID; no delivered steer holds the new work.
+        self.interrupted_children.discard(call_id)
         gate = ChildInputGate(can_queue=not any(not old.resume.is_set() and not old.closed for old, _ in self.children.values()))
         self.children[call_id] = (gate, None)
         return gate
@@ -100,15 +103,26 @@ class RunInputControl:
         return [x for x in state["items"] if x["mode"] == "steer" and x["status"] in ("pending", "applying") and x["id"] not in self.delivered]
 
     async def deliver(self, state):
+        from deerflow.agents.middlewares.token_usage_middleware import attribute_deferred_subagent_usage
+
         entries = await self.pending()
         if entries:
             entries = await self.inputs.claim_steer([x["id"] for x in entries])
-        messages = self.receipts[:]
+        messages = [*attribute_deferred_subagent_usage(state.get("messages", []), self.deferred_usage), *self.receipts]
         self.receipts.clear()
+        self.deferred_usage.clear()
         if entries:
             self.abandoned = False
             self.steering_active = True
             self.interrupted_children = set(self.children)
+        else:
+            # A steer withdrawn before delivery starts no turn whose end would
+            # resume the children that wait_tool paused for it. Only the
+            # children a delivered steer interrupted may stay paused.
+            held = self.interrupted_children if self.steering_active else set()
+            for call_id, (gate, _) in self.children.items():
+                if call_id not in held:
+                    gate.release()
         for entry in entries:
             self.delivered.add(entry["id"])
             direct = entry.get("source", "user") == "user"
@@ -184,9 +198,13 @@ class RunInputControl:
         except Exception:
             message = self._failure(call_id, "failed", "The subagent result could not be collected")
         from deerflow.agents.middlewares.delegation_ledger import extract_delegations
+        from deerflow.subagents.status_contract import SUBAGENT_TOKEN_USAGE_KEY, normalize_token_usage
 
         self.finished_calls.add(call_id)
         self.delegations.extend({**entry, "run_id": self.inputs.run_id} for entry in extract_delegations([AIMessage(content="", tool_calls=[self.calls[call_id]]), message]))
+        usage = normalize_token_usage(message.additional_kwargs.get(SUBAGENT_TOKEN_USAGE_KEY))
+        if usage:
+            self.deferred_usage.append((call_id, usage))
         self.receipts.append(
             HumanMessage(
                 content=json.dumps({"source": "subagent", "task_call_id": call_id, "result": message.content}, ensure_ascii=False),

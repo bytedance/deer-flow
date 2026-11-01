@@ -1,6 +1,7 @@
 import re
 from abc import ABC, abstractmethod
 
+from deerflow.sandbox.command_scope import CommandScopes
 from deerflow.sandbox.search import GrepMatch
 
 # POSIX env-var name rule: letter or underscore, then letters/digits/underscores.
@@ -77,8 +78,20 @@ class Sandbox(ABC):
     #: silently mounting credentials.
     lark_cli_broker: bool | None = False
 
+    supports_command_cancellation = False
+
     def __init__(self, id: str):
         self._id = id
+        self._command_scopes = CommandScopes()
+
+    def request_command_cancel(self, scope_id: str) -> None:
+        """Signal a cancelled bash execution without blocking the event loop."""
+        if self.supports_command_cancellation:
+            self._command_scopes.request_cancel(scope_id)
+
+    def cancel_command_scope(self, scope_id: str) -> None:
+        """Stop commands owned by this execution; legacy providers keep their behavior."""
+        self.request_command_cancel(scope_id)
 
     @property
     def id(self) -> str:
@@ -139,8 +152,8 @@ class Sandbox(ABC):
         return self.execute_command(command, env=env, timeout=timeout)
 
     def release_command_scope(self, scope_id: str) -> None:
-        """Release provider-specific command state for one execution scope."""
-        del scope_id
+        """Forget completed execution ownership without stopping background services."""
+        self._command_scopes.release(scope_id)
 
     @abstractmethod
     def read_file(

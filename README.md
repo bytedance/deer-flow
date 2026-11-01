@@ -1662,6 +1662,9 @@ view. Built-in and user-created/imported skills are listed separately. The
 Community tab supports importing `.skill` archives into My skills.
 General preferences remain in Settings.
 
+Failed skill requests retain their HTTP error status and a readable fallback
+when the server returns an unusable error body.
+
 The **ppt-generation** skill applies photo EXIF orientation before fitting and
 embedding slide images, so rotated or mirrored photos retain their displayed
 orientation.
@@ -2834,6 +2837,8 @@ async with runtime:
 
 Gateway run finalization also retains ownership through caller cancellation: it finishes terminal persistence, stream completion, and resource cleanup before propagating the interruption. Backend I/O must terminate or enforce its own timeout. Gateway shutdown includes workers still finalizing after their terminal status commits; an expired shutdown drain budget is logged and does not cancel their outstanding writes.
 
+Cancelled, replaced, failed or hard-stopped executions stop their owned bash processes before releasing the sandbox lease on AIO and POSIX LocalSandbox, including ordinary `nohup` children. Background services from successful earlier turns remain running. Cleanup tracks inherited execution markers and process groups; it is not a security boundary against scripts deliberately escaping that ownership. Windows LocalSandbox and third-party providers retain their existing behavior.
+
 Terminal cleanup releases the run journal and its message-sequence callback even when diagnostic logs retain a checkpoint-inspection traceback.
 
 The factory still does not load YAML or create SQL infrastructure: the caller supplies the config snapshot, repository, and lifecycle. Because it accepts a caller-owned `system_prompt`, direct integrations also own any model-visible wording about those limits; the default middleware enforces the runtime limits regardless. The factory does not mount the Gateway owner-scoped HTTP routes or Web UI, so direct applications must expose their own result API/UI if they need those surfaces. For ordinary delegation only, `SubagentRuntime(...)` needs no asynchronous startup.
@@ -3007,6 +3012,7 @@ Each task gets its own execution environment with a full filesystem view — ski
 The read-before-write gate ties each read mark to that `read_file` call's result, including custom tools returning multi-message `Command` updates. An unrelated result cannot authorize a write after a failed read or hide a successful read.
 
 Deeply nested JSON returned by tools, including `read_file`, keeps its original content when result analysis reaches the JSON parser's depth limit. Explicit tool failures remain errors with an unknown category when depth prevents analysis.
+Tool-call arguments and clarification options nested past the JSON parser's recursion limit are treated as unusable opaque values instead of aborting the run.
 
 On Linux and macOS, local sandbox `write_file` replacements and `str_replace` stage complete text before replacing the destination, so write, flush or publication errors retain the previous file. Existing write access is checked; ownership, permission bits, ACLs and extended attributes are transferred before writing staging content. Failure to transfer metadata aborts the save. Successful revisions get a fresh modification time, including empty saves; source-descriptor cleanup errors are warnings and do not change the save result. Files with set-id bits, macOS file flags or content-bound Linux privilege attributes are refused unchanged. Replacement requires parent-directory write access and publishes a new inode; other hard links retain the previous version. Symlinks follow the existing path-validation rules. Append writes, other host platforms (including Windows), shell writes and remote providers keep their existing behavior. This is not a concurrent-writer or power-loss recovery guarantee.
 
