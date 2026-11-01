@@ -19,6 +19,14 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **persistence:** the SQL agent and managed-subagent catalogs now skip a stored
+  row that no longer validates, instead of failing the whole listing:
+  `SqlAgentStore.list`/`list_all` and `SqlManagedSubagentStore.list` answer with
+  the rows they can read, matching what `FileAgentStore` and
+  `FileManagedSubagentStore` already do ("one bad agent must not hide the rest").
+  Reading a damaged entry by name still raises, and the row stays removable, so
+  the failure is not hidden where it matters. ([#7740])
+
 - **projects:** The trash retention sweep no longer deletes live document
   originals when the data directory, `users/`, a user's directory or a
   user's `projects/` is a symlink. It protected each document by its resolved
@@ -15953,7 +15961,11 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7651]: https://github.com/bytedance/deer-flow/pull/7651
 [#7659]: https://github.com/bytedance/deer-flow/pull/7659
 [#7665]: https://github.com/bytedance/deer-flow/pull/7665
+<<<<<<< HEAD
 [#7723]: https://github.com/bytedance/deer-flow/pull/7723
 [#7727]: https://github.com/bytedance/deer-flow/pull/7727
 [#7729]: https://github.com/bytedance/deer-flow/pull/7729
 [#7732]: https://github.com/bytedance/deer-flow/pull/7732
+=======
+[#7740]: https://github.com/bytedance/deer-flow/pull/7740
+>>>>>>> 0ec7b48df (docs(persistence): record the catalog fix and pin the agent-side strict read)
