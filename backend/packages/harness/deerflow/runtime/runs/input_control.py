@@ -109,11 +109,14 @@ class RunInputControl:
             self.abandoned = False
             self.steering_active = True
             self.interrupted_children = set(self.children)
-        elif not self.steering_active:
+        else:
             # A steer withdrawn before delivery starts no turn whose end would
-            # resume the children that wait_tool paused for it.
-            for gate, _ in self.children.values():
-                gate.release()
+            # resume the children that wait_tool paused for it. Only the
+            # children a delivered steer interrupted may stay paused.
+            held = self.interrupted_children if self.steering_active else set()
+            for call_id, (gate, _) in self.children.items():
+                if call_id not in held:
+                    gate.release()
         for entry in entries:
             self.delivered.add(entry["id"])
             direct = entry.get("source", "user") == "user"
