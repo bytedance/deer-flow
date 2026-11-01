@@ -236,6 +236,10 @@ when an assertion fails.
 
 ## Real Compose tests
 
+Gateway startup tests decode script output explicitly as UTF-8. Their offline
+deploy cases run under UTF-8 and simulated cp936 host defaults and assert the
+Unicode success/failure diagnostics through real subprocesses.
+
 `support/compose.py` probes `docker compose version --short` and requires Compose
 2.24+ for optional `env_file` syntax. Skip missing, old or unreadable clients with
 an actionable reason; cover version detection offline in `test_support_compose.py`.

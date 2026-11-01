@@ -23,6 +23,12 @@ def _read(path: str) -> str:
     return (REPO_ROOT / path).read_text(encoding="utf-8")
 
 
+@pytest.fixture(params=["utf-8", "cp936"])
+def subprocess_default_encoding(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Exercise real child output with both modern and legacy host decoders."""
+    monkeypatch.setattr(subprocess, "_text_encoding", lambda: request.param)
+
+
 def _deploy_fixture(tmp_path: Path, *, docker_script: str) -> tuple[Path, dict[str, str]]:
     worktree = tmp_path / "repo"
     shutil.copytree(REPO_ROOT / "scripts", worktree / "scripts")
@@ -74,7 +80,7 @@ def test_production_gateway_has_a_real_readiness_probe() -> None:
 
 
 @requires_script_bash
-def test_deploy_waits_for_gateway_readiness_before_success(tmp_path: Path) -> None:
+def test_deploy_waits_for_gateway_readiness_before_success(tmp_path: Path, subprocess_default_encoding: None) -> None:
     capture = tmp_path / "docker-args.txt"
     worktree, env = _deploy_fixture(
         tmp_path,
@@ -89,6 +95,7 @@ def test_deploy_waits_for_gateway_readiness_before_success(tmp_path: Path) -> No
         check=False,
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
 
     assert result.returncode == 0, result.stderr
@@ -96,10 +103,11 @@ def test_deploy_waits_for_gateway_readiness_before_success(tmp_path: Path) -> No
     assert "--wait" in args
     assert "--wait-timeout" in args
     assert "DeerFlow is running!" in result.stdout
+    assert "🌐 Application:" in result.stdout
 
 
 @requires_script_bash
-def test_deploy_failure_prints_gateway_diagnostics_and_never_claims_success(tmp_path: Path) -> None:
+def test_deploy_failure_prints_gateway_diagnostics_and_never_claims_success(tmp_path: Path, subprocess_default_encoding: None) -> None:
     capture = tmp_path / "docker-calls.txt"
     worktree, env = _deploy_fixture(
         tmp_path,
@@ -114,11 +122,12 @@ def test_deploy_failure_prints_gateway_diagnostics_and_never_claims_success(tmp_
         check=False,
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
 
     assert result.returncode != 0
     assert "DeerFlow is running!" not in result.stdout
-    assert "DeerFlow services failed to become ready" in result.stderr
+    assert "✗ DeerFlow services failed to become ready" in result.stderr
     assert "supports `docker compose up --wait`" in result.stderr
     assert "upgrade to Docker Compose 2.24+" in result.stderr
     calls = capture.read_text(encoding="utf-8")
@@ -171,6 +180,7 @@ def test_production_entry_points_parse_the_compose_project_without_env_files(tmp
         check=False,
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
 
     assert result.returncode == 0, result.stderr
