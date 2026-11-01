@@ -296,12 +296,14 @@ def attribute_deferred_subagent_usage(messages: list[Any], deferred: list[tuple[
     below cannot see this usage. The caller owns delivering each entry once.
     """
     updates: dict[int, AIMessage] = {}
+    indexes = [idx for idx in range(len(messages) - 1, -1, -1) if isinstance(messages[idx], AIMessage)]
     for tool_call_id, usage in deferred:
-        indexes = [idx for idx in range(len(messages) - 1, -1, -1) if isinstance(messages[idx], AIMessage)]
-        # Compaction can drop the dispatch; the budget still has to see the tokens.
+        # Compaction can drop the dispatch, so fall back to the newest AIMessage.
         target = next((idx for idx in indexes if _has_tool_call(messages[idx], tool_call_id)), indexes[0] if indexes else None)
-        if target is not None:
-            updates[target] = _add_subagent_usage(updates.get(target, messages[target]), usage)
+        if target is None:
+            logger.warning("Token budget missed subagent usage for %s: no AIMessage to charge", tool_call_id)
+            continue
+        updates[target] = _add_subagent_usage(updates.get(target, messages[target]), usage)
     return [updates[idx] for idx in sorted(updates)]
 
 

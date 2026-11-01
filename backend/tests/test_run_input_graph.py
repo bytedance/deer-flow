@@ -389,6 +389,15 @@ async def test_deferred_usage_survives_a_compacted_dispatch(usage, charged):
     assert await control.deliver({"messages": [latest]}) is None
 
 
+def test_deferred_usage_with_no_ai_message_to_charge_is_reported(caplog):
+    from deerflow.agents.middlewares.token_usage_middleware import attribute_deferred_subagent_usage
+
+    usage = {"input_tokens": 3, "output_tokens": 4, "total_tokens": 7}
+    with caplog.at_level("WARNING", logger="deerflow.agents.middlewares.token_usage_middleware"):
+        assert attribute_deferred_subagent_usage([HumanMessage(content="Only input")], [("lost", usage)]) == []
+    assert "lost" in caplog.text
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("capped", [False, True])
 async def test_input_during_inference_defers_old_actions_but_never_overrides_budget(capped):
