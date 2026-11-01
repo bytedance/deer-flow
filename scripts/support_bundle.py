@@ -72,6 +72,7 @@ WINDOWS_HOME_RE = re.compile(r"(?i)([A-Z]:\\Users\\)([^\\\s:]+)")
 SAFE_THREAD_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 DOCTOR_STATUS_RE = re.compile(r"Status:\s*(\d+)\s+error\(s\),\s*(\d+)\s+warning\(s\)", re.IGNORECASE)
 ATTENTION_SIGNAL_NAMES = {
+    "startup_failed",
     "doctor_failed",
     "config_missing",
     "config_error",
@@ -507,7 +508,7 @@ def _dirty_worktree(status_short: str | None) -> bool:
 def _status_from_signals(signals: dict[str, bool]) -> str:
     if signals["config_missing"] or signals["config_error"] or signals["models_missing"] or signals["extensions_config_error"]:
         return "needs_user_setup"
-    if signals["node_missing"] or signals["node_version_too_old"] or signals["nginx_missing"]:
+    if signals["node_missing"] or signals["node_version_too_old"] or signals["nginx_missing"] or signals.get("startup_failed"):
         return "environment_mismatch"
     if not signals["doctor_included"]:
         return "insufficient_evidence"
@@ -596,6 +597,7 @@ def build_triage_report(
     status_short = _git_stdout(git_summary, "status_short")
     doctor_errors, doctor_warnings = _doctor_counts(doctor)
     signals = {
+        "startup_failed": bool(startup and any(item["status"] == "fail" for item in startup["checks"])),
         "doctor_included": doctor is not None,
         "doctor_failed": bool(doctor and not doctor.get("ok")),
         "config_missing": config.get("present") is False,
@@ -657,8 +659,6 @@ def build_triage_report(
             }
         )
         findings = [item for item in startup["checks"] if item["status"] in {"warn", "fail"}]
-        if any(item["status"] == "fail" for item in findings) and status != "needs_user_setup":
-            report["status"] = "environment_mismatch"
         report["reporter_next_steps"] = list(dict.fromkeys([item["fix"] for item in findings if item["fix"]] + report["reporter_next_steps"]))
         report["maintainer_next_steps"].insert(
             0,
@@ -705,7 +705,8 @@ def render_issue_summary(triage: dict[str, Any]) -> str:
         codes = ", ".join(item["code"] for item in startup["checks"] if item["status"] != "ok") or "none"
         startup_lines = [f"- Startup: mode={startup['mode']}, bind={startup['host']}:{startup['port']}, findings={codes}"]
         startup_lines.extend(f"- {item['label']}: {item['detail']}" for item in startup["checks"] if item["status"] != "ok")
-        lines[8:8] = startup_lines
+        next_steps = lines.index("### Reporter next steps")
+        lines[next_steps:next_steps] = startup_lines + [""]
     return "\n".join(lines)
 
 

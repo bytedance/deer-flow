@@ -53,6 +53,7 @@ Docker context/host precedence, 5s command timeouts. Report fixed findings/PIDs,
 never endpoints, stderr, process arguments or env values. Busy ports may be
 DeerFlow; denied binds can be exclusive listeners. Never mutate runtime state.
 Coverage: `backend/tests/test_startup_diagnostics.py`; evidence: `startup.json`.
+`startup_failed` drives triage status and active signals before rendering.
 
 `serve.sh` reads `DEER_FLOW_GATEWAY_STARTUP_TIMEOUT` after root `.env` for
 local Gateway port readiness (positive integer seconds, default 30). Reject

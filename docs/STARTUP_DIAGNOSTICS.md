@@ -76,8 +76,9 @@ or reset your containers/volumes.
 ## Share a diagnostic bundle
 
 With `--startup-mode`, the zip includes `startup.json`, and `triage.json` and
-the issue summary include the same findings and reporter next steps. Review
-the summary before sharing it. Startup evidence includes probe mode, explicit
+the issue summary include the same findings and reporter next steps.
+Failed probes set the `startup_failed` active signal; warnings alone do not.
+Review the summary before sharing it. Startup evidence includes probe mode, explicit
 bind IP/port, fixed diagnostic messages and optional numeric listener PIDs.
 Raw Docker endpoints, command stderr, process command lines and environment
 values are omitted; the bundle also applies its existing redaction pipeline.

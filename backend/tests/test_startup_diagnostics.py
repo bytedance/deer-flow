@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import ast
 import errno
+import inspect
 import json
 import socket
 import subprocess
@@ -304,3 +306,63 @@ def test_bundle_forwards_startup_mode_to_included_doctor(probes, monkeypatch, tm
         triage = json.loads(bundle.read("triage.json"))
         assert triage["signals"]["nginx_missing"] is False
         assert triage["status"] == "ok"
+
+
+def startup_triage(status="fail", *, include_doctor=True, config_missing=False):
+    import support_bundle
+
+    return support_bundle.build_triage_report(
+        manifest={"generated_at": "2026-11-01T00:00:00Z", "privacy": {}},
+        environment={"platform": {}, "commands": []},
+        config_summary={"present": False} if config_missing else {"models": [{"name": "example"}]},
+        extensions_summary={},
+        git_summary={},
+        doctor={"ok": True, "returncode": 0, "stdout": "Ready"} if include_doctor else None,
+        thread_summary=None,
+        startup={"mode": "docker", "host": "127.0.0.1", "port": 2026, "checks": [{"code": "docker_engine_unavailable", "status": status, "label": "Docker engine", "detail": "engine unavailable", "fix": "Check the engine."}]},
+    )
+
+
+@pytest.mark.parametrize("include_doctor", [False, True])
+def test_startup_failure_has_an_active_signal_in_every_summary(include_doctor):
+    import support_bundle
+
+    report = startup_triage(include_doctor=include_doctor)
+    assert report["status"] == "environment_mismatch"
+    assert report["signals"]["startup_failed"] is True
+    assert report["active_signals"] == ["startup_failed"]
+    summary = support_bundle.render_issue_summary(report)
+    assert "Active signals: startup_failed" in summary
+    assert "Active signals: none" not in support_bundle.render_ai_issue_draft(report, summary, None)
+
+
+@pytest.mark.parametrize("status", ["ok", "warn", "skip"])
+def test_non_failing_startup_does_not_set_failure_signal(status):
+    report = startup_triage(status)
+    assert report["status"] == "ok"
+    assert report["signals"]["startup_failed"] is False
+    assert "startup_failed" not in report["active_signals"]
+
+
+def test_startup_failure_preserves_setup_failure_priority():
+    report = startup_triage(config_missing=True)
+    assert report["status"] == "needs_user_setup"
+    assert "startup_failed" in report["active_signals"]
+
+
+@pytest.mark.parametrize("header_change", ["remove", "add"])
+def test_startup_summary_stays_before_next_steps_when_header_changes(header_change):
+    import support_bundle
+
+    # Simulate future header edits in a copied renderer, keeping production sources intact.
+    tree = ast.parse(inspect.getsource(support_bundle.render_issue_summary))
+    header = next(node.value for node in ast.walk(tree) if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == "lines" for target in node.targets))
+    if header_change == "remove":
+        del header.elts[2:5]
+    else:
+        header.elts[2:2] = [ast.Constant(value="- Extra header one"), ast.Constant(value="- Extra header two")]
+    scope = dict(vars(support_bundle))
+    exec(compile(ast.fix_missing_locations(tree), "changed-summary-template", "exec"), scope)
+    summary = scope["render_issue_summary"](startup_triage())
+    assert summary.index("- Versions:") < summary.index("- Startup:") < summary.index("### Reporter next steps")
+    assert summary.index("Docker engine: engine unavailable") < summary.index("### Reporter next steps")
