@@ -25,9 +25,10 @@ Regressions: `tests/test_aio_sandbox.py`, `tests/test_lark_broker.py`.
 Managed bash uses existing async exec/poll APIs without retrying execution.
 Read only the current console entry; keep exit codes and persistent-shell stdin.
 Legacy Shell needs a same-line owner prefix. Poll by returned session/command identity; stop inherited owner processes through
-a separate fixed control command with pidfds. A missing cleanup receipt fences reuse through existing
-quarantine; it is never a clean stop. Markers support cooperative cleanup, not
-hostile-code isolation.
+a separate fixed control command with pidfds. Missing command state or cleanup
+receipts fence reuse through existing quarantine. New output from a running
+command needs its next offset; empty polls retain the previous offsets.
+Markers support cooperative cleanup, not hostile-code isolation.
 
 ## Reuse admission
 

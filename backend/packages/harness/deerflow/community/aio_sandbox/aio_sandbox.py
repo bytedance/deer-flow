@@ -1073,17 +1073,23 @@ class AioSandbox(Sandbox):
                     return self._render_bash_output("".join(stdout), "".join(stderr), 124, "timed_out", timeout)
                 response = self._client.bash.output(session_id=session_id, command_id=command_id, offset=offset, stderr_offset=stderr_offset, wait=True, wait_timeout=1, request_options=self._bounded_cleanup_request_options())
                 data = response.data if response else None
-                if data is None:
+                command_info = getattr(data, "command", None)
+                if command_info is None:
                     self._command_cleanup_failed = True
                     raise RuntimeError("AIO bash command result is unavailable")
                 stdout.append(data.stdout or "")
                 stderr.append(data.stderr or "")
-                offset, stderr_offset = data.offset, data.stderr_offset
-                status = data.command.status
+                status = command_info.status
                 if scope.cancelled.is_set():
                     continue
                 if status != "running":
-                    return self._render_bash_output("".join(stdout), "".join(stderr), data.command.exit_code, status, timeout)
+                    return self._render_bash_output("".join(stdout), "".join(stderr), command_info.exit_code, status, timeout)
+                if (data.stdout and data.offset is None) or (data.stderr and data.stderr_offset is None):
+                    self._command_cleanup_failed = True
+                    raise RuntimeError("AIO bash output position is unavailable")
+                # Empty polls may omit offsets; retain the last known positions.
+                offset = data.offset if data.offset is not None else offset
+                stderr_offset = data.stderr_offset if data.stderr_offset is not None else stderr_offset
         finally:
             self._cleanup_bash_session_best_effort(self._client, session_id)
 

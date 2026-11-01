@@ -22,7 +22,7 @@ This section accumulates work toward the **2.3.0** milestone
 - **sandbox:** Cancelled native Runs now stop their owned AIO and POSIX local
   bash processes, including ordinary `nohup` children, before releasing the
   execution lease. Concurrent work and background services from successful
-  earlier turns remain running. ([#7771](https://github.com/bytedance/deer-flow/issues/7771))
+  earlier turns remain running. ([#7772])
 
 - **projects:** The trash retention sweep no longer deletes live document
   originals when the data directory, `users/`, a user's directory or a
@@ -15962,3 +15962,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7727]: https://github.com/bytedance/deer-flow/pull/7727
 [#7729]: https://github.com/bytedance/deer-flow/pull/7729
 [#7732]: https://github.com/bytedance/deer-flow/pull/7732
+[#7772]: https://github.com/bytedance/deer-flow/pull/7772

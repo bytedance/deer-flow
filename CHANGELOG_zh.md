@@ -22,7 +22,7 @@
 
 - **沙箱：** 取消原生 Run 时，先回收其所属的 AIO 或 POSIX 本地 bash 进程
   （包括普通 `nohup` 后台子进程），再释放沙箱占用。并发任务和之前成功回合
-  保留的后台服务继续运行。([#7771](https://github.com/bytedance/deer-flow/issues/7771))
+  保留的后台服务继续运行。([#7772])
 
 - **项目：** 当数据目录、`users/`、某个用户目录或用户的 `projects/` 是符号链接时，
   回收站保留期清扫不再删除仍在使用的文档原件。此前它按解析后的路径保护每个文档，
@@ -12723,3 +12723,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7727]: https://github.com/bytedance/deer-flow/pull/7727
 [#7729]: https://github.com/bytedance/deer-flow/pull/7729
 [#7732]: https://github.com/bytedance/deer-flow/pull/7732
+[#7772]: https://github.com/bytedance/deer-flow/pull/7772

@@ -364,3 +364,57 @@ def test_aio_cleanup_does_not_report_success_without_pidfd_support():
     assert result.returncode != 0
     assert "pidfd unavailable" in result.stderr
     assert '"remaining": 0' not in result.stdout
+
+
+@pytest.mark.parametrize("case", ["missing-command", "missing-stdout-cursor", "missing-stderr-cursor", "completed-without-cursors", "empty-poll"])
+def test_aio_owned_bash_handles_optional_output_fields_without_unsafe_reuse(monkeypatch, case):
+    from types import SimpleNamespace as N
+    from unittest.mock import MagicMock
+
+    from agent_sandbox.types.bash_command_info import BashCommandInfo
+    from agent_sandbox.types.bash_output_result import BashOutputResult
+
+    sandbox, _ = _aio(monkeypatch)
+    bash = MagicMock()
+    bash.exec.return_value = N(data=N(command_id="owned-command"))
+    completed = {"stdout": "done", "stderr": "diagnostic", "status": "completed"}
+    frames = {
+        "missing-command": [{"stdout": "partial", "command_missing": True}],
+        "missing-stdout-cursor": [{"stdout": "partial", "stderr_offset": 0}],
+        "missing-stderr-cursor": [{"stderr": "partial", "offset": 0}],
+        "completed-without-cursors": [completed],
+        "empty-poll": [{"stdout": "one", "stderr": "two", "offset": 3, "stderr_offset": 3}, {}, completed],
+    }[case]
+    # A second response makes an erroneous continuation deterministic instead
+    # of leaving this regression in a polling loop until its timeout.
+    frames = [*frames, completed]
+    observed = []
+
+    def output(**kwargs):
+        observed.append(kwargs)
+        frame = dict(frames[len(observed) - 1])
+        missing = frame.pop("command_missing", False)
+        status = frame.pop("status", "running")
+        command = None if missing else BashCommandInfo(command_id="owned-command", command="echo result", status=status, exit_code=7 if status == "completed" else None)
+        return N(data=BashOutputResult(session_id=kwargs["session_id"], command=command, **frame))
+
+    bash.output.side_effect = output
+    sandbox._client.bash = bash
+    with command_owner(sandbox, "run"):
+        result = sandbox.execute_command("echo result", env={"FAKE_KEY": "test-only"})
+
+    bash.exec.assert_called_once()
+    bash.close_session.assert_called_once()
+    if case.startswith("missing-"):
+        assert result.startswith("Error: AIO bash")
+        assert sandbox.requires_container_recycle
+        assert len(observed) == 1
+    else:
+        assert "done" in result and "diagnostic" in result and "Exit Code: 7" in result
+        assert not sandbox.requires_container_recycle
+        if case == "empty-poll":
+            assert len(observed) == 3
+            assert [(row["offset"], row["stderr_offset"]) for row in observed] == [(0, 0), (3, 3), (3, 3)]
+            assert result.startswith("onedone\n") and "twodiagnostic" in result
+        else:
+            assert len(observed) == 1
