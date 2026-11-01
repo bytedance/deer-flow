@@ -1891,6 +1891,11 @@ class TestNullConfidenceDoesNotBlockUpdates:
         assert _coerce_source_confidence({}) == 0.5
         assert _coerce_source_confidence({"confidence": 0.83}) == 0.83
 
+    def test_coerce_source_confidence_tolerates_an_unbounded_int(self) -> None:
+        # A stored fact can carry a JSON integer such as 10**400; float() raises
+        # OverflowError, which must fall back like any other unusable value.
+        assert _coerce_source_confidence({"confidence": 10**400}) == 0.5
+
 
 class TestOutOfRangeExtractionConfidenceDoesNotBlockUpdates:
     """A model-emitted confidence outside [0, 1] must not fail the whole update.

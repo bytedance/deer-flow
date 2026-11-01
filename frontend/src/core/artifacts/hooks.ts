@@ -34,12 +34,13 @@ export function useArtifactContent({
 
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: ["artifact", filepath, threadId, isMock, fullContentRequested],
-    queryFn: () => {
+    queryFn: ({ signal }) => {
       return loadArtifactContent({
         filepath,
         threadId,
         isMock,
         full: fullContentRequested,
+        signal,
       });
     },
     enabled,
@@ -103,12 +104,13 @@ export function useStandaloneArtifactContent({
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["artifact", filepath, threadId, isMock, fullContentRequested],
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       loadArtifactContent({
         filepath,
         threadId,
         isMock,
         full: fullContentRequested,
+        signal,
       }),
     staleTime: 0,
     refetchOnWindowFocus: true,

@@ -11,13 +11,15 @@ import stat
 import subprocess
 import sys
 import threading
-from contextlib import suppress
+import time
+from contextlib import nullcontext, suppress
 from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path, PurePosixPath
 from typing import NamedTuple
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
+from deerflow.sandbox.command_scope import COMMAND_OWNER_ENV, current_command_scope
 from deerflow.sandbox.download import DEFAULT_DOWNLOAD_LIMIT, download_limit
 from deerflow.sandbox.env_policy import build_sandbox_env
 from deerflow.sandbox.local.list_dir import list_dir
@@ -327,6 +329,30 @@ def escape_powershell_path(match: re.Match[str], path: str) -> str:
 
 
 class LocalSandbox(Sandbox):
+    supports_command_cancellation = os.name == "posix"
+
+    def cancel_command_scope(self, scope_id: str) -> None:
+        scope = self._command_scopes.find(scope_id)
+        if scope is None:
+            return
+        self.request_command_cancel(scope_id)
+        with scope.lock:
+            processes = list(scope.processes)
+        for process in processes:
+            if process.poll() is None:
+                self._terminate_process_group(process, process.pid)
+                continue
+            # A returned shell may leave nohup children. Verify the execution
+            # marker in this recorded group before signalling a recycled PGID.
+            members = subprocess.run(["pgrep", "-g", str(process.pid)], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=2)
+            pids = ",".join(x for x in members.stdout.split() if x.isdecimal())
+            if not pids:
+                continue
+            result = subprocess.run(["ps", "eww", "-o", "command=", "-p", pids], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=2)
+            if f"{COMMAND_OWNER_ENV}={scope.token}" in result.stdout:
+                with suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGKILL)
+
     #: Every call is a fresh ``subprocess.run([shell, "-c", ...])`` process —
     #: no shell state survives into the next command.
     persistent_shell_sessions = False
@@ -1082,20 +1108,29 @@ class LocalSandbox(Sandbox):
 
         Returns ``(stdout, stderr, returncode, timed_out)``.
         """
+        scope = current_command_scope()
+        if scope is not None:
+            scope.check()
+            env = {**(os.environ if env is None else env), COMMAND_OWNER_ENV: scope.token}
         timed_out = False
         stdout_read_fd, stdout_write_fd = os.pipe()
         stderr_read_fd, stderr_write_fd = os.pipe()
         process = None
         try:
-            process = subprocess.Popen(
-                args,
-                shell=False,
-                stdin=subprocess.DEVNULL,
-                stdout=stdout_write_fd,
-                stderr=stderr_write_fd,
-                start_new_session=True,
-                env=env,
-            )
+            with scope.lock if scope is not None else nullcontext():
+                if scope is not None:
+                    scope.check()
+                process = subprocess.Popen(
+                    args,
+                    shell=False,
+                    stdin=subprocess.DEVNULL,
+                    stdout=stdout_write_fd,
+                    stderr=stderr_write_fd,
+                    start_new_session=True,
+                    env=env,
+                )
+                if scope is not None:
+                    scope.processes.append(process)
             # With start_new_session=True, the new process is also the
             # process-group leader, so its PID is the stable group identifier.
             process_group_id = process.pid
@@ -1129,7 +1164,19 @@ class LocalSandbox(Sandbox):
         stderr_capture, stderr_thread = LocalSandbox._start_pipe_drain(stderr_read_fd, "deerflow-bash-stderr-drain")
         try:
             try:
-                process.wait(timeout=timeout)
+                if scope is None:
+                    process.wait(timeout=timeout)
+                else:
+                    deadline = time.monotonic() + timeout
+                    while process.poll() is None:
+                        if scope.cancelled.is_set():
+                            LocalSandbox._terminate_process_group(process, process_group_id)
+                            break
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise subprocess.TimeoutExpired(args, timeout)
+                        with suppress(subprocess.TimeoutExpired):
+                            process.wait(timeout=min(0.1, remaining))
             except subprocess.TimeoutExpired:
                 timed_out = True
                 LocalSandbox._terminate_process_group(process, process_group_id)

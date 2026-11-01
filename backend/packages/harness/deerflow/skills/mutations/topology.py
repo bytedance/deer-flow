@@ -10,6 +10,8 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import sessionmaker
 
+from deerflow.persistence.json_compat import dumps_json_safe
+
 
 class PublicationTopology:
     """Operator attests local single host; SQLite additionally enforces one host.
@@ -64,7 +66,7 @@ def mutation_session_factory(url: str, *, postgres_schema: str = ""):
         args = {"connect_timeout": 5, "options": f"{options} -c lock_timeout=5000 -c statement_timeout=30000 -c synchronous_commit=on".strip()}
     else:
         raise HostCapabilityError("UNSUPPORTED_TOPOLOGY")
-    engine = create_engine(url, connect_args=args, pool_size=4, max_overflow=0, pool_timeout=5, pool_pre_ping=True)
+    engine = create_engine(url, connect_args=args, pool_size=4, max_overflow=0, pool_timeout=5, pool_pre_ping=True, json_serializer=dumps_json_safe)
     if parsed.get_backend_name() == "sqlite":
 
         @event.listens_for(engine, "connect")

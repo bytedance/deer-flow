@@ -510,7 +510,7 @@ def _convert_call_tool_result(
     from langchain_core.messages import ToolMessage
     from langchain_core.messages.content import create_file_block, create_image_block, create_text_block
     from langchain_core.tools import ToolException
-    from mcp.types import EmbeddedResource, ImageContent, ResourceLink, TextContent, TextResourceContents
+    from mcp.types import AudioContent, EmbeddedResource, ImageContent, ResourceLink, TextContent, TextResourceContents
 
     # Pass ToolMessage through directly (interceptor short-circuit).
     if isinstance(call_tool_result, ToolMessage):
@@ -554,6 +554,8 @@ def _convert_call_tool_result(
             lc_content.append(create_text_block(text=_resolve_text(item.text)))
         elif isinstance(item, ImageContent):
             lc_content.append(create_image_block(base64=item.data, mime_type=item.mimeType))
+        elif isinstance(item, AudioContent):
+            raise NotImplementedError(f"AudioContent conversion to LangChain content blocks is not yet supported. Received audio with mime type: {item.mimeType}")
         elif isinstance(item, ResourceLink):
             mime = item.mimeType or None
             url = _resolve_link_url(str(item.uri))
@@ -681,15 +683,15 @@ def _make_session_pool_tool(
     effective_domain = binding.domain if binding is not None else ownership_domain
 
     async def call_with_persistent_session(
-        runtime: Runtime | None = None,
+        deerflow_runtime: Runtime | None = None,
         **arguments: Any,
     ) -> Any:
-        thread_id = _extract_thread_id(runtime)
-        user_id = resolve_runtime_user_id(runtime)
+        thread_id = _extract_thread_id(deerflow_runtime)
+        user_id = resolve_runtime_user_id(deerflow_runtime)
         # Scope the pooled session by user *and* thread. Filesystem isolation is
         # per-(user_id, thread_id), so a thread_id alone could otherwise let two
         # users with a colliding thread_id share one stateful MCP session.
-        thread_incarnation = runtime_thread_incarnation(runtime)
+        thread_incarnation = runtime_thread_incarnation(deerflow_runtime)
         scope_key = mcp_session_scope_key(
             user_id=user_id,
             thread_id=thread_id,
@@ -808,7 +810,7 @@ def _make_session_pool_tool(
                 name=original_name,
                 args=arguments,
                 server_name=server_name,
-                runtime=runtime,
+                runtime=deerflow_runtime,
             )
             call_tool_result = await handler(request)
         else:
@@ -875,16 +877,16 @@ def _make_background_submit_tool(
     background_contract = f"Submitted as durable background task {task_name!r}; returns a DeerFlow task ID immediately and status polling is handled automatically."
 
     async def submit_in_background(
-        runtime: Runtime | None = None,
+        deerflow_runtime: Runtime | None = None,
         **arguments: Any,
     ) -> dict[str, Any]:
         submitter = get_mcp_task_submitter()
-        thread_id = _extract_thread_id(runtime)
-        user_id = resolve_runtime_user_id(runtime)
-        thread_incarnation = runtime_thread_incarnation(runtime)
-        context = runtime.context if runtime is not None and runtime.context else {}
+        thread_id = _extract_thread_id(deerflow_runtime)
+        user_id = resolve_runtime_user_id(deerflow_runtime)
+        thread_incarnation = runtime_thread_incarnation(deerflow_runtime)
+        context = deerflow_runtime.context if deerflow_runtime is not None and deerflow_runtime.context else {}
         run_id = context.get("run_id")
-        tool_call_id = getattr(runtime, "tool_call_id", None) if runtime is not None else None
+        tool_call_id = getattr(deerflow_runtime, "tool_call_id", None) if deerflow_runtime is not None else None
         created = await submitter.submit(
             driver_name=ORDINARY_MCP_TASK_DRIVER,
             request=TaskSubmitRequest(

@@ -31,6 +31,12 @@ event waiters during teardown.
 benchmark module's clock binding. Keep asyncio's clock real, initialize
 `Trace.started` from the controlled clock, and advance ticks at event gates.
 
+`test_bench_opensandbox.py` owns provider-independent sandbox benchmark CLI
+validation. Invalid timing values must be rejected through real `main()` before
+fail-loud factories run; accepted controls must preserve factory inputs and JSONL
+dimensions. Keep live providers stubbed and OpenSandbox's unsupported-option
+checks distinct from shared timing validation.
+
 `test_doctor_script.py` runs a copied doctor from a temporary checkout with an
 empty-model config. Drop inherited `DEER_FLOW_*`, `PYTHONPATH` and `PYTHONHOME`
 from child processes; cover help, invalid flags, normal reporting and an
@@ -213,6 +219,13 @@ The 0033 batch-evidence migration fixture uses the same adapter. Its connection
 contract probes execute the actual migration test setup through SQLAlchemy's
 dialect argument conversion, stopping before database acquisition; the real
 SQLite/PostgreSQL cases still exercise upgrade, downgrade and re-upgrade.
+
+## Batch lease renewal races
+
+`test_batch_lease_lifecycle.py` parks recovery after the per-item expiry SELECT,
+identified by selected item columns; the parent query can contain the same expiry
+predicate. Assert one rejected item UPDATE as well as the preserved row, so an
+empty expiry scan cannot satisfy the concurrency guard.
 
 ## DingTalk stream tasks
 
@@ -490,3 +503,20 @@ Multi-instance harness tests use `support.shell.require_script_bash()` for shell
 smoke checks. Keep config content and secret stability checks portable; isolate
 POSIX owner-only permission assertions so Windows skips only those checks.
 Nginx path expectations must include quoted-string escaping for native paths.
+
+## Launcher dotenv parsing
+
+`serve.sh` never sources root `.env`: stdlib-only `scripts/dotenv_exports.py`
+(host Python, before `uv sync`) tokenizes it like python-dotenv, keeps `.env`
+over shell exports and the `$NAME`/`${NAME:-x}`/leading-`~` expansion that
+`support_bundle.py` mirrors (keep both expanders in step), and prints
+shell-quoted exports for `eval`. `test_serve_dotenv.py` and the launcher-block
+cases in `test_support_bundle.py` run the real block; harnesses that copy
+`serve.sh` with a `.env` must copy the parser too.
+
+## Channel artifact turn sequencing
+
+`test_channels.py` models consecutive artifact-producing turns by awaiting an
+async outbound callback before sending the next inbound message. Keep the real
+worker-pool concurrency, preserve per-turn artifact assertions, and stop the
+manager in `finally` so a failure cannot leave tasks using a closed test loop.
