@@ -1925,7 +1925,7 @@ async def list_run_events(
         # nothing and return a 200 with a truncated audit trail. Blank entries
         # carry no intent and are dropped; a filter that reduces to nothing is
         # the same as no filter, matching the empty-string case above.
-        types = [entry.strip() for entry in event_types.split(",") if entry.strip()]
+        types = [name for entry in event_types.split(",") if (name := entry.strip())]
         if len(types) > MAX_EVENT_TYPE_FILTERS:
             raise HTTPException(
                 status_code=422,
