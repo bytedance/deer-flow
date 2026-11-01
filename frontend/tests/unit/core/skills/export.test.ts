@@ -12,6 +12,31 @@ import {
 
 describe("custom skill export requests", () => {
   beforeEach(() => request.mockReset());
+  for (const body of [
+    null,
+    { detail: null },
+    { detail: { code: [], message: 123 } },
+  ]) {
+    for (const operation of ["preview", "download"]) {
+      it(`keeps a typed ${operation} failure for ${JSON.stringify(body)}`, async () => {
+        request.mockResolvedValue(
+          new Response(JSON.stringify(body), { status: 503 }),
+        );
+        const signal = new AbortController().signal;
+        const result =
+          operation === "preview"
+            ? loadSkillExportManifest("demo", signal)
+            : downloadSkillExport("demo", "revision", signal);
+        await expect(result).rejects.toMatchObject({
+          name: "SkillExportRequestError",
+          status: 503,
+          code: "skill_export_failed",
+          message: "Could not export this skill.",
+        });
+        expect(request).toHaveBeenCalledTimes(1);
+      });
+    }
+  }
   it("binds download to the exact preview and forwards cancellation", async () => {
     request.mockResolvedValue(
       new Response("zip", { headers: { "content-type": "application/zip" } }),

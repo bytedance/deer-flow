@@ -1,6 +1,8 @@
 import { fetch } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
 
+import { isErrorDetailRecord, readSkillErrorDetail } from "./error-detail";
+
 export interface SkillExportNotice {
   code: string;
   message: string;
@@ -46,18 +48,16 @@ async function exportRequest(
     { signal, cache: "no-store" },
   );
   if (!response.ok) {
-    const data = (await response.json().catch(() => ({}))) as {
-      detail?: { code?: string; message?: string } | string;
-    };
-    const detail = data.detail;
+    const detail = await readSkillErrorDetail(response);
+    const record = isErrorDetailRecord(detail) ? detail : undefined;
     throw new SkillExportRequestError(
       response.status,
-      typeof detail === "object"
-        ? (detail.code ?? "skill_export_failed")
-        : "skill_export_failed",
+      typeof record?.code === "string" ? record.code : "skill_export_failed",
       typeof detail === "string"
         ? detail
-        : (detail?.message ?? "Could not export this skill."),
+        : typeof record?.message === "string"
+          ? record.message
+          : "Could not export this skill.",
     );
   }
   return response;
