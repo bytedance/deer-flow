@@ -20,6 +20,13 @@
 
 ### 修复
 
+- **harness：** 重试失败条目不再重新打开已取消的持久子智能体批次。`retry_item`
+  此前只保留已暂停批次的状态，因此重试已取消批次中的失败条目会把批次改回
+  `queued`，worker 随即认领并执行该条目，批次最终变为 `completed`。现在对已取消
+  批次的重试路由返回 409，包括 SQLite 上取消在重试进行中提交的情况；工作区也不再
+  为这些条目显示重试按钮。在已完成、失败、运行中或已暂停批次中重试的行为不变。
+  ([#7792])
+
 - **智能体：** `PUT /api/agents/{name}` 传入 `"description": null` 时现在会把描述重置为
   空。此前会把 null 原样保存，而智能体配置不接受该值，导致之后每次加载都失败：更新本身、
   GET 和修复性更新都返回 500，文件后端会把它从智能体列表中漏掉，数据库后端会让该用户的
@@ -12732,3 +12739,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7732]: https://github.com/bytedance/deer-flow/pull/7732
 [#7762]: https://github.com/bytedance/deer-flow/pull/7762
 [#7772]: https://github.com/bytedance/deer-flow/pull/7772
+[#7792]: https://github.com/bytedance/deer-flow/pull/7792
