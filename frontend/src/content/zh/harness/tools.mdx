@@ -219,7 +219,7 @@ tools:
   - use: deerflow.community.outcrawl.tools:web_search_tool
     api_key: $OUTCRAWL_API_KEY
 ```
-返回包含标题、URL 和摘要的网页搜索结果。需要 [Outcrawl](https://outcrawl.ai) API Key，`max_results` 上限为 20。同时支持 `web_fetch`（`deerflow.community.outcrawl.tools:web_fetch_tool`），以 Markdown 返回页面正文。
+返回包含标题、URL 和摘要的网页搜索结果。需要 [Outcrawl](https://outcrawl.ai) API Key，`max_results` 上限为 20。同时支持 `web_fetch`（`deerflow.community.outcrawl.tools:web_fetch_tool`），以 Markdown 返回页面正文。当 Outcrawl 标记结果质量下降时（例如返回的是登录页而不是所请求的页面），两个工具都会把它的 `warnings` 传给 Agent。
 
 无需额外依赖。
 

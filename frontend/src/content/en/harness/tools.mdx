@@ -228,7 +228,7 @@ tools:
   - use: deerflow.community.outcrawl.tools:web_search_tool
     api_key: $OUTCRAWL_API_KEY
 ```
-Web search results with title, URL and snippet. Requires an [Outcrawl](https://outcrawl.ai) API key. `max_results` is capped at 20. Also supports `web_fetch` (`deerflow.community.outcrawl.tools:web_fetch_tool`), which returns the page's main content as Markdown.
+Web search results with title, URL and snippet. Requires an [Outcrawl](https://outcrawl.ai) API key. `max_results` is capped at 20. Also supports `web_fetch` (`deerflow.community.outcrawl.tools:web_fetch_tool`), which returns the page's main content as Markdown. When Outcrawl marks a result as degraded (for example a sign-in page came back instead of the page asked for), both tools pass its `warnings` to the agent.
 
 No extra dependency required.
 
