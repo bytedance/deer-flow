@@ -1427,7 +1427,6 @@ class TestCardMode:
         channel = DingTalkChannel(bus, config={})
         assert channel._card_template_id == ""
         assert channel._card_track_ids == {}
-        assert channel._card_repliers == {}
         assert channel._incoming_messages == {}
         assert channel._dingtalk_client is None
 
@@ -1767,7 +1766,7 @@ class TestCardMode:
 
         _run(go())
 
-    def test_card_replier_cleanup_on_final(self):
+    def test_card_track_cleanup_on_final(self):
         async def go():
             bus = MessageBus()
             channel = DingTalkChannel(bus, config={"card_template_id": "tpl_123"})
@@ -1777,7 +1776,6 @@ class TestCardMode:
 
             source_key = f"{_CONVERSATION_TYPE_P2P}:user_001::msg_001"
             channel._card_track_ids[source_key] = "track_001"
-            channel._card_repliers["track_001"] = MagicMock()
 
             msg = OutboundMessage(
                 channel_name="dingtalk",
@@ -1796,7 +1794,6 @@ class TestCardMode:
             await channel.send(msg)
 
             assert source_key not in channel._card_track_ids
-            assert "track_001" not in channel._card_repliers
 
         _run(go())
 
@@ -1828,21 +1825,11 @@ class TestCardMode:
 
         _run(go())
 
-    def test_stream_update_card_raises_without_replier(self):
-        async def go():
-            bus = MessageBus()
-            channel = DingTalkChannel(bus, config={"card_template_id": "tpl_123"})
-
-            with pytest.raises(RuntimeError, match="No AICardReplier found"):
-                await channel._stream_update_card("nonexistent_track", "content")
-
-        _run(go())
-
     def test_card_calls_use_the_channel_token_not_the_sdk_fetch(self, monkeypatch):
-        """The AI card replier sends the channel's httpx token; the SDK never fetches one.
+        """Card requests send the channel's httpx token; the SDK never fetches one.
 
         dingtalk-stream's ``get_access_token()`` posts with ``requests`` and no
-        timeout, inline in the replier's async methods on the Gateway loop.
+        timeout, which on the Gateway loop would block every channel.
         """
         pytest.importorskip("dingtalk_stream")
         import dingtalk_stream
@@ -1885,21 +1872,148 @@ class TestCardMode:
 
         _run(go())
 
-    def test_stream_update_card_raises_when_the_channel_token_fails(self):
+    @staticmethod
+    def _card_channel(monkeypatch, base: str) -> DingTalkChannel:
+        """A card-mode channel holding a valid token, so the API sees only card calls."""
+        monkeypatch.setattr("app.channels.dingtalk.DINGTALK_API_BASE", base)
+        # The SDK too, so card calls can never reach the real DingTalk API.
+        monkeypatch.setattr("dingtalk_stream.card_replier.DINGTALK_OPENAPI_ENDPOINT", base)
+        channel = DingTalkChannel(MessageBus(), config={"card_template_id": "tpl_123"})
+        channel._client_id = "robot_001"
+        channel._cached_token = "tok"
+        channel._token_expires_at = time.monotonic() + 3600
+        channel._dingtalk_client = MagicMock()
+        return channel
+
+    @staticmethod
+    def _incoming(conversation_type: str = _CONVERSATION_TYPE_P2P):
+        dingtalk_stream = pytest.importorskip("dingtalk_stream")
+        incoming = dingtalk_stream.ChatbotMessage()
+        incoming.conversation_type = conversation_type
+        incoming.sender_staff_id = "user_001"
+        incoming.conversation_id = "cid_001"
+        incoming.message_id = "msg_001"
+        return incoming
+
+    @staticmethod
+    async def _reply_turn(channel: DingTalkChannel, incoming) -> None:
+        """Running reply, one streamed chunk and the final answer, as the manager sends them."""
+        metadata = {"conversation_type": _CONVERSATION_TYPE_P2P, "sender_staff_id": "user_001", "conversation_id": "", "message_id": "msg_001"}
+        inbound = channel._make_inbound(chat_id="user_001", user_id="user_001", text="hello", metadata=metadata)
+        channel._incoming_messages[channel._make_card_source_key(inbound)] = incoming
+        await channel._send_running_reply("user_001", inbound)
+        for text, is_final in [("Partial", False), ("Final answer.", True)]:
+            await channel.send(OutboundMessage(channel_name="dingtalk", chat_id="user_001", thread_id="t1", text=text, is_final=is_final, thread_ts="msg_001", metadata=metadata))
+
+    @pytest.mark.parametrize("conversation_type", [_CONVERSATION_TYPE_P2P, _CONVERSATION_TYPE_GROUP], ids=["p2p", "group"])
+    @pytest.mark.parametrize("hosted", [False, True], ids=["direct", "hosted"])
+    def test_card_requests_match_the_sdk_request_bodies(self, monkeypatch, conversation_type, hosted):
+        """The channel sends the bodies dingtalk-stream's ``AICardReplier`` sends."""
+        from dingtalk_stream import card_replier
+        from dingtalk_stream.chatbot import HostingContext
+        from support.local_sockets import LocalHttpServer
+
+        incoming = self._incoming(conversation_type)
+        if hosted:
+            incoming.hosting_context = HostingContext()
+            incoming.hosting_context.user_id = "host_001"
+
+        async def go():
+            async with LocalHttpServer() as api:
+                base = api.url.removesuffix("/open")
+                monkeypatch.setattr(card_replier, "DINGTALK_OPENAPI_ENDPOINT", base)
+                sdk_client = MagicMock()
+                sdk_client.credential.client_id = "robot_001"
+                sdk_client.get_access_token.return_value = "tok"
+                sdk = card_replier.AICardReplier(sdk_client, incoming)
+                sdk_track = await sdk.async_create_and_deliver_card(card_template_id="tpl_123", card_data={"content": "Working on it..."})
+                await sdk.async_streaming(card_instance_id=sdk_track, content_key="content", content_value="done", append=False, finished=True, failed=False)
+
+                channel = self._card_channel(monkeypatch, base)
+                track = await channel._create_and_deliver_card("Working on it...", chatbot_message=incoming)
+                await channel._stream_update_card(track, "done", is_finalize=True)
+
+            assert [(method, path) for method, path, _ in api.calls] == [("POST", "/v1.0/card/instances/createAndDeliver"), ("PUT", "/v1.0/card/streaming")] * 2
+            sdk_create, sdk_stream, create, stream = api.requests
+            assert create.pop("outTrackId") == track
+            assert stream.pop("outTrackId") == track
+            sdk_create.pop("outTrackId")
+            sdk_stream.pop("outTrackId")
+            assert stream.pop("guid") != sdk_stream.pop("guid")
+            assert create == sdk_create
+            assert stream == sdk_stream
+
+        _run(go())
+
+    @pytest.mark.parametrize("failure", [403, 500, "unreachable"])
+    def test_failed_card_creation_still_delivers_the_reply(self, monkeypatch, failure):
+        """dingtalk-stream returns a card ID even when the API refused the card."""
+        from support.local_sockets import LocalHttpServer
+
+        async def deliver(base: str) -> DingTalkChannel:
+            channel = self._card_channel(monkeypatch, base)
+            channel._send_text_message_to_user = AsyncMock()
+            channel._send_p2p_message = AsyncMock()
+            await self._reply_turn(channel, self._incoming())
+            return channel
+
+        async def go():
+            if failure == "unreachable":
+                async with LocalHttpServer() as closed:
+                    base = closed.url.removesuffix("/open")
+                channel = await deliver(base)
+            else:
+                async with LocalHttpServer(status=failure, body={"code": "Forbidden.AccessDenied"}) as api:
+                    channel = await deliver(api.url.removesuffix("/open"))
+                assert [(method, path) for method, path, _ in api.calls] == [("POST", "/v1.0/card/instances/createAndDeliver")]
+
+            assert channel._card_track_ids == {}
+            channel._send_text_message_to_user.assert_awaited_once_with("robot_001", "user_001", "\u23f3 Working on it...")
+            # Without a card the streamed chunk is skipped and the final answer is sent once.
+            channel._send_p2p_message.assert_awaited_once_with("robot_001", "user_001", "Final answer.")
+
+        _run(go())
+
+    def test_failed_card_stream_still_delivers_the_final_reply(self, monkeypatch):
+        """The SDK's streaming call also logs a failure and returns."""
+        from support.local_sockets import LocalHttpServer
+
+        async def go():
+            async with LocalHttpServer() as api:
+                channel = self._card_channel(monkeypatch, api.url.removesuffix("/open"))
+                channel._send_text_message_to_user = AsyncMock()
+                channel._send_p2p_message = AsyncMock()
+                original_create = channel._create_and_deliver_card
+
+                async def create_then_refuse(*args, **kwargs):
+                    track = await original_create(*args, **kwargs)
+                    api.status = 403
+                    return track
+
+                channel._create_and_deliver_card = create_then_refuse
+                await self._reply_turn(channel, self._incoming())
+
+            assert [(method, path) for method, path, _ in api.calls] == [("POST", "/v1.0/card/instances/createAndDeliver")] + [("PUT", "/v1.0/card/streaming")] * 2
+            assert channel._card_track_ids == {}
+            channel._send_text_message_to_user.assert_not_awaited()
+            channel._send_p2p_message.assert_awaited_once_with("robot_001", "user_001", "Final answer.")
+
+        _run(go())
+
+    def test_stream_update_card_raises_when_the_channel_token_fails(self, monkeypatch):
         """A token failure surfaces, so ``send`` falls back instead of dropping the update."""
+        http_client = MagicMock(side_effect=AssertionError("no card request without a token"))
+        monkeypatch.setattr("app.channels.dingtalk.httpx.AsyncClient", http_client)
 
         async def go():
             channel = DingTalkChannel(MessageBus(), config={"card_template_id": "tpl_123"})
-            replier = MagicMock()
-            replier.async_streaming = AsyncMock()
-            channel._card_repliers["track_001"] = replier
             channel._get_access_token = AsyncMock(side_effect=ValueError("bad token response"))
 
             with pytest.raises(ValueError, match="bad token response"):
                 await channel._stream_update_card("track_001", "content", is_finalize=True)
-            replier.async_streaming.assert_not_awaited()
 
         _run(go())
+        http_client.assert_not_called()
 
     def test_stop_clears_card_state(self):
         async def go():
@@ -1908,14 +2022,12 @@ class TestCardMode:
             channel._running = True
             channel._dingtalk_client = MagicMock()
             channel._incoming_messages["key"] = MagicMock()
-            channel._card_repliers["track"] = MagicMock()
             channel._card_track_ids["source"] = "track"
 
             await channel.stop()
 
             assert channel._dingtalk_client is None
             assert channel._incoming_messages == {}
-            assert channel._card_repliers == {}
             assert channel._card_track_ids == {}
 
         _run(go())
