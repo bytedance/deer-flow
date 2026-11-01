@@ -87,6 +87,8 @@ class RunInputControl:
     def child(self, call_id):
         if call_id in self.children and not self.children[call_id][0].closed:
             return self.children[call_id][0]
+        # A provider can reuse a finished call's ID; no delivered steer holds the new work.
+        self.interrupted_children.discard(call_id)
         gate = ChildInputGate(can_queue=not any(not old.resume.is_set() and not old.closed for old, _ in self.children.values()))
         self.children[call_id] = (gate, None)
         return gate
@@ -109,6 +111,14 @@ class RunInputControl:
             self.abandoned = False
             self.steering_active = True
             self.interrupted_children = set(self.children)
+        else:
+            # A steer withdrawn before delivery starts no turn whose end would
+            # resume the children that wait_tool paused for it. Only the
+            # children a delivered steer interrupted may stay paused.
+            held = self.interrupted_children if self.steering_active else set()
+            for call_id, (gate, _) in self.children.items():
+                if call_id not in held:
+                    gate.release()
         for entry in entries:
             self.delivered.add(entry["id"])
             direct = entry.get("source", "user") == "user"

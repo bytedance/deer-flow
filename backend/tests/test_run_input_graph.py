@@ -506,6 +506,232 @@ async def test_graph_finishing_with_a_concurrent_steer_applies_it_before_closing
         await control.close()
 
 
+class ChildAndSiblingModel(InputModel):
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        self.observed.append(messages)
+        if len(self.observed) == 1:
+            message = AIMessage(content="", tool_calls=[{"name": "task", "args": {}, "id": "child"}, {"name": "sibling", "args": {}, "id": "slow"}])
+        else:
+            message = AIMessage(content="Work completed")
+        return ChatResult(generations=[ChatGeneration(message=message)])
+
+
+@pytest.mark.asyncio
+async def test_steer_withdrawn_before_delivery_releases_the_children_it_paused():
+    store = MemoryRunStore()
+    await store.put("run", thread_id="thread", user_id="owner", status="running", owner_worker_id="worker")
+    inputs = RunInputs(store, "run", "owner", "worker")
+    saver = InMemorySaver()
+    control = RunInputControl(inputs, agent_runs=SimpleNamespace(), thread_id="thread", checkpointer=saver)
+    entered, withdrawn, sibling_release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    @tool
+    async def task() -> str:
+        """Controlled child; a real one parks at this boundary before its next model call."""
+        entered.set()
+        await withdrawn.wait()
+        await control.child("child").boundary()
+        return "Child result"
+
+    @tool
+    async def sibling() -> str:
+        """Keeps the tool step open, so the steer is withdrawn before delivery."""
+        await sibling_release.wait()
+        return "Sibling result"
+
+    model = ChildAndSiblingModel(observed=[])
+    graph = create_agent(model, tools=[task, sibling], middleware=[RunInputAdmissionMiddleware(), RunInputMiddleware()], state_schema=ThreadState, context_schema=dict, checkpointer=saver)
+    run = asyncio.create_task(graph.ainvoke({"messages": [HumanMessage(content="Original task")]}, {"configurable": {"thread_id": "thread"}}, context={INPUT_CONTEXT_KEY: control}))
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        await inputs.submit("update", "Handle this first", "steer")
+        gate = control.child("child")
+        async with asyncio.timeout(5):
+            while gate.resume.is_set():
+                await asyncio.sleep(0.01)
+        await inputs.cancel("update")
+        withdrawn.set()
+        sibling_release.set()
+        result = await asyncio.wait_for(run, 5)
+        assert any(message.name == "subagent-result" and "Child result" in message.content for message in result["messages"])
+        assert not any(message.additional_kwargs.get("run_input_id") for message in result["messages"])
+        assert (await inputs.read())["items"][0]["status"] == "cancelled"
+    finally:
+        withdrawn.set()
+        sibling_release.set()
+        if not run.done():
+            run.cancel()
+        await asyncio.gather(run, return_exceptions=True)
+        await control.close()
+
+
+@pytest.mark.asyncio
+async def test_children_stay_paused_while_a_delivered_steer_is_being_handled():
+    store = MemoryRunStore()
+    await store.put("run", thread_id="thread", user_id="owner", status="running", owner_worker_id="worker")
+    inputs = RunInputs(store, "run", "owner", "worker")
+    await inputs.submit("update", "Handle this first", "steer")
+    control = RunInputControl(inputs, agent_runs=None, thread_id="thread", checkpointer=None)
+    gate = control.child("child")
+    gate.resume.clear()
+    assert (await control.deliver({}))["applied_run_inputs"]["ids"] == ["update"]
+    # Later model turns of the same steer have nothing to deliver, yet the
+    # user's decision on the paused children is still outstanding.
+    assert await control.deliver({}) is None
+    assert not gate.resume.is_set()
+    await control.close()
+
+
+@pytest.mark.asyncio
+async def test_steer_withdrawn_during_a_steering_turn_releases_the_child_it_paused():
+    store = MemoryRunStore()
+    await store.put("run", thread_id="thread", user_id="owner", status="running", owner_worker_id="worker")
+    inputs = RunInputs(store, "run", "owner", "worker")
+    # Delivered at the first model boundary, before any child exists, so the
+    # child paused below is outside this steer's interrupted snapshot.
+    await inputs.submit("first", "Delegate the new work", "steer")
+    saver = InMemorySaver()
+    control = RunInputControl(inputs, agent_runs=SimpleNamespace(), thread_id="thread", checkpointer=saver)
+    entered, withdrawn, sibling_release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    @tool
+    async def task() -> str:
+        """Controlled child; a real one parks at this boundary before its next model call."""
+        entered.set()
+        await withdrawn.wait()
+        await control.child("child").boundary()
+        return "Child result"
+
+    @tool
+    async def sibling() -> str:
+        """Keeps the tool step open, so the second steer is withdrawn before delivery."""
+        await sibling_release.wait()
+        return "Sibling result"
+
+    model = ChildAndSiblingModel(observed=[])
+    graph = create_agent(model, tools=[task, sibling], middleware=[RunInputAdmissionMiddleware(), RunInputMiddleware()], state_schema=ThreadState, context_schema=dict, checkpointer=saver)
+    run = asyncio.create_task(graph.ainvoke({"messages": [HumanMessage(content="Original task")]}, {"configurable": {"thread_id": "thread"}}, context={INPUT_CONTEXT_KEY: control}))
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        assert control.steering_active and control.interrupted_children == set()
+        await inputs.submit("second", "Handle this first", "steer")
+        gate = control.child("child")
+        async with asyncio.timeout(5):
+            while gate.resume.is_set():
+                await asyncio.sleep(0.01)
+        await inputs.cancel("second")
+        withdrawn.set()
+        sibling_release.set()
+        result = await asyncio.wait_for(run, 5)
+        assert any(message.name == "subagent-result" and "Child result" in message.content for message in result["messages"])
+        assert {item["id"]: item["status"] for item in (await inputs.read())["items"]}["second"] == "cancelled"
+    finally:
+        withdrawn.set()
+        sibling_release.set()
+        if not run.done():
+            run.cancel()
+        await asyncio.gather(run, return_exceptions=True)
+        await control.close()
+
+
+class ReplacementReusingCallIdModel(InputModel):
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        self.observed.append(messages)
+        calls = {
+            1: [{"name": "task", "args": {}, "id": "call_0"}],
+            2: [{"name": "manage_current_work", "args": {"action": "replace"}, "id": "replace"}],
+            3: [{"name": "task", "args": {}, "id": "call_0"}, {"name": "sibling", "args": {}, "id": "slow"}],
+        }.get(len(self.observed), [])
+        return ChatResult(generations=[ChatGeneration(message=AIMessage(content="" if calls else "Work completed", tool_calls=calls))])
+
+
+@pytest.mark.asyncio
+async def test_steer_withdrawn_from_a_replacement_reusing_a_call_id_releases_it():
+    from deerflow.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
+
+    store = MemoryRunStore()
+    await store.put("run", thread_id="thread", user_id="owner", status="running", owner_worker_id="worker")
+    inputs = RunInputs(store, "run", "owner", "worker")
+    saver = InMemorySaver()
+    old_finished, entered, replacement_entered, withdrawn, sibling_release = (asyncio.Event() for _ in range(5))
+
+    async def authorize_control(**kwargs):
+        old_finished.set()
+        async with asyncio.timeout(5):
+            while not old_gate.closed:
+                await asyncio.sleep(0.01)
+
+    control = RunInputControl(inputs, agent_runs=SimpleNamespace(authorize_control=authorize_control), thread_id="thread", checkpointer=saver)
+    started = []
+
+    @tool
+    async def task() -> str:
+        """The first call is replaced; the second reuses its provider call ID."""
+        started.append(True)
+        if len(started) == 1:
+            entered.set()
+            await old_finished.wait()
+            return "Old result"
+        replacement_entered.set()
+        await withdrawn.wait()
+        await control.child("call_0").boundary()
+        return "Replacement result"
+
+    @tool
+    async def sibling() -> str:
+        """Keeps the tool step open, so the second steer is withdrawn before delivery."""
+        await sibling_release.wait()
+        return "Sibling result"
+
+    model = ReplacementReusingCallIdModel(observed=[])
+    middleware = [RunInputAdmissionMiddleware(), DanglingToolCallMiddleware(), RunInputMiddleware()]
+    graph = create_agent(model, tools=[task, sibling], middleware=middleware, state_schema=ThreadState, context_schema=dict, checkpointer=saver)
+    run = asyncio.create_task(graph.ainvoke({"messages": [HumanMessage(content="Original task")]}, {"configurable": {"thread_id": "thread"}}, context={INPUT_CONTEXT_KEY: control}))
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        old_gate = control.child("call_0")
+        await inputs.submit("first", "Do this instead", "steer")
+        await asyncio.wait_for(replacement_entered.wait(), 5)
+        gate = control.child("call_0")
+        assert gate is not old_gate and control.abandoned
+        await inputs.submit("second", "Handle this first", "steer")
+        async with asyncio.timeout(5):
+            while gate.resume.is_set():
+                await asyncio.sleep(0.01)
+        await inputs.cancel("second")
+        withdrawn.set()
+        sibling_release.set()
+        result = await asyncio.wait_for(run, 5)
+        assert any(message.name == "subagent-result" and "Replacement result" in message.content for message in result["messages"])
+        assert {item["id"]: item["status"] for item in (await inputs.read())["items"]}["second"] == "cancelled"
+    finally:
+        old_finished.set()
+        withdrawn.set()
+        sibling_release.set()
+        if not run.done():
+            run.cancel()
+        await asyncio.gather(run, return_exceptions=True)
+        await control.close()
+
+
+@pytest.mark.asyncio
+async def test_withdrawn_steer_keeps_children_held_by_the_delivered_steer_paused():
+    store = MemoryRunStore()
+    await store.put("run", thread_id="thread", user_id="owner", status="running", owner_worker_id="worker")
+    inputs = RunInputs(store, "run", "owner", "worker")
+    await inputs.submit("first", "Handle this first", "steer")
+    control = RunInputControl(inputs, agent_runs=None, thread_id="thread", checkpointer=None)
+    held = control.child("held")
+    held.resume.clear()
+    await control.deliver({})
+    released = control.child("released")
+    released.resume.clear()
+    assert await control.deliver({}) is None
+    assert released.resume.is_set()
+    assert not held.resume.is_set()
+    await control.close()
+
+
 @pytest.mark.asyncio
 async def test_terminal_queue_worker_remains_owned_until_it_stops():
     from deerflow.runtime.runs.manager import RunManager

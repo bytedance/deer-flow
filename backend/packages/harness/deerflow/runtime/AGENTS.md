@@ -19,7 +19,9 @@ Interactive Queue/Steer inputs belong to the existing RunStore row. Accept only
 owner-bound text; acknowledge it after a durable graph receipt. Queue dispatch
 uses ordinary AgentRuns admission after the old worker finalizes. Steer releases
 a native `task()` wait without marking the child completed; the same executor
-owns cooperative pause, timeout and cancellation. Only direct-user input exposes
+owns cooperative pause, timeout and cancellation. A steer withdrawn before
+delivery resumes the children it paused, except those a delivered steer still
+holds. Only direct-user input exposes
 current-work control. Preserve permissions, pool caps and token/loop stops.
 On restart retain unapplied text for explicit retry; never replay side effects
 automatically. Regressions: `test_run_inputs.py`, `test_run_input_graph.py`.
