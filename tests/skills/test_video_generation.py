@@ -174,7 +174,7 @@ def test_gemini_download_writes_nested_dir(monkeypatch, tmp_path):
 
     monkeypatch.setattr(vid.requests, "get", fake_get)
     out = tmp_path / "nested" / "dir" / "v.mp4"
-    vid.download("https://dl/v.mp4", str(out))
+    vid.download("https://generativelanguage.googleapis.com/v1beta/files/video:download", str(out))
     assert out.read_bytes() == b"VIDEO"
 
 
