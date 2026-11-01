@@ -8,6 +8,11 @@ Cache identity includes input order, filesystem-encoded basenames, per-file cont
 digests, and a namespace version. Directory relocation alone does not change a
 readable input's identity. Bump the namespace if table-mapping semantics change.
 
+Close the initial writable import connection and reopen the cache read-only before
+any action, matching the cache-hit path. The v3 namespace excludes older caches
+that user SQL could modify. Keep mutation rejection, legacy-cache rebuilding, and
+fresh/reused alias/CTE/export coverage in `test_data_analysis_cache_readonly.py`.
+
 Regressions live under the repository's root tests directory. They use
 real DuckDB. Excel and CLI integration additionally run with an already installed
 official spatial extension via `DEERFLOW_TEST_SPATIAL_DIRECTORY`; default tests
