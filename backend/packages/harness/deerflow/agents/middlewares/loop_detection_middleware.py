@@ -109,6 +109,17 @@ _UI_NARRATION_TOOLS = frozenset({"bash", "ls", "glob", "grep"})
 
 type _RunScopeKey = tuple[str, str | None]
 
+# Deeply nested args cannot be serialized for a key; they collapse to one opaque key.
+_UNSERIALIZABLE_ARGS = "<unserializable>"
+
+
+def _stable_args_key(value: object) -> str | None:
+    """Serialize opaque args for a stable key, or None past the recursion limit."""
+    try:
+        return json.dumps(value, sort_keys=True, default=str)
+    except (TypeError, ValueError, RecursionError):
+        return None
+
 
 def _normalize_tool_call_args(raw_args: object) -> tuple[dict, str | None]:
     """Normalize tool call args to a dict plus an optional fallback key.
@@ -123,17 +134,17 @@ def _normalize_tool_call_args(raw_args: object) -> tuple[dict, str | None]:
     if isinstance(raw_args, str):
         try:
             parsed = json.loads(raw_args)
-        except (TypeError, ValueError, json.JSONDecodeError):
+        except (TypeError, ValueError, json.JSONDecodeError, RecursionError):
             return {}, raw_args
 
         if isinstance(parsed, dict):
             return parsed, None
-        return {}, json.dumps(parsed, sort_keys=True, default=str)
+        return {}, _stable_args_key(parsed)
 
     if raw_args is None:
         return {}, None
 
-    return {}, json.dumps(raw_args, sort_keys=True, default=str)
+    return {}, _stable_args_key(raw_args)
 
 
 def _coerce_line_number(value: object) -> int | None:
@@ -181,6 +192,11 @@ def _stable_tool_key(name: str, args: dict, fallback_key: str | None) -> str:
     """Derive a stable key from the args that change what a call does."""
     if name == "read_file" and fallback_key is None:
         path = args.get("path") or ""
+        if not isinstance(path, str):
+            # Formatting a nested structure into the key calls repr(), which
+            # recurses past the limit for the same payloads _stable_args_key
+            # already treats as opaque.
+            path = _stable_args_key(path) or _UNSERIALIZABLE_ARGS
         start_line, end_line = _normalized_read_range(args)
         return f"{path}:{start_line}-{end_line if end_line is not None else _OPEN_ENDED_READ}"
 
@@ -190,7 +206,7 @@ def _stable_tool_key(name: str, args: dict, fallback_key: str | None) -> str:
     if name in {"write_file", "str_replace"}:
         if fallback_key is not None:
             return fallback_key
-        return json.dumps(args, sort_keys=True, default=str)
+        return _stable_args_key(args) or _UNSERIALIZABLE_ARGS
 
     if fallback_key is not None:
         return fallback_key
@@ -203,7 +219,7 @@ def _stable_tool_key(name: str, args: dict, fallback_key: str | None) -> str:
     # call look new (#1905).
     if name in _UI_NARRATION_TOOLS:
         args = {field: value for field, value in args.items() if field != "description"}
-    return json.dumps(args, sort_keys=True, default=str)
+    return _stable_args_key(args) or _UNSERIALIZABLE_ARGS
 
 
 def _hash_tool_calls(tool_calls: list[dict]) -> str:
