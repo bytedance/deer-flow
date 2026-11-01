@@ -6,7 +6,17 @@ REST API and one key:
 * ``web_search`` calls ``POST /v1/search`` and returns a JSON list of
   ``{title, url, snippet}``.
 * ``web_fetch`` calls ``POST /v1/scrape`` with ``formats: ["markdown"]`` and
-  returns the page's main content as Markdown.
+  returns the page's main content as Markdown under its title.
+
+Outcrawl can answer 200 for a degraded result and say so in a top-level
+``warnings`` list of ``{code, message}`` (``login_redirect``,
+``partial_document``, ``empty_capture`` and others on scrape;
+``engines_refused`` on search). Both tools pass those warnings to the agent
+instead of returning the result as if it were clean: ``web_search`` then
+returns ``{query, results, warnings}``, and ``web_fetch`` puts one quoted
+warning line per entry above the content. ``web_fetch`` also flags a target
+page that answered with an HTTP error, which Outcrawl reports in
+``statusCode``.
 
 The key comes from the tool's ``api_key`` config or ``OUTCRAWL_API_KEY``. The
 module is self-contained (httpx only, no SDK and no new dependency).
@@ -21,6 +31,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 
 import httpx
 from langchain.tools import tool
@@ -81,6 +92,51 @@ def _http_error_message(status: int) -> str:
     return f"{message} ({hint})" if hint else message
 
 
+def _response_warnings(data: object) -> list[dict[str, str]]:
+    """Normalize Outcrawl's top-level ``warnings`` to ``[{code, message}]``.
+
+    Entries without a usable ``code`` are dropped; a payload or ``warnings``
+    value of the wrong type yields no warnings.
+    """
+    raw = data.get("warnings") if isinstance(data, dict) else None
+    if not isinstance(raw, list):
+        return []
+    warnings = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        code = entry.get("code")
+        if not isinstance(code, str) or not code.strip():
+            continue
+        message = entry.get("message")
+        warnings.append({"code": code.strip(), "message": message.strip() if isinstance(message, str) else ""})
+    return warnings
+
+
+def _format_warning(warning: dict[str, str]) -> str:
+    message = warning["message"]
+    return f"> Outcrawl warning ({warning['code']}): {message}" if message else f"> Outcrawl warning ({warning['code']})"
+
+
+_HEADING_RE = re.compile(r"^#{1,6}[ \t]+(.+?)[ \t#]*$", re.MULTILINE)
+
+
+def _page_title(data: dict, requested_url: str) -> str:
+    """Title for a scraped page: ``metadata.title``, else the first Markdown heading, else the URL."""
+    metadata = data.get("metadata")
+    if isinstance(metadata, dict):
+        title = metadata.get("title")
+        if isinstance(title, str) and title.strip():
+            return title.strip()
+    markdown = data.get("markdown")
+    if isinstance(markdown, str):
+        heading = _HEADING_RE.search(markdown)
+        if heading:
+            return heading.group(1).strip()
+    final_url = data.get("url")
+    return final_url if isinstance(final_url, str) and final_url.strip() else requested_url
+
+
 async def _post(path: str, api_key: str, body: dict) -> dict:
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -126,8 +182,14 @@ async def web_search_tool(query: str, max_results: int | None = None) -> str:
         logger.error("Outcrawl returned unexpected 'hits' payload type: %s", type(hits).__name__)
         return json.dumps({"error": "Outcrawl returned an unexpected response format", "query": query}, ensure_ascii=False)
     results = [hit for hit in hits or [] if isinstance(hit, dict)]
+    warnings = _response_warnings(data)
+    if warnings:
+        logger.warning("Outcrawl search returned warnings: %s", ", ".join(w["code"] for w in warnings))
     if not results:
-        return json.dumps({"error": "No results found", "query": query}, ensure_ascii=False)
+        error = {"error": "No results found", "query": query}
+        if warnings:
+            error["warnings"] = warnings
+        return json.dumps(error, ensure_ascii=False)
 
     normalized_results = [
         {
@@ -137,6 +199,8 @@ async def web_search_tool(query: str, max_results: int | None = None) -> str:
         }
         for hit in results[:count]
     ]
+    if warnings:
+        return json.dumps({"query": query, "results": normalized_results, "warnings": warnings}, indent=2, ensure_ascii=False)
     return json.dumps(normalized_results, indent=2, ensure_ascii=False)
 
 
@@ -172,9 +236,17 @@ async def web_fetch_tool(url: str) -> str:
 
     if not isinstance(data, dict):
         return "Error: Outcrawl returned an unexpected response format"
-    markdown_content = data.get("markdown") or ""
-    if not markdown_content:
-        return "Error: No content found"
-    metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
-    title = metadata.get("title") or "Untitled"
-    return f"# {title}\n\n{markdown_content[:_MAX_FETCH_CHARS]}"
+    warnings = _response_warnings(data)
+    if warnings:
+        logger.warning("Outcrawl scrape of %s returned warnings: %s", url, ", ".join(w["code"] for w in warnings))
+    notes = [_format_warning(w) for w in warnings]
+    target_status = data.get("statusCode")
+    if isinstance(target_status, int) and not isinstance(target_status, bool) and target_status >= 400:
+        notes.append(f"> Outcrawl warning: the target page responded HTTP {target_status}")
+    markdown_content = data.get("markdown")
+    if not isinstance(markdown_content, str) or not markdown_content:
+        return "\n".join(["Error: No content found", *notes])
+    header = f"# {_page_title(data, url)}\n\n"
+    if notes:
+        header += "\n".join(notes) + "\n\n"
+    return f"{header}{markdown_content[:_MAX_FETCH_CHARS]}"

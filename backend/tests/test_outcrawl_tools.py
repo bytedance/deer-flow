@@ -153,3 +153,102 @@ async def test_web_fetch_reports_empty_content(monkeypatch):
     result = await outcrawl_tools.web_fetch_tool.ainvoke({"url": "https://example.com"})
 
     assert result == "Error: No content found"
+
+
+async def test_web_search_surfaces_outcrawl_warnings(monkeypatch):
+    _patch_config(monkeypatch, {"api_key": "test-key"})
+    payload = {
+        "hits": [{"url": "https://example.com/a", "title": "A", "snippet": "first", "rank": 1}],
+        "warnings": [
+            {"code": "engines_refused", "message": "one search engine refused the query; results come from the others"},
+            {"message": "no code, dropped"},
+            "not an object, dropped",
+        ],
+        "usage": {"credits": "0.5"},
+    }
+    _patch_transport(monkeypatch, lambda _request: httpx.Response(200, json=payload))
+
+    result = json.loads(await outcrawl_tools.web_search_tool.ainvoke({"query": "q"}))
+
+    assert result == {
+        "query": "q",
+        "results": [{"title": "A", "url": "https://example.com/a", "snippet": "first"}],
+        "warnings": [{"code": "engines_refused", "message": "one search engine refused the query; results come from the others"}],
+    }
+
+
+async def test_web_search_reports_warnings_when_nothing_came_back(monkeypatch):
+    _patch_config(monkeypatch, {"api_key": "test-key"})
+    payload = {"hits": [], "warnings": [{"code": "engines_refused", "message": "every engine refused"}]}
+    _patch_transport(monkeypatch, lambda _request: httpx.Response(200, json=payload))
+
+    result = json.loads(await outcrawl_tools.web_search_tool.ainvoke({"query": "q"}))
+
+    assert result == {
+        "error": "No results found",
+        "query": "q",
+        "warnings": [{"code": "engines_refused", "message": "every engine refused"}],
+    }
+
+
+async def test_web_fetch_puts_warnings_above_the_content(monkeypatch):
+    _patch_config(monkeypatch, {"api_key": "test-key"})
+    monkeypatch.setattr(outcrawl_tools, "validate_public_http_url", lambda _url: None)
+    # Shape of a live /v1/scrape answer for a page that redirects to its sign-in page.
+    payload = {
+        "url": "https://github.com/login?return_to=https%3A%2F%2Fgithub.com%2Fsettings%2Fprofile",
+        "statusCode": 200,
+        "markdown": "Sign in to GitHub",
+        "metadata": {"title": "Sign in to GitHub \u00b7 GitHub", "complete": False},
+        "warnings": [
+            {
+                "code": "login_redirect",
+                "message": "the site redirected this request to its sign-in page (github.com/login), so treat this as a failed fetch",
+            }
+        ],
+    }
+    _patch_transport(monkeypatch, lambda _request: httpx.Response(200, json=payload))
+
+    result = await outcrawl_tools.web_fetch_tool.ainvoke({"url": "https://github.com/settings/profile"})
+
+    assert result == ("# Sign in to GitHub \u00b7 GitHub\n\n> Outcrawl warning (login_redirect): the site redirected this request to its sign-in page (github.com/login), so treat this as a failed fetch\n\nSign in to GitHub")
+
+
+async def test_web_fetch_flags_a_target_http_error(monkeypatch):
+    _patch_config(monkeypatch, {"api_key": "test-key"})
+    monkeypatch.setattr(outcrawl_tools, "validate_public_http_url", lambda _url: None)
+    payload = {"url": "https://example.com/missing", "statusCode": 404, "markdown": "Not found", "metadata": {"title": "404"}}
+    _patch_transport(monkeypatch, lambda _request: httpx.Response(200, json=payload))
+
+    result = await outcrawl_tools.web_fetch_tool.ainvoke({"url": "https://example.com/missing"})
+
+    assert result == "# 404\n\n> Outcrawl warning: the target page responded HTTP 404\n\nNot found"
+
+
+async def test_web_fetch_reports_warnings_with_empty_content(monkeypatch):
+    _patch_config(monkeypatch, {"api_key": "test-key"})
+    monkeypatch.setattr(outcrawl_tools, "validate_public_http_url", lambda _url: None)
+    payload = {"markdown": "", "metadata": {}, "warnings": [{"code": "empty_capture", "message": "the page rendered nothing"}]}
+    _patch_transport(monkeypatch, lambda _request: httpx.Response(200, json=payload))
+
+    result = await outcrawl_tools.web_fetch_tool.ainvoke({"url": "https://example.com"})
+
+    assert result == "Error: No content found\n> Outcrawl warning (empty_capture): the page rendered nothing"
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected_title"),
+    [
+        ({"url": "https://example.com/post", "markdown": "intro\n\n## Release notes ##\n\nbody", "metadata": {}}, "Release notes"),
+        ({"url": "https://example.com/post", "markdown": "no heading here", "metadata": {"title": "  "}}, "https://example.com/post"),
+        ({"markdown": "no heading here"}, "https://example.com/requested"),
+    ],
+)
+async def test_web_fetch_title_falls_back_to_heading_then_url(monkeypatch, payload, expected_title):
+    _patch_config(monkeypatch, {"api_key": "test-key"})
+    monkeypatch.setattr(outcrawl_tools, "validate_public_http_url", lambda _url: None)
+    _patch_transport(monkeypatch, lambda _request: httpx.Response(200, json=payload))
+
+    result = await outcrawl_tools.web_fetch_tool.ainvoke({"url": "https://example.com/requested"})
+
+    assert result.startswith(f"# {expected_title}\n\n")
