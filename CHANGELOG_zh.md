@@ -24,6 +24,16 @@
 - **模型：** 管理员可在 **设置 → 模型** 中选择 StepFun（阶跃星辰），
   填写 API Key 和模型 ID 即可接入普通 API。([#7988](https://github.com/bytedance/deer-flow/pull/7988))
 
+- **社区工具：** 新增 Outcrawl 作为可选启用的 `web_search` 和 `web_fetch` 提供方
+  （`deerflow.community.outcrawl`），两者共用一个 `OUTCRAWL_API_KEY`。`web_search` 调用
+  `POST /v1/search`，返回 `{title, url, snippet}` 结果，上限 20 条；`web_fetch` 调用
+  `POST /v1/scrape` 获取 Markdown，标题取自 `metadata.title`（没有时取第一个标题，再没有时用 URL），
+  正文截断为 4096 个字符。当 Outcrawl 在 `warnings` 列表中标记结果质量下降时（其文档列出的抓取警告码有
+  `empty_capture`、`blocked_interstitial`；任何警告码都会原样传递），这些警告会传给 Agent：
+  `web_search` 返回 `{query, results, warnings}`，`web_fetch` 在正文上方每条警告一行引用。
+  请求失败时，返回的错误会在 HTTP 状态码旁附上 Outcrawl 的错误 `code`，例如所有搜索引擎都拒绝时的
+  `search_refused`。目标页面返回 HTTP 错误时，`web_fetch` 也会注明。([#7778])
+
 ### 变更
 
 - **Checkpoint：** DeltaChannel 部署现在要求 `langgraph-checkpoint` 4.3.0、
@@ -12879,6 +12889,7 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7746]: https://github.com/bytedance/deer-flow/pull/7746
 [#7762]: https://github.com/bytedance/deer-flow/pull/7762
 [#7772]: https://github.com/bytedance/deer-flow/pull/7772
+[#7778]: https://github.com/bytedance/deer-flow/pull/7778
 [#7781]: https://github.com/bytedance/deer-flow/pull/7781
 [#7792]: https://github.com/bytedance/deer-flow/pull/7792
 [#7794]: https://github.com/bytedance/deer-flow/pull/7794
