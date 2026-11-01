@@ -849,6 +849,42 @@ def test_import_memory_data_saves_and_returns_imported_memory() -> None:
     assert result == imported_memory
 
 
+@pytest.mark.parametrize("confidence", [10**400, -(10**400)], ids=["positive", "negative"])
+def test_import_memory_data_defaults_overflowing_confidence_without_crossing_scopes(tmp_path, confidence) -> None:
+    from deerflow.agents.memory.backends.deermem.deermem.core.storage import FileMemoryStorage
+
+    config = DeerMemConfig(storage_path=str(tmp_path), retrieval_adapter="")
+    storage = FileMemoryStorage(config)
+    updater = MemoryUpdater(config, storage, MagicMock())
+    existing = _make_memory(facts=[{"id": "existing", "content": "Existing preference", "confidence": 0.9}])
+    existing["user"]["workContext"]["summary"] = "Shared work context"
+    updater.import_memory_data(existing, agent_name="researcher", user_id="alice")
+    other_agent = updater.import_memory_data(existing, agent_name="writer", user_id="alice")
+    other_user = updater.import_memory_data(existing, agent_name="researcher", user_id="bob")
+    incoming = {
+        "facts": [
+            {"id": "valid", "content": "Valid preference", "confidence": 0.87},
+            {"id": "legacy", "content": "Legacy preference", "confidence": confidence},
+        ]
+    }
+
+    result = updater.import_memory_data(incoming, agent_name="researcher", user_id="alice", replace_shared_summaries=False)
+
+    assert {fact["id"]: fact["confidence"] for fact in result["facts"]} == {"valid": 0.87, "legacy": 0.5}
+    assert result["user"] == other_agent["user"]
+    reloaded = MemoryUpdater(config, FileMemoryStorage(config), MagicMock())
+    assert reloaded.get_memory_data("researcher", user_id="alice") == result
+    reloaded_other_agent = reloaded.get_memory_data("writer", user_id="alice")
+    for section in ("facts", "user", "history"):
+        assert reloaded_other_agent[section] == other_agent[section]
+    assert reloaded.get_memory_data("researcher", user_id="bob") == other_user
+    assert incoming["facts"][1]["confidence"] == confidence
+
+    with pytest.raises(ValueError, match="non-empty content"):
+        updater.import_memory_data({"facts": [*incoming["facts"], {"content": ""}]}, agent_name="researcher", user_id="alice")
+    assert reloaded.get_memory_data("researcher", user_id="alice") == result
+
+
 def test_update_memory_fact_updates_only_matching_fact() -> None:
     current_memory = _make_memory(
         facts=[

@@ -44,6 +44,32 @@ class TestCreateEmptyMemory:
 class TestNormalizeMemoryData:
     """Test backward-compatible memory schema normalization."""
 
+    @pytest.mark.parametrize(
+        ("confidence", "expected"),
+        [
+            (10**400, 0.5),
+            (-(10**400), 0.5),
+            (None, 0.5),
+            ("invalid", 0.5),
+            (float("inf"), 0.5),
+            (float("-inf"), 0.5),
+            (float("nan"), 0.5),
+            (True, 0.5),
+            (0, 0.0),
+            (0.87, 0.87),
+            ("0.75", 0.75),
+            (-1, 0.0),
+            (2, 1.0),
+        ],
+    )
+    def test_normalizes_legacy_confidence(self, confidence, expected):
+        legacy = {"facts": [{"content": "User prefers Python", "confidence": confidence}]}
+
+        normalized = normalize_memory_data(legacy)
+
+        assert normalized["facts"][0]["confidence"] == expected
+        assert legacy["facts"][0]["confidence"] is confidence
+
     def test_normalizes_legacy_facts_without_mutating_input(self):
         legacy = {
             "version": "1.0",
