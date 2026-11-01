@@ -336,6 +336,7 @@ async def browser_stream(websocket: WebSocket, thread_id: ThreadId) -> None:
             allow_unguarded_cdp=_cfg_bool("allow_unguarded_cdp", False),
             url_guard=validate_browser_url,
             egress_resolver=resolve_browser_egress,
+            engine=(_cfg_str("engine") or "chromium").lower(),
         )
         session = session_lease.__enter__()
     except BrowserSessionCapacityError:

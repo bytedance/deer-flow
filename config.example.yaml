@@ -1204,6 +1204,12 @@ tools:
   #   timeout_ms: 30000                # Per-action navigation/interaction timeout
   #   viewport_width: 1280
   #   viewport_height: 720
+  #   # engine: chromium               # chromium (default) | camoufox. camoufox launches an
+  #   #                                # anti-detection Firefox for bot-protected sites. Needs:
+  #   #                                #   cd backend && uv sync --extra browser --extra camoufox
+  #   #                                #   uv run python -m camoufox fetch
+  #   #                                # Keeps the SSRF guard + pinned egress proxy and blocks
+  #   #                                # WebRTC; cannot be combined with cdp_url (Chromium-only).
   #   # allow_private_addresses: false # SSRF guard: keep false in production. Also applies to the
   #   #                                # pinned egress proxy every launched browser connects through.
   #   # cdp_url: http://127.0.0.1:9222 # Attach to YOUR running Chrome (Codex-style)

@@ -25,3 +25,15 @@ closure; rebuild only when the browser disconnects or the context is gone.
 Reset `_request_guard_bound` / `_page_listener_bound` only on context replacement.
 Await `bring_to_front()` before `_set_active_page()` during managed-page
 recovery; CDP sessions preserve user focus and intentionally skip the request guard.
+
+### Launch Engines
+
+`engine` on `browser_navigate` selects the managed launch: `chromium` (default,
+unchanged code path) or `camoufox` (optional `camoufox` extra, imported lazily
+in `_launch_camoufox`; a missing package raises a `RuntimeError` with the
+install command on first launch, never at import). Every session opener (tools
+and the Live router) must pass `engine`, because the first opener fixes it.
+Camoufox is Firefox, so keep its egress parity: `socks_remote_dns` and
+`allow_hijacking_localhost` prefs replace Chromium's `<-loopback>` bypass token,
+and `block_webrtc` stays on. `cdp_url` is Chromium-only and rejected with
+`camoufox`. See `backend/tests/test_browser_camoufox_engine.py`.
