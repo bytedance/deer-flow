@@ -81,11 +81,16 @@ def _as_user(user_id: str) -> dict[str, str]:
 @pytest.fixture(autouse=True)
 def _isolate(tmp_path, monkeypatch):
     import deerflow.config.paths as paths_mod
+    from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
 
     monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path / "home"))
     monkeypatch.setattr(paths_mod, "_paths", None)
+    set_app_config(AppConfig(sandbox={"use": "deerflow.sandbox.local:LocalSandboxProvider"}))
     yield
-    anyio.run(close_engine)
+    try:
+        anyio.run(close_engine)
+    finally:
+        reset_app_config()
 
 
 def _create_project(client: TestClient, name: str = "P", **kwargs) -> dict:
@@ -179,6 +184,70 @@ def test_long_workspace_document_lifecycle(tmp_path, monkeypatch, filename):
 
 
 class TestTrashListing:
+    def test_missing_config_preserves_documents_until_retention_can_be_read(self, tmp_path, monkeypatch, caplog):
+        """A transient config loss must not shorten a 365-day retention to 30 days."""
+        from app.gateway.auth_disabled import AUTH_DISABLED_USER_ID
+        from app.gateway.auth_middleware import AuthMiddleware
+        from deerflow.config.app_config import get_app_config, reset_app_config
+        from deerflow.config.extensions_config import reset_extensions_config
+
+        config_path = tmp_path / "config.yaml"
+        config_text = "sandbox:\n  use: deerflow.sandbox.local:LocalSandboxProvider\nprojects:\n  trash_retention_days: 365\n"
+        config_path.write_text(config_text, encoding="utf-8")
+        extensions_path = tmp_path / "extensions_config.json"
+        extensions_path.write_text('{"mcpServers": {}, "skills": {}}', encoding="utf-8")
+        monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(config_path))
+        monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
+        monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "1")
+        monkeypatch.delenv("DEER_FLOW_ENV", raising=False)
+        monkeypatch.delenv("ENVIRONMENT", raising=False)
+        reconciliation_time = 0.0
+        monkeypatch.setattr(trash, "time", SimpleNamespace(monotonic=lambda: reconciliation_time))
+        monkeypatch.setattr(trash, "_LAST_RECONCILIATION", {})
+        reset_app_config()
+        reset_extensions_config()
+        try:
+            assert get_app_config().projects.trash_retention_days == 365
+            app = _build_app(tmp_path)
+            # Exercise real local-mode authentication and configuration loading,
+            # rather than letting a fixture bypass a request-time config failure.
+            app.user_middleware.clear()
+            app.add_middleware(AuthMiddleware)
+            app.dependency_overrides.pop(get_config)
+            with TestClient(app) as client:
+                project = _create_project(client)
+                doc = _upload(client, project["id"], "protected.txt", b"still recoverable")
+                _trash(client, project["id"], doc["id"])
+                _set_trashed_at(doc["id"], datetime.now(UTC) - timedelta(days=60))
+                row = _get_row(app, doc["id"], user_id=AUTH_DISABLED_USER_ID)
+                original = _original_path(app, row, user_id=AUTH_DISABLED_USER_ID)
+                assert client.get("/api/trash/documents").json()["total"] == 1
+
+                last_reconciliation = trash._LAST_RECONCILIATION[AUTH_DISABLED_USER_ID]
+                # Make reconciliation due again so a premature throttle stamp is observable.
+                reconciliation_time += trash._RECONCILIATION_MIN_INTERVAL_SECONDS
+                config_path.unlink()
+                listing = client.get("/api/trash/documents")
+
+                assert listing.status_code == 200
+                assert trash._LAST_RECONCILIATION[AUTH_DISABLED_USER_ID] == last_reconciliation
+                assert _get_row(app, doc["id"], user_id=AUTH_DISABLED_USER_ID) is not None
+                assert original.read_bytes() == b"still recoverable"
+                assert listing.json()["total"] == 1
+                assert "Lazy trash retention sweep failed" in caplog.text
+
+                config_path.write_text(config_text, encoding="utf-8")
+                assert client.get("/api/trash/documents").json()["total"] == 1
+                assert trash._LAST_RECONCILIATION[AUTH_DISABLED_USER_ID] == reconciliation_time
+                # A successful hot reload still applies an intentionally shorter policy.
+                config_path.write_text(config_text.replace("365", "30"), encoding="utf-8")
+                assert client.get("/api/trash/documents").json()["total"] == 0
+                assert _get_row(app, doc["id"], user_id=AUTH_DISABLED_USER_ID) is None
+                assert not original.exists()
+        finally:
+            reset_app_config()
+            reset_extensions_config()
+
     def test_list_empty_then_populated_with_origin_display_fields(self, tmp_path):
         app = _build_app(tmp_path)
         client = TestClient(app)

@@ -10,6 +10,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 This section accumulates work toward the **2.3.0** milestone
 ([2.3.0](https://github.com/bytedance/deer-flow/milestone/4)).
 
+### Added
+
+- **chat:** Running Web chats offer Queue and Steer in the composer. Queue
+  waits for the next turn; Steer lets the main Agent handle updates while
+  native subagents pause and resume. Unconfirmed messages can be retried
+  after a Gateway restart. ([#7729])
+
+### Fixed
+
+- **agents:** `PUT /api/agents/{name}` with `"description": null` now resets the
+  description to empty. It used to store the null, which the agent config
+  rejects, so the agent then failed every load: the update, GET and repair
+  updates returned 500, the file backend dropped it from the agent list, the
+  database backend failed the owner's whole list, and chats with it failed.
+  Agents already stored with a null description load again. ([#7638])
+
+- **sandbox:** Cancelled native Runs now stop their owned AIO and POSIX local
+  bash processes, including ordinary `nohup` children, before releasing the
+  execution lease. Concurrent work and background services from successful
+  earlier turns remain running. ([#7772])
+  
+- **agents:** A clarification no longer overwrites an earlier question when the
+  provider reuses a tool-call ID across turns (for example `call_0` on every
+  response). Its message ID, which is also the human-input `request_id`, named
+  only the call ID, so the later question replaced the earlier one in place and
+  the later call was left without a result. The ID now also names the
+  AIMessage that issued the call; a retry of the same call keeps its ID.
+  ([#7762])
+
+- **projects:** The trash retention sweep no longer deletes live document
+  originals when the data directory, `users/`, a user's directory or a
+  user's `projects/` is a symlink. It protected each document by its resolved
+  path but walked the unresolved tree, so no document matched and every
+  original older than 24 hours was removed as an orphan, at Gateway startup
+  and from `GET /api/trash/documents`. ([#7732])
+
+- **dev:** `scripts/dev_multi_instance.sh logs all` now prints the nginx logs
+  as well as both Gateway logs; it printed only the Gateway logs, the same as
+  `logs` with no argument. `logs nginx` and `logs all` also include `nginx.log`,
+  the nginx start command's own output, which no option printed before.
+  ([#7723])
+
+- **memory:** `GET /api/memory/config` and `/api/memory/status` now mask
+  credential values in `backend_config` (`api_key`, tokens, passwords,
+  `Authorization` headers, at any depth) as `***`. They returned the config as
+  loaded, with `$VAR` references already resolved, so a DeerMem extraction
+  model key or a Honcho `api_key` reached every caller with `memory:read` in
+  plaintext, which with authorization disabled (the default) is every
+  signed-in user. Non-secret knobs, `api_key_env` names and unset values are
+  unchanged. ([#7665])
+- **gateway:** `GET /threads/{thread_id}/token-usage` now resolves the live
+  config in a worker thread. `build_context_usage` called the accessor inline,
+  and `get_app_config()` revalidates on every call — it digests the whole
+  `config.yaml`, then `extensions_config.json` — so a config edit landing just
+  before a thread view stalled the Gateway event loop that runs, streams and
+  every other thread share. The response is unchanged. ([#7727])
+
 ## [2.2.0] — 2026-10-29
 
 This section accumulates work toward the **2.2.0** milestone
@@ -15642,6 +15699,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7017]: https://github.com/bytedance/deer-flow/pull/7017
 [#7018]: https://github.com/bytedance/deer-flow/pull/7018
 [#7020]: https://github.com/bytedance/deer-flow/pull/7020
+[#7022]: https://github.com/bytedance/deer-flow/issues/7022
 [#7023]: https://github.com/bytedance/deer-flow/pull/7023
 [#7024]: https://github.com/bytedance/deer-flow/pull/7024
 [#7031]: https://github.com/bytedance/deer-flow/pull/7031
@@ -15914,3 +15972,11 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7643]: https://github.com/bytedance/deer-flow/pull/7643
 [#7651]: https://github.com/bytedance/deer-flow/pull/7651
 [#7659]: https://github.com/bytedance/deer-flow/pull/7659
+[#7638]: https://github.com/bytedance/deer-flow/pull/7638
+[#7665]: https://github.com/bytedance/deer-flow/pull/7665
+[#7723]: https://github.com/bytedance/deer-flow/pull/7723
+[#7727]: https://github.com/bytedance/deer-flow/pull/7727
+[#7729]: https://github.com/bytedance/deer-flow/pull/7729
+[#7732]: https://github.com/bytedance/deer-flow/pull/7732
+[#7762]: https://github.com/bytedance/deer-flow/pull/7762
+[#7772]: https://github.com/bytedance/deer-flow/pull/7772

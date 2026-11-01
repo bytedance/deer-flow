@@ -126,8 +126,8 @@ FastAPI 应用程序，为前端集成提供 REST 接口：
 | `POST /api/skills/install` | 从 `.skill` 归档文件安装技能 |
 | `GET /api/memory` | 获取记忆数据 |
 | `POST /api/memory/reload` | 强制重新加载记忆 |
-| `GET /api/memory/config` | 获取记忆配置 |
-| `GET /api/memory/status` | 获取组合后的配置和数据状态 |
+| `GET /api/memory/config` | 获取记忆配置；`backend_config` 中的凭据值会被遮蔽 |
+| `GET /api/memory/status` | 获取组合后的配置（同样遮蔽凭据）和数据状态 |
 | `GET /api/threads/{id}/runs/{run_id}/events` | 获取某次运行的调试或审计事件；可使用 `event_types=context:memory` 筛选实际记忆标识 |
 | `POST /api/threads/{id}/uploads` | 上传文件（可选地将 PDF、PPT、Excel、Word 转换为 Markdown；拒绝目录路径；自动重命名单次请求中的重复文件名） |
 | `GET /api/threads/{id}/uploads/list` | 列出已上传的文件 |

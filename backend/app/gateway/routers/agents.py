@@ -96,7 +96,7 @@ class AgentUpdateRequest(BaseModel):
     """Request body for updating a custom agent."""
 
     display_name: AgentDisplayName | None = Field(default=None, description="Updated display name; null clears it")
-    description: str | None = Field(default=None, description="Updated description")
+    description: str | None = Field(default=None, description="Updated description; null resets it to empty")
     model: str | None = Field(default=None, description="Updated model override")
     tool_groups: list[str] | None = Field(default=None, description="Updated tool group whitelist")
     mcp_plugins: list[str] | None = Field(default=None, description="MCP installation selection (None=all, []=none)")
@@ -601,7 +601,9 @@ async def update_agent(name: str, body: AgentUpdateRequest, request: Request) ->
         if config_changed:
             updated = {
                 "name": agent_cfg.name,
-                "description": body.description if "description" in fields_set else agent_cfg.description,
+                # Explicit null resets to the AgentConfig default; storing None
+                # would make every later load of this agent fail validation.
+                "description": (body.description or "") if "description" in fields_set else agent_cfg.description,
             }
             if "display_name" in fields_set:
                 updated["display_name"] = body.display_name or None
