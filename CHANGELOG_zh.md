@@ -20,6 +20,11 @@
 
 ### 修复
 
+- **智能体：** 当模型提供方在不同轮次复用同一个工具调用 ID（例如每次响应都是 `call_0`）时，
+  澄清提问不再覆盖之前的问题。此前其消息 ID（同时也是人工输入的 `request_id`）只包含调用 ID，
+  后一个问题会原地替换前一个问题，后一次调用也因此缺少结果。现在 ID 还会包含发起该调用的
+  AIMessage；同一调用的重试仍保持原 ID。([#7762])
+
 - **项目：** 当数据目录、`users/`、某个用户目录或用户的 `projects/` 是符号链接时，
   回收站保留期清扫不再删除仍在使用的文档原件。此前它按解析后的路径保护每个文档，
   却遍历未解析的目录树，导致没有任何文档能匹配上，所有超过 24 小时的原件都被当作
@@ -12719,3 +12724,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7727]: https://github.com/bytedance/deer-flow/pull/7727
 [#7729]: https://github.com/bytedance/deer-flow/pull/7729
 [#7732]: https://github.com/bytedance/deer-flow/pull/7732
+[#7762]: https://github.com/bytedance/deer-flow/pull/7762
