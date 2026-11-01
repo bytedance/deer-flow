@@ -3957,6 +3957,9 @@ spaces, tabs, line breaks, and nonbreaking spaces. A separator closes the slash
 palette so Enter submits the composed text. Pasted skill tasks can start on the
 next line; their internal line breaks and indentation are preserved.
 
+Tool cards keep each turn's activity and results separate, preserving the
+earlier transcript when a later turn runs another tool.
+
 During an active run, `/resume`, `/threads`, and `/switch` ask you to wait before
 switching conversations. An invalid `/resume` reference displays an error without
 closing the TUI or changing the current conversation.
