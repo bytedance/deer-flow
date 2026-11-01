@@ -81,25 +81,34 @@ def _content_path_translation_applies(path: str, content: str, *, append: bool, 
     interpreter (PR #1935). Documents, data files, and configs are not
     executed, so their bytes are stored verbatim: rewriting them put host
     paths into deliverables while ``read_file`` masked the rewrite back to
-    virtual paths (#7461).
+    virtual paths (#7461). That holds inside ``scripts/`` too: the directory
+    names where a file lives, not that a host interpreter opens it (#7618).
 
     A suffix settles the classification by itself, so only an extensionless
     destination is inspected for a shebang. That keeps named files free of
     I/O and leaves an append to a pipe or device untouched.
     """
-    from deerflow.skills.package_files import is_code_file, is_code_path
+    from deerflow.skills.package_files import CODE_SUFFIXES, is_code_file
 
     posix = PurePosixPath(path.replace("\\", "/"))
-    if is_code_path(path) or posix.suffix.lower() in _INTERPRETER_SCRIPT_SUFFIXES:
-        return True
-    if posix.suffix:
-        # A non-script suffix settles it: a shebang cannot make ``.md`` a program.
-        return False
+    suffix = posix.suffix.lower()
+    if suffix:
+        # A named suffix settles the classification before the path is
+        # consulted, so a document, data file, or config that happens to sit
+        # under ``scripts/`` is still stored verbatim: the directory says where
+        # a file lives, not that a host interpreter opens it (#7618). A shebang
+        # cannot make ``.md`` a program either.
+        return suffix in CODE_SUFFIXES or suffix in _INTERPRETER_SCRIPT_SUFFIXES
     head = content[:2].encode("utf-8", "surrogatepass")
     if append and not head.startswith(b"#!"):
         # An extensionless script's interpreter line sits at the top of the
         # existing file, not in the text being appended.
         head = _existing_regular_file_head(resolved_path) or head
+    # Only an extensionless destination is inspected, so named files stay free
+    # of I/O and an append to a pipe or device is left untouched. The shared
+    # rule still covers a package-relative ``scripts/`` member
+    # (``scripts/collect``); a virtual or host path never starts with
+    # ``scripts/``, so that branch cannot match one.
     return is_code_file(path, head)
 
 
