@@ -101,7 +101,7 @@ describe("collectRenderedSubtasks", () => {
       "Subtask",
     );
 
-    expect(rendered.tasks.get("task-1")).toMatchObject({
+    expect(rendered.tasksByGroup.get(1)?.get("task-1")).toMatchObject({
       id: "task-1",
       status: "in_progress",
       subagent_type: "researcher",
@@ -137,7 +137,7 @@ describe("collectRenderedSubtasks", () => {
       "Subtask",
     );
 
-    expect(rendered.tasks.get("task-1")).toMatchObject({
+    expect(rendered.tasksByGroup.get(0)?.get("task-1")).toMatchObject({
       id: "task-1",
       status: "failed",
       error: "Subtask failed",
@@ -181,7 +181,7 @@ describe("collectRenderedSubtasks", () => {
       "Subtask",
     );
 
-    expect(rendered.tasks.get("task-1")).toMatchObject({
+    expect(rendered.tasksByGroup.get(0)?.get("task-1")).toMatchObject({
       id: "task-1",
       status: "completed",
       result: "done",
@@ -218,7 +218,9 @@ describe("collectRenderedSubtasks description fallback", () => {
         "failed",
         "Localized subtask",
       );
-      expect(rendered.tasks.get("task-1")?.description).toBe(expected);
+      expect(rendered.tasksByGroup.get(0)?.get("task-1")?.description).toBe(
+        expected,
+      );
     },
   );
 });
@@ -350,5 +352,101 @@ describe("resolveRenderedSubtask", () => {
       result: "done",
       futureLiveMetadata: "preserved",
     });
+  });
+});
+
+describe("collectRenderedSubtasks reused task ids", () => {
+  function turnGroup(
+    taskId: string,
+    description: string,
+    result: string,
+  ): MessageGroup {
+    return {
+      id: `group-${description}`,
+      type: "assistant:subagent",
+      messages: [
+        {
+          type: "ai",
+          content: "",
+          tool_calls: [
+            {
+              id: taskId,
+              name: "task",
+              args: {
+                subagent_type: "researcher",
+                description,
+                prompt: description,
+              },
+            },
+          ],
+        } as unknown as Message,
+        {
+          type: "tool",
+          name: "task",
+          tool_call_id: taskId,
+          content: result,
+          additional_kwargs: {
+            subagent_status: "completed",
+            subagent_result_brief: result,
+          },
+        } as unknown as Message,
+      ],
+    };
+  }
+
+  it("keeps each turn's own snapshot when a provider reuses one tool_call_id", () => {
+    const rendered = collectRenderedSubtasks(
+      [
+        turnGroup("call_0", "First task", "first result"),
+        turnGroup("call_0", "Second task", "second result"),
+      ],
+      () => false,
+      "failed",
+      "Subtask",
+    );
+
+    expect(rendered.tasksByGroup.get(0)?.get("call_0")).toMatchObject({
+      description: "First task",
+      status: "completed",
+      result: "first result",
+    });
+    expect(rendered.tasksByGroup.get(1)?.get("call_0")).toMatchObject({
+      description: "Second task",
+      status: "completed",
+      result: "second result",
+    });
+  });
+
+  it("reports the last owning group when a provider reuses one tool_call_id", () => {
+    const rendered = collectRenderedSubtasks(
+      [
+        turnGroup("call_0", "First task", "first result"),
+        turnGroup("call_0", "Second task", "second result"),
+      ],
+      () => false,
+      "failed",
+      "Subtask",
+    );
+
+    expect(rendered.ownerGroupByTaskId.get("call_0")).toBe(1);
+  });
+
+  it("reports each turn as the owner of an id it uses once", () => {
+    const rendered = collectRenderedSubtasks(
+      [
+        turnGroup("call_0", "First task", "first result"),
+        turnGroup("call_1", "Second task", "second result"),
+      ],
+      () => false,
+      "failed",
+      "Subtask",
+    );
+
+    expect(rendered.ownerGroupByTaskId).toEqual(
+      new Map([
+        ["call_0", 0],
+        ["call_1", 1],
+      ]),
+    );
   });
 });
