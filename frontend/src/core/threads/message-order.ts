@@ -38,6 +38,36 @@ export const MESSAGE_SEQ_KEY = "deerflow_seq";
 
 const INJECTED_USER_MESSAGE_ID_SUFFIX = "__user";
 
+/**
+ * Visible text length of a message's content.
+ *
+ * Used to tell a *truncated* live copy from a complete one: an interrupted
+ * stream leaves a partially assembled live message in memory, while the
+ * persisted copy in history already holds the finished turn. Non-text parts
+ * (images, citations) contribute nothing, which is fine for the comparison.
+ */
+function visibleTextLength(message: Message): number {
+  const content = message.content;
+  if (typeof content === "string") {
+    return content.length;
+  }
+  if (!Array.isArray(content)) {
+    return 0;
+  }
+  let total = 0;
+  for (const part of content) {
+    if (typeof part === "string") {
+      total += part.length;
+      continue;
+    }
+    const text = (part as { text?: unknown } | null)?.text;
+    if (typeof text === "string") {
+      total += text.length;
+    }
+  }
+  return total;
+}
+
 export function messageIdentity(message: Message): string | undefined {
   // Providers can reuse tool_call_id across runs and assistant turns. The
   // journal assigns result ids before persistence so feed/checkpoint copies
@@ -324,12 +354,25 @@ export function mergeMessages(
       // A hidden checkpoint control message must not replace a visible
       // canonical user turn that happens to reuse its identity. In every
       // other case the live checkpoint copy is fresher and replaces history
-      // without moving it.
+      // without moving it — unless the live copy is *truncated*.
+      //
+      // An interrupted stream (tab closed/backgrounded mid-run, dropped SSE
+      // connection) leaves a partially assembled live copy in memory. Letting
+      // it replace the complete persisted copy is what turns a reconnected
+      // transcript into a patchwork: the server holds the finished turn, the
+      // UI re-renders the fragments that happened to arrive before the drop.
+      // A live copy only wins when it is at least as long as the canonical
+      // one, which is the normal streaming-growth case (0 -> full text, never
+      // shrinking). A shorter live copy keeps the authoritative history.
       if (
         !isHiddenFromUIMessage(message) ||
         isHiddenFromUIMessage(canonicalMessage)
       ) {
-        replacementByIdentity.set(identity, message);
+        const liveLength = visibleTextLength(message);
+        const canonicalLength = visibleTextLength(canonicalMessage);
+        if (liveLength >= canonicalLength) {
+          replacementByIdentity.set(identity, message);
+        }
       }
       continue;
     }
