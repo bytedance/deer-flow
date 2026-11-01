@@ -608,6 +608,7 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
                 "serply": "SERPLY_API_KEY",
                 "sofya": "SOFYA_API_KEY",
                 "tencent_wsa": "TENCENTCLOUD_WSA_APIKEY",
+                "outcrawl": "OUTCRAWL_API_KEY",
                 "webz": "WEBZ_API_KEY",
             },
             "web_fetch": {
@@ -617,6 +618,7 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
                 "fastcrw": "CRW_API_KEY",
                 "sofya": "SOFYA_API_KEY",
                 "unbrowse": "UNBROWSE_API_KEY",
+                "outcrawl": "OUTCRAWL_API_KEY",
             },
             "image_search": {
                 "brave": "BRAVE_SEARCH_API_KEY",

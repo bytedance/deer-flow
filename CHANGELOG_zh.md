@@ -18,6 +18,15 @@
   Queue 等当前任务结束后再执行下一条消息；Steer 让主 Agent 先处理新要求，原生子 Agent 可暂停后恢复。
   Gateway 重启后，尚未确认生效的消息可以手动重试。([#7729])
 
+- **社区工具：** 新增 Outcrawl 作为可选启用的 `web_search` 和 `web_fetch` 提供方
+  （`deerflow.community.outcrawl`），两者共用一个 `OUTCRAWL_API_KEY`。`web_search` 调用
+  `POST /v1/search`，返回 `{title, url, snippet}` 结果，上限 20 条；`web_fetch` 调用
+  `POST /v1/scrape` 获取 Markdown，标题取自 `metadata.title`（没有时取第一个标题，再没有时用 URL），
+  正文截断为 4096 个字符。当 Outcrawl 在 `warnings` 列表中标记结果质量下降时（`login_redirect`、
+  `partial_document`、`empty_capture` 等；搜索为 `engines_refused`），这些警告会传给 Agent：
+  `web_search` 返回 `{query, results, warnings}`，`web_fetch` 在正文上方每条警告一行引用。
+  目标页面返回 HTTP 错误时，`web_fetch` 也会注明。([#7778])
+
 ### 修复
 
 - **智能体：** 当模型提供方在不同轮次复用同一个工具调用 ID（例如每次响应都是 `call_0`）时，
@@ -12725,3 +12734,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7729]: https://github.com/bytedance/deer-flow/pull/7729
 [#7732]: https://github.com/bytedance/deer-flow/pull/7732
 [#7762]: https://github.com/bytedance/deer-flow/pull/7762
+[#7778]: https://github.com/bytedance/deer-flow/pull/7778

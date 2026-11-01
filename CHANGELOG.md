@@ -17,6 +17,18 @@ This section accumulates work toward the **2.3.0** milestone
   native subagents pause and resume. Unconfirmed messages can be retried
   after a Gateway restart. ([#7729])
 
+- **community:** Add Outcrawl as an opt-in `web_search` and `web_fetch`
+  provider (`deerflow.community.outcrawl`), one `OUTCRAWL_API_KEY` for both.
+  `web_search` calls `POST /v1/search` and returns `{title, url, snippet}`
+  results, capped at 20; `web_fetch` calls `POST /v1/scrape` for Markdown,
+  titled from `metadata.title` (else the first heading, else the URL) and cut
+  at 4096 characters. When Outcrawl marks a result as degraded in its
+  `warnings` list (`login_redirect`, `partial_document`, `empty_capture` and
+  others; `engines_refused` on search), the warnings reach the agent:
+  `web_search` returns `{query, results, warnings}` and `web_fetch` puts one
+  quoted warning line per entry above the content. `web_fetch` also flags a
+  target page that answered with an HTTP error. ([#7778])
+
 ### Fixed
 
 - **agents:** A clarification no longer overwrites an earlier question when the
@@ -15966,3 +15978,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7729]: https://github.com/bytedance/deer-flow/pull/7729
 [#7732]: https://github.com/bytedance/deer-flow/pull/7732
 [#7762]: https://github.com/bytedance/deer-flow/pull/7762
+[#7778]: https://github.com/bytedance/deer-flow/pull/7778

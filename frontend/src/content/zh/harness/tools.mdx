@@ -110,7 +110,7 @@ tools:
 
 ### 网络搜索
 
-<Tabs items={["DuckDuckGo（默认）", "Tavily", "Brave", "Serply", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya", "You.com"]}>
+<Tabs items={["DuckDuckGo（默认）", "Tavily", "Brave", "Serply", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya", "You.com", "Outcrawl"]}>
   <Tabs.Tab>
 ```yaml
 tools:
@@ -209,6 +209,17 @@ tools:
 返回 You.com 自有索引的结果，每条结果附带从页面提取的片段，而不只是一段元描述。未配置 Key 时使用免密钥端点（免费额度，目前为每天 100 次搜索）；配置 `YDC_API_KEY` 后自动切换到额度更高的完整 Search API。`max_results` 上限为 100。
 
 API Key 可选，可在 [You.com](https://you.com/platform) 获取。
+
+无需额外依赖。
+
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - use: deerflow.community.outcrawl.tools:web_search_tool
+    api_key: $OUTCRAWL_API_KEY
+```
+返回包含标题、URL 和摘要的网页搜索结果。需要 [Outcrawl](https://outcrawl.ai) API Key，`max_results` 上限为 20。同时支持 `web_fetch`（`deerflow.community.outcrawl.tools:web_fetch_tool`），以 Markdown 返回页面正文。当 Outcrawl 标记结果质量下降时（例如返回的是登录页而不是所请求的页面），两个工具都会把它的 `warnings` 传给 Agent。
 
 无需额外依赖。
 

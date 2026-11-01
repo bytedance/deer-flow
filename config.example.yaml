@@ -1074,6 +1074,16 @@ tools:
   #   max_results: 5                  # Clamped to 1-100 by You.com
   #   # api_key: $YDC_API_KEY         # Omit to use the keyless free tier
 
+  # Web search tool (uses Outcrawl, requires OUTCRAWL_API_KEY)
+  # Outcrawl search returns title, URL and snippet per hit. The same key also
+  # powers deerflow.community.outcrawl.tools:web_fetch_tool (page as Markdown).
+  # Get a key at https://outcrawl.ai (docs: https://outcrawl.ai/docs/api/overview)
+  # - name: web_search
+  #   group: web
+  #   use: deerflow.community.outcrawl.tools:web_search_tool
+  #   max_results: 5                  # Clamped to 1-20
+  #   # api_key: $OUTCRAWL_API_KEY    # Optional if the env var is set
+
   # Web fetch tool (uses Browserless - headless Chrome, self-hosted or cloud)
   # Browserless renders pages with a real headless Chrome, ideal for JavaScript-heavy
   # sites and SPAs. Deploy your own: https://github.com/browserless/browserless
