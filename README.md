@@ -2598,7 +2598,7 @@ failed or timed-out outcome already published before cancellation.
 
 Sub-agent step history is persisted separately from live streaming. A batch
 retries only when the store proves that no event committed (for example, a DB
-failure before commit or a successful JSONL rollback). After three consecutive
+transient failure before commit or a successful JSONL I/O rollback). After three consecutive
 failed attempts, or any ambiguous exception or store cancellation, persistence
 stops for that run without replaying possibly committed events. Pending payloads
 are released; finalization logs unconfirmed and skipped event counts with a

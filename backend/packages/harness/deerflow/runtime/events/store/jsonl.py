@@ -260,7 +260,8 @@ class JsonlRunEventStore(RunEventStore):
         groups are processed sequentially, so a later failure does not roll
         back earlier thread groups. Cancellation drains the current thread group
         before propagating, without starting subsequent groups. This rollback
-        does not make a multi-file batch crash-atomic.
+        does not make a multi-file batch crash-atomic. Unlocked readers may see
+        rows before rollback and see them again at new seq values after retry.
         """
         if not events:
             return []
@@ -342,8 +343,8 @@ class JsonlRunEventStore(RunEventStore):
                 for record in records:
                     records_by_run.setdefault(record["run_id"], []).append(record)
                 run_batches = [(self._run_file(thread_id, run_id), run_records) for run_id, run_records in records_by_run.items()]
-            except Exception as exc:
-                raise RunEventStoreNotCommittedError("JSONL batch preparation failed before append") from exc
+            except OSError as exc:
+                raise RunEventStoreNotCommittedError(f"JSONL batch preparation failed before append: {type(exc).__name__}: {exc}") from exc
             await asyncio.to_thread(self._append_record_groups, run_batches)
             return records
 
@@ -385,8 +386,8 @@ class JsonlRunEventStore(RunEventStore):
                         path,
                         exc_info=True,
                     )
-            if rolled_back:
-                raise RunEventStoreNotCommittedError("JSONL batch append rolled back") from exc
+            if rolled_back and isinstance(exc, OSError):
+                raise RunEventStoreNotCommittedError(f"JSONL batch append rolled back: {type(exc).__name__}: {exc}") from exc
             raise
 
     async def list_messages(self, thread_id, *, limit=50, before_seq=None, after_seq=None, user_id: str | None | _AutoSentinel = AUTO):

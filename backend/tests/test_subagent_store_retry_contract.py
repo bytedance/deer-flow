@@ -72,7 +72,8 @@ async def test_jsonl_failed_rollback_remains_ambiguous(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_db_checkout_failure_can_retry(tmp_path, monkeypatch):
+@pytest.mark.parametrize("failure", [ConnectionError("checkout failed"), ValueError("invalid timestamp"), UnicodeError("invalid content")])
+async def test_db_checkout_failure_can_retry(tmp_path, monkeypatch, failure):
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
     from deerflow.persistence.models.run_event import RunEventRow, RunEventThreadSeqRow
@@ -86,11 +87,11 @@ async def test_db_checkout_failure_can_retry(tmp_path, monkeypatch):
     original = store._max_seq_for_thread
 
     async def fail_checkout(*args):
-        raise ConnectionError("checkout failed before write")
+        raise failure
 
     try:
         monkeypatch.setattr(store, "_max_seq_for_thread", fail_checkout)
-        with pytest.raises(RunEventStoreNotCommittedError):
+        with pytest.raises(RunEventStoreNotCommittedError if isinstance(failure, ConnectionError) else type(failure)):
             await store.put_batch([event()])
         monkeypatch.setattr(store, "_max_seq_for_thread", original)
         await store.put_batch([event()])
@@ -161,3 +162,37 @@ async def test_repeated_rejection_is_bounded_and_reported(caplog):
     assert "unconfirmed=27" in caplog.text
     assert "skipped=973" in caplog.text
     assert "child" in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [OSError("temporary read failure"), ValueError("corrupt watermark")])
+async def test_jsonl_journal_transient_retry_and_deterministic_quarantine(tmp_path, monkeypatch, failure):
+    from deerflow.runtime.journal import RunJournal
+
+    store = JsonlRunEventStore(tmp_path)
+    load = store._ensure_seq_loaded
+    calls = 0
+
+    async def fail_once(thread_id):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise failure
+        await load(thread_id)
+
+    monkeypatch.setattr(store, "_ensure_seq_loaded", fail_once)
+    journal = RunJournal("r1", "t1", store, flush_threshold=100)
+    journal._put(event_type="trace", category="trace", content="first")
+    with pytest.raises(RunEventStoreNotCommittedError if isinstance(failure, OSError) else ValueError):
+        await journal.flush()
+    if isinstance(failure, OSError):
+        await journal.flush()
+        assert len(await store.list_events("t1", "r1")) == 1
+        assert calls == 2
+    else:
+        for _ in range(5):
+            journal._put(event_type="trace", category="trace", content="later")
+            with pytest.raises(RuntimeError, match="unknown durable outcome"):
+                await journal.flush()
+        assert calls == 1
+    await journal.close(flush=False)

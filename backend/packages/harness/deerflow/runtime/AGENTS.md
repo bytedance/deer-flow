@@ -179,8 +179,9 @@ journal and emit no such event. Recorder failures are fail-open.
 `RunEventStoreNotCommittedError` allows retry; three consecutive failures or an
 unknown outcome stop persistence and release pending payloads. Finalization logs
 unconfirmed/skipped counts and at most 20 task IDs; SSE and business status remain
-independent. DB pre-commit errors and fully rolled-back JSONL batches emit the
-explicit signal; a JSONL batch with an earlier committed thread never does.
+independent. Plausibly transient DB pre-commit errors and rolled-back JSONL I/O failures emit the
+explicit signal; deterministic data errors stay generic to quarantine Journal
+poison batches. A JSONL batch with an earlier committed thread never retries.
 Regression: `test_subagent_store_retry_contract.py` and
 `test_worker_subagent_write_outcome.py` (Worker and reopened JSONL).
 

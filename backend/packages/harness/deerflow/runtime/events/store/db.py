@@ -16,6 +16,8 @@ from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import delete, func, or_, select, text, update
+from sqlalchemy.exc import InterfaceError, OperationalError
+from sqlalchemy.exc import TimeoutError as SqlTimeoutError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.models.run_event import RunEventRow, RunEventThreadSeqRow
@@ -287,11 +289,11 @@ class DbRunEventStore(RunEventStore):
                         commit_started = True
                     return [self._row_to_dict(r) for r in rows]
         except Exception as exc:
-            if not commit_started:
+            if not commit_started and isinstance(exc, (OperationalError, InterfaceError, SqlTimeoutError, TimeoutError, ConnectionError)):
                 # No COMMIT was issued; checkout, preparation and flush errors
                 # cannot have committed this transaction. Commit/ack failures
                 # and post-commit receipt errors must remain ambiguous.
-                raise RunEventStoreNotCommittedError("DB batch failed before commit") from exc
+                raise RunEventStoreNotCommittedError(f"DB batch failed before commit: {type(exc).__name__}: {exc}") from exc
             raise
 
     async def put_if_absent(
