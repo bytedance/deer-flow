@@ -2,6 +2,10 @@
 
 Sandbox restore requires a thread ID, even forks.
 
+Signal managed bash before draining cancellation. Stop only the lease owner’s
+processes before outer release; normal completion keeps previews. Replacement
+resets its command generation. Regression: `test_sandbox_command_cancellation.py`.
+
 On startup failure, close reads and kill/reap the child, preserving the error.
 Only `finally` closes write ends.
 

@@ -653,6 +653,28 @@ async def test_externally_advanced_state_is_never_misattributed(plugin):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("verified", [False, True])
+async def test_same_run_steer_requires_host_input_record_before_result_attribution(plugin, verified):
+    _, actions, service = plugin
+    runs = Runs()
+    team = await create(actions, runs)
+    member = team["members"][0]
+    job = await actions["send"]({"team_id": team["id"], "member_id": member["id"], "text": "Check", "request_id": "steer"}, context(runs))
+    await service.tick()
+    messages = runs.threads[member["thread_id"]]["values"]["messages"]
+    messages.append({"type": "human", "id": "steered__user", "content": "Include the appendix", "additional_kwargs": {"run_id": job["id"], "run_input_id": "direct"}})
+
+    async def list_inputs(**kwargs):
+        return {"items": [{"id": "direct", "message_id": "steered", "mode": "steer", "status": "applied", "target_run_id": job["id"]}] if verified else []}
+
+    runs.list_inputs = list_inputs
+    runs.finish(job["id"], "Appendix checked.")
+    await service.tick()
+    view = await actions["get"]({"team_id": team["id"]}, context(runs))
+    assert view["jobs"][0]["status"] == ("completed" if verified else "failed")
+
+
+@pytest.mark.asyncio
 async def test_service_lock_prevents_two_workers_and_releases_on_shutdown(plugin):
     import sqlite3
 

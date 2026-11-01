@@ -3,7 +3,7 @@
 import json
 import logging
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from hashlib import sha256
 from typing import Any, override
 
@@ -96,12 +96,42 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
 
     state_schema = ClarificationMiddlewareState
 
-    def _stable_message_id(self, tool_call_id: str, formatted_message: str) -> str:
-        """Build a deterministic message ID so retried clarification calls replace, not append."""
-        if tool_call_id:
-            return f"clarification:{tool_call_id}"
-        digest = sha256(formatted_message.encode("utf-8")).hexdigest()[:16]
-        return f"clarification:{digest}"
+    def _stable_message_id(self, tool_call_id: str, formatted_message: str, issuing_message_id: str | None = None) -> str:
+        """Build a deterministic message ID so retried clarification calls replace, not append.
+
+        The ID doubles as the human-input ``request_id``. Providers may reuse
+        call IDs across turns, so the ID also names the AIMessage that issued
+        the call: a later question must not take an earlier one's ID, or
+        ``add_messages`` would replace the earlier question in place and leave
+        the new call without a result. A retry of the same call comes from the
+        same AIMessage and keeps its ID.
+        """
+        base = tool_call_id or sha256(formatted_message.encode("utf-8")).hexdigest()[:16]
+        if not issuing_message_id:
+            return f"clarification:{base}"
+        # A digest rather than the raw AIMessage ID keeps the request ID short
+        # enough for keys built from it, such as the 128-character
+        # notification source key.
+        return f"clarification:{base}:{sha256(issuing_message_id.encode('utf-8')).hexdigest()[:12]}"
+
+    @staticmethod
+    def _issuing_message_id(request: ToolCallRequest) -> str | None:
+        """ID of the latest AIMessage in state that carries this tool call, if any.
+
+        Message IDs are unique within state, since ``add_messages`` merges
+        messages that share one, so this identifies the call's turn.
+        """
+        state = getattr(request, "state", None)
+        if not isinstance(state, Mapping):
+            return None
+        messages = state.get("messages")
+        if not isinstance(messages, list):
+            return None
+        tool_call_id = request.tool_call.get("id") or ""
+        for message in reversed(messages):
+            if isinstance(message, AIMessage) and any((tool_call.get("id") or "") == tool_call_id for tool_call in message.tool_calls):
+                return message.id or None
+        return None
 
     def _normalize_options(self, raw_options: Any) -> list[str]:
         """Normalize tool-provided options into displayable string values."""
@@ -113,7 +143,7 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
         if isinstance(options, str):
             try:
                 options = json.loads(options)
-            except (json.JSONDecodeError, TypeError):
+            except (json.JSONDecodeError, TypeError, RecursionError):
                 options = [options]
 
         if options is None:
@@ -129,7 +159,11 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
         normalized: list[str] = []
         seen: set[str] = set()
         for option in options:
-            text = _XML_TAG_RE.sub("", str(option)).strip()
+            try:
+                text = _XML_TAG_RE.sub("", str(option)).strip()
+            except RecursionError:
+                # A native option nested past the limit cannot become a label.
+                continue
             if not text or text in seen:
                 continue
             seen.add(text)
@@ -140,18 +174,17 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
     def _flatten_dict_option_values(value: dict[str, Any]) -> list[str | int | float]:
         """Flatten scalar leaves from XML-to-dict option payloads in source order."""
         flattened: list[str | int | float] = []
-
-        def collect(nested: Any) -> None:
-            if isinstance(nested, dict):
-                for item in nested.values():
-                    collect(item)
-            elif isinstance(nested, list):
-                for item in nested:
-                    collect(item)
-            elif isinstance(nested, str | int | float):
-                flattened.append(nested)
-
-        collect(value)
+        # Explicit stack instead of recursion: XML-to-dict payloads are
+        # model-controlled and can nest past the interpreter's limit.
+        stack: list[Any] = [value]
+        while stack:
+            node = stack.pop()
+            if isinstance(node, dict):
+                stack.extend(reversed(list(node.values())))
+            elif isinstance(node, list):
+                stack.extend(reversed(node))
+            elif isinstance(node, str | int | float):
+                flattened.append(node)
         return flattened
 
     @staticmethod
@@ -178,7 +211,7 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
         if isinstance(fields, str):
             try:
                 fields = json.loads(fields)
-            except (json.JSONDecodeError, TypeError):
+            except (json.JSONDecodeError, TypeError, RecursionError):
                 return []
         if not isinstance(fields, list):
             return []
@@ -457,7 +490,7 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
         tool_call_id = request.tool_call.get("id", "")
         logger.info("ask_clarification suppressed by run interaction policy; applying unattended risk guidance")
         return ToolMessage(
-            id=self._stable_message_id(tool_call_id, "proceed-without-clarification"),
+            id=self._stable_message_id(tool_call_id, "proceed-without-clarification", self._issuing_message_id(request)),
             content=(
                 "Clarification is disabled in this context — the human is not present "
                 "to answer synchronously. Do not ask for confirmation or wait for a human response. "
@@ -497,7 +530,7 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
         # Get the tool call ID
         tool_call_id = request.tool_call.get("id", "")
 
-        request_id = self._stable_message_id(tool_call_id, formatted_message)
+        request_id = self._stable_message_id(tool_call_id, formatted_message, self._issuing_message_id(request))
         human_input_payload = self._build_human_input_payload(args, tool_call_id=tool_call_id, request_id=request_id, fields=fields)
 
         # Create a ToolMessage with the formatted question

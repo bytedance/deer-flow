@@ -135,3 +135,7 @@ continue, and consume/log its outcome in a completion callback. Prepare-stage
 cancellation retains its handoff/reclaim path. Regressions in
 `tests/blocking_io/test_workspace_changes_cancellation.py` must cover prompt
 metadata cancellation and text-cache drain/cleanup.
+
+### Project Summary Worker Shutdown (`projects/summaries.py`)
+
+`stop()` closes admission synchronously and shares one shielded `_stop_task`; `start()` reopens admission only after it completes and is cleared. Preserve queue-drop/sentinel/grace semantics. Regressions: `test_stop_drains_workers_before_propagating_repeated_cancellation` and `test_start_after_stop_restarts_worker_pool` in `backend/tests/test_project_summaries.py`.

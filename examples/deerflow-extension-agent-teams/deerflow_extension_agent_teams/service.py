@@ -647,8 +647,31 @@ class Teams:
         if marker is None:
             await self.finish(owner, team, job, "failed", "Request checkpoint no longer available; inspect the conversation")
             return
-        if any(m.get("type", m.get("role")) in ("human", "user") for m in messages[marker + 1 :]):
-            await self.finish(owner, team, job, "failed", "Conversation advanced outside this request; inspect it before reusing the result")
+        later_humans = [m for m in messages[marker + 1 :] if m.get("type", m.get("role")) in ("human", "user")]
+        verified = {}
+        if later_humans and callable(getattr(runs, "list_inputs", None)):
+            records = await runs.list_inputs(thread_id=thread)
+            verified = {entry["id"]: entry for entry in records.get("items", []) if entry.get("target_run_id") == job["run_id"] and entry.get("mode") == "steer" and entry.get("status") == "applied"}
+        task_ids = {call.get("id") for message in messages[marker + 1 :] for call in message.get("tool_calls", []) if call.get("name") == "task"}
+
+        def belongs_to_this_run(message):
+            meta = message.get("additional_kwargs", {})
+            if meta.get("run_id") != job["run_id"]:
+                return False
+            entry = verified.get(meta.get("run_input_id"))
+            if entry and str(message.get("id", "")).removesuffix("__user") == entry["message_id"]:
+                return True
+            origin = meta.get("origin_task_id")
+            return bool(verified and origin in task_ids and message.get("id") == "run-input-result-" + job["run_id"] + "-" + str(origin))
+
+        if any(not belongs_to_this_run(m) for m in later_humans):
+            await self.finish(
+                owner,
+                team,
+                job,
+                "failed",
+                "Conversation advanced outside this request; inspect it before reusing the result",
+            )
             return
         clarification = pending_clarification(messages[marker + 1 :])
         if clarification:

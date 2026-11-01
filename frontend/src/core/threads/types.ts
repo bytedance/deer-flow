@@ -71,6 +71,7 @@ export interface AgentThreadState extends Record<string, unknown> {
   todos?: Todo[];
   goal?: GoalState | null;
   goal_outcome?: ThreadGoalOutcome | null;
+  applied_run_inputs?: { run_id: string; ids: string[] } | null;
   tool_artifacts?: ArtifactEntry[];
 }
 

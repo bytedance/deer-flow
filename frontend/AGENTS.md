@@ -280,6 +280,10 @@ or user/skill changes. `core/skills/export.ts` owns the revision-bound Blob down
 HTTP 409 requires explicit preview refresh. Keep file lists paginated and diagnostics
 localized. Browser handoff does not prove the file was saved to disk.
 
+`core/skills/error-detail.ts` reads error JSON as unknown for skill management
+and export. Narrow records and string fields before use; malformed bodies must
+preserve typed HTTP failures and the upload API's soft-failure contract.
+
 Sidebar rows request deletion through `ThreadDeleteDialogProvider`, hosted in
 `WorkspaceSidebar` outside the virtualized flat/project lists. Keep the selected
 thread snapshot and retry UI alive when a partial deletion removes its row.

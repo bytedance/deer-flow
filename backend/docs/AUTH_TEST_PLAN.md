@@ -1494,7 +1494,7 @@ done
 docker logs deer-flow-gateway 2>&1 | grep -E "ChannelManager|channel" | head -10
 ```
 
-**预期：** 无 auth 相关错误。渠道不依赖浏览器 cookie；服务端通过内部认证头把请求归入 `default` 用户桶。
+**预期：** 无 auth 相关错误。渠道不依赖浏览器 cookie；服务端通过内部认证头接受请求，run 归入绑定 owner 的用户桶（未绑定时为规范化后的平台用户 ID；仅 `DEER_FLOW_AUTH_DISABLED=1` 时为 `default`）。
 
 #### TC-DOCKER-05: reset_admin 密码写入 0600 凭证文件（不再走日志）
 

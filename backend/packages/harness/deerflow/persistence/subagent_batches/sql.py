@@ -5,7 +5,7 @@ from collections import Counter
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import defer
@@ -250,12 +250,27 @@ class SubagentBatchRepository:
         limit: int,
         exclude_item_ids: tuple[str, ...] = (),
     ) -> list[dict[str, Any]]:
-        """Promote pending work and atomically claim runnable items."""
+        """Recover expired attempts, then promote and claim only runnable work."""
         if limit <= 0:
             return []
         claimed: list[dict[str, Any]] = []
         async with self._sf() as session:
-            batches = list((await session.execute(select(SubagentBatchRow).where(SubagentBatchRow.status.in_(("queued", "running"))).order_by(SubagentBatchRow.created_at, SubagentBatchRow.id).with_for_update(skip_locked=True))).scalars())
+            expired_items = select(SubagentBatchItemRow.id).where(
+                SubagentBatchItemRow.batch_id == SubagentBatchRow.id,
+                SubagentBatchItemRow.status.in_(("leased", "running")),
+                SubagentBatchItemRow.lease_expires_at < now,
+                SubagentBatchItemRow.id.not_in(exclude_item_ids),
+            )
+            batches = list(
+                (
+                    await session.execute(
+                        select(SubagentBatchRow)
+                        .where(or_(SubagentBatchRow.status.in_(("queued", "running")), (SubagentBatchRow.status == "paused") & expired_items.exists()))
+                        .order_by(SubagentBatchRow.created_at, SubagentBatchRow.id)
+                        .with_for_update(skip_locked=True)
+                    )
+                ).scalars()
+            )
             for batch in batches:
                 if len(claimed) >= limit:
                     break
@@ -304,6 +319,11 @@ class SubagentBatchRepository:
 
                 if terminalized_expired:
                     await self._refresh_batch_status(session, batch, now=now)
+
+                # Pausing blocks new work, not recovery of an abandoned attempt.
+                # Retryable items remain queued until an explicit resume.
+                if batch.status == "paused":
+                    continue
 
                 counts = await self._counts(session, batch.id)
                 live = counts["queued"] + counts["leased"] + counts["running"]

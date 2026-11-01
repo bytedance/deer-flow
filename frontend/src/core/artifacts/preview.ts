@@ -1,3 +1,5 @@
+import { indexToolResults } from "../messages/tool-result";
+
 export function getTabularDelimiter(
   language: string | null,
 ): "," | "\t" | null {
@@ -98,8 +100,9 @@ export function buildWriteFileDraftContent({
 
   let draft = "";
   let hasDraft = false;
+  const toolResults = indexToolResults(messages);
 
-  for (const message of messages) {
+  for (const [messageIndex, message] of messages.entries()) {
     if (message.type !== "ai") {
       continue;
     }
@@ -116,7 +119,7 @@ export function buildWriteFileDraftContent({
 
       const toolCallId = toolCall.id;
       const toolResult = toolCallId
-        ? findToolResult(toolCallId, messages)
+        ? findToolResult(toolCallId, toolResults.get(messageIndex) ?? [])
         : undefined;
       const isSelected =
         toolCallId === target.toolCallId &&

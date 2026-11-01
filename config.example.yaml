@@ -75,6 +75,7 @@ logging:
 #   middlewares:
 #     - my_company.deerflow_middlewares:DomainGuardMiddleware
 #     - class: my_company.deerflow_middlewares:LatencyStampingMiddleware
+#       apply_to: lead  # both (default), lead, or subagent
 #       kwargs:
 #         header: X-DeerFlow-Latency
 

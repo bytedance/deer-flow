@@ -2703,6 +2703,17 @@ def test_get_thread_history_injects_turn_duration_once_per_run() -> None:
     assert replayed[4]["additional_kwargs"]["turn_duration"] == 9
 
 
+def test_stamp_turn_duration_recovers_from_non_mapping_additional_kwargs(caplog) -> None:
+    from app.gateway.routers.thread_runs import stamp_turn_duration_on_last_ai
+
+    messages = [{"seq": 7, "run_id": "run-1", "type": "ai", "additional_kwargs": "legacy"}]
+    with caplog.at_level("WARNING", logger="app.gateway.routers.thread_runs"):
+        stamp_turn_duration_on_last_ai(messages, {"run-1": 4}, thread_id="thread-1")
+
+    assert messages[0]["additional_kwargs"] == {"turn_duration": 4}
+    assert any("thread thread-1" in record.message and "row seq 7" in record.message for record in caplog.records)
+
+
 # ── branch threads from completed assistant turns ─────────────────────────────
 
 

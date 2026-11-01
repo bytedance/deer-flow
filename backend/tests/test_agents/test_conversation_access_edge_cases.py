@@ -39,9 +39,9 @@ def test_visible_text_is_parsed_once_per_scan_and_refreshed_on_the_next_read(mon
 
     calls = Counter()
 
-    def track_projection(row):
+    def track_projection(row, **kwargs):
         calls[row["seq"]] += 1
-        return _visible_text(row)
+        return _visible_text(row, **kwargs)
 
     monkeypatch.setattr(conversation_access, "_visible_text", track_projection)
 
@@ -95,6 +95,13 @@ def test_only_visible_text_blocks_cross_the_reader():
     }
 
     assert _visible_text(row) == ("assistant", "visible answer")
+
+
+@pytest.mark.parametrize("malformed_role", [["ai"], {"type": "ai"}])
+def test_visible_text_skips_unhashable_message_roles(malformed_role):
+    row = {"seq": 1, "content": {"type": malformed_role, "content": "ignored"}}
+
+    assert _visible_text(row) is None
 
 
 @pytest.mark.parametrize("path", ["/workspace/chats/source", "/workspace/agents/researcher/chats/source"])
