@@ -19,6 +19,14 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **agents:** A clarification no longer overwrites an earlier question when the
+  provider reuses a tool-call ID across turns (for example `call_0` on every
+  response). Its message ID, which is also the human-input `request_id`, named
+  only the call ID, so the later question replaced the earlier one in place and
+  the later call was left without a result. The ID now also names the
+  AIMessage that issued the call; a retry of the same call keeps its ID.
+  ([#7762])
+
 - **projects:** The trash retention sweep no longer deletes live document
   originals when the data directory, `users/`, a user's directory or a
   user's `projects/` is a symlink. It protected each document by its resolved
@@ -15957,3 +15965,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7727]: https://github.com/bytedance/deer-flow/pull/7727
 [#7729]: https://github.com/bytedance/deer-flow/pull/7729
 [#7732]: https://github.com/bytedance/deer-flow/pull/7732
+[#7762]: https://github.com/bytedance/deer-flow/pull/7762
