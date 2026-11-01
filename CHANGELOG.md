@@ -19,6 +19,13 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **channels:** A DingTalk reply in AI card mode (`card_template_id`) is no
+  longer lost when a card request fails, for example without card permission
+  or during a DingTalk outage. dingtalk-stream logs a failed card request and
+  returns as if it succeeded, so neither the text running reply nor the
+  `sampleMarkdown` fallback for the final answer ever ran. The channel now
+  sends card requests itself and falls back when one fails. ([#7781])
+
 - **agents:** A clarification no longer overwrites an earlier question when the
   provider reuses a tool-call ID across turns (for example `call_0` on every
   response). Its message ID, which is also the human-input `request_id`, named
@@ -15966,3 +15973,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7729]: https://github.com/bytedance/deer-flow/pull/7729
 [#7732]: https://github.com/bytedance/deer-flow/pull/7732
 [#7762]: https://github.com/bytedance/deer-flow/pull/7762
+[#7781]: https://github.com/bytedance/deer-flow/pull/7781
