@@ -4,6 +4,10 @@
 
 BASH ?= bash
 BACKEND_UV_RUN = cd backend && uv run
+# Startup probes are opt-in; targets are explicit rather than inferred from .env.
+STARTUP_HOST ?= 127.0.0.1
+STARTUP_PORT ?= 2026
+STARTUP_DIAGNOSTIC_ARGS = $(if $(STARTUP_MODE),--startup-mode "$(STARTUP_MODE)" --startup-host "$(STARTUP_HOST)" --startup-port "$(STARTUP_PORT)")
 
 # Detect OS for Windows compatibility
 ifeq ($(OS),Windows_NT)
@@ -73,10 +77,10 @@ setup:
 	@$(BACKEND_UV_RUN) python ../scripts/setup_wizard.py
 
 doctor:
-	@$(BACKEND_UV_RUN) python ../scripts/doctor.py
+	@$(BACKEND_UV_RUN) python ../scripts/doctor.py $(STARTUP_DIAGNOSTIC_ARGS)
 
 support-bundle:
-	@$(BACKEND_UV_RUN) python ../scripts/support_bundle.py --include-doctor
+	@$(BACKEND_UV_RUN) python ../scripts/support_bundle.py --include-doctor $(STARTUP_DIAGNOSTIC_ARGS)
 
 detect-thread-boundaries:
 	@$(BACKEND_UV_RUN) python ../scripts/detect_thread_boundaries.py --json-output ../.deer-flow/thread-boundary-inventory.json

@@ -72,6 +72,7 @@ WINDOWS_HOME_RE = re.compile(r"(?i)([A-Z]:\\Users\\)([^\\\s:]+)")
 SAFE_THREAD_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 DOCTOR_STATUS_RE = re.compile(r"Status:\s*(\d+)\s+error\(s\),\s*(\d+)\s+warning\(s\)", re.IGNORECASE)
 ATTENTION_SIGNAL_NAMES = {
+    "startup_failed",
     "doctor_failed",
     "config_missing",
     "config_error",
@@ -403,10 +404,13 @@ def collect_thread_summary(project_root: Path, thread_id: str) -> dict[str, Any]
     }
 
 
-def collect_doctor_output(project_root: Path) -> dict[str, Any]:
+def collect_doctor_output(project_root: Path, *, startup_mode: str | None = None, startup_host: str = "127.0.0.1", startup_port: int = 2026) -> dict[str, Any]:
     backend_dir = project_root / "backend"
     cwd = backend_dir if backend_dir.exists() else project_root
-    return _run_command([sys.executable, str(project_root / "scripts" / "doctor.py")], cwd=cwd, timeout_s=60)
+    args = [sys.executable, str(project_root / "scripts" / "doctor.py")]
+    if startup_mode is not None:
+        args.extend(["--startup-mode", startup_mode, "--startup-host", startup_host, "--startup-port", str(startup_port)])
+    return _run_command(args, cwd=cwd, timeout_s=60)
 
 
 def _command_output(command: dict[str, Any] | None) -> str | None:
@@ -504,7 +508,7 @@ def _dirty_worktree(status_short: str | None) -> bool:
 def _status_from_signals(signals: dict[str, bool]) -> str:
     if signals["config_missing"] or signals["config_error"] or signals["models_missing"] or signals["extensions_config_error"]:
         return "needs_user_setup"
-    if signals["node_missing"] or signals["node_version_too_old"] or signals["nginx_missing"]:
+    if signals["node_missing"] or signals["node_version_too_old"] or signals["nginx_missing"] or signals.get("startup_failed"):
         return "environment_mismatch"
     if not signals["doctor_included"]:
         return "insufficient_evidence"
@@ -583,6 +587,7 @@ def build_triage_report(
     git_summary: dict[str, Any],
     doctor: dict[str, Any] | None,
     thread_summary: dict[str, Any] | None,
+    startup: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the stable machine-readable summary that maintainers and AI read first."""
     versions = _environment_versions(environment)
@@ -592,6 +597,7 @@ def build_triage_report(
     status_short = _git_stdout(git_summary, "status_short")
     doctor_errors, doctor_warnings = _doctor_counts(doctor)
     signals = {
+        "startup_failed": bool(startup and any(item["status"] == "fail" for item in startup["checks"])),
         "doctor_included": doctor is not None,
         "doctor_failed": bool(doctor and not doctor.get("ok")),
         "config_missing": config.get("present") is False,
@@ -606,8 +612,10 @@ def build_triage_report(
         "thread_summary_included": thread_summary is not None,
         "thread_summary_found": bool(thread_summary and thread_summary.get("found")),
     }
+    if startup is not None and startup["mode"] == "docker":
+        signals["nginx_missing"] = False  # Docker supplies nginx; a host binary is unnecessary.
     status = _status_from_signals(signals)
-    return {
+    report = {
         "schema_version": 1,
         "generated_at": manifest["generated_at"],
         "status": status,
@@ -636,9 +644,27 @@ def build_triage_report(
         },
         "reporter_next_steps": _reporter_next_steps(status, signals),
         "maintainer_next_steps": _maintainer_next_steps(status, signals),
-        "evidence_files": _evidence_files(include_doctor=doctor is not None, include_thread_summary=thread_summary is not None),
+        "evidence_files": _evidence_files(
+            include_doctor=doctor is not None,
+            include_thread_summary=thread_summary is not None,
+        ),
         "privacy": manifest["privacy"],
     }
+    if startup is not None:
+        report["startup"] = startup
+        report["evidence_files"].append(
+            {
+                "path": "startup.json",
+                "description": "Structured startup probes; no raw Docker endpoints or process command lines.",
+            }
+        )
+        findings = [item for item in startup["checks"] if item["status"] in {"warn", "fail"}]
+        report["reporter_next_steps"] = list(dict.fromkeys([item["fix"] for item in findings if item["fix"]] + report["reporter_next_steps"]))
+        report["maintainer_next_steps"].insert(
+            0,
+            "Read startup.json for the selected launch mode and probe targets; an occupied port may belong to an already running DeerFlow service.",
+        )
+    return report
 
 
 def _markdown_list(items: list[str]) -> str:
@@ -674,6 +700,13 @@ def render_issue_summary(triage: dict[str, Any]) -> str:
         "Privacy: this bundle excludes `.env`, raw conversation messages, and user file contents.",
         "",
     ]
+    if "startup" in triage:
+        startup = triage["startup"]
+        codes = ", ".join(item["code"] for item in startup["checks"] if item["status"] != "ok") or "none"
+        startup_lines = [f"- Startup: mode={startup['mode']}, bind={startup['host']}:{startup['port']}, findings={codes}"]
+        startup_lines.extend(f"- {item['label']}: {item['detail']}" for item in startup["checks"] if item["status"] != "ok")
+        next_steps = lines.index("### Reporter next steps")
+        lines[next_steps:next_steps] = startup_lines + [""]
     return "\n".join(lines)
 
 
@@ -896,6 +929,9 @@ def create_support_bundle(
     extensions_config_path: Path | None = None,
     thread_id: str | None = None,
     include_doctor: bool = False,
+    startup_mode: str | None = None,
+    startup_host: str = "127.0.0.1",
+    startup_port: int = 2026,
 ) -> Path:
     """Create a redacted support bundle and return the zip path."""
     project_root = project_root.resolve()
@@ -906,6 +942,13 @@ def create_support_bundle(
     # zipfile with a raw PermissionError/IsADirectoryError.
     if out_path.is_dir():
         raise ValueError(f"--out must be a file path, not a directory: {out_path}")
+    startup = None
+    if startup_mode is None and (startup_host != "127.0.0.1" or startup_port != 2026):
+        raise ValueError("select --startup-mode before overriding startup probe targets")
+    if startup_mode is not None:
+        from startup_diagnostics import collect_startup_diagnostics
+
+        startup = redact_data(collect_startup_diagnostics(startup_mode, host=startup_host, port=startup_port))
     out_path.parent.mkdir(parents=True, exist_ok=True)
     if thread_id:
         _validate_thread_id(thread_id)
@@ -927,11 +970,15 @@ def create_support_bundle(
     }
 
     environment = collect_environment(project_root)
+    if startup is not None:
+        manifest["includes"]["startup"] = True
     config_summary = collect_config_summary(config_path)
     extensions_summary = collect_extensions_summary(extensions_config_path)
     git_summary = collect_git_summary(project_root)
     thread_summary = collect_thread_summary(project_root, thread_id) if thread_id else None
-    doctor = collect_doctor_output(project_root) if include_doctor else None
+    doctor = None
+    if include_doctor:
+        doctor = collect_doctor_output(project_root) if startup_mode is None else collect_doctor_output(project_root, startup_mode=startup_mode, startup_host=startup_host, startup_port=startup_port)
     triage = build_triage_report(
         manifest=manifest,
         environment=environment,
@@ -940,6 +987,7 @@ def create_support_bundle(
         git_summary=git_summary,
         doctor=doctor,
         thread_summary=thread_summary,
+        startup=startup,
     )
 
     issue_summary = render_issue_summary(triage)
@@ -954,6 +1002,8 @@ def create_support_bundle(
         _write_json(zf, "config-summary", config_summary)
         _write_json(zf, "extensions-summary", extensions_summary)
         _write_json(zf, "git", git_summary)
+        if startup is not None:
+            _write_json(zf, "startup", startup)
         if thread_summary is not None:
             _write_json(zf, "thread-summary", thread_summary)
         if doctor is not None:
@@ -965,14 +1015,30 @@ def create_support_bundle(
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    from startup_diagnostics import add_startup_arguments
+
     parser = argparse.ArgumentParser(description=__doc__)
     repo_root = Path(__file__).resolve().parents[1]
     parser.add_argument("--project-root", type=Path, default=repo_root, help="DeerFlow project root")
     parser.add_argument("--config", type=Path, default=None, help="Path to config.yaml")
-    parser.add_argument("--extensions-config", type=Path, default=None, help="Path to extensions_config.json")
-    parser.add_argument("--thread-id", default=None, help="Optional thread id to include file manifests for")
+    parser.add_argument(
+        "--extensions-config",
+        type=Path,
+        default=None,
+        help="Path to extensions_config.json",
+    )
+    parser.add_argument(
+        "--thread-id",
+        default=None,
+        help="Optional thread id to include file manifests for",
+    )
     parser.add_argument("--out", type=Path, default=None, help="Output zip file path")
-    parser.add_argument("--include-doctor", action="store_true", help="Include redacted make doctor output")
+    parser.add_argument(
+        "--include-doctor",
+        action="store_true",
+        help="Include redacted make doctor output",
+    )
+    add_startup_arguments(parser)
     return parser.parse_args(argv)
 
 
@@ -986,6 +1052,9 @@ def main(argv: list[str] | None = None) -> int:
             extensions_config_path=args.extensions_config,
             thread_id=args.thread_id,
             include_doctor=args.include_doctor,
+            startup_mode=args.startup_mode,
+            startup_host=args.startup_host,
+            startup_port=args.startup_port,
         )
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)

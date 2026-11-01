@@ -20,6 +20,7 @@ def doctor_checkout(tmp_path: Path) -> Path:
     scripts_dir.mkdir(parents=True)
     (checkout / "frontend").mkdir()
     shutil.copyfile(REPO_ROOT / "scripts" / "doctor.py", scripts_dir / "doctor.py")
+    shutil.copyfile(REPO_ROOT / "scripts" / "startup_diagnostics.py", scripts_dir / "startup_diagnostics.py")
     (checkout / "config.yaml").write_text("config_version: 5\nmodels: []\n", encoding="utf-8")
     return checkout
 
