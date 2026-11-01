@@ -2130,9 +2130,13 @@ class SubagentExecutor:
             async def cleanup_execution() -> None:
                 if execution_context is not None:
                     try:
-                        from deerflow.sandbox.lease import release_sandbox_execution_lease_async
+                        from deerflow.sandbox.lease import cancel_sandbox_execution_lease_async, release_sandbox_execution_lease_async
 
-                        await release_sandbox_execution_lease_async(execution_context)
+                        try:
+                            if result.status in (SubagentStatus.CANCELLED, SubagentStatus.FAILED, SubagentStatus.TIMED_OUT):
+                                await cancel_sandbox_execution_lease_async(execution_context)
+                        finally:
+                            await release_sandbox_execution_lease_async(execution_context)
                     except Exception:
                         logger.warning(
                             "[trace=%s] Failed to release sandbox execution lease for subagent %s",
