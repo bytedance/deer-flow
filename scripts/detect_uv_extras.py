@@ -12,6 +12,7 @@ Order of resolution:
    - checkpointer.type == postgres       -> postgres
    - stream_bridge.type == redis         -> redis
    - tools[].name == browser_navigate    -> browser
+   - browser_navigate engine == camoufox -> camoufox
    - sandbox.ownership.type == redis     -> redis
    - channels.discord.enabled == true    -> discord
    - channels.buzz.enabled == true       -> buzz
@@ -248,16 +249,17 @@ def nested_section_value(lines: list[str], section_path: str, key: str) -> str |
     return None
 
 
-def tools_include_name(lines: list[str], tool_name: str) -> bool:
-    """Return True when the top-level tools list has an active item name.
+def _iter_tool_fields(lines: list[str]):
+    """Yield ``(item_number, key, value)`` for each direct field of a top-level tool.
 
     The first list item fixes the list indent, and each item's first key column
-    identifies its direct fields. The name may appear anywhere in the mapping;
-    deeper-nested names are ignored in both indented and indentless lists.
+    identifies its direct fields. Deeper-nested keys are ignored in both
+    indented and indentless lists.
     """
     inside = False
     list_indent: int | None = None
     field_indent: int | None = None
+    item_number = -1
     for raw in lines:
         line = _strip_comment(raw)
         if not line.strip():
@@ -282,6 +284,7 @@ def tools_include_name(lines: list[str], tool_name: str) -> bool:
             # The first mapping key need not be name. Its column determines
             # which continuation keys belong to the tool rather than options.
             field_indent = item_match.start(2)
+            item_number += 1
             key, value = item_match.group(2, 3)
         elif indent == 0:
             inside = False
@@ -291,9 +294,26 @@ def tools_include_name(lines: list[str], tool_name: str) -> bool:
             if indent != field_indent or key_match is None:
                 continue
             key, value = key_match.group(1, 2)
-        if key == "name" and _unquote(value.strip()) == tool_name:
-            return True
-    return False
+        yield item_number, key, _unquote(value.strip())
+
+
+def tools_include_name(lines: list[str], tool_name: str) -> bool:
+    """Return True when the top-level tools list has an active item name.
+
+    The name may appear anywhere in the mapping; deeper-nested names are ignored.
+    """
+    return any(key == "name" and value == tool_name for _item, key, value in _iter_tool_fields(lines))
+
+
+def tool_field_value(lines: list[str], tool_name: str, field: str) -> str | None:
+    """Return a direct field of the active top-level tool named *tool_name*."""
+    fields: dict[int, dict[str, str]] = {}
+    for item, key, value in _iter_tool_fields(lines):
+        fields.setdefault(item, {}).setdefault(key, value)
+    for item_fields in fields.values():
+        if item_fields.get("name") == tool_name:
+            return item_fields.get(field)
+    return None
 
 
 def models_use_providers(lines: list[str]) -> set[str]:
@@ -374,6 +394,8 @@ def detect_from_config(path: Path) -> list[str]:
             extras.add(provider)
     if tools_include_name(lines, "browser_navigate"):
         extras.add("browser")
+        if (tool_field_value(lines, "browser_navigate", "engine") or "").lower() == "camoufox":
+            extras.add("camoufox")
     for provider in models_use_providers(lines):
         extra = _PROVIDER_EXTRAS.get(provider)
         if extra is not None:

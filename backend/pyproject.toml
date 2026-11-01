@@ -50,6 +50,7 @@ buzz = ["coincurve>=20.0.0"]
 monocle = ["deerflow-harness[monocle]"]
 ollama = ["deerflow-harness[ollama]"]
 browser = ["deerflow-harness[browser]"]
+camoufox = ["deerflow-harness[camoufox]"]
 memory-zh = ["deerflow-harness[memory-zh]"]
 
 [dependency-groups]
