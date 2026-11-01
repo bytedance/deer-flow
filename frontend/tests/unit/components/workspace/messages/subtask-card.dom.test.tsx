@@ -7,6 +7,7 @@ import {
   fireEvent,
   render,
   screen,
+  waitFor,
 } from "@testing-library/react";
 import { useEffect, useMemo, useState } from "react";
 
@@ -448,5 +449,75 @@ describe("SubtaskCard turn ownership", () => {
     expect(await screen.findByText("read_file")).toBeTruthy();
     expect(setTasks).not.toHaveBeenCalled();
     expect(view.container.textContent).toContain("First task");
+  });
+
+  it("backfills locally after a live card stops owning the shared map", async () => {
+    rs.mocked(fetchSubtaskSteps).mockResolvedValue([
+      {
+        kind: "tool",
+        message_index: 1,
+        text: "history",
+        tool_name: "read_file",
+      },
+    ]);
+    const setTasks = rs.fn();
+    const contextTasks: Record<string, Subtask> = {
+      call_0: {
+        id: "call_0",
+        status: "in_progress",
+        subagent_type: "researcher",
+        description: "First task",
+        prompt: "First task",
+      },
+    };
+    const fallbackTask: Subtask = {
+      id: "call_0",
+      status: "in_progress",
+      subagent_type: "researcher",
+      description: "First task",
+      prompt: "First task",
+    };
+    const client = new QueryClient();
+    client.setQueryData(["models"], {
+      models: [],
+      token_usage: { enabled: false },
+    });
+    const draw = (live: boolean) => (
+      <QueryClientProvider client={client}>
+        <I18nContext.Provider
+          value={{ locale: "en-US", setLocale: () => undefined, t: enUS }}
+        >
+          <SubtaskContext.Provider
+            value={{
+              tasks: contextTasks,
+              tasksRef: { current: contextTasks },
+              setTasks,
+            }}
+          >
+            <SubtaskCard
+              taskId="call_0"
+              threadId="thread-1"
+              runId="run-1"
+              isLoading={live}
+              live={live}
+              fallbackTask={fallbackTask}
+            />
+          </SubtaskContext.Provider>
+        </I18nContext.Provider>
+      </QueryClientProvider>
+    );
+
+    const view = render(draw(true));
+    fireEvent.click(screen.getByRole("button"));
+    await waitFor(() => expect(fetchSubtaskSteps).toHaveBeenCalledTimes(1));
+    // The live backfill wrote its steps into the shared map.
+    await waitFor(() => expect(setTasks).toHaveBeenCalled());
+
+    view.rerender(draw(false));
+
+    // Re-armed guard: the non-owner card fetches into local state instead of
+    // showing an empty timeline until a remount.
+    await waitFor(() => expect(fetchSubtaskSteps).toHaveBeenCalledTimes(2));
+    expect(await screen.findByText("read_file")).toBeTruthy();
   });
 });

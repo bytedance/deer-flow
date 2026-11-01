@@ -123,6 +123,16 @@ export function SubtaskCard({
   // when a provider reused this call id.
   const stepsCount = steps?.length ?? 0;
   const backfilledRef = useRef(false);
+  // A card can finish a backfill while it still owns the shared live state
+  // (the fetched steps were written into the shared map), then a later turn
+  // reuses the call id and it stops owning it. Re-arm the one-shot guard so
+  // the non-live branch can backfill into local state instead of showing an
+  // empty timeline until a remount.
+  useEffect(() => {
+    if (!live) {
+      backfilledRef.current = false;
+    }
+  }, [live]);
   useEffect(() => {
     if (collapsed || backfilledRef.current || stepsCount > 0) {
       return;
