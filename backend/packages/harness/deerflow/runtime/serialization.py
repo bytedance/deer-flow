@@ -79,11 +79,13 @@ def serialize_channel_values(channel_values: dict[str, Any]) -> dict[str, Any]:
 
     Only ``__pregel_*`` keys are removed — ``__interrupt__`` is deliberately
     preserved so the LangGraph SDK can detect interrupt events from values
-    chunks (see issue #3595).
+    chunks (see issue #3595). The middleware-owned ``durable_context_snapshot``
+    channel is also removed because it is model/checkpoint state, not public
+    API data.
     """
     result: dict[str, Any] = {}
     for key, value in channel_values.items():
-        if key.startswith("__pregel_"):
+        if key.startswith("__pregel_") or key == "durable_context_snapshot":
             continue
         result[key] = serialize_lc_object(value)
     return result
