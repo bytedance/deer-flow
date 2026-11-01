@@ -1,5 +1,7 @@
 """Behavioral checks for checkpoint-reachable parent-task recall."""
 
+import sqlite3
+from contextlib import closing
 from types import SimpleNamespace
 
 import pytest
@@ -144,6 +146,101 @@ def test_active_only_matches_deduplicate_before_result_limit(scoped):
 
     assert len(result["results"]) == 2
     assert {row["message_id"] for row in result["results"]} == {None, "archived"}
+
+
+def test_an_undecodable_archived_payload_is_skipped_not_fatal(scoped):
+    messages = [HumanMessage(content="Citrine alpha", id="u1"), HumanMessage(content="Citrine beta", id="u2")]
+    config = TaskContinuityConfig(enabled=True)
+    state = {"task_history": archive.capture({}, scoped, messages, config)}
+    path, _ = archive.scope(scoped)
+    first_id = archive.records(messages)[0]["id"]
+    with closing(sqlite3.connect(path)) as db:
+        (rowid,) = db.execute("SELECT rowid FROM sources WHERE id=?", (first_id,)).fetchone()
+        # Both a parser depth failure and malformed JSON must degrade per row.
+        db.execute("UPDATE sources SET payload=? WHERE rowid=?", ("[" * 20000 + "]" * 20000, rowid))
+        db.commit()
+
+    result = archive.lookup(state, scoped, query="Citrine")
+
+    assert result["status"] == "partially_expired"
+    assert [row["id"] for row in result["results"]] != [first_id]
+    assert len(result["results"]) == 1
+
+
+def test_a_malformed_archived_payload_does_not_hide_other_matches(scoped):
+    messages = [HumanMessage(content="Citrine alpha", id="u1"), HumanMessage(content="Citrine beta", id="u2")]
+    config = TaskContinuityConfig(enabled=True)
+    state = {"task_history": archive.capture({}, scoped, messages, config)}
+    path, _ = archive.scope(scoped)
+    with closing(sqlite3.connect(path)) as db:
+        db.execute("UPDATE sources SET payload=?", ("not json",))
+        db.commit()
+
+    result = archive.lookup(state, scoped, query="Citrine")
+
+    assert result["status"] == "partially_expired"
+    assert result["results"] == []
+
+
+def test_a_corrupt_payload_does_not_abort_a_role_filtered_search(scoped):
+    messages = [HumanMessage(content="Citrine alpha", id="u1"), AIMessage(content="Citrine reply", id="a1")]
+    config = TaskContinuityConfig(enabled=True)
+    state = {"task_history": archive.capture({}, scoped, messages, config)}
+    path, _ = archive.scope(scoped)
+    assistant_id = archive.records(messages)[1]["id"]
+    with closing(sqlite3.connect(path)) as db:
+        (rowid,) = db.execute("SELECT rowid FROM sources WHERE id=?", (assistant_id,)).fetchone()
+        # The role predicate evaluates json_extract on matched rows before returning
+        # any of them, so this row used to abort the whole role-filtered query.
+        db.execute("UPDATE sources SET payload=? WHERE rowid=?", ("not json", rowid))
+        db.commit()
+
+    result = archive.lookup(state, scoped, query="Citrine", role="human")
+
+    assert result["status"] == "partially_expired"
+    assert [row["id"] for row in result["results"]] == [archive.records(messages)[0]["id"]]
+
+
+def test_a_corrupt_matching_row_still_degrades_a_role_filtered_search(scoped):
+    messages = [HumanMessage(content="Citrine alpha", id="u1"), HumanMessage(content="Citrine beta", id="u2")]
+    config = TaskContinuityConfig(enabled=True)
+    state = {"task_history": archive.capture({}, scoped, messages, config)}
+    path, _ = archive.scope(scoped)
+    first_id = archive.records(messages)[0]["id"]
+    with closing(sqlite3.connect(path)) as db:
+        (rowid,) = db.execute("SELECT rowid FROM sources WHERE id=?", (first_id,)).fetchone()
+        db.execute("UPDATE sources SET payload=? WHERE rowid=?", ("not json", rowid))
+        db.commit()
+
+    result = archive.lookup(state, scoped, query="Citrine", role="human")
+
+    # The role predicate now hides the corrupt row instead of failing, so the status
+    # must still warn that a matching source was skipped rather than report nothing found.
+    assert result["status"] == "partially_expired"
+    assert [row["id"] for row in result["results"]] == [archive.records(messages)[1]["id"]]
+
+
+@pytest.mark.asyncio
+async def test_a_payload_without_readable_text_is_skipped(scoped):
+    import json
+
+    messages = [HumanMessage(content="Citrine alpha", id="u1"), HumanMessage(content="Citrine beta", id="u2")]
+    config = TaskContinuityConfig(enabled=True)
+    history = archive.capture({}, scoped, messages, config)
+    scoped.state = {"task_history": history}
+    path, _ = archive.scope(scoped)
+    first_id = archive.records(messages)[0]["id"]
+    with closing(sqlite3.connect(path)) as db:
+        (rowid,) = db.execute("SELECT rowid FROM sources WHERE id=?", (first_id,)).fetchone()
+        # Valid JSON with a string id but no readable text: history_search would
+        # raise KeyError at row.pop("text") without the shape guard.
+        db.execute("UPDATE sources SET payload=? WHERE rowid=?", (json.dumps({"id": first_id, "role": "human"}), rowid))
+        db.commit()
+
+    result = json.loads(await history_search.coroutine(scoped, "Citrine"))
+
+    assert result["status"] == "partially_expired"
+    assert [row["id"] for row in result["results"]] == [archive.records(messages)[1]["id"]]
 
 
 def test_retention_is_explicit_and_duplicate_capture_is_idempotent(scoped):

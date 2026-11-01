@@ -18,7 +18,11 @@ unused slots are recalculated in the next batch.
 `history_search` accepts optional `role=user|assistant|tool`, mapped at the tool
 boundary to stored roles `human|ai|tool`; omission/null keeps all roles. Filter
 archived JSON payloads before SQLite FTS `LIMIT 8`, and active messages before
-the merged result limit. Preserve ranking, source IDs, returned roles, checkpoint
+the merged result limit. Decode each payload independently: skip an unusable row (malformed
+JSON, or an object whose `id`/`text` is not a string) and report `partially_expired`
+instead of failing the lookup. Keep the role predicate inside `json_valid(payload)`
+so one corrupt row cannot abort a role-filtered query, and still report
+`partially_expired` when it hides such a row. Preserve ranking, source IDs, returned roles, checkpoint
 reachability, and user/thread isolation. Do not add a role parameter to `history_read`.
 Sync and async entry points share the implementation; async uses `run_file_io`.
 Regression coverage lives in `backend/tests/test_task_continuity.py`.
