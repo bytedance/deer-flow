@@ -159,6 +159,12 @@ class SubagentResult:
             execution. ``None`` when the delegation carried no acceptance
             criteria, the run ended before streaming, or harvesting failed;
             an empty list means the stream carried no bash-family tool calls.
+        execution_teardown_event: Set only after child cleanup has settled.
+            ``run_with_timeout()`` publishes it from its own ``finally`` when
+            that wrapper waited for ``_aexecute``. A hard timeout detaches the
+            child and the supervisor publishes it only after that task
+            settles. Terminal ``status``/``completed_at`` are published
+            earlier and must not be treated as teardown confirmation.
         execution_done_event: Internal lifecycle fence set only after stream,
             sandbox, extension, and capacity cleanup has settled. A configured
             timeout may publish ``TIMED_OUT`` before this fence opens.
@@ -182,6 +188,7 @@ class SubagentResult:
     knowledge_sources: list[dict[str, Any]] = field(default_factory=list, kw_only=True)
     _knowledge_messages: list[Any] = field(default_factory=list, init=False, repr=False)
     cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
+    execution_teardown_event: threading.Event = field(default_factory=threading.Event, repr=False)
     execution_done_event: threading.Event = field(default_factory=threading.Event, init=False, repr=False)
     _state_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
@@ -303,6 +310,14 @@ class SubagentResult:
             self.completed_at = completed_at or _utcnow()
             self.status = status
             return True
+
+    def mark_execution_teardown_complete(self) -> None:
+        """Publish that isolated-loop execution teardown has finished."""
+        self.execution_teardown_event.set()
+
+    def is_execution_teardown_complete(self) -> bool:
+        """True after a waited wrapper returns, or a detached child settles."""
+        return self.execution_teardown_event.is_set()
 
 
 def _terminal_direct_results(final_state: Any, return_direct_tools: set[str]) -> list[ToolMessage] | None:
@@ -2340,7 +2355,13 @@ class SubagentExecutor:
                 result.try_set_terminal(SubagentStatus.FAILED, error=str(exc))
                 return result
             finally:
+                # ``execution_task is None`` means a hard timeout or a
+                # still-running failure detached the child. The supervisor
+                # confirms teardown only after that task settles. When this
+                # wrapper waited, terminal status was published earlier and
+                # is not teardown; the event follows ``_aexecute`` cleanup.
                 if execution_task is not None:
+                    result.mark_execution_teardown_complete()
                     _mark_background_execution_done(execution_id, result)
 
         try:
@@ -2359,6 +2380,10 @@ class SubagentExecutor:
             _background_futures[execution_id] = execution_future
 
         def forget_future(completed_future: Future[SubagentResult]) -> None:
+            # Cancelling this cross-thread Future invokes callbacks before
+            # the isolated-loop task has drained. Only run_with_timeout's
+            # finally, or the detached supervisor, can confirm execution
+            # teardown; this callback merely drops the submission handle.
             if not completed_future.cancelled():
                 completed_future.exception()
             with _background_tasks_lock:
@@ -2452,6 +2477,7 @@ def _supervise_background_execution(
                     execution_id,
                     exc_info=(type(exc), exc, exc.__traceback__),
                 )
+        result.mark_execution_teardown_complete()
         _mark_background_execution_done(execution_id, result)
 
     task.add_done_callback(settled)
