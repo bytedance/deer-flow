@@ -253,3 +253,56 @@ async def test_list_run_events_bounds_event_type_filter_cardinality(count: int) 
     else:
         assert await list_run_events(**kwargs) == []
         assert len(calls["event_types"]) == MAX_EVENT_TYPE_FILTERS
+
+
+async def _event_type_filter_reaches_store(event_types: str | None) -> object:
+    """Call the route with *event_types* and return what the store received."""
+
+    from app.gateway.routers.thread_runs import list_run_events
+
+    calls: dict = {}
+
+    class FakeStore:
+        async def list_events(self, thread_id, run_id, *, event_types=None, task_id=None, limit=500, after_seq=None, user_id=None):
+            calls["event_types"] = event_types
+            return []
+
+    class FakeState:
+        run_event_store = FakeStore()
+
+    class FakeApp:
+        state = FakeState()
+
+    class FakeRequest:
+        app = FakeApp()
+        _deerflow_test_bypass_auth = True
+        cookies: dict = {}
+
+    await list_run_events(
+        thread_id="t1",
+        run_id="r1",
+        request=FakeRequest(),
+        event_types=event_types,
+        task_id=None,
+        limit=500,
+        after_seq=None,
+    )
+    return calls["event_types"]
+
+
+@pytest.mark.parametrize("raw", ["message, tool", " message ,tool ", "message,\ttool\n"])
+@pytest.mark.anyio
+async def test_event_type_filter_entries_are_trimmed_before_reaching_the_store(raw: str) -> None:
+    """A padded filter must not silently match nothing.
+
+    The entries are handed to a SQL ``IN``, so ``" tool"`` (leading space, the
+    natural result of ``?event_types=message, tool``) matched no row and the
+    endpoint returned 200 with a truncated audit trail.
+    """
+    assert await _event_type_filter_reaches_store(raw) == ["message", "tool"]
+
+
+@pytest.mark.parametrize("raw, expected", [("message,,tool", ["message", "tool"]), (" , ", None), (",", None), ("", None)])
+@pytest.mark.anyio
+async def test_event_type_filter_drops_blank_entries(raw: str, expected) -> None:
+    assert await _event_type_filter_reaches_store(raw) == expected

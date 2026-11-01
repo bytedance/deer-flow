@@ -434,8 +434,6 @@ class WeComChannel(Channel):
             logger.exception("[WeCom] failed to send attachment delivery feedback")
 
     async def send_file(self, msg: OutboundMessage, attachment: ResolvedAttachment) -> bool:
-        if not msg.is_final:
-            return True
         if not self._ws_client:
             return False
         if not msg.thread_ts:

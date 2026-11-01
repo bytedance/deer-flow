@@ -19,6 +19,26 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **agents:** `PUT /api/agents/{name}` with `"description": null` now resets the
+  description to empty. It used to store the null, which the agent config
+  rejects, so the agent then failed every load: the update, GET and repair
+  updates returned 500, the file backend dropped it from the agent list, the
+  database backend failed the owner's whole list, and chats with it failed.
+  Agents already stored with a null description load again. ([#7638])
+
+- **sandbox:** Cancelled native Runs now stop their owned AIO and POSIX local
+  bash processes, including ordinary `nohup` children, before releasing the
+  execution lease. Concurrent work and background services from successful
+  earlier turns remain running. ([#7772])
+  
+- **agents:** A clarification no longer overwrites an earlier question when the
+  provider reuses a tool-call ID across turns (for example `call_0` on every
+  response). Its message ID, which is also the human-input `request_id`, named
+  only the call ID, so the later question replaced the earlier one in place and
+  the later call was left without a result. The ID now also names the
+  AIMessage that issued the call; a retry of the same call keeps its ID.
+  ([#7762])
+
 - **projects:** The trash retention sweep no longer deletes live document
   originals when the data directory, `users/`, a user's directory or a
   user's `projects/` is a symlink. It protected each document by its resolved
@@ -15952,8 +15972,11 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7643]: https://github.com/bytedance/deer-flow/pull/7643
 [#7651]: https://github.com/bytedance/deer-flow/pull/7651
 [#7659]: https://github.com/bytedance/deer-flow/pull/7659
+[#7638]: https://github.com/bytedance/deer-flow/pull/7638
 [#7665]: https://github.com/bytedance/deer-flow/pull/7665
 [#7723]: https://github.com/bytedance/deer-flow/pull/7723
 [#7727]: https://github.com/bytedance/deer-flow/pull/7727
 [#7729]: https://github.com/bytedance/deer-flow/pull/7729
 [#7732]: https://github.com/bytedance/deer-flow/pull/7732
+[#7762]: https://github.com/bytedance/deer-flow/pull/7762
+[#7772]: https://github.com/bytedance/deer-flow/pull/7772
