@@ -740,6 +740,10 @@ DeerFlow still uses `Forwarded` / `X-Forwarded-*` headers to recover the browser
 >
 > With in-memory run storage, replacing a run snapshot under another thread removes its previous thread membership. Old-thread history and usage queries exclude it, and deleting the old thread preserves the reassigned run.
 >
+> In-memory run storage copies submitted metadata, input arguments and token
+> counters. RunStore queries return independent snapshots, so editing their results
+> cannot rewrite stored history or usage, and later updates do not alter an earlier read.
+>
 > Run cancellation may land on any Gateway worker. A non-owning worker now persists the interrupt or rollback request for the live owner, which observes it during lease renewal and performs the normal cancellation flow; load-balancer routing alone no longer produces a 409. The first accepted action wins even if a retry lands on the owner, and accepted cancellation competes atomically with owner completion. Dead owners still follow lease takeover and orphan recovery. Cancellation latency is therefore bounded by the lease heartbeat interval.
 
 > Cancelling a model recovery probe, including while it is queued or waiting to retry, lets the next call check whether the provider has recovered. Cancellation does not count as a provider failure or release another call's active recovery probe.
