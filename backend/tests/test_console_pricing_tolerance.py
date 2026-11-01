@@ -17,6 +17,7 @@ it for pricing.
 
 from __future__ import annotations
 
+import logging
 import math
 from types import SimpleNamespace
 
@@ -103,3 +104,19 @@ def test_missing_optional_cache_hit_price_keeps_the_model_priced(monkeypatch):
     pricing_map = _pricing_map(monkeypatch, CONFIG)
 
     assert pricing_map["m1"].input_cache_hit_per_million is None
+
+
+def test_unusable_prices_keep_their_own_log_signatures(monkeypatch, caplog):
+    """Warn once per model, naming the shape that failed.
+
+    The two messages existed before the reconciliation (#7736 added
+    "non-finite", the older path said "malformed"); collapsing them into one
+    would silently break log greps, so each leg keeps its own text.
+    """
+    with caplog.at_level(logging.WARNING, logger=console.__name__):
+        _pricing_map(monkeypatch, {**CONFIG, "output_per_million": float("inf")})
+        _pricing_map(monkeypatch, {**CONFIG, "output_per_million": 10**400})
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("ignoring non-finite pricing on model m1" in message for message in messages)
+    assert any("ignoring malformed pricing on model m1" in message for message in messages)
