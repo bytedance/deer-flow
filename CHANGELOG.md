@@ -19,6 +19,21 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **agents:** A clarification no longer overwrites an earlier question when the
+  provider reuses a tool-call ID across turns (for example `call_0` on every
+  response). Its message ID, which is also the human-input `request_id`, named
+  only the call ID, so the later question replaced the earlier one in place and
+  the later call was left without a result. The ID now also names the
+  AIMessage that issued the call; a retry of the same call keeps its ID.
+  ([#7762])
+
+- **projects:** The trash retention sweep no longer deletes live document
+  originals when the data directory, `users/`, a user's directory or a
+  user's `projects/` is a symlink. It protected each document by its resolved
+  path but walked the unresolved tree, so no document matched and every
+  original older than 24 hours was removed as an orphan, at Gateway startup
+  and from `GET /api/trash/documents`. ([#7732])
+
 - **dev:** `scripts/dev_multi_instance.sh logs all` now prints the nginx logs
   as well as both Gateway logs; it printed only the Gateway logs, the same as
   `logs` with no argument. `logs nginx` and `logs all` also include `nginx.log`,
@@ -15956,3 +15971,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7723]: https://github.com/bytedance/deer-flow/pull/7723
 [#7727]: https://github.com/bytedance/deer-flow/pull/7727
 [#7729]: https://github.com/bytedance/deer-flow/pull/7729
+[#7732]: https://github.com/bytedance/deer-flow/pull/7732
+[#7762]: https://github.com/bytedance/deer-flow/pull/7762
