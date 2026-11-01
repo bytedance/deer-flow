@@ -2851,6 +2851,12 @@ For example, independent read-only research can run concurrently when the wall-c
 
 ### Sandbox & File System
 
+With local host bash enabled, the path guard permits division in simple shell
+arithmetic and recognized single-quoted Python, Node.js and Perl programs.
+Variable-built paths remain checked even when the filename is numeric or a
+glob precedes the slash. This is a best-effort guard; host filesystem isolation
+requires an isolated sandbox provider.
+
 Local `grep` reports file permission and I/O failures as errors rather than
 successful empty or partial searches. Binary files and files that disappear
 during scanning remain excluded.

@@ -1244,9 +1244,7 @@ def test_validate_local_bash_command_paths_blocks_brace_expansion_host_paths(com
         # scan, so a multi-segment path stays rejected even after ``)``.
         ("awk '{print ($1)/etc/passwd}' /mnt/user-data/workspace/data.txt", "/etc/passwd"),
         ("awk 'BEGIN{x = 1 /etc/shadow}'", "/etc/shadow"),
-        # The expression-division exemption (#7444) is narrower than awk's:
-        # an identifier segment after ``)`` must close a ``name(...)`` call and
-        # ``}`` admits digits only, so unknown-value path builds stay rejected.
+        # Shell path constructions never qualify for the division exemption.
         ("echo $(pwd)/x", "/x"),
         ("cp f $(mktemp -d)/etc", "/etc"),
         ("(pwd)/x", "/x"),
@@ -1255,6 +1253,21 @@ def test_validate_local_bash_command_paths_blocks_brace_expansion_host_paths(com
         ("$(dirname /mnt/user-data/workspace/a.txt)/etc/passwd", "/etc/passwd"),
         ("echo /2", "/2"),
         ("ls /2", "/2"),
+        # A closer is not enough to identify division: these are shell paths.
+        ('cat "${REVIEW_ROOT}/2"', "/2"),
+        ('cat "$(printenv REVIEW_ROOT)/2"', "/2"),
+        ("cat ${ROOT}[x]/secret", "/secret"),
+        ("cat ${ROOT}[x]/2", "/2"),
+        ('cat $(printf %s "$ROOT" # f(\n)/secret', "/secret"),
+        ('cat $(printf %s "$ROOT" # $((\n)/2 # ))', "/2"),
+        # Interpreter arguments and string literals are not executable expressions.
+        ("python3 script.py 'x[0]/secret'", "/secret"),
+        ("python3 -c 'print(\")/2\")'", "/2"),
+        ('python3 -c \'print("""x")/2""")\'', "/2"),
+        ("node -e 'console.log(\"] /secret\")'", "/secret"),
+        ('node -e \'console.log(0)/*"*/; require("child_process").execSync("cat $(printenv ROOT)/2")\'', "/2"),
+        ("perl -e 'qx(cat ${ROOT}/2)'", "/2"),
+        ("eval python3 -c 'cat ${ROOT}/2'", "/2"),
         # An ``awk`` word that is an argument of another command is not a command.
         ("echo $(true) awk '{print $NF/2}'", "$NF/2"),
         ("echo >| awk '{print $NF/2}'", "$NF/2"),
@@ -1317,8 +1330,8 @@ def test_validate_local_bash_command_paths_blocks_variable_prefixed_host_paths(c
         "awk '{print length($0)/2}' /mnt/user-data/workspace/data.txt",
         "awk '{a[$1]/=2; print a[$1]/2}' /mnt/user-data/workspace/data.txt",
         # ``/`` after a closing paren/bracket/brace is division in other inline
-        # languages and in shell arithmetic too (#7444); the per-closer rules
-        # live in ``_is_expression_division_after_closer``.
+        # languages and in shell arithmetic too (#7444); the scanner verifies
+        # these expression contexts before granting an exemption.
         "python3 -c 'xs=[1,2,3]; print(sum(xs)/len(xs))'",
         "python3 -c 'print((3+4)/2)'",
         "python3 -c 'import os; print(os.path.getsize(\"/mnt/user-data/workspace/a.bin\")/1024)'",
@@ -1328,6 +1341,10 @@ def test_validate_local_bash_command_paths_blocks_variable_prefixed_host_paths(c
         "python3 -c 'x=[1,2]; print(x[0]/n)'",
         "echo $(( ${SIZE}/2 ))",
         "bash -c 'echo $(( ${#arr}/2 ))'",
+        'echo "$(( (SIZE+1)/2 ))"',
+        "echo $((values[0]/2))",
+        "python3 -c 'print(sum([1,2])/len([1,2]))' && echo $(( ${SIZE}/2 ))",
+        "echo \"$(python3 -c 'print(sum([1,2])/len([1,2]))')\"",
         # The command word is found like the shell does: basename, after an
         # assignment prefix, inside ``$(...)``, before a comment.
         "/usr/bin/awk '{print $NF/2}' /mnt/user-data/workspace/data.txt",
@@ -1394,6 +1411,10 @@ def test_bash_tool_rejects_variable_prefixed_host_path_before_execution(monkeypa
         ('cat "$HOME/.ssh/id_rsa"', "Unsafe absolute paths in command: $HOME/.ssh/id_rsa"),
         ('CDPATH="$HOME" cd .ssh && cat $PWD/id_rsa', "Unsafe working directory change via CDPATH"),
         ('cat "$HOME/文档/id_rsa"', "Unsafe absolute paths in command: $HOME/文档/id_rsa"),
+        ('cat "${REVIEW_ROOT}/2"', "Unsafe absolute paths in command: /2"),
+        ('cat "$(printenv REVIEW_ROOT)/2"', "Unsafe absolute paths in command: /2"),
+        ("cat ${ROOT}[x]/secret", "Unsafe absolute paths in command: /secret"),
+        ('cat $(printf %s "$ROOT" # f(\n)/secret', "Unsafe absolute paths in command: /secret"),
     ],
 )
 def test_local_bash_tool_does_not_read_variable_prefixed_host_file(tmp_path: Path, monkeypatch, command: str, rejected: str) -> None:
@@ -1404,7 +1425,14 @@ def test_local_bash_tool_does_not_read_variable_prefixed_host_file(tmp_path: Pat
     (home / ".ssh" / "id_rsa").write_text("host-private-key")
     (home / "文档").mkdir()
     (home / "文档" / "id_rsa").write_text("host-private-key")
+    (home / "2").write_text("host-private-key", encoding="utf-8")
+    (home / "secret").write_text("host-private-key", encoding="utf-8")
+    glob_home = tmp_path / "homex"
+    glob_home.mkdir()
+    (glob_home / "secret").write_text("host-private-key", encoding="utf-8")
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("ROOT", str(home))
+    monkeypatch.setenv("REVIEW_ROOT", str(home))
     thread_root = tmp_path / "threads" / "t1" / "user-data"
     thread_data = {f"{name}_path": str(thread_root / name) for name in ("workspace", "uploads", "outputs")}
     for path in thread_data.values():
@@ -1422,6 +1450,8 @@ def test_local_bash_tool_does_not_read_variable_prefixed_host_file(tmp_path: Pat
     monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: sandbox)
     monkeypatch.setattr("deerflow.sandbox.tools.is_host_bash_allowed", lambda: True)
 
+    # The real shell can read the synthetic file; the public tool must stop it.
+    assert "host-private-key" in sandbox.execute_command(command)
     result = bash_tool.func(runtime=runtime, description="read key", command=command)
 
     assert "host-private-key" not in result

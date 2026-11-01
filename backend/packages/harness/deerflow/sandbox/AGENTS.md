@@ -132,6 +132,12 @@ Fork lookups reject invalidated clients; cancelled acquires leave borrowers a pe
 
 **Sandbox Tools** (in `packages/harness/deerflow/sandbox/tools.py`):
 
+Closer-division exemptions require scanned shell arithmetic or single-quoted
+Python/Node/Perl program code. Reuse shell word/comment tracking; exclude
+program strings and uncertain syntax. Never infer division from a numeric
+filename or a closing glob bracket. `test_sandbox_tools_security.py` covers
+these paths through the guard and real LocalSandbox execution.
+
 Case-insensitive literal grep uses KMP + single-character `re.IGNORECASE` for
 linear work and Unicode parity. Regression: `tests/test_local_grep_long_lines.py`.
 
