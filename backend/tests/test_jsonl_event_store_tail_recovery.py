@@ -6,6 +6,7 @@ import json
 
 import pytest
 
+from deerflow.runtime.events.store.base import RunEventStoreNotCommittedError
 from deerflow.runtime.events.store.jsonl import JsonlRunEventStore
 
 TAILS = {
@@ -88,7 +89,7 @@ async def test_batch_failure_restores_original_tail_bytes_before_retry(tmp_path,
             raise OSError("second group failed after writing")
 
     monkeypatch.setattr(store, "_append_records", fail_second_group)
-    with pytest.raises(OSError, match="second group failed"):
+    with pytest.raises(RunEventStoreNotCommittedError, match="second group failed"):
         await store.put_batch([_event(), _event("r2")])
 
     assert path.read_bytes() == original_bytes

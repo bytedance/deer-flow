@@ -7,6 +7,7 @@ import threading
 
 import pytest
 
+from deerflow.runtime.events.store.base import RunEventStoreNotCommittedError
 from deerflow.runtime.events.store.jsonl import JsonlRunEventStore
 
 
@@ -136,10 +137,11 @@ async def test_old_batch_rollback_cannot_erase_later_acknowledged_write(tmp_path
         await _checkpoint()
         assert not writer.done(), "a new writer entered before rollback settled"
         paused.release.set()
-        with pytest.raises(asyncio.CancelledError if cancel else OSError) as caught:
+        with pytest.raises(asyncio.CancelledError if cancel else RunEventStoreNotCommittedError) as caught:
             await batch
         if cancel:
-            assert isinstance(caught.value.__cause__, OSError)
+            assert isinstance(caught.value.__cause__, RunEventStoreNotCommittedError)
+            assert isinstance(caught.value.__cause__.__cause__, OSError)
         saved = await writer
         assert saved["content"] == "acknowledged-later"
         assert [row["content"] for row in await store.list_messages("t1")] == ["baseline", "acknowledged-later"]
@@ -341,7 +343,8 @@ async def test_cancelled_multithread_batch_drains_current_group_without_starting
         with pytest.raises(asyncio.CancelledError) as caught:
             await pending
         if fail_first_thread:
-            assert isinstance(caught.value.__cause__, OSError)
+            assert isinstance(caught.value.__cause__, RunEventStoreNotCommittedError)
+            assert isinstance(caught.value.__cause__.__cause__, OSError)
             assert [row["content"] for row in await store.list_messages("t1")] == ["baseline"]
             assert await store.list_events("t1", "r2") == []
         else:
