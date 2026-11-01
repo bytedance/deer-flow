@@ -136,6 +136,13 @@ pins offload, executor isolation, request context, and failure ordering.
 
 Tool and agent assembly re-enters `get_available_tools()` and may block on MCP discovery, so the four async assembly entry points — `run_agent`'s `agent_factory` call, `task_tool`, durable batch `_execute_item`, and `abuild_checkpoint_state_accessor` — dispatch through `deerflow.utils.assembly_io.run_assembly`, a dedicated ContextVar-preserving bounded executor (`DEER_FLOW_ASSEMBLY_WORKERS`, default 8) rather than the loop's default executor; a hung MCP server therefore parks an assembly worker instead of queueing unrelated default-executor work, and the pool logs a warning when pending assemblies exceed the worker count. `tests/blocking_io/test_tool_assembly_offloop.py` pins all four offloads plus the ContextVar propagation.
 
+### Document Conversion
+
+`file_conversion.convert_file_to_markdown` resolves the live PDF converter in
+its drained parsing worker. Config cache hits still stat/hash files; keep them
+off-loop with parsing. Cold/cache-hit coverage uses real temporary configs in
+`tests/blocking_io/test_file_conversion_offloop.py`.
+
 ### Uploaded Document Summaries
 
 Outlines skip root-level HTML comment blocks (`<!--` with up to three leading

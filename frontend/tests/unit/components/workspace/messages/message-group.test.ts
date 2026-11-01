@@ -38,6 +38,37 @@ afterEach(() => {
 });
 
 describe("MessageGroup", () => {
+  it("renders each assistant turn's result when provider tool-call ids repeat", () => {
+    const messages: Message[] = ["first", "second"].flatMap((turn) => [
+      {
+        id: `assistant-${turn}`,
+        type: "ai",
+        content: "",
+        tool_calls: [
+          {
+            id: "call_0",
+            name: "web_fetch",
+            args: { url: `https://example.com/${turn}` },
+          },
+        ],
+      } as Message,
+      {
+        id: `result-${turn}`,
+        type: "tool",
+        name: "web_fetch",
+        tool_call_id: "call_0",
+        content: `# ${turn} fetched title\n\n${turn} result`,
+      } as Message,
+    ]);
+
+    expect(renderGroup(messages.slice(0, 2))).toContain("first fetched title");
+    // Earlier tool steps are collapsed by default; the current card must show
+    // its own result rather than borrowing the first call's fetched title.
+    const html = renderGroup(messages);
+    expect(html).toContain("second fetched title");
+    expect(html).not.toContain("first fetched title");
+  });
+
   it("resolves relative artifact links in chain-of-thought assistant text", () => {
     const html = renderGroup(
       [

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import math
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -13,6 +15,33 @@ from sqlalchemy.sql.compiler import SQLCompiler
 from sqlalchemy.sql.expression import ColumnElement
 from sqlalchemy.sql.visitors import InternalTraversal
 from sqlalchemy.types import Boolean, TypeEngine
+
+
+def json_safe_value(obj: Any) -> Any:
+    """Recursively replace non-finite floats with ``None``.
+
+    ``NaN`` / ``inf`` / ``-inf`` are not valid JSON (RFC 8259) but reach
+    persistence from ordinary runtime data — caller-supplied run metadata,
+    model-authored ``goal_verdict`` JSON, or provider usage numbers
+    (``json.loads("1e400")`` yields ``inf``). PostgreSQL's jsonb rejects the
+    bare ``NaN`` / ``Infinity`` token as invalid JSON, turning the column
+    write into a ``DataError``; SQLite silently round-trips it instead. This
+    mirrors the canonical display serializer's normalization (#7670) for the
+    persisted surfaces that one explicitly does not cover.
+    """
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, dict):
+        return {key: json_safe_value(value) for key, value in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [json_safe_value(value) for value in obj]
+    return obj
+
+
+def dumps_json_safe(obj: Any) -> str:
+    """Serialize JSON column payloads without ever emitting bare NaN/Infinity."""
+    return json.dumps(json_safe_value(obj), ensure_ascii=False)
+
 
 # Key is interpolated into compiled SQL; restrict charset to prevent injection.
 _KEY_CHARSET_RE = re.compile(r"^[A-Za-z0-9_\-]+$")

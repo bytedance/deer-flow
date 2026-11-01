@@ -1,5 +1,13 @@
 ### Middleware Chain
 
+Tool-result JSON analysis is best-effort: parser depth failures must preserve the
+original content and must not abort the graph. Explicit error results fall back
+to `unknown` / recoverable / `try_alternative`, without classifying incidental
+JSON fields as auth failures. Producer metadata remains authoritative. Keep
+depth regressions in `tests/test_tool_result_meta_json_depth.py`, including real
+LocalSandbox reads through both synchronous and asynchronous agent graphs.
+Deep graph cases must establish a real parser depth failure or report a skip.
+
 Async gate waiters own separate cross-loop futures. Cancel only their signal;
 notify outside the state lock. `_await_off_thread` drains started I/O across
 repeated cancellation.
@@ -29,6 +37,13 @@ A pre-turn reply prevents cancellation; legacy replies without status metadata m
 stay `in_progress`. Never infer status from reply text.
 
 Assembly order: `tool_error_handling_middleware.py::_build_runtime_middlewares` (exposed as `build_lead_runtime_middlewares`), then `../lead_agent/agent.py::build_middlewares`. Optional entries require their config/runtime condition.
+
+Config-declared middleware uses `configured_extensions.py`; the lead and subagent
+builders pass their own required keyword-only `scope` (no implicit lead default).
+Optional `apply_to: both | lead | subagent`
+defaults to both, including legacy strings. Filter before reflection/construction;
+preserve selected entry order and create fresh instances per build. This fixed-slot
+selector does not alter packaged extensions' `AgentScope` or placement contract.
 
 **Message provenance.** Injected/rewritten messages use
 `deerflow_extension_api.provenance.provenance_kwargs()`: server-owned
@@ -169,7 +184,7 @@ Before changing a later authorization phase, read the [authorization RFC](../../
 32. **TokenBudgetMiddleware** - `token_budget.enabled`: run-ID budgets survive continuations; missing/invalid IDs reset invocation state. With token usage tracking, place CompletedSubagentUsageMiddleware after the guard: reversed `after_model` hooks backfill terminal child usage before enforcement. Keep TokenUsageMiddleware earlier so current-step attribution reflects calls retained by all guards.
 33. **ModelContentCompatibilityMiddleware** - Read-time sanitizer (`wrap_model_call`/`awrap_model_call`, request view only; never writes state): rewrites URL-sourced `file` blocks (any role, gated on the `url` key; an http(s) URL is preserved when the selected model's serializer accepts it — OpenAI Responses API or Anthropic) and non-fetchable-scheme (non-`http`/`https`/`data`) `image` blocks into text placeholders whose MIME/location metadata passes the shared `neutralize_untrusted_tags` guard, so pre-MCP-fix checkpoints heal on the next turn with no migration. Uses the conversion layer's `resource_placeholder_text`/`model_visible_location` for model-visible text; artifact capture scans state messages, so healing adds neither `resource_links` nor handles. See the MCP guide for conversion and the module docstring for healing; malformed URLs degrade to location-less placeholders instead of raising. Registered after DurableContext/summarization, before the date/coalescer tail.
 34. **Custom middlewares** - *(optional)* Any `custom_middlewares` passed to `build_middlewares` are injected here, before config-declared extensions and the terminal-response/safety/clarification tail
-35. **Configured extension middlewares** - `extensions.middlewares` in `config.yaml` or `extensions_config.json` optionally accepts `module.path:ClassName` strings or `{class, kwargs}` objects. `deerflow.reflection.resolve_class` loads `AgentMiddleware` classes; import, class, and constructor errors fail agent creation. `kwargs` must be JSON-compatible; YAML dates/timestamps become ISO strings. Order: built-ins/custom and loop/token guards → extensions → terminal-response/safety/clarification tail. Subagents share the list before their safety tail; separate lead/subagent lists are unsupported. Trusted operator config only: paths instantiate arbitrary code. Gateway skill/MCP toggles preserve it in raw JSON; adding an API write path requires explicit trust-boundary review.
+35. **Configured extension middlewares** - `extensions.middlewares` in `config.yaml` or `extensions_config.json` optionally accepts `module.path:ClassName` strings or `{class, kwargs, apply_to}` objects. `deerflow.reflection.resolve_class` loads `AgentMiddleware` classes; import, class, and constructor errors fail agent creation. `kwargs` must be JSON-compatible; YAML dates/timestamps become ISO strings. Order: built-ins/custom and loop/token guards → extensions → terminal-response/safety/clarification tail. Optional `apply_to` selects both chains (default), lead, or subagent before import/construction. Trusted operator config only: paths instantiate arbitrary code. Gateway skill/MCP toggles preserve it in raw JSON; adding an API write path requires explicit trust-boundary review.
 36. **TerminalResponseMiddleware** - When a provider returns an empty terminal `AIMessage` after tool execution, injects a hidden recovery prompt and retries the model once; a second empty response is replaced in checkpoint state by a visible error fallback marked for the run worker, so the run finishes as an error instead of a silent success
 37. **ModelLengthFinishReasonMiddleware** - Responses: same-container `status=incomplete` + `incomplete_details.reason=max_output_tokens`. Suppress calls via shared cloning after clearing invalid calls; keep non-call blocks/metadata. Stamp cap markers; add notice. Also registered on subagent chains (before Safety), where `consume_stop_reason` surfaces `model_length_capped` to the executor.
 38. **SafetyFinishReasonMiddleware** - `safety_finish_reason.enabled`: suppresses valid/invalid safety-stopped calls. Responses: `status=incomplete` + `incomplete_details.reason=content_filter`. Clear invalid calls before shared cloning. Place after terminal/custom/configured hooks; `after_model` runs in reverse.

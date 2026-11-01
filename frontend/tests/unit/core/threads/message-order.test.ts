@@ -75,7 +75,36 @@ function idsOf(messages: Message[]): (string | undefined)[] {
   return messages.map((message) => message.id);
 }
 
-test("messageIdentity collapses X and X__user and keys tools by tool_call_id", () => {
+test("a pending checkpoint copy cannot replace the same Run's completed task result", () => {
+  const completed = withKwargs(
+    {
+      ...msg("result-1", "tool", "Completed"),
+      tool_call_id: "reused",
+    } as Message,
+    { run_id: "run-1", subagent_status: "completed" },
+  );
+  const pending = withKwargs(
+    {
+      ...msg("result-1", "tool", "Pending"),
+      tool_call_id: "reused",
+    } as Message,
+    { run_id: "run-1", subagent_pending: true },
+  );
+  expect(dedupeMessagesByIdentity([completed, pending])).toEqual([completed]);
+  // Provider call IDs may be reused by later Runs. Keep their pending result.
+  const later = withKwargs({ ...pending, id: "result-2" }, { run_id: "run-2" });
+  expect(dedupeMessagesByIdentity([completed, later])).toEqual([
+    completed,
+    later,
+  ]);
+  const sameRun = withKwargs(later, { run_id: "run-1" });
+  expect(dedupeMessagesByIdentity([completed, sameRun])).toEqual([
+    completed,
+    sameRun,
+  ]);
+});
+
+test("messageIdentity collapses X and X__user and keys tools by message id", () => {
   expect(messageIdentity(msg("req-1", "human", "q"))).toBe("message:req-1");
   expect(messageIdentity(msg("req-1__user", "human", "q"))).toBe(
     "message:req-1",
@@ -92,7 +121,7 @@ test("messageIdentity collapses X and X__user and keys tools by tool_call_id", (
       content: "result",
       tool_call_id: "call-1",
     } as Message),
-  ).toBe("tool:call-1");
+  ).toBe("message:tool-own-id");
 });
 
 test("trustedMessageSeq accepts only positive safe integers", () => {
@@ -165,16 +194,16 @@ test("hidden control copy never overwrites the visible human or its position", (
   expect(merged[0]!.additional_kwargs?.[MESSAGE_SEQ_KEY]).toBe(5);
 });
 
-test("tool results dedupe by tool_call_id and keep the known position", () => {
+test("copies of one tool result dedupe by message id and keep the known position", () => {
   const historyTool = {
-    id: "tool-old-row",
+    id: "tool-result",
     type: "tool",
     content: "partial",
     tool_call_id: "call-1",
     additional_kwargs: { [MESSAGE_SEQ_KEY]: 6 },
   } as Message;
   const liveTool = {
-    id: "tool-new-row",
+    id: "tool-result",
     type: "tool",
     content: "complete",
     tool_call_id: "call-1",
@@ -191,6 +220,55 @@ test("tool results dedupe by tool_call_id and keep the known position", () => {
   expect(tool.content).toBe("complete");
   expect(tool.tool_call_id).toBe("call-1");
   expect(tool.additional_kwargs?.[MESSAGE_SEQ_KEY]).toBe(6);
+});
+
+test.each(["run-a", "run-b"])(
+  "reused tool-call ids preserve both results and positions (second run %s)",
+  (secondRunId) => {
+    const first = msg("tool-first", "tool", "first result", 3, {
+      tool_call_id: "call_0",
+    });
+    const second = msg("tool-second", "tool", "second result", 6, {
+      tool_call_id: "call_0",
+    });
+    const history = buildVisibleHistoryMessages(
+      [
+        row("run-a", 2, msg("assistant-first", "ai", "search one")),
+        row("run-a", 3, first),
+        row(secondRunId, 5, msg("assistant-second", "ai", "search two")),
+        row(secondRunId, 6, second),
+        row(secondRunId, 7, { ...second, content: "complete second result" }),
+      ],
+      new Set(),
+    );
+    const live = [
+      msg("assistant-second", "ai", "search two"),
+      msg("tool-second", "tool", "replayed second result", undefined, {
+        tool_call_id: "call_0",
+      }),
+    ];
+
+    const results = mergeMessages(history, live, []).filter(
+      (message) => message.type === "tool",
+    );
+    expect(idsOf(results)).toEqual(["tool-first", "tool-second"]);
+    expect(results.map((message) => message.content)).toEqual([
+      "first result",
+      "replayed second result",
+    ]);
+    expect(seqsOf(results)).toEqual([3, 6]);
+  },
+);
+
+test("legacy tool results without message ids are not merged by provider id", () => {
+  const first = {
+    type: "tool",
+    tool_call_id: "call_0",
+    content: "first",
+  } as Message;
+  const second = { ...first, content: "second" } as Message;
+  expect(messageIdentity(first)).toBeUndefined();
+  expect(dedupeMessagesByIdentity([first, second])).toEqual([first, second]);
 });
 
 test("invalid seq values never overwrite a trusted position or break the merge", () => {

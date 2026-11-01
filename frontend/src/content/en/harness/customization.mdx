@@ -51,13 +51,16 @@ extensions:
   middlewares:
     - my_company.deerflow_middlewares:AuditMiddleware
     - class: my_company.deerflow_middlewares:AuditMiddleware
+      apply_to: lead
       kwargs:
         max_tool_calls: 5
 ```
 
+Optional `apply_to` on object entries accepts `both` (default), `lead`, or `subagent`. String entries and objects without this field retain both chains. Invalid values fail configuration validation. The host selects the chain before importing or constructing a middleware, so an excluded entry has no import/constructor side effects in that chain. Selected entries keep their relative order. This selects the fixed-slot configuration path only; packaged extensions retain their existing scope and placement APIs.
+
 Configured middleware is loaded after the built-in middleware and optional loop/token guards. On the lead-agent pipeline, it runs before the terminal-response, model-length, safety, and clarification tail; subagents have no terminal-response or clarification stage, so configured middleware is followed by the model-length guard, the optional safety guard, `DurableContextMiddleware`, optional `SummarizationMiddleware`, then `SubagentDateContextMiddleware` and `SystemMessageCoalescingMiddleware`. Treat these class paths as trusted configuration because loading one executes Python code. Embedded callers can instead use `DeerFlowClient(middlewares=[AuditMiddleware()])`, which builds the full lead-agent chain and places middleware before its terminal-response, model-length, safety, and clarification tail. `create_deerflow_agent(extra_middleware=[AuditMiddleware()])` instead builds a smaller feature-based lead-agent chain; unanchored extras are placed immediately before `ClarificationMiddleware` (anchored extras follow their `@Next`/`@Prev` placement). Neither API forwards middleware to subagents.
 
-Choose the registration path by ownership and placement. The fixed-slot (not deprecated) `extensions.middlewares` list is accepted in `config.yaml` and `extensions_config.json` (`config.yaml` wins) and applies to both lead and subagent pipelines. Packaged extensions registered through the top-level `plugins:` list contribute middleware at semantic extension points. Contributor code that needs committed, programmatic lead-only wiring can use `build_middlewares(..., custom_middlewares=[AuditMiddleware()])`.
+Choose the registration path by ownership and placement. The fixed-slot (not deprecated) `extensions.middlewares` list is accepted in `config.yaml` and `extensions_config.json` (`config.yaml` wins) and applies to both lead and subagent pipelines by default. Packaged extensions registered through the top-level `plugins:` list contribute middleware at semantic extension points. Contributor code that needs committed, programmatic lead-only wiring can use `build_middlewares(..., custom_middlewares=[AuditMiddleware()])`.
 
 For `create_deerflow_agent`, an `@Next` or `@Prev` anchor must name a middleware that this smaller chain actually contains; anchors from the full middleware list otherwise fail to resolve.
 

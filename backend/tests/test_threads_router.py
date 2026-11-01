@@ -1126,11 +1126,26 @@ def test_fast_path_trusted_claim_does_not_take_over_owned_row() -> None:
     assert final_record["user_id"] == "owner-a"
 
 
-def test_insert_race_concurrent_trusted_claims_have_one_winner() -> None:
+def test_insert_race_concurrent_trusted_claims_have_one_winner(monkeypatch) -> None:
     from sqlalchemy.exc import IntegrityError
 
     from app.gateway.auth_disabled import AUTH_SOURCE_INTERNAL
     from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME, INTERNAL_SYSTEM_ROLE
+    from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
+
+    # These INSERTs represent separate Gateways: they share SQL rows but have
+    # distinct process-local lifecycle locks. Same-Gateway serialization is
+    # covered with the real stores in test_thread_create_idempotency.py.
+    worker_locks = [AsyncKeyedLockTable[str](), AsyncKeyedLockTable[str]()]
+    lock_calls = 0
+
+    def worker_thread_lock(thread_id):
+        nonlocal lock_calls
+        lock_calls += 1
+        assert lock_calls <= len(worker_locks), f"expected two simulated Gateway lock acquisitions, got {lock_calls}"
+        return worker_locks[lock_calls - 1].hold(thread_id)
+
+    monkeypatch.setattr(threads, "goal_thread_lock", worker_thread_lock)
 
     class _ConcurrentInsertRaceStore(MemoryThreadMetaStore):
         def __init__(self):
@@ -1184,6 +1199,7 @@ def test_insert_race_concurrent_trusted_claims_have_one_winner() -> None:
     assert final_record["user_id"] in owners
     assert len(failures) == 1
     assert failures[0].status_code == 500
+    assert all(not table._entries_by_loop for table in worker_locks)
 
 
 def test_create_thread_maps_memory_owner_conflict_to_404() -> None:
@@ -2685,6 +2701,17 @@ def test_get_thread_history_injects_turn_duration_once_per_run() -> None:
     assert replayed[2]["additional_kwargs"]["turn_duration"] == 5
     assert "turn_duration" not in (replayed[3].get("additional_kwargs") or {})
     assert replayed[4]["additional_kwargs"]["turn_duration"] == 9
+
+
+def test_stamp_turn_duration_recovers_from_non_mapping_additional_kwargs(caplog) -> None:
+    from app.gateway.routers.thread_runs import stamp_turn_duration_on_last_ai
+
+    messages = [{"seq": 7, "run_id": "run-1", "type": "ai", "additional_kwargs": "legacy"}]
+    with caplog.at_level("WARNING", logger="app.gateway.routers.thread_runs"):
+        stamp_turn_duration_on_last_ai(messages, {"run-1": 4}, thread_id="thread-1")
+
+    assert messages[0]["additional_kwargs"] == {"turn_duration": 4}
+    assert any("thread thread-1" in record.message and "row seq 7" in record.message for record in caplog.records)
 
 
 # ── branch threads from completed assistant turns ─────────────────────────────
