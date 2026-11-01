@@ -10,7 +10,7 @@ from fastapi import HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.gateway.deps import get_current_user, get_run_context, get_run_manager
-from deerflow.runtime.runs.inputs import InputConflict, RunInputs
+from deerflow.runtime.runs.inputs import InputCancelled, InputConflict, RunInputs
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +92,13 @@ async def dispatch_queued_inputs(inputs: RunInputs, *, agent_runs, thread_id: st
         if entry["mode"] != "queue" or entry["status"] != "pending":
             continue
         try:
-            run = await agent_runs.dispatch_input(thread_id=thread_id, run_id=inputs.run_id, input_id=entry["id"])
+            try:
+                run = await agent_runs.dispatch_input(thread_id=thread_id, run_id=inputs.run_id, input_id=entry["id"])
+            except InputCancelled:
+                # Cancellation can win after the snapshot, even during
+                # admission. The atomic claim proves no Run was started.
+                logger.info("Skipping cancelled queued input %s for Run %s", entry["id"], inputs.run_id)
+                continue
             while run.status in ("pending", "running"):
                 # AgentRuns.wait retains its capped backoff and revocation
                 # checks; a long task exceeding a wait window is still live.
