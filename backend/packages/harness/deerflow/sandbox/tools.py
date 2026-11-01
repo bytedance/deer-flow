@@ -10,6 +10,7 @@ import string
 from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
@@ -2361,6 +2362,161 @@ def _execute_bash_command(
     return sandbox.execute_command(command, env=env, timeout=timeout)
 
 
+async def _execute_bash_command_async(
+    sandbox: Sandbox,
+    command: str,
+    *,
+    runtime: Runtime,
+    env: dict[str, str] | None,
+    timeout: float | None = None,
+) -> str:
+    """Async twin of _execute_bash_command: route subagent bash calls through
+    their isolated shell-session scope when the sandbox supports it async."""
+    scope_id = sandbox_command_scope(runtime.context)
+    scoped_execute = getattr(sandbox, "execute_command_in_scope_async", None)
+    if scope_id is not None and callable(scoped_execute):
+        return await scoped_execute(command, env=env, timeout=timeout, scope_id=scope_id)
+    if scope_id is not None:
+        # A scoped call on a sandbox without the async scoped method keeps the
+        # original sync router (scope/session semantics) in a worker.
+        return await run_sync_lifecycle_operation(_execute_bash_command, sandbox, command, runtime=runtime, env=env, timeout=timeout)
+    # Keep duck-typed custom providers and test doubles compatible: probe the
+    # plain async method next, then fall back to the original sync router in a
+    # worker.
+    plain_async = getattr(sandbox, "execute_command_async", None)
+    if callable(plain_async):
+        return await plain_async(command, env=env, timeout=timeout)
+    return await run_sync_lifecycle_operation(_execute_bash_command, sandbox, command, runtime=runtime, env=env, timeout=timeout)
+
+
+class _HostBashDisabledError(Exception):
+    """Raised by prepare when the local host-bash policy denies execution; the
+    tool bodies translate it into the same user-facing error string the sync
+    path returned before the prepare/exec split."""
+
+
+class _BashRedactionCell:
+    """Tracks the secret-redaction set as prepare progresses, so the tool
+    bodies' error paths mask with exactly the state the sync path had at the
+    same point: ``None`` before secrets are read, the injected set afterwards,
+    the merged local set for local sandboxes."""
+
+    __slots__ = ("env",)
+
+    def __init__(self) -> None:
+        self.env: dict[str, str] | None = None
+
+
+@dataclass(slots=True)
+class _BashInvocation:
+    """Everything the bash bodies need between prepare and the exec call."""
+
+    sandbox: Sandbox
+    command: str
+    env: dict[str, str] | None
+    timeout: float | None
+    max_chars: int
+    redaction_env: dict[str, str] | None
+    thread_data: ThreadDataState | None
+
+
+def _bash_output_config() -> tuple[int, float | None]:
+    """Read the bash output cap and command timeout from config with the same
+    tolerant fallbacks both branches used."""
+    try:
+        from deerflow.config.app_config import get_app_config
+
+        sandbox_cfg = get_app_config().sandbox
+        return (
+            sandbox_cfg.bash_output_max_chars if sandbox_cfg else 20000,
+            sandbox_cfg.bash_command_timeout if sandbox_cfg else None,
+        )
+    except Exception:
+        return 20000, None
+
+
+def _prepare_bash_invocation(runtime: Runtime, command: str, redaction: _BashRedactionCell) -> _BashInvocation:
+    """Resolve everything the bash bodies need before the sandbox exec call:
+    request-scoped secret env (#3861), path guards and transformations, and
+    output config. Runs in a worker thread on both tool paths (it touches the
+    filesystem); the exec call itself is the only part that differs between
+    the sync and async bodies."""
+    sandbox = ensure_sandbox_initialized(runtime)
+    # Request-scoped secrets resolved for the active skill (#3861), plus a
+    # short-lived GitHub App installation token threaded through by the
+    # GitHub channel. Both are injected as per-call env into the subprocess,
+    # never placed in the command string.
+    injected_env = read_active_secrets(getattr(runtime, "context", None)) or None
+    identity_prefix = _channel_identity_prefix(runtime)
+    user_prefix = _user_identity_prefix(runtime)
+    github_env = _github_env_from_runtime(runtime)
+    lark_cli_env = _lark_cli_env_from_runtime(runtime, command, sandbox_paths=not is_local_sandbox(runtime), sandbox=sandbox)
+    if github_env:
+        injected_env = {**(injected_env or {}), **github_env}
+    if lark_cli_env:
+        injected_env = {**(injected_env or {}), **lark_cli_env}
+    redaction.env = injected_env
+    if is_local_sandbox(runtime):
+        # Match the credential-name policy used for inherited host env.
+        # Keep benign operator settings readable and redact effective
+        # credentials before execution, including any exception output.
+        redaction.env = {name: value for name, value in (getattr(sandbox, "environment", None) or {}).items() if is_blocked_env_name(name)}
+        redaction.env.update(injected_env or {})
+        if not is_host_bash_allowed():
+            raise _HostBashDisabledError
+        ensure_thread_directories_exist(runtime)
+        thread_data = get_thread_data(runtime)
+        validate_local_bash_command_paths(command, thread_data)
+        command = replace_virtual_paths_in_command(command, thread_data)
+        command = _apply_cwd_prefix(command, thread_data)
+        # POSIX-only: the Windows local sandbox may execute via
+        # PowerShell/cmd.exe where `export` is not valid syntax, so the id
+        # is published through the subprocess environment instead —
+        # LocalSandbox layers `env` into the per-process environment, and
+        # unlike AioSandbox it has no persistent shell session that could
+        # carry a stale value forward. Deliberately kept out of
+        # `injected_env`, which doubles as the secret-redaction set: an
+        # identifier is not a secret and must stay readable in output.
+        local_env = injected_env
+        if not _is_windows():
+            command = user_prefix + (identity_prefix or "") + command
+        else:
+            windows_user_id = _resolved_user_id(runtime)
+            if windows_user_id is not None:
+                local_env = {**(injected_env or {}), USER_ID_ENV: windows_user_id}
+        max_chars, command_timeout = _bash_output_config()
+        return _BashInvocation(
+            sandbox=sandbox,
+            command=command,
+            env=local_env,
+            timeout=command_timeout,
+            max_chars=max_chars,
+            redaction_env=redaction.env,
+            thread_data=thread_data,
+        )
+    ensure_thread_directories_exist(runtime)
+    command = f"cd {VIRTUAL_PATH_PREFIX}/workspace; {command}"
+    command = user_prefix + (identity_prefix or "") + command
+    max_chars, command_timeout = _bash_output_config()
+    return _BashInvocation(
+        sandbox=sandbox,
+        command=command,
+        env=injected_env,
+        timeout=command_timeout,
+        max_chars=max_chars,
+        redaction_env=injected_env,
+        thread_data=None,
+    )
+
+
+def _finish_bash_output(output: str, invocation: _BashInvocation) -> str:
+    """Mask secrets and local paths, then truncate — exactly as the two sync
+    branches did after their exec call."""
+    if invocation.thread_data is not None:
+        output = mask_local_paths_in_output(output, invocation.thread_data)
+    return _truncate_bash_output(mask_secret_values(output, invocation.redaction_env), invocation.max_chars)
+
+
 def ensure_thread_directories_exist(runtime: Runtime | None) -> None:
     """Ensure thread data directories (workspace, uploads, outputs) exist.
 
@@ -2848,106 +3004,65 @@ def bash_tool(runtime: Runtime, command: str, description: str = "") -> str:
         command: The bash command to execute. Always use absolute paths for files and directories.
         description: Optional short explanation of this command shown in the UI.
     """
-    redaction_env = None
+    redaction = _BashRedactionCell()
     try:
-        sandbox = ensure_sandbox_initialized(runtime)
-        # Request-scoped secrets resolved for the active skill (#3861), plus a
-        # short-lived GitHub App installation token threaded through by the
-        # GitHub channel. Both are injected as per-call env into the subprocess,
-        # never placed in the command string.
-        injected_env = read_active_secrets(getattr(runtime, "context", None)) or None
-        identity_prefix = _channel_identity_prefix(runtime)
-        user_prefix = _user_identity_prefix(runtime)
-        github_env = _github_env_from_runtime(runtime)
-        lark_cli_env = _lark_cli_env_from_runtime(runtime, command, sandbox_paths=not is_local_sandbox(runtime), sandbox=sandbox)
-        if github_env:
-            injected_env = {**(injected_env or {}), **github_env}
-        if lark_cli_env:
-            injected_env = {**(injected_env or {}), **lark_cli_env}
-        redaction_env = injected_env
-        if is_local_sandbox(runtime):
-            # Match the credential-name policy used for inherited host env.
-            # Keep benign operator settings readable and redact effective
-            # credentials before execution, including any exception output.
-            redaction_env = {name: value for name, value in (getattr(sandbox, "environment", None) or {}).items() if is_blocked_env_name(name)}
-            redaction_env.update(injected_env or {})
-            if not is_host_bash_allowed():
-                return f"Error: {LOCAL_HOST_BASH_DISABLED_MESSAGE}"
-            ensure_thread_directories_exist(runtime)
-            thread_data = get_thread_data(runtime)
-            validate_local_bash_command_paths(command, thread_data)
-            command = replace_virtual_paths_in_command(command, thread_data)
-            command = _apply_cwd_prefix(command, thread_data)
-            # POSIX-only: the Windows local sandbox may execute via
-            # PowerShell/cmd.exe where `export` is not valid syntax, so the id
-            # is published through the subprocess environment instead —
-            # LocalSandbox layers `env` into the per-process environment, and
-            # unlike AioSandbox it has no persistent shell session that could
-            # carry a stale value forward. Deliberately kept out of
-            # `injected_env`, which doubles as the secret-redaction set: an
-            # identifier is not a secret and must stay readable in output.
-            local_env = injected_env
-            if not _is_windows():
-                command = user_prefix + (identity_prefix or "") + command
-            else:
-                windows_user_id = _resolved_user_id(runtime)
-                if windows_user_id is not None:
-                    local_env = {**(injected_env or {}), USER_ID_ENV: windows_user_id}
-            try:
-                from deerflow.config.app_config import get_app_config
-
-                sandbox_cfg = get_app_config().sandbox
-                max_chars = sandbox_cfg.bash_output_max_chars if sandbox_cfg else 20000
-                command_timeout = sandbox_cfg.bash_command_timeout if sandbox_cfg else None
-            except Exception:
-                max_chars = 20000
-                command_timeout = None
-            output = _execute_bash_command(
-                sandbox,
-                command,
-                runtime=runtime,
-                env=local_env,
-                timeout=command_timeout,
-            )
-            return _truncate_bash_output(
-                mask_secret_values(mask_local_paths_in_output(output, thread_data), redaction_env),
-                max_chars,
-            )
-        ensure_thread_directories_exist(runtime)
-        command = f"cd {VIRTUAL_PATH_PREFIX}/workspace; {command}"
-        command = user_prefix + (identity_prefix or "") + command
-        try:
-            from deerflow.config.app_config import get_app_config
-
-            sandbox_cfg = get_app_config().sandbox
-            max_chars = sandbox_cfg.bash_output_max_chars if sandbox_cfg else 20000
-            command_timeout = sandbox_cfg.bash_command_timeout if sandbox_cfg else None
-        except Exception:
-            max_chars = 20000
-            command_timeout = None
-        return _truncate_bash_output(
-            mask_secret_values(
-                _execute_bash_command(
-                    sandbox,
-                    command,
-                    runtime=runtime,
-                    env=injected_env,
-                    timeout=command_timeout,
-                ),
-                injected_env,
-            ),
-            max_chars,
-        )
+        invocation = _prepare_bash_invocation(runtime, command, redaction)
+        output = _execute_bash_command(invocation.sandbox, invocation.command, runtime=runtime, env=invocation.env, timeout=invocation.timeout)
+        return _finish_bash_output(output, invocation)
+    except _HostBashDisabledError:
+        return f"Error: {LOCAL_HOST_BASH_DISABLED_MESSAGE}"
     except SandboxError as e:
-        return mask_secret_values(f"Error: {e}", redaction_env)
+        return mask_secret_values(f"Error: {e}", redaction.env)
     except PermissionError as e:
-        return mask_secret_values(f"Error: {e}", redaction_env)
+        return mask_secret_values(f"Error: {e}", redaction.env)
     except Exception as e:
-        return mask_secret_values(f"Error: Unexpected error executing command: {_sanitize_error(e, runtime)}", redaction_env)
+        return mask_secret_values(f"Error: Unexpected error executing command: {_sanitize_error(e, runtime)}", redaction.env)
 
 
 async def _bash_tool_async(runtime: Runtime, command: str, description: str = "") -> str:
-    return await _run_sync_tool_after_async_sandbox_init(bash_tool.func, runtime, command, description)
+    return await _run_bash_tool_after_async_sandbox_init(runtime, command, description)
+
+
+async def _run_bash_tool_after_async_sandbox_init(runtime: Runtime, command: str, description: str = "") -> str:
+    """Async twin of _run_sync_tool_after_async_sandbox_init for the bash tool:
+    async sandbox init under the authorization scope, then the async body."""
+    del description  # UI-only label, forwarded for signature parity; the body never reads it
+    try:
+        async with sandbox_authorization_scope_async(runtime):
+            await ensure_sandbox_initialized_async(runtime)
+            return await _bash_tool_body_async(runtime, command)
+    except SandboxError as e:
+        return f"Error: {e}"
+    except Exception as e:
+        detail = await run_sync_lifecycle_operation(_sanitize_error, e, runtime)
+        return f"Error: Unexpected error initializing sandbox: {detail}"
+
+
+async def _bash_tool_body_async(runtime: Runtime, command: str) -> str:
+    """Async twin of the bash_tool body: prepare runs in a worker thread (it
+    touches the filesystem), the sandbox exec runs on the loop through
+    execute_command_async when supported. Output masking stays off-loop because
+    it resolves filesystem paths. Error paths preserve secret-redaction state."""
+    redaction = _BashRedactionCell()
+    try:
+        invocation = await run_sync_lifecycle_operation(_prepare_bash_invocation, runtime, command, redaction)
+        output = await _execute_bash_command_async(
+            invocation.sandbox,
+            invocation.command,
+            runtime=runtime,
+            env=invocation.env,
+            timeout=invocation.timeout,
+        )
+        return await run_sync_lifecycle_operation(_finish_bash_output, output, invocation)
+    except _HostBashDisabledError:
+        return f"Error: {LOCAL_HOST_BASH_DISABLED_MESSAGE}"
+    except SandboxError as e:
+        return mask_secret_values(f"Error: {e}", redaction.env)
+    except PermissionError as e:
+        return mask_secret_values(f"Error: {e}", redaction.env)
+    except Exception as e:
+        detail = await run_sync_lifecycle_operation(_sanitize_error, e, runtime)
+        return mask_secret_values(f"Error: Unexpected error executing command: {detail}", redaction.env)
 
 
 bash_tool.coroutine = _bash_tool_async
