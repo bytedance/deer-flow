@@ -166,7 +166,7 @@ async def test_real_process_kill_during_review(plugin):
 
     _, actions, service, runs = plugin
     await service.stop()
-    root = Path(__file__).resolve().parents[2]
+    root = Path(__file__).resolve().parents[3]
     program = r"""
 import asyncio,json,sys
 from deerflow_extension_workflows.service import Workflows

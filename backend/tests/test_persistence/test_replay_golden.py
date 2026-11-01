@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 from _replay_fixture import REPLAY_MODEL_BLOCK, build_config_yaml, drive_gateway, prepare_hermetic_extras
 
-FIXTURE_DIR = Path(__file__).parent / "fixtures" / "replay"
+FIXTURE_DIR = Path(__file__).parent.parent / "fixtures" / "replay"
 
 
 def _reset_process_singletons(monkeypatch: pytest.MonkeyPatch) -> None:

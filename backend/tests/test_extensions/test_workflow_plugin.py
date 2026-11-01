@@ -18,7 +18,7 @@ from tests.test_extensions.test_extension_agent_runs import runtime as _runtime_
 
 pytestmark = pytest.mark.skipif(os.name != "posix", reason="Workflow worker execution requires POSIX")
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 
 
 class Runs:

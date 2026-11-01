@@ -65,7 +65,7 @@ async def test_public_consumer_end_to_end_and_plugin_removed_restart(tmp_path, m
         await host.start()
         evidence, mutations = host.bindings[spec.use]
         deps = ExtensionRuntimeDeps(app_store=ExtensionData("fixture"), policy=HostPolicySnapshot(), completed_run_evidence=evidence, skill_mutations=mutations)
-        module_spec = importlib.util.spec_from_file_location("external_consumer", Path(__file__).parent / "fixtures" / "skill_evolution_consumer.py")
+        module_spec = importlib.util.spec_from_file_location("external_consumer", Path(__file__).parent.parent / "fixtures" / "skill_evolution_consumer.py")
         consumer = importlib.util.module_from_spec(module_spec)
         module_spec.loader.exec_module(consumer)
         operation, reverted = await consumer.exercise(deps, thread_id="thread", run_id="run", name="example")

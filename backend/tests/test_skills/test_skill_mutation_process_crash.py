@@ -36,7 +36,7 @@ async def test_sigkill_recovers_without_replay_or_double_version(host, boundary,
         "proposal": proposal.proposal_id,
         "boundary": boundary,
     }
-    child = await asyncio.create_subprocess_exec(sys.executable, str(Path(__file__).parent / "fixtures" / "skill_mutation_crash_worker.py"), json.dumps(args), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    child = await asyncio.create_subprocess_exec(sys.executable, str(Path(__file__).parent.parent / "fixtures" / "skill_mutation_crash_worker.py"), json.dumps(args), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     _, stderr = await asyncio.wait_for(child.communicate(), timeout=30)
     assert child.returncode == -signal.SIGKILL, stderr.decode()
     await asyncio.to_thread(host.recovery.recover_owner, "owner")

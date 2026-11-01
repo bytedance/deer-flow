@@ -14,7 +14,7 @@ def _root_declarations():
             continue
         tree = ast.parse(source_text)
         for node in ast.walk(tree):
-            if not isinstance(node, ast.Assign) or not any(isinstance(target, ast.Name) and target.id.lower().strip("_") in {"repo_root", "repository_root"} for target in node.targets):
+            if not isinstance(node, ast.Assign) or not any(isinstance(target, ast.Name) and target.id.lower().strip("_") in {"root", "repo_root", "repository_root"} for target in node.targets):
                 continue
             value = node.value
             if not isinstance(value, ast.Subscript) or not isinstance(value.value, ast.Attribute) or value.value.attr != "parents":
@@ -30,3 +30,34 @@ def test_repository_root_declarations_resolve_to_checkout():
     assert declarations, "No repository-root declarations were checked"
     incorrect = [f"{path.relative_to(TESTS_ROOT).as_posix()}:{line}: parents[{index}] resolves to {path.resolve().parents[index]}" for path, index, line in declarations if path.resolve().parents[index] != REPO_ROOT]
     assert not incorrect, "Incorrect repository roots:\n" + "\n".join(incorrect)
+
+
+def _literal_file_path(node, path):
+    if isinstance(node, ast.Call) and ast.unparse(node) == "Path(__file__)":
+        return path
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "resolve" and not node.args and not node.keywords:
+        return _literal_file_path(node.func.value, path).resolve()
+    if isinstance(node, ast.Attribute) and node.attr == "parent":
+        return _literal_file_path(node.value, path).parent
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div) and isinstance(node.right, ast.Constant) and isinstance(node.right.value, str):
+        return _literal_file_path(node.left, path) / node.right.value
+    raise ValueError("Not a literal file-relative path")
+
+
+def test_file_relative_fixture_paths_exist():
+    checked = []
+    for path in sorted(TESTS_ROOT.glob("test_*/*.py")):
+        source = path.read_text(encoding="utf-8-sig")
+        if "__file__" not in source or "fixtures" not in source:
+            continue
+        for node in ast.walk(ast.parse(source)):
+            if not isinstance(node, ast.BinOp):
+                continue
+            try:
+                target = _literal_file_path(node, path)
+            except ValueError:
+                continue
+            if "fixtures" in target.parts:
+                checked.append(target)
+                assert target.exists(), f"{path.relative_to(TESTS_ROOT)}:{node.lineno}: missing fixture path {target}"
+    assert checked, "No file-relative fixture paths were checked"

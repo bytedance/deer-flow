@@ -174,7 +174,7 @@ async def test_real_owner_kill_during_review_and_rolling_upgrade(cluster):
     from pathlib import Path
 
     a, b, runs = cluster
-    root = Path(__file__).resolve().parents[2]
+    root = Path(__file__).resolve().parents[3]
     program = r"""
 import asyncio,json,sys
 from deerflow_extension_workflows.service import Workflows
