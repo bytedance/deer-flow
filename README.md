@@ -1662,6 +1662,9 @@ view. Built-in and user-created/imported skills are listed separately. The
 Community tab supports importing `.skill` archives into My skills.
 General preferences remain in Settings.
 
+Failed skill requests retain their HTTP error status and a readable fallback
+when the server returns an unusable error body.
+
 The **ppt-generation** skill applies photo EXIF orientation before fitting and
 embedding slide images, so rotated or mirrored photos retain their displayed
 orientation.

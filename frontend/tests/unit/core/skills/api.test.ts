@@ -36,6 +36,25 @@ beforeEach(() => {
 });
 
 describe("skills api", () => {
+  test("retains a typed HTTP failure when the response body is JSON null", async () => {
+    mockedFetch.mockResolvedValueOnce(jsonResponse(403, null));
+    await expect(enableSkill("demo", true)).rejects.toMatchObject({
+      name: "SkillRequestError",
+      status: 403,
+      message: "HTTP 403: Error",
+    });
+  });
+
+  test("keeps upload soft failures when the response body is JSON null", async () => {
+    mockedFetch.mockResolvedValueOnce(jsonResponse(500, null));
+    await expect(
+      uploadSkillArchive(new File(["archive"], "demo.skill")),
+    ).resolves.toEqual({
+      success: false,
+      skill_name: "",
+      message: "HTTP 500: Error",
+    });
+  });
   test("uploads a local .skill archive as multipart form data", async () => {
     mockedFetch.mockResolvedValueOnce(
       jsonResponse(200, {
