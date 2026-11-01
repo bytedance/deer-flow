@@ -542,6 +542,11 @@ make docker-start   # Start services (auto-detects sandbox mode from config.yaml
 make docker-logs    # View logs
 ```
 
+Optional private web search: export a random `SEARXNG_SECRET` and run `make searxng-up`
+to serve JSON search at `http://localhost:8088` with seven enabled engines.
+Use `make searxng-down` to stop it. See the [SearXNG deployment guide](docker/searxng/README.md)
+for secret setup, tool configuration, and Docker Gateway networking.
+
 `make docker-start` starts `provisioner` only when `config.yaml` uses provisioner mode (`sandbox.use: deerflow.community.aio_sandbox:AioSandboxProvider` with `provisioner_url`). Direct Compose users can add `--profile provisioner` to the dev command for the same mode; the default stack does not require Kubernetes.
 With `USERDATA_PVC_NAME`, sandbox data, extra mounts and Lark broker credentials share one `user-data` volume with separate `subPath` mounts, avoiding duplicate references to the same claim on NFS CSI drivers.
 

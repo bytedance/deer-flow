@@ -1,0 +1,21 @@
+# Optional private SearXNG, standalone or merged with either DeerFlow stack.
+# See searxng/README.md for configuration and Gateway networking.
+services:
+  searxng:
+    image: searxng/searxng:latest
+    ports:
+      - "${BIND_HOST:-127.0.0.1}:${SEARXNG_PORT:-8088}:8080"
+    environment:
+      SEARXNG_SECRET: "${SEARXNG_SECRET:?Set SEARXNG_SECRET to a random secret}"
+    volumes:
+      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
+    networks:
+      - deer-flow
+      - deer-flow-dev
+    restart: unless-stopped
+
+networks:
+  deer-flow:
+    driver: bridge
+  deer-flow-dev:
+    driver: bridge

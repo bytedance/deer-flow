@@ -1,0 +1,36 @@
+use_default_settings:
+  engines:
+    keep_only:
+      - brave
+      - bing
+      - mojeek
+      - qwant
+      - startpage
+      - wikipedia
+      - duckduckgo
+
+search:
+  formats:
+    - html
+    - json
+
+server:
+  # SearXNG reads secret_key from SEARXNG_SECRET in the container environment.
+  limiter: false
+  public_instance: false
+
+engines:
+  - name: brave
+    disabled: false
+  - name: bing
+    disabled: false
+  - name: mojeek
+    disabled: false
+  - name: qwant
+    disabled: false
+  - name: startpage
+    disabled: false
+  - name: wikipedia
+    disabled: false
+  - name: duckduckgo
+    disabled: false

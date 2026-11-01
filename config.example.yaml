@@ -953,7 +953,9 @@ tools:
 
   # Web search tool (uses SearXNG, self-hosted, no API key required)
   # SearXNG is a free internet metasearch engine which aggregates results from
-  # various search services. Deploy your own instance: https://github.com/searxng/searxng
+  # various search services. Run make searxng-up with SEARXNG_SECRET exported.
+  # JSON output and multiple engines are configured in docker/searxng/settings.yml.
+  # Docker Gateway: merge the overlay and use http://searxng:8080; see docker/searxng/README.md.
   # For Docker deployments, use the Docker service name instead of localhost.
   # - name: web_search
   #   group: web
