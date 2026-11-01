@@ -96,3 +96,14 @@ def test_real_compose_rejects_missing_or_empty_secret(secret, tmp_path):
     )
     assert result.returncode != 0
     assert "SEARXNG_SECRET" in result.stderr
+
+
+# searxng/searxng 2026.11.1 marks these `inactive: true` upstream (proof-of-work
+# CAPTCHAs), so listing them in keep_only/engines silently loads nothing.
+UPSTREAM_INACTIVE_GENERAL_ENGINES = {"mojeek", "startpage", "dogpile", "marginalia"}
+
+
+def test_searxng_enables_no_upstream_inactive_engines():
+    settings = yaml.safe_load(SETTINGS_PATH.read_text(encoding="utf-8"))
+    listed = set(settings["use_default_settings"]["engines"]["keep_only"])
+    assert not listed & UPSTREAM_INACTIVE_GENERAL_ENGINES

@@ -3,8 +3,10 @@
 The official `searxng/searxng:latest` image serves HTML and JSON on port 8080.
 The overlay publishes only `${BIND_HOST:-127.0.0.1}:${SEARXNG_PORT:-8088}:8080`,
 matching DeerFlow's default SearXNG URL, `http://localhost:8088`.
-Brave, Bing, Mojeek, Qwant, Startpage, Wikipedia, and DuckDuckGo are enabled;
-a block at one provider can still leave results from the others. Availability
+Brave, Yahoo, Yandex, Mwmbl, Wikipedia, and DuckDuckGo are enabled; a block
+at one provider can still leave results from the others. Mojeek and Startpage
+are inactive upstream (proof-of-work CAPTCHAs), and Bing, Google, Qwant, Yep and
+Seznam failed or were denied in live testing, so they are left out. Availability
 and rate limits depend on the providers and your server's outbound IP.
 
 ## Local Gateway

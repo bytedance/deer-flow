@@ -543,7 +543,7 @@ make docker-logs    # View logs
 ```
 
 Optional private web search: export a random `SEARXNG_SECRET` and run `make searxng-up`
-to serve JSON search at `http://localhost:8088` with seven enabled engines.
+to serve JSON search at `http://localhost:8088` with six enabled engines (Brave, Yahoo and Yandex carry most results).
 Use `make searxng-down` to stop it. See the [SearXNG deployment guide](docker/searxng/README.md)
 for secret setup, tool configuration, and Docker Gateway networking.
 
