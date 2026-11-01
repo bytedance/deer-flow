@@ -473,12 +473,16 @@ fences, including unclosed fences, in complete and streamed replies.
    TAVILY_API_KEY=your-tavily-api-key
    ```
 
-   `make dev` and `make start` read `.env` as data, never as a shell script, so a
-   value means what the Gateway reads: `$$`, backticks and `$(...)` stay as
+   `make dev` and `make start` read `.env` as data, never as a shell script:
+   `$$`, backticks and `$(...)` stay as
    written, and an unquoted value may contain spaces. `$NAME`, `${NAME}`,
    `${NAME:-default}` and an unquoted leading `~` still expand, and
    single-quoted values stay literal. Quoted Windows paths ending in escaped
    backslashes keep their closing quote and do not discard later settings.
+   This last case deliberately differs from python-dotenv 1.2.2: standalone
+   Gateway launches and support-bundle reads may still skip these and following
+   quoted assignments. Launcher exports take precedence over the Gateway's
+   non-overriding dotenv read.
 
    </details>
 

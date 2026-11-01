@@ -157,3 +157,14 @@ def test_quoted_trailing_backslashes_preserve_following_assignments(tmp_path: Pa
     assert exported["DEER_FLOW_HOME"] == "C:" + "\\" * (backslashes // 2)
     assert exported["MODEL_NAME"] == "configured-model"
     assert exported["AFTER"] == "still-loaded"
+
+
+@pytest.mark.parametrize("quote", ["'", '"'])
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_quoted_backslash_before_newline_preserves_value(tmp_path: Path, quote: str, newline: str) -> None:
+    dotenv = f"MULTILINE={quote}one\\{newline}two{quote}{newline}AFTER=still-loaded{newline}"
+
+    exported = _exported(tmp_path, dotenv.encode("utf-8"))
+
+    assert exported["MULTILINE"] == "one\\\ntwo"
+    assert exported["AFTER"] == "still-loaded"

@@ -11,7 +11,11 @@ This reads the file as data instead and never executes any of it:
 
 - Statements are tokenized like python-dotenv (comments, `export` prefixes,
   single/double quotes and their escapes, multi-line quoted values, inline
-  comments after unquoted values), so a value means what the Gateway reads.
+  comments after unquoted values), with one deliberate exception: quoted
+  values ending in escaped backslashes keep their closing quote. Direct
+  reads by python-dotenv 1.2.2 in standalone Gateway launches or support
+  bundles can still skip these and following quoted assignments. Launcher
+  exports take precedence over the Gateway's non-overriding dotenv read.
 - The launcher's own semantics stay, as `support_bundle.py` mirrors them:
   `.env` assignments override inherited variables, even with an empty value;
   `$NAME`, `${NAME}` and `${NAME:-literal}` expand in unquoted and
