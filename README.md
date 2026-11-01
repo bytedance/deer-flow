@@ -3231,6 +3231,10 @@ captures from overwriting one another. Failed publication releases the placehold
 if cleanup fails, Gateway logs a warning with its path and preserves the original
 publication error or interruption.
 
+Browserless `web_fetch` and `web_capture` accept a positive, finite request timeout
+in seconds through `timeout_s` (or `timeout`). Invalid values fall back to 30 seconds.
+Invalid configured values emit a warning; omitting both keys uses the default silently.
+
 `browser_screenshot` never replaces an existing `outputs/` file: a taken name
 moves to the next free one, such as `report-1.png`.
 
