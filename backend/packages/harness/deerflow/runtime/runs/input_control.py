@@ -78,6 +78,7 @@ class RunInputControl:
         self.children: dict[str, tuple[ChildInputGate, str | None]] = {}
         self.interrupted_children: set[str] = set()
         self.receipts: list[HumanMessage] = []
+        self.deferred_usage: list[tuple[str, dict[str, int]]] = []
         self.pending_calls: set[str] = set()
         self.finished_calls: set[str] = set()
         self.on_result = on_result
@@ -100,11 +101,14 @@ class RunInputControl:
         return [x for x in state["items"] if x["mode"] == "steer" and x["status"] in ("pending", "applying") and x["id"] not in self.delivered]
 
     async def deliver(self, state):
+        from deerflow.agents.middlewares.token_usage_middleware import attribute_deferred_subagent_usage
+
         entries = await self.pending()
         if entries:
             entries = await self.inputs.claim_steer([x["id"] for x in entries])
-        messages = self.receipts[:]
+        messages = [*attribute_deferred_subagent_usage(state.get("messages", []), self.deferred_usage), *self.receipts]
         self.receipts.clear()
+        self.deferred_usage.clear()
         if entries:
             self.abandoned = False
             self.steering_active = True
@@ -184,9 +188,13 @@ class RunInputControl:
         except Exception:
             message = self._failure(call_id, "failed", "The subagent result could not be collected")
         from deerflow.agents.middlewares.delegation_ledger import extract_delegations
+        from deerflow.subagents.status_contract import SUBAGENT_TOKEN_USAGE_KEY, normalize_token_usage
 
         self.finished_calls.add(call_id)
         self.delegations.extend({**entry, "run_id": self.inputs.run_id} for entry in extract_delegations([AIMessage(content="", tool_calls=[self.calls[call_id]]), message]))
+        usage = normalize_token_usage(message.additional_kwargs.get(SUBAGENT_TOKEN_USAGE_KEY))
+        if usage:
+            self.deferred_usage.append((call_id, usage))
         self.receipts.append(
             HumanMessage(
                 content=json.dumps({"source": "subagent", "task_call_id": call_id, "result": message.content}, ensure_ascii=False),
