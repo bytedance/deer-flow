@@ -206,14 +206,13 @@ dangling links and removal before retry. Keep filesystem work off the event loop
 
 ## PostgreSQL batch fixtures
 
-Batch fixtures use `support.postgres.asyncpg_test_url` to map libpq `sslmode`
-to asyncpg `ssl` and remove unsupported `channel_binding` before constructing
-database config. Preserve TLS modes, credentials and other query options;
-reject conflicting `ssl`/`sslmode` values. CI uses `?sslmode=disable`; validate
+Batch fixtures use `support.postgres.asyncpg_test_url`, delegating to production
+`normalize_asyncpg_url` to map libpq `sslmode` to asyncpg `ssl`. Preserve TLS
+modes, credentials and other query options; reject conflicting `ssl`/`sslmode`
+and unsupported `channel_binding`. CI uses `?sslmode=disable`; validate
 that URI shape against a real test database, not only a parameter-free local
 URI. Reuse the normalized config for reopening and teardown, and drop only the
-fixture's UUID schema. This is test-only handling; production connection and
-TLS policy are unchanged.
+fixture's UUID schema. Keep the raw URI for production connection and CLI tests.
 
 The 0033 batch-evidence migration fixture uses the same adapter. Its connection
 contract probes execute the actual migration test setup through SQLAlchemy's

@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from sqlalchemy import JSON, BigInteger, DateTime, Index, Integer, String, Text, UniqueConstraint, text
+from sqlalchemy import JSON, BigInteger, Boolean, DateTime, Index, Integer, String, Text, UniqueConstraint, false, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from deerflow.persistence.base import Base
@@ -57,6 +57,10 @@ class RunRow(Base):
     # Multi-worker run ownership
     owner_worker_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Null on migrated rows: historical status is not producer authority.
+    run_incarnation: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    producer_epoch: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    producer_state: Mapped[str | None] = mapped_column(String(16), nullable=True)
     # A non-owning worker records cancellation here; the owner consumes it
     # while renewing its lease. The first action wins.
     cancel_action: Mapped[str | None] = mapped_column(String(20), nullable=True)
@@ -98,6 +102,15 @@ class RunRow(Base):
             postgresql_where=text("status IN ('pending', 'running')"),
         ),
     )
+
+
+class RunProducerPolicyRow(Base):
+    """Restart-required, database-wide strict event admission policy."""
+
+    __tablename__ = "run_producer_policy"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    strict: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=false())
+    cutover_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 class RunChangeClockRow(Base):
