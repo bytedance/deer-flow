@@ -31,8 +31,13 @@ def latest_genuine_user_message(messages: list[object]) -> HumanMessage | None:
 
 
 def genuine_user_turn_id(messages: list[object]) -> str | None:
-    """Return the non-empty message ID shared by turn-scoped middlewares."""
-    target = latest_genuine_user_message(messages)
+    """Return the non-empty message ID shared by turn-scoped middlewares.
+
+    A Steer delivered inside a Run carries ``run_input_id`` and continues that
+    Run's turn. Gateway strips the key from client input, so every Run's
+    opening message still starts a new turn.
+    """
+    target = next((message for message in reversed(messages) if is_genuine_user_message(message) and not message.additional_kwargs.get("run_input_id")), None)
     return target.id if target is not None and isinstance(target.id, str) and target.id else None
 
 
