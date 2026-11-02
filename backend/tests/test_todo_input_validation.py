@@ -40,6 +40,11 @@ def test_external_todos_accept_the_write_todos_shape(boundary):
 
 
 @pytest.mark.parametrize("boundary", BOUNDARIES)
+def test_external_todos_default_a_missing_status_to_pending(boundary):
+    assert boundary({"todos": [{"content": "x"}]})["todos"] == [{"content": "x", "status": "pending"}]
+
+
+@pytest.mark.parametrize("boundary", BOUNDARIES)
 @pytest.mark.parametrize("todos", [None, []])
 def test_external_todos_preserve_null_and_empty(boundary, todos):
     assert boundary({"todos": todos})["todos"] == todos
