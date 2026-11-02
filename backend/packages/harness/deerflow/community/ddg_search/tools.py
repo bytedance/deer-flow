@@ -207,6 +207,9 @@ def _search_text(
         min_interval_seconds = float(min_interval_seconds)
         if not 0 <= min_interval_seconds <= 300:
             raise ValueError("min_interval_seconds must be between 0 and 300")
+        if isinstance(max_retries, str) and re.fullmatch(r"\s*\d+\s*", max_retries):
+            # An env-sourced value (`max_retries: $DDG_MAX_RETRIES`) arrives as a string.
+            max_retries = int(max_retries)
         if isinstance(max_retries, bool) or not isinstance(max_retries, int) or not 0 <= max_retries <= 5:
             raise ValueError("max_retries must be an integer between 0 and 5")
         for attempt in range(max_retries + 1):

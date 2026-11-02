@@ -104,7 +104,22 @@ def test_tool_passes_pacing_config(monkeypatch):
     assert search.call_args.kwargs["max_retries"] == 1
 
 
-@pytest.mark.parametrize("options", [{"max_retries": -1}, {"max_retries": 6}, {"max_retries": True}, {"min_interval_seconds": float("nan")}, {"min_interval_seconds": -1}])
+@pytest.mark.parametrize("value", ["2", " 2 "])
+def test_env_sourced_retry_count_is_accepted(monkeypatch, clock, value):
+    # `max_retries: $DDG_MAX_RETRIES` reaches the tool as the string "2".
+    calls = []
+
+    def blocked(*args, **kwargs):
+        calls.append(1)
+        raise DDGSException("CAPTCHA")
+
+    fake_client(monkeypatch, blocked)
+    with pytest.raises(tools.DDGSearchError, match="DuckDuckGo blocked/challenged this request"):
+        tools._search_text("news", min_interval_seconds=0, max_retries=value)
+    assert len(calls) == 3
+
+
+@pytest.mark.parametrize("options", [{"max_retries": -1}, {"max_retries": 6}, {"max_retries": True}, {"max_retries": "1.5"}, {"max_retries": "6"}, {"max_retries": ""}, {"min_interval_seconds": float("nan")}, {"min_interval_seconds": -1}])
 def test_invalid_pacing_config_fails_without_request(monkeypatch, clock, options):
     def unexpected(*args, **kwargs):
         pytest.fail("invalid configuration must not reach DDGS")
