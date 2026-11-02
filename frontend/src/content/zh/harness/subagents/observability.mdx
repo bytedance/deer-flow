@@ -111,7 +111,7 @@ GET /api/threads/{thread_id}/token-usage?include_active=false
 | `POST /{batch_id}/pause`                  | 暂停                                                                  |
 | `POST /{batch_id}/resume`                 | 恢复                                                                  |
 | `POST /{batch_id}/cancel`                 | 取消；worker 未运行时返回 503                                         |
-| `POST /{batch_id}/items/{item_id}/retry`  | 重试单个条目，只接受 `failed` 状态，否则 409                          |
+| `POST /{batch_id}/items/{item_id}/retry`  | 重试单个 `failed` 条目；其他状态或批次已取消时返回 409                |
 | `GET /{batch_id}/items/{position}`        | 读取一个按所有者/线程授权的报告和已捕获证据快照                  |
 | `GET /{batch_id}/results.jsonl`           | 以 NDJSON 流式导出全部条目，含完整结果与验收结论                      |
 

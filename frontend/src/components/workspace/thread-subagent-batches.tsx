@@ -304,6 +304,7 @@ function BatchItems({
           key={item.id}
           item={item}
           workerRunning={workerRunning}
+          batchCancelled={batch.status === "cancelled"}
           retrying={retry.isPending && retry.variables === item.id}
           onRetry={() => retry.mutate(item.id)}
         />
@@ -332,6 +333,7 @@ function BatchItemRow({
   batchId,
   item,
   workerRunning,
+  batchCancelled,
   retrying,
   onRetry,
 }: {
@@ -339,6 +341,7 @@ function BatchItemRow({
   batchId: string;
   item: SubagentBatchItem;
   workerRunning: boolean;
+  batchCancelled: boolean;
   retrying: boolean;
   onRetry: () => void;
 }) {
@@ -374,7 +377,7 @@ function BatchItemRow({
         >
           <EyeIcon /> {t.subagentBatches.viewResult}
         </Button>
-        {item.status === "failed" && (
+        {item.status === "failed" && !batchCancelled && (
           <Button
             type="button"
             size="sm"

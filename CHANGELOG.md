@@ -19,6 +19,15 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **harness:** Retrying a failed item no longer reopens a cancelled durable
+  subagent batch. `retry_item` kept only a paused batch as it was, so a failed
+  item of a cancelled batch put the batch back to `queued`, the worker claimed
+  and ran the item, and the batch ended `completed`. The retry route now
+  answers 409 for a cancelled batch, including when the cancel commits while
+  the retry is in flight on SQLite, and the workspace no longer offers Retry
+  there. Retrying in a completed, failed, running or paused batch is
+  unchanged. ([#7792])
+
 - **agents:** `PUT /api/agents/{name}` with `"description": null` now resets the
   description to empty. It used to store the null, which the agent config
   rejects, so the agent then failed every load: the update, GET and repair
@@ -15980,3 +15989,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7732]: https://github.com/bytedance/deer-flow/pull/7732
 [#7762]: https://github.com/bytedance/deer-flow/pull/7762
 [#7772]: https://github.com/bytedance/deer-flow/pull/7772
+[#7792]: https://github.com/bytedance/deer-flow/pull/7792
