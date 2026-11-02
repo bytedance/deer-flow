@@ -12,6 +12,7 @@ from langchain.agents.middleware.todo import Todo
 from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.runtime import Runtime
 
+from deerflow.agents.middlewares.message_utils import is_mid_run_input
 from deerflow.subagents.status_contract import SUBAGENT_TOKEN_USAGE_KEY, normalize_token_usage
 
 logger = logging.getLogger(__name__)
@@ -315,11 +316,16 @@ def _attribute_completed_subagent_usage(messages: list[Any]) -> dict[int, AIMess
     # Walk backward through consecutive ToolMessages before the new AIMessage
     # so that multiple concurrent task tool calls all get their subagent tokens
     # written back to the same dispatch message (merging into one update).
+    # A steer or receipt delivered before that AIMessage sits after those
+    # ToolMessages without ending the step, so the walk passes over it.
     state_updates: dict[int, AIMessage | ToolMessage] = {}
     if len(messages) >= 2:
         idx = len(messages) - 2
         while idx >= 0:
             tool_msg = messages[idx]
+            if is_mid_run_input(tool_msg):
+                idx -= 1
+                continue
             if not isinstance(tool_msg, ToolMessage) or not tool_msg.tool_call_id:
                 break
 
