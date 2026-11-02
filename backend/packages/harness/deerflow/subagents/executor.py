@@ -772,6 +772,27 @@ def _get_isolated_subagent_loop() -> asyncio.AbstractEventLoop:
         return _isolated_subagent_loop
 
 
+def _run_on_isolated_loop_if_live(callback: Callable[[], None]) -> None:
+    """Run ``callback`` on the isolated loop, or inline when it cannot run.
+
+    Used to re-order a decision against a coroutine that was already submitted
+    to the loop: only the loop itself is serialized with that coroutine's first
+    step, so a caller thread cannot tell which of the two landed first.
+
+    A loop that is missing, stopped, or closed can no longer start the
+    coroutine, so running inline is then equivalent to running on it.
+    """
+    loop = _isolated_subagent_loop
+    if loop is None or loop.is_closed() or not loop.is_running():
+        callback()
+        return
+    try:
+        loop.call_soon_threadsafe(callback)
+    except RuntimeError:
+        # Closed between the lookup and the hand-off; nothing can start on it.
+        callback()
+
+
 def _submit_to_isolated_loop_in_context(
     context: Context,
     coro_factory: Callable[[], Coroutine[Any, Any, SubagentResult]],
@@ -2365,8 +2386,25 @@ class SubagentExecutor:
         with _background_tasks_lock:
             _background_futures[execution_id] = execution_future
 
+        def publish_pre_start_cancel() -> None:
+            # The chained future reports ``cancelled()`` for two different
+            # outcomes: the cancel beat the loop, or it reached a started
+            # coroutine that is still winding down. Only the first leaves the
+            # result without an owner able to publish a terminal status, and a
+            # task that exists but has not taken its first step still runs its
+            # body. Deciding on the loop, after that step, keeps the cleanup
+            # fence closed while the worker can still hold its capacity slot.
+            if execution_started.is_set():
+                return
+            result.try_set_terminal(
+                SubagentStatus.CANCELLED,
+                error="Cancelled before the execution started",
+                tool_receipts=result.snapshot_tool_receipts(),
+            )
+            _mark_background_execution_done(execution_id, result)
+
         def forget_future(completed_future: Future[SubagentResult]) -> None:
-            if completed_future.cancelled() and not execution_started.is_set():
+            if completed_future.cancelled():
                 # ``Future.cancel()`` only wins while the loop has not picked the
                 # coroutine up yet. In that window ``run_with_timeout`` never runs,
                 # so nothing writes a terminal status and nothing opens the cleanup
@@ -2375,13 +2413,8 @@ class SubagentExecutor:
                 # for a result that could never arrive. Publish the cancellation
                 # here; a cancellation that reached a running coroutine is handled
                 # by its own ``CancelledError`` branch, which owns the terminal write.
-                result.try_set_terminal(
-                    SubagentStatus.CANCELLED,
-                    error="Cancelled before the execution started",
-                    tool_receipts=result.snapshot_tool_receipts(),
-                )
-                _mark_background_execution_done(execution_id, result)
-            elif not completed_future.cancelled():
+                _run_on_isolated_loop_if_live(publish_pre_start_cancel)
+            else:
                 completed_future.exception()
             with _background_tasks_lock:
                 _background_futures.pop(execution_id, None)
