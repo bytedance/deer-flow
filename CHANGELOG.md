@@ -19,6 +19,13 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **channels:** A DingTalk reply in AI card mode (`card_template_id`) is no
+  longer lost when a card request fails, for example without card permission
+  or during a DingTalk outage. dingtalk-stream logs a failed card request and
+  returns as if it succeeded, so neither the text running reply nor the
+  `sampleMarkdown` fallback for the final answer ever ran. The channel now
+  sends card requests itself and falls back when one fails. ([#7781])
+  
 - **harness:** Retrying a failed item no longer reopens a cancelled durable
   subagent batch. `retry_item` kept only a paused batch as it was, so a failed
   item of a cancelled batch put the batch back to `queued`, the worker claimed
@@ -15989,4 +15996,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7732]: https://github.com/bytedance/deer-flow/pull/7732
 [#7762]: https://github.com/bytedance/deer-flow/pull/7762
 [#7772]: https://github.com/bytedance/deer-flow/pull/7772
+[#7781]: https://github.com/bytedance/deer-flow/pull/7781
 [#7792]: https://github.com/bytedance/deer-flow/pull/7792
