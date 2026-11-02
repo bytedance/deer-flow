@@ -57,6 +57,7 @@ python /path/to/skill/scripts/github_api.py <owner> <repo> tree
 - releases
 
 The `issues` command returns repository issues only, excluding pull requests. It follows additional pages when needed to fill the requested issue limit; use `prs` to research pull requests separately.
+The summary's contributor count is `100+` when its 100-entry sample is full; it is a lower bound, not an exact count.
 
 **Round 2 - Discovery (3-5 web_search)**
 - Get overview and identify key terms
