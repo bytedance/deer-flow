@@ -70,8 +70,13 @@ successful no-op; a live owner's write retains its existing missing-buffer
 Memory publication snapshots the payload before allocating an event ID. Each
 subscriber receives its own deep copy outside the stream Condition, so producer
 reuse and reader edits cannot rewrite retained frames. Heartbeat/END sentinels
-keep identity. `tests/test_memory_stream_payload_isolation.py` covers nested
-payloads and Worker-to-Gateway SSE/reconnect metadata, including subgraphs.
+keep identity. A publisher rechecks the captured generation's `retired` and
+`ended` flags under its Condition before allocating an event ID; cleanup and
+END therefore fence already-queued writes, and rejected writes consume no
+sequence. `publish_end` is idempotent and ignores retired generations.
+`tests/test_memory_stream_payload_isolation.py` covers nested payloads and
+Worker-to-Gateway SSE/reconnect metadata, including subgraphs;
+`tests/test_memory_stream_retirement.py` covers cleanup and END races.
 
 Memory keeps the exact last evicted event ID as bounded per-run metadata. A
 reconnect from that known predecessor replays all retained successors and END,
