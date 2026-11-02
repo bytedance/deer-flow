@@ -4435,6 +4435,295 @@ class TestCooperativeCancellation:
         """Test that requesting cancellation on a nonexistent task does not raise."""
         executor_module.request_cancel_background_task("nonexistent-task")
 
+    def test_cancel_before_the_coroutine_starts_leaves_no_pending_entry(self, executor_module, classes, base_config):
+        """A cancel that wins the race against the loop must still terminalize.
+
+        ``_submit_to_isolated_loop_in_context`` hands back a Future, and while the
+        loop has not picked the coroutine up ``Future.cancel()`` succeeds — so
+        ``run_with_timeout`` never runs, nothing writes a terminal status, and
+        nothing opens the cleanup fence. The entry stayed PENDING: the poller burned
+        its whole budget waiting, and ``cleanup_background_task`` refused to remove
+        it because it only drops terminal entries.
+
+        The coroutine is submitted to the real isolated loop, so ``cancelled()``
+        here comes from the same chained future ``run_coroutine_threadsafe`` hands
+        back in production rather than from a stand-in that was never scheduled.
+        """
+        SubagentExecutor = classes["SubagentExecutor"]
+        executor = SubagentExecutor(config=base_config, tools=[], thread_id="test-thread")
+        body_ran = threading.Event()
+
+        async def never_started() -> None:
+            body_ran.set()
+
+        loop = executor_module._get_isolated_subagent_loop()
+        hold = threading.Event()
+
+        def hold_loop() -> None:
+            hold.wait(5)
+
+        # Keep the loop inside a callback so the submission is still queued when
+        # the cancel lands: the coroutine has been created but cannot have run.
+        loop.call_soon_threadsafe(hold_loop)
+        try:
+            execution_id = executor.execute_async("Task")
+            result = executor_module._background_tasks[execution_id]
+            assert result.status.value == "pending"
+            assert not executor_module._background_futures[execution_id].done()
+
+            executor_module.request_cancel_background_task(execution_id)
+        finally:
+            hold.set()
+
+        try:
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and not result.status.is_terminal:
+                time.sleep(0.01)
+
+            assert not body_ran.is_set()
+            assert result.status.value == "cancelled"
+            assert result.error == "Cancelled before the execution started"
+
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and not result.execution_done_event.is_set():
+                time.sleep(0.01)
+            assert result.execution_done_event.is_set()
+
+            executor_module.cleanup_background_task(execution_id)
+            assert execution_id not in executor_module._background_tasks
+        finally:
+            executor_module._background_tasks.pop(execution_id, None)
+            executor_module._background_futures.pop(execution_id, None)
+
+    def test_cancel_before_the_submission_callback_never_fences_a_live_slot(
+        self,
+        executor_module,
+        classes,
+        base_config,
+        monkeypatch,
+    ):
+        """A cancel that beats the submission callback must not admit a worker.
+
+        Holding the loop in an earlier callback keeps the submission queued, so
+        ``Future.cancel()`` wins before ``run_coroutine_threadsafe`` has even
+        created the asyncio task. The done-callback then publishes the terminal
+        status and opens the cleanup fence on the loop, one turn *before* that
+        deferred task takes its first step — so the wrapper could still reach
+        ``_aexecute``, take the only capacity slot, and have its registry entry
+        removed while the slot was live.
+
+        The fix is a startup handshake rather than better ordering:
+        ``request_cancel_background_task`` sets ``cancel_event`` before it
+        cancels anything, and a wrapper that starts afterwards declines to
+        create the execution task. The invariant asserted here is the one that
+        matters — the fence never opens while a worker holds a slot.
+        """
+        from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
+        from deerflow.subagents.capacity import SubagentExecutionCapacity
+
+        SubagentExecutor = classes["SubagentExecutor"]
+        capacity = SubagentExecutionCapacity(SubagentRuntimeConfig(max_running=1))
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+            execution_capacity=capacity,
+        )
+
+        admitted = threading.Event()
+        admission_release = asyncio.Event()
+        loop = executor_module._get_isolated_subagent_loop()
+
+        async def hold_admission(*_args, **_kwargs):
+            admitted.set()
+            await admission_release.wait()
+            return {}, [], None
+
+        monkeypatch.setattr(executor, "_build_initial_state", hold_admission)
+
+        hold = threading.Event()
+        release = threading.Event()
+
+        def hold_loop() -> None:
+            hold.set()
+            release.wait(5)
+
+        loop.call_soon_threadsafe(hold_loop)
+        assert hold.wait(5)
+        execution_id = None
+        try:
+            execution_id = executor.execute_async("Task")
+            result = executor_module._background_tasks[execution_id]
+            # The loop is still inside ``hold_loop``, so the submission callback
+            # that would create the asyncio task has not run yet.
+            assert result.status.value == "pending"
+            assert executor_module._background_futures[execution_id].cancel()
+
+            executor_module.request_cancel_background_task(execution_id)
+        finally:
+            release.set()
+
+        try:
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline and not (admitted.is_set() or result.execution_done_event.is_set()):
+                time.sleep(0.01)
+
+            if admitted.is_set():
+                # A live worker owns the only slot; handing the entry to cleanup
+                # now would drop it while the release is still unfinished.
+                assert capacity.snapshot().running == 1
+                assert not result.execution_done_event.is_set()
+                loop.call_soon_threadsafe(admission_release.set)
+
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline and not result.execution_done_event.is_set():
+                time.sleep(0.01)
+
+            assert result.execution_done_event.is_set()
+            assert result.status.value == "cancelled"
+            assert capacity.snapshot().running == 0
+            # The handshake means the wrapper never creates the execution task,
+            # so nothing can acquire a slot after the fence opened.
+            assert not admitted.is_set()
+
+            executor_module.cleanup_background_task(execution_id)
+            assert execution_id not in executor_module._background_tasks
+        finally:
+            loop.call_soon_threadsafe(admission_release.set)
+            if execution_id is not None:
+                executor_module._background_tasks.pop(execution_id, None)
+                executor_module._background_futures.pop(execution_id, None)
+
+    def test_cancel_after_the_task_exists_keeps_the_fence_closed_until_teardown(
+        self,
+        executor_module,
+        classes,
+        base_config,
+    ):
+        """A cancel in the task-created window must not fence a live worker off.
+
+        ``Future.cancel()`` on the chained future succeeds while the asyncio task
+        exists but has not taken its first step, so a start-marker snapshot taken
+        from the cancelling thread reads "not started" even though the loop still
+        owns the coroutine. Deciding there published a terminal status and opened
+        the cleanup fence from the caller's thread; the decision now waits for the
+        loop, which is the only place serialized with that first step.
+
+        Which owner ends up publishing is a loop-queue coin toss from here:
+        ``Task.__init__`` queues the first step inside the factory, so the step
+        can precede the deferred decision and the coroutine's own
+        ``CancelledError`` branch wins ("Cancelled by user"); when the step loses
+        that race the deferred decision publishes instead. The invariants that
+        matter hold either way: the status is terminal ``cancelled``, the fence
+        opens only after the loop has settled the body, and cleanup removes the
+        entry.
+        """
+        SubagentExecutor = classes["SubagentExecutor"]
+        executor = SubagentExecutor(config=base_config, tools=[], thread_id="test-thread")
+        task_created = threading.Event()
+        execution_ran = threading.Event()
+        factory_release = threading.Event()
+        loop = executor_module._get_isolated_subagent_loop()
+        previous_factory = loop.get_task_factory()
+
+        async def slow_execution(_task, result_holder=None):
+            execution_ran.set()
+            await asyncio.sleep(30)
+            return result_holder
+
+        def hold_after_task_creation(loop_arg, coro, context=None):
+            task = asyncio.Task(coro, loop=loop_arg, context=context)
+            if not task_created.is_set():
+                # The task is queued but cannot step while the loop sits here,
+                # which is exactly the window the caller-side snapshot misreads.
+                # Block on an event rather than a timer: on a loaded worker the
+                # caller may need longer than any fixed delay to request the
+                # cancel, and the body would then start first and invalidate the
+                # window this test is about.
+                task_created.set()
+                factory_release.wait(5)
+            return task
+
+        loop.set_task_factory(hold_after_task_creation)
+        try:
+            with patch.object(executor, "_aexecute", new=slow_execution):
+                execution_id = executor.execute_async("Task")
+                assert task_created.wait(5)
+
+                result = executor_module._background_tasks[execution_id]
+                executor_module.request_cancel_background_task(execution_id)
+
+                # The loop is still holding the task, so nothing can have finished
+                # teardown: publishing here would hand the entry to cleanup while
+                # the worker could still take its slot.
+                assert not result.status.is_terminal
+                assert not result.execution_done_event.is_set()
+        finally:
+            factory_release.set()
+            loop.set_task_factory(previous_factory)
+
+        try:
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline and not result.execution_done_event.is_set():
+                time.sleep(0.01)
+
+            # Either the deferred decision publishes (the step lost the race) or
+            # the body started and its own CancelledError branch does; both own
+            # the terminal write legitimately.
+            assert not execution_ran.is_set()
+            assert result.status.value == "cancelled"
+            assert result.error in ("Cancelled before the execution started", "Cancelled by user")
+            assert result.execution_done_event.is_set()
+
+            executor_module.cleanup_background_task(execution_id)
+            assert execution_id not in executor_module._background_tasks
+        finally:
+            executor_module._background_tasks.pop(execution_id, None)
+            executor_module._background_futures.pop(execution_id, None)
+
+    def test_cancel_of_a_running_body_keeps_its_own_terminal_write(
+        self,
+        executor_module,
+        classes,
+        base_config,
+    ):
+        """A cancelled running body still owns the terminal write.
+
+        The deferred pre-start decision runs after the coroutine's first step, so a
+        body that already started must win: it reports "Cancelled by user" after its
+        own cleanup, not the pre-start message.
+        """
+        SubagentExecutor = classes["SubagentExecutor"]
+        executor = SubagentExecutor(config=base_config, tools=[], thread_id="test-thread")
+        execution_ran = threading.Event()
+
+        async def slow_execution(_task, result_holder=None):
+            execution_ran.set()
+            await asyncio.sleep(30)
+            return result_holder
+
+        with patch.object(executor, "_aexecute", new=slow_execution):
+            execution_id = executor.execute_async("Task")
+            assert execution_ran.wait(5)
+            result = executor_module._background_tasks[execution_id]
+
+            executor_module.request_cancel_background_task(execution_id)
+
+        try:
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline and not result.execution_done_event.is_set():
+                time.sleep(0.01)
+
+            assert result.status.value == "cancelled"
+            assert result.error == "Cancelled by user"
+            assert result.execution_done_event.is_set()
+
+            executor_module.cleanup_background_task(execution_id)
+            assert execution_id not in executor_module._background_tasks
+        finally:
+            executor_module._background_tasks.pop(execution_id, None)
+            executor_module._background_futures.pop(execution_id, None)
+
     def test_execute_async_runs_without_calling_execute(self, executor_module, classes, base_config):
         """Regression: execute_async should not route through execute()/asyncio.run()."""
         import concurrent.futures
