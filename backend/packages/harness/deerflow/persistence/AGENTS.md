@@ -16,6 +16,11 @@ On SQLite, `BEGIN IMMEDIATE` takes the database-wide write lock, so every unrela
 
 ## Batch lease recovery
 
+Batch controls reserve the parent writer and reload its current state before
+deciding pause/resume/cancel. SQLite ignores SELECT FOR UPDATE; deriving a
+transition from the earlier snapshot can replace a committed terminal outcome.
+Keep the parent-before-item lock order and terminal completion timestamps.
+
 Batch lease recovery includes paused parents only when they have expired active
 items. Reconcile through the existing owner/expiry fence, then skip promotion and
 claiming while paused. Preserve explicit retry/resume and terminal projection;
