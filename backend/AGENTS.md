@@ -32,9 +32,8 @@ live in `tests/`, `docs/`, and `scripts/benchmark/` respectively. Module-local
 ## Important Development Guidelines
 
 ### Documentation Update Policy
-Every code change must keep docs accurate and current: update `README.md` for
-user-facing behavior and the relevant `AGENTS.md` for development changes.
-`CLAUDE.md` imports `AGENTS.md`; do not edit the shim.
+Update `README.md` for behavior and scoped `AGENTS.md` for development changes.
+Do not edit the `CLAUDE.md` import shim.
 
 Image result URL policy: [image search guide](packages/harness/deerflow/community/image_search/AGENTS.md).
 
@@ -240,23 +239,12 @@ Run `make dev` from the repo root to start all services at `http://localhost:202
 
 ### Running Backend Services Separately
 
-From the **backend** directory:
-
-```bash
-# Gateway API
-make gateway
-```
-
-Direct access (without nginx):
-- Gateway: `http://localhost:8001`
+From `backend/`, run `make gateway`; direct access is `http://localhost:8001`.
 
 ### Frontend Configuration
 
-The frontend uses environment variables to connect to backend services:
-- `NEXT_PUBLIC_LANGGRAPH_BASE_URL` - Defaults to `/api/langgraph` (through nginx)
-- `NEXT_PUBLIC_BACKEND_BASE_URL` - Defaults to empty string (through nginx)
-
-When using `make dev` from root, the frontend automatically connects through nginx.
+`NEXT_PUBLIC_LANGGRAPH_BASE_URL` defaults to `/api/langgraph` and
+`NEXT_PUBLIC_BACKEND_BASE_URL` to empty. Root `make dev` uses nginx for both.
 
 ## Key Features
 
