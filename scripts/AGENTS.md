@@ -25,6 +25,8 @@ path variables and compare storage defaults with the launcher's actual shell blo
 
 ## Dependency and Label Checks
 
+Wizard dotenv literals: `wizard/writer.py`; tests: `test_setup_wizard.py`.
+
 `check_extension.py`: Gateway wheel asset validator; example CI:
 `extension-package-check.yml`. Tests: `backend/tests/test_extension_check_script.py`.
 
@@ -106,10 +108,9 @@ checkout has no config. `tests/test_serve_config_presence.py` runs the full
 launcher through dependency detection with service operations stubbed.
 `setup-sandbox.sh` also strips the leading BOM and normalizes CRLF before selecting the image;
 keep its shell filter compatible with GNU and BSD sed.
-An Apple Container pull that succeeds on macOS must not fail the setup step
-just because Docker is absent. Keep the Docker pull when Docker is available,
-including after an Apple Container failure, and retain the final image-config
-note rather than exiting early on Apple Container success.
+On macOS, successful Apple Container pulls work without Docker. Still pull with
+Docker when available, including after Apple Container failure; retain the final
+image-config note after Apple Container success.
 
 The root `PORT` value configures Docker's published nginx ingress only; local
 orchestration pins Next.js to `3000`. Local runs bind the Gateway and Next.js to

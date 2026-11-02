@@ -6,9 +6,22 @@ Run from repo root:
 
 from __future__ import annotations
 
+import json
+import os
+import shutil
+import subprocess
+
+import pytest
 import yaml
+from dotenv import dotenv_values
 from wizard import ui as wizard_ui
-from wizard.providers import LLM_PROVIDERS, SEARCH_PROVIDERS, WEB_FETCH_PROVIDERS, LLMProvider, with_thinking_support
+from wizard.providers import (
+    LLM_PROVIDERS,
+    SEARCH_PROVIDERS,
+    WEB_FETCH_PROVIDERS,
+    LLMProvider,
+    with_thinking_support,
+)
 from wizard.steps import channels as channels_step
 from wizard.steps import llm as llm_step
 from wizard.steps import search as search_step
@@ -108,7 +121,10 @@ class TestProviders:
 
     def test_zai_glm_flash_generated_config_loads_as_a_required_thinking_model(self):
         from deerflow.config.model_config import ModelConfig
-        from deerflow.models.reasoning import resolve_reasoning_contract, resolve_reasoning_request
+        from deerflow.models.reasoning import (
+            resolve_reasoning_contract,
+            resolve_reasoning_request,
+        )
 
         provider = next(p for p in LLM_PROVIDERS if p.name == "zai")
         content = build_minimal_config(
@@ -638,6 +654,130 @@ class TestWizardUi:
 
 
 class TestEnvFileHelpers:
+    def test_written_credentials_match_compose_literals(self, tmp_path):
+        docker = shutil.which("docker")
+        if not docker:
+            pytest.skip("Docker Compose CLI is not installed")
+        version = subprocess.run([docker, "compose", "version"], capture_output=True, timeout=15)
+        if version.returncode:
+            pytest.skip("Docker Compose CLI is not installed")
+        values = {
+            "TEST_WIZARD_DOLLAR": "literal-$WIZARD_SUFFIX",
+            "TEST_WIZARD_PATH": "space and embedded\\path",
+            "TEST_WIZARD_QUOTES": "dollar$WIZARD_SUFFIX and 'quote'",
+        }
+        env_file = tmp_path / ".env"
+        write_env_file(env_file, values)
+        actual_config = tmp_path / "actual.json"
+        actual_config.write_text(
+            json.dumps({"services": {"probe": {"image": "scratch", "env_file": [str(env_file)]}}}),
+            encoding="utf-8",
+        )
+        expected_config = tmp_path / "expected.json"
+        expected_config.write_text(
+            json.dumps(
+                {
+                    "services": {
+                        "probe": {
+                            "image": "scratch",
+                            "environment": {key: value.replace("$", "$$") for key, value in values.items()},
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        command = [
+            docker,
+            "compose",
+            "--project-name",
+            "deerflow-wizard-test",
+            "--env-file",
+            str(env_file),
+        ]
+        environment = {**os.environ, "WIZARD_SUFFIX": "expanded"}
+        results = []
+        for config in (actual_config, expected_config):
+            result = subprocess.run(
+                [*command, "-f", str(config), "config", "--format", "json"],
+                env=environment,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=30,
+            )
+            assert result.returncode == 0, result.stderr
+            results.append(json.loads(result.stdout)["services"]["probe"]["environment"])
+        assert results[0] == results[1]
+
+    @pytest.mark.parametrize("existing", [False, True])
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "sk-plain",
+            "literal-$WIZARD_SUFFIX",
+            "literal # suffix",
+            "~literal",
+            "single' and double\" quotes",
+            "embedded\\path",
+            "space and embedded\\path",
+            "dollar$WIZARD_SUFFIX and 'quote'",
+            "trailing\\",
+            "unicode-中文",
+        ],
+    )
+    def test_written_credentials_survive_runtime_readers(self, tmp_path, monkeypatch, existing, value):
+        from test_serve_dotenv import _exported
+
+        monkeypatch.setenv("WIZARD_SUFFIX", "expanded")
+        env_file = tmp_path / ".env"
+        if existing:
+            env_file.write_text(
+                "# keep this comment\nTEST_WIZARD_KEY=old\nUNRELATED=${WIZARD_SUFFIX}\n",
+                encoding="utf-8",
+            )
+        write_env_file(env_file, {"TEST_WIZARD_KEY": value})
+        contents = env_file.read_bytes()
+
+        assert dotenv_values(env_file)["TEST_WIZARD_KEY"] == value
+        assert read_env_file(env_file)["TEST_WIZARD_KEY"] == value
+        exported = _exported(tmp_path, contents, WIZARD_SUFFIX="expanded")
+        assert exported["TEST_WIZARD_KEY"] == value
+        if existing:
+            assert "# keep this comment" in contents.decode()
+            assert exported["UNRELATED"] == "expanded"
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "literal-${WIZARD_SUFFIX}",
+            "line\nbreak",
+            "nul\x00byte",
+            "space and trailing\\",
+            "dollar$WIZARD_SUFFIX and back\\slash",
+        ],
+    )
+    def test_unrepresentable_credentials_leave_existing_file_untouched(self, tmp_path, value):
+        env_file = tmp_path / ".env"
+        original = b"# retained\r\nFIRST_KEY=old\r\nSECOND_KEY=old\r\n"
+        env_file.write_bytes(original)
+
+        with pytest.raises(ValueError, match="SECOND_KEY") as error:
+            write_env_file(env_file, {"FIRST_KEY": "new", "SECOND_KEY": value})
+        assert value not in str(error.value)
+        assert env_file.read_bytes() == original
+
+    def test_update_replaces_whole_multiline_binding(self, tmp_path):
+        env_file = tmp_path / ".env"
+        env_file.write_text('# keep\nexport KEY="old\nvalue"\nOTHER="untouched"', encoding="utf-8")
+        write_env_file(env_file, {"KEY": "new # value", "ADDED": "new"})
+        assert dotenv_values(env_file) == {
+            "KEY": "new # value",
+            "OTHER": "untouched",
+            "ADDED": "new",
+        }
+        assert 'OTHER="untouched"' in env_file.read_text(encoding="utf-8")
+
     def test_write_and_read_new_file(self, tmp_path):
         env_file = tmp_path / ".env"
         write_env_file(env_file, {"OPENAI_API_KEY": "sk-test123"})

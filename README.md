@@ -246,6 +246,8 @@ fences, including unclosed fences, in complete and streamed replies.
 
    This launches an interactive wizard that guides you through choosing an LLM provider, optional web search, and execution/safety preferences such as sandbox mode, bash access, and file-write tools. It generates a minimal `config.yaml` and writes your keys to `.env`. Takes about 2 minutes.
 
+   The wizard writes API keys as literal values, preserving characters such as `$NAME`, spaces, and `#` when the local launcher and Gateway read them. Values containing `${...}`, line breaks, NUL, a mix of dollar signs and backslashes, or a trailing backslash that requires quoting cannot be preserved across the current dotenv readers; the wizard rejects them with a key-name-only error before changing `.env`. For such credentials, export the value directly and omit that key from `.env`. Existing hand-written variable references in unrelated settings remain unchanged.
+
    The wizard also lets you configure an optional web search provider, or skip it for now.
 
    Brave web search preserves valid entries in mixed result lists. Malformed response containers or lists containing no usable entries return a structured format error; missing, null, or empty results keep the existing "No results found" response. Format errors also log the malformed container's path and type, or the absence of usable result objects, without including search queries, credentials, or payload values.
