@@ -19,6 +19,15 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **extensions:** Context-compaction observers now learn which task a
+  compaction happened in. Inside a lead run or subagent they receive that
+  task's store instead of a detached one, and `CompactionEvent` gains
+  `task_id`, `run_id` and `thread_id` (default `None`), copied from the
+  `TaskInfo` the host now seeds into every task store even when no lifecycle
+  contributor is registered. A manual `/compact` still gets a detached store
+  and `None` ids. `deerflow-extension-api` is now 0.2.10; existing
+  extensions keep working. ([#TBD])
+
 - **channels:** A DingTalk reply in AI card mode (`card_template_id`) is no
   longer lost when a card request fails, for example without card permission
   or during a DingTalk outage. dingtalk-stream logs a failed card request and
