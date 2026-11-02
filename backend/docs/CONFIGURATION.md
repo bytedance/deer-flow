@@ -942,6 +942,30 @@ empty or omitted `include_domains`. These filters compose with `max_results`
 and the model's optional `time_range`. The model-visible arguments remain `query`
 and `time_range`; the filters do not apply to `web_fetch` or other search providers.
 
+#### Per-Run first-party Web attempt budget
+
+`web_attempt_budget.max_attempts` is `null` by default. A positive integer
+enables an atomic, process-local counter for HTTP requests sent by the built-in
+Serper `web_search`/`image_search` and Jina `web_fetch` tools. Each initial
+request, retry, and redirect hop consumes one attempt immediately before
+transport. When the limit is exhausted, the covered tool returns a local
+`web_attempt_budget_exhausted` error and sends no further request; the agent
+may finish with the results already obtained. The value is operator-owned and
+is not a model-facing tool argument.
+
+```yaml
+web_attempt_budget:
+  max_attempts: 12
+```
+
+Lead and native subagent calls in one worker share the same counter, which is
+removed on run cleanup. This setting does not cover other Web providers, MCP
+tools, or background HTTP traffic. Durable subagents dispatched to a different
+process cannot access the local counter and their covered calls fail closed.
+The policy is therefore suitable for a single-worker deployment; it is not a
+cross-instance cost ceiling. Keep it disabled if the deployment needs covered
+cross-process subagents to continue until a durable counter is available.
+
 #### Jina fetch retries
 
 Jina's `web_fetch` keeps one attempt by default. Configure retries on its existing

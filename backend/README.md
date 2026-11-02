@@ -595,6 +595,21 @@ reachability.
 
 ---
 
+## First-party Web request budget
+
+Set `web_attempt_budget.max_attempts` in `config.yaml` to a positive integer to
+limit physical HTTP attempts made by the built-in Serper web/image search and
+Jina web fetch tools during one Gateway run. The default `null` leaves the
+existing behavior unchanged. A retry or redirect hop uses another attempt;
+the next covered request returns a local `web_attempt_budget_exhausted` error
+before network I/O. The agent can use that error to finish with partial results.
+
+The counter is shared by the lead agent and subagents executing in the same
+worker process and is cleared when the run ends. It does not cover other Web
+providers, MCP tools, or arbitrary HTTP clients. Cross-process subagents have
+no access to the local counter, so covered requests fail closed there when the
+policy is enabled. This setting is not a deployment-wide request or cost cap.
+
 ## License
 
 See the [LICENSE](../LICENSE) file in the project root.

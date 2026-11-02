@@ -621,6 +621,7 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: Final[frozenset[str]] = (
             "__run_input_control",
             THREAD_INCARNATION_CONTEXT_KEY,
             THREAD_INCARNATION_METADATA_GUARD_KEY,
+            "app_config",
             "is_subagent",
             "agent_id",
             "__run_loop_detection_recorder",
@@ -757,7 +758,7 @@ def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> N
     existing_context = config.get("context")
     if isinstance(existing_context, dict):
         existing_context.setdefault("thread_id", runtime_context["thread_id"])
-        existing_context.setdefault("run_id", runtime_context["run_id"])
+        existing_context["run_id"] = runtime_context["run_id"]
         # Keep both context views authoritative. A server-owned value is
         # assigned from the runtime context when present and removed otherwise,
         # so an embedded caller cannot preserve a forged lifecycle identity in
@@ -1337,6 +1338,10 @@ async def run_agent(
             thread_incarnation=thread_incarnation,
             scheduler_capability=ctx.scheduler_capability,
         )
+        from deerflow.community.web_attempt_budget import register_run
+
+        budget_policy = getattr(ctx.app_config, "web_attempt_budget", None)
+        register_run(run_id, getattr(budget_policy, "max_attempts", None))
         register_sandbox_prewarm_cleanup(runtime_ctx)
         # Bind every checkpoint produced by this run to the effective agent
         # identity that produced its state. Manual compaction uses only this
@@ -2302,6 +2307,9 @@ async def run_agent(
                             run_id,
                         )
                     finally:
+                        from deerflow.community.web_attempt_budget import unregister_run
+
+                        unregister_run(run_id)
                         _release_run_scoped_references(
                             runnable_configs,
                             runtime_ctx,

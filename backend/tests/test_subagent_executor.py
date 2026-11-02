@@ -5535,11 +5535,27 @@ class TestSubagentGuardrailAttribution:
         assert context.get("oauth_provider") == "keycloak"
         assert context.get("oauth_id") == "subj-123"
         assert context.get("run_id") == "run-42"
+        assert "context" not in fake_agent.captured_config
         assert context.get("is_subagent") is True
         lease_owner = context.get("sandbox_lease_owner_id")
         assert isinstance(lease_owner, str)
         assert lease_owner.startswith("subagent:")
         assert context.get("sandbox_command_scope_id") == lease_owner
+
+    @pytest.mark.anyio
+    async def test_aexecute_supplies_enabled_web_budget_policy_in_runtime_context(self, classes, monkeypatch):
+        executor = self._make_executor(classes, run_id="parent-run")
+        policy = SimpleNamespace(web_attempt_budget=SimpleNamespace(max_attempts=2))
+        monkeypatch.setattr(executor, "_get_resolved_app_config", lambda: policy)
+        fake_agent = _FakeStreamAgent()
+        monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
+        monkeypatch.setattr(executor, "_create_agent", _async_create_agent_double(fake_agent))
+
+        await executor._aexecute("do something")
+
+        assert fake_agent.captured_context["run_id"] == "parent-run"
+        assert fake_agent.captured_context["app_config"] is policy
+        assert "context" not in fake_agent.captured_config
 
     @pytest.mark.anyio
     async def test_aexecute_propagates_narrow_loop_detection_recorder(

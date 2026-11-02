@@ -11,6 +11,8 @@ from email.utils import parsedate_to_datetime
 
 import httpx
 
+from deerflow.community.web_attempt_budget import WebAttemptBudgetExceeded, _Counter
+
 from .request_admission import JinaAdmissionError, get_admission
 
 logger = logging.getLogger(__name__)
@@ -147,6 +149,7 @@ class JinaClient:
         retry_budget_seconds: float = 30.0,
         max_response_bytes: int | None = None,
         request_admission: dict | None = None,
+        attempt_budget: _Counter | None = None,
     ) -> str:
         """Fetch with optional bounded retries; cancellation always propagates."""
         diagnostic = logger.isEnabledFor(logging.DEBUG)
@@ -190,6 +193,12 @@ class JinaClient:
                     if proxy:
                         client_kwargs["proxy"] = proxy
                     async with _admission_client(client_kwargs) if admission else httpx.AsyncClient(**client_kwargs) as client:
+                        if attempt_budget is not None:
+
+                            async def reserve_request(_request: httpx.Request) -> None:
+                                attempt_budget.reserve()
+
+                            client.event_hooks["request"].append(reserve_request)
                         delay = 0.5
                         for attempt in range(max_retries + 1):
                             remaining = deadline - asyncio.get_running_loop().time() if deadline is not None else None
@@ -272,6 +281,10 @@ class JinaClient:
                                     if diagnostic:
                                         backoff_seconds += time.monotonic() - wait_started
                             delay = min(delay * 2, 4.0)
+            except WebAttemptBudgetExceeded as e:
+                outcome, reason = "error", "web_attempt_budget_exhausted"
+                logger.info("Jina request skipped: local Run Web request budget exhausted")
+                return f"Error: {e} (web_attempt_budget_exhausted)"
             except JinaAdmissionError as e:
                 if pending_return:
                     outcome, reason = "error", "request_failure"

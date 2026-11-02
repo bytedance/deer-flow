@@ -64,6 +64,7 @@ from deerflow.config.tool_progress_config import ToolProgressConfig
 from deerflow.config.tool_search_config import ToolSearchConfig, load_tool_search_config_from_dict
 from deerflow.config.typesafe_config import TypeSafeConfig, load_typesafe_config_from_dict
 from deerflow.config.verification_config import VerificationConfig
+from deerflow.config.web_attempt_budget_config import WebAttemptBudgetConfig
 from deerflow.env import load_selected_env_file
 from deerflow.extensions.loader import ExtensionSpec
 
@@ -242,6 +243,7 @@ class AppConfig(BaseModel):
     )
     token_usage: TokenUsageConfig = Field(default_factory=TokenUsageConfig, description="Token usage tracking configuration")
     token_budget: TokenBudgetConfig = Field(default_factory=TokenBudgetConfig, description="Token Budget tracking and limits configuration.")
+    web_attempt_budget: WebAttemptBudgetConfig = Field(default_factory=WebAttemptBudgetConfig, description="Optional process-local, per-Run first-party Serper/Jina HTTP attempt limit.")
     plugins: list[ExtensionSpec] = Field(
         default_factory=list,
         description=format_field_description(
