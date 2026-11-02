@@ -25,6 +25,12 @@ PII-redacted before splitting, then escaped before insertion into prompt blocks.
 No human-anchor filter or successful "too long" placeholder can discard selected
 source. Recent-message retention and AI/Tool partition boundaries stay unchanged.
 
+State system messages, tagged dynamic-context reminders and the latest genuine
+user request remain outside compression. Summary source conversion uses message
+copies to include native document `text`/`content` plaintext, title and context
+in their original block order, before redaction and chunking. It does not decode
+binary documents, fetch remote media or change checkpoint content.
+
 Only after all chunks succeed are hooks, the compaction event, history capture
 and message replacement committed once. Any failed chunk leaves active history
 unchanged; manual `/compact` reports generation failure. A pass processes at most

@@ -19,14 +19,11 @@ Preserve the recognition sample and 5,000,000 UTF-8-byte guard. Count incrementa
 on parsing or field-limit errors, report an undetermined count rather than a
 physical-line or sample total.
 
-Keep state `SystemMessage`s; inject transient instructions via request wrappers.
-Skip fully rescued partitions. Fold all raw source in order without human
-anchoring. PII-redact before splitting; budget before escaping. Generated carry:
-marked head/tail within half the raw budget; at most 64 chunks/pass. Commit
-hooks/history/removal only on success. Cap breaches use a bounded process-local
-5m cooldown across builds for the same user/thread/executor/window/policy;
-smaller source or changed policy retries immediately. See the linked contract.
-`trim_tokens_to_summarize=None` uses one unbounded step.
+Preserve required context; fold all selected source in order. Convert native
+text documents on copies; PII before splitting, budgets before escaping. Never
+decode/fetch opaque media. Commit hooks/history/removal only on success.
+Chunk/carry/cooldown invariants and regressions:
+[contract](../../../../../docs/summarization.md).
 
 Todo compaction: [contract](../../../../../docs/summarization.md#todo-reminders).
 
