@@ -109,7 +109,29 @@ def test_searxng_enables_no_upstream_inactive_engines():
     assert not listed & UPSTREAM_INACTIVE_GENERAL_ENGINES
 
 
-def test_searxng_down_does_not_require_the_secret():
+def _searxng_down_recipe() -> str:
     makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
-    down = makefile.split("\nsearxng-down:\n", 1)[1].split("\n\n", 1)[0]
-    assert "SEARXNG_SECRET=" in down
+    return makefile.split("\nsearxng-down:\n", 1)[1].split("\n\n", 1)[0]
+
+
+def test_searxng_down_recipe_is_shell_neutral():
+    # Windows runs recipes under cmd.exe, which has no `VAR=value cmd` prefix
+    # assignment or `${VAR:-default}` expansion; make supplies the placeholder instead.
+    recipe = _searxng_down_recipe()
+    assert "SEARXNG_SECRET=" not in recipe
+    assert "${" not in recipe
+    assert "$${" not in recipe
+
+
+@pytest.mark.skipif(os.name == "nt", reason="stub docker executable is a POSIX script")
+@pytest.mark.parametrize(("secret", "expected"), [(None, "unused-for-down"), ("", "unused-for-down"), ("real-secret", "real-secret")])
+def test_searxng_down_does_not_require_the_secret(tmp_path, secret, expected):
+    stub = tmp_path / "docker"
+    stub.write_text('#!/bin/sh\nprintf "%s|%s\\n" "$SEARXNG_SECRET" "$*"\n', encoding="utf-8")
+    stub.chmod(0o755)
+    env = {k: v for k, v in os.environ.items() if k != "SEARXNG_SECRET"}
+    env["PATH"] = f"{tmp_path}{os.pathsep}{env['PATH']}"
+    if secret is not None:
+        env["SEARXNG_SECRET"] = secret
+    out = subprocess.run(["make", "-s", "searxng-down"], cwd=REPO_ROOT, env=env, capture_output=True, text=True, check=True).stdout
+    assert out.strip() == f"{expected}|compose -p deer-flow-searxng -f docker/docker-compose.searxng.yaml down"

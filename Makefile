@@ -73,8 +73,11 @@ help:
 searxng-up:
 	docker compose -p deer-flow-searxng -f docker/docker-compose.searxng.yaml up -d
 
+# Compose validates SEARXNG_SECRET even for down; make exports a placeholder so the
+# recipe needs no shell syntax (Windows runs it under cmd.exe).
+searxng-down: export SEARXNG_SECRET := $(or $(SEARXNG_SECRET),unused-for-down)
 searxng-down:
-	SEARXNG_SECRET=$${SEARXNG_SECRET:-unused-for-down} docker compose -p deer-flow-searxng -f docker/docker-compose.searxng.yaml down
+	docker compose -p deer-flow-searxng -f docker/docker-compose.searxng.yaml down
 
 ## Setup & Diagnosis
 setup:
