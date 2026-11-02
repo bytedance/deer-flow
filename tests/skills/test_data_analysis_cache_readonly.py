@@ -135,3 +135,48 @@ def test_legacy_writable_cache_is_rebuilt_from_source(cli, tmp_path):
     assert json.loads(output.read_text(encoding="utf-8")) == [{"value": 7}]
     with duckdb.connect(str(legacy_db), read_only=True) as con:
         assert con.execute("SELECT * FROM source").fetchall() == [(999,)]
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "UPDATE source SET value = 999",
+        "INSERT INTO source VALUES (999)",
+        "DELETE FROM source",
+        "ALTER TABLE source ADD COLUMN extra INTEGER",
+        "CREATE TABLE unexpected AS SELECT 999 AS value",
+    ],
+)
+def test_cache_hit_rejects_mutations_without_spatial(
+    tmp_path, monkeypatch, capsys, sql
+):
+    analysis = runpy.run_path(str(SCRIPT))
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    analysis["main"].__globals__["CACHE_DIR"] = str(cache)
+    source = tmp_path / "source.csv"
+    original = b"value\n7\n"
+    source.write_bytes(original)
+    key = analysis["compute_files_hash"]([str(source)])
+    db_path = cache / f"{key}.duckdb"
+    with duckdb.connect(str(db_path)) as con:
+        con.execute("CREATE TABLE source AS SELECT 7 AS value")
+    analysis["save_table_map"](key, {"source": "source"})
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [str(SCRIPT), "--files", str(source), "--action", "query", "--sql", sql],
+    )
+
+    analysis["main"]()
+
+    assert "read-only" in capsys.readouterr().out.lower()
+    assert source.read_bytes() == original
+    with duckdb.connect(str(db_path), read_only=True) as con:
+        assert con.execute("SELECT * FROM source").fetchall() == [(7,)]
+        assert [col[0] for col in con.execute("DESCRIBE source").fetchall()] == [
+            "value"
+        ]
+        assert con.execute(
+            "SELECT table_name FROM duckdb_tables() WHERE schema_name = 'main'"
+        ).fetchall() == [("source",)]
