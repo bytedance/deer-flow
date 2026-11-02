@@ -95,5 +95,7 @@ curl -fsS 'http://127.0.0.1:8088/search?q=test&format=json' \
 ```
 
 The configured engine list is not proof of live results. Check `unresponsive_engines`
-in the JSON response when providers fail. The image follows upstream `latest`;
+in the JSON response when providers fail. DeerFlow reports an empty answer with
+failed engines as an error, so the search chain falls back instead of returning
+"No results found". The image follows upstream `latest`;
 validate a new image before updating a deployment that needs reproducibility.

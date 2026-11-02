@@ -369,3 +369,22 @@ async def test_brave_query_goes_through_module_query_hygiene():
     sent_query, sent_params = brave_get.call_args.args[2], brave_get.call_args.args[3]
     assert sent_query == "q" * 400
     assert sent_params["q"] == "q" * 400
+
+
+@pytest.mark.anyio
+async def test_searxng_empty_answer_with_failed_engines_fails_over():
+    # SearXNG answers HTTP 200 with no rows when its upstream engines time out or are challenged.
+    response = MagicMock(status_code=200, raise_for_status=MagicMock(return_value=None))
+    response.json.return_value = {"results": [], "unresponsive_engines": [["google", "timeout"]]}
+    with (
+        _config(providers=["searxng", "ddg"], searxng={"base_url": "http://searxng:8080"}),
+        patch("deerflow.community.searxng.searxng_client.httpx.AsyncClient") as client_cls,
+        patch("deerflow.community.ddg_search.tools._search_text", return_value=_ddg_rows("d")),
+    ):
+        client_cls.return_value.__aenter__.return_value.get = AsyncMock(return_value=response)
+        out = await _run()
+    assert out["provider"] == "ddg"
+    [attempt] = out["attempts"]
+    assert attempt["provider"] == "searxng"
+    assert attempt["status"] == "failed"
+    assert "google (timeout)" in attempt["error"]

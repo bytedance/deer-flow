@@ -12,8 +12,9 @@ providers in the configured `providers` order (default
 - Per-provider settings sit under the provider's name in the tool entry; keys
   fall back to `BRAVE_SEARCH_API_KEY`, `TAVILY_API_KEY`, `EXA_API_KEY`. SearXNG
   needs an explicit `base_url`. Missing credentials are `skipped`, not failures.
-- Exceptions, HTTP errors (429 included), `DDGSearchError` and malformed
-  payloads are `failed` and fail over. Error text passes through
+- Exceptions, HTTP errors (429 included), `DDGSearchError`, malformed
+  payloads and a SearXNG empty page with `unresponsive_engines` are `failed`
+  and fail over. Error text passes through
   `redact_secret` with the provider's configured key.
 - A genuine empty result returns "No results found" from that provider unless
   `fallback_on_empty: true`. When nothing answers, the error starts with
