@@ -1,4 +1,5 @@
 import { copy } from "./copy.mjs";
+import { mountLibrary } from "./library.mjs";
 
 const API = "/api/extensions/knowledge-platform";
 const enc = encodeURIComponent;
@@ -59,6 +60,7 @@ export function mountCenter(root, context) {
   let generation = 0;
   let controller = new AbortController();
   let busy = false;
+  let dirty = false;
   let latestResources = [];
   // Selection-scoped only. No browser storage across accounts or visits.
   let records = new Map();
@@ -104,6 +106,7 @@ export function mountCenter(root, context) {
     error.textContent = "";
     status.textContent = "";
     content.replaceChildren();
+    dirty = false;
   }
   async function loadSpaces() {
     reset();
@@ -207,10 +210,15 @@ export function mountCenter(root, context) {
     warning.append(make("p", w.uncertain), acknowledge);
     const mutationControls = [];
     const controls = () => {
+      mutationControls.splice(
+        0,
+        mutationControls.length,
+        ...mutationControls.filter((node) => content.contains(node)),
+      );
       for (const node of mutationControls) node.disabled = busy || uncertain;
-      spaces.disabled = bases.disabled = reload.disabled = busy;
+      spaces.disabled = bases.disabled = reload.disabled = busy || dirty;
     };
-    const write = async (action, operation) => {
+    const write = async (action, operation, accept = record) => {
       if (busy || uncertain || !active(g)) return;
       readEpoch++;
       busy = true;
@@ -226,8 +234,10 @@ export function mountCenter(root, context) {
         submitted = true;
         const result = await operation();
         if (!active(g)) return;
-        record(result);
-        status.textContent = w.accepted;
+        accept(result);
+        status.textContent = action.startsWith("entry_")
+          ? w.entrySaved
+          : w.accepted;
       } catch (cause) {
         if (active(g) && cause.name !== "AbortError") {
           error.textContent = message(cause);
@@ -518,7 +528,35 @@ export function mountCenter(root, context) {
       controls();
     }
     taskSection.append(rows, make("p", w.snapshots, { class: "note" }));
-    content.append(section, taskSection, future);
+    future.replaceChildren();
+    content.append(future, section, taskSection);
+    mountLibrary(future, {
+      locale: context.locale,
+      make,
+      button,
+      field,
+      listen,
+      request,
+      prefix,
+      operations,
+      active: () => active(g),
+      run,
+      write,
+      controls,
+      mutationControls,
+      setDirty: (value) => {
+        dirty = value;
+        controls();
+      },
+      isBusy: () => busy,
+      lookup,
+      item,
+      readEpoch: () => readEpoch,
+      onTitle: (title) => {
+        if (active(g) && title)
+          bases.selectedOptions[0].textContent = `${title} · ${item.native_base_id} · ${item.connection_id}`;
+      },
+    });
     controls();
   }
   // One current-resource list; avoid accumulating handlers on repeated reloads.
@@ -530,6 +568,35 @@ export function mountCenter(root, context) {
   });
   if (!context.requestBackend) error.textContent = w.oldHost;
   else void run(loadSpaces);
+  listen(window, "beforeunload", (event) => {
+    if (dirty || busy) {
+      event.preventDefault();
+      event.returnValue = "";
+    }
+  });
+  // Protect ordinary host-link navigation while an editor draft is present.
+  document.addEventListener(
+    "click",
+    (event) => {
+      const link = event
+        .composedPath()
+        .find((node) => node instanceof HTMLAnchorElement && node.href);
+      if (
+        link &&
+        (busy ||
+          (dirty &&
+            !window.confirm(
+              context.locale.startsWith("zh")
+                ? "放弃尚未保存的条目修改？"
+                : "Discard your unsaved entry changes?",
+            )))
+      ) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+      }
+    },
+    { capture: true, signal: context.signal },
+  );
   return {
     dispose() {
       disposed = true;

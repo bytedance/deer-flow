@@ -221,7 +221,7 @@ class Store:
         state, role = self._access(principal, space_id, tree)
         operations = state.operations & (policy.defaults.operations if policy.defaults.operations is not None else OPERATIONS)
         if role == "viewer":
-            operations &= {"capabilities", "status"}
+            operations &= {"capabilities", "status", "documents", "entries", "entry", "revisions", "revision", "graph"}
         items, defaults = [], {}
         for key in sorted(state.resources):
             conn, base = self.resources[key]

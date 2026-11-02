@@ -119,6 +119,14 @@ Policy evaluation resolves each ancestor once within the current snapshot, combi
 
 ## Verification
 
+Version **0.1.1** forwards optional [library operations](../deerflow-extension-knowledge-management/LIBRARY.md)
+through the same space and namespace admission. Existing operator resources keep
+the legacy operation default; explicitly add library names to the resource ceiling
+and Provider grants. Library reads recheck policy after upstream I/O; mutations
+recheck after capability discovery and never retry. The browser-only knowledge
+center can be enabled independently, and management Providers without `library`
+remain supported for their original operations.
+
 ```sh
 uv run --no-sync --project backend pytest backend/tests/test_knowledge_platform_extension.py -q
 uv run --no-sync --project backend pytest backend/tests/blocking_io/test_knowledge_platform_extension.py -q

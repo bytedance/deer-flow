@@ -84,7 +84,7 @@ class WeKnoraManagement:
                     return conn
         raise PermissionError("Management operation is not granted for this resource")
 
-    async def _request(self, conn: Connection, method: str, path: str, **kwargs):
+    async def _request(self, conn: Connection, method: str, path: str, *, envelope="data", **kwargs):
         key = os.environ.get(conn.api_key_env, "").strip()
         if not key or not key.isascii() or any(ord(c) < 33 or ord(c) == 127 for c in key):
             raise ManagementCredentialUnavailable("Management credential is unavailable")
@@ -118,10 +118,10 @@ class WeKnoraManagement:
             # Never log exception text, request URLs, response bodies or chains.
             logger.warning("Knowledge management provider request failed: %s", type(exc).__name__)
             raise RuntimeError("Provider response unavailable; reconcile state before retrying a write") from None
-        if not isinstance(payload, dict) or payload.get("success") is not True or not isinstance(payload.get("data"), dict):
+        if not isinstance(payload, dict) or (envelope is not None and payload.get("success") is not True) or (envelope == "data" and not isinstance(payload.get("data"), dict)):
             logger.warning("Knowledge management provider request failed: invalid_envelope")
             raise RuntimeError("Invalid provider response")
-        return payload["data"]
+        return payload["data"] if envelope == "data" else payload
 
     async def _base(self, conn: Connection, base: str) -> dict:
         data = await self._request(conn, "GET", f"/api/v1/knowledge-bases/{base}")
@@ -179,6 +179,10 @@ class WeKnoraManagement:
         if not isinstance(flags, dict):
             raise RuntimeError("Invalid provider capabilities")
         operations = frozenset(op for g in conn.grants if g.user_id == context.principal.user_id and base in g.knowledge_base_ids for op in g.operations)
+        # Pipeline extraction does not imply a stored entity-graph query API.
+        operations -= {"graph"}
+        if flags.get("wiki") is not True:
+            operations -= {"entries", "entry", "revisions", "revision", "entry_edit", "entry_restore"}
         pipeline = {
             "parse": "provider_managed",
             "chunk": "provider_managed",
@@ -193,6 +197,12 @@ class WeKnoraManagement:
         if isinstance(chunking, dict) and chunking.get("enable_parent_child") is not True:
             options.update({"chunk_size", "chunk_overlap"})
         return Capabilities(operations=operations, processing_options=frozenset(options), pipeline=pipeline)
+
+    async def library(self, context, connection, base, operation, query):
+        # Optional contract; ingestion-only providers need not implement it.
+        from .weknora_library import invoke
+
+        return await invoke(self, context, connection, base, operation, query)
 
     async def ingest(self, context: ManagementContext, connection: str, base: str, body: IngestRequest) -> ProcessingResult:
         conn = self._authorize(context, connection, base, body.kind)

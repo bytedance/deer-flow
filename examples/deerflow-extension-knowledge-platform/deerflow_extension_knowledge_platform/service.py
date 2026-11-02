@@ -3,6 +3,7 @@
 import asyncio
 
 from deerflow_extension_knowledge_management.contracts import ManagementContext, ProcessingOptions, ProcessingResult
+from deerflow_extension_knowledge_management.library import LIBRARY_OPERATIONS, EditEntry, LibraryQuery, LibraryResult, RestoreEntry
 
 from .store import RevisionConflict, administrator
 
@@ -22,6 +23,37 @@ class Platform:
 
     async def effective(self, principal, space_id):
         return await asyncio.to_thread(self.store.effective, principal, space_id)
+
+    async def library(self, principal, space_id, resource, operation, payload):
+        if operation not in LIBRARY_OPERATIONS:
+            raise ValueError("Unknown library operation")
+        model = EditEntry if operation == "entry_edit" else RestoreEntry if operation == "entry_restore" else LibraryQuery
+        payload = model.model_validate(payload)
+        revision, item = await self._admit(principal, space_id, resource, operation)
+        provider = self.providers[item["connection_id"]]
+        context = ManagementContext(principal=principal)
+        connection, base = item["connection_id"], item["native_base_id"]
+        capabilities = await provider.capabilities(context, connection, base)
+        if operation not in capabilities.operations or not callable(getattr(provider, "library", None)):
+            raise NotImplementedError("Provider does not support this library operation")
+        latest, _ = await self._admit(principal, space_id, resource, operation)
+        if latest != revision:
+            raise RevisionConflict("Policy changed during library admission")
+        try:
+            result = LibraryResult.model_validate(await provider.library(context, connection, base, operation, payload))
+        except ValueError:
+            raise RuntimeError("Invalid library response") from None
+        if (result.provider, result.connection_id, result.dataset_id) != (item["provider"], connection, item["dataset_id"]):
+            raise RuntimeError("Library response identity does not match space resource")
+        for document in result.documents:
+            self._result(document.processing, item)
+        if result.entry is not None and result.entry.key != payload.entry:
+            raise RuntimeError("Library entry identity does not match request")
+        # Reads can be slow. Never return data after membership/policy revocation.
+        latest, _ = await self._admit(principal, space_id, resource, operation)
+        if latest != revision:
+            raise RevisionConflict("Policy changed during library request; reconcile any write")
+        return result
 
     async def _admit(self, principal, space_id, resource, operation):
         # Keep phase 2's explicit administrator floor; never impersonate a member.

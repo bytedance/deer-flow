@@ -27,7 +27,7 @@ def test_optional_center_has_packaged_page_and_no_management_backend(load_center
     assert not plugin.backend and not plugin.tools and not loaded.routers
     assets = plugin.frontend
     assert assets.entry == "static/index.mjs"
-    assert set(assets.files) == {"static/index.mjs", "static/center.mjs", "static/styles.css", "static/copy.mjs"}
+    assert set(assets.files) == {"static/index.mjs", "static/center.mjs", "static/styles.css", "static/copy.mjs", "static/library.mjs", "static/library-copy.mjs", "static/graph.mjs"}
     assert b"requestBackend" in assets.files["static/center.mjs"].content
 
 
