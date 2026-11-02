@@ -1751,9 +1751,11 @@ disabled by default and includes no management page or global chat retrieval ACL
 
 The optional [knowledge center extension](examples/deerflow-extension-knowledge-center/README.md)
 adds an independently enabled workspace page for authorized spaces, file/URL/text
-ingestion and document processing snapshots. It consumes the platform and management
-APIs; it does not grant permissions or add entry editing, versions, graph browsing,
-complete document/task directories or Trace. Retrieval works without it.
+ingestion, searchable document directories and processing-state filters. Optional
+library capabilities add WeKnora Wiki entry editing/history/guarded restoration
+and LightRAG entity-relation queries with graph and evidence views. It consumes
+the platform and management APIs without granting permissions. Provider queue-job
+history and phase-5 Trace are separate capabilities. Retrieval works without it.
 
 The optional [knowledge management extension](examples/deerflow-extension-knowledge-management/README.md)
 adds administrator-authorized file, URL and manual ingestion, processing status,

@@ -32,3 +32,10 @@ Never infer processing success or progress from policy/capability presence.
 
 Tests use real SQLite and HTTP routing, mock only upstream transport. Real
 upstream acceptance must be explicitly distinguished from synthetic coverage.
+
+Library routes require management 0.1.1, preserve both namespace scopes and the
+administrator floor, and validate qualified result identities. Recheck policy
+after capability I/O and after library responses; a failed post-write check still
+requires reconciliation. Existing Resource operations default to the legacy set;
+adding library names to the policy alone must not grant new operations. Viewer
+roles only receive reads within an explicit operator resource ceiling.

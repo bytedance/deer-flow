@@ -40,7 +40,6 @@ p {
 }
 .intro,
 .note,
-.future,
 summary {
   color: var(--muted-foreground);
 }
@@ -174,6 +173,55 @@ article {
   align-items: center;
   gap: 8px;
 }
+.library-nav,
+.entity-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0 20px;
+}
+.library-nav [aria-pressed="true"] {
+  background: var(--secondary);
+  border-color: var(--ring);
+}
+.directory-search {
+  display: flex;
+  align-items: end;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.directory-search label {
+  flex: 1 1 180px;
+  margin: 0;
+}
+.directory-search button {
+  flex: 0 0 auto;
+}
+.relation-graph {
+  display: block;
+  width: 100%;
+  max-height: 540px;
+  border: 1px solid var(--border);
+  background: var(--background);
+  border-radius: 8px;
+  margin: 16px 0;
+}
+.relation-graph line {
+  stroke: var(--muted-foreground);
+  stroke-width: 1;
+  opacity: 0.5;
+}
+.relation-graph circle {
+  fill: var(--primary);
+}
+.relation-graph text {
+  fill: var(--foreground);
+  font-size: 14px;
+}
+.entity-list button {
+  overflow-wrap: anywhere;
+  max-width: 100%;
+}
 .confirmation {
   flex-basis: 100%;
   padding: 12px;
@@ -184,6 +232,9 @@ article {
   flex-basis: 100%;
 }
 @media (max-width: 640px) {
+  .relation-graph text {
+    font-size: 28px;
+  }
   .center {
     padding: 16px 4px 40px;
   }

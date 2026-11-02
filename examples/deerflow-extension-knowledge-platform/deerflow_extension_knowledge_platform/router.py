@@ -6,7 +6,8 @@ from typing import Literal
 
 from deerflow_extension_api.auth import arequire_plugin_management
 from deerflow_extension_knowledge_management.contracts import IngestRequest, ManagementCredentialUnavailable, ProcessingOptions
-from fastapi import APIRouter, Depends, HTTPException, Request
+from deerflow_extension_knowledge_management.library import EditEntry, LibraryQuery, RestoreEntry
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import ValidationError
 
 from .models import Update
@@ -104,6 +105,33 @@ def build_router(platform):
     @router.get(prefix + "/capabilities")
     async def capabilities(space: str, resource: str, caller=Depends(manager)):
         return await invoke(platform.invoke(caller, space, resource, "capabilities"))
+
+    @router.get(prefix + "/library/{operation}")
+    async def library(
+        space: str,
+        resource: str,
+        operation: Literal["documents", "entries", "entry", "revisions", "revision", "graph"],
+        page: int = Query(default=1, ge=1, le=10000),
+        page_size: int = Query(default=20, ge=1, le=50),
+        search: str = Query(default="", max_length=500),
+        state: str = Query(default="", max_length=32),
+        entry: str | None = Query(default=None, max_length=255),
+        version: int | None = Query(default=None, ge=1),
+        caller=Depends(manager),
+    ):
+        try:
+            query = LibraryQuery(page=page, page_size=page_size, search=search, state=state, entry=entry, version=version)
+        except ValueError:
+            raise HTTPException(422, "Invalid library query") from None
+        return await invoke(platform.library(caller, space, resource, operation, query))
+
+    @router.put(prefix + "/entry")
+    async def edit_entry(request: Request, space: str, resource: str, caller=Depends(manager)):
+        return await invoke(platform.library(caller, space, resource, "entry_edit", await body(request, EditEntry)))
+
+    @router.post(prefix + "/entry/restore")
+    async def restore_entry(request: Request, space: str, resource: str, caller=Depends(manager)):
+        return await invoke(platform.library(caller, space, resource, "entry_restore", await body(request, RestoreEntry)))
 
     @router.post(prefix + "/documents", status_code=202)
     async def ingest(request: Request, space: str, resource: str, caller=Depends(manager)):

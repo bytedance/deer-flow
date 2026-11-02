@@ -5,9 +5,11 @@ import json
 from typing import Any, Literal
 
 from deerflow_extension_knowledge_management.contracts import Model, Operation, ProcessingOptions
+from deerflow_extension_knowledge_management.library import LIBRARY_OPERATIONS
 from pydantic import Field, field_validator, model_validator
 
-OPERATIONS = frozenset({"capabilities", "status", "upload", "url", "manual", "reprocess", "cancel"})
+LEGACY_OPERATIONS = frozenset({"capabilities", "status", "upload", "url", "manual", "reprocess", "cancel"})
+OPERATIONS = LEGACY_OPERATIONS | LIBRARY_OPERATIONS
 TOOLS = frozenset({"knowledge_search", "knowledge_entries_search", "entity_relations_search"})
 Role = Literal["blocked", "viewer", "editor", "manager"]
 RANK = {"blocked": 0, "viewer": 1, "editor": 2, "manager": 3}
@@ -21,7 +23,8 @@ def resource_key(provider: str, connection: str, base: str) -> str:
 class Resource(Model):
     base_id: str = Field(min_length=1, max_length=256)
     dataset_id: str = Field(min_length=1, max_length=256)
-    operations: frozenset[Operation] = OPERATIONS
+    # Existing installations must not gain new reads or writes on upgrade.
+    operations: frozenset[Operation] = LEGACY_OPERATIONS
     tools: frozenset[Tool] = TOOLS
 
 

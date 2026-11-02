@@ -1,6 +1,6 @@
 [project]
 name = "deerflow-extension-knowledge-management"
-version = "0.1.0"
+version = "0.1.1"
 description = "Optional provider-owned knowledge ingestion and processing for DeerFlow"
 readme = "README.md"
 requires-python = ">=3.12"

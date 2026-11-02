@@ -5,6 +5,9 @@
     "static/index.mjs",
     "static/center.mjs",
     "static/copy.mjs",
+    "static/library.mjs",
+    "static/library-copy.mjs",
+    "static/graph.mjs",
     "static/styles.css"
   ]
 }

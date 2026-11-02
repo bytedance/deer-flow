@@ -1,6 +1,6 @@
 [project]
 name = "deerflow-extension-knowledge-center"
-version = "0.1.0"
+version = "0.1.1"
 description = "Optional capability-aware knowledge center pages for DeerFlow"
 requires-python = ">=3.12"
 license = "MIT"

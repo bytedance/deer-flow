@@ -74,7 +74,15 @@ async function setup(
       });
     const filename = pathname.split("/").pop()!;
     if (
-      !["index.mjs", "center.mjs", "copy.mjs", "styles.css"].includes(filename)
+      ![
+        "index.mjs",
+        "center.mjs",
+        "copy.mjs",
+        "library.mjs",
+        "library-copy.mjs",
+        "graph.mjs",
+        "styles.css",
+      ].includes(filename)
     )
       return route.fulfill({ status: 404 });
     return route.fulfill({
@@ -220,8 +228,16 @@ for (const zh of [false, true]) {
     await expect
       .poll(() => calls.filter((r) => r.method() === "POST").length)
       .toBe(3);
+    await page
+      .getByRole("button", {
+        name: zh ? "知识条目" : "Knowledge entries",
+        exact: true,
+      })
+      .click();
     await expect(
-      page.getByText(zh ? /此连接暂不支持/ : /Entry editing, version history/),
+      page.getByText(
+        zh ? /此连接未提供这项能力/ : /This connection does not offer/,
+      ),
     ).toBeVisible();
     expect(
       await page.evaluate(
@@ -480,5 +496,377 @@ test("disabled page and empty membership have explicit states", async ({
   ).toBeVisible();
   await expect(
     page.getByRole("link", { name: "Knowledge center", exact: true }),
+  ).toHaveCount(0);
+});
+
+async function setupLibrary(page: Page, locale = "en-US", conflict = false) {
+  const fixture = await setup(page, { locale });
+  const mutations: Request[] = [];
+  let version = 2;
+  const entry = {
+    key: "concept/cedar",
+    title: "Cedar",
+    content: "Current text",
+    summary: "A tree",
+    version,
+    status: "published",
+  };
+  const operations = [
+    ...resource.operations,
+    "documents",
+    "entries",
+    "entry",
+    "revisions",
+    "revision",
+    "entry_edit",
+    "entry_restore",
+    "graph",
+  ];
+  await page.route(`**${api}/**/capabilities`, (route) =>
+    route.fulfill({
+      json: { operations, processing_options: [], pipeline: {} },
+    }),
+  );
+  await page.route(`**${api}/**/library/**`, (route) => {
+    fixture.calls.push(route.request());
+    const url = new URL(route.request().url());
+    const action = url.pathname.split("/").pop();
+    const data = {
+      provider: "weknora",
+      connection_id: "local",
+      dataset_id: "wk1_fixture",
+      title: "Handbook",
+      page: Number(url.searchParams.get("page") ?? 1),
+      page_size: 20,
+      total: 1,
+      documents: [],
+      entries: [],
+      revisions: [],
+      entry: null,
+      graph: null,
+    };
+    if (action === "documents")
+      return route.fulfill({
+        json: {
+          ...data,
+          documents: [{ title: "Team guide", processing: result }],
+        },
+      });
+    if (action === "entries")
+      return route.fulfill({ json: { ...data, entries: [entry] } });
+    if (action === "revisions")
+      return route.fulfill({
+        json: {
+          ...data,
+          entry: { ...entry, version },
+          revisions: [
+            {
+              version: 1,
+              editor: "Alice",
+              source: "user",
+              edited_at: "2026-01-01",
+            },
+          ],
+        },
+      });
+    if (action === "graph")
+      return route.fulfill({
+        json: {
+          ...data,
+          graph: {
+            bounded: true,
+            entities: [
+              { id: "Cedar", description: "A tree" },
+              { id: "Forest", description: "A place" },
+            ],
+            relations: [
+              {
+                source: "Cedar",
+                target: "Forest",
+                description: "Grows in",
+                evidence_ids: ["chunk-a"],
+              },
+            ],
+            evidence: [
+              { id: "chunk-a", content: "Cedar grows in the forest." },
+            ],
+          },
+        },
+      });
+    return route.fulfill({
+      json: {
+        ...data,
+        entry: {
+          ...entry,
+          version: action === "revision" ? 1 : version,
+          content: action === "revision" ? "Old text" : entry.content,
+        },
+      },
+    });
+  });
+  await page.route(`**${api}/**/entry**`, (route) => {
+    if (!["PUT", "POST"].includes(route.request().method()))
+      return route.fallback();
+    mutations.push(route.request());
+    if (conflict) return route.fulfill({ status: 409, json: {} });
+    version++;
+    return route.fulfill({
+      json: {
+        provider: "weknora",
+        connection_id: "local",
+        dataset_id: "wk1_fixture",
+        entry: { ...entry, version, content: "Saved text" },
+      },
+    });
+  });
+  return { ...fixture, mutations };
+}
+
+for (const zh of [false, true]) {
+  test(`knowledge library directories, editing, history and graph (${zh ? "zh mobile" : "en"})`, async ({
+    page,
+  }) => {
+    if (zh) await page.setViewportSize({ width: 375, height: 812 });
+    const { mutations } = await setupLibrary(page, zh ? "zh-CN" : "en-US");
+    await page.goto(pageURL, { waitUntil: "domcontentloaded" });
+    await expect(
+      page.getByRole("button", { name: "Team guide", exact: true }),
+    ).toBeVisible();
+    await page.getByRole("button", { name: "Team guide", exact: true }).click();
+    await expect(
+      page.getByRole("heading", { name: "doc-1", exact: true }),
+    ).toBeVisible();
+    await page
+      .getByRole("button", {
+        name: zh ? "知识条目" : "Knowledge entries",
+        exact: true,
+      })
+      .click();
+    await page.getByRole("button", { name: "Cedar", exact: true }).click();
+    const editor = page.getByLabel(zh ? "条目正文" : "Entry content", {
+      exact: true,
+    });
+    await expect(editor).toHaveValue("Current text");
+    await editor.fill("Saved text");
+    await expect(
+      page.getByLabel(zh ? "知识库" : "Knowledge base", { exact: true }),
+    ).toBeDisabled();
+    await page
+      .getByRole("button", {
+        name: zh ? "保存条目" : "Save entry",
+        exact: true,
+      })
+      .click();
+    await expect(editor).toHaveValue("Saved text");
+    await expect.poll(() => mutations.length).toBe(1);
+    await expect(editor).toBeEnabled();
+    expect(mutations[0]!.postDataJSON()).toMatchObject({
+      expected_version: 2,
+      content: "Saved text",
+      entry: "concept/cedar",
+    });
+    await page
+      .getByRole("button", {
+        name: zh ? "版本历史" : "Version history",
+        exact: true,
+      })
+      .click();
+    await page
+      .getByRole("button", {
+        name: zh ? "查看版本 1" : "View version 1",
+        exact: true,
+      })
+      .click();
+    await expect(page.getByText("Old text", { exact: true })).toBeVisible();
+    await page
+      .getByRole("button", {
+        name: zh ? "恢复此版本" : "Restore this version",
+        exact: true,
+      })
+      .click();
+    await page
+      .getByRole("button", {
+        name: zh ? "确认恢复" : "Confirm restore",
+        exact: true,
+      })
+      .click();
+    await expect.poll(() => mutations.length).toBe(2);
+    expect(mutations[1]!.postDataJSON()).toMatchObject({
+      expected_version: 3,
+      version: 1,
+    });
+    await page
+      .getByRole("button", {
+        name: zh ? "实体关系" : "Entities and relations",
+        exact: true,
+      })
+      .click();
+    await page
+      .getByLabel(zh ? "关系查询" : "Relation query", { exact: true })
+      .fill("Cedar");
+    await page
+      .getByRole("button", {
+        name: zh ? "查询图谱" : "Query graph",
+        exact: true,
+      })
+      .click();
+    await expect(
+      page.getByRole("img", {
+        name: zh ? "实体关系图" : "Entity relation graph",
+      }),
+    ).toBeVisible();
+    await expect(
+      page.getByText("Cedar grows in the forest.", { exact: true }),
+    ).toBeVisible();
+    if (!zh)
+      await page.evaluate(() => document.documentElement.classList.add("dark"));
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= window.innerWidth,
+      ),
+    ).toBe(true);
+    if (process.env.KNOWLEDGE_SCREENSHOT_DIR) {
+      await page.setViewportSize({ width: zh ? 375 : 1280, height: 1400 });
+      await page
+        .getByRole("button", {
+          name: zh ? "实体关系" : "Entities and relations",
+          exact: true,
+        })
+        .scrollIntoViewIfNeeded();
+      await page.screenshot({
+        path: path.join(
+          process.env.KNOWLEDGE_SCREENSHOT_DIR,
+          zh ? "library-zh-mobile.png" : "library-en.png",
+        ),
+        fullPage: true,
+      });
+    }
+  });
+}
+
+test("entry conflict keeps draft and requires reconciliation without retry", async ({
+  page,
+}) => {
+  const { mutations } = await setupLibrary(page, "en-US", true);
+  await page.goto(pageURL, { waitUntil: "domcontentloaded" });
+  await page
+    .getByRole("button", { name: "Knowledge entries", exact: true })
+    .click();
+  await page.getByRole("button", { name: "Cedar", exact: true }).click();
+  await page.getByLabel("Entry content", { exact: true }).fill("My draft");
+  await page.getByRole("button", { name: "Save entry", exact: true }).click();
+  await expect(page.getByLabel("Entry content", { exact: true })).toHaveValue(
+    "My draft",
+  );
+  await expect(
+    page.getByRole("button", { name: "Save entry", exact: true }),
+  ).toBeDisabled();
+  await expect.poll(() => mutations.length).toBe(1);
+  await expect(
+    page.getByRole("button", {
+      name: "I checked the upstream result",
+      exact: true,
+    }),
+  ).toBeVisible();
+});
+
+test("document directory sends real search and processing filters", async ({
+  page,
+}) => {
+  const { calls } = await setupLibrary(page);
+  await page.goto(pageURL, { waitUntil: "domcontentloaded" });
+  await page.getByLabel("Search directory", { exact: true }).fill("Team guide");
+  await page
+    .getByLabel("Processing filter", { exact: true })
+    .selectOption("processing");
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await expect
+    .poll(
+      () =>
+        calls.filter(
+          (req) =>
+            req.url().includes("/library/documents") &&
+            new URL(req.url()).searchParams.get("state") === "processing",
+        ).length,
+    )
+    .toBe(1);
+  const req = calls
+    .filter((req) => req.url().includes("/library/documents"))
+    .at(-1)!;
+  expect(new URL(req.url()).searchParams.get("search")).toBe("Team guide");
+  expect(new URL(req.url()).searchParams.get("page")).toBe("1");
+});
+
+test("entry fields lock during save and unsaved navigation requires consent", async ({
+  page,
+}) => {
+  await setupLibrary(page);
+  await page.goto(pageURL, { waitUntil: "domcontentloaded" });
+  await page
+    .getByRole("button", { name: "Knowledge entries", exact: true })
+    .click();
+  await page.getByRole("button", { name: "Cedar", exact: true }).click();
+  const editor = page.getByLabel("Entry content", { exact: true });
+  await editor.fill("Draft remains");
+  page.once("dialog", (dialog) => dialog.dismiss());
+  await page.getByRole("button", { name: "Documents", exact: true }).click();
+  await expect(editor).toHaveValue("Draft remains");
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await page.route(`**${api}/**/entry`, async (route) => {
+    await gate;
+    await route.fallback();
+  });
+  try {
+    await page.getByRole("button", { name: "Save entry", exact: true }).click();
+    await expect(editor).toBeDisabled();
+  } finally {
+    release();
+  }
+  await expect(editor).toBeEnabled();
+});
+
+test("a directory read started before cancellation cannot render stale rows", async ({
+  page,
+}) => {
+  await setupLibrary(page);
+  await page.goto(pageURL, { waitUntil: "domcontentloaded" });
+  await page.getByRole("button", { name: "Team guide", exact: true }).click();
+  await expect(
+    page.getByRole("heading", { name: "doc-1", exact: true }),
+  ).toBeVisible();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await page.route(`**${api}/**/library/documents?**`, async (route) => {
+    await gate;
+    await route.fulfill({
+      json: {
+        provider: "weknora",
+        connection_id: "local",
+        dataset_id: "wk1_fixture",
+        documents: [{ title: "Stale directory entry", processing: result }],
+        page_size: 20,
+        total: 1,
+      },
+    });
+  });
+  try {
+    await page.getByRole("button", { name: "Search", exact: true }).click();
+    await expect(page.getByText("Loading…", { exact: true })).toBeVisible();
+    await page
+      .getByRole("button", { name: "Cancel processing", exact: true })
+      .click();
+    await page.getByRole("button", { name: "Confirm", exact: true }).click();
+    await expect(page.getByText(/Submission returned/)).toBeVisible();
+  } finally {
+    release();
+  }
+  await expect(page.getByText("Loading…", { exact: true })).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "Stale directory entry", exact: true }),
   ).toHaveCount(0);
 });
