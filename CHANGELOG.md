@@ -26,7 +26,7 @@ This section accumulates work toward the **2.3.0** milestone
   `TaskInfo` the host now seeds into every task store even when no lifecycle
   contributor is registered. A manual `/compact` still gets a detached store
   and `None` ids. `deerflow-extension-api` is now 0.2.10; existing
-  extensions keep working. ([#TBD])
+  extensions keep working. ([#7831])
 
 - **channels:** A DingTalk reply in AI card mode (`card_template_id`) is no
   longer lost when a card request fails, for example without card permission
@@ -16007,3 +16007,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7772]: https://github.com/bytedance/deer-flow/pull/7772
 [#7781]: https://github.com/bytedance/deer-flow/pull/7781
 [#7792]: https://github.com/bytedance/deer-flow/pull/7792
+[#7831]: https://github.com/bytedance/deer-flow/pull/7831
