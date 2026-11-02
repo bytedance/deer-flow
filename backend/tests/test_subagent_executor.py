@@ -4509,6 +4509,15 @@ class TestCooperativeCancellation:
         owns the coroutine. Deciding there published a terminal status and opened
         the cleanup fence from the caller's thread; the decision now waits for the
         loop, which is the only place serialized with that first step.
+
+        Which owner ends up publishing is a loop-queue coin toss from here:
+        ``Task.__init__`` queues the first step inside the factory, so the step
+        can precede the deferred decision and the coroutine's own
+        ``CancelledError`` branch wins ("Cancelled by user"); when the step loses
+        that race the deferred decision publishes instead. The invariants that
+        matter hold either way: the status is terminal ``cancelled``, the fence
+        opens only after the loop has settled the body, and cleanup removes the
+        entry.
         """
         SubagentExecutor = classes["SubagentExecutor"]
         executor = SubagentExecutor(config=base_config, tools=[], thread_id="test-thread")
@@ -4553,11 +4562,12 @@ class TestCooperativeCancellation:
             while time.monotonic() < deadline and not result.execution_done_event.is_set():
                 time.sleep(0.01)
 
-            # The chained future cancels the task before its first step here, so
-            # the pre-start branch is the one that publishes.
+            # Either the deferred decision publishes (the step lost the race) or
+            # the body started and its own CancelledError branch does; both own
+            # the terminal write legitimately.
             assert not execution_ran.is_set()
             assert result.status.value == "cancelled"
-            assert result.error == "Cancelled before the execution started"
+            assert result.error in ("Cancelled before the execution started", "Cancelled by user")
             assert result.execution_done_event.is_set()
 
             executor_module.cleanup_background_task(execution_id)
