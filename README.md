@@ -3537,6 +3537,10 @@ messages. Keep `runs/.seq-watermark` with the run files when backing up this
 backend. New or replaced watermarks inherit the deleted run file's permission bits.
 Deleting the complete thread removes the watermark and resets allocation.
 
+In memory mode, thread metadata inputs and returned records are independent
+snapshots. Python callers can annotate a returned record without changing stored
+metadata, pin/archive visibility or other reads.
+
 Thread IDs may be supplied by callers and do not have to be UUIDs. Explicit
 IDs must contain 1–64 ASCII letters, digits, hyphens, or underscores
 (`^[A-Za-z0-9_-]{1,64}$`). DeerFlow generates a UUID only when `thread_id` is

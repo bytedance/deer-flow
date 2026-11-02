@@ -26,6 +26,14 @@ claiming while paused. Preserve explicit retry/resume and terminal projection;
 
 A repository method that creates or updates a row by a unique key must survive two first writers: both can miss the SELECT, and the later INSERT raises `IntegrityError`, a 500 for the caller. Use a dialect `on_conflict_do_update` when every key column is non-null, or retry the select-then-write after rolling back the session, as `ChannelConnectionRepository.upsert_connection` / `set_thread_id` and `FeedbackRepository.upsert` do. Feedback keeps the retry because `user_id` is nullable and a NULL key never conflicts, so ON CONFLICT would stop updating the NULL-user row.
 
+## Thread metadata payload ownership
+
+MemoryThreadMetaStore owns create/update metadata and public create/get/search
+views over LangGraph BaseStore. Prepare the detached create result before
+publication; copy only selected search rows after filter/sort/pagination. Copy
+failures preserve prior data and release the thread lock. Copies are synchronous
+O(payload). Tests: `test_thread_metadata_payload_isolation.py`.
+
 ## JSON integer filters
 
 Stored JSON integers are not bounded by the signed-64-bit filter input contract.
