@@ -85,6 +85,12 @@ _URL_SCHEME_IN_TEXT_RE = re.compile(r"(?<![\w.+/\\-])(?P<scheme>[A-Za-z][A-Za-z0
 # Trailing characters that are punctuation/markup rather than part of a path.
 _TEXT_PATH_TRAILING_CHARS = ".,;:!?)]}>\"'`"
 
+# MIME type used for an embedded blob that declares none. The MCP spec marks
+# ``BlobResourceContents.mimeType`` optional, while a base64 payload needs one
+# in langchain-core, so a missing type degrades to a generic binary type
+# instead of aborting the whole tool call.
+_DEFAULT_BLOB_MIME_TYPE = "application/octet-stream"
+
 _FILE_SNAPSHOT = dict[Path, tuple[int, int]]
 
 
@@ -600,8 +606,14 @@ def _convert_call_tool_result(
             if isinstance(res, TextResourceContents):
                 lc_content.append(create_text_block(text=_resolve_text(res.text)))
             elif isinstance(res, BlobResourceContents):
-                mime = res.mimeType or None
-                if mime and mime.startswith("image/"):
+                # ``mimeType`` is optional in the MCP spec, but a base64 payload
+                # requires one in langchain-core (``create_file_block`` raises
+                # "mime_type is required when using base64 data"). Passing the
+                # optional field through unchanged aborted the whole tool call
+                # and discarded the server's text blocks, so a missing type
+                # degrades to a generic one instead.
+                mime = res.mimeType or _DEFAULT_BLOB_MIME_TYPE
+                if mime.startswith("image/"):
                     lc_content.append(create_image_block(base64=res.blob, mime_type=mime))
                 else:
                     lc_content.append(create_file_block(base64=res.blob, mime_type=mime))
