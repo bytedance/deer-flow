@@ -1209,6 +1209,8 @@ _AWK_REGEX_KEYWORDS = frozenset({"case", "delete", "do", "else", "exit", "getlin
 _AWK_CONDITION_KEYWORDS = frozenset({"for", "if", "while"})
 _AWK_WORD_CHARS = frozenset(string.ascii_letters + string.digits + "_")
 _SHELL_WORD_OPERATOR_CHARS = frozenset(";&|()<>\n\r")
+_SHELL_ARITHMETIC_CHARS = frozenset(string.ascii_letters + string.digits + "_ \t\r\n+-*/%<>=!&|^~?:,[]")
+_SHELL_ARITHMETIC_VARIABLE_PATTERN = re.compile(r"\$(?:\{#?[A-Za-z_][A-Za-z0-9_]*\}|\{[0-9]+\}|[A-Za-z_][A-Za-z0-9_]*|[0-9]+)")
 
 
 def _awk_word_before(program: str, position: int) -> str | None:
@@ -1303,7 +1305,36 @@ class _ShellWord:
         self.single_quoted = single_quoted
 
 
-def _scan_shell_words(command: str) -> list[list[_ShellWord]] | None:
+def _shell_arithmetic_end(command: str, start: int) -> int | None:
+    """End of a simple ``$((...))``, without strings or command substitutions.
+
+    Only ordinary arithmetic and simple variable/length expansions qualify.
+    Unknown parameter operators, quoting and executable substitutions forfeit
+    the exemption instead of guessing where the expression ends.
+    """
+    position = start + 3
+    depth = 0
+    while position < len(command):
+        char = command[position]
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            if depth == 0:
+                return position + 2 if command.startswith("))", position) else None
+            depth -= 1
+        elif char == "$":
+            variable = _SHELL_ARITHMETIC_VARIABLE_PATTERN.match(command, position)
+            if variable is None:
+                return None
+            position = variable.end()
+            continue
+        elif char not in _SHELL_ARITHMETIC_CHARS:
+            return None
+        position += 1
+    return None
+
+
+def _scan_shell_words(command: str, arithmetic_spans: list[tuple[int, int]] | None = None) -> list[list[_ShellWord]] | None:
     """Split *command* into word lists, one per command context, bash-style.
 
     The first list is the top-level command; every ``$(...)`` substitution adds
@@ -1315,6 +1346,8 @@ def _scan_shell_words(command: str) -> list[list[_ShellWord]] | None:
     granted, for anything it does not model: a backslash-newline (bash splices
     the lines before parsing, which can spell ``awk`` across lines), backticks,
     ``$'...'`` strings, a heredoc, an unmatched ``)`` and unbalanced quotes.
+    Simple arithmetic expansions are opaque words; optionally collect their
+    content spans separately from command substitutions and shell comments.
     """
     if "\\\n" in command or "\\\r" in command:
         return None
@@ -1385,6 +1418,13 @@ def _scan_shell_words(command: str) -> list[list[_ShellWord]] | None:
                         position += 2
                     elif command[position] == "`":
                         return None
+                    elif command.startswith("$((", position):
+                        after = _shell_arithmetic_end(command, position)
+                        if after is None:
+                            return None
+                        if arithmetic_spans is not None:
+                            arithmetic_spans.append((position + 3, after - 2))
+                        position = after
                     elif command.startswith("$(", position):
                         after = scan(position + 2, True)
                         if after is None:
@@ -1399,6 +1439,15 @@ def _scan_shell_words(command: str) -> list[list[_ShellWord]] | None:
                 position += 1
             elif command.startswith("$'", position):
                 return None
+            elif command.startswith("$((", position):
+                after = _shell_arithmetic_end(command, position)
+                if after is None:
+                    return None
+                if arithmetic_spans is not None:
+                    arithmetic_spans.append((position + 3, after - 2))
+                text.append("\x00")
+                in_word, plain_so_far = True, False
+                position = after
             elif command.startswith("$(", position):
                 after = scan(position + 2, True)
                 if after is None:
@@ -1450,40 +1499,22 @@ def _awk_inline_program_span(items: list[_ShellWord], index: int) -> tuple[tuple
     return None, index + 1
 
 
-def _awk_program_field_spans(command: str) -> list[tuple[int, int]]:
-    """Spans where ``$NAME/`` is an awk field reference rather than a path.
-
-    Only the single-quoted inline program of an awk-family command qualifies:
-    bash performs no expansion inside single quotes and awk reads ``$`` as its
-    field operator. The command word is found the way
-    ``_validate_local_bash_shell_tokens`` finds it (after separators,
-    assignments, prefix keywords and ``command``/``builtin``, reduced to its
-    basename), at the top level and inside every ``$(...)``. Text
-    re-interpreted by another shell (``sh -c '...'``, ``eval``, double-quoted
-    programs) never qualifies, because the command word there is not awk. The
-    exemption assumes the word ``awk`` runs the real awk, so a command that
-    defines or could redefine commands (``alias``, ``function``, ``name()``,
-    ``autoload``, zsh's ``functions[...]=`` / ``aliases[...]=`` arrays,
-    ``eval``, ``source``, ``hash``, ``enable``, ``PATH=``) gets no exemption
-    at all. That
-    list is best-effort, like the rest of this guard. Inside the program, awk string
-    literals are left out: ``system("cat $HOME/x")`` hands that text to a
-    shell. A program whose ``"`` may sit in a regex literal gets no exemption.
-    """
-    contexts = _scan_shell_words(command)
+def _shell_commands_for_exemptions(command: str, arithmetic_spans: list[tuple[int, int]] | None = None) -> list[tuple[str, list[_ShellWord]]] | None:
+    """Command names and arguments, unless shell syntax can redefine/re-read them."""
+    contexts = _scan_shell_words(command, arithmetic_spans)
     if contexts is None:
-        return []
+        return None
 
-    field_spans: list[tuple[int, int]] = []
+    commands: list[tuple[str, list[_ShellWord]]] = []
     for items in contexts:
         at_command_start = True
         index = 0
         while index < len(items):
             item = items[index]
             if item.text.startswith("PATH=") or (index + 1 < len(items) and items[index + 1].kind == "op" and items[index + 1].text.startswith("(")):
-                return []  # PATH rebind or ``name ()`` function definition
+                return None  # PATH rebind or ``name ()`` function definition
             if at_command_start and item.kind == "word" and _SHELL_ARRAY_ASSIGNMENT_PATTERN.match(item.text):
-                return []  # zsh ``functions[awk]=...`` / ``aliases[awk]=...``
+                return None  # zsh ``functions[awk]=...`` / ``aliases[awk]=...``
             if item.kind == "op":
                 at_command_start = True
                 index += 1
@@ -1502,12 +1533,27 @@ def _awk_program_field_spans(command: str) -> list[tuple[int, int]]:
                 index += 1
                 continue
             if name in _AWK_EXEMPTION_BLOCKING_COMMANDS:
-                return []
+                return None
             at_command_start = False
-            if name not in _AWK_COMMAND_NAMES:
-                index += 1
-                continue
-            program, index = _awk_inline_program_span(items, index + 1)
+            argument_end = index + 1
+            while argument_end < len(items) and items[argument_end].kind != "op":
+                argument_end += 1
+            commands.append((name, items[index + 1 : argument_end]))
+            index += 1
+    return commands
+
+
+def _awk_program_field_spans(command: str) -> list[tuple[int, int]]:
+    """Spans where ``$NAME/`` is an awk field reference rather than a path.
+
+    Only wholly single-quoted awk-family inline programs qualify. The shared
+    shell scanner rejects definitions, re-reading commands and uncertain shell
+    syntax. Awk string literals and ambiguous regex syntax remain checked.
+    """
+    field_spans: list[tuple[int, int]] = []
+    for name, arguments in _shell_commands_for_exemptions(command) or []:
+        if name in _AWK_COMMAND_NAMES:
+            program, _ = _awk_inline_program_span(arguments, 0)
             if program is None:
                 continue
             start, end = program
@@ -1790,6 +1836,46 @@ def _is_non_path_literal_fragment(fragment: str) -> bool:
     return False
 
 
+def _expression_division_spans(command: str) -> list[tuple[int, int]]:
+    """Verified inline-code and shell-arithmetic spans for closer division.
+
+    A shell word ending in a closer can still construct a path, including a
+    numeric filename or a variable-prefixed glob. Only simple shell arithmetic
+    and wholly single-quoted Python/Node/Perl program arguments qualify. The
+    existing conservative awk lexer also excludes double-quoted strings and
+    ambiguous regex syntax. Python triple quotes, JavaScript comments, backticks
+    and Perl alternative quoting forfeit the exemption because their lexical
+    rules differ. Single-quoted ``sh/bash -c`` arguments are
+    scanned as shell source, so their paths never become program expressions.
+    """
+    spans: list[tuple[int, int]] = []
+    commands = _shell_commands_for_exemptions(command, spans)
+    if commands is None:
+        return []
+    for name, arguments in commands:
+        if len(arguments) < 2 or arguments[0].kind != "word" or arguments[1].single_quoted is None:
+            continue
+        option = arguments[0].text
+        python = re.fullmatch(r"python(?:3(?:\.[0-9]+)?)?", name) and option == "-c"
+        node = name in {"node", "nodejs"} and option in {"-e", "--eval"}
+        perl = name == "perl" and re.fullmatch(r"-[alnpw]*e", option)
+        shell = name in {"sh", "bash"} and option == "-c"
+        start, end = arguments[1].single_quoted
+        program = command[start:end]
+        if shell:
+            spans.extend((start + left, start + right) for left, right in _expression_division_spans(program))
+        elif python or node or perl:
+            if "`" in program or (python and '"""' in program) or (node and ("/*" in program or "//" in program)) or (perl and re.search(r"\b(?:q[qrxw]?|m|s|tr|y)\b", program)):
+                continue
+            spans.extend(_awk_program_code_spans(program, start) or [])
+    return spans
+
+
+def _is_expression_division_after_closer(command: str, start: int, spans: list[tuple[int, int]]) -> bool:
+    """A single-segment slash after a closer must belong to verified code."""
+    return start > 0 and command[start - 1] in ")]}" and _is_in_spans(start - 1, spans) and _is_in_spans(start, spans)
+
+
 def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState | None) -> None:
     """Validate absolute paths in local-sandbox bash commands.
 
@@ -1813,6 +1899,10 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
     exemption is withheld from any command that could redefine ``awk`` or
     re-read quoted text (see ``_awk_program_field_spans``);
     ``$PWD/...`` is checked like the relative path it is equivalent to.
+    Outside awk programs, a single-segment match directly after ``)``, ``]``
+    or ``}`` is exempt only in verified single-quoted interpreter code or
+    simple shell arithmetic. Shell path construction stays checked regardless
+    of whether the filename is numeric or follows a glob or substitution.
     A windows-incompatible segment still rejects a path that is not already
     stored on the host; an existing host file may be read or renamed.
     """
@@ -1837,6 +1927,7 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
     # (``/2``, ``/n``, ``/NR``) is exempt, so anything shaped like ``/a/b``
     # is still rejected should the scanner ever misjudge a span.
     awk_field_spans: list[tuple[int, int]] | None = None
+    expression_spans: list[tuple[int, int]] | None = None
     for match in _ABSOLUTE_PATH_PATTERN.finditer(command):
         if _is_in_spans(match.start(), url_spans):
             continue
@@ -1844,6 +1935,10 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
             if awk_field_spans is None:
                 awk_field_spans = _awk_program_field_spans(command)
             if _is_in_spans(match.start(), awk_field_spans):
+                continue
+            if expression_spans is None:
+                expression_spans = _expression_division_spans(command)
+            if _is_expression_division_after_closer(command, match.start(), expression_spans):
                 continue
         absolute_path = match.group()
         if _is_non_path_literal_fragment(absolute_path):
