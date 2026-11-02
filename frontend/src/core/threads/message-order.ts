@@ -364,13 +364,21 @@ export function mergeMessages(
       // A live copy only wins when it is at least as long as the canonical
       // one, which is the normal streaming-growth case (0 -> full text, never
       // shrinking). A shorter live copy keeps the authoritative history.
+      //
+      // The guard is scoped to the visible transcript: a hidden-to-hidden
+      // refresh (a regenerated reminder or summary control copy) is never
+      // rendered and may legitimately shrink between checkpoint windows, so
+      // it keeps the previous always-replace behavior.
       if (
         !isHiddenFromUIMessage(message) ||
         isHiddenFromUIMessage(canonicalMessage)
       ) {
+        const bothHidden =
+          isHiddenFromUIMessage(message) &&
+          isHiddenFromUIMessage(canonicalMessage);
         const liveLength = visibleTextLength(message);
         const canonicalLength = visibleTextLength(canonicalMessage);
-        if (liveLength >= canonicalLength) {
+        if (bothHidden || liveLength >= canonicalLength) {
           replacementByIdentity.set(identity, message);
         }
       }
